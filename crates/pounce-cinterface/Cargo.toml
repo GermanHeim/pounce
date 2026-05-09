@@ -1,0 +1,19 @@
+[package]
+name = "pounce-cinterface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "C ABI for POUNCE (port of Ipopt's Interfaces/IpStdCInterface.{h,cpp}). Provides IpoptCreate / IpoptSolve / IpoptFreeProblem so existing PyIpopt / cyipopt / JuMP / AMPL clients link without source changes. Phase 11 — scaffolded; full implementation lands when the algorithm-side optimizer is solving."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-nlp = { path = "../pounce-nlp" }
+pounce-algorithm = { path = "../pounce-algorithm" }
+
+[lints]
+workspace = true

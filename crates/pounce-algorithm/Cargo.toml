@@ -1,0 +1,18 @@
+[package]
+name = "pounce-algorithm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Algorithm-side core for POUNCE (port of Ipopt's src/Algorithm/): IteratesVector, IpoptData, CalculatedQuantities, KKT solvers, line search, mu update, conv check, initializer, IpoptAlg main loop, AlgBuilder."
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-linalg = { path = "../pounce-linalg" }
+pounce-linsol = { path = "../pounce-linsol" }
+pounce-nlp = { path = "../pounce-nlp" }
+pounce-hsl = { path = "../pounce-hsl" }
+
+[lints]
+workspace = true

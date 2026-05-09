@@ -1,0 +1,501 @@
+//! Filter line-search acceptor — port of
+//! `Algorithm/IpFilterLSAcceptor.{hpp,cpp}`.
+//!
+//! Combines an [`super::filter::Filter`] with Fletcher-Leyffer's
+//! filter logic: at each backtracking step it asks whether the
+//! `(theta_trial, phi_trial)` pair is acceptable to the filter and
+//! to a sufficient-decrease test. The decisions are:
+//!
+//! * **Switching condition**: `d_phi < 0 ∧
+//!   alpha * (-d_phi)^s_phi > delta * theta^s_theta` — when true, we
+//!   require an Armijo decrease in `phi`; otherwise we relax to the
+//!   filter test.
+//! * **Armijo decrease**:
+//!   `phi_trial - phi <= eta_phi * alpha * d_phi`.
+//! * **Filter acceptance**: `phi_trial < phi - gamma_phi * theta` OR
+//!   `theta_trial < (1 - gamma_theta) * theta`.
+//!
+//! See `ref/Ipopt/AGENT_REFERENCE/LINE_SEARCH.md` §"Acceptance" for
+//! the full statement; constants below default to upstream's
+//! `RegisterOptions` values.
+
+use crate::line_search::filter::Filter;
+use crate::line_search::ls_acceptor::BacktrackingLsAcceptor;
+use pounce_common::types::Number;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptDecision {
+    /// `(theta_trial, phi_trial)` is acceptable to the filter and
+    /// passes the decrease test for the current `alpha`.
+    Accept,
+    /// Trial point fails the filter or decrease check.
+    Reject,
+}
+
+pub struct FilterLsAcceptor {
+    pub filter: Filter,
+    pub eta_phi: Number,
+    pub delta_armijo: Number,
+    pub theta_min_fact: Number,
+    pub theta_max_fact: Number,
+    pub gamma_phi: Number,
+    pub gamma_theta: Number,
+    pub s_phi: Number,
+    pub s_theta: Number,
+    pub max_soc: i32,
+    /// `alpha_min_frac` from `IpFilterLSAcceptor.cpp:RegisterOptions` —
+    /// safety factor applied to the dynamic alpha-min before declaring
+    /// a tiny step / handing off to restoration. Default 0.05.
+    pub alpha_min_frac: Number,
+    /// Lazily initialised `theta_min_` (upstream
+    /// `IpFilterLSAcceptor.cpp:333-339`). `None` until the first call to
+    /// [`Self::calc_alpha_min`] sees a reference theta.
+    theta_min: Option<Number>,
+}
+
+impl Default for FilterLsAcceptor {
+    fn default() -> Self {
+        // Defaults from `IpFilterLSAcceptor.cpp:RegisterOptions`.
+        Self {
+            filter: Filter::new(),
+            eta_phi: 1e-8,
+            delta_armijo: 1.0,
+            theta_min_fact: 1e-4,
+            theta_max_fact: 1e4,
+            gamma_phi: 1e-8,
+            gamma_theta: 1e-5,
+            s_phi: 2.3,
+            s_theta: 1.1,
+            max_soc: 4,
+            alpha_min_frac: 0.05,
+            theta_min: None,
+        }
+    }
+}
+
+impl FilterLsAcceptor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Switching condition — true ⇒ require Armijo decrease in phi
+    /// rather than the filter check. Mirrors
+    /// `IpFilterLSAcceptor.cpp:IsSwitchingCondition` (line ~590).
+    pub fn is_switching_condition(
+        &self,
+        alpha_primal: Number,
+        d_phi: Number,
+        theta: Number,
+    ) -> bool {
+        if d_phi >= 0.0 {
+            return false;
+        }
+        let lhs = alpha_primal * (-d_phi).powf(self.s_phi);
+        let rhs = self.delta_armijo * theta.powf(self.s_theta);
+        lhs > rhs
+    }
+
+    /// Armijo sufficient decrease in `phi`.
+    /// Mirrors `IpFilterLSAcceptor.cpp:ArmijoHolds`.
+    pub fn armijo_holds(
+        &self,
+        alpha_primal: Number,
+        d_phi: Number,
+        phi: Number,
+        phi_trial: Number,
+    ) -> bool {
+        phi_trial - phi <= self.eta_phi * alpha_primal * d_phi
+    }
+
+    /// Sufficient progress check (used when *not* in switching mode).
+    /// Mirrors the OR-test in `IpFilterLSAcceptor.cpp:IsAcceptableToCurrentIterate`.
+    pub fn is_sufficient_progress(
+        &self,
+        theta: Number,
+        phi: Number,
+        theta_trial: Number,
+        phi_trial: Number,
+    ) -> bool {
+        phi_trial < phi - self.gamma_phi * theta
+            || theta_trial < (1.0 - self.gamma_theta) * theta
+    }
+
+    /// Mirrors `FilterLSAcceptor::IsAcceptableToCurrentFilter`
+    /// (`IpFilterLSAcceptor.cpp:501-504`). True iff `(theta, barr)` is
+    /// not dominated by any entry in the filter.
+    pub fn is_acceptable_to_current_filter(
+        &self,
+        trial_barr: Number,
+        trial_theta: Number,
+    ) -> bool {
+        !self.filter.dominated_by_any(trial_theta, trial_barr)
+    }
+
+    /// Mirrors `FilterLSAcceptor::IsAcceptableToCurrentIterate`
+    /// (`IpFilterLSAcceptor.cpp:471-499`).
+    ///
+    /// `reference_*` is the iterate-pair the line search is comparing
+    /// against (typically the current iterate's `(barr, theta)` at the
+    /// start of the line search). `obj_max_inc` is the upstream
+    /// `obj_max_inc` option (default 5.0). `called_from_restoration`
+    /// disables the rapid-barrier-increase guard — used by
+    /// [`crate::line_search::filter_acceptor`] consumers in the
+    /// restoration phase, since the resto sub-solver's barrier value
+    /// has no direct comparability to the outer one.
+    pub fn is_acceptable_to_current_iterate(
+        &self,
+        trial_barr: Number,
+        trial_theta: Number,
+        reference_barr: Number,
+        reference_theta: Number,
+        obj_max_inc: Number,
+        called_from_restoration: bool,
+    ) -> bool {
+        if !called_from_restoration && trial_barr > reference_barr {
+            // Rapid-increase guard: log-scale jump cap.
+            let basval = if reference_barr.abs() > 10.0 {
+                reference_barr.abs().log10()
+            } else {
+                1.0
+            };
+            if (trial_barr - reference_barr).log10() > obj_max_inc + basval {
+                return false;
+            }
+        }
+        // Filter-style sufficient-progress test (line 497-498).
+        pounce_common::utils::compare_le(
+            trial_theta,
+            (1.0 - self.gamma_theta) * reference_theta,
+            reference_theta,
+        ) || pounce_common::utils::compare_le(
+            trial_barr - reference_barr,
+            -self.gamma_phi * reference_theta,
+            reference_barr,
+        )
+    }
+
+    /// Single-trial accept decision. Caller has already computed the
+    /// trial `(theta, phi)` pair and the directional derivative
+    /// `d_phi`. Mirrors the body of
+    /// `IpFilterLSAcceptor::CheckAcceptabilityOfTrialPoint` (lines
+    /// 311-437): the iterate test runs first (Armijo when F-type AND
+    /// `theta <= theta_min`, otherwise `IsAcceptableToCurrentIterate`
+    /// with the `obj_max_inc` rapid-increase guard); only on iterate
+    /// acceptance do we then consult the filter.
+    pub fn check_acceptability(
+        &self,
+        alpha_primal: Number,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+        phi_trial: Number,
+    ) -> AcceptDecision {
+        // theta_min may not yet have been initialised if the caller
+        // skipped `calc_alpha_min` for some reason; fall back to the
+        // same lazy formula upstream uses on first encounter.
+        let theta_min = self
+            .theta_min
+            .unwrap_or_else(|| self.theta_min_fact * theta.max(1.0));
+
+        let f_type =
+            alpha_primal > 0.0 && self.is_switching_condition(alpha_primal, d_phi, theta);
+        let take_armijo = f_type && theta <= theta_min;
+
+        let iterate_ok = if take_armijo {
+            self.armijo_holds(alpha_primal, d_phi, phi, phi_trial)
+        } else {
+            // `IsAcceptableToCurrentIterate` with `called_from_restoration=false`.
+            // Rapid-barrier-increase guard (`obj_max_inc` default 5.0).
+            let rapid_increase_ok = if phi_trial > phi {
+                let basval = if phi.abs() > 10.0 { phi.abs().log10() } else { 1.0 };
+                (phi_trial - phi).log10() <= 5.0 + basval
+            } else {
+                true
+            };
+            rapid_increase_ok
+                && (pounce_common::utils::compare_le(
+                    theta_trial,
+                    (1.0 - self.gamma_theta) * theta,
+                    theta,
+                ) || pounce_common::utils::compare_le(
+                    phi_trial - phi,
+                    -self.gamma_phi * theta,
+                    phi,
+                ))
+        };
+
+        if !iterate_ok {
+            return AcceptDecision::Reject;
+        }
+
+        if self.filter.dominated_by_any(theta_trial, phi_trial) {
+            return AcceptDecision::Reject;
+        }
+
+        AcceptDecision::Accept
+    }
+}
+
+impl FilterLsAcceptor {
+    /// Lazy initialiser for `theta_min` matching upstream
+    /// `IpFilterLSAcceptor.cpp:333-339`: on first invocation (and never
+    /// again — upstream resets only `theta_min_ = -1` in
+    /// `InitializeImpl`, not in `Reset()`), set
+    /// `theta_min = theta_min_fact * max(1, reference_theta)`.
+    fn ensure_theta_min(&mut self, reference_theta: Number) -> Number {
+        *self.theta_min.get_or_insert_with(|| {
+            self.theta_min_fact * reference_theta.max(1.0)
+        })
+    }
+}
+
+impl BacktrackingLsAcceptor for FilterLsAcceptor {
+    fn reset(&mut self) {
+        self.filter.clear();
+    }
+
+    /// Port of `IpFilterLSAcceptor.cpp:CalculateAlphaMin` (lines
+    /// 450-469). Returns `alpha_min_frac * alpha_min` where
+    /// `alpha_min` is `gamma_theta` by default, tightened to
+    /// `gamma_phi * theta / (-d_phi)` when `d_phi < 0`, and further
+    /// tightened to `delta * theta^s_theta / (-d_phi)^s_phi` when
+    /// `theta <= theta_min`.
+    fn calc_alpha_min(&mut self, d_phi: Number, theta: Number) -> Number {
+        let theta_min = self.ensure_theta_min(theta);
+        let mut alpha_min = self.gamma_theta;
+        if d_phi < 0.0 {
+            alpha_min = alpha_min.min(self.gamma_phi * theta / (-d_phi));
+            if theta <= theta_min {
+                alpha_min = alpha_min.min(
+                    self.delta_armijo * theta.powf(self.s_theta) / (-d_phi).powf(self.s_phi),
+                );
+            }
+        }
+        self.alpha_min_frac * alpha_min
+    }
+
+    fn check_trial_point(
+        &self,
+        alpha_primal: Number,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+        phi_trial: Number,
+    ) -> AcceptDecision {
+        self.check_acceptability(alpha_primal, theta, phi, d_phi, theta_trial, phi_trial)
+    }
+
+    /// Port of `IpFilterLSAcceptor::UpdateForNextIteration` (lines
+    /// 881-895). Returns `'f'` when both the switching condition fires
+    /// AND Armijo holds (in which case the filter is **not** augmented);
+    /// otherwise returns `'h'` and augments the filter with the
+    /// pre-shrunken envelope `(theta_add, phi_add) = ((1 - γ_θ)·θ_ref,
+    /// φ_ref - γ_φ·θ_ref)`.
+    fn update_for_next_iteration(
+        &mut self,
+        alpha_primal: Number,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        phi_trial: Number,
+    ) -> char {
+        let is_ftype = self.is_switching_condition(alpha_primal, d_phi, theta);
+        let armijo = self.armijo_holds(alpha_primal, d_phi, phi, phi_trial);
+        if !is_ftype || !armijo {
+            let phi_add = phi - self.gamma_phi * theta;
+            let theta_add = (1.0 - self.gamma_theta) * theta;
+            self.filter.add(theta_add, phi_add, 0);
+            'h'
+        } else {
+            'f'
+        }
+    }
+
+    /// Build the orig-progress callback for the inner restoration IPM.
+    /// Clones the current filter and the iterate-acceptance constants
+    /// into the closure so it can be evaluated repeatedly without
+    /// holding a borrow on the acceptor.
+    fn make_orig_progress_check(
+        &self,
+        reference_theta: Number,
+        reference_barr: Number,
+        // `called_from_restoration=true` in the closure below disables
+        // the rapid-barrier-increase guard, which is the only place
+        // upstream consumes `obj_max_inc`. Param kept on the trait
+        // surface for parity with upstream's signature.
+        _obj_max_inc: Number,
+    ) -> Option<crate::restoration::OrigProgressCallback> {
+        let filter_snapshot = self.filter.clone();
+        let gamma_theta = self.gamma_theta;
+        let gamma_phi = self.gamma_phi;
+        Some(Box::new(move |trial_barr: Number, trial_theta: Number| {
+            // 1. Filter acceptance — `IsAcceptableToCurrentFilter`.
+            if filter_snapshot.dominated_by_any(trial_theta, trial_barr) {
+                return false;
+            }
+            // 2. Iterate acceptance with `called_from_restoration=true`
+            //    — disables the rapid-barrier-increase guard and runs
+            //    only the sufficient-progress branch
+            //    (`IpFilterLSAcceptor.cpp:495-498`).
+            pounce_common::utils::compare_le(
+                trial_theta,
+                (1.0 - gamma_theta) * reference_theta,
+                reference_theta,
+            ) || pounce_common::utils::compare_le(
+                trial_barr - reference_barr,
+                -gamma_phi * reference_theta,
+                reference_barr,
+            )
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_condition_requires_descent() {
+        let a = FilterLsAcceptor::new();
+        // d_phi >= 0 always returns false.
+        assert!(!a.is_switching_condition(1.0, 0.0, 1.0));
+        assert!(!a.is_switching_condition(1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn switching_condition_holds_when_descent_dominates_theta() {
+        let a = FilterLsAcceptor::new();
+        // alpha * (-d_phi)^s_phi vs delta * theta^s_theta.
+        // alpha=1, d_phi=-1 → lhs=1; theta=1e-3, s_theta=1.1
+        //   → rhs ≈ 1.0 * (1e-3)^1.1 ≈ 5e-4. lhs > rhs.
+        assert!(a.is_switching_condition(1.0, -1.0, 1e-3));
+    }
+
+    #[test]
+    fn armijo_strict_decrease() {
+        let a = FilterLsAcceptor::new();
+        // phi - phi_trial >= -eta_phi * alpha * d_phi  (with d_phi<0).
+        // alpha=1, d_phi=-1, eta_phi=1e-8 → req: phi_trial - phi <= -1e-8.
+        assert!(a.armijo_holds(1.0, -1.0, 0.0, -1e-7));
+        assert!(!a.armijo_holds(1.0, -1.0, 0.0, 1e-7));
+    }
+
+    #[test]
+    fn accept_when_filter_clear_and_progress_in_phi() {
+        let a = FilterLsAcceptor::new();
+        // Not in switching mode (small descent, small alpha).
+        // Sufficient progress: phi_trial = -1 < phi=0 - gamma_phi*theta=0.
+        let d = a.check_acceptability(1e-12, 1.0, 0.0, -1e-12, 1.0, -1.0);
+        assert_eq!(d, AcceptDecision::Accept);
+    }
+
+    #[test]
+    fn reject_when_filter_dominates_trial() {
+        let mut a = FilterLsAcceptor::new();
+        a.filter.add(0.5, -0.5, 0);
+        // Trial (1.0, 1.0) is dominated by (0.5, -0.5).
+        let d = a.check_acceptability(1.0, 1.0, 0.0, -1.0, 1.0, 1.0);
+        assert_eq!(d, AcceptDecision::Reject);
+    }
+
+    #[test]
+    fn reject_when_switching_but_armijo_fails() {
+        let a = FilterLsAcceptor::new();
+        // Switching mode active, but phi_trial is *worse* than phi.
+        let d = a.check_acceptability(1.0, 1e-3, 0.0, -1.0, 1e-3, 1.0);
+        assert_eq!(d, AcceptDecision::Reject);
+    }
+
+    #[test]
+    fn accept_when_switching_and_armijo_holds() {
+        let a = FilterLsAcceptor::new();
+        // Switching mode and phi_trial is much smaller than phi.
+        let d = a.check_acceptability(1.0, 1e-3, 0.0, -1.0, 1e-3, -1.0);
+        assert_eq!(d, AcceptDecision::Accept);
+    }
+
+    #[test]
+    fn calc_alpha_min_floor_at_alpha_min_frac_times_gamma_theta_when_no_descent() {
+        let mut a = FilterLsAcceptor::new();
+        // d_phi >= 0 → upstream skips both descent-based tightenings;
+        // alpha_min = alpha_min_frac * gamma_theta.
+        let v = a.calc_alpha_min(0.0, 1.0);
+        assert!((v - 0.05 * 1e-5).abs() < 1e-20);
+    }
+
+    #[test]
+    fn calc_alpha_min_uses_descent_term_when_d_phi_negative() {
+        let mut a = FilterLsAcceptor::new();
+        // theta=1 (large), so the second tightening (theta <= theta_min)
+        // does NOT fire on first call; theta_min lazy-inits to
+        // theta_min_fact*max(1,theta) = 1e-4. theta=1 > 1e-4.
+        // alpha_min = min(gamma_theta, gamma_phi*theta/(-d_phi))
+        //           = min(1e-5, 1e-8*1/1)  = 1e-8
+        // returned = alpha_min_frac * 1e-8 = 5e-10.
+        let v = a.calc_alpha_min(-1.0, 1.0);
+        assert!((v - 0.05 * 1e-8).abs() < 1e-25);
+    }
+
+    #[test]
+    fn calc_alpha_min_lazy_inits_theta_min_from_first_reference() {
+        let mut a = FilterLsAcceptor::new();
+        let _ = a.calc_alpha_min(0.0, 0.5);
+        // theta_min should now be 1e-4 * max(1, 0.5) = 1e-4.
+        assert!((a.theta_min.unwrap() - 1e-4).abs() < 1e-15);
+        // Subsequent calls keep the original theta_min (matches
+        // upstream where theta_min_ stays set across iterations).
+        let _ = a.calc_alpha_min(0.0, 100.0);
+        assert!((a.theta_min.unwrap() - 1e-4).abs() < 1e-15);
+    }
+
+    #[test]
+    fn make_orig_progress_check_accepts_when_filter_clear_and_theta_drops() {
+        use crate::line_search::ls_acceptor::BacktrackingLsAcceptor;
+        let a = FilterLsAcceptor::new();
+        // Empty filter, reference (theta=1.0, barr=0.0), trial below
+        // (1-gamma_theta)*reference_theta ⇒ accepted via theta branch.
+        let cb = a
+            .make_orig_progress_check(1.0, 0.0, 5.0)
+            .expect("FilterLsAcceptor returns Some");
+        assert!(cb(2.0, 0.5)); // trial_barr=2.0 worse, but theta=0.5<<1.0
+    }
+
+    #[test]
+    fn make_orig_progress_check_rejects_when_filter_dominates() {
+        use crate::line_search::ls_acceptor::BacktrackingLsAcceptor;
+        let mut a = FilterLsAcceptor::new();
+        // Plant a filter entry that dominates the trial.
+        a.filter.add(0.05, 0.0, 0);
+        let cb = a
+            .make_orig_progress_check(1.0, 0.0, 5.0)
+            .expect("FilterLsAcceptor returns Some");
+        // (theta_trial=0.1, barr_trial=0.5) is dominated by (0.05, 0.0).
+        assert!(!cb(0.5, 0.1));
+    }
+
+    #[test]
+    fn make_orig_progress_check_rejects_when_no_progress() {
+        use crate::line_search::ls_acceptor::BacktrackingLsAcceptor;
+        let a = FilterLsAcceptor::new();
+        // Reference (theta=1.0, barr=0.0). Trial (theta=1.0, barr=2.0)
+        // — no theta progress and barr increases. force_armijo skips
+        // the rapid-increase guard, but the sufficient-progress
+        // disjunction still fails on both branches.
+        let cb = a
+            .make_orig_progress_check(1.0, 0.0, 5.0)
+            .expect("FilterLsAcceptor returns Some");
+        assert!(!cb(2.0, 1.0));
+    }
+
+    #[test]
+    fn accept_via_theta_progress_when_phi_unchanged() {
+        let a = FilterLsAcceptor::new();
+        // Not in switching mode; phi stays put but theta drops by
+        // more than gamma_theta. Sufficient progress in theta.
+        // theta=1, theta_trial=0.5 < (1-1e-5)*1 = 0.99999.
+        let d = a.check_acceptability(1e-12, 1.0, 0.0, -1e-12, 0.5, 0.0);
+        assert_eq!(d, AcceptDecision::Accept);
+    }
+}

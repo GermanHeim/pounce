@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pounce-common",
+    "crates/pounce-linalg",
+    "crates/pounce-linsol",
+    "crates/pounce-nlp",
+    "crates/pounce-hsl",
+    "crates/pounce-algorithm",
+    "crates/pounce-restoration",
+    "crates/pounce-cinterface",
+    "crates/pounce-cli",
+    "benchmarks/cutest",
+    "tools/iter-diff",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "EPL-2.0"
+authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
+repository = "https://github.com/jkitchin/pounce"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

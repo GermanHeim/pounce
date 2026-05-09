@@ -1,0 +1,20 @@
+# Cargo build artifacts
+/target
+
+# Upstream Ipopt source mirror — tracked separately (vendor as submodule if desired)
+/ref
+
+# Benchmark inputs/outputs — large, regenerated
+/benchmarks
+
+# Claude Code local state
+.claude/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+.idea/
+.vscode/

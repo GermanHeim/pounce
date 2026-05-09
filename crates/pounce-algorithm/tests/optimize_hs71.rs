@@ -1,0 +1,317 @@
+//! End-to-end smoke test: solve HS071 through `IpoptApplication::optimize_tnlp`.
+//!
+//! HS071 (Hock & Schittkowski, 1981, problem 71):
+//!
+//! ```text
+//! min  x1*x4*(x1 + x2 + x3) + x3
+//! s.t. x1*x2*x3*x4 >= 25
+//!      x1^2 + x2^2 + x3^2 + x4^2 == 40
+//!      1 <= xi <= 5
+//! ```
+//!
+//! Known optimum: f* = 17.0140173 at x* = (1, 4.7429996, 3.8211499, 1.3794082).
+
+use pounce_algorithm::application::IpoptApplication;
+use pounce_common::types::Number;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::tnlp::{
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
+    TNLP,
+};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Default)]
+struct Hs071 {
+    final_x: Option<[Number; 4]>,
+    final_obj: Option<Number>,
+}
+
+impl TNLP for Hs071 {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 4,
+            m: 2,
+            nnz_jac_g: 8,
+            nnz_h_lag: 10,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[1.0; 4]);
+        b.x_u.copy_from_slice(&[5.0; 4]);
+        // g0: x1*x2*x3*x4 >= 25  (inequality, finite lower only)
+        // g1: sum xi^2 == 40     (equality)
+        b.g_l.copy_from_slice(&[25.0, 40.0]);
+        b.g_u.copy_from_slice(&[2.0e19, 40.0]);
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[1.0, 5.0, 5.0, 1.0]);
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2])
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[3] * (2.0 * x[0] + x[1] + x[2]);
+        g[1] = x[0] * x[3];
+        g[2] = x[0] * x[3] + 1.0;
+        g[3] = x[0] * (x[0] + x[1] + x[2]);
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0] * x[1] * x[2] * x[3];
+        g[1] = x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0, 0, 0, 1, 1, 1, 1]);
+                jcol.copy_from_slice(&[0, 1, 2, 3, 0, 1, 2, 3]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("eval_jac_g(Values) without x");
+                values[0] = x[1] * x[2] * x[3];
+                values[1] = x[0] * x[2] * x[3];
+                values[2] = x[0] * x[1] * x[3];
+                values[3] = x[0] * x[1] * x[2];
+                values[4] = 2.0 * x[0];
+                values[5] = 2.0 * x[1];
+                values[6] = 2.0 * x[2];
+                values[7] = 2.0 * x[3];
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 1, 2, 2, 2, 3, 3, 3, 3]);
+                jcol.copy_from_slice(&[0, 0, 1, 0, 1, 2, 0, 1, 2, 3]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("eval_h(Values) without x");
+                let lam = lambda.expect("eval_h(Values) without lambda");
+                let of = obj_factor;
+                let l0 = lam[0];
+                let l1 = lam[1];
+                values[0] = of * (2.0 * x[3]) + l1 * 2.0;
+                values[1] = of * x[3] + l0 * (x[2] * x[3]);
+                values[2] = l1 * 2.0;
+                values[3] = of * x[3] + l0 * (x[1] * x[3]);
+                values[4] = l0 * (x[0] * x[3]);
+                values[5] = l1 * 2.0;
+                values[6] = of * (2.0 * x[0] + x[1] + x[2]) + l0 * (x[1] * x[2]);
+                values[7] = of * x[0] + l0 * (x[0] * x[2]);
+                values[8] = of * x[0] + l0 * (x[0] * x[1]);
+                values[9] = l1 * 2.0;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+        if sol.x.len() == 4 {
+            self.final_x = Some([sol.x[0], sol.x[1], sol.x[2], sol.x[3]]);
+        }
+        self.final_obj = Some(sol.obj_value);
+    }
+}
+
+#[test]
+fn hs071_solves_via_application() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+
+    let stats = app.statistics();
+    eprintln!(
+        "HS71: status={:?} iter={} obj={} wall_s={:.3}",
+        status,
+        stats.iteration_count,
+        stats.final_objective,
+        stats.total_wallclock_time_secs,
+    );
+    assert!(
+        stats.iteration_count < 50,
+        "iter_count = {} (expected < 50)",
+        stats.iteration_count,
+    );
+
+    // Final objective at optimum is 17.0140173.
+    let obj = stats.final_objective;
+    assert!(
+        (obj - 17.014017).abs() < 1e-4,
+        "final_objective = {obj} (expected ~17.014017)",
+    );
+
+    // The user's TNLP::finalize_solution should also have been called
+    // with the same objective value.
+    let user = tnlp_concrete.borrow();
+    assert!(user.final_obj.is_some(), "finalize_solution was not called");
+    let f_user = user.final_obj.unwrap();
+    assert!(
+        (f_user - 17.014017).abs() < 1e-4,
+        "user-side final_obj = {f_user} (expected ~17.014017)",
+    );
+}
+
+#[test]
+fn hs071_solves_with_penalty_line_search() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("line_search_method", "penalty", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 penalty: status={:?} iter={} obj={}",
+        status, stats.iteration_count, stats.final_objective,
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-4,
+        "final_objective = {} (expected ~17.014017)",
+        stats.final_objective,
+    );
+}
+
+#[test]
+fn hs071_solves_with_adaptive_mu_loqo_oracle() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("mu_strategy", "adaptive", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("mu_oracle", "loqo", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 adaptive+loqo: status={:?} iter={} obj={}",
+        status, stats.iteration_count, stats.final_objective,
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+}
+
+#[test]
+fn hs071_solves_with_adaptive_mu_quality_function_oracle() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("mu_strategy", "adaptive", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("mu_oracle", "quality-function", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+
+    let stats = app.statistics();
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-4,
+        "final_objective = {} (expected ~17.014017)",
+        stats.final_objective,
+    );
+}
+
+#[test]
+fn hs071_solves_with_adaptive_mu_probing_oracle() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("mu_strategy", "adaptive", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("mu_oracle", "probing", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+
+    let stats = app.statistics();
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-4,
+        "final_objective = {} (expected ~17.014017)",
+        stats.final_objective,
+    );
+}

@@ -1,0 +1,680 @@
+//! User-facing application object — port of `Interfaces/IpIpoptApplication.{hpp,cpp}`.
+//!
+//! # Crate placement
+//!
+//! `IpoptApplication` lives in `pounce-algorithm` (rather than
+//! alongside the other Interfaces-side ports in `pounce-nlp`) because
+//! `optimize_tnlp` needs to drive the full IPM: it constructs a
+//! `TNLPAdapter` + `OrigIpoptNlp` (from `pounce-nlp`) and hands the
+//! NLP off to an [`IpoptAlgorithm`] (this crate). `pounce-nlp` cannot
+//! depend on `pounce-algorithm` (the reverse already exists), so
+//! orchestration must live on the algorithm side. Public callers
+//! continue to import via `pounce_algorithm::IpoptApplication`.
+//!
+//! `optimize_tnlp` dispatches:
+//!
+//! * `m == 0` (no constraints reported by the TNLP) → falls through
+//!   to `pounce_nlp::newton_driver::solve` so unconstrained problems
+//!   keep working without the full primal-dual stack.
+//! * `m > 0` → builds the primal-dual algorithm via
+//!   [`crate::alg_builder::AlgorithmBuilder`] (default backend MA57
+//!   from `pounce-hsl`) and runs [`IpoptAlgorithm::optimize`].
+
+use crate::alg_builder::{
+    AlgorithmBuilder, HessianApproxChoice, LineSearchChoice, LinearBackendFactory,
+    LinearSolverChoice, MuStrategyChoice, NlpScalingChoice,
+};
+use crate::upstream_options::register_all_upstream_options;
+use crate::ipopt_alg::IpoptAlgorithm;
+use crate::ipopt_cq::IpoptCalculatedQuantities;
+use crate::ipopt_data::IpoptData as AlgIpoptData;
+use crate::ipopt_nlp::IpoptNlp;
+use crate::iterates_vector::IteratesVector;
+use crate::restoration::RestorationPhase;
+
+/// Factory that constructs a fresh restoration-phase strategy on
+/// demand. The outer algorithm owns at most one restoration object,
+/// so the factory is invoked once per `optimize_tnlp` call. The
+/// factory is `FnMut` to allow callers to capture a builder that
+/// internally reuses caches across builds.
+pub type RestorationFactory = Box<dyn FnMut() -> Box<dyn RestorationPhase>>;
+use pounce_linalg::dense_vector::DenseVectorSpace;
+use pounce_common::exception::{ExceptionKind, SolverException};
+use pounce_common::journalist::Journalist;
+use pounce_common::options_list::OptionsList;
+use pounce_common::reg_options::RegisteredOptions;
+use pounce_common::types::{Index, Number};
+use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::orig_ipopt_nlp::{NoScaling, OrigIpoptNlp, ScalingMethod};
+use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::solve_statistics::SolveStatistics;
+use pounce_nlp::tnlp::{IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP};
+use pounce_nlp::tnlp_adapter::TNLPAdapter;
+use std::cell::RefCell;
+use std::fmt;
+use std::path::Path;
+use std::rc::Rc;
+use std::time::Instant;
+
+pub struct IpoptApplication {
+    options: OptionsList,
+    reg_options: Rc<RegisteredOptions>,
+    journalist: Rc<Journalist>,
+    statistics: RefCell<SolveStatistics>,
+    /// Optional override factory for the symmetric linear-solver
+    /// backend. When `None`, we ship the workspace default (MA57 via
+    /// `pounce-hsl`). Tests can plug a stub via [`Self::set_linear_backend_factory`].
+    linear_backend_factory: Option<LinearBackendFactory>,
+    /// Optional factory for the restoration phase. Lives outside this
+    /// crate because `pounce-algorithm` cannot depend on
+    /// `pounce-restoration` (the dep edge is the other way). Callers
+    /// that need restoration plug a factory via
+    /// [`Self::set_restoration_factory`]; when unset, the outer
+    /// algorithm runs without a restoration fallback and surfaces
+    /// `RestorationFailure` as soon as the line-search would otherwise
+    /// jump into restoration.
+    restoration_factory: Option<RestorationFactory>,
+}
+
+impl fmt::Debug for IpoptApplication {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IpoptApplication")
+            .field("options", &self.options)
+            .field("statistics", &self.statistics)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for IpoptApplication {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IpoptApplication {
+    /// New application with empty options and a default journalist.
+    /// Equivalent to `IpoptApplication::IpoptApplication(true,true)`.
+    pub fn new() -> Self {
+        let reg = RegisteredOptions::default();
+        // Registration of a fresh registry can only fail on a duplicate
+        // name, which would be a programming error in `reg_op`.
+        register_all_upstream_options(&reg).unwrap_or_else(|e| {
+            panic!("Upstream options registration failed: {e}")
+        });
+        let reg = Rc::new(reg);
+        Self {
+            options: OptionsList::with_registered(Rc::clone(&reg)),
+            reg_options: reg,
+            journalist: Rc::new(Journalist::new()),
+            statistics: RefCell::new(SolveStatistics::new()),
+            linear_backend_factory: None,
+            restoration_factory: None,
+        }
+    }
+
+    pub fn options(&self) -> &OptionsList {
+        &self.options
+    }
+
+    pub fn options_mut(&mut self) -> &mut OptionsList {
+        &mut self.options
+    }
+
+    pub fn registered_options(&self) -> &Rc<RegisteredOptions> {
+        &self.reg_options
+    }
+
+    pub fn journalist(&self) -> &Rc<Journalist> {
+        &self.journalist
+    }
+
+    /// Plug a custom symmetric-linear-solver factory. Useful for tests
+    /// that want to swap MA57 for a stub. Production callers should
+    /// leave this unset — the default ([`default_backend_factory`])
+    /// returns the workspace's MA57 binding.
+    pub fn set_linear_backend_factory(&mut self, factory: LinearBackendFactory) {
+        self.linear_backend_factory = Some(factory);
+    }
+
+    /// Plug a restoration-phase factory. Called once per
+    /// `optimize_tnlp` invocation to mint a fresh
+    /// `Box<dyn RestorationPhase>` that the outer algorithm uses as
+    /// its line-search restoration fallback. Lives behind a setter
+    /// (rather than at construction) because the concrete restoration
+    /// strategies live in `pounce-restoration`, which depends on this
+    /// crate; consumers in `pounce-cli` / integration tests wire the
+    /// factory at the application boundary.
+    pub fn set_restoration_factory(&mut self, factory: RestorationFactory) {
+        self.restoration_factory = Some(factory);
+    }
+
+    /// Read an `ipopt.opt`-format options file. Equivalent to
+    /// `IpoptApplication::Initialize(const std::string& options_file)`.
+    pub fn initialize_with_options_file(&mut self, path: &Path) -> Result<(), SolverException> {
+        let txt = std::fs::read_to_string(path).map_err(|e| {
+            SolverException::new(
+                ExceptionKind::IPOPT_APPLICATION_ERROR,
+                format!("could not read options file {}: {}", path.display(), e),
+                file!(),
+                line!() as Index,
+            )
+        })?;
+        self.options.read_from_str(&txt, true)
+    }
+
+    /// Read options from a string in `ipopt.opt` format. Useful for
+    /// tests and embedded callers.
+    pub fn initialize_with_options_str(&mut self, s: &str) -> Result<(), SolverException> {
+        self.options.read_from_str(s, true)
+    }
+
+    /// No-op initialize (just succeeds). Mirrors
+    /// `IpoptApplication::Initialize(bool allow_clobber)` with no
+    /// options file.
+    pub fn initialize(&mut self) -> Result<(), SolverException> {
+        Ok(())
+    }
+
+    /// Wrap a TNLP and report problem dimensions. Used in tests until
+    /// the full IPM path covers every entry shape.
+    pub fn problem_dimensions(&self, tnlp: &mut dyn TNLP) -> Option<NlpInfo> {
+        tnlp.get_nlp_info()
+    }
+
+    pub fn statistics(&self) -> SolveStatistics {
+        self.statistics.borrow().clone()
+    }
+
+    /// Drive a solve.
+    ///
+    /// * Constrained problems (`m > 0`) take the primal-dual IPM path:
+    ///   build a `TNLPAdapter` → `OrigIpoptNlp`, run the
+    ///   [`AlgorithmBuilder`] with the workspace MA57 backend, and
+    ///   call [`IpoptAlgorithm::optimize`]. The `SolverReturn` →
+    ///   `ApplicationReturnStatus` mapping mirrors the table in
+    ///   `ref/Ipopt/AGENT_REFERENCE/MAIN_LOOP.md` ("exception →
+    ///   SolverReturn map").
+    /// * Unconstrained problems (`m == 0`) keep going through the
+    ///   in-`pounce-nlp` Newton driver so the trivial path is
+    ///   independent of the linear-solver backend.
+    pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        let info = match tnlp.borrow_mut().get_nlp_info() {
+            Some(info) => info,
+            None => return ApplicationReturnStatus::InvalidProblemDefinition,
+        };
+        if info.m == 0 {
+            let mut borrow = tnlp.borrow_mut();
+            let opts = self.newton_options_from_options_list();
+            let (status, stats) = pounce_nlp::newton_driver::solve(&mut *borrow, opts);
+            *self.statistics.borrow_mut() = stats;
+            return status;
+        }
+        self.optimize_constrained(tnlp)
+    }
+
+    /// **Stub.** Re-solve with a warm start. Phase 7+.
+    pub fn reoptimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        // Same dispatch as `optimize_tnlp` for now; warm-start handling
+        // lands once the IPM path's warm-start hooks are exposed.
+        self.optimize_tnlp(tnlp)
+    }
+
+    fn newton_options_from_options_list(&self) -> pounce_nlp::newton_driver::NewtonOptions {
+        let mut opts = pounce_nlp::newton_driver::NewtonOptions::default();
+        if let Ok((v, found)) = self.options.get_numeric_value("tol", "") {
+            if found {
+                opts.tol = v;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_integer_value("max_iter", "") {
+            if found {
+                opts.max_iter = v;
+            }
+        }
+        opts
+    }
+
+    /// Constrained-NLP path: build adapter → OrigIpoptNlp → algorithm
+    /// bundle, run `optimize`, populate statistics, and call
+    /// `finalize_solution` on the user's TNLP.
+    fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        let t_start = Instant::now();
+
+        // Build adapter + Nlp.
+        let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
+            Ok(a) => Rc::new(RefCell::new(a)),
+            Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
+        };
+        let mut orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+            Ok(n) => n,
+            Err(_) => return ApplicationReturnStatus::InternalError,
+        };
+
+        // Relax `x_L / x_U / d_L / d_U` by `bound_relax_factor` (default
+        // 1e-8), capped by `constr_viol_tol` (default 1e-4). Matches
+        // `OrigIpoptNLP::InitializeStructures` lines 343-358.
+        let bound_relax_factor = self
+            .options
+            .get_numeric_value("bound_relax_factor", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-8);
+        let constr_viol_tol = self
+            .options
+            .get_numeric_value("constr_viol_tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-4);
+        orig_nlp.relax_bounds(bound_relax_factor, constr_viol_tol);
+
+        // Apply automatic NLP scaling per `nlp_scaling_method` option
+        // (port of `OrigIpoptNLP::InitializeStructures` →
+        // `NLPScalingObject::DetermineScaling`). Default is
+        // `gradient-based` to match upstream Ipopt 3.14.
+        let scaling_method = self
+            .options
+            .get_string_value("nlp_scaling_method", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or_else(|| "gradient-based".to_string());
+        let scaling_method = match scaling_method.as_str() {
+            "none" => ScalingMethod::None,
+            "gradient-based" => ScalingMethod::GradientBased,
+            // user-scaling / equilibration not yet implemented; fall back
+            // to gradient-based which matches the upstream default.
+            _ => ScalingMethod::GradientBased,
+        };
+        let max_gradient = self
+            .options
+            .get_numeric_value("nlp_scaling_max_gradient", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(100.0);
+        let min_value = self
+            .options
+            .get_numeric_value("nlp_scaling_min_value", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-8);
+        orig_nlp.determine_scaling_from_starting_point(scaling_method, max_gradient, min_value);
+
+        let nlp_handle: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
+
+        // Build the algorithm strategy bundle. Read coarse knobs from
+        // the OptionsList where we have them; fall through to defaults
+        // otherwise. The full upstream parsing surface (mu_strategy,
+        // hessian_approximation, line_search_method, ...) is wired by
+        // `AlgBuilder::RegisterOptions` in upstream — that registry
+        // hookup lands as a follow-up; default builder is correct for
+        // HS71-class problems.
+        let builder = self.algorithm_builder_from_options();
+
+        // Linear-solver backend.
+        let factory = self
+            .linear_backend_factory
+            .take()
+            .unwrap_or_else(|| default_backend_factory());
+        let bundle = builder.build_with_backend(factory);
+
+        // Wire the data / cq pair around the NLP.
+        let data: crate::ipopt_data::IpoptDataHandle =
+            Rc::new(RefCell::new(AlgIpoptData::new()));
+        let cq: crate::ipopt_cq::IpoptCqHandle = Rc::new(RefCell::new(
+            IpoptCalculatedQuantities::new(Rc::clone(&data), Rc::clone(&nlp_handle)),
+        ));
+
+        // Seed `data.curr` with a zero-valued iterate of the correct
+        // dimensions. The `IterateInitializer` consumes these as its
+        // template (it overwrites `x`, `s`, multipliers in place); we
+        // just need the dim metadata.
+        {
+            let nlp_borrow = nlp_handle.borrow();
+            let n_x = nlp_borrow.n();
+            let n_s = nlp_borrow.m_ineq();
+            let n_yc = nlp_borrow.m_eq();
+            let n_yd = nlp_borrow.m_ineq();
+            let n_zl = nlp_borrow.x_l().dim();
+            let n_zu = nlp_borrow.x_u().dim();
+            let n_vl = nlp_borrow.d_l().dim();
+            let n_vu = nlp_borrow.d_u().dim();
+            drop(nlp_borrow);
+            let iv = IteratesVector::new(
+                Rc::new(DenseVectorSpace::new(n_x).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_s).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_yc).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_yd).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_zl).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_zu).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_vl).make_new_dense()),
+                Rc::new(DenseVectorSpace::new(n_vu).make_new_dense()),
+            );
+            data.borrow_mut().set_curr(iv);
+        }
+
+        let max_iter = self
+            .options
+            .get_integer_value("max_iter", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(3000);
+        let tol = self
+            .options
+            .get_numeric_value("tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-8);
+        data.borrow_mut().tol = tol;
+
+        let mut alg = IpoptAlgorithm::new(data, cq, bundle).with_nlp(Rc::clone(&nlp_handle));
+        if let Some(factory) = self.restoration_factory.as_mut() {
+            alg = alg.with_restoration(factory());
+        }
+        alg.max_iter = max_iter;
+
+        let solver_status = alg.optimize();
+
+        // Drain counters / iter count off the algorithm.
+        {
+            let mut stats = self.statistics.borrow_mut();
+            stats.iteration_count = alg.data.borrow().iter_count;
+            stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
+            // Best-effort: capture final objective at the algorithm's
+            // (compressed `x_var`-space) iterate via the NLP. The
+            // fine-grained eval counters live on the concrete
+            // `OrigIpoptNlp`; threading them up through a generic
+            // `IpoptNlp` accessor is left for follow-up work.
+            let curr_x = alg.data.borrow().curr.as_ref().map(|c| c.x.clone());
+            if let Some(x) = curr_x {
+                if let Ok(f) = try_eval_curr_f(&nlp_handle, &x) {
+                    stats.final_objective = f;
+                    stats.final_scaled_objective = f;
+                }
+            }
+            // Final residuals straight off the cq cache. These mirror
+            // the values upstream prints in its end-of-run summary
+            // ("Dual infeasibility / Constraint violation /
+            // Complementarity / Overall NLP error").
+            let cq = alg.cq.borrow();
+            stats.final_dual_inf = cq.curr_dual_infeasibility_max();
+            stats.final_constr_viol = cq.curr_primal_infeasibility_max();
+            // Infinity-norm complementarity, max over all four bound
+            // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
+            // empty-bound blocks return `0` from amax(), so the max is
+            // safe even when only one side has bounds.
+            let compl = cq
+                .curr_compl_x_l()
+                .amax()
+                .max(cq.curr_compl_x_u().amax())
+                .max(cq.curr_compl_s_l().amax())
+                .max(cq.curr_compl_s_u().amax());
+            stats.final_compl = compl;
+            stats.final_kkt_error = cq.curr_nlp_error();
+        }
+
+        // Map SolverReturn → ApplicationReturnStatus per
+        // MAIN_LOOP.md's exception table.
+        let app_status = solver_return_to_app_status(solver_status);
+
+        // Finalize: forward the final iterate to the user's TNLP.
+        if let Err(()) = finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp)
+        {
+            // Couldn't finalize; still surface the original status.
+        }
+        app_status
+    }
+
+    fn algorithm_builder_from_options(&self) -> AlgorithmBuilder {
+        let mut builder = AlgorithmBuilder::new();
+        if let Ok((v, found)) = self.options.get_string_value("mu_strategy", "") {
+            if found {
+                builder.mu_strategy = match v.as_str() {
+                    "adaptive" => MuStrategyChoice::Adaptive,
+                    _ => MuStrategyChoice::Monotone,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("mu_oracle", "") {
+            if found {
+                builder.mu_oracle = match v.as_str() {
+                    "loqo" => crate::mu::adaptive::MuOracleKind::Loqo,
+                    "probing" => crate::mu::adaptive::MuOracleKind::Probing,
+                    _ => crate::mu::adaptive::MuOracleKind::QualityFunction,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("hessian_approximation", "") {
+            if found {
+                builder.hessian_approximation = match v.as_str() {
+                    "limited-memory" => HessianApproxChoice::LimitedMemory,
+                    _ => HessianApproxChoice::Exact,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("line_search_method", "") {
+            if found {
+                builder.line_search_method = match v.as_str() {
+                    "cg-penalty" => LineSearchChoice::CgPenalty,
+                    "penalty" => LineSearchChoice::Penalty,
+                    _ => LineSearchChoice::Filter,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("nlp_scaling_method", "") {
+            if found {
+                builder.nlp_scaling_method = match v.as_str() {
+                    "none" => NlpScalingChoice::None,
+                    "user-scaling" => NlpScalingChoice::User,
+                    "equilibration-based" => NlpScalingChoice::EquilibrationBased,
+                    _ => NlpScalingChoice::GradientBased,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("linear_solver", "") {
+            if found {
+                builder.linear_solver = match v.as_str() {
+                    "mumps" => LinearSolverChoice::Mumps,
+                    "feral" => LinearSolverChoice::Feral,
+                    _ => LinearSolverChoice::Ma57,
+                };
+            }
+        }
+        builder
+    }
+}
+
+/// Default symmetric linear-solver factory: returns an MA57 backend
+/// from `pounce-hsl` regardless of the requested choice. Other backends
+/// (MUMPS, FERAL) plug in via the same factory pattern once their
+/// bindings land.
+fn default_backend_factory() -> LinearBackendFactory {
+    Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+        match choice {
+            LinearSolverChoice::Ma57 | LinearSolverChoice::Mumps | LinearSolverChoice::Feral => {
+                Box::new(pounce_hsl::Ma57SolverInterface::new())
+            }
+        }
+    })
+}
+
+/// Map upstream `SolverReturn` codes to `ApplicationReturnStatus`.
+/// Mirrors the table in
+/// `ref/Ipopt/AGENT_REFERENCE/MAIN_LOOP.md` ("exception → SolverReturn
+/// map") and the corresponding switch in
+/// `IpIpoptApplication.cpp:call_optimize`.
+fn solver_return_to_app_status(s: SolverReturn) -> ApplicationReturnStatus {
+    match s {
+        SolverReturn::Success => ApplicationReturnStatus::SolveSucceeded,
+        SolverReturn::StopAtAcceptablePoint => ApplicationReturnStatus::SolvedToAcceptableLevel,
+        SolverReturn::FeasiblePointFound => ApplicationReturnStatus::FeasiblePointFound,
+        SolverReturn::MaxiterExceeded => ApplicationReturnStatus::MaximumIterationsExceeded,
+        SolverReturn::CpuTimeExceeded => ApplicationReturnStatus::MaximumCpuTimeExceeded,
+        SolverReturn::WallTimeExceeded => ApplicationReturnStatus::MaximumWallTimeExceeded,
+        SolverReturn::StopAtTinyStep => ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
+        SolverReturn::LocalInfeasibility => ApplicationReturnStatus::InfeasibleProblemDetected,
+        SolverReturn::UserRequestedStop => ApplicationReturnStatus::UserRequestedStop,
+        SolverReturn::DivergingIterates => ApplicationReturnStatus::DivergingIterates,
+        SolverReturn::RestorationFailure => ApplicationReturnStatus::RestorationFailed,
+        SolverReturn::ErrorInStepComputation => ApplicationReturnStatus::ErrorInStepComputation,
+        SolverReturn::InvalidNumberDetected => ApplicationReturnStatus::InvalidNumberDetected,
+        SolverReturn::TooFewDegreesOfFreedom => {
+            ApplicationReturnStatus::NotEnoughDegreesOfFreedom
+        }
+        SolverReturn::InvalidOption => ApplicationReturnStatus::InvalidOption,
+        SolverReturn::OutOfMemory => ApplicationReturnStatus::InsufficientMemory,
+        SolverReturn::InternalError | SolverReturn::Unassigned => {
+            ApplicationReturnStatus::InternalError
+        }
+    }
+}
+
+/// Best-effort evaluation of the objective at the algorithm's final
+/// `x`. Used only to populate `SolveStatistics::final_objective`.
+fn try_eval_curr_f(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    x: &Rc<dyn pounce_linalg::Vector>,
+) -> Result<Number, ()> {
+    let mut nlp_mut = nlp.borrow_mut();
+    Ok(nlp_mut.eval_f(&**x))
+}
+
+/// Forward the final iterate back to the user's `TNLP::finalize_solution`.
+/// We pull `x` (compressed in `x_var`-space) off the algorithm's
+/// `data.curr`, lift it back to full TNLP indexing, and pass empty
+/// multipliers for now (the algorithm's `y_c`, `y_d`, `z_l`, `z_u` are
+/// in compressed split form — re-assembling them into the user's
+/// `lambda` / `z_l` / `z_u` is mechanical but lives behind a
+/// `OrigIpoptNlp::finalize_solution_*` accessor that's still being
+/// fleshed out). Returns `Err` if the final iterate is missing.
+fn finalize_via_orig_nlp(
+    _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    alg: &IpoptAlgorithm,
+    solver_status: SolverReturn,
+    _app_status: ApplicationReturnStatus,
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+) -> Result<(), ()> {
+    let curr = alg.data.borrow().curr.clone().ok_or(())?;
+    // Best-effort: extract a Vec<f64> from `curr.x` if it's a DenseVector.
+    let x_dense = curr
+        .x
+        .as_any()
+        .downcast_ref::<pounce_linalg::DenseVector>()
+        .ok_or(())?;
+    let x_vec: Vec<Number> = x_dense.values().to_vec();
+    let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
+    let n = info.n as usize;
+    let m = info.m as usize;
+    // For now we forward `x` only; the multiplier vectors come through
+    // as zeros until `OrigIpoptNlp` ships its
+    // `finalize_solution_lambda/z_l/z_u` accessors. Compute g(x) via
+    // the user TNLP so the final residual is at least populated.
+    let mut g_final = vec![0.0; m];
+    let _ = tnlp.borrow_mut().eval_g(&x_vec, true, &mut g_final);
+    let f_final = tnlp
+        .borrow_mut()
+        .eval_f(&x_vec, true)
+        .unwrap_or(Number::NAN);
+    let z_l = vec![0.0; n];
+    let z_u = vec![0.0; n];
+    let lambda = vec![0.0; m];
+    tnlp.borrow_mut().finalize_solution(
+        Solution {
+            status: solver_status,
+            x: &x_vec,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g_final,
+            lambda: &lambda,
+            obj_value: f_final,
+        },
+        &TnlpIpoptData::default(),
+        &TnlpIpoptCq::default(),
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pounce_nlp::tnlp::{
+        BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
+        StartingPoint,
+    };
+
+    struct Hs071Stub;
+    impl TNLP for Hs071Stub {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            // HS071 dimensions: n=4, m=2, dense Jacobian (8 nz),
+            // dense lower-triangular Hessian (10 nz).
+            Some(NlpInfo {
+                n: 4,
+                m: 2,
+                nnz_jac_g: 8,
+                nnz_h_lag: 10,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[1.0; 4]);
+            b.x_u.copy_from_slice(&[5.0; 4]);
+            b.g_l.copy_from_slice(&[25.0, 40.0]);
+            b.g_u.copy_from_slice(&[2.0e19, 40.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[1.0, 5.0, 5.0, 1.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2])
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            grad.fill(0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            if let SparsityRequest::Structure { irow, jcol } = mode {
+                irow.copy_from_slice(&[0, 0, 0, 0, 1, 1, 1, 1]);
+                jcol.copy_from_slice(&[0, 1, 2, 3, 0, 1, 2, 3]);
+            }
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn application_constructs_and_loads_options() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        // ipopt.opt-style file: an integer-typed option registered by
+        // the Interfaces layer.
+        app.initialize_with_options_str("print_level 5\nfile_print_level 7\n")
+            .unwrap();
+        let (level, found) = app
+            .options()
+            .get_integer_value("print_level", "")
+            .unwrap();
+        assert!(found);
+        assert_eq!(level, 5);
+    }
+
+    #[test]
+    fn application_reports_problem_dimensions() {
+        let app = IpoptApplication::new();
+        let mut tnlp = Hs071Stub;
+        let info = app.problem_dimensions(&mut tnlp).unwrap();
+        assert_eq!(info.n, 4);
+        assert_eq!(info.m, 2);
+        assert_eq!(info.nnz_jac_g, 8);
+        assert_eq!(info.nnz_h_lag, 10);
+    }
+}

@@ -1,0 +1,23 @@
+[package]
+name = "pounce-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line driver for POUNCE — solves built-in TNLPs and AMPL .nl files."
+
+[[bin]]
+name = "pounce"
+path = "src/main.rs"
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-nlp = { path = "../pounce-nlp" }
+pounce-algorithm = { path = "../pounce-algorithm" }
+pounce-restoration = { path = "../pounce-restoration" }
+pounce-hsl = { path = "../pounce-hsl" }
+pounce-linsol = { path = "../pounce-linsol" }
+
+[lints]
+workspace = true

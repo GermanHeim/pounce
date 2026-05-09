@@ -1,0 +1,11 @@
+[package]
+name = "pounce-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Common primitives for POUNCE (port of Ipopt's src/Common): types, exceptions, journalist, options, tagged objects, cached results."
+
+[lints]
+workspace = true

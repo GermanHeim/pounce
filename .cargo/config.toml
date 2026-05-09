@@ -1,0 +1,19 @@
+# Workspace-wide cargo configuration.
+#
+# `pounce-hsl` links against `libcoinhsl.dylib`, whose @rpath
+# dependencies (libopenblas, libmetis, libgfortran.5, libgomp.1) live
+# next to it under /Users/jkitchin/Dropbox/projects/CoinHSL.../lib/.
+# `pounce-hsl/build.rs` already emits `-Wl,-rpath,<COINHSL_DIR>/lib`
+# for local-package tests, but cargo's per-package link args do not
+# propagate to downstream crates' test/bin binaries that pull
+# pounce-hsl in as a dependency. We therefore set the rpath at the
+# workspace level so any downstream crate's binary can locate
+# libcoinhsl at runtime.
+#
+# Override by exporting `COINHSL_DIR` and editing this rpath, or
+# remove the rpath when MA57 isn't being exercised.
+[target.'cfg(target_os = "macos")']
+rustflags = [
+    "-C",
+    "link-arg=-Wl,-rpath,/Users/jkitchin/Dropbox/projects/CoinHSL.v2023.11.17.aarch64-apple-darwin-libgfortran5/lib",
+]
