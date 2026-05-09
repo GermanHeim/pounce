@@ -301,6 +301,33 @@ pub fn run_inner_resto(
         let d = alg.data.borrow();
         (d.iter_count, d.info_iters_since_header, d.info_last_output)
     };
+
+    // Locally-infeasible detection. Mirrors upstream
+    // `IpRestoConvCheck.cpp:208-241`: fires when the inner sub-IPM
+    // converged via its OWN KKT residual (stationarity of the resto
+    // NLP, not via the kappa-reduction early-exit) and the orig-NLP
+    // `inf_pr` at the converged iterate is still well above outer
+    // `tol`. This is the algorithmic signature of a local
+    // infeasibility — the resto sub-problem has driven `||c||_1` to
+    // a local minimum that's bounded away from zero.
+    //
+    // Distinguishing the two `Success` paths matters: when the inner
+    // returns via the kappa guard (orig_inf_pr reduced sufficiently),
+    // its own KKT residual at termination is whatever happens to be
+    // — typically large because we exited early. When the inner
+    // returns via stationarity, its KKT residual is tight (≤ inner
+    // `tol`). Without this gate, we'd misclassify any kappa-guard
+    // exit at exactly the entry `inf_pr` as locally-infeasible
+    // (HATFLDF, POLAK6, ROSENMMX, ... regress).
+    let outer_tol = outer_data.borrow().tol;
+    let orig_inf_pr_at_final =
+        eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or(0.0);
+    let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
+    let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
+    let locally_infeasible = matches!(status, SolverReturn::Success)
+        && inner_stationarity_converged
+        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4);
+
     Some(RestoSolveResult {
         trial_x,
         trial_s,
@@ -311,7 +338,41 @@ pub fn run_inner_resto(
         // iteration row).
         iters_since_header,
         last_output,
+        locally_infeasible,
     })
+}
+
+/// Evaluate `max(||c(x_orig)||∞, ||d(x_orig) − s||∞)` at the inner
+/// IPM's converged iterate. Returns `None` on any downcast / dim
+/// mismatch (caller treats as `0.0` and the locally-infeasible gate
+/// fails closed — i.e. we don't spuriously declare infeasibility on
+/// a fixture we can't evaluate).
+fn eval_orig_inf_pr_at_inner_curr(
+    inner_x: &dyn Vector,
+    inner_s: &dyn Vector,
+    orig_rc: &Rc<RefCell<dyn IpoptNlp>>,
+) -> Option<f64> {
+    let xc = inner_x.as_any().downcast_ref::<CompoundVector>()?;
+    let x_orig = xc.comp(BLOCK_X);
+    let mut orig = orig_rc.borrow_mut();
+    let m_eq = orig.m_eq();
+    let m_ineq = orig.m_ineq();
+    let c_amax = if m_eq > 0 {
+        let mut buf = DenseVectorSpace::new(m_eq).make_new_dense();
+        orig.eval_c(x_orig, &mut buf);
+        buf.amax()
+    } else {
+        0.0
+    };
+    let d_minus_s_amax = if m_ineq > 0 {
+        let mut buf = DenseVectorSpace::new(m_ineq).make_new_dense();
+        orig.eval_d(x_orig, &mut buf);
+        buf.axpy(-1.0, inner_s);
+        buf.amax()
+    } else {
+        0.0
+    };
+    Some(c_amax.max(d_minus_s_amax))
 }
 
 /// Capture the pieces of the outer iterate the resto initializer needs.

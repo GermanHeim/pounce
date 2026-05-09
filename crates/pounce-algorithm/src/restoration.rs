@@ -52,6 +52,12 @@ pub enum RestorationOutcome {
     /// Resto failed. Outer loop maps this to
     /// `SolverReturn::RestorationFailure`.
     Failed,
+    /// The inner sub-IPM converged its KKT system but the orig-NLP
+    /// constraint violation at the converged point is still well above
+    /// `tol`. Mirrors the `LOCALLY_INFEASIBLE` exception thrown from
+    /// `IpRestoConvCheck.cpp:240`. Outer loop maps this to
+    /// `SolverReturn::LocalInfeasibility`.
+    LocallyInfeasible,
 }
 
 pub trait RestorationPhase {

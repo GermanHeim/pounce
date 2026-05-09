@@ -62,6 +62,16 @@ pub struct RestoSolveResult {
     pub iters_since_header: Index,
     /// Inner solver's `info_last_output` at termination.
     pub last_output: Number,
+    /// `true` when the inner sub-IPM reached its KKT tolerance but the
+    /// orig-NLP constraint violation at the converged point is still
+    /// well above `tol` — i.e. the resto NLP is at a stationary point
+    /// of `||c(x)||_1` with non-zero residual. Mirrors upstream's
+    /// `LOCALLY_INFEASIBLE` exception thrown from
+    /// `IpRestoConvCheck.cpp:240`. The driver propagates this as
+    /// [`RestorationOutcome::LocallyInfeasible`] so the outer loop
+    /// surfaces `SolverReturn::LocalInfeasibility` instead of cycling
+    /// in restoration on an unchanged iterate.
+    pub locally_infeasible: bool,
 }
 
 /// Inner-loop driver hook. Constructs and runs the nested IPM around
@@ -170,6 +180,18 @@ impl RestorationPhase for MinC1NormRestoration {
         let Some(result) = (self.inner_solver)(data, cq, nlp, cb) else {
             return RestorationOutcome::Failed;
         };
+
+        // 1b. Locally-infeasible short-circuit. The inner sub-IPM
+        // satisfied its own KKT tolerance (true stationary point of
+        // the resto NLP, not just a kappa-guard freebie) and the
+        // orig-NLP constraint violation at that point is still well
+        // above outer `tol`. This is the algorithmic signature of a
+        // local infeasibility — the resto sub-problem can't drive
+        // `||c||_1` lower than this. Mirrors upstream
+        // `IpRestoConvCheck.cpp:240`'s `LOCALLY_INFEASIBLE` throw.
+        if result.locally_infeasible {
+            return RestorationOutcome::LocallyInfeasible;
+        }
 
         // Take an immutable snapshot of curr we need throughout.
         let Some(curr) = data.borrow().curr.clone() else {

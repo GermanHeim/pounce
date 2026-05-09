@@ -546,6 +546,15 @@ impl IpoptAlgorithm {
             RestorationOutcome::Failed => {
                 IterateOutcome::Terminate(SolverReturn::RestorationFailure)
             }
+            RestorationOutcome::LocallyInfeasible => {
+                // Mirrors upstream's catch of `LOCALLY_INFEASIBLE` thrown
+                // from `IpRestoConvCheck.cpp:240` — the resto sub-IPM
+                // settled at a stationary point of `||c(x)||_1` whose
+                // residual is still well above `tol`. Without this
+                // detection the outer would re-enter restoration on the
+                // unchanged iterate forever.
+                IterateOutcome::Terminate(SolverReturn::LocalInfeasibility)
+            }
         }
     }
 
