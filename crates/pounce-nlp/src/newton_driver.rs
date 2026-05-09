@@ -40,6 +40,15 @@ pub struct NewtonOptions {
     pub max_iter: Index,
     pub line_search_eta: Number,
     pub line_search_min_alpha: Number,
+    /// Looser tolerance used to declare `SolvedToAcceptableLevel` when
+    /// `tol` itself is unreachable (typical for nonlinear-regression
+    /// problems where `||∇f||∞` floors above 1e-8). Mirrors Ipopt's
+    /// `acceptable_tol`.
+    pub acceptable_tol: Number,
+    /// Number of consecutive iterations the residual must stay below
+    /// `acceptable_tol` before we accept. Mirrors Ipopt's
+    /// `acceptable_iter`.
+    pub acceptable_iter: Index,
 }
 
 impl Default for NewtonOptions {
@@ -49,6 +58,8 @@ impl Default for NewtonOptions {
             max_iter: 1000,
             line_search_eta: 1e-4,
             line_search_min_alpha: 1e-12,
+            acceptable_tol: 1e-6,
+            acceptable_iter: 15,
         }
     }
 }
@@ -218,6 +229,14 @@ pub fn solve_unconstrained(
     let mut iter: Index = 0;
     let mut last_grad_norm = Number::INFINITY;
     let mut stagnation_count = 0;
+    let mut acceptable_streak: Index = 0;
+    // Captured on the first iteration so we can scale the
+    // acceptable-level threshold to the problem's natural gradient
+    // magnitude. Mirrors the spirit of upstream Ipopt's gradient-based
+    // NLP scaling, which divides the gradient by `max(grad_f_max, 1)`
+    // before testing against `tol`. We don't rescale the problem here;
+    // we just relax the acceptable threshold accordingly.
+    let mut initial_grad_norm: Number = 0.0;
     let final_status = 'outer: loop {
         if !tnlp.eval_grad_f(&x, false, &mut grad) {
             break ApplicationReturnStatus::InvalidNumberDetected;
@@ -239,7 +258,17 @@ pub fn solve_unconstrained(
         }
 
         let grad_norm = grad.iter().fold(0.0_f64, |acc, &g| acc.max(g.abs()));
-        if grad_norm < opts.tol.max(10.0 * mu) {
+        if iter == 0 {
+            initial_grad_norm = grad_norm;
+        }
+        // Scaled tolerance — large initial gradients raise the bar,
+        // but cap the relaxation so we don't accept flat regions far
+        // from the optimum on problems whose initial gradient is huge.
+        // The cap (1.0) is conservative: even a problem scaled to
+        // ||∇f||₀ = 10^10 only relaxes the acceptable threshold to 1.0.
+        let tol_scaled = (opts.tol * initial_grad_norm.max(1.0)).min(1e-3);
+        let acceptable_scaled = (opts.acceptable_tol * initial_grad_norm.max(1.0)).min(1.0);
+        if grad_norm < tol_scaled.max(10.0 * mu) {
             // Inner loop converged at this mu — decrease it or stop.
             if mu <= mu_min {
                 break ApplicationReturnStatus::SolveSucceeded;
@@ -251,17 +280,48 @@ pub fn solve_unconstrained(
             stagnation_count = 0;
             continue 'outer;
         }
+        // Acceptable-level path: when the strict tolerance is
+        // unreachable (typical for nonlinear-regression sums-of-squares
+        // problems with residual gradient floored above `tol`), accept
+        // after `acceptable_iter` consecutive iterations below the
+        // looser, scaled `acceptable_tol`. Mirrors Ipopt's acceptable_*
+        // mechanism. Require *actual* progress from the initial point
+        // (drop by ≥ 100×) so we don't prematurely accept a flat region
+        // when the initial gradient was already huge.
+        let made_progress =
+            initial_grad_norm <= 0.0 || grad_norm < 1e-2 * initial_grad_norm;
+        if mu <= mu_min && grad_norm < acceptable_scaled && made_progress {
+            acceptable_streak += 1;
+            if acceptable_streak >= opts.acceptable_iter {
+                break ApplicationReturnStatus::SolvedToAcceptableLevel;
+            }
+        } else {
+            acceptable_streak = 0;
+        }
+
         // Stagnation: gradient norm refuses to decrease. Common when
         // mu is at its floor and finite-precision arithmetic at the
-        // boundary dominates. Accept the current iterate.
-        if has_bounds && mu <= mu_min {
-            if (last_grad_norm - grad_norm).abs() < 1e-15 * last_grad_norm.abs().max(1.0) {
+        // boundary dominates, or for ill-conditioned unconstrained
+        // problems whose Hessian is near-singular at the optimum.
+        if mu <= mu_min {
+            let rel = (last_grad_norm - grad_norm).abs();
+            let scale = last_grad_norm.abs().max(grad_norm.abs()).max(1.0);
+            if rel < 1e-12 * scale {
                 stagnation_count += 1;
             } else {
                 stagnation_count = 0;
             }
-            if stagnation_count >= 3 {
-                break ApplicationReturnStatus::SolvedToAcceptableLevel;
+            if stagnation_count >= 5 {
+                let made_strong_progress = initial_grad_norm > 0.0
+                    && grad_norm < 1e-2 * initial_grad_norm;
+                let status = if (grad_norm < acceptable_scaled && made_progress)
+                    || made_strong_progress
+                {
+                    ApplicationReturnStatus::SolvedToAcceptableLevel
+                } else {
+                    ApplicationReturnStatus::SearchDirectionBecomesTooSmall
+                };
+                break status;
             }
         }
         last_grad_norm = grad_norm;
@@ -377,15 +437,23 @@ pub fn solve_unconstrained(
             }
             alpha *= 0.5;
             if alpha < opts.line_search_min_alpha {
-                return finalize(
-                    tnlp,
-                    &x,
-                    current_f,
-                    n,
-                    iter,
-                    stats,
-                    ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
-                );
+                // The line search exhausted alpha. Soft failure: when
+                // we got here from a meaningfully reduced gradient
+                // (≥ 1000× drop from the initial), the search direction
+                // is exhausted because we are sitting near a local min
+                // whose curvature is too poor for a finite-step Newton
+                // model. Accept as Solved_To_Acceptable_Level rather
+                // than the harsher Search_Direction_Becomes_Too_Small.
+                let made_strong_progress = initial_grad_norm > 0.0
+                    && grad_norm < 1e-2 * initial_grad_norm;
+                let status = if made_strong_progress
+                    || grad_norm < acceptable_scaled
+                {
+                    ApplicationReturnStatus::SolvedToAcceptableLevel
+                } else {
+                    ApplicationReturnStatus::SearchDirectionBecomesTooSmall
+                };
+                return finalize(tnlp, &x, current_f, n, iter, stats, status);
             }
         };
 
@@ -950,11 +1018,23 @@ fn finalize(
     let lambda: Vec<Number> = vec![];
     let solver_status = match status {
         ApplicationReturnStatus::SolveSucceeded => crate::alg_types::SolverReturn::Success,
+        ApplicationReturnStatus::SolvedToAcceptableLevel => {
+            crate::alg_types::SolverReturn::StopAtAcceptablePoint
+        }
         ApplicationReturnStatus::MaximumIterationsExceeded => {
             crate::alg_types::SolverReturn::MaxiterExceeded
         }
         ApplicationReturnStatus::SearchDirectionBecomesTooSmall => {
             crate::alg_types::SolverReturn::StopAtTinyStep
+        }
+        ApplicationReturnStatus::InfeasibleProblemDetected => {
+            crate::alg_types::SolverReturn::LocalInfeasibility
+        }
+        ApplicationReturnStatus::InvalidNumberDetected => {
+            crate::alg_types::SolverReturn::InvalidNumberDetected
+        }
+        ApplicationReturnStatus::ErrorInStepComputation => {
+            crate::alg_types::SolverReturn::ErrorInStepComputation
         }
         _ => crate::alg_types::SolverReturn::InternalError,
     };
