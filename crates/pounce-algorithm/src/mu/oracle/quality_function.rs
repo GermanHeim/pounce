@@ -34,6 +34,9 @@ use std::rc::Rc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormType {
     OneNorm,
+    /// Squared 2-norm — upstream `NM_NORM_2_SQUARED` (default).
+    /// Aggregates are `||·||²` (no sqrt) and `(1−α)²` weighting.
+    TwoNormSquared,
     TwoNorm,
     MaxNorm,
 }
@@ -69,7 +72,7 @@ impl Default for QualityFunctionMuOracle {
     fn default() -> Self {
         // Defaults from `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
         Self {
-            norm_type: NormType::TwoNorm,
+            norm_type: NormType::TwoNormSquared,
             centrality_type: CentralityType::None,
             balancing_term: BalancingTermType::None,
             max_section_steps: 8,
@@ -190,6 +193,11 @@ impl QualityFunctionMuOracle {
         let d_minus_s = cq_ref.curr_d_minus_s();
         let dual_aggr = match self.norm_type {
             NormType::OneNorm => grad_lag_x.asum() + grad_lag_s.asum(),
+            NormType::TwoNormSquared => {
+                let nx = grad_lag_x.nrm2();
+                let ns = grad_lag_s.nrm2();
+                nx * nx + ns * ns
+            }
             NormType::TwoNorm => {
                 let nx = grad_lag_x.nrm2();
                 let ns = grad_lag_s.nrm2();
@@ -199,6 +207,11 @@ impl QualityFunctionMuOracle {
         };
         let primal_aggr = match self.norm_type {
             NormType::OneNorm => c.asum() + d_minus_s.asum(),
+            NormType::TwoNormSquared => {
+                let nc = c.nrm2();
+                let nd = d_minus_s.nrm2();
+                nc * nc + nd * nd
+            }
             NormType::TwoNorm => {
                 let nc = c.nrm2();
                 let nd = d_minus_s.nrm2();
@@ -296,6 +309,13 @@ impl QualityFunctionMuOracle {
                         + trial_s_s_l.asum()
                         + trial_s_s_u.asum()
                 }
+                NormType::TwoNormSquared => {
+                    let a = trial_s_x_l.nrm2();
+                    let b = trial_s_x_u.nrm2();
+                    let c = trial_s_s_l.nrm2();
+                    let d = trial_s_s_u.nrm2();
+                    a * a + b * b + c * c + d * d
+                }
                 NormType::TwoNorm => {
                     let a = trial_s_x_l.nrm2();
                     let b = trial_s_x_u.nrm2();
@@ -362,7 +382,21 @@ impl QualityFunctionMuOracle {
         );
 
         let mu_new = sigma * avrg_compl;
-        Some(mu_new.clamp(self.mu_min, self.mu_max))
+        let mu_clamped = mu_new.clamp(self.mu_min, self.mu_max);
+        if std::env::var("POUNCE_DBG_QF").is_ok() {
+            let iter_count = data.borrow().iter_count;
+            let curr_mu = data.borrow().curr_mu;
+            let sigma_floor = self.sigma_min.max(self.mu_min / avrg_compl);
+            let sigma_up_dn = sigma_floor.max(1.0 - self.section_sigma_tol.max(1e-4))
+                .min(self.mu_max / avrg_compl);
+            eprintln!(
+                "[QF] iter={} curr_mu={:.3e} avrg_compl={:.3e} sigma={:.3e} mu_new={:.3e} mu_clamped={:.3e} | sigma_min={:.3e} mu_min={:.3e} sigma_lo_dn={:.3e} sigma_up_dn={:.3e} mu_min/avrg={:.3e}",
+                iter_count, curr_mu, avrg_compl, sigma, mu_new, mu_clamped,
+                self.sigma_min, self.mu_min, sigma_floor, sigma_up_dn,
+                self.mu_min / avrg_compl,
+            );
+        }
+        Some(mu_clamped)
     }
 }
 
@@ -498,6 +532,21 @@ pub fn evaluate_quality_function(
         NormType::OneNorm => {
             let mut d = (1.0 - alpha_dual) * aggr.dual_aggr;
             let mut p = (1.0 - alpha_primal) * aggr.primal_aggr;
+            let mut c = aggr.compl_aggr;
+            d /= aggr.n_dual as Number;
+            if aggr.n_pri > 0 {
+                p /= aggr.n_pri as Number;
+            }
+            debug_assert!(aggr.n_comp > 0);
+            c /= aggr.n_comp as Number;
+            (d, p, c)
+        }
+        NormType::TwoNormSquared => {
+            // Upstream `IpQualityFunctionMuOracle.cpp:584-595`. The
+            // (1−α)² weight and per-n averaging differ from the plain
+            // 2-norm branch — and this is the upstream default.
+            let mut d = (1.0 - alpha_dual).powi(2) * aggr.dual_aggr;
+            let mut p = (1.0 - alpha_primal).powi(2) * aggr.primal_aggr;
             let mut c = aggr.compl_aggr;
             d /= aggr.n_dual as Number;
             if aggr.n_pri > 0 {
