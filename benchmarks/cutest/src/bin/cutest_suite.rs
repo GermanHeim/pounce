@@ -488,7 +488,12 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
     {
         let opts = app.options_mut();
         let _ = opts.set_string_value("sb", "yes", true, false);
-        let _ = opts.set_string_value("mu_strategy", "adaptive", true, false);
+        let mu_strategy = std::env::var("POUNCE_MU_STRATEGY")
+            .unwrap_or_else(|_| "adaptive".to_string());
+        let _ = opts.set_string_value("mu_strategy", &mu_strategy, true, false);
+        if let Ok(o) = std::env::var("POUNCE_MU_ORACLE") {
+            let _ = opts.set_string_value("mu_oracle", &o, true, false);
+        }
         let _ = opts.set_numeric_value("tol", 1e-8, true, false);
         let _ = opts.set_integer_value("max_iter", 3000, true, false);
         let pl: i32 = std::env::var("POUNCE_PRINT_LEVEL")
