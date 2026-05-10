@@ -236,6 +236,20 @@ impl IpoptAlgorithm {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 
+        // Mirror upstream `IpAdaptiveMuUpdate.cpp:339, 386, 431` and
+        // `IpMonotoneMuUpdate.cpp:165`: every code path that *changes*
+        // μ calls `linesearch_->Reset()`, which clears the filter via
+        // `FilterLSAcceptor::Reset` (`IpFilterLSAcceptor.cpp:524-532`).
+        // Rationale: filter entries are computed against the current
+        // barrier — when μ changes, prior entries no longer apply and
+        // would over-constrain acceptance. The two upstream paths that
+        // do NOT reset (stay-fixed-no-decrease and fixed→free transition)
+        // both keep μ at curr_mu, so the `mu_changed` check captures
+        // the intended distinction.
+        if next_mu != mu_before {
+            self.bundle.line_search.reset();
+        }
+
         // 4. Hessian update.
         let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
 
