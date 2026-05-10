@@ -11,7 +11,7 @@
 //! `crate::ipopt_nlp::IpoptNlp` path.
 
 use pounce_common::types::{Index, Number};
-use pounce_linalg::{Matrix, SymMatrix, Vector};
+use pounce_linalg::{DenseVector, Matrix, SymMatrix, Vector};
 use std::rc::Rc;
 
 /// Lower-level NLP interface (post-`TNLPAdapter`). Equality and
@@ -81,5 +81,18 @@ pub trait IpoptNlp: Nlp {
         _v_u: &mut dyn Vector,
     ) -> bool {
         true
+    }
+
+    /// Lift a compressed `x_var` (length `n_x_var`) to the full-x
+    /// length (`n_full_x` = user TNLP's `n`), splicing fixed-variable
+    /// values back in. Used at finalize-solution time to hand the user
+    /// a full-length x. Default impl returns x as-is, valid when the
+    /// problem has no fixed variables.
+    fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
+        let dx = x
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .expect("IpoptNlp::lift_x_to_full expects DenseVector");
+        dx.expanded_values().to_vec()
     }
 }

@@ -165,6 +165,15 @@ pub struct OrigIpoptNlp {
     /// Total nonzeros in the full (un-split) `eval_jac_g` triplet.
     nnz_jac_g_full: Index,
 
+    // ----- hessian sparsity remap (fixed-var filtering) -----
+    /// Total nonzeros the user's `eval_h` writes into. May exceed
+    /// `h_space.nonzeros()` when fixed variables drop entries.
+    nnz_h_lag_full: Index,
+    /// `h_entry_in_full[k]` = position in the full TNLP hessian's
+    /// values array of the k-th kept entry. Only populated when
+    /// `nnz_h_lag_full > h_space.nonzeros()`.
+    h_entry_in_full: Vec<Index>,
+
     // ----- caches (one entry; key = input vector tag) -----
     f_cache: RefCell<Cache<Number>>,
     grad_f_cache: RefCell<Cache<Rc<dyn Vector>>>,
@@ -354,11 +363,19 @@ impl OrigIpoptNlp {
         let mut jac_d_jcol_1based = Vec::new();
         let mut jac_d_entry_in_g = Vec::new();
 
+        // `make_parameter`: drop Jacobian entries in fixed-variable
+        // columns. Their contribution to f and g is constant under the
+        // active-x search so they don't appear in the KKT.
+        let full_to_var = &classification.full_to_var;
         for k in 0..info.nnz_jac_g as usize {
             let g_row_0 = (full_irow[k] - style_offset) as usize;
             let x_col_0 = (full_jcol[k] - style_offset) as usize;
+            let var_col = full_to_var[x_col_0];
+            if var_col < 0 {
+                continue;
+            }
             // Triplet output is 1-based (matches `GenTMatrix` convention).
-            let col_1based = (x_col_0 + 1) as Index;
+            let col_1based = var_col + 1;
             let c_row = g_to_c[g_row_0];
             if c_row >= 0 {
                 jac_c_irow_1based.push(c_row + 1);
@@ -390,6 +407,8 @@ impl OrigIpoptNlp {
         // implement `eval_h`, we leave `h_space = None`. The Phase-8
         // limited-memory quasi-Newton path will populate it from
         // `LowRankUpdateSymMatrixSpace` instead. -----
+        let nnz_h_lag_full = info.nnz_h_lag;
+        let mut h_entry_in_full: Vec<Index> = Vec::new();
         let h_space = if info.nnz_h_lag > 0 {
             let mut h_irow = vec![0 as Index; info.nnz_h_lag as usize];
             let mut h_jcol = vec![0 as Index; info.nnz_h_lag as usize];
@@ -409,15 +428,25 @@ impl OrigIpoptNlp {
                 )
             };
             if supports_h {
-                // Convert to 1-based (irrespective of TNLP index style).
-                let h_irow_1: Vec<Index> = h_irow
-                    .iter()
-                    .map(|&v| v - style_offset + 1)
-                    .collect();
-                let h_jcol_1: Vec<Index> = h_jcol
-                    .iter()
-                    .map(|&v| v - style_offset + 1)
-                    .collect();
+                // `make_parameter`: drop Hessian entries where row OR
+                // column is fixed (the second derivatives w.r.t. a
+                // parameter are not needed in the active-x KKT). The
+                // surviving entries are remapped from full-x indices
+                // to var-x indices via `full_to_var`.
+                let mut h_irow_1: Vec<Index> = Vec::with_capacity(h_irow.len());
+                let mut h_jcol_1: Vec<Index> = Vec::with_capacity(h_jcol.len());
+                for k in 0..h_irow.len() {
+                    let i_full = (h_irow[k] - style_offset) as usize;
+                    let j_full = (h_jcol[k] - style_offset) as usize;
+                    let i_var = full_to_var[i_full];
+                    let j_var = full_to_var[j_full];
+                    if i_var < 0 || j_var < 0 {
+                        continue;
+                    }
+                    h_irow_1.push(i_var + 1);
+                    h_jcol_1.push(j_var + 1);
+                    h_entry_in_full.push(k as Index);
+                }
                 Some(SymTMatrixSpace::new(n_x_var, h_irow_1, h_jcol_1))
             } else {
                 // TODO(Phase 8): wire the L-BFGS / SR1 path here.
@@ -461,6 +490,8 @@ impl OrigIpoptNlp {
             jac_c_entry_in_g,
             jac_d_entry_in_g,
             nnz_jac_g_full: info.nnz_jac_g,
+            nnz_h_lag_full,
+            h_entry_in_full,
             f_cache: RefCell::new(Cache::new(1)),
             grad_f_cache: RefCell::new(Cache::new(1)),
             c_cache: RefCell::new(Cache::new(1)),
@@ -827,10 +858,11 @@ impl OrigIpoptNlp {
     }
 
     /// Lift a compressed `x_var` (length `n_x_var`) up to the full TNLP
-    /// `x` (length `n_full_x`). Fixed-variable removal will live here
-    /// once Phase-3 introduces it; today `x_not_fixed_map` is identity
-    /// for non-fixed problems so this is essentially a copy.
-    fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
+    /// `x` (length `n_full_x`), inserting `x_fixed_vals` at the
+    /// `x_fixed_map` positions. Mirrors upstream
+    /// `IpTNLPAdapter::ResortX` under `fixed_variable_treatment =
+    /// make_parameter`.
+    pub fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
         let Some(dx) = x.as_any().downcast_ref::<DenseVector>() else {
             panic!("OrigIpoptNlp expects DenseVector for x");
         };
@@ -840,6 +872,9 @@ impl OrigIpoptNlp {
         let vals = dx.expanded_values();
         for (var_idx, &full_idx) in cls.x_not_fixed_map.iter().enumerate() {
             full[full_idx as usize] = vals[var_idx];
+        }
+        for (i, &full_idx) in cls.x_fixed_map.iter().enumerate() {
+            full[full_idx as usize] = cls.x_fixed_vals[i];
         }
         full
     }
@@ -1263,7 +1298,11 @@ impl OrigIpoptNlp {
         let full_lambda = self.pack_lambda_for_user(y_c, y_d, &cls);
         let scaled_obj_factor = obj_factor * self.obj_scale_factor.get();
 
-        let mut full_vals = vec![0.0; h_space.nonzeros() as usize];
+        // The user TNLP writes `nnz_h_lag_full` values; the kept
+        // (var-x ⊗ var-x) subset has `h_space.nonzeros()` entries
+        // selected via `h_entry_in_full`. They differ when fixed
+        // variables drop entries.
+        let mut full_vals = vec![0.0; self.nnz_h_lag_full as usize];
         let ok = {
             let a = self.adapter.borrow();
             let mut t = a.tnlp().borrow_mut();
@@ -1280,7 +1319,18 @@ impl OrigIpoptNlp {
         };
         assert!(ok, "TNLP::eval_h(Values) returned false");
         let mut h = SymTMatrix::new(Rc::clone(h_space));
-        h.values_mut().copy_from_slice(&full_vals);
+        let kept = h_space.nonzeros() as usize;
+        let h_vals = h.values_mut();
+        if self.h_entry_in_full.is_empty() {
+            // Fast path — no fixed-var filtering, lengths match.
+            debug_assert_eq!(kept, full_vals.len());
+            h_vals.copy_from_slice(&full_vals);
+        } else {
+            debug_assert_eq!(kept, self.h_entry_in_full.len());
+            for (k, &src) in self.h_entry_in_full.iter().enumerate() {
+                h_vals[k] = full_vals[src as usize];
+            }
+        }
         let result: Rc<dyn SymMatrix> = Rc::new(h);
         self.h_cache.borrow_mut().add(
             Rc::clone(&result),
@@ -1411,6 +1461,10 @@ impl IpoptNlp for OrigIpoptNlp {
             xs[var_idx] = full_x[full_idx as usize];
         }
         true
+    }
+
+    fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
+        OrigIpoptNlp::lift_x_to_full(self, x)
     }
 }
 

@@ -32,11 +32,25 @@ pub const DEFAULT_NLP_UPPER_BOUND_INF: Number = 1.0e19;
 pub struct BoundClassification {
     pub n_full_x: Index,
     pub n_full_g: Index,
-    /// Number of variables with `x_l == x_u`. Treated as parameters
-    /// upstream by default; for Phase 3 we only count them.
+    /// Number of variables with `x_l == x_u`. With
+    /// `fixed_variable_treatment = make_parameter` (the upstream
+    /// default — and pounce's only mode today) these are removed from
+    /// the active set; their indices live in `x_fixed_map` and their
+    /// values in `x_fixed_vals`.
     pub n_x_fixed: Index,
     /// Indices in `[0, n_full_x)` that are not fixed (`x_l < x_u`).
+    /// Length is `n_x_var = n_full_x - n_x_fixed`.
     pub x_not_fixed_map: Vec<Index>,
+    /// Indices in `[0, n_full_x)` that ARE fixed. Length `n_x_fixed`.
+    pub x_fixed_map: Vec<Index>,
+    /// Fixed values (== `x_l[i] == x_u[i]`) for each entry of
+    /// `x_fixed_map`. Used by `OrigIpoptNlp::lift_x_to_full` to insert
+    /// the correct constant into the full-x array before calling the
+    /// user's TNLP.
+    pub x_fixed_vals: Vec<Number>,
+    /// Maps full-x index → var-x index, with `-1` for fixed entries.
+    /// Used by sparsity filtering for the Jacobian / Hessian.
+    pub full_to_var: Vec<Index>,
     /// Subset of `x_not_fixed_map`'s domain (i.e. positions in `x_var`)
     /// where a finite lower bound is present.
     pub x_l_map: Vec<Index>,
@@ -237,6 +251,9 @@ fn classify_bounds(
 
     // --- Variables ---------------------------------------------------
     let mut x_not_fixed_map: Vec<Index> = Vec::with_capacity(nx);
+    let mut x_fixed_map: Vec<Index> = Vec::new();
+    let mut x_fixed_vals: Vec<Number> = Vec::new();
+    let mut full_to_var: Vec<Index> = vec![-1; nx];
     let mut x_l_map: Vec<Index> = Vec::new();
     let mut x_u_map: Vec<Index> = Vec::new();
     let mut n_x_fixed: Index = 0;
@@ -256,17 +273,19 @@ fn classify_bounds(
             ));
         }
         if lo == hi {
-            // Fixed: counted but, for Phase 3 (no fixed-var treatment),
-            // also kept in x_var with both finite bounds.
+            // `fixed_variable_treatment = make_parameter` (upstream
+            // default): drop fixed vars from x_var entirely. Their
+            // values are spliced back into the full-x array each time
+            // we call into the user's TNLP (see
+            // `OrigIpoptNlp::lift_x_to_full`).
             n_x_fixed += 1;
-            let var_idx = x_not_fixed_map.len() as Index;
-            x_not_fixed_map.push(i as Index);
-            x_l_map.push(var_idx);
-            x_u_map.push(var_idx);
+            x_fixed_map.push(i as Index);
+            x_fixed_vals.push(lo);
             continue;
         }
         let var_idx = x_not_fixed_map.len() as Index;
         x_not_fixed_map.push(i as Index);
+        full_to_var[i] = var_idx;
         if lo > lo_inf {
             x_l_map.push(var_idx);
         }
@@ -316,6 +335,9 @@ fn classify_bounds(
         n_full_g,
         n_x_fixed,
         x_not_fixed_map,
+        x_fixed_map,
+        x_fixed_vals,
+        full_to_var,
         x_l_map,
         x_u_map,
         n_c,
@@ -397,6 +419,8 @@ mod tests {
         assert_eq!(c.n_full_g, 2);
         assert_eq!(c.n_x_fixed, 0);
         assert_eq!(c.n_x_var(), 4);
+        assert!(c.x_fixed_map.is_empty());
+        assert_eq!(c.full_to_var, vec![0, 1, 2, 3]);
         // All four variables have both finite bounds.
         assert_eq!(c.x_l_map, vec![0, 1, 2, 3]);
         assert_eq!(c.x_u_map, vec![0, 1, 2, 3]);
@@ -457,14 +481,17 @@ mod tests {
         let c = adapter.classification();
         assert_eq!(c.n_full_x, 3);
         assert_eq!(c.n_x_fixed, 1);
-        // All three remain in x_var (Phase 3 — no fixed-variable removal).
-        assert_eq!(c.n_x_var(), 3);
-        assert_eq!(c.x_not_fixed_map, vec![0, 1, 2]);
-        // x[0] fixed → counted as both lower and upper at index 0.
-        // x[1] fully free → not in either map.
-        // x[2] upper-only → in x_u_map only at index 2.
-        assert_eq!(c.x_l_map, vec![0]);
-        assert_eq!(c.x_u_map, vec![0, 2]);
+        // x[0] fixed at 3 → removed from x_var (make_parameter).
+        // x[1] free, x[2] upper-only → both in x_var.
+        assert_eq!(c.n_x_var(), 2);
+        assert_eq!(c.x_not_fixed_map, vec![1, 2]);
+        assert_eq!(c.x_fixed_map, vec![0]);
+        assert_eq!(c.x_fixed_vals, vec![3.0]);
+        assert_eq!(c.full_to_var, vec![-1, 0, 1]);
+        // After fixed-var removal, x[1] (now var idx 0) is fully free,
+        // x[2] (now var idx 1) has only an upper bound.
+        assert!(c.x_l_map.is_empty());
+        assert_eq!(c.x_u_map, vec![1]);
         // No equalities; both constraints are classified as inequalities.
         assert_eq!(c.n_c, 0);
         assert_eq!(c.n_d, 2);

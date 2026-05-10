@@ -558,23 +558,21 @@ fn try_eval_curr_f(
 /// `OrigIpoptNlp::finalize_solution_*` accessor that's still being
 /// fleshed out). Returns `Err` if the final iterate is missing.
 fn finalize_via_orig_nlp(
-    _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
     alg: &IpoptAlgorithm,
     solver_status: SolverReturn,
     _app_status: ApplicationReturnStatus,
     tnlp: &Rc<RefCell<dyn TNLP>>,
 ) -> Result<(), ()> {
     let curr = alg.data.borrow().curr.clone().ok_or(())?;
-    // Best-effort: extract a Vec<f64> from `curr.x` if it's a DenseVector.
-    let x_dense = curr
-        .x
-        .as_any()
-        .downcast_ref::<pounce_linalg::DenseVector>()
-        .ok_or(())?;
-    let x_vec: Vec<Number> = x_dense.values().to_vec();
+    // Lift compressed x_var → full-x (length `info.n`) so the user
+    // TNLP receives the same shape it provided. With `make_parameter`
+    // the fixed components are spliced back in by the IpoptNlp.
+    let x_vec: Vec<Number> = nlp.borrow().lift_x_to_full(&*curr.x);
     let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
     let n = info.n as usize;
     let m = info.m as usize;
+    debug_assert_eq!(x_vec.len(), n);
     // For now we forward `x` only; the multiplier vectors come through
     // as zeros until `OrigIpoptNlp` ships its
     // `finalize_solution_lambda/z_l/z_u` accessors. Compute g(x) via
