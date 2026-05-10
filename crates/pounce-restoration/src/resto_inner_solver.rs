@@ -305,9 +305,13 @@ pub fn run_inner_resto(
     let status = alg.optimize();
 
     // ---- 7. Map status & extract orig_x/orig_s. ---------------------
-    if !is_resto_success(status) {
-        return None;
-    }
+    //
+    // We need to recover trial_x / trial_s on BOTH the success path
+    // (regular RestoSolveResult return) and the alt-locally-infeasible
+    // path (inner exited RestorationFailure / MaxiterExceeded but the
+    // resto NLP itself reached stationarity at a point of large
+    // orig-NLP `inf_pr`). Hoist the extraction so it runs before the
+    // status branch.
     let final_iv = alg.data.borrow().curr.clone()?;
     let xc = final_iv.x.as_any().downcast_ref::<CompoundVector>()?;
     let trial_x = clone_dense_block(xc.comp(BLOCK_X))?;
@@ -340,9 +344,73 @@ pub fn run_inner_resto(
         eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or(0.0);
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
-    let locally_infeasible = matches!(status, SolverReturn::Success)
+    let strict_locally_infeasible = matches!(status, SolverReturn::Success)
         && inner_stationarity_converged
         && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4);
+
+    // Alt locally-infeasible gate. PFIT2/PFIT3-style: the inner
+    // resto NLP is at (or near) a stationary point — `inner_kkt_err`
+    // has dropped to a small value — but the inner's own line search
+    // can't make the next step (degenerate Hessian / nested
+    // resto-of-resto trips), so the inner exits with
+    // `RestorationFailure` or `MaxiterExceeded` instead of `Success`.
+    // Algorithmically this is the same locally-infeasible signature:
+    // the resto sub-problem has driven `||c||_1` as low as the
+    // sub-NLP can, the value is bounded above outer `tol`, and the
+    // KKT residual is well into the "approaching stationary" regime.
+    //
+    // Heuristic thresholds:
+    //
+    //   * `inner_kkt_err <= 1e-2` — loose enough to admit the
+    //     PFIT2-style exit (inf_du ≈ 1e-3 in the trace, full nlp_err
+    //     of similar magnitude after compl/scaling), tight enough to
+    //     reject genuinely-stuck inners that haven't approached
+    //     stationarity at all.
+    //   * `orig_inf_pr_at_final > max(100*outer_tol, 1e-3)` — the
+    //     orig-NLP `inf_pr` floor is non-trivial (i.e. NOT just a
+    //     little above outer tol — distinguish from the kappa-guard
+    //     near-feasible exit).
+    //   * `inner_iter_count >= 30` — not a premature failure on the
+    //     first few inner iters.
+    //
+    // Mirrors the spirit of upstream's exception-throw at
+    // `IpRestoConvCheck.cpp:240` for the case where the inner happens
+    // to exit via line-search failure rather than by clean
+    // convergence — upstream avoids this by being more numerically
+    // robust in the line search itself (365+ inner iters on PFIT2),
+    // pounce currently can't reach that depth so we surface the
+    // diagnosis on the failure exit instead.
+    let alt_locally_infeasible = matches!(
+        status,
+        SolverReturn::RestorationFailure
+            | SolverReturn::MaxiterExceeded
+            | SolverReturn::ErrorInStepComputation
+    ) && inner_kkt_err <= 1e-2
+        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+        && inner_iter_count >= 30;
+
+    let locally_infeasible = strict_locally_infeasible || alt_locally_infeasible;
+
+    if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
+        eprintln!(
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} → loc_inf={}",
+            status,
+            inner_iter_count,
+            inner_kkt_err,
+            orig_inf_pr_at_final,
+            outer_tol,
+            strict_locally_infeasible,
+            alt_locally_infeasible,
+            locally_infeasible
+        );
+    }
+
+    // If the inner failed AND we did NOT detect locally-infeasible,
+    // fall back to the original Failed path (caller turns this into
+    // `RestorationOutcome::Failed`).
+    if !is_resto_success(status) && !locally_infeasible {
+        return None;
+    }
 
     Some(RestoSolveResult {
         trial_x,
