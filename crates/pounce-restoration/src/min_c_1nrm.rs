@@ -177,9 +177,26 @@ impl RestorationPhase for MinC1NormRestoration {
         //    can gate `Converged` on outer-filter acceptance per
         //    upstream `IpRestoFilterConvCheck.cpp:53-80`.
         let cb = self.orig_progress.take();
+        // Upstream isolates the resto sub-IPM behind a separate
+        // `IpoptData` (`IpRestoMinC_1Nrm.cpp:123`), so the outer's
+        // `curr_mu` / `curr_tau` are untouched across the inner solve;
+        // `ComputeBoundMultiplierStep` (`IpRestoMinC_1Nrm.cpp:445`)
+        // reads `IpData().curr_mu()` and gets the outer value. Pounce
+        // shares the outer `IpoptData`, and `pounce-restoration::init`
+        // overwrites `curr_mu`; the inner barrier loop overwrites it
+        // again at every update. Snapshot here and restore before the
+        // bound-multiplier-step computation below so it sees the outer
+        // mu/tau, matching upstream.
+        let saved_mu = data.borrow().curr_mu;
+        let saved_tau = data.borrow().curr_tau;
         let Some(result) = (self.inner_solver)(data, cq, nlp, cb) else {
             return RestorationOutcome::Failed;
         };
+        {
+            let mut d = data.borrow_mut();
+            d.curr_mu = saved_mu;
+            d.curr_tau = saved_tau;
+        }
 
         // 1b. Locally-infeasible short-circuit. The inner sub-IPM
         // satisfied its own KKT tolerance (true stationary point of
