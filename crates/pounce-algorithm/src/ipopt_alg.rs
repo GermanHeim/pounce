@@ -101,6 +101,23 @@ pub struct IpoptAlgorithm {
     /// `Outcome::Accepted` between entries and are unaffected.
     last_resto_entry_x: Option<Box<dyn Vector>>,
     last_resto_entry_s: Option<Box<dyn Vector>>,
+    /// Snapshot of the *recovery* iterate from the previous
+    /// restoration. Compared against the next entry's `(x, s)` to
+    /// detect "outer made no progress between consecutive resto
+    /// invocations". When this distance is below threshold for
+    /// several consecutive entries, terminate — catching
+    /// slow-non-convergence cycles (ACOPR14, TRO3X3, ACOPR30) where
+    /// resto's *inner* moves substantively each call but the *outer*
+    /// makes no progress between calls. Cleared on any LS-accepted
+    /// step.
+    last_resto_recovery_x: Option<Box<dyn Vector>>,
+    last_resto_recovery_s: Option<Box<dyn Vector>>,
+    /// Count of consecutive restoration entries on which the outer
+    /// step (recovery → next-entry) was below the iterate-distance
+    /// threshold. Cleared on any LS-accepted step. Limit chosen to
+    /// let MAKELA3, HAIFAM, HALDMADS, ROBOT, TENBARS2 — which need
+    /// 2-3 consecutive resto entries to recover — pass through.
+    resto_no_outer_progress_count: usize,
 }
 
 impl IpoptAlgorithm {
@@ -124,6 +141,9 @@ impl IpoptAlgorithm {
             tiny_step_last_iteration: false,
             last_resto_entry_x: None,
             last_resto_entry_s: None,
+            last_resto_recovery_x: None,
+            last_resto_recovery_s: None,
+            resto_no_outer_progress_count: 0,
         }
     }
 
@@ -450,6 +470,9 @@ impl IpoptAlgorithm {
                         // so the next resto entry starts fresh.
                         self.last_resto_entry_x = None;
                         self.last_resto_entry_s = None;
+                        self.last_resto_recovery_x = None;
+                        self.last_resto_recovery_s = None;
+                        self.resto_no_outer_progress_count = 0;
                     }
                     Outcome::TinyStep | Outcome::Failed => {
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
@@ -536,21 +559,33 @@ impl IpoptAlgorithm {
         let reference_theta = self.cq.borrow().curr_constraint_violation();
         let reference_barr = self.cq.borrow().curr_barrier_obj();
 
-        // No-progress restoration cycle detector. When the previous
-        // outer iteration also exited via restoration AND the current
-        // outer `(x, s)` is essentially identical to the snapshot from
-        // the previous entry, the inner resto-IPM is producing
-        // recovered iterates indistinguishable from `curr` — the outer
-        // never moves and the algorithm cycles forever (QCNEW,
-        // ACOPR14). Surface as `ErrorInStepComputation`. The signal is
-        // iterate-distance, not `inf_pr`, because in cases like ACOPR14
-        // `inf_pr` micro-drifts (~3e-12) between entries while the
-        // outer iterate is bit-stable; an `inf_pr` heuristic misses
-        // this. A productive single-restoration sequence (BT8,
-        // HIMMELBJ, LINSPANH, LSNNODOC, ODFITS, OET3) clears the
-        // snapshot via `Outcome::Accepted` between entries and is
-        // unaffected. Mirrors the *intent* of upstream
-        // `IpBacktrackingLineSearch.cpp:580-600`.
+        // No-progress restoration cycle detector. Two layered checks
+        // surface as `ErrorInStepComputation` instead of cycling to
+        // `max_iter` exhaustion (mirrors the *intent* of upstream
+        // `IpBacktrackingLineSearch.cpp:580-600`'s almost-feasible
+        // resto guard):
+        //
+        // 1. *Static cycle*: entry-to-entry — when the curr `(x, s)`
+        //    at this entry is essentially identical to the snapshot
+        //    from the previous entry, the inner resto-IPM is
+        //    returning recovered iterates indistinguishable from
+        //    entry, AND the outer didn't move either. Fires
+        //    immediately. Catches QCNEW, EQC, MESH, POLAK6, S365,
+        //    S365MOD, SIPOW2M, PFIT4.
+        //
+        // 2. *Slow-progress cycle*: recovery-to-entry — when curr at
+        //    this entry is essentially identical to the *recovery*
+        //    iterate from the previous resto, the outer made no
+        //    progress between resto invocations even though resto's
+        //    inner moved substantively. Counted, fires after 5
+        //    consecutive entries. Catches ACOPR14, ACOPR30, TRO3X3
+        //    while letting MAKELA3, HAIFAM, HALDMADS, ROBOT,
+        //    TENBARS2 — which need 2-3 productive resto entries
+        //    before LS accepts — pass through.
+        //
+        // A productive single-restoration sequence (BT8, HIMMELBJ,
+        // LINSPANH, LSNNODOC, ODFITS, OET3) clears both snapshots via
+        // `Outcome::Accepted` between entries and is unaffected.
         let curr = self
             .data
             .borrow()
@@ -565,6 +600,24 @@ impl IpoptAlgorithm {
             let ds_rel = relative_distance(&*curr.s, &**prev_s);
             if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
                 return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
+            }
+        }
+        if let (Some(prev_x), Some(prev_s)) = (
+            self.last_resto_recovery_x.as_ref(),
+            self.last_resto_recovery_s.as_ref(),
+        ) {
+            let dx_rel = relative_distance(&*curr.x, &**prev_x);
+            let ds_rel = relative_distance(&*curr.s, &**prev_s);
+            if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
+                self.resto_no_outer_progress_count =
+                    self.resto_no_outer_progress_count.saturating_add(1);
+                if self.resto_no_outer_progress_count >= 5 {
+                    return IterateOutcome::Terminate(
+                        SolverReturn::ErrorInStepComputation,
+                    );
+                }
+            } else {
+                self.resto_no_outer_progress_count = 0;
             }
         }
         self.last_resto_entry_x = Some(curr.x.make_new_copy());
@@ -590,6 +643,20 @@ impl IpoptAlgorithm {
                 // The driver has staged the recovered point on
                 // `data.trial`; promote it and continue iterating.
                 self.data.borrow_mut().accept_trial_point();
+                // Snapshot the recovery iterate for the slow-cycle
+                // detector at the top of the next `invoke_restoration`.
+                // Compared against next-entry curr, dx_rel ≈ ‖α·d‖ —
+                // measures purely the outer step. See header comment
+                // on the cycle detector above.
+                let recovered = self
+                    .data
+                    .borrow()
+                    .curr
+                    .as_ref()
+                    .expect("accept_trial_point sets curr")
+                    .clone();
+                self.last_resto_recovery_x = Some(recovered.x.make_new_copy());
+                self.last_resto_recovery_s = Some(recovered.s.make_new_copy());
                 // Mirror upstream `IpoptAlgorithm::AcceptTrialPoint`
                 // (`IpIpoptAlg.cpp:917-963`): kappa_sigma clamp on the
                 // four bound-multiplier vectors. Upstream applies this
