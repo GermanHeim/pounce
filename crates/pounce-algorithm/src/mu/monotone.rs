@@ -64,6 +64,18 @@ impl MonotoneMuUpdate {
         self
     }
 
+    /// Builder for the `mu_min` floor. The restoration inner IPM uses
+    /// `100 * outer_mu_min` per upstream `IpAdaptiveMuUpdate.cpp:206-211`
+    /// (and the analogous monotone path); without the conservative
+    /// floor, near-feasible iterates collapse μ to the absolute floor
+    /// in a single step and the next direction is dominated by the
+    /// penalty/proximity terms instead of the barrier, which destroys
+    /// near-feasibility (DECONVBNE).
+    pub fn with_mu_min(mut self, mu_min: Number) -> Self {
+        self.mu_min = mu_min;
+        self
+    }
+
     /// Fraction-to-the-bound parameter `tau` from upstream
     /// `IpMonotoneMuUpdate.cpp:Update`:
     ///

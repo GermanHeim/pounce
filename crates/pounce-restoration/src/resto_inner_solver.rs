@@ -203,8 +203,24 @@ pub fn run_inner_resto(
     // flag). The inner restoration IPM is monotone in upstream
     // regardless of the outer `mu_strategy` selection — see
     // `IpAlgBuilder.cpp:BuildRestoIpoptAlgorithm`.
-    alg_bundle.mu_update = Box::new(MonotoneMuUpdate::new().with_first_iter_resto(true))
-        as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>;
+    //
+    // Conservative `mu_min` floor: upstream
+    // `IpAdaptiveMuUpdate.cpp:206-211` applies `100 * mu_min` for the
+    // restoration phase. Without it, a near-feasible inner iterate
+    // (theta ≈ 1e-13) collapses μ to the absolute floor (1e-11) in a
+    // single step. With μ at the floor the next direction is dominated
+    // by the ρ‖p+n‖₁ penalty and proximity terms instead of the
+    // barrier, and the resulting trial blows the orig-NLP infeasibility
+    // back up several orders of magnitude — kappa-reduction guard then
+    // can never re-fire and the inner runs out of iters
+    // (DECONVBNE: 479 iter Restoration_Failed → upstream's resto.mu_min
+    // = 1e-9 lets it converge in 484 outer iters).
+    let outer_mu_min = 1e-11_f64;
+    alg_bundle.mu_update = Box::new(
+        MonotoneMuUpdate::new()
+            .with_first_iter_resto(true)
+            .with_mu_min(100.0 * outer_mu_min),
+    ) as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>;
 
     // ---- 5. Construct inner cq (inner_data already built above). ----
     let inner_cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
