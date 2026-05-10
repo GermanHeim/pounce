@@ -52,8 +52,13 @@ pub trait BacktrackingLsAcceptor {
     /// `(theta, phi)` and the directional derivative `d_phi`.
     /// Default: always accept (lets stub acceptors compose without
     /// interfering with the driver's α-loop).
+    ///
+    /// Mutable receiver so concrete acceptors (notably
+    /// [`super::filter_acceptor::FilterLsAcceptor`]) can record per-trial
+    /// state used by the filter-reset heuristic
+    /// (`IpFilterLSAcceptor.cpp:407-433`).
     fn check_trial_point(
-        &self,
+        &mut self,
         _alpha_primal: Number,
         _theta: Number,
         _phi: Number,

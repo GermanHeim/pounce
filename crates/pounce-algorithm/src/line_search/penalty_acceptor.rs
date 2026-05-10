@@ -231,7 +231,7 @@ impl BacktrackingLsAcceptor for PenaltyLsAcceptor {
     /// The relaxed `≤` mirrors upstream's `Compare_le` ε-tolerance.
     /// `Reject` falls through to the driver's α-reduction step.
     fn check_trial_point(
-        &self,
+        &mut self,
         alpha_primal: Number,
         _theta: Number,
         _phi: Number,
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn check_trial_point_without_cache_accepts() {
         // Driver-init path not yet exercised → fall-through accept.
-        let a = PenaltyLsAcceptor::new();
+        let mut a = PenaltyLsAcceptor::new();
         assert_eq!(
             a.check_trial_point(1.0, 1.0, 10.0, -1.0, 0.5, 8.0),
             AcceptDecision::Accept

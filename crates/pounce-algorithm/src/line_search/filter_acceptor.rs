@@ -60,6 +60,29 @@ pub struct FilterLsAcceptor {
     /// Newton step from a poorly-scaled iterate landing far outside
     /// the feasible basin).
     theta_max: Option<Number>,
+    /// Maximum number of filter resets allowed per solve (upstream
+    /// option `max_filter_resets`, default 5). Set to `0` to disable
+    /// the heuristic entirely.
+    pub max_filter_resets: i32,
+    /// Number of consecutive filter-rejected accepts that triggers a
+    /// reset (upstream option `filter_reset_trigger`, default 5).
+    pub filter_reset_trigger: i32,
+    /// Resets used so far this solve. Bumped each time the heuristic
+    /// fires; not cleared by [`Self::reset`] — only re-initialising
+    /// the acceptor (a fresh `Default::default()`) zeroes it. Mirrors
+    /// upstream `n_filter_resets_`, which is cleared only in
+    /// `InitializeImpl` (per-solve), never in `Reset()`.
+    n_filter_resets: i32,
+    /// `true` when the most recent trial was rejected because of the
+    /// filter (as opposed to the iterate-acceptability test). Mirrors
+    /// upstream `last_rejection_due_to_filter_`. Read on the accept
+    /// path to decide whether to bump `count_successive_filter_rejections`.
+    last_rejection_due_to_filter: bool,
+    /// Number of consecutive accepted trials whose immediately-preceding
+    /// rejection was due to the filter. Reset whenever an accept
+    /// follows a non-filter rejection (or the very first accept of the
+    /// solve). Mirrors `count_successive_filter_rejections_`.
+    count_successive_filter_rejections: i32,
 }
 
 impl Default for FilterLsAcceptor {
@@ -79,6 +102,11 @@ impl Default for FilterLsAcceptor {
             alpha_min_frac: 0.05,
             theta_min: None,
             theta_max: None,
+            max_filter_resets: 5,
+            filter_reset_trigger: 5,
+            n_filter_resets: 0,
+            last_rejection_due_to_filter: false,
+            count_successive_filter_rejections: 0,
         }
     }
 }
@@ -192,8 +220,13 @@ impl FilterLsAcceptor {
     /// `theta <= theta_min`, otherwise `IsAcceptableToCurrentIterate`
     /// with the `obj_max_inc` rapid-increase guard); only on iterate
     /// acceptance do we then consult the filter.
+    ///
+    /// The `&mut self` receiver lets the method record the rejection
+    /// reason in `last_rejection_due_to_filter` and run the filter-reset
+    /// heuristic on the accept path
+    /// (`IpFilterLSAcceptor.cpp:407-433`).
     pub fn check_acceptability(
-        &self,
+        &mut self,
         alpha_primal: Number,
         theta: Number,
         phi: Number,
@@ -218,6 +251,7 @@ impl FilterLsAcceptor {
         // violation by many orders of magnitude (POLAK6, ROSENMMX,
         // ACOPR14: theta jumps from 8 to 1e12 on iter 1).
         if theta_trial > theta_max {
+            self.last_rejection_due_to_filter = false;
             return AcceptDecision::Reject;
         }
 
@@ -249,12 +283,38 @@ impl FilterLsAcceptor {
         };
 
         if !iterate_ok {
+            // Iterate-acceptability rejection (the LS-test branch in
+            // upstream's `CheckAcceptabilityOfTrialPoint`, lines 363-381).
+            // Upstream sets `last_rejection_due_to_filter_ = false` on
+            // both the unfortunate-Armijo-failure and the
+            // sufficient-progress-failure paths.
+            self.last_rejection_due_to_filter = false;
             return AcceptDecision::Reject;
         }
 
         if self.filter.dominated_by_any(theta_trial, phi_trial) {
+            // Iterate test passed but filter dominates → mark this
+            // rejection as filter-due (line 397).
+            self.last_rejection_due_to_filter = true;
             return AcceptDecision::Reject;
         }
+
+        // Trial accepted. Run the filter-reset heuristic
+        // (`IpFilterLSAcceptor.cpp:407-433`).
+        if self.max_filter_resets > 0 && self.n_filter_resets < self.max_filter_resets {
+            if self.last_rejection_due_to_filter {
+                self.count_successive_filter_rejections += 1;
+                if self.count_successive_filter_rejections >= self.filter_reset_trigger {
+                    self.filter.clear();
+                    self.n_filter_resets += 1;
+                    self.count_successive_filter_rejections = 0;
+                }
+            } else {
+                self.count_successive_filter_rejections = 0;
+            }
+        }
+        // Clear for the next outer iteration's α-loop (line 434).
+        self.last_rejection_due_to_filter = false;
 
         AcceptDecision::Accept
     }
@@ -284,7 +344,14 @@ impl FilterLsAcceptor {
 
 impl BacktrackingLsAcceptor for FilterLsAcceptor {
     fn reset(&mut self) {
+        // Mirrors upstream `FilterLSAcceptor::Reset`
+        // (`IpFilterLSAcceptor.cpp:524-532`): clears the filter and the
+        // per-LS rejection-tracking state, but **does not** clear
+        // `n_filter_resets` (that's only cleared in `InitializeImpl`,
+        // i.e. via constructing a fresh acceptor).
         self.filter.clear();
+        self.last_rejection_due_to_filter = false;
+        self.count_successive_filter_rejections = 0;
     }
 
     /// Port of `IpFilterLSAcceptor.cpp:CalculateAlphaMin` (lines
@@ -309,7 +376,7 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
     }
 
     fn check_trial_point(
-        &self,
+        &mut self,
         alpha_primal: Number,
         theta: Number,
         phi: Number,
@@ -417,7 +484,7 @@ mod tests {
 
     #[test]
     fn accept_when_filter_clear_and_progress_in_phi() {
-        let a = FilterLsAcceptor::new();
+        let mut a = FilterLsAcceptor::new();
         // Not in switching mode (small descent, small alpha).
         // Sufficient progress: phi_trial = -1 < phi=0 - gamma_phi*theta=0.
         let d = a.check_acceptability(1e-12, 1.0, 0.0, -1e-12, 1.0, -1.0);
@@ -435,7 +502,7 @@ mod tests {
 
     #[test]
     fn reject_when_switching_but_armijo_fails() {
-        let a = FilterLsAcceptor::new();
+        let mut a = FilterLsAcceptor::new();
         // Switching mode active, but phi_trial is *worse* than phi.
         let d = a.check_acceptability(1.0, 1e-3, 0.0, -1.0, 1e-3, 1.0);
         assert_eq!(d, AcceptDecision::Reject);
@@ -443,7 +510,7 @@ mod tests {
 
     #[test]
     fn accept_when_switching_and_armijo_holds() {
-        let a = FilterLsAcceptor::new();
+        let mut a = FilterLsAcceptor::new();
         // Switching mode and phi_trial is much smaller than phi.
         let d = a.check_acceptability(1.0, 1e-3, 0.0, -1.0, 1e-3, -1.0);
         assert_eq!(d, AcceptDecision::Accept);
@@ -523,8 +590,89 @@ mod tests {
     }
 
     #[test]
+    fn filter_reset_heuristic_clears_after_trigger_consecutive_filter_rejected_accepts() {
+        let mut a = FilterLsAcceptor::new();
+        a.filter_reset_trigger = 2;
+        a.max_filter_resets = 5;
+        // Plant a filter entry that dominates the planned filter-reject
+        // trial. Accept iterates between two trial sets:
+        //   - theta_trial=1.0, phi_trial=10.0 (dominated by (0.5, 9.0))
+        //   - theta_trial=0.4, phi_trial=8.0 (passes filter, accepted)
+        // For the heuristic to fire we need the LS to record a
+        // filter-due rejection just before each accept.
+        a.filter.add(0.5, 9.0, 0);
+
+        // Backtrack 1: filter-reject (sets last_rejection_due_to_filter).
+        let r1 = a.check_acceptability(1.0, 1.0, 10.0, -1.0, 1.0, 9.5);
+        assert_eq!(r1, AcceptDecision::Reject);
+        assert!(a.last_rejection_due_to_filter);
+        // Backtrack 2: accept on a smaller alpha → bumps count to 1.
+        let r2 = a.check_acceptability(0.5, 1.0, 10.0, -1.0, 0.4, 8.0);
+        assert_eq!(r2, AcceptDecision::Accept);
+        assert_eq!(a.count_successive_filter_rejections, 1);
+        assert_eq!(a.n_filter_resets, 0);
+        assert!(!a.filter.entries().is_empty());
+
+        // Re-plant filter and repeat for the second accept → count
+        // reaches the trigger=2, filter is reset.
+        a.filter.add(0.5, 9.0, 0);
+        let r3 = a.check_acceptability(1.0, 1.0, 10.0, -1.0, 1.0, 9.5);
+        assert_eq!(r3, AcceptDecision::Reject);
+        let r4 = a.check_acceptability(0.5, 1.0, 10.0, -1.0, 0.4, 8.0);
+        assert_eq!(r4, AcceptDecision::Accept);
+        assert_eq!(a.n_filter_resets, 1);
+        assert_eq!(a.count_successive_filter_rejections, 0);
+        assert!(a.filter.entries().is_empty());
+    }
+
+    #[test]
+    fn filter_reset_count_clears_when_last_rejection_was_iterate_test() {
+        let mut a = FilterLsAcceptor::new();
+        a.filter_reset_trigger = 2;
+        a.filter.add(0.5, 9.0, 0);
+
+        // First sequence: filter-rejection + accept → count = 1.
+        let _ = a.check_acceptability(1.0, 1.0, 10.0, -1.0, 1.0, 9.5);
+        let _ = a.check_acceptability(0.5, 1.0, 10.0, -1.0, 0.4, 8.0);
+        assert_eq!(a.count_successive_filter_rejections, 1);
+
+        // Second sequence: iterate-reject (theta and phi both fail
+        // sufficient progress AND switching/Armijo) + accept → count
+        // resets to 0, no filter reset.
+        a.filter.clear();
+        // Reject: not switching (small alpha), no theta progress
+        // (theta_trial == theta), and phi is essentially unchanged
+        // (no sufficient barrier decrease).
+        let r1 = a.check_acceptability(1e-12, 1.0, 0.0, -1e-12, 1.0, 0.0);
+        assert_eq!(r1, AcceptDecision::Reject);
+        assert!(!a.last_rejection_due_to_filter);
+        // Accept on a trial with theta progress.
+        let r2 = a.check_acceptability(1e-12, 1.0, 0.0, -1e-12, 0.5, 0.0);
+        assert_eq!(r2, AcceptDecision::Accept);
+        assert_eq!(a.count_successive_filter_rejections, 0);
+        assert_eq!(a.n_filter_resets, 0);
+    }
+
+    #[test]
+    fn filter_reset_disabled_when_max_filter_resets_zero() {
+        let mut a = FilterLsAcceptor::new();
+        a.max_filter_resets = 0;
+        a.filter_reset_trigger = 1;
+        a.filter.add(0.5, 9.0, 0);
+
+        // Any number of filter-reject + accept cycles must not reset.
+        for _ in 0..5 {
+            a.filter.add(0.5, 9.0, 0);
+            let _ = a.check_acceptability(1.0, 1.0, 10.0, -1.0, 1.0, 9.5);
+            let _ = a.check_acceptability(0.5, 1.0, 10.0, -1.0, 0.4, 8.0);
+        }
+        assert_eq!(a.n_filter_resets, 0);
+        assert!(!a.filter.entries().is_empty());
+    }
+
+    #[test]
     fn accept_via_theta_progress_when_phi_unchanged() {
-        let a = FilterLsAcceptor::new();
+        let mut a = FilterLsAcceptor::new();
         // Not in switching mode; phi stays put but theta drops by
         // more than gamma_theta. Sufficient progress in theta.
         // theta=1, theta_trial=0.5 < (1-1e-5)*1 = 0.99999.
