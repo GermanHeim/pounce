@@ -335,9 +335,16 @@ impl MuUpdate for AdaptiveMuUpdate {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         pd_search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Number {
+        // Read-and-clear `tiny_step_flag` — mirrors upstream
+        // `IpAdaptiveMuUpdate.cpp:297-298`. The flag is consumed by
+        // this call: without the clear, a single tiny-step detection
+        // would persist forever and suppress `sufficient_progress` on
+        // every later outer iter.
         let (curr_mu, iter_count, tiny_step_flag) = {
-            let d = data.borrow();
-            (d.curr_mu, d.iter_count, d.tiny_step_flag)
+            let mut d = data.borrow_mut();
+            let out = (d.curr_mu, d.iter_count, d.tiny_step_flag);
+            d.tiny_step_flag = false;
+            out
         };
 
         // Bootstrap: at iter_count==0 the iterate is the unmodified
@@ -373,9 +380,10 @@ impl MuUpdate for AdaptiveMuUpdate {
             } else {
                 // Keep reducing μ Fiacco-McCormick style if the
                 // barrier subproblem is solved to within
-                // `barrier_tol_factor · μ`.
+                // `barrier_tol_factor · μ`, OR if a tiny step was
+                // just detected (`cpp:320` `|| tiny_step_flag`).
                 let sub_problem_error = cq.borrow().curr_barrier_error();
-                if sub_problem_error <= self.barrier_tol_factor * curr_mu {
+                if sub_problem_error <= self.barrier_tol_factor * curr_mu || tiny_step_flag {
                     let lin = self.mu_linear_decrease_factor * curr_mu;
                     let sup = curr_mu.powf(self.mu_superlinear_decrease_power);
                     let new_mu = lin.min(sup).max(self.mu_min).min(self.mu_max);
