@@ -43,4 +43,23 @@ pub trait ConvCheck {
     ) -> ConvergenceStatus {
         self.check_convergence(nlp_err, iter_count)
     }
+
+    /// Whether the supplied `nlp_err` is at or below the acceptable
+    /// tolerance — port of upstream
+    /// `OptimalityErrorConvergenceCheck::CurrentIsAcceptable`. Used by
+    /// the main loop to gate `StoreAcceptablePoint` /
+    /// `RestoreAcceptablePoint`. Default returns `false` so policies
+    /// that don't track an acceptable level (e.g. resto-of-resto inner
+    /// adapters) silently skip the rollback machinery.
+    fn current_is_acceptable(&self, _nlp_err: Number) -> bool {
+        false
+    }
+
+    /// Outer NLP convergence tolerance, as used by the main loop's
+    /// almost-feasible bypass guard (port of
+    /// `IpBacktrackingLineSearch.cpp:580`). Default `1e-8` matches
+    /// upstream's default `tol`.
+    fn tol_or_default(&self) -> Number {
+        1e-8
+    }
 }

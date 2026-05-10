@@ -60,6 +60,22 @@ impl ConvCheck for OptErrorConvCheck {
         }
         ConvergenceStatus::Continue
     }
+
+    fn tol_or_default(&self) -> Number {
+        self.tol
+    }
+
+    fn current_is_acceptable(&self, nlp_err: Number) -> bool {
+        // Mirrors upstream
+        // `OptimalityErrorConvergenceCheck::CurrentIsAcceptable`
+        // (`IpOptErrorConvCheck.cpp`): the iterate is "acceptable" iff
+        // the NLP optimality error is at or below the looser
+        // acceptable tolerance. Upstream cross-checks the unscaled
+        // primal/dual residuals against `acceptable_constr_viol_tol`
+        // and friends; we approximate with the scalar nlp_err since
+        // pounce's `curr_nlp_error` already aggregates those.
+        nlp_err.is_finite() && nlp_err <= self.acceptable_tol
+    }
 }
 
 #[cfg(test)]

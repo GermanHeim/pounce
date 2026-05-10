@@ -118,6 +118,17 @@ pub struct IpoptAlgorithm {
     /// let MAKELA3, HAIFAM, HALDMADS, ROBOT, TENBARS2 — which need
     /// 2-3 consecutive resto entries to recover — pass through.
     resto_no_outer_progress_count: usize,
+    /// Snapshot of the most recent iterate that the convergence check
+    /// flagged "acceptable" (NLP error ≤ `acceptable_tol`). Mirrors
+    /// upstream `IpBacktrackingLineSearch::acceptable_iterate_`
+    /// (`IpBacktrackingLineSearch.cpp:1286-1310`). Used by
+    /// [`Self::restore_acceptable_point`] to roll back when restoration
+    /// fails — if such an iterate exists, the algorithm exits with
+    /// `SolverReturn::StopAtAcceptablePoint` rather than
+    /// `RestorationFailure`. Cleared/refreshed on every iteration that
+    /// satisfies the acceptable predicate.
+    acceptable_iterate: Option<crate::iterates_vector::IteratesVector>,
+    acceptable_iter_number: Index,
 }
 
 impl IpoptAlgorithm {
@@ -144,7 +155,37 @@ impl IpoptAlgorithm {
             last_resto_recovery_x: None,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
+            acceptable_iterate: None,
+            acceptable_iter_number: 0,
         }
+    }
+
+    /// Stash the current iterate as the "last acceptable" backup —
+    /// port of `IpBacktrackingLineSearch::StoreAcceptablePoint`
+    /// (`IpBacktrackingLineSearch.cpp:1286-1293`).
+    fn store_acceptable_point(&mut self) {
+        let d = self.data.borrow();
+        if let Some(curr) = d.curr.as_ref() {
+            self.acceptable_iterate = Some(curr.clone());
+            self.acceptable_iter_number = d.iter_count;
+        }
+    }
+
+    /// Roll the iterate back to the last acceptable snapshot — port of
+    /// `IpBacktrackingLineSearch::RestoreAcceptablePoint`
+    /// (`IpBacktrackingLineSearch.cpp:1295-1310`). Returns `true` if a
+    /// snapshot was available and applied; `false` otherwise (caller
+    /// then surfaces the original failure status).
+    fn restore_acceptable_point(&mut self) -> bool {
+        let Some(prev) = self.acceptable_iterate.clone() else {
+            return false;
+        };
+        let mut d = self.data.borrow_mut();
+        d.set_trial(prev);
+        // `accept_trial_point` promotes `trial → curr`, mirroring the
+        // upstream sequence `set_trial(...); AcceptTrialPoint();`.
+        d.accept_trial_point();
+        true
     }
 
     pub fn with_nlp(mut self, nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
@@ -213,6 +254,15 @@ impl IpoptAlgorithm {
             ConvergenceStatus::Failed => {
                 return IterateOutcome::Terminate(SolverReturn::InternalError);
             }
+        }
+
+        // Stash the iterate if it satisfies `acceptable_tol`. Mirrors
+        // upstream `IpBacktrackingLineSearch.cpp:282-289` — checked at
+        // the top of every line-search call so the most recent
+        // acceptable iterate is always available as a rollback target
+        // if restoration later fails.
+        if self.bundle.conv_check.current_is_acceptable(nlp_err) {
+            self.store_acceptable_point();
         }
 
         // 3. Barrier parameter. Pass nlp + search_dir through so the
@@ -685,7 +735,20 @@ impl IpoptAlgorithm {
                 IterateOutcome::Continue
             }
             RestorationOutcome::Failed => {
-                IterateOutcome::Terminate(SolverReturn::RestorationFailure)
+                // Mirrors upstream `IpBacktrackingLineSearch.cpp:611-623`:
+                // when `PerformRestoration` returns false, attempt to
+                // roll back to the most recent acceptable iterate before
+                // surfacing failure. If a snapshot is available we exit
+                // cleanly with `StopAtAcceptablePoint` (mapped by the
+                // application layer to `Solved_To_Acceptable_Level`),
+                // matching the upstream `ACCEPTABLE_POINT_REACHED`
+                // throw. Without a snapshot we surface
+                // `RestorationFailure` as before.
+                if self.restore_acceptable_point() {
+                    IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
+                } else {
+                    IterateOutcome::Terminate(SolverReturn::RestorationFailure)
+                }
             }
             RestorationOutcome::LocallyInfeasible => {
                 // Mirrors upstream's catch of `LOCALLY_INFEASIBLE` thrown
