@@ -84,6 +84,22 @@ pub struct IpoptAlgorithm {
     /// so the mu update can attempt to terminate. Mirrors
     /// `IpBacktrackingLineSearch::tiny_step_last_iteration_`.
     pub tiny_step_last_iteration: bool,
+    /// Cycle-detection state for [`Self::invoke_restoration`]. Holds the
+    /// `curr_constraint_violation` snapshotted at the previous
+    /// restoration entry; cleared on any iteration that exits via a
+    /// normal line-search accept. When restoration is invoked twice in
+    /// a row at essentially the same `inf_pr` (and that `inf_pr` is at
+    /// or below `1e-2 * tol`), the algorithm is cycling — the inner
+    /// resto-IPM keeps returning Recovered with a tiny α that doesn't
+    /// move the outer iterate. Mirrors the *intent* (not the surface
+    /// shape) of upstream's `IpBacktrackingLineSearch.cpp:580-600`
+    /// almost-feasible-resto guard, but avoids upstream's collateral
+    /// damage on first-time-resto-on-feasible cases by requiring two
+    /// no-progress entries before tripping. QCNEW (`inf_pr = 0`)
+    /// triggers on entry 2; BT8/HIMMELBJ/LINSPANH/LSNNODOC/ODFITS/OET3
+    /// — which previously solved through a single productive resto on
+    /// a near-feasible iterate — pass through untouched.
+    last_resto_entry_inf_pr: Option<Number>,
 }
 
 impl IpoptAlgorithm {
@@ -105,6 +121,7 @@ impl IpoptAlgorithm {
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             tiny_step_last_iteration: false,
+            last_resto_entry_inf_pr: None,
         }
     }
 
@@ -425,7 +442,12 @@ impl IpoptAlgorithm {
                     self.search_dir.as_mut(),
                 );
                 match outcome {
-                    Outcome::Accepted => {}
+                    Outcome::Accepted => {
+                        // A normal LS-accepted step breaks any in-flight
+                        // restoration cycle — clear the cycle detector
+                        // so the next resto entry starts fresh.
+                        self.last_resto_entry_inf_pr = None;
+                    }
                     Outcome::TinyStep | Outcome::Failed => {
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
                         // `LINE_SEARCH_FAILED` when α drops below
@@ -510,6 +532,33 @@ impl IpoptAlgorithm {
         // `IpFilterLSAcceptor::Reset`'s `reference_*_` snapshot).
         let reference_theta = self.cq.borrow().curr_constraint_violation();
         let reference_barr = self.cq.borrow().curr_barrier_obj();
+
+        // No-progress restoration cycle detector. When the previous
+        // outer iteration also exited via restoration AND the current
+        // entry's `inf_pr` is essentially the same as the previous
+        // entry's, the inner resto-IPM is producing recovered iterates
+        // that don't move the outer (e.g. QCNEW: outer LS rejects every
+        // alpha down to 1.83e-12, resto returns Recovered with that
+        // tiny α, the recovered point coincides with the curr point to
+        // working precision, the next outer iter has identical state,
+        // repeat forever). Surface as `ErrorInStepComputation`. We only
+        // trip when the cycle is on a near-feasible iterate
+        // (`theta <= 1e-2 * tol`); a productive in-progress restoration
+        // sequence (BT8, HIMMELBJ, LINSPANH, LSNNODOC, ODFITS, OET3)
+        // either reduces `inf_pr` between entries or starts at a
+        // not-near-feasible point, so it passes through. Mirrors the
+        // *intent* of upstream `IpBacktrackingLineSearch.cpp:580-600`.
+        let outer_tol = self.data.borrow().tol;
+        if let Some(prev_theta) = self.last_resto_entry_inf_pr {
+            let delta = (reference_theta - prev_theta).abs();
+            let scale = 1.0 + reference_theta.max(prev_theta);
+            let no_progress = delta <= 1e-12 * scale;
+            if no_progress && reference_theta <= 1e-2 * outer_tol {
+                return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
+            }
+        }
+        self.last_resto_entry_inf_pr = Some(reference_theta);
+
         let orig_progress_cb = self
             .bundle
             .line_search
