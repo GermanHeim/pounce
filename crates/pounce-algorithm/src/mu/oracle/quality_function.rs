@@ -445,11 +445,13 @@ pub fn golden_section(
     let mut qmid2 = q(sigma_mid2);
 
     let mut nsections = 0;
+    let mut width_ok;
+    let mut qf_ok;
     loop {
-        let width_ok = (sigma_up - sigma_lo) >= sigma_tol * sigma_up;
+        width_ok = (sigma_up - sigma_lo) >= sigma_tol * sigma_up;
         let qmin = q_lo.min(q_up).min(qmid1).min(qmid2);
         let qmax = q_lo.max(q_up).max(qmid1).max(qmid2);
-        let qf_ok = qmax > 0.0 && (1.0 - qmin / qmax) >= qf_tol;
+        qf_ok = qmax > 0.0 && (1.0 - qmin / qmax) >= qf_tol;
         if !(width_ok && qf_ok && nsections < max_steps) {
             break;
         }
@@ -471,20 +473,60 @@ pub fn golden_section(
         }
     }
 
-    // Pick the endpoint or midpoint with the smallest q.
-    let (mut best_s, mut best_q) = (sigma_lo, q_lo);
-    if q_up < best_q {
-        best_s = sigma_up;
-        best_q = q_up;
+    // Post-loop selection — mirrors `IpQualityFunctionMuOracle.cpp:749-826`.
+    //
+    // Two distinct cases:
+    //  * **qf_tol stop** (`width_ok && !qf_ok`): the four sampled values
+    //    have converged to within `qf_tol`. Pick whichever of the four
+    //    has the smallest q. Upstream `DBG_ASSERT(qf_min > -100.)`
+    //    holds because the qf_ok predicate `(1 - qmin/qmax) < qf_tol`
+    //    forces qmin to be a real positive value (sentinel `-100.0`
+    //    would yield `1 + 100/qmax > 1 > qf_tol`, keeping the loop
+    //    alive until the sentinel slot is overwritten).
+    //  * **Else** (`!width_ok || nsections == max_steps`): pick min of
+    //    the two midpoints, then check whether either endpoint *never
+    //    moved during the loop*. If an unmoved endpoint was passed in
+    //    with the `-100.0` sentinel, it has not been evaluated yet —
+    //    compute its q now and compare. Without this, callers that
+    //    pass a sentinel endpoint (every `pick_sigma` call does — one
+    //    of `q_lo`/`q_up` is always `-100.0`) can have the routine
+    //    return that *unevaluated* endpoint as the minimum, which is
+    //    how DECONVBNE used to land on `sigma = sigma_min`.
+    if width_ok && !qf_ok {
+        let mut best_s = sigma_lo;
+        let mut best_q = q_lo;
+        if q_up < best_q {
+            best_s = sigma_up;
+            best_q = q_up;
+        }
+        if qmid1 < best_q {
+            best_s = sigma_mid1;
+            best_q = qmid1;
+        }
+        if qmid2 < best_q {
+            best_s = sigma_mid2;
+        }
+        return best_s;
     }
-    if qmid1 < best_q {
-        best_s = sigma_mid1;
-        best_q = qmid1;
+    let (mut sigma, mut qval) = if qmid1 < qmid2 {
+        (sigma_mid1, qmid1)
+    } else {
+        (sigma_mid2, qmid2)
+    };
+    if sigma_up == sigma_up_in {
+        let qtmp = if q_up < 0.0 { q(sigma_up) } else { q_up };
+        if qtmp < qval {
+            sigma = sigma_up;
+            qval = qtmp;
+        }
+    } else if sigma_lo == sigma_lo_in {
+        let qtmp = if q_lo < 0.0 { q(sigma_lo) } else { q_lo };
+        if qtmp < qval {
+            sigma = sigma_lo;
+        }
     }
-    if qmid2 < best_q {
-        best_s = sigma_mid2;
-    }
-    best_s
+    let _ = qval;
+    sigma
 }
 
 /// Per-norm aggregates feeding [`evaluate_quality_function`].
