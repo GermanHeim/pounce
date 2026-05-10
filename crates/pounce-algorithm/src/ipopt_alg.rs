@@ -84,22 +84,23 @@ pub struct IpoptAlgorithm {
     /// so the mu update can attempt to terminate. Mirrors
     /// `IpBacktrackingLineSearch::tiny_step_last_iteration_`.
     pub tiny_step_last_iteration: bool,
-    /// Cycle-detection state for [`Self::invoke_restoration`]. Holds the
-    /// `curr_constraint_violation` snapshotted at the previous
-    /// restoration entry; cleared on any iteration that exits via a
-    /// normal line-search accept. When restoration is invoked twice in
-    /// a row at essentially the same `inf_pr` (and that `inf_pr` is at
-    /// or below `1e-2 * tol`), the algorithm is cycling — the inner
-    /// resto-IPM keeps returning Recovered with a tiny α that doesn't
-    /// move the outer iterate. Mirrors the *intent* (not the surface
-    /// shape) of upstream's `IpBacktrackingLineSearch.cpp:580-600`
-    /// almost-feasible-resto guard, but avoids upstream's collateral
-    /// damage on first-time-resto-on-feasible cases by requiring two
-    /// no-progress entries before tripping. QCNEW (`inf_pr = 0`)
-    /// triggers on entry 2; BT8/HIMMELBJ/LINSPANH/LSNNODOC/ODFITS/OET3
-    /// — which previously solved through a single productive resto on
-    /// a near-feasible iterate — pass through untouched.
-    last_resto_entry_inf_pr: Option<Number>,
+    /// Cycle-detection state for [`Self::invoke_restoration`]: the
+    /// outer `(x, s)` snapshot from the previous restoration entry,
+    /// cleared on any iteration that exits via a normal line-search
+    /// accept. When restoration is invoked twice in a row and the
+    /// outer iterate has not moved between entries (relative
+    /// 2-norm < 1e-10 on both `x` and `s`), the inner resto-IPM is
+    /// returning Recovered points indistinguishable from `curr` — a
+    /// cycle. Surfaces as `ErrorInStepComputation`. Mirrors the
+    /// *intent* of upstream `IpBacktrackingLineSearch.cpp:580-600`'s
+    /// almost-feasible-resto guard while staying robust against the
+    /// `inf_pr` micro-drift seen on ACOPR14 (delta ~3e-12 per entry,
+    /// inf_du essentially constant) where a scalar-`inf_pr` heuristic
+    /// fails. Productive single-restoration sequences (BT8, HIMMELBJ,
+    /// LINSPANH, LSNNODOC, ODFITS, OET3) clear the snapshot via
+    /// `Outcome::Accepted` between entries and are unaffected.
+    last_resto_entry_x: Option<Box<dyn Vector>>,
+    last_resto_entry_s: Option<Box<dyn Vector>>,
 }
 
 impl IpoptAlgorithm {
@@ -121,7 +122,8 @@ impl IpoptAlgorithm {
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             tiny_step_last_iteration: false,
-            last_resto_entry_inf_pr: None,
+            last_resto_entry_x: None,
+            last_resto_entry_s: None,
         }
     }
 
@@ -446,7 +448,8 @@ impl IpoptAlgorithm {
                         // A normal LS-accepted step breaks any in-flight
                         // restoration cycle — clear the cycle detector
                         // so the next resto entry starts fresh.
-                        self.last_resto_entry_inf_pr = None;
+                        self.last_resto_entry_x = None;
+                        self.last_resto_entry_s = None;
                     }
                     Outcome::TinyStep | Outcome::Failed => {
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
@@ -535,29 +538,37 @@ impl IpoptAlgorithm {
 
         // No-progress restoration cycle detector. When the previous
         // outer iteration also exited via restoration AND the current
-        // entry's `inf_pr` is essentially the same as the previous
-        // entry's, the inner resto-IPM is producing recovered iterates
-        // that don't move the outer (e.g. QCNEW: outer LS rejects every
-        // alpha down to 1.83e-12, resto returns Recovered with that
-        // tiny α, the recovered point coincides with the curr point to
-        // working precision, the next outer iter has identical state,
-        // repeat forever). Surface as `ErrorInStepComputation`. We only
-        // trip when the cycle is on a near-feasible iterate
-        // (`theta <= 1e-2 * tol`); a productive in-progress restoration
-        // sequence (BT8, HIMMELBJ, LINSPANH, LSNNODOC, ODFITS, OET3)
-        // either reduces `inf_pr` between entries or starts at a
-        // not-near-feasible point, so it passes through. Mirrors the
-        // *intent* of upstream `IpBacktrackingLineSearch.cpp:580-600`.
-        let outer_tol = self.data.borrow().tol;
-        if let Some(prev_theta) = self.last_resto_entry_inf_pr {
-            let delta = (reference_theta - prev_theta).abs();
-            let scale = 1.0 + reference_theta.max(prev_theta);
-            let no_progress = delta <= 1e-12 * scale;
-            if no_progress && reference_theta <= 1e-2 * outer_tol {
+        // outer `(x, s)` is essentially identical to the snapshot from
+        // the previous entry, the inner resto-IPM is producing
+        // recovered iterates indistinguishable from `curr` — the outer
+        // never moves and the algorithm cycles forever (QCNEW,
+        // ACOPR14). Surface as `ErrorInStepComputation`. The signal is
+        // iterate-distance, not `inf_pr`, because in cases like ACOPR14
+        // `inf_pr` micro-drifts (~3e-12) between entries while the
+        // outer iterate is bit-stable; an `inf_pr` heuristic misses
+        // this. A productive single-restoration sequence (BT8,
+        // HIMMELBJ, LINSPANH, LSNNODOC, ODFITS, OET3) clears the
+        // snapshot via `Outcome::Accepted` between entries and is
+        // unaffected. Mirrors the *intent* of upstream
+        // `IpBacktrackingLineSearch.cpp:580-600`.
+        let curr = self
+            .data
+            .borrow()
+            .curr
+            .as_ref()
+            .expect("curr set before invoke_restoration")
+            .clone();
+        if let (Some(prev_x), Some(prev_s)) =
+            (self.last_resto_entry_x.as_ref(), self.last_resto_entry_s.as_ref())
+        {
+            let dx_rel = relative_distance(&*curr.x, &**prev_x);
+            let ds_rel = relative_distance(&*curr.s, &**prev_s);
+            if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
                 return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
             }
         }
-        self.last_resto_entry_inf_pr = Some(reference_theta);
+        self.last_resto_entry_x = Some(curr.x.make_new_copy());
+        self.last_resto_entry_s = Some(curr.s.make_new_copy());
 
         let orig_progress_cb = self
             .bundle
@@ -736,6 +747,19 @@ impl IpoptAlgorithm {
 enum IterateOutcome {
     Continue,
     Terminate(SolverReturn),
+}
+
+/// `||a - b||_2 / (1 + ||b||_2)`. Used by the restoration cycle
+/// detector in [`IpoptAlgorithm::invoke_restoration`] to test whether
+/// the outer iterate has moved between two consecutive restoration
+/// entries.
+fn relative_distance(a: &dyn Vector, b: &dyn Vector) -> Number {
+    if a.dim() == 0 {
+        return 0.0;
+    }
+    let mut diff = a.make_new_copy();
+    diff.axpy(-1.0, b);
+    diff.nrm2() / (1.0 + b.nrm2())
 }
 
 /// `out = curr + α_p · δ` for the primal/equality blocks and
