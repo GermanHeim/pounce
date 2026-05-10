@@ -373,10 +373,17 @@ impl MuUpdate for AdaptiveMuUpdate {
             let sufficient_progress =
                 !force_no_progress && self.check_sufficient_progress(cq);
             if sufficient_progress {
-                // Switch back to free mode; record the iterate.
+                // Switch back to free mode; record the iterate. Mirror
+                // upstream `cpp:304-310`: μ is NOT changed on the
+                // transition iter — the oracle only runs on subsequent
+                // iters via the free-mu branch. Returning curr_mu here
+                // (instead of falling through to the oracle) keeps the
+                // trajectory in lockstep with upstream.
                 self.free_mu_mode = true;
                 self.remember_current_point_as_accepted(data, cq);
-                // Fall through to the free-mode oracle path below.
+                let new_tau = self.tau_min.max(1.0 - curr_mu);
+                data.borrow_mut().curr_tau = new_tau;
+                return curr_mu;
             } else {
                 // Keep reducing μ Fiacco-McCormick style if the
                 // barrier subproblem is solved to within
