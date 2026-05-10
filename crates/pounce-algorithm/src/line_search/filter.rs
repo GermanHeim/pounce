@@ -44,17 +44,23 @@ impl Filter {
     }
 
     /// True if `(theta, phi)` is dominated by *any* existing entry,
-    /// using upstream's dominance rule:
+    /// using upstream's dominance rule. A point is **not acceptable**
+    /// iff some entry beats it strictly in BOTH coordinates:
     ///
     /// ```text
-    ///   theta_new >= e.theta  AND  phi_new >= e.phi
+    ///   theta_new > e.theta  AND  phi_new > e.phi
     /// ```
     ///
-    /// (See `IpFilter.cpp:Acceptable`.)
+    /// This is the negation of `IpFilter.cpp:FilterEntry::Acceptable`,
+    /// which returns true when *any* coord satisfies `vals[i] <= vals_[i]`.
+    /// Strict `>` matters at exact ties: upstream considers `vals == entry`
+    /// acceptable (1.0 <= 1.0 → true at first coord). Using `>=` here
+    /// would over-reject and trigger spurious adaptive-μ free→fixed
+    /// transitions when the iterate is approximately constant.
     pub fn dominated_by_any(&self, theta: Number, phi: Number) -> bool {
         self.entries
             .iter()
-            .any(|e| theta >= e.theta && phi >= e.phi)
+            .any(|e| theta > e.theta && phi > e.phi)
     }
 
     /// Add the entry and prune any existing entries that the new one
@@ -80,9 +86,11 @@ mod tests {
     fn add_entry_then_dominated_check() {
         let mut f = Filter::new();
         f.add(1.0, 5.0, 0);
-        // Larger theta and phi → dominated.
+        // Strictly worse in both → dominated.
         assert!(f.dominated_by_any(2.0, 6.0));
-        assert!(f.dominated_by_any(1.0, 5.0));
+        // Exact tie → acceptable per upstream (`vals[i] <= vals_[i]`
+        // satisfied at i=0 → entry returns Acceptable=true).
+        assert!(!f.dominated_by_any(1.0, 5.0));
         // Smaller in either dimension → not dominated.
         assert!(!f.dominated_by_any(0.5, 5.0));
         assert!(!f.dominated_by_any(1.0, 4.9));
