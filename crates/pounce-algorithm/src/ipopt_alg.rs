@@ -585,11 +585,26 @@ impl IpoptAlgorithm {
         };
         resto.set_orig_progress_check(orig_progress_cb);
         let aug = sd.pd_solver_mut().aug_solver_mut();
+        // Upstream isolates the resto sub-IPM behind its own
+        // `IpoptData` (`IpRestoMinC_1Nrm.cpp:123`), so the outer's
+        // `curr_mu` / `curr_tau` are untouched across the call. Pounce
+        // shares the outer `IpoptData`, and `pounce-restoration::init`
+        // overwrites `curr_mu` (and the resto inner-loop overwrites it
+        // again on every barrier update). Snapshot here and restore
+        // before `correct_bound_multiplier`, which depends on the outer
+        // mu for its kappa_sigma clamp (`IpIpoptAlg.cpp:1055-1134`).
+        let saved_mu = self.data.borrow().curr_mu;
+        let saved_tau = self.data.borrow().curr_tau;
         match resto.perform_restoration(&self.data, &self.cq, nlp, aug) {
             RestorationOutcome::Recovered => {
                 // The driver has staged the recovered point on
                 // `data.trial`; promote it and continue iterating.
                 self.data.borrow_mut().accept_trial_point();
+                {
+                    let mut d = self.data.borrow_mut();
+                    d.curr_mu = saved_mu;
+                    d.curr_tau = saved_tau;
+                }
                 // Mirror upstream `IpoptAlgorithm::AcceptTrialPoint`
                 // (`IpIpoptAlg.cpp:917-963`): kappa_sigma clamp on the
                 // four bound-multiplier vectors. Upstream applies this
