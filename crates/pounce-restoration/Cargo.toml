@@ -15,7 +15,7 @@ pounce-algorithm = { path = "../pounce-algorithm" }
 pounce-linsol = { path = "../pounce-linsol" }
 
 [dev-dependencies]
-pounce-hsl = { path = "../pounce-hsl" }
+pounce-feral = { path = "../pounce-feral" }
 
 [lints]
 workspace = true

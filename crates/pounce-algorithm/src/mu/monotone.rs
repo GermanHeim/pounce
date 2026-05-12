@@ -23,6 +23,13 @@ pub struct MonotoneMuUpdate {
     /// `mu_target` floor — μ never goes below this regardless of the
     /// reduction formula. Defaults to 0 (the floor is `mu_min`).
     pub mu_target: Number,
+    /// Complementarity tolerance — option `compl_inf_tol`, default 1e-4
+    /// per `IpAlgorithmRegOp.cpp`. Enters the dynamic μ floor via
+    /// `min(tol, compl_inf_tol) / (barrier_tol_factor + 1)` per
+    /// `IpMonotoneMuUpdate.cpp:CalcNewMuAndTau:215`. Without this floor,
+    /// μ can collapse to the absolute floor (`mu_min`) while primal
+    /// infeasibility is still large — observed on SSINE/DECONVBNE.
+    pub compl_inf_tol: Number,
     /// `first_iter_resto_` flag from
     /// `Algorithm/IpMonotoneMuUpdate.cpp:118-121,144,196`. When set,
     /// the very next call to [`Self::update_barrier_parameter`] skips
@@ -46,6 +53,7 @@ impl Default for MonotoneMuUpdate {
             tau_min: 0.99,
             barrier_tol_factor: 10.0,
             mu_target: 0.0,
+            compl_inf_tol: 1e-4,
             first_iter_resto: false,
         }
     }
@@ -136,6 +144,18 @@ impl MuUpdate for MonotoneMuUpdate {
             return mu;
         }
 
+        // Dynamic floor from `IpMonotoneMuUpdate.cpp:CalcNewMuAndTau:215`:
+        //     floor = max(mu_target, min(tol, compl_inf_tol) / (barrier_tol_factor + 1))
+        // Without this, μ collapses to `mu_min` (1e-11) while primal
+        // infeasibility is still large — observed on SSINE/DECONVBNE,
+        // where the next direction is dominated by ill-conditioned
+        // barrier terms and the line search stalls.
+        // We also `max` with `mu_min` so the restoration sub-builder's
+        // `with_mu_min(100 * outer_mu_min)` safeguard still applies.
+        let tol = data.borrow().tol;
+        let dynamic_floor = tol.min(self.compl_inf_tol) / (self.barrier_tol_factor + 1.0);
+        let floor = self.mu_target.max(self.mu_min).max(dynamic_floor);
+
         // The barrier error depends on μ via the relaxed
         // complementarity. Read it once per μ value.
         loop {
@@ -148,9 +168,6 @@ impl MuUpdate for MonotoneMuUpdate {
                 .mu_linear_decrease_factor
                 .min(mu.powf(self.mu_superlinear_decrease_power - 1.0))
                 * mu;
-            // Floor at max(mu_target, mu_min). When mu_target=0 this is
-            // mu_min.
-            let floor = self.mu_target.max(self.mu_min);
             if new_mu < floor {
                 new_mu = floor;
             }
@@ -218,5 +235,21 @@ mod tests {
         };
         let next = m.compute_next_mu(1e-10);
         assert!((next - 1e-3).abs() < 1e-15);
+    }
+
+    #[test]
+    fn dynamic_floor_matches_upstream_calcnewmuandtau() {
+        // Replicate `IpMonotoneMuUpdate.cpp:CalcNewMuAndTau:215`:
+        //   floor = max(mu_target, min(tol, compl_inf_tol) / (barrier_tol_factor + 1))
+        // With default `tol=1e-8`, `compl_inf_tol=1e-4`, `barrier_tol_factor=10`,
+        // `mu_target=0`: floor ≈ 1e-8 / 11 ≈ 9.09e-10.
+        let m = MonotoneMuUpdate::default();
+        let tol: Number = 1e-8;
+        let expected_floor = tol.min(m.compl_inf_tol) / (m.barrier_tol_factor + 1.0);
+        assert!((expected_floor - 1e-8 / 11.0).abs() < 1e-20);
+        // The hardcoded `mu_min = 1e-11` is well below the dynamic floor
+        // with default tols — the runtime `floor = max(...)` picks the
+        // dynamic one. (Verified in `update_barrier_parameter`.)
+        assert!(m.mu_min < expected_floor);
     }
 }

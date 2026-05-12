@@ -67,7 +67,17 @@ pub struct AdaptiveMuUpdate {
     pub filter_max_margin: Number,
     pub filter_margin_fact: Number,
     pub mu_min: Number,
+    /// Upper bound on μ. Sentinel `-1.0` means "not yet computed; init
+    /// lazily on the first `update_barrier_parameter` call to
+    /// `mu_max_fact * curr_avrg_compl()`". Mirrors
+    /// `IpAdaptiveMuUpdate.cpp:160-165` (load step) and
+    /// `IpAdaptiveMuUpdate.cpp:267-274` (lazy init).
     pub mu_max: Number,
+    /// `mu_max_fact` (default 1e3) — factor for lazy init of `mu_max`.
+    /// Upstream `IpAdaptiveMuUpdate.cpp:RegisterOptions` line 42.
+    /// Ignored if the user explicitly sets `mu_max` to a non-sentinel
+    /// value.
+    pub mu_max_fact: Number,
     /// `tau_min` from `IpAdaptiveMuUpdate.cpp:RegisterOptions`. Used to
     /// derive `curr_tau = max(tau_min, 1 - mu)` after each update,
     /// mirroring upstream's `IpAdaptiveMuUpdate.cpp:UpdateBarrierParameter`
@@ -113,6 +123,15 @@ pub struct AdaptiveMuUpdate {
     /// iterate; restored when switching to fixed mode if
     /// `restore_accepted_iterate` is on. Mirrors `accepted_point_`.
     accepted_point: Option<IteratesVector>,
+    /// `no_bounds_` flag — port of `IpAdaptiveMuUpdate.cpp:282-287`.
+    /// Set to `true` on the first `update_barrier_parameter` call when
+    /// the iterate has zero bound multipliers (z_l, z_u, v_l, v_u all
+    /// have dim 0 — e.g. BT3, GENHS28, HS50, equality-only TNLPs).
+    /// Subsequent calls return `mu_min` immediately. Without this,
+    /// `mu_max = mu_max_fact * curr_avrg_compl()` evaluates to 0 (no
+    /// slacks → zero complementarity) and the later `clamp(mu_min,
+    /// mu_max)` panics with `min > max`.
+    no_bounds: bool,
 }
 
 impl Default for AdaptiveMuUpdate {
@@ -128,7 +147,12 @@ impl Default for AdaptiveMuUpdate {
             filter_max_margin: 1.0,
             filter_margin_fact: 1e-5,
             mu_min: 1e-11,
-            mu_max: 1e5,
+            // Sentinel; lazy-initialised to `mu_max_fact * avrg_compl`
+            // on the first `update_barrier_parameter` call. Upstream
+            // `IpAdaptiveMuUpdate.cpp:164` sets `mu_max_ = -1.` when
+            // the option is not user-specified.
+            mu_max: -1.0,
+            mu_max_fact: 1e3,
             tau_min: 0.99,
             mu_init: 0.1,
             barrier_tol_factor: 10.0,
@@ -142,6 +166,7 @@ impl Default for AdaptiveMuUpdate {
             refs_vals: VecDeque::new(),
             filter: Filter::new(),
             accepted_point: None,
+            no_bounds: false,
         }
     }
 }
@@ -293,9 +318,20 @@ impl MuUpdate for AdaptiveMuUpdate {
     /// resets the globalization state, and starts in free-μ mode
     /// (`SetFreeMuMode(true)` at line 239).
     fn initialize(&mut self, data: &IpoptDataHandle) {
+        // Mirror upstream `IpAdaptiveMuUpdate.cpp:246-247`:
+        //   IpData().Set_mu(1.);
+        //   IpData().Set_tau(0.);
+        // These are placeholder values so `CalculateSafeSlack` and the
+        // first output line have something to work with; the actual μ
+        // is computed by the oracle at iter 0's `update_barrier_parameter`.
+        // Setting curr_mu = mu_init here (as we used to) skipped the
+        // oracle's iter-0 call and locked μ at mu_init for the first
+        // Newton step — diverging from upstream's iter-0 behaviour
+        // (PFIT3: upstream iter 0 oracle picked μ=1.6e-6, pounce was
+        // stuck at μ=0.1, producing different iter-1 trial point).
         let mut d = data.borrow_mut();
-        d.curr_mu = self.mu_init;
-        d.curr_tau = self.tau_min.max(1.0 - self.mu_init);
+        d.curr_mu = 1.0;
+        d.curr_tau = 0.0;
         drop(d);
         self.free_mu_mode = true;
         self.refs_vals.clear();
@@ -303,6 +339,13 @@ impl MuUpdate for AdaptiveMuUpdate {
         self.accepted_point = None;
         self.init_dual_inf = -1.0;
         self.init_primal_inf = -1.0;
+        // Reset mu_max sentinel so a re-solve re-runs the lazy init
+        // against the fresh starting iterate's curr_avrg_compl.
+        // Upstream re-enters InitializeImpl on each solve which
+        // (lines 160-165) resets `mu_max_ = -1.` when not user-set.
+        self.mu_max = -1.0;
+        // Reset no-bounds detection on re-solve.
+        self.no_bounds = false;
     }
 
     /// Adaptive μ update — port of `UpdateBarrierParameter`
@@ -335,6 +378,47 @@ impl MuUpdate for AdaptiveMuUpdate {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         pd_search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Number {
+        // Lazy `mu_max` init — port of `IpAdaptiveMuUpdate.cpp:267-274`.
+        // Upstream computes `mu_max = mu_max_fact * curr_avrg_compl()`
+        // on the first call when the user did not set `mu_max`
+        // explicitly. Pounce previously hard-coded `mu_max = 1e5`,
+        // which let `new_fixed_mu = 0.8 * curr_avrg_compl` cap at 1e5
+        // — on DECONVBNE that allowed μ to jump from 2.5e-3 to ~2000
+        // at iter 198, destabilising the rest of the run.
+        if self.mu_max < 0.0 {
+            let avrg = cq.borrow().curr_avrg_compl();
+            self.mu_max = self.mu_max_fact * avrg;
+        }
+
+        // No-bounds short-circuit — port of `IpAdaptiveMuUpdate.cpp:282-296`.
+        // Detect once on the first call whether the iterate has any
+        // bound multipliers (z_l, z_u, v_l, v_u). When all four are
+        // dim-zero (equality-only TNLPs: BT3, GENHS28, HS50, METHANL8,
+        // ...), `curr_avrg_compl()` is 0, hence `mu_max = 0`, and the
+        // later `clamp(mu_min, mu_max)` panics with `min > max`.
+        // Upstream sets `mu = mu_min`, `tau = tau_min`, and short-
+        // circuits all subsequent oracle work; we mirror that.
+        if !self.no_bounds {
+            let n_bounds = {
+                let d = data.borrow();
+                let c = d.curr.as_ref().expect("curr set");
+                c.z_l.dim() + c.z_u.dim() + c.v_l.dim() + c.v_u.dim()
+            };
+            if n_bounds == 0 {
+                self.no_bounds = true;
+                let mut d = data.borrow_mut();
+                d.curr_mu = self.mu_min;
+                d.curr_tau = self.tau_min;
+                return self.mu_min;
+            }
+        }
+        if self.no_bounds {
+            let mut d = data.borrow_mut();
+            d.curr_mu = self.mu_min;
+            d.curr_tau = self.tau_min;
+            return self.mu_min;
+        }
+
         // Read-and-clear `tiny_step_flag` — mirrors upstream
         // `IpAdaptiveMuUpdate.cpp:297-298`. The flag is consumed by
         // this call: without the clear, a single tiny-step detection
@@ -347,18 +431,14 @@ impl MuUpdate for AdaptiveMuUpdate {
             out
         };
 
-        // Bootstrap: at iter_count==0 the iterate is the unmodified
-        // initial point. Snapshot it as the first reference and bail
-        // out with the seed μ. Mirrors upstream's first-iteration
-        // short-circuit (`IpAdaptiveMuUpdate.cpp:236` + the
-        // `RememberCurrentPointAsAccepted` call upstream makes from
-        // `IpoptAlgorithm`'s init path).
-        if iter_count == 0 {
-            self.remember_current_point_as_accepted(data, cq);
-            data.borrow_mut().curr_tau = self.tau_min.max(1.0 - curr_mu);
-            return curr_mu;
-        }
-
+        // NB: do NOT short-circuit at iter_count==0. Upstream's
+        // `UpdateBarrierParameter` runs the oracle at iter 0 (the
+        // initialize() above set μ=1.0 as a placeholder only). Skipping
+        // the oracle here locked μ at the placeholder for the first
+        // Newton step. Letting the iter-0 path flow through the
+        // free-μ branch picks up the oracle's choice — the empty
+        // `refs_vals_` makes `check_sufficient_progress` return true,
+        // we remember the iterate, then call the oracle below.
         // `tiny_step_flag` (and upstream's `CheckSkippedLineSearch()`,
         // which is only set in non-rigorous resto mode) forces
         // `sufficient_progress = false` when not in `NEVER_MONOTONE_MODE`
@@ -512,22 +592,17 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         // Safeguard floor + global band clamp (cpp:410-426).
         let lower = self.lower_mu_safeguard(dual_inf, primal_inf, candidate);
-        let mut mu = candidate.max(self.mu_min).max(lower).min(self.mu_max);
+        let mu = candidate.max(self.mu_min).max(lower).min(self.mu_max);
 
-        // Free-mode growth cap — pragmatic stand-in for upstream's
-        // `linesearch_->CheckSkippedLineSearch()` hook
-        // (`IpAdaptiveMuUpdate.cpp:347-350`). Upstream forces
-        // `sufficient_progress = false` if the previous line search
-        // was skipped/tiny-stepped; that signal is plumbed through
-        // `tiny_step_flag` above into the fixed/free mode switch
-        // (which can raise μ via `new_fixed_mu`). The free-mode
-        // oracle itself can swing 100× either direction on iterates
-        // with non-uniform complementarity, and an unconstrained
-        // increase tends to destabilise the filter line search on
-        // problems like HAIFAM. Keep the cap on the oracle path.
-        if mu > curr_mu {
-            mu = curr_mu;
-        }
+        // NB: upstream `IpAdaptiveMuUpdate.cpp:410-426` does NOT require
+        // `mu ≤ curr_mu` in free mode — the oracle is allowed to bump
+        // μ back up. A prior attempt to cap growth here ("HAIFAM
+        // stability hack") let DECONVBNE's μ plunge from 0.1 to 5e-10
+        // in ~20 iters and never recover (upstream oscillates μ in
+        // [-8,-1] for the same range), trapping `inf_du` at 1e13.
+        // Tiny-step skips are already handled by the
+        // `tiny_step_flag → force_no_progress → new_fixed_mu` path
+        // above, which can raise μ via the fixed-mode branch.
         mu
     }
 }

@@ -347,6 +347,8 @@ impl AugSystemSolver for StdAugSystemSolver {
         let mut packed = vec![0.0; self.dim as usize];
         self.pack_rhs(rhs, &mut packed);
 
+        let dump_rhs = packed.clone();
+
         let status = self.linsol.multi_solve(
             &self.vals,
             true,
@@ -362,11 +364,92 @@ impl AugSystemSolver for StdAugSystemSolver {
             }
             self.unpack_sol(&packed, sol);
         }
+
+        // Diagnostic dump: when POUNCE_DUMP_KKT is set, append the
+        // augmented system to that JSONL path. Used by the offline
+        // FERAL/MA57/LAPACK comparison tool.
+        if let Ok(path) = std::env::var("POUNCE_DUMP_KKT") {
+            dump_kkt(
+                &path,
+                self.dim,
+                &self.irn,
+                &self.jcn,
+                &self.vals,
+                &dump_rhs,
+                &packed,
+                check_neg_evals,
+                num_neg_evals,
+                status,
+                self.last_neg_evals,
+            );
+        }
+
         status
     }
 }
 
 // ---------------- helpers ----------------
+
+#[allow(clippy::too_many_arguments)]
+fn dump_kkt(
+    path: &str,
+    dim: Index,
+    irn: &[Index],
+    jcn: &[Index],
+    vals: &[Number],
+    rhs: &[Number],
+    sol: &[Number],
+    check_neg_evals: bool,
+    num_neg_evals: Index,
+    status: ESymSolverStatus,
+    last_neg_evals: Index,
+) {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+
+    let mut line = String::with_capacity(64 * vals.len());
+    line.push('{');
+    let _ = write!(line, "\"n\":{dim},");
+    let _ = write!(line, "\"check_neg_evals\":{check_neg_evals},");
+    let _ = write!(line, "\"num_neg_evals_expected\":{num_neg_evals},");
+    let _ = write!(line, "\"num_neg_evals_actual\":{last_neg_evals},");
+    let _ = write!(line, "\"status\":\"{status:?}\",");
+
+    line.push_str("\"irn\":[");
+    for (i, v) in irn.iter().enumerate() {
+        if i > 0 { line.push(','); }
+        let _ = write!(line, "{v}");
+    }
+    line.push_str("],\"jcn\":[");
+    for (i, v) in jcn.iter().enumerate() {
+        if i > 0 { line.push(','); }
+        let _ = write!(line, "{v}");
+    }
+    line.push_str("],\"vals\":[");
+    for (i, v) in vals.iter().enumerate() {
+        if i > 0 { line.push(','); }
+        let _ = write!(line, "{v:.17e}");
+    }
+    line.push_str("],\"rhs\":[");
+    for (i, v) in rhs.iter().enumerate() {
+        if i > 0 { line.push(','); }
+        let _ = write!(line, "{v:.17e}");
+    }
+    line.push_str("],\"sol\":[");
+    for (i, v) in sol.iter().enumerate() {
+        if i > 0 { line.push(','); }
+        let _ = write!(line, "{v:.17e}");
+    }
+    line.push_str("]}\n");
+
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
 
 fn sym_t_downcast(m: &dyn pounce_linalg::SymMatrix) -> &SymTMatrix {
     let Some(t) = m.as_any().downcast_ref::<SymTMatrix>() else {

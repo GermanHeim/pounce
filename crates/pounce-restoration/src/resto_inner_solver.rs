@@ -163,6 +163,19 @@ pub fn run_inner_resto(
     // (`IpRestoConvCheck.cpp:175`) against a fixed reference.
     let orig_curr_inf_pr = outer_cq.borrow().curr_primal_infeasibility_max();
 
+    // Square-problem kappa override — mirrors upstream
+    // `IpRestoMinC_1Nrm.cpp:157-163`: when `IsSquareProblem()` is true
+    // (`x.dim() == y_c.dim()`), upstream sets
+    // `required_infeasibility_reduction = 0` on the resto sub-options,
+    // which the inner conv check (`IpRestoConvCheck.cpp:163`) reads as
+    // "the kappa-reduction guard is disabled — keep iterating until the
+    // sub-NLP is fully converged". Without this, pounce's resto inner
+    // exits on PFIT3/PFIT4 after only a 10% feasibility reduction
+    // (kappa_resto=0.9), the outer Newton step from the partially-
+    // recovered iterate blows up, and we re-enter resto in a loop.
+    let is_square_problem = n_orig == m_eq;
+    let kappa_resto = if is_square_problem { 0.0 } else { 0.9 };
+
     // ---- 4. Build the inner alg bundle and override its init /
     //         conv_check / iter_output slots with resto-side ones. ----
     let mut alg_bundle = inner_alg_builder.build_with_backend(backend_factory);
@@ -186,7 +199,7 @@ pub fn run_inner_resto(
     alg_bundle.init = Box::new(resto_bundle.init)
         as Box<dyn pounce_algorithm::init::r#trait::IterateInitializer>;
     let mut adapter = crate::conv_check::RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)
-        .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, 0.9);
+        .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto);
     if let Some(cb) = orig_progress_cb {
         adapter = adapter.with_orig_progress_callback(cb);
     }
@@ -344,7 +357,21 @@ pub fn run_inner_resto(
         eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or(0.0);
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
-    let strict_locally_infeasible = matches!(status, SolverReturn::Success)
+    // Square problems: upstream `IpRestoMinC_1Nrm.cpp:357-371` returns
+    // the recovered point to the outer unconditionally when the inner
+    // succeeds — even if `constr_viol > constr_viol_tol_`. The outer
+    // gets another shot at making progress (PFIT4 trace: 190 iters with
+    // theta oscillating from 3.77e7 down to 3.42e-11). Pounce previously
+    // declared `strict_locally_infeasible` when the inner converged on
+    // an infeasible stationary point, which on PFIT3/PFIT4 short-
+    // circuited the outer's recovery path. The outer's
+    // `resto_no_outer_progress_count` cycle detector (5 consecutive
+    // null-progress entries) bounds the worst case if the outer truly
+    // can't escape; the cycle exit now surfaces `LocalInfeasibility`
+    // when the outer cv at re-entry is bounded above `max(100*tol, 1e-4)`
+    // and `ErrorInStepComputation` otherwise.
+    let strict_locally_infeasible = !is_square_problem
+        && matches!(status, SolverReturn::Success)
         && inner_stationarity_converged
         && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4);
 
@@ -389,11 +416,51 @@ pub fn run_inner_resto(
         && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
         && inner_iter_count >= 30;
 
-    let locally_infeasible = strict_locally_infeasible || alt_locally_infeasible;
+    // Cycle locally-infeasible gate (CRESC100-style). The inner has run
+    // a very large number of iterations and exited via MaxiterExceeded
+    // with orig-NLP `inf_pr` bounded well above outer tol — same
+    // user-facing diagnosis (problem is locally infeasible) as the
+    // strict / alt gates, but the inner's own KKT residual is still
+    // huge because the inner's line search is cycling between basins
+    // rather than approaching a stationary point. Upstream solves
+    // these via its more robust MUMPS / MA57 backend; for the FERAL
+    // backend we surface `LocallyInfeasible` rather than the misleading
+    // `Restoration_Failed` once a generous iteration budget has been
+    // burned with no exit. Conservative threshold to avoid
+    // misclassifying genuinely under-resourced solves.
+    let cycle_locally_infeasible = matches!(status, SolverReturn::MaxiterExceeded)
+        && inner_iter_count >= 1000
+        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+        && orig_inf_pr_at_final.is_finite();
+
+    // Step-failure locally-infeasible gate (qcqp750-2nc-style). The
+    // inner ran for a non-trivial number of iterations, the orig-NLP
+    // `inf_pr` plateau'd at a finite value well above outer tol, and
+    // then the inner step computation diverged (||d|| explodes, line
+    // search collapses to alpha ≈ 1e-12). `data.curr` at termination
+    // is the last accepted iterate (the pre-explosion plateau), so
+    // `trial_x`/`trial_s` extracted above are usable — only
+    // `inner_kkt_err` is poisoned by the explosion, which is why the
+    // `alt` gate's `<= 1e-2` threshold rejects this signature.
+    // Upstream resto's more robust inertia controller avoids the
+    // explosion; for pounce we surface `LocallyInfeasible` with the
+    // recovered pre-explosion point rather than the misleading
+    // `Restoration_Failed`. The `iter >= 30` floor matches the `alt`
+    // gate's "not a premature failure".
+    let step_failure_locally_infeasible =
+        matches!(status, SolverReturn::ErrorInStepComputation)
+            && inner_iter_count >= 30
+            && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+            && orig_inf_pr_at_final.is_finite();
+
+    let locally_infeasible = strict_locally_infeasible
+        || alt_locally_infeasible
+        || cycle_locally_infeasible
+        || step_failure_locally_infeasible;
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         eprintln!(
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
@@ -401,6 +468,8 @@ pub fn run_inner_resto(
             outer_tol,
             strict_locally_infeasible,
             alt_locally_infeasible,
+            cycle_locally_infeasible,
+            step_failure_locally_infeasible,
             locally_infeasible
         );
     }

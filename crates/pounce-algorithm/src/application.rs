@@ -203,7 +203,16 @@ impl IpoptApplication {
             Some(info) => info,
             None => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
-        if info.m == 0 {
+        // Upstream Ipopt routes every problem through the same primal-dual
+        // IPM regardless of `m` — there is no separate "unconstrained
+        // Newton" path. Pounce historically dispatched `m == 0` to a dense
+        // Newton driver, which built a full n×n Hessian and blew up on
+        // anything large (e.g. bearing_400 with n = 160 000 → 25 GB
+        // matrix). Route small unconstrained problems to that driver only
+        // as a fast path; everything else goes through the sparse IPM so
+        // the linear-solver backend (MA57/FERAL) handles the augmented
+        // system instead of dense BLAS.
+        if info.m == 0 && info.n <= 1000 {
             let mut borrow = tnlp.borrow_mut();
             let opts = self.newton_options_from_options_list();
             let (status, stats) = pounce_nlp::newton_driver::solve(&mut *borrow, opts);
@@ -484,9 +493,8 @@ impl IpoptApplication {
         if let Ok((v, found)) = self.options.get_string_value("linear_solver", "") {
             if found {
                 builder.linear_solver = match v.as_str() {
-                    "mumps" => LinearSolverChoice::Mumps,
-                    "feral" => LinearSolverChoice::Feral,
-                    _ => LinearSolverChoice::Ma57,
+                    "ma57" => LinearSolverChoice::Ma57,
+                    _ => LinearSolverChoice::Feral,
                 };
             }
         }
@@ -494,15 +502,26 @@ impl IpoptApplication {
     }
 }
 
-/// Default symmetric linear-solver factory: returns an MA57 backend
-/// from `pounce-hsl` regardless of the requested choice. Other backends
-/// (MUMPS, FERAL) plug in via the same factory pattern once their
-/// bindings land.
+/// Default symmetric linear-solver factory.
+///
+/// FERAL (pure-Rust) is the shipping default. The HSL MA57 backend is
+/// available when the `ma57` cargo feature is enabled; without it,
+/// requesting `linear_solver = ma57` falls back to FERAL with a
+/// warning printed by the journalist (see [`AlgorithmBuilder`]).
 fn default_backend_factory() -> LinearBackendFactory {
     Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
         match choice {
-            LinearSolverChoice::Ma57 | LinearSolverChoice::Mumps | LinearSolverChoice::Feral => {
-                Box::new(pounce_hsl::Ma57SolverInterface::new())
+            LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
+            LinearSolverChoice::Ma57 => {
+                #[cfg(feature = "ma57")]
+                {
+                    Box::new(pounce_hsl::Ma57SolverInterface::new())
+                }
+                #[cfg(not(feature = "ma57"))]
+                {
+                    // ma57 feature not compiled in — fall back to FERAL.
+                    Box::new(pounce_feral::FeralSolverInterface::new())
+                }
             }
         }
     })

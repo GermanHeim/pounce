@@ -7,10 +7,30 @@
 //! the comments below against the source in
 //! `ref/Ipopt/.../IpMa57TSolverInterface.cpp`).
 
-use crate::ffi::{ma57ad_, ma57bd_, ma57cd_, ma57ed_, ma57id_};
+use crate::ffi::{ma57ad_, ma57bd_, ma57cd_, ma57ed_, ma57id_, openblas_set_num_threads};
 use pounce_common::options_list::OptionsList;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+use std::sync::Once;
+
+/// First-touch OpenBLAS thread-count setup. MA57's internal dgemm
+/// calls on small supernodes are dominated by thread spin-up on
+/// many-core machines (M1/M2 with 8+ cores): on `elec_400` (1200×1200
+/// fully dense Hessian) the default thread count makes each
+/// factorization ~5× slower wall-clock and ~30× slower CPU than
+/// single-threaded. Honour `OPENBLAS_NUM_THREADS` if the user set it;
+/// otherwise force single-threaded BLAS on first MA57 construction.
+fn configure_openblas_threads_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("OPENBLAS_NUM_THREADS").is_some() {
+            return;
+        }
+        // SAFETY: `openblas_set_num_threads` is a thread-safe setter
+        // exported by libopenblas (loaded transitively via libcoinhsl).
+        unsafe { openblas_set_num_threads(1) };
+    });
+}
 
 /// Settings drawn from `OptionsList` at `InitializeImpl` time
 /// (`IpMa57TSolverInterface.cpp:287-421`).
@@ -170,6 +190,7 @@ impl std::fmt::Debug for Ma57SolverInterface {
 impl Ma57SolverInterface {
     /// New backend with `opts` already read from `OptionsList`.
     pub fn with_options(opts: Options) -> Self {
+        configure_openblas_threads_once();
         let mut me = Self {
             options: opts,
             negevals: 0,

@@ -34,6 +34,11 @@ fn main() {
     };
     println!("cargo:rustc-link-search=native={lib_dir_str}");
     println!("cargo:rustc-link-lib=dylib=coinhsl");
+    // Explicit -lopenblas so `openblas_set_num_threads` resolves at
+    // link time. macOS two-level namespace will not pull the symbol
+    // transitively through libcoinhsl. The dylib lives in the same
+    // lib_dir, so the search path above already finds it.
+    println!("cargo:rustc-link-lib=dylib=openblas");
     // libcoinhsl.dylib's @rpath dependencies live in the same lib
     // directory, so this single rpath resolves all of them.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir_str}");

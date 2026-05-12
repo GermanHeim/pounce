@@ -12,7 +12,13 @@ pounce-common = { path = "../pounce-common" }
 pounce-linalg = { path = "../pounce-linalg" }
 pounce-linsol = { path = "../pounce-linsol" }
 pounce-nlp = { path = "../pounce-nlp" }
-pounce-hsl = { path = "../pounce-hsl" }
+pounce-feral = { path = "../pounce-feral" }
+pounce-hsl = { path = "../pounce-hsl", optional = true }
+
+[features]
+default = []
+# Enable the HSL MA57 backend. Requires libcoinhsl on the link path.
+ma57 = ["dep:pounce-hsl"]
 
 [lints]
 workspace = true

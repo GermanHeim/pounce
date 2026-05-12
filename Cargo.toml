@@ -6,6 +6,23 @@ members = [
     "crates/pounce-linsol",
     "crates/pounce-nlp",
     "crates/pounce-hsl",
+    "crates/pounce-feral",
+    "crates/pounce-algorithm",
+    "crates/pounce-restoration",
+    "crates/pounce-cinterface",
+    "crates/pounce-cli",
+    "benchmarks/cutest",
+    "tools/iter-diff",
+]
+# Default `cargo build` / `cargo test` skip pounce-hsl so the pure-Rust
+# build needs no Fortran/HSL toolchain. To build with the HSL MA57
+# backend: `cargo build -p pounce-cli --features ma57`.
+default-members = [
+    "crates/pounce-common",
+    "crates/pounce-linalg",
+    "crates/pounce-linsol",
+    "crates/pounce-nlp",
+    "crates/pounce-feral",
     "crates/pounce-algorithm",
     "crates/pounce-restoration",
     "crates/pounce-cinterface",

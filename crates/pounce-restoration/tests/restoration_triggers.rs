@@ -176,10 +176,10 @@ fn line_search_failure_invokes_user_supplied_restoration_phase() {
 }
 
 /// Backend factory matching the application-side default: every
-/// `LinearSolverChoice` returns a fresh MA57 instance.
+/// `LinearSolverChoice` returns a fresh FERAL instance.
 fn ma57_backend() -> LinearBackendFactory {
     Box::new(|_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        Box::new(pounce_hsl::Ma57SolverInterface::new())
+        Box::new(pounce_feral::FeralSolverInterface::new())
     })
 }
 

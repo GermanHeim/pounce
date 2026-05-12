@@ -16,8 +16,16 @@ pounce-common = { path = "../pounce-common" }
 pounce-nlp = { path = "../pounce-nlp" }
 pounce-algorithm = { path = "../pounce-algorithm" }
 pounce-restoration = { path = "../pounce-restoration" }
-pounce-hsl = { path = "../pounce-hsl" }
+pounce-feral = { path = "../pounce-feral" }
+pounce-hsl = { path = "../pounce-hsl", optional = true }
 pounce-linsol = { path = "../pounce-linsol" }
+
+[features]
+default = []
+# Enable the HSL MA57 backend (requires libcoinhsl). When enabled, also
+# turns on the matching feature in pounce-algorithm so the option
+# `linear_solver = ma57` resolves to MA57 instead of falling back to FERAL.
+ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
 
 [lints]
 workspace = true

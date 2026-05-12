@@ -22,13 +22,14 @@
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
+use pounce_common::cached::Cache;
 use pounce_common::types::Number;
 use pounce_linalg::{Matrix, SymMatrix, Vector};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Calculated-quantities object. Holds shared handles on data and the
-/// NLP; per-quantity caches will live in `RefCell`s here once enabled.
+/// NLP; per-quantity caches live in `RefCell`s here.
 pub struct IpoptCalculatedQuantities {
     data: IpoptDataHandle,
     nlp: Rc<RefCell<dyn IpoptNlp>>,
@@ -38,6 +39,21 @@ pub struct IpoptCalculatedQuantities {
     /// Damping coefficient for the bound-multiplier complementarity
     /// term (`kappa_d` in upstream's RegisterOptions).
     pub kappa_d: Number,
+
+    // Per-iterate caches for the hot accessors used by the KKT solver
+    // dependency-tag check. Without these the PdFullSpaceSolver sees a
+    // fresh tag on every solve (each `curr_slack_*` / `curr_sigma_*`
+    // allocates a new vector with a fresh `TaggedCell`), which forces
+    // an MA57 refactor on every SOC step even though the matrix data
+    // is unchanged. Caches are keyed on the input iterate-vector tag
+    // and survive across calls but are naturally invalidated when the
+    // outer iterate advances (curr.x bump).
+    curr_slack_x_l_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    curr_slack_x_u_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    curr_slack_s_l_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    curr_slack_s_u_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    curr_sigma_x_cache: RefCell<Cache<Rc<dyn Vector>>>,
+    curr_sigma_s_cache: RefCell<Cache<Rc<dyn Vector>>>,
 }
 
 /// Helper: convert `Box<dyn Vector>` to `Rc<dyn Vector>`. Cheap; the
@@ -53,6 +69,12 @@ impl IpoptCalculatedQuantities {
             nlp,
             s_max: 100.0,
             kappa_d: 1e-5,
+            curr_slack_x_l_cache: RefCell::new(Cache::new(1)),
+            curr_slack_x_u_cache: RefCell::new(Cache::new(1)),
+            curr_slack_s_l_cache: RefCell::new(Cache::new(1)),
+            curr_slack_s_u_cache: RefCell::new(Cache::new(1)),
+            curr_sigma_x_cache: RefCell::new(Cache::new(1)),
+            curr_sigma_s_cache: RefCell::new(Cache::new(1)),
         }
     }
 
@@ -102,26 +124,66 @@ impl IpoptCalculatedQuantities {
 
     pub fn curr_slack_x_l(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        {
+            let cache = self.curr_slack_x_l_cache.borrow();
+            if let Some(v) = cache.get(&[iv.x.as_tagged()], &[]) {
+                return v;
+            }
+        }
         let nlp = self.nlp.borrow();
-        Self::calc_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l())
+        let v = Self::calc_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l());
+        self.curr_slack_x_l_cache
+            .borrow_mut()
+            .add(v.clone(), &[iv.x.as_tagged()], &[]);
+        v
     }
 
     pub fn curr_slack_x_u(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        {
+            let cache = self.curr_slack_x_u_cache.borrow();
+            if let Some(v) = cache.get(&[iv.x.as_tagged()], &[]) {
+                return v;
+            }
+        }
         let nlp = self.nlp.borrow();
-        Self::calc_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u())
+        let v = Self::calc_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u());
+        self.curr_slack_x_u_cache
+            .borrow_mut()
+            .add(v.clone(), &[iv.x.as_tagged()], &[]);
+        v
     }
 
     pub fn curr_slack_s_l(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        {
+            let cache = self.curr_slack_s_l_cache.borrow();
+            if let Some(v) = cache.get(&[iv.s.as_tagged()], &[]) {
+                return v;
+            }
+        }
         let nlp = self.nlp.borrow();
-        Self::calc_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l())
+        let v = Self::calc_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l());
+        self.curr_slack_s_l_cache
+            .borrow_mut()
+            .add(v.clone(), &[iv.s.as_tagged()], &[]);
+        v
     }
 
     pub fn curr_slack_s_u(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        {
+            let cache = self.curr_slack_s_u_cache.borrow();
+            if let Some(v) = cache.get(&[iv.s.as_tagged()], &[]) {
+                return v;
+            }
+        }
         let nlp = self.nlp.borrow();
-        Self::calc_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u())
+        let v = Self::calc_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u());
+        self.curr_slack_s_u_cache
+            .borrow_mut()
+            .add(v.clone(), &[iv.s.as_tagged()], &[]);
+        v
     }
 
     pub fn trial_slack_x_l(&self) -> Rc<dyn Vector> {
@@ -400,6 +462,15 @@ impl IpoptCalculatedQuantities {
 
     pub fn curr_sigma_x(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        {
+            let cache = self.curr_sigma_x_cache.borrow();
+            if let Some(v) = cache.get(
+                &[iv.x.as_tagged(), iv.z_l.as_tagged(), iv.z_u.as_tagged()],
+                &[],
+            ) {
+                return v;
+            }
+        }
         let slack_l = self.curr_slack_x_l();
         let slack_u = self.curr_slack_x_u();
 
@@ -411,11 +482,26 @@ impl IpoptCalculatedQuantities {
             .add_m_sinv_z(1.0, &*slack_l, &*iv.z_l, &mut *sigma);
         nlp.px_u()
             .add_m_sinv_z(1.0, &*slack_u, &*iv.z_u, &mut *sigma);
-        rc_from(sigma)
+        let v = rc_from(sigma);
+        self.curr_sigma_x_cache.borrow_mut().add(
+            v.clone(),
+            &[iv.x.as_tagged(), iv.z_l.as_tagged(), iv.z_u.as_tagged()],
+            &[],
+        );
+        v
     }
 
     pub fn curr_sigma_s(&self) -> Rc<dyn Vector> {
         let iv = self.curr_iv();
+        {
+            let cache = self.curr_sigma_s_cache.borrow();
+            if let Some(v) = cache.get(
+                &[iv.s.as_tagged(), iv.v_l.as_tagged(), iv.v_u.as_tagged()],
+                &[],
+            ) {
+                return v;
+            }
+        }
         let slack_l = self.curr_slack_s_l();
         let slack_u = self.curr_slack_s_u();
 
@@ -427,7 +513,13 @@ impl IpoptCalculatedQuantities {
             .add_m_sinv_z(1.0, &*slack_l, &*iv.v_l, &mut *sigma);
         nlp.pd_u()
             .add_m_sinv_z(1.0, &*slack_u, &*iv.v_u, &mut *sigma);
-        rc_from(sigma)
+        let v = rc_from(sigma);
+        self.curr_sigma_s_cache.borrow_mut().add(
+            v.clone(),
+            &[iv.s.as_tagged(), iv.v_l.as_tagged(), iv.v_u.as_tagged()],
+            &[],
+        );
+        v
     }
 
     // --------------------------------------------------------------
@@ -898,6 +990,36 @@ impl IpoptCalculatedQuantities {
             .mult_vector(self.kappa_d * mu, &*d_s_l, 1.0, &mut *tmp);
         nlp.pd_u()
             .mult_vector(-self.kappa_d * mu, &*d_s_u, 1.0, &mut *tmp);
+        rc_from(tmp)
+    }
+
+    /// `kappa_d · (P_L · damping_l − P_U · damping_u)` in the full x
+    /// space — port of `IpIpoptCalculatedQuantities.cpp::grad_kappa_times_damping_x`
+    /// (lines 912-949). Unlike `curr_grad_lag_with_damping_x` this does
+    /// NOT include `grad_lag_x` and is NOT scaled by `mu`; the centering
+    /// RHS in the quality-function oracle multiplies the returned vector
+    /// by `-avrg_compl` per upstream `IpQualityFunctionMuOracle.cpp:229`.
+    pub fn grad_kappa_times_damping_x(&self) -> Rc<dyn Vector> {
+        let mut tmp = self.curr_iv().x.make_new();
+        tmp.set(0.0);
+        if self.kappa_d > 0.0 {
+            let di = self.damping_indicators();
+            let nlp = self.nlp.borrow();
+            nlp.px_l().mult_vector(self.kappa_d, &*di.x_l, 0.0, &mut *tmp);
+            nlp.px_u().mult_vector(-self.kappa_d, &*di.x_u, 1.0, &mut *tmp);
+        }
+        rc_from(tmp)
+    }
+
+    pub fn grad_kappa_times_damping_s(&self) -> Rc<dyn Vector> {
+        let mut tmp = self.curr_iv().s.make_new();
+        tmp.set(0.0);
+        if self.kappa_d > 0.0 {
+            let di = self.damping_indicators();
+            let nlp = self.nlp.borrow();
+            nlp.pd_l().mult_vector(self.kappa_d, &*di.s_l, 0.0, &mut *tmp);
+            nlp.pd_u().mult_vector(-self.kappa_d, &*di.s_u, 1.0, &mut *tmp);
+        }
         rc_from(tmp)
     }
 

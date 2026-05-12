@@ -129,7 +129,21 @@ enum AlphaResult {
     /// `max_trials` exhausted without acceptance. The last attempted
     /// trial iterate is left in `data.trial` so the watchdog
     /// "accept-anyway" path can promote it.
-    Failed { n_steps: i32, last_alpha: Number },
+    ///
+    /// `evaluation_error` flags that the last attempted trial produced
+    /// a non-finite `theta_trial`/`phi_trial` — mirrors upstream's
+    /// `evaluation_error` tracked from `IpoptNLP::Eval_Error`
+    /// (`IpBacktrackingLineSearch.cpp:776-784`). The watchdog handler
+    /// must treat this as a forced StopWatchDog
+    /// (`IpBacktrackingLineSearch.cpp:493`) — accepting a non-finite
+    /// iterate via the 'w' branch propagates NaN/Inf into the next
+    /// outer iter (observed on PFIT3 iter 53: inf_pr=7.87e305 from a
+    /// 'w'-accepted trial; on PFIT4 iter 31: inf_pr=1.01e11).
+    Failed {
+        n_steps: i32,
+        last_alpha: Number,
+        evaluation_error: bool,
+    },
 }
 
 impl BacktrackingLineSearch {
@@ -287,10 +301,17 @@ impl BacktrackingLineSearch {
                 d.info_ls_count = n_steps + 1;
                 Outcome::TinyStep
             }
-            AlphaResult::Failed { n_steps, last_alpha } => {
+            AlphaResult::Failed { n_steps, last_alpha, evaluation_error } => {
                 if self.in_watchdog {
                     self.handle_watchdog_failure(
-                        data, cq, alpha_init, alpha_dual, nlp, n_steps, last_alpha,
+                        data,
+                        cq,
+                        alpha_init,
+                        alpha_dual,
+                        nlp,
+                        n_steps,
+                        last_alpha,
+                        evaluation_error,
                     )
                 } else {
                     // Genuine failure → restoration.
@@ -352,9 +373,16 @@ impl BacktrackingLineSearch {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         n_steps: i32,
         last_alpha: Number,
+        evaluation_error: bool,
     ) -> Outcome {
         self.watchdog_trial_iter += 1;
-        if self.watchdog_trial_iter > self.watchdog_trial_iter_max {
+        // Mirror upstream `IpBacktrackingLineSearch.cpp:493`:
+        // `if (evaluation_error || watchdog_trial_iter > max)` →
+        // StopWatchDog. A non-finite trial must NOT be promoted via
+        // the 'w' accept-anyway path; doing so propagates NaN/Inf
+        // into the next outer iter and the iterate is unrecoverable
+        // (observed on PFIT3, PFIT4).
+        if evaluation_error || self.watchdog_trial_iter > self.watchdog_trial_iter_max {
             // StopWatchDog: revert curr to the snapshot, re-run on
             // saved delta with `skip_first=true` (alpha starts at
             // `alpha_init * alpha_red_factor`).
@@ -422,6 +450,7 @@ impl BacktrackingLineSearch {
                 AlphaResult::Failed {
                     n_steps: ns2,
                     last_alpha: la2,
+                    evaluation_error: _,
                 } => {
                     let mut d = data.borrow_mut();
                     d.trial = None;
@@ -479,9 +508,12 @@ impl BacktrackingLineSearch {
                 return AlphaResult::Failed {
                     n_steps: 0,
                     last_alpha: 0.0,
+                    evaluation_error: false,
                 }
             }
         };
+
+        let mut evaluation_error = false;
 
         let mut soc_search_dir = search_dir;
         let (mut c_soc_buf, mut dms_soc_buf) = if soc_search_dir.is_some()
@@ -524,6 +556,20 @@ impl BacktrackingLineSearch {
             let theta_trial = cq.borrow().trial_constraint_violation();
             let phi_trial = cq.borrow().trial_barrier_obj();
             if !theta_trial.is_finite() || !phi_trial.is_finite() {
+                // Mirror upstream `IpBacktrackingLineSearch.cpp:776-784`:
+                // a non-finite eval is treated as `Eval_Error`, sets the
+                // `evaluation_error` flag, and the alpha-loop continues
+                // to backtrack. Under watchdog, upstream breaks out
+                // immediately (line 791-794) so the watchdog handler
+                // can force StopWatchDog via line 493.
+                evaluation_error = true;
+                if self.in_watchdog {
+                    return AlphaResult::Failed {
+                        n_steps: trial,
+                        last_alpha: alpha,
+                        evaluation_error: true,
+                    };
+                }
                 alpha *= self.alpha_red_factor;
                 continue;
             }
@@ -550,9 +596,29 @@ impl BacktrackingLineSearch {
                 return AlphaResult::Accepted { n_steps: trial };
             }
 
+            // Watchdog: under upstream `IpBacktrackingLineSearch.cpp:791-794`,
+            // a failed trial inside the watchdog window breaks out of the
+            // alpha-loop immediately — alpha is NOT reduced. The trial just
+            // attempted (at the full `alpha_init`) is left in `data.trial`
+            // so `handle_watchdog_failure` can promote it via the 'w'
+            // accept-anyway branch. Without this break, pounce kept
+            // reducing alpha under watchdog and accepted the same tiny
+            // step that triggered watchdog activation in the first place,
+            // leaving the iterate stalled (observed on HATFLDFLNE: iter 11
+            // accepted α=1.22e-4 'h' instead of α=1.00 'w').
+            if self.in_watchdog {
+                return AlphaResult::Failed {
+                    n_steps: trial,
+                    last_alpha: alpha,
+                    evaluation_error,
+                };
+            }
+
             // SOC: only on the first non-skipped trial when constraint
             // violation grew. Disabled when `skip_first=true` (no SOC
-            // buffers were allocated).
+            // buffers were allocated). Also disabled under watchdog (the
+            // `in_watchdog` break above pre-empts SOC, matching upstream
+            // which gates SOC after the in_watchdog break).
             if trial == 0
                 && !skip_first
                 && self.max_soc > 0
@@ -649,7 +715,11 @@ impl BacktrackingLineSearch {
             alpha *= self.alpha_red_factor;
         }
 
-        AlphaResult::Failed { n_steps, last_alpha }
+        AlphaResult::Failed {
+            n_steps,
+            last_alpha,
+            evaluation_error,
+        }
     }
 
     /// Directional derivative of the barrier objective along the step
@@ -781,11 +851,17 @@ mod tests {
         let r = AlphaResult::Failed {
             n_steps: 7,
             last_alpha: 1e-6,
+            evaluation_error: false,
         };
         match r {
-            AlphaResult::Failed { n_steps, last_alpha } => {
+            AlphaResult::Failed {
+                n_steps,
+                last_alpha,
+                evaluation_error,
+            } => {
                 assert_eq!(n_steps, 7);
                 assert!((last_alpha - 1e-6).abs() < 1e-20);
+                assert!(!evaluation_error);
             }
             _ => unreachable!(),
         }

@@ -1,0 +1,397 @@
+//! FERAL backend — pure-Rust sparse symmetric LDL^T factor.
+//!
+//! Implements [`SparseSymLinearSolverInterface`] over [`feral::Solver`].
+//! The lifecycle mirrors `pounce_hsl::Ma57SolverInterface`:
+//!
+//! * `matrix_format()` returns [`EMatrixFormat::TripletFormat`] (1-based,
+//!   lower-triangle COO) so the IPM `TSymLinearSolver` wrapper requires
+//!   no changes versus the MA57 path.
+//! * `initialize_structure` caches the 0-based row/col arrays needed by
+//!   FERAL's [`CscMatrix::from_triplets`] and allocates the values
+//!   buffer.
+//! * `multi_solve` rebuilds `CscMatrix` from the cached pattern + caller-
+//!   filled values and dispatches to [`feral::Solver::factor`] /
+//!   [`feral::Solver::solve_many`]. FERAL's pattern-fingerprint cache
+//!   reuses the symbolic factorization across iterates with identical
+//!   structure (the IPM common case).
+//! * `increase_quality` delegates to [`feral::Solver::increase_quality`]
+//!   and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
+//!   upper-layer reload-and-retry semantics line up.
+
+use feral::{CscMatrix, FactorStatus, Solver};
+use pounce_common::types::{Index, Number};
+use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+
+/// FERAL solver implementing the IPM-side sparse symmetric backend
+/// contract.
+pub struct FeralSolverInterface {
+    solver: Solver,
+
+    initialized: bool,
+    pivtol_changed: bool,
+    refactorize: bool,
+
+    dim: Index,
+    nonzeros: Index,
+
+    /// 0-based row indices, fixed by `initialize_structure`.
+    rows_0: Vec<usize>,
+    /// 0-based column indices, fixed by `initialize_structure`.
+    cols_0: Vec<usize>,
+    /// Caller-filled numerical values, in the same order as
+    /// `(rows_0, cols_0)`.
+    values: Vec<Number>,
+
+    negevals: Index,
+}
+
+impl FeralSolverInterface {
+    pub fn new() -> Self {
+        let mut solver = Solver::new();
+        if matches!(
+            std::env::var("FERAL_PARALLEL").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        ) {
+            solver = solver.with_parallel(false);
+        }
+        Self {
+            solver,
+            initialized: false,
+            pivtol_changed: false,
+            refactorize: false,
+            dim: 0,
+            nonzeros: 0,
+            rows_0: Vec::new(),
+            cols_0: Vec::new(),
+            values: Vec::new(),
+            negevals: 0,
+        }
+    }
+
+    /// Build the lower-triangle CSC view, factor it, and stash the
+    /// negative-eigenvalue count.
+    fn factor(
+        &mut self,
+        check_neg_evals: bool,
+        number_of_neg_evals: Index,
+    ) -> ESymSolverStatus {
+        let n = self.dim as usize;
+        let matrix = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
+            Ok(m) => m,
+            Err(_) => return ESymSolverStatus::FatalError,
+        };
+
+        match self.solver.factor(&matrix, None) {
+            FactorStatus::Success => {
+                self.negevals = self.solver.num_negative_eigenvalues() as Index;
+                if check_neg_evals && self.negevals != number_of_neg_evals {
+                    return ESymSolverStatus::WrongInertia;
+                }
+                ESymSolverStatus::Success
+            }
+            FactorStatus::Singular => ESymSolverStatus::Singular,
+            FactorStatus::WrongInertia { .. } => {
+                // Should not occur — we passed `None` for check_inertia.
+                ESymSolverStatus::FatalError
+            }
+            FactorStatus::FatalError(_) => ESymSolverStatus::FatalError,
+        }
+    }
+
+    fn backsolve(&self, nrhs: Index, rhs_vals: &mut [Number]) -> ESymSolverStatus {
+        let n = self.dim as usize;
+        let nrhs = nrhs as usize;
+        debug_assert_eq!(rhs_vals.len(), n * nrhs);
+
+        let solved = if nrhs == 1 {
+            self.solver.solve(rhs_vals)
+        } else {
+            self.solver.solve_many(rhs_vals, nrhs)
+        };
+        match solved {
+            Ok(x) => {
+                rhs_vals.copy_from_slice(&x);
+                ESymSolverStatus::Success
+            }
+            Err(_) => ESymSolverStatus::FatalError,
+        }
+    }
+}
+
+impl Default for FeralSolverInterface {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for FeralSolverInterface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeralSolverInterface")
+            .field("dim", &self.dim)
+            .field("nonzeros", &self.nonzeros)
+            .field("initialized", &self.initialized)
+            .field("negevals", &self.negevals)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SparseSymLinearSolverInterface for FeralSolverInterface {
+    fn initialize_structure(
+        &mut self,
+        dim: Index,
+        nonzeros: Index,
+        ia: &[Index],
+        ja: &[Index],
+    ) -> ESymSolverStatus {
+        assert_eq!(ia.len(), nonzeros as usize);
+        assert_eq!(ja.len(), nonzeros as usize);
+
+        self.dim = dim;
+        self.nonzeros = nonzeros;
+        self.values = vec![0.0; nonzeros as usize];
+
+        // Convert 1-based MA57-style indices to 0-based for FERAL, and
+        // canonicalize each entry to the lower triangle. MA57 accepts
+        // either triangle of a symmetric COO; pounce's KKT assembly
+        // takes advantage of that and emits a mix of lower- and
+        // upper-triangle entries. FERAL's `CscMatrix::from_triplets`
+        // documents "Entries must be lower-triangle (row >= col)" but
+        // does NOT check it — upper-triangle entries get stored in the
+        // CSC structure where the LDL^T factorization ignores them,
+        // silently dropping them from the factored matrix.
+        self.rows_0 = Vec::with_capacity(nonzeros as usize);
+        self.cols_0 = Vec::with_capacity(nonzeros as usize);
+        for k in 0..nonzeros as usize {
+            let i = (ia[k] - 1) as usize;
+            let j = (ja[k] - 1) as usize;
+            if i >= j {
+                self.rows_0.push(i);
+                self.cols_0.push(j);
+            } else {
+                self.rows_0.push(j);
+                self.cols_0.push(i);
+            }
+        }
+
+        self.initialized = true;
+        ESymSolverStatus::Success
+    }
+
+    fn values_array_mut(&mut self) -> &mut [Number] {
+        debug_assert!(self.initialized);
+        &mut self.values
+    }
+
+    fn multi_solve(
+        &mut self,
+        new_matrix: bool,
+        _ia: &[Index],
+        _ja: &[Index],
+        nrhs: Index,
+        rhs_vals: &mut [Number],
+        check_neg_evals: bool,
+        number_of_neg_evals: Index,
+    ) -> ESymSolverStatus {
+        // Quality was bumped since the last factor → caller must refill
+        // values and we'll re-factor. Mirrors MA57's protocol.
+        if self.pivtol_changed {
+            self.pivtol_changed = false;
+            if !new_matrix {
+                self.refactorize = true;
+                return ESymSolverStatus::CallAgain;
+            }
+        }
+
+        if new_matrix || self.refactorize {
+            let status = self.factor(check_neg_evals, number_of_neg_evals);
+            if status != ESymSolverStatus::Success {
+                return status;
+            }
+            self.refactorize = false;
+        }
+
+        self.backsolve(nrhs, rhs_vals)
+    }
+
+    fn number_of_neg_evals(&self) -> Index {
+        debug_assert!(self.initialized);
+        self.negevals
+    }
+
+    fn increase_quality(&mut self) -> bool {
+        if self.solver.increase_quality() {
+            self.pivtol_changed = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn provides_inertia(&self) -> bool {
+        true
+    }
+
+    fn matrix_format(&self) -> EMatrixFormat {
+        EMatrixFormat::TripletFormat
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2x2 SPD matrix `[[2,1],[1,3]]`. Lower-triangle 1-based triplets.
+    /// Solving against (3, 4) gives x = (1, 1).
+    #[test]
+    fn factor_and_solve_spd_2x2() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-12, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 1.0).abs() < 1e-12, "x1 = {}", rhs[1]);
+        assert_eq!(s.number_of_neg_evals(), 0);
+        assert!(s.provides_inertia());
+        assert_eq!(s.matrix_format(), EMatrixFormat::TripletFormat);
+    }
+
+    /// 2x2 indefinite `[[1,2],[2,1]]` — eigenvalues 3, -1.
+    #[test]
+    fn detects_one_negative_eigenvalue() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[1.0, 2.0, 1.0]);
+
+        let mut rhs = [3.0, 3.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::Success
+        );
+        assert_eq!(s.number_of_neg_evals(), 1);
+        assert!((rhs[0] - 1.0).abs() < 1e-12);
+        assert!((rhs[1] - 1.0).abs() < 1e-12);
+    }
+
+    /// Wrong expected inertia → `WrongInertia` (and no solve).
+    #[test]
+    fn check_neg_evals_mismatch_returns_wrong_inertia() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]); // SPD
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::WrongInertia
+        );
+    }
+
+    /// `increase_quality` then resolve with `new_matrix=false`
+    /// returns `CallAgain`; refilling values and retrying succeeds.
+    #[test]
+    fn increase_quality_then_resolve_triggers_call_again() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+
+        if s.increase_quality() {
+            // Quality bumped; new_matrix=false → CallAgain.
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(false, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::CallAgain
+            );
+            // Refill values and retry.
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(false, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success
+            );
+            assert!((rhs[0] - 1.0).abs() < 1e-12);
+            assert!((rhs[1] - 1.0).abs() < 1e-12);
+        }
+    }
+
+    /// Pounce emits some symmetric entries as upper-triangle
+    /// `(i, j)` with `i < j` because MA57 accepts either half. The
+    /// FERAL wrapper must canonicalize to lower triangle (row >= col)
+    /// before handing entries to `CscMatrix::from_triplets`, which
+    /// silently drops upper-triangle entries during LDL^T. A regression
+    /// in this canonicalization would corrupt residuals and inertia
+    /// (see jkitchin/feral#6).
+    #[test]
+    fn upper_triangle_entries_are_canonicalized() {
+        let mut s = FeralSolverInterface::new();
+        // Same matrix as `factor_and_solve_spd_2x2`, but the (2,1)
+        // off-diagonal is given as upper-triangle (1,2).
+        let irn: [Index; 3] = [1, 1, 2];
+        let jcn: [Index; 3] = [1, 2, 2];
+        s.initialize_structure(2, 3, &irn, &jcn);
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-12, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 1.0).abs() < 1e-12, "x1 = {}", rhs[1]);
+    }
+
+    /// Two-RHS solve via `solve_many`.
+    #[test]
+    fn multi_rhs_solve() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+
+        // Column 1: A x = (3, 4) → x = (1, 1)
+        // Column 2: A x = (4, 5) → x = (7/5, 6/5)
+        let mut rhs = [3.0, 4.0, 4.0, 5.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 2, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-10);
+        assert!((rhs[1] - 1.0).abs() < 1e-10);
+        assert!((rhs[2] - 7.0 / 5.0).abs() < 1e-10);
+        assert!((rhs[3] - 6.0 / 5.0).abs() < 1e-10);
+    }
+}

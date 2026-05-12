@@ -10,9 +10,9 @@
 //! * Text header (`g…`).
 //! * Constraint and objective expression segments using opcodes
 //!   `o0` (add), `o1` (sub), `o2` (mul), `o3` (div), `o5` (pow),
-//!   `o16` (unary minus), `o39` (sqrt), `o42` (log), `o43` (exp),
-//!   `o15` (abs), `o41` (sin), `o46` (cos), plus `n<num>` constants
-//!   and `v<idx>` variables.
+//!   `o16` (unary minus), `o39` (sqrt), `o42` (log10), `o43` (log),
+//!   `o44` (exp), `o15` (abs), `o41` (sin), `o46` (cos), plus
+//!   `n<num>` constants and `v<idx>` variables.
 //! * Linear-Jacobian (`J`) and linear-objective (`G`) segments.
 //! * Variable bounds (`b`) and constraint bounds (`r`).
 //! * Optional initial primal (`x`) segment. Initial dual (`d`) is
@@ -83,6 +83,7 @@ pub enum UnaryOp {
     Abs,
     Sin,
     Cos,
+    Log10,
 }
 
 /// Parsed `.nl` problem in the form needed by `NlTnlp`.
@@ -510,8 +511,9 @@ impl<'a> Parser<'a> {
             16 => Ok(Expr::Unary(UnaryOp::Neg, Box::new(self.parse_expr()?))),
             39 => Ok(Expr::Unary(UnaryOp::Sqrt, Box::new(self.parse_expr()?))),
             41 => Ok(Expr::Unary(UnaryOp::Sin, Box::new(self.parse_expr()?))),
-            42 => Ok(Expr::Unary(UnaryOp::Log, Box::new(self.parse_expr()?))),
-            43 => Ok(Expr::Unary(UnaryOp::Exp, Box::new(self.parse_expr()?))),
+            42 => Ok(Expr::Unary(UnaryOp::Log10, Box::new(self.parse_expr()?))),
+            43 => Ok(Expr::Unary(UnaryOp::Log, Box::new(self.parse_expr()?))),
+            44 => Ok(Expr::Unary(UnaryOp::Exp, Box::new(self.parse_expr()?))),
             46 => Ok(Expr::Unary(UnaryOp::Cos, Box::new(self.parse_expr()?))),
             54 => {
                 // Variadic sum: next data line gives the count.
@@ -639,6 +641,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 UnaryOp::Neg => -va,
                 UnaryOp::Sqrt => va.sqrt(),
                 UnaryOp::Log => va.ln(),
+                UnaryOp::Log10 => va.log10(),
                 UnaryOp::Exp => va.exp(),
                 UnaryOp::Abs => va.abs(),
                 UnaryOp::Sin => va.sin(),
@@ -693,6 +696,7 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 UnaryOp::Neg => -1.0,
                 UnaryOp::Sqrt => 0.5 / va.sqrt(),
                 UnaryOp::Log => 1.0 / va,
+                UnaryOp::Log10 => 1.0 / (va * std::f64::consts::LN_10),
                 UnaryOp::Exp => va.exp(),
                 UnaryOp::Abs => {
                     if va > 0.0 {
@@ -747,12 +751,16 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
 #[derive(Debug)]
 pub struct NlTnlp {
     prob: NlProblem,
-    /// Tape for the objective's nonlinear part. Built once at
-    /// construction; reused for every `eval_f`/`eval_grad_f`/`eval_h`
-    /// call.
-    obj_tape: Tape,
-    /// Tape for each constraint's nonlinear part (length m).
-    con_tapes: Vec<Tape>,
+    /// One tape per top-level summand of the objective's nonlinear
+    /// part. Variadic `o54` sums (and nested `o0` adds at the top of
+    /// the tree) are split into independent terms so that the
+    /// forward-over-reverse Hessian walks each small subgraph
+    /// separately instead of the full tape once per variable —
+    /// turning a separable obj's O(n²) Hessian cost into O(n).
+    obj_tapes: Vec<Tape>,
+    /// One tape per top-level summand of each constraint's nonlinear
+    /// part (length m). Same separable-Sum split as `obj_tapes`.
+    con_tapes: Vec<Vec<Tape>>,
     /// Lower-triangle Hessian sparsity (row >= col), one entry per
     /// structurally nonzero second derivative in the Lagrangian. The
     /// `(row, col) -> values index` map lets each tape's
@@ -768,26 +776,66 @@ pub struct NlTnlp {
     final_obj: Number,
 }
 
+/// Recursively flatten top-level Sum and binary-Add nodes into a list
+/// of independent summands. Non-Sum/Add expressions are returned as a
+/// single-element vector. This lets `NlTnlp` build one small tape per
+/// term so the per-variable Hessian sweep only walks the term that
+/// actually depends on that variable.
+fn split_top_sums(expr: &Expr) -> Vec<Expr> {
+    let mut out = Vec::new();
+    fn go(e: &Expr, out: &mut Vec<Expr>) {
+        match e {
+            Expr::Sum(terms) => {
+                for t in terms {
+                    go(t, out);
+                }
+            }
+            Expr::Binary(BinOp::Add, l, r) => {
+                go(l, out);
+                go(r, out);
+            }
+            _ => out.push(e.clone()),
+        }
+    }
+    go(expr, &mut out);
+    if out.is_empty() {
+        out.push(Expr::Const(0.0));
+    }
+    out
+}
+
 impl NlTnlp {
     pub fn new(prob: NlProblem) -> Self {
-        // Build all tapes up front. Common subexpressions (`Expr::Cse`)
-        // are shared via `Rc` in the parsed `Expr`; the tape builder
-        // emits each shared body exactly once.
-        let obj_tape = Tape::build(&prob.obj_nonlinear);
-        let con_tapes: Vec<Tape> = (0..prob.m)
-            .map(|k| Tape::build(&prob.con_nonlinear[k]))
+        // Build tapes up front. The objective and each constraint's
+        // nonlinear part are split at top-level `Sum`/`Add` so each
+        // summand gets its own small tape — see `split_top_sums`.
+        let obj_tapes: Vec<Tape> = split_top_sums(&prob.obj_nonlinear)
+            .iter()
+            .map(Tape::build)
+            .collect();
+        let con_tapes: Vec<Vec<Tape>> = (0..prob.m)
+            .map(|k| {
+                split_top_sums(&prob.con_nonlinear[k])
+                    .iter()
+                    .map(Tape::build)
+                    .collect()
+            })
             .collect();
 
         // Structural Hessian sparsity: union of per-tape sparsities.
         // Linear segments have zero 2nd derivative so they contribute
         // nothing here.
         let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for p in obj_tape.hessian_sparsity() {
-            pairs.insert(p);
-        }
-        for t in &con_tapes {
+        for t in &obj_tapes {
             for p in t.hessian_sparsity() {
                 pairs.insert(p);
+            }
+        }
+        for ts in &con_tapes {
+            for t in ts {
+                for p in t.hessian_sparsity() {
+                    pairs.insert(p);
+                }
             }
         }
         let mut h_irow = Vec::with_capacity(pairs.len());
@@ -799,12 +847,17 @@ impl NlTnlp {
             hess_map.insert((*hi, *lo), k);
         }
 
-        // Per-row Jacobian sparsity = union of the constraint tape's
-        // variables and the linear-segment vars for that row.
+        // Per-row Jacobian sparsity = union over all summand tapes of
+        // their variables, plus the linear-segment vars for that row.
         let mut jac_cols: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
         let mut jac_nnz = 0;
         for i in 0..prob.m {
-            let mut set: BTreeSet<usize> = con_tapes[i].variables().into_iter().collect();
+            let mut set: BTreeSet<usize> = BTreeSet::new();
+            for t in &con_tapes[i] {
+                for v in t.variables() {
+                    set.insert(v);
+                }
+            }
             for (v, _) in &prob.con_linear[i] {
                 set.insert(*v);
             }
@@ -815,7 +868,7 @@ impl NlTnlp {
 
         Self {
             prob,
-            obj_tape,
+            obj_tapes,
             con_tapes,
             h_irow,
             h_jcol,
@@ -863,7 +916,7 @@ impl TNLP for NlTnlp {
     }
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
-        let nl = self.obj_tape.eval(x);
+        let nl: Number = self.obj_tapes.iter().map(|t| t.eval(x)).sum();
         let lin: Number = self
             .prob
             .obj_linear
@@ -877,7 +930,9 @@ impl TNLP for NlTnlp {
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
         grad.fill(0.0);
-        self.obj_tape.gradient_seed(x, 1.0, grad);
+        for t in &self.obj_tapes {
+            t.gradient_seed(x, 1.0, grad);
+        }
         for (i, c) in &self.prob.obj_linear {
             grad[*i] += c;
         }
@@ -891,7 +946,7 @@ impl TNLP for NlTnlp {
 
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         for i in 0..self.prob.m {
-            let nl = self.con_tapes[i].eval(x);
+            let nl: Number = self.con_tapes[i].iter().map(|t| t.eval(x)).sum();
             let lin: Number = self.prob.con_linear[i]
                 .iter()
                 .map(|(j, c)| c * x[*j])
@@ -925,8 +980,18 @@ impl TNLP for NlTnlp {
                 let mut row_grad = vec![0.0; n];
                 let mut k = 0;
                 for i in 0..self.prob.m {
-                    row_grad.fill(0.0);
-                    self.con_tapes[i].gradient_seed(xs, 1.0, &mut row_grad);
+                    // gradient_seed writes only to positions that appear
+                    // in the constraint's tape (its Var nodes); linear
+                    // contributions touch only `con_linear[i]`. Both
+                    // sets are subsets of `jac_cols[i]`, so clearing
+                    // just those entries is sufficient and avoids an
+                    // O(n) fill per row.
+                    for &j in &self.jac_cols[i] {
+                        row_grad[j] = 0.0;
+                    }
+                    for t in &self.con_tapes[i] {
+                        t.gradient_seed(xs, 1.0, &mut row_grad);
+                    }
                     for &(v, c) in &self.prob.con_linear[i] {
                         row_grad[v] += c;
                     }
@@ -964,13 +1029,15 @@ impl TNLP for NlTnlp {
                 } else {
                     -obj_factor
                 };
-                self.obj_tape
-                    .hessian_accumulate(x, obj_seed, &self.hess_map, values);
+                for t in &self.obj_tapes {
+                    t.hessian_accumulate(x, obj_seed, &self.hess_map, values);
+                }
 
                 if let Some(lam) = lambda {
                     for k in 0..self.prob.m {
-                        self.con_tapes[k]
-                            .hessian_accumulate(x, lam[k], &self.hess_map, values);
+                        for t in &self.con_tapes[k] {
+                            t.hessian_accumulate(x, lam[k], &self.hess_map, values);
+                        }
                     }
                 }
                 true

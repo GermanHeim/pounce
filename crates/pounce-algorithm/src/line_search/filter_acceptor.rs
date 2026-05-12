@@ -450,6 +450,24 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
             )
         }))
     }
+
+    /// Port of `IpFilterLSAcceptor::PrepareRestoPhaseStart` →
+    /// `AugmentFilter` (`IpFilterLSAcceptor.cpp:297-308, 898-901`).
+    /// Called by the algorithm immediately before restoration; adds
+    /// the resto-entry envelope to the filter so that after recovery,
+    /// the outer's Newton step is forced to make real progress vs
+    /// the entry point. Without this, pounce on DECONVBNE enters
+    /// restoration 323× (vs ipopt 21×): the outer accepts null-progress
+    /// 'h' steps and immediately re-enters restoration.
+    fn prepare_resto_phase_start(
+        &mut self,
+        reference_theta: Number,
+        reference_barr: Number,
+    ) {
+        let phi_add = reference_barr - self.gamma_phi * reference_theta;
+        let theta_add = (1.0 - self.gamma_theta) * reference_theta;
+        self.filter.add(theta_add, phi_add, 0);
+    }
 }
 
 #[cfg(test)]

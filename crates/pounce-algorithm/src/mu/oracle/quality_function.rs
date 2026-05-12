@@ -366,8 +366,46 @@ impl QualityFunctionMuOracle {
                 n_comp,
             };
 
+            if std::env::var("POUNCE_DBG_QF_AGGR").is_ok() {
+                eprintln!(
+                    "[QF_AGGR] σ={:.6e} α_pri={:.6e} α_du={:.6e} xi={:.6e} dual_aggr={:.6e} primal_aggr={:.6e} compl_aggr={:.6e} n_dual={} n_pri={} n_comp={}",
+                    sigma, alpha_pri, alpha_du, xi,
+                    dual_aggr, primal_aggr, compl_aggr,
+                    n_dual, n_pri, n_comp
+                );
+            }
+
             evaluate_quality_function(norm_type, centrality, balancing, alpha_pri, alpha_du, xi, aggr)
         };
+
+        // One-shot σ-sweep dump for iter==N: emits q(σ) at 21 σ values
+        // spanning [σ_min, σ_max] log-uniform. Enable with
+        // `POUNCE_DBG_QF_SWEEP=<iter>` (matches `data.iter_count`).
+        if let Ok(s) = std::env::var("POUNCE_DBG_QF_SWEEP") {
+            if let Ok(target_iter) = s.parse::<i32>() {
+                if data.borrow().iter_count == target_iter {
+                    let lo = self.sigma_min.max(self.mu_min / avrg_compl);
+                    let hi = self.sigma_max.min(self.mu_max / avrg_compl).max(lo * 10.0);
+                    let log_lo = lo.ln();
+                    let log_hi = hi.ln();
+                    eprintln!("[QF_SWEEP] iter={} avrg_compl={:.6e} σ_range=[{:.3e},{:.3e}] sigma_min={:.3e} sigma_max={:.3e} mu_min={:.3e} mu_max={:.3e}",
+                        target_iter, avrg_compl, lo, hi,
+                        self.sigma_min, self.sigma_max, self.mu_min, self.mu_max);
+                    let n = 21;
+                    for i in 0..n {
+                        let frac = i as f64 / (n - 1) as f64;
+                        let sig = (log_lo + frac * (log_hi - log_lo)).exp();
+                        let q = eval_q(sig);
+                        eprintln!("[QF_SWEEP] σ={:.6e} q={:.10e}", sig, q);
+                    }
+                    let q1 = eval_q(1.0);
+                    let s1m = 1.0 - self.section_sigma_tol.max(1e-4);
+                    let q1m = eval_q(s1m);
+                    eprintln!("[QF_SWEEP] σ=1.0 q={:.10e}  σ={:.6e} q={:.10e}  (q_1minus>q_1: {})",
+                        q1, s1m, q1m, q1m > q1);
+                }
+            }
+        }
 
         let sigma = pick_sigma(
             self.sigma_min,

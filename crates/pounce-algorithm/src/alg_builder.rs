@@ -47,16 +47,15 @@ use std::rc::Rc;
 
 /// Backend factory — the application supplies one before calling
 /// [`AlgorithmBuilder::build`]. Mirrors upstream's
-/// `SymLinearSolverFactory` knob in `IpAlgBuilder.cpp`. Default factory
-/// in `pounce-algorithm` is unset; the `pounce-nlp` crate (or a test
-/// harness) wires in MA57/MUMPS/FERAL as needed.
+/// `SymLinearSolverFactory` knob in `IpAlgBuilder.cpp`. The default
+/// factory wires in FERAL; MA57 is selectable when the `ma57` cargo
+/// feature is enabled.
 pub type LinearBackendFactory =
     Box<dyn FnMut(LinearSolverChoice) -> Box<dyn SparseSymLinearSolverInterface>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverChoice {
     Ma57,
-    Mumps,
     Feral,
 }
 
@@ -122,7 +121,7 @@ pub struct AlgorithmBuilder {
 impl Default for AlgorithmBuilder {
     fn default() -> Self {
         Self {
-            linear_solver: LinearSolverChoice::Ma57,
+            linear_solver: LinearSolverChoice::Feral,
             mu_strategy: MuStrategyChoice::Monotone,
             mu_oracle: MuOracleKind::QualityFunction,
             hessian_approximation: HessianApproxChoice::Exact,
@@ -241,10 +240,10 @@ mod tests {
 
     #[test]
     fn build_with_backend_assembles_search_dir_chain() {
-        // Drive the builder with an MA57 backend factory; the resulting
-        // bundle should expose a populated `PdSearchDirCalc`.
+        // Drive the builder with the FERAL backend factory; the
+        // resulting bundle should expose a populated `PdSearchDirCalc`.
         let factory: LinearBackendFactory = Box::new(|_| {
-            Box::new(pounce_hsl::Ma57SolverInterface::new())
+            Box::new(pounce_feral::FeralSolverInterface::new())
                 as Box<dyn SparseSymLinearSolverInterface>
         });
         let bundle = AlgorithmBuilder::new().build_with_backend(factory);
@@ -263,11 +262,7 @@ mod tests {
 
     #[test]
     fn every_strategy_combination_assembles_without_panic() {
-        let solvers = [
-            LinearSolverChoice::Ma57,
-            LinearSolverChoice::Mumps,
-            LinearSolverChoice::Feral,
-        ];
+        let solvers = [LinearSolverChoice::Ma57, LinearSolverChoice::Feral];
         let mu = [MuStrategyChoice::Monotone, MuStrategyChoice::Adaptive];
         let hess = [
             HessianApproxChoice::Exact,

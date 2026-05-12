@@ -74,6 +74,14 @@ pub struct IpoptAlgorithm {
     /// Step is "tiny" when `max_i |δx_i|/(1+|x_i|) ≤ tiny_step_tol`
     /// (and same for s, and `c_viol ≤ 1e-4`).
     pub tiny_step_tol: Number,
+    /// Port of upstream `IpIpoptAlg.cpp` divergence guard: when
+    /// `max_i |x_i|` exceeds this threshold the optimization aborts with
+    /// `SolverReturn::DivergingIterates`. Default `1e20` matches the
+    /// registered `diverging_iterates_tol` option. Catches MESH and
+    /// similar cases where the normal-mode IPM heads off to infinity
+    /// (orig `f` to ±1e33 by iter 90) before line-search failure forces
+    /// a degenerate restoration entry.
+    pub diverging_iterates_tol: Number,
     /// Companion threshold on the dual step — when both primal and dual
     /// steps are tiny in two consecutive iterations the algorithm
     /// declares convergence at the best attainable accuracy. Default
@@ -118,6 +126,24 @@ pub struct IpoptAlgorithm {
     /// let MAKELA3, HAIFAM, HALDMADS, ROBOT, TENBARS2 — which need
     /// 2-3 consecutive resto entries to recover — pass through.
     resto_no_outer_progress_count: usize,
+    /// Count of consecutive restoration entries on which the outer
+    /// constraint violation at entry was already below `tol` (the
+    /// outer optimality tolerance). Matches the *intent* of upstream
+    /// `IpBacktrackingLineSearch.cpp:580-600`'s almost-feasible-resto
+    /// guard while using a looser cv threshold (`tol` vs `1e-2·tol`)
+    /// — catches DECONVBNE's resto-thrash where each cycle re-enters
+    /// at cv ≈ 3e-10 < tol with bound multipliers reset to 1, the
+    /// outer's σ-blowup explodes inf_du to 1.9e7, alpha-min triggers
+    /// resto re-entry, and the (inf_pr, inf_du) post-recovery state
+    /// is essentially identical across cycles but `x` drifts enough
+    /// that [`Self::last_resto_recovery_x`]-based detection misses.
+    /// Cumulative (never cleared on LS-accept), since DECONVBNE's
+    /// cycle interleaves R-recoveries with sub-tol accepts that
+    /// accomplish no real outer progress. Fires after 3 near-feasible
+    /// entries — surfaces as `StopAtAcceptablePoint` since the
+    /// recovered point already satisfies constraint feasibility
+    /// within `tol`.
+    resto_near_feasible_count: usize,
     /// Snapshot of the most recent iterate that the convergence check
     /// flagged "acceptable" (NLP error ≤ `acceptable_tol`). Mirrors
     /// upstream `IpBacktrackingLineSearch::acceptable_iterate_`
@@ -148,6 +174,7 @@ impl IpoptAlgorithm {
             max_iter: 3000,
             alpha_init: 1.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
+            diverging_iterates_tol: 1e20,
             tiny_step_y_tol: 1e-2,
             tiny_step_last_iteration: false,
             last_resto_entry_x: None,
@@ -155,6 +182,7 @@ impl IpoptAlgorithm {
             last_resto_recovery_x: None,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
+            resto_near_feasible_count: 0,
             acceptable_iterate: None,
             acceptable_iter_number: 0,
         }
@@ -238,6 +266,18 @@ impl IpoptAlgorithm {
         if !nlp_err.is_finite() {
             return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
         }
+        // Divergence guard — port of upstream `IpIpoptAlg.cpp` post-
+        // AcceptTrialPoint check. When `max_i |x_i|` exceeds the
+        // registered `diverging_iterates_tol` (default `1e20`), exit
+        // cleanly with `DivergingIterates` rather than spiralling into
+        // a degenerate restoration whose inner sub-NLP can't recover
+        // (MESH: orig `f` already at -3.6e33 by iter 90, restoration
+        // entered too late to bound `x`).
+        if let Some(curr) = self.data.borrow().curr.as_ref() {
+            if curr.x.amax() > self.diverging_iterates_tol {
+                return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
+            }
+        }
         match self.bundle.conv_check.check_convergence_with_state(
             nlp_err,
             iter_count,
@@ -265,7 +305,20 @@ impl IpoptAlgorithm {
             self.store_acceptable_point();
         }
 
-        // 3. Barrier parameter. Pass nlp + search_dir through so the
+        // 3. Hessian update. Must run BEFORE `update_barrier_parameter`
+        // so the adaptive-μ oracles (probing, quality-function) drive
+        // their affine/centering solves against `W(curr_N)`, not the
+        // stale `W(curr_{N-1})` left in `data.w` by the previous iter's
+        // tail-end Hessian update. Upstream calls `UpdateHessian()`
+        // first in every main-loop body (`IpIpoptAlg.cpp:386`); pounce
+        // previously reordered this to the tail, which made iters 1+
+        // pick μ from the prior iterate's Hessian on adaptive-mu +
+        // quality-function — visible on CRESC50 as a catastrophic
+        // early-iter divergence (theta=5.8e5 by iter 61 vs upstream
+        // never entering restoration).
+        let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
+
+        // 4. Barrier parameter. Pass nlp + search_dir through so the
         // adaptive μ oracles (probing, quality-function) can drive
         // their own affine-step solves; monotone ignores them.
         // Snapshot the tiny-step flag (set by the previous iteration's
@@ -300,15 +353,25 @@ impl IpoptAlgorithm {
             self.bundle.line_search.reset();
         }
 
-        // 4. Hessian update.
-        let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
-
         // 5. Search direction. Skipped without an NLP + search_dir.
+        // (Hessian was updated in step 3 above before the barrier-μ
+        // oracle so that adaptive-μ uses W(curr_N), not stale W.)
         if let (Some(nlp), Some(sd)) = (self.nlp.as_ref(), self.search_dir.as_mut()) {
             let ok = sd.compute_search_direction(&self.data, &self.cq, nlp);
             if !ok {
-                // Upstream's `STEP_COMPUTATION_FAILED` exception →
-                // `ErrorInStepComputation` (table in `MAIN_LOOP.md`).
+                // Mirror upstream `IpIpoptAlg.cpp:417-430`: a failed
+                // step computation puts the algorithm in emergency
+                // mode, which calls `BacktrackingLineSearch::
+                // ActivateFallbackMechanism` (cpp:1312-1328). When a
+                // restoration phase is configured, the next pass of
+                // `ComputeAcceptableTrialPoint` sees `goto_resto` at
+                // cpp:299-306 and hands control to restoration. Only
+                // when neither restoration nor an acceptor-level
+                // fallback is available does upstream throw
+                // `STEP_COMPUTATION_FAILED`.
+                if self.restoration.is_some() {
+                    return self.invoke_restoration();
+                }
                 return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
             }
             if std::env::var_os("POUNCE_DBG_DELTA").is_some() {
@@ -537,6 +600,20 @@ impl IpoptAlgorithm {
                         self.last_resto_recovery_x = None;
                         self.last_resto_recovery_s = None;
                         self.resto_no_outer_progress_count = 0;
+                        // Intentionally *not* clearing
+                        // `resto_near_feasible_count` here: DECONVBNE's
+                        // cycle interleaves R-recoveries with 2-3
+                        // LS-accepted 'f'/'h' steps (which return
+                        // `Outcome::Accepted` but accomplish no real
+                        // outer progress — alpha drops to 1e-6 and
+                        // inf_du remains pinned at 1.9e7), so resetting
+                        // on every accept would zero the counter every
+                        // cycle and never fire. The counter persists
+                        // for the duration of the run and trips after
+                        // 3 cumulative near-feasible entries; legitimate
+                        // solves enter resto at most once at near-
+                        // feasibility (POLAK6, HAIFAM) and stay under
+                        // the limit.
                     }
                     Outcome::TinyStep | Outcome::Failed => {
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
@@ -623,6 +700,17 @@ impl IpoptAlgorithm {
         let reference_theta = self.cq.borrow().curr_constraint_violation();
         let reference_barr = self.cq.borrow().curr_barrier_obj();
 
+        if std::env::var("POUNCE_DBG_RESTO").is_ok() {
+            let iter = self.data.borrow().iter_count;
+            eprintln!(
+                "RESTO_ENTRY iter={} theta={:.6e} barr={:.6e} near_feas_ct={}",
+                iter,
+                reference_theta,
+                reference_barr,
+                self.resto_near_feasible_count,
+            );
+        }
+
         // No-progress restoration cycle detector. Two layered checks
         // surface as `ErrorInStepComputation` instead of cycling to
         // `max_iter` exhaustion (mirrors the *intent* of upstream
@@ -657,13 +745,31 @@ impl IpoptAlgorithm {
             .as_ref()
             .expect("curr set before invoke_restoration")
             .clone();
+        // Helper: when the cycle detector fires and the orig cv is
+        // bounded away from outer tol (e.g. PFIT1's 2.73e-2), the
+        // outer is stuck at a feasibility-stationary point and the
+        // honest exit is `LocalInfeasibility`. Below that threshold
+        // the failure is numerical, not algorithmic, so retain
+        // `ErrorInStepComputation`.
+        let outer_tol_for_cycle = self.bundle.conv_check.tol_or_default();
+        let cycle_exit = if reference_theta > (100.0 * outer_tol_for_cycle).max(1e-4) {
+            SolverReturn::LocalInfeasibility
+        } else {
+            SolverReturn::ErrorInStepComputation
+        };
         if let (Some(prev_x), Some(prev_s)) =
             (self.last_resto_entry_x.as_ref(), self.last_resto_entry_s.as_ref())
         {
             let dx_rel = relative_distance(&*curr.x, &**prev_x);
             let ds_rel = relative_distance(&*curr.s, &**prev_s);
+            if std::env::var_os("POUNCE_DBG_RESTO_CYCLE").is_some() {
+                eprintln!(
+                    "[PN_RESTO_CYCLE] entry-vs-entry dx_rel={:.6e} ds_rel={:.6e}",
+                    dx_rel, ds_rel
+                );
+            }
             if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
-                return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
+                return IterateOutcome::Terminate(cycle_exit);
             }
         }
         if let (Some(prev_x), Some(prev_s)) = (
@@ -672,20 +778,72 @@ impl IpoptAlgorithm {
         ) {
             let dx_rel = relative_distance(&*curr.x, &**prev_x);
             let ds_rel = relative_distance(&*curr.s, &**prev_s);
+            if std::env::var_os("POUNCE_DBG_RESTO_CYCLE").is_some() {
+                eprintln!(
+                    "[PN_RESTO_CYCLE] entry-vs-recovery dx_rel={:.6e} ds_rel={:.6e} count={}",
+                    dx_rel, ds_rel, self.resto_no_outer_progress_count
+                );
+            }
             if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
                 self.resto_no_outer_progress_count =
                     self.resto_no_outer_progress_count.saturating_add(1);
-                if self.resto_no_outer_progress_count >= 5 {
-                    return IterateOutcome::Terminate(
-                        SolverReturn::ErrorInStepComputation,
-                    );
+                // 10-strike limit: tuned to give OET7-style traces room
+                // to break through (inner inf_pr still decreasing across
+                // strikes) while still bounding DECONVBNE-style cycles
+                // (which need a guard but tolerate a wider window —
+                // ~3 outer steps per cycle, so 10 strikes ≈ 30 outer
+                // iters, well below the 2987-iter pathological run).
+                if self.resto_no_outer_progress_count >= 10 {
+                    return IterateOutcome::Terminate(cycle_exit);
                 }
             } else {
                 self.resto_no_outer_progress_count = 0;
             }
         }
+        // Near-feasible resto re-entry detector — matches the *intent*
+        // of upstream `IpBacktrackingLineSearch.cpp:580-600`'s almost-
+        // feasible-resto guard with a looser cv threshold. When the
+        // outer enters restoration with the constraint violation
+        // already at or below `tol`, the resto sub-IPM will produce a
+        // recovered iterate that's at most marginally more feasible,
+        // and any post-recovery σ-blowup from the next outer KKT solve
+        // will re-trigger resto on the next iteration. Counting these
+        // entries surfaces the cycle as `StopAtAcceptablePoint` —
+        // primal feasibility is already met, only the dual residual
+        // remains. Catches DECONVBNE: pounce ran 2987 iters before
+        // this guard (cycle of ~30-inner-resto + 3 outer per cycle);
+        // upstream solves in 505 iters via a different x trajectory.
+        // Single-entry productive restos (BT8, HIMMELBJ, ODFITS) and
+        // sub-tol-but-recoverable starts pass through under the 3-
+        // strike limit.
+        let outer_tol = self.bundle.conv_check.tol_or_default();
+        if reference_theta <= outer_tol {
+            self.resto_near_feasible_count =
+                self.resto_near_feasible_count.saturating_add(1);
+            if self.resto_near_feasible_count >= 3 {
+                return IterateOutcome::Terminate(
+                    SolverReturn::StopAtAcceptablePoint,
+                );
+            }
+        } else {
+            self.resto_near_feasible_count = 0;
+        }
         self.last_resto_entry_x = Some(curr.x.make_new_copy());
         self.last_resto_entry_s = Some(curr.s.make_new_copy());
+
+        // Augment the outer's filter with the resto-entry envelope —
+        // mirrors upstream `IpBacktrackingLineSearch.cpp:566`:
+        // `acceptor_->PrepareRestoPhaseStart()`. Adds
+        // `((1-γ_θ)·θ_entry, φ_entry - γ_φ·θ_entry)` to the filter so
+        // that after restoration recovers, the outer's Newton step is
+        // forced by the filter to make real progress vs the entry
+        // point. Without this, the outer accepts null-progress 'h'
+        // steps and re-enters restoration on the next iteration (root
+        // cause of DECONVBNE's 323 R-accepts vs ipopt's 21).
+        self.bundle
+            .line_search
+            .acceptor_mut()
+            .prepare_resto_phase_start(reference_theta, reference_barr);
 
         let orig_progress_cb = self
             .bundle
@@ -743,9 +901,21 @@ impl IpoptAlgorithm {
                 // application layer to `Solved_To_Acceptable_Level`),
                 // matching the upstream `ACCEPTABLE_POINT_REACHED`
                 // throw. Without a snapshot we surface
-                // `RestorationFailure` as before.
+                // `RestorationFailure` — unless the restoration left the
+                // iterate diverging (`|x|_∞ > diverging_iterates_tol`), in
+                // which case we surface `DivergingIterates` to mirror the
+                // outcome upstream produces on pathological problems like
+                // MESH (where ipopt reports `Diverging_Iterates` and
+                // pounce previously reported `Restoration_Failed` with an
+                // obj of −3.6e+33).
                 if self.restore_acceptable_point() {
                     IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
+                } else if let Some(curr) = self.data.borrow().curr.as_ref() {
+                    if curr.x.amax() > self.diverging_iterates_tol {
+                        IterateOutcome::Terminate(SolverReturn::DivergingIterates)
+                    } else {
+                        IterateOutcome::Terminate(SolverReturn::RestorationFailure)
+                    }
                 } else {
                     IterateOutcome::Terminate(SolverReturn::RestorationFailure)
                 }
@@ -832,11 +1002,12 @@ impl IpoptAlgorithm {
             }
         }
 
-        // 0c. Seed `IpoptData::w` with the initial-iterate Hessian so
-        //     the first `update_barrier_parameter` call (adaptive mu
-        //     oracles drive an affine solve) finds W populated. Matches
-        //     upstream's `InitializeImpl` which leaves W set after
-        //     `DefaultIterateInitializer::SetInitialIterates`.
+        // 0c. Seed `IpoptData::w` with the initial-iterate Hessian.
+        //     Redundant with the iter-body `update_hessian` call (which
+        //     now runs BEFORE `update_barrier_parameter`) but kept to
+        //     cover any code path that consults `data.w` between
+        //     `set_initial_iterates` and the first `iterate()` call
+        //     (e.g. the iter-0 trace dump below).
         if self.data.borrow().curr.is_some() {
             let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
         }

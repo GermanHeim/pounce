@@ -116,4 +116,23 @@ pub trait BacktrackingLsAcceptor {
     ) -> Option<OrigProgressCallback> {
         None
     }
+
+    /// Hook called by the algorithm immediately before invoking the
+    /// restoration phase — port of
+    /// `IpFilterLSAcceptor::PrepareRestoPhaseStart` →
+    /// `AugmentFilter` (`IpFilterLSAcceptor.cpp:898-901`, called from
+    /// `IpBacktrackingLineSearch.cpp:566`). The filter acceptor
+    /// augments the filter with the resto-entry iterate's shrunk
+    /// envelope `((1 - γ_θ)·θ_ref, φ_ref - γ_φ·θ_ref)`. After
+    /// restoration recovers, the outer's Newton step is then forced
+    /// by the filter to make real progress vs the entry point —
+    /// without this, the outer can accept null-progress 'h' steps
+    /// and re-enter restoration (observed on DECONVBNE: 323 R-accepts
+    /// vs ipopt's 21). Default: no-op for non-filter acceptors.
+    fn prepare_resto_phase_start(
+        &mut self,
+        _reference_theta: Number,
+        _reference_barr: Number,
+    ) {
+    }
 }

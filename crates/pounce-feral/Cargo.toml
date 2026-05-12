@@ -1,0 +1,16 @@
+[package]
+name = "pounce-feral"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "FERAL pure-Rust sparse symmetric LDL^T backend for POUNCE. Implements pounce-linsol's SparseSymLinearSolverInterface."
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-linsol = { path = "../pounce-linsol" }
+feral = { path = "/Users/jkitchin/projects/feral" }
+
+[lints]
+workspace = true

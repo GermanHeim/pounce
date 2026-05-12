@@ -260,20 +260,26 @@ extern "C" fn eval_h_cb(
 extern "C" fn intermediate_cb(
     _alg_mod: i32,
     iter_count: i32,
-    _obj_value: f64,
-    _inf_pr: f64,
-    _inf_du: f64,
-    _mu: f64,
-    _d_norm: f64,
+    obj_value: f64,
+    inf_pr: f64,
+    inf_du: f64,
+    mu: f64,
+    d_norm: f64,
     _regularization_size: f64,
-    _alpha_du: f64,
-    _alpha_pr: f64,
+    alpha_du: f64,
+    alpha_pr: f64,
     _ls_trials: i32,
     user_data: *mut c_void,
 ) -> bool {
     unsafe {
         let w = &mut *(user_data as *mut IpoptWrapper);
         w.iterations = iter_count;
+        if std::env::var("IPOPT_LOG_MU").is_ok() {
+            eprintln!(
+                "IPOPT_ITER iter={} obj={:.6e} inf_pr={:.3e} inf_du={:.3e} mu={:.6e} d_norm={:.3e} alpha_du={:.3e} alpha_pr={:.3e}",
+                iter_count, obj_value, inf_pr, inf_du, mu, d_norm, alpha_du, alpha_pr,
+            );
+        }
         true
     }
 }
@@ -431,6 +437,9 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
         set_str(p, "mu_strategy", "adaptive");
         set_num(p, "tol", 1e-8);
         set_int(p, "max_iter", 3000);
+        if std::env::var("IPOPT_NO_SCALING").is_ok() {
+            set_str(p, "nlp_scaling_method", "none");
+        }
         let ipl: i32 = std::env::var("IPOPT_PRINT_LEVEL")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -469,11 +478,24 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
     }
 }
 
-/// MA57 backend factory used by the restoration sub-IPM. Mirrors
-/// `pounce-cli`'s `ma57_backend_factory`.
+/// Default backend factory used by the restoration sub-IPM. Mirrors
+/// `pounce-cli`'s `default_backend_factory`: FERAL by default, MA57
+/// available behind the `ma57` cargo feature.
 fn ma57_backend_factory() -> LinearBackendFactory {
-    Box::new(|_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        Box::new(pounce_hsl::Ma57SolverInterface::new())
+    Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+        match choice {
+            LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
+            LinearSolverChoice::Ma57 => {
+                #[cfg(feature = "ma57")]
+                {
+                    Box::new(pounce_hsl::Ma57SolverInterface::new())
+                }
+                #[cfg(not(feature = "ma57"))]
+                {
+                    Box::new(pounce_feral::FeralSolverInterface::new())
+                }
+            }
+        }
     })
 }
 

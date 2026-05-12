@@ -1,7 +1,8 @@
 //! Integration test: feed a real triplet matrix through
 //! [`pounce_linsol::TSymLinearSolver`] backed by MA57 (via
 //! `pounce-hsl`'s `Ma57SolverInterface`), confirm the solve hits
-//! machine-precision.
+//! machine-precision. Gated on the `ma57` cargo feature; without
+//! HSL linked in, MA57 is not available.
 //!
 //! Lives in `pounce-algorithm` because the algorithm crate is the
 //! consumer that wires Phase-4 (linsol + hsl) into Phase-6 (KKT
@@ -9,6 +10,8 @@
 //! `pounce_linsol::TSymLinearSolver`; the duplicate local copy under
 //! `pounce-algorithm/src/kkt/` was removed when `StdAugSystemSolver`
 //! was rewired in Phase 6.
+
+#![cfg(feature = "ma57")]
 
 use pounce_common::types::{Index, Number};
 use pounce_hsl::Ma57SolverInterface;

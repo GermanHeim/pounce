@@ -209,6 +209,24 @@ impl PdFullSpaceSolver {
         ];
         let uptodate = self.last_dep_tags.map_or(false, |prev| prev == cur_tags);
         if !uptodate {
+            if std::env::var_os("POUNCE_DBG_PD_TAGS").is_some() {
+                if let Some(prev) = self.last_dep_tags {
+                    let names = [
+                        "w", "j_c", "j_d", "z_l", "z_u", "v_l", "v_u",
+                        "slack_x_l", "slack_x_u", "slack_s_l", "slack_s_u",
+                        "sigma_x", "sigma_s",
+                    ];
+                    let mut diffs = String::new();
+                    for i in 0..13 {
+                        if prev[i] != cur_tags[i] {
+                            diffs.push_str(&format!(" {}({:?}→{:?})", names[i], prev[i], cur_tags[i]));
+                        }
+                    }
+                    eprintln!("[PN_PD_TAGS] cache_miss diffs:{}", diffs);
+                } else {
+                    eprintln!("[PN_PD_TAGS] cache_miss first_solve");
+                }
+            }
             self.last_dep_tags = Some(cur_tags);
             self.matrix_considered = false;
             self.augsys_improved = false;

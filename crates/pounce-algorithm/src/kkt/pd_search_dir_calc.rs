@@ -164,8 +164,13 @@ impl PdSearchDirCalc {
         let mut rhs = curr.make_new_zeroed();
         {
             let cq_ref = cq.borrow();
-            rhs.x.copy(&*cq_ref.curr_grad_lag_with_damping_x());
-            rhs.s.copy(&*cq_ref.curr_grad_lag_with_damping_s());
+            // Upstream `IpQualityFunctionMuOracle.cpp:193-200` uses the
+            // *plain* `curr_grad_lag_{x,s}` here, NOT the damped variant.
+            // The `μ·κ_d·(P_L − P_U)` damping enters the main-step RHS
+            // only — for the affine (predictor) RHS upstream wants the
+            // gradient at μ=0.
+            rhs.x.copy(&*cq_ref.curr_grad_lag_x());
+            rhs.s.copy(&*cq_ref.curr_grad_lag_s());
             rhs.y_c.copy(&*cq_ref.curr_c());
             rhs.y_d.copy(&*cq_ref.curr_d_minus_s());
             // Affine RHS: complementarity blocks use `s·z` (μ=0),
@@ -179,6 +184,14 @@ impl PdSearchDirCalc {
         let frozen_rhs = rhs.freeze();
         let mut delta_aff = frozen_rhs.make_new_zeroed();
 
+        // Upstream `IpQualityFunctionMuOracle.cpp:208` passes
+        // `allow_inexact = true`. Pounce keeps full iterative
+        // refinement here (allow_inexact=false): an earlier attempt to
+        // set this to `true` regressed TRO3X3 from Solve_Succeeded to
+        // Infeasible_Problem_Detected, because pounce's IR-driven
+        // `increase_quality()` cascade produces materially different
+        // steps than upstream's single-shot MA57. Leaving as-is until
+        // the MA57 backend lands in Phase 4.
         let ok = self.pd_solver.solve(
             data,
             cq,
@@ -219,10 +232,16 @@ impl PdSearchDirCalc {
         let avrg_compl = cq.borrow().curr_avrg_compl();
 
         let mut rhs = curr.make_new_zeroed();
-        // x, s, y_c, y_d are zero. The four bound-mult blocks get the
-        // constant μ̄ vector (matches upstream's `Set(avrg_compl)`).
-        rhs.x.set(0.0);
-        rhs.s.set(0.0);
+        // x/s blocks: -avrg_compl · grad_kappa_times_damping_{x,s}, per
+        // upstream IpQualityFunctionMuOracle.cpp:229-230. With kappa_d=0
+        // (the default) these are zero, but kappa_d=1e-5 (default) makes
+        // them nonzero on damped components and the centering direction
+        // depends on them.
+        {
+            let cq_ref = cq.borrow();
+            rhs.x.add_one_vector(-avrg_compl, &*cq_ref.grad_kappa_times_damping_x(), 0.0);
+            rhs.s.add_one_vector(-avrg_compl, &*cq_ref.grad_kappa_times_damping_s(), 0.0);
+        }
         rhs.y_c.set(0.0);
         rhs.y_d.set(0.0);
         rhs.z_l.set(avrg_compl);
@@ -233,6 +252,10 @@ impl PdSearchDirCalc {
         let frozen_rhs = rhs.freeze();
         let mut delta_cen = frozen_rhs.make_new_zeroed();
 
+        // Upstream `IpQualityFunctionMuOracle.cpp:243` passes
+        // `allow_inexact = true`. Same caveat as `compute_affine_step`
+        // — flipping this on regresses TRO3X3 because the FERAL-backed
+        // IR cascade differs from MA57's single-shot. Defer until MA57.
         let ok = self.pd_solver.solve(
             data,
             cq,

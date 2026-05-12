@@ -44,6 +44,7 @@ pub enum TapeOp {
     Sqrt(usize),
     Exp(usize),
     Log(usize),
+    Log10(usize),
     Sin(usize),
     Cos(usize),
 }
@@ -84,6 +85,7 @@ impl Tape {
                 TapeOp::Sqrt(a) => vals[*a].sqrt(),
                 TapeOp::Exp(a) => vals[*a].exp(),
                 TapeOp::Log(a) => vals[*a].ln(),
+                TapeOp::Log10(a) => vals[*a].log10(),
                 TapeOp::Sin(a) => vals[*a].sin(),
                 TapeOp::Cos(a) => vals[*a].cos(),
             };
@@ -173,6 +175,9 @@ impl Tape {
                 TapeOp::Log(j) => {
                     adj[*j] += a / vals[*j];
                 }
+                TapeOp::Log10(j) => {
+                    adj[*j] += a / (vals[*j] * std::f64::consts::LN_10);
+                }
                 TapeOp::Sin(j) => {
                     adj[*j] += a * vals[*j].cos();
                 }
@@ -195,9 +200,12 @@ impl Tape {
     }
 
     /// Forward tangent sweep: `dot[i] = d(slot_i) / dx_{seed_var}`.
-    fn forward_tangent(&self, vals: &[f64], seed_var: usize) -> Vec<f64> {
+    /// Caller-supplied `dot` buffer is overwritten in full; no zeroing
+    /// needed beforehand because every slot is written before it is
+    /// read (the loop walks forward and only reads earlier slots).
+    fn forward_tangent(&self, vals: &[f64], seed_var: usize, dot: &mut [f64]) {
         let n = self.ops.len();
-        let mut dot = vec![0.0f64; n];
+        debug_assert_eq!(dot.len(), n);
         for i in 0..n {
             dot[i] = match &self.ops[i] {
                 TapeOp::Const(_) => 0.0,
@@ -247,11 +255,11 @@ impl Tape {
                 }
                 TapeOp::Exp(a) => dot[*a] * vals[i],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
+                TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
                 TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
                 TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
             };
         }
-        dot
     }
 
     /// Forward-over-reverse Hessian: for each variable `j` the tape
@@ -274,13 +282,22 @@ impl Tape {
         let v = self.forward(x);
         let var_indices = self.variables();
 
+        // Hoist scratch allocations out of the per-variable loop —
+        // each was costing O(n) per j on every hessian_accumulate
+        // call, which dominated runtime on large tapes (the dense-
+        // Hessian Mittelmann problems). `forward_tangent` fully
+        // overwrites `dot`, so no reset is needed there. `adj` and
+        // `adj_dot` are mutated additively, so we zero them per j.
+        let mut dot = vec![0.0f64; n];
+        let mut adj = vec![0.0f64; n];
+        let mut adj_dot = vec![0.0f64; n];
         for &j in &var_indices {
-            let dot = self.forward_tangent(&v, j);
+            self.forward_tangent(&v, j, &mut dot);
 
             // adj[i] = standard adjoint (∂f/∂slot_i)
             // adj_dot[i] = derivative of adj[i] w.r.t. x_j = ∂²f/(∂slot_i ∂x_j)
-            let mut adj = vec![0.0f64; n];
-            let mut adj_dot = vec![0.0f64; n];
+            adj.fill(0.0);
+            adj_dot.fill(0.0);
             adj[n - 1] = 1.0;
 
             for i in (0..n).rev() {
@@ -394,6 +411,12 @@ impl Tape {
                         adj[*a] += w / u;
                         adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
                     }
+                    TapeOp::Log10(a) => {
+                        let u = v[*a];
+                        let c = std::f64::consts::LN_10;
+                        adj[*a] += w / (u * c);
+                        adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+                    }
                     TapeOp::Sin(a) => {
                         let u = v[*a];
                         let cu = u.cos();
@@ -469,6 +492,7 @@ impl Tape {
                 TapeOp::Sqrt(a)
                 | TapeOp::Exp(a)
                 | TapeOp::Log(a)
+                | TapeOp::Log10(a)
                 | TapeOp::Sin(a)
                 | TapeOp::Cos(a) => {
                     emit_self(&var_sets[*a], &mut pairs);
@@ -517,6 +541,7 @@ fn build_recursive(
                 UnaryOp::Neg => TapeOp::Neg(v),
                 UnaryOp::Sqrt => TapeOp::Sqrt(v),
                 UnaryOp::Log => TapeOp::Log(v),
+                UnaryOp::Log10 => TapeOp::Log10(v),
                 UnaryOp::Exp => TapeOp::Exp(v),
                 UnaryOp::Abs => TapeOp::Abs(v),
                 UnaryOp::Sin => TapeOp::Sin(v),

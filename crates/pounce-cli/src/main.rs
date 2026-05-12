@@ -72,7 +72,7 @@ fn main() -> ExitCode {
     // surfaces as `RestorationFailure` instead of falling back into the
     // ℓ1-feasibility sub-IPM. Mirrors what upstream's `IpAlgBuilder`
     // does unconditionally for every solve.
-    let bff: InnerBackendFactoryFactory = Box::new(ma57_backend_factory);
+    let bff: InnerBackendFactoryFactory = Box::new(default_backend_factory);
     let resto_factory = make_default_restoration_factory(
         RestoAlgorithmBuilder::new(),
         AlgorithmBuilder::new(),
@@ -133,12 +133,24 @@ fn main() -> ExitCode {
     }
 }
 
-/// MA57 backend factory used by the restoration sub-IPM. Mirrors the
-/// private `default_backend_factory` in `pounce-algorithm` (which is
-/// not re-exported); the CLI is the natural place to commit to a
-/// concrete linear-solver choice.
-fn ma57_backend_factory() -> LinearBackendFactory {
-    Box::new(|_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        Box::new(pounce_hsl::Ma57SolverInterface::new())
+/// Default backend factory used by the restoration sub-IPM. Mirrors
+/// the private `default_backend_factory` in `pounce-algorithm` (which
+/// is not re-exported): FERAL is the shipping default, with MA57
+/// available behind the `ma57` cargo feature.
+fn default_backend_factory() -> LinearBackendFactory {
+    Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+        match choice {
+            LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
+            LinearSolverChoice::Ma57 => {
+                #[cfg(feature = "ma57")]
+                {
+                    Box::new(pounce_hsl::Ma57SolverInterface::new())
+                }
+                #[cfg(not(feature = "ma57"))]
+                {
+                    Box::new(pounce_feral::FeralSolverInterface::new())
+                }
+            }
+        }
     })
 }

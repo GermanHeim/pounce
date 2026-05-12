@@ -126,4 +126,12 @@ extern "C" {
         c: *mut f32,
         w: *mut f32,
     );
+
+    /// OpenBLAS thread-count setter. MA57's `ma57bd_` calls dgemm
+    /// internally on small dense supernodes; with the default thread
+    /// count (= core count on M-series Macs) the per-call thread spin-
+    /// up dominates the actual flops and slows factorization by 5-10×.
+    /// libopenblas is pulled in transitively via libcoinhsl, so this
+    /// symbol resolves at link time without an extra `-lopenblas`.
+    pub fn openblas_set_num_threads(num: std::os::raw::c_int);
 }
