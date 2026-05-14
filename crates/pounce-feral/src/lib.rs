@@ -18,6 +18,8 @@
 //!   and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
 //!   upper-layer reload-and-retry semantics line up.
 
+use feral::numeric::factorize::NumericParams;
+use feral::symbolic::SupernodeParams;
 use feral::{CscMatrix, FactorStatus, Solver};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
@@ -47,7 +49,25 @@ pub struct FeralSolverInterface {
 
 impl FeralSolverInterface {
     pub fn new() -> Self {
-        let mut solver = Solver::new();
+        // Diagnostic env var (issue #17): POUNCE_FERAL_CASCADE_BREAK=off
+        // overrides feral's default cascade_break_ratio=Some(0.5) /
+        // cascade_break_eps=Some(1e-10) to None/None so the legacy
+        // delayed-pivot path is used. Intended for comparing inertia
+        // trajectories on robot_1600 / rocket_12800.
+        let cb_off = matches!(
+            std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref(),
+            Ok("0") | Ok("false") | Ok("off")
+        );
+        let mut solver = if cb_off {
+            let np = NumericParams {
+                cascade_break_ratio: None,
+                cascade_break_eps: None,
+                ..NumericParams::default()
+            };
+            Solver::with_params(np, SupernodeParams::default())
+        } else {
+            Solver::new()
+        };
         if matches!(
             std::env::var("FERAL_PARALLEL").as_deref(),
             Ok("0") | Ok("false") | Ok("off")
@@ -70,11 +90,7 @@ impl FeralSolverInterface {
 
     /// Build the lower-triangle CSC view, factor it, and stash the
     /// negative-eigenvalue count.
-    fn factor(
-        &mut self,
-        check_neg_evals: bool,
-        number_of_neg_evals: Index,
-    ) -> ESymSolverStatus {
+    fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
         let n = self.dim as usize;
         let matrix = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
             Ok(m) => m,
