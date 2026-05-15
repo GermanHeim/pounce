@@ -18,7 +18,8 @@
 //!   and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
 //!   upper-layer reload-and-retry semantics line up.
 
-use feral::{CscMatrix, FactorStatus, Solver};
+use feral::symbolic::SupernodeParams;
+use feral::{CscMatrix, FactorStatus, NumericParams, Solver};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
 
@@ -122,12 +123,24 @@ impl FeralSolverInterface {
     /// (e.g. `benchmarks/mittelmann/profiles/pinene_3200.opt`) flip
     /// `feral_cascade_break yes` for problems where cb is a net win.
     pub fn with_config(cfg: FeralConfig) -> Self {
+        // `POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` overrides feral's parallel-
+        // dispatch flop gate (feral#19, default 10^8). `0` fires the
+        // gate on every multi-child tree ≥ N_PAR_MIN supernodes (pre-
+        // feral#19 behavior). `u64::MAX` rejects all parallel dispatch
+        // at the tree level. Useful when the per-hardware break-even
+        // is far from feral's default.
+        let mut np = NumericParams::default();
+        if let Ok(s) = std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS") {
+            if let Ok(v) = s.parse::<u64>() {
+                np.min_parallel_flops = Some(v);
+            }
+        }
         let mut solver = if cfg.cascade_break {
-            Solver::new()
+            Solver::with_params(np, SupernodeParams::default())
                 .with_cascade_break(0.5)
                 .with_cascade_break_eps(1e-10)
         } else {
-            Solver::new()
+            Solver::with_params(np, SupernodeParams::default())
         };
         if matches!(
             std::env::var("FERAL_PARALLEL").as_deref(),
