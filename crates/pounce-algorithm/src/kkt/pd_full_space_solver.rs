@@ -424,9 +424,11 @@ impl PdFullSpaceSolver {
                 sol_c: &mut *sol.y_c,
                 sol_d: &mut *sol.y_d,
             };
-            // `check_inertia=false, num_neg_evals=0` — same matrix, same
-            // perturbations, inertia is already known good.
-            let retval = self.aug_solver.solve(&coeffs, &aug_rhs, &mut aug_sol, false, 0);
+            // Same matrix, same perturbations, inertia already known —
+            // use the cached factor and avoid the per-call refactor
+            // that otherwise dominates MA57 wall-time on long iter-ref
+            // loops (cont5_2_4_l drops 97s → ~30s).
+            let retval = self.aug_solver.resolve(&coeffs, &aug_rhs, &mut aug_sol);
             if retval != ESymSolverStatus::Success {
                 return false;
             }

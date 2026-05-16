@@ -67,6 +67,11 @@ pub struct StdAugSystemSolver {
 
     last_neg_evals: Index,
     last_status: Option<ESymSolverStatus>,
+
+    /// `true` once a successful `solve()` has been completed since the
+    /// last reinitialisation or `increase_quality`. Required precondition
+    /// for `resolve()` (back-substitution against the cached factor).
+    have_factor: bool,
 }
 
 impl std::fmt::Debug for StdAugSystemSolver {
@@ -105,6 +110,7 @@ impl StdAugSystemSolver {
             dd_range: 0..0,
             last_neg_evals: 0,
             last_status: None,
+            have_factor: false,
         }
     }
 
@@ -320,6 +326,10 @@ impl AugSystemSolver for StdAugSystemSolver {
     }
 
     fn increase_quality(&mut self) -> bool {
+        // Quality bump → pivtol changed → next solve must refactor.
+        // `resolve` would silently hand back stale numbers; force the
+        // full path by invalidating the cached-factor flag here.
+        self.have_factor = false;
         self.linsol.increase_quality()
     }
 
@@ -363,6 +373,7 @@ impl AugSystemSolver for StdAugSystemSolver {
                 self.last_neg_evals = self.linsol.number_of_neg_evals();
             }
             self.unpack_sol(&packed, sol);
+            self.have_factor = true;
         }
 
         // Diagnostic dump: when POUNCE_DUMP_KKT is set, append the
@@ -384,6 +395,40 @@ impl AugSystemSolver for StdAugSystemSolver {
             );
         }
 
+        status
+    }
+
+    fn resolve(
+        &mut self,
+        coeffs: &AugSysCoeffs<'_>,
+        rhs: &AugSysRhs<'_>,
+        sol: &mut AugSysSol<'_>,
+    ) -> ESymSolverStatus {
+        // Contract: caller has invoked `solve` with byte-identical
+        // coefficients since the last `increase_quality`. We trust
+        // them and reuse the cached factor. If `have_factor` is false
+        // (cold start, or quality was bumped), fall through to a
+        // full solve so correctness is preserved even when the call
+        // site misjudges the cache state.
+        if !self.have_factor {
+            return self.solve(coeffs, rhs, sol, false, 0);
+        }
+
+        let mut packed = vec![0.0; self.dim as usize];
+        self.pack_rhs(rhs, &mut packed);
+
+        let status = self.linsol.multi_solve(
+            &self.vals,
+            false,
+            1,
+            &mut packed,
+            false,
+            0,
+        );
+        self.last_status = Some(status);
+        if status == ESymSolverStatus::Success {
+            self.unpack_sol(&packed, sol);
+        }
         status
     }
 }

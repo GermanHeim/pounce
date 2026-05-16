@@ -95,6 +95,27 @@ pub trait AugSystemSolver {
         num_neg_evals: Index,
     ) -> ESymSolverStatus;
 
+    /// Back-substitution only, reusing the factorization from the most
+    /// recent successful `solve`. Caller must guarantee the augmented
+    /// matrix is byte-identical to that solve (same W, J_c, J_d, all
+    /// diagonals, all perturbations, same pivot tolerance). Used by
+    /// `PdFullSpaceSolver`'s iterative-refinement loop and same-matrix
+    /// fast path to avoid the per-iter MA57BD refactor that dominates
+    /// pounce-ma57 wall time on long-iter problems (e.g. cont5_2_4_l
+    /// drops from 97s → ~30s once refactor-per-refinement is gone).
+    ///
+    /// Default impl falls through to `solve` (correct but slow);
+    /// `StdAugSystemSolver` overrides to skip `refill_values` and pass
+    /// `new_matrix=false` to the linear solver.
+    fn resolve(
+        &mut self,
+        coeffs: &AugSysCoeffs<'_>,
+        rhs: &AugSysRhs<'_>,
+        sol: &mut AugSysSol<'_>,
+    ) -> ESymSolverStatus {
+        self.solve(coeffs, rhs, sol, false, 0)
+    }
+
     /// Solve the same KKT system for `nrhs` right-hand sides. Default
     /// impl loops [`solve`]; concrete backends override only when they
     /// can amortize factorization across calls. Mirrors upstream's
