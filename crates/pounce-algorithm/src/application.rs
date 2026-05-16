@@ -490,13 +490,17 @@ impl IpoptApplication {
                 };
             }
         }
-        if let Ok((v, found)) = self.options.get_string_value("linear_solver", "") {
-            if found {
-                builder.linear_solver = match v.as_str() {
-                    "ma57" => LinearSolverChoice::Ma57,
-                    _ => LinearSolverChoice::Feral,
-                };
-            }
+        // Unlike the other options here, we always honor the registry
+        // value (not just when the user set it explicitly): the option
+        // registry default is "ma57" but `AlgorithmBuilder::default`
+        // has `linear_solver: Feral`, so gating on `found` would
+        // silently route default runs through Feral while the banner
+        // (and ipopt-compatible behavior) advertises MA57.
+        if let Ok((v, _found)) = self.options.get_string_value("linear_solver", "") {
+            builder.linear_solver = match v.as_str() {
+                "ma57" => LinearSolverChoice::Ma57,
+                _ => LinearSolverChoice::Feral,
+            };
         }
         builder
     }

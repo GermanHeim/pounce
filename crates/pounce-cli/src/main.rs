@@ -116,7 +116,28 @@ fn main() -> ExitCode {
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&counting) as Rc<RefCell<dyn TNLP>>;
 
     // Banner + problem-statistics block, before the iteration table.
-    print::print_banner("MA57 (HSL)");
+    let backend_tag = {
+        let v = app
+            .options()
+            .get_string_value("linear_solver", "")
+            .ok()
+            .map(|(s, _)| s)
+            .unwrap_or_else(|| "ma57".to_string());
+        match v.as_str() {
+            "ma57" => {
+                #[cfg(feature = "ma57")]
+                {
+                    "MA57 (HSL)"
+                }
+                #[cfg(not(feature = "ma57"))]
+                {
+                    "FERAL (ma57 requested but not compiled)"
+                }
+            }
+            _ => "FERAL",
+        }
+    };
+    print::print_banner(backend_tag);
     if let Some(stats) = print::collect_stats(&tnlp) {
         print::print_problem_stats(&stats);
     }
