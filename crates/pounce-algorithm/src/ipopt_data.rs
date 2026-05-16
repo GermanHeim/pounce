@@ -11,6 +11,7 @@
 //! and outputs.
 
 use crate::iterates_vector::IteratesVector;
+use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::SymMatrix;
 use std::cell::RefCell;
@@ -91,6 +92,14 @@ pub struct IpoptData {
     /// 7 reprints every `print_frequency_iter` lines. Mirrors
     /// `IpIpoptData::info_iters_since_header_`.
     pub info_iters_since_header: Index,
+
+    /// Shared per-subsystem timing accumulator. Mirrors upstream's
+    /// `IpoptData::TimingStats_`. `IpoptApplication` constructs a single
+    /// instance per solve and shares it (via `Rc`) with the algorithm,
+    /// NLP, and KKT solver so each can record its own contribution.
+    /// Defaults to a fresh empty instance for the structural unit tests
+    /// that don't go through `IpoptApplication`.
+    pub timing: Rc<TimingStatistics>,
 }
 
 impl Default for IpoptData {
@@ -123,6 +132,7 @@ impl IpoptData {
             info_ls_count: 0,
             info_last_output: -1.0,
             info_iters_since_header: 0,
+            timing: Rc::new(TimingStatistics::new()),
         }
     }
 

@@ -582,6 +582,10 @@ impl MuUpdate for AdaptiveMuUpdate {
                     let mut oracle = QualityFunctionMuOracle::new();
                     oracle.mu_min = self.mu_min;
                     oracle.mu_max = self.mu_max;
+                    // Mirrors upstream's `quality_function_search` timer
+                    // around `CalculateMu` in `IpQualityFunctionMuOracle.cpp`.
+                    let timing = data.borrow().timing.clone();
+                    let _qf_guard = timing.quality_function_search.guard();
                     oracle
                         .calculate_mu_with_predictor_centering(data, cq, nlp, sd)
                         .unwrap_or_else(loqo_candidate)

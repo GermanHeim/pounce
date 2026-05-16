@@ -83,6 +83,144 @@ impl TimedTask {
     pub fn total_cpu_time(&self) -> Number { self.total_cpu.get() }
     pub fn total_sys_time(&self) -> Number { self.total_sys.get() }
     pub fn total_wallclock_time(&self) -> Number { self.total_wall.get() }
+
+    /// RAII-style guard: start the timer immediately, end it when the
+    /// returned value is dropped (or when [`TimedGuard::stop`] is
+    /// called). Survives early returns / `?` in the caller scope.
+    pub fn guard(&self) -> TimedGuard<'_> {
+        self.start();
+        TimedGuard { task: Some(self) }
+    }
+}
+
+/// Drop-on-end guard returned by [`TimedTask::guard`]. Calls
+/// [`TimedTask::end_if_started`] in its destructor so a function with
+/// many exit paths can wrap a section with a single line.
+#[must_use = "the guard ends the timer when dropped; bind it to a variable"]
+pub struct TimedGuard<'a> {
+    task: Option<&'a TimedTask>,
+}
+
+impl<'a> TimedGuard<'a> {
+    /// End the timer immediately. Useful when you want to stop timing
+    /// before the natural scope exit (e.g. before a long-running
+    /// follow-up that should not be attributed to this section).
+    pub fn stop(mut self) {
+        if let Some(t) = self.task.take() {
+            t.end_if_started();
+        }
+    }
+}
+
+impl<'a> Drop for TimedGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(t) = self.task.take() {
+            t.end_if_started();
+        }
+    }
+}
+
+/// Aggregate of per-subsystem [`TimedTask`] counters. Mirrors
+/// `Algorithm/IpTimingStatistics.{hpp,cpp}`. Owned by `IpoptApplication`
+/// and shared (via `Rc`) with the algorithm, NLP, and KKT solver so each
+/// subsystem can bump its own field. Reported at the end of a solve
+/// when `print_timing_statistics yes`.
+#[derive(Debug, Default)]
+pub struct TimingStatistics {
+    pub overall_alg: TimedTask,
+    pub print_problem_statistics: TimedTask,
+    pub initialize_iterates: TimedTask,
+    pub update_hessian: TimedTask,
+    pub output_iteration: TimedTask,
+    pub update_barrier_parameter: TimedTask,
+    pub compute_search_direction: TimedTask,
+    pub compute_acceptable_trial_point: TimedTask,
+    pub accept_trial_point: TimedTask,
+    pub check_convergence: TimedTask,
+
+    pub linear_system_factorization: TimedTask,
+    pub linear_system_back_solve: TimedTask,
+    pub linear_system_structure_converter: TimedTask,
+    pub linear_system_structure_converter_init: TimedTask,
+    pub quality_function_search: TimedTask,
+    pub total_callback_time: TimedTask,
+    pub total_function_evaluation_time: TimedTask,
+    pub eval_obj: TimedTask,
+    pub eval_grad_obj: TimedTask,
+    pub eval_constr: TimedTask,
+    pub eval_constr_jac: TimedTask,
+    pub eval_lag_hess: TimedTask,
+}
+
+impl TimingStatistics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Format a per-subsystem timing report (wall-clock seconds, mirroring
+    /// upstream `IpoptApplication`'s end-of-run "Timing Statistics" block
+    /// but with sys/cpu columns omitted — pounce only tracks wall time).
+    /// Lines are indented to reflect the upstream visual nesting
+    /// (OverallAlgorithm → its phases; TotalFunctionEvaluations → its
+    /// per-callback breakdown). Returns a multi-line string ending in a
+    /// trailing newline so callers can `print!` it directly.
+    pub fn report(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let row = |s: &mut String, label: &str, t: &TimedTask| {
+            let _ = writeln!(
+                s,
+                "{label:<42} {wall:>10.3}s",
+                wall = t.total_wallclock_time()
+            );
+        };
+        s.push_str("\nTiming Statistics:\n");
+        row(&mut s, "OverallAlgorithm....................:", &self.overall_alg);
+        row(&mut s, " InitializeIterates.................:", &self.initialize_iterates);
+        row(&mut s, " UpdateHessian......................:", &self.update_hessian);
+        row(&mut s, " OutputIteration....................:", &self.output_iteration);
+        row(&mut s, " UpdateBarrierParameter.............:", &self.update_barrier_parameter);
+        row(&mut s, " ComputeSearchDirection.............:", &self.compute_search_direction);
+        row(&mut s, " ComputeAcceptableTrialPoint........:", &self.compute_acceptable_trial_point);
+        row(&mut s, " AcceptTrialPoint...................:", &self.accept_trial_point);
+        row(&mut s, " CheckConvergence...................:", &self.check_convergence);
+        row(&mut s, "LinearSystemFactorization...........:", &self.linear_system_factorization);
+        row(&mut s, "LinearSystemBackSolve...............:", &self.linear_system_back_solve);
+        row(&mut s, "QualityFunctionSearch...............:", &self.quality_function_search);
+        row(&mut s, "TotalFunctionEvaluations............:", &self.total_function_evaluation_time);
+        row(&mut s, " ObjectiveFunctionEvaluations.......:", &self.eval_obj);
+        row(&mut s, " ObjectiveGradientEvaluations.......:", &self.eval_grad_obj);
+        row(&mut s, " ConstraintEvaluations..............:", &self.eval_constr);
+        row(&mut s, " ConstraintJacobianEvaluations......:", &self.eval_constr_jac);
+        row(&mut s, " LagrangianHessianEvaluations.......:", &self.eval_lag_hess);
+        s
+    }
+
+    /// Reset all counters. Mirrors upstream `ResetTimes()`.
+    pub fn reset(&self) {
+        self.overall_alg.reset();
+        self.print_problem_statistics.reset();
+        self.initialize_iterates.reset();
+        self.update_hessian.reset();
+        self.output_iteration.reset();
+        self.update_barrier_parameter.reset();
+        self.compute_search_direction.reset();
+        self.compute_acceptable_trial_point.reset();
+        self.accept_trial_point.reset();
+        self.check_convergence.reset();
+        self.linear_system_factorization.reset();
+        self.linear_system_back_solve.reset();
+        self.linear_system_structure_converter.reset();
+        self.linear_system_structure_converter_init.reset();
+        self.quality_function_search.reset();
+        self.total_callback_time.reset();
+        self.total_function_evaluation_time.reset();
+        self.eval_obj.reset();
+        self.eval_grad_obj.reset();
+        self.eval_constr.reset();
+        self.eval_constr_jac.reset();
+        self.eval_lag_hess.reset();
+    }
 }
 
 #[cfg(test)]

@@ -15,9 +15,11 @@
 //! interpreted as zero. `delta_*` are the perturbations driven by the
 //! `PerturbationHandler`.
 
+use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
+use std::rc::Rc;
 
 /// Bundle of the matrices/vectors that define one augmented-system
 /// instance. Lives only for the duration of the call. Mirrors the
@@ -81,6 +83,14 @@ pub trait AugSystemSolver {
 
     /// Status of the most recent `solve` call.
     fn last_solve_status(&self) -> ESymSolverStatus;
+
+    /// Install the shared per-solve `TimingStatistics` so the
+    /// linear-system factor/back-solve calls are attributed to
+    /// `linear_system_factorization` / `linear_system_back_solve`.
+    /// Default impl is a no-op (timing disabled); the standard
+    /// solver overrides to record both fields, and composite solvers
+    /// (LowRank) forward to their inner solver.
+    fn set_timing_stats(&mut self, _timing: Rc<TimingStatistics>) {}
 
     /// One factor + back-substitution for the full 4×4 block system.
     /// `check_neg_evals=true` asks the linsol to verify that the

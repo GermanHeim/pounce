@@ -236,6 +236,10 @@ impl IpoptAlgorithm {
     /// [`SolverReturn`] mirroring upstream's exception → return-code
     /// translation table (see `MAIN_LOOP.md` §"Exception mapping").
     fn iterate(&mut self) -> IterateOutcome {
+        // Shared timing accumulator — cheap Rc clone so each phase can
+        // bump its own counter without re-borrowing `data`.
+        let timing = self.data.borrow().timing.clone();
+
         // 1. Output iteration row. Header every 10 iters; the row
         //    itself is built by the strategy and printed here so a
         //    long-running solve gives the user feedback. (Phase-7
@@ -246,6 +250,7 @@ impl IpoptAlgorithm {
         //    accepted step from the previous iteration (alphas, ls
         //    count, alpha_char), matching upstream's
         //    `IpIpoptAlgorithm::Optimize` ordering.
+        timing.output_iteration.start();
         self.bundle.iter_output.write_output();
         {
             let iter_count = self.data.borrow().iter_count;
@@ -255,15 +260,18 @@ impl IpoptAlgorithm {
             let row = self.bundle.iter_output.format_row(&self.data, &self.cq);
             println!("{row}");
         }
+        timing.output_iteration.end();
 
         // Reset per-iteration info on data (after printing previous
         // iter's accepted-step info; before the next line search).
         self.data.borrow_mut().reset_info();
 
         // 2. Convergence check.
+        timing.check_convergence.start();
         let nlp_err = self.cq.borrow().curr_nlp_error();
         let iter_count = self.data.borrow().iter_count;
         if !nlp_err.is_finite() {
+            timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
         }
         // Divergence guard — port of upstream `IpIpoptAlg.cpp` post-
@@ -275,23 +283,28 @@ impl IpoptAlgorithm {
         // entered too late to bound `x`).
         if let Some(curr) = self.data.borrow().curr.as_ref() {
             if curr.x.amax() > self.diverging_iterates_tol {
+                timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
             }
         }
-        match self.bundle.conv_check.check_convergence_with_state(
+        let conv_status = self.bundle.conv_check.check_convergence_with_state(
             nlp_err,
             iter_count,
             &self.data,
             &self.cq,
-        ) {
+        );
+        match conv_status {
             ConvergenceStatus::Continue => {}
             ConvergenceStatus::Converged => {
+                timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::Success);
             }
             ConvergenceStatus::MaxIterExceeded => {
+                timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::MaxiterExceeded);
             }
             ConvergenceStatus::Failed => {
+                timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::InternalError);
             }
         }
@@ -304,6 +317,7 @@ impl IpoptAlgorithm {
         if self.bundle.conv_check.current_is_acceptable(nlp_err) {
             self.store_acceptable_point();
         }
+        timing.check_convergence.end();
 
         // 3. Hessian update. Must run BEFORE `update_barrier_parameter`
         // so the adaptive-μ oracles (probing, quality-function) drive
@@ -316,7 +330,9 @@ impl IpoptAlgorithm {
         // quality-function — visible on CRESC50 as a catastrophic
         // early-iter divergence (theta=5.8e5 by iter 61 vs upstream
         // never entering restoration).
+        timing.update_hessian.start();
         let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
+        timing.update_hessian.end();
 
         // 4. Barrier parameter. Pass nlp + search_dir through so the
         // adaptive μ oracles (probing, quality-function) can drive
@@ -326,6 +342,7 @@ impl IpoptAlgorithm {
         // the flag is on, upstream `IpMonotoneMuUpdate.cpp:158-161`
         // throws TINY_STEP_DETECTED → STOP_AT_TINY_STEP, which we
         // realise as a clean termination here.
+        timing.update_barrier_parameter.start();
         let tiny_at_entry = self.data.borrow().tiny_step_flag;
         let mu_before = self.data.borrow().curr_mu;
         let next_mu = self.bundle.mu_update.update_barrier_parameter(
@@ -335,6 +352,7 @@ impl IpoptAlgorithm {
             self.search_dir.as_mut(),
         );
         self.data.borrow_mut().curr_mu = next_mu;
+        timing.update_barrier_parameter.end();
         if tiny_at_entry && (next_mu - mu_before).abs() < Number::EPSILON {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
@@ -357,7 +375,9 @@ impl IpoptAlgorithm {
         // (Hessian was updated in step 3 above before the barrier-μ
         // oracle so that adaptive-μ uses W(curr_N), not stale W.)
         if let (Some(nlp), Some(sd)) = (self.nlp.as_ref(), self.search_dir.as_mut()) {
+            timing.compute_search_direction.start();
             let ok = sd.compute_search_direction(&self.data, &self.cq, nlp);
+            timing.compute_search_direction.end();
             if !ok {
                 // Mirror upstream `IpIpoptAlg.cpp:417-430`: a failed
                 // step computation puts the algorithm in emergency
@@ -521,7 +541,10 @@ impl IpoptAlgorithm {
         }
 
         // 6. Acceptable trial point — run the line search if we have a
-        //    primal/dual step on `data.delta`.
+        //    primal/dual step on `data.delta`. Wrap in a guard so all
+        //    early-return paths (ErrorInStepComputation, InternalError,
+        //    restoration entry) still stop the timer.
+        let _ls_guard = timing.compute_acceptable_trial_point.guard();
         let have_delta = self.data.borrow().delta.is_some();
         if have_delta {
             let delta = match self.data.borrow().delta.as_ref().cloned() {
@@ -627,11 +650,18 @@ impl IpoptAlgorithm {
             }
         }
 
+        // End the line-search/trial timer here so the bookkeeping in
+        // steps 7-8 below is attributed to `accept_trial_point` (which
+        // mirrors upstream's split: filter update and FTB reset are
+        // accept-side, not line-search-side).
+        _ls_guard.stop();
+
         // 7. Accept trial point (promotes `trial` to `curr` if set).
         //    The acceptor's filter has already been augmented (when
         //    appropriate) inside `find_acceptable_trial_point` via
         //    `update_for_next_iteration`, mirroring upstream's call
         //    chain in `IpBacktrackingLineSearch.cpp:839`.
+        let _accept_guard = timing.accept_trial_point.guard();
         self.data.borrow_mut().accept_trial_point();
 
         // 8. Bound multiplier kappa_sigma reset.
@@ -974,6 +1004,18 @@ impl IpoptAlgorithm {
     /// RESTORATION_FAILED → RESTORATION_FAILURE, etc.) lands in
     /// Phase 9 alongside the restoration phase.
     pub fn optimize(&mut self) -> SolverReturn {
+        // Shared timing accumulator — every phase below records into it.
+        let timing = self.data.borrow().timing.clone();
+
+        // Install the shared accumulator on the augmented-system solver
+        // so its factor / back-solve calls are attributed to
+        // `linear_system_factorization` / `linear_system_back_solve`.
+        if let Some(sd) = self.search_dir.as_mut() {
+            sd.pd_solver_mut()
+                .aug_solver_mut()
+                .set_timing_stats(std::rc::Rc::clone(&timing));
+        }
+
         // 0a. Strategy initialization — port of upstream's
         //     `IpoptAlgorithm::InitializeImpl` calls. The mu update needs
         //     `data.curr_mu`/`curr_tau` seeded before the iterate
@@ -991,11 +1033,13 @@ impl IpoptAlgorithm {
             // the search_dir is present (otherwise the init function
             // is responsible for not consulting it).
             if let Some(sd) = self.search_dir.as_mut() {
+                timing.initialize_iterates.start();
                 let aug_solver = sd.pd_solver_mut().aug_solver_mut();
                 let ok = self
                     .bundle
                     .init
                     .set_initial_iterates(&self.data, &self.cq, nlp, aug_solver);
+                timing.initialize_iterates.end();
                 if !ok {
                     return SolverReturn::InternalError;
                 }
@@ -1009,7 +1053,9 @@ impl IpoptAlgorithm {
         //     `set_initial_iterates` and the first `iterate()` call
         //     (e.g. the iter-0 trace dump below).
         if self.data.borrow().curr.is_some() {
+            timing.update_hessian.start();
             let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
+            timing.update_hessian.end();
         }
 
         // Track-A iterate-trace dumper. Activated by

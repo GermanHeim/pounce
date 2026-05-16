@@ -61,6 +61,7 @@ use crate::ipopt_nlp::{IpoptNlp, Nlp};
 use crate::tnlp::{NlpInfo, SparsityRequest, StartingPoint};
 use crate::tnlp_adapter::{BoundClassification, TNLPAdapter};
 use pounce_common::cached::Cache;
+use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::{
     DenseVector, DenseVectorSpace, ExpansionMatrix, ExpansionMatrixSpace, GenTMatrix,
@@ -195,6 +196,12 @@ pub struct OrigIpoptNlp {
     /// Cached `NlpInfo` (n, m, nnz_jac_g, nnz_h_lag, index_style) so we
     /// don't re-borrow the TNLP for dimension queries.
     info: NlpInfo,
+
+    /// Shared per-subsystem timing accumulator. `None` until
+    /// `IpoptApplication` installs the shared `Rc<TimingStatistics>` via
+    /// [`Self::set_timing_stats`]; when `None`, all `eval_*` entry
+    /// points skip the timing overhead.
+    timing: RefCell<Option<Rc<TimingStatistics>>>,
 }
 
 impl std::fmt::Debug for OrigIpoptNlp {
@@ -507,7 +514,43 @@ impl OrigIpoptNlp {
             jac_d_evals: RefCell::new(0),
             h_evals: RefCell::new(0),
             info,
+            timing: RefCell::new(None),
         })
+    }
+
+    /// Install the shared timing accumulator. `IpoptApplication` calls
+    /// this once per solve so each `eval_*` entrypoint records into the
+    /// same `TimingStatistics` instance the algorithm reports at the
+    /// end of the run. Calling with `None` (or never calling) leaves
+    /// timing disabled.
+    pub fn set_timing_stats(&self, t: Rc<TimingStatistics>) {
+        *self.timing.borrow_mut() = Some(t);
+    }
+
+    /// Run `f` with two timers active for the duration of the call:
+    /// `pick(&timing)` (e.g. `eval_obj`) and `total_function_evaluation_time`.
+    /// When no `TimingStatistics` is installed, the closure is invoked
+    /// directly with no overhead.
+    fn timed_eval<R, F>(&self, pick: fn(&TimingStatistics) -> &pounce_common::TimedTask, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let guard = self.timing.borrow();
+        match guard.as_deref() {
+            Some(t) => {
+                let task = pick(t);
+                task.start();
+                t.total_function_evaluation_time.start();
+                let r = f();
+                t.total_function_evaluation_time.end();
+                task.end();
+                r
+            }
+            None => {
+                drop(guard);
+                f()
+            }
+        }
     }
 
     // ---- accessors used by the algorithm wiring layer ----
@@ -1369,25 +1412,25 @@ impl Nlp for OrigIpoptNlp {
     }
 
     fn eval_f(&mut self, x: &dyn Vector) -> Number {
-        self.eval_f_internal(x)
+        self.timed_eval(|t| &t.eval_obj, || self.eval_f_internal(x))
     }
     fn eval_grad_f(&mut self, x: &dyn Vector, g: &mut dyn Vector) {
-        let result = self.eval_grad_f_internal(x);
+        let result = self.timed_eval(|t| &t.eval_grad_obj, || self.eval_grad_f_internal(x));
         g.copy(&*result);
     }
     fn eval_c(&mut self, x: &dyn Vector, c: &mut dyn Vector) {
-        let result = self.eval_c_internal(x);
+        let result = self.timed_eval(|t| &t.eval_constr, || self.eval_c_internal(x));
         c.copy(&*result);
     }
     fn eval_d(&mut self, x: &dyn Vector, d: &mut dyn Vector) {
-        let result = self.eval_d_internal(x);
+        let result = self.timed_eval(|t| &t.eval_constr, || self.eval_d_internal(x));
         d.copy(&*result);
     }
     fn eval_jac_c(&mut self, x: &dyn Vector) -> Rc<dyn Matrix> {
-        self.eval_jac_c_internal(x)
+        self.timed_eval(|t| &t.eval_constr_jac, || self.eval_jac_c_internal(x))
     }
     fn eval_jac_d(&mut self, x: &dyn Vector) -> Rc<dyn Matrix> {
-        self.eval_jac_d_internal(x)
+        self.timed_eval(|t| &t.eval_constr_jac, || self.eval_jac_d_internal(x))
     }
     fn eval_h(
         &mut self,
@@ -1396,7 +1439,7 @@ impl Nlp for OrigIpoptNlp {
         y_c: &dyn Vector,
         y_d: &dyn Vector,
     ) -> Rc<dyn SymMatrix> {
-        self.eval_h_internal(x, obj_factor, y_c, y_d)
+        self.timed_eval(|t| &t.eval_lag_hess, || self.eval_h_internal(x, obj_factor, y_c, y_d))
     }
 }
 

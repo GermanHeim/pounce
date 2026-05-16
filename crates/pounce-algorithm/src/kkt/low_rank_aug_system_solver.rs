@@ -25,6 +25,7 @@
 
 use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
 use pounce_common::tagged::Tag;
+use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_gen_matrix::{DenseGenMatrix, DenseGenMatrixSpace};
 use pounce_linalg::dense_sym_matrix::DenseSymMatrixSpace;
@@ -565,6 +566,10 @@ impl AugSystemSolver for LowRankAugSystemSolver {
 
     fn last_solve_status(&self) -> ESymSolverStatus {
         self.inner.last_solve_status()
+    }
+
+    fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
+        self.inner.set_timing_stats(timing);
     }
 
     fn solve(

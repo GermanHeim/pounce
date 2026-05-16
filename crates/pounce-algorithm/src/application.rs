@@ -43,6 +43,7 @@ use pounce_common::exception::{ExceptionKind, SolverException};
 use pounce_common::journalist::Journalist;
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::RegisteredOptions;
+use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::alg_types::SolverReturn;
@@ -62,6 +63,12 @@ pub struct IpoptApplication {
     reg_options: Rc<RegisteredOptions>,
     journalist: Rc<Journalist>,
     statistics: RefCell<SolveStatistics>,
+    /// Shared per-subsystem timing accumulator. Re-created at the top of
+    /// every solve (so back-to-back `optimize_tnlp` calls don't bleed
+    /// timings across invocations) and handed to the data, the NLP, and
+    /// any other consumer via `Rc`. Reported by [`Self::timing_stats`]
+    /// after the solve completes.
+    timing: RefCell<Rc<TimingStatistics>>,
     /// Optional override factory for the symmetric linear-solver
     /// backend. When `None`, we ship the workspace default (MA57 via
     /// `pounce-hsl`). Tests can plug a stub via [`Self::set_linear_backend_factory`].
@@ -108,6 +115,7 @@ impl IpoptApplication {
             reg_options: reg,
             journalist: Rc::new(Journalist::new()),
             statistics: RefCell::new(SolveStatistics::new()),
+            timing: RefCell::new(Rc::new(TimingStatistics::new())),
             linear_backend_factory: None,
             restoration_factory: None,
         }
@@ -186,6 +194,16 @@ impl IpoptApplication {
         self.statistics.borrow().clone()
     }
 
+    /// Shared timing accumulator from the most recent `optimize_tnlp`
+    /// call. Each subsystem (algorithm, NLP, KKT solver) bumped its own
+    /// fields during the solve; consumers read totals out of the
+    /// returned `Rc`. The instance is replaced at the top of every
+    /// subsequent solve, so cloning the `Rc` and holding it past a
+    /// re-solve will give you the previous solve's timings — by design.
+    pub fn timing_stats(&self) -> Rc<TimingStatistics> {
+        Rc::clone(&self.timing.borrow())
+    }
+
     /// Drive a solve.
     ///
     /// * Constrained problems (`m > 0`) take the primal-dual IPM path:
@@ -250,15 +268,31 @@ impl IpoptApplication {
     fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         let t_start = Instant::now();
 
+        // Mint a fresh `TimingStatistics` for this solve — shared (via
+        // `Rc`) with the data and the NLP below so every `eval_*` and
+        // every iterate-phase records into the same accumulator. The
+        // application keeps its own `Rc` so callers can read totals out
+        // via [`Self::timing_stats`].
+        let timing = Rc::new(TimingStatistics::new());
+        *self.timing.borrow_mut() = Rc::clone(&timing);
+        timing.overall_alg.start();
+
         // Build adapter + Nlp.
         let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
             Ok(a) => Rc::new(RefCell::new(a)),
-            Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
+            Err(_) => {
+                timing.overall_alg.end();
+                return ApplicationReturnStatus::InvalidProblemDefinition;
+            }
         };
         let mut orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
             Ok(n) => n,
-            Err(_) => return ApplicationReturnStatus::InternalError,
+            Err(_) => {
+                timing.overall_alg.end();
+                return ApplicationReturnStatus::InternalError;
+            }
         };
+        orig_nlp.set_timing_stats(Rc::clone(&timing));
 
         // Mirror upstream `OrigIpoptNLP::InitializeStructures` (IpOrigIpoptNLP.cpp:299):
         // bail out with NotEnoughDegreesOfFreedom when there are fewer free
@@ -268,6 +302,7 @@ impl IpoptApplication {
         let n_x_var = orig_nlp.x_space().dim();
         let n_c = orig_nlp.c_space().dim();
         if n_x_var > 0 && n_x_var < n_c {
+            timing.overall_alg.end();
             return ApplicationReturnStatus::NotEnoughDegreesOfFreedom;
         }
 
@@ -337,9 +372,14 @@ impl IpoptApplication {
             .unwrap_or_else(|| default_backend_factory());
         let bundle = builder.build_with_backend(factory);
 
-        // Wire the data / cq pair around the NLP.
+        // Wire the data / cq pair around the NLP. Install the shared
+        // `TimingStatistics` so the algorithm's iterate phases
+        // (output, convergence, hessian, μ, search-direction,
+        // line-search, accept) all record into the same accumulator
+        // the application exposes via `timing_stats()`.
         let data: crate::ipopt_data::IpoptDataHandle =
             Rc::new(RefCell::new(AlgIpoptData::new()));
+        data.borrow_mut().timing = Rc::clone(&timing);
         let cq: crate::ipopt_cq::IpoptCqHandle = Rc::new(RefCell::new(
             IpoptCalculatedQuantities::new(Rc::clone(&data), Rc::clone(&nlp_handle)),
         ));
@@ -393,6 +433,12 @@ impl IpoptApplication {
         alg.max_iter = max_iter;
 
         let solver_status = alg.optimize();
+        // Close the overall-algorithm timer on the success path. The
+        // early-return arms above end it themselves before bailing out;
+        // this one matches upstream `IpoptApplication::call_optimize`
+        // (which calls `EndCpuTime()` on overall_alg right after
+        // `Optimize` returns, regardless of solver_status).
+        timing.overall_alg.end();
 
         // Drain counters / iter count off the algorithm.
         {
@@ -441,6 +487,23 @@ impl IpoptApplication {
         {
             // Couldn't finalize; still surface the original status.
         }
+
+        // End-of-solve timing report. Gated on `print_timing_statistics`
+        // (default "no"); mirrors upstream's
+        // `IpoptApplication::call_optimize` →
+        // `IpTimingStatistics::PrintAllValues` call site. Routed through
+        // stdout (not the journalist) for parity with the existing
+        // banner / iter-row output path.
+        let print_timing = self
+            .options
+            .get_bool_value("print_timing_statistics", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(false);
+        if print_timing {
+            print!("{}", timing.report());
+        }
+
         app_status
     }
 

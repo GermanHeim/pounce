@@ -27,6 +27,7 @@
 //! flattening (used by L-BFGS in Phase 8) is deferred.
 
 use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
+use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::DenseVector;
@@ -34,6 +35,7 @@ use pounce_linalg::triplet::{GenTMatrix, SymTMatrix};
 use pounce_linalg::Vector;
 use pounce_linsol::{ESymSolverStatus, SymLinearSolver, TSymLinearSolver};
 use std::ops::Range;
+use std::rc::Rc;
 
 /// Standard augmented-system solver.
 pub struct StdAugSystemSolver {
@@ -72,6 +74,11 @@ pub struct StdAugSystemSolver {
     /// last reinitialisation or `increase_quality`. Required precondition
     /// for `resolve()` (back-substitution against the cached factor).
     have_factor: bool,
+
+    /// Shared per-solve timing accumulator. `None` until the
+    /// algorithm installs it via [`AugSystemSolver::set_timing_stats`];
+    /// when `None`, both `solve` and `resolve` skip the timing bumps.
+    timing: Option<Rc<TimingStatistics>>,
 }
 
 impl std::fmt::Debug for StdAugSystemSolver {
@@ -111,6 +118,7 @@ impl StdAugSystemSolver {
             last_neg_evals: 0,
             last_status: None,
             have_factor: false,
+            timing: None,
         }
     }
 
@@ -359,6 +367,10 @@ impl AugSystemSolver for StdAugSystemSolver {
 
         let dump_rhs = packed.clone();
 
+        // Attributes the whole factor+back-solve to
+        // `linear_system_factorization` (mirrors upstream
+        // `IpStdAugSystemSolver.cpp:155`).
+        let _factor_guard = self.timing.as_deref().map(|t| t.linear_system_factorization.guard());
         let status = self.linsol.multi_solve(
             &self.vals,
             true,
@@ -367,6 +379,7 @@ impl AugSystemSolver for StdAugSystemSolver {
             check_neg_evals,
             num_neg_evals,
         );
+        drop(_factor_guard);
         self.last_status = Some(status);
         if status == ESymSolverStatus::Success {
             if self.linsol.provides_inertia() {
@@ -417,6 +430,9 @@ impl AugSystemSolver for StdAugSystemSolver {
         let mut packed = vec![0.0; self.dim as usize];
         self.pack_rhs(rhs, &mut packed);
 
+        // Back-substitution against the cached factor; mirrors upstream
+        // `IpStdAugSystemSolver.cpp` `linear_system_back_solve` task.
+        let _back_guard = self.timing.as_deref().map(|t| t.linear_system_back_solve.guard());
         let status = self.linsol.multi_solve(
             &self.vals,
             false,
@@ -425,11 +441,16 @@ impl AugSystemSolver for StdAugSystemSolver {
             false,
             0,
         );
+        drop(_back_guard);
         self.last_status = Some(status);
         if status == ESymSolverStatus::Success {
             self.unpack_sol(&packed, sol);
         }
         status
+    }
+
+    fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
+        self.timing = Some(timing);
     }
 }
 

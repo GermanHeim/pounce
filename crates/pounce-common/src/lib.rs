@@ -26,5 +26,5 @@ pub use reg_options::{
     DefaultValue, OptionType, RegisteredOption, RegisteredOptions, StringEntry,
 };
 pub use tagged::{Tag, TaggedCell, TaggedObject};
-pub use timing::TimedTask;
+pub use timing::{TimedTask, TimingStatistics};
 pub use types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
