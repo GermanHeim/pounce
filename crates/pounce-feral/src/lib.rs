@@ -18,8 +18,6 @@
 //!   and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
 //!   upper-layer reload-and-retry semantics line up.
 
-use feral::numeric::factorize::NumericParams;
-use feral::symbolic::SupernodeParams;
 use feral::{CscMatrix, FactorStatus, Solver};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
@@ -32,6 +30,7 @@ pub struct FeralSolverInterface {
     initialized: bool,
     pivtol_changed: bool,
     refactorize: bool,
+    refine: bool,
 
     dim: Index,
     nonzeros: Index,
@@ -44,29 +43,33 @@ pub struct FeralSolverInterface {
     /// `(rows_0, cols_0)`.
     values: Vec<Number>,
 
+    /// Last factored matrix, retained so `backsolve` can run iterative
+    /// refinement against it (feral's `solve_*_refined` requires `A`).
+    matrix: Option<CscMatrix>,
+
     negevals: Index,
 }
 
 impl FeralSolverInterface {
     pub fn new() -> Self {
-        // Diagnostic env var (issue #17): POUNCE_FERAL_CASCADE_BREAK=off
-        // overrides feral's default cascade_break_ratio=Some(0.5) /
-        // cascade_break_eps=Some(1e-10) to None/None so the legacy
-        // delayed-pivot path is used. Intended for comparing inertia
-        // trajectories on robot_1600 / rocket_12800.
+        // Cascade-break (ratio=0.5, eps=1e-10) is required for IPM KKT
+        // matrices with cascade-overloaded supernodes — e.g.
+        // pinene_3200_0009 factor: 33ms with cb on vs 94s with cb off
+        // (feral 585d739). Feral 585d739 made cb opt-in, so we set it
+        // explicitly here rather than relying on the constructor.
+        // POUNCE_FERAL_CASCADE_BREAK=off disables it for diagnostic runs
+        // (issue #17, inertia trajectory comparison on robot_1600 /
+        // rocket_12800).
         let cb_off = matches!(
             std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref(),
             Ok("0") | Ok("false") | Ok("off")
         );
         let mut solver = if cb_off {
-            let np = NumericParams {
-                cascade_break_ratio: None,
-                cascade_break_eps: None,
-                ..NumericParams::default()
-            };
-            Solver::with_params(np, SupernodeParams::default())
+            Solver::new()
         } else {
             Solver::new()
+                .with_cascade_break(0.5)
+                .with_cascade_break_eps(1e-10)
         };
         if matches!(
             std::env::var("FERAL_PARALLEL").as_deref(),
@@ -74,16 +77,28 @@ impl FeralSolverInterface {
         ) {
             solver = solver.with_parallel(false);
         }
+        // Iterative refinement at solve time closes the residual floor
+        // produced by cascade-break's L-factor perturbation; matches
+        // capi.rs default (`FERAL_REFINE`). Without refinement,
+        // pinene_3200 and similar IPM tails stall as the per-pivot
+        // residual exceeds the duality gap. Set
+        // `POUNCE_FERAL_REFINE=0`/`off`/`false` to disable.
+        let refine = !matches!(
+            std::env::var("POUNCE_FERAL_REFINE").as_deref(),
+            Ok("0") | Ok("false") | Ok("off") | Ok("no"),
+        );
         Self {
             solver,
             initialized: false,
             pivtol_changed: false,
             refactorize: false,
+            refine,
             dim: 0,
             nonzeros: 0,
             rows_0: Vec::new(),
             cols_0: Vec::new(),
             values: Vec::new(),
+            matrix: None,
             negevals: 0,
         }
     }
@@ -97,7 +112,12 @@ impl FeralSolverInterface {
             Err(_) => return ESymSolverStatus::FatalError,
         };
 
-        match self.solver.factor(&matrix, None) {
+        let status = self.solver.factor(&matrix, None);
+        // Keep the matrix for refinement in backsolve, regardless of
+        // factor outcome — the caller may still issue solves against
+        // a stale factor in some restart paths.
+        self.matrix = Some(matrix);
+        match status {
             FactorStatus::Success => {
                 self.negevals = self.solver.num_negative_eigenvalues() as Index;
                 if check_neg_evals && self.negevals != number_of_neg_evals {
@@ -119,10 +139,11 @@ impl FeralSolverInterface {
         let nrhs = nrhs as usize;
         debug_assert_eq!(rhs_vals.len(), n * nrhs);
 
-        let solved = if nrhs == 1 {
-            self.solver.solve(rhs_vals)
-        } else {
-            self.solver.solve_many(rhs_vals, nrhs)
+        let solved = match (self.refine, self.matrix.as_ref(), nrhs == 1) {
+            (true, Some(m), true) => self.solver.solve_refined(m, rhs_vals),
+            (true, Some(m), false) => self.solver.solve_many_refined(m, rhs_vals, nrhs),
+            (_, _, true) => self.solver.solve(rhs_vals),
+            (_, _, false) => self.solver.solve_many(rhs_vals, nrhs),
         };
         match solved {
             Ok(x) => {
@@ -235,12 +256,11 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
     }
 
     fn increase_quality(&mut self) -> bool {
-        if self.solver.increase_quality() {
-            self.pivtol_changed = true;
-            true
-        } else {
-            false
-        }
+        // Mirror ipopt-feral (IpFeralSolverInterface.cpp:134): no pivtol
+        // escalation here. Returning false hands recovery to
+        // PDPerturbationHandler so matrix-side regularization (`lg(rg)`)
+        // is the single escalator, matching ipopt-feral's trajectory.
+        false
     }
 
     fn provides_inertia(&self) -> bool {
