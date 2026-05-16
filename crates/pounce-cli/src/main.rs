@@ -155,15 +155,18 @@ fn main() -> ExitCode {
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&counting) as Rc<RefCell<dyn TNLP>>;
 
     // Banner + problem-statistics block, before the iteration table.
+    // The registered default for `linear_solver` mirrors upstream IPOPT
+    // (`"ma57"`), but pounce's actual default backend is FERAL. Only
+    // treat `"ma57"` as user intent when the option was explicitly set
+    // — otherwise the banner would always claim "ma57 requested" on
+    // every default-config run.
     let backend_tag = {
-        let v = app
+        let (v, explicit) = app
             .options()
             .get_string_value("linear_solver", "")
-            .ok()
-            .map(|(s, _)| s)
-            .unwrap_or_else(|| "ma57".to_string());
-        match v.as_str() {
-            "ma57" => {
+            .unwrap_or_else(|_| ("feral".to_string(), false));
+        match (v.as_str(), explicit) {
+            ("ma57", true) => {
                 #[cfg(feature = "ma57")]
                 {
                     "MA57 (HSL)"
@@ -173,6 +176,7 @@ fn main() -> ExitCode {
                     "FERAL (ma57 requested but not compiled)"
                 }
             }
+            ("ma57", false) => "FERAL",
             _ => "FERAL",
         }
     };
