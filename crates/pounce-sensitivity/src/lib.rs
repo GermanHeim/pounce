@@ -2,10 +2,46 @@
 //!
 //! # Status
 //!
-//! Phase A (current): trait surface for [`schur_data::SchurData`] and
-//! [`p_calculator::PCalculator`] plus the `Index` flavors. Pure
-//! data-shuttling; the IPM-side wiring lands in Phases B–E per
-//! [pounce#7](https://github.com/jkitchin/pounce/issues/7).
+//! Phases A–C complete. Wired today:
+//!
+//! * [`schur_data::IndexSchurData`] + [`p_calculator::IndexPCalculator`]:
+//!   row-selector representation of the perturbation matrix `B`.
+//! * [`backsolver::DenseLuBacksolver`] + [`PdSensBacksolver`]: backsolves
+//!   against the converged KKT factor (test / live IPM, respectively).
+//! * [`schur_driver::DenseGenSchurDriver`]: dense Schur-complement
+//!   factor `S = -B K⁻¹ Bᵀ` with parallel right-hand-side solves.
+//! * [`step_calc::StdStepCalc`] + [`sens_app::SensApplication`]:
+//!   high-level `parametric_step(Δp, dx)` and
+//!   [`reduced_hessian::compute_reduced_hessian`] entry points.
+//! * [`SensSolve`] / [`SensResult`]: one-call builder (covers the
+//!   `on_converged` plumbing typically required to wire the above into
+//!   an `IpoptApplication`).
+//!
+//! Verified against upstream sIPOPT 3.14.19's `parametric_cpp` golden
+//! output to 1e-8 (see `tests/parametric_cpp.rs`); the standalone
+//! `pounce_sens` AMPL driver in `pounce-cli` matches `sensitivity_amplsolver`'s
+//! `_sens_sol` output on representative .nl problems.
+//!
+//! **Phase D progress** (per [pounce#7](https://github.com/jkitchin/pounce/issues/7)):
+//!
+//! * **Fixed-variable lifting** ✔ — `pounce_sens` handles `n_x != n_full`
+//!   via the `IpoptNlp::full_x_to_var_x` / `var_x_to_full_x` /
+//!   `full_g_to_c_block` trait methods (which delegate to
+//!   `BoundClassification.x_not_fixed_map` / `c_map`).
+//! * **Reduced-Hessian eigendecomposition** ✔ — pure-Rust cyclic Jacobi
+//!   in [`eigen::symmetric_eigen`]; surfaced via
+//!   [`SensApplication::compute_reduced_hessian_eigen`],
+//!   [`SensSolve::with_reduced_hessian_eigen`], the `pounce_sens
+//!   --rh-eigendecomp` flag, and the Python `solve_with_sens(rh_eigendecomp=True)`
+//!   kwarg.
+//! * **`sens_boundcheck` bound projection** ✔ (single-pass clamp) —
+//!   [`boundcheck::clamp_step_to_bounds`] /
+//!   [`boundcheck::clamp_with_nlp`] project the perturbed step onto
+//!   `[x_l, x_u]` after the linear solve. Surfaced via
+//!   [`SensSolve::with_boundcheck`], `pounce_sens --sens-boundcheck`,
+//!   and the Python `solve_with_sens(sens_boundcheck=True)` kwarg.
+//!   Upstream's iterative Schur refinement (re-factorize on each
+//!   violation) is **not** ported — see [`boundcheck`] module docs.
 //!
 //! # Algorithmic reference
 //!
@@ -28,6 +64,9 @@
 
 pub mod algorithm_backsolver;
 pub mod backsolver;
+pub mod boundcheck;
+pub mod convenience;
+pub mod eigen;
 pub mod p_calculator;
 pub mod reduced_hessian;
 pub mod schur_data;
@@ -37,6 +76,8 @@ pub mod step_calc;
 
 pub use algorithm_backsolver::PdSensBacksolver;
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};
+pub use convenience::{SensResult, SensSolve};
+pub use eigen::symmetric_eigen;
 pub use p_calculator::{IndexPCalculator, PCalculator};
 pub use reduced_hessian::compute_reduced_hessian;
 pub use schur_data::{IndexSchurData, SchurData};

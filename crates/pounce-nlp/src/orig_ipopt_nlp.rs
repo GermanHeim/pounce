@@ -1675,6 +1675,36 @@ impl IpoptNlp for OrigIpoptNlp {
     fn finalize_solution_z_u(&self, z_u: &dyn Vector) -> Vec<Number> {
         OrigIpoptNlp::finalize_solution_z_u(self, z_u)
     }
+
+    fn full_x_to_var_x(&self, full_idx: Index) -> Option<Index> {
+        let cls = self.adapter.borrow();
+        let cls = cls.classification();
+        let f = full_idx as usize;
+        if f >= cls.full_to_var.len() {
+            return None;
+        }
+        let v = cls.full_to_var[f];
+        if v < 0 {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    fn full_g_to_c_block(&self, full_idx: Index) -> Option<Index> {
+        let cls = self.adapter.borrow();
+        let cls = cls.classification();
+        cls.c_map
+            .iter()
+            .position(|&g_idx| g_idx == full_idx)
+            .map(|p| p as Index)
+    }
+
+    fn var_x_to_full_x(&self, var_idx: Index) -> Index {
+        let cls = self.adapter.borrow();
+        let cls = cls.classification();
+        cls.x_not_fixed_map[var_idx as usize]
+    }
 }
 
 // -------------------- Tests --------------------
@@ -1959,5 +1989,98 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(x.values(), &[1.0, 5.0, 5.0, 1.0]);
+    }
+
+    /// Two-variable TNLP with `x[0]` fixed at 7.0 (`x_l == x_u`) and
+    /// one equality on `x[1]`. Exercises the index-mapping methods on
+    /// the `IpoptNlp` trait that are used by `pounce_sens` to support
+    /// `.nl` files with fixed variables.
+    struct OneFixedOneFree;
+    impl TNLP for OneFixedOneFree {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 7.0;
+            b.x_u[0] = 7.0; // fixed
+            b.x_l[1] = -1.0e19;
+            b.x_u[1] = 1.0e19;
+            b.g_l[0] = 0.0;
+            b.g_u[0] = 0.0; // equality
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 7.0;
+            sp.x[1] = 0.5;
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
+            Some(x[1])
+        }
+        fn eval_grad_f(&mut self, _: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            g[1] = 1.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[1];
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, m: SparsityRequest<'_>) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 1;
+                }
+                SparsityRequest::Values { values } => values[0] = 1.0,
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            _: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            _: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    #[test]
+    fn ipopt_nlp_index_mapping_methods_handle_fixed_var() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneFixedOneFree));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+
+        // Sanity: classification trimmed x[0] (fixed) from var-x space.
+        assert_eq!(nlp.n_full_x(), 2);
+        assert_eq!(nlp.n(), 1);
+
+        // full_x_to_var_x: x[0] is fixed → None; x[1] → var idx 0.
+        let nlp_dyn: &dyn crate::ipopt_nlp::IpoptNlp = &nlp;
+        assert_eq!(nlp_dyn.full_x_to_var_x(0), None);
+        assert_eq!(nlp_dyn.full_x_to_var_x(1), Some(0));
+
+        // var_x_to_full_x: var 0 → full 1.
+        assert_eq!(nlp_dyn.var_x_to_full_x(0), 1);
+
+        // full_g_to_c_block: the one g is an equality → c-block 0.
+        assert_eq!(nlp_dyn.full_g_to_c_block(0), Some(0));
+
+        // lift_x_to_full inflates a compressed [v_0] back to [7.0, v_0].
+        let mut x_var = nlp.x_space().make_new_dense();
+        x_var.values_mut()[0] = 0.5;
+        let lifted = nlp_dyn.lift_x_to_full(&x_var);
+        assert_eq!(lifted, vec![7.0, 0.5]);
     }
 }

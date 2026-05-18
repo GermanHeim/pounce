@@ -22,6 +22,7 @@
 //! a synthetic dense LU.
 
 use crate::backsolver::SensBacksolver;
+use crate::eigen::symmetric_eigen;
 use crate::p_calculator::IndexPCalculator;
 use crate::reduced_hessian::compute_reduced_hessian;
 use crate::schur_data::{IndexSchurData, SchurData};
@@ -74,6 +75,10 @@ pub struct SensOptions {
     /// Hessian. Default 1.0; pounce's IPM-side scaling lands in
     /// Phase B.2's algorithm-wrapper.
     pub obj_scal: Number,
+    /// Whether to also compute the eigendecomposition of the reduced
+    /// Hessian. Mapped from `rh_eigendecomp` (upstream
+    /// [`SensReducedHessianCalculator.cpp:38`](../../../ref/Ipopt/contrib/sIPOPT/src/SensReducedHessianCalculator.cpp)).
+    pub rh_eigendecomp: bool,
 }
 
 impl Default for SensOptions {
@@ -83,6 +88,7 @@ impl Default for SensOptions {
             run_sens: false,
             n_sens_steps: 1,
             obj_scal: 1.0,
+            rh_eigendecomp: false,
         }
     }
 }
@@ -124,6 +130,40 @@ impl<B: SensBacksolver> SensApplication<B> {
         let backsolver = self.backsolver.clone();
         let mut pcalc = IndexPCalculator::new(backsolver, self.a_data.clone());
         compute_reduced_hessian(&mut pcalc, &self.a_data, self.options.obj_scal, out)
+    }
+
+    /// Compute the reduced Hessian and its symmetric eigendecomposition
+    /// in one pass. `hr_out` is the column-major `n²` Hessian buffer
+    /// (same shape as [`Self::compute_reduced_hessian`]); `eigvals_out`
+    /// receives the `n` eigenvalues in ascending order; `eigvecs_out`
+    /// receives the `n²` column-major eigenvector matrix (column `j`
+    /// is the eigenvector for `eigvals_out[j]`).
+    ///
+    /// Mirrors the `rh_eigendecomp=true` branch of upstream
+    /// [`SensReducedHessianCalculator::ComputeReducedHessian`](../../../ref/Ipopt/contrib/sIPOPT/src/SensReducedHessianCalculator.cpp).
+    ///
+    /// Returns `false` if either the Schur reduction or the
+    /// eigendecomposition fails (or any buffer is mis-sized).
+    pub fn compute_reduced_hessian_eigen(
+        &mut self,
+        hr_out: &mut [Number],
+        eigvals_out: &mut [Number],
+        eigvecs_out: &mut [Number],
+    ) -> bool
+    where
+        B: Clone,
+    {
+        let n = self.a_data.nrows() as usize;
+        if hr_out.len() != n * n
+            || eigvals_out.len() != n
+            || eigvecs_out.len() != n * n
+        {
+            return false;
+        }
+        if !self.compute_reduced_hessian(hr_out) {
+            return false;
+        }
+        symmetric_eigen(hr_out, n, eigvals_out, eigvecs_out)
     }
 
     /// Compute one sensitivity step: given `rhs_u` (length
@@ -254,7 +294,7 @@ pub fn register_options(
         "rh_eigendecomp",
         "Compute eigendecomposition of the reduced Hessian.",
         false,
-        "Mirrors upstream `rh_eigendecomp` (SensApplication.cpp:106). Pounce ships the option key for ipopt.opt-compatibility; the eigendecomposition itself is a Phase-D follow-up.",
+        "Mirrors upstream `rh_eigendecomp` (SensReducedHessianCalculator.cpp:38). When set together with `compute_red_hessian=yes`, pounce-sensitivity returns the eigenvalues and eigenvectors of `H_R` alongside the matrix itself (cyclic Jacobi rotation, pure Rust).",
     )?;
     Ok(())
 }
@@ -320,6 +360,45 @@ mod tests {
         assert!((dx[0] - (-1.0)).abs() < 1e-10);
         assert!((dx[1] - (-0.5)).abs() < 1e-10);
         assert!((dx[2] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sens_application_computes_reduced_hessian_eigen() {
+        // Same fixture as the plain reduced-Hessian test: expected
+        // H_R = [[3/4, 1/4], [1/4, 3/4]] (rows {0,2} of K⁻¹).
+        // Eigenvalues: 1/2 and 1, eigenvectors [1,-1]/√2 and
+        // [1,1]/√2.
+        #[rustfmt::skip]
+        let k = vec![
+             2.0, -1.0,  0.0,
+            -1.0,  2.0, -1.0,
+             0.0, -1.0,  2.0,
+        ];
+        let backsolver = DenseLuBacksolver::from_dense(3, &k).unwrap();
+        let a = IndexSchurData::from_parts(vec![0, 2], vec![1, 1]).unwrap();
+        let opts = SensOptions {
+            compute_red_hessian: true,
+            rh_eigendecomp: true,
+            ..SensOptions::default()
+        };
+        let mut app = SensApplication::new(a, backsolver, opts);
+        let mut hr = vec![0.0; 4];
+        let mut w = vec![0.0; 2];
+        let mut v = vec![0.0; 4];
+        assert!(app.compute_reduced_hessian_eigen(&mut hr, &mut w, &mut v));
+
+        assert!((w[0] - 0.5).abs() < 1e-12, "eig0 = {}", w[0]);
+        assert!((w[1] - 1.0).abs() < 1e-12, "eig1 = {}", w[1]);
+
+        // Verify H_R · v_j = λ_j · v_j for each column.
+        for j in 0..2 {
+            let v0 = v[2 * j];
+            let v1 = v[2 * j + 1];
+            let av0 = hr[0] * v0 + hr[2] * v1;
+            let av1 = hr[1] * v0 + hr[3] * v1;
+            assert!((av0 - w[j] * v0).abs() < 1e-10);
+            assert!((av1 - w[j] * v1).abs() < 1e-10);
+        }
     }
 
     #[test]

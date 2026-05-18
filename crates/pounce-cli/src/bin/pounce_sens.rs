@@ -49,7 +49,9 @@ use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
-use pounce_sensitivity::{IndexSchurData, PdSensBacksolver, SensBacksolver};
+use pounce_sensitivity::{
+    IndexSchurData, PdSensBacksolver, SensApplication, SensBacksolver, SensOptions,
+};
 
 const USAGE: &str = "\
 Usage: pounce_sens <input.nl> [<output.sol>] [OPTIONS]
@@ -67,6 +69,20 @@ Options:
                             after the solve (pounce#8 — FAIR-aligned)
   --json-detail LEVEL       summary | full (default: summary). `full` adds
                             per-iteration trajectory and suffix blocks.
+  --sens-boundcheck         clamp the perturbed primal x* + Δx onto the
+                            declared `[x_l, x_u]` (single-pass clamp;
+                            upstream's iterative Schur refinement is a
+                            future enhancement). Mirrors `sens_boundcheck`.
+  --sens-bound-eps EPS      tolerance for `--sens-boundcheck` (default 1e-3).
+  --compute-red-hessian     after the solve, compute the reduced Hessian
+                            over the variables tagged by the `red_hessian`
+                            integer var-suffix in the input .nl. The matrix
+                            is printed to stderr and, with `--json-detail full`,
+                            written as `_red_hessian` in the JSON report.
+                            Mirrors upstream sIPOPT's `compute_red_hessian`.
+  --rh-eigendecomp          also compute the eigendecomposition of the
+                            reduced Hessian. Implies --compute-red-hessian.
+                            Mirrors upstream `rh_eigendecomp`.
   --help, -h                print this message and exit
   --version, -V             print version and exit
 ";
@@ -101,6 +117,10 @@ fn main() -> ExitCode {
     let out_path = parsed.out_path;
     let json_output = parsed.json_output;
     let json_detail = parsed.json_detail;
+    let compute_red_hessian = parsed.compute_red_hessian;
+    let rh_eigendecomp = parsed.rh_eigendecomp;
+    let sens_boundcheck = parsed.sens_boundcheck;
+    let sens_bound_eps = parsed.sens_bound_eps;
 
     // 1. Parse the .nl. Keep `suffixes` separate from the consumed
     //    NlProblem so the on_converged closure can read them after
@@ -140,21 +160,21 @@ fn main() -> ExitCode {
     let sens_out: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
     let nominal_x_out: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
     let lambda_out: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
+    let red_hessian_out: Rc<RefCell<Option<RedHessianResult>>> = Rc::new(RefCell::new(None));
 
     let sens_out_cb = Rc::clone(&sens_out);
     let nominal_x_cb = Rc::clone(&nominal_x_out);
     let lambda_cb = Rc::clone(&lambda_out);
+    let red_hessian_cb = Rc::clone(&red_hessian_out);
     let suffixes_cb = suffixes.clone();
     app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
-        // Capture nominal primal / dual once for the .sol writer.
+        // Capture nominal primal / dual once for the .sol writer. The
+        // .sol's x block must be full-length (`n_full`); when fixed
+        // variables were eliminated, the IPM's `curr.x` carries only
+        // the `n_x_var` free coordinates — `lift_x_to_full` reinflates.
         let curr = data.borrow().curr.clone().expect("curr at convergence");
-        let x_dense = curr
-            .x
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .expect("x is dense");
-        let x_vals = x_dense.expanded_values();
-        *nominal_x_cb.borrow_mut() = Some(x_vals.clone());
+        let x_full: Vec<Number> = nlp.borrow().lift_x_to_full(&*curr.x);
+        *nominal_x_cb.borrow_mut() = Some(x_full.clone());
 
         let yc_dense = curr.y_c.as_any().downcast_ref::<DenseVector>();
         let yd_dense = curr.y_d.as_any().downcast_ref::<DenseVector>();
@@ -176,16 +196,65 @@ fn main() -> ExitCode {
         // Try to run the sensitivity step. Bail quietly (so the
         // nominal-solve solution still writes out) when any required
         // suffix is missing.
-        if let Some(dx) =
-            try_compute_sens_step(data, cq, nlp, pd, &suffixes_cb, n_full, m_full, &x_vals)
+        if let Some(mut dx) =
+            try_compute_sens_step(data, cq, nlp, pd, &suffixes_cb, n_full, m_full, &x_full)
         {
-            // x_perturbed = x_nominal + Δx[0..n_x]
             let n_x = curr.x.dim() as usize;
-            let mut x_pert = vec![0.0; n_full];
-            for i in 0..n_x {
-                x_pert[i] = x_vals[i] + dx[i];
+            if sens_boundcheck {
+                // Single-pass clamp of the primal step before
+                // scattering onto the full-x grid; see
+                // pounce_sensitivity::boundcheck for the algorithm.
+                use pounce_linalg::dense_vector::DenseVector;
+                let x_curr_compressed: Vec<Number> = curr
+                    .x
+                    .as_any()
+                    .downcast_ref::<DenseVector>()
+                    .map(|d| d.values().to_vec())
+                    .unwrap_or_default();
+                let mut dx_primal = dx[..n_x].to_vec();
+                let n_clamped = pounce_sensitivity::boundcheck::clamp_with_nlp(
+                    &*nlp.borrow(),
+                    &x_curr_compressed,
+                    &mut dx_primal,
+                    sens_bound_eps,
+                );
+                if n_clamped > 0 {
+                    eprintln!(
+                        "pounce_sens: --sens-boundcheck clamped {n_clamped} primal coordinate(s)"
+                    );
+                    dx[..n_x].copy_from_slice(&dx_primal);
+                }
+            }
+            // Scatter the compressed primal step `dx[0..n_x_var]` back
+            // onto the full-x grid; fixed variables stay at their
+            // nominal (== fixed) values.
+            let mut x_pert = x_full.clone();
+            let nlp_ref = nlp.borrow();
+            for var_idx in 0..n_x {
+                let full_idx = nlp_ref.var_x_to_full_x(var_idx as Index) as usize;
+                x_pert[full_idx] += dx[var_idx];
             }
             *sens_out_cb.borrow_mut() = Some(x_pert);
+        }
+
+        if compute_red_hessian {
+            match try_compute_red_hessian(
+                data,
+                cq,
+                nlp,
+                pd,
+                &suffixes_cb,
+                rh_eigendecomp,
+            ) {
+                Some(r) => *red_hessian_cb.borrow_mut() = Some(r),
+                None => {
+                    eprintln!(
+                        "pounce_sens: --compute-red-hessian requested but `red_hessian` suffix \
+                         is missing or empty in {}",
+                        "the input .nl"
+                    );
+                }
+            }
         }
     }));
 
@@ -229,6 +298,18 @@ fn main() -> ExitCode {
 
     eprintln!("pounce_sens: wrote {}", out_path.display());
 
+    // Print the reduced Hessian (and optional eigendecomp) to stderr
+    // when requested. Mirrors upstream sIPOPT's `J_INSUPPRESSIBLE`
+    // RedHessian / Eigenvalues prints in `SensReducedHessianCalculator.cpp`.
+    if let Some(rh) = red_hessian_out.borrow().as_ref() {
+        print_red_hessian_to_stderr(rh);
+    } else if compute_red_hessian {
+        eprintln!(
+            "pounce_sens: --compute-red-hessian requested but the reduced \
+             Hessian was not produced (see warnings above)."
+        );
+    }
+
     // Optional JSON report (pounce#8). Carries everything in the .sol
     // plus FAIR provenance + per-iter history (when --json-detail
     // full was requested).
@@ -249,6 +330,45 @@ fn main() -> ExitCode {
         if matches!(json_detail, ReportDetail::Full) {
             for s in &suffixes_out {
                 builder.solution.suffixes.push(sol_suffix_to_report(s));
+            }
+            if let Some(rh) = red_hessian_out.borrow().as_ref() {
+                // Pack the reduced Hessian as a problem-level suffix so
+                // downstream consumers can fish it out alongside the
+                // standard solution suffixes. Layout: a single
+                // length-n² real vector in column-major order, with the
+                // ordering of variables recorded in `_red_hessian_vars`.
+                builder.solution.suffixes.push(SolutionSuffix {
+                    name: "_red_hessian".to_string(),
+                    target: "problem".to_string(),
+                    kind: "real".to_string(),
+                    values: rh.hr.clone(),
+                    int_values: Vec::new(),
+                });
+                builder.solution.suffixes.push(SolutionSuffix {
+                    name: "_red_hessian_vars".to_string(),
+                    target: "problem".to_string(),
+                    kind: "int".to_string(),
+                    values: Vec::new(),
+                    int_values: rh.var_indices.iter().map(|&v| v as i32).collect(),
+                });
+                if let Some(w) = &rh.eigenvalues {
+                    builder.solution.suffixes.push(SolutionSuffix {
+                        name: "_red_hessian_eigenvalues".to_string(),
+                        target: "problem".to_string(),
+                        kind: "real".to_string(),
+                        values: w.clone(),
+                        int_values: Vec::new(),
+                    });
+                }
+                if let Some(v) = &rh.eigenvectors {
+                    builder.solution.suffixes.push(SolutionSuffix {
+                        name: "_red_hessian_eigenvectors".to_string(),
+                        target: "problem".to_string(),
+                        kind: "real".to_string(),
+                        values: v.clone(),
+                        int_values: Vec::new(),
+                    });
+                }
             }
         }
         builder.ingest_stats(&app.statistics());
@@ -300,6 +420,10 @@ struct ParsedArgs {
     out_path: PathBuf,
     json_output: Option<PathBuf>,
     json_detail: ReportDetail,
+    compute_red_hessian: bool,
+    rh_eigendecomp: bool,
+    sens_boundcheck: bool,
+    sens_bound_eps: Number,
 }
 
 /// Read argv. Positional: `<input.nl> [<output.sol>]`. Flags:
@@ -310,6 +434,10 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     let mut positional: Vec<PathBuf> = Vec::new();
     let mut json_output: Option<PathBuf> = None;
     let mut json_detail = ReportDetail::Summary;
+    let mut compute_red_hessian = false;
+    let mut rh_eigendecomp = false;
+    let mut sens_boundcheck = false;
+    let mut sens_bound_eps: Number = 1e-3;
 
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
@@ -325,6 +453,21 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
                     .next()
                     .ok_or_else(|| "--json-detail requires a value".to_string())?;
                 json_detail = ReportDetail::parse(v)?;
+            }
+            "--compute-red-hessian" => compute_red_hessian = true,
+            "--rh-eigendecomp" => {
+                rh_eigendecomp = true;
+                compute_red_hessian = true;
+            }
+            "--sens-boundcheck" => sens_boundcheck = true,
+            "--sens-bound-eps" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--sens-bound-eps requires a value".to_string())?;
+                sens_bound_eps = v
+                    .parse::<Number>()
+                    .map_err(|e| format!("--sens-bound-eps: {e}"))?;
+                sens_boundcheck = true;
             }
             other if other.starts_with("--") => {
                 return Err(format!("unrecognized flag '{other}'"));
@@ -352,6 +495,154 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         out_path,
         json_output,
         json_detail,
+        compute_red_hessian,
+        rh_eigendecomp,
+        sens_boundcheck,
+        sens_bound_eps,
+    })
+}
+
+/// Format a reduced Hessian (and optional eigendecomp) onto stderr.
+/// Matches the style of upstream sIPOPT's
+/// `SensReducedHessianCalculator.cpp` `S->Print(...)` /
+/// `eigenvalues->Print(...)` calls — informational, not parsed.
+fn print_red_hessian_to_stderr(rh: &RedHessianResult) {
+    let n = rh.var_indices.len();
+    eprintln!("\n=== Reduced Hessian (n={n}) ===");
+    eprintln!("var indices: {:?}", rh.var_indices);
+    for i in 0..n {
+        let mut row = String::new();
+        for j in 0..n {
+            // column-major: hr[i + n*j]
+            row.push_str(&format!(" {:>14.6e}", rh.hr[i + n * j]));
+        }
+        eprintln!(" [{i:>3}]{row}");
+    }
+    if let Some(w) = &rh.eigenvalues {
+        eprintln!("\n=== Reduced-Hessian eigenvalues (ascending) ===");
+        for (k, v) in w.iter().enumerate() {
+            eprintln!(" [{k:>3}] {v:>14.6e}");
+        }
+    }
+    eprintln!();
+}
+
+/// Outputs of [`try_compute_red_hessian`]: the column-major `n × n`
+/// reduced Hessian (`hr`), the variable indices `var_indices` that
+/// label its rows/cols (so a downstream JSON consumer can map back to
+/// AMPL var names), and the optional eigendecomposition.
+struct RedHessianResult {
+    /// var-x indices (algorithm-side, length `n`) that label the
+    /// rows/cols of `hr`, ordered by the 1..n slot from the AMPL
+    /// `red_hessian` suffix. Fixed variables are skipped (they cannot
+    /// participate in the reduced Hessian).
+    var_indices: Vec<usize>,
+    /// Column-major `n × n` reduced Hessian.
+    hr: Vec<Number>,
+    /// Optional ascending eigenvalues (length `n`).
+    eigenvalues: Option<Vec<Number>>,
+    /// Optional column-major eigenvectors (length `n²`).
+    eigenvectors: Option<Vec<Number>>,
+}
+
+/// Read the AMPL `red_hessian` integer var-suffix from `.nl`, select
+/// the tagged free variables, and compute the reduced Hessian via
+/// [`SensApplication::compute_reduced_hessian`] (optionally also the
+/// eigendecomposition). Returns `None` (quietly) when the suffix is
+/// missing or empty.
+///
+/// Mirrors the `compute_red_hessian=yes` branch of upstream
+/// [`SensBuilder::BuildRedHessCalc`](../../../ref/Ipopt/contrib/sIPOPT/src/SensBuilder.cpp).
+fn try_compute_red_hessian(
+    data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
+    cq: &pounce_algorithm::ipopt_cq::IpoptCqHandle,
+    nlp: &Rc<RefCell<dyn pounce_nlp::ipopt_nlp::IpoptNlp>>,
+    pd: &mut pounce_algorithm::kkt::pd_full_space_solver::PdFullSpaceSolver,
+    suffixes: &NlSuffixes,
+    compute_eigen: bool,
+) -> Option<RedHessianResult> {
+    let red_hessian_tags = suffixes.var_int.get("red_hessian")?;
+    let max_slot = red_hessian_tags.iter().copied().max().unwrap_or(0);
+    if max_slot <= 0 {
+        return None;
+    }
+    let n_slots = max_slot as usize;
+
+    // For each slot 1..n_slots, look up the full-x index, then map to
+    // the var-x index via the IpoptNlp trait. Fixed variables (no
+    // var-x mapping) are skipped with a warning.
+    let nlp_ref = nlp.borrow();
+    let mut full_for_slot: Vec<Option<usize>> = vec![None; n_slots];
+    for (full_idx, &slot) in red_hessian_tags.iter().enumerate() {
+        if slot > 0 {
+            let s = slot as usize;
+            if s <= n_slots {
+                full_for_slot[s - 1] = Some(full_idx);
+            }
+        }
+    }
+    let mut var_indices: Vec<usize> = Vec::with_capacity(n_slots);
+    for (k, slot) in full_for_slot.iter().enumerate() {
+        let full_idx = match slot {
+            Some(i) => *i,
+            None => {
+                eprintln!(
+                    "pounce_sens: red_hessian slot {} has no tagged variable",
+                    k + 1
+                );
+                return None;
+            }
+        };
+        match nlp_ref.full_x_to_var_x(full_idx as Index) {
+            Some(v) => var_indices.push(v as usize),
+            None => {
+                eprintln!(
+                    "pounce_sens: red_hessian slot {} tags fixed variable {} (skipping)",
+                    k + 1,
+                    full_idx
+                );
+                return None;
+            }
+        }
+    }
+    drop(nlp_ref);
+
+    // Build the row-selector SchurData over the var-x rows directly
+    // (the x block starts at compound-vector index 0).
+    let rows: Vec<Index> = var_indices.iter().map(|&v| v as Index).collect();
+    let signs: Vec<Index> = vec![1; var_indices.len()];
+    let a_data = IndexSchurData::from_parts(rows, signs).ok()?;
+
+    let backsolver = PdSensBacksolver::new(data, cq, nlp, pd).ok()?;
+    let opts = SensOptions {
+        compute_red_hessian: true,
+        rh_eigendecomp: compute_eigen,
+        ..SensOptions::default()
+    };
+    let mut app = SensApplication::new(a_data, backsolver, opts);
+    let n = var_indices.len();
+    let mut hr = vec![0.0; n * n];
+    let (eigenvalues, eigenvectors) = if compute_eigen {
+        let mut w = vec![0.0; n];
+        let mut v = vec![0.0; n * n];
+        if !app.compute_reduced_hessian_eigen(&mut hr, &mut w, &mut v) {
+            eprintln!("pounce_sens: reduced-Hessian eigendecomp failed");
+            return None;
+        }
+        (Some(w), Some(v))
+    } else {
+        if !app.compute_reduced_hessian(&mut hr) {
+            eprintln!("pounce_sens: reduced-Hessian computation failed");
+            return None;
+        }
+        (None, None)
+    };
+    let _ = cq;
+    Some(RedHessianResult {
+        var_indices,
+        hr,
+        eigenvalues,
+        eigenvectors,
     })
 }
 
@@ -424,38 +715,49 @@ fn try_compute_sens_step(
     }
 
     // Build the SchurData rows: flat compound-vector index for each
-    // pinning constraint = n_x + n_s + con_idx (i.e. y_c[con_idx]
-    // slot). Pounce's compound layout matches upstream's
+    // pinning constraint = n_x + n_s + c_block_idx (i.e. y_c[…] slot).
+    // Pounce's compound layout matches upstream's
     // `MetadataMeasurement::GetInitialEqConstraints`
     // (`ref/Ipopt/contrib/sIPOPT/src/SensMetadataMeasurement.cpp:69-83`).
+    //
+    // Two coordinate transforms are needed when `n_x != n_full` (fixed
+    // variables present) or when the c/d split reorders constraints:
+    //   * full-x index → var-x index via `IpoptNlp::full_x_to_var_x`
+    //   * full-g index → c-block index via `IpoptNlp::full_g_to_c_block`
     let curr = data.borrow().curr.clone()?;
     let n_x = curr.x.dim() as usize;
     let n_s = curr.s.dim() as usize;
-    if n_x != n_full {
-        // pounce-cli only supports problems whose compressed-x equals
-        // the .nl's full-x dimension (no fixed variables). Lifting via
-        // `classification.x_not_fixed_map` is a follow-up.
-        eprintln!(
-            "pounce_sens: this build does not yet support fixed variables (n_x={n_x}, n_full={n_full})"
-        );
-        return None;
-    }
+    let nlp_ref = nlp.borrow();
     let y_c_offset = n_x + n_s;
-    let rows: Vec<Index> = param_con_idx
-        .iter()
-        .map(|ci| (y_c_offset + ci.unwrap()) as Index)
-        .collect();
+    let mut rows: Vec<Index> = Vec::with_capacity(n_params);
+    for k in 0..n_params {
+        let full_ci = param_con_idx[k].unwrap();
+        match nlp_ref.full_g_to_c_block(full_ci as Index) {
+            Some(c_idx) => rows.push(y_c_offset as Index + c_idx),
+            None => {
+                eprintln!(
+                    "pounce_sens: parameter {} pinning constraint #{} is an inequality (not in the c block)",
+                    k + 1,
+                    full_ci
+                );
+                return None;
+            }
+        }
+    }
     let signs: Vec<Index> = vec![1; n_params];
     let a_data = IndexSchurData::from_parts(rows, signs).ok()?;
 
-    // Δp[k] = perturbed_value - current_value for parameter k. We use
-    // `x_nominal[var_idx[k]]` as the current value (which is what the
-    // IPM converged to under the equality g_k(x) - p_k = 0).
+    // Δp[k] = perturbed_value - current_value for parameter k. Both
+    // sides are read from the user's full-x array (length `n_full`); the
+    // caller passes `x_nominal` already lifted via
+    // `IpoptNlp::lift_x_to_full`, so indexing by the full-x var index
+    // works whether or not other variables were eliminated.
     let mut delta_p: Vec<Number> = Vec::with_capacity(n_params);
     for k in 0..n_params {
         let vi = param_var_idx[k].unwrap();
         delta_p.push(sens_state_value[vi] - x_nominal[vi]);
     }
+    drop(nlp_ref);
 
     let backsolver = PdSensBacksolver::new(data, cq, nlp, pd).ok()?;
     let n_full_pd = backsolver.dim();

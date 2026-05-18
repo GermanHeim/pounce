@@ -132,21 +132,49 @@ unknown fields — additive changes don't bump the version.
 
 ### Sensitivity analysis (sIPOPT-compatible)
 
-For parametric sensitivity analysis on AMPL `.nl` files declaring
-sIPOPT-style suffixes (`sens_state_1`, `sens_state_value_1`,
-`sens_init_constr`), use `pounce_sens`:
+The `pounce-sensitivity` crate is a Rust port of upstream Ipopt's
+`contrib/sIPOPT/` (Pirnay, López-Negrete & Biegler 2012, [DOI
+10.1007/s12532-012-0043-2](https://doi.org/10.1007/s12532-012-0043-2)).
+Three entry points cover the common workflows:
 
-```sh
-pounce_sens problem.nl              # writes problem.sol
-pounce_sens problem.nl out.sol --json-output result.json --json-detail full
-```
+* **AMPL CLI** — `pounce_sens` consumes `.nl` files annotated with
+  sIPOPT suffixes (`sens_state_1`, `sens_state_value_1`,
+  `sens_init_constr`) and writes the perturbed primal back as
+  `sens_sol_state_1`:
 
-The binary runs the IPM, then performs the post-optimal sensitivity
-step using `pounce-sensitivity` (port of upstream sIPOPT), writing the
-perturbed primal back into the `.sol` as a `sens_sol_state_1` suffix.
-The JSON report carries the same data plus FAIR metadata. See
-[`docs/schema/solve-report-v1.md`](docs/schema/solve-report-v1.md) for
-the full schema.
+  ```sh
+  pounce_sens problem.nl              # writes problem.sol
+  pounce_sens problem.nl out.sol --json-output result.json --json-detail full
+  ```
+
+* **Rust library** — `SensSolve` is a builder that wraps the
+  `on_converged` callback plumbing into a single call:
+
+  ```rust
+  use pounce_sensitivity::SensSolve;
+  let result = SensSolve::new(vec![2, 3])
+      .with_deltas(vec![0.05, 0.0])
+      .with_reduced_hessian()
+      .run(&mut app, tnlp);
+  // result.dx, result.reduced_hessian, result.status
+  ```
+
+* **Python (`pounce.Problem`)** — `solve_with_sens` exposes the same
+  capability from the cyipopt-compatible Python wrapper. See
+  [`python/notebooks/04_sensitivity.ipynb`](python/notebooks/04_sensitivity.ipynb)
+  for a walkthrough.
+
+All three are verified against upstream sIPOPT 3.14.19's
+`parametric_cpp` golden output to 1e-8. Reduced-Hessian eigendecomposition
+is available via `--rh-eigendecomp` (AMPL CLI),
+`SensSolve::with_reduced_hessian_eigen` (Rust), and
+`solve_with_sens(rh_eigendecomp=True)` (Python). Bound projection of the
+perturbed step is available via `--sens-boundcheck [--sens-bound-eps EPS]`
+(AMPL CLI), `SensSolve::with_boundcheck(eps)` (Rust), and
+`solve_with_sens(sens_boundcheck=True, sens_bound_eps=…)` (Python); the
+implementation is a single-pass clamp rather than upstream's iterative
+Schur refinement — track progress in
+[pounce#7](https://github.com/jkitchin/pounce/issues/7).
 
 ## Benchmarks
 

@@ -164,4 +164,41 @@ pub trait IpoptNlp: Nlp {
     fn finalize_solution_z_u(&self, _z_u: &dyn Vector) -> Vec<Number> {
         Vec::new()
     }
+
+    /// Map a 0-based **full-x** index (user-TNLP space, length
+    /// `n_full_x()`) to a 0-based **var-x** index (algorithm-side,
+    /// length `n()`). Returns `None` when the variable was eliminated
+    /// because `x_l[i] == x_u[i]` under
+    /// `fixed_variable_treatment = make_parameter`.
+    ///
+    /// Default impl assumes no fixed variables (identity mapping). The
+    /// `OrigIpoptNlp` implementation consults
+    /// `BoundClassification::full_to_var`.
+    fn full_x_to_var_x(&self, full_idx: Index) -> Option<Index> {
+        Some(full_idx)
+    }
+
+    /// Map a 0-based **full-g** index (user-TNLP space, length
+    /// `n_full_g()`) to a 0-based position in the c-block (algorithm-side
+    /// equality multiplier vector `y_c`, length `m_eq()`). Returns
+    /// `None` when the constraint is an inequality (lives in `d`, not
+    /// `c`).
+    ///
+    /// Default impl assumes the c-block matches the user's g order
+    /// (no c/d split); `OrigIpoptNlp` overrides via
+    /// `BoundClassification::c_map`.
+    fn full_g_to_c_block(&self, full_idx: Index) -> Option<Index> {
+        Some(full_idx)
+    }
+
+    /// Inverse of [`Self::full_x_to_var_x`]: map a 0-based var-x index
+    /// (length `n()`) to the corresponding full-x index (length
+    /// `n_full_x()`). Used when scattering a compressed step or
+    /// iterate back into the user's full-x array.
+    ///
+    /// Default impl assumes no fixed variables (identity); `OrigIpoptNlp`
+    /// returns `classification.x_not_fixed_map[var_idx]`.
+    fn var_x_to_full_x(&self, var_idx: Index) -> Index {
+        var_idx
+    }
 }

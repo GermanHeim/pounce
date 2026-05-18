@@ -15,6 +15,7 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{make_default_restoration_factory, InnerBackendFactoryFactory};
+use pounce_sensitivity::SensSolve;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -150,32 +151,197 @@ impl PyProblem {
         zl: Option<Py<PyAny>>,
         zu: Option<Py<PyAny>>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
+        let (mut app, bridge) = self.prepare(py, x0, lagrange, zl, zu)?;
+        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+        let status: ApplicationReturnStatus = app.optimize_tnlp(bridge_for_solve);
+        let stats = app.statistics();
+        let info = build_info_dict(py, &bridge.borrow(), status, stats.iteration_count)?;
+        let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
+        Ok((x_out, info))
+    }
+
+    /// Solve, then run a parametric sensitivity step at the converged
+    /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
+    /// extra keys `dx`, `dx_full`, `reduced_hessian`,
+    /// `reduced_hessian_eigenvalues`, and `reduced_hessian_eigenvectors`
+    /// (each may be `None` when the corresponding output was not
+    /// requested or the solve did not converge).
+    ///
+    /// `pin_constraint_indices` are 0-based indices into `g(x)`
+    /// identifying the parameter-pin equalities `g_i(x) = p_i`. The
+    /// caller must have declared these as exact equalities in the
+    /// `Problem` constructor (`cl[i] == cu[i] == p_i`).
+    ///
+    /// Passing `rh_eigendecomp=True` implies `compute_reduced_hessian=True`
+    /// and additionally returns the ascending eigenvalues plus the
+    /// column-major eigenvector matrix of `H_R` (mirrors upstream
+    /// sIPOPT's `rh_eigendecomp` option).
+    ///
+    /// Passing `sens_boundcheck=True` clamps the perturbed primal step
+    /// against the variable bounds (single-pass projection — simpler
+    /// than upstream's iterative Schur refinement; see
+    /// `pounce_sensitivity::boundcheck`). `sens_bound_eps` is the
+    /// tolerance (default `1e-9`).
+    #[pyo3(signature = (
+        x0,
+        pin_constraint_indices,
+        deltas = None,
+        compute_reduced_hessian = false,
+        rh_eigendecomp = false,
+        sens_boundcheck = false,
+        sens_bound_eps = 1e-9,
+        obj_scal = 1.0,
+        lagrange = None,
+        zl = None,
+        zu = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_sens<'py>(
+        &mut self,
+        py: Python<'py>,
+        x0: Py<PyAny>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Option<Vec<Number>>,
+        compute_reduced_hessian: bool,
+        rh_eigendecomp: bool,
+        sens_boundcheck: bool,
+        sens_bound_eps: Number,
+        obj_scal: Number,
+        lagrange: Option<Py<PyAny>>,
+        zl: Option<Py<PyAny>>,
+        zu: Option<Py<PyAny>>,
+    ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
+        let compute_reduced_hessian = compute_reduced_hessian || rh_eigendecomp;
+        let m = self.m as usize;
+        let pins: Vec<Index> = pin_constraint_indices
+            .iter()
+            .map(|&i| {
+                if i < 0 || (i as usize) >= m {
+                    Err(PyValueError::new_err(format!(
+                        "pin_constraint_indices[..] = {i} out of range [0, m={m})",
+                    )))
+                } else {
+                    Ok(i as Index)
+                }
+            })
+            .collect::<PyResult<_>>()?;
+        if let Some(d) = &deltas {
+            if d.len() != pins.len() {
+                return Err(PyValueError::new_err(format!(
+                    "deltas length {} must equal pin_constraint_indices length {}",
+                    d.len(),
+                    pins.len(),
+                )));
+            }
+        }
+        if !compute_reduced_hessian && deltas.is_none() {
+            return Err(PyValueError::new_err(
+                "solve_with_sens: pass deltas=..., compute_reduced_hessian=True, or both",
+            ));
+        }
+
+        let (mut app, bridge) = self.prepare(py, x0, lagrange, zl, zu)?;
+        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+
+        let mut builder = SensSolve::new(pins).with_obj_scal(obj_scal);
+        if let Some(d) = deltas {
+            builder = builder.with_deltas(d);
+        }
+        if rh_eigendecomp {
+            builder = builder.with_reduced_hessian_eigen();
+        } else if compute_reduced_hessian {
+            builder = builder.with_reduced_hessian();
+        }
+        if sens_boundcheck {
+            builder = builder.with_boundcheck(sens_bound_eps);
+        }
+        let result = builder.run(&mut app, bridge_for_solve);
+        let stats = app.statistics();
+
+        let info = build_info_dict(py, &bridge.borrow(), result.status, stats.iteration_count)?;
+        let dx_obj: PyObject = match result.dx {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("dx", dx_obj)?;
+        let dx_full_obj: PyObject = match result.dx_full {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("dx_full", dx_full_obj)?;
+        let rh_obj: PyObject = match result.reduced_hessian {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("reduced_hessian", rh_obj)?;
+        let eigvals_obj: PyObject = match result.reduced_hessian_eigenvalues {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("reduced_hessian_eigenvalues", eigvals_obj)?;
+        let eigvecs_obj: PyObject = match result.reduced_hessian_eigenvectors {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("reduced_hessian_eigenvectors", eigvecs_obj)?;
+
+        let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
+        Ok((x_out, info))
+    }
+
+    #[getter]
+    fn n(&self) -> i64 {
+        self.n as i64
+    }
+    #[getter]
+    fn m(&self) -> i64 {
+        self.m as i64
+    }
+    #[getter]
+    fn has_hessian(&self) -> bool {
+        self.has_hessian
+    }
+}
+
+impl PyProblem {
+    /// Shared setup for [`Self::solve`] / [`Self::solve_with_sens`]:
+    /// decode warm-start vectors, materialize Jac/Hess sparsity, build
+    /// and configure the application (options + restoration), and mint
+    /// the Py↔Rust TNLP bridge. Returns the application ready for
+    /// `optimize_tnlp` and the bridge whose `final_*` fields the
+    /// callback writes into.
+    fn prepare(
+        &self,
+        py: Python<'_>,
+        x0: Py<PyAny>,
+        lagrange: Option<Py<PyAny>>,
+        zl: Option<Py<PyAny>>,
+        zu: Option<Py<PyAny>>,
+    ) -> PyResult<(IpoptApplication, Rc<RefCell<PyTnlp>>)> {
         let n = self.n as usize;
         let m = self.m as usize;
         let x0_vec = extract_f64_vec(&x0, n, "x0")?;
-        let lam0 = lagrange.map(|v| extract_f64_vec(&v, m, "lagrange")).transpose()?;
+        let lam0 = lagrange
+            .map(|v| extract_f64_vec(&v, m, "lagrange"))
+            .transpose()?;
         let z_l0 = zl.map(|v| extract_f64_vec(&v, n, "zl")).transpose()?;
         let z_u0 = zu.map(|v| extract_f64_vec(&v, n, "zu")).transpose()?;
 
-        // Materialize Jacobian sparsity once.
         let (jac_rows, jac_cols, nele_jac) = if m > 0 {
             let s = call0(&self.problem_obj, "jacobianstructure")?;
-            // We don't know nnz_jac up front; infer it from the
-            // returned tuple's row length.
             let (rows, cols) = decode_structure_inferred(&s)?;
             (rows.clone(), cols.clone(), rows.len() as Index)
         } else {
             (Vec::new(), Vec::new(), 0)
         };
 
-        // And Hessian sparsity. When the user provides one, use it
+        // Hessian sparsity. When the user provides one, use it
         // verbatim. Without one we still need a non-empty pattern: the
         // L-BFGS updater pins its work-space sparsity from
         // `curr_exact_hessian()`, so an empty space means nowhere for
-        // the quasi-Newton approximation to land (and the solver
-        // wanders). Declare the dense lower triangle — `eval_h(Values)`
-        // returns zeros, and `LimMemQuasiNewtonUpdater` overwrites them
-        // with its rank-update approximation each iteration.
+        // the quasi-Newton approximation to land. Declare the dense
+        // lower triangle — `eval_h(Values)` returns zeros and the
+        // updater overwrites them with its rank-update approximation.
         let (hess_rows, hess_cols, nele_hess) = if self.has_hessian {
             let s = call0(&self.problem_obj, "hessianstructure")?;
             let (rows, cols) = decode_structure_inferred(&s)?;
@@ -193,9 +359,7 @@ impl PyProblem {
             (rows, cols, nele)
         };
 
-        // Build app and apply options.
         let mut app = IpoptApplication::new();
-        // Force L-BFGS unless the user gave us a Hessian.
         if !self.has_hessian {
             let _ = app.options_mut().set_string_value(
                 "hessian_approximation",
@@ -222,9 +386,6 @@ impl PyProblem {
         app.initialize()
             .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
 
-        // Wire restoration (mirrors what `pounce-cli` does — without it,
-        // any line-search failure surfaces as RestorationFailure
-        // instead of falling back to the ℓ₁-feasibility sub-IPM).
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
         let bff: InnerBackendFactoryFactory =
             Box::new(move || default_backend_factory(feral_cfg));
@@ -235,7 +396,6 @@ impl PyProblem {
         );
         app.set_restoration_factory(resto_factory);
 
-        // Build the bridge.
         let init = PyTnlpInit {
             n: self.n,
             m: self.m,
@@ -264,55 +424,35 @@ impl PyProblem {
             final_status_code: 0,
         };
         let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
-        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+        Ok((app, bridge))
+    }
+}
 
-        // We do NOT `py.allow_threads` here: `IpoptApplication` and the
-        // TNLP bridge hold `Rc<…>` internally, so they aren't `Send`.
-        // The solver is single-threaded anyway, and intermediate
-        // callbacks re-enter Python through `Python::with_gil` (which
-        // is a no-op when the GIL is already held).
-        let status: ApplicationReturnStatus = app.optimize_tnlp(bridge_for_solve);
-        let _ = py;
-        let stats = app.statistics();
-
-        let b = bridge.borrow();
-        let x_out = b.state.final_x.clone().into_pyarray_bound(py);
-        let info = PyDict::new_bound(py);
-        info.set_item("status", status as i32)?;
-        info.set_item("status_msg", status_message(status))?;
-        info.set_item("obj_val", b.state.final_obj)?;
-        info.set_item(
-            "g",
-            b.state.final_g.clone().into_pyarray_bound(py),
-        )?;
-        info.set_item(
-            "mult_g",
-            b.state.final_lambda.clone().into_pyarray_bound(py),
-        )?;
-        info.set_item(
-            "mult_x_L",
-            b.state.final_z_l.clone().into_pyarray_bound(py),
-        )?;
-        info.set_item(
-            "mult_x_U",
-            b.state.final_z_u.clone().into_pyarray_bound(py),
-        )?;
-        info.set_item("iter_count", stats.iteration_count)?;
-        Ok((x_out, info))
-    }
-
-    #[getter]
-    fn n(&self) -> i64 {
-        self.n as i64
-    }
-    #[getter]
-    fn m(&self) -> i64 {
-        self.m as i64
-    }
-    #[getter]
-    fn has_hessian(&self) -> bool {
-        self.has_hessian
-    }
+fn build_info_dict<'py>(
+    py: Python<'py>,
+    bridge: &PyTnlp,
+    status: ApplicationReturnStatus,
+    iter_count: i32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let info = PyDict::new_bound(py);
+    info.set_item("status", status as i32)?;
+    info.set_item("status_msg", status_message(status))?;
+    info.set_item("obj_val", bridge.state.final_obj)?;
+    info.set_item("g", bridge.state.final_g.clone().into_pyarray_bound(py))?;
+    info.set_item(
+        "mult_g",
+        bridge.state.final_lambda.clone().into_pyarray_bound(py),
+    )?;
+    info.set_item(
+        "mult_x_L",
+        bridge.state.final_z_l.clone().into_pyarray_bound(py),
+    )?;
+    info.set_item(
+        "mult_x_U",
+        bridge.state.final_z_u.clone().into_pyarray_bound(py),
+    )?;
+    info.set_item("iter_count", iter_count)?;
+    Ok(info)
 }
 
 /// Variant of `decode_structure` that infers `nnz` from the input
