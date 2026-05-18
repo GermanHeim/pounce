@@ -15,48 +15,127 @@ use pounce_common::exception::SolverException;
 use pounce_common::reg_options::RegisteredOptions;
 
 pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), SolverException> {
-
     // ===== IpoptApplication::RegisterOptions (Interfaces/IpIpoptApplication.cpp) =====
     r.set_registering_category("Output");
     r.add_bounded_integer_option("print_level", "Output verbosity level.", 0, 12, 5, "Sets the default verbosity level for console output. The larger this value the more detailed is the output.")?;
     r.add_string_option("output_file", "File name of desired output file (leave unset for no file output).", "", &[("*", "Any acceptable standard file name")], "NOTE: This option only works when read from the ipopt.opt options file! An output file with this name will be written (leave unset for no file output). The verbosity level is by default set to \"print_level\", but can be overridden with \"file_print_level\". The file name is changed to use only small letters.")?;
     r.add_bounded_integer_option("file_print_level", "Verbosity level for output file.", 0, 12, 5, "NOTE: This option only works when read from the ipopt.opt options file! Determines the verbosity level for the file specified by \"output_file\". By default it is the same as \"print_level\".")?;
-    r.add_bool_option("file_append", "Whether to append to output file, if set, instead of truncating.", false, "NOTE: This option only works when read from the ipopt.opt options file!")?;
+    r.add_bool_option(
+        "file_append",
+        "Whether to append to output file, if set, instead of truncating.",
+        false,
+        "NOTE: This option only works when read from the ipopt.opt options file!",
+    )?;
     r.add_bool_option("print_user_options", "Print all options set by the user.", false, "If selected, the algorithm will print the list of all options set by the user including their values and whether they have been used. In some cases this information might be incorrect, due to the internal program flow.")?;
     r.add_bool_option("print_options_documentation", "Switch to print all algorithmic options with some documentation before solving the optimization problem.", false, "")?;
     r.add_bounded_integer_option("debug_print_level", "Verbosity level for debug file.", 0, 12, 5, "This Ipopt library has been compiled in debug mode, and a file \"debug.out\" is produced for every run. This option determines the verbosity level for this file. By default it is the same as \"print_level\".")?;
     r.add_bool_option("print_timing_statistics", "Switch to print timing statistics.", false, "If selected, the program will print the time spend for selected tasks. This implies timing_statistics=yes.")?;
     r.set_registering_category("Miscellaneous");
     r.add_string_option("option_file_name", "File name of options file.", "ipopt.opt", &[("*", "Any acceptable standard file name")], "By default, the name of the Ipopt options file is \"ipopt.opt\" - or something else if specified in the IpoptApplication::Initialize call. If this option is set by SetStringValue BEFORE the options file is read, it specifies the name of the options file. It does not make any sense to specify this option within the options file. Setting this option to an empty string disables reading of an options file.")?;
-    r.add_bool_option("replace_bounds", "Whether all variable bounds should be replaced by inequality constraints", false, "This option must be set for the inexact algorithm.")?;
+    r.add_bool_option(
+        "replace_bounds",
+        "Whether all variable bounds should be replaced by inequality constraints",
+        false,
+        "This option must be set for the inexact algorithm.",
+    )?;
     r.add_bool_option("skip_finalize_solution_call", "Whether a call to NLP::FinalizeSolution after optimization should be suppressed", false, "In some Ipopt applications, the user might want to call the FinalizeSolution method separately. Setting this option to \"yes\" will cause the IpoptApplication object to suppress the default call to that method.")?;
     r.set_registering_category("Undocumented");
     r.add_bool_option("suppress_all_output", "", false, "")?;
-    r.add_bool_option("inexact_algorithm", "Whether to activate the version of Ipopt that allows iterative linear solvers.", false, "EXPERIMENTAL")?;
+    r.add_bool_option(
+        "inexact_algorithm",
+        "Whether to activate the version of Ipopt that allows iterative linear solvers.",
+        false,
+        "EXPERIMENTAL",
+    )?;
     r.set_registering_category("");
 
     // ===== RegisteredOptions::RegisterOptions (Common/IpRegOptions.cpp) =====
     r.set_registering_category("Output");
-    r.add_string_option("print_options_mode", "format in which to print options documentation", "text", &[("text", "Ordinary text"), ("latex", "LaTeX formatted"), ("doxygen", "Doxygen (markdown) formatted")], "")?;
-    r.add_bool_option("print_advanced_options", "whether to print also advanced options", false, "")?;
+    r.add_string_option(
+        "print_options_mode",
+        "format in which to print options documentation",
+        "text",
+        &[
+            ("text", "Ordinary text"),
+            ("latex", "LaTeX formatted"),
+            ("doxygen", "Doxygen (markdown) formatted"),
+        ],
+        "",
+    )?;
+    r.add_bool_option(
+        "print_advanced_options",
+        "whether to print also advanced options",
+        false,
+        "",
+    )?;
 
     // ===== TNLPAdapter::RegisterOptions (Interfaces/IpTNLPAdapter.cpp) =====
     r.set_registering_category("NLP");
-    r.add_number_option("nlp_lower_bound_inf", "any bound less or equal this value will be considered -inf (i.e. not lower bounded).", -1e19, "")?;
-    r.add_number_option("nlp_upper_bound_inf", "any bound greater or this value will be considered +inf (i.e. not upper bounded).", 1e19, "")?;
+    r.add_number_option(
+        "nlp_lower_bound_inf",
+        "any bound less or equal this value will be considered -inf (i.e. not lower bounded).",
+        -1e19,
+        "",
+    )?;
+    r.add_number_option(
+        "nlp_upper_bound_inf",
+        "any bound greater or this value will be considered +inf (i.e. not upper bounded).",
+        1e19,
+        "",
+    )?;
     r.add_string_option("fixed_variable_treatment", "Determines how fixed variables should be handled.", "make_parameter", &[("make_parameter", "Remove fixed variable from optimization variables"), ("make_parameter_nodual", "Remove fixed variable from optimization variables and do not compute bound multipliers for fixed variables"), ("make_constraint", "Add equality constraints fixing variables"), ("relax_bounds", "Relax fixing bound constraints")], "The main difference between those options is that the starting point in the \"make_constraint\" case still has the fixed variables at their given values, whereas in the case \"make_parameter(_nodual)\" the functions are always evaluated with the fixed values for those variables.  Also, for \"relax_bounds\", the fixing bound constraints are relaxed (according to\" bound_relax_factor\"). For all but \"make_parameter_nodual\", bound multipliers are computed for the fixed variables.")?;
     // SKIP AddStringOption "dependency_detector": unhandled kind: AddStringOption
     r.add_bool_option("dependency_detection_with_rhs", "Indicates if the right hand sides of the constraints should be considered in addition to gradients during dependency detection", false, "")?;
     r.add_lower_bounded_integer_option("num_linear_variables", "Number of linear variables", 0, 0, "When the Hessian is approximated, it is assumed that the first num_linear_variables variables are linear. The Hessian is then not approximated in this space. If the get_number_of_nonlinear_variables method in the TNLP is implemented, this option is ignored.")?;
-    r.add_string_option("jacobian_approximation", "Specifies technique to compute constraint Jacobian", "exact", &[("exact", "user-provided derivatives"), ("finite-difference-values", "user-provided structure, values by finite differences")], "")?;
-    r.add_string_option("gradient_approximation", "Specifies technique to compute objective Gradient", "exact", &[("exact", "user-provided gradient"), ("finite-difference-values", "values by finite differences")], "")?;
-    r.add_lower_bounded_number_option("findiff_perturbation", "Size of the finite difference perturbation for derivative approximation.", 0.0, true, 1e-7, "This determines the relative perturbation of the variable entries.")?;
+    r.add_string_option(
+        "jacobian_approximation",
+        "Specifies technique to compute constraint Jacobian",
+        "exact",
+        &[
+            ("exact", "user-provided derivatives"),
+            (
+                "finite-difference-values",
+                "user-provided structure, values by finite differences",
+            ),
+        ],
+        "",
+    )?;
+    r.add_string_option(
+        "gradient_approximation",
+        "Specifies technique to compute objective Gradient",
+        "exact",
+        &[
+            ("exact", "user-provided gradient"),
+            ("finite-difference-values", "values by finite differences"),
+        ],
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "findiff_perturbation",
+        "Size of the finite difference perturbation for derivative approximation.",
+        0.0,
+        true,
+        1e-7,
+        "This determines the relative perturbation of the variable entries.",
+    )?;
     r.set_registering_category("Derivative Checker");
     r.add_string_option("derivative_test", "Enable derivative checker", "none", &[("none", "do not perform derivative test"), ("first-order", "perform test of first derivatives at starting point"), ("second-order", "perform test of first and second derivatives at starting point"), ("only-second-order", "perform test of second derivatives at starting point")], "If this option is enabled, a (slow!) derivative test will be performed before the optimization. The test is performed at the user provided starting point and marks derivative values that seem suspicious")?;
     r.add_lower_bounded_integer_option("derivative_test_first_index", "Index of first quantity to be checked by derivative checker", -2, -2, "If this is set to -2, then all derivatives are checked. Otherwise, for the first derivative test it specifies the first variable for which the test is done (counting starts at 0). For second derivatives, it specifies the first constraint for which the test is done; counting of constraint indices starts at 0, and -1 refers to the objective function Hessian.")?;
-    r.add_lower_bounded_number_option("derivative_test_perturbation", "Size of the finite difference perturbation in derivative test.", 0.0, true, 1e-8, "This determines the relative perturbation of the variable entries.")?;
+    r.add_lower_bounded_number_option(
+        "derivative_test_perturbation",
+        "Size of the finite difference perturbation in derivative test.",
+        0.0,
+        true,
+        1e-8,
+        "This determines the relative perturbation of the variable entries.",
+    )?;
     r.add_lower_bounded_number_option("derivative_test_tol", "Threshold for indicating wrong derivative.", 0.0, true, 1e-4, "If the relative deviation of the estimated derivative from the given one is larger than this value, the corresponding derivative is marked as wrong.")?;
-    r.add_bool_option("derivative_test_print_all", "Indicates whether information for all estimated derivatives should be printed.", false, "Determines verbosity of derivative checker.")?;
+    r.add_bool_option(
+        "derivative_test_print_all",
+        "Indicates whether information for all estimated derivatives should be printed.",
+        false,
+        "Determines verbosity of derivative checker.",
+    )?;
     r.add_lower_bounded_number_option("point_perturbation_radius", "Maximal perturbation of an evaluation point.", 0.0, false, 10.0, "If a random perturbation of a points is required, this number indicates the maximal perturbation. This is for example used when determining the center point at which the finite difference derivative test is executed.")?;
     r.add_string_option("dependency_detector", "Indicates which linear solver should be used to detect linearly dependent equality constraints.", "none", &[("none", "don't check; no extra work at beginning"), ("mumps", "use MUMPS"), ("wsmp", "use WSMP"), ("ma28", "use MA28")], "This is experimental and does not work well.")?;
 
@@ -72,7 +151,14 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_lower_bounded_integer_option("adaptive_mu_kkterror_red_iters", "Maximum number of iterations requiring sufficient progress.", 0, 4, "For the \"kkt-error\" based globalization strategy, sufficient progress must be made for \"adaptive_mu_kkterror_red_iters\" iterations. If this number of iterations is exceeded, the globalization strategy switches to the monotone mode.")?;
     r.add_bounded_number_option("adaptive_mu_kkterror_red_fact", "Sufficient decrease factor for \"kkt-error\" globalization strategy.", 0.0, true, 1.0, true, 0.9999, "For the \"kkt-error\" based globalization strategy, the error must decrease by this factor to be deemed sufficient decrease.")?;
     r.add_bounded_number_option("filter_margin_fact", "Factor determining width of margin for obj-constr-filter adaptive globalization strategy.", 0.0, true, 1.0, true, 1e-5, "When using the adaptive globalization strategy, \"obj-constr-filter\", sufficient progress for a filter entry is defined as follows: (new obj) < (filter obj) - filter_margin_fact*(new constr-viol) OR (new constr-viol) < (filter constr-viol) - filter_margin_fact*(new constr-viol). For the description of the \"kkt-error-filter\" option see \"filter_max_margin\".")?;
-    r.add_lower_bounded_number_option("filter_max_margin", "Maximum width of margin in obj-constr-filter adaptive globalization strategy.", 0.0, true, 1.0, "")?;
+    r.add_lower_bounded_number_option(
+        "filter_max_margin",
+        "Maximum width of margin in obj-constr-filter adaptive globalization strategy.",
+        0.0,
+        true,
+        1.0,
+        "",
+    )?;
     r.add_bool_option("adaptive_mu_restore_previous_iterate", "Indicates if the previous accepted iterate should be restored if the monotone mode is entered.", false, "When the globalization strategy for the adaptive barrier algorithm switches to the monotone mode, it can either start from the most recent iterate (no), or from the last iterate that was accepted (yes).")?;
     r.add_lower_bounded_number_option("adaptive_mu_monotone_init_factor", "Determines the initial value of the barrier parameter when switching to the monotone mode.", 0.0, true, 0.8, "When the globalization strategy for the adaptive barrier algorithm switches to the monotone mode and fixed_mu_oracle is chosen as \"average_compl\", the barrier parameter is set to the current average complementarity times the value of \"adaptive_mu_monotone_init_factor\".")?;
     r.add_string_option("adaptive_mu_kkt_norm_type", "Norm used for the KKT error in the adaptive mu globalization strategies.", "2-norm-squared", &[("1-norm", "use the 1-norm (abs sum)"), ("2-norm-squared", "use the 2-norm squared (sum of squares)"), ("max-norm", "use the infinity norm (max)"), ("2-norm", "use 2-norm")], "When computing the KKT error for the globalization strategies, the norm to be used is specified with this option. Note, this option is also used in the QualityFunctionMuOracle.")?;
@@ -82,20 +168,49 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.set_registering_category("Linear Solver");
     // SKIP AddStringOption "linear_solver": unhandled kind: AddStringOption
     // SKIP AddStringOption "linear_system_scaling": unhandled kind: AddStringOption
-    r.add_string_option("hsllib", "Name of library containing HSL routines for load at runtime", "libhsl.so", &[("*", "Any acceptable filename (may contain path, too)")], "")?;
+    r.add_string_option(
+        "hsllib",
+        "Name of library containing HSL routines for load at runtime",
+        "libhsl.so",
+        &[("*", "Any acceptable filename (may contain path, too)")],
+        "",
+    )?;
     r.add_string_option("pardisolib", "Name of library containing Pardiso routines (from pardiso-project.org) for load at runtime", "libpardiso.so", &[("*", "Any acceptable filename (may contain path, too)")], "")?;
     r.set_registering_category("NLP Scaling");
     // SKIP AddStringOption "nlp_scaling_method": unhandled kind: AddStringOption
     r.set_registering_category("Barrier Parameter Update");
-    r.add_string_option("mu_strategy", "Update strategy for barrier parameter.", "monotone", &[("monotone", "use the monotone (Fiacco-McCormick) strategy"), ("adaptive", "use the adaptive update strategy")], "Determines which barrier parameter update strategy is to be used.")?;
+    r.add_string_option(
+        "mu_strategy",
+        "Update strategy for barrier parameter.",
+        "monotone",
+        &[
+            ("monotone", "use the monotone (Fiacco-McCormick) strategy"),
+            ("adaptive", "use the adaptive update strategy"),
+        ],
+        "Determines which barrier parameter update strategy is to be used.",
+    )?;
     r.add_string_option("mu_oracle", "Oracle for a new barrier parameter in the adaptive strategy.", "quality-function", &[("probing", "Mehrotra's probing heuristic"), ("loqo", "LOQO's centrality rule"), ("quality-function", "minimize a quality function")], "Determines how a new barrier parameter is computed in each \"free-mode\" iteration of the adaptive barrier parameter strategy. (Only considered if \"adaptive\" is selected for option \"mu_strategy\").")?;
     r.add_string_option("fixed_mu_oracle", "Oracle for the barrier parameter when switching to fixed mode.", "average_compl", &[("probing", "Mehrotra's probing heuristic"), ("loqo", "LOQO's centrality rule"), ("quality-function", "minimize a quality function"), ("average_compl", "base on current average complementarity")], "Determines how the first value of the barrier parameter should be computed when switching to the \"monotone mode\" in the adaptive strategy. (Only considered if \"adaptive\" is selected for option \"mu_strategy\".)")?;
     r.set_registering_category("Hessian Approximation");
-    r.add_string_option("limited_memory_aug_solver", "Strategy for solving the augmented system for low-rank Hessian.", "sherman-morrison", &[("sherman-morrison", "use Sherman-Morrison formula"), ("extended", "use an extended augmented system")], "")?;
+    r.add_string_option(
+        "limited_memory_aug_solver",
+        "Strategy for solving the augmented system for low-rank Hessian.",
+        "sherman-morrison",
+        &[
+            ("sherman-morrison", "use Sherman-Morrison formula"),
+            ("extended", "use an extended augmented system"),
+        ],
+        "",
+    )?;
     r.set_registering_category("Line Search");
     r.add_string_option("line_search_method", "Globalization method used in backtracking line search", "filter", &[("filter", "Filter method"), ("cg-penalty", "Chen-Goldfarb penalty function"), ("penalty", "Standard penalty function")], "Only the \"filter\" choice is officially supported. But sometimes, good results might be obtained with the other choices.")?;
     r.set_registering_category("Undocumented");
-    r.add_bool_option("wsmp_iterative", "Switches to use iterative instead of direct solver in WSMP.", false, "EXPERIMENTAL!")?;
+    r.add_bool_option(
+        "wsmp_iterative",
+        "Switches to use iterative instead of direct solver in WSMP.",
+        false,
+        "EXPERIMENTAL!",
+    )?;
     r.add_string_option("linear_solver", "Linear solver used for step computations.", "ma57", &[("ma27", "use the Harwell routine MA27"), ("ma57", "use the Harwell routine MA57"), ("ma77", "use the Harwell routine HSL_MA77"), ("ma86", "use the Harwell routine HSL_MA86"), ("ma97", "use the Harwell routine HSL_MA97"), ("pardiso", "use the Pardiso package from pardiso-project.org"), ("pardisomkl", "use the Pardiso package from Intel MKL"), ("spral", "use the SPRAL package"), ("wsmp", "use WSMP package"), ("mumps", "use MUMPS package"), ("custom", "use custom linear solver (expert use)"), ("feral", "use FERAL pure-Rust sparse symmetric solver (pounce extension)")], "Determines which linear algebra package is to be used for the solution of the augmented linear system (for obtaining the search directions).")?;
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
@@ -104,11 +219,48 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.set_registering_category("Line Search");
     r.add_bounded_number_option("alpha_red_factor", "Fractional reduction of the trial step size in the backtracking line search.", 0.0, true, 1.0, true, 0.5, "At every step of the backtracking line search, the trial step size is reduced by this factor.")?;
     r.set_registering_category("Undocumented");
-    r.add_bool_option("magic_steps", "Enables magic steps.", false, "DOESN'T REALLY WORK YET!")?;
+    r.add_bool_option(
+        "magic_steps",
+        "Enables magic steps.",
+        false,
+        "DOESN'T REALLY WORK YET!",
+    )?;
     r.set_registering_category("");
     r.add_bool_option("accept_every_trial_step", "Always accept the first trial step.", false, "Setting this option to \"yes\" essentially disables the line search and makes the algorithm take aggressive steps, without global convergence guarantees.")?;
     r.add_lower_bounded_integer_option("accept_after_max_steps", "Accept a trial point after maximal this number of steps even if it does not satisfy line search conditions.", -1, -1, "Setting this to -1 disables this option.")?;
-    r.add_string_option("alpha_for_y", "Method to determine the step size for constraint multipliers (alpha_y) .", "primal", &[("primal", "use primal step size"), ("bound-mult", "use step size for the bound multipliers (good for LPs)"), ("min", "use the min of primal and bound multipliers"), ("max", "use the max of primal and bound multipliers"), ("full", "take a full step of size one"), ("min-dual-infeas", "choose step size minimizing new dual infeasibility"), ("safer-min-dual-infeas", "like \"min_dual_infeas\", but safeguarded by \"min\" and \"max\""), ("primal-and-full", "use the primal step size, and full step if delta_x <= alpha_for_y_tol"), ("dual-and-full", "use the dual step size, and full step if delta_x <= alpha_for_y_tol"), ("acceptor", "Call LSAcceptor to get step size for y")], "")?;
+    r.add_string_option(
+        "alpha_for_y",
+        "Method to determine the step size for constraint multipliers (alpha_y) .",
+        "primal",
+        &[
+            ("primal", "use primal step size"),
+            (
+                "bound-mult",
+                "use step size for the bound multipliers (good for LPs)",
+            ),
+            ("min", "use the min of primal and bound multipliers"),
+            ("max", "use the max of primal and bound multipliers"),
+            ("full", "take a full step of size one"),
+            (
+                "min-dual-infeas",
+                "choose step size minimizing new dual infeasibility",
+            ),
+            (
+                "safer-min-dual-infeas",
+                "like \"min_dual_infeas\", but safeguarded by \"min\" and \"max\"",
+            ),
+            (
+                "primal-and-full",
+                "use the primal step size, and full step if delta_x <= alpha_for_y_tol",
+            ),
+            (
+                "dual-and-full",
+                "use the dual step size, and full step if delta_x <= alpha_for_y_tol",
+            ),
+            ("acceptor", "Call LSAcceptor to get step size for y"),
+        ],
+        "",
+    )?;
     r.add_lower_bounded_number_option("alpha_for_y_tol", "Tolerance for switching to full equality multiplier steps.", 0.0, false, 10.0, "This is only relevant if \"alpha_for_y\" is chosen \"primal-and-full\" or \"dual-and-full\". The step size for the equality constraint multipliers is taken to be one if the max-norm of the primal step is less than this tolerance.")?;
     r.add_lower_bounded_number_option("tiny_step_tol", "Tolerance for detecting numerically insignificant steps.", 0.0, false, 10.0 * f64::EPSILON, "If the search direction in the primal variables (x and s) is, in relative terms for each component, less than this value, the algorithm accepts the full step without line search. If this happens repeatedly, the algorithm will terminate with a corresponding exit message. The default value is 10 times machine precision.")?;
     r.add_lower_bounded_number_option("tiny_step_y_tol", "Tolerance for quitting because of numerically insignificant steps.", 0.0, false, 1e-2, "If the search direction in the primal variables (x and s) is, in relative terms for each component, repeatedly less than tiny_step_tol, and the step in the y variables is smaller than this threshold, the algorithm will terminate.")?;
@@ -126,13 +278,70 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.set_registering_category("Line Search");
     r.add_lower_bounded_number_option("theta_max_fact", "Determines upper bound for constraint violation in the filter.", 0.0, true, 1e4, "The algorithmic parameter theta_max is determined as theta_max_fact times the maximum of 1 and the constraint violation at initial point. Any point with a constraint violation larger than theta_max is unacceptable to the filter (see Eqn. (21) in the implementation paper).")?;
     r.add_lower_bounded_number_option("theta_min_fact", "Determines constraint violation threshold in the switching rule.", 0.0, true, 1e-4, "The algorithmic parameter theta_min is determined as theta_min_fact times the maximum of 1 and the constraint violation at initial point. The switching rule treats an iteration as an h-type iteration whenever the current constraint violation is larger than theta_min (see paragraph before Eqn. (19) in the implementation paper).")?;
-    r.add_bounded_number_option("eta_phi", "Relaxation factor in the Armijo condition.", 0.0, true, 0.5, true, 1e-8, "See Eqn. (20) in the implementation paper.")?;
-    r.add_lower_bounded_number_option("delta", "Multiplier for constraint violation in the switching rule.", 0.0, true, 1.0, "See Eqn. (19) in the implementation paper.")?;
-    r.add_lower_bounded_number_option("s_phi", "Exponent for linear barrier function model in the switching rule.", 1.0, true, 2.3, "See Eqn. (19) in the implementation paper.")?;
-    r.add_lower_bounded_number_option("s_theta", "Exponent for current constraint violation in the switching rule.", 1.0, true, 1.1, "See Eqn. (19) in the implementation paper.")?;
-    r.add_bounded_number_option("gamma_phi", "Relaxation factor in the filter margin for the barrier function.", 0.0, true, 1.0, true, 1e-8, "See Eqn. (18a) in the implementation paper.")?;
-    r.add_bounded_number_option("gamma_theta", "Relaxation factor in the filter margin for the constraint violation.", 0.0, true, 1.0, true, 1e-5, "See Eqn. (18b) in the implementation paper.")?;
-    r.add_bounded_number_option("alpha_min_frac", "Safety factor for the minimal step size (before switching to restoration phase).", 0.0, true, 1.0, true, 0.05, "This is gamma_alpha in Eqn. (23) in the implementation paper.")?;
+    r.add_bounded_number_option(
+        "eta_phi",
+        "Relaxation factor in the Armijo condition.",
+        0.0,
+        true,
+        0.5,
+        true,
+        1e-8,
+        "See Eqn. (20) in the implementation paper.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "delta",
+        "Multiplier for constraint violation in the switching rule.",
+        0.0,
+        true,
+        1.0,
+        "See Eqn. (19) in the implementation paper.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "s_phi",
+        "Exponent for linear barrier function model in the switching rule.",
+        1.0,
+        true,
+        2.3,
+        "See Eqn. (19) in the implementation paper.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "s_theta",
+        "Exponent for current constraint violation in the switching rule.",
+        1.0,
+        true,
+        1.1,
+        "See Eqn. (19) in the implementation paper.",
+    )?;
+    r.add_bounded_number_option(
+        "gamma_phi",
+        "Relaxation factor in the filter margin for the barrier function.",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-8,
+        "See Eqn. (18a) in the implementation paper.",
+    )?;
+    r.add_bounded_number_option(
+        "gamma_theta",
+        "Relaxation factor in the filter margin for the constraint violation.",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-5,
+        "See Eqn. (18b) in the implementation paper.",
+    )?;
+    r.add_bounded_number_option(
+        "alpha_min_frac",
+        "Safety factor for the minimal step size (before switching to restoration phase).",
+        0.0,
+        true,
+        1.0,
+        true,
+        0.05,
+        "This is gamma_alpha in Eqn. (23) in the implementation paper.",
+    )?;
     r.add_lower_bounded_integer_option("max_soc", "Maximum number of second order correction trial steps at each iteration.", 0, 4, "Choosing 0 disables the second order corrections. This is p^{max} of Step A-5.9 of Algorithm A in the implementation paper.")?;
     r.add_lower_bounded_number_option("kappa_soc", "Factor in the sufficient reduction rule for second order correction.", 0.0, true, 0.99, "This option determines how much a second order correction step must reduce the constraint violation so that further correction steps are attempted. See Step A-5.9 of Algorithm A in the implementation paper.")?;
     r.add_lower_bounded_number_option("obj_max_inc", "Determines the upper bound on the acceptable increase of barrier objective function.", 1.0, true, 5.0, "Trial points are rejected if they lead to an increase in the barrier objective function by more than obj_max_inc orders of magnitude.")?;
@@ -146,9 +355,32 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
 
     // ===== PenaltyLSAcceptor::RegisterOptions (Algorithm/IpPenaltyLSAcceptor.cpp) =====
     r.set_registering_category("Line Search");
-    r.add_lower_bounded_number_option("nu_init", "Initial value of the penalty parameter.", 0.0, true, 1e-6, "")?;
-    r.add_lower_bounded_number_option("nu_inc", "Increment of the penalty parameter.", 0.0, true, 1e-4, "")?;
-    r.add_bounded_number_option("rho", "Value in penalty parameter update formula.", 0.0, true, 1.0, true, 1e-1, "")?;
+    r.add_lower_bounded_number_option(
+        "nu_init",
+        "Initial value of the penalty parameter.",
+        0.0,
+        true,
+        1e-6,
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "nu_inc",
+        "Increment of the penalty parameter.",
+        0.0,
+        true,
+        1e-4,
+        "",
+    )?;
+    r.add_bounded_number_option(
+        "rho",
+        "Value in penalty parameter update formula.",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-1,
+        "",
+    )?;
 
     // ===== StandardScalingBase::RegisterOptions (Algorithm/IpNLPScaling.cpp) =====
     r.set_registering_category("NLP Scaling");
@@ -170,9 +402,19 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.set_registering_category("Step Calculation");
     r.add_bool_option("mehrotra_algorithm", "Indicates whether to do Mehrotra's predictor-corrector algorithm.", false, "If enabled, line search is disabled and the (unglobalized) adaptive mu strategy is chosen with the \"probing\" oracle, and \"corrector_type=affine\" is used without any safeguards; you should not set any of those options explicitly in addition. Also, unless otherwise specified, the values of \"bound_push\", \"bound_frac\", and \"bound_mult_init_val\" are set more aggressive, and sets \"alpha_for_y=bound_mult\". The Mehrotra's predictor-corrector algorithm works usually very well for LPs and convex QPs.")?;
     r.set_registering_category("Undocumented");
-    r.add_bool_option("sb", "whether to skip printing Ipopt copyright banner", false, "")?;
+    r.add_bool_option(
+        "sb",
+        "whether to skip printing Ipopt copyright banner",
+        false,
+        "",
+    )?;
     r.set_registering_category("Miscellaneous");
-    r.add_bool_option("timing_statistics", "Indicates whether to measure time spend in components of Ipopt and NLP evaluation", false, "The overall algorithm time is unaffected by this option.")?;
+    r.add_bool_option(
+        "timing_statistics",
+        "Indicates whether to measure time spend in components of Ipopt and NLP evaluation",
+        false,
+        "The overall algorithm time is unaffected by this option.",
+    )?;
 
     // ===== IpoptData::RegisterOptions (Algorithm/IpIpoptData.cpp) =====
     r.set_registering_category("");
@@ -182,9 +424,23 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     // ===== IpoptCalculatedQuantities::RegisterOptions (Algorithm/IpIpoptCalculatedQuantities.cpp) =====
     r.set_registering_category("");
     r.set_registering_category("Termination");
-    r.add_lower_bounded_number_option("s_max", "Scaling threshold for the NLP error.", 0.0, true, 100.0, "See paragraph after Eqn. (6) in the implementation paper.")?;
+    r.add_lower_bounded_number_option(
+        "s_max",
+        "Scaling threshold for the NLP error.",
+        0.0,
+        true,
+        100.0,
+        "See paragraph after Eqn. (6) in the implementation paper.",
+    )?;
     r.set_registering_category("NLP");
-    r.add_lower_bounded_number_option("kappa_d", "Weight for linear damping term (to handle one-sided bounds).", 0.0, false, 1e-5, "See Section 3.7 in implementation paper.")?;
+    r.add_lower_bounded_number_option(
+        "kappa_d",
+        "Weight for linear damping term (to handle one-sided bounds).",
+        0.0,
+        false,
+        1e-5,
+        "See Section 3.7 in implementation paper.",
+    )?;
     r.set_registering_category("Line Search");
     r.add_lower_bounded_number_option("slack_move", "Correction size for very small slacks.", 0.0, false, (f64::EPSILON).powf(0.75), "Due to numerical issues or the lack of an interior, the slack variables might become very small. If a slack becomes very small compared to machine precision, the corresponding bound is moved slightly. This parameter determines how large the move should be. Its default value is mach_eps^{3/4}. See also end of Section 3.5 in implementation paper - but actual implementation might be somewhat different.")?;
     r.add_string_option("constraint_violation_norm_type", "Norm to be used for the constraint violation in the line search.", "1-norm", &[("1-norm", "use the 1-norm"), ("2-norm", "use the 2-norm"), ("max-norm", "use the infinity norm")], "Determines which norm should be used when the algorithm computes the constraint violation in the line search.")?;
@@ -192,7 +448,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     // ===== LimMemQuasiNewtonUpdater::RegisterOptions (Algorithm/IpLimMemQuasiNewtonUpdater.cpp) =====
     r.set_registering_category("Hessian Approximation");
     r.add_lower_bounded_integer_option("limited_memory_max_history", "Maximum size of the history for the limited quasi-Newton Hessian approximation.", 0, 6, "This option determines the number of most recent iterations that are taken into account for the limited-memory quasi-Newton approximation.")?;
-    r.add_string_option("limited_memory_update_type", "Quasi-Newton update formula for the limited memory quasi-Newton approximation.", "bfgs", &[("bfgs", "BFGS update (with skipping)"), ("sr1", "SR1 (not working well)")], "")?;
+    r.add_string_option(
+        "limited_memory_update_type",
+        "Quasi-Newton update formula for the limited memory quasi-Newton approximation.",
+        "bfgs",
+        &[
+            ("bfgs", "BFGS update (with skipping)"),
+            ("sr1", "SR1 (not working well)"),
+        ],
+        "",
+    )?;
     r.add_string_option("limited_memory_initialization", "Initialization strategy for the limited memory quasi-Newton approximation.", "scalar1", &[("scalar1", "sigma = s^Ty/s^Ts"), ("scalar2", "sigma = y^Ty/s^Ty"), ("scalar3", "arithmetic average of scalar1 and scalar2"), ("scalar4", "geometric average of scalar1 and scalar2"), ("constant", "sigma = limited_memory_init_val")], "Determines how the diagonal Matrix B_0 as the first term in the limited memory approximation should be computed.")?;
     r.add_lower_bounded_number_option("limited_memory_init_val", "Value for B0 in low-rank update.", 0.0, true, 1.0, "The starting matrix in the low rank update, B0, is chosen to be this multiple of the identity in the first iteration (when no updates have been performed yet), and is constantly chosen as this value, if \"limited_memory_initialization\" is \"constant\".")?;
     r.add_lower_bounded_number_option("limited_memory_init_val_max", "Upper bound on value for B0 in low-rank update.", 0.0, true, 1e8, "The starting matrix in the low rank update, B0, is chosen to be this multiple of the identity in the first iteration (when no updates have been performed yet), and is constantly chosen as this value, if \"limited_memory_initialization\" is \"constant\".")?;
@@ -211,7 +476,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
 
     // ===== OptimalityErrorConvergenceCheck::RegisterOptions (Algorithm/IpOptErrorConvCheck.cpp) =====
     r.set_registering_category("Termination");
-    r.add_lower_bounded_integer_option("max_iter", "Maximum number of iterations.", 0, 3000, "The algorithm terminates with a message if the number of iterations exceeded this number.")?;
+    r.add_lower_bounded_integer_option(
+        "max_iter",
+        "Maximum number of iterations.",
+        0,
+        3000,
+        "The algorithm terminates with a message if the number of iterations exceeded this number.",
+    )?;
     r.add_lower_bounded_number_option("max_wall_time", "Maximum number of walltime clock seconds.", 0.0, true, 1e20, "A limit on walltime clock seconds that Ipopt can use to solve one problem. If during the convergence check this limit is exceeded, Ipopt will terminate with a corresponding message.")?;
     r.add_lower_bounded_number_option("max_cpu_time", "Maximum number of CPU seconds.", 0.0, true, 1e20, "A limit on CPU seconds that Ipopt can use to solve one problem. If during the convergence check this limit is exceeded, Ipopt will terminate with a corresponding message.")?;
     r.add_lower_bounded_number_option("dual_inf_tol", "Desired threshold for the dual infeasibility.", 0.0, true, 1.0, "Absolute tolerance on the dual infeasibility. Successful termination requires that the max-norm of the (unscaled) dual infeasibility is less than this threshold.")?;
@@ -249,7 +520,22 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_bool_option("hessian_constant", "Indicates whether to assume the problem is a QP (quadratic objective, linear constraints)", false, "Activating this option will cause Ipopt to ask for the Hessian of the Lagrangian function only once from the NLP and reuse this information later.")?;
     r.set_registering_category("Hessian Approximation");
     r.add_string_option("hessian_approximation", "Indicates what Hessian information is to be used.", "exact", &[("exact", "Use second derivatives provided by the NLP."), ("limited-memory", "Perform a limited-memory quasi-Newton approximation")], "This determines which kind of information for the Hessian of the Lagrangian function is used by the algorithm.")?;
-    r.add_string_option("hessian_approximation_space", "Indicates in which subspace the Hessian information is to be approximated.", "nonlinear-variables", &[("nonlinear-variables", "only in space of nonlinear variables."), ("all-variables", "in space of all variables (without slacks)")], "")?;
+    r.add_string_option(
+        "hessian_approximation_space",
+        "Indicates in which subspace the Hessian information is to be approximated.",
+        "nonlinear-variables",
+        &[
+            (
+                "nonlinear-variables",
+                "only in space of nonlinear variables.",
+            ),
+            (
+                "all-variables",
+                "in space of all variables (without slacks)",
+            ),
+        ],
+        "",
+    )?;
 
     // ===== OrigIterationOutput::RegisterOptions (Algorithm/IpOrigIterationOutput.cpp) =====
     r.set_registering_category("Output");
@@ -283,15 +569,40 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_lower_bounded_number_option("perturb_inc_fact", "Increase factor for x-s perturbation.", 1.0, true, 8.0, "The factor by which the perturbation is increased when a trial value was not sufficient - this value is used for the computation of all perturbations except for the first. This is kappa_w^+ in the implementation paper.")?;
     r.add_bounded_number_option("perturb_dec_fact", "Decrease factor for x-s perturbation.", 0.0, true, 1.0, true, 1.0 / 3.0, "The factor by which the perturbation is decreased when a trial value is deduced from the size of the most recent successful perturbation. This is kappa_w^- in the implementation paper.")?;
     r.add_lower_bounded_number_option("first_hessian_perturbation", "Size of first x-s perturbation tried.", 0.0, true, 1e-4, "The first value tried for the x-s perturbation in the inertia correction scheme. This is delta_0 in the implementation paper.")?;
-    r.add_lower_bounded_number_option("jacobian_regularization_value", "Size of the regularization for rank-deficient constraint Jacobians.", 0.0, false, 1e-8, "This is bar delta_c in the implementation paper.")?;
-    r.add_lower_bounded_number_option("jacobian_regularization_exponent", "Exponent for mu in the regularization for rank-deficient constraint Jacobians.", 0.0, false, 0.25, "This is kappa_c in the implementation paper.")?;
+    r.add_lower_bounded_number_option(
+        "jacobian_regularization_value",
+        "Size of the regularization for rank-deficient constraint Jacobians.",
+        0.0,
+        false,
+        1e-8,
+        "This is bar delta_c in the implementation paper.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "jacobian_regularization_exponent",
+        "Exponent for mu in the regularization for rank-deficient constraint Jacobians.",
+        0.0,
+        false,
+        0.25,
+        "This is kappa_c in the implementation paper.",
+    )?;
     r.add_bool_option("perturb_always_cd", "Active permanent perturbation of constraint linearization.", false, "Enabling this option leads to using the delta_c and delta_d perturbation for the computation of every search direction. Usually, it is only used when the iteration matrix is singular.")?;
 
     // ===== QualityFunctionMuOracle::RegisterOptions (Algorithm/IpQualityFunctionMuOracle.cpp) =====
     r.set_registering_category("Barrier Parameter Update");
     r.add_lower_bounded_number_option("sigma_max", "Maximum value of the centering parameter.", 0.0, true, 1e2, "This is the upper bound for the centering parameter chosen by the quality function based barrier parameter update. Only used if option \"mu_oracle\" is set to \"quality-function\".")?;
     r.add_lower_bounded_number_option("sigma_min", "Minimum value of the centering parameter.", 0.0, false, 1e-6, "This is the lower bound for the centering parameter chosen by the quality function based barrier parameter update. Only used if option \"mu_oracle\" is set to \"quality-function\".")?;
-    r.add_string_option("quality_function_norm_type", "Norm used for components of the quality function.", "2-norm-squared", &[("1-norm", "use the 1-norm (abs sum)"), ("2-norm-squared", "use the 2-norm squared (sum of squares)"), ("max-norm", "use the infinity norm (max)"), ("2-norm", "use 2-norm")], "Only used if option \"mu_oracle\" is set to \"quality-function\".")?;
+    r.add_string_option(
+        "quality_function_norm_type",
+        "Norm used for components of the quality function.",
+        "2-norm-squared",
+        &[
+            ("1-norm", "use the 1-norm (abs sum)"),
+            ("2-norm-squared", "use the 2-norm squared (sum of squares)"),
+            ("max-norm", "use the infinity norm (max)"),
+            ("2-norm", "use 2-norm"),
+        ],
+        "Only used if option \"mu_oracle\" is set to \"quality-function\".",
+    )?;
     r.add_string_option("quality_function_centrality", "The penalty term for centrality that is included in quality function.", "none", &[("none", "no penalty term is added"), ("log", "complementarity * the log of the centrality measure"), ("reciprocal", "complementarity * the reciprocal of the centrality measure"), ("cubed-reciprocal", "complementarity * the reciprocal of the centrality measure cubed")], "This determines whether a term is added to the quality function to penalize deviation from centrality with respect to complementarity. The complementarity measure here is the xi in the Loqo update rule. Only used if option \"mu_oracle\" is set to \"quality-function\".")?;
     r.add_string_option("quality_function_balancing_term", "The balancing term included in the quality function for centrality.", "none", &[("none", "no balancing term is added"), ("cubic", "Max(0,Max(dual_inf,primal_inf)-compl)^3")], "This determines whether a term is added to the quality function that penalizes situations where the complementarity is much smaller than dual and primal infeasibilities. Only used if option \"mu_oracle\" is set to \"quality-function\".")?;
     r.add_lower_bounded_integer_option("quality_function_max_section_steps", "Maximum number of search steps during direct search procedure determining the optimal centering parameter.", 0, 8, "The golden section search is performed for the quality function based mu oracle. Only used if option \"mu_oracle\" is set to \"quality-function\".")?;
@@ -306,7 +617,14 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     // ===== RestoIpoptNLP::RegisterOptions (Algorithm/IpRestoIpoptNLP.cpp) =====
     r.set_registering_category("Restoration Phase");
     r.add_bool_option("evaluate_orig_obj_at_resto_trial", "Determines if the original objective function should be evaluated at restoration phase trial points.", true, "Enabling this option makes the restoration phase algorithm evaluate the objective function of the original problem at every trial point encountered during the restoration phase, even if this value is not required.  In this way, it is guaranteed that the original objective function can be evaluated without error at all accepted iterates; otherwise the algorithm might fail at a point where the restoration phase accepts an iterate that is good for the restoration phase problem, but not the original problem. On the other hand, if the evaluation of the original objective is expensive, this might be costly.")?;
-    r.add_lower_bounded_number_option("resto_penalty_parameter", "Penalty parameter in the restoration phase objective function.", 0.0, true, 1e3, "This is the parameter rho in equation (31a) in the Ipopt implementation paper.")?;
+    r.add_lower_bounded_number_option(
+        "resto_penalty_parameter",
+        "Penalty parameter in the restoration phase objective function.",
+        0.0,
+        true,
+        1e3,
+        "This is the parameter rho in equation (31a) in the Ipopt implementation paper.",
+    )?;
     r.add_lower_bounded_number_option("resto_proximity_weight", "Weighting factor for the proximity term in restoration phase objective.", 0.0, false, 1.0, "This determines how the parameter zeta in equation (29a) in the implementation paper is computed. zeta here is resto_proximity_weight*sqrt(mu), where mu is the current barrier parameter.")?;
 
     // ===== MinC_1NrmRestorationPhase::RegisterOptions (Algorithm/IpRestoMinC_1Nrm.cpp) =====
@@ -317,33 +635,126 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
 
     // ===== WarmStartIterateInitializer::RegisterOptions (Algorithm/IpWarmStartIterateInitializer.cpp) =====
     r.set_registering_category("Warm Start");
-    r.add_lower_bounded_number_option("warm_start_bound_push", "same as bound_push for the regular initializer", 0.0, true, 1e-3, "")?;
-    r.add_bounded_number_option("warm_start_bound_frac", "same as bound_frac for the regular initializer", 0.0, true, 0.5, false, 1e-3, "")?;
-    r.add_lower_bounded_number_option("warm_start_slack_bound_push", "same as slack_bound_push for the regular initializer", 0.0, true, 1e-3, "")?;
-    r.add_bounded_number_option("warm_start_slack_bound_frac", "same as slack_bound_frac for the regular initializer", 0.0, true, 0.5, false, 1e-3, "")?;
-    r.add_lower_bounded_number_option("warm_start_mult_bound_push", "same as mult_bound_push for the regular initializer", 0.0, true, 1e-3, "")?;
-    r.add_number_option("warm_start_mult_init_max", "Maximum initial value for the equality multipliers.", 1e6, "")?;
-    r.add_string_option("warm_start_entire_iterate", "Tells algorithm whether to use the GetWarmStartIterate method in the NLP.", "no", &[("no", "call GetStartingPoint in the NLP"), ("yes", "call GetWarmStartIterate in the NLP")], "")?;
+    r.add_lower_bounded_number_option(
+        "warm_start_bound_push",
+        "same as bound_push for the regular initializer",
+        0.0,
+        true,
+        1e-3,
+        "",
+    )?;
+    r.add_bounded_number_option(
+        "warm_start_bound_frac",
+        "same as bound_frac for the regular initializer",
+        0.0,
+        true,
+        0.5,
+        false,
+        1e-3,
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "warm_start_slack_bound_push",
+        "same as slack_bound_push for the regular initializer",
+        0.0,
+        true,
+        1e-3,
+        "",
+    )?;
+    r.add_bounded_number_option(
+        "warm_start_slack_bound_frac",
+        "same as slack_bound_frac for the regular initializer",
+        0.0,
+        true,
+        0.5,
+        false,
+        1e-3,
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "warm_start_mult_bound_push",
+        "same as mult_bound_push for the regular initializer",
+        0.0,
+        true,
+        1e-3,
+        "",
+    )?;
+    r.add_number_option(
+        "warm_start_mult_init_max",
+        "Maximum initial value for the equality multipliers.",
+        1e6,
+        "",
+    )?;
+    r.add_string_option(
+        "warm_start_entire_iterate",
+        "Tells algorithm whether to use the GetWarmStartIterate method in the NLP.",
+        "no",
+        &[
+            ("no", "call GetStartingPoint in the NLP"),
+            ("yes", "call GetWarmStartIterate in the NLP"),
+        ],
+        "",
+    )?;
     r.add_number_option("warm_start_target_mu", "", 0.0, "Experimental!")?;
 
     // ===== CGSearchDirCalculator::RegisterOptions (contrib/CGPenalty/IpCGSearchDirCalc.cpp) =====
     r.set_registering_category("CG Penalty");
-    r.add_lower_bounded_number_option("penalty_init_max", "Maximal value for the initial penalty parameter (for Chen-Goldfarb line search).", 0.0, true, 1e5, "")?;
+    r.add_lower_bounded_number_option(
+        "penalty_init_max",
+        "Maximal value for the initial penalty parameter (for Chen-Goldfarb line search).",
+        0.0,
+        true,
+        1e5,
+        "",
+    )?;
     r.add_lower_bounded_number_option("penalty_init_min", "Minimal value for the initial penalty parameter for line search (for Chen-Goldfarb line search).", 0.0, true, 1.0, "")?;
-    r.add_lower_bounded_number_option("penalty_max", "Maximal value for the penalty parameter (for Chen-Goldfarb line search).", 0.0, true, 1e30, "")?;
-    r.add_lower_bounded_number_option("pen_des_fact", "a parameter used in penalty parameter computation (for Chen-Goldfarb line search).", 0.0, true, 2e-1, "")?;
+    r.add_lower_bounded_number_option(
+        "penalty_max",
+        "Maximal value for the penalty parameter (for Chen-Goldfarb line search).",
+        0.0,
+        true,
+        1e30,
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "pen_des_fact",
+        "a parameter used in penalty parameter computation (for Chen-Goldfarb line search).",
+        0.0,
+        true,
+        2e-1,
+        "",
+    )?;
     r.add_lower_bounded_number_option("kappa_x_dis", "a parameter used to check if the fast direction can be used as the line search direction (for Chen-Goldfarb line search).", 0.0, true, 1e2, "")?;
     r.add_lower_bounded_number_option("kappa_y_dis", "a parameter used to check if the fast direction can be used as the line search direction (for Chen-Goldfarb line search).", 0.0, true, 1e4, "")?;
     r.add_lower_bounded_number_option("vartheta", "a parameter used to check if the fast direction can be used as the line search direction (for Chen-Goldfarb line search).", 0.0, true, 0.5, "")?;
     r.add_lower_bounded_number_option("delta_y_max", "a parameter used to check if the fast direction can be used as the line search direction (for Chen-Goldfarb line search).", 0.0, true, 1e12, "")?;
     r.add_lower_bounded_number_option("fast_des_fact", "a parameter used to check if the fast direction can be used as the line search direction (for Chen-Goldfarb line search).", 0.0, true, 1e-1, "")?;
     r.add_lower_bounded_number_option("pen_init_fac", "a parameter used to choose initial penalty parameters when the regularized Newton method is used.", 0.0, true, 5e1, "")?;
-    r.add_bool_option("never_use_fact_cgpen_direction", "Toggle to switch off the fast Chen-Goldfarb direction", false, "")?;
+    r.add_bool_option(
+        "never_use_fact_cgpen_direction",
+        "Toggle to switch off the fast Chen-Goldfarb direction",
+        false,
+        "",
+    )?;
 
     // ===== CGPenaltyLSAcceptor::RegisterOptions (contrib/CGPenalty/IpCGPenaltyLSAcceptor.cpp) =====
     r.set_registering_category("CG Penalty");
-    r.add_bool_option("never_use_piecewise_penalty_ls", "Toggle to switch off the piecewise penalty method", false, "")?;
-    r.add_bounded_number_option("eta_penalty", "Relaxation factor in the Armijo condition for the penalty function.", 0.0, true, 0.5, true, 1e-8, "")?;
+    r.add_bool_option(
+        "never_use_piecewise_penalty_ls",
+        "Toggle to switch off the piecewise penalty method",
+        false,
+        "",
+    )?;
+    r.add_bounded_number_option(
+        "eta_penalty",
+        "Relaxation factor in the Armijo condition for the penalty function.",
+        0.0,
+        true,
+        0.5,
+        true,
+        1e-8,
+        "",
+    )?;
     r.add_lower_bounded_number_option("penalty_update_infeasibility_tol", "Threshold for infeasibility in penalty parameter update test.", 0.0, true, 1e-9, "If the new constraint violation is smaller than this tolerance, the penalty parameter is not increased.")?;
     r.add_lower_bounded_number_option("eta_min", "", 0.0, true, 1e1, "")?;
     r.add_lower_bounded_number_option("pen_theta_max_fact", "Determines upper bound for constraint violation in the filter.", 0.0, true, 1e4, "The algorithmic parameter theta_max is determined as theta_max_fact times the maximum of 1 and the constraint violation at initial point. Any point with a constraint violation larger than theta_max is unacceptable to the filter (see Eqn. (21) in implementation paper).")?;
@@ -358,8 +769,22 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_lower_bounded_number_option("piecewisepenalty_gamma_infeasi", "", 0.0, true, 1e-13, "")?;
     r.add_lower_bounded_number_option("min_alpha_primal", "", 0.0, true, 1e-13, "")?;
     r.add_lower_bounded_number_option("theta_min", "", 0.0, true, 1e-6, "")?;
-    r.add_lower_bounded_number_option("mult_diverg_feasibility_tol", "tolerance for deciding if the multipliers are diverging", 0.0, true, 1e-7, "")?;
-    r.add_lower_bounded_number_option("mult_diverg_y_tol", "tolerance for deciding if the multipliers are diverging", 0.0, true, 1e8, "")?;
+    r.add_lower_bounded_number_option(
+        "mult_diverg_feasibility_tol",
+        "tolerance for deciding if the multipliers are diverging",
+        0.0,
+        true,
+        1e-7,
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "mult_diverg_y_tol",
+        "tolerance for deciding if the multipliers are diverging",
+        0.0,
+        true,
+        1e8,
+        "",
+    )?;
 
     // ===== TSymLinearSolver::RegisterOptions (Algorithm/LinearSolvers/IpTSymLinearSolver.cpp) =====
     r.set_registering_category("Linear Solver");
@@ -368,7 +793,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     // ===== Ma27TSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa27TSolverInterface.cpp) =====
     r.set_registering_category("MA27 Linear Solver");
     r.add_bounded_integer_option("ma27_print_level", "Debug printing level for the linear solver MA27", 0, 4, 0, "0: no printing; 1: Error messages only; 2: Error and warning messages; 3: Error and warning messages and terse monitoring; 4: All information.")?;
-    r.add_bounded_number_option("ma27_pivtol", "Pivot tolerance for the linear solver MA27.", 0.0, true, 1.0, true, 1e-8, "A smaller number pivots for sparsity, a larger number pivots for stability.")?;
+    r.add_bounded_number_option(
+        "ma27_pivtol",
+        "Pivot tolerance for the linear solver MA27.",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-8,
+        "A smaller number pivots for sparsity, a larger number pivots for stability.",
+    )?;
     r.add_bounded_number_option("ma27_pivtolmax", "Maximum pivot tolerance for the linear solver MA27.", 0.0, true, 1.0, true, 1e-4, "Ipopt may increase pivtol as high as ma27_pivtolmax to get a more accurate solution to the linear system.")?;
     r.add_lower_bounded_number_option("ma27_liw_init_factor", "Integer workspace memory for MA27.", 1.0, false, 5.0, "The initial integer workspace memory = liw_init_factor * memory required by unfactored system. Ipopt will increase the workspace size by ma27_meminc_factor if required.")?;
     r.add_lower_bounded_number_option("ma27_la_init_factor", "Real workspace memory for MA27.", 1.0, false, 5.0, "The initial real workspace memory = la_init_factor * memory required by unfactored system. Ipopt will increase the workspace size by ma27_meminc_factor if required.")?;
@@ -379,13 +813,41 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     // ===== Ma57TSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa57TSolverInterface.cpp) =====
     r.set_registering_category("MA57 Linear Solver");
     r.add_lower_bounded_integer_option("ma57_print_level", "Debug printing level for the linear solver MA57", 0, 0, "0: no printing; 1: Error messages only; 2: Error and warning messages; 3: Error and warning messages and terse monitoring; >=4: All information.")?;
-    r.add_bounded_number_option("ma57_pivtol", "Pivot tolerance for the linear solver MA57.", 0.0, true, 1.0, true, 1e-8, "A smaller number pivots for sparsity, a larger number pivots for stability.")?;
+    r.add_bounded_number_option(
+        "ma57_pivtol",
+        "Pivot tolerance for the linear solver MA57.",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-8,
+        "A smaller number pivots for sparsity, a larger number pivots for stability.",
+    )?;
     r.add_bounded_number_option("ma57_pivtolmax", "Maximum pivot tolerance for the linear solver MA57.", 0.0, true, 1.0, true, 1e-4, "Ipopt may increase pivtol as high as ma57_pivtolmax to get a more accurate solution to the linear system.")?;
     r.add_lower_bounded_number_option("ma57_pre_alloc", "Safety factor for work space memory allocation for the linear solver MA57.", 1.0, false, 1.05, "If 1 is chosen, the suggested amount of work space is used. However, choosing a larger number might avoid reallocation if the suggest values do not suffice.")?;
-    r.add_bounded_integer_option("ma57_pivot_order", "Controls pivot order in MA57", 0, 5, 5, "This is ICNTL(6) in MA57.")?;
+    r.add_bounded_integer_option(
+        "ma57_pivot_order",
+        "Controls pivot order in MA57",
+        0,
+        5,
+        5,
+        "This is ICNTL(6) in MA57.",
+    )?;
     r.add_bool_option("ma57_automatic_scaling", "Controls whether to enable automatic scaling in MA57", false, "For higher reliability of the MA57 solver, you may want to set this option to yes. This is ICNTL(15) in MA57.")?;
-    r.add_lower_bounded_integer_option("ma57_block_size", "Controls block size used by Level 3 BLAS in MA57BD", 1, 16, "This is ICNTL(11) in MA57.")?;
-    r.add_lower_bounded_integer_option("ma57_node_amalgamation", "Node amalgamation parameter", 1, 16, "This is ICNTL(12) in MA57.")?;
+    r.add_lower_bounded_integer_option(
+        "ma57_block_size",
+        "Controls block size used by Level 3 BLAS in MA57BD",
+        1,
+        16,
+        "This is ICNTL(11) in MA57.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "ma57_node_amalgamation",
+        "Node amalgamation parameter",
+        1,
+        16,
+        "This is ICNTL(12) in MA57.",
+    )?;
     r.add_bounded_integer_option("ma57_small_pivot_flag", "Handling of small pivots", 0, 1, 0, "If set to 1, then when small entries defined by CNTL(2) are detected they are removed and the corresponding pivots placed at the end of the factorization. This can be particularly efficient if the matrix is highly rank deficient. This is ICNTL(16) in MA57.")?;
 
     // ===== FeralSolverInterface::RegisterOptions (pounce extension; not in upstream Ipopt) =====
@@ -406,120 +868,647 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     // ===== Ma77SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa77SolverInterface.cpp) =====
     r.set_registering_category("MA77 Linear Solver");
     r.add_integer_option("ma77_print_level", "Debug printing level for the linear solver MA77", -1, "<0: no printing; 0: Error and warning messages only; 1: Limited diagnostic printing; >1 Additional diagnostic printing.")?;
-    r.add_lower_bounded_integer_option("ma77_buffer_lpage", "Number of scalars per MA77 in-core buffer page in the out-of-core solver MA77", 1, 4096, "Must be at most ma77_file_size.")?;
-    r.add_lower_bounded_integer_option("ma77_buffer_npage", "Number of pages that make up MA77 buffer", 1, 1600, "Number of pages of size buffer_lpage that exist in-core for the out-of-core solver MA77.")?;
+    r.add_lower_bounded_integer_option(
+        "ma77_buffer_lpage",
+        "Number of scalars per MA77 in-core buffer page in the out-of-core solver MA77",
+        1,
+        4096,
+        "Must be at most ma77_file_size.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "ma77_buffer_npage",
+        "Number of pages that make up MA77 buffer",
+        1,
+        1600,
+        "Number of pages of size buffer_lpage that exist in-core for the out-of-core solver MA77.",
+    )?;
     r.add_lower_bounded_integer_option("ma77_file_size", "Target size of each temporary file for MA77, scalars per type", 1, 2097152, "MA77 uses many temporary files, this option controls the size of each one. It is measured in the number of entries (int or double), NOT bytes.")?;
     r.add_lower_bounded_integer_option("ma77_maxstore", "Maximum storage size for MA77 in-core mode", 0, 0, "If greater than zero, the maximum size of factors stored in core before out-of-core mode is invoked.")?;
-    r.add_lower_bounded_integer_option("ma77_nemin", "Node Amalgamation parameter", 1, 8, "Two nodes in elimination tree are merged if result has fewer than ma77_nemin variables.")?;
-    r.add_lower_bounded_number_option("ma77_small", "Zero Pivot Threshold", 0.0, false, 1e-20, "Any pivot less than ma77_small is treated as zero.")?;
+    r.add_lower_bounded_integer_option(
+        "ma77_nemin",
+        "Node Amalgamation parameter",
+        1,
+        8,
+        "Two nodes in elimination tree are merged if result has fewer than ma77_nemin variables.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ma77_small",
+        "Zero Pivot Threshold",
+        0.0,
+        false,
+        1e-20,
+        "Any pivot less than ma77_small is treated as zero.",
+    )?;
     r.add_lower_bounded_number_option("ma77_static", "Static Pivoting Threshold", 0.0, false, 0.0, "See MA77 documentation. Either ma77_static=0.0 or ma77_static>ma77_small. ma77_static=0.0 disables static pivoting.")?;
-    r.add_bounded_number_option("ma77_u", "Pivoting Threshold", 0.0, false, 0.5, false, 1e-8, "See MA77 documentation.")?;
-    r.add_bounded_number_option("ma77_umax", "Maximum Pivoting Threshold", 0.0, false, 0.5, false, 1e-4, "Maximum value to which u will be increased to improve quality.")?;
-    r.add_string_option("ma77_order", "Controls type of ordering used by MA77", "metis", &[("amd", "Use the HSL_MC68 approximate minimum degree algorithm"), ("metis", "Use the MeTiS nested dissection algorithm (if available)")], "")?;
+    r.add_bounded_number_option(
+        "ma77_u",
+        "Pivoting Threshold",
+        0.0,
+        false,
+        0.5,
+        false,
+        1e-8,
+        "See MA77 documentation.",
+    )?;
+    r.add_bounded_number_option(
+        "ma77_umax",
+        "Maximum Pivoting Threshold",
+        0.0,
+        false,
+        0.5,
+        false,
+        1e-4,
+        "Maximum value to which u will be increased to improve quality.",
+    )?;
+    r.add_string_option(
+        "ma77_order",
+        "Controls type of ordering used by MA77",
+        "metis",
+        &[
+            (
+                "amd",
+                "Use the HSL_MC68 approximate minimum degree algorithm",
+            ),
+            (
+                "metis",
+                "Use the MeTiS nested dissection algorithm (if available)",
+            ),
+        ],
+        "",
+    )?;
 
     // ===== Ma86SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa86SolverInterface.cpp) =====
     r.set_registering_category("MA86 Linear Solver");
     r.add_integer_option("ma86_print_level", "Debug printing level", -1, "<0: no printing; 0: Error and warning messages only; 1: Limited diagnostic printing; >1 Additional diagnostic printing.")?;
-    r.add_lower_bounded_integer_option("ma86_nemin", "Node Amalgamation parameter", 1, 32, "Two nodes in elimination tree are merged if result has fewer than ma86_nemin variables.")?;
-    r.add_lower_bounded_number_option("ma86_small", "Zero Pivot Threshold", 0.0, false, 1e-20, "Any pivot less than ma86_small is treated as zero.")?;
+    r.add_lower_bounded_integer_option(
+        "ma86_nemin",
+        "Node Amalgamation parameter",
+        1,
+        32,
+        "Two nodes in elimination tree are merged if result has fewer than ma86_nemin variables.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ma86_small",
+        "Zero Pivot Threshold",
+        0.0,
+        false,
+        1e-20,
+        "Any pivot less than ma86_small is treated as zero.",
+    )?;
     r.add_lower_bounded_number_option("ma86_static", "Static Pivoting Threshold", 0.0, false, 0.0, "See MA86 documentation. Either ma86_static=0.0 or ma86_static>ma86_small. ma86_static=0.0 disables static pivoting.")?;
-    r.add_bounded_number_option("ma86_u", "Pivoting Threshold", 0.0, false, 0.5, false, 1e-8, "See MA86 documentation.")?;
-    r.add_bounded_number_option("ma86_umax", "Maximum Pivoting Threshold", 0.0, false, 0.5, false, 1e-4, "Maximum value to which u will be increased to improve quality.")?;
-    r.add_string_option("ma86_scaling", "Controls scaling of matrix", "mc64", &[("none", "Do not scale the linear system matrix"), ("mc64", "Scale linear system matrix using MC64"), ("mc77", "Scale linear system matrix using MC77 [1,3,0]")], "")?;
-    r.add_string_option("ma86_order", "Controls type of ordering", "auto", &[("auto", "Try both AMD and MeTiS, pick best"), ("amd", "Use the HSL_MC68 approximate minimum degree algorithm"), ("metis", "Use the MeTiS nested dissection algorithm (if available)")], "")?;
+    r.add_bounded_number_option(
+        "ma86_u",
+        "Pivoting Threshold",
+        0.0,
+        false,
+        0.5,
+        false,
+        1e-8,
+        "See MA86 documentation.",
+    )?;
+    r.add_bounded_number_option(
+        "ma86_umax",
+        "Maximum Pivoting Threshold",
+        0.0,
+        false,
+        0.5,
+        false,
+        1e-4,
+        "Maximum value to which u will be increased to improve quality.",
+    )?;
+    r.add_string_option(
+        "ma86_scaling",
+        "Controls scaling of matrix",
+        "mc64",
+        &[
+            ("none", "Do not scale the linear system matrix"),
+            ("mc64", "Scale linear system matrix using MC64"),
+            ("mc77", "Scale linear system matrix using MC77 [1,3,0]"),
+        ],
+        "",
+    )?;
+    r.add_string_option(
+        "ma86_order",
+        "Controls type of ordering",
+        "auto",
+        &[
+            ("auto", "Try both AMD and MeTiS, pick best"),
+            (
+                "amd",
+                "Use the HSL_MC68 approximate minimum degree algorithm",
+            ),
+            (
+                "metis",
+                "Use the MeTiS nested dissection algorithm (if available)",
+            ),
+        ],
+        "",
+    )?;
 
     // ===== Ma97SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa97SolverInterface.cpp) =====
     r.set_registering_category("MA97 Linear Solver");
     r.add_integer_option("ma97_print_level", "Debug printing level", -1, "<0: no printing; 0: Error and warning messages only; 1: Limited diagnostic printing; >1 Additional diagnostic printing.")?;
-    r.add_lower_bounded_integer_option("ma97_nemin", "Node Amalgamation parameter", 1, 8, "Two nodes in elimination tree are merged if result has fewer than ma97_nemin variables.")?;
-    r.add_lower_bounded_number_option("ma97_small", "Zero Pivot Threshold", 0.0, false, 1e-20, "Any pivot less than ma97_small is treated as zero.")?;
-    r.add_bounded_number_option("ma97_u", "Pivoting Threshold", 0.0, false, 0.5, false, 1e-8, "See MA97 documentation.")?;
-    r.add_bounded_number_option("ma97_umax", "Maximum Pivoting Threshold", 0.0, false, 0.5, false, 1e-4, "See MA97 documentation.")?;
+    r.add_lower_bounded_integer_option(
+        "ma97_nemin",
+        "Node Amalgamation parameter",
+        1,
+        8,
+        "Two nodes in elimination tree are merged if result has fewer than ma97_nemin variables.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ma97_small",
+        "Zero Pivot Threshold",
+        0.0,
+        false,
+        1e-20,
+        "Any pivot less than ma97_small is treated as zero.",
+    )?;
+    r.add_bounded_number_option(
+        "ma97_u",
+        "Pivoting Threshold",
+        0.0,
+        false,
+        0.5,
+        false,
+        1e-8,
+        "See MA97 documentation.",
+    )?;
+    r.add_bounded_number_option(
+        "ma97_umax",
+        "Maximum Pivoting Threshold",
+        0.0,
+        false,
+        0.5,
+        false,
+        1e-4,
+        "See MA97 documentation.",
+    )?;
     r.add_string_option("ma97_scaling", "Specifies strategy for scaling", "dynamic", &[("none", "Do not scale the linear system matrix"), ("mc30", "Scale all linear system matrices using MC30"), ("mc64", "Scale all linear system matrices using MC64"), ("mc77", "Scale all linear system matrices using MC77 [1,3,0]"), ("dynamic", "Dynamically select scaling according to rules specified by ma97_scalingX and ma97_switchX options.")], "")?;
     r.add_string_option("ma97_scaling1", "First scaling.", "mc64", &[("none", "No scaling"), ("mc30", "Scale linear system matrix using MC30"), ("mc64", "Scale linear system matrix using MC64"), ("mc77", "Scale linear system matrix using MC77 [1,3,0]")], "If ma97_scaling=dynamic, this scaling is used according to the trigger ma97_switch1. If ma97_switch2 is triggered it is disabled.")?;
     r.add_string_option("ma97_switch1", "First switch, determine when ma97_scaling1 is enabled.", "od_hd_reuse", &[("never", "Scaling is never enabled."), ("at_start", "Scaling to be used from the very start."), ("at_start_reuse", "Scaling to be used on first iteration, then reused thereafter."), ("on_demand", "Scaling to be used after Ipopt request improved solution (i.e. iterative refinement has failed)."), ("on_demand_reuse", "As on_demand, but reuse scaling from previous itr"), ("high_delay", "Scaling to be used after more than 0.05*n delays are present"), ("high_delay_reuse", "Scaling to be used only when previous itr created more that 0.05*n additional delays, otherwise reuse scaling from previous itr"), ("od_hd", "Combination of on_demand and high_delay"), ("od_hd_reuse", "Combination of on_demand_reuse and high_delay_reuse")], "If ma97_scaling=dynamic, ma97_scaling1 is enabled according to this condition. If ma97_switch2 occurs this option is henceforth ignored.")?;
     r.add_string_option("ma97_scaling2", "Second scaling.", "mc64", &[("none", "No scaling"), ("mc30", "Scale linear system matrix using MC30"), ("mc64", "Scale linear system matrix using MC64"), ("mc77", "Scale linear system matrix using MC77 [1,3,0]")], "If ma97_scaling=dynamic, this scaling is used according to the trigger ma97_switch2. If ma97_switch3 is triggered it is disabled.")?;
     r.add_string_option("ma97_switch2", "Second switch, determine when ma97_scaling2 is enabled.", "never", &[("never", "Scaling is never enabled."), ("at_start", "Scaling to be used from the very start."), ("at_start_reuse", "Scaling to be used on first iteration, then reused thereafter."), ("on_demand", "Scaling to be used after Ipopt request improved solution (i.e. iterative refinement has failed)."), ("on_demand_reuse", "As on_demand, but reuse scaling from previous itr"), ("high_delay", "Scaling to be used after more than 0.05*n delays are present"), ("high_delay_reuse", "Scaling to be used only when previous itr created more that 0.05*n additional delays, otherwise reuse scaling from previous itr"), ("od_hd", "Combination of on_demand and high_delay"), ("od_hd_reuse", "Combination of on_demand_reuse and high_delay_reuse")], "If ma97_scaling=dynamic, ma97_scaling2 is enabled according to this condition. If ma97_switch3 occurs this option is henceforth ignored.")?;
-    r.add_string_option("ma97_scaling3", "Third scaling.", "mc64", &[("none", "No scaling"), ("mc30", "Scale linear system matrix using MC30"), ("mc64", "Scale linear system matrix using MC64"), ("mc77", "Scale linear system matrix using MC77 [1,3,0]")], "If ma97_scaling=dynamic, this scaling is used according to the trigger ma97_switch3.")?;
+    r.add_string_option(
+        "ma97_scaling3",
+        "Third scaling.",
+        "mc64",
+        &[
+            ("none", "No scaling"),
+            ("mc30", "Scale linear system matrix using MC30"),
+            ("mc64", "Scale linear system matrix using MC64"),
+            ("mc77", "Scale linear system matrix using MC77 [1,3,0]"),
+        ],
+        "If ma97_scaling=dynamic, this scaling is used according to the trigger ma97_switch3.",
+    )?;
     r.add_string_option("ma97_switch3", "Third switch, determine when ma97_scaling3 is enabled.", "never", &[("never", "Scaling is never enabled."), ("at_start", "Scaling to be used from the very start."), ("at_start_reuse", "Scaling to be used on first iteration, then reused thereafter."), ("on_demand", "Scaling to be used after Ipopt request improved solution (i.e. iterative refinement has failed)."), ("on_demand_reuse", "As on_demand, but reuse scaling from previous itr"), ("high_delay", "Scaling to be used after more than 0.05*n delays are present"), ("high_delay_reuse", "Scaling to be used only when previous itr created more that 0.05*n additional delays, otherwise reuse scaling from previous itr"), ("od_hd", "Combination of on_demand and high_delay"), ("od_hd_reuse", "Combination of on_demand_reuse and high_delay_reuse")], "If ma97_scaling=dynamic, ma97_scaling3 is enabled according to this condition.")?;
-    r.add_string_option("ma97_order", "Controls type of ordering", "auto", &[("auto", "Use HSL_MA97 heuristic to guess best of AMD and METIS"), ("best", "Try both AMD and MeTiS, pick best"), ("amd", "Use the HSL_MC68 approximate minimum degree algorithm"), ("metis", "Use the MeTiS nested dissection algorithm"), ("matched-auto", "Use the HSL_MC80 matching with heuristic choice of AMD or METIS"), ("matched-metis", "Use the HSL_MC80 matching based ordering with METIS"), ("matched-amd", "Use the HSL_MC80 matching based ordering with AMD")], "")?;
-    r.add_string_option("ma97_dump_matrix", "Controls whether HSL_MA97 dumps each matrix to a file", "no", &[("no", "Do not dump matrix"), ("yes", "Do dump matrix")], "")?;
-    r.add_string_option("ma97_solve_blas3", "Controls if blas2 or blas3 routines are used for solve", "no", &[("no", "Use BLAS2 (faster, some implementations bit incompatible)"), ("yes", "Use BLAS3 (slower)")], "")?;
+    r.add_string_option(
+        "ma97_order",
+        "Controls type of ordering",
+        "auto",
+        &[
+            (
+                "auto",
+                "Use HSL_MA97 heuristic to guess best of AMD and METIS",
+            ),
+            ("best", "Try both AMD and MeTiS, pick best"),
+            (
+                "amd",
+                "Use the HSL_MC68 approximate minimum degree algorithm",
+            ),
+            ("metis", "Use the MeTiS nested dissection algorithm"),
+            (
+                "matched-auto",
+                "Use the HSL_MC80 matching with heuristic choice of AMD or METIS",
+            ),
+            (
+                "matched-metis",
+                "Use the HSL_MC80 matching based ordering with METIS",
+            ),
+            (
+                "matched-amd",
+                "Use the HSL_MC80 matching based ordering with AMD",
+            ),
+        ],
+        "",
+    )?;
+    r.add_string_option(
+        "ma97_dump_matrix",
+        "Controls whether HSL_MA97 dumps each matrix to a file",
+        "no",
+        &[("no", "Do not dump matrix"), ("yes", "Do dump matrix")],
+        "",
+    )?;
+    r.add_string_option(
+        "ma97_solve_blas3",
+        "Controls if blas2 or blas3 routines are used for solve",
+        "no",
+        &[
+            (
+                "no",
+                "Use BLAS2 (faster, some implementations bit incompatible)",
+            ),
+            ("yes", "Use BLAS3 (slower)"),
+        ],
+        "",
+    )?;
 
     // ===== MumpsSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMumpsSolverInterface.cpp) =====
     r.set_registering_category("Mumps Linear Solver");
     r.add_lower_bounded_integer_option("mumps_print_level", "Debug printing level for the linear solver MUMPS", 0, 0, "0: no printing; 1: Error messages only; 2: Error, warning, and main statistic messages; 3: Error and warning messages and terse diagnostics; >=4: All information.")?;
-    r.add_bounded_number_option("mumps_pivtol", "Pivot tolerance for the linear solver MUMPS.", 0.0, false, 1.0, false, 1e-6, "A smaller number pivots for sparsity, a larger number pivots for stability.")?;
+    r.add_bounded_number_option(
+        "mumps_pivtol",
+        "Pivot tolerance for the linear solver MUMPS.",
+        0.0,
+        false,
+        1.0,
+        false,
+        1e-6,
+        "A smaller number pivots for sparsity, a larger number pivots for stability.",
+    )?;
     r.add_bounded_number_option("mumps_pivtolmax", "Maximum pivot tolerance for the linear solver MUMPS.", 0.0, false, 1.0, false, 0.1, "Ipopt may increase pivtol as high as pivtolmax to get a more accurate solution to the linear system.")?;
     r.add_lower_bounded_integer_option("mumps_mem_percent", "Percentage increase in the estimated working space for MUMPS.", 0, 1000, "When significant extra fill-in is caused by numerical pivoting, larger values of mumps_mem_percent may help use the workspace more efficiently. On the other hand, if memory requirement are too large at the very beginning of the optimization, choosing a much smaller value for this option, such as 5, might reduce memory requirements.")?;
-    r.add_bounded_integer_option("mumps_permuting_scaling", "Controls permuting and scaling in MUMPS", 0, 7, 7, "This is ICNTL(6) in MUMPS.")?;
-    r.add_bounded_integer_option("mumps_pivot_order", "Controls pivot order in MUMPS", 0, 7, 7, "This is ICNTL(7) in MUMPS.")?;
-    r.add_bounded_integer_option("mumps_scaling", "Controls scaling in MUMPS", -2, 77, 77, "This is ICNTL(8) in MUMPS.")?;
+    r.add_bounded_integer_option(
+        "mumps_permuting_scaling",
+        "Controls permuting and scaling in MUMPS",
+        0,
+        7,
+        7,
+        "This is ICNTL(6) in MUMPS.",
+    )?;
+    r.add_bounded_integer_option(
+        "mumps_pivot_order",
+        "Controls pivot order in MUMPS",
+        0,
+        7,
+        7,
+        "This is ICNTL(7) in MUMPS.",
+    )?;
+    r.add_bounded_integer_option(
+        "mumps_scaling",
+        "Controls scaling in MUMPS",
+        -2,
+        77,
+        77,
+        "This is ICNTL(8) in MUMPS.",
+    )?;
     r.add_number_option("mumps_dep_tol", "Threshold to consider a pivot at zero in detection of linearly dependent constraints with MUMPS.", 0.0, "This is CNTL(3) in MUMPS.")?;
     r.add_integer_option("mumps_mpi_communicator", "MPI communicator used for matrix operations", -987654, "This sets the MPI communicator. MPI_COMM_WORLD is the default. Any other value should be the return value from MPI_Comm_c2f. This option is only available if MUMPS's libseq/mpi.h is not used.")?;
 
     // ===== PardisoSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpPardisoSolverInterface.cpp) =====
     r.set_registering_category("Pardiso (pardiso-project.org) Linear Solver");
-    r.add_string_option("pardiso_matching_strategy", "Matching strategy to be used by Pardiso", "complete+2x2", &[("complete", "Match complete (IPAR(13)=1)"), ("complete+2x2", "Match complete+2x2 (IPAR(13)=2)"), ("constraints", "Match constraints (IPAR(13)=3)")], "This is IPAR(13) in Pardiso manual.")?;
+    r.add_string_option(
+        "pardiso_matching_strategy",
+        "Matching strategy to be used by Pardiso",
+        "complete+2x2",
+        &[
+            ("complete", "Match complete (IPAR(13)=1)"),
+            ("complete+2x2", "Match complete+2x2 (IPAR(13)=2)"),
+            ("constraints", "Match constraints (IPAR(13)=3)"),
+        ],
+        "This is IPAR(13) in Pardiso manual.",
+    )?;
     r.add_string_option("pardiso_redo_symbolic_fact_only_if_inertia_wrong", "Toggle for handling case when elements were perturbed by Pardiso.", "no", &[("no", "Always redo symbolic factorization when elements were perturbed"), ("yes", "Only redo symbolic factorization when elements were perturbed if also the inertia was wrong")], "")?;
     r.add_bool_option("pardiso_repeated_perturbation_means_singular", "Whether to assume that matrix is singular if elements were perturbed after recent symbolic factorization.", false, "")?;
-    r.add_lower_bounded_integer_option("pardiso_msglvl", "Pardiso message level", 0, 0, "This is MSGLVL in the Pardiso manual.")?;
+    r.add_lower_bounded_integer_option(
+        "pardiso_msglvl",
+        "Pardiso message level",
+        0,
+        0,
+        "This is MSGLVL in the Pardiso manual.",
+    )?;
     r.add_bool_option("pardiso_skip_inertia_check", "Whether to pretend that inertia is correct.", false, "Setting this option to \"yes\" essentially disables inertia check. This option makes the algorithm non-robust and easily fail, but it might give some insight into the necessity of inertia control.")?;
     r.add_integer_option("pardiso_max_iterative_refinement_steps", "Limit on number of iterative refinement steps.", 0, "The solver does not perform more than the absolute value of this value steps of iterative refinement and stops the process if a satisfactory level of accuracy of the solution in terms of backward error is achieved. If negative, the accumulation of the residue uses extended precision real and complex data types. Perturbed pivots result in iterative refinement. The solver automatically performs two steps of iterative refinements when perturbed pivots are obtained during the numerical factorization and this option is set to 0.")?;
-    r.add_string_option("pardiso_order", "Controls the fill-in reduction ordering algorithm for the input matrix.", "metis", &[("amd", "minimum degree algorithm"), ("one", ""), ("metis", "MeTiS nested dissection algorithm"), ("pmetis", "parallel (OpenMP) version of MeTiS nested dissection algorithm"), ("four", ""), ("five", "")], "")?;
-    r.add_lower_bounded_integer_option("pardiso_max_iter", "Maximum number of Krylov-Subspace Iteration", 1, 500, "DPARM(1)")?;
-    r.add_bounded_number_option("pardiso_iter_relative_tol", "Relative Residual Convergence", 0.0, true, 1.0, true, 1e-6, "DPARM(2)")?;
-    r.add_lower_bounded_integer_option("pardiso_iter_coarse_size", "Maximum Size of Coarse Grid Matrix", 1, 5000, "DPARM(3)")?;
-    r.add_lower_bounded_integer_option("pardiso_iter_max_levels", "Maximum Size of Grid Levels", 1, 10, "DPARM(4)")?;
-    r.add_bounded_number_option("pardiso_iter_dropping_factor", "dropping value for incomplete factor", 0.0, true, 1.0, true, 0.5, "DPARM(5)")?;
-    r.add_bounded_number_option("pardiso_iter_dropping_schur", "dropping value for sparsify schur complement factor", 0.0, true, 1.0, true, 1e-1, "DPARM(6)")?;
-    r.add_lower_bounded_integer_option("pardiso_iter_max_row_fill", "max fill for each row", 1, 10000000, "DPARM(7)")?;
-    r.add_lower_bounded_number_option("pardiso_iter_inverse_norm_factor", "", 1.0, true, 5000000.0, "DPARM(8)")?;
-    r.add_bool_option("pardiso_iterative", "Switch for iterative solver in Pardiso library", false, "")?;
-    r.add_lower_bounded_integer_option("pardiso_max_droptol_corrections", "Maximal number of decreases of drop tolerance during one solve.", 1, 4, "This is relevant only for iterative Pardiso options.")?;
+    r.add_string_option(
+        "pardiso_order",
+        "Controls the fill-in reduction ordering algorithm for the input matrix.",
+        "metis",
+        &[
+            ("amd", "minimum degree algorithm"),
+            ("one", ""),
+            ("metis", "MeTiS nested dissection algorithm"),
+            (
+                "pmetis",
+                "parallel (OpenMP) version of MeTiS nested dissection algorithm",
+            ),
+            ("four", ""),
+            ("five", ""),
+        ],
+        "",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "pardiso_max_iter",
+        "Maximum number of Krylov-Subspace Iteration",
+        1,
+        500,
+        "DPARM(1)",
+    )?;
+    r.add_bounded_number_option(
+        "pardiso_iter_relative_tol",
+        "Relative Residual Convergence",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-6,
+        "DPARM(2)",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "pardiso_iter_coarse_size",
+        "Maximum Size of Coarse Grid Matrix",
+        1,
+        5000,
+        "DPARM(3)",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "pardiso_iter_max_levels",
+        "Maximum Size of Grid Levels",
+        1,
+        10,
+        "DPARM(4)",
+    )?;
+    r.add_bounded_number_option(
+        "pardiso_iter_dropping_factor",
+        "dropping value for incomplete factor",
+        0.0,
+        true,
+        1.0,
+        true,
+        0.5,
+        "DPARM(5)",
+    )?;
+    r.add_bounded_number_option(
+        "pardiso_iter_dropping_schur",
+        "dropping value for sparsify schur complement factor",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-1,
+        "DPARM(6)",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "pardiso_iter_max_row_fill",
+        "max fill for each row",
+        1,
+        10000000,
+        "DPARM(7)",
+    )?;
+    r.add_lower_bounded_number_option(
+        "pardiso_iter_inverse_norm_factor",
+        "",
+        1.0,
+        true,
+        5000000.0,
+        "DPARM(8)",
+    )?;
+    r.add_bool_option(
+        "pardiso_iterative",
+        "Switch for iterative solver in Pardiso library",
+        false,
+        "",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "pardiso_max_droptol_corrections",
+        "Maximal number of decreases of drop tolerance during one solve.",
+        1,
+        4,
+        "This is relevant only for iterative Pardiso options.",
+    )?;
 
     // ===== PardisoMKLSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpPardisoMKLSolverInterface.cpp) =====
     r.set_registering_category("Pardiso (MKL) Linear Solver");
-    r.add_string_option("pardisomkl_matching_strategy", "Matching strategy to be used by Pardiso", "complete+2x2", &[("complete", "Match complete (IPAR(13)=1)"), ("complete+2x2", "Match complete+2x2 (IPAR(13)=2)"), ("constraints", "Match constraints (IPAR(13)=3)")], "This is IPAR(13) in Pardiso manual.")?;
+    r.add_string_option(
+        "pardisomkl_matching_strategy",
+        "Matching strategy to be used by Pardiso",
+        "complete+2x2",
+        &[
+            ("complete", "Match complete (IPAR(13)=1)"),
+            ("complete+2x2", "Match complete+2x2 (IPAR(13)=2)"),
+            ("constraints", "Match constraints (IPAR(13)=3)"),
+        ],
+        "This is IPAR(13) in Pardiso manual.",
+    )?;
     r.add_string_option("pardisomkl_redo_symbolic_fact_only_if_inertia_wrong", "Toggle for handling case when elements were perturbed by Pardiso.", "no", &[("no", "Always redo symbolic factorization when elements were perturbed"), ("yes", "Only redo symbolic factorization when elements were perturbed if also the inertia was wrong")], "")?;
     r.add_bool_option("pardisomkl_repeated_perturbation_means_singular", "Whether to assume that matrix is singular if elements were perturbed after recent symbolic factorization.", false, "")?;
-    r.add_lower_bounded_integer_option("pardisomkl_msglvl", "Pardiso message level", 0, 0, "This is MSGLVL in the Pardiso manual.")?;
+    r.add_lower_bounded_integer_option(
+        "pardisomkl_msglvl",
+        "Pardiso message level",
+        0,
+        0,
+        "This is MSGLVL in the Pardiso manual.",
+    )?;
     r.add_bool_option("pardisomkl_skip_inertia_check", "Whether to pretend that inertia is correct.", false, "Setting this option to \"yes\" essentially disables inertia check. This option makes the algorithm non-robust and easily fail, but it might give some insight into the necessity of inertia control.")?;
     r.add_integer_option("pardisomkl_max_iterative_refinement_steps", "Limit on number of iterative refinement steps.", 1, "The solver does not perform more than the absolute value of this value steps of iterative refinement and stops the process if a satisfactory level of accuracy of the solution in terms of backward error is achieved. If negative, the accumulation of the residue uses extended precision real and complex data types. Perturbed pivots result in iterative refinement. The solver automatically performs two steps of iterative refinements when perturbed pivots are obtained during the numerical factorization and this option is set to 0.")?;
-    r.add_string_option("pardisomkl_order", "Controls the fill-in reduction ordering algorithm for the input matrix.", "metis", &[("amd", "minimum degree algorithm"), ("one", "undocumented"), ("metis", "MeTiS nested dissection algorithm"), ("pmetis", "parallel (OpenMP) version of MeTiS nested dissection algorithm")], "")?;
+    r.add_string_option(
+        "pardisomkl_order",
+        "Controls the fill-in reduction ordering algorithm for the input matrix.",
+        "metis",
+        &[
+            ("amd", "minimum degree algorithm"),
+            ("one", "undocumented"),
+            ("metis", "MeTiS nested dissection algorithm"),
+            (
+                "pmetis",
+                "parallel (OpenMP) version of MeTiS nested dissection algorithm",
+            ),
+        ],
+        "",
+    )?;
 
     // ===== SpralSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpSpralSolverInterface.cpp) =====
     r.set_registering_category("SPRAL Linear Solver");
-    r.add_lower_bounded_integer_option("spral_cpu_block_size", "CPU Parallelization Block Size", 1, 256, "Block size to use for parallelization of large nodes on CPU resources.")?;
-    r.add_lower_bounded_number_option("spral_gpu_perf_coeff", "GPU Performance Coefficient", 0.0, true, 1.0, "How many times faster a GPU is than a CPU at factoring a subtree.")?;
-    r.add_string_option("spral_ignore_numa", "Non-uniform memory access (NUMA) region setting.", "yes", &[("no", "Do not treat CPUs and GPUs as belonging to a single NUMA region."), ("yes", "Treat CPUs and GPUs as belonging to a single NUMA region.")], "")?;
-    r.add_lower_bounded_number_option("spral_max_load_inbalance", "Maximum Permissible Load", 1.0, true, 1.2, "Maximum permissible load inbalance for leaf subtree allocations.")?;
-    r.add_lower_bounded_number_option("spral_min_gpu_work", "Minimum GPU Work", 0.0, false, 5.0e9, "Minimum number of FLOPS in subtree before scheduling on GPU.")?;
+    r.add_lower_bounded_integer_option(
+        "spral_cpu_block_size",
+        "CPU Parallelization Block Size",
+        1,
+        256,
+        "Block size to use for parallelization of large nodes on CPU resources.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "spral_gpu_perf_coeff",
+        "GPU Performance Coefficient",
+        0.0,
+        true,
+        1.0,
+        "How many times faster a GPU is than a CPU at factoring a subtree.",
+    )?;
+    r.add_string_option(
+        "spral_ignore_numa",
+        "Non-uniform memory access (NUMA) region setting.",
+        "yes",
+        &[
+            (
+                "no",
+                "Do not treat CPUs and GPUs as belonging to a single NUMA region.",
+            ),
+            (
+                "yes",
+                "Treat CPUs and GPUs as belonging to a single NUMA region.",
+            ),
+        ],
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "spral_max_load_inbalance",
+        "Maximum Permissible Load",
+        1.0,
+        true,
+        1.2,
+        "Maximum permissible load inbalance for leaf subtree allocations.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "spral_min_gpu_work",
+        "Minimum GPU Work",
+        0.0,
+        false,
+        5.0e9,
+        "Minimum number of FLOPS in subtree before scheduling on GPU.",
+    )?;
     r.add_lower_bounded_integer_option("spral_nemin", "Node Amalgamation Parameter", 1, 32, "Two nodes in the elimination tree are merged if the result has fewer than spral_nemin variables.")?;
-    r.add_string_option("spral_order", "Controls type of ordering used by SPRAL", "matching", &[("metis", "Use METIS with default settings."), ("matching", "Use matching-based elimination ordering.")], "")?;
-    r.add_string_option("spral_pivot_method", "Specifies strategy for scaling in SPRAL linear solver.", "block", &[("aggressive", "Aggressive a posteori pivoting."), ("block", "Block a posteori pivoting."), ("threshold", "Threshold partial pivoting (not parallel).")], "")?;
+    r.add_string_option(
+        "spral_order",
+        "Controls type of ordering used by SPRAL",
+        "matching",
+        &[
+            ("metis", "Use METIS with default settings."),
+            ("matching", "Use matching-based elimination ordering."),
+        ],
+        "",
+    )?;
+    r.add_string_option(
+        "spral_pivot_method",
+        "Specifies strategy for scaling in SPRAL linear solver.",
+        "block",
+        &[
+            ("aggressive", "Aggressive a posteori pivoting."),
+            ("block", "Block a posteori pivoting."),
+            ("threshold", "Threshold partial pivoting (not parallel)."),
+        ],
+        "",
+    )?;
     r.add_integer_option("spral_print_level", "Print level for the linear solver SPRAL", -1, "<0: no printing, 0: errors and warning messages, 1: limited diagnostics, >1: additional diagnostics")?;
-    r.add_string_option("spral_scaling", "Specifies strategy for scaling in SPRAL linear solver.", "matching", &[("none", "Do not scale the linear system matrix."), ("mc64", "Scale using weighted bipartite matching (MC64)."), ("auction", "Scale using the auction algorithm."), ("matching", "Scale using the matching-based ordering."), ("ruiz", "Scale using the norm-equilibration algorithm of Ruiz (MC77)."), ("dynamic", "Dynamically select scaling according to switch options.")], "")?;
+    r.add_string_option(
+        "spral_scaling",
+        "Specifies strategy for scaling in SPRAL linear solver.",
+        "matching",
+        &[
+            ("none", "Do not scale the linear system matrix."),
+            ("mc64", "Scale using weighted bipartite matching (MC64)."),
+            ("auction", "Scale using the auction algorithm."),
+            ("matching", "Scale using the matching-based ordering."),
+            (
+                "ruiz",
+                "Scale using the norm-equilibration algorithm of Ruiz (MC77).",
+            ),
+            (
+                "dynamic",
+                "Dynamically select scaling according to switch options.",
+            ),
+        ],
+        "",
+    )?;
     r.add_string_option("spral_scaling_1", "First scaling strategy.", "matching", &[("none", "Do not scale the linear system matrix."), ("mc64", "Scale using weighted bipartite matching (MC64)."), ("auction", "Scale using the auction algorithm."), ("matching", "Scale using the matching-based ordering."), ("ruiz", "Scale using the norm-equilibration algorithm of Ruiz (MC77).")], "If spral_scaling = dynamic, this scaling is used according to the trigger spral_switch_1. If spral_switch_2 is triggered, it is disabled.")?;
     r.add_string_option("spral_scaling_2", "Second scaling strategy.", "mc64", &[("none", "Do not scale the linear system matrix."), ("mc64", "Scale using weighted bipartite matching (MC64)."), ("auction", "Scale using the auction algorithm."), ("matching", "Scale using the matching-based ordering."), ("ruiz", "Scale using the norm-equilibration algorithm of Ruiz (MC77).")], "If spral_scaling = dynamic, this scaling is used according to the trigger spral_switch_2. If spral_switch_3 is triggered, it is disabled.")?;
-    r.add_string_option("spral_scaling_3", "Third scaling strategy.", "none", &[("none", "Do not scale the linear system matrix."), ("mc64", "Scale using weighted bipartite matching (MC64)."), ("auction", "Scale using the auction algorithm."), ("matching", "Scale using the matching-based ordering."), ("ruiz", "Scale using the norm-equilibration algorithm of Ruiz (MC77).")], "If spral_scaling = dynamic, this scaling is used according to the trigger spral_switch_3.")?;
+    r.add_string_option(
+        "spral_scaling_3",
+        "Third scaling strategy.",
+        "none",
+        &[
+            ("none", "Do not scale the linear system matrix."),
+            ("mc64", "Scale using weighted bipartite matching (MC64)."),
+            ("auction", "Scale using the auction algorithm."),
+            ("matching", "Scale using the matching-based ordering."),
+            (
+                "ruiz",
+                "Scale using the norm-equilibration algorithm of Ruiz (MC77).",
+            ),
+        ],
+        "If spral_scaling = dynamic, this scaling is used according to the trigger spral_switch_3.",
+    )?;
     r.add_string_option("spral_switch_1", "First switch, determining when spral_scaling_1 is enabled.", "at_start", &[("never", "Scaling is never enabled."), ("at_start", "Scaling is used from the very start."), ("at_start_reuse", "Scaling is used on the first iteration, then reused thereafter."), ("on_demand", "Scaling is used when iterative refinement has failed."), ("on_demand_reuse", "As on_demand, but scaling from previous iteration is reused."), ("high_delay", "Scaling is used after more than 0.05*n delays are present."), ("high_delay_reuse", "Scaling is used only when previous iteration created more that 0.05*n additional delays; otherwise, reuse scaling from the previous iteration."), ("od_hd", "Combination of on_demand and high_delay."), ("od_hd_reuse", "Combination of on_demand_reuse and high_delay_reuse")], "If spral_scaling = dynamic, spral_scaling_1 is enabled according to this condition. If spral_switch_2 occurs, this option is henceforth ignored.")?;
     r.add_string_option("spral_switch_2", "Second switch, determining when spral_scaling_2 is enabled.", "on_demand", &[("never", "Scaling is never enabled."), ("at_start", "Scaling is used from the very start."), ("at_start_reuse", "Scaling is used on the first iteration, then reused thereafter."), ("on_demand", "Scaling is used when iterative refinement has failed."), ("on_demand_reuse", "As on_demand, but scaling from previous iteration is reused."), ("high_delay", "Scaling is used after more than 0.05*n delays are present."), ("high_delay_reuse", "Scaling is used only when previous iteration created more that 0.05*n additional delays; otherwise, reuse scaling from the previous iteration."), ("od_hd", "Combination of on_demand and high_delay."), ("od_hd_reuse", "Combination of on_demand_reuse and high_delay_reuse")], "If spral_scaling = dynamic, spral_scaling_2 is enabled according to this condition. If spral_switch_3 occurs, this option is henceforth ignored.")?;
     r.add_string_option("spral_switch_3", "Third switch, determining when spral_scaling_3 is enabled.", "never", &[("never", "Scaling is never enabled."), ("at_start", "Scaling is used from the very start."), ("at_start_reuse", "Scaling is used on the first iteration, then reused thereafter."), ("on_demand", "Scaling is used when iterative refinement has failed."), ("on_demand_reuse", "As on_demand, but scaling from previous iteration is reused."), ("high_delay", "Scaling is used after more than 0.05*n delays are present."), ("high_delay_reuse", "Scaling is used only when previous iteration created more that 0.05*n additional delays; otherwise, reuse scaling from the previous iteration."), ("od_hd", "Combination of on_demand and high_delay."), ("od_hd_reuse", "Combination of on_demand_reuse and high_delay_reuse")], "If spral_scaling = dynamic, spral_scaling_3 is enabled according to this condition.")?;
-    r.add_lower_bounded_number_option("spral_small", "Zero Pivot Threshold", 0.0, true, 1.0e-20, "Any pivot less than spral_small is treated as zero.")?;
-    r.add_lower_bounded_number_option("spral_small_subtree_threshold", "Small Subtree Threshold", 0.0, true, 4.0e6, "Maximum number of FLOPS in a subtree treated as a single task.")?;
-    r.add_bounded_number_option("spral_u", "Pivoting Threshold", 0.0, true, 0.5, false, 1.0e-8, "Relative pivot threshold used in symmetric indefinite case.")?;
-    r.add_bounded_number_option("spral_umax", "Maximum Pivoting Threshold", 0.0, true, 0.5, false, 1.0e-4, "See SPRAL documentation.")?;
+    r.add_lower_bounded_number_option(
+        "spral_small",
+        "Zero Pivot Threshold",
+        0.0,
+        true,
+        1.0e-20,
+        "Any pivot less than spral_small is treated as zero.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "spral_small_subtree_threshold",
+        "Small Subtree Threshold",
+        0.0,
+        true,
+        4.0e6,
+        "Maximum number of FLOPS in a subtree treated as a single task.",
+    )?;
+    r.add_bounded_number_option(
+        "spral_u",
+        "Pivoting Threshold",
+        0.0,
+        true,
+        0.5,
+        false,
+        1.0e-8,
+        "Relative pivot threshold used in symmetric indefinite case.",
+    )?;
+    r.add_bounded_number_option(
+        "spral_umax",
+        "Maximum Pivoting Threshold",
+        0.0,
+        true,
+        0.5,
+        false,
+        1.0e-4,
+        "See SPRAL documentation.",
+    )?;
     r.add_bool_option("spral_use_gpu", "Specifies whether or not graphics processing units (GPUs) are used by the SPRAL linear solver if present.", true, "")?;
 
     // ===== WsmpSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpWsmpSolverInterface.cpp) =====
     r.set_registering_category("WSMP Linear Solver");
-    r.add_integer_option("wsmp_num_threads", "Number of threads to be used in WSMP", 1, "")?;
-    r.add_bounded_integer_option("wsmp_ordering_option", "Determines how ordering is done in WSMP", -2, 3, 1, "This corresponds to the value of WSSMP's IPARM(16).")?;
-    r.add_bounded_integer_option("wsmp_ordering_option2", "Determines how ordering is done in WSMP", 0, 3, 1, "This corresponds to the value of WSSMP's IPARM(20).")?;
-    r.add_bounded_number_option("wsmp_pivtol", "Pivot tolerance for the linear solver WSMP.", 0.0, true, 1.0, true, 1e-4, "A smaller number pivots for sparsity, a larger number pivots for stability.")?;
+    r.add_integer_option(
+        "wsmp_num_threads",
+        "Number of threads to be used in WSMP",
+        1,
+        "",
+    )?;
+    r.add_bounded_integer_option(
+        "wsmp_ordering_option",
+        "Determines how ordering is done in WSMP",
+        -2,
+        3,
+        1,
+        "This corresponds to the value of WSSMP's IPARM(16).",
+    )?;
+    r.add_bounded_integer_option(
+        "wsmp_ordering_option2",
+        "Determines how ordering is done in WSMP",
+        0,
+        3,
+        1,
+        "This corresponds to the value of WSSMP's IPARM(20).",
+    )?;
+    r.add_bounded_number_option(
+        "wsmp_pivtol",
+        "Pivot tolerance for the linear solver WSMP.",
+        0.0,
+        true,
+        1.0,
+        true,
+        1e-4,
+        "A smaller number pivots for sparsity, a larger number pivots for stability.",
+    )?;
     r.add_bounded_number_option("wsmp_pivtolmax", "Maximum pivot tolerance for the linear solver WSMP.", 0.0, true, 1.0, true, 1e-1, "Ipopt may increase pivtol as high as pivtolmax to get a more accurate solution to the linear system.")?;
-    r.add_bounded_integer_option("wsmp_scaling", "Determines how the matrix is scaled by WSMP.", 0, 3, 0, "This corresponds to the value of WSSMP's IPARM(10).")?;
+    r.add_bounded_integer_option(
+        "wsmp_scaling",
+        "Determines how the matrix is scaled by WSMP.",
+        0,
+        3,
+        0,
+        "This corresponds to the value of WSSMP's IPARM(10).",
+    )?;
     r.add_bounded_number_option("wsmp_singularity_threshold", "WSMP's singularity threshold.", 0.0, true, 1.0, true, 1e-18, "WSMP's DPARM(10) parameter. The smaller this value the less likely a matrix is declared singular.")?;
     r.add_lower_bounded_integer_option("wsmp_write_matrix_iteration", "Iteration in which the matrices are written to files.", -1, -1, "If non-negative, this option determines the iteration in which all matrices given to WSMP are written to files.")?;
     r.add_bool_option("wsmp_skip_inertia_check", "Whether to always pretend that inertia is correct.", false, "Setting this option to \"yes\" essentially disables inertia check. This option makes the algorithm non-robust and easily fail, but it might give some insight into the necessity of inertia control.")?;
@@ -527,13 +1516,42 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
 
     // ===== IterativeWsmpSolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpIterativeWsmpSolverInterface.cpp) =====
     r.set_registering_category("WSMP Linear Solver");
-    r.add_lower_bounded_integer_option("wsmp_max_iter", "Maximal number of iterations in iterative WISMP", 1, 1000, "")?;
-    r.add_lower_bounded_number_option("wsmp_inexact_droptol", "Drop tolerance for inexact factorization preconditioner in WISMP.", 0.0, false, 0.0, "DPARM(14) in WISMP")?;
-    r.add_lower_bounded_number_option("wsmp_inexact_fillin_limit", "Fill-in limit for inexact factorization preconditioner in WISMP.", 0.0, false, 0.0, "DPARM(15) in WISMP")?;
+    r.add_lower_bounded_integer_option(
+        "wsmp_max_iter",
+        "Maximal number of iterations in iterative WISMP",
+        1,
+        1000,
+        "",
+    )?;
+    r.add_lower_bounded_number_option(
+        "wsmp_inexact_droptol",
+        "Drop tolerance for inexact factorization preconditioner in WISMP.",
+        0.0,
+        false,
+        0.0,
+        "DPARM(14) in WISMP",
+    )?;
+    r.add_lower_bounded_number_option(
+        "wsmp_inexact_fillin_limit",
+        "Fill-in limit for inexact factorization preconditioner in WISMP.",
+        0.0,
+        false,
+        0.0,
+        "DPARM(15) in WISMP",
+    )?;
 
     // ===== Ma28TDependencyDetector::RegisterOptions (Algorithm/LinearSolvers/IpMa28TDependencyDetector.cpp) =====
     r.set_registering_category("MA28 Linear Solver");
-    r.add_bounded_number_option("ma28_pivtol", "Pivot tolerance for linear solver MA28.", 0.0, true, 1.0, false, 0.01, "")?;
+    r.add_bounded_number_option(
+        "ma28_pivtol",
+        "Pivot tolerance for linear solver MA28.",
+        0.0,
+        true,
+        1.0,
+        false,
+        0.01,
+        "",
+    )?;
 
     // ===== ℓ₁-exact penalty-barrier wrapper (pounce-l1penalty / pounce#10) =====
     // Not in upstream Ipopt 3.14 — pounce extension porting Thierry &

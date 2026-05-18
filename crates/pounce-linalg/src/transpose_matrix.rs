@@ -60,13 +60,7 @@ impl Matrix for TransposeMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         self.orig.trans_mult_vector(alpha, x, beta, y);
     }
 
@@ -140,6 +134,9 @@ mod tests {
         let mut large2 = dvec_box(&[0.0; 5]);
         pt.trans_mult_vector(1.0, small2.as_dyn_vector(), 0.0, large2.as_mut());
         let dv = large2.as_any().downcast_ref::<DenseVector>().unwrap();
-        assert_eq!(dv.expanded_values().to_vec(), vec![0.0, 7.0, 0.0, -2.0, 0.0]);
+        assert_eq!(
+            dv.expanded_values().to_vec(),
+            vec![0.0, 7.0, 0.0, -2.0, 0.0]
+        );
     }
 }

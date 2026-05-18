@@ -155,13 +155,7 @@ impl Matrix for ScaledMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         // Upstream sequence (IpScaledMatrix.cpp:22-58):
         // 1. y *= beta (or y = 0)
         // 2. tmp_x = x.MakeNewCopy()
@@ -321,13 +315,7 @@ impl Matrix for SymScaledMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         if beta != 0.0 {
             y.scal(beta);
         } else {

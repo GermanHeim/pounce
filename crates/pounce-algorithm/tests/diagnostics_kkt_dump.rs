@@ -10,9 +10,7 @@
 //! * the top-level `manifest.json` helper works.
 
 use pounce_algorithm::application::IpoptApplication;
-use pounce_common::diagnostics::{
-    DiagCategory, DiagnosticsConfig, DiagnosticsState, IterSpec,
-};
+use pounce_common::diagnostics::{DiagCategory, DiagnosticsConfig, DiagnosticsState, IterSpec};
 use pounce_common::types::Number;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
@@ -28,7 +26,13 @@ struct Hs071;
 
 impl TNLP for Hs071 {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
-        Some(NlpInfo { n: 4, m: 2, nnz_jac_g: 8, nnz_h_lag: 10, index_style: IndexStyle::C })
+        Some(NlpInfo {
+            n: 4,
+            m: 2,
+            nnz_jac_g: 8,
+            nnz_h_lag: 10,
+            index_style: IndexStyle::C,
+        })
     }
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
         b.x_l.copy_from_slice(&[1.0; 4]);
@@ -162,7 +166,10 @@ fn kkt_dump_produces_per_iter_files_and_manifest() {
         let solve = dir.join("kkt_solve_001.jsonl");
         assert!(solve.is_file(), "missing dump file: {solve:?}");
         let body = fs::read_to_string(&solve).unwrap();
-        assert!(body.starts_with('{') && body.contains("\"n\":"), "bad record: {body}");
+        assert!(
+            body.starts_with('{') && body.contains("\"n\":"),
+            "bad record: {body}"
+        );
         assert!(body.contains("\"vals\":["), "missing vals field");
         assert!(body.contains("\"sol\":["), "missing sol field");
         assert!(body.ends_with("]}\n"), "missing terminator: {body}");
@@ -180,7 +187,8 @@ fn kkt_dump_produces_per_iter_files_and_manifest() {
     }
 
     // The top-level writer helper drops files at `dump_dir`.
-    diag.write_top_level("manifest.json", "{\"hello\":\"world\"}\n").unwrap();
+    diag.write_top_level("manifest.json", "{\"hello\":\"world\"}\n")
+        .unwrap();
     let manifest = fs::read_to_string(dump_dir.join("manifest.json")).unwrap();
     assert!(manifest.contains("\"hello\":\"world\""));
 

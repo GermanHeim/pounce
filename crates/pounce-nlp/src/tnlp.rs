@@ -175,8 +175,7 @@ pub trait TNLP {
 
     /// **Required.** Jacobian of `g`. Sparsity vs. values selected by
     /// `mode`. `x` and `new_x` are unused on the structure call.
-    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>)
-        -> bool;
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool;
 
     /// **Required for exact Hessian, optional for L-BFGS.** Hessian
     /// of the Lagrangian. Default returns false (signals to %Ipopt

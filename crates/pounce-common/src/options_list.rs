@@ -28,7 +28,12 @@ struct OptionValue {
 
 impl OptionValue {
     fn new(value: String, allow_clobber: bool, dont_print: bool) -> Self {
-        Self { value, counter: std::cell::Cell::new(0), allow_clobber, dont_print }
+        Self {
+            value,
+            counter: std::cell::Cell::new(0),
+            allow_clobber,
+            dont_print,
+        }
     }
     fn get_value(&self) -> &str {
         self.counter.set(self.counter.get() + 1);
@@ -44,10 +49,15 @@ pub struct OptionsList {
 }
 
 impl OptionsList {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn with_registered(reg: Rc<RegisteredOptions>) -> Self {
-        Self { options: BTreeMap::new(), reg_options: Some(reg) }
+        Self {
+            options: BTreeMap::new(),
+            reg_options: Some(reg),
+        }
     }
 
     pub fn set_registered_options(&mut self, reg: Rc<RegisteredOptions>) {
@@ -62,7 +72,9 @@ impl OptionsList {
         self.options.clear();
     }
 
-    fn key(name: &str) -> String { name.to_ascii_lowercase() }
+    fn key(name: &str) -> String {
+        name.to_ascii_lowercase()
+    }
 
     /// Mirrors `OptionsList::find_tag` — try `prefix+tag` first, then
     /// bare `tag`. Returns the stored string and bumps its read counter.
@@ -92,25 +104,35 @@ impl OptionsList {
         dont_print: bool,
     ) -> Result<bool, SolverException> {
         if let Some(reg) = &self.reg_options {
-            let opt = reg.get_option(tag).ok_or_else(|| SolverException::new(
-                ExceptionKind::OPTION_INVALID,
-                format!("Unknown option \"{tag}\"."),
-                file!(), line!() as Index,
-            ))?;
+            let opt = reg.get_option(tag).ok_or_else(|| {
+                SolverException::new(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Unknown option \"{tag}\"."),
+                    file!(),
+                    line!() as Index,
+                )
+            })?;
             if opt.option_type != OptionType::OT_String {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Option \"{tag}\" is not a string option."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\" is not a string option.")
+                );
             }
             if !opt.is_valid_string(value) {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Invalid value \"{value}\" for string option \"{tag}\"."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Invalid value \"{value}\" for string option \"{tag}\".")
+                );
             }
         }
         if !self.will_allow_clobber(tag) {
             return Ok(false);
         }
         let stored = value.to_ascii_lowercase();
-        self.options.insert(Self::key(tag), OptionValue::new(stored, allow_clobber, dont_print));
+        self.options.insert(
+            Self::key(tag),
+            OptionValue::new(stored, allow_clobber, dont_print),
+        );
         Ok(true)
     }
 
@@ -123,18 +145,25 @@ impl OptionsList {
         dont_print: bool,
     ) -> Result<bool, SolverException> {
         if let Some(reg) = &self.reg_options {
-            let opt = reg.get_option(tag).ok_or_else(|| SolverException::new(
-                ExceptionKind::OPTION_INVALID,
-                format!("Unknown option \"{tag}\"."),
-                file!(), line!() as Index,
-            ))?;
+            let opt = reg.get_option(tag).ok_or_else(|| {
+                SolverException::new(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Unknown option \"{tag}\"."),
+                    file!(),
+                    line!() as Index,
+                )
+            })?;
             if opt.option_type != OptionType::OT_Number {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Option \"{tag}\" is not a numeric option."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\" is not a numeric option.")
+                );
             }
             if !opt.is_valid_number(value) {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Numeric value {value} for option \"{tag}\" out of range."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Numeric value {value} for option \"{tag}\" out of range.")
+                );
             }
         }
         if !self.will_allow_clobber(tag) {
@@ -142,7 +171,10 @@ impl OptionsList {
         }
         // Print with full precision so round-trip preserves the value.
         let s = format!("{value:.18e}");
-        self.options.insert(Self::key(tag), OptionValue::new(s, allow_clobber, dont_print));
+        self.options.insert(
+            Self::key(tag),
+            OptionValue::new(s, allow_clobber, dont_print),
+        );
         Ok(true)
     }
 
@@ -155,24 +187,34 @@ impl OptionsList {
         dont_print: bool,
     ) -> Result<bool, SolverException> {
         if let Some(reg) = &self.reg_options {
-            let opt = reg.get_option(tag).ok_or_else(|| SolverException::new(
-                ExceptionKind::OPTION_INVALID,
-                format!("Unknown option \"{tag}\"."),
-                file!(), line!() as Index,
-            ))?;
+            let opt = reg.get_option(tag).ok_or_else(|| {
+                SolverException::new(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Unknown option \"{tag}\"."),
+                    file!(),
+                    line!() as Index,
+                )
+            })?;
             if opt.option_type != OptionType::OT_Integer {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Option \"{tag}\" is not an integer option."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\" is not an integer option.")
+                );
             }
             if !opt.is_valid_integer(value) {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Integer value {value} for option \"{tag}\" out of range."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Integer value {value} for option \"{tag}\" out of range.")
+                );
             }
         }
         if !self.will_allow_clobber(tag) {
             return Ok(false);
         }
-        self.options.insert(Self::key(tag), OptionValue::new(value.to_string(), allow_clobber, dont_print));
+        self.options.insert(
+            Self::key(tag),
+            OptionValue::new(value.to_string(), allow_clobber, dont_print),
+        );
         Ok(true)
     }
 
@@ -184,7 +226,12 @@ impl OptionsList {
         allow_clobber: bool,
         dont_print: bool,
     ) -> Result<bool, SolverException> {
-        self.set_string_value(tag, if value { "yes" } else { "no" }, allow_clobber, dont_print)
+        self.set_string_value(
+            tag,
+            if value { "yes" } else { "no" },
+            allow_clobber,
+            dont_print,
+        )
     }
 
     /// Mirrors `UnsetValue`. Returns true if the value was removed.
@@ -203,7 +250,11 @@ impl OptionsList {
 
     /// Mirrors `GetStringValue`. Returns true if found in the list.
     /// Falls back to the registered default when not found.
-    pub fn get_string_value(&self, tag: &str, prefix: &str) -> Result<(String, bool), SolverException> {
+    pub fn get_string_value(
+        &self,
+        tag: &str,
+        prefix: &str,
+    ) -> Result<(String, bool), SolverException> {
         if let Some(v) = self.find_tag(tag, prefix) {
             return Ok((v.get_value().to_string(), true));
         }
@@ -212,22 +263,31 @@ impl OptionsList {
                 if let DefaultValue::String(d) = &opt.default {
                     return Ok((d.clone(), false));
                 }
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Option \"{tag}\" is not a string option."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\" is not a string option.")
+                );
             }
         }
         Ok((String::new(), false))
     }
 
     /// Mirrors `GetNumericValue`.
-    pub fn get_numeric_value(&self, tag: &str, prefix: &str) -> Result<(Number, bool), SolverException> {
+    pub fn get_numeric_value(
+        &self,
+        tag: &str,
+        prefix: &str,
+    ) -> Result<(Number, bool), SolverException> {
         if let Some(v) = self.find_tag(tag, prefix) {
             let s = v.get_value().to_string();
-            let parsed = parse_ipopt_number(&s).ok_or_else(|| SolverException::new(
-                ExceptionKind::OPTION_INVALID,
-                format!("Option \"{tag}\": cannot parse value \"{s}\" as Number."),
-                file!(), line!() as Index,
-            ))?;
+            let parsed = parse_ipopt_number(&s).ok_or_else(|| {
+                SolverException::new(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\": cannot parse value \"{s}\" as Number."),
+                    file!(),
+                    line!() as Index,
+                )
+            })?;
             return Ok((parsed, true));
         }
         if let Some(reg) = &self.reg_options {
@@ -235,22 +295,31 @@ impl OptionsList {
                 if let DefaultValue::Number(d) = &opt.default {
                     return Ok((*d, false));
                 }
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Option \"{tag}\" is not a numeric option."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\" is not a numeric option.")
+                );
             }
         }
         Ok((0.0, false))
     }
 
     /// Mirrors `GetIntegerValue`.
-    pub fn get_integer_value(&self, tag: &str, prefix: &str) -> Result<(Index, bool), SolverException> {
+    pub fn get_integer_value(
+        &self,
+        tag: &str,
+        prefix: &str,
+    ) -> Result<(Index, bool), SolverException> {
         if let Some(v) = self.find_tag(tag, prefix) {
             let s = v.get_value().to_string();
-            let parsed: Index = s.trim().parse().map_err(|_| SolverException::new(
-                ExceptionKind::OPTION_INVALID,
-                format!("Option \"{tag}\": cannot parse value \"{s}\" as Integer."),
-                file!(), line!() as Index,
-            ))?;
+            let parsed: Index = s.trim().parse().map_err(|_| {
+                SolverException::new(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\": cannot parse value \"{s}\" as Integer."),
+                    file!(),
+                    line!() as Index,
+                )
+            })?;
             return Ok((parsed, true));
         }
         if let Some(reg) = &self.reg_options {
@@ -258,8 +327,10 @@ impl OptionsList {
                 if let DefaultValue::Integer(d) = &opt.default {
                     return Ok((*d, false));
                 }
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Option \"{tag}\" is not an integer option."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Option \"{tag}\" is not an integer option.")
+                );
             }
         }
         Ok((0, false))
@@ -271,60 +342,91 @@ impl OptionsList {
         let v = match s.to_ascii_lowercase().as_str() {
             "yes" => true,
             "no" => false,
-            other => throw!(ExceptionKind::OPTION_INVALID,
-                format!("Option \"{tag}\" has non-boolean value \"{other}\".")),
+            other => throw!(
+                ExceptionKind::OPTION_INVALID,
+                format!("Option \"{tag}\" has non-boolean value \"{other}\".")
+            ),
         };
         Ok((v, found))
     }
 
     /// Mirrors `GetEnumValue`. Returns the index of the value in the
     /// registered string list.
-    pub fn get_enum_value(&self, tag: &str, prefix: &str) -> Result<(Index, bool), SolverException> {
+    pub fn get_enum_value(
+        &self,
+        tag: &str,
+        prefix: &str,
+    ) -> Result<(Index, bool), SolverException> {
         let (s, found) = self.get_string_value(tag, prefix)?;
-        let reg = self.reg_options.as_ref().ok_or_else(|| SolverException::new(
-            ExceptionKind::OPTION_INVALID,
-            "GetEnumValue requires a RegisteredOptions registry.".to_string(),
-            file!(), line!() as Index,
-        ))?;
-        let opt = reg.get_option(tag).ok_or_else(|| SolverException::new(
-            ExceptionKind::OPTION_INVALID,
-            format!("Unknown option \"{tag}\"."),
-            file!(), line!() as Index,
-        ))?;
-        let idx = opt.map_string_to_enum(&s).ok_or_else(|| SolverException::new(
-            ExceptionKind::ERROR_CONVERTING_STRING_TO_ENUM,
-            format!("Cannot map \"{s}\" to enum for option \"{tag}\"."),
-            file!(), line!() as Index,
-        ))?;
+        let reg = self.reg_options.as_ref().ok_or_else(|| {
+            SolverException::new(
+                ExceptionKind::OPTION_INVALID,
+                "GetEnumValue requires a RegisteredOptions registry.".to_string(),
+                file!(),
+                line!() as Index,
+            )
+        })?;
+        let opt = reg.get_option(tag).ok_or_else(|| {
+            SolverException::new(
+                ExceptionKind::OPTION_INVALID,
+                format!("Unknown option \"{tag}\"."),
+                file!(),
+                line!() as Index,
+            )
+        })?;
+        let idx = opt.map_string_to_enum(&s).ok_or_else(|| {
+            SolverException::new(
+                ExceptionKind::ERROR_CONVERTING_STRING_TO_ENUM,
+                format!("Cannot map \"{s}\" to enum for option \"{tag}\"."),
+                file!(),
+                line!() as Index,
+            )
+        })?;
         Ok((idx, found))
     }
 
     /// Mirrors `ReadFromStream`. Parses an `ipopt.opt`-style file:
     /// whitespace-separated `tag value` pairs, `#` line comments,
     /// double-quoted tokens permitted.
-    pub fn read_from_stream<R: Read>(&mut self, mut r: R, allow_clobber: bool) -> Result<(), SolverException> {
+    pub fn read_from_stream<R: Read>(
+        &mut self,
+        mut r: R,
+        allow_clobber: bool,
+    ) -> Result<(), SolverException> {
         let mut s = String::new();
-        r.read_to_string(&mut s).map_err(|e| SolverException::new(
-            ExceptionKind::OPTION_INVALID,
-            format!("I/O error reading options: {e}"),
-            file!(), line!() as Index,
-        ))?;
+        r.read_to_string(&mut s).map_err(|e| {
+            SolverException::new(
+                ExceptionKind::OPTION_INVALID,
+                format!("I/O error reading options: {e}"),
+                file!(),
+                line!() as Index,
+            )
+        })?;
         self.read_from_str(&s, allow_clobber)
     }
 
     pub fn read_from_str(&mut self, s: &str, allow_clobber: bool) -> Result<(), SolverException> {
         let mut tokens = Tokenizer::new(s);
         loop {
-            let Some(tag) = tokens.next_token()? else { return Ok(()); };
+            let Some(tag) = tokens.next_token()? else {
+                return Ok(());
+            };
             let Some(value) = tokens.next_token()? else {
-                throw!(ExceptionKind::OPTION_INVALID,
-                    format!("Error reading value for tag {tag} from option file."));
+                throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    format!("Error reading value for tag {tag} from option file.")
+                );
             };
             self.set_from_text(&tag, &value, allow_clobber)?;
         }
     }
 
-    fn set_from_text(&mut self, tag: &str, value: &str, allow_clobber: bool) -> Result<(), SolverException> {
+    fn set_from_text(
+        &mut self,
+        tag: &str,
+        value: &str,
+        allow_clobber: bool,
+    ) -> Result<(), SolverException> {
         if let Some(reg) = self.reg_options.clone() {
             let opt = reg.get_option(tag).ok_or_else(|| SolverException::new(
                 ExceptionKind::OPTION_INVALID,
@@ -335,8 +437,10 @@ impl OptionsList {
                 OptionType::OT_String => {
                     let ok = self.set_string_value(tag, value, allow_clobber, false)?;
                     if !ok {
-                        throw!(ExceptionKind::OPTION_INVALID,
-                            "Error setting string value read from option file.".to_string());
+                        throw!(
+                            ExceptionKind::OPTION_INVALID,
+                            "Error setting string value read from option file.".to_string()
+                        );
                     }
                 }
                 OptionType::OT_Number => {
@@ -347,8 +451,10 @@ impl OptionsList {
                     ))?;
                     let ok = self.set_numeric_value(tag, v, allow_clobber, false)?;
                     if !ok {
-                        throw!(ExceptionKind::OPTION_INVALID,
-                            "Error setting numeric value read from file.".to_string());
+                        throw!(
+                            ExceptionKind::OPTION_INVALID,
+                            "Error setting numeric value read from file.".to_string()
+                        );
                     }
                 }
                 OptionType::OT_Integer => {
@@ -359,13 +465,17 @@ impl OptionsList {
                     ))?;
                     let ok = self.set_integer_value(tag, v, allow_clobber, false)?;
                     if !ok {
-                        throw!(ExceptionKind::OPTION_INVALID,
-                            "Error setting integer value read from option file.".to_string());
+                        throw!(
+                            ExceptionKind::OPTION_INVALID,
+                            "Error setting integer value read from option file.".to_string()
+                        );
                     }
                 }
                 OptionType::OT_Unknown => {
-                    throw!(ExceptionKind::OPTION_INVALID,
-                        format!("Option \"{tag}\" has unknown type."));
+                    throw!(
+                        ExceptionKind::OPTION_INVALID,
+                        format!("Option \"{tag}\" has unknown type.")
+                    );
                 }
             }
         } else {
@@ -379,7 +489,12 @@ impl OptionsList {
         let mut out = String::new();
         out.push_str("                                    Name   Value           # times used\n");
         for (k, v) in &self.options {
-            out.push_str(&format!("{:>40} = {:<30} # {}\n", k, v.value, v.counter.get()));
+            out.push_str(&format!(
+                "{:>40} = {:<30} # {}\n",
+                k,
+                v.value,
+                v.counter.get()
+            ));
         }
         out
     }
@@ -388,8 +503,14 @@ impl OptionsList {
     pub fn print_user_options(&self) -> String {
         let mut out = String::new();
         for (k, v) in &self.options {
-            if v.dont_print { continue; }
-            let used = if v.counter.get() > 0 { "used" } else { "notused" };
+            if v.dont_print {
+                continue;
+            }
+            let used = if v.counter.get() > 0 {
+                "used"
+            } else {
+                "notused"
+            };
             out.push_str(&format!("{} {} ({})\n", k, v.value, used));
         }
         out
@@ -401,7 +522,11 @@ impl OptionsList {
 fn parse_ipopt_number(s: &str) -> Option<Number> {
     let mut buf = String::with_capacity(s.len());
     for c in s.chars() {
-        if c == 'd' || c == 'D' { buf.push('e'); } else { buf.push(c); }
+        if c == 'd' || c == 'D' {
+            buf.push('e');
+        } else {
+            buf.push(c);
+        }
     }
     buf.trim().parse().ok()
 }
@@ -415,17 +540,25 @@ struct Tokenizer<'a> {
 }
 
 impl<'a> Tokenizer<'a> {
-    fn new(s: &'a str) -> Self { Self { chars: s.chars(), peeked: None } }
+    fn new(s: &'a str) -> Self {
+        Self {
+            chars: s.chars(),
+            peeked: None,
+        }
+    }
 
     fn next_char(&mut self) -> Option<char> {
         self.peeked.take().or_else(|| self.chars.next())
     }
 
     fn next_token(&mut self) -> Result<Option<String>, SolverException> {
-        let mut c = match self.next_char() { Some(c) => c, None => return Ok(None) };
+        let mut c = match self.next_char() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
         loop {
-            if c.is_whitespace() { /* skip */ }
-            else if c == '#' {
+            if c.is_whitespace() { /* skip */
+            } else if c == '#' {
                 // skip until newline
                 loop {
                     match self.next_char() {
@@ -433,16 +566,23 @@ impl<'a> Tokenizer<'a> {
                         _ => {}
                     }
                 }
-            } else { break; }
-            c = match self.next_char() { Some(c) => c, None => return Ok(None) };
+            } else {
+                break;
+            }
+            c = match self.next_char() {
+                Some(c) => c,
+                None => return Ok(None),
+            };
         }
         let inside_quotes = c == '"';
         let mut tok = String::new();
         if inside_quotes {
             c = match self.next_char() {
                 Some(c) => c,
-                None => throw!(ExceptionKind::OPTION_INVALID,
-                    "Unterminated quoted string in option file.".to_string()),
+                None => throw!(
+                    ExceptionKind::OPTION_INVALID,
+                    "Unterminated quoted string in option file.".to_string()
+                ),
             };
         }
         loop {
@@ -457,8 +597,10 @@ impl<'a> Tokenizer<'a> {
                 Some(c) => c,
                 None => {
                     if inside_quotes {
-                        throw!(ExceptionKind::OPTION_INVALID,
-                            "Unterminated quoted string in option file.".to_string());
+                        throw!(
+                            ExceptionKind::OPTION_INVALID,
+                            "Unterminated quoted string in option file.".to_string()
+                        );
                     }
                     return Ok(Some(tok));
                 }
@@ -474,13 +616,20 @@ mod tests {
     fn registry_with_basic() -> Rc<RegisteredOptions> {
         let r = RegisteredOptions::new();
         r.set_registering_category("Test");
-        r.add_lower_bounded_number_option("tol", "Convergence tolerance", 0.0, true, 1e-8, "").unwrap();
+        r.add_lower_bounded_number_option("tol", "Convergence tolerance", 0.0, true, 1e-8, "")
+            .unwrap();
         r.add_string_option(
-            "linear_solver", "Linear solver", "mumps",
-            &[("mumps", ""), ("feral", "")], "",
-        ).unwrap();
-        r.add_lower_bounded_integer_option("max_iter", "Maximum iterations", 0, 3000, "").unwrap();
-        r.add_bool_option("print_user_options", "", false, "").unwrap();
+            "linear_solver",
+            "Linear solver",
+            "mumps",
+            &[("mumps", ""), ("feral", "")],
+            "",
+        )
+        .unwrap();
+        r.add_lower_bounded_integer_option("max_iter", "Maximum iterations", 0, 3000, "")
+            .unwrap();
+        r.add_bool_option("print_user_options", "", false, "")
+            .unwrap();
         r
     }
 
@@ -545,7 +694,9 @@ print_user_options yes
     fn invalid_string_value_rejected() {
         let reg = registry_with_basic();
         let mut o = OptionsList::with_registered(reg);
-        let err = o.set_string_value("linear_solver", "ma27", true, false).unwrap_err();
+        let err = o
+            .set_string_value("linear_solver", "ma27", true, false)
+            .unwrap_err();
         assert_eq!(err.kind, ExceptionKind::OPTION_INVALID);
     }
 
@@ -561,7 +712,8 @@ print_user_options yes
     fn enum_value_index() {
         let reg = registry_with_basic();
         let mut o = OptionsList::with_registered(reg);
-        o.set_string_value("linear_solver", "feral", true, false).unwrap();
+        o.set_string_value("linear_solver", "feral", true, false)
+            .unwrap();
         assert_eq!(o.get_enum_value("linear_solver", "").unwrap().0, 1);
     }
 

@@ -26,8 +26,8 @@ pub fn find_redundant_rows(
 
 fn is_redundant(row: &LinearRow, x_l: &[Number], x_u: &[Number], tol: Number) -> bool {
     let act = row_activity_pub(row, x_l, x_u);
-    let lo_satisfied = row.lo <= -INF_BOUND
-        || (act.lo_neg_inf == 0 && act.lo_finite >= row.lo - tol);
+    let lo_satisfied =
+        row.lo <= -INF_BOUND || (act.lo_neg_inf == 0 && act.lo_finite >= row.lo - tol);
     let hi_satisfied =
         row.hi >= INF_BOUND || (act.hi_pos_inf == 0 && act.hi_finite <= row.hi + tol);
     lo_satisfied && hi_satisfied

@@ -400,12 +400,7 @@ impl TNLP for L1PenaltyBarrierTnlp {
         true
     }
 
-    fn eval_jac_g(
-        &mut self,
-        x: Option<&[Number]>,
-        new_x: bool,
-        mode: SparsityRequest<'_>,
-    ) -> bool {
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
         let n = self.n_orig;
         let m_eq = self.m_eq;
         let inner_nnz = self.inner_jac_nnz;
@@ -483,9 +478,9 @@ impl TNLP for L1PenaltyBarrierTnlp {
         // contributions to c(x) are linear.
         let n = self.n_orig;
         let inner_x = x.map(|xa| &xa[..n]);
-        self.inner.borrow_mut().eval_h(
-            inner_x, new_x, obj_factor, lambda, new_lambda, mode,
-        )
+        self.inner
+            .borrow_mut()
+            .eval_h(inner_x, new_x, obj_factor, lambda, new_lambda, mode)
     }
 
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
@@ -589,8 +584,12 @@ mod tests {
             })
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
-            for v in b.x_l.iter_mut() { *v = -1e19; }
-            for v in b.x_u.iter_mut() { *v = 1e19; }
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
             b.g_l[0] = 1.0;
             b.g_u[0] = 1.0;
             true
@@ -620,8 +619,10 @@ mod tests {
         ) -> bool {
             match mode {
                 SparsityRequest::Structure { irow, jcol } => {
-                    irow[0] = 0; jcol[0] = 0;
-                    irow[1] = 0; jcol[1] = 1;
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                    irow[1] = 0;
+                    jcol[1] = 1;
                     true
                 }
                 SparsityRequest::Values { values } => {
@@ -642,8 +643,10 @@ mod tests {
         ) -> bool {
             match mode {
                 SparsityRequest::Structure { irow, jcol } => {
-                    irow[0] = 0; jcol[0] = 0;
-                    irow[1] = 1; jcol[1] = 1;
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                    irow[1] = 1;
+                    jcol[1] = 1;
                     true
                 }
                 SparsityRequest::Values { values } => {
@@ -653,7 +656,13 @@ mod tests {
                 }
             }
         }
-        fn finalize_solution(&mut self, _sol: Solution<'_>, _ip_data: &IpoptData, _ip_cq: &IpoptCq) {}
+        fn finalize_solution(
+            &mut self,
+            _sol: Solution<'_>,
+            _ip_data: &IpoptData,
+            _ip_cq: &IpoptCq,
+        ) {
+        }
     }
 
     fn wrap(rho: Number) -> L1PenaltyBarrierTnlp {
@@ -683,7 +692,10 @@ mod tests {
         let mut g_l = vec![0.0; 1];
         let mut g_u = vec![0.0; 1];
         assert!(w.get_bounds_info(BoundsInfo {
-            x_l: &mut x_l, x_u: &mut x_u, g_l: &mut g_l, g_u: &mut g_u,
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
         }));
         // Original vars unbounded.
         assert!(x_l[0] <= -1e18 && x_u[0] >= 1e18);
@@ -738,7 +750,10 @@ mod tests {
         assert!(w.eval_jac_g(
             None,
             false,
-            SparsityRequest::Structure { irow: &mut irow, jcol: &mut jcol },
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            },
         ));
         // First two entries from inner: (0, 0) and (0, 1).
         assert_eq!((irow[0], jcol[0]), (0, 0));
@@ -777,7 +792,10 @@ mod tests {
             1.0,
             None,
             false,
-            SparsityRequest::Structure { irow: &mut irow, jcol: &mut jcol },
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            },
         ));
         assert_eq!((irow[0], jcol[0]), (0, 0));
         assert_eq!((irow[1], jcol[1]), (1, 1));
@@ -808,9 +826,13 @@ mod tests {
         let mut z_u = vec![0.0; 4];
         let mut lam = vec![0.0; 1];
         assert!(w.get_starting_point(StartingPoint {
-            init_x: true, x: &mut x,
-            init_z: false, z_l: &mut z_l, z_u: &mut z_u,
-            init_lambda: false, lambda: &mut lam,
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: false,
+            lambda: &mut lam,
         }));
         assert_eq!(x[0], 0.0);
         assert_eq!(x[1], 0.0);
@@ -824,29 +846,43 @@ mod tests {
         impl TNLP for Mixed {
             fn get_nlp_info(&mut self) -> Option<NlpInfo> {
                 Some(NlpInfo {
-                    n: 1, m: 3, nnz_jac_g: 3, nnz_h_lag: 1,
+                    n: 1,
+                    m: 3,
+                    nnz_jac_g: 3,
+                    nnz_h_lag: 1,
                     index_style: IndexStyle::C,
                 })
             }
             fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
-                b.x_l[0] = -1e19; b.x_u[0] = 1e19;
+                b.x_l[0] = -1e19;
+                b.x_u[0] = 1e19;
                 // row 0: equality at 0
-                b.g_l[0] = 0.0; b.g_u[0] = 0.0;
+                b.g_l[0] = 0.0;
+                b.g_u[0] = 0.0;
                 // row 1: inequality 1 ≤ . ≤ 2
-                b.g_l[1] = 1.0; b.g_u[1] = 2.0;
+                b.g_l[1] = 1.0;
+                b.g_u[1] = 2.0;
                 // row 2: equality at 5
-                b.g_l[2] = 5.0; b.g_u[2] = 5.0;
+                b.g_l[2] = 5.0;
+                b.g_u[2] = 5.0;
                 true
             }
             fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-                sp.x[0] = 0.0; true
+                sp.x[0] = 0.0;
+                true
             }
-            fn eval_f(&mut self, _x: &[Number], _: bool) -> Option<Number> { Some(0.0) }
+            fn eval_f(&mut self, _x: &[Number], _: bool) -> Option<Number> {
+                Some(0.0)
+            }
             fn eval_grad_f(&mut self, _x: &[Number], _: bool, g: &mut [Number]) -> bool {
-                g[0] = 0.0; true
+                g[0] = 0.0;
+                true
             }
             fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
-                g[0] = x[0]; g[1] = x[0]; g[2] = x[0]; true
+                g[0] = x[0];
+                g[1] = x[0];
+                g[2] = x[0];
+                true
             }
             fn eval_jac_g(
                 &mut self,
@@ -856,13 +892,19 @@ mod tests {
             ) -> bool {
                 match mode {
                     SparsityRequest::Structure { irow, jcol } => {
-                        irow[0] = 0; jcol[0] = 0;
-                        irow[1] = 1; jcol[1] = 0;
-                        irow[2] = 2; jcol[2] = 0;
+                        irow[0] = 0;
+                        jcol[0] = 0;
+                        irow[1] = 1;
+                        jcol[1] = 0;
+                        irow[2] = 2;
+                        jcol[2] = 0;
                         true
                     }
                     SparsityRequest::Values { values } => {
-                        values[0] = 1.0; values[1] = 1.0; values[2] = 1.0; true
+                        values[0] = 1.0;
+                        values[1] = 1.0;
+                        values[2] = 1.0;
+                        true
                     }
                 }
             }

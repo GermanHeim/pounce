@@ -158,7 +158,11 @@ fn phase2_end_to_end_solve_succeeds_and_inner_sees_full_g() {
     let lam = user.final_lambda.as_ref().expect("lambda set");
     assert_eq!(lam.len(), 2);
     // The dropped row's lambda was reinstated as 0.
-    assert!(lam[1].abs() < 1e-12, "dropped-row lambda should be 0, got {}", lam[1]);
+    assert!(
+        lam[1].abs() < 1e-12,
+        "dropped-row lambda should be 0, got {}",
+        lam[1]
+    );
 }
 
 #[test]

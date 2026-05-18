@@ -138,13 +138,7 @@ impl Matrix for ExpansionMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         // Order matches upstream IpExpansionMatrix.cpp:38-94: y is
         // scaled or zeroed first, then the scatter pass is applied.
         if beta != 0.0 {
@@ -231,13 +225,7 @@ impl Matrix for ExpansionMatrix {
         }
     }
 
-    fn add_m_sinv_z_impl(
-        &self,
-        alpha: Number,
-        s: &dyn Vector,
-        z: &dyn Vector,
-        x: &mut dyn Vector,
-    ) {
+    fn add_m_sinv_z_impl(&self, alpha: Number, s: &dyn Vector, z: &dyn Vector, x: &mut dyn Vector) {
         let ds = dense(s);
         let dz = dense(z);
 
@@ -334,8 +322,7 @@ impl Matrix for ExpansionMatrix {
                     }
                 } else {
                     for i in 0..n_cols as usize {
-                        vals_x[i] = (scalar_r
-                            + alpha * vals_z[i] * vals_d[exp_pos[i] as usize])
+                        vals_x[i] = (scalar_r + alpha * vals_z[i] * vals_d[exp_pos[i] as usize])
                             / vals_s[i];
                     }
                 }
@@ -361,8 +348,7 @@ impl Matrix for ExpansionMatrix {
                     }
                 } else {
                     for i in 0..n_cols as usize {
-                        vals_x[i] = (vals_r[i]
-                            + alpha * vals_z[i] * vals_d[exp_pos[i] as usize])
+                        vals_x[i] = (vals_r[i] + alpha * vals_z[i] * vals_d[exp_pos[i] as usize])
                             / vals_s[i];
                     }
                 }
@@ -452,7 +438,10 @@ mod tests {
         let mut y = dvec_box(&[0.0; 5]);
         m.mult_vector(1.0, x.as_dyn_vector(), 0.0, y.as_mut());
         let dv = y.as_any().downcast_ref::<DenseVector>().unwrap();
-        assert_eq!(dv.expanded_values().to_vec(), vec![0.0, 7.0, 0.0, -2.0, 0.0]);
+        assert_eq!(
+            dv.expanded_values().to_vec(),
+            vec![0.0, 7.0, 0.0, -2.0, 0.0]
+        );
     }
 
     #[test]

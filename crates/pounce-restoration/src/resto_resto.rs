@@ -135,14 +135,7 @@ impl RestorationPhase for RestoRestorationPhase {
 
         // Assemble new_x: keep block 0 (x_orig), replace blocks 1..=4.
         let new_x = build_new_x(
-            n_orig,
-            m_eq,
-            m_ineq,
-            x_orig,
-            &n_c_vals,
-            &p_c_vals,
-            &n_d_vals,
-            &p_d_vals,
+            n_orig, m_eq, m_ineq, x_orig, &n_c_vals, &p_c_vals, &n_d_vals, &p_d_vals,
         );
 
         // Stage as trial — `s` and all multipliers stay unchanged.

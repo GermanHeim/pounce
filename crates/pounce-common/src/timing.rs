@@ -40,12 +40,22 @@ impl Default for TimedTask {
 }
 
 impl TimedTask {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn enable(&self) { self.enabled.set(true); }
-    pub fn disable(&self) { self.enabled.set(false); }
-    pub fn is_enabled(&self) -> bool { self.enabled.get() }
-    pub fn is_started(&self) -> bool { self.start_called.get() }
+    pub fn enable(&self) {
+        self.enabled.set(true);
+    }
+    pub fn disable(&self) {
+        self.enabled.set(false);
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.get()
+    }
+    pub fn is_started(&self) -> bool {
+        self.start_called.get()
+    }
 
     pub fn reset(&self) {
         self.total_cpu.set(0.0);
@@ -56,7 +66,9 @@ impl TimedTask {
     }
 
     pub fn start(&self) {
-        if !self.enabled.get() { return; }
+        if !self.enabled.get() {
+            return;
+        }
         self.end_called.set(false);
         self.start_called.set(true);
         self.start_cpu.set(cpu_time());
@@ -65,24 +77,37 @@ impl TimedTask {
     }
 
     pub fn end(&self) {
-        if !self.enabled.get() { return; }
+        if !self.enabled.get() {
+            return;
+        }
         self.end_called.set(true);
         self.start_called.set(false);
-        self.total_cpu.set(self.total_cpu.get() + cpu_time() - self.start_cpu.get());
-        self.total_sys.set(self.total_sys.get() + sys_time() - self.start_sys.get());
-        self.total_wall.set(self.total_wall.get() + wallclock_time() - self.start_wall.get());
+        self.total_cpu
+            .set(self.total_cpu.get() + cpu_time() - self.start_cpu.get());
+        self.total_sys
+            .set(self.total_sys.get() + sys_time() - self.start_sys.get());
+        self.total_wall
+            .set(self.total_wall.get() + wallclock_time() - self.start_wall.get());
     }
 
     pub fn end_if_started(&self) {
-        if !self.enabled.get() { return; }
+        if !self.enabled.get() {
+            return;
+        }
         if self.start_called.get() {
             self.end();
         }
     }
 
-    pub fn total_cpu_time(&self) -> Number { self.total_cpu.get() }
-    pub fn total_sys_time(&self) -> Number { self.total_sys.get() }
-    pub fn total_wallclock_time(&self) -> Number { self.total_wall.get() }
+    pub fn total_cpu_time(&self) -> Number {
+        self.total_cpu.get()
+    }
+    pub fn total_sys_time(&self) -> Number {
+        self.total_sys.get()
+    }
+    pub fn total_wallclock_time(&self) -> Number {
+        self.total_wall.get()
+    }
 
     /// Running wallclock seconds since `start()` plus accumulated total
     /// from prior start/end cycles. When the task is not currently
@@ -198,24 +223,96 @@ impl TimingStatistics {
             );
         };
         s.push_str("\nTiming Statistics:\n");
-        row(&mut s, "OverallAlgorithm....................:", &self.overall_alg);
-        row(&mut s, " InitializeIterates.................:", &self.initialize_iterates);
-        row(&mut s, " UpdateHessian......................:", &self.update_hessian);
-        row(&mut s, " OutputIteration....................:", &self.output_iteration);
-        row(&mut s, " UpdateBarrierParameter.............:", &self.update_barrier_parameter);
-        row(&mut s, " ComputeSearchDirection.............:", &self.compute_search_direction);
-        row(&mut s, " ComputeAcceptableTrialPoint........:", &self.compute_acceptable_trial_point);
-        row(&mut s, " AcceptTrialPoint...................:", &self.accept_trial_point);
-        row(&mut s, " CheckConvergence...................:", &self.check_convergence);
-        row(&mut s, "LinearSystemFactorization...........:", &self.linear_system_factorization);
-        row(&mut s, "LinearSystemBackSolve...............:", &self.linear_system_back_solve);
-        row(&mut s, "QualityFunctionSearch...............:", &self.quality_function_search);
-        row(&mut s, "TotalFunctionEvaluations............:", &self.total_function_evaluation_time);
-        row(&mut s, " ObjectiveFunctionEvaluations.......:", &self.eval_obj);
-        row(&mut s, " ObjectiveGradientEvaluations.......:", &self.eval_grad_obj);
-        row(&mut s, " ConstraintEvaluations..............:", &self.eval_constr);
-        row(&mut s, " ConstraintJacobianEvaluations......:", &self.eval_constr_jac);
-        row(&mut s, " LagrangianHessianEvaluations.......:", &self.eval_lag_hess);
+        row(
+            &mut s,
+            "OverallAlgorithm....................:",
+            &self.overall_alg,
+        );
+        row(
+            &mut s,
+            " InitializeIterates.................:",
+            &self.initialize_iterates,
+        );
+        row(
+            &mut s,
+            " UpdateHessian......................:",
+            &self.update_hessian,
+        );
+        row(
+            &mut s,
+            " OutputIteration....................:",
+            &self.output_iteration,
+        );
+        row(
+            &mut s,
+            " UpdateBarrierParameter.............:",
+            &self.update_barrier_parameter,
+        );
+        row(
+            &mut s,
+            " ComputeSearchDirection.............:",
+            &self.compute_search_direction,
+        );
+        row(
+            &mut s,
+            " ComputeAcceptableTrialPoint........:",
+            &self.compute_acceptable_trial_point,
+        );
+        row(
+            &mut s,
+            " AcceptTrialPoint...................:",
+            &self.accept_trial_point,
+        );
+        row(
+            &mut s,
+            " CheckConvergence...................:",
+            &self.check_convergence,
+        );
+        row(
+            &mut s,
+            "LinearSystemFactorization...........:",
+            &self.linear_system_factorization,
+        );
+        row(
+            &mut s,
+            "LinearSystemBackSolve...............:",
+            &self.linear_system_back_solve,
+        );
+        row(
+            &mut s,
+            "QualityFunctionSearch...............:",
+            &self.quality_function_search,
+        );
+        row(
+            &mut s,
+            "TotalFunctionEvaluations............:",
+            &self.total_function_evaluation_time,
+        );
+        row(
+            &mut s,
+            " ObjectiveFunctionEvaluations.......:",
+            &self.eval_obj,
+        );
+        row(
+            &mut s,
+            " ObjectiveGradientEvaluations.......:",
+            &self.eval_grad_obj,
+        );
+        row(
+            &mut s,
+            " ConstraintEvaluations..............:",
+            &self.eval_constr,
+        );
+        row(
+            &mut s,
+            " ConstraintJacobianEvaluations......:",
+            &self.eval_constr_jac,
+        );
+        row(
+            &mut s,
+            " LagrangianHessianEvaluations.......:",
+            &self.eval_lag_hess,
+        );
         s
     }
 
@@ -254,7 +351,9 @@ mod tests {
     fn start_end_accumulates_nonneg() {
         let t = TimedTask::new();
         t.start();
-        for _ in 0..1000 { std::hint::black_box(0u64); }
+        for _ in 0..1000 {
+            std::hint::black_box(0u64);
+        }
         t.end();
         assert!(t.total_wallclock_time() >= 0.0);
     }

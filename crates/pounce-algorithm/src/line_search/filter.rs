@@ -58,16 +58,13 @@ impl Filter {
     /// would over-reject and trigger spurious adaptive-μ free→fixed
     /// transitions when the iterate is approximately constant.
     pub fn dominated_by_any(&self, theta: Number, phi: Number) -> bool {
-        self.entries
-            .iter()
-            .any(|e| theta > e.theta && phi > e.phi)
+        self.entries.iter().any(|e| theta > e.theta && phi > e.phi)
     }
 
     /// Add the entry and prune any existing entries that the new one
     /// strictly dominates. Mirrors `IpFilter::AddEntry`.
     pub fn add(&mut self, theta: Number, phi: Number, iter: i32) {
-        self.entries
-            .retain(|e| !(theta <= e.theta && phi <= e.phi));
+        self.entries.retain(|e| !(theta <= e.theta && phi <= e.phi));
         self.entries.push(FilterEntry::new(theta, phi, iter));
     }
 }

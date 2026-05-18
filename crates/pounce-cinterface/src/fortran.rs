@@ -18,9 +18,9 @@
 //! the buffer with trailing-space stripping ([`f2cstr`]).
 
 use crate::{
-    AddIpoptIntOption, AddIpoptNumOption, AddIpoptStrOption, CreateIpoptProblem,
-    Eval_F_CB, Eval_G_CB, Eval_Grad_F_CB, Eval_H_CB, Eval_Jac_G_CB, FreeIpoptProblem, Index,
-    Intermediate_CB, IpoptProblem, IpoptSolve, Number, SetIntermediateCallback,
+    AddIpoptIntOption, AddIpoptNumOption, AddIpoptStrOption, CreateIpoptProblem, Eval_F_CB,
+    Eval_G_CB, Eval_Grad_F_CB, Eval_H_CB, Eval_Jac_G_CB, FreeIpoptProblem, Index, Intermediate_CB,
+    IpoptProblem, IpoptSolve, Number, SetIntermediateCallback,
 };
 use std::ffi::{c_char, c_int, c_void};
 
@@ -498,7 +498,16 @@ pub unsafe extern "C" fn ipsolve_(
     fud.idat = idat;
     fud.ddat = ddat;
     let fud_ptr = (*fproblem) as *mut c_void;
-    IpoptSolve(fud.problem, x, g, obj_val, mult_g, mult_x_l, mult_x_u, fud_ptr)
+    IpoptSolve(
+        fud.problem,
+        x,
+        g,
+        obj_val,
+        mult_g,
+        mult_x_l,
+        mult_x_u,
+        fud_ptr,
+    )
 }
 
 /// `ipaddstroption_(FProblem, KEYWORD, VALUE, klen, vlen) -> Index`.
@@ -521,7 +530,11 @@ pub unsafe extern "C" fn ipaddstroption_(
     let fud = &mut *(*fproblem as *mut FortranUserData);
     let k = f2cstr(keyword, klen);
     let v = f2cstr(value, vlen);
-    let ok = AddIpoptStrOption(fud.problem, k.as_ptr() as *const c_char, v.as_ptr() as *const c_char);
+    let ok = AddIpoptStrOption(
+        fud.problem,
+        k.as_ptr() as *const c_char,
+        v.as_ptr() as *const c_char,
+    );
     if ok != 0 {
         OK
     } else {
@@ -586,10 +599,7 @@ pub unsafe extern "C" fn ipaddintoption_(
 /// `fproblem` must be valid; `inter_cb` must be a valid Fortran
 /// callback for the lifetime of the problem.
 #[no_mangle]
-pub unsafe extern "C" fn ipsetcallback_(
-    fproblem: *mut *mut c_void,
-    inter_cb: FIntermediate_CB,
-) {
+pub unsafe extern "C" fn ipsetcallback_(fproblem: *mut *mut c_void, inter_cb: FIntermediate_CB) {
     if fproblem.is_null() || (*fproblem).is_null() {
         return;
     }

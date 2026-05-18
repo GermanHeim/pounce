@@ -130,7 +130,12 @@ impl SolverException {
         file: &'static str,
         line: Index,
     ) -> Self {
-        Self { kind, message: message.into(), file, line }
+        Self {
+            kind,
+            message: message.into(),
+            file,
+            line,
+        }
     }
 }
 

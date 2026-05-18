@@ -90,9 +90,12 @@ impl TSymScalingMethod for SlackBasedTSymScalingMethod {
         bound.set(self.slack_scale_max);
         tmp.element_wise_min(&*bound);
 
-        let dense = tmp.as_any().downcast_ref::<DenseVector>().unwrap_or_else(|| {
-            panic!("SlackBasedTSymScalingMethod: slack vector is not a DenseVector")
-        });
+        let dense = tmp
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .unwrap_or_else(|| {
+                panic!("SlackBasedTSymScalingMethod: slack vector is not a DenseVector")
+            });
         let vals = dense.expanded_values();
         scaling_factors[nx as usize..(nx + ns) as usize].copy_from_slice(&vals);
 

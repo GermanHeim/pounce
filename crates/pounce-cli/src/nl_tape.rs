@@ -356,9 +356,8 @@ impl Tape {
                                 adj[*a] += w * p_a;
                                 let mut dp_a = dr * u.powf(r - 1.0);
                                 if u > 0.0 {
-                                    dp_a += r
-                                        * u.powf(r - 1.0)
-                                        * ((r - 1.0) * du / u + dr * u.ln());
+                                    dp_a +=
+                                        r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
                                 } else {
                                     dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
                                 }
@@ -738,9 +737,11 @@ mod tests {
         let n_body_adds = t
             .ops
             .iter()
-            .filter(|op| matches!(op, TapeOp::Add(a, b) if {
-                matches!(t.ops[*a], TapeOp::Var(0)) && matches!(t.ops[*b], TapeOp::Var(1))
-            }))
+            .filter(|op| {
+                matches!(op, TapeOp::Add(a, b) if {
+                    matches!(t.ops[*a], TapeOp::Var(0)) && matches!(t.ops[*b], TapeOp::Var(1))
+                })
+            })
             .count();
         assert_eq!(n_body_adds, 1, "CSE body should be emitted exactly once");
 

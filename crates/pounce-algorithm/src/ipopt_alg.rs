@@ -23,12 +23,10 @@
 
 use crate::alg_builder::AlgorithmBundle;
 use crate::conv_check::r#trait::ConvergenceStatus;
-use crate::ipopt_cq::IpoptCqHandle;
 use crate::intermediate::{CtxGuard, IntermediateContext};
+use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
-use pounce_nlp::return_codes::AlgorithmMode;
-use pounce_nlp::tnlp::{IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, IterStats, TNLP};
 use crate::iter_dump::IterDumper;
 use crate::kkt::pd_search_dir_calc::PdSearchDirCalc;
 use crate::line_search::backtracking::Outcome;
@@ -37,6 +35,8 @@ use pounce_common::diagnostics::DiagnosticsState;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::Vector;
 use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::return_codes::AlgorithmMode;
+use pounce_nlp::tnlp::{IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, IterStats, TNLP};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -443,12 +443,10 @@ impl IpoptAlgorithm {
                 return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
             }
         }
-        let conv_status = self.bundle.conv_check.check_convergence_with_state(
-            nlp_err,
-            iter_count,
-            &self.data,
-            &self.cq,
-        );
+        let conv_status = self
+            .bundle
+            .conv_check
+            .check_convergence_with_state(nlp_err, iter_count, &self.data, &self.cq);
         match conv_status {
             ConvergenceStatus::Continue => {}
             ConvergenceStatus::Converged => {
@@ -609,14 +607,27 @@ impl IpoptAlgorithm {
                             cdx.comp(4).asum(),
                         );
                         // Argmax of orig block via dot with sign — print first few values.
-                        if let Some(dv_orig) = cdx.comp(0).as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+                        if let Some(dv_orig) =
+                            cdx.comp(0)
+                                .as_any()
+                                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                        {
                             let v = dv_orig.values();
                             let mut imax = 0usize;
                             let mut amax = 0.0f64;
                             for (i, &x) in v.iter().enumerate() {
-                                if x.abs() > amax { amax = x.abs(); imax = i; }
+                                if x.abs() > amax {
+                                    amax = x.abs();
+                                    imax = i;
+                                }
                             }
-                            eprintln!("[PN_DELTA] iter={} dx_orig argmax: i={} v={:.17e} (n={})", it, imax, v[imax], v.len());
+                            eprintln!(
+                                "[PN_DELTA] iter={} dx_orig argmax: i={} v={:.17e} (n={})",
+                                it,
+                                imax,
+                                v[imax],
+                                v.len()
+                            );
                         }
                     }
                     let p = &d.perturbations;
@@ -676,8 +687,13 @@ impl IpoptAlgorithm {
                         if let Some(czu) = curr.z_u.as_any().downcast_ref::<CompoundVector>() {
                             eprintln!("[PN_DELTA] iter={} zU_ncomps={}", it, czu.n_comps());
                             for ic in 0..czu.n_comps() {
-                                eprintln!("[PN_DELTA] iter={} zU_block[{}]_amax={:.6e} dim={}",
-                                    it, ic, czu.comp(ic).amax(), czu.comp(ic).dim());
+                                eprintln!(
+                                    "[PN_DELTA] iter={} zU_block[{}]_amax={:.6e} dim={}",
+                                    it,
+                                    ic,
+                                    czu.comp(ic).amax(),
+                                    czu.comp(ic).dim()
+                                );
                             }
                         }
                     }
@@ -696,18 +712,25 @@ impl IpoptAlgorithm {
                     let d = self.data.borrow();
                     // Also dump curr.x_orig argmax
                     if let Some(curr) = d.curr.as_ref() {
-                    if let Some(cx) = curr.x.as_any().downcast_ref::<CompoundVector>() {
-                        if let Some(xo) = cx.comp(0).as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
-                            let v = xo.values();
-                            let mut imax = 0usize;
-                            let mut amax = 0.0f64;
-                            for (i, &x) in v.iter().enumerate() {
-                                if x.abs() > amax { amax = x.abs(); imax = i; }
-                            }
-                            eprintln!("[PN_DELTA] iter={} curr_x_orig argmax: i={} v={:.17e} amax={:.17e} nrm2={:.17e}",
+                        if let Some(cx) = curr.x.as_any().downcast_ref::<CompoundVector>() {
+                            if let Some(xo) =
+                                cx.comp(0)
+                                    .as_any()
+                                    .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                            {
+                                let v = xo.values();
+                                let mut imax = 0usize;
+                                let mut amax = 0.0f64;
+                                for (i, &x) in v.iter().enumerate() {
+                                    if x.abs() > amax {
+                                        amax = x.abs();
+                                        imax = i;
+                                    }
+                                }
+                                eprintln!("[PN_DELTA] iter={} curr_x_orig argmax: i={} v={:.17e} amax={:.17e} nrm2={:.17e}",
                                 it, imax, v[imax], xo.amax(), xo.nrm2());
+                            }
                         }
-                    }
                     }
                 }
             }
@@ -733,14 +756,8 @@ impl IpoptAlgorithm {
             // calls to `IpCq.primal_frac_to_the_bound` /
             // `IpCq.dual_frac_to_the_bound` with τ = `curr_tau`.
             let tau = self.data.borrow().curr_tau;
-            let alpha_p_max = self
-                .cq
-                .borrow()
-                .aff_step_alpha_primal_max(&delta, tau);
-            let alpha_d_max = self
-                .cq
-                .borrow()
-                .aff_step_alpha_dual_max(&delta, tau);
+            let alpha_p_max = self.cq.borrow().aff_step_alpha_primal_max(&delta, tau);
+            let alpha_d_max = self.cq.borrow().aff_step_alpha_dual_max(&delta, tau);
 
             // Tiny-step gate — port of `IpBacktrackingLineSearch.cpp:363`
             // and the handling block at lines 382-435. When the search
@@ -907,10 +924,7 @@ impl IpoptAlgorithm {
             let iter = self.data.borrow().iter_count;
             eprintln!(
                 "RESTO_ENTRY iter={} theta={:.6e} barr={:.6e} near_feas_ct={}",
-                iter,
-                reference_theta,
-                reference_barr,
-                self.resto_near_feasible_count,
+                iter, reference_theta, reference_barr, self.resto_near_feasible_count,
             );
         }
 
@@ -960,9 +974,10 @@ impl IpoptAlgorithm {
         } else {
             SolverReturn::ErrorInStepComputation
         };
-        if let (Some(prev_x), Some(prev_s)) =
-            (self.last_resto_entry_x.as_ref(), self.last_resto_entry_s.as_ref())
-        {
+        if let (Some(prev_x), Some(prev_s)) = (
+            self.last_resto_entry_x.as_ref(),
+            self.last_resto_entry_s.as_ref(),
+        ) {
             let dx_rel = relative_distance(&*curr.x, &**prev_x);
             let ds_rel = relative_distance(&*curr.s, &**prev_s);
             if std::env::var_os("POUNCE_DBG_RESTO_CYCLE").is_some() {
@@ -1021,12 +1036,9 @@ impl IpoptAlgorithm {
         // strike limit.
         let outer_tol = self.bundle.conv_check.tol_or_default();
         if reference_theta <= outer_tol {
-            self.resto_near_feasible_count =
-                self.resto_near_feasible_count.saturating_add(1);
+            self.resto_near_feasible_count = self.resto_near_feasible_count.saturating_add(1);
             if self.resto_near_feasible_count >= 3 {
-                return IterateOutcome::Terminate(
-                    SolverReturn::StopAtAcceptablePoint,
-                );
+                return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
             }
         } else {
             self.resto_near_feasible_count = 0;
@@ -1048,11 +1060,11 @@ impl IpoptAlgorithm {
             .acceptor_mut()
             .prepare_resto_phase_start(reference_theta, reference_barr);
 
-        let orig_progress_cb = self
-            .bundle
-            .line_search
-            .acceptor()
-            .make_orig_progress_check(reference_theta, reference_barr, 5.0);
+        let orig_progress_cb = self.bundle.line_search.acceptor().make_orig_progress_check(
+            reference_theta,
+            reference_barr,
+            5.0,
+        );
 
         let (Some(nlp), Some(sd), Some(resto)) = (
             self.nlp.as_ref(),
@@ -1397,7 +1409,10 @@ fn clamp_against_slack(
 }
 
 fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
-    if let Some(dv) = v.as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+    if let Some(dv) = v
+        .as_any()
+        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+    {
         let vs = dv.expanded_values();
         dst.copy_from_slice(&vs);
         return;
@@ -1434,7 +1449,10 @@ fn flat_write_into(v: &mut dyn Vector, src: &[Number]) {
         dv.set_values(src);
         return;
     }
-    if let Some(cv) = v.as_any_mut().downcast_mut::<pounce_linalg::CompoundVector>() {
+    if let Some(cv) = v
+        .as_any_mut()
+        .downcast_mut::<pounce_linalg::CompoundVector>()
+    {
         let mut off = 0usize;
         for k in 0..cv.n_comps() {
             let blk = cv.comp_mut(k);

@@ -86,12 +86,7 @@ fn main() {
 
     let trampoline_lib = format!("{}/libcutest_trampoline.a", out_dir);
     let s = Command::new("ar")
-        .args([
-            "rcs",
-            &trampoline_lib,
-            &trampoline_obj,
-            &fortran_open_obj,
-        ])
+        .args(["rcs", &trampoline_lib, &trampoline_obj, &fortran_open_obj])
         .status()
         .expect("ar not found");
     if !s.success() {
@@ -120,6 +115,9 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=gfortran");
 
     println!("cargo:rerun-if-changed={}", trampoline_src);
-    println!("cargo:rerun-if-changed={}/fortran_open_fixed.f90", manifest_dir);
+    println!(
+        "cargo:rerun-if-changed={}/fortran_open_fixed.f90",
+        manifest_dir
+    );
     println!("cargo:rerun-if-changed={}/build.rs", manifest_dir);
 }

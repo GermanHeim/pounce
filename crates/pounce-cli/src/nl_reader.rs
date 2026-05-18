@@ -355,9 +355,7 @@ fn parse_suffix_segment(
     let kind: u32 = kind_str
         .parse()
         .map_err(|e| format!("S kind '{kind_str}': {e}"))?;
-    let nentries: usize = parts[1]
-        .parse()
-        .map_err(|e| format!("S nentries: {e}"))?;
+    let nentries: usize = parts[1].parse().map_err(|e| format!("S nentries: {e}"))?;
     let name = parts[2].to_string();
 
     let is_real = (kind & 0x4) != 0;
@@ -572,10 +570,7 @@ impl<'a> Parser<'a> {
     fn parse_header(&mut self) -> Result<(), String> {
         let line0 = self.next_line().ok_or("empty .nl file")?;
         let trimmed = strip_comment(line0).trim();
-        let first = trimmed
-            .chars()
-            .next()
-            .ok_or("empty header line")?;
+        let first = trimmed.chars().next().ok_or("empty header line")?;
         if first != 'g' {
             return Err(format!(
                 "only ASCII (g-) .nl files supported; got header '{trimmed}'"
@@ -624,27 +619,33 @@ impl<'a> Parser<'a> {
         if tok.is_empty() {
             return Err("empty expression token".into());
         }
-        let first = tok
-            .chars()
-            .next()
-            .ok_or("empty expression token")?;
+        let first = tok.chars().next().ok_or("empty expression token")?;
         match first {
             'n' => {
-                let v: Number = tok[1..].trim().parse().map_err(|e| format!("n value: {e}"))?;
+                let v: Number = tok[1..]
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("n value: {e}"))?;
                 Ok(Expr::Const(v))
             }
             'v' => {
-                let i: usize = tok[1..].trim().parse().map_err(|e| format!("v index: {e}"))?;
+                let i: usize = tok[1..]
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("v index: {e}"))?;
                 Ok(self.var_or_cse(i)?)
             }
             'o' => {
-                let code: i32 = tok[1..].trim().parse().map_err(|e| format!("opcode: {e}"))?;
+                let code: i32 = tok[1..]
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("opcode: {e}"))?;
                 self.parse_opcode(code)
             }
-            'f' | 't' | 'u' => {
-                Err(format!("unsupported expression token '{tok}'"))
-            }
-            other => Err(format!("unexpected expression token start '{other}': '{tok}'")),
+            'f' | 't' | 'u' => Err(format!("unsupported expression token '{tok}'")),
+            other => Err(format!(
+                "unexpected expression token start '{other}': '{tok}'"
+            )),
         }
     }
 
@@ -1085,12 +1086,7 @@ impl TNLP for NlTnlp {
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
         let nl: Number = self.obj_tapes.iter().map(|t| t.eval(x)).sum();
-        let lin: Number = self
-            .prob
-            .obj_linear
-            .iter()
-            .map(|(i, c)| c * x[*i])
-            .sum();
+        let lin: Number = self.prob.obj_linear.iter().map(|(i, c)| c * x[*i]).sum();
         let v = self.prob.obj_constant + nl + lin;
         let signed = if self.prob.minimize { v } else { -v };
         Some(signed)
@@ -1115,10 +1111,7 @@ impl TNLP for NlTnlp {
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         for i in 0..self.prob.m {
             let nl: Number = self.con_tapes[i].iter().map(|t| t.eval(x)).sum();
-            let lin: Number = self.prob.con_linear[i]
-                .iter()
-                .map(|(j, c)| c * x[*j])
-                .sum();
+            let lin: Number = self.prob.con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
             g[i] = nl + lin;
         }
         true
@@ -1526,7 +1519,11 @@ S4 1 sens_state_value_1
         let v = p.suffixes.var_int.get("sens_state_1").expect("var_int");
         assert_eq!(v.as_slice(), &[7]);
         // Real var-suffix: dense length 1, slot 0 = 4.5.
-        let r = p.suffixes.var_real.get("sens_state_value_1").expect("var_real");
+        let r = p
+            .suffixes
+            .var_real
+            .get("sens_state_value_1")
+            .expect("var_real");
         assert_eq!(r.len(), 1);
         assert!((r[0] - 4.5).abs() < 1e-12);
         // Other suffix slots stay empty.

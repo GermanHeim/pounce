@@ -107,13 +107,7 @@ extern "C" {
 
     /// Evaluate constraint values c(x) only.
     #[link_name = "cutest_ccf_"]
-    pub fn cutest_ccf(
-        status: *mut i32,
-        n: *const i32,
-        m: *const i32,
-        x: *const f64,
-        c: *mut f64,
-    );
+    pub fn cutest_ccf(status: *mut i32, n: *const i32, m: *const i32, x: *const f64, c: *mut f64);
 
     /// Constraints + sparse Jacobian (0-based indices).
     #[link_name = "cutest_ccfsg_c_"]

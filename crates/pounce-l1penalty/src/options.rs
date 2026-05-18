@@ -43,9 +43,6 @@ impl L1PenaltyOptions {
     /// that wire the wrapper explicitly without going through the
     /// option-table parser.
     pub fn enabled_with_rho(rho: Number) -> Self {
-        Self {
-            enabled: true,
-            rho,
-        }
+        Self { enabled: true, rho }
     }
 }

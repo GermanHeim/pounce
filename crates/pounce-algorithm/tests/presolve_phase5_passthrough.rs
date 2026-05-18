@@ -111,10 +111,8 @@ impl TNLP for WithMetaScaling {
     fn get_var_con_metadata(&mut self, var: &mut MetaData, con: &mut MetaData) -> bool {
         var.strings
             .insert("var_names".into(), vec!["a".into(), "b".into()]);
-        con.strings.insert(
-            "con_names".into(),
-            vec!["budget".into(), "spread".into()],
-        );
+        con.strings
+            .insert("con_names".into(), vec!["budget".into(), "spread".into()]);
         con.integers.insert("priority".into(), vec![7 as Index, 3]);
         con.numerics.insert("weight".into(), vec![1.5, 0.5]);
         true
@@ -153,7 +151,10 @@ fn phase5_con_metadata_projects_to_kept_row_only() {
     let mut con = MetaData::default();
     assert!(p.get_var_con_metadata(&mut var, &mut con));
     assert_eq!(var.strings.get("var_names").unwrap().len(), 2);
-    assert_eq!(con.strings.get("con_names").unwrap(), &vec!["budget".to_string()]);
+    assert_eq!(
+        con.strings.get("con_names").unwrap(),
+        &vec!["budget".to_string()]
+    );
     assert_eq!(con.integers.get("priority").unwrap(), &vec![7 as Index]);
     assert_eq!(con.numerics.get("weight").unwrap(), &vec![1.5]);
 }

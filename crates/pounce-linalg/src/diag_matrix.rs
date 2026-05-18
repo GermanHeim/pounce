@@ -81,13 +81,7 @@ impl Matrix for DiagMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         let diag = self.diag_ref();
         // Match upstream order: scal(beta) → tmp = x .* diag → y += alpha tmp.
         if beta != 0.0 {

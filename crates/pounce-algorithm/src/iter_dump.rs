@@ -156,11 +156,7 @@ impl IterDumper {
     /// Emit one iteration record. `data` and `cq` must reference the
     /// post-`accept_trial_point` state (or, for iter 0, the initialised
     /// `curr` iterate).
-    pub(crate) fn write_record(
-        &mut self,
-        data: &IpoptDataHandle,
-        cq: &IpoptCqHandle,
-    ) {
+    pub(crate) fn write_record(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) {
         if let Err(e) = self.write_record_inner(data, cq) {
             eprintln!(
                 "iter_dump: failed to write iteration record: {} — dumping aborted",
@@ -177,18 +173,7 @@ impl IterDumper {
         // Snapshot all data we need before any I/O (avoid holding a
         // borrow across self.writer writes — we don't, but it keeps the
         // structure clear).
-        let (
-            iter,
-            mu,
-            tau,
-            alpha_pr,
-            alpha_du,
-            delta_x,
-            delta_s,
-            delta_c,
-            delta_d,
-            curr_opt,
-        ) = {
+        let (iter, mu, tau, alpha_pr, alpha_du, delta_x, delta_s, delta_c, delta_d, curr_opt) = {
             let d = data.borrow();
             (
                 d.iter_count as u32,
@@ -214,11 +199,11 @@ impl IterDumper {
         let inf_du = cq.borrow().curr_dual_infeasibility_max();
         let constr_viol = cq.borrow().curr_constraint_violation();
         let dual_inf = inf_du; // alias per FORMAT.md
-        // FORMAT.md describes `complementarity` as
-        // `IpCq().curr_complementarity(0.0, NORM_MAX)` — the max-norm
-        // unbarriered complementarity. We compute it directly from the
-        // four `curr_compl_*` blocks (the same pieces curr_nlp_error
-        // already uses).
+                               // FORMAT.md describes `complementarity` as
+                               // `IpCq().curr_complementarity(0.0, NORM_MAX)` — the max-norm
+                               // unbarriered complementarity. We compute it directly from the
+                               // four `curr_compl_*` blocks (the same pieces curr_nlp_error
+                               // already uses).
         let complementarity = {
             let cq_ref = cq.borrow();
             cq_ref
@@ -304,10 +289,8 @@ mod tests {
         // Round-trip a small vector through write_vec → in-memory buffer.
         // We don't have IpoptDataHandle here, so we test write_vec
         // directly via a tempfile + manual byte-level check.
-        let path = std::env::temp_dir().join(format!(
-            "pounce_iter_dump_test_{}.bin",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("pounce_iter_dump_test_{}.bin", std::process::id()));
         std::env::set_var(ENV_DUMP_PATH, &path);
         let mut dumper = IterDumper::from_env().expect("dumper");
         std::env::remove_var(ENV_DUMP_PATH);
@@ -332,10 +315,8 @@ mod tests {
 
     #[test]
     fn header_writes_magic_and_version() {
-        let path = std::env::temp_dir().join(format!(
-            "pounce_iter_dump_hdr_{}.bin",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("pounce_iter_dump_hdr_{}.bin", std::process::id()));
         std::env::set_var(ENV_DUMP_PATH, &path);
         std::env::set_var(ENV_DUMP_NAME, "hs071");
         let mut dumper = IterDumper::from_env().expect("dumper");

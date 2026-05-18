@@ -28,9 +28,7 @@
 
 use crate::return_codes::ApplicationReturnStatus;
 use crate::solve_statistics::SolveStatistics;
-use crate::tnlp::{
-    BoundsInfo, IpoptCq, IpoptData, Solution, SparsityRequest, StartingPoint, TNLP,
-};
+use crate::tnlp::{BoundsInfo, IpoptCq, IpoptData, Solution, SparsityRequest, StartingPoint, TNLP};
 use pounce_common::types::{Index, Number};
 
 /// Configuration matching upstream's `tol`, `max_iter` defaults.
@@ -254,8 +252,7 @@ pub fn solve_unconstrained(
         None => return (ApplicationReturnStatus::InvalidNumberDetected, stats),
     };
     stats.num_obj_evals += 1;
-    let mut current_phi =
-        current_f + barrier_term(&x, &x_l, &x_u, mu, nlp_lower, nlp_upper);
+    let mut current_phi = current_f + barrier_term(&x, &x_l, &x_u, mu, nlp_lower, nlp_upper);
 
     let mut iter: Index = 0;
     let mut last_grad_norm = Number::INFINITY;
@@ -317,8 +314,7 @@ pub fn solve_unconstrained(
                 break ApplicationReturnStatus::SolveSucceeded;
             }
             mu = (mu * mu).max(mu_min);
-            current_phi =
-                current_f + barrier_term(&x, &x_l, &x_u, mu, nlp_lower, nlp_upper);
+            current_phi = current_f + barrier_term(&x, &x_l, &x_u, mu, nlp_lower, nlp_upper);
             last_grad_norm = Number::INFINITY;
             stagnation_count = 0;
             continue 'outer;
@@ -331,8 +327,7 @@ pub fn solve_unconstrained(
         // mechanism. Require *actual* progress from the initial point
         // (drop by ≥ 100×) so we don't prematurely accept a flat region
         // when the initial gradient was already huge.
-        let made_progress =
-            initial_grad_norm <= 0.0 || grad_norm < 1e-2 * initial_grad_norm;
+        let made_progress = initial_grad_norm <= 0.0 || grad_norm < 1e-2 * initial_grad_norm;
         if mu <= mu_min && grad_norm < acceptable_scaled && made_progress {
             acceptable_streak += 1;
             if acceptable_streak >= opts.acceptable_iter {
@@ -340,8 +335,8 @@ pub fn solve_unconstrained(
                 // dropped by ≥ 1e4× from x0 — Newton-on-NLS sums of
                 // squares routinely floor grad_norm at sqrt(ε) · κ
                 // above 1e-8, but the iterate is at the true optimum.
-                let bit_converged = initial_grad_norm > 0.0
-                    && grad_norm < 1e-4 * initial_grad_norm.max(1.0);
+                let bit_converged =
+                    initial_grad_norm > 0.0 && grad_norm < 1e-4 * initial_grad_norm.max(1.0);
                 let status = if bit_converged {
                     ApplicationReturnStatus::SolveSucceeded
                 } else {
@@ -373,15 +368,13 @@ pub fn solve_unconstrained(
                 // Ipopt-style relative-gradient convergence criterion
                 // accepts on problems where initial_grad_norm is huge
                 // (e.g. CUTEst least-squares with poor initial scaling).
-                let bit_converged = initial_grad_norm > 0.0
-                    && grad_norm < 1e-4 * initial_grad_norm.max(1.0);
-                let made_strong_progress = initial_grad_norm > 0.0
-                    && grad_norm < 1e-2 * initial_grad_norm;
+                let bit_converged =
+                    initial_grad_norm > 0.0 && grad_norm < 1e-4 * initial_grad_norm.max(1.0);
+                let made_strong_progress =
+                    initial_grad_norm > 0.0 && grad_norm < 1e-2 * initial_grad_norm;
                 let status = if bit_converged {
                     ApplicationReturnStatus::SolveSucceeded
-                } else if (grad_norm < acceptable_scaled && made_progress)
-                    || made_strong_progress
-                {
+                } else if (grad_norm < acceptable_scaled && made_progress) || made_strong_progress {
                     ApplicationReturnStatus::SolvedToAcceptableLevel
                 } else {
                     ApplicationReturnStatus::SearchDirectionBecomesTooSmall
@@ -511,9 +504,7 @@ pub fn solve_unconstrained(
             } else {
                 Number::INFINITY
             };
-            if phi_trial.is_finite()
-                && phi_trial <= current_phi + alpha * armijo_rhs_factor
-            {
+            if phi_trial.is_finite() && phi_trial <= current_phi + alpha * armijo_rhs_factor {
                 break (f_trial, phi_trial);
             }
             alpha *= 0.5;
@@ -525,15 +516,13 @@ pub fn solve_unconstrained(
                 // whose curvature is too poor for a finite-step Newton
                 // model. Accept as Solved_To_Acceptable_Level rather
                 // than the harsher Search_Direction_Becomes_Too_Small.
-                let bit_converged = initial_grad_norm > 0.0
-                    && grad_norm < 1e-4 * initial_grad_norm.max(1.0);
-                let made_strong_progress = initial_grad_norm > 0.0
-                    && grad_norm < 1e-2 * initial_grad_norm;
+                let bit_converged =
+                    initial_grad_norm > 0.0 && grad_norm < 1e-4 * initial_grad_norm.max(1.0);
+                let made_strong_progress =
+                    initial_grad_norm > 0.0 && grad_norm < 1e-2 * initial_grad_norm;
                 let status = if bit_converged {
                     ApplicationReturnStatus::SolveSucceeded
-                } else if made_strong_progress
-                    || grad_norm < acceptable_scaled
-                {
+                } else if made_strong_progress || grad_norm < acceptable_scaled {
                     ApplicationReturnStatus::SolvedToAcceptableLevel
                 } else {
                     ApplicationReturnStatus::SearchDirectionBecomesTooSmall
@@ -838,9 +827,7 @@ pub fn solve_eq_constrained(
             } else {
                 Number::INFINITY
             };
-            if merit_trial.is_finite()
-                && merit_trial <= merit_curr + alpha * armijo_rhs_factor
-            {
+            if merit_trial.is_finite() && merit_trial <= merit_curr + alpha * armijo_rhs_factor {
                 break f_trial;
             }
             alpha *= 0.5;
@@ -977,7 +964,11 @@ fn schur_kkt_solve(
                 cholesky_solve(&s_fac, &mut rhs_y, m);
                 break true;
             }
-            s_lambda = if s_lambda == 0.0 { 1e-8 } else { s_lambda * 10.0 };
+            s_lambda = if s_lambda == 0.0 {
+                1e-8
+            } else {
+                s_lambda * 10.0
+            };
             if s_lambda > 1e6 {
                 break false;
             }
@@ -1070,10 +1061,7 @@ fn barrier_term(
         let lo = x_l[i];
         let hi = x_u[i];
         // Fixed variables (lo == hi) contribute no barrier term.
-        if lo > nlp_lower
-            && hi < nlp_upper
-            && (hi - lo).abs() <= fixed_eps * lo.abs().max(1.0)
-        {
+        if lo > nlp_lower && hi < nlp_upper && (hi - lo).abs() <= fixed_eps * lo.abs().max(1.0) {
             continue;
         }
         if lo > nlp_lower {
@@ -1151,7 +1139,12 @@ fn finalize(
 /// system is positive-definite enough for Cholesky to succeed. This
 /// mirrors the spirit of `PdPerturbationHandler::PerturbForWrongInertia`
 /// but on a single dense system rather than the augmented KKT.
-fn solve_with_damping(h: &[Number], grad: &[Number], n: usize, step: &mut [Number]) -> Result<(), ()> {
+fn solve_with_damping(
+    h: &[Number],
+    grad: &[Number],
+    n: usize,
+    step: &mut [Number],
+) -> Result<(), ()> {
     // If the Hessian contains non-finite entries (e.g. the user
     // function reports an unbounded second derivative at the starting
     // point), zero those entries and rely on Levenberg damping to

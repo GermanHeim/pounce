@@ -65,8 +65,7 @@ pub struct CutestProblem {
 impl CutestProblem {
     /// Load a CUTEst problem from its compiled shared library and `OUTSDIF.d`.
     pub fn load(name: &str, lib_path: &str, outsdif_path: &str) -> Result<Self, String> {
-        let lib_cstr =
-            CString::new(lib_path).map_err(|e| format!("Invalid lib path: {}", e))?;
+        let lib_cstr = CString::new(lib_path).map_err(|e| format!("Invalid lib path: {}", e))?;
         let outsdif_cstr =
             CString::new(outsdif_path).map_err(|e| format!("Invalid OUTSDIF path: {}", e))?;
         let funit = NEXT_FUNIT.fetch_add(1, Ordering::SeqCst);

@@ -45,8 +45,8 @@ use crate::conv_check::{RestoFilterConvCheck, RestoPenaltyConvCheck};
 use crate::init::RestoIterateInitializer;
 use crate::min_c_1nrm::MinC1NormRestoration;
 use crate::output::{InfPrTag, PrintInfoString, RestoIterationOutput};
-use crate::resto_nlp::RestoIpoptNlp;
 use crate::r#trait::{RestorationOutcome, RestorationPhase};
+use crate::resto_nlp::RestoIpoptNlp;
 use pounce_algorithm::ipopt_cq::IpoptCqHandle;
 use pounce_algorithm::ipopt_data::IpoptDataHandle;
 use pounce_algorithm::ipopt_nlp::IpoptNlp;
@@ -161,7 +161,8 @@ impl RestoAlgorithmBuilder {
         m_ineq: pounce_common::types::Index,
         x_ref_vals: &[f64],
     ) -> RestoAlgorithmBundle {
-        let mut nlp = RestoIpoptNlp::new(n_orig, m_eq, m_ineq, x_ref_vals, self.rho, self.eta_factor);
+        let mut nlp =
+            RestoIpoptNlp::new(n_orig, m_eq, m_ineq, x_ref_vals, self.rho, self.eta_factor);
         nlp.evaluate_orig_obj_at_resto_trial = self.evaluate_orig_obj_at_resto_trial;
 
         let init = RestoIterateInitializer::with_dims(n_orig, m_eq, m_ineq, x_ref_vals.to_vec())

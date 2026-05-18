@@ -183,8 +183,9 @@ Options:
         }
 
         if !help && !version && !about {
-            let problem = problem
-                .ok_or_else(|| "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string())?;
+            let problem = problem.ok_or_else(|| {
+                "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string()
+            })?;
             return Ok(Self {
                 problem,
                 options_file,

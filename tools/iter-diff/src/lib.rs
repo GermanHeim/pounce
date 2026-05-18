@@ -407,7 +407,10 @@ impl std::fmt::Display for HeaderMismatch {
 pub enum CompareError {
     Header(HeaderMismatch),
     /// Different record counts. Reported once at the start.
-    RecordCount { left: usize, right: usize },
+    RecordCount {
+        left: usize,
+        right: usize,
+    },
     /// Vector dimension mismatch — reported as a divergence with the
     /// field name and the two lengths encoded in `left`/`right`.
     VectorLength {
@@ -423,11 +426,9 @@ impl std::fmt::Display for CompareError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CompareError::Header(h) => write!(f, "{}", h),
-            CompareError::RecordCount { left, right } => write!(
-                f,
-                "record count differs: left={}, right={}",
-                left, right
-            ),
+            CompareError::RecordCount { left, right } => {
+                write!(f, "record count differs: left={}, right={}", left, right)
+            }
             CompareError::VectorLength {
                 iter_index,
                 field,
@@ -643,8 +644,14 @@ mod tests {
     fn tolerance_parse() {
         assert!(matches!(Tolerance::parse("bit"), Ok(Tolerance::Bit)));
         assert!(matches!(Tolerance::parse("ulp:4"), Ok(Tolerance::Ulp(4))));
-        assert!(matches!(Tolerance::parse("abs:1e-9"), Ok(Tolerance::Abs(_))));
-        assert!(matches!(Tolerance::parse("rel:1e-9"), Ok(Tolerance::Rel(_))));
+        assert!(matches!(
+            Tolerance::parse("abs:1e-9"),
+            Ok(Tolerance::Abs(_))
+        ));
+        assert!(matches!(
+            Tolerance::parse("rel:1e-9"),
+            Ok(Tolerance::Rel(_))
+        ));
         assert!(Tolerance::parse("garbage").is_err());
     }
 

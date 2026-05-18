@@ -178,9 +178,11 @@ fn line_search_failure_invokes_user_supplied_restoration_phase() {
 /// Backend factory matching the application-side default: every
 /// `LinearSolverChoice` returns a fresh FERAL instance.
 fn ma57_backend() -> LinearBackendFactory {
-    Box::new(|_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        Box::new(pounce_feral::FeralSolverInterface::new())
-    })
+    Box::new(
+        |_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::new())
+        },
+    )
 }
 
 /// End-to-end smoke test for the nested IPM produced by
@@ -198,8 +200,7 @@ fn make_default_restoration_factory_drives_nested_ipm_without_panicking() {
     let resto_builder = RestoAlgorithmBuilder::new();
     let inner_alg_builder = AlgorithmBuilder::new();
     let bff: InnerBackendFactoryFactory = Box::new(ma57_backend);
-    let factory =
-        make_default_restoration_factory(resto_builder, inner_alg_builder, bff);
+    let factory = make_default_restoration_factory(resto_builder, inner_alg_builder, bff);
     app.set_restoration_factory(factory);
 
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(InfeasibleScalar));

@@ -48,8 +48,8 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
+    TNLP,
 };
 use pounce_sensitivity::{
     DenseGenSchurDriver, IndexPCalculator, IndexSchurData, PCalculator, PdSensBacksolver,
@@ -178,9 +178,7 @@ impl TNLP for ParametricTNLP {
 /// on_converged callback. The returned `R` is stashed via Rc<RefCell>;
 /// `Rc::try_unwrap` extracts it after the application drops the
 /// callback closure.
-fn with_converged_adapter<R: 'static>(
-    f: impl Fn(&PdSensBacksolver<'_>) -> R + 'static,
-) -> R {
+fn with_converged_adapter<R: 'static>(f: impl Fn(&PdSensBacksolver<'_>) -> R + 'static) -> R {
     let out: Rc<RefCell<Option<R>>> = Rc::new(RefCell::new(None));
     let out_clone = Rc::clone(&out);
 
@@ -195,8 +193,8 @@ fn with_converged_adapter<R: 'static>(
 
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP));
     app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
-        let backsolver = PdSensBacksolver::new(data, cq, nlp, pd)
-            .expect("PdSensBacksolver construction");
+        let backsolver =
+            PdSensBacksolver::new(data, cq, nlp, pd).expect("PdSensBacksolver construction");
         let r = f(&backsolver);
         *out_clone.borrow_mut() = Some(r);
     }));
@@ -275,10 +273,8 @@ fn adapter_compute_p_respects_negative_signs() {
     with_converged_adapter(|backsolver| {
         let n_full = backsolver.dim();
 
-        let a_pos =
-            IndexSchurData::from_parts(vec![Y_C_PARAM_ROW_ETA1], vec![1]).unwrap();
-        let a_neg =
-            IndexSchurData::from_parts(vec![Y_C_PARAM_ROW_ETA1], vec![-1]).unwrap();
+        let a_pos = IndexSchurData::from_parts(vec![Y_C_PARAM_ROW_ETA1], vec![1]).unwrap();
+        let a_neg = IndexSchurData::from_parts(vec![Y_C_PARAM_ROW_ETA1], vec![-1]).unwrap();
 
         let mut pc_pos = IndexPCalculator::new(backsolver.clone(), a_pos);
         let mut pc_neg = IndexPCalculator::new(backsolver.clone(), a_neg);
@@ -378,7 +374,12 @@ fn adapter_drives_std_step_calc_pipeline() {
 
         for j in 0..2 {
             let err = (du[j] - du_ref[j]).abs();
-            assert!(err < 1e-12, "du[{j}]: pipeline={} hand={} |err|={err}", du[j], du_ref[j]);
+            assert!(
+                err < 1e-12,
+                "du[{j}]: pipeline={} hand={} |err|={err}",
+                du[j],
+                du_ref[j]
+            );
         }
         for i in 0..n_full {
             let err = (dx[i] - dx_ref[i]).abs();

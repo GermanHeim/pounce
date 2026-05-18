@@ -82,10 +82,7 @@ fn pounce_sens_matches_upstream_sipopt_on_parametric_cpp() {
     // workspace target/ is writeable). Each test invocation gets a
     // fresh name to avoid races across `cargo test --jobs N`.
     let mut out = std::env::temp_dir();
-    out.push(format!(
-        "pounce_sens_parametric_{}.sol",
-        std::process::id()
-    ));
+    out.push(format!("pounce_sens_parametric_{}.sol", std::process::id()));
 
     let status = Command::new(pounce_sens_exe())
         .arg(&nl)
@@ -97,11 +94,13 @@ fn pounce_sens_matches_upstream_sipopt_on_parametric_cpp() {
     let sol_text = std::fs::read_to_string(&out).expect("read .sol");
     eprintln!("---- emitted .sol ----\n{sol_text}");
 
-    let sens = parse_sens_sol_state_1(&sol_text)
-        .expect("sens_sol_state_1 suffix present in .sol");
+    let sens = parse_sens_sol_state_1(&sol_text).expect("sens_sol_state_1 suffix present in .sol");
 
     eprintln!("pounce sens_sol_state_1  = {:?}", sens);
-    eprintln!("upstream sens_sol_state_1 = {:?}", UPSTREAM_X_PERTURBED_NOBC);
+    eprintln!(
+        "upstream sens_sol_state_1 = {:?}",
+        UPSTREAM_X_PERTURBED_NOBC
+    );
 
     // pounce#16 acceptance bound: per-component agreement to 1e-8.
     for (k, (got, want)) in sens

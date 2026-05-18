@@ -21,7 +21,6 @@
 //! `IpoptAlgorithm` lands once each strategy's arithmetic does.
 
 use crate::conv_check::opt_error::OptErrorConvCheck;
-use pounce_common::types::{Index, Number};
 use crate::eq_mult::least_square::LeastSquareMults;
 use crate::hess::exact::ExactHessianUpdater;
 use crate::hess::lim_mem_quasi_newton::{LimMemQuasiNewtonUpdater, UpdateType};
@@ -42,6 +41,7 @@ use crate::scaling::{
     equilibration::EquilibrationScaling, gradient::GradientScaling, none::NoNlpScalingObject,
     r#trait::NlpScalingObject, user::UserScaling,
 };
+use pounce_common::types::{Index, Number};
 use pounce_linsol::{SparseSymLinearSolverInterface, TSymLinearSolver};
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -559,8 +559,7 @@ impl IpoptCalculatedQuantities {
         s_s_u: &dyn Vector,
     ) -> Number {
         let mu = self.data.borrow().curr_mu;
-        let log_sum =
-            s_x_l.sum_logs() + s_x_u.sum_logs() + s_s_l.sum_logs() + s_s_u.sum_logs();
+        let log_sum = s_x_l.sum_logs() + s_x_u.sum_logs() + s_s_l.sum_logs() + s_s_u.sum_logs();
         let mut phi = f - mu * log_sum;
         if self.kappa_d > 0.0 {
             let di = self.damping_indicators();
@@ -791,9 +790,19 @@ impl IpoptCalculatedQuantities {
         let cxu = self.curr_compl_x_u();
         let csl = self.curr_compl_s_l();
         let csu = self.curr_compl_s_u();
-        let m = |v: &Rc<dyn Vector>| if v.dim() == 0 { Number::INFINITY } else { v.min() };
+        let m = |v: &Rc<dyn Vector>| {
+            if v.dim() == 0 {
+                Number::INFINITY
+            } else {
+                v.min()
+            }
+        };
         let acc = m(&cxl).min(m(&cxu)).min(m(&csl)).min(m(&csu));
-        if acc.is_infinite() { 0.0 } else { acc }
+        if acc.is_infinite() {
+            0.0
+        } else {
+            acc
+        }
     }
 
     /// Max-norm of the unbarriered complementarity blocks
@@ -909,14 +918,17 @@ impl IpoptCalculatedQuantities {
         };
 
         // s_d: mean asum of all dual multipliers, capped, divided.
-        let n_d = iv.y_c.dim() + iv.y_d.dim() + iv.z_l.dim() + iv.z_u.dim()
-            + iv.v_l.dim() + iv.v_u.dim();
+        let n_d =
+            iv.y_c.dim() + iv.y_d.dim() + iv.z_l.dim() + iv.z_u.dim() + iv.v_l.dim() + iv.v_u.dim();
         let s_d = if n_d == 0 {
             1.0
         } else {
-            let asum = iv.y_c.asum() + iv.y_d.asum()
-                + iv.z_l.asum() + iv.z_u.asum()
-                + iv.v_l.asum() + iv.v_u.asum();
+            let asum = iv.y_c.asum()
+                + iv.y_d.asum()
+                + iv.z_l.asum()
+                + iv.z_u.asum()
+                + iv.v_l.asum()
+                + iv.v_u.asum();
             (s_max.max(asum / Number::from(n_d))) / s_max
         };
 
@@ -946,7 +958,8 @@ impl IpoptCalculatedQuantities {
         let mut d_x_l = nlp.x_l().make_new();
         nlp.px_l().trans_mult_vector(1.0, &*tmp_x, 0.0, &mut *d_x_l);
         let mut d_x_u = nlp.x_u().make_new();
-        nlp.px_u().trans_mult_vector(-1.0, &*tmp_x, 0.0, &mut *d_x_u);
+        nlp.px_u()
+            .trans_mult_vector(-1.0, &*tmp_x, 0.0, &mut *d_x_u);
 
         let mut tmp_s_l = nlp.d_l().make_new();
         tmp_s_l.set(1.0);
@@ -958,7 +971,8 @@ impl IpoptCalculatedQuantities {
         let mut d_s_l = nlp.d_l().make_new();
         nlp.pd_l().trans_mult_vector(1.0, &*tmp_s, 0.0, &mut *d_s_l);
         let mut d_s_u = nlp.d_u().make_new();
-        nlp.pd_u().trans_mult_vector(-1.0, &*tmp_s, 0.0, &mut *d_s_u);
+        nlp.pd_u()
+            .trans_mult_vector(-1.0, &*tmp_s, 0.0, &mut *d_s_u);
 
         DampingIndicators {
             x_l: rc_from(d_x_l),
@@ -1020,8 +1034,10 @@ impl IpoptCalculatedQuantities {
         if self.kappa_d > 0.0 {
             let di = self.damping_indicators();
             let nlp = self.nlp.borrow();
-            nlp.px_l().mult_vector(self.kappa_d, &*di.x_l, 0.0, &mut *tmp);
-            nlp.px_u().mult_vector(-self.kappa_d, &*di.x_u, 1.0, &mut *tmp);
+            nlp.px_l()
+                .mult_vector(self.kappa_d, &*di.x_l, 0.0, &mut *tmp);
+            nlp.px_u()
+                .mult_vector(-self.kappa_d, &*di.x_u, 1.0, &mut *tmp);
         }
         rc_from(tmp)
     }
@@ -1032,8 +1048,10 @@ impl IpoptCalculatedQuantities {
         if self.kappa_d > 0.0 {
             let di = self.damping_indicators();
             let nlp = self.nlp.borrow();
-            nlp.pd_l().mult_vector(self.kappa_d, &*di.s_l, 0.0, &mut *tmp);
-            nlp.pd_u().mult_vector(-self.kappa_d, &*di.s_u, 1.0, &mut *tmp);
+            nlp.pd_l()
+                .mult_vector(self.kappa_d, &*di.s_l, 0.0, &mut *tmp);
+            nlp.pd_u()
+                .mult_vector(-self.kappa_d, &*di.s_u, 1.0, &mut *tmp);
         }
         rc_from(tmp)
     }
@@ -1059,15 +1077,20 @@ impl IpoptCalculatedQuantities {
 
         // Project Δx / Δs onto each bound subspace with the right sign.
         let mut step_x_l = s_x_l.make_new();
-        nlp.px_l().trans_mult_vector(1.0, &*delta_aff.x, 0.0, &mut *step_x_l);
+        nlp.px_l()
+            .trans_mult_vector(1.0, &*delta_aff.x, 0.0, &mut *step_x_l);
         let mut step_x_u = s_x_u.make_new();
-        nlp.px_u().trans_mult_vector(-1.0, &*delta_aff.x, 0.0, &mut *step_x_u);
+        nlp.px_u()
+            .trans_mult_vector(-1.0, &*delta_aff.x, 0.0, &mut *step_x_u);
         let mut step_s_l = s_s_l.make_new();
-        nlp.pd_l().trans_mult_vector(1.0, &*delta_aff.s, 0.0, &mut *step_s_l);
+        nlp.pd_l()
+            .trans_mult_vector(1.0, &*delta_aff.s, 0.0, &mut *step_s_l);
         let mut step_s_u = s_s_u.make_new();
-        nlp.pd_u().trans_mult_vector(-1.0, &*delta_aff.s, 0.0, &mut *step_s_u);
+        nlp.pd_u()
+            .trans_mult_vector(-1.0, &*delta_aff.s, 0.0, &mut *step_s_u);
 
-        s_x_l.frac_to_bound(&*step_x_l, tau)
+        s_x_l
+            .frac_to_bound(&*step_x_l, tau)
             .min(s_x_u.frac_to_bound(&*step_x_u, tau))
             .min(s_s_l.frac_to_bound(&*step_s_l, tau))
             .min(s_s_u.frac_to_bound(&*step_s_u, tau))
@@ -1104,7 +1127,8 @@ impl IpoptCalculatedQuantities {
         let mut s_x_l_aff = s_x_l.make_new();
         s_x_l_aff.copy(&*s_x_l);
         let mut tmp = s_x_l.make_new();
-        nlp.px_l().trans_mult_vector(1.0, &*delta_aff.x, 0.0, &mut *tmp);
+        nlp.px_l()
+            .trans_mult_vector(1.0, &*delta_aff.x, 0.0, &mut *tmp);
         s_x_l_aff.axpy(alpha_primal, &*tmp);
         // z_L_aff = z_L + α_du · Δz_L
         let mut z_l_aff = iv.z_l.make_new();
@@ -1117,7 +1141,8 @@ impl IpoptCalculatedQuantities {
         let mut s_x_u_aff = s_x_u.make_new();
         s_x_u_aff.copy(&*s_x_u);
         let mut tmp = s_x_u.make_new();
-        nlp.px_u().trans_mult_vector(-1.0, &*delta_aff.x, 0.0, &mut *tmp);
+        nlp.px_u()
+            .trans_mult_vector(-1.0, &*delta_aff.x, 0.0, &mut *tmp);
         s_x_u_aff.axpy(alpha_primal, &*tmp);
         let mut z_u_aff = iv.z_u.make_new();
         z_u_aff.copy(&*iv.z_u);
@@ -1129,7 +1154,8 @@ impl IpoptCalculatedQuantities {
         let mut s_s_l_aff = s_s_l.make_new();
         s_s_l_aff.copy(&*s_s_l);
         let mut tmp = s_s_l.make_new();
-        nlp.pd_l().trans_mult_vector(1.0, &*delta_aff.s, 0.0, &mut *tmp);
+        nlp.pd_l()
+            .trans_mult_vector(1.0, &*delta_aff.s, 0.0, &mut *tmp);
         s_s_l_aff.axpy(alpha_primal, &*tmp);
         let mut v_l_aff = iv.v_l.make_new();
         v_l_aff.copy(&*iv.v_l);
@@ -1141,7 +1167,8 @@ impl IpoptCalculatedQuantities {
         let mut s_s_u_aff = s_s_u.make_new();
         s_s_u_aff.copy(&*s_s_u);
         let mut tmp = s_s_u.make_new();
-        nlp.pd_u().trans_mult_vector(-1.0, &*delta_aff.s, 0.0, &mut *tmp);
+        nlp.pd_u()
+            .trans_mult_vector(-1.0, &*delta_aff.s, 0.0, &mut *tmp);
         s_s_u_aff.axpy(alpha_primal, &*tmp);
         let mut v_u_aff = iv.v_u.make_new();
         v_u_aff.copy(&*iv.v_u);

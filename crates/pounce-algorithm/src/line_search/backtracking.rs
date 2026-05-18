@@ -257,16 +257,7 @@ impl BacktrackingLineSearch {
 
         // Run the alpha-loop on the caller's `delta`.
         let result = self.run_alpha_loop(
-            data,
-            cq,
-            delta,
-            alpha_init,
-            alpha_dual,
-            nlp,
-            search_dir,
-            theta,
-            phi,
-            d_phi,
+            data, cq, delta, alpha_init, alpha_dual, nlp, search_dir, theta, phi, d_phi,
             /*skip_first*/ false,
         );
 
@@ -292,7 +283,10 @@ impl BacktrackingLineSearch {
                 }
                 Outcome::Accepted
             }
-            AlphaResult::TinyStep { n_steps, last_alpha } => {
+            AlphaResult::TinyStep {
+                n_steps,
+                last_alpha,
+            } => {
                 let mut d = data.borrow_mut();
                 d.trial = None;
                 d.info_alpha_primal = last_alpha;
@@ -301,7 +295,11 @@ impl BacktrackingLineSearch {
                 d.info_ls_count = n_steps + 1;
                 Outcome::TinyStep
             }
-            AlphaResult::Failed { n_steps, last_alpha, evaluation_error } => {
+            AlphaResult::Failed {
+                n_steps,
+                last_alpha,
+                evaluation_error,
+            } => {
                 if self.in_watchdog {
                     self.handle_watchdog_failure(
                         data,
@@ -516,22 +514,19 @@ impl BacktrackingLineSearch {
         let mut evaluation_error = false;
 
         let mut soc_search_dir = search_dir;
-        let (mut c_soc_buf, mut dms_soc_buf) = if soc_search_dir.is_some()
-            && nlp.is_some()
-            && self.max_soc > 0
-            && !skip_first
-        {
-            let cq_ref = cq.borrow();
-            let curr_c = cq_ref.curr_c();
-            let curr_dms = cq_ref.curr_d_minus_s();
-            let mut c_soc = curr_c.make_new();
-            c_soc.copy(&*curr_c);
-            let mut dms_soc = curr_dms.make_new();
-            dms_soc.copy(&*curr_dms);
-            (Some(c_soc), Some(dms_soc))
-        } else {
-            (None, None)
-        };
+        let (mut c_soc_buf, mut dms_soc_buf) =
+            if soc_search_dir.is_some() && nlp.is_some() && self.max_soc > 0 && !skip_first {
+                let cq_ref = cq.borrow();
+                let curr_c = cq_ref.curr_c();
+                let curr_dms = cq_ref.curr_d_minus_s();
+                let mut c_soc = curr_c.make_new();
+                c_soc.copy(&*curr_c);
+                let mut dms_soc = curr_dms.make_new();
+                dms_soc.copy(&*curr_dms);
+                (Some(c_soc), Some(dms_soc))
+            } else {
+                (None, None)
+            };
 
         let mut alpha = if skip_first {
             alpha_init * self.alpha_red_factor
@@ -545,7 +540,10 @@ impl BacktrackingLineSearch {
 
         for trial in 0..self.max_trials {
             if alpha < alpha_min_eff {
-                return AlphaResult::TinyStep { n_steps, last_alpha };
+                return AlphaResult::TinyStep {
+                    n_steps,
+                    last_alpha,
+                };
             }
             last_alpha = alpha;
             n_steps = trial;
@@ -574,9 +572,9 @@ impl BacktrackingLineSearch {
                 continue;
             }
 
-            let decision = self
-                .acceptor
-                .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial);
+            let decision =
+                self.acceptor
+                    .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial);
             if decision == AcceptDecision::Accept {
                 let mode = self
                     .acceptor
@@ -655,9 +653,7 @@ impl BacktrackingLineSearch {
                             .as_deref_mut()
                             .expect("SOC: search_dir is gated above");
                         let nlp_ref = nlp.expect("SOC: nlp is gated above");
-                        let c_soc = c_soc_buf
-                            .as_deref()
-                            .expect("SOC: c_soc_buf is gated above");
+                        let c_soc = c_soc_buf.as_deref().expect("SOC: c_soc_buf is gated above");
                         let dms_soc = dms_soc_buf
                             .as_deref()
                             .expect("SOC: dms_soc_buf is gated above");
@@ -692,13 +688,13 @@ impl BacktrackingLineSearch {
                     if !theta_soc.is_finite() || !phi_soc.is_finite() {
                         break;
                     }
-                    let dec = self.acceptor.check_trial_point(
-                        alpha_test, theta, phi, d_phi, theta_soc, phi_soc,
-                    );
+                    let dec = self
+                        .acceptor
+                        .check_trial_point(alpha_test, theta, phi, d_phi, theta_soc, phi_soc);
                     if dec == AcceptDecision::Accept {
-                        let mode = self.acceptor.update_for_next_iteration(
-                            alpha_test, theta, phi, d_phi, phi_soc,
-                        );
+                        let mode = self
+                            .acceptor
+                            .update_for_next_iteration(alpha_test, theta, phi, d_phi, phi_soc);
                         let mut d = data.borrow_mut();
                         d.info_alpha_primal = alpha_primal_soc;
                         d.info_alpha_dual = alpha_dual;
@@ -730,7 +726,6 @@ impl BacktrackingLineSearch {
         let g_s = cq_ref.curr_grad_barrier_obj_s();
         g_x.dot(&*delta.x) + g_s.dot(&*delta.s)
     }
-
 }
 
 /// `out = curr + alpha * delta` for all eight components, returned as a

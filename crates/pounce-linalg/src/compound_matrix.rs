@@ -176,7 +176,6 @@ impl CompoundMatrix {
         self.diagonal_known.set(true);
         diag
     }
-
 }
 
 impl TaggedObject for CompoundMatrix {
@@ -228,13 +227,7 @@ impl Matrix for CompoundMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         // Pre-scale y exactly once per call (matches upstream).
         if beta != 0.0 {
             y.scal(beta);
@@ -516,13 +509,7 @@ impl Matrix for CompoundSymMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         let n = self.space.n_comps_dim as usize;
         // Upstream `static_cast`s — both x and y must be CompoundVector
         // with NComps() == NComps_Dim(). We follow the same contract.

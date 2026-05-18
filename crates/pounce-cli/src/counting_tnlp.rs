@@ -12,11 +12,11 @@
 //! Jacobian / Hessian evaluation, mirroring the way Ipopt reports
 //! these numbers.
 
+use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
     BoundsInfo, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo, ScalingRequest, Solution,
     SparsityRequest, StartingPoint, TNLP,
 };
-use pounce_common::types::{Index, Number};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -70,12 +70,7 @@ impl TNLP for CountingTnlp {
         self.inner.borrow_mut().eval_g(x, new_x, g)
     }
 
-    fn eval_jac_g(
-        &mut self,
-        x: Option<&[Number]>,
-        new_x: bool,
-        mode: SparsityRequest<'_>,
-    ) -> bool {
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
         // Only the values call counts as a real Jacobian evaluation;
         // the symbolic Structure call is bookkeeping.
         if matches!(mode, SparsityRequest::Values { .. }) {
@@ -120,9 +115,7 @@ impl TNLP for CountingTnlp {
     }
 
     fn get_list_of_nonlinear_variables(&mut self, pos: &mut [Index]) -> bool {
-        self.inner
-            .borrow_mut()
-            .get_list_of_nonlinear_variables(pos)
+        self.inner.borrow_mut().get_list_of_nonlinear_variables(pos)
     }
 
     fn intermediate_callback(

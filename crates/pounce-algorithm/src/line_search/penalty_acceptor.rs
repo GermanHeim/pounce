@@ -128,8 +128,8 @@ impl PenaltyLsAcceptor {
     ) {
         self.last_nu = self.nu;
         if reference_theta > 0.0 {
-            let nu_plus = (grad_barr_t_delta + 0.5 * delta_w_delta)
-                / ((1.0 - self.rho) * reference_theta);
+            let nu_plus =
+                (grad_barr_t_delta + 0.5 * delta_w_delta) / ((1.0 - self.rho) * reference_theta);
             if self.nu < nu_plus {
                 self.nu = nu_plus + self.nu_inc;
             }
@@ -159,8 +159,7 @@ impl PenaltyLsAcceptor {
         );
         let theta_2 = tmp_c.asum() + tmp_d.asum();
 
-        let pred = -alpha * cache.grad_barr_t_delta
-            - 0.5 * alpha * alpha * cache.dwd
+        let pred = -alpha * cache.grad_barr_t_delta - 0.5 * alpha * alpha * cache.dwd
             + self.nu * (cache.theta_ref - theta_2);
         if pred < 0.0 {
             0.0
@@ -363,7 +362,14 @@ mod tests {
         let mut a = PenaltyLsAcceptor::new();
         a.nu = 0.5;
         a.cache = Some(cache_for_test(
-            3.0, 0.0, 2.0, 4.0, vec![1.0, 2.0], vec![4.0], vec![-1.0, -1.0], vec![-2.0],
+            3.0,
+            0.0,
+            2.0,
+            4.0,
+            vec![1.0, 2.0],
+            vec![4.0],
+            vec![-1.0, -1.0],
+            vec![-2.0],
         ));
         assert!((a.calc_pred(0.5) - 0.0).abs() < 1e-12);
     }
@@ -376,7 +382,14 @@ mod tests {
         let mut a = PenaltyLsAcceptor::new();
         a.nu = 1.0;
         a.cache = Some(cache_for_test(
-            3.0, 0.0, -2.0, 0.0, vec![1.0, 2.0], vec![0.0], vec![-1.0, -2.0], vec![0.0],
+            3.0,
+            0.0,
+            -2.0,
+            0.0,
+            vec![1.0, 2.0],
+            vec![0.0],
+            vec![-1.0, -2.0],
+            vec![0.0],
         ));
         assert!((a.calc_pred(1.0) - 5.0).abs() < 1e-12);
     }
@@ -390,7 +403,14 @@ mod tests {
         a.nu = 1.0;
         a.eta_penalty = 0.5;
         a.cache = Some(cache_for_test(
-            3.0, 0.0, -2.0, 0.0, vec![1.0, 2.0], vec![0.0], vec![-1.0, -2.0], vec![0.0],
+            3.0,
+            0.0,
+            -2.0,
+            0.0,
+            vec![1.0, 2.0],
+            vec![0.0],
+            vec![-1.0, -2.0],
+            vec![0.0],
         ));
         assert_eq!(
             a.check_trial_point(1.0, 3.0, 0.0, -2.0, 0.0, -3.0),
@@ -406,7 +426,14 @@ mod tests {
         a.nu = 1.0;
         a.eta_penalty = 0.5;
         a.cache = Some(cache_for_test(
-            3.0, 0.0, -2.0, 0.0, vec![1.0, 2.0], vec![0.0], vec![-1.0, -2.0], vec![0.0],
+            3.0,
+            0.0,
+            -2.0,
+            0.0,
+            vec![1.0, 2.0],
+            vec![0.0],
+            vec![-1.0, -2.0],
+            vec![0.0],
         ));
         assert_eq!(
             a.check_trial_point(1.0, 3.0, 0.0, -2.0, 2.999, 0.0),

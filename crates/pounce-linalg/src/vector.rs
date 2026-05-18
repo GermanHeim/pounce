@@ -104,13 +104,7 @@ pub trait Vector: TaggedObject + Debug + 'static {
     fn sum_impl(&self) -> Number;
     fn sum_logs_impl(&self) -> Number;
     fn frac_to_bound_impl(&self, delta: &dyn Vector, tau: Number) -> Number;
-    fn add_vector_quotient_impl(
-        &mut self,
-        a: Number,
-        z: &dyn Vector,
-        s: &dyn Vector,
-        c: Number,
-    );
+    fn add_vector_quotient_impl(&mut self, a: Number, z: &dyn Vector, s: &dyn Vector, c: Number);
 
     // ---- defaultable implementations ----
 

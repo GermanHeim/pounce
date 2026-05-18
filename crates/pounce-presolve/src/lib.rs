@@ -185,7 +185,9 @@ impl PresolveTnlp {
     /// no hint is set for that variable, else the configured
     /// `bound_mult_init_val`. `None` until init has run.
     pub fn z_warm_starts(&self) -> Option<(&[Number], &[Number])> {
-        self.state.as_ref().map(|s| (&s.z_l_warm[..], &s.z_u_warm[..]))
+        self.state
+            .as_ref()
+            .map(|s| (&s.z_l_warm[..], &s.z_u_warm[..]))
     }
 
     /// Lazy initialization: pull inner dims, bounds, linearity tags,
@@ -311,8 +313,7 @@ impl PresolveTnlp {
                 }
             })
             .collect();
-        let linear_rows: Vec<LinearRow> =
-            linear_row_map.iter().filter_map(|r| r.clone()).collect();
+        let linear_rows: Vec<LinearRow> = linear_row_map.iter().filter_map(|r| r.clone()).collect();
 
         // Snapshot inner bounds before Phase 1 mutates them; needed
         // for Phase 4 warm-start hints.
@@ -322,8 +323,13 @@ impl PresolveTnlp {
         // Phase 1: bound tightening using linear rows.
         let mut tighten_report = TightenReport::default();
         if self.opts.bound_tightening && !linear_rows.is_empty() {
-            tighten_report =
-                tighten_bounds(&linear_rows, &mut x_l, &mut x_u, self.opts.max_passes, 1e-12);
+            tighten_report = tighten_bounds(
+                &linear_rows,
+                &mut x_l,
+                &mut x_u,
+                self.opts.max_passes,
+                1e-12,
+            );
         }
 
         // Phase 4: any variable whose lower (upper) bound moved
@@ -553,11 +559,7 @@ impl TNLP for PresolveTnlp {
             return false;
         };
         let s = self.state.as_mut().expect("inited");
-        if !self
-            .inner
-            .borrow_mut()
-            .eval_g(x, new_x, &mut s.scratch_g)
-        {
+        if !self.inner.borrow_mut().eval_g(x, new_x, &mut s.scratch_g) {
             return false;
         }
         for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
@@ -566,12 +568,7 @@ impl TNLP for PresolveTnlp {
         true
     }
 
-    fn eval_jac_g(
-        &mut self,
-        x: Option<&[Number]>,
-        new_x: bool,
-        mode: SparsityRequest<'_>,
-    ) -> bool {
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
         let Some(_) = self.ensure_init() else {
             return false;
         };
@@ -640,7 +637,9 @@ impl TNLP for PresolveTnlp {
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
         let Some(_) = self.ensure_init() else {
             // Init failed earlier — best effort: just forward as-is.
-            self.inner.borrow_mut().finalize_solution(sol, ip_data, ip_cq);
+            self.inner
+                .borrow_mut()
+                .finalize_solution(sol, ip_data, ip_cq);
             return;
         };
         // Reconstruct inner-sized g and lambda.
@@ -709,13 +708,16 @@ impl TNLP for PresolveTnlp {
         let mut obj_scaling = 1.0;
         let inner_x_scaling_len = req.x_scaling.len();
         let mut inner_x = vec![1.0; inner_x_scaling_len];
-        let ok = self.inner.borrow_mut().get_scaling_parameters(ScalingRequest {
-            obj_scaling: &mut obj_scaling,
-            use_x_scaling: &mut use_x,
-            x_scaling: &mut inner_x,
-            use_g_scaling: &mut use_g,
-            g_scaling: &mut inner_g,
-        });
+        let ok = self
+            .inner
+            .borrow_mut()
+            .get_scaling_parameters(ScalingRequest {
+                obj_scaling: &mut obj_scaling,
+                use_x_scaling: &mut use_x,
+                x_scaling: &mut inner_x,
+                use_g_scaling: &mut use_g,
+                g_scaling: &mut inner_g,
+            });
         if !ok {
             return false;
         }

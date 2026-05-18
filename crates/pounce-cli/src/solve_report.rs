@@ -506,10 +506,7 @@ mod tests {
 
     #[test]
     fn full_detail_includes_iteration_rows() {
-        let mut b = ReportBuilder::new(
-            ReportDetail::Full,
-            InputDescriptor::TnlpDirect,
-        );
+        let mut b = ReportBuilder::new(ReportDetail::Full, InputDescriptor::TnlpDirect);
         let mut stats = SolveStatistics::default();
         stats.iterations.push(IterRecord {
             iter: 0,
@@ -532,24 +529,19 @@ mod tests {
 
     #[test]
     fn detail_parser_accepts_known_values() {
-        assert_eq!(ReportDetail::parse("summary").unwrap(), ReportDetail::Summary);
+        assert_eq!(
+            ReportDetail::parse("summary").unwrap(),
+            ReportDetail::Summary
+        );
         assert_eq!(ReportDetail::parse("Full").unwrap(), ReportDetail::Full);
         assert!(ReportDetail::parse("verbose").is_err());
     }
 
     #[test]
     fn result_id_is_unique_and_time_ordered() {
-        let a = ReportBuilder::new(
-            ReportDetail::Summary,
-            InputDescriptor::TnlpDirect,
-        )
-        .finish();
+        let a = ReportBuilder::new(ReportDetail::Summary, InputDescriptor::TnlpDirect).finish();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let b = ReportBuilder::new(
-            ReportDetail::Summary,
-            InputDescriptor::TnlpDirect,
-        )
-        .finish();
+        let b = ReportBuilder::new(ReportDetail::Summary, InputDescriptor::TnlpDirect).finish();
         assert_ne!(a.fair_metadata.result_id, b.fair_metadata.result_id);
         assert!(
             b.fair_metadata.created_at_unix_nanos > a.fair_metadata.created_at_unix_nanos,

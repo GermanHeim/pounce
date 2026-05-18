@@ -103,8 +103,7 @@ fn tighten_pass(
             let j = j as usize;
             let (others_lo, others_hi) = act.others_for(a, x_l[j], x_u[j]);
 
-            let (new_lo, new_hi) =
-                implied_bounds_for_var(row.lo, row.hi, a, others_lo, others_hi);
+            let (new_lo, new_hi) = implied_bounds_for_var(row.lo, row.hi, a, others_lo, others_hi);
 
             if let Some(nl) = new_lo {
                 if nl > x_l[j] + tol {
@@ -155,12 +154,7 @@ pub(crate) struct RowActivity {
 
 impl RowActivity {
     /// Activity of the row across *all* its variables.
-    fn others_for(
-        &self,
-        a: Number,
-        xl: Number,
-        xu: Number,
-    ) -> (Option<Number>, Option<Number>) {
+    fn others_for(&self, a: Number, xl: Number, xu: Number) -> (Option<Number>, Option<Number>) {
         let (cj_lo, cj_hi) = contribution(a, xl, xu);
 
         // others_lo: subtract cj_lo (which may be -∞) from (lo_finite, lo_neg_inf).

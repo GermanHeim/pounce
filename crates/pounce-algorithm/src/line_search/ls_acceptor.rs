@@ -129,10 +129,5 @@ pub trait BacktrackingLsAcceptor {
     /// without this, the outer can accept null-progress 'h' steps
     /// and re-enter restoration (observed on DECONVBNE: 323 R-accepts
     /// vs ipopt's 21). Default: no-op for non-filter acceptors.
-    fn prepare_resto_phase_start(
-        &mut self,
-        _reference_theta: Number,
-        _reference_barr: Number,
-    ) {
-    }
+    fn prepare_resto_phase_start(&mut self, _reference_theta: Number, _reference_barr: Number) {}
 }

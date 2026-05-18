@@ -222,8 +222,7 @@ impl QualityFunctionMuOracle {
 
         let n_dual = curr_iv.x.dim() + curr_iv.s.dim();
         let n_pri = curr_iv.y_c.dim() + curr_iv.y_d.dim();
-        let n_comp =
-            curr_iv.z_l.dim() + curr_iv.z_u.dim() + curr_iv.v_l.dim() + curr_iv.v_u.dim();
+        let n_comp = curr_iv.z_l.dim() + curr_iv.z_u.dim() + curr_iv.v_l.dim() + curr_iv.v_u.dim();
         let tau = data.borrow().curr_tau;
 
         let curr_z_l = curr_iv.z_l.clone();
@@ -375,7 +374,9 @@ impl QualityFunctionMuOracle {
                 );
             }
 
-            evaluate_quality_function(norm_type, centrality, balancing, alpha_pri, alpha_du, xi, aggr)
+            evaluate_quality_function(
+                norm_type, centrality, balancing, alpha_pri, alpha_du, xi, aggr,
+            )
         };
 
         // One-shot σ-sweep dump for iter==N: emits q(σ) at 21 σ values
@@ -401,8 +402,13 @@ impl QualityFunctionMuOracle {
                     let q1 = eval_q(1.0);
                     let s1m = 1.0 - self.section_sigma_tol.max(1e-4);
                     let q1m = eval_q(s1m);
-                    eprintln!("[QF_SWEEP] σ=1.0 q={:.10e}  σ={:.6e} q={:.10e}  (q_1minus>q_1: {})",
-                        q1, s1m, q1m, q1m > q1);
+                    eprintln!(
+                        "[QF_SWEEP] σ=1.0 q={:.10e}  σ={:.6e} q={:.10e}  (q_1minus>q_1: {})",
+                        q1,
+                        s1m,
+                        q1m,
+                        q1m > q1
+                    );
                 }
             }
         }
@@ -425,7 +431,8 @@ impl QualityFunctionMuOracle {
             let iter_count = data.borrow().iter_count;
             let curr_mu = data.borrow().curr_mu;
             let sigma_floor = self.sigma_min.max(self.mu_min / avrg_compl);
-            let sigma_up_dn = sigma_floor.max(1.0 - self.section_sigma_tol.max(1e-4))
+            let sigma_up_dn = sigma_floor
+                .max(1.0 - self.section_sigma_tol.max(1e-4))
                 .min(self.mu_max / avrg_compl);
             eprintln!(
                 "[QF] iter={} curr_mu={:.3e} avrg_compl={:.3e} sigma={:.3e} mu_new={:.3e} mu_clamped={:.3e} | sigma_min={:.3e} mu_min={:.3e} sigma_lo_dn={:.3e} sigma_up_dn={:.3e} mu_min/avrg={:.3e}",
@@ -719,7 +726,9 @@ pub fn pick_sigma(
         if sigma_lo >= sigma_up {
             sigma_up
         } else {
-            golden_section(sigma_lo, sigma_up, qf_1, -100.0, sigma_tol, qf_tol, max_steps, q)
+            golden_section(
+                sigma_lo, sigma_up, qf_1, -100.0, sigma_tol, qf_tol, max_steps, q,
+            )
         }
     } else {
         // q decreases for σ < 1 — search down.
@@ -729,14 +738,7 @@ pub fn pick_sigma(
             sigma_lo
         } else {
             golden_section(
-                sigma_lo,
-                sigma_up,
-                -100.0,
-                qf_1minus,
-                sigma_tol,
-                qf_tol,
-                max_steps,
-                q,
+                sigma_lo, sigma_up, -100.0, qf_1minus, sigma_tol, qf_tol, max_steps, q,
             )
         }
     }
@@ -776,7 +778,14 @@ mod tests {
         assert!(o.calculate_mu().is_none());
     }
 
-    fn aggr(d: Number, p: Number, c: Number, nd: i32, np: i32, nc: i32) -> QualityFunctionAggregates {
+    fn aggr(
+        d: Number,
+        p: Number,
+        c: Number,
+        nd: i32,
+        np: i32,
+        nc: i32,
+    ) -> QualityFunctionAggregates {
         QualityFunctionAggregates {
             dual_aggr: d,
             primal_aggr: p,
@@ -794,7 +803,7 @@ mod tests {
             NormType::OneNorm,
             CentralityType::None,
             BalancingTermType::None,
-            0.5, // α_pri
+            0.5,  // α_pri
             0.25, // α_du
             1.0,
             aggr(8.0, 4.0, 6.0, 4, 2, 3),

@@ -7,12 +7,12 @@
 //!     cargo run --release --bin cutest_suite -- ROSENBR HS71
 //!     cargo run --release --bin cutest_suite          # uses problem_list.txt
 
-use pounce_cutest::CutestProblem;
-use pounce_nlp::alg_types::SolverReturn;
-use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
+use pounce_cutest::CutestProblem;
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
+use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
@@ -46,7 +46,11 @@ struct CutestResult {
 // null on the parent side, fails to deserialize into f64, and the row is
 // silently dropped from the aggregate.
 fn ser_f64<S: serde::Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if v.is_finite() { s.serialize_f64(*v) } else { s.serialize_none() }
+    if v.is_finite() {
+        s.serialize_f64(*v)
+    } else {
+        s.serialize_none()
+    }
 }
 fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
@@ -58,9 +62,17 @@ type IpoptProblem = *mut c_void;
 type EvalFCB = extern "C" fn(i32, *const f64, bool, *mut f64, *mut c_void) -> bool;
 type EvalGradFCB = extern "C" fn(i32, *const f64, bool, *mut f64, *mut c_void) -> bool;
 type EvalGCB = extern "C" fn(i32, *const f64, bool, i32, *mut f64, *mut c_void) -> bool;
-type EvalJacGCB =
-    extern "C" fn(i32, *const f64, bool, i32, i32, *mut i32, *mut i32, *mut f64, *mut c_void)
-        -> bool;
+type EvalJacGCB = extern "C" fn(
+    i32,
+    *const f64,
+    bool,
+    i32,
+    i32,
+    *mut i32,
+    *mut i32,
+    *mut f64,
+    *mut c_void,
+) -> bool;
 type EvalHCB = extern "C" fn(
     i32,
     *const f64,
@@ -386,8 +398,16 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
     let m = problem.m;
     let mut x_l = problem.x_l.clone();
     let mut x_u = problem.x_u.clone();
-    let mut g_l = if m > 0 { problem.c_l.clone() } else { vec![0.0] };
-    let mut g_u = if m > 0 { problem.c_u.clone() } else { vec![0.0] };
+    let mut g_l = if m > 0 {
+        problem.c_l.clone()
+    } else {
+        vec![0.0]
+    };
+    let mut g_u = if m > 0 {
+        problem.c_u.clone()
+    } else {
+        vec![0.0]
+    };
     let nele_jac = problem.jac_rows.len() as i32;
     let nele_hess = problem.hess_rows.len() as i32;
 
@@ -482,21 +502,23 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
 /// `pounce-cli`'s `default_backend_factory`: FERAL by default, MA57
 /// available behind the `ma57` cargo feature.
 fn ma57_backend_factory() -> LinearBackendFactory {
-    Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        match choice {
-            LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
-            LinearSolverChoice::Ma57 => {
-                #[cfg(feature = "ma57")]
-                {
-                    Box::new(pounce_hsl::Ma57SolverInterface::new())
-                }
-                #[cfg(not(feature = "ma57"))]
-                {
-                    Box::new(pounce_feral::FeralSolverInterface::new())
+    Box::new(
+        |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+            match choice {
+                LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
+                LinearSolverChoice::Ma57 => {
+                    #[cfg(feature = "ma57")]
+                    {
+                        Box::new(pounce_hsl::Ma57SolverInterface::new())
+                    }
+                    #[cfg(not(feature = "ma57"))]
+                    {
+                        Box::new(pounce_feral::FeralSolverInterface::new())
+                    }
                 }
             }
-        }
-    })
+        },
+    )
 }
 
 fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
@@ -510,8 +532,8 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
     {
         let opts = app.options_mut();
         let _ = opts.set_string_value("sb", "yes", true, false);
-        let mu_strategy = std::env::var("POUNCE_MU_STRATEGY")
-            .unwrap_or_else(|_| "adaptive".to_string());
+        let mu_strategy =
+            std::env::var("POUNCE_MU_STRATEGY").unwrap_or_else(|_| "adaptive".to_string());
         let _ = opts.set_string_value("mu_strategy", &mu_strategy, true, false);
         if let Ok(o) = std::env::var("POUNCE_MU_ORACLE") {
             let _ = opts.set_string_value("mu_oracle", &o, true, false);
@@ -596,8 +618,7 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
 fn run_single(name: &str, solver: &str) {
     let suite_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let problems_dir = suite_dir.join("problems");
-    let lib_path =
-        problems_dir.join(format!("lib{}.{}", name, std::env::consts::DLL_EXTENSION));
+    let lib_path = problems_dir.join(format!("lib{}.{}", name, std::env::consts::DLL_EXTENSION));
     let outsdif_path = problems_dir.join(format!("{}_OUTSDIF.d", name));
 
     let problem = match CutestProblem::load(
@@ -652,10 +673,7 @@ fn problem_list(suite_dir: &Path) -> Vec<String> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| suite_dir.join("problem_list.txt"));
     if !list.exists() {
-        eprintln!(
-            "No problems specified and {} not found.",
-            list.display()
-        );
+        eprintln!("No problems specified and {} not found.", list.display());
         eprintln!("Usage: cutest_suite PROBLEM1 PROBLEM2 ...");
         std::process::exit(1);
     }
@@ -698,7 +716,9 @@ fn main() {
     let jsonl_path = std::env::var("RESULTS_JSONL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| suite_dir.join("results.jsonl"));
-    let mut jsonl = std::fs::File::create(&jsonl_path).ok().map(std::io::BufWriter::new);
+    let mut jsonl = std::fs::File::create(&jsonl_path)
+        .ok()
+        .map(std::io::BufWriter::new);
     eprintln!("Streaming results to {}", jsonl_path.display());
 
     let mut all: Vec<CutestResult> = Vec::new();
@@ -824,10 +844,7 @@ fn main() {
     eprintln!("  ipopt  solved: {}/{}", ipopt_solved, n_problems);
 }
 
-fn append_jsonl(
-    writer: &mut Option<std::io::BufWriter<std::fs::File>>,
-    r: &CutestResult,
-) {
+fn append_jsonl(writer: &mut Option<std::io::BufWriter<std::fs::File>>, r: &CutestResult) {
     use std::io::Write;
     if let Some(w) = writer.as_mut() {
         if let Ok(line) = serde_json::to_string(r) {

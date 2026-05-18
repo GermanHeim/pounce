@@ -132,11 +132,13 @@ impl IterSpec {
         }
         if let Some(rest) = s.strip_prefix('-') {
             // "-M"
-            let hi: i32 = rest
-                .parse()
-                .map_err(|_| format!("invalid iter-spec '{s}': expected '-M' with non-negative integer M"))?;
+            let hi: i32 = rest.parse().map_err(|_| {
+                format!("invalid iter-spec '{s}': expected '-M' with non-negative integer M")
+            })?;
             if hi < 0 {
-                return Err(format!("invalid iter-spec '{s}': iter must be non-negative"));
+                return Err(format!(
+                    "invalid iter-spec '{s}': iter must be non-negative"
+                ));
             }
             return Ok(IterSpec::Range(None, Some(hi)));
         }
@@ -145,7 +147,9 @@ impl IterSpec {
                 .parse()
                 .map_err(|_| format!("invalid iter-spec '{s}': '{a}' is not an integer"))?;
             if lo < 0 {
-                return Err(format!("invalid iter-spec '{s}': iter must be non-negative"));
+                return Err(format!(
+                    "invalid iter-spec '{s}': iter must be non-negative"
+                ));
             }
             if b.is_empty() {
                 // "N-"
@@ -156,7 +160,9 @@ impl IterSpec {
                 .parse()
                 .map_err(|_| format!("invalid iter-spec '{s}': '{b}' is not an integer"))?;
             if hi < 0 {
-                return Err(format!("invalid iter-spec '{s}': iter must be non-negative"));
+                return Err(format!(
+                    "invalid iter-spec '{s}': iter must be non-negative"
+                ));
             }
             if hi < lo {
                 return Err(format!(
@@ -166,11 +172,13 @@ impl IterSpec {
             return Ok(IterSpec::Range(Some(lo), Some(hi)));
         }
         // Bare "N"
-        let n: i32 = s
-            .parse()
-            .map_err(|_| format!("invalid iter-spec '{s}': expected 'all', 'N', 'N-M', 'N-', or '-M'"))?;
+        let n: i32 = s.parse().map_err(|_| {
+            format!("invalid iter-spec '{s}': expected 'all', 'N', 'N-M', 'N-', or '-M'")
+        })?;
         if n < 0 {
-            return Err(format!("invalid iter-spec '{s}': iter must be non-negative"));
+            return Err(format!(
+                "invalid iter-spec '{s}': iter must be non-negative"
+            ));
         }
         Ok(IterSpec::Single(n))
     }
@@ -187,9 +195,7 @@ impl DumpFormat {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "jsonl" => Ok(DumpFormat::Jsonl),
-            other => Err(format!(
-                "unknown dump format '{other}' (expected: jsonl)"
-            )),
+            other => Err(format!("unknown dump format '{other}' (expected: jsonl)")),
         }
     }
 }
@@ -330,9 +336,9 @@ impl DiagnosticsState {
         let dir = if self.in_restoration.load(Ordering::SeqCst) {
             let parent = self.resto_parent_iter.load(Ordering::SeqCst);
             let inner = self.resto_inner_iter.load(Ordering::SeqCst).max(0);
-            self.config.dump_dir.join(format!(
-                "resto/parent_iter_{parent:03}/iter_{inner:03}"
-            ))
+            self.config
+                .dump_dir
+                .join(format!("resto/parent_iter_{parent:03}/iter_{inner:03}"))
         } else {
             let iter = self.current_iter.load(Ordering::SeqCst).max(0);
             self.config.dump_dir.join(format!("iter_{iter:03}"))
@@ -454,8 +460,8 @@ mod tests {
     #[test]
     fn state_emits_solve_indices_and_iter_dirs() {
         let tmp = tempdir();
-        let cfg = DiagnosticsConfig::new(tmp.clone())
-            .with_category(DiagCategory::Kkt, IterSpec::All);
+        let cfg =
+            DiagnosticsConfig::new(tmp.clone()).with_category(DiagCategory::Kkt, IterSpec::All);
         let state = DiagnosticsState::new(cfg).unwrap();
         state.bump_iter(); // iter 0
         assert_eq!(state.next_solve_index(), 1);
@@ -471,8 +477,8 @@ mod tests {
     #[test]
     fn restoration_dumps_live_under_resto_subtree() {
         let tmp = tempdir();
-        let cfg = DiagnosticsConfig::new(tmp.clone())
-            .with_category(DiagCategory::Kkt, IterSpec::All);
+        let cfg =
+            DiagnosticsConfig::new(tmp.clone()).with_category(DiagCategory::Kkt, IterSpec::All);
         let state = DiagnosticsState::new(cfg).unwrap();
         state.bump_iter(); // main iter 0
         state.bump_iter(); // main iter 1

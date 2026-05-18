@@ -111,9 +111,7 @@ impl RestoConvCheck {
 
         // kappa_resto reduction guard (line 175). When kappa_resto == 0
         // upstream disables this guard entirely.
-        if self.kappa_resto > 0.0
-            && orig_trial_inf_pr > self.kappa_resto * orig_curr_inf_pr
-        {
+        if self.kappa_resto > 0.0 && orig_trial_inf_pr > self.kappa_resto * orig_curr_inf_pr {
             return RestoConvergenceStatus::Continue;
         }
 
@@ -638,8 +636,8 @@ mod tests {
         // through the nested IPM.
         let cb: pounce_algorithm::restoration::OrigProgressCallback =
             Box::new(|_barr: f64, _theta: f64| true);
-        let a = RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)
-            .with_orig_progress_callback(cb);
+        let a =
+            RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000).with_orig_progress_callback(cb);
         assert!(a.orig_progress_callback.is_some());
     }
 

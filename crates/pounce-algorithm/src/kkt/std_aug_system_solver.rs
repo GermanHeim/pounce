@@ -241,7 +241,9 @@ impl StdAugSystemSolver {
         self.n_d = n_d;
         self.dim = n_x + n_s + n_c + n_d;
 
-        let status = self.linsol.initialize_structure(self.dim, &self.irn, &self.jcn);
+        let status = self
+            .linsol
+            .initialize_structure(self.dim, &self.irn, &self.jcn);
         if status == ESymSolverStatus::Success {
             self.initialized = true;
         }
@@ -326,10 +328,7 @@ impl StdAugSystemSolver {
         write_vec(sol.sol_x, &packed[..n_x]);
         write_vec(sol.sol_s, &packed[n_x..n_x + n_s]);
         write_vec(sol.sol_c, &packed[n_x + n_s..n_x + n_s + n_c]);
-        write_vec(
-            sol.sol_d,
-            &packed[n_x + n_s + n_c..n_x + n_s + n_c + n_d],
-        );
+        write_vec(sol.sol_d, &packed[n_x + n_s + n_c..n_x + n_s + n_c + n_d]);
     }
 }
 
@@ -379,7 +378,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         // Attributes the whole factor+back-solve to
         // `linear_system_factorization` (mirrors upstream
         // `IpStdAugSystemSolver.cpp:155`).
-        let _factor_guard = self.timing.as_deref().map(|t| t.linear_system_factorization.guard());
+        let _factor_guard = self
+            .timing
+            .as_deref()
+            .map(|t| t.linear_system_factorization.guard());
         let status = self.linsol.multi_solve(
             &self.vals,
             true,
@@ -470,15 +472,13 @@ impl AugSystemSolver for StdAugSystemSolver {
 
         // Back-substitution against the cached factor; mirrors upstream
         // `IpStdAugSystemSolver.cpp` `linear_system_back_solve` task.
-        let _back_guard = self.timing.as_deref().map(|t| t.linear_system_back_solve.guard());
-        let status = self.linsol.multi_solve(
-            &self.vals,
-            false,
-            1,
-            &mut packed,
-            false,
-            0,
-        );
+        let _back_guard = self
+            .timing
+            .as_deref()
+            .map(|t| t.linear_system_back_solve.guard());
+        let status = self
+            .linsol
+            .multi_solve(&self.vals, false, 1, &mut packed, false, 0);
         drop(_back_guard);
         self.last_status = Some(status);
         if status == ESymSolverStatus::Success {
@@ -528,27 +528,37 @@ fn write_kkt_record(
 
     line.push_str("\"irn\":[");
     for (i, v) in irn.iter().enumerate() {
-        if i > 0 { line.push(','); }
+        if i > 0 {
+            line.push(',');
+        }
         let _ = write!(line, "{v}");
     }
     line.push_str("],\"jcn\":[");
     for (i, v) in jcn.iter().enumerate() {
-        if i > 0 { line.push(','); }
+        if i > 0 {
+            line.push(',');
+        }
         let _ = write!(line, "{v}");
     }
     line.push_str("],\"vals\":[");
     for (i, v) in vals.iter().enumerate() {
-        if i > 0 { line.push(','); }
+        if i > 0 {
+            line.push(',');
+        }
         let _ = write!(line, "{v:.17e}");
     }
     line.push_str("],\"rhs\":[");
     for (i, v) in rhs.iter().enumerate() {
-        if i > 0 { line.push(','); }
+        if i > 0 {
+            line.push(',');
+        }
         let _ = write!(line, "{v:.17e}");
     }
     line.push_str("],\"sol\":[");
     for (i, v) in sol.iter().enumerate() {
-        if i > 0 { line.push(','); }
+        if i > 0 {
+            line.push(',');
+        }
         let _ = write!(line, "{v:.17e}");
     }
     line.push_str("]}\n");
@@ -648,17 +658,14 @@ fn flat_write(dst: &mut dyn Vector, src: &[Number]) {
         }
         return;
     }
-    unreachable!("StdAugSystemSolver: sol must be DenseVector or CompoundVector of DenseVectors in v1.0")
+    unreachable!(
+        "StdAugSystemSolver: sol must be DenseVector or CompoundVector of DenseVectors in v1.0"
+    )
 }
 
 /// Write `sign · (D[i] + delta)` into each slot. `D = None` means
 /// the diagonal weight is zero, leaving just `sign · delta`.
-fn fill_diag(
-    dst: &mut [Number],
-    d: Option<&dyn Vector>,
-    delta: Number,
-    sign: Number,
-) {
+fn fill_diag(dst: &mut [Number], d: Option<&dyn Vector>, delta: Number, sign: Number) {
     match d {
         None => {
             for v in dst.iter_mut() {

@@ -179,10 +179,16 @@ impl IterateInitializer for RestoIterateInitializer {
         downcast_dense_mut(x.comp_mut(BLOCK_X)).set_values(&x_ref_vals);
 
         // Slack blocks via init_slack_pair on each entry of c / d-s.
-        let c_vals = snap.c_vec.as_any().downcast_ref::<DenseVector>()
+        let c_vals = snap
+            .c_vec
+            .as_any()
+            .downcast_ref::<DenseVector>()
             .map(|d| d.expanded_values())
             .unwrap_or_else(|| vec![0.0; m_eq as usize]);
-        let dms_vals = snap.d_minus_s_vec.as_any().downcast_ref::<DenseVector>()
+        let dms_vals = snap
+            .d_minus_s_vec
+            .as_any()
+            .downcast_ref::<DenseVector>()
             .map(|d| d.expanded_values())
             .unwrap_or_else(|| vec![0.0; m_ineq as usize]);
 
@@ -238,14 +244,10 @@ impl IterateInitializer for RestoIterateInitializer {
         }
         downcast_dense_mut(z_l.comp_mut(0)).set_values(&zl0);
         // block 1: resto_mu / n_c (componentwise)
-        downcast_dense_mut(z_l.comp_mut(1))
-            .set_values(&divide_safe(resto_mu, &nc_vals));
-        downcast_dense_mut(z_l.comp_mut(2))
-            .set_values(&divide_safe(resto_mu, &pc_vals));
-        downcast_dense_mut(z_l.comp_mut(3))
-            .set_values(&divide_safe(resto_mu, &nd_vals));
-        downcast_dense_mut(z_l.comp_mut(4))
-            .set_values(&divide_safe(resto_mu, &pd_vals));
+        downcast_dense_mut(z_l.comp_mut(1)).set_values(&divide_safe(resto_mu, &nc_vals));
+        downcast_dense_mut(z_l.comp_mut(2)).set_values(&divide_safe(resto_mu, &pc_vals));
+        downcast_dense_mut(z_l.comp_mut(3)).set_values(&divide_safe(resto_mu, &nd_vals));
+        downcast_dense_mut(z_l.comp_mut(4)).set_values(&divide_safe(resto_mu, &pd_vals));
 
         // ---- z_u: orig-shape (slacks have no upper bound) ----
         let mut z_u = DenseVectorSpace::new(n_xu_orig).make_new_dense();
@@ -304,13 +306,18 @@ impl IterateInitializer for RestoIterateInitializer {
             fn dump3(label: &str, v: &dyn Vector) {
                 eprintln!(
                     "[PN_RESTO_INIT] {} amax={:.17e} asum={:.17e} nrm2={:.17e}",
-                    label, v.amax(), v.asum(), v.nrm2()
+                    label,
+                    v.amax(),
+                    v.asum(),
+                    v.nrm2()
                 );
             }
             fn dump2(label: &str, v: &dyn Vector) {
                 eprintln!(
                     "[PN_RESTO_INIT] {} amax={:.17e} asum={:.17e}",
-                    label, v.amax(), v.asum()
+                    label,
+                    v.amax(),
+                    v.asum()
                 );
             }
             let cx = iv.x.as_any().downcast_ref::<CompoundVector>().unwrap();
@@ -331,7 +338,8 @@ impl IterateInitializer for RestoIterateInitializer {
             dump2("zL_pd   ", &*czl.comp(4));
             eprintln!(
                 "[PN_RESTO_INIT] y_c amax={:.17e} y_d amax={:.17e}",
-                iv.y_c.amax(), iv.y_d.amax()
+                iv.y_c.amax(),
+                iv.y_d.amax()
             );
         }
 
@@ -454,7 +462,13 @@ fn build_z_l_space(
 /// the floor only fires on degenerate inputs.
 fn divide_safe(mu: Number, x: &[Number]) -> Vec<Number> {
     x.iter()
-        .map(|&v| if v.abs() < 1e-300 { mu / 1e-300 } else { mu / v })
+        .map(|&v| {
+            if v.abs() < 1e-300 {
+                mu / 1e-300
+            } else {
+                mu / v
+            }
+        })
         .collect()
 }
 
@@ -542,9 +556,9 @@ mod tests {
         use pounce_algorithm::kkt::aug_system_solver::{
             AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver,
         };
-        use pounce_linsol::status::ESymSolverStatus;
         use pounce_common::types::Index;
         use pounce_linalg::{IdentityMatrix, Matrix, SymMatrix};
+        use pounce_linsol::status::ESymSolverStatus;
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -751,13 +765,27 @@ mod tests {
             assert_eq!(xc.comp(BLOCK_P_D).dim(), 1);
 
             // BLOCK_X copies x_ref.
-            let x0 = xc.comp(BLOCK_X).as_any().downcast_ref::<DenseVector>().unwrap();
+            let x0 = xc
+                .comp(BLOCK_X)
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .unwrap();
             assert_eq!(x0.values(), &[1.5, 2.5]);
 
             // n_c, p_c match init_slack_pair(c=2, mu_R=2, rho=1e3).
             let (n_exp, p_exp) = init_slack_pair(2.0, 2.0, 1e3);
-            let nc = xc.comp(BLOCK_N_C).as_any().downcast_ref::<DenseVector>().unwrap().values()[0];
-            let pc = xc.comp(BLOCK_P_C).as_any().downcast_ref::<DenseVector>().unwrap().values()[0];
+            let nc = xc
+                .comp(BLOCK_N_C)
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .unwrap()
+                .values()[0];
+            let pc = xc
+                .comp(BLOCK_P_C)
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .unwrap()
+                .values()[0];
             assert!((nc - n_exp).abs() < 1e-15);
             assert!((pc - p_exp).abs() < 1e-15);
 

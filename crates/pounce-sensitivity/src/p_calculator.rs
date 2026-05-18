@@ -70,11 +70,7 @@ pub trait PCalculator {
     ///
     /// Phase A: default returns `false`. Phase B implements the real
     /// row-by-row construction over `B`'s `multiplying_row` surface.
-    fn schur_matrix(
-        &mut self,
-        _b: &dyn SchurData,
-        _dense_schur: &mut [Number],
-    ) -> bool {
+    fn schur_matrix(&mut self, _b: &dyn SchurData, _dense_schur: &mut [Number]) -> bool {
         false
     }
 }
@@ -172,11 +168,7 @@ impl<B: SensBacksolver> PCalculator for IndexPCalculator<B> {
         true
     }
 
-    fn schur_matrix(
-        &mut self,
-        b: &dyn SchurData,
-        dense_schur: &mut [Number],
-    ) -> bool {
+    fn schur_matrix(&mut self, b: &dyn SchurData, dense_schur: &mut [Number]) -> bool {
         let n_b = b.nrows() as usize;
         let n_a = self.data_a.nrows() as usize;
         if dense_schur.len() != n_b * n_a {
@@ -234,7 +226,10 @@ mod tests {
     fn trait_default_compute_p_returns_false() {
         let a = IndexSchurData::from_parts(vec![0, 2], vec![1, -1]).unwrap();
         let mut pc = StubPCalculator { a };
-        assert!(!pc.compute_p(), "default compute_p must return false until Phase B");
+        assert!(
+            !pc.compute_p(),
+            "default compute_p must return false until Phase B"
+        );
     }
 
     #[test]
@@ -402,7 +397,9 @@ mod tests {
             assert!(
                 (s_actual[k] - s_expected[k]).abs() < 1e-10,
                 "S[{}] actual={}, expected={}",
-                k, s_actual[k], s_expected[k],
+                k,
+                s_actual[k],
+                s_expected[k],
             );
         }
     }

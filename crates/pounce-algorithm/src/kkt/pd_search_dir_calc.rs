@@ -239,8 +239,10 @@ impl PdSearchDirCalc {
         // depends on them.
         {
             let cq_ref = cq.borrow();
-            rhs.x.add_one_vector(-avrg_compl, &*cq_ref.grad_kappa_times_damping_x(), 0.0);
-            rhs.s.add_one_vector(-avrg_compl, &*cq_ref.grad_kappa_times_damping_s(), 0.0);
+            rhs.x
+                .add_one_vector(-avrg_compl, &*cq_ref.grad_kappa_times_damping_x(), 0.0);
+            rhs.s
+                .add_one_vector(-avrg_compl, &*cq_ref.grad_kappa_times_damping_s(), 0.0);
         }
         rhs.y_c.set(0.0);
         rhs.y_d.set(0.0);
@@ -321,9 +323,17 @@ impl PdSearchDirCalc {
         }
         let frozen_rhs = rhs.freeze();
         let mut delta_soc = frozen_rhs.make_new_zeroed();
-        let ok = self
-            .pd_solver
-            .solve(data, cq, nlp, -1.0, 0.0, &frozen_rhs, &mut delta_soc, false, false);
+        let ok = self.pd_solver.solve(
+            data,
+            cq,
+            nlp,
+            -1.0,
+            0.0,
+            &frozen_rhs,
+            &mut delta_soc,
+            false,
+            false,
+        );
         if ok {
             Some(delta_soc.freeze())
         } else {

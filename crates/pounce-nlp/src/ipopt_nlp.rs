@@ -149,11 +149,7 @@ pub trait IpoptNlp: Nlp {
     /// to `pack_lambda_for_user`; added by pounce#11 for the
     /// `finalize_solution` path. Default returns empty; `OrigIpoptNlp`
     /// overrides.
-    fn finalize_solution_lambda(
-        &self,
-        _y_c: &dyn Vector,
-        _y_d: &dyn Vector,
-    ) -> Vec<Number> {
+    fn finalize_solution_lambda(&self, _y_c: &dyn Vector, _y_d: &dyn Vector) -> Vec<Number> {
         Vec::new()
     }
 

@@ -61,7 +61,9 @@ impl TaggedCell {
     /// Construct with an initial tag (matches Ipopt's constructor which
     /// calls `ObjectChanged()` once).
     pub fn new() -> Self {
-        Self { tag: Cell::new(next_tag()) }
+        Self {
+            tag: Cell::new(next_tag()),
+        }
     }
 
     /// Current tag — equivalent to `TaggedObject::GetTag`.

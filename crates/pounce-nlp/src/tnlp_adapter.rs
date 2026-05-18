@@ -352,9 +352,7 @@ fn classify_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tnlp::{
-        IndexStyle, IpoptCq, IpoptData, Solution, SparsityRequest, StartingPoint,
-    };
+    use crate::tnlp::{IndexStyle, IpoptCq, IpoptData, Solution, SparsityRequest, StartingPoint};
 
     /// HS071: min x[0]*x[3]*(x[0]+x[1]+x[2]) + x[2]
     /// s.t.   x[0]*x[1]*x[2]*x[3] >= 25                (inequality)
@@ -460,17 +458,28 @@ mod tests {
             b.g_u.copy_from_slice(&[1.0, 2.0e19]);
             true
         }
-        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool { true }
-        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> { Some(0.0) }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
         fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-            g.fill(0.0); true
+            g.fill(0.0);
+            true
         }
         fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-            g.fill(0.0); true
+            g.fill(0.0);
+            true
         }
         fn eval_jac_g(
-            &mut self, _x: Option<&[Number]>, _new_x: bool, _m: SparsityRequest<'_>,
-        ) -> bool { true }
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _m: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 
@@ -506,20 +515,40 @@ mod tests {
     struct Bad;
     impl TNLP for Bad {
         fn get_nlp_info(&mut self) -> Option<NlpInfo> {
-            Some(NlpInfo { n: 1, m: 0, nnz_jac_g: 0, nnz_h_lag: 0, index_style: IndexStyle::C })
+            Some(NlpInfo {
+                n: 1,
+                m: 0,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
-            b.x_l[0] = 5.0; b.x_u[0] = 1.0; true
+            b.x_l[0] = 5.0;
+            b.x_u[0] = 1.0;
+            true
         }
-        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool { true }
-        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> { Some(0.0) }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
         fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-            g.fill(0.0); true
+            g.fill(0.0);
+            true
         }
-        fn eval_g(&mut self, _x: &[Number], _new_x: bool, _g: &mut [Number]) -> bool { true }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, _g: &mut [Number]) -> bool {
+            true
+        }
         fn eval_jac_g(
-            &mut self, _x: Option<&[Number]>, _new_x: bool, _m: SparsityRequest<'_>,
-        ) -> bool { true }
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _m: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 

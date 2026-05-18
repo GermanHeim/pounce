@@ -120,12 +120,7 @@ impl AugRestoSystemSolver {
         }
     }
 
-    fn build_structure(
-        &mut self,
-        w: &SymTMatrix,
-        j_c: &GenTMatrix,
-        j_d: &GenTMatrix,
-    ) {
+    fn build_structure(&mut self, w: &SymTMatrix, j_c: &GenTMatrix, j_d: &GenTMatrix) {
         let m_eq = j_c.n_rows();
         let m_ineq = j_d.n_rows();
         let n_total = j_c.n_cols();
@@ -337,12 +332,8 @@ impl AugSystemSolver for AugRestoSystemSolver {
         for i in 0..m_ineq {
             // rhs_dR = rhs_d − σ̃_{n_d}⁻¹ · rhs_{n_d} + σ̃_{p_d}⁻¹ · rhs_{p_d}
             // (Pd_L = +I, −Pd_U = −I in pounce's flat resto).
-            let n_contrib = sig_tilde_n_d_inv[i]
-                .map(|s| s * rhs_n_d[i])
-                .unwrap_or(0.0);
-            let p_contrib = sig_tilde_p_d_inv[i]
-                .map(|s| s * rhs_p_d[i])
-                .unwrap_or(0.0);
+            let n_contrib = sig_tilde_n_d_inv[i].map(|s| s * rhs_n_d[i]).unwrap_or(0.0);
+            let p_contrib = sig_tilde_p_d_inv[i].map(|s| s * rhs_p_d[i]).unwrap_or(0.0);
             rhs_d_r[i] = rhs_d_vals[i] - n_contrib + p_contrib;
         }
         let mut rhs_d_r_dense = self.space_m_ineq.as_ref().unwrap().make_new_dense();
@@ -445,8 +436,10 @@ impl AugSystemSolver for AugRestoSystemSolver {
         let mut sol_n_c_vals = vec![0.0; m_eq];
         let mut sol_p_c_vals = vec![0.0; m_eq];
         for i in 0..m_eq {
-            sol_n_c_vals[i] = expand_sol_n_c_elem(rhs_n_c[i], sol_y_c_vals[i], sig_tilde_n_c_inv[i]);
-            sol_p_c_vals[i] = expand_sol_p_c_elem(rhs_p_c[i], sol_y_c_vals[i], sig_tilde_p_c_inv[i]);
+            sol_n_c_vals[i] =
+                expand_sol_n_c_elem(rhs_n_c[i], sol_y_c_vals[i], sig_tilde_n_c_inv[i]);
+            sol_p_c_vals[i] =
+                expand_sol_p_c_elem(rhs_p_c[i], sol_y_c_vals[i], sig_tilde_p_c_inv[i]);
         }
         let mut sol_n_d_vals = vec![0.0; m_ineq];
         let mut sol_p_d_vals = vec![0.0; m_ineq];

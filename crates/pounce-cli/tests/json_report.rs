@@ -55,8 +55,7 @@ fn pounce_emits_summary_report_without_iterations() {
     let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
     assert_eq!(report.schema, "pounce.solve-report/v1");
     assert_eq!(
-        report.fair_metadata.solver.name,
-        "pounce",
+        report.fair_metadata.solver.name, "pounce",
         "FAIR metadata identifies solver"
     );
     assert!(
@@ -68,8 +67,11 @@ fn pounce_emits_summary_report_without_iterations() {
     assert_eq!(report.solution.x.len(), 5);
     assert_eq!(report.solution.lambda.len(), 4);
     assert!(report.solution.objective.is_finite());
-    assert_eq!(report.statistics.iteration_count, report.statistics.iteration_count); // sanity
-    // Summary mode: iterations dropped.
+    assert_eq!(
+        report.statistics.iteration_count,
+        report.statistics.iteration_count
+    ); // sanity
+       // Summary mode: iterations dropped.
     assert!(
         report.iterations.is_empty(),
         "summary should drop iter history, got {}",
@@ -157,12 +159,13 @@ fn schema_field_is_stable_across_runs() {
             .status()
             .expect("spawn pounce");
     }
-    let r1: SolveReport =
-        serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
-    let r2: SolveReport =
-        serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
+    let r1: SolveReport = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    let r2: SolveReport = serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
     assert_eq!(r1.schema, r2.schema);
-    assert_eq!(r1.fair_metadata.solver.version, r2.fair_metadata.solver.version);
+    assert_eq!(
+        r1.fair_metadata.solver.version,
+        r2.fair_metadata.solver.version
+    );
     // Two separate runs must produce distinct result_ids.
     assert_ne!(r1.fair_metadata.result_id, r2.fair_metadata.result_id);
 

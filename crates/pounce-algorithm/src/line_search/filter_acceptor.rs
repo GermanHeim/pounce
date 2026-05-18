@@ -154,18 +154,13 @@ impl FilterLsAcceptor {
         theta_trial: Number,
         phi_trial: Number,
     ) -> bool {
-        phi_trial < phi - self.gamma_phi * theta
-            || theta_trial < (1.0 - self.gamma_theta) * theta
+        phi_trial < phi - self.gamma_phi * theta || theta_trial < (1.0 - self.gamma_theta) * theta
     }
 
     /// Mirrors `FilterLSAcceptor::IsAcceptableToCurrentFilter`
     /// (`IpFilterLSAcceptor.cpp:501-504`). True iff `(theta, barr)` is
     /// not dominated by any entry in the filter.
-    pub fn is_acceptable_to_current_filter(
-        &self,
-        trial_barr: Number,
-        trial_theta: Number,
-    ) -> bool {
+    pub fn is_acceptable_to_current_filter(&self, trial_barr: Number, trial_theta: Number) -> bool {
         !self.filter.dominated_by_any(trial_theta, trial_barr)
     }
 
@@ -255,8 +250,7 @@ impl FilterLsAcceptor {
             return AcceptDecision::Reject;
         }
 
-        let f_type =
-            alpha_primal > 0.0 && self.is_switching_condition(alpha_primal, d_phi, theta);
+        let f_type = alpha_primal > 0.0 && self.is_switching_condition(alpha_primal, d_phi, theta);
         let take_armijo = f_type && theta <= theta_min;
 
         let iterate_ok = if take_armijo {
@@ -265,7 +259,11 @@ impl FilterLsAcceptor {
             // `IsAcceptableToCurrentIterate` with `called_from_restoration=false`.
             // Rapid-barrier-increase guard (`obj_max_inc` default 5.0).
             let rapid_increase_ok = if phi_trial > phi {
-                let basval = if phi.abs() > 10.0 { phi.abs().log10() } else { 1.0 };
+                let basval = if phi.abs() > 10.0 {
+                    phi.abs().log10()
+                } else {
+                    1.0
+                };
                 (phi_trial - phi).log10() <= 5.0 + basval
             } else {
                 true
@@ -327,18 +325,18 @@ impl FilterLsAcceptor {
     /// `InitializeImpl`, not in `Reset()`), set
     /// `theta_min = theta_min_fact * max(1, reference_theta)`.
     fn ensure_theta_min(&mut self, reference_theta: Number) -> Number {
-        *self.theta_min.get_or_insert_with(|| {
-            self.theta_min_fact * reference_theta.max(1.0)
-        })
+        *self
+            .theta_min
+            .get_or_insert_with(|| self.theta_min_fact * reference_theta.max(1.0))
     }
 
     /// Lazy initialiser for `theta_max_` matching upstream
     /// `IpFilterLSAcceptor.cpp:325-331`: locked once on first
     /// encounter to `theta_max_fact * max(1, reference_theta)`.
     fn ensure_theta_max(&mut self, reference_theta: Number) -> Number {
-        *self.theta_max.get_or_insert_with(|| {
-            self.theta_max_fact * reference_theta.max(1.0)
-        })
+        *self
+            .theta_max
+            .get_or_insert_with(|| self.theta_max_fact * reference_theta.max(1.0))
     }
 }
 
@@ -367,9 +365,8 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         if d_phi < 0.0 {
             alpha_min = alpha_min.min(self.gamma_phi * theta / (-d_phi));
             if theta <= theta_min {
-                alpha_min = alpha_min.min(
-                    self.delta_armijo * theta.powf(self.s_theta) / (-d_phi).powf(self.s_phi),
-                );
+                alpha_min = alpha_min
+                    .min(self.delta_armijo * theta.powf(self.s_theta) / (-d_phi).powf(self.s_phi));
             }
         }
         self.alpha_min_frac * alpha_min
@@ -459,11 +456,7 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
     /// the entry point. Without this, pounce on DECONVBNE enters
     /// restoration 323× (vs ipopt 21×): the outer accepts null-progress
     /// 'h' steps and immediately re-enters restoration.
-    fn prepare_resto_phase_start(
-        &mut self,
-        reference_theta: Number,
-        reference_barr: Number,
-    ) {
+    fn prepare_resto_phase_start(&mut self, reference_theta: Number, reference_barr: Number) {
         let phi_add = reference_barr - self.gamma_phi * reference_theta;
         let theta_add = (1.0 - self.gamma_theta) * reference_theta;
         self.filter.add(theta_add, phi_add, 0);

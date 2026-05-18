@@ -31,8 +31,8 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
+    TNLP,
 };
 use pounce_sensitivity::{
     IndexSchurData, PdSensBacksolver, SensApplication, SensBacksolver, SensOptions,
@@ -197,8 +197,7 @@ fn solve_at(eta1: Number, eta2: Number) -> [Number; 5] {
         .set_string_value("sb", "yes", true, false)
         .unwrap();
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> =
-        Rc::new(RefCell::new(ParametricTNLP::new(eta1, eta2)));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(eta1, eta2)));
 
     // Capture x* via finalize_solution side-channel: re-wrap with a
     // capturing TNLP. Simpler: read off the final iterate from a
@@ -285,17 +284,13 @@ fn run_sensitivity_step(delta_p: [Number; 2]) -> [Number; 5] {
         let n_x = curr.x.dim() as usize;
         let n_s = curr.s.dim() as usize;
         let y_c_offset = n_x + n_s;
-        let param_rows = vec![
-            (y_c_offset + 2) as Index,
-            (y_c_offset + 3) as Index,
-        ];
+        let param_rows = vec![(y_c_offset + 2) as Index, (y_c_offset + 3) as Index];
 
-        let backsolver = PdSensBacksolver::new(data, cq, nlp, pd)
-            .expect("PdSensBacksolver construction");
+        let backsolver =
+            PdSensBacksolver::new(data, cq, nlp, pd).expect("PdSensBacksolver construction");
         let n_full = backsolver.dim();
 
-        let a_data =
-            IndexSchurData::from_parts(param_rows, vec![1, 1]).expect("A SchurData");
+        let a_data = IndexSchurData::from_parts(param_rows, vec![1, 1]).expect("A SchurData");
         let opts = SensOptions {
             run_sens: true,
             ..SensOptions::default()
@@ -407,16 +402,15 @@ fn parametric_cpp_first_order_sensitivity_matches_finite_difference() {
             (y_c_offset + 3) as pounce_common::types::Index,
         ];
 
-        let backsolver = PdSensBacksolver::new(data, cq, nlp, pd)
-            .expect("PdSensBacksolver construction");
+        let backsolver =
+            PdSensBacksolver::new(data, cq, nlp, pd).expect("PdSensBacksolver construction");
         let n_full = backsolver.dim();
 
         // `SensApplication::parametric_step` matches upstream
         // [`SensStdStepCalc::Step`](../../../ref/Ipopt/contrib/sIPOPT/src/SensStdStepCalc.cpp:48-83)
         // — scatter Δp onto the y_c slots picked by `a_data`, then one
         // backsolve against the converged KKT factor.
-        let a_data = IndexSchurData::from_parts(param_rows, vec![1, 1])
-            .expect("A SchurData");
+        let a_data = IndexSchurData::from_parts(param_rows, vec![1, 1]).expect("A SchurData");
         let opts = SensOptions {
             run_sens: true,
             ..SensOptions::default()
@@ -485,7 +479,12 @@ fn parametric_cpp_first_order_sensitivity_matches_finite_difference() {
     // both are pinned to the parameter, so they must have the same
     // sign convention.
     let sign = (dx_x[3] * dx_fd[3]).signum();
-    assert!(sign > 0.0, "sensitivity sign convention disagrees with FD reference: dx_x[3]={}, dx_fd[3]={}", dx_x[3], dx_fd[3]);
+    assert!(
+        sign > 0.0,
+        "sensitivity sign convention disagrees with FD reference: dx_x[3]={}, dx_fd[3]={}",
+        dx_x[3],
+        dx_fd[3]
+    );
 
     for k in 0..3 {
         let pred = sign * dx_x[k];

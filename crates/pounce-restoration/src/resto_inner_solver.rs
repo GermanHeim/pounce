@@ -196,8 +196,8 @@ pub fn run_inner_resto(
             ))
         });
     }
-    alg_bundle.init = Box::new(resto_bundle.init)
-        as Box<dyn pounce_algorithm::init::r#trait::IterateInitializer>;
+    alg_bundle.init =
+        Box::new(resto_bundle.init) as Box<dyn pounce_algorithm::init::r#trait::IterateInitializer>;
     let mut adapter = crate::conv_check::RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)
         .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto);
     if let Some(cb) = orig_progress_cb {
@@ -206,8 +206,7 @@ pub fn run_inner_resto(
     alg_bundle.conv_check =
         Box::new(adapter) as Box<dyn pounce_algorithm::conv_check::r#trait::ConvCheck>;
     alg_bundle.iter_output = Box::new(
-        crate::output::RestoIterationOutputAdapter::new()
-            .with_orig_nlp(Rc::clone(outer_nlp)),
+        crate::output::RestoIterationOutputAdapter::new().with_orig_nlp(Rc::clone(outer_nlp)),
     ) as Box<dyn pounce_algorithm::output::r#trait::IterationOutput>;
 
     // Replace the inner-bundle mu update with a fresh MonotoneMuUpdate
@@ -309,9 +308,10 @@ pub fn run_inner_resto(
     // in closed form (holding the `x_orig` block and `s` fixed) so the
     // inner can keep iterating. Without this, any inner line-search
     // failure terminates the outer with `RestorationFailure`.
-    let resto_of_resto: Box<dyn pounce_algorithm::restoration::RestorationPhase> =
-        Box::new(crate::resto_resto::RestoRestorationPhase::new(resto_builder.rho)
-            .with_orig_nlp(Rc::clone(outer_nlp)));
+    let resto_of_resto: Box<dyn pounce_algorithm::restoration::RestorationPhase> = Box::new(
+        crate::resto_resto::RestoRestorationPhase::new(resto_builder.rho)
+            .with_orig_nlp(Rc::clone(outer_nlp)),
+    );
     let mut alg = IpoptAlgorithm::new(inner_data, inner_cq, alg_bundle)
         .with_nlp(Rc::clone(&resto_nlp_rc))
         .with_restoration(resto_of_resto);
@@ -447,11 +447,10 @@ pub fn run_inner_resto(
     // recovered pre-explosion point rather than the misleading
     // `Restoration_Failed`. The `iter >= 30` floor matches the `alt`
     // gate's "not a premature failure".
-    let step_failure_locally_infeasible =
-        matches!(status, SolverReturn::ErrorInStepComputation)
-            && inner_iter_count >= 30
-            && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
-            && orig_inf_pr_at_final.is_finite();
+    let step_failure_locally_infeasible = matches!(status, SolverReturn::ErrorInStepComputation)
+        && inner_iter_count >= 30
+        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+        && orig_inf_pr_at_final.is_finite();
 
     let locally_infeasible = strict_locally_infeasible
         || alt_locally_infeasible

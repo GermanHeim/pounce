@@ -235,7 +235,9 @@ impl TSymLinearSolver {
                 }
                 // SAFETY: removing an env var is safe in single-threaded
                 // setup; this dump fires from the main IPM thread.
-                unsafe { std::env::remove_var("POUNCE_DBG_KKT_DUMP"); }
+                unsafe {
+                    std::env::remove_var("POUNCE_DBG_KKT_DUMP");
+                }
             }
         }
 
@@ -267,12 +269,7 @@ impl TSymLinearSolver {
                     self.ajcn.as_ptr(),
                     self.ajcn.len(),
                 ),
-                Some(c) => (
-                    c.ia().as_ptr(),
-                    c.ia().len(),
-                    c.ja().as_ptr(),
-                    c.ja().len(),
-                ),
+                Some(c) => (c.ia().as_ptr(), c.ia().len(), c.ja().as_ptr(), c.ja().len()),
             };
             // SAFETY: the slices live in `self.airn/ajcn` or in the
             // converter, both owned by `self`; the pointers are valid
@@ -385,10 +382,7 @@ impl SymLinearSolver for TSymLinearSolver {
     /// the wrapper level (`linear_scaling_on_demand=true` path) takes
     /// precedence over asking the backend for tighter pivoting.
     fn increase_quality(&mut self) -> bool {
-        if self.scaling_method.is_some()
-            && !self.use_scaling
-            && self.linear_scaling_on_demand
-        {
+        if self.scaling_method.is_some() && !self.use_scaling && self.linear_scaling_on_demand {
             self.use_scaling = true;
             self.just_switched_on_scaling = true;
             return true;
@@ -558,11 +552,8 @@ mod tests {
             canned_solution: vec![7.0, 11.0],
             ..Default::default()
         };
-        let mut solver = TSymLinearSolver::new(
-            Box::new(backend),
-            Some(Box::new(DiagTwoThree)),
-            false,
-        );
+        let mut solver =
+            TSymLinearSolver::new(Box::new(backend), Some(Box::new(DiagTwoThree)), false);
         let (irn, jcn) = make_2x2_indef_pattern();
         solver.initialize_structure(2, &irn, &jcn);
 

@@ -16,7 +16,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
-    let git_sha = run("git", &["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let git_sha =
+        run("git", &["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let dirty = run("git", &["status", "--porcelain"])
         .map(|s| if s.is_empty() { "" } else { "+dirty" })
         .unwrap_or("");

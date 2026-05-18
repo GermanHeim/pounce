@@ -164,13 +164,7 @@ fn write_suffix(out: &mut String, s: &SolSuffix) {
                 .filter(|(_, &v)| v != 0)
                 .map(|(i, &v)| (i, v))
                 .collect();
-            let _ = writeln!(
-                out,
-                "suffix {} {} {}",
-                target_bits,
-                entries.len(),
-                s.name
-            );
+            let _ = writeln!(out, "suffix {} {} {}", target_bits, entries.len(), s.name);
             for (i, v) in entries {
                 let _ = writeln!(out, "{i} {v}");
             }
@@ -266,10 +260,7 @@ mod tests {
         assert!(s.contains("\n3 3.5"), "missing entry idx 3:\n{s}");
         // index 0 / 2 are zero — must not appear in the suffix block.
         // (The single-digit `0` could appear elsewhere, so we anchor.)
-        assert!(
-            !s.contains("\n0 0.0"),
-            "zero entry was not trimmed:\n{s}",
-        );
+        assert!(!s.contains("\n0 0.0"), "zero entry was not trimmed:\n{s}",);
     }
 
     #[test]

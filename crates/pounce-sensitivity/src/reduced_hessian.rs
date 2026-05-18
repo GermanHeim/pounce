@@ -118,7 +118,9 @@ mod tests {
         let mut pcalc = IndexPCalculator::new(backsolver, pcalc_a);
 
         let mut hr = vec![0.0; 2 * 2];
-        assert!(compute_reduced_hessian(&mut pcalc, &hess_data, 1.0, &mut hr));
+        assert!(compute_reduced_hessian(
+            &mut pcalc, &hess_data, 1.0, &mut hr
+        ));
 
         // Column-major: [j * n + i]
         // H_R[0,0] = 3/4
@@ -146,7 +148,9 @@ mod tests {
 
         // K⁻¹[1, 1] = 1, so H_R = obj_scal · 1.
         let mut hr = vec![0.0; 1];
-        assert!(compute_reduced_hessian(&mut pcalc, &hess_data, 2.5, &mut hr));
+        assert!(compute_reduced_hessian(
+            &mut pcalc, &hess_data, 2.5, &mut hr
+        ));
         assert!((hr[0] - 2.5).abs() < 1e-12, "H_R = {}", hr[0]);
     }
 

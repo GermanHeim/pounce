@@ -38,8 +38,8 @@ use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution,
-    SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution, SparsityRequest,
+    StartingPoint, TNLP,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -333,7 +333,11 @@ pub unsafe extern "C" fn AddIpoptNumOption(
     let Some(k) = keyword_str(keyword) else {
         return FALSE;
     };
-    match info.app.options_mut().set_numeric_value(k, val, true, false) {
+    match info
+        .app
+        .options_mut()
+        .set_numeric_value(k, val, true, false)
+    {
         Ok(_) => TRUE,
         Err(_) => FALSE,
     }
@@ -358,11 +362,12 @@ pub unsafe extern "C" fn AddIpoptIntOption(
     let Some(k) = keyword_str(keyword) else {
         return FALSE;
     };
-    match info
-        .app
-        .options_mut()
-        .set_integer_value(k, val as pounce_common::types::Index, true, false)
-    {
+    match info.app.options_mut().set_integer_value(
+        k,
+        val as pounce_common::types::Index,
+        true,
+        false,
+    ) {
         Ok(_) => TRUE,
         Err(_) => FALSE,
     }
@@ -780,7 +785,6 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
     }
 }
 
-
 /// Port of `IpStdCInterface.cpp:GetIpoptVersion` (Ipopt 3.14.18+).
 /// Writes the pounce crate's `major.minor.patch` into the buffers.
 /// Any pointer may be NULL to skip that component.
@@ -1051,19 +1055,16 @@ impl TNLP for CCallbackTnlp {
         ok != FALSE
     }
 
-    fn eval_jac_g(
-        &mut self,
-        x: Option<&[Number]>,
-        new_x: bool,
-        mode: SparsityRequest<'_>,
-    ) -> bool {
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
         if self.m == 0 || self.nele_jac == 0 {
             return true;
         }
         let Some(cb) = self.eval_jac_g else {
             return false;
         };
-        let x_ptr = x.map(|s| s.as_ptr() as *mut Number).unwrap_or(std::ptr::null_mut());
+        let x_ptr = x
+            .map(|s| s.as_ptr() as *mut Number)
+            .unwrap_or(std::ptr::null_mut());
         let ok = match mode {
             SparsityRequest::Structure { irow, jcol } => unsafe {
                 cb(
@@ -1110,7 +1111,9 @@ impl TNLP for CCallbackTnlp {
         if self.nele_hess == 0 {
             return true;
         }
-        let x_ptr = x.map(|s| s.as_ptr() as *mut Number).unwrap_or(std::ptr::null_mut());
+        let x_ptr = x
+            .map(|s| s.as_ptr() as *mut Number)
+            .unwrap_or(std::ptr::null_mut());
         let lambda_ptr = lambda
             .map(|s| s.as_ptr() as *mut Number)
             .unwrap_or(std::ptr::null_mut());
@@ -1535,7 +1538,10 @@ mod tests {
                 std::ptr::null_mut(),
             )
         };
-        assert_eq!(rc, ApplicationReturnStatus::InvalidProblemDefinition as Index);
+        assert_eq!(
+            rc,
+            ApplicationReturnStatus::InvalidProblemDefinition as Index
+        );
         unsafe { FreeIpoptProblem(p) };
     }
 
@@ -1553,7 +1559,11 @@ mod tests {
     fn get_version_tolerates_null_buffers() {
         // None of these should crash.
         unsafe {
-            GetIpoptVersion(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+            GetIpoptVersion(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
     }
 
@@ -1561,9 +1571,7 @@ mod tests {
     fn set_scaling_stores_user_supplied_arrays() {
         let p = create_unconstrained();
         let xs = [2.0, 3.0, 4.0, 5.0];
-        let ok = unsafe {
-            SetIpoptProblemScaling(p, 7.0, xs.as_ptr(), std::ptr::null())
-        };
+        let ok = unsafe { SetIpoptProblemScaling(p, 7.0, xs.as_ptr(), std::ptr::null()) };
         assert_eq!(ok, TRUE);
         let info = unsafe { &*p };
         let s = info.user_scaling.as_ref().unwrap();
@@ -1612,7 +1620,10 @@ mod tests {
     fn open_output_file_with_null_inputs_returns_false() {
         let key = CString::new("nope").unwrap();
         unsafe {
-            assert_eq!(OpenIpoptOutputFile(std::ptr::null_mut(), key.as_ptr(), 0), FALSE);
+            assert_eq!(
+                OpenIpoptOutputFile(std::ptr::null_mut(), key.as_ptr(), 0),
+                FALSE
+            );
         }
         let p = create_unconstrained();
         unsafe {
@@ -1626,9 +1637,15 @@ mod tests {
         let p = create_unconstrained();
         let rc = unsafe {
             GetIpoptCurrentIterate(
-                p, FALSE, 0,
-                std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(),
-                0, std::ptr::null_mut(), std::ptr::null_mut(),
+                p,
+                FALSE,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(rc, FALSE);
@@ -1640,11 +1657,17 @@ mod tests {
         let p = create_unconstrained();
         let rc = unsafe {
             GetIpoptCurrentViolations(
-                p, FALSE, 0,
-                std::ptr::null_mut(), std::ptr::null_mut(),
-                std::ptr::null_mut(), std::ptr::null_mut(),
+                p,
+                FALSE,
+                0,
                 std::ptr::null_mut(),
-                0, std::ptr::null_mut(), std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(rc, FALSE);
@@ -1672,11 +1695,19 @@ mod tests {
         let p = unsafe {
             CreateIpoptProblem(
                 1,
-                xl.as_ptr(), xu.as_ptr(),
+                xl.as_ptr(),
+                xu.as_ptr(),
                 0,
-                std::ptr::null(), std::ptr::null(),
-                0, 1, 0,
-                Some(quad_eval_f), None, Some(quad_eval_grad_f), None, Some(quad_eval_h),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
             )
         };
         let mut x = [0.0_f64];
@@ -1687,7 +1718,9 @@ mod tests {
                 x.as_mut_ptr(),
                 std::ptr::null_mut(),
                 &mut obj,
-                std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
                 std::ptr::null_mut(),
             )
         };
@@ -1792,11 +1825,8 @@ mod tests {
         }
     }
 
-
-    static CB_ITER_COUNTER: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
-    static CB_LAST_ITER: std::sync::atomic::AtomicI32 =
-        std::sync::atomic::AtomicI32::new(-1);
+    static CB_ITER_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static CB_LAST_ITER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
     static CB_INSPECTOR_OK: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 

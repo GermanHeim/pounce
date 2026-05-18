@@ -235,10 +235,7 @@ impl SchurData for IndexSchurData {
         Ok(())
     }
 
-    fn multiplying_row(
-        &self,
-        i: Index,
-    ) -> Result<(Vec<Index>, Vec<Number>), SchurDataError> {
+    fn multiplying_row(&self, i: Index) -> Result<(Vec<Index>, Vec<Number>), SchurDataError> {
         if !self.initialized {
             return Err(SchurDataError::NotInitialized);
         }
@@ -394,19 +391,13 @@ mod tests {
         let s = IndexSchurData::new();
         let v = [0.0];
         let mut u = [0.0];
-        assert_eq!(
-            s.multiply(&v, &mut u),
-            Err(SchurDataError::NotInitialized),
-        );
+        assert_eq!(s.multiply(&v, &mut u), Err(SchurDataError::NotInitialized),);
     }
 
     #[test]
     fn multiplying_row_out_of_range() {
         let s = IndexSchurData::from_parts(vec![0], vec![1]).expect("ok");
-        assert_eq!(
-            s.multiplying_row(2),
-            Err(SchurDataError::RowOutOfRange),
-        );
+        assert_eq!(s.multiplying_row(2), Err(SchurDataError::RowOutOfRange),);
     }
 
     #[test]

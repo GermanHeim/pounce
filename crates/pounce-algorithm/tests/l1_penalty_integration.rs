@@ -41,7 +41,12 @@ struct EqOnly {
 impl EqOnly {
     fn new() -> (Self, Rc<RefCell<Option<CapturedSolution>>>) {
         let captured = Rc::new(RefCell::new(None));
-        (Self { captured: Rc::clone(&captured) }, captured)
+        (
+            Self {
+                captured: Rc::clone(&captured),
+            },
+            captured,
+        )
     }
 }
 
@@ -86,8 +91,10 @@ impl TNLP for EqOnly {
     ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow[0] = 0; jcol[0] = 0;
-                irow[1] = 0; jcol[1] = 1;
+                irow[0] = 0;
+                jcol[0] = 0;
+                irow[1] = 0;
+                jcol[1] = 1;
                 true
             }
             SparsityRequest::Values { values } => {
@@ -108,8 +115,10 @@ impl TNLP for EqOnly {
     ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow[0] = 0; jcol[0] = 0;
-                irow[1] = 1; jcol[1] = 1;
+                irow[0] = 0;
+                jcol[0] = 0;
+                irow[1] = 1;
+                jcol[1] = 1;
                 true
             }
             SparsityRequest::Values { values } => {
@@ -154,14 +163,32 @@ fn flag_off_solves_eq_only_to_known_optimum() {
     let tnlp_rc: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(tnlp));
     let mut app = build_app(false, 1.0);
     let status = app.optimize_tnlp(Rc::clone(&tnlp_rc));
-    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded
-                            | ApplicationReturnStatus::SolvedToAcceptableLevel),
-        "flag-off status = {:?}", status);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "flag-off status = {:?}",
+        status
+    );
     let cap = captured.borrow().clone().expect("finalize_solution called");
     assert_eq!(cap.x.len(), 2, "flag-off x length");
-    assert!((cap.x[0] - 0.5).abs() < 1e-6, "flag-off x[0] = {}", cap.x[0]);
-    assert!((cap.x[1] - 0.5).abs() < 1e-6, "flag-off x[1] = {}", cap.x[1]);
-    assert!((cap.obj_value - 0.5).abs() < 1e-8, "flag-off obj = {}", cap.obj_value);
+    assert!(
+        (cap.x[0] - 0.5).abs() < 1e-6,
+        "flag-off x[0] = {}",
+        cap.x[0]
+    );
+    assert!(
+        (cap.x[1] - 0.5).abs() < 1e-6,
+        "flag-off x[1] = {}",
+        cap.x[1]
+    );
+    assert!(
+        (cap.obj_value - 0.5).abs() < 1e-8,
+        "flag-off obj = {}",
+        cap.obj_value
+    );
     // Diagnostic: pounce#11 (fixed 2026-05-14) wired the multiplier
     // lift on the OrigIpoptNlp path. For this fixture the analytic
     // |λ| = 1.0 (∇L = 2x − λ·1 = 0 with x[0]+x[1] = 1 ⇒ λ = 1);
@@ -185,7 +212,12 @@ fn flag_on_solution_x_truncated_to_n_orig() {
     // though the IPM solved the augmented (n_orig + 2*m_eq = 4)-variable
     // problem. The user must never see slack variables in their
     // finalize_solution callback.
-    assert_eq!(cap.x.len(), 2, "x must be truncated to n_orig (got {} entries)", cap.x.len());
+    assert_eq!(
+        cap.x.len(),
+        2,
+        "x must be truncated to n_orig (got {} entries)",
+        cap.x.len()
+    );
 }
 
 #[test]
@@ -202,8 +234,11 @@ fn flag_on_objective_excludes_penalty_term() {
     // coincide here, but the back-projection guarantee must hold even
     // when Σ(p+n) > 0 (Phase 3 will exercise that path on infeasible
     // problems via the slack-collapse / honest-infeasibility check).
-    assert!((cap.obj_value - 0.5).abs() < 1e-6,
-        "reported obj must be original f(x*) = 0.5, got {}", cap.obj_value);
+    assert!(
+        (cap.obj_value - 0.5).abs() < 1e-6,
+        "reported obj must be original f(x*) = 0.5, got {}",
+        cap.obj_value
+    );
 }
 
 #[test]
@@ -222,9 +257,12 @@ fn flag_on_constraint_value_excludes_slack_contribution() {
     // Phase 3's slack-collapse check will drive Σ(p+n) → 0 on
     // feasible problems and tighten this naturally.
     assert_eq!(cap.g.len(), 1);
-    assert!((cap.g[0] - 1.0).abs() < 1e-3,
+    assert!(
+        (cap.g[0] - 1.0).abs() < 1e-3,
         "reported g[0] = {} (expected ≈ 1.0; gap = {:.2e})",
-        cap.g[0], (cap.g[0] - 1.0).abs());
+        cap.g[0],
+        (cap.g[0] - 1.0).abs()
+    );
 }
 
 #[test]
@@ -257,7 +295,11 @@ fn flag_on_lambda_length_and_passthrough() {
     let _ = app_on.optimize_tnlp(Rc::clone(&tnlp_on_rc));
     let cap_on = captured_on.borrow().clone().expect("flag-on finalize");
 
-    assert_eq!(cap_on.lambda.len(), 1, "wrapper must not add constraint rows");
+    assert_eq!(
+        cap_on.lambda.len(),
+        1,
+        "wrapper must not add constraint rows"
+    );
     assert_eq!(
         cap_on.lambda.len(),
         cap_off.lambda.len(),
@@ -267,7 +309,9 @@ fn flag_on_lambda_length_and_passthrough() {
         assert!(
             (cap_on.lambda[i] - cap_off.lambda[i]).abs() < 1e-6,
             "lambda[{}] must pass through (flag-off {}, flag-on {})",
-            i, cap_off.lambda[i], cap_on.lambda[i],
+            i,
+            cap_off.lambda[i],
+            cap_on.lambda[i],
         );
     }
 }
@@ -285,26 +329,34 @@ fn flag_on_no_op_when_no_equality_rows() {
     impl TNLP for IneqOnly {
         fn get_nlp_info(&mut self) -> Option<NlpInfo> {
             Some(NlpInfo {
-                n: 1, m: 1, nnz_jac_g: 1, nnz_h_lag: 1,
+                n: 1,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 1,
                 index_style: IndexStyle::C,
             })
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
-            b.x_l[0] = -1e19; b.x_u[0] = 1e19;
-            b.g_l[0] = -1e19; b.g_u[0] = 10.0;
+            b.x_l[0] = -1e19;
+            b.x_u[0] = 1e19;
+            b.g_l[0] = -1e19;
+            b.g_u[0] = 10.0;
             true
         }
         fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-            sp.x[0] = 0.0; true
+            sp.x[0] = 0.0;
+            true
         }
         fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
             Some((x[0] - 3.0).powi(2))
         }
         fn eval_grad_f(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
-            g[0] = 2.0 * (x[0] - 3.0); true
+            g[0] = 2.0 * (x[0] - 3.0);
+            true
         }
         fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
-            g[0] = x[0]; true
+            g[0] = x[0];
+            true
         }
         fn eval_jac_g(
             &mut self,
@@ -314,11 +366,13 @@ fn flag_on_no_op_when_no_equality_rows() {
         ) -> bool {
             match mode {
                 SparsityRequest::Structure { irow, jcol } => {
-                    irow[0] = 0; jcol[0] = 0;
+                    irow[0] = 0;
+                    jcol[0] = 0;
                     true
                 }
                 SparsityRequest::Values { values } => {
-                    values[0] = 1.0; true
+                    values[0] = 1.0;
+                    true
                 }
             }
         }
@@ -333,10 +387,13 @@ fn flag_on_no_op_when_no_equality_rows() {
         ) -> bool {
             match mode {
                 SparsityRequest::Structure { irow, jcol } => {
-                    irow[0] = 0; jcol[0] = 0; true
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                    true
                 }
                 SparsityRequest::Values { values } => {
-                    values[0] = 2.0 * obj_factor; true
+                    values[0] = 2.0 * obj_factor;
+                    true
                 }
             }
         }
@@ -358,7 +415,11 @@ fn flag_on_no_op_when_no_equality_rows() {
     let cap = captured.borrow().clone().expect("finalize_solution called");
     // n_orig = 1, no equality rows, wrapper should be a no-op.
     assert_eq!(cap.x.len(), 1);
-    assert!((cap.x[0] - 3.0).abs() < 1e-4, "x* should be ~3, got {}", cap.x[0]);
+    assert!(
+        (cap.x[0] - 3.0).abs() < 1e-4,
+        "x* should be ~3, got {}",
+        cap.x[0]
+    );
 }
 
 // ---------- Phase-3 BNW outer loop + honest-infeasibility tests ----------
@@ -377,14 +438,21 @@ struct BurkeHanLike {
 impl BurkeHanLike {
     fn new() -> (Self, Rc<RefCell<Option<CapturedSolution>>>) {
         let captured = Rc::new(RefCell::new(None));
-        (Self { captured: Rc::clone(&captured) }, captured)
+        (
+            Self {
+                captured: Rc::clone(&captured),
+            },
+            captured,
+        )
     }
 }
 impl TNLP for BurkeHanLike {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
-            n: 2, m: 2,
-            nnz_jac_g: 4, nnz_h_lag: 2,
+            n: 2,
+            m: 2,
+            nnz_jac_g: 4,
+            nnz_h_lag: 2,
             index_style: IndexStyle::C,
         })
     }
@@ -396,29 +464,33 @@ impl TNLP for BurkeHanLike {
         true
     }
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-        sp.x.copy_from_slice(&[0.5, 0.5]); true
+        sp.x.copy_from_slice(&[0.5, 0.5]);
+        true
     }
-    fn eval_f(&mut self, _x: &[Number], _: bool) -> Option<Number> { Some(0.0) }
+    fn eval_f(&mut self, _x: &[Number], _: bool) -> Option<Number> {
+        Some(0.0)
+    }
     fn eval_grad_f(&mut self, _x: &[Number], _: bool, g: &mut [Number]) -> bool {
-        g[0] = 0.0; g[1] = 0.0; true
+        g[0] = 0.0;
+        g[1] = 0.0;
+        true
     }
     fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
         g[0] = x[0] + x[1];
         g[1] = x[0] * x[0] + x[1] * x[1];
         true
     }
-    fn eval_jac_g(
-        &mut self,
-        x: Option<&[Number]>,
-        _: bool,
-        mode: SparsityRequest<'_>,
-    ) -> bool {
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, _: bool, mode: SparsityRequest<'_>) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow[0] = 0; jcol[0] = 0;
-                irow[1] = 0; jcol[1] = 1;
-                irow[2] = 1; jcol[2] = 0;
-                irow[3] = 1; jcol[3] = 1;
+                irow[0] = 0;
+                jcol[0] = 0;
+                irow[1] = 0;
+                jcol[1] = 1;
+                irow[2] = 1;
+                jcol[2] = 0;
+                irow[3] = 1;
+                jcol[3] = 1;
                 true
             }
             SparsityRequest::Values { values } => {
@@ -442,8 +514,10 @@ impl TNLP for BurkeHanLike {
     ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow[0] = 0; jcol[0] = 0;
-                irow[1] = 1; jcol[1] = 1;
+                irow[0] = 0;
+                jcol[0] = 0;
+                irow[1] = 1;
+                jcol[1] = 1;
                 true
             }
             SparsityRequest::Values { values } => {
@@ -476,9 +550,15 @@ fn bnw_outer_loop_runs_to_completion() {
     let tnlp_rc: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(tnlp));
     let mut app = build_app(true, 1.0);
     let status = app.optimize_tnlp(Rc::clone(&tnlp_rc));
-    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded
-                            | ApplicationReturnStatus::SolvedToAcceptableLevel),
-        "BNW outer-loop status = {:?}", status);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "BNW outer-loop status = {:?}",
+        status
+    );
     let cap = captured.borrow().clone().expect("finalize_solution called");
     assert_eq!(cap.x.len(), 2);
     assert!((cap.x[0] - 0.5).abs() < 1e-4);
@@ -529,11 +609,20 @@ fn flag_on_does_not_regress_well_conditioned_problem() {
 
     // Same basin: x* and obj match to a reasonable tolerance.
     for i in 0..cap_off.x.len() {
-        assert!((cap_off.x[i] - cap_on.x[i]).abs() < 1e-3,
-            "x[{}] differs: off {} vs on {}", i, cap_off.x[i], cap_on.x[i]);
+        assert!(
+            (cap_off.x[i] - cap_on.x[i]).abs() < 1e-3,
+            "x[{}] differs: off {} vs on {}",
+            i,
+            cap_off.x[i],
+            cap_on.x[i]
+        );
     }
-    assert!((cap_off.obj_value - cap_on.obj_value).abs() < 1e-3,
-        "obj differs: off {} vs on {}", cap_off.obj_value, cap_on.obj_value);
+    assert!(
+        (cap_off.obj_value - cap_on.obj_value).abs() < 1e-3,
+        "obj differs: off {} vs on {}",
+        cap_off.obj_value,
+        cap_on.obj_value
+    );
 }
 
 // ---------- Phase 3.5 auto-fallback tests ----------
@@ -549,12 +638,7 @@ fn build_app_with_fallback(rho_init: Number) -> IpoptApplication {
         let _ = opts.set_integer_value("print_level", 0, true, false);
         let _ = opts.set_numeric_value("tol", 1e-10, true, false);
         let _ = opts.set_integer_value("max_iter", 200, true, false);
-        let _ = opts.set_string_value(
-            "l1_fallback_on_restoration_failure",
-            "yes",
-            true,
-            false,
-        );
+        let _ = opts.set_string_value("l1_fallback_on_restoration_failure", "yes", true, false);
         let _ = opts.set_numeric_value("l1_penalty_init", rho_init, true, false);
         // Keep the retry's outer-iter budget small so the test runs fast.
         let _ = opts.set_integer_value("l1_penalty_max_outer_iter", 5, true, false);
@@ -583,14 +667,19 @@ fn auto_fallback_no_op_when_first_attempt_succeeds() {
         std::mem::discriminant(&status_off),
         std::mem::discriminant(&status_fb),
         "fallback should not change status on a success path: off {:?} vs fb {:?}",
-        status_off, status_fb
+        status_off,
+        status_fb
     );
     let cap_off = captured_off.borrow().clone().expect("off finalize");
     let cap_fb = captured_fb.borrow().clone().expect("fb finalize");
     for i in 0..cap_off.x.len() {
-        assert!((cap_off.x[i] - cap_fb.x[i]).abs() < 1e-6,
+        assert!(
+            (cap_off.x[i] - cap_fb.x[i]).abs() < 1e-6,
             "x[{}] should be identical: off {} vs fb {}",
-            i, cap_off.x[i], cap_fb.x[i]);
+            i,
+            cap_off.x[i],
+            cap_fb.x[i]
+        );
     }
 }
 

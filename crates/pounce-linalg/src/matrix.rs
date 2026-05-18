@@ -97,13 +97,7 @@ pub trait Matrix: TaggedObject + Debug + 'static {
 
     /// `X = X + α · M · S⁻¹ · Z`. Default: build `tmp = Z./S`, then
     /// `MultVector(α, tmp, 1, X)`. Override for ExpansionMatrix etc.
-    fn add_m_sinv_z_impl(
-        &self,
-        alpha: Number,
-        s: &dyn Vector,
-        z: &dyn Vector,
-        x: &mut dyn Vector,
-    ) {
+    fn add_m_sinv_z_impl(&self, alpha: Number, s: &dyn Vector, z: &dyn Vector, x: &mut dyn Vector) {
         let mut tmp = s.make_new_copy();
         // tmp ← (1)*Z/S + (0)*tmp  ≡  tmp = Z/S
         tmp.set(0.0);

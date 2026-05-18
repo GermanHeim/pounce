@@ -236,14 +236,7 @@ impl IterateInitializer for DefaultIterateInitializer {
             let mut new_y_c = DenseVectorSpace::new(n_yc).make_new_dense();
             let mut new_y_d = DenseVectorSpace::new(n_yd).make_new_dense();
             let calc = self.eq_mult_calculator.as_mut().unwrap();
-            let ok = calc.calculate_y_eq(
-                data,
-                cq,
-                nlp,
-                aug_solver,
-                &mut new_y_c,
-                &mut new_y_d,
-            );
+            let ok = calc.calculate_y_eq(data, cq, nlp, aug_solver, &mut new_y_c, &mut new_y_d);
             if !ok {
                 // Solver failed → leave at zero (already the case).
                 data.borrow_mut().append_info_string("y0");
@@ -421,13 +414,7 @@ mod tests {
     fn lower_only_pushed_by_max_abs() {
         // Lower-only with lo=-100: p_l = bound_push * max(|-100|, 1) = 1e-2 * 100 = 1.
         // x=-100 → -100 + 1 = -99.
-        let v = DefaultIterateInitializer::push_to_interior(
-            1e-2,
-            1e-2,
-            -100.0,
-            Some(-100.0),
-            None,
-        );
+        let v = DefaultIterateInitializer::push_to_interior(1e-2, 1e-2, -100.0, Some(-100.0), None);
         assert!((v - -99.0).abs() < 1e-13);
     }
 
@@ -448,8 +435,7 @@ mod tests {
     fn narrow_interval_uses_bound_frac_branch() {
         // Tiny span [0, 1e-4]: p_l = min(1e-2 * 1, 1e-2 * 1e-4) = 1e-6.
         // x=0 → 0 + 1e-6 = 1e-6.
-        let v =
-            DefaultIterateInitializer::push_to_interior(1e-2, 1e-2, 0.0, Some(0.0), Some(1e-4));
+        let v = DefaultIterateInitializer::push_to_interior(1e-2, 1e-2, 0.0, Some(0.0), Some(1e-4));
         assert!((v - 1e-6).abs() < 1e-18);
     }
 }

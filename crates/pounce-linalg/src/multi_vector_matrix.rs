@@ -106,7 +106,9 @@ impl MultiVectorMatrix {
     pub fn get_vector(&self, i: Index) -> &Rc<dyn Vector> {
         let idx = i as usize;
         debug_assert!(idx < self.cols.len());
-        self.cols[idx].as_ref().expect("MultiVectorMatrix column is unset")
+        self.cols[idx]
+            .as_ref()
+            .expect("MultiVectorMatrix column is unset")
     }
 
     /// Like upstream `FillWithNewVectors`: replaces every column with
@@ -133,20 +135,16 @@ impl MultiVectorMatrix {
     /// then asked us to mutate it, which upstream's non-const path
     /// rules out by construction.
     fn col_mut(&mut self, i: usize) -> &mut dyn Vector {
-        let slot = self.cols[i].as_mut().expect("MultiVectorMatrix column is unset");
+        let slot = self.cols[i]
+            .as_mut()
+            .expect("MultiVectorMatrix column is unset");
         let inner: &mut dyn Vector = Rc::get_mut(slot)
             .expect("MultiVectorMatrix column is shared; cannot mutate (clone first)");
         inner
     }
 
     /// `y ← α V Vᵀ x + β y`. Port of `LRMultVector`.
-    pub fn lr_mult_vector(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    pub fn lr_mult_vector(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert_eq!(self.space.n_rows, x.dim());
         debug_assert_eq!(self.space.n_rows, y.dim());
         if beta != 0.0 {
@@ -194,12 +192,7 @@ impl MultiVectorMatrix {
 
     /// `V ← a · V1 + c · V` (column-wise). When `c == 0`, replaces
     /// every column with a fresh allocation first, mirroring upstream.
-    pub fn add_one_multi_vector_matrix(
-        &mut self,
-        a: Number,
-        mv1: &MultiVectorMatrix,
-        c: Number,
-    ) {
+    pub fn add_one_multi_vector_matrix(&mut self, a: Number, mv1: &MultiVectorMatrix, c: Number) {
         debug_assert_eq!(self.space.n_rows, mv1.space.n_rows);
         debug_assert_eq!(self.space.n_cols, mv1.space.n_cols);
         if c == 0.0 {
@@ -288,13 +281,7 @@ impl Matrix for MultiVectorMatrix {
     /// Port of `MultVectorImpl`. Reduction order matches upstream:
     /// scal/set y first, then iterate columns left-to-right and
     /// accumulate via `AddOneVector`.
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert_eq!(self.space.n_cols, x.dim());
         debug_assert_eq!(self.space.n_rows, y.dim());
 

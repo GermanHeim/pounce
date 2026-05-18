@@ -145,7 +145,9 @@ impl DenseGenMatrix {
         _trans_b: bool,
         _beta: Number,
     ) {
-        unimplemented!("DenseGenMatrix::add_matrix_product needs BLAS gemm — wired in LAPACK shim phase");
+        unimplemented!(
+            "DenseGenMatrix::add_matrix_product needs BLAS gemm — wired in LAPACK shim phase"
+        );
     }
 
     /// `J Jᵀ = M` where `M` is symmetric positive definite. Lower
@@ -217,12 +219,7 @@ impl DenseGenMatrix {
     /// stored in `self`. `trans = true` solves `Lᵀ X = α B`,
     /// `trans = false` solves `L X = α B`. Mirrors `dtrsm` for a single
     /// triangular factor in-place per upstream `IpDenseGenMatrix.cpp:228-240`.
-    pub fn cholesky_back_solve_matrix(
-        &self,
-        trans: bool,
-        alpha: Number,
-        b: &mut DenseGenMatrix,
-    ) {
+    pub fn cholesky_back_solve_matrix(&self, trans: bool, alpha: Number, b: &mut DenseGenMatrix) {
         debug_assert!(self.initialized.get());
         debug_assert_eq!(self.nr(), self.nc());
         debug_assert_eq!(self.nr(), b.nr());
@@ -406,13 +403,7 @@ impl Matrix for DenseGenMatrix {
 
     /// `y ← α · M · x + β · y`. Reference DGEMV column-outer order:
     /// `for j: temp = α x[j]; for i: y[i] += temp · A[i + j·m]`.
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert!(self.initialized.get());
         let nr = self.nr();
         let nc = self.nc();

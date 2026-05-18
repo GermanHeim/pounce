@@ -113,7 +113,9 @@ struct LevelTable {
 
 impl LevelTable {
     fn new(default_level: JournalLevel) -> Self {
-        Self { levels: [default_level as i32; JournalCategory::J_LAST_CATEGORY] }
+        Self {
+            levels: [default_level as i32; JournalCategory::J_LAST_CATEGORY],
+        }
     }
 
     fn is_accepted(&self, category: JournalCategory, level: JournalLevel) -> bool {
@@ -184,7 +186,11 @@ impl FileJournal {
             other => {
                 let mut opts = OpenOptions::new();
                 opts.write(true).create(true);
-                if append { opts.append(true); } else { opts.truncate(true); }
+                if append {
+                    opts.append(true);
+                } else {
+                    opts.truncate(true);
+                }
                 match opts.open(other) {
                     Ok(f) => FileSink::File(f),
                     Err(_) => return false,
@@ -201,10 +207,15 @@ impl FileJournal {
 }
 
 impl Journal for FileJournal {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn is_accepted(&self, category: JournalCategory, level: JournalLevel) -> bool {
-        self.levels.lock().map(|t| t.is_accepted(category, level)).unwrap_or(false)
+        self.levels
+            .lock()
+            .map(|t| t.is_accepted(category, level))
+            .unwrap_or(false)
     }
 
     fn set_print_level(&self, category: JournalCategory, level: JournalLevel) {
@@ -256,15 +267,23 @@ impl StringJournal {
     }
 
     pub fn take(&self) -> String {
-        self.buffer.lock().map(|mut b| std::mem::take(&mut *b)).unwrap_or_default()
+        self.buffer
+            .lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default()
     }
 }
 
 impl Journal for StringJournal {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn is_accepted(&self, category: JournalCategory, level: JournalLevel) -> bool {
-        self.levels.lock().map(|t| t.is_accepted(category, level)).unwrap_or(false)
+        self.levels
+            .lock()
+            .map(|t| t.is_accepted(category, level))
+            .unwrap_or(false)
     }
 
     fn set_print_level(&self, category: JournalCategory, level: JournalLevel) {
@@ -299,7 +318,9 @@ pub struct Journalist {
 }
 
 impl Journalist {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add_journal(&self, j: Arc<dyn Journal>) -> bool {
         if let Ok(journals) = self.journals.try_borrow_mut() {
@@ -336,7 +357,11 @@ impl Journalist {
     }
 
     pub fn get_journal(&self, location_name: &str) -> Option<Arc<dyn Journal>> {
-        self.journals.borrow().iter().find(|j| j.name() == location_name).cloned()
+        self.journals
+            .borrow()
+            .iter()
+            .find(|j| j.name() == location_name)
+            .cloned()
     }
 
     pub fn delete_all_journals(&self) {
@@ -376,7 +401,10 @@ impl Journalist {
 
     /// Mirrors `ProduceOutput` — true iff at least one journal accepts.
     pub fn produce_output(&self, level: JournalLevel, category: JournalCategory) -> bool {
-        self.journals.borrow().iter().any(|j| j.is_accepted(category, level))
+        self.journals
+            .borrow()
+            .iter()
+            .any(|j| j.is_accepted(category, level))
     }
 
     pub fn flush_buffer(&self) {
@@ -396,7 +424,11 @@ mod tests {
         let j = Arc::new(StringJournal::new("buf", JournalLevel::J_SUMMARY));
         jnlst.add_journal(j.clone());
         jnlst.print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, "err\n");
-        jnlst.print(JournalLevel::J_DETAILED, JournalCategory::J_MAIN, "detail\n");
+        jnlst.print(
+            JournalLevel::J_DETAILED,
+            JournalCategory::J_MAIN,
+            "detail\n",
+        );
         let s = j.contents();
         assert!(s.contains("err"));
         assert!(!s.contains("detail"));
@@ -407,7 +439,11 @@ mod tests {
         let jnlst = Journalist::new();
         let j = Arc::new(StringJournal::new("buf", JournalLevel::J_NONE));
         jnlst.add_journal(j.clone());
-        jnlst.print(JournalLevel::J_INSUPPRESSIBLE, JournalCategory::J_MAIN, "x\n");
+        jnlst.print(
+            JournalLevel::J_INSUPPRESSIBLE,
+            JournalCategory::J_MAIN,
+            "x\n",
+        );
         assert_eq!(j.contents(), "x\n");
     }
 

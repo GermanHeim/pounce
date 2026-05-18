@@ -198,8 +198,7 @@ impl AdaptiveMuUpdate {
             self.init_primal_inf = primal_inf.max(1.0);
         }
         let dual_term = self.adaptive_mu_safeguard_factor * (dual_inf / self.init_dual_inf);
-        let prim_term =
-            self.adaptive_mu_safeguard_factor * (primal_inf / self.init_primal_inf);
+        let prim_term = self.adaptive_mu_safeguard_factor * (primal_inf / self.init_primal_inf);
         let mut lower = dual_term.max(prim_term);
         if self.adaptive_mu_globalization == AdaptiveMuGlobalization::KktError {
             lower = lower.min(min_ref_val);
@@ -261,9 +260,10 @@ impl AdaptiveMuUpdate {
                 // global error margin driver.
                 let curr_err = cq_ref.curr_nlp_error();
                 drop(cq_ref);
-                let margin =
-                    self.filter_margin_fact * self.filter_max_margin.min(curr_err);
-                !self.filter.dominated_by_any(curr_theta + margin, curr_f + margin)
+                let margin = self.filter_margin_fact * self.filter_max_margin.min(curr_err);
+                !self
+                    .filter
+                    .dominated_by_any(curr_theta + margin, curr_f + margin)
             }
             AdaptiveMuGlobalization::NeverMonotoneMode => true,
         }
@@ -272,11 +272,7 @@ impl AdaptiveMuUpdate {
     /// Port of `AdaptiveMuUpdate::RememberCurrentPointAsAccepted`
     /// (`IpAdaptiveMuUpdate.cpp:492-546`). Records the iterate state
     /// for the next sufficient-progress check.
-    fn remember_current_point_as_accepted(
-        &mut self,
-        data: &IpoptDataHandle,
-        cq: &IpoptCqHandle,
-    ) {
+    fn remember_current_point_as_accepted(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) {
         match self.adaptive_mu_globalization {
             AdaptiveMuGlobalization::KktError => {
                 let curr_error = self.quality_function_pd_system(cq);
@@ -450,8 +446,7 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
-            let sufficient_progress =
-                !force_no_progress && self.check_sufficient_progress(cq);
+            let sufficient_progress = !force_no_progress && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 // Switch back to free mode; record the iterate. Mirror
                 // upstream `cpp:304-310`: μ is NOT changed on the
@@ -485,8 +480,7 @@ impl MuUpdate for AdaptiveMuUpdate {
             }
         } else {
             // Free-mu branch — `cpp:343-389`.
-            let sufficient_progress =
-                !force_no_progress && self.check_sufficient_progress(cq);
+            let sufficient_progress = !force_no_progress && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 self.remember_current_point_as_accepted(data, cq);
                 // Fall through to the oracle call below.
@@ -498,8 +492,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                     let nlp_err = cqr.curr_nlp_error();
                     let avrg = cqr.curr_avrg_compl();
                     drop(cqr);
-                    let margin =
-                        self.filter_margin_fact * self.filter_max_margin.min(nlp_err);
+                    let margin = self.filter_margin_fact * self.filter_max_margin.min(nlp_err);
                     let entries: Vec<(Number, Number, i32)> = self
                         .filter
                         .entries()

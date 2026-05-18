@@ -51,9 +51,24 @@ fn ma57_solves_3x3_spd_via_t_sym_wrapper() {
     let status = tsym.multi_solve(&vals, true, 1, &mut rhs, true, 0);
     assert_eq!(status, ESymSolverStatus::Success);
 
-    assert!((rhs[0] - x1).abs() < 1e-12, "x1: got {} want {}", rhs[0], x1);
-    assert!((rhs[1] - x2).abs() < 1e-12, "x2: got {} want {}", rhs[1], x2);
-    assert!((rhs[2] - x3).abs() < 1e-12, "x3: got {} want {}", rhs[2], x3);
+    assert!(
+        (rhs[0] - x1).abs() < 1e-12,
+        "x1: got {} want {}",
+        rhs[0],
+        x1
+    );
+    assert!(
+        (rhs[1] - x2).abs() < 1e-12,
+        "x2: got {} want {}",
+        rhs[1],
+        x2
+    );
+    assert!(
+        (rhs[2] - x3).abs() < 1e-12,
+        "x3: got {} want {}",
+        rhs[2],
+        x3
+    );
 
     use pounce_linsol::SymLinearSolver;
     assert_eq!(

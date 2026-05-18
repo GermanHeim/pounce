@@ -107,7 +107,11 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
         ) {
             let one_based = matches!(info.index_style, pounce_nlp::tnlp::IndexStyle::Fortran);
             for &r in &irow {
-                let row = if one_based { (r - 1) as usize } else { r as usize };
+                let row = if one_based {
+                    (r - 1) as usize
+                } else {
+                    r as usize
+                };
                 if row < m && row_is_eq[row] {
                     nnz_jac_eq += 1;
                 } else {
@@ -136,21 +140,11 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
 }
 
 pub fn print_banner(linear_solver: &str) {
-    println!(
-        "******************************************************************************"
-    );
-    println!(
-        "This program contains POUNCE, a Rust port of Ipopt for nonlinear optimization."
-    );
-    println!(
-        " Released under the Eclipse Public License (EPL) — drop-in compatible with Ipopt."
-    );
-    println!(
-        "         For more information visit https://github.com/jkitchin/pounce"
-    );
-    println!(
-        "******************************************************************************"
-    );
+    println!("******************************************************************************");
+    println!("This program contains POUNCE, a Rust port of Ipopt for nonlinear optimization.");
+    println!(" Released under the Eclipse Public License (EPL) — drop-in compatible with Ipopt.");
+    println!("         For more information visit https://github.com/jkitchin/pounce");
+    println!("******************************************************************************");
     println!();
     println!(
         "This is POUNCE version {}, running with linear solver {}.",
@@ -366,4 +360,3 @@ pub fn status_message(s: ApplicationReturnStatus) -> &'static str {
         ApplicationReturnStatus::InternalError => "INTERNAL ERROR: Unknown SolverReturn value.",
     }
 }
-

@@ -131,15 +131,25 @@ impl RestoIpoptNlp {
         let total_dim = n_orig + 2 * m_eq + 2 * m_ineq;
         let x_space = CompoundVectorSpace::new(5, total_dim);
         let s = Rc::clone(&orig_x_space);
-        x_space.set_comp(BLOCK_X, n_orig, move || Box::new(DenseVector::new(Rc::clone(&s))));
+        x_space.set_comp(BLOCK_X, n_orig, move || {
+            Box::new(DenseVector::new(Rc::clone(&s)))
+        });
         let s = Rc::clone(&n_c_space);
-        x_space.set_comp(BLOCK_N_C, m_eq, move || Box::new(DenseVector::new(Rc::clone(&s))));
+        x_space.set_comp(BLOCK_N_C, m_eq, move || {
+            Box::new(DenseVector::new(Rc::clone(&s)))
+        });
         let s = Rc::clone(&p_c_space);
-        x_space.set_comp(BLOCK_P_C, m_eq, move || Box::new(DenseVector::new(Rc::clone(&s))));
+        x_space.set_comp(BLOCK_P_C, m_eq, move || {
+            Box::new(DenseVector::new(Rc::clone(&s)))
+        });
         let s = Rc::clone(&n_d_space);
-        x_space.set_comp(BLOCK_N_D, m_ineq, move || Box::new(DenseVector::new(Rc::clone(&s))));
+        x_space.set_comp(BLOCK_N_D, m_ineq, move || {
+            Box::new(DenseVector::new(Rc::clone(&s)))
+        });
         let s = Rc::clone(&p_d_space);
-        x_space.set_comp(BLOCK_P_D, m_ineq, move || Box::new(DenseVector::new(Rc::clone(&s))));
+        x_space.set_comp(BLOCK_P_D, m_ineq, move || {
+            Box::new(DenseVector::new(Rc::clone(&s)))
+        });
 
         // Materialize x_ref / dr_x / dr2_x as DenseVectors.
         let mut x_ref = DenseVector::new(Rc::clone(&orig_x_space));
@@ -666,9 +676,7 @@ impl Nlp for RestoIpoptNlp {
             .as_ref()
             .expect("RestoIpoptNlp::eval_h called before set_orig_nlp")
             .clone();
-        let orig_h_dyn = orig
-            .borrow_mut()
-            .eval_h(cv.comp(BLOCK_X), 0.0, y_c, y_d);
+        let orig_h_dyn = orig.borrow_mut().eval_h(cv.comp(BLOCK_X), 0.0, y_c, y_d);
         let orig_h = orig_h_dyn
             .as_any()
             .downcast_ref::<SymTMatrix>()
@@ -932,13 +940,7 @@ pub fn slack_sum(n_c: &[f64], p_c: &[f64], n_d: &[f64], p_d: &[f64]) -> f64 {
 ///
 /// The caller writes `rho` into the slack-block slots itself; this
 /// helper fills the `x`-block slot.
-pub fn restoration_grad_x(
-    eta: f64,
-    x: &[f64],
-    x_ref: &[f64],
-    dr_x: &[f64],
-    out: &mut [f64],
-) {
+pub fn restoration_grad_x(eta: f64, x: &[f64], x_ref: &[f64], dr_x: &[f64], out: &mut [f64]) {
     debug_assert_eq!(x.len(), x_ref.len());
     debug_assert_eq!(x.len(), dr_x.len());
     debug_assert_eq!(x.len(), out.len());
@@ -1122,7 +1124,11 @@ mod tests {
         let nlp = new_nlp_2_1_1();
         let mut x = nlp.make_new_x();
         nlp.init_starting_x(&mut x);
-        let x0 = x.comp(BLOCK_X).as_any().downcast_ref::<DenseVector>().unwrap();
+        let x0 = x
+            .comp(BLOCK_X)
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .unwrap();
         assert_eq!(x0.values(), &[1.0, 2.0]);
         // Slack blocks should be 1.0 (homogeneous after `set(1.0)`).
         for &k in &[BLOCK_N_C, BLOCK_P_C, BLOCK_N_D, BLOCK_P_D] {
@@ -1174,7 +1180,11 @@ mod tests {
 
         // eta = 1*sqrt(1) = 1; dr2 = [1, 0.25]; (x - x_ref) = [2, 2]
         // → grad_x = [1*1*2, 1*0.25*2] = [2.0, 0.5]
-        let g0 = g.comp(BLOCK_X).as_any().downcast_ref::<DenseVector>().unwrap();
+        let g0 = g
+            .comp(BLOCK_X)
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .unwrap();
         assert_eq!(g0.values(), &[2.0, 0.5]);
 
         // Slack blocks: g = rho.
@@ -1365,12 +1375,7 @@ mod tests {
         }
         fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
             // ∂c/∂x = [1, 1] (1 row, 2 cols, dense triplets)
-            let space = pounce_linalg::triplet::GenTMatrixSpace::new(
-                1,
-                2,
-                vec![1, 1],
-                vec![1, 2],
-            );
+            let space = pounce_linalg::triplet::GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]);
             let mut m = pounce_linalg::triplet::GenTMatrix::new(space);
             m.set_values(&[1.0, 1.0]);
             Rc::new(m)
@@ -1378,12 +1383,7 @@ mod tests {
         fn eval_jac_d(&mut self, x: &dyn Vector) -> Rc<dyn Matrix> {
             // ∂d/∂x = [x[1], x[0]]
             let xv = downcast_dense(x).expanded_values();
-            let space = pounce_linalg::triplet::GenTMatrixSpace::new(
-                1,
-                2,
-                vec![1, 1],
-                vec![1, 2],
-            );
+            let space = pounce_linalg::triplet::GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]);
             let mut m = pounce_linalg::triplet::GenTMatrix::new(space);
             m.set_values(&[xv[1], xv[0]]);
             Rc::new(m)
@@ -1402,11 +1402,8 @@ mod tests {
             // [`SymTMatrix`] from the user TNLP's triplet sparsity —
             // the resto-side flat-Hessian path requires that shape.
             let yd = downcast_dense(y_d).expanded_values();
-            let space = pounce_linalg::triplet::SymTMatrixSpace::new(
-                2,
-                vec![1, 2, 2],
-                vec![1, 1, 2],
-            );
+            let space =
+                pounce_linalg::triplet::SymTMatrixSpace::new(2, vec![1, 2, 2], vec![1, 1, 2]);
             let mut h = pounce_linalg::triplet::SymTMatrix::new(space);
             h.set_values(&[obj_factor, yd[0], obj_factor]);
             Rc::new(h)
@@ -1702,7 +1699,10 @@ mod tests {
         // diagonal entries from the proximity term.
         let n_diag = 2;
         let total_nz = sym_t.nonzeros() as usize;
-        assert!(total_nz >= n_diag, "expected at least {n_diag} diagonal entries");
+        assert!(
+            total_nz >= n_diag,
+            "expected at least {n_diag} diagonal entries"
+        );
         for k in 0..n_diag {
             let idx = total_nz - n_diag + k;
             assert_eq!(sym_t.irows()[idx], (k + 1) as i32);

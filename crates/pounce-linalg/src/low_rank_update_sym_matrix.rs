@@ -153,13 +153,7 @@ impl Matrix for LowRankUpdateSymMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert_eq!(self.space.dim, x.dim());
         debug_assert_eq!(self.space.dim, y.dim());
         let d = self.diag_ref();

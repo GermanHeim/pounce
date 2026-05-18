@@ -8,16 +8,14 @@
 //!
 //! Exit status: 0 on `Solve_Succeeded`, non-zero otherwise.
 
+use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
+use pounce_algorithm::application::IpoptApplication;
 use pounce_cli::builtin;
 use pounce_cli::cli::{Args, ProblemSource};
 use pounce_cli::counting_tnlp::CountingTnlp;
 use pounce_cli::nl_reader;
 use pounce_cli::print;
-use pounce_cli::solve_report::{
-    InputDescriptor, ReportBuilder, ReportDetail, write_report_file,
-};
-use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
-use pounce_algorithm::application::IpoptApplication;
+use pounce_cli::solve_report::{write_report_file, InputDescriptor, ReportBuilder, ReportDetail};
 use pounce_common::diagnostics::{
     DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
 };
@@ -25,7 +23,9 @@ use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{make_default_restoration_factory, InnerBackendFactoryFactory};
+use pounce_restoration::resto_inner_solver::{
+    make_default_restoration_factory, InnerBackendFactoryFactory,
+};
 use std::cell::RefCell;
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -96,8 +96,7 @@ fn main() -> ExitCode {
     // IPM. Snapshot, not borrow: the BFF outlives the option-mutation
     // window we cleanly own here.
     let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-    let bff: InnerBackendFactoryFactory =
-        Box::new(move || default_backend_factory(feral_cfg));
+    let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
     let resto_factory = make_default_restoration_factory(
         RestoAlgorithmBuilder::new(),
         AlgorithmBuilder::new(),
@@ -115,8 +114,14 @@ fn main() -> ExitCode {
     // Capture the converged primal / dual into `nominal_capture` so
     // the JSON report below can ship `solution.x` and
     // `solution.lambda` (mirrors what `pounce_sens` does).
-    let nominal_capture: Rc<RefCell<Option<(Vec<pounce_common::types::Number>, Vec<pounce_common::types::Number>)>>> =
-        Rc::new(RefCell::new(None));
+    let nominal_capture: Rc<
+        RefCell<
+            Option<(
+                Vec<pounce_common::types::Number>,
+                Vec<pounce_common::types::Number>,
+            )>,
+        >,
+    > = Rc::new(RefCell::new(None));
     if args.json_output.is_some() {
         let cap = Rc::clone(&nominal_capture);
         app.set_on_converged(Box::new(move |data, _cq, _nlp, _pd| {
@@ -131,10 +136,18 @@ fn main() -> ExitCode {
                 .map(|dv| dv.expanded_values())
                 .unwrap_or_default();
             let mut lambda = Vec::with_capacity(curr.y_c.dim() as usize + curr.y_d.dim() as usize);
-            if let Some(dv) = curr.y_c.as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+            if let Some(dv) = curr
+                .y_c
+                .as_any()
+                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+            {
                 lambda.extend_from_slice(&dv.expanded_values());
             }
-            if let Some(dv) = curr.y_d.as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+            if let Some(dv) = curr
+                .y_d
+                .as_any()
+                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+            {
                 lambda.extend_from_slice(&dv.expanded_values());
             }
             *cap.borrow_mut() = Some((x, lambda));
@@ -174,14 +187,13 @@ fn main() -> ExitCode {
 
     // Optionally wrap with presolve before counting so eval-call
     // counts reflect what the solver actually issues.
-    let presolve_opts =
-        match pounce_presolve::PresolveOptions::from_options_list(app.options()) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("pounce: presolve setup failed: {e}");
-                return ExitCode::from(2);
-            }
-        };
+    let presolve_opts = match pounce_presolve::PresolveOptions::from_options_list(app.options()) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("pounce: presolve setup failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let presolve_handle = if presolve_opts.enabled {
         let p = Rc::new(RefCell::new(pounce_presolve::PresolveTnlp::new(
             Rc::clone(&inner_tnlp),
@@ -277,7 +289,11 @@ fn main() -> ExitCode {
             "Diagnostics: dumping to {} ({} categor{} configured)",
             diag.dump_dir().display(),
             diag.config.categories.len(),
-            if diag.config.categories.len() == 1 { "y" } else { "ies" },
+            if diag.config.categories.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
         );
         app.set_diagnostics(Rc::clone(diag));
     }
@@ -300,9 +316,7 @@ fn main() -> ExitCode {
     // write to a path; stdout-mode is a follow-up).
     if let Some(json_path) = &args.json_output {
         let input = match &args.problem {
-            ProblemSource::Builtin(name) => InputDescriptor::Builtin {
-                name: name.clone(),
-            },
+            ProblemSource::Builtin(name) => InputDescriptor::Builtin { name: name.clone() },
             ProblemSource::NlFile(p) => InputDescriptor::NlFile {
                 path: p.clone(),
                 size_bytes: std::fs::metadata(p).ok().map(|m| m.len()),
@@ -327,7 +341,10 @@ fn main() -> ExitCode {
 
         let report = builder.finish();
         if let Err(e) = write_report_file(json_path, &report) {
-            eprintln!("pounce: failed to write JSON report to {}: {e}", json_path.display());
+            eprintln!(
+                "pounce: failed to write JSON report to {}: {e}",
+                json_path.display()
+            );
         } else {
             eprintln!("pounce: wrote {}", json_path.display());
         }
@@ -359,8 +376,7 @@ fn build_diagnostics(
     if dump_specs.is_empty() {
         if dump_dir.is_some() || dump_format.is_some() {
             return Err(
-                "--dump-dir / --dump-format require at least one --dump <cat>[:spec]"
-                    .to_string(),
+                "--dump-dir / --dump-format require at least one --dump <cat>[:spec]".to_string(),
             );
         }
         return Ok(None);
@@ -481,10 +497,7 @@ fn print_about() {
     }
     println!();
 
-    println!(
-        "Report bugs at {}/issues",
-        env!("CARGO_PKG_REPOSITORY")
-    );
+    println!("Report bugs at {}/issues", env!("CARGO_PKG_REPOSITORY"));
 }
 
 /// Map a pounce `ApplicationReturnStatus` onto an AMPL-style
@@ -525,21 +538,23 @@ fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
 /// the application's options list, so per-problem `.opt` overrides
 /// flow into the resto sub-IPM as well.
 fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
-    Box::new(move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        match choice {
-            LinearSolverChoice::Feral => {
-                Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
-            }
-            LinearSolverChoice::Ma57 => {
-                #[cfg(feature = "ma57")]
-                {
-                    Box::new(pounce_hsl::Ma57SolverInterface::new())
-                }
-                #[cfg(not(feature = "ma57"))]
-                {
+    Box::new(
+        move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+            match choice {
+                LinearSolverChoice::Feral => {
                     Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
                 }
+                LinearSolverChoice::Ma57 => {
+                    #[cfg(feature = "ma57")]
+                    {
+                        Box::new(pounce_hsl::Ma57SolverInterface::new())
+                    }
+                    #[cfg(not(feature = "ma57"))]
+                    {
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                    }
+                }
             }
-        }
-    })
+        },
+    )
 }

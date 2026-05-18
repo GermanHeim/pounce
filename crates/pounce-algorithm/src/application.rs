@@ -24,13 +24,13 @@ use crate::alg_builder::{
     AlgorithmBuilder, HessianApproxChoice, LineSearchChoice, LinearBackendFactory,
     LinearSolverChoice, MuStrategyChoice, NlpScalingChoice,
 };
-use crate::upstream_options::register_all_upstream_options;
 use crate::ipopt_alg::IpoptAlgorithm;
 use crate::ipopt_cq::IpoptCalculatedQuantities;
 use crate::ipopt_data::IpoptData as AlgIpoptData;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
 use crate::restoration::RestorationPhase;
+use crate::upstream_options::register_all_upstream_options;
 
 /// Factory that constructs a fresh restoration-phase strategy on
 /// demand. The outer algorithm owns at most one restoration object,
@@ -72,7 +72,6 @@ pub type ConvergedCallback = Box<
         &mut crate::kkt::pd_full_space_solver::PdFullSpaceSolver,
     ),
 >;
-use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_common::diagnostics::DiagnosticsState;
 use pounce_common::exception::{ExceptionKind, SolverException};
 use pounce_common::journalist::{JournalLevel, Journalist};
@@ -80,12 +79,15 @@ use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
+use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::orig_ipopt_nlp::{NoScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
-use pounce_nlp::tnlp::{IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP};
+use pounce_nlp::tnlp::{
+    IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP,
+};
 use pounce_nlp::tnlp_adapter::TNLPAdapter;
 use std::cell::RefCell;
 use std::fmt;
@@ -163,12 +165,10 @@ impl IpoptApplication {
         let reg = RegisteredOptions::default();
         // Registration of a fresh registry can only fail on a duplicate
         // name, which would be a programming error in `reg_op`.
-        register_all_upstream_options(&reg).unwrap_or_else(|e| {
-            panic!("Upstream options registration failed: {e}")
-        });
-        pounce_presolve::register_options(&reg).unwrap_or_else(|e| {
-            panic!("Presolve options registration failed: {e}")
-        });
+        register_all_upstream_options(&reg)
+            .unwrap_or_else(|e| panic!("Upstream options registration failed: {e}"));
+        pounce_presolve::register_options(&reg)
+            .unwrap_or_else(|e| panic!("Presolve options registration failed: {e}"));
         let reg = Rc::new(reg);
         Self {
             options: OptionsList::with_registered(Rc::clone(&reg)),
@@ -244,10 +244,7 @@ impl IpoptApplication {
     /// stale one, so the default one-shot restoration factory does
     /// not panic on its second invocation. If both `set_restoration_factory`
     /// and this are configured, the provider wins.
-    pub fn set_restoration_factory_provider(
-        &mut self,
-        provider: RestorationFactoryProvider,
-    ) {
+    pub fn set_restoration_factory_provider(&mut self, provider: RestorationFactoryProvider) {
         self.restoration_factory_provider = Some(provider);
     }
 
@@ -427,10 +424,7 @@ impl IpoptApplication {
         // SolveSucceeded — otherwise return the original. Skipped if
         // the user already opted into the wrapper above (this avoids
         // a double pass and keeps semantics predictable).
-        if info.m > 0
-            && self.is_l1_fallback_enabled()
-            && !self.is_l1_penalty_enabled()
-        {
+        if info.m > 0 && self.is_l1_fallback_enabled() && !self.is_l1_penalty_enabled() {
             return self.run_with_l1_fallback(tnlp, info);
         }
         // Upstream Ipopt routes every problem through the same primal-dual
@@ -544,13 +538,11 @@ impl IpoptApplication {
             .options
             .get_string_value("l1_exact_penalty_barrier", "")
             .ok();
-        let _ = self.options.set_string_value(
-            "l1_exact_penalty_barrier",
-            "yes",
-            true,
-            false,
-        );
-        let retry_status = self.run_l1_penalty_outer_loop(Rc::clone(&tnlp))
+        let _ = self
+            .options
+            .set_string_value("l1_exact_penalty_barrier", "yes", true, false);
+        let retry_status = self
+            .run_l1_penalty_outer_loop(Rc::clone(&tnlp))
             .unwrap_or(ApplicationReturnStatus::InternalError);
         let _ = self.options.set_string_value(
             "l1_exact_penalty_barrier",
@@ -615,10 +607,7 @@ impl IpoptApplication {
         let slack_tol = self.l1_slack_tol();
         let max_outer = self.l1_penalty_max_outer_iter().max(1);
 
-        let mut wrapper = pounce_l1penalty::L1PenaltyBarrierTnlp::new(
-            Rc::clone(&tnlp),
-            rho_init,
-        )?;
+        let mut wrapper = pounce_l1penalty::L1PenaltyBarrierTnlp::new(Rc::clone(&tnlp), rho_init)?;
         if wrapper.m_eq() == 0 {
             // Nothing to slack — let the standard dispatch path handle
             // this TNLP unmodified.
@@ -712,9 +701,7 @@ impl IpoptApplication {
                 .unwrap_or(0);
             let mut g_inner = vec![0.0; m];
             if m > 0 {
-                let _ = tnlp
-                    .borrow_mut()
-                    .eval_g(&x_trunc, false, &mut g_inner);
+                let _ = tnlp.borrow_mut().eval_g(&x_trunc, false, &mut g_inner);
             }
             tnlp.borrow_mut().finalize_solution(
                 Solution {
@@ -773,7 +760,10 @@ impl IpoptApplication {
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or(false);
         if print_opts {
-            print!("\nList of user-set options:\n\n{}", self.options.print_user_options());
+            print!(
+                "\nList of user-set options:\n\n{}",
+                self.options.print_user_options()
+            );
         }
 
         // Mint a fresh `TimingStatistics` for this solve — shared (via
@@ -890,8 +880,7 @@ impl IpoptApplication {
         // (output, convergence, hessian, μ, search-direction,
         // line-search, accept) all record into the same accumulator
         // the application exposes via `timing_stats()`.
-        let data: crate::ipopt_data::IpoptDataHandle =
-            Rc::new(RefCell::new(AlgIpoptData::new()));
+        let data: crate::ipopt_data::IpoptDataHandle = Rc::new(RefCell::new(AlgIpoptData::new()));
         data.borrow_mut().timing = Rc::clone(&timing);
         let cq: crate::ipopt_cq::IpoptCqHandle = Rc::new(RefCell::new(
             IpoptCalculatedQuantities::new(Rc::clone(&data), Rc::clone(&nlp_handle)),
@@ -1278,7 +1267,10 @@ impl IpoptApplication {
         if let Some(v) = read_num("warm_start_target_mu") {
             builder.warm.target_mu = v;
         }
-        if let Ok((v, found)) = self.options.get_string_value("warm_start_entire_iterate", "") {
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("warm_start_entire_iterate", "")
+        {
             if found {
                 builder.warm.entire_iterate = v == "yes";
             }
@@ -1317,24 +1309,26 @@ fn journal_level_from_int(v: i32) -> JournalLevel {
 /// requesting `linear_solver = ma57` falls back to FERAL with a
 /// warning printed by the journalist (see [`AlgorithmBuilder`]).
 pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
-    Box::new(move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-        match choice {
-            LinearSolverChoice::Feral => {
-                Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
-            }
-            LinearSolverChoice::Ma57 => {
-                #[cfg(feature = "ma57")]
-                {
-                    Box::new(pounce_hsl::Ma57SolverInterface::new())
-                }
-                #[cfg(not(feature = "ma57"))]
-                {
-                    // ma57 feature not compiled in — fall back to FERAL.
+    Box::new(
+        move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+            match choice {
+                LinearSolverChoice::Feral => {
                     Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
                 }
+                LinearSolverChoice::Ma57 => {
+                    #[cfg(feature = "ma57")]
+                    {
+                        Box::new(pounce_hsl::Ma57SolverInterface::new())
+                    }
+                    #[cfg(not(feature = "ma57"))]
+                    {
+                        // ma57 feature not compiled in — fall back to FERAL.
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                    }
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 /// Read the three `feral_*` extension options off `options`, falling
@@ -1378,9 +1372,7 @@ fn solver_return_to_app_status(s: SolverReturn) -> ApplicationReturnStatus {
         SolverReturn::RestorationFailure => ApplicationReturnStatus::RestorationFailed,
         SolverReturn::ErrorInStepComputation => ApplicationReturnStatus::ErrorInStepComputation,
         SolverReturn::InvalidNumberDetected => ApplicationReturnStatus::InvalidNumberDetected,
-        SolverReturn::TooFewDegreesOfFreedom => {
-            ApplicationReturnStatus::NotEnoughDegreesOfFreedom
-        }
+        SolverReturn::TooFewDegreesOfFreedom => ApplicationReturnStatus::NotEnoughDegreesOfFreedom,
         SolverReturn::InvalidOption => ApplicationReturnStatus::InvalidOption,
         SolverReturn::OutOfMemory => ApplicationReturnStatus::InsufficientMemory,
         SolverReturn::InternalError | SolverReturn::Unassigned => {
@@ -1547,10 +1539,7 @@ mod tests {
         // the Interfaces layer.
         app.initialize_with_options_str("print_level 5\nfile_print_level 7\n")
             .unwrap();
-        let (level, found) = app
-            .options()
-            .get_integer_value("print_level", "")
-            .unwrap();
+        let (level, found) = app.options().get_integer_value("print_level", "").unwrap();
         assert!(found);
         assert_eq!(level, 5);
     }

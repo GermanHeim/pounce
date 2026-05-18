@@ -821,13 +821,7 @@ impl Vector for DenseVector {
         self.initialized = true;
     }
 
-    fn add_vector_quotient_impl(
-        &mut self,
-        a: Number,
-        z: &dyn Vector,
-        s: &dyn Vector,
-        c: Number,
-    ) {
+    fn add_vector_quotient_impl(&mut self, a: Number, z: &dyn Vector, s: &dyn Vector, c: Number) {
         debug_assert_eq!(self.space.dim(), z.dim());
         debug_assert_eq!(self.space.dim(), s.dim());
         let dz = downcast_dense(z);
@@ -907,7 +901,7 @@ mod tests {
         x.set(2.0); // homogeneous 2
         let mut y = DenseVector::new(Rc::clone(&s));
         y.set(3.0); // homogeneous 3
-        // 4 entries of 2*3 = 24
+                    // 4 entries of 2*3 = 24
         assert_eq!(x.dot(&y), 24.0);
     }
 

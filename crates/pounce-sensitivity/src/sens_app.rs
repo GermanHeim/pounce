@@ -95,11 +95,7 @@ impl<B: SensBacksolver> SensApplication<B> {
     /// path ([`SensApplication.cpp:127-198`](../../../ref/Ipopt/contrib/sIPOPT/src/SensApplication.cpp))
     /// but split so the construction is testable without the
     /// `IpoptApplication` plumbing.
-    pub fn new(
-        a_data: IndexSchurData,
-        backsolver: B,
-        options: SensOptions,
-    ) -> Self {
+    pub fn new(a_data: IndexSchurData, backsolver: B, options: SensOptions) -> Self {
         Self {
             a_data,
             backsolver,
@@ -309,7 +305,10 @@ mod tests {
         let backsolver = DenseLuBacksolver::from_dense(3, &k).unwrap();
         let a = IndexSchurData::from_parts(vec![0, 2], vec![1, 1]).unwrap();
         let b = IndexSchurData::from_parts(vec![0, 2], vec![1, 1]).unwrap();
-        let opts = SensOptions { run_sens: true, ..SensOptions::default() };
+        let opts = SensOptions {
+            run_sens: true,
+            ..SensOptions::default()
+        };
         let mut app = SensApplication::new(a, backsolver, opts);
         let rhs_u = [1.0, 0.0];
         let mut du = [0.0; 2];

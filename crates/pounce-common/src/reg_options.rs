@@ -62,7 +62,14 @@ pub struct RegisteredOption {
 }
 
 impl RegisteredOption {
-    fn new(name: String, short: String, long: String, category: String, counter: Index, advanced: bool) -> Self {
+    fn new(
+        name: String,
+        short: String,
+        long: String,
+        category: String,
+        counter: Index,
+        advanced: bool,
+    ) -> Self {
         Self {
             name,
             short_description: short,
@@ -85,12 +92,24 @@ impl RegisteredOption {
     /// Equivalent to `IsValidNumberSetting` — checks bounds.
     pub fn is_valid_number(&self, v: Number) -> bool {
         if self.has_lower {
-            let ok = if self.lower_strict { v > self.lower } else { v >= self.lower };
-            if !ok { return false; }
+            let ok = if self.lower_strict {
+                v > self.lower
+            } else {
+                v >= self.lower
+            };
+            if !ok {
+                return false;
+            }
         }
         if self.has_upper {
-            let ok = if self.upper_strict { v < self.upper } else { v <= self.upper };
-            if !ok { return false; }
+            let ok = if self.upper_strict {
+                v < self.upper
+            } else {
+                v <= self.upper
+            };
+            if !ok {
+                return false;
+            }
         }
         true
     }
@@ -141,7 +160,9 @@ pub struct RegisteredOptions {
 }
 
 impl RegisteredOptions {
-    pub fn new() -> Rc<Self> { Rc::new(Self::default()) }
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self::default())
+    }
 
     pub fn set_registering_category(&self, category: impl Into<String>) {
         *self.current_category.borrow_mut() = category.into();
@@ -199,12 +220,18 @@ impl RegisteredOptions {
         long_description: &str,
     ) -> Result<Rc<RegisteredOption>, SolverException> {
         let mut o = RegisteredOption::new(
-            name.to_string(), short_description.to_string(), long_description.to_string(),
-            self.current_category.borrow().clone(), self.alloc_counter(), false,
+            name.to_string(),
+            short_description.to_string(),
+            long_description.to_string(),
+            self.current_category.borrow().clone(),
+            self.alloc_counter(),
+            false,
         );
         o.option_type = OptionType::OT_Number;
         o.default = DefaultValue::Number(default_value);
-        o.has_lower = true; o.lower = lower; o.lower_strict = strict;
+        o.has_lower = true;
+        o.lower = lower;
+        o.lower_strict = strict;
         self.register(o)
     }
 
@@ -221,13 +248,21 @@ impl RegisteredOptions {
         long_description: &str,
     ) -> Result<Rc<RegisteredOption>, SolverException> {
         let mut o = RegisteredOption::new(
-            name.to_string(), short_description.to_string(), long_description.to_string(),
-            self.current_category.borrow().clone(), self.alloc_counter(), false,
+            name.to_string(),
+            short_description.to_string(),
+            long_description.to_string(),
+            self.current_category.borrow().clone(),
+            self.alloc_counter(),
+            false,
         );
         o.option_type = OptionType::OT_Number;
         o.default = DefaultValue::Number(default_value);
-        o.has_lower = true; o.lower = lower; o.lower_strict = lower_strict;
-        o.has_upper = true; o.upper = upper; o.upper_strict = upper_strict;
+        o.has_lower = true;
+        o.lower = lower;
+        o.lower_strict = lower_strict;
+        o.has_upper = true;
+        o.upper = upper;
+        o.upper_strict = upper_strict;
         self.register(o)
     }
 
@@ -239,8 +274,12 @@ impl RegisteredOptions {
         long_description: &str,
     ) -> Result<Rc<RegisteredOption>, SolverException> {
         let mut o = RegisteredOption::new(
-            name.to_string(), short_description.to_string(), long_description.to_string(),
-            self.current_category.borrow().clone(), self.alloc_counter(), false,
+            name.to_string(),
+            short_description.to_string(),
+            long_description.to_string(),
+            self.current_category.borrow().clone(),
+            self.alloc_counter(),
+            false,
         );
         o.option_type = OptionType::OT_Integer;
         o.default = DefaultValue::Integer(default_value);
@@ -256,12 +295,17 @@ impl RegisteredOptions {
         long_description: &str,
     ) -> Result<Rc<RegisteredOption>, SolverException> {
         let mut o = RegisteredOption::new(
-            name.to_string(), short_description.to_string(), long_description.to_string(),
-            self.current_category.borrow().clone(), self.alloc_counter(), false,
+            name.to_string(),
+            short_description.to_string(),
+            long_description.to_string(),
+            self.current_category.borrow().clone(),
+            self.alloc_counter(),
+            false,
         );
         o.option_type = OptionType::OT_Integer;
         o.default = DefaultValue::Integer(default_value);
-        o.has_lower = true; o.lower = lower as Number;
+        o.has_lower = true;
+        o.lower = lower as Number;
         self.register(o)
     }
 
@@ -275,13 +319,19 @@ impl RegisteredOptions {
         long_description: &str,
     ) -> Result<Rc<RegisteredOption>, SolverException> {
         let mut o = RegisteredOption::new(
-            name.to_string(), short_description.to_string(), long_description.to_string(),
-            self.current_category.borrow().clone(), self.alloc_counter(), false,
+            name.to_string(),
+            short_description.to_string(),
+            long_description.to_string(),
+            self.current_category.borrow().clone(),
+            self.alloc_counter(),
+            false,
         );
         o.option_type = OptionType::OT_Integer;
         o.default = DefaultValue::Integer(default_value);
-        o.has_lower = true; o.lower = lower as Number;
-        o.has_upper = true; o.upper = upper as Number;
+        o.has_lower = true;
+        o.lower = lower as Number;
+        o.has_upper = true;
+        o.upper = upper as Number;
         self.register(o)
     }
 
@@ -294,13 +344,21 @@ impl RegisteredOptions {
         long_description: &str,
     ) -> Result<Rc<RegisteredOption>, SolverException> {
         let mut o = RegisteredOption::new(
-            name.to_string(), short_description.to_string(), long_description.to_string(),
-            self.current_category.borrow().clone(), self.alloc_counter(), false,
+            name.to_string(),
+            short_description.to_string(),
+            long_description.to_string(),
+            self.current_category.borrow().clone(),
+            self.alloc_counter(),
+            false,
         );
         o.option_type = OptionType::OT_String;
         o.default = DefaultValue::String(default_value.to_string());
-        o.valid_strings = valid.iter()
-            .map(|(v, d)| StringEntry { value: v.to_string(), description: d.to_string() })
+        o.valid_strings = valid
+            .iter()
+            .map(|(v, d)| StringEntry {
+                value: v.to_string(),
+                description: d.to_string(),
+            })
             .collect();
         self.register(o)
     }
@@ -330,7 +388,10 @@ impl RegisteredOptions {
             Some(pos) => &name[pos + 1..],
             None => name,
         };
-        self.options.borrow().get(&tag_only.to_ascii_lowercase()).cloned()
+        self.options
+            .borrow()
+            .get(&tag_only.to_ascii_lowercase())
+            .cloned()
     }
 
     /// Returns options in registration order.
@@ -368,7 +429,8 @@ mod tests {
     #[test]
     fn bounds_check_on_number() {
         let r = RegisteredOptions::new();
-        r.add_lower_bounded_number_option("mu", "", 0.0, true, 0.1, "").unwrap();
+        r.add_lower_bounded_number_option("mu", "", 0.0, true, 0.1, "")
+            .unwrap();
         let opt = r.get_option("mu").unwrap();
         assert!(opt.is_valid_number(1e-12));
         assert!(!opt.is_valid_number(0.0));
@@ -379,11 +441,13 @@ mod tests {
     fn string_enum_lookup() {
         let r = RegisteredOptions::new();
         r.add_string_option(
-            "linear_solver", "",
+            "linear_solver",
+            "",
             "mumps",
             &[("mumps", "MUMPS"), ("feral", "FERAL")],
             "",
-        ).unwrap();
+        )
+        .unwrap();
         let opt = r.get_option("linear_solver").unwrap();
         assert!(opt.is_valid_string("MuMpS"));
         assert!(!opt.is_valid_string("ma27"));
@@ -396,7 +460,11 @@ mod tests {
         r.add_number_option("c", "", 0.0, "").unwrap();
         r.add_number_option("a", "", 0.0, "").unwrap();
         r.add_number_option("b", "", 0.0, "").unwrap();
-        let order: Vec<_> = r.registered_options_in_order().iter().map(|o| o.name.clone()).collect();
+        let order: Vec<_> = r
+            .registered_options_in_order()
+            .iter()
+            .map(|o| o.name.clone())
+            .collect();
         assert_eq!(order, vec!["c", "a", "b"]);
     }
 }

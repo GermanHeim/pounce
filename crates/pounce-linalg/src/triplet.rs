@@ -163,14 +163,17 @@ fn read_flat(v: &dyn Vector) -> Vec<Number> {
         let mut out = Vec::with_capacity(cv.dim() as usize);
         for k in 0..cv.n_comps() {
             let blk = cv.comp(k);
-            let dblk = blk.as_any().downcast_ref::<DenseVector>().expect(
-                "read_flat: CompoundVector blocks must be DenseVectors in v0.1",
-            );
+            let dblk = blk
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .expect("read_flat: CompoundVector blocks must be DenseVectors in v0.1");
             out.extend_from_slice(&dblk.expanded_values());
         }
         return out;
     }
-    panic!("read_flat: unsupported Vector kind (need DenseVector or CompoundVector of DenseVectors)");
+    panic!(
+        "read_flat: unsupported Vector kind (need DenseVector or CompoundVector of DenseVectors)"
+    );
 }
 
 /// Inverse of [`read_flat`]: write a flat slice back into a Vector
@@ -185,15 +188,18 @@ fn write_flat(v: &mut dyn Vector, src: &[Number]) {
         for k in 0..cv.n_comps() {
             let blk = cv.comp_mut(k);
             let dim = blk.dim() as usize;
-            let dblk = blk.as_any_mut().downcast_mut::<DenseVector>().expect(
-                "write_flat: CompoundVector blocks must be DenseVectors in v0.1",
-            );
+            let dblk = blk
+                .as_any_mut()
+                .downcast_mut::<DenseVector>()
+                .expect("write_flat: CompoundVector blocks must be DenseVectors in v0.1");
             dblk.set_values(&src[off..off + dim]);
             off += dim;
         }
         return;
     }
-    panic!("write_flat: unsupported Vector kind (need DenseVector or CompoundVector of DenseVectors)");
+    panic!(
+        "write_flat: unsupported Vector kind (need DenseVector or CompoundVector of DenseVectors)"
+    );
 }
 
 impl Matrix for GenTMatrix {
@@ -219,13 +225,7 @@ impl Matrix for GenTMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert!(self.initialized);
         if beta != 0.0 {
             y.scal(beta);
@@ -254,13 +254,9 @@ impl Matrix for GenTMatrix {
                 }
             } else {
                 let xvals = dx.values();
-                for ((&irow, &jcol), &val) in irows
-                    .iter()
-                    .zip(jcols.iter())
-                    .zip(self.values.iter())
+                for ((&irow, &jcol), &val) in irows.iter().zip(jcols.iter()).zip(self.values.iter())
                 {
-                    yvals[(irow - 1) as usize] +=
-                        alpha * val * xvals[(jcol - 1) as usize];
+                    yvals[(irow - 1) as usize] += alpha * val * xvals[(jcol - 1) as usize];
                 }
             }
             return;
@@ -307,13 +303,9 @@ impl Matrix for GenTMatrix {
                 }
             } else {
                 let xvals = dx.values();
-                for ((&irow, &jcol), &val) in irows
-                    .iter()
-                    .zip(jcols.iter())
-                    .zip(self.values.iter())
+                for ((&irow, &jcol), &val) in irows.iter().zip(jcols.iter()).zip(self.values.iter())
                 {
-                    yvals[(jcol - 1) as usize] +=
-                        alpha * val * xvals[(irow - 1) as usize];
+                    yvals[(jcol - 1) as usize] += alpha * val * xvals[(irow - 1) as usize];
                 }
             }
             return;
@@ -506,13 +498,7 @@ impl Matrix for SymTMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert!(self.initialized);
         if beta != 0.0 {
             y.scal(beta);
@@ -533,9 +519,7 @@ impl Matrix for SymTMatrix {
             let yvals = dy.values_mut();
             if dx.is_homogeneous() {
                 let as_ = alpha * dx.scalar();
-                for ((&i_one, &j_one), &val) in
-                    irn.iter().zip(jcn.iter()).zip(self.values.iter())
-                {
+                for ((&i_one, &j_one), &val) in irn.iter().zip(jcn.iter()).zip(self.values.iter()) {
                     let i = (i_one - 1) as usize;
                     let j = (j_one - 1) as usize;
                     yvals[i] += as_ * val;
@@ -545,9 +529,7 @@ impl Matrix for SymTMatrix {
                 }
             } else {
                 let xvals = dx.values();
-                for ((&i_one, &j_one), &val) in
-                    irn.iter().zip(jcn.iter()).zip(self.values.iter())
-                {
+                for ((&i_one, &j_one), &val) in irn.iter().zip(jcn.iter()).zip(self.values.iter()) {
                     let i = (i_one - 1) as usize;
                     let j = (j_one - 1) as usize;
                     yvals[i] += alpha * val * xvals[j];
@@ -604,9 +586,7 @@ impl Matrix for SymTMatrix {
         let jcn = self.jcols();
         let vec_vals = dv.values_mut();
         vec_vals[..dim].fill(0.0);
-        for ((&i_one, &j_one), &val) in
-            irn.iter().zip(jcn.iter()).zip(self.values.iter())
-        {
+        for ((&i_one, &j_one), &val) in irn.iter().zip(jcn.iter()).zip(self.values.iter()) {
             let i = (i_one - 1) as usize;
             let j = (j_one - 1) as usize;
             let f = val.abs();

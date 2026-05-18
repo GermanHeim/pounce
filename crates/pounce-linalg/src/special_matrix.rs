@@ -62,13 +62,7 @@ impl Matrix for ZeroMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        _alpha: Number,
-        _x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, _alpha: Number, _x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         if beta != 0.0 {
             y.scal(beta);
         } else {
@@ -147,13 +141,7 @@ impl Matrix for ZeroSymMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        _alpha: Number,
-        _x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, _alpha: Number, _x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         if beta != 0.0 {
             y.scal(beta);
         } else {
@@ -238,13 +226,7 @@ impl Matrix for IdentityMatrix {
         self
     }
 
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         // y ← (alpha*factor) x + beta y, via add_one_vector.
         y.add_one_vector(alpha * self.factor, x, beta);
     }
@@ -283,13 +265,7 @@ impl Matrix for IdentityMatrix {
         sym_default_compute_col_amax_impl(self, cols_norms, init);
     }
 
-    fn add_m_sinv_z_impl(
-        &self,
-        alpha: Number,
-        s: &dyn Vector,
-        z: &dyn Vector,
-        x: &mut dyn Vector,
-    ) {
+    fn add_m_sinv_z_impl(&self, alpha: Number, s: &dyn Vector, z: &dyn Vector, x: &mut dyn Vector) {
         // Specialised override per IpIdentityMatrix.cpp:82-95.
         // X.AddVectorQuotient(alpha, Z, S, 1.) — note: factor_ is
         // intentionally omitted upstream (the override exists

@@ -49,12 +49,7 @@ pub trait SensStepCalc {
     /// Returns `false` if the Schur driver hasn't been built /
     /// factored, the backsolver fails, or the buffers are
     /// mis-sized.
-    fn compute_step(
-        &self,
-        rhs_u: &[Number],
-        du: &mut [Number],
-        dx_full: &mut [Number],
-    ) -> bool;
+    fn compute_step(&self, rhs_u: &[Number], du: &mut [Number], dx_full: &mut [Number]) -> bool;
 }
 
 /// Reference implementation that strings together
@@ -100,12 +95,7 @@ where
     D: SchurDriver + WithBacksolver,
     P: PCalculator,
 {
-    fn compute_step(
-        &self,
-        rhs_u: &[Number],
-        du: &mut [Number],
-        dx_full: &mut [Number],
-    ) -> bool {
+    fn compute_step(&self, rhs_u: &[Number], du: &mut [Number], dx_full: &mut [Number]) -> bool {
         // 1. Schur step: solve S · du = rhs_u.
         if !self.driver.schur_solve(rhs_u, du) {
             return false;

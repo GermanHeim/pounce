@@ -127,7 +127,10 @@ fn main() -> ExitCode {
     );
     for d in &divs {
         eprintln!("  {}", d);
-        if matches!(d, CompareError::Header(_) | CompareError::RecordCount { .. }) {
+        if matches!(
+            d,
+            CompareError::Header(_) | CompareError::RecordCount { .. }
+        ) {
             // header/count issues are most actionable; still print the rest
         }
     }

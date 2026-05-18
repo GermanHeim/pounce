@@ -214,8 +214,7 @@ impl DenseSymMatrix {
                 let v2j = v2.get_vector(j as Index).as_ref();
                 for i in j..n {
                     let v1i = v1.get_vector(i as Index).as_ref();
-                    self.values[i + j * n] =
-                        alpha * v1i.dot(v2j) + beta * self.values[i + j * n];
+                    self.values[i + j * n] = alpha * v1i.dot(v2j) + beta * self.values[i + j * n];
                 }
             }
         }
@@ -271,13 +270,7 @@ impl Matrix for DenseSymMatrix {
     /// Reference DSYMV ordering: outer `j` updates both `y[j]` (using
     /// the column from row `j` downward) and column `j`'s contribution
     /// to `y[i]` for `i > j` simultaneously.
-    fn mult_vector_impl(
-        &self,
-        alpha: Number,
-        x: &dyn Vector,
-        beta: Number,
-        y: &mut dyn Vector,
-    ) {
+    fn mult_vector_impl(&self, alpha: Number, x: &dyn Vector, beta: Number, y: &mut dyn Vector) {
         debug_assert!(self.initialized.get());
         let n = self.n();
         let xvals = dense_x_values(x);
@@ -305,10 +298,7 @@ impl Matrix for DenseSymMatrix {
             let x_lower = &xvals[(j + 1)..n];
             let (yj_block, y_lower) = yvals.split_at_mut(j + 1);
             let _ = yj_block; // silence unused
-            for ((y_i, &a_ij), &x_i) in y_lower
-                .iter_mut()
-                .zip(col_lower.iter())
-                .zip(x_lower.iter())
+            for ((y_i, &a_ij), &x_i) in y_lower.iter_mut().zip(col_lower.iter()).zip(x_lower.iter())
             {
                 *y_i += temp1 * a_ij;
                 temp2 += a_ij * x_i;

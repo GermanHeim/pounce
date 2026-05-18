@@ -131,15 +131,18 @@ impl<'a> PdSensBacksolver<'a> {
         let mut out = self.template.make_new_zeroed();
         let off = self.offsets();
         let blocks: [&mut Box<dyn pounce_linalg::vector::Vector>; 8] = [
-            &mut out.x, &mut out.s, &mut out.y_c, &mut out.y_d,
-            &mut out.z_l, &mut out.z_u, &mut out.v_l, &mut out.v_u,
+            &mut out.x,
+            &mut out.s,
+            &mut out.y_c,
+            &mut out.y_d,
+            &mut out.z_l,
+            &mut out.z_u,
+            &mut out.v_l,
+            &mut out.v_u,
         ];
         for (i, blk) in blocks.into_iter().enumerate() {
             let slice = &flat[off[i]..off[i + 1]];
-            let dv = blk
-                .as_any_mut()
-                .downcast_mut::<DenseVector>()
-                .ok_or(())?;
+            let dv = blk.as_any_mut().downcast_mut::<DenseVector>().ok_or(())?;
             dv.set_values(slice);
         }
         Ok(out)

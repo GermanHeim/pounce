@@ -176,9 +176,9 @@ fn main() -> ExitCode {
         // Try to run the sensitivity step. Bail quietly (so the
         // nominal-solve solution still writes out) when any required
         // suffix is missing.
-        if let Some(dx) = try_compute_sens_step(
-            data, cq, nlp, pd, &suffixes_cb, n_full, m_full, &x_vals,
-        ) {
+        if let Some(dx) =
+            try_compute_sens_step(data, cq, nlp, pd, &suffixes_cb, n_full, m_full, &x_vals)
+        {
             // x_perturbed = x_nominal + Δx[0..n_x]
             let n_x = curr.x.dim() as usize;
             let mut x_pert = vec![0.0; n_full];
@@ -248,10 +248,7 @@ fn main() -> ExitCode {
         builder.solution.lambda = lambda.clone();
         if matches!(json_detail, ReportDetail::Full) {
             for s in &suffixes_out {
-                builder
-                    .solution
-                    .suffixes
-                    .push(sol_suffix_to_report(s));
+                builder.solution.suffixes.push(sol_suffix_to_report(s));
             }
         }
         builder.ingest_stats(&app.statistics());
@@ -286,12 +283,8 @@ fn sol_suffix_to_report(s: &SolSuffix) -> SolutionSuffix {
     let (kind, values, int_values) = match &s.values {
         SolSuffixValues::Real(v) => ("real".to_string(), v.clone(), Vec::new()),
         SolSuffixValues::Int(v) => ("int".to_string(), Vec::new(), v.clone()),
-        SolSuffixValues::ProblemReal(v) => {
-            ("real".to_string(), vec![*v], Vec::new())
-        }
-        SolSuffixValues::ProblemInt(v) => {
-            ("int".to_string(), Vec::new(), vec![*v])
-        }
+        SolSuffixValues::ProblemReal(v) => ("real".to_string(), vec![*v], Vec::new()),
+        SolSuffixValues::ProblemInt(v) => ("int".to_string(), Vec::new(), vec![*v]),
     };
     SolutionSuffix {
         name: s.name.clone(),

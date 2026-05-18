@@ -76,14 +76,22 @@ impl EqMultCalculator for LeastSquareMults {
         // `IpLeastSquareMults.cpp:54-57` exactly).
         let mut rhs_x = grad_f.make_new();
         rhs_x.copy(&*grad_f);
-        nlp_ref.px_l().mult_vector(1.0, &*curr.z_l, -1.0, &mut *rhs_x);
-        nlp_ref.px_u().mult_vector(-1.0, &*curr.z_u, 1.0, &mut *rhs_x);
+        nlp_ref
+            .px_l()
+            .mult_vector(1.0, &*curr.z_l, -1.0, &mut *rhs_x);
+        nlp_ref
+            .px_u()
+            .mult_vector(-1.0, &*curr.z_u, 1.0, &mut *rhs_x);
 
         // rhs_s = Pₗ v_L − Pᵤ v_U  (zero-init then mult; mirrors
         // `IpLeastSquareMults.cpp:60-61`).
         let mut rhs_s = curr.s.make_new();
-        nlp_ref.pd_l().mult_vector(1.0, &*curr.v_l, 0.0, &mut *rhs_s);
-        nlp_ref.pd_u().mult_vector(-1.0, &*curr.v_u, 1.0, &mut *rhs_s);
+        nlp_ref
+            .pd_l()
+            .mult_vector(1.0, &*curr.v_l, 0.0, &mut *rhs_s);
+        nlp_ref
+            .pd_u()
+            .mult_vector(-1.0, &*curr.v_u, 1.0, &mut *rhs_s);
 
         // rhs_c = 0, rhs_d = 0.
         let mut rhs_c = curr.y_c.make_new();

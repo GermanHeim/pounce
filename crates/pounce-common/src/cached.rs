@@ -27,9 +27,7 @@ struct Entry<T> {
 
 impl<T> Entry<T> {
     fn matches(&self, dep_tags: &[Tag], scalar_deps: &[Number]) -> bool {
-        if self.dep_tags.len() != dep_tags.len()
-            || self.scalar_deps.len() != scalar_deps.len()
-        {
+        if self.dep_tags.len() != dep_tags.len() || self.scalar_deps.len() != scalar_deps.len() {
             return false;
         }
         for (a, b) in self.dep_tags.iter().zip(dep_tags.iter()) {
@@ -61,12 +59,18 @@ pub struct Cache<T> {
 impl<T: Clone> Cache<T> {
     /// Bounded cache holding up to `max_size` entries.
     pub fn new(max_size: usize) -> Self {
-        Self { max_size: Some(max_size), entries: VecDeque::new() }
+        Self {
+            max_size: Some(max_size),
+            entries: VecDeque::new(),
+        }
     }
 
     /// Equivalent to Ipopt's negative `max_cache_size` (no eviction).
     pub fn unbounded() -> Self {
-        Self { max_size: None, entries: VecDeque::new() }
+        Self {
+            max_size: None,
+            entries: VecDeque::new(),
+        }
     }
 
     pub fn clear(&mut self) {
@@ -93,7 +97,11 @@ impl<T: Clone> Cache<T> {
     }
 
     fn add_with_tags(&mut self, value: T, dep_tags: Vec<Tag>, scalar_deps: Vec<Number>) {
-        self.entries.push_front(Entry { value, dep_tags, scalar_deps });
+        self.entries.push_front(Entry {
+            value,
+            dep_tags,
+            scalar_deps,
+        });
         if let Some(max) = self.max_size {
             while self.entries.len() > max {
                 self.entries.pop_back();
@@ -104,11 +112,7 @@ impl<T: Clone> Cache<T> {
     /// Generic lookup — equivalent to `GetCachedResult(...)`. Returns
     /// `Some(value)` if a stored entry's dependency tags exactly match
     /// the current tags of `dependents` and the scalar deps match.
-    pub fn get(
-        &self,
-        dependents: &[&dyn TaggedObject],
-        scalar_dependents: &[Number],
-    ) -> Option<T> {
+    pub fn get(&self, dependents: &[&dyn TaggedObject], scalar_dependents: &[Number]) -> Option<T> {
         let dep_tags: Vec<Tag> = dependents.iter().map(|d| d.get_tag()).collect();
         for e in &self.entries {
             if e.matches(&dep_tags, scalar_dependents) {

@@ -356,13 +356,7 @@ impl Vector for CompoundVector {
         debug_assert_eq!(self.n_comps(), cv1.n_comps());
         debug_assert_eq!(self.n_comps(), cv2.n_comps());
         for i in 0..self.comps.len() {
-            self.comps[i].add_two_vectors(
-                a,
-                cv1.comps[i].as_ref(),
-                b,
-                cv2.comps[i].as_ref(),
-                c,
-            );
+            self.comps[i].add_two_vectors(a, cv1.comps[i].as_ref(), b, cv2.comps[i].as_ref(), c);
         }
     }
 
@@ -379,13 +373,7 @@ impl Vector for CompoundVector {
         alpha
     }
 
-    fn add_vector_quotient_impl(
-        &mut self,
-        a: Number,
-        z: &dyn Vector,
-        s: &dyn Vector,
-        c: Number,
-    ) {
+    fn add_vector_quotient_impl(&mut self, a: Number, z: &dyn Vector, s: &dyn Vector, c: Number) {
         let cz = downcast_compound(z);
         let cs = downcast_compound(s);
         for i in 0..self.comps.len() {
@@ -437,7 +425,7 @@ mod tests {
         let mut v = CompoundVector::new(space);
         fill_dense(v.comp_mut(0), &[3.0, 4.0]); // nrm2 = 5
         fill_dense(v.comp_mut(1), &[0.0, 0.0, 12.0]); // nrm2 = 12
-        // sqrt(25 + 144) = 13
+                                                      // sqrt(25 + 144) = 13
         assert!((v.nrm2() - 13.0).abs() < 1e-15);
     }
 
@@ -497,7 +485,7 @@ mod tests {
         let mut delta = CompoundVector::new(space);
         fill_dense(delta.comp_mut(0), &[-2.0, 0.0]); // alpha = tau/2 * 1 = 0.5
         fill_dense(delta.comp_mut(1), &[-1.5]); // alpha = tau/1.5 * 3 = 2*tau
-        // Min(0.5, 2*tau) for tau=1 → 0.5
+                                                // Min(0.5, 2*tau) for tau=1 → 0.5
         let alpha = x.frac_to_bound(&delta, 1.0);
         assert!((alpha - 0.5).abs() < 1e-15);
     }

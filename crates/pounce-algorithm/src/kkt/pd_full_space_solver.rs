@@ -12,8 +12,8 @@ use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::{IteratesVector, IteratesVectorMut};
 use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
-use crate::kkt::perturbation_handler::PdPerturbationHandler;
 use crate::kkt::pd_system_solver::PdSystemSolver;
+use crate::kkt::perturbation_handler::PdPerturbationHandler;
 use pounce_common::tagged::Tag;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::{Matrix, SymMatrix, Vector};
@@ -212,14 +212,27 @@ impl PdFullSpaceSolver {
             if std::env::var_os("POUNCE_DBG_PD_TAGS").is_some() {
                 if let Some(prev) = self.last_dep_tags {
                     let names = [
-                        "w", "j_c", "j_d", "z_l", "z_u", "v_l", "v_u",
-                        "slack_x_l", "slack_x_u", "slack_s_l", "slack_s_u",
-                        "sigma_x", "sigma_s",
+                        "w",
+                        "j_c",
+                        "j_d",
+                        "z_l",
+                        "z_u",
+                        "v_l",
+                        "v_u",
+                        "slack_x_l",
+                        "slack_x_u",
+                        "slack_s_l",
+                        "slack_s_u",
+                        "sigma_x",
+                        "sigma_s",
                     ];
                     let mut diffs = String::new();
                     for i in 0..13 {
                         if prev[i] != cur_tags[i] {
-                            diffs.push_str(&format!(" {}({:?}→{:?})", names[i], prev[i], cur_tags[i]));
+                            diffs.push_str(&format!(
+                                " {}({:?}→{:?})",
+                                names[i], prev[i], cur_tags[i]
+                            ));
                         }
                     }
                     eprintln!("[PN_PD_TAGS] cache_miss diffs:{}", diffs);
@@ -370,12 +383,14 @@ impl PdFullSpaceSolver {
         // Build aug-system primal RHS:
         //   augRhs_x = rhs.x + Px_L · S_xL⁻¹ · z_L − Px_U · S_xU⁻¹ · z_U
         let mut aug_rhs_x = rhs.x.make_new_copy();
-        b.px_l.add_m_sinv_z(1.0, b.slack_x_l, &*rhs.z_l, &mut *aug_rhs_x);
+        b.px_l
+            .add_m_sinv_z(1.0, b.slack_x_l, &*rhs.z_l, &mut *aug_rhs_x);
         b.px_u
             .add_m_sinv_z(-1.0, b.slack_x_u, &*rhs.z_u, &mut *aug_rhs_x);
 
         let mut aug_rhs_s = rhs.s.make_new_copy();
-        b.pd_l.add_m_sinv_z(1.0, b.slack_s_l, &*rhs.v_l, &mut *aug_rhs_s);
+        b.pd_l
+            .add_m_sinv_z(1.0, b.slack_s_l, &*rhs.v_l, &mut *aug_rhs_s);
         b.pd_u
             .add_m_sinv_z(-1.0, b.slack_s_u, &*rhs.v_u, &mut *aug_rhs_s);
 
@@ -595,7 +610,9 @@ impl PdFullSpaceSolver {
         b.px_l.mult_vector(-1.0, &*res.z_l, 1.0, &mut *resid.x);
         b.px_u.mult_vector(1.0, &*res.z_u, 1.0, &mut *resid.x);
         // resid.x += δ_x·res.x − rhs.x
-        resid.x.add_two_vectors(d.delta_x, &*res.x, -1.0, &*rhs.x, 1.0);
+        resid
+            .x
+            .add_two_vectors(d.delta_x, &*res.x, -1.0, &*rhs.x, 1.0);
 
         // s: Pd_U·res.v_U − Pd_L·res.v_L − res.y_d − rhs.s + δ_s·res.s
         b.pd_u.mult_vector(1.0, &*res.v_u, 0.0, &mut *resid.s);
@@ -768,18 +785,14 @@ fn expand_bound_multipliers(
     rhs: &IteratesVector,
     sol: &mut IteratesVectorMut,
 ) {
-    b.px_l.sinv_blrm_zmt_dbr(
-        -1.0, b.slack_x_l, &*rhs.z_l, b.z_l, &*sol.x, &mut *sol.z_l,
-    );
-    b.px_u.sinv_blrm_zmt_dbr(
-        1.0, b.slack_x_u, &*rhs.z_u, b.z_u, &*sol.x, &mut *sol.z_u,
-    );
-    b.pd_l.sinv_blrm_zmt_dbr(
-        -1.0, b.slack_s_l, &*rhs.v_l, b.v_l, &*sol.s, &mut *sol.v_l,
-    );
-    b.pd_u.sinv_blrm_zmt_dbr(
-        1.0, b.slack_s_u, &*rhs.v_u, b.v_u, &*sol.s, &mut *sol.v_u,
-    );
+    b.px_l
+        .sinv_blrm_zmt_dbr(-1.0, b.slack_x_l, &*rhs.z_l, b.z_l, &*sol.x, &mut *sol.z_l);
+    b.px_u
+        .sinv_blrm_zmt_dbr(1.0, b.slack_x_u, &*rhs.z_u, b.z_u, &*sol.x, &mut *sol.z_u);
+    b.pd_l
+        .sinv_blrm_zmt_dbr(-1.0, b.slack_s_l, &*rhs.v_l, b.v_l, &*sol.s, &mut *sol.v_l);
+    b.pd_u
+        .sinv_blrm_zmt_dbr(1.0, b.slack_s_u, &*rhs.v_u, b.v_u, &*sol.s, &mut *sol.v_u);
 }
 
 fn thaw(iv: IteratesVector) -> IteratesVectorMut {

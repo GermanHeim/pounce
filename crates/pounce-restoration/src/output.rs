@@ -178,9 +178,7 @@ impl pounce_algorithm::output::r#trait::IterationOutput for RestoIterationOutput
         let mut inf_pr = c.curr_primal_infeasibility_max();
         if let Some(orig_rc) = &self.orig_nlp {
             if let Some(curr) = d.curr.clone() {
-                if let Some((f_orig, viol_orig)) =
-                    eval_orig_at_inner_curr(&curr, orig_rc)
-                {
+                if let Some((f_orig, viol_orig)) = eval_orig_at_inner_curr(&curr, orig_rc) {
                     unscaled_f = f_orig;
                     inf_pr = viol_orig;
                 }
@@ -275,9 +273,8 @@ mod tests {
     #[test]
     fn row_has_r_suffix_after_iter_field() {
         let out = RestoIterationOutput::new();
-        let row = out.format_row_explicit(
-            7, 1.234567e+0, 1e-3, 1e-4, 0.1, 1e-2, 0.0, 1.0, 0.5, 'f', 2,
-        );
+        let row =
+            out.format_row_explicit(7, 1.234567e+0, 1e-3, 1e-4, 0.1, 1e-2, 0.0, 1.0, 0.5, 'f', 2);
         // Iter is right-justified in width 4 then the literal 'r', so
         // `"   7r"` is the prefix.
         assert!(row.starts_with("   7r"), "row = {row:?}");
@@ -286,9 +283,7 @@ mod tests {
     #[test]
     fn regu_field_dashes_when_zero() {
         let out = RestoIterationOutput::new();
-        let row = out.format_row_explicit(
-            0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, ' ', 0,
-        );
+        let row = out.format_row_explicit(0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, ' ', 0);
         // Look for the exact "   - " regu segment in the row.
         assert!(row.contains("   - "), "row = {row:?}");
     }
@@ -296,9 +291,7 @@ mod tests {
     #[test]
     fn regu_field_logs_value_when_nonzero() {
         let out = RestoIterationOutput::new();
-        let row = out.format_row_explicit(
-            0, 1.0, 1.0, 1.0, 1.0, 1.0, 1e-3, 1.0, 1.0, ' ', 0,
-        );
+        let row = out.format_row_explicit(0, 1.0, 1.0, 1.0, 1.0, 1.0, 1e-3, 1.0, 1.0, ' ', 0);
         // log10(1e-3) = -3.0 → " -3.0".
         assert!(row.contains(" -3.0"), "row = {row:?}");
     }
@@ -306,9 +299,7 @@ mod tests {
     #[test]
     fn alpha_char_appears_immediately_before_ls_field() {
         let out = RestoIterationOutput::new();
-        let row = out.format_row_explicit(
-            0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 'h', 12,
-        );
+        let row = out.format_row_explicit(0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 'h', 12);
         // …7.2e + 'h' + 3-wide ls = "1.0000e0h 12" (no space between
         // alpha_pr and the char).
         assert!(row.ends_with("h 12"), "row = {row:?}");

@@ -195,8 +195,14 @@ fn main() {
         if !printed_header {
             println!(
                 "{:>4} {:>3} {:>4} {:>2} {:>2}  {:>14}  {:<22}  {:<22}",
-                "row", "n", "nnz", "exp", "logged",
-                "lapack(neg|min|cond)", "FERAL(stat|neg|res)", "MA57(stat|neg|res)"
+                "row",
+                "n",
+                "nnz",
+                "exp",
+                "logged",
+                "lapack(neg|min|cond)",
+                "FERAL(stat|neg|res)",
+                "MA57(stat|neg|res)"
             );
             printed_header = true;
         }

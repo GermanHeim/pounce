@@ -73,20 +73,26 @@ impl PresolveOptions {
     pub fn from_options_list(opts: &OptionsList) -> Result<Self, SolverException> {
         let enabled = opts.get_bool_value("presolve", "")?.0;
         let bound_tightening = opts.get_bool_value("presolve_bound_tightening", "")?.0;
-        let redundant_constraint_removal =
-            opts.get_bool_value("presolve_redundant_constraint_removal", "")?.0;
+        let redundant_constraint_removal = opts
+            .get_bool_value("presolve_redundant_constraint_removal", "")?
+            .0;
         let linear_eq_reduction = opts.get_bool_value("presolve_linear_eq_reduction", "")?.0;
         let licq_check = opts.get_bool_value("presolve_licq_check", "")?.0;
         let print_level = opts.get_integer_value("presolve_print_level", "")?.0;
         let max_passes = opts.get_integer_value("presolve_max_passes", "")?.0;
-        let licq_action = match opts.get_string_value("presolve_licq_action", "")?.0.as_str() {
+        let licq_action = match opts
+            .get_string_value("presolve_licq_action", "")?
+            .0
+            .as_str()
+        {
             "auto_l1" => LicqAction::AutoL1,
             // "warn" or anything else (including the registered default).
             _ => LicqAction::Warn,
         };
         let warm_z_bounds = opts.get_bool_value("presolve_warm_z_bounds", "")?.0;
-        let bound_mult_init_val =
-            opts.get_numeric_value("presolve_bound_mult_init_val", "")?.0;
+        let bound_mult_init_val = opts
+            .get_numeric_value("presolve_bound_mult_init_val", "")?
+            .0;
         Ok(Self {
             enabled,
             bound_tightening,
@@ -241,7 +247,8 @@ mod tests {
     fn enabling_master_switch_round_trips() {
         let reg = reg_with_presolve();
         let mut opts = OptionsList::with_registered(reg);
-        opts.set_string_value("presolve", "yes", true, false).unwrap();
+        opts.set_string_value("presolve", "yes", true, false)
+            .unwrap();
         opts.set_string_value("presolve_licq_action", "auto_l1", true, false)
             .unwrap();
         opts.set_integer_value("presolve_max_passes", 5, true, false)

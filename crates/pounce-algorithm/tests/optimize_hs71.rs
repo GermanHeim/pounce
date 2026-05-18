@@ -168,10 +168,7 @@ fn hs071_solves_via_application() {
     let stats = app.statistics();
     eprintln!(
         "HS71: status={:?} iter={} obj={} wall_s={:.3}",
-        status,
-        stats.iteration_count,
-        stats.final_objective,
-        stats.total_wallclock_time_secs,
+        status, stats.iteration_count, stats.final_objective, stats.total_wallclock_time_secs,
     );
     assert!(
         stats.iteration_count < 50,
@@ -563,7 +560,11 @@ fn hs071_reports_nonzero_multipliers_at_optimum() {
     assert_eq!(z_u.len(), 4);
 
     let lam_max = lambda.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    assert!(lam_max > 1e-3, "lambda must be non-zero at HS071 optimum; got {:?}", lambda);
+    assert!(
+        lam_max > 1e-3,
+        "lambda must be non-zero at HS071 optimum; got {:?}",
+        lambda
+    );
 
     // KKT stationarity recomposed from user-visible quantities:
     //   ∇f + J_g^T λ − z_l + z_u ≈ 0  at the optimum.
@@ -584,7 +585,10 @@ fn hs071_reports_nonzero_multipliers_at_optimum() {
     assert!(
         kkt_inf < 1e-3,
         "KKT residual with lifted multipliers = {:.2e} (lambda={:?}, z_l={:?}, z_u={:?})",
-        kkt_inf, lambda, z_l, z_u,
+        kkt_inf,
+        lambda,
+        z_l,
+        z_u,
     );
 
     eprintln!(

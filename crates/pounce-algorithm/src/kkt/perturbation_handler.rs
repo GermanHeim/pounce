@@ -435,9 +435,7 @@ impl PdPerturbationHandler {
                 self.delta_xs_min
                     .max(self.delta_x_last * self.delta_xs_dec_fact)
             };
-        } else if self.delta_x_last == 0.0
-            || 1e5 * self.delta_x_last < self.delta_x_curr
-        {
+        } else if self.delta_x_last == 0.0 || 1e5 * self.delta_x_last < self.delta_x_curr {
             self.delta_x_curr *= self.delta_xs_first_inc_fact;
         } else {
             self.delta_x_curr *= self.delta_xs_inc_fact;
@@ -603,7 +601,15 @@ mod tests {
     fn consider_new_system_default_zeros_dcd() {
         let mut h = PdPerturbationHandler::new();
         let d = h.consider_new_system(0.1, None).unwrap();
-        assert_eq!(d, Deltas { delta_x: 0.0, delta_s: 0.0, delta_c: 0.0, delta_d: 0.0 });
+        assert_eq!(
+            d,
+            Deltas {
+                delta_x: 0.0,
+                delta_s: 0.0,
+                delta_c: 0.0,
+                delta_d: 0.0
+            }
+        );
     }
 
     #[test]

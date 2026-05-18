@@ -536,10 +536,7 @@ impl SparseSymLinearSolverInterface for Ma57SolverInterface {
         self.pivtol_changed = true;
         // Upstream: `pivtol = min(pivtolmax, pivtol^0.75)`
         // (cpp:832).
-        self.options.pivtol = self
-            .options
-            .pivtolmax
-            .min(self.options.pivtol.powf(0.75));
+        self.options.pivtol = self.options.pivtolmax.min(self.options.pivtol.powf(0.75));
         true
     }
 

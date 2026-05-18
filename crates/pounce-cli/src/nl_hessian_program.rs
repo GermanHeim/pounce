@@ -48,32 +48,97 @@ use super::nl_tape::{Tape, TapeOp};
 #[derive(Debug, Clone, Copy)]
 pub enum HOp {
     // ===== Forward pass =====
-    FwdLoadVar { dst: u32, x_idx: u32 },
-    FwdLoadConst { dst: u32, c_idx: u32 },
-    FwdAdd { dst: u32, a: u32, b: u32 },
-    FwdSub { dst: u32, a: u32, b: u32 },
-    FwdMul { dst: u32, a: u32, b: u32 },
-    FwdDiv { dst: u32, a: u32, b: u32 },
-    FwdPow { dst: u32, a: u32, b: u32 },
-    FwdNeg { dst: u32, a: u32 },
-    FwdAbs { dst: u32, a: u32 },
-    FwdSqrt { dst: u32, a: u32 },
-    FwdExp { dst: u32, a: u32 },
-    FwdLog { dst: u32, a: u32 },
-    FwdLog10 { dst: u32, a: u32 },
-    FwdSin { dst: u32, a: u32 },
-    FwdCos { dst: u32, a: u32 },
+    FwdLoadVar {
+        dst: u32,
+        x_idx: u32,
+    },
+    FwdLoadConst {
+        dst: u32,
+        c_idx: u32,
+    },
+    FwdAdd {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
+    FwdSub {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
+    FwdMul {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
+    FwdDiv {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
+    FwdPow {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
+    FwdNeg {
+        dst: u32,
+        a: u32,
+    },
+    FwdAbs {
+        dst: u32,
+        a: u32,
+    },
+    FwdSqrt {
+        dst: u32,
+        a: u32,
+    },
+    FwdExp {
+        dst: u32,
+        a: u32,
+    },
+    FwdLog {
+        dst: u32,
+        a: u32,
+    },
+    FwdLog10 {
+        dst: u32,
+        a: u32,
+    },
+    FwdSin {
+        dst: u32,
+        a: u32,
+    },
+    FwdCos {
+        dst: u32,
+        a: u32,
+    },
 
     // ===== Scalar slot init =====
-    SetZero { dst: u32 },
-    SetOne { dst: u32 },
+    SetZero {
+        dst: u32,
+    },
+    SetOne {
+        dst: u32,
+    },
 
     // ===== Bulk reset (start of each j) =====
-    ZeroRange { start: u32, len: u32 },
+    ZeroRange {
+        start: u32,
+        len: u32,
+    },
 
     // ===== Forward tangent (per j) =====
-    DotAdd { dst: u32, a: u32, b: u32 },
-    DotSub { dst: u32, a: u32, b: u32 },
+    DotAdd {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
+    DotSub {
+        dst: u32,
+        a: u32,
+        b: u32,
+    },
     /// dot[d] = dot[a]*v[b] + v[a]*dot[b]
     DotMul {
         dst: u32,
@@ -91,15 +156,46 @@ pub enum HOp {
         dot_b: u32,
     },
     /// dot[d] = 0.5 / v[d] * dot[a]  (v[d] = sqrt(v[a]))
-    DotSqrt { dst: u32, dot_a: u32, vd: u32 },
+    DotSqrt {
+        dst: u32,
+        dot_a: u32,
+        vd: u32,
+    },
     /// dot[d] = v[d] * dot[a]  (v[d] = exp(v[a]))
-    DotExp { dst: u32, dot_a: u32, vd: u32 },
-    DotLog { dst: u32, dot_a: u32, va: u32 },
-    DotLog10 { dst: u32, dot_a: u32, va: u32 },
-    DotSin { dst: u32, dot_a: u32, va: u32 },
-    DotCos { dst: u32, dot_a: u32, va: u32 },
-    DotNeg { dst: u32, dot_a: u32 },
-    DotAbs { dst: u32, dot_a: u32, va: u32 },
+    DotExp {
+        dst: u32,
+        dot_a: u32,
+        vd: u32,
+    },
+    DotLog {
+        dst: u32,
+        dot_a: u32,
+        va: u32,
+    },
+    DotLog10 {
+        dst: u32,
+        dot_a: u32,
+        va: u32,
+    },
+    DotSin {
+        dst: u32,
+        dot_a: u32,
+        va: u32,
+    },
+    DotCos {
+        dst: u32,
+        dot_a: u32,
+        va: u32,
+    },
+    DotNeg {
+        dst: u32,
+        dot_a: u32,
+    },
+    DotAbs {
+        dst: u32,
+        dot_a: u32,
+        va: u32,
+    },
     /// Compound: dot[d] for Pow(a, b). Carries the runtime
     /// `u != 0` / `u > 0` branches.
     DotPow {
@@ -233,7 +329,10 @@ pub enum HOp {
 
     // ===== Output =====
     /// values[hess_ptr] += weight * scratch[adj_dot_slot].
-    HessEmit { hess_ptr: u32, adj_dot_slot: u32 },
+    HessEmit {
+        hess_ptr: u32,
+        adj_dot_slot: u32,
+    },
 }
 
 /// Precompiled Hessian-of-one-tape program. Built once via
@@ -714,9 +813,8 @@ impl HessianProgram {
                     va,
                     dot_b,
                 } => {
-                    scratch[dst as usize] =
-                        scratch[dot_a as usize] * scratch[vb as usize]
-                            + scratch[va as usize] * scratch[dot_b as usize];
+                    scratch[dst as usize] = scratch[dot_a as usize] * scratch[vb as usize]
+                        + scratch[va as usize] * scratch[dot_b as usize];
                 }
                 HOp::DotDiv {
                     dst,
@@ -862,8 +960,8 @@ impl HessianProgram {
                     scratch[adj_a as usize] += w_v / vb_v;
                     scratch[adj_dot_a as usize] += wd_v / vb_v + w_v * (-db_v / vb2);
                     scratch[adj_b as usize] += w_v * (-va_v / vb2);
-                    scratch[adj_dot_b as usize] += wd_v * (-va_v / vb2)
-                        + w_v * (-da_v / vb2 + 2.0 * va_v * db_v / vb3);
+                    scratch[adj_dot_b as usize] +=
+                        wd_v * (-va_v / vb2) + w_v * (-da_v / vb2 + 2.0 * va_v * db_v / vb3);
                 }
                 HOp::RevPow {
                     adj_a,
@@ -890,8 +988,7 @@ impl HessianProgram {
                             scratch[adj_a as usize] += w_v * p_a;
                             let mut dp_a = dr * u.powf(r - 1.0);
                             if u > 0.0 {
-                                dp_a +=
-                                    r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
+                                dp_a += r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
                             } else {
                                 dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
                             }
@@ -932,7 +1029,11 @@ impl HessianProgram {
                     wd,
                     va,
                 } => {
-                    let s = if scratch[va as usize] >= 0.0 { 1.0 } else { -1.0 };
+                    let s = if scratch[va as usize] >= 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     scratch[adj_a as usize] += scratch[w as usize] * s;
                     scratch[adj_dot_a as usize] += scratch[wd as usize] * s;
                 }
@@ -1293,4 +1394,3 @@ mod tests {
         assert_program_matches_tape(&tape, &[0.7, 1.1, 2.2], 1.0);
     }
 }
-

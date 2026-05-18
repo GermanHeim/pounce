@@ -78,12 +78,12 @@ mod tests {
             -1
         );
         assert_eq!(ApplicationReturnStatus::RestorationFailed.as_int(), -2);
-        assert_eq!(
-            ApplicationReturnStatus::ErrorInStepComputation.as_int(),
-            -3
-        );
+        assert_eq!(ApplicationReturnStatus::ErrorInStepComputation.as_int(), -3);
         assert_eq!(ApplicationReturnStatus::MaximumCpuTimeExceeded.as_int(), -4);
-        assert_eq!(ApplicationReturnStatus::MaximumWallTimeExceeded.as_int(), -5);
+        assert_eq!(
+            ApplicationReturnStatus::MaximumWallTimeExceeded.as_int(),
+            -5
+        );
 
         assert_eq!(
             ApplicationReturnStatus::NotEnoughDegreesOfFreedom.as_int(),

@@ -375,7 +375,11 @@ impl LowRankAugSystemSolver {
                         }
                     }
                 }
-                self.factor.j1.as_ref().unwrap().cholesky_solve_matrix(&mut c_mat);
+                self.factor
+                    .j1
+                    .as_ref()
+                    .unwrap()
+                    .cholesky_solve_matrix(&mut c_mat);
                 ut_x.add_right_mult_matrix(-1.0, vt1_x, &c_mat, 1.0);
                 ut_s.add_right_mult_matrix(-1.0, vt1_s, &c_mat, 1.0);
                 ut_c.add_right_mult_matrix(-1.0, vt1_c, &c_mat, 1.0);
@@ -480,8 +484,13 @@ impl LowRankAugSystemSolver {
                     sol_c: &mut sol_c,
                     sol_d: &mut sol_d,
                 };
-                self.inner
-                    .solve(&inner_coeffs, &inner_rhs, &mut sol, check_neg_evals, num_neg_evals)
+                self.inner.solve(
+                    &inner_coeffs,
+                    &inner_rhs,
+                    &mut sol,
+                    check_neg_evals,
+                    num_neg_evals,
+                )
             };
             if self.inner.provides_inertia() {
                 self.num_neg_evals = self.inner.number_of_neg_evals();
@@ -496,7 +505,6 @@ impl LowRankAugSystemSolver {
         }
         (Ok(out_x), out_s, out_c, out_d)
     }
-
 }
 
 /// Build inner-solver coefficients that substitute `Wdiag` for `W`.
@@ -590,21 +598,13 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         let needs_rebuild = self.first_call || self.augmented_system_requires_change(coeffs);
         if needs_rebuild {
             let lr_w = match coeffs.w {
-                Some(w) => w
-                    .as_any()
-                    .downcast_ref::<LowRankUpdateSymMatrix>()
-                    .expect(
-                        "LowRankAugSystemSolver requires a LowRankUpdateSymMatrix as its W block",
-                    ),
+                Some(w) => w.as_any().downcast_ref::<LowRankUpdateSymMatrix>().expect(
+                    "LowRankAugSystemSolver requires a LowRankUpdateSymMatrix as its W block",
+                ),
                 None => panic!("LowRankAugSystemSolver requires a non-None W"),
             };
-            let status = self.update_factorization(
-                lr_w,
-                coeffs,
-                rhs,
-                check_neg_evals,
-                num_neg_evals,
-            );
+            let status =
+                self.update_factorization(lr_w, coeffs, rhs, check_neg_evals, num_neg_evals);
             if status != ESymSolverStatus::Success {
                 return status;
             }
@@ -643,13 +643,7 @@ impl LowRankAugSystemSolver {
     ///
     /// `use_u = true` selects `(Utilde2, J2, +1)`; `false` selects
     /// `(Vtilde1, J1, −1)` (sign passed in by caller).
-    fn apply_smw(
-        &self,
-        sign: Number,
-        use_u: bool,
-        rhs: &AugSysRhs<'_>,
-        sol: &mut AugSysSol<'_>,
-    ) {
+    fn apply_smw(&self, sign: Number, use_u: bool, rhs: &AugSysRhs<'_>, sol: &mut AugSysSol<'_>) {
         let (mvx, mvs, mvc, mvd, j) = if use_u {
             (
                 self.factor.utilde2_x.as_ref().unwrap(),
@@ -737,9 +731,8 @@ mod tests {
             let diag_rc = wdiag.get_diag().expect("Wdiag has no diag set").clone();
             let diag = downcast_dense(diag_rc.as_ref()).expanded_values();
             let rhs_x = downcast_dense(rhs.rhs_x).expanded_values();
-            let dx_vals: Option<Vec<Number>> = coeffs
-                .d_x
-                .map(|d| downcast_dense(d).expanded_values());
+            let dx_vals: Option<Vec<Number>> =
+                coeffs.d_x.map(|d| downcast_dense(d).expanded_values());
             let mut out = vec![0.0; rhs_x.len()];
             for i in 0..rhs_x.len() {
                 let dx_i = match &dx_vals {

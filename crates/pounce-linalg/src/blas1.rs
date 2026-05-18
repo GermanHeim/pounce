@@ -122,14 +122,7 @@ pub fn copy(x: &[Number], inc_x: Index, y: &mut [Number], inc_y: Index, n: Index
 }
 
 /// `y ← α x + y`. Equivalent to `IpBlasAxpy` / `DAXPY`.
-pub fn axpy(
-    alpha: Number,
-    x: &[Number],
-    inc_x: Index,
-    y: &mut [Number],
-    inc_y: Index,
-    n: Index,
-) {
+pub fn axpy(alpha: Number, x: &[Number], inc_x: Index, y: &mut [Number], inc_y: Index, n: Index) {
     let n = n.max(0) as usize;
     if alpha == 0.0 {
         return;

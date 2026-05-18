@@ -246,18 +246,10 @@ impl OrigIpoptNlp {
         let d_u_space = DenseVectorSpace::new(classification.n_d_u());
 
         // ---- Expansion matrix spaces (column-compressed → full x_var / d) ----
-        let px_l_space = ExpansionMatrixSpace::new(
-            n_x_var,
-            classification.n_x_l(),
-            &classification.x_l_map,
-            0,
-        );
-        let px_u_space = ExpansionMatrixSpace::new(
-            n_x_var,
-            classification.n_x_u(),
-            &classification.x_u_map,
-            0,
-        );
+        let px_l_space =
+            ExpansionMatrixSpace::new(n_x_var, classification.n_x_l(), &classification.x_l_map, 0);
+        let px_u_space =
+            ExpansionMatrixSpace::new(n_x_var, classification.n_x_u(), &classification.x_u_map, 0);
         let pd_l_space = ExpansionMatrixSpace::new(
             classification.n_d,
             classification.n_d_l(),
@@ -933,11 +925,7 @@ impl OrigIpoptNlp {
     /// `mu_user = d_scale * y_d / obj_scale_factor`). Used by
     /// `application.rs::finalize_via_orig_nlp` to populate the
     /// `Solution.lambda` slot — pounce#11.
-    pub fn finalize_solution_lambda(
-        &self,
-        y_c: &dyn Vector,
-        y_d: &dyn Vector,
-    ) -> Vec<Number> {
+    pub fn finalize_solution_lambda(&self, y_c: &dyn Vector, y_d: &dyn Vector) -> Vec<Number> {
         let cls = self.adapter.borrow().classification().clone();
         let mut lambda = self.pack_lambda_for_user(y_c, y_d, &cls);
         let obj_scal = self.obj_scale_factor.get();
@@ -1467,7 +1455,10 @@ impl OrigIpoptNlp {
 
 // ---- helpers ----
 
-fn make_dense_from(space: &Rc<DenseVectorSpace>, mut f: impl FnMut(usize) -> Number) -> DenseVector {
+fn make_dense_from(
+    space: &Rc<DenseVectorSpace>,
+    mut f: impl FnMut(usize) -> Number,
+) -> DenseVector {
     let mut v = space.make_new_dense();
     let dim = space.dim() as usize;
     if dim > 0 {
@@ -1520,7 +1511,10 @@ impl Nlp for OrigIpoptNlp {
         y_c: &dyn Vector,
         y_d: &dyn Vector,
     ) -> Rc<dyn SymMatrix> {
-        self.timed_eval(|t| &t.eval_lag_hess, || self.eval_h_internal(x, obj_factor, y_c, y_d))
+        self.timed_eval(
+            |t| &t.eval_lag_hess,
+            || self.eval_h_internal(x, obj_factor, y_c, y_d),
+        )
     }
 }
 
@@ -1670,11 +1664,7 @@ impl IpoptNlp for OrigIpoptNlp {
         full
     }
 
-    fn finalize_solution_lambda(
-        &self,
-        y_c: &dyn Vector,
-        y_d: &dyn Vector,
-    ) -> Vec<Number> {
+    fn finalize_solution_lambda(&self, y_c: &dyn Vector, y_d: &dyn Vector) -> Vec<Number> {
         OrigIpoptNlp::finalize_solution_lambda(self, y_c, y_d)
     }
 
@@ -1818,16 +1808,16 @@ mod tests {
                     // Hessian of g1 = sum x_i^2: 2*I.
                     let l0 = lam[0];
                     let l1 = lam[1];
-                    values[0] = of * (2.0 * x[3]) + l1 * 2.0;            // (0,0)
-                    values[1] = of * x[3] + l0 * (x[2] * x[3]);          // (1,0)
-                    values[2] = l1 * 2.0;                                // (1,1)
-                    values[3] = of * x[3] + l0 * (x[1] * x[3]);          // (2,0)
-                    values[4] = l0 * (x[0] * x[3]);                      // (2,1)
-                    values[5] = l1 * 2.0;                                // (2,2)
+                    values[0] = of * (2.0 * x[3]) + l1 * 2.0; // (0,0)
+                    values[1] = of * x[3] + l0 * (x[2] * x[3]); // (1,0)
+                    values[2] = l1 * 2.0; // (1,1)
+                    values[3] = of * x[3] + l0 * (x[1] * x[3]); // (2,0)
+                    values[4] = l0 * (x[0] * x[3]); // (2,1)
+                    values[5] = l1 * 2.0; // (2,2)
                     values[6] = of * (2.0 * x[0] + x[1] + x[2]) + l0 * (x[1] * x[2]); // (3,0)
-                    values[7] = of * x[0] + l0 * (x[0] * x[2]);          // (3,1)
-                    values[8] = of * x[0] + l0 * (x[0] * x[1]);          // (3,2)
-                    values[9] = l1 * 2.0;                                // (3,3)
+                    values[7] = of * x[0] + l0 * (x[0] * x[2]); // (3,1)
+                    values[8] = of * x[0] + l0 * (x[0] * x[1]); // (3,2)
+                    values[9] = l1 * 2.0; // (3,3)
                 }
             }
             true
