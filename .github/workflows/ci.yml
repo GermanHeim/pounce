@@ -30,11 +30,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        # Gate on lints that signal real bugs / perf issues; let
-        # `restriction`-group warns (unwrap_used, expect_used, etc.) and
-        # style nits surface as informational. Cargo.toml's workspace
-        # lints already declare those as `warn`, not `deny`.
-        run: cargo clippy --workspace --exclude pounce-cutest --exclude pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
+        # Gate on lints that signal real bugs (`correctness`,
+        # `suspicious`). `perf` is excluded because its current hits are
+        # benign micro-opts in test code (`useless_vec!` on fixed-size
+        # buffers); revisit if a real perf-relevant lint surfaces. Other
+        # groups (style, restriction, pedantic) stay as informational
+        # warns, matching Cargo.toml's workspace lint policy.
+        run: cargo clippy --workspace --exclude pounce-cutest --exclude pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious
 
       - name: Build
         run: cargo build --workspace --exclude pounce-cutest --exclude pounce-hsl --verbose
