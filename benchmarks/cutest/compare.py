@@ -16,7 +16,10 @@ from collections import defaultdict
 
 
 def is_solved(status):
-    return status in ('Optimal', 'Acceptable', 'Solve_Succeeded', 'Solved_To_Acceptable_Level')
+    return status in (
+        'Optimal', 'Acceptable',
+        'Solve_Succeeded', 'Solved_To_Acceptable_Level',
+    )
 
 
 def obj_diff(ro, co):
@@ -74,7 +77,7 @@ def main():
     ripopt_by_name = {}
     ipopt_by_name = {}
     for r in data:
-        if r['solver'] in ('ripopt', 'pounce'):
+        if r['solver'] in ('pounce', 'ripopt'):
             ripopt_by_name[r['name']] = r
         elif r['solver'] == 'ipopt':
             ipopt_by_name[r['name']] = r
@@ -103,8 +106,8 @@ def main():
             'm': m,
             'ripopt_status': rr.get('status', 'N/A'),
             'ipopt_status': cr.get('status', 'N/A'),
-            'ripopt_obj': rr.get('objective') if rr.get('objective') is not None else float('nan'),
-            'ipopt_obj': cr.get('objective') if cr.get('objective') is not None else float('nan'),
+            'ripopt_obj': rr.get('objective', float('nan')),
+            'ipopt_obj': cr.get('objective', float('nan')),
             'obj_diff': od,
             'ripopt_iters': rr.get('iterations', 0),
             'ipopt_iters': cr.get('iterations', 0),
@@ -307,7 +310,7 @@ def main():
         lines.append("|---------|---|---|--------------|------------|")
         for c in ipopt_only_fails:
             ro = c['ripopt_obj']
-            ro_str = f"{ro:.6e}" if ro is not None and not math.isnan(ro) else "N/A"
+            ro_str = f"{ro:.6e}" if isinstance(ro, (int, float)) and not math.isnan(ro) else "N/A"
             lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['ipopt_status']} | {ro_str} |")
         lines.append("")
 

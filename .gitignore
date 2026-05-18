@@ -13,7 +13,12 @@
 /benchmarks/cutest/*.json
 /benchmarks/cutest/*.jsonl
 /benchmarks/cutest/*_stderr.txt
+/benchmarks/cutest/*.stderr
 /benchmarks/cutest/*.log
+/benchmarks/cutest/*.csv
+/benchmarks/cutest/CUTEST_REPORT*.md
+/benchmarks/cutest/FERAL_DELTA*.md
+/benchmarks/cutest/l1_audit/
 /benchmarks/logs/
 
 # Python cache
