@@ -36,3 +36,7 @@ __pycache__/
 *.swo
 .idea/
 .vscode/
+
+# Local logo experiments
+/logos/pounce_B_trajectory.png
+/logos/pounce_C_cage_break.png
