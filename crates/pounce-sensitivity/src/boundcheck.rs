@@ -175,7 +175,7 @@ mod tests {
         let n_x = 2;
         let x_curr = [0.9, 1.0];
         let mut dx = [0.5, 0.0]; // trial = [1.4, 1.0]
-        // No lower bounds.
+                                 // No lower bounds.
         let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
         let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
         let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 1, &[0], 0);

@@ -14,7 +14,9 @@ use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{make_default_restoration_factory, InnerBackendFactoryFactory};
+use pounce_restoration::resto_inner_solver::{
+    make_default_restoration_factory, InnerBackendFactoryFactory,
+};
 use pounce_sensitivity::SensSolve;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -111,8 +113,7 @@ impl PyProblem {
         // PyO3 will happily extract `True`/`False` as `1`/`0`. We want
         // cyipopt-style `True → "yes"`, so isinstance-check for `bool`
         // *before* falling through to int extraction.
-        let is_bool = value
-            .is_instance_of::<pyo3::types::PyBool>();
+        let is_bool = value.is_instance_of::<pyo3::types::PyBool>();
         if is_bool {
             if let Ok(b) = value.extract::<bool>() {
                 self.str_opts
@@ -387,8 +388,7 @@ impl PyProblem {
             .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-        let bff: InnerBackendFactoryFactory =
-            Box::new(move || default_backend_factory(feral_cfg));
+        let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
         let resto_factory = make_default_restoration_factory(
             RestoAlgorithmBuilder::new(),
             AlgorithmBuilder::new(),
@@ -550,7 +550,11 @@ fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec
     })
 }
 
-fn decode_bounds(val: Option<Py<PyAny>>, expected: usize, default: Number) -> PyResult<Vec<Number>> {
+fn decode_bounds(
+    val: Option<Py<PyAny>>,
+    expected: usize,
+    default: Number,
+) -> PyResult<Vec<Number>> {
     if expected == 0 {
         return Ok(Vec::new());
     }

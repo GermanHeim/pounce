@@ -216,7 +216,12 @@ impl TNLP for PyTnlp {
         copy_pyarray_into(&res, g, "constraints").is_ok()
     }
 
-    fn eval_jac_g(&mut self, x: Option<&[Number]>, _new_x: bool, mode: SparsityRequest<'_>) -> bool {
+    fn eval_jac_g(
+        &mut self,
+        x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
                 if irow.len() != self.state.jac_rows.len() {
@@ -275,8 +280,7 @@ impl TNLP for PyTnlp {
                     let x_arr = PyArray1::<Number>::from_slice_bound(py, xx);
                     let lam_arr = PyArray1::<Number>::from_slice_bound(py, lam);
                     let bound = self.state.py_obj.bind(py);
-                    let res =
-                        bound.call_method1("hessian", (x_arr, lam_arr, obj_factor))?;
+                    let res = bound.call_method1("hessian", (x_arr, lam_arr, obj_factor))?;
                     Ok(res.unbind())
                 });
                 let res = match res {
@@ -362,9 +366,9 @@ pub(crate) fn call0(obj: &Py<PyAny>, method: &str) -> PyResult<Py<PyAny>> {
 pub(crate) fn decode_structure(val: &Py<PyAny>, nnz: usize) -> PyResult<(Vec<Index>, Vec<Index>)> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
-        let tup = bound.downcast::<PyTuple>().map_err(|_| {
-            PyValueError::new_err("structure: expected a (rows, cols) tuple")
-        })?;
+        let tup = bound
+            .downcast::<PyTuple>()
+            .map_err(|_| PyValueError::new_err("structure: expected a (rows, cols) tuple"))?;
         if tup.len() != 2 {
             return Err(PyValueError::new_err(
                 "structure: expected a (rows, cols) tuple of length 2",
@@ -426,4 +430,3 @@ fn extract_index_vec(val: &Py<PyAny>, nnz: usize, what: &str) -> PyResult<Vec<In
         Ok(out)
     })
 }
-

@@ -137,7 +137,11 @@ pub fn symmetric_eigen(
     // permute columns of V to match.
     let mut idx: Vec<usize> = (0..n).collect();
     let diag: Vec<Number> = (0..n).map(|k| m[k * n + k]).collect();
-    idx.sort_by(|&i, &j| diag[i].partial_cmp(&diag[j]).unwrap_or(std::cmp::Ordering::Equal));
+    idx.sort_by(|&i, &j| {
+        diag[i]
+            .partial_cmp(&diag[j])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let v_in = eigenvectors.to_vec();
     for (new_pos, &old_pos) in idx.iter().enumerate() {
@@ -172,17 +176,17 @@ mod tests {
     use super::*;
 
     fn assert_close(a: Number, b: Number, tol: Number, label: &str) {
-        assert!((a - b).abs() < tol, "{label}: {a} vs {b} (|d|={})", (a - b).abs());
+        assert!(
+            (a - b).abs() < tol,
+            "{label}: {a} vs {b} (|d|={})",
+            (a - b).abs()
+        );
     }
 
     #[test]
     fn eigen_diagonal_matrix() {
         // A = diag(3, 1, 2). Eigenvalues sorted: 1, 2, 3.
-        let a = vec![
-            3.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 2.0,
-        ];
+        let a = vec![3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0];
         let mut w = vec![0.0; 3];
         let mut v = vec![0.0; 9];
         assert!(symmetric_eigen(&a, 3, &mut w, &mut v));
@@ -203,18 +207,17 @@ mod tests {
         assert_close(w[1], 3.0, 1e-12, "w1");
         // Column 0 should be ±[1, -1]/√2 (up to sign).
         let s = 1.0 / 2f64.sqrt();
-        assert!(((v[0] - s).abs() < 1e-10 && (v[1] + s).abs() < 1e-10)
-            || ((v[0] + s).abs() < 1e-10 && (v[1] - s).abs() < 1e-10));
+        assert!(
+            ((v[0] - s).abs() < 1e-10 && (v[1] + s).abs() < 1e-10)
+                || ((v[0] + s).abs() < 1e-10 && (v[1] - s).abs() < 1e-10)
+        );
     }
 
     #[test]
     fn eigen_reconstructs_matrix() {
         // Random-ish 4×4 symmetric matrix. Verify A · v_j = λ_j · v_j.
         let a = vec![
-             4.0, 1.0, 2.0, 0.5,
-             1.0, 3.0, 0.7, 1.5,
-             2.0, 0.7, 5.0, 0.3,
-             0.5, 1.5, 0.3, 2.0,
+            4.0, 1.0, 2.0, 0.5, 1.0, 3.0, 0.7, 1.5, 2.0, 0.7, 5.0, 0.3, 0.5, 1.5, 0.3, 2.0,
         ];
         let n = 4;
         let mut w = vec![0.0; n];

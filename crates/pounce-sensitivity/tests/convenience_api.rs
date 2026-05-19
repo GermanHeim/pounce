@@ -210,7 +210,10 @@ fn sens_solve_builder_matches_upstream() {
     let x = result.x.expect("x captured");
     assert_eq!(x.len(), 5);
     assert!(result.obj_val.is_some());
-    assert!(result.dx_full.is_some(), "dx_full mirrors the KKT-space step");
+    assert!(
+        result.dx_full.is_some(),
+        "dx_full mirrors the KKT-space step"
+    );
     assert!(
         result.reduced_hessian.is_none(),
         "reduced Hessian only populated when with_reduced_hessian was set",
@@ -228,8 +231,7 @@ fn sens_solve_reduced_hessian_is_symmetric_positive_definite() {
 
     assert!(matches!(
         result.status,
-        ApplicationReturnStatus::SolveSucceeded
-            | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
     ));
     let hr = result.reduced_hessian.expect("reduced Hessian populated");
     assert_eq!(hr.len(), 4, "n_params=2 → 2x2 column-major dense matrix");

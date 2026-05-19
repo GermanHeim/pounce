@@ -154,10 +154,7 @@ impl<B: SensBacksolver> SensApplication<B> {
         B: Clone,
     {
         let n = self.a_data.nrows() as usize;
-        if hr_out.len() != n * n
-            || eigvals_out.len() != n
-            || eigvecs_out.len() != n * n
-        {
+        if hr_out.len() != n * n || eigvals_out.len() != n || eigvecs_out.len() != n * n {
             return false;
         }
         if !self.compute_reduced_hessian(hr_out) {

@@ -118,11 +118,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
 /// install the result on `data.curr`. Mirrors steps 1-4 of
 /// `DefaultIterateInitializer::set_initial_iterates`, but with
 /// upstream's warm-start option block governing the push.
-fn seed_from_nlp(
-    data: &IpoptDataHandle,
-    nlp: &Rc<RefCell<dyn IpoptNlp>>,
-    opts: &WarmStartOptions,
-) {
+fn seed_from_nlp(data: &IpoptDataHandle, nlp: &Rc<RefCell<dyn IpoptNlp>>, opts: &WarmStartOptions) {
     let (n_x, n_s, n_yc, n_yd, n_zl, n_zu, n_vl, n_vu) = {
         let borrow = data.borrow();
         let c = borrow.curr.as_ref().unwrap();

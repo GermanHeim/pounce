@@ -238,14 +238,7 @@ fn main() -> ExitCode {
         }
 
         if compute_red_hessian {
-            match try_compute_red_hessian(
-                data,
-                cq,
-                nlp,
-                pd,
-                &suffixes_cb,
-                rh_eigendecomp,
-            ) {
+            match try_compute_red_hessian(data, cq, nlp, pd, &suffixes_cb, rh_eigendecomp) {
                 Some(r) => *red_hessian_cb.borrow_mut() = Some(r),
                 None => {
                     eprintln!(
