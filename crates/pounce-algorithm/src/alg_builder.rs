@@ -122,6 +122,9 @@ pub struct ConvCheckOptions {
     pub max_iter: Index,
     pub max_cpu_time: Number,
     pub max_wall_time: Number,
+    pub infeas_stationarity_tol: Number,
+    pub infeas_viol_kappa: Number,
+    pub infeas_max_streak: Index,
 }
 
 impl Default for ConvCheckOptions {
@@ -140,6 +143,9 @@ impl Default for ConvCheckOptions {
             max_iter: 3000,
             max_cpu_time: 1e6,
             max_wall_time: 1e6,
+            infeas_stationarity_tol: 1e-8,
+            infeas_viol_kappa: 1e2,
+            infeas_max_streak: 5,
         }
     }
 }
@@ -393,6 +399,10 @@ impl AlgorithmBuilder {
                 max_wall_time: self.conv_check.max_wall_time,
                 acceptable_count: 0,
                 last_acceptable_obj: None,
+                infeas_stationarity_tol: self.conv_check.infeas_stationarity_tol,
+                infeas_viol_kappa: self.conv_check.infeas_viol_kappa,
+                infeas_max_streak: self.conv_check.infeas_max_streak,
+                infeas_streak: 0,
             });
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point

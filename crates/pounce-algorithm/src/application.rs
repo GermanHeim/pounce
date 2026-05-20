@@ -1177,6 +1177,15 @@ impl IpoptApplication {
         if let Some(v) = read_int("acceptable_iter") {
             builder.conv_check.acceptable_iter = v;
         }
+        if let Some(v) = read_num("infeas_stationarity_tol") {
+            builder.conv_check.infeas_stationarity_tol = v;
+        }
+        if let Some(v) = read_num("infeas_viol_kappa") {
+            builder.conv_check.infeas_viol_kappa = v;
+        }
+        if let Some(v) = read_int("infeas_max_streak") {
+            builder.conv_check.infeas_max_streak = v;
+        }
 
         // Barrier-parameter (μ) options — consumers in
         // `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp`. Both

@@ -755,6 +755,26 @@ impl IpoptCalculatedQuantities {
         glx.amax().max(gls.amax())
     }
 
+    /// Scaled stationarity of the infeasibility measure `½‖(c, d−s)‖²`
+    /// — `‖J_cᵀ c + J_dᵀ (d−s)‖_∞ / max(1, ‖(c, d−s)‖_∞)`. The
+    /// numerator is the x-gradient of the squared constraint
+    /// violation; a value near zero with the violation itself bounded
+    /// away from zero marks an iterate converging to a stationary
+    /// point of the infeasibility — i.e. a locally infeasible problem.
+    /// No linear solve: two transpose-products. Mirrors the gradient
+    /// term behind Ipopt's `IpRestoConvCheck.cpp` `LOCALLY_INFEASIBLE`
+    /// test, applied here in the main loop.
+    pub fn curr_infeasibility_stationarity(&self) -> Number {
+        let c = self.curr_c();
+        let dms = self.curr_d_minus_s();
+        let jc_t_c = self.curr_jac_c_t_times_vec(&*c);
+        let jd_t_dms = self.curr_jac_d_t_times_vec(&*dms);
+        let mut grad = jc_t_c.make_new();
+        grad.add_two_vectors(1.0, &*jc_t_c, 1.0, &*jd_t_dms, 0.0);
+        let viol = c.amax().max(dms.amax());
+        grad.amax() / viol.max(1.0)
+    }
+
     // --------------------------------------------------------------
     // Average / scalar complementarity
     // --------------------------------------------------------------
