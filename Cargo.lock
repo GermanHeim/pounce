@@ -295,6 +295,7 @@ dependencies = [
  "pounce-algorithm",
  "pounce-common",
  "pounce-nlp",
+ "pounce-restoration",
 ]
 
 [[package]]
