@@ -11,7 +11,8 @@
 //!   require an Armijo decrease in `phi`; otherwise we relax to the
 //!   filter test.
 //! * **Armijo decrease**:
-//!   `phi_trial - phi <= eta_phi * alpha * d_phi`.
+//!   `phi_trial - phi <= eta_phi * alpha * d_phi`, compared via
+//!   `Compare_le` (a round-off-tolerant `<=`) — see [`FilterLsAcceptor::armijo_holds`].
 //! * **Filter acceptance**: `phi_trial < phi - gamma_phi * theta` OR
 //!   `theta_trial < (1 - gamma_theta) * theta`.
 //!
@@ -134,7 +135,17 @@ impl FilterLsAcceptor {
     }
 
     /// Armijo sufficient decrease in `phi`.
-    /// Mirrors `IpFilterLSAcceptor.cpp:ArmijoHolds`.
+    /// Mirrors `IpFilterLSAcceptor.cpp:ArmijoHolds`, which compares with
+    /// `Compare_le` — a `<=` carrying a `10·eps·|phi|` round-off slack —
+    /// not a bare `<=`. The slack is essential near a solution: when the
+    /// barrier objective is flat, `phi_trial - phi` is dominated by
+    /// floating-point summation noise (a tiny *positive* value even on a
+    /// genuine descent step), while `eta_phi·alpha·d_phi` is a tiny
+    /// *negative* number. A bare `<=` can then never hold, so the line
+    /// search backtracks to `alpha_min` and falls into restoration —
+    /// mislabelling a converged iterate `Error_In_Step_Computation`
+    /// (PALMER1/2, VESUVIALS, HIELOW, MGH10LS, ... — all reach the
+    /// optimum, then stall here).
     pub fn armijo_holds(
         &self,
         alpha_primal: Number,
@@ -142,7 +153,11 @@ impl FilterLsAcceptor {
         phi: Number,
         phi_trial: Number,
     ) -> bool {
-        phi_trial - phi <= self.eta_phi * alpha_primal * d_phi
+        pounce_common::utils::compare_le(
+            phi_trial - phi,
+            self.eta_phi * alpha_primal * d_phi,
+            phi,
+        )
     }
 
     /// Sufficient progress check (used when *not* in switching mode).
