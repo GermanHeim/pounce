@@ -201,4 +201,12 @@ pub trait IpoptNlp: Nlp {
     fn var_x_to_full_x(&self, var_idx: Index) -> Index {
         var_idx
     }
+
+    /// Effective objective scaling factor (`df_` upstream): the value
+    /// `f` is multiplied by inside [`Self::eval_f`]. Used to recover the
+    /// unscaled objective for display. Default `1.0` (no scaling);
+    /// `OrigIpoptNlp` overrides.
+    fn obj_scaling_factor(&self) -> Number {
+        1.0
+    }
 }

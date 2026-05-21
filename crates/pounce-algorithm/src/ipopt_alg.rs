@@ -406,7 +406,7 @@ impl IpoptAlgorithm {
             let alpha_primal = d.info_alpha_primal;
             let alpha_primal_char = d.info_alpha_primal_char;
             let ls_trials = d.info_ls_count;
-            let objective = c.curr_f();
+            let objective = c.unscaled_curr_f();
             drop(d);
             drop(c);
             self.iter_history

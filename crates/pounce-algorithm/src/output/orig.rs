@@ -68,7 +68,7 @@ impl IterationOutput for OrigIterationOutput {
         let c = cq.borrow();
 
         let iter = d.iter_count;
-        let unscaled_f = c.curr_f();
+        let unscaled_f = c.unscaled_curr_f();
         let inf_pr = match self.inf_pr_output {
             InfPrTag::Internal => c.curr_primal_infeasibility_max(),
             // The "original" mode wants the unscaled NLP constraint

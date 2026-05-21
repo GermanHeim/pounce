@@ -1544,6 +1544,10 @@ impl IpoptNlp for OrigIpoptNlp {
         Rc::clone(&self.pd_u)
     }
 
+    fn obj_scaling_factor(&self) -> Number {
+        self.obj_scale_factor.get()
+    }
+
     /// Populate `x` (length `n_x_var`) from the TNLP's starting point,
     /// compressed via `x_not_fixed_map`. Mirrors the `init_x` arm of
     /// upstream `IpOrigIpoptNLP::GetStartingPoint`.

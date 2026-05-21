@@ -544,6 +544,22 @@ impl IpoptCalculatedQuantities {
         nlp.eval_f(&*iv.x)
     }
 
+    /// Unscaled objective at the current iterate. `curr_f` returns the
+    /// internally scaled value (`f · df_`); upstream IPOPT prints the
+    /// unscaled objective in its iteration log, so this divides the
+    /// scaling back out. Mirrors `IpoptCalculatedQuantities::
+    /// unscaled_curr_f`. A zero factor (scaling never determined) is
+    /// treated as the identity.
+    pub fn unscaled_curr_f(&self) -> Number {
+        let scaled = self.curr_f();
+        let factor = self.nlp.borrow().obj_scaling_factor();
+        if factor == 0.0 {
+            scaled
+        } else {
+            scaled / factor
+        }
+    }
+
     pub fn trial_f(&self) -> Number {
         let iv = self.trial_iv();
         let mut nlp = self.nlp.borrow_mut();
