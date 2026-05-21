@@ -429,14 +429,23 @@ impl IpoptApplication {
         }
         // Upstream Ipopt routes every problem through the same primal-dual
         // IPM regardless of `m` — there is no separate "unconstrained
-        // Newton" path. Pounce historically dispatched `m == 0` to a dense
-        // Newton driver, which built a full n×n Hessian and blew up on
-        // anything large (e.g. bearing_400 with n = 160 000 → 25 GB
-        // matrix). Route small unconstrained problems to that driver only
-        // as a fast path; everything else goes through the sparse IPM so
-        // the linear-solver backend (MA57/FERAL) handles the augmented
-        // system instead of dense BLAS.
-        if info.m == 0 && info.n <= 1000 {
+        // Newton" path. Pounce historically dispatched `m == 0` to the
+        // dense MVP Newton driver in `pounce-nlp::newton_driver`, but that
+        // driver is explicitly *not* a port of the upstream algorithm: it
+        // is a plain damped-Newton with backtracking Armijo, no filter
+        // line search, no barrier strategy, no second-order corrections.
+        // On hard / multi-extremal unconstrained problems (e.g. the
+        // CUTEst DMN/DIAMOND powder-diffraction `*LS` family) it stalls
+        // in a slow, non-converging crawl and hits `max_iter` far from
+        // the solution, while the real IPM converges. So unconstrained
+        // problems now go through the sparse IPM (`optimize_constrained`)
+        // by default, exactly as upstream does — the linear-solver
+        // backend (FERAL/MA57) handles the augmented system, so there is
+        // no dense-Hessian blowup on large `n`. The MVP Newton driver
+        // remains available as an explicit opt-in for the small-problem
+        // fast path via `POUNCE_NEWTON_FASTPATH`.
+        let use_newton_fastpath = std::env::var("POUNCE_NEWTON_FASTPATH").is_ok();
+        if info.m == 0 && info.n <= 1000 && use_newton_fastpath {
             let mut borrow = tnlp.borrow_mut();
             let opts = self.newton_options_from_options_list();
             let (status, stats) = pounce_nlp::newton_driver::solve(&mut *borrow, opts);
