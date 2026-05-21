@@ -23,7 +23,6 @@
 
 pub mod alg_types;
 pub mod ipopt_nlp;
-pub mod newton_driver;
 pub mod orig_ipopt_nlp;
 pub mod return_codes;
 pub mod solve_statistics;

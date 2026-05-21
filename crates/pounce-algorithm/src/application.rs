@@ -11,18 +11,15 @@
 //! orchestration must live on the algorithm side. Public callers
 //! continue to import via `pounce_algorithm::IpoptApplication`.
 //!
-//! `optimize_tnlp` dispatches:
-//!
-//! * `m == 0` (no constraints reported by the TNLP) → falls through
-//!   to `pounce_nlp::newton_driver::solve` so unconstrained problems
-//!   keep working without the full primal-dual stack.
-//! * `m > 0` → builds the primal-dual algorithm via
-//!   [`crate::alg_builder::AlgorithmBuilder`] (default backend MA57
-//!   from `pounce-hsl`) and runs [`IpoptAlgorithm::optimize`].
+//! `optimize_tnlp` routes every problem — constrained or not —
+//! through the same primal-dual IPM, exactly as upstream Ipopt does:
+//! it builds the algorithm via [`crate::alg_builder::AlgorithmBuilder`]
+//! (default backend MA57 from `pounce-hsl`) and runs
+//! [`IpoptAlgorithm::optimize`].
 
 use crate::alg_builder::{
     AlgorithmBuilder, HessianApproxChoice, LineSearchChoice, LinearBackendFactory,
-    LinearSolverChoice, MuStrategyChoice, NlpScalingChoice,
+    LinearSolverChoice, MuStrategyChoice,
 };
 use crate::ipopt_alg::IpoptAlgorithm;
 use crate::ipopt_cq::IpoptCalculatedQuantities;
@@ -425,33 +422,14 @@ impl IpoptApplication {
         // the user already opted into the wrapper above (this avoids
         // a double pass and keeps semantics predictable).
         if info.m > 0 && self.is_l1_fallback_enabled() && !self.is_l1_penalty_enabled() {
-            return self.run_with_l1_fallback(tnlp, info);
+            return self.run_with_l1_fallback(tnlp);
         }
-        // Upstream Ipopt routes every problem through the same primal-dual
-        // IPM regardless of `m` — there is no separate "unconstrained
-        // Newton" path. Pounce historically dispatched `m == 0` to the
-        // dense MVP Newton driver in `pounce-nlp::newton_driver`, but that
-        // driver is explicitly *not* a port of the upstream algorithm: it
-        // is a plain damped-Newton with backtracking Armijo, no filter
-        // line search, no barrier strategy, no second-order corrections.
-        // On hard / multi-extremal unconstrained problems (e.g. the
-        // CUTEst DMN/DIAMOND powder-diffraction `*LS` family) it stalls
-        // in a slow, non-converging crawl and hits `max_iter` far from
-        // the solution, while the real IPM converges. So unconstrained
-        // problems now go through the sparse IPM (`optimize_constrained`)
-        // by default, exactly as upstream does — the linear-solver
-        // backend (FERAL/MA57) handles the augmented system, so there is
-        // no dense-Hessian blowup on large `n`. The MVP Newton driver
-        // remains available as an explicit opt-in for the small-problem
-        // fast path via `POUNCE_NEWTON_FASTPATH`.
-        let use_newton_fastpath = std::env::var("POUNCE_NEWTON_FASTPATH").is_ok();
-        if info.m == 0 && info.n <= 1000 && use_newton_fastpath {
-            let mut borrow = tnlp.borrow_mut();
-            let opts = self.newton_options_from_options_list();
-            let (status, stats) = pounce_nlp::newton_driver::solve(&mut *borrow, opts);
-            *self.statistics.borrow_mut() = stats;
-            return status;
-        }
+        // Every problem — constrained or not — goes through the same
+        // primal-dual IPM, exactly as upstream Ipopt does. There is no
+        // separate "unconstrained Newton" path: the linear-solver
+        // backend (FERAL/MA57) handles the augmented system, so the
+        // sparse IPM covers `m == 0` at any `n` without a dense-Hessian
+        // blowup.
         self.optimize_constrained(tnlp)
     }
 
@@ -534,9 +512,10 @@ impl IpoptApplication {
     fn run_with_l1_fallback(
         &mut self,
         tnlp: Rc<RefCell<dyn TNLP>>,
-        info: NlpInfo,
     ) -> ApplicationReturnStatus {
-        let first_status = self.run_standard_constrained_or_unconstrained(Rc::clone(&tnlp), info);
+        // First attempt: the standard IPM solve, no ℓ₁ wrapper. Only
+        // reached for `m > 0`, so `optimize_constrained` is exact.
+        let first_status = self.optimize_constrained(Rc::clone(&tnlp));
         if !is_l1_fallback_trigger(first_status) {
             return first_status;
         }
@@ -564,25 +543,6 @@ impl IpoptApplication {
         } else {
             first_status
         }
-    }
-
-    /// Run the standard dispatch path (unconstrained Newton or
-    /// constrained IPM) without consulting the ℓ₁ wrapper. Used by
-    /// the Phase 3.5 auto-fallback driver to perform its first
-    /// attempt before deciding whether to retry.
-    fn run_standard_constrained_or_unconstrained(
-        &mut self,
-        tnlp: Rc<RefCell<dyn TNLP>>,
-        info: NlpInfo,
-    ) -> ApplicationReturnStatus {
-        if info.m == 0 && info.n <= 1000 {
-            let mut borrow = tnlp.borrow_mut();
-            let opts = self.newton_options_from_options_list();
-            let (status, stats) = pounce_nlp::newton_driver::solve(&mut *borrow, opts);
-            *self.statistics.borrow_mut() = stats;
-            return status;
-        }
-        self.optimize_constrained(tnlp)
     }
 
     /// Phase-3 ℓ₁-exact penalty-barrier outer loop.
@@ -736,21 +696,6 @@ impl IpoptApplication {
         // Same dispatch as `optimize_tnlp` for now; warm-start handling
         // lands once the IPM path's warm-start hooks are exposed.
         self.optimize_tnlp(tnlp)
-    }
-
-    fn newton_options_from_options_list(&self) -> pounce_nlp::newton_driver::NewtonOptions {
-        let mut opts = pounce_nlp::newton_driver::NewtonOptions::default();
-        if let Ok((v, found)) = self.options.get_numeric_value("tol", "") {
-            if found {
-                opts.tol = v;
-            }
-        }
-        if let Ok((v, found)) = self.options.get_integer_value("max_iter", "") {
-            if found {
-                opts.max_iter = v;
-            }
-        }
-        opts
     }
 
     /// Constrained-NLP path: build adapter → OrigIpoptNlp → algorithm
@@ -1109,16 +1054,11 @@ impl IpoptApplication {
                 };
             }
         }
-        if let Ok((v, found)) = self.options.get_string_value("nlp_scaling_method", "") {
-            if found {
-                builder.nlp_scaling_method = match v.as_str() {
-                    "none" => NlpScalingChoice::None,
-                    "user-scaling" => NlpScalingChoice::User,
-                    "equilibration-based" => NlpScalingChoice::EquilibrationBased,
-                    _ => NlpScalingChoice::GradientBased,
-                };
-            }
-        }
+        // `nlp_scaling_method` is consumed NLP-side in
+        // `OrigIpoptNlp::determine_scaling_from_starting_point` (see the
+        // `determine_scaling_from_starting_point` call earlier in this
+        // method); there is no algorithm-side scaling strategy to wire.
+
         // Unlike the other options here, we always honor the registry
         // value (not just when the user set it explicitly): the option
         // registry default is "ma57" but `AlgorithmBuilder::default`
