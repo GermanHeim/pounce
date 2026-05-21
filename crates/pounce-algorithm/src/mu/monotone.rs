@@ -123,6 +123,14 @@ impl MonotoneMuUpdate {
 }
 
 impl MuUpdate for MonotoneMuUpdate {
+    /// Monotone μ throws `TINY_STEP_DETECTED` when a tiny step is
+    /// flagged and μ is already at its floor — see
+    /// `IpMonotoneMuUpdate.cpp`. The main loop realises that throw as a
+    /// `STOP_AT_TINY_STEP` termination.
+    fn terminates_on_tiny_step(&self) -> bool {
+        true
+    }
+
     /// Port of `IpMonotoneMuUpdate.cpp:InitializeImpl`. Seeds
     /// `curr_mu = min(mu_init, mu_max)`,
     /// `curr_tau = max(tau_min, 1 - curr_mu)`.

@@ -460,6 +460,10 @@ impl IpoptAlgorithm {
                 timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::Success);
             }
+            ConvergenceStatus::ConvergedToAcceptable => {
+                timing.check_convergence.end();
+                return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
+            }
             ConvergenceStatus::MaxIterExceeded => {
                 timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::MaxiterExceeded);
@@ -523,10 +527,14 @@ impl IpoptAlgorithm {
         // tiny-step branch) and the entry mu — if μ can't reduce while
         // the flag is on, upstream `IpMonotoneMuUpdate.cpp:158-161`
         // throws TINY_STEP_DETECTED → STOP_AT_TINY_STEP, which we
-        // realise as a clean termination here.
+        // realise as a clean termination here. Only the monotone update
+        // throws: `IpAdaptiveMuUpdate.cpp` consumes the tiny-step flag
+        // via its `force_no_progress` path (fix μ, keep iterating), so
+        // the termination is gated on `terminates_on_tiny_step()`.
         timing.update_barrier_parameter.start();
         let tiny_at_entry = self.data.borrow().tiny_step_flag;
         let mu_before = self.data.borrow().curr_mu;
+        let mu_terminates_on_tiny = self.bundle.mu_update.terminates_on_tiny_step();
         let next_mu = self.bundle.mu_update.update_barrier_parameter(
             &self.data,
             &self.cq,
@@ -535,7 +543,10 @@ impl IpoptAlgorithm {
         );
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
-        if tiny_at_entry && (next_mu - mu_before).abs() < Number::EPSILON {
+        if tiny_at_entry
+            && mu_terminates_on_tiny
+            && (next_mu - mu_before).abs() < Number::EPSILON
+        {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 

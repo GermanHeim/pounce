@@ -183,7 +183,7 @@ impl ConvCheck for OptErrorConvCheck {
         if nlp_err <= self.acceptable_tol {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
-                return ConvergenceStatus::Converged;
+                return ConvergenceStatus::ConvergedToAcceptable;
             }
         } else {
             self.acceptable_count = 0;
@@ -219,7 +219,7 @@ impl ConvCheck for OptErrorConvCheck {
         if self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f) {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
-                return ConvergenceStatus::Converged;
+                return ConvergenceStatus::ConvergedToAcceptable;
             }
         } else {
             self.acceptable_count = 0;
@@ -309,7 +309,10 @@ mod tests {
         // nlp_err between tol (1e-8) and acceptable (1e-6).
         assert_eq!(c.check_convergence(1e-7, 0), ConvergenceStatus::Continue);
         assert_eq!(c.check_convergence(1e-7, 1), ConvergenceStatus::Continue);
-        assert_eq!(c.check_convergence(1e-7, 2), ConvergenceStatus::Converged);
+        assert_eq!(
+            c.check_convergence(1e-7, 2),
+            ConvergenceStatus::ConvergedToAcceptable
+        );
     }
 
     #[test]
@@ -323,7 +326,10 @@ mod tests {
         assert_eq!(c.check_convergence(1e-3, 1), ConvergenceStatus::Continue);
         assert_eq!(c.check_convergence(1e-7, 2), ConvergenceStatus::Continue);
         assert_eq!(c.check_convergence(1e-7, 3), ConvergenceStatus::Continue);
-        assert_eq!(c.check_convergence(1e-7, 4), ConvergenceStatus::Converged);
+        assert_eq!(
+            c.check_convergence(1e-7, 4),
+            ConvergenceStatus::ConvergedToAcceptable
+        );
     }
 
     #[test]

@@ -384,7 +384,10 @@ pub fn run_inner_resto(
     // when the outer cv at re-entry is bounded above `max(100*tol, 1e-4)`
     // and `ErrorInStepComputation` otherwise.
     let strict_locally_infeasible = !is_square_problem
-        && matches!(status, SolverReturn::Success)
+        && matches!(
+            status,
+            SolverReturn::Success | SolverReturn::StopAtAcceptablePoint
+        )
         && inner_stationarity_converged
         && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4);
 

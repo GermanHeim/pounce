@@ -909,15 +909,26 @@ impl BacktrackingLineSearch {
                     };
                     let tau = data.borrow().curr_tau;
                     alpha_primal_soc = cq.borrow().aff_step_alpha_primal_max(&delta_soc, tau);
+                    // Upstream `IpFilterLSAcceptor.cpp` sets `actual_delta =
+                    // delta_soc` on an accepted SOC step: the *entire* step,
+                    // primal and dual, is replaced. The dual update therefore
+                    // uses the SOC step's own multiplier components — not the
+                    // original `delta` — and the dual fraction-to-boundary is
+                    // recomputed from `delta_soc`
+                    // (`IpBacktrackingLineSearch.cpp:639`). Applying `delta`'s
+                    // duals here left the accepted iterate with a primal from
+                    // `delta_soc` but duals from `delta`, diverging `inf_du`
+                    // from Ipopt on any `H`-flagged iteration (e.g. CRESC4).
+                    let alpha_dual_soc = cq.borrow().aff_step_alpha_dual_max(&delta_soc, tau);
                     let mut trial_iv = curr.deep_copy();
                     trial_iv.x.axpy(alpha_primal_soc, &*delta_soc.x);
                     trial_iv.s.axpy(alpha_primal_soc, &*delta_soc.s);
-                    trial_iv.y_c.axpy(alpha, &*delta.y_c);
-                    trial_iv.y_d.axpy(alpha, &*delta.y_d);
-                    trial_iv.z_l.axpy(alpha_dual, &*delta.z_l);
-                    trial_iv.z_u.axpy(alpha_dual, &*delta.z_u);
-                    trial_iv.v_l.axpy(alpha_dual, &*delta.v_l);
-                    trial_iv.v_u.axpy(alpha_dual, &*delta.v_u);
+                    trial_iv.y_c.axpy(alpha_primal_soc, &*delta_soc.y_c);
+                    trial_iv.y_d.axpy(alpha_primal_soc, &*delta_soc.y_d);
+                    trial_iv.z_l.axpy(alpha_dual_soc, &*delta_soc.z_l);
+                    trial_iv.z_u.axpy(alpha_dual_soc, &*delta_soc.z_u);
+                    trial_iv.v_l.axpy(alpha_dual_soc, &*delta_soc.v_l);
+                    trial_iv.v_u.axpy(alpha_dual_soc, &*delta_soc.v_u);
                     let trial_iv = trial_iv.freeze();
                     data.borrow_mut().set_trial(trial_iv);
                     let theta_soc = cq.borrow().trial_constraint_violation();
@@ -934,7 +945,7 @@ impl BacktrackingLineSearch {
                             .update_for_next_iteration(alpha_test, theta, phi, d_phi, phi_soc);
                         let mut d = data.borrow_mut();
                         d.info_alpha_primal = alpha_primal_soc;
-                        d.info_alpha_dual = alpha_dual;
+                        d.info_alpha_dual = alpha_dual_soc;
                         d.info_ls_count = trial + 1;
                         d.info_alpha_primal_char = mode.to_ascii_uppercase();
                         return AlphaResult::Accepted { n_steps: trial };

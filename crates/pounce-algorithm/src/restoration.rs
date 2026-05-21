@@ -93,4 +93,10 @@ pub trait RestorationPhase {
     /// search hands its acceptor to the resto conv check at restoration
     /// entry). Default no-op so non-filter-aware drivers compose.
     fn set_orig_progress_check(&mut self, _cb: Option<OrigProgressCallback>) {}
+
+    /// Propagate the outer algorithm's per-iteration print gate to the
+    /// restoration driver so the nested restoration IPM honors
+    /// `print_level == 0` instead of leaking its `r`-suffixed iteration
+    /// table to stdout. Default no-op for drivers without a nested IPM.
+    fn set_print_iter_output(&mut self, _enabled: bool) {}
 }

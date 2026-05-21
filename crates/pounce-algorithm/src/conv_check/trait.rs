@@ -20,6 +20,11 @@ use pounce_common::types::{Index, Number};
 pub enum ConvergenceStatus {
     Continue,
     Converged,
+    /// Converged to the looser `acceptable_*` tolerance band rather
+    /// than the tight `tol` — upstream `CONVERGED_TO_ACCEPTABLE_POINT`.
+    /// Maps to `SolverReturn::StopAtAcceptablePoint` →
+    /// `ApplicationReturnStatus::SolvedToAcceptableLevel`.
+    ConvergedToAcceptable,
     MaxIterExceeded,
     /// `max_cpu_time` budget reached. Maps to
     /// `SolverReturn::CpuTimeExceeded` → `MaximumCpuTimeExceeded`.

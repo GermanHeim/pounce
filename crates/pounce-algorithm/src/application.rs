@@ -907,6 +907,12 @@ impl IpoptApplication {
         if let Ok((v, found)) = self.options.get_integer_value("print_level", "") {
             if found && v <= 0 {
                 alg.print_iter_output = false;
+                // The nested restoration IPM is built inside the
+                // restoration driver, not by `IpoptAlgorithm::new`, so
+                // it never sees this gate unless we forward it.
+                if let Some(resto) = alg.restoration.as_mut() {
+                    resto.set_print_iter_output(false);
+                }
             }
         }
 
@@ -931,11 +937,13 @@ impl IpoptApplication {
             stats.restoration_outer_iters = alg.resto_outer_iters;
             stats.restoration_wall_secs = alg.resto_wall_secs;
             stats.iterations = std::mem::take(&mut alg.iter_history);
-            // Best-effort: capture final objective at the algorithm's
-            // (compressed `x_var`-space) iterate via the NLP. The
-            // fine-grained eval counters live on the concrete
-            // `OrigIpoptNlp`; threading them up through a generic
-            // `IpoptNlp` accessor is left for follow-up work.
+            // Capture the final *scaled* objective at the algorithm's
+            // (compressed `x_var`-space) iterate via the NLP: the
+            // algorithm-side `eval_f` returns `f * obj_scale_factor`.
+            // `final_objective` is seeded with it only as a best-effort
+            // fallback; the success path below overwrites it with the
+            // true unscaled objective from `finalize_via_orig_nlp`
+            // (which evaluates the user TNLP directly).
             let curr_x = alg.data.borrow().curr.as_ref().map(|c| c.x.clone());
             if let Some(x) = curr_x {
                 if let Ok(f) = try_eval_curr_f(&nlp_handle, &x) {
@@ -985,10 +993,19 @@ impl IpoptApplication {
             }
         }
 
-        // Finalize: forward the final iterate to the user's TNLP.
-        if let Err(()) = finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp)
-        {
-            // Couldn't finalize; still surface the original status.
+        // Finalize: forward the final iterate to the user's TNLP. The
+        // returned objective is evaluated on the *user* TNLP at the
+        // unscaled iterate, so it overrides the scaled best-effort
+        // value stashed in `final_objective` above (the algorithm-side
+        // `eval_f` returns `f * obj_scale_factor`).
+        match finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp) {
+            Ok(f_unscaled) => {
+                self.statistics.borrow_mut().final_objective = f_unscaled;
+            }
+            Err(()) => {
+                // Couldn't finalize; keep the scaled fallback and
+                // surface the original status.
+            }
         }
 
         // End-of-solve timing report. Gated on `print_timing_statistics`
@@ -1358,7 +1375,8 @@ fn solver_return_to_app_status(s: SolverReturn) -> ApplicationReturnStatus {
 }
 
 /// Best-effort evaluation of the objective at the algorithm's final
-/// `x`. Used only to populate `SolveStatistics::final_objective`.
+/// `x`. Returns the *scaled* objective (`f * obj_scale_factor`); used
+/// to populate `SolveStatistics::final_scaled_objective`.
 fn try_eval_curr_f(
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     x: &Rc<dyn pounce_linalg::Vector>,
@@ -1391,14 +1409,16 @@ fn is_l1_fallback_trigger(status: ApplicationReturnStatus) -> bool {
 /// in compressed split form — re-assembling them into the user's
 /// `lambda` / `z_l` / `z_u` is mechanical but lives behind a
 /// `OrigIpoptNlp::finalize_solution_*` accessor that's still being
-/// fleshed out). Returns `Err` if the final iterate is missing.
+/// fleshed out). On success returns the unscaled objective evaluated
+/// on the user TNLP at the final iterate; returns `Err` if the final
+/// iterate is missing.
 fn finalize_via_orig_nlp(
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     alg: &IpoptAlgorithm,
     solver_status: SolverReturn,
     _app_status: ApplicationReturnStatus,
     tnlp: &Rc<RefCell<dyn TNLP>>,
-) -> Result<(), ()> {
+) -> Result<Number, ()> {
     let curr = alg.data.borrow().curr.clone().ok_or(())?;
     // Lift compressed x_var → full-x (length `info.n`) so the user
     // TNLP receives the same shape it provided. With `make_parameter`
@@ -1446,7 +1466,7 @@ fn finalize_via_orig_nlp(
         &TnlpIpoptData::default(),
         &TnlpIpoptCq::default(),
     );
-    Ok(())
+    Ok(f_final)
 }
 
 #[cfg(test)]

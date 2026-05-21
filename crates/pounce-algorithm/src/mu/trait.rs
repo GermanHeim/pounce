@@ -33,4 +33,15 @@ pub trait MuUpdate {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         pd_search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Number;
+
+    /// Whether a flagged tiny step with μ unable to decrease should
+    /// terminate the algorithm with `STOP_AT_TINY_STEP`. Upstream
+    /// `IpMonotoneMuUpdate.cpp` throws `TINY_STEP_DETECTED` in exactly
+    /// that case; `IpAdaptiveMuUpdate.cpp` instead routes the tiny-step
+    /// flag through its `force_no_progress` path — it fixes μ and keeps
+    /// iterating, never self-terminating. Default `false` matches the
+    /// adaptive behaviour; `MonotoneMuUpdate` overrides to `true`.
+    fn terminates_on_tiny_step(&self) -> bool {
+        false
+    }
 }
