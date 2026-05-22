@@ -11,10 +11,7 @@ description = "FERAL pure-Rust sparse symmetric LDL^T backend for POUNCE. Implem
 [dependencies]
 pounce-common = { path = "../pounce-common" }
 pounce-linsol = { path = "../pounce-linsol" }
-# Pinned to a specific rev rather than a tag so CI builds against the
-# exact feral commit the dev tree was last verified against. Bump rev
-# when promoting a new feral release.
-feral = { git = "https://github.com/jkitchin/feral", rev = "b3e4d3e" }
+feral = "0.5.0"
 
 [lints]
 workspace = true
