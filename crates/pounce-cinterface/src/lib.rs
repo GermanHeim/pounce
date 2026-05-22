@@ -38,15 +38,15 @@ use pounce_algorithm::application::{
     default_backend_factory, feral_config_from_options, IpoptApplication,
 };
 use pounce_algorithm::intermediate as ip_intermediate;
-use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory, InnerBackendFactoryFactory,
-};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution, SparsityRequest,
     StartingPoint, TNLP,
+};
+use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
+use pounce_restoration::resto_inner_solver::{
+    make_default_restoration_factory, InnerBackendFactoryFactory,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr};

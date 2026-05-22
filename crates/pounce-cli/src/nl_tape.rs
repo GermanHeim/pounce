@@ -439,8 +439,7 @@ impl Tape {
                             adj[*a] += w * p_a;
                             let mut dp_a = dr * u.powf(r - 1.0);
                             if u > 0.0 {
-                                dp_a +=
-                                    r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
+                                dp_a += r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
                             } else {
                                 dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
                             }
@@ -1405,10 +1404,17 @@ fn build_into_summand(
                 local.push(SummandOp::Local(TapeOp::Const(0.0)));
                 return i;
             }
-            let mut acc =
-                build_into_summand(&args[0], local, local_cache, prelude, prelude_map, cse_count);
+            let mut acc = build_into_summand(
+                &args[0],
+                local,
+                local_cache,
+                prelude,
+                prelude_map,
+                cse_count,
+            );
             for a in &args[1..] {
-                let nxt = build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
+                let nxt =
+                    build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
                 let i = local.len();
                 local.push(SummandOp::Local(TapeOp::Add(acc, nxt)));
                 acc = i;
@@ -1432,14 +1438,8 @@ fn build_into_summand(
                 local_cache.insert(key, li);
                 li
             } else {
-                let li = build_into_summand(
-                    body,
-                    local,
-                    local_cache,
-                    prelude,
-                    prelude_map,
-                    cse_count,
-                );
+                let li =
+                    build_into_summand(body, local, local_cache, prelude, prelude_map, cse_count);
                 local_cache.insert(key, li);
                 li
             }
@@ -1474,7 +1474,14 @@ fn try_emit_const_pow_summand(
         ));
     }
     if c == 0.5 {
-        let b = build_into_summand(base_expr, local, local_cache, prelude, prelude_map, cse_count);
+        let b = build_into_summand(
+            base_expr,
+            local,
+            local_cache,
+            prelude,
+            prelude_map,
+            cse_count,
+        );
         let i = local.len();
         local.push(SummandOp::Local(TapeOp::Sqrt(b)));
         return Some(i);
@@ -1486,7 +1493,14 @@ fn try_emit_const_pow_summand(
             local.push(SummandOp::Local(TapeOp::Const(1.0)));
             return Some(i);
         }
-        let b = build_into_summand(base_expr, local, local_cache, prelude, prelude_map, cse_count);
+        let b = build_into_summand(
+            base_expr,
+            local,
+            local_cache,
+            prelude,
+            prelude_map,
+            cse_count,
+        );
         let pos = emit_int_pow_summand(b, n, local);
         if c < 0.0 {
             let one_idx = local.len();
@@ -1752,14 +1766,7 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
 }
 
 #[inline]
-fn rev_step(
-    op: &TapeOp,
-    i: usize,
-    vals: &[f64],
-    adj: &mut [f64],
-    a: f64,
-    grad: &mut [f64],
-) {
+fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: &mut [f64]) {
     match op {
         TapeOp::Const(_) => {}
         TapeOp::Var(j) => {
@@ -1932,8 +1939,8 @@ fn ror_step(
             adj[*a] += w / vb;
             adj_dot[*a] += wd / vb + w * (-dot[*b] / vb2);
             adj[*b] += w * (-vals[*a] / vb2);
-            adj_dot[*b] += wd * (-vals[*a] / vb2)
-                + w * (-dot[*a] / vb2 + 2.0 * vals[*a] * dot[*b] / vb3);
+            adj_dot[*b] +=
+                wd * (-vals[*a] / vb2) + w * (-dot[*a] / vb2 + 2.0 * vals[*a] * dot[*b] / vb3);
         }
         TapeOp::Pow(a, b) => {
             let u = vals[*a];

@@ -543,10 +543,7 @@ impl IpoptAlgorithm {
         );
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
-        if tiny_at_entry
-            && mu_terminates_on_tiny
-            && (next_mu - mu_before).abs() < Number::EPSILON
-        {
+        if tiny_at_entry && mu_terminates_on_tiny && (next_mu - mu_before).abs() < Number::EPSILON {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 

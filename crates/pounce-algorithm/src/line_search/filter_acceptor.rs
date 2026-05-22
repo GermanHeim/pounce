@@ -163,11 +163,7 @@ impl FilterLsAcceptor {
         phi: Number,
         phi_trial: Number,
     ) -> bool {
-        pounce_common::utils::compare_le(
-            phi_trial - phi,
-            self.eta_phi * alpha_primal * d_phi,
-            phi,
-        )
+        pounce_common::utils::compare_le(phi_trial - phi, self.eta_phi * alpha_primal * d_phi, phi)
     }
 
     /// Sufficient progress check (used when *not* in switching mode).

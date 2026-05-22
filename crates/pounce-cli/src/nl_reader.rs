@@ -1136,7 +1136,10 @@ impl NlTnlp {
         let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
         for (&(i, j), &idx) in hess_map.iter() {
             let c = var_color[j];
-            debug_assert!(c != u32::MAX, "column {j} has Hessian pair {idx} but no color");
+            debug_assert!(
+                c != u32::MAX,
+                "column {j} has Hessian pair {idx} but no color"
+            );
             decoding[c as usize].push(ColorWrite {
                 row: i as u32,
                 hess_idx: idx as u32,
@@ -1206,8 +1209,8 @@ impl NlTnlp {
             }
             let t = total.max(1);
             let nnz_h = h_irow.len();
-            let avg_decode = decoding.iter().map(|d| d.len()).sum::<usize>() as f64
-                / n_colors.max(1) as f64;
+            let avg_decode =
+                decoding.iter().map(|d| d.len()).sum::<usize>() as f64 / n_colors.max(1) as f64;
             eprintln!(
                 "[tape stats] summands={total} (obj={n_obj} con={n_con}) \
                  total_ops={sum_ops} avg_ops={:.1} max_ops={max_tape_n} \

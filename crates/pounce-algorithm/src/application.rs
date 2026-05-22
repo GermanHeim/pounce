@@ -509,10 +509,7 @@ impl IpoptApplication {
     /// point) even though the returned status is the original's.
     /// Documented on the option's help text; tightening this is a
     /// Phase-4 follow-up.
-    fn run_with_l1_fallback(
-        &mut self,
-        tnlp: Rc<RefCell<dyn TNLP>>,
-    ) -> ApplicationReturnStatus {
+    fn run_with_l1_fallback(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         // First attempt: the standard IPM solve, no ℓ₁ wrapper. Only
         // reached for `m > 0`, so `optimize_constrained` is exact.
         let first_status = self.optimize_constrained(Rc::clone(&tnlp));
