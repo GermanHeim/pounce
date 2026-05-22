@@ -37,6 +37,18 @@ parameter estimation, gas/water network design). The C ABI shim
 
 See `benchmarks/` for the comparison harness against upstream Ipopt.
 
+## Documentation
+
+The full user guide lives in [`docs/`](docs/src) as an
+[mdbook](https://rust-lang.github.io/mdBook/) — installation, the CLI,
+solver options, the JSON solve report, sensitivity analysis, and the
+Pyomo / Python integrations. Browse the Markdown sources directly on
+GitHub, or render the book locally:
+
+```sh
+make book       # builds docs/book/ (requires `cargo install mdbook`)
+```
+
 ## Workspace layout
 
 | Crate                                          | Purpose |
@@ -159,7 +171,7 @@ pounce problem.nl --json-output result.json --json-detail full
 
 The report is FAIR-aligned (Wilkinson et al. 2016, DOI
 [10.1038/sdata.2016.18](https://doi.org/10.1038/sdata.2016.18)) — every
-field documented in [`docs/schema/solve-report-v1.md`](docs/schema/solve-report-v1.md).
+field documented in [`docs/src/schema/solve-report-v1.md`](docs/src/schema/solve-report-v1.md).
 `--json-detail summary` (default) emits status, primal `x`, dual
 `lambda`, and aggregate statistics; `--json-detail full` adds the
 per-iteration trajectory (`iter`, `objective`, `inf_pr`, `inf_du`, `mu`,
@@ -176,15 +188,20 @@ The `pounce-sensitivity` crate is a Rust port of upstream Ipopt's
 10.1007/s12532-012-0043-2](https://doi.org/10.1007/s12532-012-0043-2)).
 Three entry points cover the common workflows:
 
-* **AMPL CLI** — `pounce_sens` consumes `.nl` files annotated with
-  sIPOPT suffixes (`sens_state_1`, `sens_state_value_1`,
-  `sens_init_constr`) and writes the perturbed primal back as
-  `sens_sol_state_1`:
+* **AMPL CLI** — the main `pounce` driver auto-detects the sIPOPT
+  suffixes (`sens_state_1`, `sens_state_value_1`, `sens_init_constr`)
+  in an input `.nl`, runs a post-optimal sensitivity step after the
+  solve, and writes the perturbed primal back as `sens_sol_state_1` —
+  no separate binary or flag needed:
 
   ```sh
-  pounce_sens problem.nl              # writes problem.sol
-  pounce_sens problem.nl out.sol --json-output result.json --json-detail full
+  pounce problem.nl                   # writes problem.sol
+  pounce problem.nl out.sol --json-output result.json --json-detail full
   ```
+
+  `pounce_sens` is retained as a thin backward-compatibility alias:
+  `pounce_sens in.nl out.sol` is identical to `pounce in.nl out.sol`,
+  so existing AMPL / solver scripts keep working unchanged.
 
 * **Rust library** — `SensSolve` is a builder that wraps the
   `on_converged` callback plumbing into a single call:
@@ -210,10 +227,9 @@ is available via `--rh-eigendecomp` (AMPL CLI),
 `solve_with_sens(rh_eigendecomp=True)` (Python). Bound projection of the
 perturbed step is available via `--sens-boundcheck [--sens-bound-eps EPS]`
 (AMPL CLI), `SensSolve::with_boundcheck(eps)` (Rust), and
-`solve_with_sens(sens_boundcheck=True, sens_bound_eps=…)` (Python); the
-implementation is a single-pass clamp rather than upstream's iterative
-Schur refinement — track progress in
-[pounce#7](https://github.com/jkitchin/pounce/issues/7).
+`solve_with_sens(sens_boundcheck=True, sens_bound_eps=…)` (Python). The
+bound projection is a single-pass clamp; upstream's iterative Schur
+refinement (re-factorize on each violation) is intentionally not ported.
 
 ## Benchmarks
 
@@ -231,3 +247,45 @@ make bench-cutest       # CUTEst (requires one-time `make bench-cutest-prepare`)
 ```
 
 See `benchmarks/README.md` for the full list and per-suite details.
+
+## Acknowledgments
+
+POUNCE is a Rust port of [Ipopt](https://github.com/coin-or/Ipopt),
+the interior-point nonlinear programming solver by Andreas Wächter,
+Lorenz T. Biegler, and the COIN-OR community. Its algorithm, console
+output, and option semantics are modeled directly on that codebase,
+which is released under the EPL-2.0.
+
+It is a sibling of [ripopt](https://github.com/jkitchin/ripopt), an
+earlier memory-safe interior-point NLP optimizer in Rust by the same
+author ([doi:10.5281/zenodo.19542664](https://doi.org/10.5281/zenodo.19542664)).
+
+### Key references
+
+- Wächter, A., Biegler, L.T. "On the implementation of an
+  interior-point filter line-search algorithm for large-scale
+  nonlinear programming." *Mathematical Programming* 106(1), 25–57
+  (2006). [doi:10.1007/s10107-004-0559-y](https://doi.org/10.1007/s10107-004-0559-y)
+  — the algorithm POUNCE implements.
+- Wächter, A., Biegler, L.T. "Line search filter methods for nonlinear
+  programming: Motivation and global convergence." *SIAM Journal on
+  Optimization* 16(1), 1–31 (2005).
+  [doi:10.1137/S1052623403426556](https://doi.org/10.1137/S1052623403426556)
+- Wächter, A., Biegler, L.T. "Line search filter methods for nonlinear
+  programming: Local convergence." *SIAM Journal on Optimization*
+  16(1), 32–48 (2005).
+  [doi:10.1137/S1052623403426544](https://doi.org/10.1137/S1052623403426544)
+- Fletcher, R., Leyffer, S. "Nonlinear programming without a penalty
+  function." *Mathematical Programming* 91(2), 239–269 (2002).
+  [doi:10.1007/s101070100244](https://doi.org/10.1007/s101070100244)
+  — the filter concept underlying the line search.
+- Pirnay, H., López-Negrete, R., Biegler, L.T. "Optimal sensitivity
+  based on IPOPT." *Mathematical Programming Computation* 4(4),
+  307–331 (2012).
+  [doi:10.1007/s12532-012-0043-2](https://doi.org/10.1007/s12532-012-0043-2)
+  — the sIPOPT method behind `pounce-sensitivity`.
+- Duff, I.S. "MA57—a code for the solution of sparse symmetric
+  definite and indefinite systems." *ACM Transactions on Mathematical
+  Software* 30(2), 118–144 (2004).
+  [doi:10.1145/992200.992202](https://doi.org/10.1145/992200.992202)
+  — the optional `ma57` linear-solver backend.

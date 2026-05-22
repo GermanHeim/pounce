@@ -87,7 +87,7 @@ pounce problem.nl --json-output result.json --json-detail full
 The JSON report carries the same data the AMPL `.sol` file does
 (status, primal `x`, dual `lambda`, suffixes) plus FAIR-aligned
 provenance metadata (solver identity, schema version, timestamps).
-See [`docs/schema/solve-report-v1.md`](../../docs/schema/solve-report-v1.md)
+See [`docs/src/schema/solve-report-v1.md`](../../docs/src/schema/solve-report-v1.md)
 for the field reference.
 
 `--json-detail` knobs:

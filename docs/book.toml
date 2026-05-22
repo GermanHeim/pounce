@@ -1,0 +1,11 @@
+[book]
+title = "POUNCE"
+description = "A pure-Rust port of the Ipopt interior-point nonlinear programming solver"
+authors = ["John Kitchin"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/jkitchin/pounce"
+edit-url-template = "https://github.com/jkitchin/pounce/edit/main/docs/src/{path}"

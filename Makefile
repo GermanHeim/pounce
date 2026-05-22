@@ -9,6 +9,7 @@
 #   make clippy           # lint with clippy (treats warnings as errors)
 #   make fmt              # rustfmt the workspace
 #   make doc              # build rustdoc
+#   make book             # build the mdbook documentation (docs/)
 #   make install          # install pounce CLI + cinterface cdylib under $(PREFIX)
 #   make uninstall        # remove installed artifacts
 #   make clean            # cargo clean
@@ -76,7 +77,7 @@ PRINT_LEVEL    ?= 5
 BENCH_OPTIONS  ?=
 BENCH_ARGS     := linear_solver=$(LINEAR_SOLVER) max_iter=$(MAX_ITER) print_level=$(PRINT_LEVEL) $(BENCH_OPTIONS)
 
-.PHONY: all build debug test check clippy fmt fmt-check doc install uninstall clean help \
+.PHONY: all build debug test check clippy fmt fmt-check doc book install uninstall clean help \
         bench bench-cho bench-gas bench-water bench-mittelmann bench-cutest \
         bench-cutest-prepare bench-cutest-smoke bench-cutest-report bench-clean
 
@@ -105,6 +106,9 @@ fmt-check:
 
 doc:
 	$(CARGO) doc --workspace --no-deps $(CARGO_PROFILE_FLAG)
+
+book:
+	mdbook build docs
 
 install: build
 	@echo "Installing pounce into $(PREFIX)"

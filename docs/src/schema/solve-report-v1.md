@@ -8,7 +8,7 @@ PATH`. The report carries everything an AMPL `.sol` file holds —
 status, primal `x`, dual `lambda`, suffix blocks — plus FAIR-aligned
 provenance metadata and (optionally) the per-iteration trajectory.
 
-Implementation: [`crates/pounce-cli/src/solve_report.rs`](../../crates/pounce-cli/src/solve_report.rs).
+Implementation: [`crates/pounce-cli/src/solve_report.rs`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-cli/src/solve_report.rs).
 
 ## Why a structured solve report?
 
