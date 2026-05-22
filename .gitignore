@@ -42,6 +42,10 @@ python/*.egg-info/
 # are tracked; this lock is process-local state)
 .crucible/references.bib.lock
 
+# Source PDFs are kept locally but not tracked — the extracted .txt
+# alongside each is what the wiki is distilled from.
+.crucible/sources/external/pdfs/*.pdf
+
 # macOS
 .DS_Store
 
