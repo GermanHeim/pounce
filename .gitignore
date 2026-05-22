@@ -38,13 +38,10 @@ python/*.egg-info/
 # Claude Code local state
 .claude/
 
-# Crucible knowledge base — transient lock file (the .bib and graph db
-# are tracked; this lock is process-local state)
-.crucible/references.bib.lock
-
-# Source PDFs are kept locally but not tracked — the extracted .txt
-# alongside each is what the wiki is distilled from.
-.crucible/sources/external/pdfs/*.pdf
+# Crucible knowledge base — kept entirely local. The distilled sources
+# include extracted text of copyrighted papers, so the whole directory
+# stays out of version control.
+.crucible/
 
 # macOS
 .DS_Store
