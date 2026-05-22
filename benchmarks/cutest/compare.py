@@ -6,6 +6,7 @@ Reads a single JSON file with solver field per entry.
 Usage:
     python compare.py results.json
     python compare.py results.json --output report.md
+    python compare.py results.json --low-dof-max 2
 """
 
 import json
@@ -47,11 +48,20 @@ def fmt_time(t):
         return f"{t*1e6:.0f}us"
 
 
-def classify_problem(n, m):
+def classify_problem(n, m, dof, low_dof_max):
+    """Bucket a problem into a benchmark cohort.
+
+    Constrained problems whose degrees of freedom (n - n_eq) are at or
+    below `low_dof_max` go into their own `low-dof` class: they are
+    near-square systems that solve almost instantly and would otherwise
+    skew the aggregate timing/iteration stats of the genuinely hard
+    problems. `dof` is None when the result predates the n_eq field.
+    """
     if m == 0:
         return "unconstrained"
-    else:
-        return "constrained"
+    if dof is not None and dof <= low_dof_max:
+        return "low-dof"
+    return "constrained"
 
 
 def main():
@@ -60,6 +70,12 @@ def main():
         sys.exit(1)
 
     results_path = sys.argv[1]
+
+    low_dof_max = 0
+    if '--low-dof-max' in sys.argv:
+        idx = sys.argv.index('--low-dof-max')
+        low_dof_max = int(sys.argv[idx + 1])
+
     output_path = None
     if '--output' in sys.argv:
         idx = sys.argv.index('--output')
@@ -99,11 +115,14 @@ def main():
 
         n = rr.get('n', cr.get('n', 0))
         m = rr.get('m', cr.get('m', 0))
+        n_eq = rr.get('n_eq', cr.get('n_eq'))
+        dof = (n - n_eq) if n_eq is not None else None
 
         comparisons.append({
             'name': name,
             'n': n,
             'm': m,
+            'dof': dof,
             'ripopt_status': rr.get('status', 'N/A'),
             'ipopt_status': cr.get('status', 'N/A'),
             'ripopt_obj': rr.get('objective', float('nan')),
@@ -119,7 +138,7 @@ def main():
             'ripopt_solved': r_solved,
             'ipopt_solved': c_solved,
             'both_solved': both_solved,
-            'category': classify_problem(n, m),
+            'category': classify_problem(n, m, dof, low_dof_max),
         })
 
     # Statistics
@@ -199,6 +218,13 @@ def main():
 
     lines.append("## Category Breakdown")
     lines.append("")
+    lines.append(
+        f"`low-dof` = constrained problems with degrees of freedom "
+        f"(n &minus; n_eq) &le; {low_dof_max} &mdash; near-square systems split "
+        f"out so they don't skew the harder cohorts. Override with "
+        f"`--low-dof-max N`."
+    )
+    lines.append("")
     lines.append("| Category | Total | ripopt | Ipopt | Both | Match |")
     lines.append("|----------|-------|--------|-------|------|-------|")
     for cat in sorted(categories.keys()):
@@ -208,8 +234,8 @@ def main():
 
     lines.append("## Detailed Results")
     lines.append("")
-    lines.append("| Problem | n | m | ripopt | Ipopt | Obj Diff | r_iter | i_iter | r_time | i_time | Speedup | Status |")
-    lines.append("|---------|---|---|--------|-------|----------|--------|--------|--------|--------|---------|--------|")
+    lines.append("| Problem | n | m | dof | ripopt | Ipopt | Obj Diff | r_iter | i_iter | r_time | i_time | Speedup | Status |")
+    lines.append("|---------|---|---|-----|--------|-------|----------|--------|--------|--------|--------|---------|--------|")
     for c in comparisons:
         od = f"{c['obj_diff']:.2e}" if not math.isnan(c['obj_diff']) else "N/A"
         rt_str = fmt_time(c['ripopt_time']) if c['ripopt_time'] > 0 else "N/A"
@@ -228,7 +254,8 @@ def main():
             status = "ipopt_FAIL"
         else:
             status = "MISMATCH"
-        lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['ripopt_status'][:12]} | {c['ipopt_status'][:12]} | {od} | {c['ripopt_iters']} | {c['ipopt_iters']} | {rt_str} | {it_str} | {sp_str} | {status} |")
+        dof_str = str(c['dof']) if c['dof'] is not None else "N/A"
+        lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {dof_str} | {c['ripopt_status'][:12]} | {c['ipopt_status'][:12]} | {od} | {c['ripopt_iters']} | {c['ipopt_iters']} | {rt_str} | {it_str} | {sp_str} | {status} |")
     lines.append("")
 
     # Performance comparison

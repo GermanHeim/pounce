@@ -32,6 +32,7 @@ struct CutestResult {
     solver: String,
     n: usize,
     m: usize,
+    n_eq: usize,
     status: String,
     #[serde(serialize_with = "ser_f64", deserialize_with = "de_f64")]
     objective: f64,
@@ -396,6 +397,7 @@ fn pounce_status_label(s: SolverReturn) -> String {
 fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
     let n = problem.n;
     let m = problem.m;
+    let n_eq = problem.n_eq;
     let mut x_l = problem.x_l.clone();
     let mut x_u = problem.x_u.clone();
     let mut g_l = if m > 0 {
@@ -446,6 +448,7 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
                 solver: "ipopt".to_string(),
                 n,
                 m,
+                n_eq,
                 status: "Internal_Error".to_string(),
                 objective: f64::NAN,
                 constraint_violation: f64::NAN,
@@ -489,6 +492,7 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
             solver: "ipopt".to_string(),
             n,
             m,
+            n_eq,
             status: ipopt_status_label(status),
             objective: obj_val,
             constraint_violation: cv,
@@ -524,6 +528,7 @@ fn ma57_backend_factory() -> LinearBackendFactory {
 fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
     let n = problem.n;
     let m = problem.m;
+    let n_eq = problem.n_eq;
     let name = problem.name.clone();
 
     let problem_rc: Rc<RefCell<CutestProblem>> = Rc::new(RefCell::new(problem));
@@ -568,6 +573,7 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
                 solver: "pounce".to_string(),
                 n,
                 m,
+                n_eq,
                 status: format!("Init_Error({:?})", e.kind),
                 objective: f64::NAN,
                 constraint_violation: f64::NAN,
@@ -606,6 +612,7 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
         solver: "pounce".to_string(),
         n,
         m,
+        n_eq,
         status: final_status,
         objective: final_obj,
         constraint_violation: cv,
@@ -745,6 +752,7 @@ fn main() {
         };
         let n = p.n;
         let m = p.m;
+        let n_eq = p.n_eq;
         p.cleanup();
         if n > max_n {
             eprintln!("  SKIP {} (n={} > max_n={})", name, n, max_n);
@@ -781,6 +789,7 @@ fn main() {
                             solver: solver.to_string(),
                             n,
                             m,
+                            n_eq,
                             status,
                             objective: f64::NAN,
                             constraint_violation: f64::NAN,

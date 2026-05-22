@@ -37,6 +37,8 @@ pub struct CutestProblem {
     pub name: String,
     pub n: usize,
     pub m: usize,
+    /// Number of equality constraints. Degrees of freedom = `n - n_eq`.
+    pub n_eq: usize,
     funit: i32,
     pub x0: Vec<f64>,
     pub x_l: Vec<f64>,
@@ -133,6 +135,8 @@ impl CutestProblem {
                     return Err(format!("cutest_csetup failed with status={}", status));
                 }
 
+                let n_eq = equatn.iter().filter(|&&e| e).count();
+
                 for b in x_l.iter_mut() {
                     *b = convert_bound(*b);
                 }
@@ -203,6 +207,7 @@ impl CutestProblem {
                     name: name.to_string(),
                     n,
                     m,
+                    n_eq,
                     funit,
                     x0,
                     x_l,
@@ -282,6 +287,7 @@ impl CutestProblem {
                     name: name.to_string(),
                     n,
                     m: 0,
+                    n_eq: 0,
                     funit,
                     x0,
                     x_l,
