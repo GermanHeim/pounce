@@ -3,6 +3,10 @@
 # Alternate target dir for the MA57-linked build
 /target-ma57
 
+# Local cargo config — holds a machine-specific CoinHSL rpath for the
+# optional `ma57` feature. Set COINHSL_DIR instead (see crates/pounce-hsl).
+/.cargo/config.toml
+
 # Upstream Ipopt source mirror — tracked separately (vendor as submodule if desired)
 /ref
 

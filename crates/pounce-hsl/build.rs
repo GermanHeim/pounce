@@ -1,8 +1,8 @@
 //! Tells cargo where to find `libcoinhsl.dylib` at link- and run-time.
 //!
-//! Default search path is the precompiled CoinHSL drop the user
-//! supplied; override with the env var `COINHSL_DIR` (which must
-//! contain `lib/libcoinhsl.{dylib,a}`).
+//! Set the env var `COINHSL_DIR` to a CoinHSL install whose `lib/`
+//! holds `libcoinhsl.{dylib,a}`. Only consulted when the `ma57`
+//! feature is enabled — this crate is left out of the default build.
 //!
 //! `libcoinhsl.dylib` itself depends on `libopenblas`, `libmetis`,
 //! `libgfortran.5`, `libgomp.1`, all of which live next to it under
@@ -12,15 +12,17 @@
 use std::env;
 use std::path::PathBuf;
 
-const DEFAULT_COINHSL_DIR: &str =
-    "/Users/jkitchin/Dropbox/projects/CoinHSL.v2023.11.17.aarch64-apple-darwin-libgfortran5";
-
 fn main() {
     println!("cargo:rerun-if-env-changed=COINHSL_DIR");
 
-    let coinhsl_dir = env::var("COINHSL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_COINHSL_DIR));
+    let coinhsl_dir = env::var("COINHSL_DIR").map(PathBuf::from).unwrap_or_else(|_| {
+        panic!(
+            "the `ma57` feature requires the COINHSL_DIR environment variable to \
+             point at a CoinHSL install whose `lib/` holds libcoinhsl.{{dylib,a}} \
+             (build CoinHSL from https://www.hsl.rl.ac.uk/ipopt/). Omit \
+             `--features ma57` to use the pure-Rust FERAL backend instead."
+        )
+    });
 
     let lib_dir = coinhsl_dir.join("lib");
     assert!(

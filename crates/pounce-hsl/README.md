@@ -11,16 +11,24 @@ this backend instead of falling back to FERAL.
 
 ## Prerequisites
 
-1. **`libcoinhsl`** discoverable by the linker. Build from
-   [HSL for IPOPT](https://www.hsl.rl.ac.uk/ipopt/) or install via
-   your package manager.
-2. On macOS, ensure `libcoinhsl.dylib` is on `DYLD_LIBRARY_PATH`
-   or installed under `/usr/local/lib` (or `$HOME/.local/lib`).
-3. Linux: `LD_LIBRARY_PATH` or `ldconfig`-known path.
+1. A **CoinHSL install** — build from
+   [HSL for IPOPT](https://www.hsl.rl.ac.uk/ipopt/) or use a
+   precompiled drop. Its `lib/` must contain `libcoinhsl.{dylib,a}`.
+2. Set **`COINHSL_DIR`** to that install when building with
+   `--features ma57`:
 
-`build.rs` checks for the library via `pkg-config` and falls back to
-the linker default. The `links = "coinhsl"` declaration in `Cargo.toml`
-prevents accidental double-link.
+   ```sh
+   COINHSL_DIR=/path/to/CoinHSL cargo build -p pounce-cli --release --features ma57
+   ```
+
+`build.rs` reads `COINHSL_DIR`, adds its `lib/` to the link search
+path, and embeds an `-rpath` so `libcoinhsl` and its transitive
+dependencies (`libopenblas`, `libmetis`, `libgfortran`, `libgomp`)
+resolve at runtime. That `-rpath` covers `pounce-hsl`'s own test and
+bench binaries only; to run a downstream binary such as the `pounce`
+CLI, also put `libcoinhsl`'s `lib/` on `DYLD_LIBRARY_PATH` (macOS) or
+`LD_LIBRARY_PATH` (Linux). The `links = "coinhsl"` declaration in
+`Cargo.toml` prevents accidental double-link.
 
 ## Why MA57?
 
