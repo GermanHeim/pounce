@@ -1118,19 +1118,49 @@ phasing tightens to four shippable milestones:
     and runs `SqpAlgorithm`. Maps `SqpStatus` back to
     `ApplicationReturnStatus`.
 
-  **Remaining items deferred to Phase 5c+** (not blockers for
-  the SQP path being shippable as the QP-subproblem-driven NLP
-  solver inside pounce-algorithm):
+  **Phase 5b finish — c13–c15** completes everything that didn't
+  require an external oracle:
+  - c13 — `finalize_solution` callback for SQP. New
+    `finalize_via_sqp(nlp, res, status, tnlp)` helper builds
+    DenseVectors from the SQP slice outputs, lifts via
+    `OrigIpoptNlp::lift_x_to_full` + `pack_z_l_for_user` +
+    `pack_z_u_for_user` + `pack_lambda_for_user`, and invokes
+    `TNLP::finalize_solution` with a `pounce_nlp::tnlp::Solution`
+    carrying the lifted multipliers, primal, g, and obj. Also
+    fixes `IpoptNlpAdapter::variable_bounds` /
+    `constraint_bounds` to scatter compressed `x_l`/`x_u`/`d_l`/
+    `d_u` through `px_*` / `pd_*` ExpansionMatrices so the SQP
+    sees full-length bound vectors with ±∞ where unbounded —
+    OrigIpoptNlp returns bounds in IPM-compressed form.
+    End-to-end test runs through `IpoptApplication::optimize_tnlp`.
+  - c14 — SQP-suboption parsing. Ten new registered options on
+    `OptionsList`: `sqp_globalization`, `sqp_hessian`,
+    `sqp_max_iter`, `sqp_tol`, `sqp_constr_viol_tol`,
+    `sqp_dual_inf_tol`, `sqp_l1_penalty`, `sqp_bt_reduction`,
+    `sqp_bt_min_alpha`, `sqp_print_level`. All defaults mirror
+    `SqpOptions::default()`. A new internal helper
+    `apply_sqp_options(&OptionsList, &mut SqpOptions)` is
+    consumed by `algorithm_builder_snapshot()` so every SQP
+    solve picks up the user's settings.
+  - c15 — L-BFGS Hessian source. New
+    `crate::sqp::lbfgs::LBfgs` module storing a circular
+    `VecDeque<(s, y)>` of curvature pairs. `as_triplet()`
+    materializes `B_k` over the full upper triangle by seeding
+    `B_0 = γI` (Nocedal-Wright eq. 7.20 — γ = yᵀy / sᵀy from the
+    most-recent pair) and replaying Powell-damped rank-2 BFGS
+    updates for every stored pair. Selected via
+    `SqpHessianSource::Lbfgs`; `lbfgs_max_history` defaults to
+    6 (matches upstream `limited_memory_max_history`).
+    Integration test confirms convergence on the
+    circle-projection NLP. The eleventh suboption
+    `sqp_lbfgs_max_history` is registered and propagates
+    through `apply_sqp_options`.
+
+  **Remaining items deferred to Phase 5c+** (require external
+  dependencies beyond the pure-Rust constraint):
   - CUTEst small-NLP regression vs filterSQP / SNOPT for the
-    §10 exit criterion (iteration-count comparison).
-  - `finalize_solution` callback for SQP — currently the SQP
-    path doesn't notify the user TNLP of the final iterate
-    through the standard hook.
-  - SQP-suboption parsing (`sqp_globalization`, `sqp_hessian`,
-    `sqp_max_iter`, etc.) from the `OptionsList` so users can
-    configure SQP entirely through `add_option`.
-  - L-BFGS Hessian source (returns `SqpError::DimensionMismatch`
-    when selected today).
+    §10 exit criterion (iteration-count comparison). Needs
+    filterSQP and SNOPT binaries; not pure-Rust.
 - **Phase 5c — Working-set warm start + integration (2–3 weeks).**
   - SQP warm-start API per §6.
   - C API additions per §7.2.
