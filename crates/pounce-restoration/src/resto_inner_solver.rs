@@ -76,17 +76,20 @@ pub fn make_resto_inner_solver(
     inner_alg_builder: AlgorithmBuilder,
     mut backend_factory_factory: InnerBackendFactoryFactory,
 ) -> crate::min_c_1nrm::RestoInnerSolver {
-    Box::new(move |outer_data, outer_cq, outer_nlp, orig_progress_cb| {
-        run_inner_resto(
-            outer_data,
-            outer_cq,
-            outer_nlp,
-            &resto_builder,
-            &inner_alg_builder,
-            backend_factory_factory(),
-            orig_progress_cb,
-        )
-    })
+    Box::new(
+        move |outer_data, outer_cq, outer_nlp, orig_progress_cb, print_iter_output| {
+            run_inner_resto(
+                outer_data,
+                outer_cq,
+                outer_nlp,
+                &resto_builder,
+                &inner_alg_builder,
+                backend_factory_factory(),
+                orig_progress_cb,
+                print_iter_output,
+            )
+        },
+    )
 }
 
 /// Build a `Box<dyn RestorationPhase>` that wraps a
@@ -122,6 +125,7 @@ pub fn run_inner_resto(
     inner_alg_builder: &AlgorithmBuilder,
     backend_factory: LinearBackendFactory,
     orig_progress_cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+    print_iter_output: bool,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -328,6 +332,11 @@ pub fn run_inner_resto(
     let mut alg = IpoptAlgorithm::new(inner_data, inner_cq, alg_bundle)
         .with_nlp(Rc::clone(&resto_nlp_rc))
         .with_restoration(resto_of_resto);
+    // Forward the outer `print_level == 0` gate. Suppresses the
+    // restoration `r`-suffixed iter table; the resto-of-resto level
+    // also inherits the same flag (its `RestorationPhase` impl is the
+    // closed-form `RestoRestorationPhase`, which doesn't print).
+    alg.print_iter_output = print_iter_output;
     let status = alg.optimize();
 
     // ---- 7. Map status & extract orig_x/orig_s. ---------------------

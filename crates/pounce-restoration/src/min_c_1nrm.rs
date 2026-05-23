@@ -96,6 +96,10 @@ pub type RestoInnerSolver = Box<
         &IpoptCqHandle,
         &Rc<RefCell<dyn IpoptNlp>>,
         Option<pounce_algorithm::restoration::OrigProgressCallback>,
+        // Suppress the nested IPM's `r`-suffixed per-iteration table when
+        // false. Outer driver forwards `print_level == 0` via
+        // `RestorationPhase::set_print_iter_output`.
+        bool,
     ) -> Option<RestoSolveResult>,
 >;
 
@@ -121,6 +125,11 @@ pub struct MinC1NormRestoration {
     /// `IpoptAlgorithm` for the pounce#12 restoration audit
     /// counters in `SolveStatistics`. Reset on each call.
     pub(crate) last_inner_iter_count: Index,
+    /// Forwarded by the outer driver via `set_print_iter_output`; the
+    /// flag is threaded into the nested IPM through `inner_solver` so
+    /// `print_level == 0` actually silences the restoration `r`-row
+    /// table instead of leaking it to stdout.
+    pub(crate) print_iter_output: bool,
 }
 
 impl Default for MinC1NormRestoration {
@@ -132,9 +141,10 @@ impl Default for MinC1NormRestoration {
             expect_infeasible_problem: false,
             start_with_resto: false,
             eq_mult: Box::new(LeastSquareMults::new()),
-            inner_solver: Box::new(|_, _, _, _| None),
+            inner_solver: Box::new(|_, _, _, _, _| None),
             orig_progress: None,
             last_inner_iter_count: 0,
+            print_iter_output: true,
         }
     }
 }
@@ -175,6 +185,10 @@ impl RestorationPhase for MinC1NormRestoration {
         self.last_inner_iter_count
     }
 
+    fn set_print_iter_output(&mut self, enabled: bool) {
+        self.print_iter_output = enabled;
+    }
+
     fn perform_restoration(
         &mut self,
         data: &IpoptDataHandle,
@@ -203,7 +217,7 @@ impl RestorationPhase for MinC1NormRestoration {
         // mu/tau, matching upstream.
         let saved_mu = data.borrow().curr_mu;
         let saved_tau = data.borrow().curr_tau;
-        let Some(result) = (self.inner_solver)(data, cq, nlp, cb) else {
+        let Some(result) = (self.inner_solver)(data, cq, nlp, cb, self.print_iter_output) else {
             return RestorationOutcome::Failed;
         };
         self.last_inner_iter_count = result.iter_count;
