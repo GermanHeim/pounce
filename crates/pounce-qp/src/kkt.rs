@@ -139,6 +139,14 @@ pub fn is_pure_box(qp: &QpProblem) -> bool {
     qp.m == 0
 }
 
+/// Are *all* general constraints equalities (`bl == bu`
+/// element-wise)? Caller routes to the equality+bounds active-set
+/// path when this returns true and the cheaper predicates above
+/// did not.
+pub fn is_all_equality_constraints(qp: &QpProblem) -> bool {
+    qp.bl.iter().zip(qp.bu.iter()).all(|(&l, &u)| l == u)
+}
+
 /// Assemble `[H Eᵀ_W; E_W 0]` for a box-constrained QP where `E_W`
 /// is the selection matrix for the currently-active bounds. Each
 /// active bound contributes one unit row at the corresponding
@@ -204,4 +212,69 @@ pub fn h_times_x(h: &pounce_linalg::triplet::SymTMatrix, x: &[Number]) -> Vec<Nu
         }
     }
     out
+}
+
+/// Assemble `[H Aᵀ_eq Eᵀ_W; A_eq 0 0; E_W 0 0]` for a QP whose
+/// general constraints are all equalities and whose currently
+/// active variable-bound working set is `active_bounds`
+/// (ascending). Layout in K-row order:
+///
+/// * rows `1..=n`         — H rows
+/// * rows `n+1..=n+m`     — `A_eq` rows
+/// * rows `n+m+1..=n+m+k` — selection rows for active bounds
+///
+/// The off-diagonal blocks land at K-rows below the H block, so
+/// each entry is lower-triangular by construction.
+pub fn assemble_equality_plus_bounds(qp: &QpProblem, active_bounds: &[usize]) -> KktTriplet {
+    let n = qp.n;
+    let m = qp.m;
+    let k = active_bounds.len();
+    let dim = n + m + k;
+
+    let nh = qp.h.nonzeros() as usize;
+    let na = qp.a.nonzeros() as usize;
+    let cap = nh + na + k;
+
+    let mut irn = Vec::with_capacity(cap);
+    let mut jcn = Vec::with_capacity(cap);
+    let mut vals = Vec::with_capacity(cap);
+
+    // ---- H block ----
+    let h_irows = qp.h.irows();
+    let h_jcols = qp.h.jcols();
+    let h_vals = qp.h.values();
+    for kk in 0..nh {
+        let i = h_irows[kk];
+        let j = h_jcols[kk];
+        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
+        irn.push(hi);
+        jcn.push(lo);
+        vals.push(h_vals[kk]);
+    }
+
+    // ---- A_eq block at rows (n+1)..(n+m) ----
+    let n_i = n as Index;
+    let a_irows = qp.a.irows();
+    let a_jcols = qp.a.jcols();
+    let a_vals = qp.a.values();
+    for kk in 0..na {
+        irn.push(n_i + a_irows[kk]);
+        jcn.push(a_jcols[kk]);
+        vals.push(a_vals[kk]);
+    }
+
+    // ---- E_W block at rows (n+m+1)..(n+m+k) ----
+    let nm_i = (n + m) as Index;
+    for (j, &var) in active_bounds.iter().enumerate() {
+        irn.push(nm_i + (j as Index) + 1);
+        jcn.push((var as Index) + 1);
+        vals.push(1.0);
+    }
+
+    KktTriplet {
+        dim,
+        irn,
+        jcn,
+        vals,
+    }
 }

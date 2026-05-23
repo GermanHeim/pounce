@@ -547,9 +547,188 @@ fn box_fixed_variable_solved_in_subspace() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Mixed unsupported path: a QP with both finite variable bounds
-// and general inequality constraints (bl ≠ bu on a general row)
-// requires phase-1 elastic mode and lands in a later commit.
+// Equality + bounds, bound-feasible equality solution.
+//
+//     min ½‖x‖²
+//     s.t. x₁ + x₂ + x₃ = 0.6,   −1 ≤ x_i ≤ 1
+//
+// Equality-relaxed KKT: x_i = −λ, Σx_i = 0.6 ⇒ λ = −0.2,
+// x* = (0.2, 0.2, 0.2). All interior; no bounds activate.
+// lambda_g = -0.2 (our convention); lambda_x = 0.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn eq_plus_bounds_interior_optimum() {
+    let n = 3;
+    let m = 1;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2, 3], vec![1, 2, 3]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0; 3]);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1, 1], vec![1, 2, 3]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0, 1.0]);
+
+    let g = [0.0; 3];
+    let bl = [0.6];
+    let bu = [0.6];
+    let xl = [-1.0; 3];
+    let xu = [1.0; 3];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+
+    for (i, &xi) in sol.x.iter().enumerate() {
+        assert!(
+            (xi - 0.2).abs() < 1e-10,
+            "x[{i}] = {xi} but expected 0.2",
+        );
+    }
+    assert!(
+        (sol.lambda_g[0] - (-0.2)).abs() < 1e-10,
+        "lambda_g[0] = {} but expected -0.2",
+        sol.lambda_g[0]
+    );
+    for (i, &lx) in sol.lambda_x.iter().enumerate() {
+        assert!(lx.abs() < 1e-10, "lambda_x[{i}] = {lx} but expected 0");
+    }
+    for (i, &b) in sol.working.bounds.iter().enumerate() {
+        assert_eq!(
+            b,
+            crate::BoundStatus::Inactive,
+            "bound {i} should be inactive"
+        );
+    }
+    assert_eq!(sol.working.constraints[0], crate::ConsStatus::Equality);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Equality + bounds, equality solution lies exactly on a bound but
+// LICQ holds (eq row and bound row are independent). The bound is
+// initialized as active; the inner loop produces a marginal
+// multiplier (≈ 0) and declares optimal.
+//
+//     min ½(x₁² + x₂²) - x₂
+//     s.t. x₁ + x₂ = 1,   0 ≤ x₁ ≤ 1   (x₂ free)
+//
+// Equality-relaxed:
+//   row 1: x₁ + λ = 0  → x₁ = −λ
+//   row 2: x₂ − 1 + λ = 0 → x₂ = 1 − λ
+//   eq:    x₁ + x₂ = 1  → −λ + 1 − λ = 1 ⇒ λ = 0
+//   ⇒ x* = (0, 1).  x₁ = xl_1 exactly (binds), x₂ free.
+// LICQ holds: A = [1 1], E = [1 0] are independent.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn eq_plus_bounds_bound_active_at_init_marginal_multiplier() {
+    let n = 2;
+    let m = 1;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2], vec![1, 2]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0, 1.0]);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0, -1.0];
+    let bl = [1.0];
+    let bu = [1.0];
+    let xl = [0.0, NLP_LOWER_BOUND_INF];
+    let xu = [1.0, NLP_UPPER_BOUND_INF];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+
+    assert!((sol.x[0] - 0.0).abs() < 1e-10, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 1.0).abs() < 1e-10, "x[1] = {}", sol.x[1]);
+    // Multiplier on the equality should match the relaxed solve
+    // (λ = 0 in our convention).
+    assert!(sol.lambda_g[0].abs() < 1e-10);
+    // x_1 starts AtLower (snapped at init). Marginal — multiplier
+    // can be either zero or close to it.
+    assert!(sol.lambda_x[0].abs() < 1e-10);
+    assert_eq!(sol.working.bounds[0], crate::BoundStatus::AtLower);
+    assert_eq!(sol.working.bounds[1], crate::BoundStatus::Inactive);
+    assert_eq!(sol.working.constraints[0], crate::ConsStatus::Equality);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Equality + bounds, equality solution is bound-INfeasible. Commit
+// 4 routes this to UnsupportedFeature; the elastic-mode commit
+// will replace this with a real solve.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn rejects_eq_plus_bounds_when_relaxed_solution_violates_bounds() {
+    let n = 2;
+    let m = 1;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2], vec![1, 2]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0, 1.0]);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[2.0, 1.0]);
+
+    // Equality-relaxed: x₁ + 2λ = 0, x₂ + λ = 0, 2x₁+x₂=1.
+    // ⇒ x₁ = -2λ, x₂ = -λ. -4λ - λ = 1 ⇒ λ = -0.2.
+    //   x = (0.4, 0.2). xl_2 = 0.5 violates → reject.
+    let g = [0.0, 0.0];
+    let bl = [1.0];
+    let bu = [1.0];
+    let xl = [-1.0, 0.5];
+    let xu = [1.0, 1.0];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let err = solver
+        .solve(&qp, None, &QpOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::QpError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Mixed unsupported path: a QP with one-sided general inequality
+// constraints (bl ≠ bu on a general row) requires the elastic
+// mode and lands in the next commit.
 // ─────────────────────────────────────────────────────────────────
 #[test]
 fn rejects_mixed_bounds_plus_general_inequality() {

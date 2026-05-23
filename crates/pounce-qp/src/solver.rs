@@ -12,8 +12,9 @@ use std::time::Instant;
 use crate::error::{QpError, QpStatus};
 use crate::factor::LinearSolver;
 use crate::kkt::{
-    assemble_box_with_active, h_times_x, is_pure_box, is_pure_equality_no_bounds,
-    rhs_equality_only, KktTriplet,
+    assemble_box_with_active, assemble_equality_plus_bounds, h_times_x,
+    is_all_equality_constraints, is_pure_box, is_pure_equality_no_bounds, rhs_equality_only,
+    KktTriplet,
 };
 use crate::options::QpOptions;
 use crate::problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
@@ -279,6 +280,222 @@ impl ParametricActiveSetSolver {
         })
     }
 
+    /// Active-set path for QPs with general equality constraints
+    /// *and* finite variable bounds. The cold start solves the
+    /// equality-relaxed KKT (ignoring bounds) and routes to the
+    /// active-set inner loop when that solution is bound-feasible.
+    ///
+    /// Bound-infeasible equality solutions are rejected with
+    /// [`QpError::UnsupportedFeature`] — recovering from that case
+    /// requires the §4.3 phase-1 elastic mode, which lands in the
+    /// next Phase 5a commit. Once it does, the elastic mode will
+    /// replace the rejection branch and produce a bound-and-
+    /// equality-feasible starting point.
+    ///
+    /// In the inner loop the equality rows live permanently in the
+    /// working set (`ConsStatus::Equality`) and are never dropped;
+    /// only variable bounds add and drop. The KKT layout is
+    /// `[H Aᵀ_eq Eᵀ_W; A_eq 0 0; E_W 0 0]` with expected inertia
+    /// `(n, m + k, 0)` for full-rank rows and PD reduced H.
+    fn solve_equality_plus_bounds(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        let started = Instant::now();
+        let n = qp.n;
+        let m = qp.m;
+
+        // ---- 1. Equality-relaxed initial point ----
+        let kkt0 = KktTriplet::assemble_equality_only(qp);
+        let mut rhs0 = rhs_equality_only(qp);
+        let expected_neg0 = match qp.hessian_inertia {
+            HessianInertia::Psd | HessianInertia::Unknown => Some(m as i32),
+            HessianInertia::Indefinite => None,
+        };
+        self.linsol
+            .factorize_and_solve(&kkt0, &mut rhs0, expected_neg0)?;
+        let mut n_refactor: u32 = 1;
+        let mut n_changes: u32 = 0;
+
+        let mut x: Vec<Number> = rhs0[..n].to_vec();
+
+        // ---- 2. Bound-feasibility check ----
+        for (i, &xi) in x.iter().enumerate() {
+            let l = qp.xl[i];
+            let u = qp.xu[i];
+            if l > NLP_LOWER_BOUND_INF && xi < l - opts.feas_tol {
+                return Err(QpError::UnsupportedFeature(format!(
+                    "equality-relaxed solution violates lower bound on x[{i}] \
+                     (x = {xi:.6e}, xl = {l:.6e}); recovering requires the \
+                     phase-1 elastic mode, which lands in the next Phase 5a commit"
+                )));
+            }
+            if u < NLP_UPPER_BOUND_INF && xi > u + opts.feas_tol {
+                return Err(QpError::UnsupportedFeature(format!(
+                    "equality-relaxed solution violates upper bound on x[{i}] \
+                     (x = {xi:.6e}, xu = {u:.6e}); recovering requires the \
+                     phase-1 elastic mode, which lands in the next Phase 5a commit"
+                )));
+            }
+        }
+
+        // ---- 3. Initial working set ----
+        let mut working = WorkingSet::cold(n, m);
+        for c in working.constraints.iter_mut() {
+            *c = ConsStatus::Equality;
+        }
+        for (i, (status, xi)) in working
+            .bounds
+            .iter_mut()
+            .zip(x.iter_mut())
+            .enumerate()
+        {
+            let l = qp.xl[i];
+            let u = qp.xu[i];
+            let l_finite = l > NLP_LOWER_BOUND_INF;
+            let u_finite = u < NLP_UPPER_BOUND_INF;
+            if l_finite && u_finite && (l - u).abs() <= opts.feas_tol {
+                *status = BoundStatus::Fixed;
+                *xi = l;
+            } else if l_finite && (*xi - l).abs() <= opts.feas_tol {
+                *status = BoundStatus::AtLower;
+                *xi = l;
+            } else if u_finite && (*xi - u).abs() <= opts.feas_tol {
+                *status = BoundStatus::AtUpper;
+                *xi = u;
+            }
+        }
+
+        // ---- 4. Active-set inner loop ----
+        for _iter in 0..opts.max_iter {
+            let active: Vec<usize> = (0..n)
+                .filter(|&i| working.bounds[i].is_active())
+                .collect();
+            let k = active.len();
+
+            let kkt = assemble_equality_plus_bounds(qp, &active);
+
+            let hx = h_times_x(qp.h, &x);
+            let mut rhs = vec![0.0; n + m + k];
+            for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
+                *rhs_i = -(hx_i + g_i);
+            }
+            // rhs[n..n+m] and rhs[n+m..n+m+k] stay zero.
+
+            let expected_neg = match qp.hessian_inertia {
+                HessianInertia::Psd | HessianInertia::Unknown => Some((m + k) as i32),
+                HessianInertia::Indefinite => None,
+            };
+            self.linsol
+                .factorize_and_solve(&kkt, &mut rhs, expected_neg)?;
+            n_refactor += 1;
+
+            let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
+
+            if p_inf <= opts.opt_tol {
+                // Check drop on bound multipliers in rhs[n+m..n+m+k].
+                let mut worst: Option<(usize, Number)> = None;
+                for (j, &i) in active.iter().enumerate() {
+                    let lam = rhs[n + m + j];
+                    let viol = match working.bounds[i] {
+                        BoundStatus::AtLower => lam,
+                        BoundStatus::AtUpper => -lam,
+                        BoundStatus::Fixed => 0.0,
+                        BoundStatus::Inactive => unreachable!(),
+                    };
+                    if viol > worst.map(|(_, v)| v).unwrap_or(opts.opt_tol) {
+                        worst = Some((i, viol));
+                    }
+                }
+
+                if let Some((i_drop, _)) = worst {
+                    working.bounds[i_drop] = BoundStatus::Inactive;
+                    n_changes += 1;
+                    continue;
+                }
+
+                // Optimal — pack multipliers.
+                let lambda_g: Vec<Number> = rhs[n..n + m].to_vec();
+                let mut lambda_x = vec![0.0; n];
+                for (j, &i) in active.iter().enumerate() {
+                    lambda_x[i] = -rhs[n + m + j];
+                }
+
+                return Ok(QpSolution {
+                    obj: quad_objective(qp, &x),
+                    x,
+                    lambda_g,
+                    lambda_x,
+                    working,
+                    status: QpStatus::Optimal,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates: 0,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
+
+            // Ratio test along p.
+            let p: Vec<Number> = rhs[..n].to_vec();
+            let mut alpha = 1.0_f64;
+            let mut blocker: Option<(usize, BoundStatus)> = None;
+            for i in 0..n {
+                if working.bounds[i].is_active() {
+                    continue;
+                }
+                if p[i] < -opts.feas_tol && qp.xl[i] > NLP_LOWER_BOUND_INF {
+                    let r = (x[i] - qp.xl[i]) / -p[i];
+                    if r < alpha {
+                        alpha = r;
+                        blocker = Some((i, BoundStatus::AtLower));
+                    }
+                }
+                if p[i] > opts.feas_tol && qp.xu[i] < NLP_UPPER_BOUND_INF {
+                    let r = (qp.xu[i] - x[i]) / p[i];
+                    if r < alpha {
+                        alpha = r;
+                        blocker = Some((i, BoundStatus::AtUpper));
+                    }
+                }
+            }
+            if alpha < 0.0 {
+                alpha = 0.0;
+            }
+            for (xi, &pi) in x.iter_mut().zip(p.iter()) {
+                *xi += alpha * pi;
+            }
+            if let Some((i_block, status)) = blocker {
+                match status {
+                    BoundStatus::AtLower => x[i_block] = qp.xl[i_block],
+                    BoundStatus::AtUpper => x[i_block] = qp.xu[i_block],
+                    _ => unreachable!(),
+                }
+                working.bounds[i_block] = status;
+                n_changes += 1;
+            }
+        }
+
+        Ok(QpSolution {
+            obj: quad_objective(qp, &x),
+            x,
+            lambda_g: vec![0.0; m],
+            lambda_x: vec![0.0; n],
+            working,
+            status: QpStatus::MaxIter,
+            stats: QpStats {
+                n_working_set_changes: n_changes,
+                n_refactor,
+                n_schur_updates: 0,
+                used_phase1: false,
+                time: started.elapsed(),
+            },
+        })
+    }
+
     /// Cold-start path for QPs that have only equality constraints
     /// and no variable bounds. Builds the saddle-point KKT and
     /// hands it to the linear solver in one shot.
@@ -354,12 +571,13 @@ impl QpSolver for ParametricActiveSetSolver {
         if is_pure_box(qp) {
             return self.solve_box_constrained(qp, opts);
         }
+        if is_all_equality_constraints(qp) {
+            return self.solve_equality_plus_bounds(qp, opts);
+        }
 
         Err(QpError::UnsupportedFeature(
-            "QPs combining general inequality constraints with variable \
-             bounds (or one-sided general constraints) require the \
-             phase-1 elastic mode + general working-set machinery, \
-             which lands in subsequent Phase 5a commits"
+            "QPs with one-sided general inequality constraints require the \
+             phase-1 elastic mode, which lands in the next Phase 5a commit"
                 .into(),
         ))
     }
