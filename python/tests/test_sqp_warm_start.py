@@ -127,3 +127,85 @@ def test_get_working_set_returns_none_on_ipm_path():
     assert info["status_msg"] == "Solve_Succeeded"
     assert info["working_set"] is None
     assert p.get_working_set() is None
+
+
+def test_classify_working_set_helper_module_level():
+    """The Phase 5c §7.5 classifier is importable as
+    ``pounce.classify_working_set`` and produces the same encoding
+    the SQP path consumes."""
+    # 1-D problem: x ≥ 0, x ≤ 10. At the optimum x=2 (interior),
+    # the lower bound is inactive.
+    bounds, cons = pounce.classify_working_set(
+        x=[2.0], x_l=[0.0], x_u=[10.0],
+        g=[2.0], g_l=[-10.0], g_u=[10.0],
+        lambda_g=[0.0], z_l=[0.0], z_u=[0.0],
+        m_eq=0,
+    )
+    assert len(bounds) == 1
+    assert len(cons) == 1
+    assert int(bounds[0]) == 0  # Inactive
+    assert int(cons[0]) == 0    # Inactive
+
+    # x at the lower bound with a positive multiplier.
+    bounds, _ = pounce.classify_working_set(
+        x=[0.0], x_l=[0.0], x_u=[10.0],
+        g=[0.0], g_l=[-10.0], g_u=[10.0],
+        lambda_g=[0.0], z_l=[2.0], z_u=[0.0],
+        m_eq=0,
+    )
+    assert int(bounds[0]) == 1  # AtLower
+
+    # Equality constraint always classified as Equality (code 3).
+    _, cons = pounce.classify_working_set(
+        x=[1.0], x_l=[-10.0], x_u=[10.0],
+        g=[5.0], g_l=[5.0], g_u=[5.0],
+        lambda_g=[1.0], z_l=[0.0], z_u=[0.0],
+        m_eq=1,
+    )
+    assert int(cons[0]) == 3  # Equality
+
+
+def test_classify_working_set_then_feed_into_sqp_solve():
+    """End-to-end Phase 5c §7.5 pattern: classify the active set
+    at a known iterate, then feed the resulting working set into a
+    follow-up `solve(..., working_set=ws)` call."""
+    p = _make()
+    x_cold, info_cold = p.solve(x0=np.array([0.0]))
+    ws_from_solve = info_cold["working_set"]
+
+    # Compute the classifier's WS from the multipliers.
+    n, m = 1, 1
+    bounds_arr, cons_arr = pounce.classify_working_set(
+        x=x_cold,
+        x_l=np.array([-1e20]),
+        x_u=np.array([1e20]),
+        g=info_cold["g"],
+        g_l=np.array([-10.0]),
+        g_u=np.array([10.0]),
+        lambda_g=info_cold["mult_g"],
+        z_l=info_cold["mult_x_L"],
+        z_u=info_cold["mult_x_U"],
+        m_eq=0,
+    )
+    assert len(bounds_arr) == n
+    assert len(cons_arr) == m
+
+    # Feed back into a fresh SQP solve.
+    p2 = _make()
+    x_warm, info_warm = p2.solve(
+        x0=np.array([0.0]),
+        working_set=(bounds_arr, cons_arr),
+    )
+    assert info_warm["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x_warm, x_cold, atol=1e-6)
+
+
+def test_classify_working_set_rejects_bad_dimensions():
+    with pytest.raises(ValueError):
+        # x has length 1 but x_l has length 2.
+        pounce.classify_working_set(
+            x=[1.0], x_l=[0.0, 0.0], x_u=[10.0],
+            g=[1.0], g_l=[0.0], g_u=[2.0],
+            lambda_g=[0.0], z_l=[0.0], z_u=[0.0],
+            m_eq=0,
+        )
