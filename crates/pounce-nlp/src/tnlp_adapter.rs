@@ -26,17 +26,39 @@ use std::rc::Rc;
 pub const DEFAULT_NLP_LOWER_BOUND_INF: Number = -1.0e19;
 pub const DEFAULT_NLP_UPPER_BOUND_INF: Number = 1.0e19;
 
+/// How a fixed variable (`x_l == x_u`) is handled during classification.
+/// Mirrors upstream's `FixedVariableTreatmentEnum` (`IpTNLPAdapter.hpp`).
+/// Only the two modes pounce relies on are implemented; `MakeConstraint`
+/// and `MakeParameterNoDual` would land alongside their upstream
+/// counterparts when needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedVarTreatment {
+    /// Default: drop the fixed variable from `x_var` and splice its value
+    /// back into `full_x` before user evals (upstream `MAKE_PARAMETER`).
+    MakeParameter,
+    /// Keep the fixed variable in `x_var` with `x_L == x_U` at the fixed
+    /// value; `bound_relax_factor` then widens those tight bounds.
+    /// Upstream `RELAX_BOUNDS` (`IpTNLPAdapter.cpp:494-500`).
+    RelaxBounds,
+}
+
+impl Default for FixedVarTreatment {
+    fn default() -> Self {
+        Self::MakeParameter
+    }
+}
+
 /// Sorted decomposition of a TNLP's bounds and constraints. All `*_map`
 /// vectors carry **0-based** indices into the full TNLP space.
 #[derive(Debug, Clone)]
 pub struct BoundClassification {
     pub n_full_x: Index,
     pub n_full_g: Index,
-    /// Number of variables with `x_l == x_u`. With
-    /// `fixed_variable_treatment = make_parameter` (the upstream
-    /// default — and pounce's only mode today) these are removed from
-    /// the active set; their indices live in `x_fixed_map` and their
-    /// values in `x_fixed_vals`.
+    /// Number of variables with `x_l == x_u` removed from `x_var` under
+    /// `fixed_variable_treatment = make_parameter` (the upstream default).
+    /// Their indices live in `x_fixed_map` and their values in
+    /// `x_fixed_vals`. Zero under `relax_bounds` (fixed vars stay in
+    /// `x_var` with tight bounds).
     pub n_x_fixed: Index,
     /// Indices in `[0, n_full_x)` that are not fixed (`x_l < x_u`).
     /// Length is `n_x_var = n_full_x - n_x_fixed`.
@@ -115,10 +137,11 @@ impl TNLPAdapter {
     /// and stores the result. Uses the default `±1e19` infinity
     /// thresholds.
     pub fn new(tnlp: Rc<RefCell<dyn TNLP>>) -> Result<Self, SolverException> {
-        Self::new_with_inf(
+        Self::new_with_options(
             tnlp,
             DEFAULT_NLP_LOWER_BOUND_INF,
             DEFAULT_NLP_UPPER_BOUND_INF,
+            FixedVarTreatment::MakeParameter,
         )
     }
 
@@ -128,6 +151,26 @@ impl TNLPAdapter {
         tnlp: Rc<RefCell<dyn TNLP>>,
         nlp_lower_bound_inf: Number,
         nlp_upper_bound_inf: Number,
+    ) -> Result<Self, SolverException> {
+        Self::new_with_options(
+            tnlp,
+            nlp_lower_bound_inf,
+            nlp_upper_bound_inf,
+            FixedVarTreatment::MakeParameter,
+        )
+    }
+
+    /// Construct an adapter with custom infinity thresholds and an
+    /// explicit `fixed_variable_treatment`. Mirrors upstream
+    /// `IpTNLPAdapter::ProcessOptions` + `Initialize` (`IpTNLPAdapter.cpp:240`,
+    /// `:430-633`): when `MakeParameter` would leave fewer free variables
+    /// than equality constraints, automatically retry classification with
+    /// `RelaxBounds` (`IpTNLPAdapter.cpp:623-633`).
+    pub fn new_with_options(
+        tnlp: Rc<RefCell<dyn TNLP>>,
+        nlp_lower_bound_inf: Number,
+        nlp_upper_bound_inf: Number,
+        fixed_var_treatment: FixedVarTreatment,
     ) -> Result<Self, SolverException> {
         if nlp_lower_bound_inf >= nlp_upper_bound_inf {
             return Err(SolverException::new(
@@ -194,7 +237,8 @@ impl TNLPAdapter {
             }
         }
 
-        let classification = classify_bounds(
+        let mut treatment = fixed_var_treatment;
+        let mut classification = classify_bounds(
             n_full_x,
             n_full_g,
             &x_l,
@@ -203,7 +247,33 @@ impl TNLPAdapter {
             &g_u,
             nlp_lower_bound_inf,
             nlp_upper_bound_inf,
+            treatment,
         )?;
+
+        // Mirror upstream `IpTNLPAdapter.cpp:623-633`: if `make_parameter`
+        // dropped enough variables to leave `n_x_var < n_c`, automatically
+        // switch to `relax_bounds` (keep fixed vars in the active set with
+        // tight bounds) and redo classification. Without this, square /
+        // over-determined-after-fixing problems abort with
+        // `NotEnoughDegreesOfFreedom`.
+        if treatment == FixedVarTreatment::MakeParameter
+            && classification.n_x_fixed > 0
+            && classification.n_x_var() > 0
+            && classification.n_x_var() < classification.n_c
+        {
+            treatment = FixedVarTreatment::RelaxBounds;
+            classification = classify_bounds(
+                n_full_x,
+                n_full_g,
+                &x_l,
+                &x_u,
+                &g_l,
+                &g_u,
+                nlp_lower_bound_inf,
+                nlp_upper_bound_inf,
+                treatment,
+            )?;
+        }
 
         Ok(Self {
             tnlp,
@@ -245,6 +315,7 @@ fn classify_bounds(
     g_u: &[Number],
     lo_inf: Number,
     up_inf: Number,
+    treatment: FixedVarTreatment,
 ) -> Result<BoundClassification, SolverException> {
     let nx = n_full_x as usize;
     let ng = n_full_g as usize;
@@ -273,15 +344,29 @@ fn classify_bounds(
             ));
         }
         if lo == hi {
-            // `fixed_variable_treatment = make_parameter` (upstream
-            // default): drop fixed vars from x_var entirely. Their
-            // values are spliced back into the full-x array each time
-            // we call into the user's TNLP (see
-            // `OrigIpoptNlp::lift_x_to_full`).
-            n_x_fixed += 1;
-            x_fixed_map.push(i as Index);
-            x_fixed_vals.push(lo);
-            continue;
+            match treatment {
+                FixedVarTreatment::MakeParameter => {
+                    // Drop fixed vars from x_var entirely. Their values are
+                    // spliced back into the full-x array each time we call
+                    // into the user's TNLP (see `OrigIpoptNlp::lift_x_to_full`).
+                    n_x_fixed += 1;
+                    x_fixed_map.push(i as Index);
+                    x_fixed_vals.push(lo);
+                    continue;
+                }
+                FixedVarTreatment::RelaxBounds => {
+                    // Keep the var in the active set with tight bounds on
+                    // both sides; `OrigIpoptNlp::relax_bounds` will widen
+                    // them by `bound_relax_factor`. Matches upstream
+                    // `IpTNLPAdapter.cpp:494-500`.
+                    let var_idx = x_not_fixed_map.len() as Index;
+                    x_not_fixed_map.push(i as Index);
+                    full_to_var[i] = var_idx;
+                    x_l_map.push(var_idx);
+                    x_u_map.push(var_idx);
+                    continue;
+                }
+            }
         }
         let var_idx = x_not_fixed_map.len() as Index;
         x_not_fixed_map.push(i as Index);
@@ -550,6 +635,154 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Two free vars, one fixed var, and two equality constraints
+    /// (`n_full_x=3`, `n_full_g=2`). Under `make_parameter` the fixed var
+    /// is dropped, leaving `n_x_var=2 == n_c=2` (boundary OK — the gate
+    /// trips on `<`, not `<=`). Under `relax_bounds` the fixed var stays
+    /// in `x_var` with tight bounds.
+    struct OneFixedTwoEq;
+    impl TNLP for OneFixedTwoEq {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 2,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[2.5, -2.0e19, -2.0e19]);
+            b.x_u.copy_from_slice(&[2.5, 2.0e19, 2.0e19]);
+            b.g_l.copy_from_slice(&[0.0, 0.0]);
+            b.g_u.copy_from_slice(&[0.0, 0.0]);
+            true
+        }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _m: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn relax_bounds_keeps_fixed_var_in_active_set() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneFixedTwoEq));
+        let adapter = TNLPAdapter::new_with_options(
+            tnlp,
+            DEFAULT_NLP_LOWER_BOUND_INF,
+            DEFAULT_NLP_UPPER_BOUND_INF,
+            FixedVarTreatment::RelaxBounds,
+        )
+        .unwrap();
+        let c = adapter.classification();
+        assert_eq!(c.n_full_x, 3);
+        assert_eq!(c.n_x_fixed, 0, "relax_bounds keeps fixed var in x_var");
+        assert_eq!(c.n_x_var(), 3);
+        assert_eq!(c.x_not_fixed_map, vec![0, 1, 2]);
+        assert!(c.x_fixed_map.is_empty());
+        assert!(c.x_fixed_vals.is_empty());
+        assert_eq!(c.full_to_var, vec![0, 1, 2]);
+        // The fixed var (index 0) gets tight finite bounds; the other two
+        // are infinite both sides.
+        assert_eq!(c.x_l_map, vec![0]);
+        assert_eq!(c.x_u_map, vec![0]);
+        assert_eq!(c.n_c, 2);
+    }
+
+    /// Same problem, default `make_parameter` treatment: `n_x_var = 2`,
+    /// `n_c = 2` — no auto-retry triggers (boundary `n_x_var == n_c`).
+    #[test]
+    fn make_parameter_no_retry_when_boundary_dof() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneFixedTwoEq));
+        let adapter = TNLPAdapter::new(tnlp).unwrap();
+        let c = adapter.classification();
+        assert_eq!(c.n_x_fixed, 1);
+        assert_eq!(c.n_x_var(), 2);
+        assert_eq!(c.n_c, 2);
+    }
+
+    /// Powerflow-style: one free var, two fixed vars, two equality
+    /// constraints. Under default `make_parameter`, `n_x_var = 1 < n_c = 2`
+    /// would trip the DOF gate — adapter must auto-retry with
+    /// `relax_bounds` so all three vars stay active.
+    struct DofRescue;
+    impl TNLP for DofRescue {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 2,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[2.5, 1.0, -2.0e19]);
+            b.x_u.copy_from_slice(&[2.5, 1.0, 2.0e19]);
+            b.g_l.copy_from_slice(&[0.0, 0.0]);
+            b.g_u.copy_from_slice(&[0.0, 0.0]);
+            true
+        }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _m: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn make_parameter_auto_retries_with_relax_bounds() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(DofRescue));
+        let adapter = TNLPAdapter::new(tnlp).unwrap();
+        let c = adapter.classification();
+        // Auto-retry kicked in: classification matches relax_bounds, not
+        // the (failing) make_parameter result.
+        assert_eq!(c.n_x_fixed, 0);
+        assert_eq!(c.n_x_var(), 3);
+        assert_eq!(c.x_not_fixed_map, vec![0, 1, 2]);
+        // Both fixed vars get tight finite bounds.
+        assert_eq!(c.x_l_map, vec![0, 1]);
+        assert_eq!(c.x_u_map, vec![0, 1]);
+        assert_eq!(c.n_c, 2);
     }
 
     #[test]

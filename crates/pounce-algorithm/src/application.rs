@@ -85,7 +85,9 @@ use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
     IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP,
 };
-use pounce_nlp::tnlp_adapter::TNLPAdapter;
+use pounce_nlp::tnlp_adapter::{
+    FixedVarTreatment, TNLPAdapter, DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF,
+};
 use std::cell::RefCell;
 use std::fmt;
 use std::path::Path;
@@ -726,8 +728,42 @@ impl IpoptApplication {
         *self.timing.borrow_mut() = Rc::clone(&timing);
         timing.overall_alg.start();
 
-        // Build adapter + Nlp.
-        let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
+        // Build adapter + Nlp. Honor `fixed_variable_treatment` (default
+        // `make_parameter`; pounce additionally implements `relax_bounds`,
+        // which the adapter also auto-selects as a fallback when
+        // `make_parameter` would leave `n_x_var < n_c` — mirrors upstream
+        // `IpTNLPAdapter.cpp:623-633`).
+        let lo_inf = self
+            .options
+            .get_numeric_value("nlp_lower_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
+        let up_inf = self
+            .options
+            .get_numeric_value("nlp_upper_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
+        let fixed_treatment = match self
+            .options
+            .get_string_value("fixed_variable_treatment", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .as_deref()
+        {
+            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
+            // `make_constraint` / `make_parameter_nodual` not yet
+            // implemented; fall back to `make_parameter` (auto-retry to
+            // `relax_bounds` will still kick in if DOF runs short).
+            _ => FixedVarTreatment::MakeParameter,
+        };
+        let adapter = match TNLPAdapter::new_with_options(
+            Rc::clone(&tnlp),
+            lo_inf,
+            up_inf,
+            fixed_treatment,
+        ) {
             Ok(a) => Rc::new(RefCell::new(a)),
             Err(_) => {
                 timing.overall_alg.end();
