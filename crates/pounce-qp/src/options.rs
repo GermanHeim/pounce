@@ -73,6 +73,26 @@ pub struct QpOptions {
     /// KKT and factors from scratch — algorithmically correct,
     /// noticeably slower on large warm-started workloads.
     pub use_schur_updates: bool,
+
+    /// §4.4 full EXPAND anti-cycling primal perturbation. Active
+    /// only when `anti_cycling = Expand`. The Harris two-pass
+    /// (c14) prevents cycling at non-degenerate vertices; these
+    /// parameters add protection at truly degenerate (α = 0)
+    /// vertices via a monotonically growing tolerance:
+    ///
+    /// - `expand_tol_initial` — starting τ at each reset.
+    /// - `expand_tol_growth`  — per-iteration increment of τ.
+    /// - `expand_tol_max`     — τ ceiling; on hitting it, snap
+    ///   all active-bound primals exactly to their bounds and
+    ///   reset τ to `expand_tol_initial`.
+    ///
+    /// Defaults are conservative — they ensure cycling protection
+    /// kicks in only on pathological degeneracy. References:
+    /// Gill-Murray-Saunders-Wright 1989 §4 (the EXPAND name and
+    /// the τ-growth schedule); SNOPT defaults.
+    pub expand_tol_initial: Number,
+    pub expand_tol_growth: Number,
+    pub expand_tol_max: Number,
 }
 
 impl Default for QpOptions {
@@ -90,6 +110,9 @@ impl Default for QpOptions {
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
             use_schur_updates: false,
+            expand_tol_initial: 1e-12,
+            expand_tol_growth: 1e-11,
+            expand_tol_max: 1e-7,
         }
     }
 }

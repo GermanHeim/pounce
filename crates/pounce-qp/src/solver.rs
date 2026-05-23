@@ -641,6 +641,13 @@ impl ParametricActiveSetSolver {
         }
 
         // ---- 2. Active-set inner loop ----
+        // GMSW EXPAND τ — primal-perturbation tolerance.
+        // Consumed by `select_blocker` only when
+        // `opts.anti_cycling = Expand`; tracked unconditionally
+        // so the snap-and-reset logic below is a no-op for the
+        // other anti-cycling choices.
+        let mut expand_tol = opts.expand_tol_initial;
+
         for _iter in 0..opts.max_iter {
             let active_cons: Vec<usize> = (0..m)
                 .filter(|&i| working.constraints[i].is_active())
@@ -820,7 +827,7 @@ impl ParametricActiveSetSolver {
                 }
             }
 
-            let (mut alpha, blocker) = select_blocker(&candidates, opts);
+            let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
 
             if alpha < 0.0 {
                 alpha = 0.0;
@@ -848,6 +855,25 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 n_changes += 1;
+            }
+
+            // EXPAND τ growth / hard reset. The condition is a
+            // no-op when `anti_cycling != Expand` (select_blocker
+            // ignores τ in other modes) and when τ stays below
+            // expand_tol_max (the common case).
+            expand_tol += opts.expand_tol_growth;
+            if expand_tol > opts.expand_tol_max {
+                // Cycling-protection hard reset: snap every
+                // active-bound primal exactly to its bound to
+                // clean out accumulated τ-relaxation drift.
+                for (i, &status) in working.bounds.iter().enumerate() {
+                    match status {
+                        BoundStatus::AtLower | BoundStatus::Fixed => x[i] = qp.xl[i],
+                        BoundStatus::AtUpper => x[i] = qp.xu[i],
+                        BoundStatus::Inactive => {}
+                    }
+                }
+                expand_tol = opts.expand_tol_initial;
             }
         }
 
@@ -1079,6 +1105,9 @@ impl ParametricActiveSetSolver {
         schur.reset(&mut self.linsol, qp, &working, active_count as i32, opts)?;
         n_refactor += 1;
 
+        // GMSW EXPAND τ — same semantics as in solve_general.
+        let mut expand_tol = opts.expand_tol_initial;
+
         for _iter in 0..opts.max_iter {
             let hx = h_times_x(qp.h, &x);
             let mut rhs = vec![0.0; n + m_total];
@@ -1208,7 +1237,7 @@ impl ParametricActiveSetSolver {
                     candidates.push((BlockerTarget::Cons(i, ConsStatus::AtUpper), r, ap[i].abs()));
                 }
             }
-            let (mut alpha, blocker) = select_blocker(&candidates, opts);
+            let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
             if alpha < 0.0 {
                 alpha = 0.0;
             }
@@ -1239,6 +1268,20 @@ impl ParametricActiveSetSolver {
                     schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
                     n_refactor += 1;
                 }
+            }
+
+            // EXPAND τ growth / hard reset (same semantics as in
+            // solve_general).
+            expand_tol += opts.expand_tol_growth;
+            if expand_tol > opts.expand_tol_max {
+                for (i, &status) in working.bounds.iter().enumerate() {
+                    match status {
+                        BoundStatus::AtLower | BoundStatus::Fixed => x[i] = qp.xl[i],
+                        BoundStatus::AtUpper => x[i] = qp.xu[i],
+                        BoundStatus::Inactive => {}
+                    }
+                }
+                expand_tol = opts.expand_tol_initial;
             }
         }
 
@@ -1312,18 +1355,35 @@ fn blocker_index_key(b: BlockerTarget) -> (u8, usize) {
 ///
 /// Returns `(α, blocker)` with `α = 1.0` and `blocker = None`
 /// when no direction blocks at less than the full step.
+///
+/// `expand_tol` is the current GMSW EXPAND τ (only consumed when
+/// `opts.anti_cycling = Expand`; pass 0.0 to disable). Non-zero
+/// τ relaxes the Phase-1 minimum ratio by `τ / |a·p|` per
+/// candidate, ensuring strictly positive step length even at
+/// degenerate vertices where multiple constraints have α = 0
+/// under the strict ratio test.
 fn select_blocker(
     candidates: &[(BlockerTarget, f64, f64)],
     opts: &QpOptions,
+    expand_tol: f64,
 ) -> (f64, Option<BlockerTarget>) {
     if candidates.is_empty() {
         return (1.0, None);
     }
-    // Pass 1: minimum ratio.
+    // Pass 1: minimum ratio (strict and τ-relaxed).
     let mut alpha_min = 1.0_f64;
-    for &(_, r, _) in candidates {
+    let mut alpha_min_relaxed = 1.0_f64;
+    for &(_, r, ap_mag) in candidates {
         if r < alpha_min {
             alpha_min = r;
+        }
+        let r_relaxed = if ap_mag > 0.0 {
+            r + expand_tol / ap_mag
+        } else {
+            r
+        };
+        if r_relaxed < alpha_min_relaxed {
+            alpha_min_relaxed = r_relaxed;
         }
     }
     if alpha_min >= 1.0 {
@@ -1347,13 +1407,23 @@ fn select_blocker(
             (r, Some(target))
         }
         AntiCyclingChoice::Expand => {
-            // Harris two-pass: among directions within
-            // `tol · (1 + |α_min|)` of `α_min`, pick the largest
-            // `|a·p|`. Tie-break by lowest index for reproducibility.
-            let tol = opts.feas_tol * (1.0 + alpha_min.abs());
+            // Harris two-pass with τ-relaxation. Phase 1 uses
+            // `r_relaxed = r + τ/|a·p|`; Phase 2 picks largest
+            // `|a·p|` among candidates within `tol · (1 + |α_min_relaxed|)`
+            // of `α_min_relaxed`. The step length used is the
+            // SELECTED candidate's *true* ratio, clamped from
+            // below by `α_min_relaxed` so that even at a
+            // degenerate vertex (true ratio = 0) we take a
+            // strictly positive step of magnitude ≈ τ/|a·p|.
+            let tol = opts.feas_tol * (1.0 + alpha_min_relaxed.abs());
             let mut best: Option<(BlockerTarget, f64, f64)> = None;
             for &(target, r, ap_mag) in candidates {
-                if r > alpha_min + tol {
+                let r_relaxed = if ap_mag > 0.0 {
+                    r + expand_tol / ap_mag
+                } else {
+                    r
+                };
+                if r_relaxed > alpha_min_relaxed + tol {
                     continue;
                 }
                 let take = match best {
@@ -1373,7 +1443,10 @@ fn select_blocker(
                 }
             }
             let (target, r, _) = best.expect("non-empty candidates above");
-            (r, Some(target))
+            // Floor the step length at the τ-relaxed minimum so
+            // we never freeze at α = 0; cap at 1.0.
+            let alpha = r.max(alpha_min_relaxed).min(1.0).max(0.0);
+            (alpha, Some(target))
         }
     }
 }

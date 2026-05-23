@@ -1079,6 +1079,54 @@ fn anti_cycling_expand_two_pass_converges_at_degenerate_vertex() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Full GMSW EXPAND with τ-growth on the same degenerate-vertex
+// problem from anti_cycling_expand_two_pass... — verifies that
+// the τ-relaxation + snap-reset machinery is wired and doesn't
+// break correctness on standard problems. (Cycling-pathology
+// stress-tests need very large iteration counts to actually
+// trigger τ_max overflow; this test just exercises the
+// τ-growth code path.)
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn expand_tau_growth_does_not_break_correctness() {
+    let n = 2;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [-1.0, -1.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF, NLP_LOWER_BOUND_INF];
+    let xu = [0.5, 0.5];
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    // Use EXPAND with a deliberately tight τ_max so the snap
+    // reset triggers within a few iterations.
+    let opts = crate::QpOptions {
+        anti_cycling: crate::AntiCyclingChoice::Expand,
+        expand_tol_initial: 1e-12,
+        expand_tol_growth: 1e-8, // grow fast
+        expand_tol_max: 1e-7,    // hit ceiling within ~10 iters
+        ..crate::QpOptions::default()
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &opts).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 0.5).abs() < 1e-9);
+    assert!((sol.x[1] - 0.5).abs() < 1e-9);
+}
+
+// ─────────────────────────────────────────────────────────────────
 // EXPAND must NOT route a problem with non-degenerate single
 // blocker differently from the default — the Harris test
 // degenerates to single-blocker selection.
