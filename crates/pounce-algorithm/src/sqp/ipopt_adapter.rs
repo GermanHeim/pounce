@@ -28,6 +28,7 @@ use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::Triplet;
 use pounce_common::Number;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use pounce_linalg::triplet::{GenTMatrix, SymTMatrix};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -60,19 +61,39 @@ impl IpoptNlpAdapter {
         let c_space = DenseVectorSpace::new(m_c as i32);
         let d_space = DenseVectorSpace::new(m_d as i32);
 
-        // Extract bounds and initial point from the NLP. Each
-        // call borrows mutably so we sequence them.
+        // Extract bounds and initial point from the NLP. IpoptNlp
+        // exposes bounds in *compressed* form (length = number of
+        // entries with a finite bound); SQP wants full-length
+        // vectors (length n / m_d) with ±∞ for unbounded entries.
+        // The expansion matrices `px_l`, `px_u`, `pd_l`, `pd_u`
+        // own the small→large index map; use them to scatter.
         let (x_l, x_u, d_l, d_u, x_init) = {
             let mut n_borrow = nlp.borrow_mut();
-            let x_l = vec_from_dyn(n_borrow.x_l());
-            let x_u = vec_from_dyn(n_borrow.x_u());
-            let d_l = if m_d > 0 {
+            let x_l_small = vec_from_dyn(n_borrow.x_l());
+            let x_u_small = vec_from_dyn(n_borrow.x_u());
+            let d_l_small = if m_d > 0 {
                 vec_from_dyn(n_borrow.d_l())
             } else {
                 Vec::new()
             };
-            let d_u = if m_d > 0 {
+            let d_u_small = if m_d > 0 {
                 vec_from_dyn(n_borrow.d_u())
+            } else {
+                Vec::new()
+            };
+            let px_l = n_borrow.px_l();
+            let px_u = n_borrow.px_u();
+            let pd_l = n_borrow.pd_l();
+            let pd_u = n_borrow.pd_u();
+            let x_l = scatter_bound(&*px_l, &x_l_small, n, Number::NEG_INFINITY);
+            let x_u = scatter_bound(&*px_u, &x_u_small, n, Number::INFINITY);
+            let d_l = if m_d > 0 {
+                scatter_bound(&*pd_l, &d_l_small, m_d, Number::NEG_INFINITY)
+            } else {
+                Vec::new()
+            };
+            let d_u = if m_d > 0 {
+                scatter_bound(&*pd_u, &d_u_small, m_d, Number::INFINITY)
             } else {
                 Vec::new()
             };
@@ -231,6 +252,29 @@ fn vec_from_dyn(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
         .downcast_ref::<DenseVector>()
         .expect("IpoptNlp bound accessors must return DenseVector");
     dv.expanded_values()
+}
+
+/// Scatter a compressed bound vector (length = number of finite bounds)
+/// into the full-length bound vector (length `n_large`), filling
+/// not-in-map entries with `fill`. Uses the `ExpansionMatrix`'s
+/// small→large index map.
+fn scatter_bound(
+    expansion: &dyn pounce_linalg::Matrix,
+    small: &[Number],
+    n_large: usize,
+    fill: Number,
+) -> Vec<Number> {
+    let em = expansion
+        .as_any()
+        .downcast_ref::<ExpansionMatrix>()
+        .expect("px_l / px_u / pd_l / pd_u must be ExpansionMatrix");
+    let exp_pos = em.expanded_pos_indices();
+    debug_assert_eq!(small.len(), exp_pos.len());
+    let mut out = vec![fill; n_large];
+    for (i, &pos) in exp_pos.iter().enumerate() {
+        out[pos as usize] = small[i];
+    }
+    out
 }
 
 fn gen_t_downcast(m: &dyn pounce_linalg::Matrix) -> &GenTMatrix {

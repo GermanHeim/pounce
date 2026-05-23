@@ -13,6 +13,7 @@ use crate::sqp::result::SqpStatus;
 use crate::sqp::sqp_alg::SqpAlgorithm;
 use pounce_common::types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
@@ -328,19 +329,23 @@ struct ConvexEqIpoptNlp {
     jac_c_space: Rc<GenTMatrixSpace>,
     jac_d_space: Rc<GenTMatrixSpace>,
     hess_space: Rc<SymTMatrixSpace>,
-    px_space: Rc<GenTMatrixSpace>,
-    pd_space: Rc<GenTMatrixSpace>,
+    px_l_space: Rc<ExpansionMatrixSpace>,
+    px_u_space: Rc<ExpansionMatrixSpace>,
+    pd_l_space: Rc<ExpansionMatrixSpace>,
+    pd_u_space: Rc<ExpansionMatrixSpace>,
 }
 
 impl ConvexEqIpoptNlp {
     fn new() -> Self {
         let n_var = 2;
-        let x_space = DenseVectorSpace::new(n_var);
+        // All variables are unbounded → compressed `x_l`/`x_u` are
+        // empty, and px_l/px_u are 2×0 ExpansionMatrices with no
+        // small→large map entries (matching the OrigIpoptNlp
+        // contract for an all-free-variable NLP).
+        let bound_space = DenseVectorSpace::new(0);
         let d_space_inh = DenseVectorSpace::new(0);
-        let mut x_l = x_space.make_new_dense();
-        x_l.set_values(&[NLP_LOWER_BOUND_INF; 2]);
-        let mut x_u = x_space.make_new_dense();
-        x_u.set_values(&[NLP_UPPER_BOUND_INF; 2]);
+        let x_l = bound_space.make_new_dense();
+        let x_u = bound_space.make_new_dense();
         let d_l = d_space_inh.make_new_dense();
         let d_u = d_space_inh.make_new_dense();
 
@@ -350,9 +355,11 @@ impl ConvexEqIpoptNlp {
         let jac_d_space = GenTMatrixSpace::new(0, 2, vec![], vec![]);
         // Hessian (2 × 2 diag).
         let hess_space = SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]);
-        // px_l, px_u, pd_l, pd_u — return dummy zero-sized matrices.
-        let px_space = GenTMatrixSpace::new(0, 2, vec![], vec![]);
-        let pd_space = GenTMatrixSpace::new(0, 0, vec![], vec![]);
+        // Bound expansion matrices: n_large = n_var (or 0 for d), n_small = 0.
+        let px_l_space = ExpansionMatrixSpace::new(n_var, 0, &[], 0);
+        let px_u_space = ExpansionMatrixSpace::new(n_var, 0, &[], 0);
+        let pd_l_space = ExpansionMatrixSpace::new(0, 0, &[], 0);
+        let pd_u_space = ExpansionMatrixSpace::new(0, 0, &[], 0);
 
         Self {
             x_l,
@@ -362,8 +369,10 @@ impl ConvexEqIpoptNlp {
             jac_c_space,
             jac_d_space,
             hess_space,
-            px_space,
-            pd_space,
+            px_l_space,
+            px_u_space,
+            pd_l_space,
+            pd_u_space,
         }
     }
 }
@@ -434,16 +443,16 @@ impl crate::ipopt_nlp::IpoptNlp for ConvexEqIpoptNlp {
         &self.d_u
     }
     fn px_l(&self) -> Rc<dyn Matrix> {
-        Rc::new(GenTMatrix::new(Rc::clone(&self.px_space)))
+        Rc::new(ExpansionMatrix::new(Rc::clone(&self.px_l_space)))
     }
     fn px_u(&self) -> Rc<dyn Matrix> {
-        Rc::new(GenTMatrix::new(Rc::clone(&self.px_space)))
+        Rc::new(ExpansionMatrix::new(Rc::clone(&self.px_u_space)))
     }
     fn pd_l(&self) -> Rc<dyn Matrix> {
-        Rc::new(GenTMatrix::new(Rc::clone(&self.pd_space)))
+        Rc::new(ExpansionMatrix::new(Rc::clone(&self.pd_l_space)))
     }
     fn pd_u(&self) -> Rc<dyn Matrix> {
-        Rc::new(GenTMatrix::new(Rc::clone(&self.pd_space)))
+        Rc::new(ExpansionMatrix::new(Rc::clone(&self.pd_u_space)))
     }
     fn get_starting_x(&mut self, x: &mut dyn Vector) -> bool {
         let dx = x.as_any_mut().downcast_mut::<DenseVector>().unwrap();

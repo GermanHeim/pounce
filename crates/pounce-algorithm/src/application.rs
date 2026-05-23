@@ -547,16 +547,9 @@ impl IpoptApplication {
     /// Phase 5b SQP entry point. Builds the same NLP chain
     /// (`TNLPAdapter` → `OrigIpoptNlp` → `IpoptNlpAdapter`) the
     /// IPM uses, then runs `SqpAlgorithm::optimize`. Maps the
-    /// `SqpResult.status` back to `ApplicationReturnStatus`.
-    ///
-    /// Current limitations (documented; will land in follow-up):
-    /// - Skips the IPM's bound-relaxation and gradient-based
-    ///   scaling preprocessing. The SQP works in unscaled space
-    ///   for now.
-    /// - Does not invoke the user TNLP's
-    ///   `finalize_solution` callback. Callers requesting SQP
-    ///   read the returned status; the final iterate is queried
-    ///   via a future `get_sqp_iterate` accessor.
+    /// `SqpResult.status` back to `ApplicationReturnStatus` and
+    /// hands the final iterate to the user TNLP's
+    /// `finalize_solution` callback via `finalize_via_sqp`.
     fn optimize_sqp_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
         use pounce_nlp::tnlp_adapter::TNLPAdapter;
@@ -572,13 +565,8 @@ impl IpoptApplication {
         };
         let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
-        let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(nlp_rc);
+        let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(&nlp_rc));
 
-        // Build the SqpAlgorithm via the same AlgorithmBuilder
-        // mechanism used by the c6 SQP dispatch. Force
-        // `algorithm = ActiveSetSqp` regardless of how the
-        // builder was constructed (we already routed here based
-        // on the string option, so this is just consistency).
         let mut builder = self.algorithm_builder_snapshot();
         builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
         let factory = self.make_backend_factory();
@@ -587,21 +575,37 @@ impl IpoptApplication {
             None => return ApplicationReturnStatus::InternalError,
         };
 
-        match alg.optimize(&mut sqp_adapter) {
-            Ok(res) => match res.status {
-                crate::sqp::SqpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
-                crate::sqp::SqpStatus::MaxIter => {
-                    ApplicationReturnStatus::MaximumIterationsExceeded
-                }
-                crate::sqp::SqpStatus::InfeasibleSubproblem => {
-                    ApplicationReturnStatus::InfeasibleProblemDetected
-                }
-                crate::sqp::SqpStatus::LineSearchFailed => {
-                    ApplicationReturnStatus::SearchDirectionBecomesTooSmall
-                }
-            },
-            Err(_) => ApplicationReturnStatus::InternalError,
-        }
+        let res = match alg.optimize(&mut sqp_adapter) {
+            Ok(r) => r,
+            Err(_) => return ApplicationReturnStatus::InternalError,
+        };
+        let (app_status, solver_status) = match res.status {
+            crate::sqp::SqpStatus::Optimal => (
+                ApplicationReturnStatus::SolveSucceeded,
+                pounce_nlp::SolverReturn::Success,
+            ),
+            crate::sqp::SqpStatus::MaxIter => (
+                ApplicationReturnStatus::MaximumIterationsExceeded,
+                pounce_nlp::SolverReturn::MaxiterExceeded,
+            ),
+            crate::sqp::SqpStatus::InfeasibleSubproblem => (
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                pounce_nlp::SolverReturn::LocalInfeasibility,
+            ),
+            crate::sqp::SqpStatus::LineSearchFailed => (
+                ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
+                pounce_nlp::SolverReturn::ErrorInStepComputation,
+            ),
+        };
+
+        // Forward to the user TNLP's finalize_solution. We pass
+        // the SQP iterate and recovered multipliers via the
+        // OrigIpoptNlp's lifting hooks. Failure here is silent
+        // (we still return the algorithm's status) — the user
+        // sees the right ApplicationReturnStatus regardless.
+        let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp);
+
+        app_status
     }
 
     /// Build a *copy* of the algorithm builder configured per the
@@ -1687,6 +1691,97 @@ fn finalize_via_orig_nlp(
     Ok(f_final)
 }
 
+/// SQP-side analog of [`finalize_via_orig_nlp`]. Hands the SQP
+/// solution iterate to the user TNLP via the standard
+/// `finalize_solution` callback. Multiplier lifting goes through
+/// the same OrigIpoptNlp hooks so the user sees the same shape
+/// regardless of which algorithm produced the iterate.
+///
+/// Returns the user-space objective value on success.
+fn finalize_via_sqp(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    res: &crate::sqp::SqpResult,
+    solver_status: pounce_nlp::SolverReturn,
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+) -> Result<Number, ()> {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
+    let n = info.n as usize;
+    let m = info.m as usize;
+
+    // Wrap SQP slices in DenseVectors so we can pass them through
+    // the OrigIpoptNlp lift_x_to_full / pack_*_for_user hooks.
+    let nlp_borrow = nlp.borrow();
+    let n_alg = nlp_borrow.n() as usize;
+    let m_eq = nlp_borrow.m_eq() as usize;
+    let m_ineq = nlp_borrow.m_ineq() as usize;
+    debug_assert_eq!(res.x.len(), n_alg);
+    debug_assert_eq!(res.lambda_g.len(), m_eq + m_ineq);
+    debug_assert_eq!(res.lambda_x.len(), n_alg);
+
+    let x_space = DenseVectorSpace::new(n_alg as Index);
+    let c_space = DenseVectorSpace::new(m_eq as Index);
+    let d_space = DenseVectorSpace::new(m_ineq as Index);
+
+    let mut x_dv = x_space.make_new_dense();
+    x_dv.set_values(&res.x);
+    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&x_dv);
+    debug_assert_eq!(x_vec.len(), n);
+
+    // λ_x is packed signed (z_l − z_u). Split for lift.
+    let mut z_l_compressed = x_space.make_new_dense();
+    let mut z_u_compressed = x_space.make_new_dense();
+    let zl_vals: Vec<Number> = res.lambda_x.iter().map(|v| v.max(0.0)).collect();
+    let zu_vals: Vec<Number> = res.lambda_x.iter().map(|v| (-v).max(0.0)).collect();
+    z_l_compressed.set_values(&zl_vals);
+    z_u_compressed.set_values(&zu_vals);
+    let mut z_l = nlp_borrow.pack_z_l_for_user(&z_l_compressed);
+    if z_l.is_empty() {
+        z_l = vec![0.0; n];
+    }
+    let mut z_u = nlp_borrow.pack_z_u_for_user(&z_u_compressed);
+    if z_u.is_empty() {
+        z_u = vec![0.0; n];
+    }
+
+    // λ_g is [y_c; y_d]; split into the c/d blocks for lift.
+    let mut y_c_dv = c_space.make_new_dense();
+    let mut y_d_dv = d_space.make_new_dense();
+    if m_eq > 0 {
+        y_c_dv.set_values(&res.lambda_g[..m_eq]);
+    }
+    if m_ineq > 0 {
+        y_d_dv.set_values(&res.lambda_g[m_eq..]);
+    }
+    let mut lambda = nlp_borrow.pack_lambda_for_user(&y_c_dv, &y_d_dv);
+    if lambda.is_empty() {
+        lambda = vec![0.0; m];
+    }
+    drop(nlp_borrow);
+
+    let mut g_final = vec![0.0; m];
+    let _ = tnlp.borrow_mut().eval_g(&x_vec, true, &mut g_final);
+    let f_final = tnlp
+        .borrow_mut()
+        .eval_f(&x_vec, true)
+        .unwrap_or(Number::NAN);
+    tnlp.borrow_mut().finalize_solution(
+        pounce_nlp::tnlp::Solution {
+            status: solver_status,
+            x: &x_vec,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g_final,
+            lambda: &lambda,
+            obj_value: f_final,
+        },
+        &TnlpIpoptData::default(),
+        &TnlpIpoptCq::default(),
+    );
+    Ok(f_final)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1759,6 +1854,117 @@ mod tests {
         app.initialize_with_options_str("algorithm active-set-sqp\n")
             .unwrap();
         assert!(app.is_sqp_algorithm_selected());
+    }
+
+    /// Convex equality NLP fixture for end-to-end SQP testing
+    /// through `IpoptApplication`:
+    ///
+    ///     min ½(x₁² + x₂²) − x₁ − 2x₂  s.t.  x₁ + x₂ = 1
+    ///
+    /// Closed form: x* = (0, 1), obj = -1.5, λ_g = 1.
+    struct ConvexEqTnlp {
+        finalize_called: std::rc::Rc<std::cell::RefCell<Option<(Vec<Number>, Number)>>>,
+    }
+    impl TNLP for ConvexEqTnlp {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 2,
+                nnz_h_lag: 2,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-2.0e19; 2]);
+            b.x_u.copy_from_slice(&[2.0e19; 2]);
+            b.g_l.copy_from_slice(&[1.0]);
+            b.g_u.copy_from_slice(&[1.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[0.0, 0.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.5 * (x[0] * x[0] + x[1] * x[1]) - x[0] - 2.0 * x[1])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            grad[0] = x[0] - 1.0;
+            grad[1] = x[1] - 2.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0]);
+                    jcol.copy_from_slice(&[0, 1]);
+                }
+                SparsityRequest::Values { values, .. } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _obj_factor: Number,
+            _lambda: Option<&[Number]>,
+            _new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 1]);
+                }
+                SparsityRequest::Values { values, .. } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            *self.finalize_called.borrow_mut() = Some((sol.x.to_vec(), sol.obj_value));
+        }
+    }
+
+    #[test]
+    fn application_sqp_path_solves_convex_eq_nlp_and_finalizes() {
+        let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let tnlp = std::rc::Rc::new(std::cell::RefCell::new(ConvexEqTnlp {
+            finalize_called: std::rc::Rc::clone(&finalize_slot),
+        }));
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        let status = app.optimize_tnlp(tnlp);
+        assert_eq!(status, ApplicationReturnStatus::SolveSucceeded);
+
+        // The TNLP's finalize_solution must have been invoked.
+        let recv = finalize_slot.borrow().clone();
+        let (x_recv, obj_recv) = recv.expect("finalize_solution was not called");
+        assert_eq!(x_recv.len(), 2);
+        assert!((x_recv[0] - 0.0).abs() < 1e-6, "x[0] = {}", x_recv[0]);
+        assert!((x_recv[1] - 1.0).abs() < 1e-6, "x[1] = {}", x_recv[1]);
+        assert!(
+            (obj_recv - (-1.5)).abs() < 1e-6,
+            "obj = {} but expected -1.5",
+            obj_recv
+        );
     }
 
     #[test]
