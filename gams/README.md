@@ -95,8 +95,22 @@ true one by a few rows. The solver degrades gracefully (drops
 infeasible rows and re-detects them on the next QP solve); it
 never returns the wrong answer.
 
-Mechanism §7.4(b) — a persistent on-disk state file for precision-
-critical workflows — is planned but not yet shipped.
+Mechanism **§7.4(b)** — persistent on-disk state-file carry — is
+opt-in via the `sqp_state_file` option in `pounce.opt`:
+
+```
+algorithm        active-set-sqp
+sqp_state_file   .mymodel.pou-ws
+```
+
+When set, the solver link reads the file at the start of each
+solve (validating a checksum keyed by the current `n`, `m`,
+`x_l`, `x_u`, `g_l`, `g_u`) and writes the post-solve working set
+back. Format: 8-byte magic `POUNWS01`, 8-byte FNV-1a checksum,
+two int32 dimensions, then `n + m` status bytes. Structural
+changes (different bounds, different number of variables) trip
+the checksum cleanly and the link silently falls back to the
+§7.4(a) marginal reconstruction.
 
 ## Examples
 

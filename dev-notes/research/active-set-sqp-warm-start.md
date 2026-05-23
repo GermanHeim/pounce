@@ -1237,14 +1237,50 @@ phasing tightens to four shippable milestones:
     `Problem.solve(working_set=…)` kwarg without dropping into
     Rust. Three new Python tests; 23 Python tests pass.
 
-  **Phase 5c remaining items — require external dependencies:**
-  - **Exit:** measured ≥5× iteration-count drop on the §8.2 MPC
-    and parametric regression suites. Requires HPIPM / qpOASES /
-    acados reference numbers — those are external oracles.
-- **Phase 5d — l1-elastic globalization alternative (1–2 weeks,
-  optional).** SNOPT-style globalization as an opt-in alongside the
-  default filter, behind `sqp_globalization=l1-elastic`. Comparison
-  benchmarks committed.
+  **Phase 5c polishing landed in c28–c32:**
+  - c28 — `SensSolve` captures user-space multipliers (`mult_g`,
+    `mult_x_L`, `mult_x_U`, `g`) into `SensResult`. The
+    parametric-corrector hand-off is now a single solve plus a
+    `classify_working_set` call (no separate IPM run needed for
+    multipliers).
+  - c29 — In-repo Hock-Schittkowski subset
+    (`tests/hock_schittkowski_subset.rs`): 10 problems with
+    published closed-form optima covering box bounds, equality,
+    mixed inequality, nonconvex separable, and large convex QP
+    cases. HS28, HS35, HS76 are exercised on both IPM and the
+    active-set SQP paths.
+  - c30 — Phase 5d l1-elastic polish: two new tunable knobs
+    (`sqp_l1_penalty_safety`, `sqp_l1_penalty_max`) clamp the
+    Han-Powell ν update; comparison tests
+    (`tests/sqp_filter_vs_l1_elastic.rs`) certify Filter and
+    L1Elastic converge to the same optimum on HS28 and HS35.
+  - c31 — Maros-Mészáros published-optimum framework
+    (`pounce-qp/tests/mm_published_optima.rs`): five hand-crafted
+    .qps fixtures covering pure equality, box-only, mixed
+    inequality, two-sided RANGES, and indefinite-Hessian shapes,
+    all parsed and solved to 1e-7 against hand-derived optima.
+    Reusable `compare_qps_to_published(text, x*, f*, …)` helper
+    for the future MM 138-problem sweep.
+  - c32 — GAMS §7.4(b) persistent state-file mechanism. Opt-in
+    via `sqp_state_file <path>`; binary format with FNV-1a
+    checksum keyed by `(n, m, x_l, x_u, g_l, g_u)` so structural
+    changes invalidate cleanly. Falls back to §7.4(a) marginal
+    reconstruction when the file is missing / mismatched.
+
+  **Phase 5 remaining items — all require external oracles:**
+  - Measured ≥5× iteration-count drop on the §8.2 MPC and
+    parametric regression suites (vs HPIPM / qpOASES / acados).
+  - §8.1 full Maros-Mészáros 138-problem regression (vs qpOASES /
+    OSQP). The c31 framework parses each .qps and asserts against
+    a supplied optimum, but the .qps distribution + reference
+    optima table need an oracle wired in to land.
+  - §8.3 full Hock-Schittkowski 119-problem regression (vs CUTEst
+    SIF runtime).
+  - §8.4 AC OPF pglib-OPF + Poisson boundary-control scaling
+    sweep timings (vs MATPOWER / PowerModels.jl numbers).
+- **Phase 5d — landed in c30.** The l1-elastic alternative is
+  shipped and self-tested; iteration-count comparison benchmarks
+  vs SNOPT remain oracle-gated.
 
 Total: 10–15 weeks of focused work, gated phase-by-phase. Phases 5a
 and 5b each have standalone value (sparse QP solver; cold SQP NLP);
