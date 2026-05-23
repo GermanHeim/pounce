@@ -17,14 +17,17 @@ is wired. Five of the six analytical-ladder problems (§8.0) pass;
 problem #4 (LICQ-violating redundant equality) is a documented
 limitation that needs rank-detection beyond inertia control.
 
-The SOTA-performance items from §4.2 (Schur-complement factor
-updates) and full §4.4 (Gill-Murray-Saunders-Wright EXPAND
-anti-cycling, beyond Bland's-rule fallback) are deferred to
-Phase 5a.1 — they are performance refinements, not correctness
-prerequisites. The current solver refactors per active-set change
-and uses steepest-violation drop (Dantzig's rule, the qpOASES
-default), which is correct and matches qpOASES's behavior on every
-non-pathological problem.
+**Phase 5a.1 — performance and tooling refinements landed.** The
+Harris-style two-pass ratio test (cycling-prevention core of
+GMSW EXPAND), the QPS RANGES section, the cached-factor `resolve`
+infrastructure (the building block on which full Schur layers),
+and basic §8.2 scaling-sweep diagnostics all ship. What remains
+for Phase 5a.2 is the algorithmic Schur active-set update
+mechanism (uses the c16 cached `resolve`), the GMSW EXPAND
+τ-growth + snap-reset machinery (uses the c14 Harris pass), the
+large-n scaling-sweep with criterion-style timing, and external-
+oracle comparison on Maros-Mészáros (requires FFI, incompatible
+with pure-Rust).
 
 ## What works
 
@@ -47,13 +50,16 @@ non-pathological problem.
 | §4.5 inertia control via diagonal-shift retry | done |
 | §4.3 l1-elastic mode | done |
 | §4.7 iterative refinement (inherited from FERAL) | done |
-| §4.4 anti-cycling: Bland's rule (`AntiCyclingChoice::Bland`) | done |
-| §4.4 anti-cycling: full EXPAND (Gill-Murray-Saunders-Wright 1989) | **deferred** |
-| §4.2 sparse Schur-complement factor updates (parametric homotopy) | **deferred** |
-| §8.1 Maros-Mészáros .qps reader | done |
-| §8.1 Maros-Mészáros oracle comparison (qpOASES / OSQP) | **deferred** (requires FFI; non-pure-Rust) |
-| §8.2 LASSO / MPC scaling-sweep benchmarks | **deferred** |
-| §8.7 per-module unit tests for `kkt`, `elastic`, `refinement` | done |
+| §4.4 anti-cycling: Bland's rule (`AntiCyclingChoice::Bland`) | done (c8) |
+| §4.4 anti-cycling: Harris two-pass (`AntiCyclingChoice::Expand`) | done (c14) |
+| §4.4 anti-cycling: full GMSW EXPAND (τ-growth + snap-reset) | **Phase 5a.2** |
+| §4.2 cached-factor `resolve` infrastructure | done (c16) |
+| §4.2 sparse Schur-complement active-set update mechanism | **Phase 5a.2** |
+| §8.1 Maros-Mészáros .qps reader (incl. RANGES) | done (c11, c13) |
+| §8.1 Maros-Mészáros oracle comparison (qpOASES / OSQP) | **deferred** (FFI; not pure-Rust) |
+| §8.2 basic scaling-sweep diagnostics | done (c15) |
+| §8.2 large-n scaling (LASSO at 10²–10⁵, MPC horizon 10–160) | **Phase 5a.2** |
+| §8.7 per-module unit tests for `kkt`, `elastic`, `refinement`, `qps` | done |
 
 ## Public API at a glance
 
@@ -77,9 +83,9 @@ let model = parse_qps(qps_text)?;
 
 ## Tests
 
-49 tests across 6 test modules:
+59 tests across 7 test modules:
 
-- `tests/analytical.rs` (17) — §8.0 ladder + integration tests for
+- `tests/analytical.rs` (~19) — §8.0 ladder + integration tests for
   every problem class, with hand-derived expected values.
 - `tests/api.rs` (11) — type-plumbing invariants for `WorkingSet`,
   `QpProblem::validate`, default `QpOptions`.
@@ -87,12 +93,18 @@ let model = parse_qps(qps_text)?;
   `KktTriplet::add_h_diagonal_shift`.
 - `tests/elastic_unit.rs` (7) — §8.7 unit tests for
   `ElasticReformulation::build` and `initial_seed`.
-- `tests/refinement_unit.rs` (2) — §4.7 pin that FERAL's iterative
-  refinement is on by default and delivers near-machine-precision
-  on representative SPD and indefinite-saddle KKT systems.
-- `tests/qps_unit.rs` (5) — QPS parser + round-trip solve.
+- `tests/refinement_unit.rs` (4) — §4.7 pin that FERAL's iterative
+  refinement is on by default and delivers near-machine-precision;
+  plus c16 cached-`resolve` contract tests.
+- `tests/qps_unit.rs` (9) — QPS parser + round-trip solve + RANGES
+  semantics for each row sense.
+- `tests/scaling_unit.rs` (3) — §8.2 scaling-sweep diagnostics at
+  `n ∈ {10, 50, 100, 200}` and a warm-restart speedup test
+  (cold: ~30 refactors / ~20 ws changes; warm at optimum:
+  1 refactor / 0 ws changes — the §8.5 payoff in microcosm).
 
-Run with: `cargo test -p pounce-qp`.
+Run with: `cargo test -p pounce-qp`. For per-test timings,
+`cargo test -p pounce-qp --release -- --nocapture`.
 
 ## Design reference
 

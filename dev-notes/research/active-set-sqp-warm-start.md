@@ -1024,17 +1024,39 @@ phasing tightens to four shippable milestones:
   - Total: 49 tests, all passing; `cargo fmt --all -- --check`
     clean; `cargo clippy --workspace -D correctness -D suspicious`
     clean.
-  **Deferred to Phase 5a.1** (performance refinements; do not
-  block Phase 5b NLP integration since the current solver is
-  algorithmically correct):
-  - §4.2 sparse Schur-complement updates (replace refactor-per-
-    iteration with cached-factor `resolve`).
-  - §4.4 full EXPAND.
-  - §8.1 Maros-Mészáros oracle comparison (needs qpOASES/OSQP
-    via FFI — non-pure-Rust; alternative: published-optimum
-    comparison against MM .lst tables).
-  - §8.2 LASSO / MPC scaling-sweep benchmarks.
-  - QPS `RANGES` section (two-sided general bounds).
+  **Phase 5a.1 — landed in c13–c17** (heads `665a3f4`…`f1066d4`):
+  - QPS RANGES section (c13).
+  - §4.4 Harris-style two-pass ratio test
+    (`AntiCyclingChoice::Expand`, c14) — the cycling-prevention
+    core of GMSW EXPAND.
+  - §8.2 basic scaling-sweep diagnostics (c15) — measured
+    `n ∈ {10, 50, 100, 200}` correctness + timings; warm-restart
+    shows ~30× factor reduction vs cold on a representative
+    n=20 problem.
+  - §4.2 cached-factor `resolve` infrastructure (c16) — the
+    LinearSolver building block on which the algorithmic Schur
+    update layers.
+  - 59 tests total (up from 49), `cargo fmt` and
+    `cargo clippy -D correctness -D suspicious` clean.
+
+  **Deferred to Phase 5a.2** (performance refinements that need
+  substantial focused commits; do not block Phase 5b NLP
+  integration):
+  - §4.2 sparse Schur-complement *algorithmic* update mechanism
+    in `solve_general`'s inner loop — replaces refactor-per-
+    iteration with cached `resolve` plus Schur block, with reset
+    on `max_schur_updates`. The c16 cached-resolve API is in;
+    only the algorithmic wiring + Schur-block bookkeeping
+    remains.
+  - §4.4 full GMSW EXPAND τ-growth and snap-to-bound reset —
+    the c14 Harris pass covers the tie-break half; the
+    perturbation half is independent.
+  - §8.1 Maros-Mészáros oracle comparison — requires qpOASES /
+    OSQP via FFI (non-pure-Rust). Alternative: published-optimum
+    comparison against MM .lst tables (pure-Rust feasible).
+  - §8.2 large-n scaling-sweep with criterion-style timing
+    (LASSO at `n ∈ {10², 10³, 10⁴, 10⁵}`; MPC quadrotor at
+    horizon ∈ {10, 20, 40, 80, 160}).
 - **Phase 5b — SQP NLP driver, cold (3–4 weeks).** `SqpAlgorithm`
   wired into `alg_builder.rs` via §7.1 `AlgorithmChoice`. Filter
   globalization (§4.1) reusing existing `FilterLsAcceptor`. Exact
