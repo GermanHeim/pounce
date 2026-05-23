@@ -3,8 +3,8 @@
 //! Maros-Mészáros test set (Maros & Mészáros 1999, *Optim. Methods
 //! Softw.* **11/12**) uses:
 //!
-//! * `NAME`, `ROWS`, `COLUMNS`, `RHS`, `BOUNDS`, `QUADOBJ` /
-//!   `QSECTION`, `ENDATA` section headers.
+//! * `NAME`, `ROWS`, `COLUMNS`, `RHS`, `RANGES`, `BOUNDS`,
+//!   `QUADOBJ` / `QSECTION`, `ENDATA` section headers.
 //! * Free-format token parsing (whitespace-separated). Comment
 //!   lines start with `*`.
 //! * Row senses: `N` (objective), `L` (≤), `G` (≥), `E` (=).
@@ -14,8 +14,14 @@
 //!   the QPS convention; the half-factor `½ xᵀ H x` is implicit
 //!   in the QP form, so values are stored as-is.
 //!
+//! RANGES semantics (per MPS reference):
+//!   L row, range r:  bl = rhs − |r|, bu = rhs
+//!   G row, range r:  bl = rhs,       bu = rhs + |r|
+//!   E row, r > 0:    bl = rhs,       bu = rhs + r
+//!   E row, r < 0:    bl = rhs + r,   bu = rhs
+//!   E row, r = 0:    bl = bu = rhs   (no-op)
+//!
 //! Not yet supported (rejected with a clear error):
-//! * `RANGES` (two-sided general constraints in MPS).
 //! * `OBJSENSE` (assumes minimization).
 //! * MIP markers / `INTORG` / `INTEND` / binary variables.
 //!
@@ -92,8 +98,9 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
     let mut g_entries: HashMap<usize, f64> = HashMap::new();
     let mut a_entries: Vec<(usize, usize, f64)> = Vec::new(); // (row, col, val)
 
-    // Right-hand side and bounds (variable bounds).
+    // Right-hand side, ranges, and bounds (variable bounds).
     let mut rhs: HashMap<String, f64> = HashMap::new();
+    let mut ranges_map: HashMap<String, f64> = HashMap::new();
     let mut obj_constant: f64 = 0.0;
     let mut bnd_lo: HashMap<usize, f64> = HashMap::new();
     let mut bnd_up: HashMap<usize, f64> = HashMap::new();
@@ -252,10 +259,33 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
                 }
             }
             Section::Ranges => {
-                return Err(format!(
-                    "line {}: RANGES section is not yet supported in pounce-qp's QPS reader",
-                    line_no + 1
-                ));
+                if tokens.len() < 3 {
+                    return Err(format!(
+                        "line {}: RANGES entry needs name+row+value",
+                        line_no + 1
+                    ));
+                }
+                // tokens[0] is the ranges-set name (often "RNG");
+                // ignored.
+                let mut i = 1;
+                while i + 1 < tokens.len() {
+                    let row_name = tokens[i];
+                    let val: f64 = tokens[i + 1].parse().map_err(|e| {
+                        format!(
+                            "line {}: bad RANGES value `{}`: {e}",
+                            line_no + 1,
+                            tokens[i + 1]
+                        )
+                    })?;
+                    if !row_idx.contains_key(row_name) {
+                        return Err(format!(
+                            "line {}: RANGES row `{row_name}` not declared",
+                            line_no + 1
+                        ));
+                    }
+                    ranges_map.insert(row_name.to_string(), val);
+                    i += 2;
+                }
             }
             Section::Bounds => {
                 if tokens.len() < 3 {
@@ -363,20 +393,40 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
         xu[col] = v;
     }
 
-    // Constraint bounds derived from row sense + RHS:
-    //   L (≤): bu = rhs, bl = -∞
-    //   G (≥): bl = rhs, bu = +∞
-    //   E (=): bl = bu = rhs
+    // Constraint bounds derived from row sense + RHS + RANGES.
+    // RANGES (per MPS spec):
+    //   L row, range r: bl = rhs − |r|, bu = rhs
+    //   G row, range r: bl = rhs,       bu = rhs + |r|
+    //   E row, r > 0:   bl = rhs,       bu = rhs + r
+    //   E row, r < 0:   bl = rhs + r,   bu = rhs
+    //   E row, r = 0:   unchanged
     let mut bl = vec![NLP_LOWER_BOUND_INF; m];
     let mut bu = vec![NLP_UPPER_BOUND_INF; m];
     for (row_name, &i) in &row_idx {
         let r = rhs.get(row_name).copied().unwrap_or(0.0);
         match row_sense[row_name] {
-            RowSense::L => bu[i] = r,
-            RowSense::G => bl[i] = r,
+            RowSense::L => {
+                bu[i] = r;
+                if let Some(&rng) = ranges_map.get(row_name) {
+                    bl[i] = r - rng.abs();
+                }
+            }
+            RowSense::G => {
+                bl[i] = r;
+                if let Some(&rng) = ranges_map.get(row_name) {
+                    bu[i] = r + rng.abs();
+                }
+            }
             RowSense::E => {
                 bl[i] = r;
                 bu[i] = r;
+                if let Some(&rng) = ranges_map.get(row_name) {
+                    if rng > 0.0 {
+                        bu[i] = r + rng;
+                    } else if rng < 0.0 {
+                        bl[i] = r + rng;
+                    }
+                }
             }
             RowSense::N => {}
         }

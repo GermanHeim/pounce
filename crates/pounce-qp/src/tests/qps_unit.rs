@@ -136,7 +136,10 @@ ENDATA
 }
 
 #[test]
-fn parse_qps_rejects_ranges_section() {
+fn parse_qps_ranges_l_row_two_sided_lower_from_abs_range() {
+    // L row: bu = rhs, bl = rhs − |range|.
+    //   rhs = 5, range = 3 ⇒ bl = 2, bu = 5.
+    //   rhs = 5, range = -3 ⇒ bl = 2, bu = 5 (|range|).
     let text = "\
 NAME          T
 ROWS
@@ -150,11 +153,77 @@ RANGES
     RNG       R1         3.0
 ENDATA
 ";
-    let err = parse_qps(text).unwrap_err();
-    assert!(
-        err.contains("RANGES"),
-        "expected error about RANGES but got: {err}"
-    );
+    let m = parse_qps(text).unwrap();
+    assert!((m.bl[0] - 2.0).abs() < 1e-12, "bl = {}", m.bl[0]);
+    assert!((m.bu[0] - 5.0).abs() < 1e-12, "bu = {}", m.bu[0]);
+
+    let text2 = text.replace("3.0", "-3.0");
+    let m2 = parse_qps(&text2).unwrap();
+    assert!((m2.bl[0] - 2.0).abs() < 1e-12);
+    assert!((m2.bu[0] - 5.0).abs() < 1e-12);
+}
+
+#[test]
+fn parse_qps_ranges_g_row_two_sided_upper_from_abs_range() {
+    // G row: bl = rhs, bu = rhs + |range|.
+    let text = "\
+NAME          T
+ROWS
+ N  C
+ G  R1
+COLUMNS
+    X1        C          1.0   R1         1.0
+RHS
+    RHS       R1         5.0
+RANGES
+    RNG       R1         3.0
+ENDATA
+";
+    let m = parse_qps(text).unwrap();
+    assert!((m.bl[0] - 5.0).abs() < 1e-12);
+    assert!((m.bu[0] - 8.0).abs() < 1e-12);
+}
+
+#[test]
+fn parse_qps_ranges_e_row_positive_range_extends_upper() {
+    // E row, range > 0: bl = rhs, bu = rhs + range.
+    let text = "\
+NAME          T
+ROWS
+ N  C
+ E  R1
+COLUMNS
+    X1        C          1.0   R1         1.0
+RHS
+    RHS       R1         5.0
+RANGES
+    RNG       R1         2.0
+ENDATA
+";
+    let m = parse_qps(text).unwrap();
+    assert!((m.bl[0] - 5.0).abs() < 1e-12);
+    assert!((m.bu[0] - 7.0).abs() < 1e-12);
+}
+
+#[test]
+fn parse_qps_ranges_e_row_negative_range_extends_lower() {
+    // E row, range < 0: bl = rhs + range, bu = rhs.
+    let text = "\
+NAME          T
+ROWS
+ N  C
+ E  R1
+COLUMNS
+    X1        C          1.0   R1         1.0
+RHS
+    RHS       R1         5.0
+RANGES
+    RNG       R1        -2.0
+ENDATA
+";
+    let m = parse_qps(text).unwrap();
+    assert!((m.bl[0] - 3.0).abs() < 1e-12);
+    assert!((m.bu[0] - 5.0).abs() < 1e-12);
 }
 
 #[test]
