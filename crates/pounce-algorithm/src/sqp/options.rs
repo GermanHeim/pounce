@@ -60,6 +60,12 @@ pub struct SqpOptions {
     /// `print_level`: 0 = silent, 1 = per-iteration summary,
     /// 2+ = trace (planned).
     pub print_level: u8,
+
+    /// Number of `(s, y)` history pairs retained when
+    /// `hessian = Lbfgs`. Mirrors the upstream
+    /// `limited_memory_max_history` default of 6 (Nocedal-Wright
+    /// recommends 3–20). Ignored for `Exact` and `DampedBfgs`.
+    pub lbfgs_max_history: u32,
 }
 
 impl Default for SqpOptions {
@@ -75,6 +81,7 @@ impl Default for SqpOptions {
             bt_reduction: 0.5,
             bt_min_alpha: 1e-12,
             print_level: 0,
+            lbfgs_max_history: 6,
         }
     }
 }

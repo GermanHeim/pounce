@@ -334,6 +334,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         0,
         "0 silences the SQP driver; 1 prints per-iteration summaries; 2+ enables trace output (planned). Only consulted when \"algorithm\" is \"active-set-sqp\".",
     )?;
+    r.add_lower_bounded_integer_option(
+        "sqp_lbfgs_max_history",
+        "Maximum number of (s, y) pairs stored by the SQP L-BFGS Hessian.",
+        1,
+        6,
+        "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
+    )?;
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
 

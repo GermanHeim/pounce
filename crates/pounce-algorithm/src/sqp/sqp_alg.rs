@@ -18,6 +18,7 @@
 use crate::sqp::bfgs::DampedBfgs;
 use crate::sqp::filter::{filter_line_search, SqpFilter};
 use crate::sqp::iterates::SqpIterates;
+use crate::sqp::lbfgs::LBfgs;
 use crate::sqp::line_search::l1_merit_line_search;
 use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
@@ -118,6 +119,11 @@ impl SqpAlgorithm {
             } else {
                 None
             };
+        let mut lbfgs: Option<LBfgs> = if matches!(self.opts.hessian, SqpHessianSource::Lbfgs) {
+            Some(LBfgs::new(n, self.opts.lbfgs_max_history.max(1) as usize))
+        } else {
+            None
+        };
 
         for outer in 0..self.opts.max_iter {
             let grad_f = nlp.eval_grad_f(&iter.x);
@@ -136,11 +142,10 @@ impl SqpAlgorithm {
                     bfgs.as_triplet()
                 }
                 SqpHessianSource::Lbfgs => {
-                    return Err(SqpError::DimensionMismatch(
-                        "SqpHessianSource::Lbfgs not yet implemented; \
-                         use Exact or DampedBfgs"
-                            .into(),
-                    ));
+                    let lb = lbfgs.as_mut().expect("LBfgs state initialized above");
+                    let grad_lag = compute_grad_lag(&grad_f, &jac_c, &iter.lambda_g, n);
+                    lb.update(&iter.x, &grad_lag);
+                    lb.as_triplet()
                 }
             };
 

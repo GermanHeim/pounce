@@ -1692,7 +1692,8 @@ fn finalize_via_orig_nlp(
 /// Bind SQP suboptions registered in `upstream_options.rs`
 /// (`sqp_globalization`, `sqp_hessian`, `sqp_max_iter`, `sqp_tol`,
 /// `sqp_constr_viol_tol`, `sqp_dual_inf_tol`, `sqp_l1_penalty`,
-/// `sqp_bt_reduction`, `sqp_bt_min_alpha`, `sqp_print_level`) onto
+/// `sqp_bt_reduction`, `sqp_bt_min_alpha`, `sqp_print_level`,
+/// `sqp_lbfgs_max_history`) onto
 /// `opts`. Used by [`IpoptApplication::algorithm_builder_snapshot`]
 /// before constructing an SQP algorithm.
 fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
@@ -1738,6 +1739,11 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     }
     if let Ok((v, true)) = options.get_integer_value("sqp_print_level", "") {
         opts.print_level = v.clamp(0, u8::MAX as i32) as u8;
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_lbfgs_max_history", "") {
+        if v >= 1 {
+            opts.lbfgs_max_history = v as u32;
+        }
     }
 }
 
@@ -2051,7 +2057,7 @@ mod tests {
         app.initialize_with_options_str(
             "algorithm active-set-sqp\n\
              sqp_globalization l1-elastic\n\
-             sqp_hessian damped-bfgs\n\
+             sqp_hessian lbfgs\n\
              sqp_max_iter 17\n\
              sqp_tol 1e-7\n\
              sqp_constr_viol_tol 1e-5\n\
@@ -2059,7 +2065,8 @@ mod tests {
              sqp_l1_penalty 2.5\n\
              sqp_bt_reduction 0.25\n\
              sqp_bt_min_alpha 1e-10\n\
-             sqp_print_level 2\n",
+             sqp_print_level 2\n\
+             sqp_lbfgs_max_history 12\n",
         )
         .unwrap();
         let snap = app.algorithm_builder_snapshot();
@@ -2067,7 +2074,7 @@ mod tests {
             snap.sqp.globalization,
             crate::sqp::SqpGlobalization::L1Elastic
         );
-        assert_eq!(snap.sqp.hessian, crate::sqp::SqpHessianSource::DampedBfgs);
+        assert_eq!(snap.sqp.hessian, crate::sqp::SqpHessianSource::Lbfgs);
         assert_eq!(snap.sqp.max_iter, 17);
         assert!((snap.sqp.tol - 1e-7).abs() < 1e-18);
         assert!((snap.sqp.constr_viol_tol - 1e-5).abs() < 1e-18);
@@ -2076,6 +2083,7 @@ mod tests {
         assert!((snap.sqp.bt_reduction - 0.25).abs() < 1e-18);
         assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
         assert_eq!(snap.sqp.print_level, 2);
+        assert_eq!(snap.sqp.lbfgs_max_history, 12);
     }
 
     #[test]
@@ -2096,6 +2104,7 @@ mod tests {
         assert!((snap.sqp.bt_reduction - d.bt_reduction).abs() < 1e-18);
         assert!((snap.sqp.bt_min_alpha - d.bt_min_alpha).abs() < 1e-18);
         assert_eq!(snap.sqp.print_level, d.print_level);
+        assert_eq!(snap.sqp.lbfgs_max_history, d.lbfgs_max_history);
     }
 
     #[test]

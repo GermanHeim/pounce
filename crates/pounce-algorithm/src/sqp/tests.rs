@@ -486,6 +486,40 @@ fn sqp_via_ipopt_adapter_solves_convex_eq_nlp() {
 }
 
 #[test]
+fn sqp_lbfgs_converges_on_nonlinear_nlp() {
+    // Same circle-projection NLP. With
+    // `SqpHessianSource::Lbfgs` the QP Hessian is rebuilt at each
+    // step from a circular buffer of (s, y) pairs.  Should
+    // converge to the same closed-form optimum.
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut opts = SqpOptions::default();
+    opts.hessian = SqpHessianSource::Lbfgs;
+    opts.lbfgs_max_history = 6;
+    opts.max_iter = 100;
+    let mut alg = SqpAlgorithm::new(qp_solver, opts);
+    let mut nlp = NonlinearEqNlp;
+
+    let res = alg.optimize(&mut nlp).unwrap();
+    assert_eq!(
+        res.status,
+        SqpStatus::Optimal,
+        "L-BFGS SQP must converge; got {:?} after {} iters",
+        res.status,
+        res.n_iter
+    );
+    let scale = 2.0 / 13.0_f64.sqrt();
+    let expected = [3.0 * scale, 2.0 * scale];
+    for (i, (a, b)) in res.x.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "L-BFGS SQP x[{i}] = {a}, expected {b} (diff {:.2e})",
+            (a - b).abs(),
+        );
+    }
+}
+
+#[test]
 fn sqp_damped_bfgs_converges_on_nonlinear_nlp() {
     // Same circle-projection NLP. With
     // `SqpHessianSource::DampedBfgs` the QP Hessian comes from
