@@ -16,7 +16,7 @@ use crate::kkt::{
     h_times_x, is_all_equality_constraints, is_pure_box, is_pure_equality_no_bounds,
     rhs_equality_only, KktTriplet,
 };
-use crate::options::QpOptions;
+use crate::options::{AntiCyclingChoice, QpOptions};
 use crate::problem::{QpProblem, QpSolution, QpStats, QpWarmStart};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
@@ -664,9 +664,54 @@ impl ParametricActiveSetSolver {
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
 
             if p_inf <= opts.opt_tol {
-                // KKT-stationary for current W. Check for wrong-sign
-                // multipliers — drop the worst.
+                // KKT-stationary for current W. Pick a wrong-sign
+                // active row to drop.
+                //
+                // Tie-breaking rule (§4.4): `AntiCyclingChoice::Bland`
+                // picks the lowest-indexed violation (Bland 1977 —
+                // guarantees finite termination at the cost of slower
+                // convergence); the default `Expand`/`None` picks
+                // the largest-magnitude violation (Dantzig's
+                // steepest-violation rule — faster but not cycle-
+                // free under pathological degeneracy).
+                //
+                // EXPAND (Gill-Murray-Saunders-Wright 1989) is the
+                // SOTA default per the design note; its full
+                // primal-perturbation machinery is one of the
+                // remaining Phase 5a items. Until it lands, the
+                // `Expand` enum variant aliases to the steepest-
+                // violation behavior, which is correct on every
+                // non-cycling problem in the analytical ladder and
+                // matches the qpOASES default.
+                let use_bland = matches!(opts.anti_cycling, AntiCyclingChoice::Bland);
+
                 let mut worst: Option<(DropTarget, Number)> = None;
+                let consider =
+                    |worst: &mut Option<(DropTarget, Number)>, target: DropTarget, viol: Number| {
+                        if viol <= opts.opt_tol {
+                            return;
+                        }
+                        let take = match *worst {
+                            None => true,
+                            Some((_, prev_viol)) => {
+                                if use_bland {
+                                    // Smallest index wins. Compare
+                                    // problem-space indices regardless
+                                    // of cons-vs-bound; cons indices
+                                    // come first.
+                                    let new_key = drop_target_key(target);
+                                    let prev_key = drop_target_key(worst.unwrap().0);
+                                    new_key < prev_key
+                                } else {
+                                    viol > prev_viol
+                                }
+                            }
+                        };
+                        if take {
+                            *worst = Some((target, viol));
+                        }
+                    };
+
                 for (j, &i) in active_cons.iter().enumerate() {
                     let lam = rhs[n + j];
                     let viol = match working.constraints[i] {
@@ -675,9 +720,7 @@ impl ParametricActiveSetSolver {
                         ConsStatus::Equality => 0.0,
                         ConsStatus::Inactive => unreachable!(),
                     };
-                    if viol > worst.map(|(_, v)| v).unwrap_or(opts.opt_tol) {
-                        worst = Some((DropTarget::Cons(i), viol));
-                    }
+                    consider(&mut worst, DropTarget::Cons(i), viol);
                 }
                 for (j, &i) in active_bounds.iter().enumerate() {
                     let lam = rhs[n + k_c + j];
@@ -687,9 +730,7 @@ impl ParametricActiveSetSolver {
                         BoundStatus::Fixed => 0.0,
                         BoundStatus::Inactive => unreachable!(),
                     };
-                    if viol > worst.map(|(_, v)| v).unwrap_or(opts.opt_tol) {
-                        worst = Some((DropTarget::Bound(i), viol));
-                    }
+                    consider(&mut worst, DropTarget::Bound(i), viol);
                 }
 
                 if let Some((target, _)) = worst {
@@ -995,6 +1036,17 @@ impl ParametricActiveSetSolver {
 enum DropTarget {
     Cons(usize),
     Bound(usize),
+}
+
+/// Total ordering on `DropTarget` used by Bland's tie-break:
+/// constraint indices `0..m` come before bound indices `0..n`.
+/// Stable across iterations because the index spaces don't change
+/// over the lifetime of a single `solve_general` call.
+fn drop_target_key(t: DropTarget) -> (u8, usize) {
+    match t {
+        DropTarget::Cons(i) => (0, i),
+        DropTarget::Bound(i) => (1, i),
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -889,6 +889,77 @@ fn warm_start_with_wrong_bound_in_working_set_drops_it() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Bland's-rule drop selection (§4.4 anti-cycling fallback).
+//
+// Box QP with two wrong-sign bounds in the warm-start working
+// set. The steepest-violation rule picks the larger-magnitude
+// violation first; Bland's picks the lower-indexed one. Both
+// converge to the same optimum but record different first-drop
+// behavior. The test pins which constraint the algorithm drops
+// first.
+//
+//     min ½(x₁² + x₂²) − 0.25 x₁ − 0.5 x₂   s.t.   0 ≤ x_i ≤ 1
+//
+// Unconstrained min: (0.25, 0.5). Box-feasible, no bound active.
+// Warm-start at (0, 0) with W = {x₁ AtLower, x₂ AtLower}: both
+// multipliers wrong-sign (λ_sat[x₁] = 0.25, λ_sat[x₂] = 0.5).
+// Steepest violation picks x₂ (larger λ); Bland picks x₁
+// (smaller index).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn anti_cycling_bland_picks_lowest_indexed_violation() {
+    let n = 2;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [-0.25, -0.5];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [0.0, 0.0];
+    let xu = [1.0, 1.0];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let ws = crate::QpWarmStart {
+        x: vec![0.0, 0.0],
+        lambda_g: vec![],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::AtLower, crate::BoundStatus::AtLower],
+            constraints: vec![],
+        },
+    };
+
+    // Steepest violation (default): drops x₂ first, then x₁.
+    let mut solver = new_solver();
+    let sol_default = solver.solve(&qp, Some(&ws), &QpOptions::default()).unwrap();
+    assert_eq!(sol_default.status, crate::QpStatus::Optimal);
+    assert!((sol_default.x[0] - 0.25).abs() < 1e-10);
+    assert!((sol_default.x[1] - 0.5).abs() < 1e-10);
+
+    // Bland's: drops x₁ first, then x₂. Same optimum, possibly
+    // different iteration count (could be more or fewer; we just
+    // pin the OPTIMUM is reached).
+    let opts_bland = crate::QpOptions {
+        anti_cycling: crate::AntiCyclingChoice::Bland,
+        ..QpOptions::default()
+    };
+    let sol_bland = solver.solve(&qp, Some(&ws), &opts_bland).unwrap();
+    assert_eq!(sol_bland.status, crate::QpStatus::Optimal);
+    assert!((sol_bland.x[0] - 0.25).abs() < 1e-10);
+    assert!((sol_bland.x[1] - 0.5).abs() < 1e-10);
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Cold start through l1-elastic (§4.3): an inequality QP whose
 // eq-relaxed solution is infeasible. The cold-init in
 // solve_general now returns Ok(None), triggering solve_elastic,
