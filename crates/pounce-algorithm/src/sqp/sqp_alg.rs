@@ -68,8 +68,30 @@ impl SqpAlgorithm {
         self.iterates.as_ref()
     }
 
-    /// Run the SQP loop to convergence (or `max_iter`).
+    /// Run the SQP loop to convergence (or `max_iter`). Cold-starts
+    /// the iterate from `nlp.x_init()` and an empty working set.
     pub fn optimize<N: SqpProblemSpec>(&mut self, nlp: &mut N) -> Result<SqpResult, SqpError> {
+        self.optimize_with_warm_start(nlp, None)
+    }
+
+    /// Warm-start variant. `warm = Some(prev)` seeds the iterate
+    /// from `prev.{x, lambda_g, lambda_x, working}` instead of the
+    /// NLP's cold defaults. Dimensions are validated against the
+    /// problem; any mismatch is fatal. The QP solver consumes
+    /// `warm.working` (when present) via `solve_with_working_set`.
+    ///
+    /// `warm = None` is equivalent to [`Self::optimize`].
+    ///
+    /// Implements the §6 design-note warm-start contract: the
+    /// tuple `(x, λ_g, λ_x, 𝒲)`. The Hessian carry-forward
+    /// (damped-BFGS / L-BFGS state) is *not* part of the warm-start
+    /// payload — each `optimize` call rebuilds its own Hessian
+    /// approximation from scratch.
+    pub fn optimize_with_warm_start<N: SqpProblemSpec>(
+        &mut self,
+        nlp: &mut N,
+        warm: Option<SqpIterates>,
+    ) -> Result<SqpResult, SqpError> {
         let n = nlp.n();
         let m = nlp.m();
         let (xl, xu) = nlp.variable_bounds();
@@ -85,14 +107,43 @@ impl SqpAlgorithm {
             )));
         }
 
-        let mut iter = SqpIterates::cold(n, m);
-        let x_init = nlp.x_init();
-        if x_init.len() != n {
-            return Err(SqpError::DimensionMismatch(format!(
-                "x_init length must be n = {n}"
-            )));
-        }
-        iter.x = x_init;
+        let mut iter = match warm {
+            Some(w) => {
+                if w.x.len() != n {
+                    return Err(SqpError::DimensionMismatch(format!(
+                        "warm.x length {} must equal n = {n}",
+                        w.x.len()
+                    )));
+                }
+                if w.lambda_g.len() != m {
+                    return Err(SqpError::DimensionMismatch(format!(
+                        "warm.lambda_g length {} must equal m = {m}",
+                        w.lambda_g.len()
+                    )));
+                }
+                if w.lambda_x.len() != n {
+                    return Err(SqpError::DimensionMismatch(format!(
+                        "warm.lambda_x length {} must equal n = {n}",
+                        w.lambda_x.len()
+                    )));
+                }
+                if let Some(ws) = w.working.as_ref() {
+                    ws.validate_dims(n, m).map_err(SqpError::QpFailure)?;
+                }
+                w
+            }
+            None => {
+                let mut cold = SqpIterates::cold(n, m);
+                let x_init = nlp.x_init();
+                if x_init.len() != n {
+                    return Err(SqpError::DimensionMismatch(format!(
+                        "x_init length must be n = {n}"
+                    )));
+                }
+                cold.x = x_init;
+                cold
+            }
+        };
 
         let mut n_qp_solves: u32 = 0;
         let mut final_stationarity = 0.0;
@@ -182,6 +233,7 @@ impl SqpAlgorithm {
                     n_qp_solves,
                     final_stationarity,
                     final_constr_viol,
+                    working_set: iter.working,
                 });
             }
 
@@ -230,6 +282,7 @@ impl SqpAlgorithm {
                         n_qp_solves,
                         final_stationarity,
                         final_constr_viol,
+                        working_set: iter.working,
                     });
                 }
                 other => {
@@ -305,6 +358,7 @@ impl SqpAlgorithm {
                     n_qp_solves,
                     final_stationarity,
                     final_constr_viol,
+                    working_set: Some(sol.working),
                 });
             }
             iter.x = ls.x_new;
@@ -332,6 +386,7 @@ impl SqpAlgorithm {
             n_qp_solves,
             final_stationarity,
             final_constr_viol,
+            working_set: iter.working,
         })
     }
 

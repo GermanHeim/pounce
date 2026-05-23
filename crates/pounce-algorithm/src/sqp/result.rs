@@ -2,7 +2,7 @@
 //! `SqpAlgorithm::optimize`.
 
 use pounce_common::Number;
-use pounce_qp::QpError;
+use pounce_qp::{QpError, WorkingSet};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,4 +67,9 @@ pub struct SqpResult {
     /// Final constraint violation (max-norm of `c(x*)` for
     /// equalities plus bound-violation slack).
     pub final_constr_viol: Number,
+    /// Final QP working set, suitable for warm-starting the next
+    /// `optimize_with_warm_start` call (§6 design-note contract).
+    /// `None` only when no QP was solved (e.g. cold-start declared
+    /// the iterate optimal at the very first KKT check).
+    pub working_set: Option<WorkingSet>,
 }

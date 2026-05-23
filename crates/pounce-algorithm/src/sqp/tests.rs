@@ -9,7 +9,7 @@ use crate::sqp::iterates::SqpIterates;
 use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
-use crate::sqp::result::SqpStatus;
+use crate::sqp::result::{SqpError, SqpStatus};
 use crate::sqp::sqp_alg::SqpAlgorithm;
 use pounce_common::types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
@@ -584,6 +584,62 @@ fn sqp_filter_globalization_matches_l1_on_nonlinear_nlp() {
             (a - b).abs(),
         );
     }
+}
+
+#[test]
+fn sqp_warm_start_skips_qp_solve_when_already_optimal() {
+    // Solve the convex equality NLP, then re-run starting from the
+    // optimum with the result's `working_set` carried in. The
+    // re-run must converge with zero QP solves (the very first
+    // KKT check declares optimality before the QP loop body
+    // executes).
+    let qp_solver_a =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg_a = SqpAlgorithm::new(qp_solver_a, SqpOptions::default());
+
+    let mut nlp = ConvexEqNlp;
+    let res_a = alg_a.optimize(&mut nlp).unwrap();
+    assert_eq!(res_a.status, SqpStatus::Optimal);
+    let ws = res_a.working_set.expect("solve must produce a WS");
+
+    // Build a SqpIterates that pins the iterate at the optimum
+    // and carries the working set.
+    let warm = SqpIterates {
+        x: res_a.x.clone(),
+        lambda_g: res_a.lambda_g.clone(),
+        lambda_x: res_a.lambda_x.clone(),
+        working: Some(ws),
+    };
+
+    let qp_solver_b =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg_b = SqpAlgorithm::new(qp_solver_b, SqpOptions::default());
+    let res_b = alg_b
+        .optimize_with_warm_start(&mut nlp, Some(warm))
+        .unwrap();
+    assert_eq!(res_b.status, SqpStatus::Optimal);
+    assert_eq!(
+        res_b.n_qp_solves, 0,
+        "warm-started at optimum should solve no QP"
+    );
+    assert!(res_b.working_set.is_some());
+}
+
+#[test]
+fn sqp_warm_start_rejects_wrong_dimension() {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg = SqpAlgorithm::new(qp_solver, SqpOptions::default());
+    let mut nlp = ConvexEqNlp;
+    // n = 2, m = 1; deliberately wrong-sized iterate.
+    let bogus = SqpIterates {
+        x: vec![0.0, 0.0, 0.0],
+        lambda_g: vec![0.0],
+        lambda_x: vec![0.0, 0.0],
+        working: None,
+    };
+    let err = alg.optimize_with_warm_start(&mut nlp, Some(bogus));
+    assert!(matches!(err, Err(SqpError::DimensionMismatch(_))));
 }
 
 #[test]
