@@ -20,22 +20,22 @@ component.
 POUNCE is a Cargo workspace. Each crate maps onto a part of the
 upstream Ipopt source tree:
 
-| Crate | Purpose |
-|---|---|
-| `pounce-common` | Types, exceptions, journalist, options, tagged objects, cached results (Ipopt `src/Common`). |
-| `pounce-linalg` | BLAS-1, dense/compound vectors and matrices, triplet storage, CSC conversion (Ipopt `src/LinAlg`). |
-| `pounce-linsol` | Symmetric linear-solver trait layer — no FFI; backends plug in below. |
-| `pounce-feral` | Pure-Rust sparse symmetric LDLᵀ backend. The default. |
-| `pounce-hsl` | MA57 backend via `libcoinhsl` (optional, behind the `ma57` feature). |
-| `pounce-nlp` | TNLP trait, TNLPAdapter, `IpoptApplication` entry point (Ipopt `src/Interfaces`). |
-| `pounce-algorithm` | IteratesVector, IpoptData, calculated quantities, KKT, line search, μ update, convergence check, main loop (Ipopt `src/Algorithm`). |
-| `pounce-restoration` | Restoration phase (Ipopt `Algorithm/Resto*`). |
-| `pounce-presolve` | Presolve / problem-reduction pass run before the IPM. |
-| `pounce-l1penalty` | ℓ₁-exact penalty-barrier wrapper for degenerate / MPCC NLPs. |
-| `pounce-sensitivity` | Parametric sensitivity (port of Ipopt `contrib/sIPOPT`). |
-| `pounce-cinterface` | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem`. |
-| `pounce-py` | Python bindings (the `pounce` Python package). |
-| `pounce-cli` | The `pounce` command-line driver. |
+| Crate                | Purpose                                                                                                                             |
+|----------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `pounce-common`      | Types, exceptions, journalist, options, tagged objects, cached results (Ipopt `src/Common`).                                        |
+| `pounce-linalg`      | BLAS-1, dense/compound vectors and matrices, triplet storage, CSC conversion (Ipopt `src/LinAlg`).                                  |
+| `pounce-linsol`      | Symmetric linear-solver trait layer — no FFI; backends plug in below.                                                               |
+| `pounce-feral`       | Pure-Rust sparse symmetric LDLᵀ backend. The default.                                                                               |
+| `pounce-hsl`         | MA57 backend via `libcoinhsl` (optional, behind the `ma57` feature).                                                                |
+| `pounce-nlp`         | TNLP trait, TNLPAdapter, `IpoptApplication` entry point (Ipopt `src/Interfaces`).                                                   |
+| `pounce-algorithm`   | IteratesVector, IpoptData, calculated quantities, KKT, line search, μ update, convergence check, main loop (Ipopt `src/Algorithm`). |
+| `pounce-restoration` | Restoration phase (Ipopt `Algorithm/Resto*`).                                                                                       |
+| `pounce-presolve`    | Presolve / problem-reduction pass run before the IPM.                                                                               |
+| `pounce-l1penalty`   | ℓ₁-exact penalty-barrier wrapper for degenerate / MPCC NLPs.                                                                        |
+| `pounce-sensitivity` | Parametric sensitivity (port of Ipopt `contrib/sIPOPT`).                                                                            |
+| `pounce-cinterface`  | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem`.                                                                     |
+| `pounce-py`          | Python bindings (the `pounce` Python package).                                                                                      |
+| `pounce-cli`         | The `pounce` command-line driver.                                                                                                   |
 
 The C ABI shim lets existing PyIpopt / cyipopt / JuMP / AMPL clients
 link against POUNCE in place of Ipopt.

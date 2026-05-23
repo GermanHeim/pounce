@@ -18,10 +18,10 @@ in `pounce` without relearning where the numbers live.
 
 ## Pure Rust by default
 
-The default build is pure Rust — no Fortran, no HSL, no system BLAS
+The default build is pure Rust — no Fortran, no commercial solver, no system BLAS
 required. The bundled FERAL backend provides a sparse symmetric LDLᵀ
 factorization. The HSL MA57 backend is available behind the optional
-`ma57` feature for users who already have `libcoinhsl` installed (see
+`ma57` feature for users who have a license for `libcoinhsl` and have it installed (see
 [Installation](installation.md)).
 
 ## Status
