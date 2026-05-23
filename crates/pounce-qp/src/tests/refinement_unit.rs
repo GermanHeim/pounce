@@ -45,6 +45,55 @@ fn refinement_delivers_near_machine_precision_on_spd_kkt() {
 }
 
 #[test]
+fn cached_resolve_returns_same_solution_as_fresh_factor() {
+    // Factor a SPD KKT, solve once, then re-solve against a
+    // different RHS via the cached factor. Result must match a
+    // fresh factor-and-solve on the same matrix and RHS.
+    let kkt = KktTriplet {
+        dim: 2,
+        irn: vec![1, 2, 2] as Vec<Index>,
+        jcn: vec![1, 1, 2] as Vec<Index>,
+        vals: vec![2.0, 1.0, 3.0],
+    };
+
+    let mut ls = LinearSolver::new(Box::new(FeralSolverInterface::new()));
+    let mut rhs1 = vec![3.0, 4.0];
+    ls.factorize_and_solve(&kkt, &mut rhs1, Some(0)).unwrap();
+    assert!(ls.has_cached_factor());
+
+    // Now resolve against a new RHS using the cached factor.
+    let mut rhs2 = vec![5.0, 11.0];
+    ls.resolve(&mut rhs2).unwrap();
+
+    // Cross-check against a fresh factor on the same matrix.
+    let mut ls_fresh = LinearSolver::new(Box::new(FeralSolverInterface::new()));
+    let mut rhs2_fresh = vec![5.0, 11.0];
+    ls_fresh
+        .factorize_and_solve(&kkt, &mut rhs2_fresh, Some(0))
+        .unwrap();
+
+    for (i, (&a, &b)) in rhs2.iter().zip(rhs2_fresh.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-12,
+            "resolve[{i}] = {a} vs fresh {b} (diff {})",
+            (a - b).abs(),
+        );
+    }
+}
+
+#[test]
+fn resolve_before_factor_errors_cleanly() {
+    let mut ls = LinearSolver::new(Box::new(FeralSolverInterface::new()));
+    let mut rhs = vec![0.0; 2];
+    let err = ls.resolve(&mut rhs).unwrap_err();
+    assert!(
+        matches!(err, crate::QpError::LinearSolverFailure(_)),
+        "expected LinearSolverFailure, got {err:?}"
+    );
+    assert!(!ls.has_cached_factor());
+}
+
+#[test]
 fn refinement_holds_under_indefinite_saddle_kkt() {
     // 3x3 saddle KKT for a 2-var equality QP:
     //   [[1, 0, 1], [0, 1, 1], [1, 1, 0]]

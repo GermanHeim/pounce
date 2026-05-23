@@ -35,13 +35,29 @@ use pounce_linsol::{EMatrixFormat, SparseSymLinearSolverInterface};
 
 /// A boxed linear-solver backend (FERAL by default; MA57 when the
 /// caller wires the `ma57` feature in pounce-hsl).
+///
+/// Maintains the last (irn, jcn) so that [`Self::resolve`] can
+/// back-substitute against the cached factor without supplying
+/// the structure arrays again. This is the wrapper-layer
+/// infrastructure on which the §4.2 Schur-complement update path
+/// builds.
 pub struct LinearSolver {
     backend: Box<dyn SparseSymLinearSolverInterface>,
+    cached_irn: Option<Vec<Index>>,
+    cached_jcn: Option<Vec<Index>>,
+    cached_dim: usize,
+    factored: bool,
 }
 
 impl LinearSolver {
     pub fn new(backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            cached_irn: None,
+            cached_jcn: None,
+            cached_dim: 0,
+            factored: false,
+        }
     }
 
     /// Factor a fresh KKT and back-substitute against a single RHS.
@@ -72,6 +88,10 @@ impl LinearSolver {
             )));
         }
 
+        // A factor in progress invalidates the cache before any
+        // backend operation, so a partial failure leaves us in a
+        // consistent "no cache" state.
+        self.factored = false;
         let dim = kkt.dim as Index;
         let nnz = kkt.irn.len() as Index;
 
@@ -98,7 +118,13 @@ impl LinearSolver {
             &kkt.irn, &kkt.jcn, 1, rhs, check, expected,
         );
         match st {
-            ESymSolverStatus::Success => Ok(()),
+            ESymSolverStatus::Success => {
+                self.cached_irn = Some(kkt.irn.clone());
+                self.cached_jcn = Some(kkt.jcn.clone());
+                self.cached_dim = kkt.dim;
+                self.factored = true;
+                Ok(())
+            }
             ESymSolverStatus::Singular => Err(QpError::LinearSolverFailure(
                 "KKT matrix is singular (LICQ violation or rank-deficient Jacobian)".into(),
             )),
@@ -116,6 +142,39 @@ impl LinearSolver {
         }
     }
 
+    /// Back-substitute against the cached factor from the last
+    /// successful [`Self::factorize_and_solve`]. Errors if no factor
+    /// has succeeded since construction. The structure must not
+    /// have changed since the last factor — the caller is
+    /// responsible for invariance; this is the building block on
+    /// which §4.2 Schur-complement updates layer.
+    pub fn resolve(&mut self, rhs: &mut [Number]) -> Result<(), QpError> {
+        if !self.factored {
+            return Err(QpError::LinearSolverFailure(
+                "resolve called before a successful factorize_and_solve".into(),
+            ));
+        }
+        if rhs.len() != self.cached_dim {
+            return Err(QpError::DimensionMismatch(format!(
+                "resolve RHS length {} but cached factor has dim {}",
+                rhs.len(),
+                self.cached_dim
+            )));
+        }
+        let irn = self.cached_irn.as_ref().expect("factored ⇒ cache present");
+        let jcn = self.cached_jcn.as_ref().expect("factored ⇒ cache present");
+        let st = self.backend.multi_solve(
+            false, // new_matrix=false ⇒ reuse cached factor
+            irn, jcn, 1, rhs, false, 0,
+        );
+        match st {
+            ESymSolverStatus::Success => Ok(()),
+            other => Err(QpError::LinearSolverFailure(format!(
+                "resolve backend status: {other:?}"
+            ))),
+        }
+    }
+
     /// Number of negative eigenvalues found in the most recent
     /// factorization. Useful for the §4.5 inertia-control path.
     /// Returns `None` if the backend does not provide inertia.
@@ -125,5 +184,10 @@ impl LinearSolver {
         } else {
             None
         }
+    }
+
+    /// Whether a cached factor is currently available.
+    pub fn has_cached_factor(&self) -> bool {
+        self.factored
     }
 }
