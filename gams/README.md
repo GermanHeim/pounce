@@ -98,6 +98,25 @@ never returns the wrong answer.
 Mechanism §7.4(b) — a persistent on-disk state file for precision-
 critical workflows — is planned but not yet shipped.
 
+## Examples
+
+`gams/examples/` ships a working parametric-warm-start demo:
+
+- `parametric_sqp_warm_start.gms` — solves a sequence of 20
+  perturbed simplex-projection NLPs, each warm-starting from
+  the previous solve's marginals via the active-set SQP
+  driver.
+- `pounce.opt` — companion option file selecting
+  `algorithm active-set-sqp` so the SQP warm-start machinery
+  activates.
+
+Run after `make install` with:
+
+```
+cd gams/examples
+gams parametric_sqp_warm_start.gms
+```
+
 ## Capabilities
 
 Registered model types: `NLP`, `DNLP`, `RMINLP`. Mixed-integer and conic
