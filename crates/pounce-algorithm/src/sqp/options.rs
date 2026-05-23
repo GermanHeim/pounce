@@ -48,9 +48,23 @@ pub struct SqpOptions {
 
     /// l1-merit penalty parameter ν. Used only when
     /// `globalization = L1Elastic`. Filter globalization ignores
-    /// this. Default is a moderate starting value; full Han-Powell
-    /// would adapt it across iterations (Phase 5b.1).
+    /// this. Default is a moderate starting value; the Han-Powell
+    /// ν-adaptation in `l1_merit_line_search` grows ν to dominate
+    /// `‖λ_qp‖_∞ + l1_penalty_safety` on every iteration.
     pub l1_penalty: Number,
+
+    /// Additive safety margin in the Han-Powell ν update:
+    /// `ν_new = max(ν, ‖λ_qp‖_∞ + l1_penalty_safety)`. Default 0.1
+    /// per Nocedal-Wright §18.4. Only consulted when
+    /// `globalization = L1Elastic`.
+    pub l1_penalty_safety: Number,
+
+    /// Upper clamp on ν. Prevents catastrophic Armijo failure on
+    /// pathological problems where `‖λ_qp‖` momentarily spikes.
+    /// Default 1e10 — large enough not to interfere with normal
+    /// runs, small enough to keep the merit numerically stable.
+    /// Only consulted when `globalization = L1Elastic`.
+    pub l1_penalty_max: Number,
 
     /// Backtracking line-search reduction factor.
     pub bt_reduction: Number,
@@ -78,6 +92,8 @@ impl Default for SqpOptions {
             dual_inf_tol: 1e-4,
             max_iter: 200,
             l1_penalty: 1.0,
+            l1_penalty_safety: 0.1,
+            l1_penalty_max: 1e10,
             bt_reduction: 0.5,
             bt_min_alpha: 1e-12,
             print_level: 0,

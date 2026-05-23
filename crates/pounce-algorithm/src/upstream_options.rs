@@ -308,6 +308,22 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         1.0,
         "Penalty weight ν for the l1-merit line search (Han-Powell). Ignored when \"sqp_globalization\" is \"filter\". Only consulted when \"algorithm\" is \"active-set-sqp\".",
     )?;
+    r.add_lower_bounded_number_option(
+        "sqp_l1_penalty_safety",
+        "Additive safety margin in the Han-Powell ν update.",
+        0.0,
+        false,
+        0.1,
+        "Each iteration the SQP driver sets `ν ← max(ν, ‖λ_qp‖_∞ + sqp_l1_penalty_safety)`. The default 0.1 follows Nocedal-Wright §18.4. Ignored when \"sqp_globalization\" is \"filter\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_l1_penalty_max",
+        "Upper clamp on the l1-merit penalty ν.",
+        0.0,
+        true,
+        1e10,
+        "Prevents catastrophic Armijo failure if `‖λ_qp‖` spikes. Ignored when \"sqp_globalization\" is \"filter\".",
+    )?;
     r.add_bounded_number_option(
         "sqp_bt_reduction",
         "Backtracking step-reduction factor for the SQP line search.",

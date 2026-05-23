@@ -96,9 +96,16 @@ pub fn l1_merit_line_search<N: SqpProblemSpec>(
     current_nu: Number,
     opts: &SqpOptions,
 ) -> LineSearchResult {
-    // ν adaptation: dominate the QP multipliers by a small buffer.
+    // ν adaptation (Han-Powell): dominate the QP multipliers by
+    // an additive safety margin, then clamp at l1_penalty_max so
+    // a pathological |λ_qp| spike doesn't blow the merit into a
+    // regime where Armijo always fails. Nocedal-Wright §18.4
+    // recommends `ν ≥ ‖λ‖_∞`; we use `+ l1_penalty_safety` to
+    // give the test a comfortable inequality.
     let lambda_inf = qp_lambda_g.iter().map(|l| l.abs()).fold(0.0_f64, f64::max);
-    let nu = current_nu.max(lambda_inf + 0.1);
+    let nu = current_nu
+        .max(lambda_inf + opts.l1_penalty_safety)
+        .min(opts.l1_penalty_max);
 
     let viol_curr = l1_violation(x, c_curr, bl, bu, xl, xu);
     let phi_curr = f_curr + nu * viol_curr;

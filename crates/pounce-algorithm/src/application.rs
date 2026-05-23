@@ -1792,6 +1792,12 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty", "") {
         opts.l1_penalty = v;
     }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty_safety", "") {
+        opts.l1_penalty_safety = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty_max", "") {
+        opts.l1_penalty_max = v;
+    }
     if let Ok((v, true)) = options.get_numeric_value("sqp_bt_reduction", "") {
         opts.bt_reduction = v;
     }
