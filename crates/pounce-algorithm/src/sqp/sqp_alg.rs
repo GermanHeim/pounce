@@ -22,9 +22,7 @@ use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::SqpQpData;
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
 use pounce_common::types::{Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
-use pounce_qp::{
-    HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus, QpWarmStart,
-};
+use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
 
 /// SQP-side algorithm driver.
 pub struct SqpAlgorithm {

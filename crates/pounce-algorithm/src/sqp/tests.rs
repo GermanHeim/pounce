@@ -25,6 +25,39 @@ fn algorithm_choice_default_is_interior_point() {
 }
 
 #[test]
+fn builder_default_returns_none_for_sqp_dispatch() {
+    use crate::alg_builder::AlgorithmBuilder;
+    use pounce_linsol::SparseSymLinearSolverInterface;
+
+    let builder = AlgorithmBuilder::default();
+    let factory: crate::alg_builder::LinearBackendFactory =
+        Box::new(|_choice| -> Box<dyn SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::new())
+        });
+    // Default algorithm is InteriorPoint ⇒ SQP build returns None.
+    assert!(builder.build_sqp_with_backend(factory).is_none());
+}
+
+#[test]
+fn builder_active_set_sqp_constructs_sqp_algorithm() {
+    use crate::alg_builder::{AlgorithmBuilder, AlgorithmChoice as AC};
+    use pounce_linsol::SparseSymLinearSolverInterface;
+
+    let mut builder = AlgorithmBuilder::default();
+    builder.algorithm = AC::ActiveSetSqp;
+    let factory: crate::alg_builder::LinearBackendFactory =
+        Box::new(|_choice| -> Box<dyn SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::new())
+        });
+    let alg = builder.build_sqp_with_backend(factory);
+    assert!(alg.is_some());
+    // Spot-check: the constructed SqpAlgorithm uses the builder's
+    // SqpOptions (defaults).
+    let alg = alg.unwrap();
+    assert_eq!(alg.options().max_iter, 200);
+}
+
+#[test]
 fn sqp_options_default_matches_design_note() {
     let opts = SqpOptions::default();
     assert_eq!(opts.globalization, SqpGlobalization::Filter);
