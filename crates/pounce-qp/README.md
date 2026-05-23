@@ -21,13 +21,19 @@ limitation that needs rank-detection beyond inertia control.
 Harris-style two-pass ratio test (cycling-prevention core of
 GMSW EXPAND), the QPS RANGES section, the cached-factor `resolve`
 infrastructure (the building block on which full Schur layers),
-and basic §8.2 scaling-sweep diagnostics all ship. What remains
-for Phase 5a.2 is the algorithmic Schur active-set update
-mechanism (uses the c16 cached `resolve`), the GMSW EXPAND
-τ-growth + snap-reset machinery (uses the c14 Harris pass), the
-large-n scaling-sweep with criterion-style timing, and external-
-oracle comparison on Maros-Mészáros (requires FFI, incompatible
-with pure-Rust).
+and basic §8.2 scaling-sweep diagnostics all ship.
+
+**Phase 5a.2 — algorithmic completion landed.** §4.2 sparse
+Schur-complement active-set updates (c18 standalone module +
+c19 wired into `solve_general` behind `use_schur_updates`) and
+§4.4 full GMSW EXPAND with τ-growth + snap-reset (c20) are both
+done. The Schur path is opt-in; correctness verified by Schur-
+vs-refactor cross-checks. EXPAND degrades to Harris-only
+behavior on non-cycling problems and only kicks in on
+pathological degeneracy. The remaining items (Maros-Mészáros
+oracle comparison, large-n scaling benchmarks) require FFI or
+benchmark infrastructure that fall outside the pure-Rust
+constraint.
 
 ## What works
 
@@ -52,9 +58,10 @@ with pure-Rust).
 | §4.7 iterative refinement (inherited from FERAL) | done |
 | §4.4 anti-cycling: Bland's rule (`AntiCyclingChoice::Bland`) | done (c8) |
 | §4.4 anti-cycling: Harris two-pass (`AntiCyclingChoice::Expand`) | done (c14) |
-| §4.4 anti-cycling: full GMSW EXPAND (τ-growth + snap-reset) | **Phase 5a.2** |
+| §4.4 anti-cycling: full GMSW EXPAND (τ-growth + snap-reset) | done (c20) |
 | §4.2 cached-factor `resolve` infrastructure | done (c16) |
-| §4.2 sparse Schur-complement active-set update mechanism | **Phase 5a.2** |
+| §4.2 sparse Schur-complement update standalone (`schur::SchurState`) | done (c18) |
+| §4.2 sparse Schur wired into `solve_general` (`use_schur_updates`) | done (c19) |
 | §8.1 Maros-Mészáros .qps reader (incl. RANGES) | done (c11, c13) |
 | §8.1 Maros-Mészáros oracle comparison (qpOASES / OSQP) | **deferred** (FFI; not pure-Rust) |
 | §8.2 basic scaling-sweep diagnostics | done (c15) |

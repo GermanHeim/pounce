@@ -1039,24 +1039,36 @@ phasing tightens to four shippable milestones:
   - 59 tests total (up from 49), `cargo fmt` and
     `cargo clippy -D correctness -D suspicious` clean.
 
-  **Deferred to Phase 5a.2** (performance refinements that need
-  substantial focused commits; do not block Phase 5b NLP
-  integration):
-  - §4.2 sparse Schur-complement *algorithmic* update mechanism
-    in `solve_general`'s inner loop — replaces refactor-per-
-    iteration with cached `resolve` plus Schur block, with reset
-    on `max_schur_updates`. The c16 cached-resolve API is in;
-    only the algorithmic wiring + Schur-block bookkeeping
-    remains.
-  - §4.4 full GMSW EXPAND τ-growth and snap-to-bound reset —
-    the c14 Harris pass covers the tie-break half; the
-    perturbation half is independent.
+  **Phase 5a.2 — landed in c18–c20** (heads `ed2ea46`…`45207d0`):
+  - §4.2 sparse Schur-complement standalone module (c18) — the
+    SchurState type owns U, V, K_0⁻¹U, S; implements
+    Sherman-Morrison-Woodbury rank-2 updates per working-set
+    change. 6 unit tests including the critical "Schur matches
+    fresh factor" cross-check at 1e-9 tolerance.
+  - §4.2 wired into `solve_general` (c19) via opt-in
+    `QpOptions::use_schur_updates`. Schur-vs-refactor parity
+    tests on the binding-inequality and drop-then-restep cases
+    confirm algorithmic equivalence.
+  - §4.4 full GMSW EXPAND τ-growth + snap-reset (c20) —
+    extends the c14 Harris pass with a primal-perturbation that
+    grows monotonically until `expand_tol_max`, then hard-
+    resets by snapping every active-bound primal to its bound.
+    Active in both `solve_general` and `solve_general_schur`.
+  - 68 tests total (up from 59 at the end of Phase 5a.1).
+
+  **Deferred to Phase 5b+** (require external dependencies
+  beyond the pure-Rust constraint, or are benchmarking work
+  that doesn't gate algorithmic completion):
   - §8.1 Maros-Mészáros oracle comparison — requires qpOASES /
     OSQP via FFI (non-pure-Rust). Alternative: published-optimum
-    comparison against MM .lst tables (pure-Rust feasible).
+    comparison against MM .lst tables (pure-Rust feasible) is
+    still open.
   - §8.2 large-n scaling-sweep with criterion-style timing
     (LASSO at `n ∈ {10², 10³, 10⁴, 10⁵}`; MPC quadrotor at
-    horizon ∈ {10, 20, 40, 80, 160}).
+    horizon ∈ {10, 20, 40, 80, 160}). The c15 basic diagnostics
+    establish that the solver scales correctly at small n; the
+    large-n sweep is benchmarking infrastructure that needs the
+    criterion crate.
 - **Phase 5b — SQP NLP driver, cold (3–4 weeks).** `SqpAlgorithm`
   wired into `alg_builder.rs` via §7.1 `AlgorithmChoice`. Filter
   globalization (§4.1) reusing existing `FilterLsAcceptor`. Exact
