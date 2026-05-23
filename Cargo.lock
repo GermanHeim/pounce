@@ -425,6 +425,7 @@ dependencies = [
  "pounce-feral",
  "pounce-linsol",
  "pounce-nlp",
+ "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
  "pyo3",
