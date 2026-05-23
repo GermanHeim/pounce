@@ -5,11 +5,27 @@
 //! drives the backend through its four-step lifecycle (initialize
 //! structure → fill values → factor → back-substitute) in one call.
 //!
-//! The Schur-complement update path (§4.2) will extend this module
-//! with a cached-factor `resolve` entry point and a state machine
-//! tracking which working-set increment is currently absorbed in the
-//! Schur complement vs in the base factor. Phase 5a commit 2 ships
-//! only the one-shot factor-and-solve.
+//! ## §4.7 iterative refinement
+//!
+//! Refinement is *implicit* in this layer: it runs inside the
+//! backend's `multi_solve` whenever the backend's `refine` flag is
+//! set, which is the default for both pounce-feral and pounce-hsl
+//! (MA57). The qp-side code does not need to drive refinement
+//! explicitly — every solve we issue is already refined to
+//! near-machine-precision provided the factor is non-singular.
+//! Reference: Wilkinson 1965 §3.5; Higham 2002 §12 — refinement
+//! is the standard practice for sparse-direct symmetric saddle-
+//! point solves and is what FERAL implements via
+//! `solver.solve_refined`.
+//!
+//! ## §4.2 Schur-complement update path
+//!
+//! The Schur-complement update path will extend this module with
+//! a cached-factor `resolve` entry point and a state machine
+//! tracking which working-set increment is currently absorbed in
+//! the Schur complement vs in the base factor. Phase 5a ships the
+//! one-shot factor-and-solve at every iteration; Schur updates
+//! are a follow-up performance commit (Phase 5a.1).
 
 use crate::error::QpError;
 use crate::kkt::KktTriplet;
