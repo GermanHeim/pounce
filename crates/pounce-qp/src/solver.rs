@@ -775,54 +775,53 @@ impl ParametricActiveSetSolver {
             let ap = a_times_x(qp.a, &p, m);
             let ax = a_times_x(qp.a, &x, m);
 
-            let mut alpha = 1.0_f64;
-            let mut blocker: Option<BlockerTarget> = None;
-
-            // Inactive variable bounds.
+            // Collect every blocking direction as
+            //   (target, ratio, |a·p|).
+            // The first pass below populates this list; the second
+            // pass selects a winner per the active-cycling rule.
+            // For Bland / steepest-violation the selection is the
+            // strict-minimum ratio (with index- or step-magnitude
+            // tie-break baked into the encounter order); for
+            // EXPAND we use a Harris-style two-pass that picks the
+            // largest-|a·p| direction among constraints within
+            // tolerance of the minimum — this is the "guarantee
+            // strict progress at degenerate vertices" half of GMSW
+            // EXPAND (Hattingh 1989; Maros 1996 §4.2). The
+            // primal-perturbation half (τ-growth + snap-reset) is
+            // a follow-up commit.
+            let mut candidates: Vec<(BlockerTarget, f64, f64)> = Vec::new();
             for i in 0..n {
                 if working.bounds[i].is_active() {
                     continue;
                 }
                 if p[i] < -opts.feas_tol && qp.xl[i] > NLP_LOWER_BOUND_INF {
                     let r = (x[i] - qp.xl[i]) / -p[i];
-                    if r < alpha {
-                        alpha = r;
-                        blocker = Some(BlockerTarget::Bound(i, BoundStatus::AtLower));
-                    }
+                    candidates.push((BlockerTarget::Bound(i, BoundStatus::AtLower), r, p[i].abs()));
                 }
                 if p[i] > opts.feas_tol && qp.xu[i] < NLP_UPPER_BOUND_INF {
                     let r = (qp.xu[i] - x[i]) / p[i];
-                    if r < alpha {
-                        alpha = r;
-                        blocker = Some(BlockerTarget::Bound(i, BoundStatus::AtUpper));
-                    }
+                    candidates.push((BlockerTarget::Bound(i, BoundStatus::AtUpper), r, p[i].abs()));
                 }
             }
-            // Inactive general inequality constraints.
             for i in 0..m {
                 if working.constraints[i].is_active() {
                     continue;
                 }
-                // An equality row (bl == bu) ought to be marked
-                // ConsStatus::Equality already — defensively skip.
                 if qp.bl[i] == qp.bu[i] {
                     continue;
                 }
                 if ap[i] < -opts.feas_tol && qp.bl[i] > NLP_LOWER_BOUND_INF {
                     let r = (ax[i] - qp.bl[i]) / -ap[i];
-                    if r < alpha {
-                        alpha = r;
-                        blocker = Some(BlockerTarget::Cons(i, ConsStatus::AtLower));
-                    }
+                    candidates.push((BlockerTarget::Cons(i, ConsStatus::AtLower), r, ap[i].abs()));
                 }
                 if ap[i] > opts.feas_tol && qp.bu[i] < NLP_UPPER_BOUND_INF {
                     let r = (qp.bu[i] - ax[i]) / ap[i];
-                    if r < alpha {
-                        alpha = r;
-                        blocker = Some(BlockerTarget::Cons(i, ConsStatus::AtUpper));
-                    }
+                    candidates.push((BlockerTarget::Cons(i, ConsStatus::AtUpper), r, ap[i].abs()));
                 }
             }
+
+            let (mut alpha, blocker) = select_blocker(&candidates, opts);
+
             if alpha < 0.0 {
                 alpha = 0.0;
             }
@@ -1053,6 +1052,96 @@ fn drop_target_key(t: DropTarget) -> (u8, usize) {
 enum BlockerTarget {
     Cons(usize, ConsStatus),
     Bound(usize, BoundStatus),
+}
+
+fn blocker_index_key(b: BlockerTarget) -> (u8, usize) {
+    match b {
+        BlockerTarget::Cons(i, _) => (0, i),
+        BlockerTarget::Bound(i, _) => (1, i),
+    }
+}
+
+/// Pick a blocking direction from the ratio-test candidate list.
+///
+/// `AntiCyclingChoice::None` and `AntiCyclingChoice::Bland` both
+/// take the strict-minimum ratio. The two differ on the drop
+/// path, not on the ratio test — at this point in the loop the
+/// difference does not manifest, so both behave identically here.
+///
+/// `AntiCyclingChoice::Expand` runs the Harris-style two-pass: it
+/// finds `α_min`, then among directions whose ratio is within
+/// `feas_tol · (1 + |α_min|)` of `α_min`, picks the one with the
+/// largest `|a·p|` — the most "expressive" direction. This is
+/// the cycling-prevention core of GMSW EXPAND (Gill-Murray-
+/// Saunders-Wright 1989); the τ-growth and snap-to-bound
+/// machinery is a follow-up commit.
+///
+/// Returns `(α, blocker)` with `α = 1.0` and `blocker = None`
+/// when no direction blocks at less than the full step.
+fn select_blocker(
+    candidates: &[(BlockerTarget, f64, f64)],
+    opts: &QpOptions,
+) -> (f64, Option<BlockerTarget>) {
+    if candidates.is_empty() {
+        return (1.0, None);
+    }
+    // Pass 1: minimum ratio.
+    let mut alpha_min = 1.0_f64;
+    for &(_, r, _) in candidates {
+        if r < alpha_min {
+            alpha_min = r;
+        }
+    }
+    if alpha_min >= 1.0 {
+        return (1.0, None);
+    }
+
+    match opts.anti_cycling {
+        AntiCyclingChoice::None | AntiCyclingChoice::Bland => {
+            // Strict-min: pick the first candidate achieving
+            // `alpha_min` (encounter order ⇒ lowest index for ties).
+            let mut best: Option<(BlockerTarget, f64)> = None;
+            for &(target, r, _) in candidates {
+                if r > alpha_min + 0.0 {
+                    continue;
+                }
+                if best.is_none() {
+                    best = Some((target, r));
+                }
+            }
+            let (target, r) = best.expect("non-empty candidates above");
+            (r, Some(target))
+        }
+        AntiCyclingChoice::Expand => {
+            // Harris two-pass: among directions within
+            // `tol · (1 + |α_min|)` of `α_min`, pick the largest
+            // `|a·p|`. Tie-break by lowest index for reproducibility.
+            let tol = opts.feas_tol * (1.0 + alpha_min.abs());
+            let mut best: Option<(BlockerTarget, f64, f64)> = None;
+            for &(target, r, ap_mag) in candidates {
+                if r > alpha_min + tol {
+                    continue;
+                }
+                let take = match best {
+                    None => true,
+                    Some((prev_target, _, prev_ap)) => {
+                        if ap_mag > prev_ap {
+                            true
+                        } else if ap_mag == prev_ap {
+                            blocker_index_key(target) < blocker_index_key(prev_target)
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if take {
+                    best = Some((target, r, ap_mag));
+                }
+            }
+            let (target, r, _) = best.expect("non-empty candidates above");
+            (r, Some(target))
+        }
+    }
 }
 
 impl QpSolver for ParametricActiveSetSolver {

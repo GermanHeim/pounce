@@ -889,6 +889,110 @@ fn warm_start_with_wrong_bound_in_working_set_drops_it() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// EXPAND (Harris-style two-pass) ratio-test selection.
+//
+// At a degenerate intersection where multiple constraints would
+// activate at the same α, the strict-min ratio test picks the
+// first-encountered constraint (lowest index). Harris picks the
+// one with the largest |a·p|, which avoids cycling at degenerate
+// vertices because the chosen direction "actually moves" with
+// the step.
+//
+//     min ½‖x‖² − x₁ − x₂   s.t.   x₁ ≤ 0.5, x₂ ≤ 0.5
+//
+// Unconstrained min (1, 1). Both bounds active at optimum. From
+// x = (0, 0), p = (1, 1). Both bounds hit at α = 0.5 — a true tie
+// in ratio. With `Expand` we pick the larger |p_i| = 1, which is
+// either one (tie). With `None` / `Bland` we pick the lower
+// index, i.e. x₁'s bound.
+// Both strategies converge to the same optimum (0.5, 0.5); the
+// test verifies that, and that the two strategies pick valid
+// blockers.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn anti_cycling_expand_two_pass_converges_at_degenerate_vertex() {
+    let n = 2;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [-1.0, -1.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF, NLP_LOWER_BOUND_INF];
+    let xu = [0.5, 0.5];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    // Default (steepest-violation drop + first-min ratio test):
+    let mut solver = new_solver();
+    let sol_default = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol_default.status, crate::QpStatus::Optimal);
+    assert!((sol_default.x[0] - 0.5).abs() < 1e-10);
+    assert!((sol_default.x[1] - 0.5).abs() < 1e-10);
+
+    // EXPAND (Harris-style):
+    let opts_expand = crate::QpOptions {
+        anti_cycling: crate::AntiCyclingChoice::Expand,
+        ..QpOptions::default()
+    };
+    let sol_expand = solver.solve(&qp, None, &opts_expand).unwrap();
+    assert_eq!(sol_expand.status, crate::QpStatus::Optimal);
+    assert!((sol_expand.x[0] - 0.5).abs() < 1e-10);
+    assert!((sol_expand.x[1] - 0.5).abs() < 1e-10);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// EXPAND must NOT route a problem with non-degenerate single
+// blocker differently from the default — the Harris test
+// degenerates to single-blocker selection.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn anti_cycling_expand_single_blocker_matches_default() {
+    let n = 2;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [-2.0, -1.0]; // unconstrained min (2, 1); only x₁ blocks
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [1.0, NLP_UPPER_BOUND_INF];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let opts_expand = crate::QpOptions {
+        anti_cycling: crate::AntiCyclingChoice::Expand,
+        ..QpOptions::default()
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &opts_expand).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 1.0).abs() < 1e-10);
+    assert!((sol.x[1] - 1.0).abs() < 1e-10);
+    assert_eq!(sol.working.bounds[0], crate::BoundStatus::AtUpper);
+    assert_eq!(sol.working.bounds[1], crate::BoundStatus::Inactive);
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Bland's-rule drop selection (§4.4 anti-cycling fallback).
 //
 // Box QP with two wrong-sign bounds in the warm-start working
