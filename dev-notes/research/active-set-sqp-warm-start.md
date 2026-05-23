@@ -1069,13 +1069,55 @@ phasing tightens to four shippable milestones:
     establish that the solver scales correctly at small n; the
     large-n sweep is benchmarking infrastructure that needs the
     criterion crate.
-- **Phase 5b — SQP NLP driver, cold (3–4 weeks).** `SqpAlgorithm`
-  wired into `alg_builder.rs` via §7.1 `AlgorithmChoice`. Filter
-  globalization (§4.1) reusing existing `FilterLsAcceptor`. Exact
-  Hessian (§4.6); damped BFGS and L-BFGS opt-in. Cold-start only.
-  **Exit:** convergence on the CUTEst small/medium NLP subset; total
-  iteration counts within 30 % of filterSQP / SNOPT published numbers
-  on the same problems.
+- **Phase 5b — SQP NLP driver, cold — core landed in 6 commits**
+  (`6994b67`…`6e954bf` on
+  `claude/active-set-sqp-warm-start-BnjLA`):
+  - c1 — `sqp/` module scaffold, `AlgorithmChoice` enum,
+    `pounce-qp` dependency wiring.
+  - c2 — `SqpQpData::build` (QP-from-linearization assembly,
+    bound-shifting, `as_qp()` view ready for `pounce-qp`).
+  - c3 — `SqpAlgorithm::optimize` outer loop end-to-end on
+    convex equality NLPs (full-step, no globalization).
+  - c4 — `IpoptNlpAdapter` so any NLP that
+    `IpoptAlgorithm` consumes (`.nl`, CUTEst, Python
+    bindings) can drive `SqpAlgorithm` too.
+  - c5 — l1-merit line search (Han-Powell with ν adaptation +
+    Armijo backtracking). Unlocks nonlinear NLPs; the
+    circle-projection test that was `#[ignore]`d now converges
+    in 5 outer iterations.
+  - c6 — `AlgorithmBuilder::build_sqp_with_backend(factory)`
+    method, sister to `build_with_backend`. Dispatch via
+    `AlgorithmChoice::ActiveSetSqp`; the IPM path is
+    unchanged when the default `InteriorPoint` is selected.
+  - 10 sqp::tests pass + all 188 pounce-algorithm lib tests +
+    all 68 pounce-qp tests; `cargo fmt --all --check` and
+    `cargo clippy --workspace -D correctness -D suspicious`
+    both clean.
+
+  **Remaining Phase 5b items** (do not block Phase 5c warm-start
+  integration; can land alongside benchmarking work):
+  - §4.1 filter globalization alternative
+    (Fletcher-Leyffer 2002). `SqpGlobalization::Filter` is
+    the default option value but currently aliases to the l1
+    line search; the real filter acceptor (reusing the
+    existing `FilterLsAcceptor`) is independent work.
+  - §4.6 damped BFGS / L-BFGS Hessian sources for problems
+    where `eval_h` is expensive or `∇²L` is indefinite. The
+    `SqpHessianSource` enum is in place; the actual updaters
+    are not.
+  - CUTEst small-NLP regression run for the §10 exit
+    criterion (iteration counts vs filterSQP / SNOPT). Needs
+    `pounce-cutest` harness updates to dispatch through
+    `build_sqp_with_backend`.
+  - QP warm-start contract extension (`pounce-qp` currently
+    requires the warm-start primal to satisfy the active
+    constraints; the SQP loop cold-starts every QP because
+    each linearization shifts the QP's constraint RHS). A
+    follow-up `pounce-qp` commit will add a
+    "working-set-only" warm-start variant.
+  - `IpoptApplication` integration so user-facing entry
+    points (`.add_option("algorithm", "active-set-sqp")`)
+    flow to `build_sqp_with_backend`.
 - **Phase 5c — Working-set warm start + integration (2–3 weeks).**
   - SQP warm-start API per §6.
   - C API additions per §7.2.

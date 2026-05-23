@@ -35,6 +35,15 @@ oracle comparison, large-n scaling benchmarks) require FFI or
 benchmark infrastructure that fall outside the pure-Rust
 constraint.
 
+**Phase 5b — SQP NLP integration core landed** in
+`pounce-algorithm::sqp`. The crate is now wired into the
+`SqpAlgorithm` outer loop via `ParametricActiveSetSolver`; SQP
+consumes any `IpoptNlp` and converges on convex equality NLPs
+(1 iter) and nonlinear NLPs (l1-merit line search, demonstrated
+on a circle-projection problem). `AlgorithmBuilder` exposes the
+SQP path via `algorithm = ActiveSetSqp` and the sister
+`build_sqp_with_backend` method.
+
 ## What works
 
 | Problem class | Path | Tested |
