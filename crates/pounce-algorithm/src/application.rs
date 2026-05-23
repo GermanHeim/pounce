@@ -612,11 +612,9 @@ impl IpoptApplication {
     /// current options. The SQP path uses this so it gets a
     /// fresh builder without mutating the application's state.
     fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {
-        // For Phase 5b commit 11 we accept the builder defaults;
-        // the option-string → builder-field mapping for the SQP
-        // suboptions (sqp_globalization, sqp_hessian, etc.) is a
-        // follow-up commit.
-        AlgorithmBuilder::default()
+        let mut builder = AlgorithmBuilder::default();
+        apply_sqp_options(&self.options, &mut builder.sqp);
+        builder
     }
 
     /// Construct a LinearBackendFactory honoring the
@@ -1691,6 +1689,58 @@ fn finalize_via_orig_nlp(
     Ok(f_final)
 }
 
+/// Bind SQP suboptions registered in `upstream_options.rs`
+/// (`sqp_globalization`, `sqp_hessian`, `sqp_max_iter`, `sqp_tol`,
+/// `sqp_constr_viol_tol`, `sqp_dual_inf_tol`, `sqp_l1_penalty`,
+/// `sqp_bt_reduction`, `sqp_bt_min_alpha`, `sqp_print_level`) onto
+/// `opts`. Used by [`IpoptApplication::algorithm_builder_snapshot`]
+/// before constructing an SQP algorithm.
+fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
+    use crate::sqp::{SqpGlobalization, SqpHessianSource};
+
+    if let Ok((s, true)) = options.get_string_value("sqp_globalization", "") {
+        opts.globalization = match s.as_str() {
+            "filter" => SqpGlobalization::Filter,
+            "l1-elastic" => SqpGlobalization::L1Elastic,
+            _ => opts.globalization,
+        };
+    }
+    if let Ok((s, true)) = options.get_string_value("sqp_hessian", "") {
+        opts.hessian = match s.as_str() {
+            "exact" => SqpHessianSource::Exact,
+            "damped-bfgs" => SqpHessianSource::DampedBfgs,
+            "lbfgs" => SqpHessianSource::Lbfgs,
+            _ => opts.hessian,
+        };
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_max_iter", "") {
+        if v >= 0 {
+            opts.max_iter = v as u32;
+        }
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_tol", "") {
+        opts.tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_constr_viol_tol", "") {
+        opts.constr_viol_tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_dual_inf_tol", "") {
+        opts.dual_inf_tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty", "") {
+        opts.l1_penalty = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_bt_reduction", "") {
+        opts.bt_reduction = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_bt_min_alpha", "") {
+        opts.bt_min_alpha = v;
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_print_level", "") {
+        opts.print_level = v.clamp(0, u8::MAX as i32) as u8;
+    }
+}
+
 /// SQP-side analog of [`finalize_via_orig_nlp`]. Hands the SQP
 /// solution iterate to the user TNLP via the standard
 /// `finalize_solution` callback. Multiplier lifting goes through
@@ -1990,6 +2040,62 @@ mod tests {
         let (level, found) = app.options().get_integer_value("print_level", "").unwrap();
         assert!(found);
         assert_eq!(level, 5);
+    }
+
+    #[test]
+    fn application_sqp_suboptions_propagate_to_builder() {
+        // All SQP suboptions are read by algorithm_builder_snapshot
+        // and baked into the builder's `sqp` field.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             sqp_globalization l1-elastic\n\
+             sqp_hessian damped-bfgs\n\
+             sqp_max_iter 17\n\
+             sqp_tol 1e-7\n\
+             sqp_constr_viol_tol 1e-5\n\
+             sqp_dual_inf_tol 1e-3\n\
+             sqp_l1_penalty 2.5\n\
+             sqp_bt_reduction 0.25\n\
+             sqp_bt_min_alpha 1e-10\n\
+             sqp_print_level 2\n",
+        )
+        .unwrap();
+        let snap = app.algorithm_builder_snapshot();
+        assert_eq!(
+            snap.sqp.globalization,
+            crate::sqp::SqpGlobalization::L1Elastic
+        );
+        assert_eq!(snap.sqp.hessian, crate::sqp::SqpHessianSource::DampedBfgs);
+        assert_eq!(snap.sqp.max_iter, 17);
+        assert!((snap.sqp.tol - 1e-7).abs() < 1e-18);
+        assert!((snap.sqp.constr_viol_tol - 1e-5).abs() < 1e-18);
+        assert!((snap.sqp.dual_inf_tol - 1e-3).abs() < 1e-18);
+        assert!((snap.sqp.l1_penalty - 2.5).abs() < 1e-18);
+        assert!((snap.sqp.bt_reduction - 0.25).abs() < 1e-18);
+        assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
+        assert_eq!(snap.sqp.print_level, 2);
+    }
+
+    #[test]
+    fn application_sqp_suboptions_default_when_unset() {
+        // Without any sqp_* settings, the snapshot should equal
+        // SqpOptions::default().
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let snap = app.algorithm_builder_snapshot();
+        let d = crate::sqp::SqpOptions::default();
+        assert_eq!(snap.sqp.globalization, d.globalization);
+        assert_eq!(snap.sqp.hessian, d.hessian);
+        assert_eq!(snap.sqp.max_iter, d.max_iter);
+        assert!((snap.sqp.tol - d.tol).abs() < 1e-18);
+        assert!((snap.sqp.constr_viol_tol - d.constr_viol_tol).abs() < 1e-18);
+        assert!((snap.sqp.dual_inf_tol - d.dual_inf_tol).abs() < 1e-18);
+        assert!((snap.sqp.l1_penalty - d.l1_penalty).abs() < 1e-18);
+        assert!((snap.sqp.bt_reduction - d.bt_reduction).abs() < 1e-18);
+        assert!((snap.sqp.bt_min_alpha - d.bt_min_alpha).abs() < 1e-18);
+        assert_eq!(snap.sqp.print_level, d.print_level);
     }
 
     #[test]
