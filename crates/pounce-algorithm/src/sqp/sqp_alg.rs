@@ -15,12 +15,13 @@
 //!    to the next iterate.
 //! 6. Carry the QP's `WorkingSet` forward for warm-start.
 
+use crate::sqp::bfgs::DampedBfgs;
 use crate::sqp::filter::{filter_line_search, SqpFilter};
 use crate::sqp::iterates::SqpIterates;
 use crate::sqp::line_search::l1_merit_line_search;
-use crate::sqp::options::{SqpGlobalization, SqpOptions};
+use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
-use crate::sqp::qp_assembly::SqpQpData;
+use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
 use pounce_common::types::{Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
@@ -107,12 +108,41 @@ impl SqpAlgorithm {
         let mut f_cached: Option<Number> = None;
         let mut c_cached: Option<Vec<Number>> = None;
 
+        // Damped-BFGS state, allocated only if needed. The
+        // matrix is updated at the END of each iteration (after
+        // we have x_new and the next ∇L), then queried at the
+        // TOP of the next iteration to populate the QP Hessian.
+        let mut bfgs: Option<DampedBfgs> =
+            if matches!(self.opts.hessian, SqpHessianSource::DampedBfgs) {
+                Some(DampedBfgs::new(n))
+            } else {
+                None
+            };
+
         for outer in 0..self.opts.max_iter {
             let grad_f = nlp.eval_grad_f(&iter.x);
             let c_vals = c_cached.take().unwrap_or_else(|| nlp.eval_c(&iter.x));
             let f_curr = f_cached.take().unwrap_or_else(|| nlp.eval_f(&iter.x));
             let jac_c = nlp.eval_jac_c(&iter.x);
-            let hess_lag = nlp.eval_hess_lag(&iter.x, &iter.lambda_g);
+            let hess_lag = match self.opts.hessian {
+                SqpHessianSource::Exact => nlp.eval_hess_lag(&iter.x, &iter.lambda_g),
+                SqpHessianSource::DampedBfgs => {
+                    let bfgs = bfgs.as_mut().expect("DampedBfgs state initialized above");
+                    // Update on the *current* (x, ∇L). The
+                    // very first iteration's update is a no-op
+                    // (no previous pair); the matrix stays I.
+                    let grad_lag = compute_grad_lag(&grad_f, &jac_c, &iter.lambda_g, n);
+                    bfgs.update(&iter.x, &grad_lag);
+                    bfgs.as_triplet()
+                }
+                SqpHessianSource::Lbfgs => {
+                    return Err(SqpError::DimensionMismatch(
+                        "SqpHessianSource::Lbfgs not yet implemented; \
+                         use Exact or DampedBfgs"
+                            .into(),
+                    ));
+                }
+            };
 
             // KKT check uses the current iterate's evaluations.
             let kkt = check_kkt(
@@ -316,6 +346,24 @@ impl SqpAlgorithm {
 struct KktError {
     pub stationarity: Number,
     pub constr_viol: Number,
+}
+
+/// Lagrangian gradient `∇L(x, λ_g) = ∇f(x) + J_c(x)ᵀ λ_g` at the
+/// current iterate. Used by the damped-BFGS update.
+fn compute_grad_lag(
+    grad_f: &[Number],
+    jac_c: &Triplet,
+    lambda_g: &[Number],
+    n: usize,
+) -> Vec<Number> {
+    let mut out = grad_f.to_vec();
+    debug_assert_eq!(out.len(), n);
+    for k in 0..jac_c.irow.len() {
+        let row_i = (jac_c.irow[k] - 1) as usize;
+        let col_j = (jac_c.jcol[k] - 1) as usize;
+        out[col_j] += jac_c.vals[k] * lambda_g[row_i];
+    }
+    out
 }
 
 fn check_kkt(

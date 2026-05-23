@@ -14,6 +14,7 @@
 //! The `InteriorPoint` choice (default) remains the
 //! `IpoptAlgorithm` path with no changes.
 
+pub mod bfgs;
 pub mod filter;
 pub mod ipopt_adapter;
 pub mod iterates;
@@ -27,6 +28,7 @@ pub mod sqp_alg;
 #[cfg(test)]
 mod tests;
 
+pub use bfgs::DampedBfgs;
 pub use filter::{filter_line_search, SqpFilter};
 pub use ipopt_adapter::IpoptNlpAdapter;
 pub use iterates::SqpIterates;
