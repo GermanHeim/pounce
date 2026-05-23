@@ -889,17 +889,23 @@ fn warm_start_with_wrong_bound_in_working_set_drops_it() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Rejection path: an inequality QP whose equality-relaxed
-// solution is infeasible w.r.t. the inequality. Without a warm-
-// start (and without the §4.3 elastic mode) commit 5 has no
-// feasible starting point and must reject.
+// Cold start through l1-elastic (§4.3): an inequality QP whose
+// eq-relaxed solution is infeasible. The cold-init in
+// solve_general now returns Ok(None), triggering solve_elastic,
+// which augments with two slacks per row and re-solves from a
+// slack-feasible warm start.
 //
 //     min ½‖x‖²   s.t.   x₁ + x₂ ≥ 1,  no bounds
 //
-// Eq-relaxed: (0, 0). a·x = 0 < bl = 1 ⇒ UnsupportedFeature.
+// Eq-relaxed (0, 0) violates the constraint. Elastic mode finds
+// the true optimum on x₁+x₂=1: by symmetry x = (0.5, 0.5),
+// λ_g = -1 (∂L/∂x_i = x_i + λ = 0 ⇒ λ = -x_i = -0.5… wait, let
+// me redo: at optimum x = (0.5, 0.5), Hx + Aᵀλ = 0
+// ⇒ 0.5 + λ = 0 ⇒ λ = -0.5).
+// Slacks zero ⇒ status = Optimal (not Infeasible).
 // ─────────────────────────────────────────────────────────────────
 #[test]
-fn rejects_general_ineq_when_eq_relaxed_violates_constraint() {
+fn general_ineq_solved_via_l1_elastic_when_cold_infeasible() {
     let n = 2;
     let m = 1;
     let h = identity_hessian(n);
@@ -928,9 +934,76 @@ fn rejects_general_ineq_when_eq_relaxed_violates_constraint() {
     };
 
     let mut solver = new_solver();
-    let err = solver.solve(&qp, None, &QpOptions::default()).unwrap_err();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 0.5).abs() < 1e-6, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 0.5).abs() < 1e-6, "x[1] = {}", sol.x[1]);
+    assert!(sol.stats.used_phase1, "elastic mode should have been used");
+    assert_eq!(sol.working.constraints[0], crate::ConsStatus::AtLower);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Ladder #5 — infeasibility certification via l1-elastic.
+//
+//     min ½ x²   s.t.   x ≥ 5,  x ≤ 3,  x free
+//
+// No x satisfies both constraints. Elastic mode minimizes
+//     ½x² + γ·(v_l + v_u)
+// s.t. x + v_l ≥ 5, x − v_u ≤ 3, v_l, v_u ≥ 0.
+// Closed form (γ large enough): x = 3, v_l = 2, v_u = 0; the
+// penalty term equals γ·2. Status reported: Infeasible.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn problem_5_infeasibility_certified_by_elastic_mode() {
+    let n = 1;
+    let m = 2;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1], vec![1]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0]);
+
+    // Two rows in A, both with one nonzero at column 1.
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 2], vec![1, 1]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0];
+    let bl = [5.0, NLP_LOWER_BOUND_INF];
+    let bu = [NLP_UPPER_BOUND_INF, 3.0];
+    let xl = [NLP_LOWER_BOUND_INF];
+    let xu = [NLP_UPPER_BOUND_INF];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Infeasible,
+        "expected Infeasible; got {:?}",
+        sol.status
+    );
     assert!(
-        matches!(err, crate::QpError::UnsupportedFeature(_)),
-        "expected UnsupportedFeature, got {err:?}"
+        sol.stats.used_phase1,
+        "elastic mode should have run for an infeasible problem"
+    );
+    // Minimal-l1 elastic minimum sits at x = 3 (the upper-side
+    // constraint binds with zero slack; the lower-side absorbs
+    // a violation of 2).
+    assert!(
+        (sol.x[0] - 3.0).abs() < 1e-6,
+        "x = {} but expected 3.0 (the minimum-violation point)",
+        sol.x[0]
     );
 }

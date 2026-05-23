@@ -575,7 +575,13 @@ impl ParametricActiveSetSolver {
         let (mut x, mut working) = if let Some(w) = ws {
             (w.x.clone(), w.working.clone())
         } else {
-            self.cold_general_initial(qp, opts, &mut n_refactor)?
+            // Try the cheap eq-relaxed cold start first; if it
+            // produces an infeasible point, route through §4.3
+            // l1-elastic mode instead.
+            match self.cold_general_initial(qp, opts, &mut n_refactor)? {
+                Some(p) => p,
+                None => return self.solve_elastic(qp, opts),
+            }
         };
 
         // Snap primal coordinates of active bounds to their exact
@@ -783,17 +789,18 @@ impl ParametricActiveSetSolver {
         })
     }
 
-    /// Build a cold-start `(x, working)` for [`Self::solve_general`]:
-    /// solve the equality-relaxed KKT (only rows with `bl == bu`
-    /// participate), then reject if the resulting `x` violates any
-    /// inequality row or variable bound. Each rejection points at
-    /// the §4.3 elastic-mode commit that will replace this branch.
+    /// Build a cold-start `(x, working)` for [`Self::solve_general`].
+    /// Solves the equality-relaxed KKT (only rows with `bl == bu`
+    /// participate). Returns `Ok(None)` when the resulting `x`
+    /// violates an inequality row or variable bound — the caller
+    /// (typically [`Self::solve_general`]) then dispatches to the
+    /// §4.3 elastic mode.
     fn cold_general_initial(
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
         n_refactor: &mut u32,
-    ) -> Result<(Vec<Number>, WorkingSet), QpError> {
+    ) -> Result<Option<(Vec<Number>, WorkingSet)>, QpError> {
         let n = qp.n;
         let m = qp.m;
 
@@ -819,44 +826,26 @@ impl ParametricActiveSetSolver {
 
         let x: Vec<Number> = rhs[..n].to_vec();
 
-        // Inequality-row feasibility check.
+        // Inequality-row feasibility check — any violation routes
+        // the caller to elastic mode.
         let ax = a_times_x(qp.a, &x, m);
         for i in 0..m {
             if qp.bl[i] == qp.bu[i] {
                 continue;
             }
             if qp.bl[i] > NLP_LOWER_BOUND_INF && ax[i] < qp.bl[i] - opts.feas_tol {
-                return Err(QpError::UnsupportedFeature(format!(
-                    "equality-relaxed solution violates lower bound on constraint row {i} \
-                     (a·x = {:.6e}, bl = {:.6e}); requires phase-1 elastic mode \
-                     (next Phase 5a commit)",
-                    ax[i], qp.bl[i]
-                )));
+                return Ok(None);
             }
             if qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] > qp.bu[i] + opts.feas_tol {
-                return Err(QpError::UnsupportedFeature(format!(
-                    "equality-relaxed solution violates upper bound on constraint row {i} \
-                     (a·x = {:.6e}, bu = {:.6e}); requires phase-1 elastic mode \
-                     (next Phase 5a commit)",
-                    ax[i], qp.bu[i]
-                )));
+                return Ok(None);
             }
         }
-        // Variable-bound feasibility check.
         for (i, &xi) in x.iter().enumerate() {
             if qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - opts.feas_tol {
-                return Err(QpError::UnsupportedFeature(format!(
-                    "equality-relaxed solution violates lower bound on x[{i}] \
-                     (x = {xi:.6e}, xl = {:.6e}); requires phase-1 elastic mode",
-                    qp.xl[i]
-                )));
+                return Ok(None);
             }
             if qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + opts.feas_tol {
-                return Err(QpError::UnsupportedFeature(format!(
-                    "equality-relaxed solution violates upper bound on x[{i}] \
-                     (x = {xi:.6e}, xu = {:.6e}); requires phase-1 elastic mode",
-                    qp.xu[i]
-                )));
+                return Ok(None);
             }
         }
 
@@ -886,7 +875,85 @@ impl ParametricActiveSetSolver {
             }
         }
 
-        Ok((x, working))
+        Ok(Some((x, working)))
+    }
+
+    /// l1-elastic mode — §4.3. Builds an
+    /// [`ElasticReformulation`], seeds the augmented problem so
+    /// the elastic slacks absorb any infeasibility at the initial
+    /// `x`, and routes the augmented problem through
+    /// [`Self::solve_general`] via the standard warm-start path.
+    /// Unpacks the augmented solution into the original variable
+    /// space and reports `QpStatus::Infeasible` when residual
+    /// slacks exceed `feas_tol`.
+    fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
+        let started = Instant::now();
+        let n = qp.n;
+        let m = qp.m;
+
+        let reform = crate::elastic::ElasticReformulation::build(qp, opts.elastic_gamma);
+        let qp_aug = reform.as_qp();
+
+        // Initial `x_orig` for the augmented seed: project 0 into
+        // the original variable box. Slacks then absorb any
+        // remaining infeasibility.
+        let mut x_orig = vec![0.0; n];
+        for (xi, (&l, &u)) in x_orig.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
+            if l > NLP_LOWER_BOUND_INF && *xi < l {
+                *xi = l;
+            }
+            if u < NLP_UPPER_BOUND_INF && *xi > u {
+                *xi = u;
+            }
+        }
+        let (x_aug, working_aug) = reform.initial_seed(qp, &x_orig, opts.feas_tol);
+
+        let ws = QpWarmStart {
+            x: x_aug,
+            lambda_g: vec![0.0; reform.m_aug],
+            lambda_x: vec![0.0; reform.n_aug],
+            working: working_aug,
+        };
+
+        // Recursive solve through the standard path.
+        let sol_aug = self.solve_general(&qp_aug, Some(&ws), opts)?;
+
+        // Pack the original-space solution.
+        let x = sol_aug.x[..n].to_vec();
+        let lambda_g = sol_aug.lambda_g.clone();
+        let lambda_x = sol_aug.lambda_x[..n].to_vec();
+        let mut working = WorkingSet::cold(n, m);
+        working
+            .constraints
+            .copy_from_slice(&sol_aug.working.constraints);
+        working.bounds.copy_from_slice(&sol_aug.working.bounds[..n]);
+
+        let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol);
+        let status = if feasible {
+            QpStatus::Optimal
+        } else {
+            QpStatus::Infeasible
+        };
+
+        // Objective uses the ORIGINAL `H`, `g`, not the augmented
+        // (penalty-inflated) values.
+        let obj = quad_objective(qp, &x);
+
+        Ok(QpSolution {
+            x,
+            lambda_g,
+            lambda_x,
+            working,
+            obj,
+            status,
+            stats: QpStats {
+                n_working_set_changes: sol_aug.stats.n_working_set_changes,
+                n_refactor: sol_aug.stats.n_refactor,
+                n_schur_updates: sol_aug.stats.n_schur_updates,
+                used_phase1: true,
+                time: started.elapsed(),
+            },
+        })
     }
 }
 

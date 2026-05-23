@@ -28,6 +28,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod elastic;
 pub mod error;
 pub mod factor;
 pub mod kkt;
@@ -39,6 +40,7 @@ pub mod working_set;
 #[cfg(test)]
 mod tests;
 
+pub use elastic::ElasticReformulation;
 pub use error::{QpError, QpStatus};
 pub use factor::LinearSolver;
 pub use kkt::{
