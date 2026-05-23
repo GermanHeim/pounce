@@ -100,6 +100,61 @@ mirror `SqpOptions::default()`.
 | `sqp_print_level`       | `0`         | 0=silent, 1=per-iter summary, 2+=trace             |
 | `sqp_lbfgs_max_history` | `6`         | L-BFGS history size                                |
 
+### Algorithm-path isolation guarantees
+
+The two solver paths share the TNLP layer, the `OrigIpoptNlp`
+adapter, the linear-solver backend, the options registry, and
+`finalize_solution`. Beyond that they are **deliberately
+isolated**, so toggling `algorithm` is always safe — no Phase 5
+addition can change IPM behaviour, and no IPM warm-start setting
+can change SQP behaviour. Concretely:
+
+- **The default (`algorithm = interior-point`) is unchanged.** No
+  user who hasn't typed `active-set-sqp` ever runs Phase 5 code.
+- **`sqp_*` options are silently ignored on the IPM path.** Setting
+  `sqp_globalization`, `sqp_hessian`, `sqp_max_iter`, … while
+  `algorithm` is `interior-point` is a no-op. The option-list
+  parser still validates them (out-of-range numeric values fail
+  validation regardless of `algorithm`), but the IPM driver never
+  reads the resolved values.
+- **IPM warm-start options are silently ignored on the SQP path.**
+  `warm_start_init_point`, `bound_push`, `bound_frac`,
+  `slack_bound_push`, `mult_init_max`, `mu_init`, `mu_target` and
+  the rest of the IPM-side initializer knobs sit on the
+  `AlgorithmBuilder` but are not consulted when the SQP outer
+  loop runs.
+- **Warm-start payloads are path-local.**
+  `IpoptApplication::set_sqp_warm_start(SqpIterates)` /
+  `Problem.solve(working_set=…)` / `IpoptSetWarmStartWorkingSet`
+  feed the SQP loop only — the IPM never reads `sqp_warm_start`.
+  Symmetrically, `lagrange=` / `zl=` / `zu=` on
+  `Problem.solve` (paired with `warm_start_init_point=yes`) feed
+  the IPM only — the SQP loop never consults them.
+- **You can flip between paths across solves on the same
+  `Problem` handle.** The application's per-solve setup
+  (restoration factory, options snapshot, statistics reset) is
+  rebuilt for every `solve()`, so a cold IPM solve followed by
+  an SQP solve with `algorithm` re-set in between is a supported
+  pattern. This is exactly how the parametric corrector in §4
+  hands off from a cold IPM warm-up to the SQP corrector.
+- **The C ABI is strictly additive.** Existing cyipopt / JuMP /
+  AMPL clients link against the new `libpounce_cinterface`
+  unchanged; the four new entry points (`IpoptGetWorkingSet`,
+  `IpoptSetWarmStartWorkingSet`, `IpoptClearWarmStartWorkingSet`,
+  `IpoptSolveWarmStart`) are pure additions.
+- **`info["working_set"]` is always present, sometimes `None`.**
+  Python callers that don't touch the SQP path never have to
+  read that key, but reading it is safe — it returns `None` on
+  the IPM path so a downstream loop won't crash on a missing
+  key.
+
+This isolation is verified by the existing test suite: 868
+workspace tests cover both paths, plus crosscutting tests like
+`application_sqp_warm_start_auto_clears_after_use` (asserts the
+SQP-side warm-start state doesn't leak between solves) and
+`application_default_does_not_select_sqp` (asserts the default
+solver path is IPM).
+
 ## 3. The working-set warm-start contract
 
 The §6 contract is the tuple `(x, λ_g, λ_x, 𝒲)` — primal, constraint

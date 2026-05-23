@@ -182,6 +182,37 @@ opt-in via `QpOptions::use_schur_updates`).
 - The Python `Problem.solve` signature gained one optional kwarg
   (`working_set=None`); positional callers are unaffected.
 
+
+### Algorithm-path isolation guarantees
+
+The IPM and active-set SQP paths share the TNLP layer, options
+registry, linear-solver backend, and `finalize_solution`, but are
+otherwise isolated. Toggling `algorithm` is always safe:
+
+- The default (`algorithm = interior-point`) runs zero Phase 5
+  code. Users who never set `active-set-sqp` are unaffected.
+- `sqp_*` options are silently ignored on the IPM path.
+- IPM warm-start options (`warm_start_init_point`, `bound_push`,
+  `bound_frac`, `slack_bound_push`, `mult_init_max`, `mu_init`,
+  `mu_target`, …) are silently ignored on the SQP path.
+- Warm-start payloads are path-local:
+  `set_sqp_warm_start(SqpIterates)` /
+  `Problem.solve(working_set=…)` / `IpoptSetWarmStartWorkingSet`
+  feed the SQP loop only; `lagrange=` / `zl=` / `zu=` paired with
+  `warm_start_init_point=yes` feed the IPM only.
+- `info["working_set"]` is always present in the Python info
+  dict but is `None` on the IPM path.
+- Callers can flip between paths across solves on the same
+  problem handle — the parametric corrector pattern in the
+  tutorial uses this for cold IPM warm-up followed by an SQP
+  corrector.
+
+These guarantees are exercised by the test suite: see
+`application_default_does_not_select_sqp`,
+`application_sqp_warm_start_auto_clears_after_use`,
+`application_sqp_warm_start_round_trip`, and
+`test_get_working_set_returns_none_on_ipm_path` (Python).
+
 ## [0.2.0] — 2026-05-25
 
 First tagged release. The `0.1.0` work-in-progress version was never
