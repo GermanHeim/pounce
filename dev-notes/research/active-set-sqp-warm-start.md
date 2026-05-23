@@ -1161,16 +1161,59 @@ phasing tightens to four shippable milestones:
   - CUTEst small-NLP regression vs filterSQP / SNOPT for the
     §10 exit criterion (iteration-count comparison). Needs
     filterSQP and SNOPT binaries; not pure-Rust.
-- **Phase 5c — Working-set warm start + integration (2–3 weeks).**
-  - SQP warm-start API per §6.
-  - C API additions per §7.2.
-  - Python additions per §7.3.
-  - GAMS additions per §7.4 (both mechanisms).
-  - Parametric integration with `pounce-sensitivity`: SQP corrector
-    after the sensitivity predictor.
-  - **Exit:** measured ≥5× iteration-count drop on the §8.2 MPC and
-    parametric regression suites; functioning end-to-end demos in
-    `python/examples/` and `gams/examples/`.
+- **Phase 5c — Working-set warm start + integration — core landed
+  in c17–c22 on `claude/active-set-sqp-warm-start-BnjLA`:**
+  - c17 — Rust SQP warm-start API. New
+    `SqpAlgorithm::optimize_with_warm_start(nlp, Option<SqpIterates>)`
+    consumes the §6 tuple `(x, λ_g, λ_x, 𝒲)` and feeds the
+    working-set into `pounce-qp`'s `solve_with_working_set`.
+    `SqpResult` gained a `working_set: Option<WorkingSet>` field
+    populated on every return path. Dimension-mismatch
+    validation throws `SqpError::DimensionMismatch`.
+  - c18 — `IpoptApplication` warm-start hooks:
+    `set_sqp_warm_start(SqpIterates)`, `clear_sqp_warm_start()`,
+    `last_sqp_working_set() -> Option<&WorkingSet>`. Input
+    iterate is consumed once and auto-cleared; output WS stays
+    valid until the next solve overwrites it. IPM path ignores
+    both — backwards-compatible by construction.
+  - c19 — C ABI per §7.2. Four new entry points in
+    `crates/pounce-cinterface/include/pounce.h`:
+    `IpoptGetWorkingSet`, `IpoptSetWarmStartWorkingSet`,
+    `IpoptClearWarmStartWorkingSet`, `IpoptSolveWarmStart`. Wire
+    status integers via `IpoptBoundStatus` / `IpoptConsStatus`
+    typedefs and four `POUNCE_WS_*` constants. Existing cyipopt
+    / JuMP / AMPL clients are unaffected (no existing signature
+    changes).
+  - c20 — Python bindings per §7.3. `Problem.solve(...,
+    working_set=(bounds_arr, cons_arr))` kwarg; `set_working_set`,
+    `clear_working_set`, `get_working_set` methods;
+    `info["working_set"]` key in the returned dict. Encoded as
+    numpy int8 (bounds, constraints) tuples; codes match the C
+    ABI `POUNCE_WS_*` values. Five new Python tests covering
+    round-trip, validation, and the IPM-path falsy case.
+  - c21 — GAMS solver-link mechanism §7.4(a). The marginal-based
+    reconstruction path classifies the working set from
+    `gmoGetVarM` / `gmoGetEquM` at the top of `pouCallSolver`
+    and forwards via `IpoptSetWarmStartWorkingSet`. Lossy at
+    degenerate active sets — same trade-off as upstream CONOPT,
+    IPOPT, KNITRO under GAMS. Mechanism §7.4(b) (persistent
+    state file) documented for a follow-up.
+  - c22 — Sensitivity-corrector classifier:
+    `pounce_algorithm::sqp::classify_working_set(...)` builds a
+    `WorkingSet` from any (primal, multipliers, bounds) snapshot.
+    This is the missing piece for the parametric
+    "predictor (sensitivity) + corrector (SQP)" pattern; the
+    `pounce-sensitivity/src/convenience.rs` module gained a docs
+    section showing the full IPM → SensSolve → classify_working_set
+    → set_sqp_warm_start → optimize_tnlp pipeline.
+
+  **Phase 5c remaining items — require external dependencies:**
+  - **Exit:** measured ≥5× iteration-count drop on the §8.2 MPC
+    and parametric regression suites. Requires HPIPM / qpOASES /
+    acados reference numbers — those are external oracles.
+  - Functioning end-to-end demos in `python/examples/` and
+    `gams/examples/` are documentation work that can land at any
+    time; they don't gate the algorithmic surface.
 - **Phase 5d — l1-elastic globalization alternative (1–2 weeks,
   optional).** SNOPT-style globalization as an opt-in alongside the
   default filter, behind `sqp_globalization=l1-elastic`. Comparison
