@@ -50,6 +50,18 @@ use std::rc::Rc;
 pub type LinearBackendFactory =
     Box<dyn FnMut(LinearSolverChoice) -> Box<dyn SparseSymLinearSolverInterface>>;
 
+/// Top-level algorithm choice. `InteriorPoint` is pounce's default
+/// (the existing `IpoptAlgorithm`); `ActiveSetSqp` is the
+/// Phase 5b SQP driver in `crate::sqp::SqpAlgorithm`, which uses
+/// `pounce-qp` for QP subproblem solves and reuses
+/// `FilterLsAcceptor` for globalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlgorithmChoice {
+    #[default]
+    InteriorPoint,
+    ActiveSetSqp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverChoice {
     Ma57,

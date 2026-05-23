@@ -1,0 +1,27 @@
+//! Phase 5b — active-set SQP algorithm driver.
+//!
+//! Sits parallel to [`crate::ipopt_alg::IpoptAlgorithm`]. Consumes
+//! the same [`crate::ipopt_nlp::IpoptNlp`] for function /
+//! derivative evaluations and reuses [`crate::line_search`] /
+//! [`crate::conv_check`] machinery where it makes sense; the QP
+//! subproblem solve is delegated to the `pounce-qp` crate
+//! (Phases 5a, 5a.1, 5a.2 of the design note).
+//!
+//! Design reference:
+//! [`docs/research/active-set-sqp-warm-start.md`].
+//!
+//! Selected via [`crate::alg_builder::AlgorithmChoice::ActiveSetSqp`].
+//! The `InteriorPoint` choice (default) remains the
+//! `IpoptAlgorithm` path with no changes.
+
+pub mod iterates;
+pub mod options;
+pub mod qp_assembly;
+pub mod sqp_alg;
+
+#[cfg(test)]
+mod tests;
+
+pub use iterates::SqpIterates;
+pub use options::{SqpGlobalization, SqpHessianSource, SqpOptions};
+pub use sqp_alg::SqpAlgorithm;
