@@ -13,5 +13,12 @@ pounce-common = { path = "../pounce-common" }
 pounce-linalg = { path = "../pounce-linalg" }
 pounce-linsol = { path = "../pounce-linsol" }
 
+[dev-dependencies]
+# FERAL backs the in-tree unit tests so the analytical ladder runs
+# end-to-end without external solvers. Production callers
+# (pounce-algorithm, pounce-sensitivity) construct their own backend
+# and pass it to `ParametricActiveSetSolver::new`.
+pounce-feral = { path = "../pounce-feral" }
+
 [lints]
 workspace = true

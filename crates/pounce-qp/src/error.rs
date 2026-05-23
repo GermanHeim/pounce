@@ -50,6 +50,10 @@ pub enum QpError {
     /// Linear-solver backend reported a hard failure that cannot be
     /// recovered by the inertia / refactor logic.
     LinearSolverFailure(String),
+    /// Feature required by this QP is not yet implemented in the
+    /// current crate phase (e.g., one-sided inequality constraints
+    /// before the working-set machinery lands).
+    UnsupportedFeature(String),
 }
 
 impl fmt::Display for QpError {
@@ -61,6 +65,7 @@ impl fmt::Display for QpError {
                 write!(f, "warm-start dimension mismatch: {s}")
             }
             QpError::LinearSolverFailure(s) => write!(f, "linear solver failure: {s}"),
+            QpError::UnsupportedFeature(s) => write!(f, "unsupported feature: {s}"),
         }
     }
 }

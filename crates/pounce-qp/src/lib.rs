@@ -29,6 +29,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod error;
+pub mod factor;
+pub mod kkt;
 pub mod options;
 pub mod problem;
 pub mod solver;
@@ -38,7 +40,9 @@ pub mod working_set;
 mod tests;
 
 pub use error::{QpError, QpStatus};
+pub use factor::LinearSolver;
+pub use kkt::{is_pure_equality_no_bounds, rhs_equality_only, KktTriplet};
 pub use options::{AntiCyclingChoice, QpAlgorithm, QpOptions};
 pub use problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
-pub use solver::QpSolver;
+pub use solver::{ParametricActiveSetSolver, QpSolver};
 pub use working_set::{BoundStatus, ConsStatus, WorkingSet};

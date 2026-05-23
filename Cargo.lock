@@ -433,6 +433,7 @@ name = "pounce-qp"
 version = "0.1.0"
 dependencies = [
  "pounce-common",
+ "pounce-feral",
  "pounce-linalg",
  "pounce-linsol",
 ]
