@@ -71,6 +71,33 @@ If a GAMS model sets `mymodel.optfile = 1`, POUNCE reads `pounce.opt`
 `keyword value` pair using POUNCE's option names; lines starting with `*`
 or `#` are comments. Integer, real, and string options are auto-detected.
 
+### Active-set SQP with working-set warm start
+
+The Phase 5c SQP driver is opt-in via `pounce.opt`:
+
+```
+algorithm active-set-sqp
+```
+
+When this is set, the solver link automatically reads the variable
+and equation marginals that the previous `solve` statement left on
+the GMO and reconstructs a QP working set, which it then forwards
+to the next solve via `IpoptSetWarmStartWorkingSet`. No additional
+configuration is required — the GAMS-native marginal carry IS the
+warm-start channel.
+
+This mechanism (the §7.4(a) **marginal-based reconstruction** in
+`docs/research/active-set-sqp-warm-start.md`) is the same idiom
+CONOPT, IPOPT, and KNITRO use under GAMS, and shares the same
+caveat: at degenerate active sets the marginal signs are
+ambiguous, so the reconstructed working set may differ from the
+true one by a few rows. The solver degrades gracefully (drops
+infeasible rows and re-detects them on the next QP solve); it
+never returns the wrong answer.
+
+Mechanism §7.4(b) — a persistent on-disk state file for precision-
+critical workflows — is planned but not yet shipped.
+
 ## Capabilities
 
 Registered model types: `NLP`, `DNLP`, `RMINLP`. Mixed-integer and conic

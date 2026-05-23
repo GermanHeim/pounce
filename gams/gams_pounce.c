@@ -701,6 +701,84 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     gmoGetVarL(gmo, x);
 
     /* ---------------------------------------------------------------
+     * Mechanism §7.4(a) — marginal-based working-set reconstruction.
+     *
+     * GAMS persists variable marginals (.m) and equation marginals
+     * across `solve` statements. Translate them into a POUNCE
+     * working set and seed the next solve via
+     * IpoptSetWarmStartWorkingSet. The IPM path ignores this
+     * (the SQP `algorithm = active-set-sqp` is opt-in via
+     * pounce.opt), so the cost on the default IPM path is one
+     * setter call + a free of the buffers.
+     *
+     * Sign convention: POUNCE expects the standard `λ_g` (positive
+     * for tight lower side); GAMS persists the "pi" with the
+     * solver-link sign flip we apply on output (mult_g[i] =
+     * -mult_g[i]). So when *reading back* we flip again.
+     *
+     * Reconstruction is lossy on degenerate active sets — same
+     * limitation upstream's CONOPT, IPOPT, and KNITRO links have
+     * under GAMS. Mechanism §7.4(b) (persistent state file) is
+     * planned as opt-in for precision-critical workflows.
+     * --------------------------------------------------------------- */
+    {
+        const double WS_TOL = 1e-8;
+        IpoptBoundStatus *bound_in = (IpoptBoundStatus *)calloc(
+            n > 0 ? (size_t)n : 1, sizeof(IpoptBoundStatus));
+        IpoptConsStatus  *cons_in = m > 0
+            ? (IpoptConsStatus *)calloc((size_t)m, sizeof(IpoptConsStatus))
+            : NULL;
+        double *var_marg_in = (double *)calloc(n > 0 ? (size_t)n : 1, sizeof(double));
+        double *equ_marg_in = m > 0
+            ? (double *)calloc((size_t)m, sizeof(double))
+            : NULL;
+        if (bound_in && var_marg_in && (m == 0 || (cons_in && equ_marg_in))) {
+            gmoGetVarM(gmo, var_marg_in);
+            if (m > 0) gmoGetEquM(gmo, equ_marg_in);
+            /* Variables: nonzero marginal ⇒ a bound is active.
+             * GAMS stores the bound-multiplier sign with our
+             * convention (we already negated when writing it on the
+             * previous solve), so a positive value flags lower-side,
+             * negative upper-side. */
+            for (int j = 0; j < n; j++) {
+                if (x_l[j] >= x_u[j] - WS_TOL) {
+                    bound_in[j] = POUNCE_WS_FIXED_OR_EQ;
+                } else if (var_marg_in[j] > WS_TOL) {
+                    bound_in[j] = POUNCE_WS_AT_LOWER;
+                } else if (var_marg_in[j] < -WS_TOL) {
+                    bound_in[j] = POUNCE_WS_AT_UPPER;
+                } else {
+                    bound_in[j] = POUNCE_WS_INACTIVE;
+                }
+            }
+            /* Constraints: declared equalities are always active.
+             * For inequalities we classify by sign of the marginal;
+             * the lossy nature is unchanged by sign conventions
+             * (pounce-qp re-detects the correct side in the first
+             * QP step regardless). */
+            for (int i = 0; i < m; i++) {
+                int etyp = gmoGetEquTypeOne(gmo, i);
+                if (etyp == gmoequ_E) {
+                    cons_in[i] = POUNCE_WS_FIXED_OR_EQ;
+                } else if (equ_marg_in[i] > WS_TOL) {
+                    cons_in[i] = POUNCE_WS_AT_LOWER;
+                } else if (equ_marg_in[i] < -WS_TOL) {
+                    cons_in[i] = POUNCE_WS_AT_UPPER;
+                } else {
+                    cons_in[i] = POUNCE_WS_INACTIVE;
+                }
+            }
+            /* Best effort; ignore failures (e.g. NULL handle, bad
+             * code). The IPM ignores warm-start input anyway. */
+            (void)IpoptSetWarmStartWorkingSet(nlp, bound_in, cons_in);
+        }
+        free(bound_in);
+        free(cons_in);
+        free(var_marg_in);
+        free(equ_marg_in);
+    }
+
+    /* ---------------------------------------------------------------
      * Solve
      * --------------------------------------------------------------- */
     {
