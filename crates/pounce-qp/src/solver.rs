@@ -110,12 +110,7 @@ impl ParametricActiveSetSolver {
 
         // ---- 2. Initial working set ----
         let mut working = WorkingSet::cold(n, 0);
-        for (i, (status, xi)) in working
-            .bounds
-            .iter_mut()
-            .zip(x.iter_mut())
-            .enumerate()
-        {
+        for (i, (status, xi)) in working.bounds.iter_mut().zip(x.iter_mut()).enumerate() {
             let l = qp.xl[i];
             let u = qp.xu[i];
             let l_finite = l > NLP_LOWER_BOUND_INF;
@@ -138,9 +133,7 @@ impl ParametricActiveSetSolver {
         for _iter in 0..opts.max_iter {
             // Build active-bound index list (ascending = problem
             // order) and assemble the KKT.
-            let active: Vec<usize> = (0..n)
-                .filter(|&i| working.bounds[i].is_active())
-                .collect();
+            let active: Vec<usize> = (0..n).filter(|&i| working.bounds[i].is_active()).collect();
             let k = active.len();
 
             let kkt = assemble_box_with_active(qp, &active);
@@ -173,9 +166,9 @@ impl ParametricActiveSetSolver {
                 for (j, &i) in active.iter().enumerate() {
                     let lam = rhs[n + j];
                     let viol = match working.bounds[i] {
-                        BoundStatus::AtLower => lam,         // want ≤ 0
-                        BoundStatus::AtUpper => -lam,        // want ≥ 0
-                        BoundStatus::Fixed => 0.0,           // never drop
+                        BoundStatus::AtLower => lam,  // want ≤ 0
+                        BoundStatus::AtUpper => -lam, // want ≥ 0
+                        BoundStatus::Fixed => 0.0,    // never drop
                         BoundStatus::Inactive => unreachable!(),
                     };
                     if viol > worst.map(|(_, v)| v).unwrap_or(opts.opt_tol) {
@@ -345,12 +338,7 @@ impl ParametricActiveSetSolver {
         for c in working.constraints.iter_mut() {
             *c = ConsStatus::Equality;
         }
-        for (i, (status, xi)) in working
-            .bounds
-            .iter_mut()
-            .zip(x.iter_mut())
-            .enumerate()
-        {
+        for (i, (status, xi)) in working.bounds.iter_mut().zip(x.iter_mut()).enumerate() {
             let l = qp.xl[i];
             let u = qp.xu[i];
             let l_finite = l > NLP_LOWER_BOUND_INF;
@@ -369,9 +357,7 @@ impl ParametricActiveSetSolver {
 
         // ---- 4. Active-set inner loop ----
         for _iter in 0..opts.max_iter {
-            let active: Vec<usize> = (0..n)
-                .filter(|&i| working.bounds[i].is_active())
-                .collect();
+            let active: Vec<usize> = (0..n).filter(|&i| working.bounds[i].is_active()).collect();
             let k = active.len();
 
             let kkt = assemble_equality_plus_bounds(qp, &active);

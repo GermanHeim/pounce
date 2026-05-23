@@ -93,10 +93,7 @@ fn problem_1_unconstrained_identity_hessian() {
 
     let expected = [-1.5, 2.0, -0.25];
     for (i, (xi, ei)) in sol.x.iter().zip(expected.iter()).enumerate() {
-        assert!(
-            (xi - ei).abs() < 1e-12,
-            "x[{i}] = {xi} but expected {ei}",
-        );
+        assert!((xi - ei).abs() < 1e-12, "x[{i}] = {xi} but expected {ei}",);
     }
     // Objective: ½‖g‖² − ‖g‖² = -½‖g‖².
     let expected_obj = -0.5 * g.iter().map(|gi| gi * gi).sum::<f64>();
@@ -255,10 +252,7 @@ fn problem_2b_equality_only_non_identity_hessian() {
 
     let expected_x = [1.0 / 3.0, 5.0 / 3.0];
     for (i, (xi, ei)) in sol.x.iter().zip(expected_x.iter()).enumerate() {
-        assert!(
-            (xi - ei).abs() < 1e-12,
-            "x[{i}] = {xi} but expected {ei}",
-        );
+        assert!((xi - ei).abs() < 1e-12, "x[{i}] = {xi} but expected {ei}",);
     }
     // λ* = -4/3 in our sign convention (Hx + Aᵀλ = -g ⇒ 2·(1/3) +
     // λ = 2, λ = 2 − 2/3 = 4/3; with the design-note convention the
@@ -339,10 +333,7 @@ fn problem_3_box_constrained_diagonal_hessian() {
 
     let expected_x = [1.0, -1.0, 1.0];
     for (i, (xi, ei)) in sol.x.iter().zip(expected_x.iter()).enumerate() {
-        assert!(
-            (xi - ei).abs() < 1e-10,
-            "x[{i}] = {xi} but expected {ei}",
-        );
+        assert!((xi - ei).abs() < 1e-10, "x[{i}] = {xi} but expected {ei}",);
     }
     let expected_lx = [-6.0, 3.0, -2.0];
     for (i, (lx, ei)) in sol.lambda_x.iter().zip(expected_lx.iter()).enumerate() {
@@ -591,10 +582,7 @@ fn eq_plus_bounds_interior_optimum() {
     assert_eq!(sol.status, crate::QpStatus::Optimal);
 
     for (i, &xi) in sol.x.iter().enumerate() {
-        assert!(
-            (xi - 0.2).abs() < 1e-10,
-            "x[{i}] = {xi} but expected 0.2",
-        );
+        assert!((xi - 0.2).abs() < 1e-10, "x[{i}] = {xi} but expected 0.2",);
     }
     assert!(
         (sol.lambda_g[0] - (-0.2)).abs() < 1e-10,
@@ -716,9 +704,7 @@ fn rejects_eq_plus_bounds_when_relaxed_solution_violates_bounds() {
         hessian_inertia: HessianInertia::Psd,
     };
     let mut solver = new_solver();
-    let err = solver
-        .solve(&qp, None, &QpOptions::default())
-        .unwrap_err();
+    let err = solver.solve(&qp, None, &QpOptions::default()).unwrap_err();
     assert!(
         matches!(err, crate::QpError::UnsupportedFeature(_)),
         "expected UnsupportedFeature, got {err:?}"
@@ -759,9 +745,7 @@ fn rejects_mixed_bounds_plus_general_inequality() {
     };
 
     let mut solver = new_solver();
-    let err = solver
-        .solve(&qp, None, &QpOptions::default())
-        .unwrap_err();
+    let err = solver.solve(&qp, None, &QpOptions::default()).unwrap_err();
     assert!(
         matches!(err, crate::QpError::UnsupportedFeature(_)),
         "expected UnsupportedFeature, got {err:?}"

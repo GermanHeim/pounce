@@ -70,9 +70,7 @@ impl LinearSolver {
 
         // Fill values in the order the backend laid out internally
         // (which matches the (irn, jcn) order we just supplied).
-        self.backend
-            .values_array_mut()
-            .copy_from_slice(&kkt.vals);
+        self.backend.values_array_mut().copy_from_slice(&kkt.vals);
 
         let (check, expected) = match expected_neg_evals {
             Some(e) => (true, e),
@@ -81,12 +79,7 @@ impl LinearSolver {
 
         let st = self.backend.multi_solve(
             true, // new_matrix
-            &kkt.irn,
-            &kkt.jcn,
-            1,
-            rhs,
-            check,
-            expected,
+            &kkt.irn, &kkt.jcn, 1, rhs, check, expected,
         );
         match st {
             ESymSolverStatus::Success => Ok(()),

@@ -69,8 +69,7 @@ impl<'a> QpProblem<'a> {
                 self.n
             )));
         }
-        if self.a.space().n_rows() as usize != self.m
-            || self.a.space().n_cols() as usize != self.n
+        if self.a.space().n_rows() as usize != self.m || self.a.space().n_cols() as usize != self.n
         {
             return Err(QpError::DimensionMismatch(format!(
                 "A is {}×{} but expected {}×{}",
