@@ -624,6 +624,22 @@ impl IpoptApplication {
         // Stash the result's working set so the next solve in a
         // sequence can fetch it via `last_sqp_working_set`.
         self.sqp_last_working_set = res.working_set.clone();
+        // Populate the shared `SolveStatistics` so the Python /
+        // C-API post-solve accessors (`GetIpoptIterCount`,
+        // `info["iter_count"]`, etc.) report the SQP outer-iter
+        // count rather than zero. Constraint-violation /
+        // dual-infeasibility residuals get the SQP-side values
+        // too. The IPM path overwrites this dict on its own
+        // solves, so SQP-vs-IPM mixing across solves stays
+        // honest.
+        {
+            let mut stats = self.statistics.borrow_mut();
+            stats.iteration_count = res.n_iter as Index;
+            stats.final_objective = res.obj;
+            stats.final_dual_inf = res.final_stationarity;
+            stats.final_constr_viol = res.final_constr_viol;
+            stats.final_compl = 0.0; // SQP has no barrier — no compl term.
+        }
         let (app_status, solver_status) = match res.status {
             crate::sqp::SqpStatus::Optimal => (
                 ApplicationReturnStatus::SolveSucceeded,

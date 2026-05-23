@@ -468,8 +468,12 @@ fn check_kkt(
         viol = viol.max(lo).max(hi);
     }
 
-    // Stationarity: ∇f + Jᵀ λ_g + λ_x. (The pounce-qp convention
-    // is Hx + Aᵀλ = −g, so the sign convention here matches.)
+    // Stationarity: ∇f + Jᵀ λ_g − λ_x. pounce-qp's KKT is
+    // `Hx + Aᵀλ_qp + (lower-bound multiplier) e_i − (upper-bound
+    // multiplier) e_i = -g`. Since `λ_x = z_l − z_u` packs the
+    // bound-multiplier sign, the variable-bound term enters the
+    // stationarity check with a negative sign — i.e. at the
+    // optimum `∇f + Jᵀ λ_g = λ_x`.
     let mut stat = vec![0.0; n];
     for (s, &g) in stat.iter_mut().zip(grad_f.iter()) {
         *s = g;
@@ -480,9 +484,9 @@ fn check_kkt(
         let j = (jac_c.jcol[k] - 1) as usize; // 0-based col in x
         stat[j] += jac_c.vals[k] * iter.lambda_g[i];
     }
-    // Add λ_x
+    // Subtract λ_x
     for (s, &lx) in stat.iter_mut().zip(iter.lambda_x.iter()) {
-        *s += lx;
+        *s -= lx;
     }
     let stat_max = stat.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
 

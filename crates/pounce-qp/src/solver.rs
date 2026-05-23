@@ -391,22 +391,17 @@ impl ParametricActiveSetSolver {
         let mut x: Vec<Number> = rhs0[..n].to_vec();
 
         // ---- 2. Bound-feasibility check ----
+        // The cheap equality-relaxed cold start may land outside
+        // the box; fall through to the §4.3 elastic mode in that
+        // case (same recovery `solve_general` uses; see
+        // `cold_general_initial` → `solve_elastic` fall-through).
         for (i, &xi) in x.iter().enumerate() {
             let l = qp.xl[i];
             let u = qp.xu[i];
-            if l > NLP_LOWER_BOUND_INF && xi < l - opts.feas_tol {
-                return Err(QpError::UnsupportedFeature(format!(
-                    "equality-relaxed solution violates lower bound on x[{i}] \
-                     (x = {xi:.6e}, xl = {l:.6e}); recovering requires the \
-                     phase-1 elastic mode, which lands in the next Phase 5a commit"
-                )));
-            }
-            if u < NLP_UPPER_BOUND_INF && xi > u + opts.feas_tol {
-                return Err(QpError::UnsupportedFeature(format!(
-                    "equality-relaxed solution violates upper bound on x[{i}] \
-                     (x = {xi:.6e}, xu = {u:.6e}); recovering requires the \
-                     phase-1 elastic mode, which lands in the next Phase 5a commit"
-                )));
+            if (l > NLP_LOWER_BOUND_INF && xi < l - opts.feas_tol)
+                || (u < NLP_UPPER_BOUND_INF && xi > u + opts.feas_tol)
+            {
+                return self.solve_elastic(qp, opts);
             }
         }
 

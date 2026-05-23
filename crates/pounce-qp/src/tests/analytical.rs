@@ -667,11 +667,13 @@ fn eq_plus_bounds_bound_active_at_init_marginal_multiplier() {
 
 // ─────────────────────────────────────────────────────────────────
 // Equality + bounds, equality solution is bound-INfeasible. Commit
-// 4 routes this to UnsupportedFeature; the elastic-mode commit
-// will replace this with a real solve.
+// 4 originally returned `UnsupportedFeature`; once §4.3 elastic
+// landed, the cold path falls through to elastic and the solve
+// completes. This is the Phase 5c-c24 fix: the eq+bounds branch
+// now recovers via elastic instead of erroring.
 // ─────────────────────────────────────────────────────────────────
 #[test]
-fn rejects_eq_plus_bounds_when_relaxed_solution_violates_bounds() {
+fn eq_plus_bounds_with_infeasible_relaxed_init_recovers_via_elastic() {
     let n = 2;
     let m = 1;
     let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2], vec![1, 2]);
@@ -682,9 +684,13 @@ fn rejects_eq_plus_bounds_when_relaxed_solution_violates_bounds() {
     let mut a = GenTMatrix::new(a_space);
     a.set_values(&[2.0, 1.0]);
 
-    // Equality-relaxed: x₁ + 2λ = 0, x₂ + λ = 0, 2x₁+x₂=1.
-    // ⇒ x₁ = -2λ, x₂ = -λ. -4λ - λ = 1 ⇒ λ = -0.2.
-    //   x = (0.4, 0.2). xl_2 = 0.5 violates → reject.
+    //   min ½(x₁² + x₂²)   s.t.   2x₁ + x₂ = 1,
+    //                              −1 ≤ x₁ ≤ 1,
+    //                              0.5 ≤ x₂ ≤ 1.
+    //
+    // Equality-relaxed unbounded min: x = (0.4, 0.2) (violates
+    // x₂ ≥ 0.5). With the bound enforced: x₂ = 0.5, x₁ = 0.25;
+    // λ_eq = 0.125, μ_xl[1] = 0.375. Closed form verified by hand.
     let g = [0.0, 0.0];
     let bl = [1.0];
     let bu = [1.0];
@@ -704,11 +710,10 @@ fn rejects_eq_plus_bounds_when_relaxed_solution_violates_bounds() {
         hessian_inertia: HessianInertia::Psd,
     };
     let mut solver = new_solver();
-    let err = solver.solve(&qp, None, &QpOptions::default()).unwrap_err();
-    assert!(
-        matches!(err, crate::QpError::UnsupportedFeature(_)),
-        "expected UnsupportedFeature, got {err:?}"
-    );
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 0.25).abs() < 1e-7, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 0.5).abs() < 1e-7, "x[1] = {}", sol.x[1]);
 }
 
 // ─────────────────────────────────────────────────────────────────
