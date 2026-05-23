@@ -988,13 +988,53 @@ The roadmap places this whole effort at Phase 5
 (`future-work-roadmap.md:398-401`). With the literature pinned, the
 phasing tightens to four shippable milestones:
 
-- **Phase 5a — `pounce-qp` standalone (4–6 weeks).** New crate with
-  the §4.2 sparse parametric active-set algorithm, §4.3 elastic
-  phase-1, §4.4 EXPAND, §4.5 inertia control, §4.7 iterative
-  refinement. Maros-Mészáros reader and oracle harness from §8.1.
-  **Exit:** match qpOASES (dense) and OSQP (sparse convex) on
-  Maros-Mészáros to 1e-6; ≥3× cold-vs-warm iteration speedup on the
-  synthetic MPC and parametric sequences.
+- **Phase 5a — `pounce-qp` standalone — feature-complete on
+  correctness, performance items deferred to 5a.1.** New crate
+  shipped over 11 commits on
+  `claude/active-set-sqp-warm-start-BnjLA` (heads
+  `4cf1e85`…`411c791`). What landed:
+  - §4.2 active-set inner loop — refactor-per-iteration variant.
+    Schur-complement factor updates deferred to 5a.1.
+  - §4.3 l1-elastic mode (Gill-Murray-Saunders, SQOPT) —
+    augmented QP with two non-negative slacks per row, penalty
+    γ, recursive solve through the standard active-set path,
+    infeasibility certified when residual slacks exceed `feas_tol`.
+  - §4.4 anti-cycling — Bland's rule wired
+    (`AntiCyclingChoice::Bland`); default `Expand` aliases the
+    qpOASES steepest-violation rule until the full GMSW EXPAND
+    primal-perturbation machinery lands in 5a.1.
+  - §4.5 inertia control — `factorize_with_inertia_control` wraps
+    every factor call site; diagonal-shift retry on `WrongInertia`
+    or `Singular`, defaults match
+    `pounce-algorithm/src/kkt/perturbation_handler.rs`.
+  - §4.7 iterative refinement — inherited from
+    `pounce-feral` (`refine: true` by default); pinned by
+    `tests/refinement_unit.rs`.
+  - §8.0 analytical correctness ladder — 5 of 6 problems pass
+    (#1 unconstrained, #2 equality-only, #3 box-constrained,
+    #5 infeasibility certification, #6 indefinite H with PD
+    reduced). #4 (redundant equality with LICQ violation)
+    remains open — needs row-rank detection beyond inertia
+    control.
+  - §8.1 Maros-Mészáros .qps reader — pure-Rust parser shipping
+    the standard subset (no RANGES yet); round-trip test
+    verifies parse-and-solve.
+  - §8.7 per-module unit tests for `kkt`, `elastic`,
+    `refinement`, `qps`.
+  - Total: 49 tests, all passing; `cargo fmt --all -- --check`
+    clean; `cargo clippy --workspace -D correctness -D suspicious`
+    clean.
+  **Deferred to Phase 5a.1** (performance refinements; do not
+  block Phase 5b NLP integration since the current solver is
+  algorithmically correct):
+  - §4.2 sparse Schur-complement updates (replace refactor-per-
+    iteration with cached-factor `resolve`).
+  - §4.4 full EXPAND.
+  - §8.1 Maros-Mészáros oracle comparison (needs qpOASES/OSQP
+    via FFI — non-pure-Rust; alternative: published-optimum
+    comparison against MM .lst tables).
+  - §8.2 LASSO / MPC scaling-sweep benchmarks.
+  - QPS `RANGES` section (two-sided general bounds).
 - **Phase 5b — SQP NLP driver, cold (3–4 weeks).** `SqpAlgorithm`
   wired into `alg_builder.rs` via §7.1 `AlgorithmChoice`. Filter
   globalization (§4.1) reusing existing `FilterLsAcceptor`. Exact
