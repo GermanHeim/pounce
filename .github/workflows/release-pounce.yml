@@ -1,0 +1,133 @@
+# Build and publish the `pounce-solver` Python extension to PyPI.
+#
+# Triggers:
+#   - push of a tag matching `python-v*`  -> build wheels + sdist, publish to PyPI
+#   - workflow_dispatch with `target: testpypi`  -> publish to TestPyPI for dry runs
+#   - workflow_dispatch with `target: none`      -> just build artifacts, no upload
+#
+# Publishing uses PyPI Trusted Publishing (OIDC). The PyPI project
+# `pounce-solver` must be configured with this workflow as a Trusted
+# Publisher (repository: jkitchin/pounce, workflow filename:
+# release-pounce.yml, environment: pypi). Same for TestPyPI under the
+# `testpypi` environment.
+name: release-pounce
+
+on:
+  push:
+    tags: ["python-v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to upload (pypi, testpypi, none)"
+        required: true
+        default: "none"
+        type: choice
+        options: [pypi, testpypi, none]
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    name: wheel ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: manylinux2014
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: manylinux2014
+          - os: macos-13      # macOS x86_64 runner
+            target: x86_64
+            manylinux: ""
+          - os: macos-14      # macOS arm64 runner (Apple Silicon)
+            target: aarch64
+            manylinux: ""
+          - os: windows-latest
+            target: x64
+            manylinux: ""
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          # abi3-py39 means one wheel per platform covers py39+.
+          args: --release --out dist
+          sccache: "true"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: python/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish-pypi:
+    name: publish to PyPI
+    needs: [build-wheels, build-sdist]
+    if: startsWith(github.ref, 'refs/tags/python-v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pounce-solver/
+    permissions:
+      id-token: write   # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-testpypi:
+    name: publish to TestPyPI
+    needs: [build-wheels, build-sdist]
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pounce-solver/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

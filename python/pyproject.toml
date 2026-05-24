@@ -3,7 +3,12 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "pounce"
+# Distribution name: the bare `pounce` slot on PyPI is taken by an
+# unrelated CLI downloader, so we publish as `pounce-solver`. The
+# Python import name is unaffected — users still write `import pounce`
+# because maturin's `module-name = "pounce._pounce"` and
+# `python-source = "."` keep the package folder named `pounce`.
+name = "pounce-solver"
 version = "0.1.0"
 description = "Python interface to POUNCE — a pure-Rust port of the Ipopt interior-point NLP solver. cyipopt-style Problem class, scipy-style minimize() facade, and JAX-friendly autodiff / implicit differentiation."
 readme = "README.md"
@@ -18,6 +23,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Operating System :: POSIX",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
 ]
 dependencies = ["numpy>=1.23"]
 
