@@ -7,10 +7,18 @@ name = "pyomo-pounce"
 version = "0.1.0"
 description = "Pyomo solver plugin for the POUNCE interior-point NLP solver"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "EPL-2.0"}
 authors = [{name = "John Kitchin", email = "jkitchin@andrew.cmu.edu"}]
-dependencies = ["pyomo>=6.0"]
+# Pyomo gives us the SolverFactory machinery; pounce-solver supplies
+# the actual `pounce` executable on PATH (it ships the Rust CLI inside
+# its wheel). Pinning >=0.1 keeps us forward-compatible across POUNCE
+# point releases; tighten if we ever need to coordinate Pyomo/POUNCE
+# API changes.
+dependencies = [
+    "pyomo>=6.0",
+    "pounce-solver>=0.1",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -29,6 +37,3 @@ pounce = "pyomo_pounce.pounce_solver"
 
 [tool.setuptools.packages.find]
 include = ["pyomo_pounce*"]
-
-[tool.setuptools.package-data]
-pyomo_pounce = ["bin/*"]

@@ -12,8 +12,9 @@ AMPL Solver Library interface — exactly how Pyomo integrates with IPOPT.
 pip install pyomo-pounce
 ```
 
-This registers the solver plugin. The `pounce` binary must be available
-either bundled in the wheel or on your `PATH`.
+That single command pulls in the `pounce-solver` dependency, which
+ships a per-platform wheel bundling the `pounce` executable. After
+install, `pounce` is on your `PATH` and Pyomo finds it automatically.
 
 ## Usage
 
@@ -44,20 +45,30 @@ solver.options['print_level'] = 5
 Options are forwarded to POUNCE's `OptionsList` (ipopt.opt-compatible
 keys).
 
-## Building from Source
+## Local development / unsupported platforms
 
-If a pre-built wheel is not available for your platform, build the
-`pounce` binary from the [pounce](https://github.com/jkitchin/pounce)
-repository and put it on your `PATH`:
+If `pounce-solver` does not ship a wheel for your platform, the pip
+install fails on the dependency. Two workarounds:
 
-```bash
-cargo build --release --bin pounce      # in the pounce repo
-export PATH="$PWD/target/release:$PATH"
-pip install pyomo-pounce
-```
+1. **Build POUNCE from source and put it on `PATH`** — the plugin
+   resolves `pounce` via `shutil.which`, so any binary on `PATH`
+   works:
 
-The plugin finds `pounce` via `shutil.which`, so any `pounce` on `PATH`
-works.
+   ```bash
+   # in the pounce repo
+   cargo build --release --bin pounce
+   export PATH="$PWD/target/release:$PATH"
+   pip install --no-deps pyomo-pounce pyomo
+   ```
+
+2. **Install `pounce-solver` from source** via maturin:
+
+   ```bash
+   cd pounce/python && maturin develop --release
+   # then `cargo install --path ../crates/pounce-cli` to get the CLI
+   # since maturin develop does not bundle the binary.
+   pip install pyomo-pounce
+   ```
 
 ## License
 

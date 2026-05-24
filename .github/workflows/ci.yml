@@ -84,8 +84,11 @@ jobs:
           which pounce
           pounce --help | head -5
 
-  # Smoke-build the pyomo-pounce wheel (binary-bundling path). Verifies
-  # the Rust CLI builds and lands inside the wheel before we ever tag.
+  # Smoke-build the pyomo-pounce wheel. Pure-Python now: the `pounce`
+  # binary comes from the `pounce-solver` dep, not bundled here. We
+  # build the wheel, install it alongside a locally-built `pounce` on
+  # PATH (since `pounce-solver` may not yet be on PyPI at PR time), and
+  # confirm the plugin resolves the executable.
   pyomo-pounce-smoke:
     name: wheel smoke (pyomo-pounce)
     runs-on: ubuntu-latest
@@ -96,23 +99,21 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: python -m pip install --upgrade pip build wheel
-      - name: Build pounce CLI
-        run: cargo build --release --bin pounce
-      - name: Stage binary + build wheel
-        run: |
-          mkdir -p pyomo-pounce/pyomo_pounce/bin
-          cp target/release/pounce pyomo-pounce/pyomo_pounce/bin/pounce
-          cd pyomo-pounce && python -m build --wheel
-          ls -l dist/
-      - name: Re-tag wheel
+      - run: python -m pip install --upgrade pip build
+      - name: Build wheel + sdist
         working-directory: pyomo-pounce
         run: |
-          orig=$(ls dist/pyomo_pounce-*-py3-none-any.whl)
-          python -m wheel tags --platform-tag manylinux2014_x86_64 --remove "$orig"
+          python -m build
           ls -l dist/
+      - name: Build pounce CLI (stand-in for pounce-solver dep)
+        run: cargo build --release --bin pounce
       - name: Install + smoke
         run: |
           python -m pip install pyomo
-          python -m pip install pyomo-pounce/dist/*.whl
+          # Install without deps because `pounce-solver` may not yet be
+          # published; the locally-built CLI on PATH satisfies the
+          # runtime requirement.
+          python -m pip install --no-deps pyomo-pounce/dist/*.whl
+          export PATH="$PWD/target/release:$PATH"
+          which pounce
           python -c "import pyomo_pounce; from pyomo.opt import SolverFactory; s = SolverFactory('pounce'); print('exe:', s.executable())"
