@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Bit-equivalence comparator for POUNCEIT iterate-trace files (Track-A validation of Ipopt → POUNCE port)."
+# Internal dev tool; not for crates.io.
+publish = false
 
 [[bin]]
 name = "iter-diff"

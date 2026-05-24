@@ -9,6 +9,9 @@ readme = "README.md"
 description = "Python bindings for POUNCE — cyipopt-compatible Problem class, scipy-style minimize() facade, and JAX-friendly autodiff/implicit-differentiation helpers. Built with PyO3 + maturin."
 keywords = ["ipopt", "python", "cyipopt", "optimization", "nlp"]
 categories = ["mathematics", "api-bindings", "science"]
+# Shipped to PyPI as `pounce-solver` via maturin (see python/ and
+# .github/workflows/release-pounce.yml), not to crates.io.
+publish = false
 
 [lib]
 name = "_pounce"
