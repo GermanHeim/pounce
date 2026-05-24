@@ -723,6 +723,9 @@ fn main() {
     let jsonl_path = std::env::var("RESULTS_JSONL")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| suite_dir.join("results.jsonl"));
+    if let Some(parent) = jsonl_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let mut jsonl = std::fs::File::create(&jsonl_path)
         .ok()
         .map(std::io::BufWriter::new);
@@ -826,6 +829,9 @@ fn main() {
     let results_path = std::env::var("RESULTS_FILE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| suite_dir.join("results.json"));
+    if let Some(parent) = results_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let json = serde_json::to_string_pretty(&all).unwrap();
     if let Err(e) = std::fs::write(&results_path, &json) {
         eprintln!("WARNING: failed to write {}: {}", results_path.display(), e);
