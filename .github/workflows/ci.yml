@@ -47,7 +47,7 @@ jobs:
   # Smoke-build the `pounce-solver` wheel on every PR so packaging
   # regressions surface here, not at tag time. Runs only on Linux
   # x86_64; the full multi-platform matrix lives in release-pounce.yml
-  # and fires on tag push.
+  # and fires on tag push. Mirrors that workflow's bundle-the-CLI flow.
   wheel-smoke:
     name: wheel smoke (pounce-solver)
     runs-on: ubuntu-latest
@@ -58,6 +58,12 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Build pounce CLI binary
+        run: cargo build --release --bin pounce
+      - name: Stage CLI binary into wheel
+        run: |
+          mkdir -p python/pounce/bin
+          cp target/release/pounce python/pounce/bin/pounce
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -66,12 +72,17 @@ jobs:
           manylinux: manylinux2014
           args: --release --out dist
           sccache: "true"
-      - name: Inspect wheel
+      - name: Install + smoke (Python API + CLI)
         run: |
           ls -l python/dist/
           python -m pip install --upgrade pip
           python -m pip install python/dist/*.whl
           python -c "import pounce; print('import ok:', pounce.__file__)"
+          # The console-script entry should now exist on PATH and shim
+          # to the bundled binary. `--help` exercises the full execve
+          # round-trip without needing an actual .nl input file.
+          which pounce
+          pounce --help | head -5
 
   # Smoke-build the pyomo-pounce wheel (binary-bundling path). Verifies
   # the Rust CLI builds and lands inside the wheel before we ever tag.

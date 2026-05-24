@@ -27,6 +27,14 @@ classifiers = [
 ]
 dependencies = ["numpy>=1.23"]
 
+# Console script: `pip install pounce-solver` drops a `pounce`
+# executable on PATH. The shim in pounce/_cli.py transfers control
+# to the bundled Rust binary at pounce/bin/pounce (or pounce.exe).
+# Local `maturin develop` installs do not bundle the binary; the
+# shim prints a helpful message in that case.
+[project.scripts]
+pounce = "pounce._cli:main"
+
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
 scipy = ["scipy>=1.11"]
@@ -51,3 +59,9 @@ python-source = "."
 module-name = "pounce._pounce"
 features = ["pyo3/extension-module"]
 strip = true
+# Pull the bundled CLI binary into the wheel. The release workflow
+# stages the platform-appropriate binary under pounce/bin/ before
+# invoking maturin; this glob captures whatever lands there. The
+# `format = "wheel"` scope keeps it out of the sdist (which is
+# platform-agnostic and should not carry a compiled binary).
+include = [{ path = "pounce/bin/*", format = "wheel" }]

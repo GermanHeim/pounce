@@ -38,24 +38,61 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: manylinux2014
-          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            binary_name: pounce
+          # GitHub's native arm64 Linux runner — public preview, free for
+          # public repos. Switched away from QEMU cross-compile because
+          # the standalone `cargo build --bin pounce` step we now do for
+          # the bundled CLI does not play well with maturin-action's
+          # QEMU container.
+          - os: ubuntu-24.04-arm
             target: aarch64
             manylinux: manylinux2014
-          - os: macos-13      # macOS x86_64 runner
+            rust_target: aarch64-unknown-linux-gnu
+            binary_name: pounce
+          - os: macos-13       # macOS x86_64 runner
             target: x86_64
             manylinux: ""
-          - os: macos-14      # macOS arm64 runner (Apple Silicon)
+            rust_target: x86_64-apple-darwin
+            binary_name: pounce
+          - os: macos-14       # macOS arm64 runner (Apple Silicon)
             target: aarch64
             manylinux: ""
+            rust_target: aarch64-apple-darwin
+            binary_name: pounce
           - os: windows-latest
             target: x64
             manylinux: ""
+            rust_target: x86_64-pc-windows-msvc
+            binary_name: pounce.exe
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pounce-cli-${{ matrix.rust_target }}
+
+      # Build the standalone pounce CLI binary and stage it inside the
+      # Python package source tree. `[tool.maturin] include` in
+      # pyproject.toml then pulls it into the wheel under pounce/bin/.
+      - name: Build pounce CLI binary
+        run: cargo build --release --bin pounce --target ${{ matrix.rust_target }}
+
+      - name: Stage CLI binary into the wheel
+        shell: bash
+        run: |
+          mkdir -p python/pounce/bin
+          cp "target/${{ matrix.rust_target }}/release/${{ matrix.binary_name }}" \
+             "python/pounce/bin/${{ matrix.binary_name }}"
+          ls -l python/pounce/bin/
 
       - name: Build wheel (maturin)
         uses: PyO3/maturin-action@v1

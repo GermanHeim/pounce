@@ -37,6 +37,10 @@ __pycache__/
 # Python build artifacts (maturin develop emits the .so next to the package)
 python/pounce/_pounce*.so
 python/pounce/_pounce*.pyd
+# Bundled CLI binary — staged here by the release workflow before
+# `maturin build`, also written by local devs running `cargo build`
+# into this dir. Never tracked.
+python/pounce/bin/
 python/.pytest_cache/
 python/build/
 python/dist/
