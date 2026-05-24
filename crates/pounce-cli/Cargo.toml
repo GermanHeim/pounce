@@ -7,6 +7,8 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Command-line driver for POUNCE — solves built-in TNLPs and AMPL .nl files."
+keywords = ["ipopt", "cli", "ampl", "nlp", "optimization"]
+categories = ["mathematics", "command-line-utilities", "science"]
 
 build = "build.rs"
 
@@ -25,16 +27,16 @@ name = "pounce_sens"
 path = "src/bin/pounce_sens.rs"
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-nlp = { path = "../pounce-nlp", features = ["serde"] }
-pounce-algorithm = { path = "../pounce-algorithm" }
-pounce-restoration = { path = "../pounce-restoration" }
-pounce-feral = { path = "../pounce-feral" }
-pounce-hsl = { path = "../pounce-hsl", optional = true }
-pounce-linsol = { path = "../pounce-linsol" }
-pounce-presolve = { path = "../pounce-presolve" }
-pounce-linalg = { path = "../pounce-linalg" }
-pounce-sensitivity = { path = "../pounce-sensitivity" }
+pounce-common.workspace = true
+pounce-nlp = { workspace = true, features = ["serde"] }
+pounce-algorithm.workspace = true
+pounce-restoration.workspace = true
+pounce-feral.workspace = true
+pounce-hsl = { workspace = true, optional = true }
+pounce-linsol.workspace = true
+pounce-presolve.workspace = true
+pounce-linalg.workspace = true
+pounce-sensitivity.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

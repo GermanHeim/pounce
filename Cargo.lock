@@ -59,9 +59,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feral"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e0f4a7c215acd4c2de661d9dc2fb1361b864588c83cd342a4f1a03ac09c78d4"
+checksum = "09aafd71efd4e9bc74b1e4211ce87c0a88f35143382a27aa171b2a283e8e42a5"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -366,6 +366,18 @@ version = "0.1.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
+]
+
+[[package]]
+name = "pounce-large-scale"
+version = "0.1.0"
+dependencies = [
+ "pounce-algorithm",
+ "pounce-common",
+ "pounce-feral",
+ "pounce-linsol",
+ "pounce-nlp",
+ "pounce-restoration",
 ]
 
 [[package]]

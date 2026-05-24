@@ -7,15 +7,17 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "HSL linear-solver backend for POUNCE: MA57 via libcoinhsl.dylib (port of Ipopt's IpMa57TSolverInterface). Implements pounce-linsol's SparseSymLinearSolverInterface."
+keywords = ["hsl", "ma57", "linear-solver", "ipopt", "sparse"]
+categories = ["mathematics", "external-ffi-bindings"]
 links = "coinhsl"
 build = "build.rs"
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-linsol = { path = "../pounce-linsol" }
+pounce-common.workspace = true
+pounce-linsol.workspace = true
 
 [dev-dependencies]
-pounce-linalg = { path = "../pounce-linalg" }
+pounce-linalg.workspace = true
 
 [lints]
 workspace = true

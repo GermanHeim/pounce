@@ -7,9 +7,11 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Linear algebra primitives for POUNCE (port of Ipopt's src/LinAlg): BLAS-1, Vector and Matrix abstractions, dense vectors/matrices, compound vectors/matrices, expansion and scaling matrices, triplet storage, triplet→CSC conversion."
+keywords = ["linear-algebra", "sparse", "optimization", "nlp", "ipopt"]
+categories = ["mathematics", "algorithms"]
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
+pounce-common.workspace = true
 
 [lints]
 workspace = true

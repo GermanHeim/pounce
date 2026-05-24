@@ -7,6 +7,8 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Python bindings for POUNCE — cyipopt-compatible Problem class, scipy-style minimize() facade, and JAX-friendly autodiff/implicit-differentiation helpers. Built with PyO3 + maturin."
+keywords = ["ipopt", "python", "cyipopt", "optimization", "nlp"]
+categories = ["mathematics", "api-bindings", "science"]
 
 [lib]
 name = "_pounce"
@@ -21,13 +23,13 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-nlp = { path = "../pounce-nlp" }
-pounce-algorithm = { path = "../pounce-algorithm" }
-pounce-restoration = { path = "../pounce-restoration" }
-pounce-feral = { path = "../pounce-feral" }
-pounce-linsol = { path = "../pounce-linsol" }
-pounce-sensitivity = { path = "../pounce-sensitivity" }
+pounce-common.workspace = true
+pounce-nlp.workspace = true
+pounce-algorithm.workspace = true
+pounce-restoration.workspace = true
+pounce-feral.workspace = true
+pounce-linsol.workspace = true
+pounce-sensitivity.workspace = true
 pyo3 = { version = "0.22", features = ["abi3-py39"] }
 numpy = "0.22"
 

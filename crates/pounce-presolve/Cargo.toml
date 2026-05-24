@@ -5,11 +5,14 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Algorithmic NLP preprocessing as a TNLP wrapper for POUNCE: bound tightening, redundant-constraint removal, LICQ degeneracy detection."
+keywords = ["presolve", "nlp", "optimization", "ipopt", "preprocessing"]
+categories = ["mathematics", "algorithms"]
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-nlp = { path = "../pounce-nlp" }
+pounce-common.workspace = true
+pounce-nlp.workspace = true
 
 [lints]
 workspace = true

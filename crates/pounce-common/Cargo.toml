@@ -7,6 +7,8 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Common primitives for POUNCE (port of Ipopt's src/Common): types, exceptions, journalist, options, tagged objects, cached results."
+keywords = ["optimization", "nlp", "ipopt", "solver"]
+categories = ["mathematics", "algorithms"]
 
 [lints]
 workspace = true

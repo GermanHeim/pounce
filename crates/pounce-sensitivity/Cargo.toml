@@ -7,12 +7,14 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Sensitivity analysis / parametric NLP warm-start / reduced Hessian for POUNCE — port of upstream Ipopt's sIPOPT contrib (Pirnay, López-Negrete, Biegler 2012)."
+keywords = ["sipopt", "sensitivity", "nlp", "ipopt", "parametric"]
+categories = ["mathematics", "algorithms", "science"]
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-linalg = { path = "../pounce-linalg" }
-pounce-algorithm = { path = "../pounce-algorithm" }
-pounce-nlp = { path = "../pounce-nlp" }
+pounce-common.workspace = true
+pounce-linalg.workspace = true
+pounce-algorithm.workspace = true
+pounce-nlp.workspace = true
 
 [lints]
 workspace = true

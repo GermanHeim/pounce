@@ -7,10 +7,12 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "NLP-side glue for POUNCE (port of Ipopt's src/Interfaces): TNLP trait, TNLPAdapter, NLP / IpoptNLP wrappers, return-code enums, IpoptApplication user-facing entry point."
+keywords = ["nlp", "optimization", "ipopt", "tnlp", "nonlinear"]
+categories = ["mathematics", "science", "algorithms"]
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-linalg = { path = "../pounce-linalg" }
+pounce-common.workspace = true
+pounce-linalg.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]

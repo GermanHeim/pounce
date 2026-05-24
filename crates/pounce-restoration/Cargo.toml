@@ -7,16 +7,18 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Restoration phase for POUNCE (port of Ipopt's Algorithm/Resto*): RestoIpoptNLP, RestoMinC_1Nrm, RestoFilterConvCheck, etc. Phase 9 — currently scaffolded with trait surface and stubbed strategies; full implementation lands incrementally."
+keywords = ["ipopt", "restoration", "nlp", "optimization", "feasibility"]
+categories = ["mathematics", "algorithms"]
 
 [dependencies]
-pounce-common = { path = "../pounce-common" }
-pounce-linalg = { path = "../pounce-linalg" }
-pounce-nlp = { path = "../pounce-nlp" }
-pounce-algorithm = { path = "../pounce-algorithm" }
-pounce-linsol = { path = "../pounce-linsol" }
+pounce-common.workspace = true
+pounce-linalg.workspace = true
+pounce-nlp.workspace = true
+pounce-algorithm.workspace = true
+pounce-linsol.workspace = true
 
 [dev-dependencies]
-pounce-feral = { path = "../pounce-feral" }
+pounce-feral.workspace = true
 
 [lints]
 workspace = true
