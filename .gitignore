@@ -67,6 +67,7 @@ python/*.egg-info/
 gams/libGamsPounce.dylib
 gams/libGamsPounce.so
 gams/*.lst
+gams/*.log
 gams/*.sol
 
 # Vendored nlpbench clone is private (GAMS-licensed); keep the whole subtree
