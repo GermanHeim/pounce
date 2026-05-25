@@ -68,7 +68,10 @@ fn main() {
     println!("Path B: refactor every solve");
     println!("  total:          {:>10.3?}", path_b);
     println!();
-    println!("speedup (B / A): {:>10.1}×", path_b.as_secs_f64() / path_a.as_secs_f64());
+    println!(
+        "speedup (B / A): {:>10.1}×",
+        path_b.as_secs_f64() / path_a.as_secs_f64()
+    );
 
     // Sanity: results agree.
     let diff: f64 = rhs

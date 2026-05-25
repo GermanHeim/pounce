@@ -28,9 +28,7 @@ impl FactorizationError {
             ESymSolverStatus::Success => Ok(()),
             ESymSolverStatus::Singular => Err(Self::Singular),
             ESymSolverStatus::WrongInertia => Err(Self::WrongInertia),
-            ESymSolverStatus::CallAgain | ESymSolverStatus::FatalError => {
-                Err(Self::FatalError)
-            }
+            ESymSolverStatus::CallAgain | ESymSolverStatus::FatalError => Err(Self::FatalError),
         }
     }
 }

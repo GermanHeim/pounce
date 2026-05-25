@@ -1992,7 +1992,10 @@ mod tests {
         assert!(!p.is_null());
         let s = unsafe { IpoptCreateSolver(&mut p) };
         assert!(!s.is_null());
-        assert!(p.is_null(), "IpoptCreateSolver should NULL out the caller's handle");
+        assert!(
+            p.is_null(),
+            "IpoptCreateSolver should NULL out the caller's handle"
+        );
         unsafe { IpoptFreeSolver(s) };
     }
 
@@ -2061,9 +2064,7 @@ mod tests {
         assert!(dim > 0, "expected positive KKT dim, got {dim}");
         let rhs = vec![0.0_f64; dim as usize];
         let mut lhs = vec![1.0_f64; dim as usize];
-        let ok = unsafe {
-            IpoptSolverKktSolve(s, rhs.as_ptr(), lhs.as_mut_ptr())
-        };
+        let ok = unsafe { IpoptSolverKktSolve(s, rhs.as_ptr(), lhs.as_mut_ptr()) };
         assert_eq!(ok, TRUE);
         for (i, v) in lhs.iter().enumerate() {
             assert!(v.abs() < 1e-10, "lhs[{i}] = {v} not ~0");

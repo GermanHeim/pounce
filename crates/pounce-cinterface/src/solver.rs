@@ -36,7 +36,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use crate::{
-    CCallbackTnlp, IpoptProblem, IpoptProblemInfo, LastSolve, Bool, Index, Number, FALSE, TRUE,
+    Bool, CCallbackTnlp, Index, IpoptProblem, IpoptProblemInfo, LastSolve, Number, FALSE, TRUE,
 };
 
 /// Internal owned state for the session-style C handle.

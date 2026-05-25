@@ -370,18 +370,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pounce-large-scale"
-version = "0.1.0"
-dependencies = [
- "pounce-algorithm",
- "pounce-common",
- "pounce-feral",
- "pounce-linsol",
- "pounce-nlp",
- "pounce-restoration",
-]
-
-[[package]]
 name = "pounce-linalg"
 version = "0.1.0"
 dependencies = [

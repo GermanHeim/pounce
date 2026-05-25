@@ -155,9 +155,7 @@ fn make_app() -> IpoptApplication {
 const N: usize = 20;
 
 fn main() {
-    let deltas: Vec<Vec<Number>> = (1..=N)
-        .map(|k| vec![0.0, 0.01 * k as Number])
-        .collect();
+    let deltas: Vec<Vec<Number>> = (1..=N).map(|k| vec![0.0, 0.01 * k as Number]).collect();
     let pins = vec![2 as Index, 3];
 
     // (1) Held-factor path: 1 solve + N parametric steps.

@@ -202,7 +202,8 @@ impl Solver {
         let r = self.state.borrow();
         r.as_ref()?;
         Some(Ref::map(r, |o| {
-            o.as_ref().unwrap_or_else(|| unreachable!("checked is_some above"))
+            o.as_ref()
+                .unwrap_or_else(|| unreachable!("checked is_some above"))
         }))
     }
 
@@ -275,8 +276,10 @@ impl Solver {
         let n_x = dims[0];
         let n_s = dims[1];
         let y_c_offset = (n_x + n_s) as Index;
-        let param_rows: Vec<Index> =
-            pin_constraint_indices.iter().map(|&i| y_c_offset + i).collect();
+        let param_rows: Vec<Index> = pin_constraint_indices
+            .iter()
+            .map(|&i| y_c_offset + i)
+            .collect();
         let signs = vec![1; pin_constraint_indices.len()];
         let a_data = IndexSchurData::from_parts(param_rows, signs)
             .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
@@ -285,8 +288,7 @@ impl Solver {
             run_sens: true,
             ..SensOptions::default()
         };
-        let sens_app =
-            SensApplication::new(a_data, state.backsolver.clone(), opts);
+        let sens_app = SensApplication::new(a_data, state.backsolver.clone(), opts);
         let n_full = state.backsolver.dim();
         let mut dx_full = vec![0.0; n_full];
         if !sens_app.parametric_step(deltas, &mut dx_full) {
@@ -315,8 +317,10 @@ impl Solver {
         let n = pin_constraint_indices.len();
         let dims = state.backsolver.block_dims();
         let y_c_offset = (dims[0] + dims[1]) as Index;
-        let param_rows: Vec<Index> =
-            pin_constraint_indices.iter().map(|&i| y_c_offset + i).collect();
+        let param_rows: Vec<Index> = pin_constraint_indices
+            .iter()
+            .map(|&i| y_c_offset + i)
+            .collect();
         let signs = vec![1; n];
         let a_data = IndexSchurData::from_parts(param_rows, signs)
             .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
@@ -325,8 +329,7 @@ impl Solver {
             obj_scal,
             ..SensOptions::default()
         };
-        let mut sens_app =
-            SensApplication::new(a_data, state.backsolver.clone(), opts);
+        let mut sens_app = SensApplication::new(a_data, state.backsolver.clone(), opts);
         let mut hr = vec![0.0; n * n];
         if !sens_app.compute_reduced_hessian(&mut hr) {
             return Err(SolverError::SensComputationFailed(

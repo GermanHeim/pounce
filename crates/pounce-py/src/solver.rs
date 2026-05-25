@@ -186,7 +186,11 @@ fn validate_pins(pin_constraint_indices: &[i64], m: usize) -> PyResult<Vec<Index
 fn solver_error_to_py(e: SolverError) -> PyErr {
     match e {
         SolverError::NotConverged => PyRuntimeError::new_err("Solver: not converged"),
-        SolverError::BadShape { what, got, expected } => PyValueError::new_err(format!(
+        SolverError::BadShape {
+            what,
+            got,
+            expected,
+        } => PyValueError::new_err(format!(
             "Solver: {what} length {got} != expected {expected}"
         )),
         SolverError::BacksolveFailed => PyRuntimeError::new_err("Solver: back-solve failed"),

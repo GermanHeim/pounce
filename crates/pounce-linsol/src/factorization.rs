@@ -90,7 +90,11 @@ impl Factorization {
         values: Vec<Number>,
         backend: Box<dyn SparseSymLinearSolverInterface>,
     ) -> Result<Self, FactorizationError> {
-        assert_eq!(airn.len(), ajcn.len(), "airn and ajcn must have same length");
+        assert_eq!(
+            airn.len(),
+            ajcn.len(),
+            "airn and ajcn must have same length"
+        );
         assert_eq!(values.len(), airn.len(), "values must match nnz");
         let nnz = airn.len() as Index;
         let mut inner = TSymLinearSolver::new(backend, None, false);
@@ -427,10 +431,9 @@ mod tests {
         let values = vec![2.0, 1.0, 3.0];
         let backend1 = Box::new(DenseLuBackend::new());
         let backend2 = Box::new(DenseLuBackend::new());
-        let mut f1 = Factorization::new(2, airn.clone(), ajcn.clone(), values.clone(), backend1)
-            .unwrap();
-        let mut f2 =
-            Factorization::new(2, airn, ajcn, values, backend2).unwrap();
+        let mut f1 =
+            Factorization::new(2, airn.clone(), ajcn.clone(), values.clone(), backend1).unwrap();
+        let mut f2 = Factorization::new(2, airn, ajcn, values, backend2).unwrap();
 
         // Packed 3-RHS solve.
         let mut packed = vec![

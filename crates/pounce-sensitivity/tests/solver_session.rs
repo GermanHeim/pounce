@@ -226,7 +226,9 @@ fn solver_kkt_solve_against_zero_rhs_returns_zero() {
         status,
         ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
     ));
-    let dim = solver.kkt_dim().expect("kkt_dim available post-convergence");
+    let dim = solver
+        .kkt_dim()
+        .expect("kkt_dim available post-convergence");
 
     let rhs = vec![0.0; dim];
     let mut lhs = vec![1.0; dim]; // pre-fill with garbage to confirm overwrite

@@ -202,8 +202,10 @@ fn main() {
 
     println!("\nparametric steps against the held factor:");
     for (d_eta2, dx) in &steps {
-        println!("  Δeta2 = {d_eta2:+.2}  -> Δx_primal = [{:+.5}, {:+.5}, {:+.5}]",
-            dx[0], dx[1], dx[2]);
+        println!(
+            "  Δeta2 = {d_eta2:+.2}  -> Δx_primal = [{:+.5}, {:+.5}, {:+.5}]",
+            dx[0], dx[1], dx[2]
+        );
     }
     let avg_step_us = total_step_dt.as_secs_f64() * 1e6 / steps.len() as f64;
     println!(
