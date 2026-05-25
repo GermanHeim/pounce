@@ -3,10 +3,11 @@
 Water distribution network design instances from
 [MINLPLib](https://www.minlplib.org), downloaded directly as AMPL NL files.
 
-This suite lives under `benchmarks/water/`. Like the gas suite, it does **not**
-feed into the composite `BENCHMARK_REPORT.md`: problems are solved one-at-a-time
-via the AMPL `.nl` interface, solver output is written to per-problem `.sol`
-files, and results are inspected manually.
+This suite lives under `benchmarks/water/`. Problems are solved via the AMPL
+`.nl` interface by `benchmarks/scripts/run_nl_bench.sh`, which invokes both
+POUNCE and Ipopt (linked against MA57) and emits `results.json` in the standard
+schema consumed by `benchmark_report.py`. The suite feeds into the composite
+`benchmarks/BENCHMARK_REPORT.md`.
 
 ## Problems
 

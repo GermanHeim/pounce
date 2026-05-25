@@ -17,6 +17,10 @@ use std::process::Command;
 
 fn main() {
     // ---- Native Ipopt (libipopt) via pkg-config ------------------------------
+    // PKG_CONFIG_PATH is honored: set it (e.g. via the benchmarks Makefile)
+    // to point at ref/Ipopt/install-ma57/lib/pkgconfig so the FFI route
+    // links against the MA57 build instead of Homebrew's MUMPS Ipopt.
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     let pkg = Command::new("pkg-config")
         .args(["--libs-only-L", "ipopt"])
         .output()

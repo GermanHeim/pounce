@@ -12,21 +12,18 @@
 #   make book             # build the mdbook documentation (docs/)
 #   make install          # install pounce CLI + cinterface cdylib under $(PREFIX)
 #   make uninstall        # remove installed artifacts
+#   make install-mcp      # build studio/mcp + register with Claude Code
+#   make uninstall-mcp    # unregister + remove the studio/mcp venv
 #   make clean            # cargo clean
 #
-# Benchmark targets (drive `pounce` on .nl files under benchmarks/):
-#   make bench            # run cho + gas + water + mittelmann (whatever is on disk)
-#   make bench-cho        # CHO parameter-estimation .nl (large, ~480 iters)
-#   make bench-gas        # GasLib pipelines (4 .nl files)
-#   make bench-water      # Water network (~7 .nl files)
-#   make bench-mittelmann # Mittelmann ampl-nlp suite (whatever's been translated)
-#   make bench-cutest     # CUTEst comparison harness (POUNCE vs native Ipopt)
-#   make bench-cutest-prepare  # compile SIF problem dylibs (one-time, ~7GB)
+# Benchmark targets — single source of truth in benchmarks/Makefile.
+# Top-level shims delegate so commands are runnable from the repo root:
+#   make benchmark            # full sweep: cutest + all .nl suites + gams + report
+#   make benchmark-report     # regenerate benchmarks/BENCHMARK_REPORT.md
+#   make benchmark-<suite>    # one suite (cutest, water, gas, electrolyte,
+#                             #   grid, cho, large-scale, mittelmann, gams)
 #
-# Tunables — pass on the command line:
-#   make bench-cho LINEAR_SOLVER=ma57 MAX_ITER=2000 PRINT_LEVEL=5
-#   make bench-gas BENCH_OPTIONS="tol=1e-10 mu_strategy=adaptive"
-# Defaults: LINEAR_SOLVER=ma57, MAX_ITER=3000, PRINT_LEVEL=5.
+# See `make -C benchmarks help` for the full target list.
 #
 # Default install prefix is $(HOME)/.local — a user-owned directory
 # that needs no sudo. Make sure $(HOME)/.local/bin is on your PATH
@@ -69,17 +66,9 @@ else
   CARGO_PROFILE_FLAG :=
 endif
 
-BENCH_DIR      := benchmarks
-BENCH_LOG_DIR  := $(BENCH_DIR)/logs
-LINEAR_SOLVER  ?= ma57
-MAX_ITER       ?= 3000
-PRINT_LEVEL    ?= 5
-BENCH_OPTIONS  ?=
-BENCH_ARGS     := linear_solver=$(LINEAR_SOLVER) max_iter=$(MAX_ITER) print_level=$(PRINT_LEVEL) $(BENCH_OPTIONS)
-
 .PHONY: all build debug test check clippy fmt fmt-check doc book install uninstall clean help \
-        bench bench-cho bench-gas bench-water bench-mittelmann bench-cutest \
-        bench-cutest-prepare bench-cutest-smoke bench-cutest-report bench-clean
+        install-mcp uninstall-mcp \
+        benchmark benchmark-report benchmark-gams
 
 all: build
 
@@ -128,107 +117,60 @@ help:
 	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,45p'
 
 # ---- Benchmarks ----------------------------------------------------------
-# Each suite runs `pounce <nl-file> $(BENCH_ARGS)` for every .nl on disk and
-# tees solver output to $(BENCH_LOG_DIR)/<suite>/<problem>.log. The final
-# status line of each run (e.g. "EXIT: Optimal Solution Found.") is printed
-# as a summary so the operator can scan results without trawling logs.
+# Single source of truth: benchmarks/Makefile. These three shims forward
+# everything so users can drive runs from the repo root.
+benchmark:
+	$(MAKE) -C benchmarks benchmark
 
-# Path to the cho_parmest .nl (override if you've moved the export).
-CHO_NL ?= $(BENCH_DIR)/cho/nl_export_results/cho_parmest.nl
+benchmark-report:
+	$(MAKE) -C benchmarks benchmark-report
 
-# Glob patterns for the per-suite .nl files. Suites silently no-op if their
-# directory isn't populated (benchmarks/ is gitignored — these are local).
-GAS_NL_FILES        := $(wildcard $(BENCH_DIR)/gas/*.nl)
-WATER_NL_FILES      := $(wildcard $(BENCH_DIR)/water/*.nl)
-MITTELMANN_NL_FILES := $(wildcard $(BENCH_DIR)/mittelmann/nl/*.nl)
+# Pattern-rule shim for any per-suite target. Examples:
+#   make benchmark-water     -> make -C benchmarks water-run
+#   make benchmark-cutest    -> make -C benchmarks cutest-run
+#   make benchmark-mittelmann -> make -C benchmarks mittelmann-run
+#   make benchmark-gams      -> make -C benchmarks gams-bench
+benchmark-gams:
+	$(MAKE) -C benchmarks gams-bench
 
-# $(call run-bench,suite,nl-file) — solve one .nl and tee to a log.
-# The trailing `|| true` keeps make going across failing problems so the
-# whole suite reports together.
-define run-bench
-	@mkdir -p "$(BENCH_LOG_DIR)/$(1)"
-	@nl="$(2)"; name="$$(basename $$nl .nl)"; \
-	  log="$(BENCH_LOG_DIR)/$(1)/$$name.log"; \
-	  echo "[$(1)] $$name"; \
-	  ./$(CLI_BIN) "$$nl" $(BENCH_ARGS) > "$$log" 2>&1 || true; \
-	  status="$$(grep -E '^EXIT:' "$$log" | tail -1)"; \
-	  iters="$$(awk '/^Number of Iterations/ {print $$NF}' "$$log" | tail -1)"; \
-	  printf "  iters=%-6s %s\n" "$${iters:-?}" "$${status:-no EXIT line — check $$log}"
+benchmark-%:
+	$(MAKE) -C benchmarks $*-run
 
-endef
+# ---- MCP server (studio/mcp) --------------------------------------------
+# Builds the pounce-studio-mcp server into a private venv under
+# studio/mcp/.venv (PyO3 extension compiled in release mode) and
+# registers it with Claude Code via `claude mcp add`. Idempotent — rerun
+# after pulling new studio changes to rebuild the extension.
+#
+#   make install-mcp                   # user scope (visible to all sessions)
+#   make install-mcp MCP_SCOPE=local   # this project only
+#   make uninstall-mcp                 # unregister + delete the venv
 
-bench-cho: $(CLI_BIN)
-	@if [ ! -f "$(CHO_NL)" ]; then \
-	  echo "bench-cho: $(CHO_NL) not found (set CHO_NL=<path> or regenerate)"; exit 0; \
+MCP_DIR   := studio/mcp
+MCP_VENV  := $(MCP_DIR)/.venv
+MCP_PY    := $(MCP_VENV)/bin/python
+MCP_BIN   := $(MCP_VENV)/bin/pounce-studio-mcp
+MCP_SCOPE ?= user
+
+install-mcp:
+	@command -v claude >/dev/null 2>&1 || { \
+	  echo "install-mcp: 'claude' CLI not on PATH (install Claude Code first)"; exit 1; }
+	@if [ ! -d "$(MCP_VENV)" ]; then \
+	  echo "Creating venv at $(MCP_VENV)"; \
+	  python3 -m venv "$(MCP_VENV)"; \
 	fi
-	$(call run-bench,cho,$(CHO_NL))
-	@echo "Logs in $(BENCH_LOG_DIR)/cho/"
+	@$(MCP_PY) -m pip install --quiet --upgrade pip maturin
+	@echo "Building native extension (maturin develop --release)"
+	@cd $(MCP_DIR) && . .venv/bin/activate && maturin develop --release
+	@echo "Registering with Claude Code (scope=$(MCP_SCOPE))"
+	@claude mcp remove pounce-studio --scope $(MCP_SCOPE) >/dev/null 2>&1 || true
+	@claude mcp add pounce-studio --scope $(MCP_SCOPE) -- "$(abspath $(MCP_BIN))"
+	@echo
+	@echo "Done. Restart Claude Code to pick up the new server."
+	@echo "Verify with: claude mcp list"
 
-bench-gas: $(CLI_BIN)
-	@if [ -z "$(GAS_NL_FILES)" ]; then \
-	  echo "bench-gas: no .nl files under $(BENCH_DIR)/gas/"; exit 0; \
-	fi
-	$(foreach nl,$(GAS_NL_FILES),$(call run-bench,gas,$(nl)))
-	@echo "Logs in $(BENCH_LOG_DIR)/gas/"
-
-bench-water: $(CLI_BIN)
-	@if [ -z "$(WATER_NL_FILES)" ]; then \
-	  echo "bench-water: no .nl files under $(BENCH_DIR)/water/"; exit 0; \
-	fi
-	$(foreach nl,$(WATER_NL_FILES),$(call run-bench,water,$(nl)))
-	@echo "Logs in $(BENCH_LOG_DIR)/water/"
-
-bench-mittelmann: $(CLI_BIN)
-	@if [ -z "$(MITTELMANN_NL_FILES)" ]; then \
-	  echo "bench-mittelmann: no .nl files under $(BENCH_DIR)/mittelmann/nl/"; \
-	  echo "  (run \`make -C $(BENCH_DIR)/mittelmann translate\` to populate)"; exit 0; \
-	fi
-	$(foreach nl,$(MITTELMANN_NL_FILES),$(call run-bench,mittelmann,$(nl)))
-	@echo "Logs in $(BENCH_LOG_DIR)/mittelmann/"
-
-bench: bench-cho bench-gas bench-water bench-mittelmann
-	@echo "All benchmarks complete. Logs under $(BENCH_LOG_DIR)/."
-
-bench-clean:
-	rm -rf "$(BENCH_LOG_DIR)"
-
-# ---- CUTEst comparison harness ------------------------------------------
-# These recipes use bash process-substitution (`2> >(tee …)`) to copy stderr
-# to a log without buffering, so they need bash explicitly. (Other recipes
-# in this Makefile are POSIX-sh-compatible; SHELL is overridden only for
-# the cutest recipes via per-target assignment below.)
-bench-cutest bench-cutest-smoke bench-cutest-prepare: SHELL := /bin/bash
-
-# Drives the pounce-cutest workspace member, which runs each SIF problem
-# in a subprocess against POUNCE and native Ipopt and emits JSON.
-# Requirements: CUTEst installed under ~/.local/cutest/, libipopt
-# discoverable via pkg-config, gfortran on PATH.
-
-CUTEST_RESULTS ?= $(BENCH_DIR)/cutest/results.json
-
-bench-cutest-prepare:
-	@if ! command -v cutest2sif >/dev/null 2>&1 && [ ! -f "$$HOME/.local/cutest/env.sh" ]; then \
-	  echo "CUTEst not found at ~/.local/cutest/. See benchmarks/cutest/README.md."; exit 1; \
-	fi
-	source $$HOME/.local/cutest/env.sh && bash $(BENCH_DIR)/cutest/prepare.sh
-
-bench-cutest:
-	RESULTS_FILE=$(CUTEST_RESULTS) \
-	  $(CARGO) run --bin cutest_suite $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS) \
-	  2> >(tee $(BENCH_DIR)/cutest/benchmark_stderr.txt >&2)
-	@echo "CUTEst run complete. Results: $(CUTEST_RESULTS)"
-
-bench-cutest-smoke:
-	RESULTS_FILE=$(BENCH_DIR)/cutest/smoke_results.json \
-	  $(CARGO) run --bin cutest_suite $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS) -- \
-	    ROSENBR BEALE CUBE DENSCHNB BROWNBS \
-	    HS6 HS10 HS35 HS71 HS106 \
-	    MARATOS BT1 HS13 HS57 \
-	  2> >(tee $(BENCH_DIR)/cutest/smoke_stderr.txt >&2)
-
-bench-cutest-report:
-	@python $(BENCH_DIR)/cutest/compare.py $(CUTEST_RESULTS)
-
-# Build CLI before any bench target if it's missing.
-$(CLI_BIN):
-	$(CARGO) build --workspace $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS)
+uninstall-mcp:
+	-@command -v claude >/dev/null 2>&1 && \
+	  claude mcp remove pounce-studio --scope $(MCP_SCOPE) >/dev/null 2>&1 || true
+	rm -rf "$(MCP_VENV)"
+	@echo "Removed $(MCP_VENV) and unregistered pounce-studio (scope=$(MCP_SCOPE))"

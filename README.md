@@ -17,11 +17,10 @@ console output, and option semantics follow upstream Ipopt closely enough
 that anyone used to reading `ipopt` logs can drop in `pounce` without
 relearning where the numbers live.
 
-The default build is pure Rust — no Fortran, no HSL, no system BLAS
-required. The bundled [FERAL](crates/pounce-feral) backend provides a
-sparse symmetric LDLᵀ factorization. The HSL MA57 backend is available
-behind the optional `ma57` feature for users who have `libcoinhsl`
-installed.
+The default build is pure Rust — no Fortran, no HSL, no system BLAS required.
+The [FERAL](crates/pounce-feral) backend provides a sparse symmetric LDLᵀ
+factorization that is also in pure Rust. The HSL MA57 backend is available
+behind the optional `ma57` feature for users who have `libcoinhsl` installed.
 
 License: EPL-2.0 (same as upstream Ipopt).
 
@@ -51,18 +50,18 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 
 ## Workspace layout
 
-| Crate                                          | Purpose |
-|------------------------------------------------|---------|
-| [`pounce-common`](crates/pounce-common)        | Types, exceptions, journalist, options, tagged objects, cached results (Ipopt `src/Common`). |
-| [`pounce-linalg`](crates/pounce-linalg)        | BLAS-1, dense/compound vectors and matrices, triplet storage, CSC conversion (Ipopt `src/LinAlg`). |
-| [`pounce-linsol`](crates/pounce-linsol)        | Symmetric linear-solver trait layer — no FFI; backends plug in below. |
-| [`pounce-feral`](crates/pounce-feral)          | Pure-Rust sparse symmetric LDLᵀ backend. Default. |
-| [`pounce-hsl`](crates/pounce-hsl)              | MA57 backend via `libcoinhsl` (optional, behind `ma57` feature). |
-| [`pounce-nlp`](crates/pounce-nlp)              | TNLP trait, TNLPAdapter, `IpoptApplication` entry point (Ipopt `src/Interfaces`). |
-| [`pounce-algorithm`](crates/pounce-algorithm)  | IteratesVector, IpoptData, calculated quantities, KKT, line search, mu update, conv check, main loop (Ipopt `src/Algorithm`). |
-| [`pounce-restoration`](crates/pounce-restoration) | Restoration phase (Ipopt `Algorithm/Resto*`). |
-| [`pounce-cinterface`](crates/pounce-cinterface) | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem`. |
-| [`pounce-cli`](crates/pounce-cli)              | The `pounce` command-line driver. |
+| Crate                                             | Purpose                                                                                                                       |
+|---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| [`pounce-common`](crates/pounce-common)           | Types, exceptions, journalist, options, tagged objects, cached results (Ipopt `src/Common`).                                  |
+| [`pounce-linalg`](crates/pounce-linalg)           | BLAS-1, dense/compound vectors and matrices, triplet storage, CSC conversion (Ipopt `src/LinAlg`).                            |
+| [`pounce-linsol`](crates/pounce-linsol)           | Symmetric linear-solver trait layer — no FFI; backends plug in below.                                                         |
+| [`pounce-feral`](crates/pounce-feral)             | Pure-Rust sparse symmetric LDLᵀ backend. Default.                                                                             |
+| [`pounce-hsl`](crates/pounce-hsl)                 | MA57 backend via `libcoinhsl` (optional, behind `ma57` feature).                                                              |
+| [`pounce-nlp`](crates/pounce-nlp)                 | TNLP trait, TNLPAdapter, `IpoptApplication` entry point (Ipopt `src/Interfaces`).                                             |
+| [`pounce-algorithm`](crates/pounce-algorithm)     | IteratesVector, IpoptData, calculated quantities, KKT, line search, mu update, conv check, main loop (Ipopt `src/Algorithm`). |
+| [`pounce-restoration`](crates/pounce-restoration) | Restoration phase (Ipopt `Algorithm/Resto*`).                                                                                 |
+| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem`.                                                               |
+| [`pounce-cli`](crates/pounce-cli)                 | The `pounce` command-line driver.                                                                                             |
 
 ## Build
 
@@ -254,19 +253,21 @@ walkthrough.
 ## Benchmarks
 
 `benchmarks/` contains comparison harnesses against upstream Ipopt
-across several suites (Hock-Schittkowski, CUTEst, Mittelmann ampl-nlp,
-CHO, gas pipelines, water networks, large-scale synthetic NLPs).
-Common targets:
+across several suites (CUTEst, Mittelmann ampl-nlp, CHO, electrolyte,
+grid, gas, water, large-scale synthetic NLPs, GAMS nlpbench). All
+suites feed a single composite report at `benchmarks/BENCHMARK_REPORT.md`
+with provenance metadata (versions, git SHA, linear solvers).
 
 ```sh
-make bench-cho          # CHO parameter-estimation
-make bench-gas          # GasLib pipelines
-make bench-water        # Water network design
-make bench-mittelmann   # Mittelmann ampl-nlp
-make bench-cutest       # CUTEst (requires one-time `make bench-cutest-prepare`)
+make benchmark              # full sweep: every suite + composite report
+make benchmark-report       # regenerate the composite report only
+make benchmark-water        # one suite at a time (water, gas, cutest, …)
 ```
 
-See `benchmarks/README.md` for the full list and per-suite details.
+The Ipopt comparison side runs against a locally-built Ipopt-MA57
+(`ref/Ipopt/install-ma57/`). Build it once with
+`make -C benchmarks build-ipopt-ma57`. See `benchmarks/README.md` for
+the full list and per-suite details.
 
 ## Acknowledgments
 
@@ -279,6 +280,15 @@ which is released under the EPL-2.0.
 It is a sibling of [ripopt](https://github.com/jkitchin/ripopt), an
 earlier memory-safe interior-point NLP optimizer in Rust by the same
 author ([doi:10.5281/zenodo.19542664](https://doi.org/10.5281/zenodo.19542664)).
+
+I want to thank Carl Laird and Victor Alves for encouraging this particular
+development path. In ripopt I codeveloped the ipm and linear algebra solvers,
+which led to a plateau in progress because of the difficulty in debugging which
+side the problems were on. They encouraged me to instead use a good, known
+linear algebra library and just focus on the ipm development. In parallel, I
+also did the same for the linear algebra library, and separated out feral to
+focus only on that. This package is the union of these two efforts, and it is
+much more robust than ripopt is. 
 
 ### Key references
 

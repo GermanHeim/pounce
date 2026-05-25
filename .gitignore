@@ -23,9 +23,11 @@
 !/benchmarks/BENCHMARK_REPORT.md
 !/benchmarks/BENCHMARK_REPORT.json
 !/benchmarks/cutest
+!/benchmarks/scripts
 !/benchmarks/*/
 /benchmarks/*/*
 !/benchmarks/*/README.md
+!/benchmarks/scripts/*
 /benchmarks/cutest/problems/
 /benchmarks/cutest/*.json
 /benchmarks/cutest/*.jsonl

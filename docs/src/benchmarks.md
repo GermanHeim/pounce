@@ -9,11 +9,13 @@ synthetic NLPs.
 Common targets:
 
 ```sh
-make bench-cho          # CHO parameter-estimation
-make bench-gas          # GasLib pipelines
-make bench-water        # Water-network design
-make bench-mittelmann   # Mittelmann ampl-nlp
-make bench-cutest       # CUTEst (requires one-time `make bench-cutest-prepare`)
+make benchmark              # full sweep: every suite + composite report
+make benchmark-report       # regenerate benchmarks/BENCHMARK_REPORT.md
+make benchmark-cho          # one suite at a time
+make benchmark-gas
+make benchmark-water
+make benchmark-mittelmann
+make benchmark-cutest       # CUTEst (requires `make -C benchmarks cutest-prepare`)
 ```
 
 The benchmark inputs themselves — large `.nl` exports, compiled SIF

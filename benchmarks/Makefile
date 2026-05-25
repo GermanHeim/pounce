@@ -13,7 +13,26 @@ REPO_ROOT := $(shell cd .. && pwd)
 CARGO_MANIFEST := $(REPO_ROOT)/Cargo.toml
 CARGO := cargo
 
+# ---- libipopt for FFI harnesses (cutest, large_scale) --------------------
+# Both crates' build.rs scripts call `pkg-config --libs-only-L ipopt`. The
+# default Homebrew install resolves to a MUMPS-linked Ipopt, which mixes
+# linear solvers when we benchmark against POUNCE-MA57. Override here to
+# pick up the locally-built MA57 install at ref/Ipopt/install-ma57/. The
+# CoinHSL pkgconfig dir is also added so `Requires: coinhsl` in ipopt.pc
+# resolves. Both build.rs scripts declare `rerun-if-env-changed=PKG_CONFIG_PATH`
+# so flipping this variable triggers a rebuild.
+IPOPT_MA57_INSTALL ?= $(REPO_ROOT)/ref/Ipopt/install-ma57
+COINHSL_DIR        ?= /Users/jkitchin/Dropbox/projects/CoinHSL.v2023.11.17.aarch64-apple-darwin-libgfortran5
+IPOPT_MA57_PKGCONFIG := $(IPOPT_MA57_INSTALL)/lib/pkgconfig
+COINHSL_PKGCONFIG    := $(COINHSL_DIR)/lib/pkgconfig
+# Prepend our two dirs; preserve any caller-supplied PKG_CONFIG_PATH.
+export PKG_CONFIG_PATH := $(IPOPT_MA57_PKGCONFIG):$(COINHSL_PKGCONFIG):$(PKG_CONFIG_PATH)
+# ipopt-ma57 AMPL executable for .nl-driven suites (electrolyte, grid,
+# water, gas, cho, mittelmann). Built by `make -C mittelmann build-ipopt-ma57`.
+IPOPT_MA57_BIN     ?= $(IPOPT_MA57_INSTALL)/bin/ipopt
+
 .PHONY: help benchmark benchmark-report \
+	check-ipopt-ma57-link build-ipopt-ma57 \
 	cutest cutest-ensure-toolchain cutest-prepare cutest-prepare-full cutest-run cutest-full cutest-report cutest-smoke cutest-large cutest-maxiter \
 	electrolyte-run grid-run cho-run large-scale mittelmann-run gas-run water-run \
 	gams-bench \
@@ -65,6 +84,23 @@ help:
 	@echo ""
 	@echo "Most suites feed into benchmarks/BENCHMARK_REPORT.md. The gas and water"
 	@echo "suites are standalone (see benchmarks/{gas,water}/README.md)."
+
+# ---- ipopt-ma57 plumbing ----
+# Verify pkg-config resolves `ipopt` to our MA57 install (not Homebrew).
+# Both Rust FFI build.rs scripts use this same pkg-config query.
+check-ipopt-ma57-link:
+	@echo "PKG_CONFIG_PATH=$$PKG_CONFIG_PATH"
+	@libdir=$$(pkg-config --variable libdir ipopt 2>/dev/null); \
+	  if [ "$$libdir" != "$(IPOPT_MA57_INSTALL)/lib" ]; then \
+	    echo "FAIL: pkg-config resolved ipopt libdir to '$$libdir', expected '$(IPOPT_MA57_INSTALL)/lib'"; \
+	    echo "       (did you run 'make build-ipopt-ma57'?)"; exit 1; \
+	  fi
+	@pkg-config --libs ipopt
+	@echo "OK: ipopt FFI route resolves to $(IPOPT_MA57_INSTALL)"
+
+# Convenience shim — the actual recipe lives in benchmarks/mittelmann/Makefile.
+build-ipopt-ma57:
+	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann build-ipopt-ma57
 
 # ---- CUTEst ----
 cutest-prepare: cutest-ensure-toolchain
@@ -140,34 +176,37 @@ cutest: cutest-prepare cutest-run cutest-report
 	@echo "CUTEst benchmark complete. Report: benchmarks/cutest/CUTEST_REPORT.md"
 
 # ---- Domain benchmarks ----
-# Solves each .nl file in benchmarks/electrolyte/nl/ with the pounce CLI.
-# Results land in per-problem .sol files alongside the .nl. No JSON
-# aggregation and does NOT feed BENCHMARK_REPORT.
-electrolyte-run:
-	@set -e; \
-	for nl in $(REPO_ROOT)/benchmarks/electrolyte/nl/*.nl; do \
-		echo "=== $$(basename $$nl) ==="; \
-		$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin pounce --release -- $$nl print_level=5 || true; \
-	done
-	@echo "Electrolyte benchmark complete. Solver output is in benchmarks/electrolyte/nl/*.sol."
+# All .nl-file suites use the shared dual-solver driver
+# (benchmarks/scripts/run_nl_bench.sh), which runs both pounce and
+# ipopt-ma57 on every problem and emits the standard
+# {solver,name,n,m,status,objective,iterations,solve_time} JSON shape
+# consumed by benchmark_report.py's load_domain_results() loader.
+NL_DRIVER       := bash $(REPO_ROOT)/benchmarks/scripts/run_nl_bench.sh
+POUNCE_BIN      := $(REPO_ROOT)/target/release/pounce
+BENCH_TIMELIMIT ?= 300
 
-# Solves each .nl file in benchmarks/grid/nl/ with the pounce CLI. Same
-# pattern as electrolyte-run / gas-run.
-grid-run:
-	@set -e; \
-	for nl in $(REPO_ROOT)/benchmarks/grid/nl/*.nl; do \
-		echo "=== $$(basename $$nl) ==="; \
-		$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin pounce --release -- $$nl print_level=5 || true; \
-	done
-	@echo "Grid benchmark complete. Solver output is in benchmarks/grid/nl/*.sol."
+# Ensure POUNCE_BIN exists; helps when a target is run before any cargo
+# build. Cheap when already built.
+$(POUNCE_BIN):
+	$(CARGO) build --release --manifest-path $(CARGO_MANIFEST) --bin pounce
 
-# Solves the CHO parameter-estimation .nl with the pounce CLI. The .sol
-# lands alongside the .nl. No JSON aggregation; does NOT feed BENCHMARK_REPORT.
-cho-run:
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin pounce --release -- \
-		$(REPO_ROOT)/benchmarks/cho/nl_export_results/cho_parmest.nl print_level=5 \
-		2> >(tee $(REPO_ROOT)/benchmarks/cho/cho_stderr.txt >&2)
-	@echo "CHO benchmark complete. Solution: benchmarks/cho/nl_export_results/cho_parmest.sol"
+electrolyte-run: $(POUNCE_BIN)
+	$(NL_DRIVER) electrolyte \
+		$(REPO_ROOT)/benchmarks/electrolyte/nl \
+		$(REPO_ROOT)/benchmarks/electrolyte/results.json \
+		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+
+grid-run: $(POUNCE_BIN)
+	$(NL_DRIVER) grid \
+		$(REPO_ROOT)/benchmarks/grid/nl \
+		$(REPO_ROOT)/benchmarks/grid/results.json \
+		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+
+cho-run: $(POUNCE_BIN)
+	$(NL_DRIVER) cho \
+		$(REPO_ROOT)/benchmarks/cho/nl_export_results \
+		$(REPO_ROOT)/benchmarks/cho/results.json \
+		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
 
 # ---- Large scale ----
 # Runs the hand-written synthetic NLP suite (`pounce-large-scale`). Five
@@ -181,26 +220,18 @@ large-scale:
 	@echo "Large-scale synthetic suite complete. Output: benchmarks/large_scale/large_scale_results.txt"
 
 # ---- Gas pipeline ----
-# Solves each .nl file with the pounce CLI. Results land in per-problem .sol
-# files alongside the .nl. No JSON aggregation and does NOT feed BENCHMARK_REPORT.
-gas-run:
-	@set -e; \
-	for nl in $(REPO_ROOT)/benchmarks/gas/*.nl; do \
-		echo "=== $$(basename $$nl) ==="; \
-		$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin pounce --release -- $$nl print_level=5 || true; \
-	done
-	@echo "Gas benchmark complete. Solver output is in benchmarks/gas/*.sol."
+gas-run: $(POUNCE_BIN)
+	$(NL_DRIVER) gas \
+		$(REPO_ROOT)/benchmarks/gas \
+		$(REPO_ROOT)/benchmarks/gas/results.json \
+		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
 
 # ---- Water network ----
-# Solves each .nl file with the pounce CLI. Results land in per-problem .sol
-# files alongside the .nl. No JSON aggregation and does NOT feed BENCHMARK_REPORT.
-water-run:
-	@set -e; \
-	for nl in $(REPO_ROOT)/benchmarks/water/*.nl; do \
-		echo "=== $$(basename $$nl) ==="; \
-		$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin pounce --release -- $$nl print_level=5 || true; \
-	done
-	@echo "Water benchmark complete. Solver output is in benchmarks/water/*.sol."
+water-run: $(POUNCE_BIN)
+	$(NL_DRIVER) water \
+		$(REPO_ROOT)/benchmarks/water \
+		$(REPO_ROOT)/benchmarks/water/results.json \
+		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
 
 # ---- Mittelmann ampl-nlp sweep ----
 # Pounce-only sweep delegated to benchmarks/mittelmann/Makefile (the full
@@ -221,12 +252,14 @@ gams-bench:
 # ---- Aggregation ----
 # Full sweep. Each sub-target runs via `-$(MAKE)` so a single failure
 # (missing toolchain, broken instance) doesn't abort the whole run — the
-# report at the end always lands. gas/water/gams-bench run after the
-# report because they do not contribute to the composite JSON.
+# report at the end always lands. All suites now feed the composite
+# BENCHMARK_REPORT.md, so the order is just "everything that produces
+# results, then generate the report".
 benchmark:
 	-$(MAKE) cutest-run
 	-$(MAKE) electrolyte-run
 	-$(MAKE) grid-run
+	-$(MAKE) cho-run
 	-$(MAKE) large-scale
 	-$(MAKE) mittelmann-run
 	-$(MAKE) gas-run
@@ -271,12 +304,18 @@ clean-bench-large-scale:
 	rm -f $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
 
 clean-bench-nl:
-	rm -f $(REPO_ROOT)/benchmarks/electrolyte/nl/*.sol
-	rm -f $(REPO_ROOT)/benchmarks/grid/nl/*.sol
-	rm -f $(REPO_ROOT)/benchmarks/gas/*.sol
-	rm -f $(REPO_ROOT)/benchmarks/water/*.sol
-	rm -f $(REPO_ROOT)/benchmarks/cho/nl_export_results/*.sol
+	rm -f $(REPO_ROOT)/benchmarks/electrolyte/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/electrolyte/results.json
+	rm -f $(REPO_ROOT)/benchmarks/grid/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/grid/results.json
+	rm -f $(REPO_ROOT)/benchmarks/gas/*.sol \
+	      $(REPO_ROOT)/benchmarks/gas/results.json
+	rm -f $(REPO_ROOT)/benchmarks/water/*.sol \
+	      $(REPO_ROOT)/benchmarks/water/results.json
+	rm -f $(REPO_ROOT)/benchmarks/cho/nl_export_results/*.sol \
+	      $(REPO_ROOT)/benchmarks/cho/results.json
 	rm -f $(REPO_ROOT)/benchmarks/cho/cho_stderr.txt
+	rm -rf $(REPO_ROOT)/benchmarks/logs
 
 clean-bench-report:
 	rm -f $(REPO_ROOT)/benchmarks/BENCHMARK_REPORT.md

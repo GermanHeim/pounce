@@ -3,12 +3,16 @@
 Comparison harnesses that exercise POUNCE against upstream Ipopt across
 several NLP test suites. Each suite lives in its own subdirectory with
 its own README explaining the problems, prerequisites, and how to run
-it.
+it. All suites feed a single composite report at
+[`BENCHMARK_REPORT.md`](BENCHMARK_REPORT.md), with run metadata (POUNCE
+version, git SHA, Ipopt version, linear solver) emitted in the report
+header.
 
 The benchmark *inputs* (large `.nl` exports, compiled SIF problem
 libraries) and the per-run *outputs* (logs, JSON results, generated
 reports) are regenerated locally and not tracked in the repository.
-The per-suite README files and the source harnesses are tracked.
+The per-suite README files, the source harnesses, and
+`benchmarks/scripts/` are tracked.
 
 ## Suites
 
@@ -23,30 +27,73 @@ The per-suite README files and the source harnesses are tracked.
 | [`mittelmann/`](mittelmann/README.md) | Mittelmann ampl-nlp | 47 problems, up to 261k vars | Standard public NLP benchmark |
 | [`water/`](water/README.md)         | Water-network design | 6 problems | MINLPLib instances, signomial nonlinearities |
 
-## Common targets
+The GAMS nlpbench harness ([`gams/nlpbench/`](../gams/nlpbench/)) is
+also aggregated into the composite report, but it lives outside this
+directory because it uses the GAMS solver-link protocol rather than the
+.nl driver.
 
-The repo-root `Makefile` exposes shortcuts that build the `pounce` CLI
-first and then drive the per-suite harnesses:
+## Running everything
+
+All targets are driven through this directory's `Makefile`. The
+top-level `Makefile` provides three convenience shims (`make benchmark`,
+`make benchmark-report`, `make benchmark-<suite>`) that delegate here.
 
 ```sh
-make bench-cho          # CHO parameter-estimation
-make bench-gas          # GasLib pipelines
-make bench-water        # Water-network design
-make bench-mittelmann   # Mittelmann ampl-nlp
-make bench-cutest       # CUTEst (run after `make bench-cutest-prepare` once)
+# Full sweep + composite report regeneration
+make -C benchmarks benchmark
+
+# Just regenerate the composite report from existing JSONs
+make -C benchmarks benchmark-report
+
+# One suite at a time
+make -C benchmarks cutest-run
+make -C benchmarks water-run
+make -C benchmarks gas-run
+make -C benchmarks electrolyte-run
+make -C benchmarks grid-run
+make -C benchmarks cho-run
+make -C benchmarks large-scale
+make -C benchmarks mittelmann-run
+make -C benchmarks gams-bench
+
+# Or from the repo root via the shim
+make benchmark
+make benchmark-water
 ```
 
-Some suites (`electrolyte`, `grid`, `large_scale`) currently run
-through `cargo run` / `cargo test` directly — see each suite's README
-for the exact invocation.
+`make -C benchmarks help` lists every target.
+
+## How the comparison runs
+
+Two paths for invoking Ipopt:
+
+1. **Rust FFI** (cutest, large_scale). The harness binaries link
+   `libipopt` via `pkg-config`. `benchmarks/Makefile` exports
+   `PKG_CONFIG_PATH` to point at `ref/Ipopt/install-ma57/`, which is
+   built by `make -C benchmarks build-ipopt-ma57`. This guarantees
+   POUNCE and Ipopt see identical problem data and are linked against
+   the same linear solver family (MA57 on the Ipopt side; FERAL on the
+   POUNCE side by default).
+2. **AMPL solver protocol** (cho, electrolyte, gas, grid, water,
+   mittelmann). `benchmarks/scripts/run_nl_bench.sh` invokes
+   `pounce <file.nl>` and `ipopt <file.nl> -AMPL`, parses stdout for
+   iteration count and objective, and writes a single
+   `<suite>/results.json` in the standard schema consumed by
+   `benchmark_report.py`.
+
+`make -C benchmarks check-ipopt-ma57-link` verifies the FFI route
+resolves to the MA57 install (run this after a fresh checkout).
 
 ## Adding a new suite
 
 1. Create `benchmarks/<suite>/` with a `README.md` describing the
    problem class, sources, prerequisites, and how to run.
-2. The `.gitignore` whitelists every `benchmarks/*/README.md` and the
-   `cutest/` source tree; everything else under `benchmarks/` is
-   ignored by default. Add explicit `!benchmarks/<suite>/<file>`
-   whitelist lines for source files that should be tracked.
-3. Wire a `make bench-<suite>` target in the repo-root `Makefile` if
-   the suite is intended to be a one-shot run.
+2. If the suite is .nl-driven, just call `benchmarks/scripts/run_nl_bench.sh`
+   from a new `<suite>-run` target in `benchmarks/Makefile`. The
+   composite loader (`load_domain_results`) picks up
+   `<suite>/results.json` automatically once you add the suite name
+   to the loop in `benchmark_report.py:main()`.
+3. The `.gitignore` whitelists every `benchmarks/*/README.md`, the
+   `cutest/` source tree, and `benchmarks/scripts/`. Everything else
+   under `benchmarks/` is ignored by default — add explicit
+   `!benchmarks/<suite>/<file>` lines for any other tracked source.

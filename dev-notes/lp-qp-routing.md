@@ -244,7 +244,7 @@ Phase 1 (routing scaffolding, no behavior change):
   `classify_problem`: feed it parsed `NlProblem` structs for known
   LP / convex QP / nonconvex QP / NLP cases (builtins + Mittelmann
   fixtures already on disk) and assert the right `ProblemClass`.
-- `make bench-mittelmann` produces identical results to current
+- `make benchmark-mittelmann` produces identical results to current
   behavior — `auto` routes everything to NLP-IPM until `pounce-convex`
   lands.
 - Integration test: `pounce --solver=lp builtin:rosenbrock` should

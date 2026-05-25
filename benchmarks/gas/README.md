@@ -4,11 +4,11 @@ Benchmark problems from [Sakshi21299/gas_networks](https://github.com/Sakshi2129
 exported as AMPL NL files.
 
 This suite lives under `benchmarks/gas/`. See `benchmarks/README.md` for an
-overview of all benchmark suites. Unlike the HS / CUTEst / domain benchmarks,
-the gas suite does **not** feed into the composite `BENCHMARK_REPORT.md`:
-the problems are solved one-at-a-time via the AMPL `.nl` interface, solver
-output is written to per-problem `.sol` files, and results are inspected
-manually rather than aggregated into a JSON summary.
+overview of all benchmark suites. Problems are solved via the AMPL `.nl`
+interface by `benchmarks/scripts/run_nl_bench.sh`, which invokes both POUNCE
+and Ipopt (linked against MA57) and emits `results.json` in the standard
+schema consumed by `benchmark_report.py`. The suite feeds into the composite
+`benchmarks/BENCHMARK_REPORT.md`.
 
 ## Problems
 

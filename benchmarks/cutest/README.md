@@ -28,7 +28,7 @@ mixed), with `problem_list_full.txt` covering all 1542 SIF problems.
 - `problems/` — compiled `lib<NAME>.dylib`/`.so` and `<NAME>_OUTSDIF.d`
   files (gitignored)
 - `results.json` — latest benchmark results
-- `CUTEST_COMPARATIVE_REPORT.org` — long-form analysis
+- Long-form CUTEst analysis lives at `benchmarks/notes/CUTEST_COMPARATIVE_REPORT.org`.
 
 ## Prerequisites
 
