@@ -1029,7 +1029,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pounce"
+name = "pounce-solver"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1280,12 +1280,16 @@ name = "pyomo-pounce"
 version = "0.1.0"
 source = { editable = "../pyomo-pounce" }
 dependencies = [
+    { name = "pounce-solver" },
     { name = "pyomo", version = "6.9.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pyomo", version = "6.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pyomo", specifier = ">=6.0" }]
+requires-dist = [
+    { name = "pounce-solver", specifier = ">=0.1" },
+    { name = "pyomo", specifier = ">=6.0" },
+]
 
 [[package]]
 name = "pytest"
