@@ -1,5 +1,7 @@
 # POUNCE
 
+[![CI](https://github.com/jkitchin/pounce/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/pounce/actions/workflows/ci.yml)
+
 ![POUNCE](logos/pounce_A_pounce.png)
 
 POUNCE is a pure-Rust port of the [Ipopt](https://github.com/coin-or/Ipopt)
