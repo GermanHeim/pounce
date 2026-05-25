@@ -32,6 +32,10 @@ stdio.
 
 | Tool                  | Purpose                                                                 |
 |-----------------------|-------------------------------------------------------------------------|
+| `analyze_problem`     | Inspect a builtin or `.nl` file: dimensions, class, option suggestions  |
+| `run_problem`         | Shell out to the `pounce` CLI; return parsed report + embedded analysis |
+| `explain`             | Glossary lookup for per-iter columns and diagnose finding codes         |
+| `citations`           | Curated paper references by subsystem topic or bib key                  |
 | `load_solve_report`   | Validate a JSON report and return a headline summary                    |
 | `convergence_trace`   | Per-iteration trajectory as column-oriented arrays (optionally filtered)|
 | `get_iterate`         | Full per-iteration record for iter `k`, with derived log10 fields       |
@@ -39,6 +43,18 @@ stdio.
 | `restoration_windows` | Contiguous runs of iters tagged as restoration                          |
 | `diagnose`            | Common Ipopt-failure heuristics with severity-tagged findings           |
 | `compare_runs`        | Side-by-side comparison of multiple reports                             |
+
+### `run_problem` notes
+
+`run_problem` locates the `pounce` binary via `POUNCE_BIN`, then by
+walking up from the installed package looking for `target/release/pounce`,
+then via `$PATH`. Set `POUNCE_BIN` explicitly if your MCP client runs
+the server with a stripped environment.
+
+By default, `analyze=True` runs `analyze_problem` first and embeds the
+result under `analysis`. Suggestions there are **advisory** — they are
+never auto-applied; the agent decides whether to re-run with them
+forwarded via the `options` arg.
 
 ## Wire it into an MCP client
 
@@ -104,6 +120,8 @@ always `pounce-studio-mcp` (or an absolute path).
 
 Once wired up:
 
+- "Analyze the rosenbrock builtin and then run it; tell me if any suggested options would help."
+- "Run my `mymodel.nl` with max_iter=500 and diagnose the result."
 - "Load `studio/mcp/fixtures/rosenbrock-stalled.json` and diagnose what went wrong."
 - "Compare `rosenbrock.json` against `rosenbrock-stalled.json` and tell me what changed."
 - "Show the inf_du trajectory and identify where the search direction quality degraded."

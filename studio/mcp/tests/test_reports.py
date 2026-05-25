@@ -215,6 +215,206 @@ def test_tool_compare_runs():
     assert out["n_runs"] == 2
 
 
+# --- explain / citations ---------------------------------------------
+
+
+def test_explain_known_column():
+    from pounce_studio_mcp.server import explain
+
+    out = explain("inf_pr")
+    assert out["kind"] == "column" and out["term"] == "inf_pr"
+    assert "definition" in out and "see_also" in out
+
+
+def test_explain_known_finding():
+    from pounce_studio_mcp.server import explain
+
+    out = explain("mu_stuck")
+    assert out["kind"] == "finding" and out["severity"] == "warning"
+
+
+def test_explain_unknown_suggests():
+    from pounce_studio_mcp.server import explain
+
+    with pytest.raises(ValueError) as exc:
+        explain("inf_p")  # near-miss for inf_pr
+    assert "inf_pr" in str(exc.value)
+
+
+def test_citations_no_args_lists_topics():
+    from pounce_studio_mcp.server import citations
+
+    out = citations()
+    assert "topics" in out
+    assert "restoration" in out["topics"]
+    # Either we found the bib file or we didn't, but the call must work.
+    assert "n_entries_loaded" in out
+
+
+def test_citations_by_topic():
+    from pounce_studio_mcp.server import citations
+
+    out = citations(topic="restoration")
+    assert out["topic"] == "restoration"
+    assert any(e["key"] == "wachter2006" for e in out["entries"])
+
+
+def test_citations_by_key():
+    from pounce_studio_mcp.server import citations
+    from pounce_studio_mcp import glossary as G
+
+    # Skip if we couldn't locate the bib (e.g. installed-out-of-tree).
+    if not G.load_bib():
+        pytest.skip("references.bib not locatable")
+    out = citations(key="wachter2006")
+    assert out["key"] == "wachter2006"
+    assert "title" in out
+
+
+def test_citations_rejects_both_args():
+    from pounce_studio_mcp.server import citations
+
+    with pytest.raises(ValueError):
+        citations(topic="restoration", key="wachter2006")
+
+
+def test_citations_unknown_topic():
+    from pounce_studio_mcp.server import citations
+
+    with pytest.raises(ValueError):
+        citations(topic="not-a-subsystem")
+
+
+def test_findings_codes_match_rust_source():
+    """Regression guard: every finding the Rust diagnose() can emit
+    must have a glossary entry. Update glossary.FINDINGS when a new
+    code is added on the Rust side."""
+    from pounce_studio_mcp import glossary as G
+    # Source of truth — keep in lockstep with analysis.rs.
+    rust_codes = {
+        "converged", "max_iter_exceeded", "restoration_used", "mu_stuck",
+        "heavy_line_search", "hessian_regularized", "restoration_loop",
+        "convergence_stall",
+    }
+    missing = rust_codes - set(G.FINDINGS)
+    assert not missing, f"glossary missing finding codes: {missing}"
+
+
+# --- analyze_problem / run_problem -----------------------------------
+
+
+def _pounce_available() -> bool:
+    from pounce_studio_mcp.server import _find_pounce_bin
+    try:
+        _find_pounce_bin()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+PARAMETRIC_NL = (
+    Path(__file__).parent.parent.parent.parent
+    / "crates" / "pounce-cli" / "tests" / "fixtures" / "parametric.nl"
+)
+
+
+def test_analyze_builtin_rosenbrock():
+    from pounce_studio_mcp.server import analyze_problem
+
+    out = analyze_problem(builtin="rosenbrock")
+    assert out["kind"] == "builtin"
+    assert out["name"] == "rosenbrock"
+    assert out["dimensions"]["n_variables"] == 2
+    assert "unconstrained" in out["class"]
+    assert isinstance(out["suggestions"], list)
+
+
+def test_analyze_builtin_unknown_raises():
+    from pounce_studio_mcp.server import analyze_problem
+
+    with pytest.raises(ValueError):
+        analyze_problem(builtin="not-a-real-problem")
+
+
+def test_analyze_requires_exactly_one_input():
+    from pounce_studio_mcp.server import analyze_problem
+
+    with pytest.raises(ValueError):
+        analyze_problem()
+    with pytest.raises(ValueError):
+        analyze_problem(builtin="rosenbrock", nl_file="x.nl")
+
+
+def test_analyze_nl_file_dimensions():
+    from pounce_studio_mcp.server import analyze_problem
+
+    if not PARAMETRIC_NL.exists():
+        pytest.skip(f"fixture not present at {PARAMETRIC_NL}")
+    out = analyze_problem(nl_file=str(PARAMETRIC_NL))
+    assert out["kind"] == "nl_file"
+    dims = out["dimensions"]
+    assert dims["format"] == "text"
+    assert dims["n_variables"] == 5
+    assert dims["n_constraints"] == 4
+    assert dims["n_objectives"] == 1
+    assert dims["n_nonlinear_objectives"] == 1
+    assert "class" in out
+
+
+def test_analyze_missing_nl_file():
+    from pounce_studio_mcp.server import analyze_problem
+
+    with pytest.raises(FileNotFoundError):
+        analyze_problem(nl_file="/tmp/definitely-not-there.nl")
+
+
+@pytest.mark.skipif(not _pounce_available(), reason="pounce binary not built")
+def test_run_problem_rosenbrock_includes_analysis(tmp_path: Path):
+    from pounce_studio_mcp.server import run_problem
+
+    out_json = tmp_path / "rosenbrock.json"
+    out = run_problem(builtin="rosenbrock", json_output=str(out_json))
+    assert out["exit_code"] == 0
+    assert out["report_path"] == str(out_json)
+    assert out_json.exists()
+    assert out["summary"]["status"] == "SolveSucceeded"
+    assert out["analysis"]["kind"] == "builtin"
+    assert out["analysis"]["name"] == "rosenbrock"
+
+
+@pytest.mark.skipif(not _pounce_available(), reason="pounce binary not built")
+def test_run_problem_forwards_options(tmp_path: Path):
+    from pounce_studio_mcp.server import run_problem
+
+    out_json = tmp_path / "rosenbrock-capped.json"
+    out = run_problem(
+        builtin="rosenbrock",
+        json_output=str(out_json),
+        options={"max_iter": "2"},
+        analyze=False,
+    )
+    # max_iter=2 means we either converge in <=2 iters or trip max-iter.
+    # Either way the option made it onto argv.
+    assert "max_iter=2" in out["argv"]
+    assert "analysis" not in out
+
+
+def test_run_problem_requires_exactly_one_input():
+    from pounce_studio_mcp.server import run_problem
+
+    with pytest.raises(ValueError):
+        run_problem()
+    with pytest.raises(ValueError):
+        run_problem(builtin="rosenbrock", nl_file="x.nl")
+
+
+def test_run_problem_rejects_bad_json_detail():
+    from pounce_studio_mcp.server import run_problem
+
+    with pytest.raises(ValueError):
+        run_problem(builtin="rosenbrock", json_detail="medium")
+
+
 def test_memoization_returns_consistent_results():
     # The Rust side caches summarize/diagnose/etc.; call twice and
     # verify the results match (the cache must return the same JSON).
