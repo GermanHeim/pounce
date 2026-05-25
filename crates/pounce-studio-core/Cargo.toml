@@ -6,6 +6,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Pure-Rust parsers and analysis helpers for pounce solve reports and POUNCEIT iter-dumps."
+keywords = ["optimization", "nlp", "ipopt", "pounce"]
+categories = ["mathematics", "parser-implementations", "development-tools"]
+readme = "README.md"
 
 [lib]
 path = "src/lib.rs"

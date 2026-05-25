@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "PyO3 bindings for pounce-studio-core; built as the _native extension module of pounce-studio-mcp."
+publish = false
 
 [lib]
 name = "_native"

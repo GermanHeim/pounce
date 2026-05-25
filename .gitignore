@@ -17,7 +17,11 @@
 # else is regenerated locally (large NL exports, compiled SIF .dylibs,
 # per-run logs and JSON results).
 /benchmarks/*
+!/benchmarks/README.md
 !/benchmarks/cutest
+!/benchmarks/*/
+/benchmarks/*/*
+!/benchmarks/*/README.md
 /benchmarks/cutest/problems/
 /benchmarks/cutest/*.json
 /benchmarks/cutest/*.jsonl
