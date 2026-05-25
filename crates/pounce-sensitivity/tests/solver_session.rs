@@ -255,6 +255,33 @@ fn solver_kkt_solve_shape_mismatch_errors() {
 }
 
 #[test]
+fn solver_reduced_hessian_matches_sens_solve_builder() {
+    let tnlp_a: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut app_a = make_app();
+    let baseline = SensSolve::new(vec![2, 3])
+        .with_reduced_hessian()
+        .run(&mut app_a, tnlp_a);
+    let hr_baseline = baseline.reduced_hessian.expect("reduced Hessian populated");
+
+    let tnlp_b: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(make_app(), tnlp_b);
+    solver.solve();
+    let hr_session = solver
+        .compute_reduced_hessian(&[2, 3], 1.0)
+        .expect("reduced_hessian ok");
+    assert_eq!(hr_session.len(), 4);
+    for k in 0..4 {
+        let err = (hr_session[k] - hr_baseline[k]).abs();
+        assert!(
+            err < 1e-10,
+            "Hr[{k}]: solver={}, sens_solve={}, |err|={err}",
+            hr_session[k],
+            hr_baseline[k],
+        );
+    }
+}
+
+#[test]
 fn solver_converged_none_before_solve() {
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
     let solver = Solver::new(make_app(), tnlp);

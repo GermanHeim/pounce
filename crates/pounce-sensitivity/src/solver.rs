@@ -297,6 +297,44 @@ impl Solver {
         dx_full.truncate(n_x);
         Ok(dx_full)
     }
+
+    /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
+    /// equality-constraint rows, where `B` selects the
+    /// `pin_constraint_indices` rows of the y_c block. Returns the
+    /// `n²`-long column-major dense matrix (`n = pin_constraint_indices.len()`).
+    ///
+    /// Equivalent to [`crate::SensSolve::with_reduced_hessian`] but
+    /// usable post-hoc on a held `Solver`.
+    pub fn compute_reduced_hessian(
+        &self,
+        pin_constraint_indices: &[Index],
+        obj_scal: Number,
+    ) -> Result<Vec<Number>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let n = pin_constraint_indices.len();
+        let dims = state.backsolver.block_dims();
+        let y_c_offset = (dims[0] + dims[1]) as Index;
+        let param_rows: Vec<Index> =
+            pin_constraint_indices.iter().map(|&i| y_c_offset + i).collect();
+        let signs = vec![1; n];
+        let a_data = IndexSchurData::from_parts(param_rows, signs)
+            .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
+        let opts = SensOptions {
+            compute_red_hessian: true,
+            obj_scal,
+            ..SensOptions::default()
+        };
+        let mut sens_app =
+            SensApplication::new(a_data, state.backsolver.clone(), opts);
+        let mut hr = vec![0.0; n * n];
+        if !sens_app.compute_reduced_hessian(&mut hr) {
+            return Err(SolverError::SensComputationFailed(
+                "SensApplication::compute_reduced_hessian failed".into(),
+            ));
+        }
+        Ok(hr)
+    }
 }
 
 fn dense_to_vec(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
