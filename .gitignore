@@ -18,6 +18,10 @@
 # per-run logs and JSON results).
 /benchmarks/*
 !/benchmarks/README.md
+!/benchmarks/Makefile
+!/benchmarks/benchmark_report.py
+!/benchmarks/BENCHMARK_REPORT.md
+!/benchmarks/BENCHMARK_REPORT.json
 !/benchmarks/cutest
 !/benchmarks/*/
 /benchmarks/*/*

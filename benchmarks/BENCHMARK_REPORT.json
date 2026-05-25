@@ -1,0 +1,7442 @@
+[
+  {
+    "name": "3PK",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.7201185695787011,
+    "ipopt_obj": 1.7201185695787018,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ACOPP14",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8081.526314065166,
+    "ipopt_obj": 8081.526314065163,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ACOPP30",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 576.8924218982646,
+    "ipopt_obj": 576.892421898335,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ACOPR14",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8081.526236731195,
+    "ipopt_obj": 8081.526236731194,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ACOPR30",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 576.8924023813677,
+    "ipopt_obj": 576.892402381318,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "AIRCRFTA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "AIRCRFTB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.790371473528008e-25,
+    "ipopt_obj": 4.790633936884642e-25,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "AIRPORT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 47952.70140963148,
+    "ipopt_obj": 47952.70140963148,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "AKIVA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.1660422124177465,
+    "ipopt_obj": 6.1660422124177465,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ALLINIT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 16.705968432879903,
+    "ipopt_obj": 16.705968432879903,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ALLINITA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 33.29610895465564,
+    "ipopt_obj": 33.29610895278262,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ALLINITC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 30.492605562789205,
+    "ipopt_obj": 30.492605562691978,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ALLINITU",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.744384910320337,
+    "ipopt_obj": 5.744384910320337,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ALSOTAME",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.08208499740191502,
+    "ipopt_obj": 0.08208499740191502,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ANTWERP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3245.2426229687376,
+    "ipopt_obj": 3245.240887989833,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ARGAUSS",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "AVGASA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.631925604851092,
+    "ipopt_obj": -4.631925604851093,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "AVGASB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.483219419712133,
+    "ipopt_obj": -4.483219419712133,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "AVION2",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 94680129.11082256,
+    "ipopt_obj": 94680129.03179865,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BA-L1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BA-L1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.646240487919071e-21,
+    "ipopt_obj": 7.647811494945488e-21,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BA-L1SP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BA-L1SPLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.476171019578447e-17,
+    "ipopt_obj": 6.476140774427959e-17,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BARD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.008214877306578989,
+    "ipopt_obj": 0.008214877306578975,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BARDNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BATCH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 259180.336085932,
+    "ipopt_obj": 259180.3371654187,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BEALE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.342569706621168e-18,
+    "ipopt_obj": 4.342571473026132e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BEALENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BENNETT5",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BENNETT5LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0005563289149091673,
+    "ipopt_obj": 0.0005563289149121826,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BIGGS3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.0311314971685176e-21,
+    "ipopt_obj": 3.0311354093061617e-21,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BIGGS5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.088199682152179e-19,
+    "ipopt_obj": 1.0882002308682471e-19,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BIGGS6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.775548669819961e-18,
+    "ipopt_obj": 2.3167246173565326e-22,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BIGGS6NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BIGGSC4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -24.5000003482288,
+    "ipopt_obj": -24.5000003482288,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BLEACHNG",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BOOTH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BOX2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.25125747243441e-23,
+    "ipopt_obj": 6.25125747243441e-23,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BOX3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.268026410568462e-23,
+    "ipopt_obj": 6.268118903734943e-23,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BOX3NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BOXBOD",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BOXBODLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9771.499999995704,
+    "ipopt_obj": 9771.499999995704,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BQP1VAR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.976861685671651e-09,
+    "ipopt_obj": -9.976861685670806e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BQPGABIM",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3.790637361405544e-05,
+    "ipopt_obj": -3.790637073520015e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BQPGASIM",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -5.51966397346776e-05,
+    "ipopt_obj": -5.519663241084397e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BRANIN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.39788735770000017,
+    "ipopt_obj": 0.39788735770000017,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BRKMCC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.16904267919645033,
+    "ipopt_obj": 0.16904267919645033,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BROWNBS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BROWNBSNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BROWNDEN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 85822.2016246899,
+    "ipopt_obj": 85822.2016246899,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BROWNDENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BT1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.9999999999974828,
+    "ipopt_obj": -0.9999999999974828,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT10",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0,
+    "ipopt_obj": -1.000000002785312,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT11",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.8248917782992535,
+    "ipopt_obj": 0.8248917782992533,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT12",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.188118811881188,
+    "ipopt_obj": 6.188118811881188,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT13",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.99e-09,
+    "ipopt_obj": -9.99e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.03256820039326121,
+    "ipopt_obj": 0.03256820039326121,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.093023255813953,
+    "ipopt_obj": 4.093023255813953,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3.7047681836394495,
+    "ipopt_obj": -3.70476818363945,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 961.715172130052,
+    "ipopt_obj": 961.715172130052,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.27704478876290517,
+    "ipopt_obj": 0.27704478876290517,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT7",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 306.5,
+    "ipopt_obj": 306.5,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT8",
+    "suite": "CUTEst",
+    "pounce_status": "Acceptable",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.0,
+    "ipopt_obj": 1.0000000037252903,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BT9",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000000000031393,
+    "ipopt_obj": -1.0000000000031393,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BURKEHAN",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": -9.799097512841412e-05,
+    "ipopt_obj": -4.078734625091242e-06,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "BYRDSPHR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.683300132670381,
+    "ipopt_obj": -4.6833001326725,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CAMEL6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0316284534898772,
+    "ipopt_obj": -1.0316284534898772,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CANTILVR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3399563524352869,
+    "ipopt_obj": 1.339956356142499,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CB2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9522244838905825,
+    "ipopt_obj": 1.9522244838905825,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CB3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9999999906764936,
+    "ipopt_obj": 1.9999999906764931,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CERI651A",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CERI651ALS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 334.8152323574635,
+    "ipopt_obj": 334.81523468585453,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CERI651B",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CERI651BLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 95.89532353971964,
+    "ipopt_obj": 95.89532253264892,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CERI651C",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CERI651CLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 56.579712429160686,
+    "ipopt_obj": 56.57971241876603,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CERI651D",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CERI651DLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 14.01752835572002,
+    "ipopt_obj": 14.017528354972,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CERI651E",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CERI651ELS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 23.683721281674423,
+    "ipopt_obj": 23.683721265571936,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CHACONN1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.952224483890659,
+    "ipopt_obj": 1.952224483890659,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CHACONN2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9999999910206627,
+    "ipopt_obj": 1.9999999910206627,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CHWIRUT1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CHWIRUT1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2384.477139309349,
+    "ipopt_obj": 2384.4771393093497,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CHWIRUT2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CHWIRUT2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 513.0480294068655,
+    "ipopt_obj": 513.0480294068656,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CLIFF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.20723801191442193,
+    "ipopt_obj": 0.20723801191442165,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CLUSTER",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CLUSTERLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.724155200984622e-18,
+    "ipopt_obj": 2.724155192058604e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CONCON",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -6230.795614719196,
+    "ipopt_obj": -6230.795614719196,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CONGIGMZ",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 27.999999910024904,
+    "ipopt_obj": 27.999999910024908,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "COOLHANS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "COOLHANSLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.2086388723365577e-18,
+    "ipopt_obj": 1.2085117735882989e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CORE1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 91.05623953090804,
+    "ipopt_obj": 91.05623953090804,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CRESC100",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.13698200078345335,
+    "ipopt_obj": -3.4120043127474586e-14,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CRESC132",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Timeout",
+    "pounce_obj": 1.21382599155381e-08,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CRESC4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.8718975148621593,
+    "ipopt_obj": 0.8718975346465687,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CRESC50",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.688609102013527e-09,
+    "ipopt_obj": 0.7862466868539991,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CSFI1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -49.075200734301035,
+    "ipopt_obj": -49.07520073430104,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CSFI2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 55.0176048099858,
+    "ipopt_obj": 55.0176048099858,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CUBE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.753567842530729e-24,
+    "ipopt_obj": 1.753567842530729e-24,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "CUBENE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DALLASS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -30909.965087025517,
+    "ipopt_obj": -32393.224298963058,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DANIWOOD",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DANIWOODLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0043173084082910596,
+    "ipopt_obj": 0.004317308408291101,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DANWOOD",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DANWOODLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.004317308408291176,
+    "ipopt_obj": 0.004317308408290951,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DECONVB",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 0.002569474644481471,
+    "ipopt_obj": 0.002569474645420781,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DECONVBNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DECONVC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0025694748774262124,
+    "ipopt_obj": 0.0025694748774262215,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DECONVNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Acceptable",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DECONVU",
+    "suite": "CUTEst",
+    "pounce_status": "Acceptable",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.1075918430705e-14,
+    "ipopt_obj": 4.1461884797743283e-13,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEGENLPA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.054880895236412,
+    "ipopt_obj": 3.0548808952563182,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEGENLPB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -30.764007520209933,
+    "ipopt_obj": -30.764007520210157,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEMBO7",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 174.78697573425566,
+    "ipopt_obj": 174.78697568942871,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEMYMALO",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3.0000000097070587,
+    "ipopt_obj": -3.0000000097070583,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.1028370907340021e-23,
+    "ipopt_obj": 1.1028370907335777e-23,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.860761315262648e-32,
+    "ipopt_obj": 9.860761315262648e-32,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNBNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DENSCHNC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.1776793722057478e-20,
+    "ipopt_obj": 2.1776793722057478e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNCNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHND",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0002221899226091316,
+    "ipopt_obj": 0.0002221899226091847,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNDNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Acceptable",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DENSCHNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.8605531364739017e-17,
+    "ipopt_obj": 1.8605531364739017e-17,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNENE",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DENSCHNF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.513455522377731e-22,
+    "ipopt_obj": 6.513455522377731e-22,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DENSCHNFNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEVGLA1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.215696133184441e-18,
+    "ipopt_obj": 8.215525485966697e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEVGLA1B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.216337125476681e-18,
+    "ipopt_obj": 8.216237151076813e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEVGLA1NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DEVGLA2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.67231690029349e-19,
+    "ipopt_obj": 6.672170703896811e-19,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEVGLA2B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 10640.458570658622,
+    "ipopt_obj": 10640.458570658622,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DEVGLA2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DGOSPEC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -993.3506218521712,
+    "ipopt_obj": -993.3506218521712,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DIAMON2D",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DIAMON2DLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Timeout",
+    "pounce_obj": 632.5670911080075,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DIAMON3D",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DIAMON3DLS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DIPIGRI",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 680.6300573593387,
+    "ipopt_obj": 680.6300573593387,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DISC2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.5624999975199962,
+    "ipopt_obj": 1.5624999975199962,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DISCS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 15.288217506015137,
+    "ipopt_obj": 12.000074872030725,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DIXCHLNG",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2471.897810918843,
+    "ipopt_obj": 2471.897810918843,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DJTL",
+    "suite": "CUTEst",
+    "pounce_status": "Acceptable",
+    "ipopt_status": "Acceptable",
+    "pounce_obj": -8951.544723747416,
+    "ipopt_obj": -8951.544723747416,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15102",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15102LS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Optimal",
+    "pounce_obj": null,
+    "ipopt_obj": 663.7445836392934,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DMN15103",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15103LS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15332",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15332LS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15333",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN15333LS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN37142",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN37142LS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN37143",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DMN37143LS",
+    "suite": "CUTEst",
+    "pounce_status": "Timeout",
+    "ipopt_status": "Timeout",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "DNIEPER",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 18744.009767338244,
+    "ipopt_obj": 18744.009767302457,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUAL1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.035012964576976065,
+    "ipopt_obj": 0.03501296457697563,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUAL2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.03373367050017812,
+    "ipopt_obj": 0.03373367050017801,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUAL4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.7460906189404996,
+    "ipopt_obj": 0.7460906189405001,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUALC1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6155.210106120122,
+    "ipopt_obj": 6155.210106120124,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUALC2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3551.3031759642695,
+    "ipopt_obj": 3551.303175964268,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUALC5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 427.2325400294519,
+    "ipopt_obj": 427.23254002945185,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "DUALC8",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 18309.360058017435,
+    "ipopt_obj": 18309.36005801744,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ECKERLE4",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ECKERLE4LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0014635887487276851,
+    "ipopt_obj": 0.0014635887487276851,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EG1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.429306769240638,
+    "ipopt_obj": -1.429306769240638,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EGGCRATE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.488197339106256,
+    "ipopt_obj": 9.488197339106256,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EGGCRATEB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.488197339106256,
+    "ipopt_obj": 9.488197339106256,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EGGCRATENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ELATTAR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 74.20615867949347,
+    "ipopt_obj": 74.20617856924706,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ELATVIDU",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 54.75111864223102,
+    "ipopt_obj": 54.75111864223102,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ELATVIDUB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 54.75111864223101,
+    "ipopt_obj": 54.75111864223102,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ELATVIDUNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ENGVAL2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.700351612247091e-20,
+    "ipopt_obj": 1.7003516122359977e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ENGVAL2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ENSO",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ENSOLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 788.5397866832382,
+    "ipopt_obj": 788.5397866832383,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EQC",
+    "suite": "CUTEst",
+    "pounce_status": "Acceptable",
+    "ipopt_status": "Error_In_Step_Computation",
+    "pounce_obj": -863.0051777366994,
+    "ipopt_obj": -865.1227138604481,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ERRINBAR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 28.0452550288578,
+    "ipopt_obj": 28.0452550288578,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXP2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.035063172931325e-21,
+    "ipopt_obj": 5.035063172931325e-21,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXP2B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.846676001119258e-23,
+    "ipopt_obj": 8.846676001119258e-23,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXP2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "EXPFIT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.240510593999058,
+    "ipopt_obj": 0.24051059399905825,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXPFITA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.001136646063660704,
+    "ipopt_obj": 0.0011366460636607078,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXPFITB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0050193670480245854,
+    "ipopt_obj": 0.005019367048024607,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXPFITC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.023302620083611423,
+    "ipopt_obj": 0.02330262008361151,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "EXPFITNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "EXTRASIM",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.99999999001,
+    "ipopt_obj": 0.99999999001,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "FBRAIN",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "FBRAIN2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "FBRAIN2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.3683881752291463,
+    "ipopt_obj": 0.3683881752291462,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "FBRAIN2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "FBRAIN3",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "FBRAIN3LS",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 0.2419135651165922,
+    "ipopt_obj": 0.24202579590827328,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "FBRAINLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.4166029445151432,
+    "ipopt_obj": 0.4166029445151432,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "FBRAINNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "FCCU",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 11.149109141484498,
+    "ipopt_obj": 11.149109141484509,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "FEEDLOC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.5512912684132e-10,
+    "ipopt_obj": -9.539853769965943e-10,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "FLETCHER",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 11.656854112882865,
+    "ipopt_obj": 11.656854112253866,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "FLT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GAUSS1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "GAUSS1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1315.8222432033774,
+    "ipopt_obj": 1315.8222432033774,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GAUSS2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "GAUSS2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1247.5282092309972,
+    "ipopt_obj": 1247.5282092309972,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GAUSS3",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "GAUSS3LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1244.484636013158,
+    "ipopt_obj": 1244.484636013158,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GAUSSIAN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.1279327696199565e-08,
+    "ipopt_obj": 1.1279327696199565e-08,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GBRAIN",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "GBRAINLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 28.51585717846504,
+    "ipopt_obj": 28.51585717846504,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GENHS28",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9271736937663912,
+    "ipopt_obj": 0.9271736937663908,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GIGOMEZ1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3.000000009970002,
+    "ipopt_obj": -3.000000009970001,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GIGOMEZ2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9522244836593583,
+    "ipopt_obj": 1.9522244836593583,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GIGOMEZ3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9999999901343473,
+    "ipopt_obj": 1.999999990134347,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GOFFIN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.500018398628458e-09,
+    "ipopt_obj": -9.500001900483032e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GOTTFR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GOULDQP1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3485.333375574878,
+    "ipopt_obj": -3485.333375574878,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GROUPING",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "GROWTH",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "GROWTHLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.004040584104694,
+    "ipopt_obj": 1.004040584104693,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GULF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.4007782572743927e-22,
+    "ipopt_obj": 3.4007711116968473e-22,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "GULFNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HAHN1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HAHN1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 33.384243670801176,
+    "ipopt_obj": 33.38424367080115,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HAIFAM",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -45.000360484125025,
+    "ipopt_obj": -45.00036022673628,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HAIFAS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.4500000099715409,
+    "ipopt_obj": -0.4500000099715406,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HAIRY",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 20.0,
+    "ipopt_obj": 20.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HALDMADS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.03294056407256445,
+    "ipopt_obj": 2.218281818509998,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HART6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3.322886891589317,
+    "ipopt_obj": -3.322886891589317,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.930176723361843e-19,
+    "ipopt_obj": 3.930177197151826e-19,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDANE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.005572808411607726,
+    "ipopt_obj": 0.005572808411607726,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDBNE",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HATFLDC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.609310856889919e-22,
+    "ipopt_obj": 4.609310856889919e-22,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDCNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.615113918660482e-08,
+    "ipopt_obj": 6.61511391864033e-08,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDDNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HATFLDE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.120376936623237e-07,
+    "ipopt_obj": 5.120376936624114e-07,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HATFLDF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDFL",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.016709259628888e-05,
+    "ipopt_obj": 6.016804163213275e-05,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDFLNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDFLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.786214768190054e-18,
+    "ipopt_obj": 3.786215080478743e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDG",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDGLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.4314832736895935e-27,
+    "ipopt_obj": 5.4316894319670494e-27,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HATFLDH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -24.500000348114483,
+    "ipopt_obj": -24.50000034811448,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HEART6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HEART6LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.98810559288947e-29,
+    "ipopt_obj": 9.463828360454664e-23,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HEART8",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HEART8LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.6026818625212822e-29,
+    "ipopt_obj": 5.96113836386737e-29,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HELIX",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.057901659769201e-25,
+    "ipopt_obj": 6.0576991032798305e-25,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HELIXNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HET-Z",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999900100004,
+    "ipopt_obj": 0.9999999900100044,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIELOW",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 874.1654321149712,
+    "ipopt_obj": 874.1654321149712,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.4013961888361014e-17,
+    "ipopt_obj": 1.4013963841073615e-17,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBCLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.804004667118332e-25,
+    "ipopt_obj": 5.804004667118332e-25,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBD",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HIMMELBE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 318.5717487911239,
+    "ipopt_obj": 318.5717487911237,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBFNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HIMMELBG",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.632999602969321e-22,
+    "ipopt_obj": 3.632999572711173e-22,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0,
+    "ipopt_obj": -1.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBI",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1735.5695799158036,
+    "ipopt_obj": -1735.5695799158036,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELBJ",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Error_In_Step_Computation",
+    "pounce_obj": null,
+    "ipopt_obj": -1910.3447232659728,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HIMMELBK",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.05181432108215192,
+    "ipopt_obj": 0.05181432108215193,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELP1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -62.05393506279643,
+    "ipopt_obj": -62.05393506279643,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELP2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -8.198044055902926,
+    "ipopt_obj": -8.198044053468209,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELP3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -59.01317804834105,
+    "ipopt_obj": -59.01317804834105,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELP4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -59.01317804834843,
+    "ipopt_obj": -59.01317804826283,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELP5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -59.01317804836958,
+    "ipopt_obj": -59.01317804836788,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HIMMELP6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -59.013178048217696,
+    "ipopt_obj": -59.01317804833877,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HONG",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 22.571087363489056,
+    "ipopt_obj": 22.571087363489053,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.28422474862637e-21,
+    "ipopt_obj": 9.28422474862637e-21,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS10",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.00000000499,
+    "ipopt_obj": -1.00000000499,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS100",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 680.6300573725428,
+    "ipopt_obj": 680.6300573725428,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS100LNP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 680.6300573876064,
+    "ipopt_obj": 680.6300573876064,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS100MOD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 678.6796378908399,
+    "ipopt_obj": 678.6796378908399,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS101",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1809.7646824748483,
+    "ipopt_obj": 1809.764682474692,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS102",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 911.8805324554512,
+    "ipopt_obj": 911.8805326354676,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS103",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 543.6679357216233,
+    "ipopt_obj": 543.6679360513294,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS104",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.9511633367433294,
+    "ipopt_obj": 3.9511633367433294,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS105",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1136.3073035633026,
+    "ipopt_obj": 1136.3073035633026,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS106",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7049.247897667791,
+    "ipopt_obj": 7049.2478976815355,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS107",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5055.01179412504,
+    "ipopt_obj": 5055.01179412504,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS108",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.5000000089363474,
+    "ipopt_obj": -0.5000000089363473,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS109",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5362.069156530553,
+    "ipopt_obj": 5362.069156537171,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS11",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -8.498464253637962,
+    "ipopt_obj": -8.498464253637962,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS111",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -47.76109085987933,
+    "ipopt_obj": -47.76109085987934,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS111LNP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -47.761090864314326,
+    "ipopt_obj": -47.76109086431432,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS112",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -47.76109085936587,
+    "ipopt_obj": -47.76109085936588,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS113",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 24.306209026389148,
+    "ipopt_obj": 24.30620902638915,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS114",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1768.8071522642404,
+    "ipopt_obj": -1768.807152264235,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS116",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 97.58747298257688,
+    "ipopt_obj": 97.58747313810716,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS117",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 32.3486775795973,
+    "ipopt_obj": 32.3486775795973,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS118",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 664.82044905087,
+    "ipopt_obj": 664.8204490508699,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS119",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 244.89969542323823,
+    "ipopt_obj": 244.89969542323823,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS12",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -30.00000000499,
+    "ipopt_obj": -30.000000004990003,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS13",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.994578532849805,
+    "ipopt_obj": 0.994578532848864,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS14",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3934649622300492,
+    "ipopt_obj": 1.3934649622300492,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS15",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 306.4999754904822,
+    "ipopt_obj": 306.4999754904822,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS16",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.24999999039931617,
+    "ipopt_obj": 0.24999999039931617,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS17",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.0000000537998646,
+    "ipopt_obj": 1.0000000537998646,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS18",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.999999998009998,
+    "ipopt_obj": 4.999999998010001,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS19",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -6961.813898841136,
+    "ipopt_obj": -6961.813898841141,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS1NE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.941229290945036,
+    "ipopt_obj": 4.941229290945036,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS20",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 40.19872718655873,
+    "ipopt_obj": 40.19872718655873,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS21",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -99.96000000079,
+    "ipopt_obj": -99.96000000079,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS21MOD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -95.96000007814212,
+    "ipopt_obj": -95.96000007814212,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS22",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999866866568,
+    "ipopt_obj": 0.9999999866866568,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS23",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9999999600664324,
+    "ipopt_obj": 1.9999999600664324,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS24",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000000106394522,
+    "ipopt_obj": -1.0000000106394522,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS25",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.082489554833484e-20,
+    "ipopt_obj": 3.082489554833484e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS25NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HS26",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.291383805134768e-16,
+    "ipopt_obj": 1.2913838048281224e-16,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS268",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.886963769327849e-07,
+    "ipopt_obj": 8.886854629963637e-07,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS27",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.03999999999776934,
+    "ipopt_obj": 0.03999999999998266,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS28",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.0814879110195774e-31,
+    "ipopt_obj": 1.2325951644078311e-30,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS29",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -22.62741700503059,
+    "ipopt_obj": -22.62741700503059,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HS3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.990000000000164e-09,
+    "ipopt_obj": -9.98999999999999e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS30",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999900100776,
+    "ipopt_obj": 1.0000000088789534,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS31",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.9999999400089035,
+    "ipopt_obj": 5.9999999400089035,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS32",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999616268184,
+    "ipopt_obj": 0.9999999616268184,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS33",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.58578655113244,
+    "ipopt_obj": -4.58578655113244,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS34",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.8340324543381397,
+    "ipopt_obj": -0.8340324484206567,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS35",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.11111110889889007,
+    "ipopt_obj": 0.11111110889889032,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS35I",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.11111110889890076,
+    "ipopt_obj": 0.11111110889890008,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS35MOD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.2500000036229486,
+    "ipopt_obj": 0.2500000036229486,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS36",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3300.0000208985844,
+    "ipopt_obj": -3300.0000208985844,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS37",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3456.000001439989,
+    "ipopt_obj": -3456.00000143999,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS38",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.928987178286383e-23,
+    "ipopt_obj": 3.9287964465106424e-23,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS39",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000000000031393,
+    "ipopt_obj": -1.0000000000031393,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS3MOD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.99000000000201e-09,
+    "ipopt_obj": -9.989999999999814e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.666666616660001,
+    "ipopt_obj": 2.666666616660001,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS40",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.25000000008228956,
+    "ipopt_obj": -0.25000000008228956,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS41",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.925925923707212,
+    "ipopt_obj": 1.925925923707212,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS42",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 13.857864376269047,
+    "ipopt_obj": 13.857864376269047,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS43",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -44.00000002998,
+    "ipopt_obj": -44.00000002998,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS44",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -15.000000149960002,
+    "ipopt_obj": -15.000000149960002,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS44NEW",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -15.000000149960002,
+    "ipopt_obj": -15.000000149960002,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS45",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999500539994,
+    "ipopt_obj": 0.9999999500539994,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS46",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.553352436693597e-16,
+    "ipopt_obj": 8.553352464057864e-16,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS47",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.575160357819919e-14,
+    "ipopt_obj": 6.575160357819919e-14,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS48",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.860761315262648e-31,
+    "ipopt_obj": 4.437342591868191e-31,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS49",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.0599961236609674e-11,
+    "ipopt_obj": 1.0599961236609674e-11,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.913222954981036,
+    "ipopt_obj": -1.913222954981036,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS50",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS51",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS52",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.326647564469917,
+    "ipopt_obj": 5.326647564469915,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS53",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.093023255813954,
+    "ipopt_obj": 4.093023255813954,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS54",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.9080747577631832,
+    "ipopt_obj": -0.9080747577631832,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS55",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.805846351739662,
+    "ipopt_obj": 6.805833286617295,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS56",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -3.456000000000087,
+    "ipopt_obj": -3.456000000000087,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS57",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.030647619047619243,
+    "ipopt_obj": 0.0306476190476192,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS59",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -6.749504719659226,
+    "ipopt_obj": -6.749504719659096,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.930380657631324e-32,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS60",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.032568200253909704,
+    "ipopt_obj": 0.032568200253909704,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS61",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -143.64614219782598,
+    "ipopt_obj": -143.64614219778028,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS62",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -26272.514647971588,
+    "ipopt_obj": -26272.514647971595,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS63",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 961.715172130052,
+    "ipopt_obj": 961.715172130052,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS64",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6299.842400586403,
+    "ipopt_obj": 6299.842405144493,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS65",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9535288559851424,
+    "ipopt_obj": 0.9535288559851424,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS66",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.5181632655344685,
+    "ipopt_obj": 0.5181632655346204,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS67",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1162.1186961620729,
+    "ipopt_obj": -1162.118696162078,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS68",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.9204250036404056,
+    "ipopt_obj": -0.920425003640406,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS69",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -956.7128866500254,
+    "ipopt_obj": -956.712886650028,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS7",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.7320508075689496,
+    "ipopt_obj": -1.7320508075689496,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS70",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.007498463574427833,
+    "ipopt_obj": 0.007498463574427714,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS71",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 17.014017272774463,
+    "ipopt_obj": 17.01401727277449,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS72",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 727.6788651162535,
+    "ipopt_obj": 727.6788651162777,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS73",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 29.89437814694515,
+    "ipopt_obj": 29.89437814694515,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS74",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5126.498109598873,
+    "ipopt_obj": 5126.498109598872,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS75",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5174.4126675901425,
+    "ipopt_obj": 5174.412667590143,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS76",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.681818203616363,
+    "ipopt_obj": -4.681818203616363,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS76I",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.6818181950507025,
+    "ipopt_obj": -4.6818181950507025,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS77",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.24150512876713315,
+    "ipopt_obj": 0.24150512876713315,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS78",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -2.9197004089696605,
+    "ipopt_obj": -2.9197004089696605,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS79",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.07877682096273643,
+    "ipopt_obj": 0.07877682096273643,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS8",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0,
+    "ipopt_obj": -1.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS80",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.05394984777026683,
+    "ipopt_obj": 0.0539498477702668,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS81",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.05394984775894951,
+    "ipopt_obj": 0.053949847770272896,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS83",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -30665.539128862412,
+    "ipopt_obj": -30665.539128862412,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS84",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1175336863.0013654,
+    "ipopt_obj": -5280335.247153389,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS85",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -2.2156047085390815,
+    "ipopt_obj": -2.215604693465009,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS86",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -32.348679161321016,
+    "ipopt_obj": -32.34867916132102,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS87",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 8981.719989659574,
+    "ipopt_obj": 8913.97004565477,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HS88",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.362646217661003,
+    "ipopt_obj": 1.362646217661002,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS89",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3626462176452556,
+    "ipopt_obj": 1.3626462176452456,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS9",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.5,
+    "ipopt_obj": -0.5,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS90",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3626462176623648,
+    "ipopt_obj": 1.3626462176623653,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS91",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3626462176623635,
+    "ipopt_obj": 1.3626462176623635,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS92",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3626462176623686,
+    "ipopt_obj": 1.3626462176625156,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS93",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 135.0759624455879,
+    "ipopt_obj": 135.07596244558786,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS95",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.015617717781731284,
+    "ipopt_obj": 0.01561771822030354,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS96",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.015617749295241849,
+    "ipopt_obj": 0.015617749733961996,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS97",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.135805795356964,
+    "ipopt_obj": 3.1358058304484815,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS98",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.1358057953569607,
+    "ipopt_obj": 3.135805830448478,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS99",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -831079891.5101074,
+    "ipopt_obj": -831079891.5101074,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HS99EXP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1260006250000.0,
+    "ipopt_obj": -1260006250000.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HUBFIT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.01689349287403147,
+    "ipopt_obj": 0.016893492874031475,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HUMPS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.747875312748581e-31,
+    "ipopt_obj": 2.7610390172916937e-17,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HYDC20LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.161301059875472e-15,
+    "ipopt_obj": 2.9675223202152527e-15,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HYDCAR20",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HYDCAR6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HYDCAR6LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.965751173576907e-26,
+    "ipopt_obj": 2.8635599362281152e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "HYPCIR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "JENSMP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 124.36218235561486,
+    "ipopt_obj": 124.36218235561488,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "JENSMPNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "JUDGE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 16.081730132960395,
+    "ipopt_obj": 16.081730132960395,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "JUDGEB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 16.08173013296039,
+    "ipopt_obj": 16.081730132960388,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "JUDGENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "KIRBY2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "KIRBY2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.905073962390896,
+    "ipopt_obj": 3.9050739623909054,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "KIWCRESC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.001760889629854e-08,
+    "ipopt_obj": -1.0017608815200428e-08,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "KOEBHELB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 77.51634735581239,
+    "ipopt_obj": 77.5163473558123,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "KOEBHELBNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "KOWOSB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.00030780094673332124,
+    "ipopt_obj": 0.000307800946733322,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "KOWOSBNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "KSIP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.5757979153497567,
+    "ipopt_obj": 0.5757979155299927,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LAKES",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 350525.1168584395,
+    "ipopt_obj": 350525.1168584257,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LANCZOS1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LANCZOS1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.190257829310409e-18,
+    "ipopt_obj": 4.715815559967705e-21,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LANCZOS2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LANCZOS2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.2299440384680457e-11,
+    "ipopt_obj": 2.229943594021625e-11,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LANCZOS3",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LANCZOS3LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.611719365429309e-08,
+    "ipopt_obj": 1.6117193593585092e-08,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LAUNCH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.00490176667509,
+    "ipopt_obj": 9.004901790139508,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEVYMONE10",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LEVYMONE5",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LEVYMONE6",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LEVYMONE7",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LEVYMONE8",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LEVYMONE9",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LEVYMONT10",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 163.70092200224954,
+    "ipopt_obj": 163.70092200224954,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEVYMONT5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.240670357972335e-25,
+    "ipopt_obj": 1.2395024696476208e-25,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEVYMONT6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 12.502860200858237,
+    "ipopt_obj": 12.502860200858237,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEVYMONT7",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 12.510759059487102,
+    "ipopt_obj": 12.510759059487102,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEVYMONT8",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 173.49564177241558,
+    "ipopt_obj": 173.49564177241558,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEVYMONT9",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 166.14960194479488,
+    "ipopt_obj": 166.14960194479488,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LEWISPOL",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LHAIFAM",
+    "suite": "CUTEst",
+    "pounce_status": "Restoration_Failed",
+    "ipopt_status": "Invalid_Number_Detected",
+    "pounce_obj": null,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LIN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.014514482929379097,
+    "ipopt_obj": -0.017577539398253905,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LINSPANH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -77.00004548051078,
+    "ipopt_obj": -77.00004548557075,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LOADBAL",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.4528510390929176,
+    "ipopt_obj": 0.4528510390929176,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LOGHAIRY",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.1823215567939546,
+    "ipopt_obj": 0.1823215567939546,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LOGROS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LOOTSMA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.4142134488745537,
+    "ipopt_obj": 1.4142134488730451,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LOTSCHD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2398.4158374772633,
+    "ipopt_obj": 2398.4158374772633,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LRCOVTYPE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.572307203523214,
+    "ipopt_obj": 0.5723072035232195,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LRIJCNN1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.2671575611460346,
+    "ipopt_obj": 0.2671575611460346,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LSC1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LSC1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.711852238819961,
+    "ipopt_obj": 7.711852238819961,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LSC2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "LSC2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 13.334222586710782,
+    "ipopt_obj": 13.334387268500349,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LSNNODOC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 123.11244812016189,
+    "ipopt_obj": 123.11244812008847,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "LSQFIT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.033786985459543804,
+    "ipopt_obj": 0.033786985459543804,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MADSEN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.6164324255695417,
+    "ipopt_obj": 0.6164324255695417,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MAKELA1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.4142135723530946,
+    "ipopt_obj": -1.4142135723530944,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MAKELA2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.199999990019989,
+    "ipopt_obj": 7.19999999001999,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MAKELA3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.800011378358812e-09,
+    "ipopt_obj": -9.810659066811851e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MAKELA4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.599999990019285e-09,
+    "ipopt_obj": -9.599999989978627e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MARATOS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000000000000009,
+    "ipopt_obj": -1.0000000000000009,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MARATOSB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000000624999923,
+    "ipopt_obj": -1.0000000624999923,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MATRIX2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.967504978428027e-11,
+    "ipopt_obj": 6.962253387497709e-12,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MAXLIKA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1136.3072968862346,
+    "ipopt_obj": 1136.3072968862346,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MCONCON",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -6230.795614719196,
+    "ipopt_obj": -6230.795614719196,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MDHOLE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.969119577782212e-09,
+    "ipopt_obj": -9.969119577782212e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MESH",
+    "suite": "CUTEst",
+    "pounce_status": "Diverging_Iterates",
+    "ipopt_status": "Diverging_Iterates",
+    "pounce_obj": -2.475512155275062e+37,
+    "ipopt_obj": -2.201154999104979e+37,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "METHANB8",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "METHANB8LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.6469760496383603e-26,
+    "ipopt_obj": 3.659178616777051e-26,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "METHANL8",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "METHANL8LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.699548484647913e-17,
+    "ipopt_obj": 5.699326323421011e-17,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MEXHAT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.04000999932268287,
+    "ipopt_obj": -0.040009999322682864,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MEYER3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 87.9458551709828,
+    "ipopt_obj": 87.9458551704532,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MEYER3NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MGH09",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MGH09LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.00030750560384923805,
+    "ipopt_obj": 0.00030750560384923805,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MGH10",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MGH10LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 87.94585517074226,
+    "ipopt_obj": 87.94585517106553,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MGH10S",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MGH10SLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 87.94585517094481,
+    "ipopt_obj": 87.94585517075065,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MGH17",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MGH17LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.879294558625982e-05,
+    "ipopt_obj": 7.898394497206178e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MGH17S",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MGH17SLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.024517940331644707,
+    "ipopt_obj": 0.024517876735880864,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MIFFLIN1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.000000009359098,
+    "ipopt_obj": -1.0000000093590975,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MIFFLIN2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000000097770645,
+    "ipopt_obj": -1.000000009976429,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MINMAXBD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 115.70643950885578,
+    "ipopt_obj": 115.70643951023332,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MINMAXRB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.956604095281733e-09,
+    "ipopt_obj": -9.95660421547646e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MINSURF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999999849988,
+    "ipopt_obj": 0.9999999999849988,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MISRA1A",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MISRA1ALS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.12455138894441356,
+    "ipopt_obj": 0.1245513889444097,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MISRA1B",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MISRA1BLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.07546468153339024,
+    "ipopt_obj": 0.07546468153343329,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MISRA1C",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MISRA1CLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.04096683697068628,
+    "ipopt_obj": 0.04096683697069956,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MISRA1D",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MISRA1DLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.05641929528264823,
+    "ipopt_obj": 0.05641929528264824,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MISTAKE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.000000010033345,
+    "ipopt_obj": -1.000000010033345,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MRIBASIS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 18.217899817831,
+    "ipopt_obj": 18.217899817831,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MSS1",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -14.411128621479827,
+    "ipopt_obj": -14.000000000012086,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MUONSINE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "MUONSINELS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 43874.11691951925,
+    "ipopt_obj": 43874.11691951925,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "MWRIGHT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 24.97880953170588,
+    "ipopt_obj": 24.97880953170588,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "NASH",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 3.942265880853754e-05,
+    "ipopt_obj": 4.9890865241107344e-05,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "NELSON",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "NET1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 941194.2587720084,
+    "ipopt_obj": 941194.2587740216,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "NYSTROM5",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "NYSTROM5C",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ODFITS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -2380.026774379209,
+    "ipopt_obj": -2380.0267743792087,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.5382431096584039,
+    "ipopt_obj": 0.5382431096584037,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.08715962462086663,
+    "ipopt_obj": 0.08715962390059094,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.004505042931228035,
+    "ipopt_obj": 0.004505042931227994,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.8576995203325488,
+    "ipopt_obj": 0.004295420787716771,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0026500766747073,
+    "ipopt_obj": 0.0026500766742341727,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.002069727025618516,
+    "ipopt_obj": 0.0020697270255729643,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OET7",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.445207609556255e-05,
+    "ipopt_obj": 4.465915088363962e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OPTCNTRL",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 549.9999988812082,
+    "ipopt_obj": 549.999998881209,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OPTPRLOC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -16.419774006930897,
+    "ipopt_obj": -16.419774005823893,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ORTHREGB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.524607631658204e-20,
+    "ipopt_obj": 4.524607631658204e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OSBORNE1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "OSBORNE2",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "OSBORNEA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.4648946974829135e-05,
+    "ipopt_obj": 5.464894697482677e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OSBORNEB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.04013773629354769,
+    "ipopt_obj": 0.04013773629354768,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "OSLBQP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.249999905455144,
+    "ipopt_obj": 6.249999905455144,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 11754.60254536196,
+    "ipopt_obj": 11754.602545361962,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1A",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.08988363337727011,
+    "ipopt_obj": 0.08988363337727134,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER1B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.4473546305350435,
+    "ipopt_obj": 3.4473546305351626,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1BNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER1C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.09759806253410017,
+    "ipopt_obj": 0.09759806253406574,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1D",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.6526826233883396,
+    "ipopt_obj": 0.6526826233885101,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1E",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.000835268490331891,
+    "ipopt_obj": 0.0008352684907200542,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER1ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER1NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3651.097535489115,
+    "ipopt_obj": 3651.0975354891143,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER2A",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.01710971702702943,
+    "ipopt_obj": 0.017109717027030295,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER2ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER2B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.6232669721642491,
+    "ipopt_obj": 0.6232669721642317,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER2BNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER2C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.014368888439744869,
+    "ipopt_obj": 0.014368888439749964,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER2E",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.11630428088699424,
+    "ipopt_obj": 0.0002065000858681228,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER2ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2416.980320830355,
+    "ipopt_obj": 2416.980320830355,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER3A",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.020431422977755662,
+    "ipopt_obj": 0.02043142297775624,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER3ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER3B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.227647252562862,
+    "ipopt_obj": 4.2276472525628686,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER3BNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER3C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.019537638081713923,
+    "ipopt_obj": 0.01953763808170921,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER3E",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.074083339184916e-05,
+    "ipopt_obj": 5.074083339187932e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER3ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER3NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2285.383225429007,
+    "ipopt_obj": 2285.383225429007,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER4A",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.040606139380163137,
+    "ipopt_obj": 0.040606139380165336,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER4ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER4B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.83513860200145,
+    "ipopt_obj": 6.835138602001406,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER4BNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER4C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.05031069485315816,
+    "ipopt_obj": 0.05031069485316239,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER4E",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.00014800422952260868,
+    "ipopt_obj": 0.00014800422952263454,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER4ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER4NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER5A",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 0.03888779190652508,
+    "ipopt_obj": 0.038726499674698454,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER5ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER5B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.009752495881194556,
+    "ipopt_obj": 0.009752495881028904,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER5BNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER5C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.128086666023396,
+    "ipopt_obj": 2.1280866660233935,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER5D",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 87.33939945055269,
+    "ipopt_obj": 87.33939945055263,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER5E",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 0.02086300663330676,
+    "ipopt_obj": 0.02086295054010992,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER5ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER6A",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.05594883897388053,
+    "ipopt_obj": 0.0559488389738797,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER6ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER6C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.01638742145229695,
+    "ipopt_obj": 0.01638742145232231,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER6E",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.000223955075571399,
+    "ipopt_obj": 0.00022395507556849349,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER6ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER7A",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 10.334909459354757,
+    "ipopt_obj": 10.33490877462177,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER7ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER7C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.6019856410928517,
+    "ipopt_obj": 0.6019856410924315,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER7E",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 10.154423885712536,
+    "ipopt_obj": 6.572691005063448,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER7ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER8A",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.07400969795106312,
+    "ipopt_obj": 0.07400969795106258,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER8ANE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PALMER8C",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.15976806821345363,
+    "ipopt_obj": 0.15976806821346007,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER8E",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0063393075420501025,
+    "ipopt_obj": 0.00633930754205,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PALMER8ENE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PARKCH",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1623.74325821732,
+    "ipopt_obj": 1623.7432582173208,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PENTAGON",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0001365216714132355,
+    "ipopt_obj": 0.00013652167141323544,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PFIT1",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PFIT1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.5047568101033284e-20,
+    "ipopt_obj": 1.3763717728574983e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PFIT2",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Restoration_Failed",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PFIT2LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.9600629387763915e-20,
+    "ipopt_obj": 1.8969733871991655e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PFIT3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PFIT3LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.1007915576991864e-20,
+    "ipopt_obj": 3.063567357697621e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PFIT4",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PFIT4LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.33779005893403e-20,
+    "ipopt_obj": 6.664019066830462e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POLAK1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.7182818184790474,
+    "ipopt_obj": 2.7182818184790474,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POLAK2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 54.598150014054056,
+    "ipopt_obj": 54.5981500311825,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POLAK3",
+    "suite": "CUTEst",
+    "pounce_status": "Restoration_Failed",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 7970447.420818062,
+    "ipopt_obj": 1040537.5258638138,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "POLAK4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -9.964434117821234e-09,
+    "ipopt_obj": -9.96595065567783e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POLAK5",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 49.9999999894905,
+    "ipopt_obj": 49.99999999002,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POLAK6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": -44.00000002924047,
+    "ipopt_obj": -29.681941666423754,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PORTFL1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.020486274517506047,
+    "ipopt_obj": 0.020486274517506047,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PORTFL2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.02968924029324859,
+    "ipopt_obj": 0.02968924029324859,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PORTFL3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.03274970896380768,
+    "ipopt_obj": 0.03274970896380768,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PORTFL4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.02630695290750834,
+    "ipopt_obj": 0.026306952907508344,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PORTFL6",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.02579179799499145,
+    "ipopt_obj": 0.025791797994991452,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POWELLBS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POWELLBSLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.2593519311862232e-23,
+    "ipopt_obj": 6.409519833704376e-26,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "POWELLSQ",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "POWELLSQLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.2768224885060396e-20,
+    "ipopt_obj": 1.2768224886146524e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PRICE3NE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PRICE4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.6589620191373616e-24,
+    "ipopt_obj": 4.597165811265968e-24,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PRICE4B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.746134461839963e-24,
+    "ipopt_obj": 7.746134461839963e-24,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PRICE4NE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Acceptable",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "PRODPL0",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 58.79009827957109,
+    "ipopt_obj": 58.79009827957107,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PRODPL1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 35.738966079522775,
+    "ipopt_obj": 35.73896607952278,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PSPDOC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.414213555312027,
+    "ipopt_obj": 2.414213555312027,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "PT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.17839421576558134,
+    "ipopt_obj": 0.17839421576558134,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "QC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -956.5378576329108,
+    "ipopt_obj": -956.5378575817144,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "QCNEW",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -806.5219397501434,
+    "ipopt_obj": -806.5219397501434,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "QPCBLEND",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.007842801089985297,
+    "ipopt_obj": -0.007842801091383,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "QPNBLEND",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.00913640408129144,
+    "ipopt_obj": -0.00913640408129143,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RAT42",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "RAT42LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.056522933811301,
+    "ipopt_obj": 8.056522933811301,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RAT43",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "RAT43LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8786.404907963177,
+    "ipopt_obj": 8786.404907963171,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RECIPE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RECIPELS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.5856951514305354e-11,
+    "ipopt_obj": 1.5856964885150466e-11,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RES",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RK23",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.08333327340359874,
+    "ipopt_obj": 0.08333327340359872,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ROBOT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Search_Direction_Becomes_Too_Small",
+    "pounce_obj": 6.593298887857102,
+    "ipopt_obj": 6.593298887857108,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ROSENBR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.743989709996202e-21,
+    "ipopt_obj": 3.743975643139474e-21,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ROSENBRTU",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.2325951644078311e-30,
+    "ipopt_obj": 1.2325951644078311e-30,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ROSENMMX",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -44.00000000999524,
+    "ipopt_obj": -44.00000000999292,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ROSZMAN1",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "ROSZMAN1LS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0004948484733096895,
+    "ipopt_obj": 0.0004948484733096878,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "RSNBRNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "S268",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.886963769327849e-07,
+    "ipopt_obj": 8.886854629963637e-07,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "S308",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.7731990564929238,
+    "ipopt_obj": 0.7731990564929238,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "S308NE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "S316-322",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 334.3145750486912,
+    "ipopt_obj": 334.31457505076196,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "S365",
+    "suite": "CUTEst",
+    "pounce_status": "Restoration_Failed",
+    "ipopt_status": "Restoration_Failed",
+    "pounce_obj": 6.0,
+    "ipopt_obj": 6.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "S365MOD",
+    "suite": "CUTEst",
+    "pounce_status": "Restoration_Failed",
+    "ipopt_status": "Restoration_Failed",
+    "pounce_obj": 6.0,
+    "ipopt_obj": 6.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "SANTA",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "SANTALS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.224358270502411e-05,
+    "ipopt_obj": 1.2243582705024448e-05,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIM2BQP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -7.674078039226607e-09,
+    "ipopt_obj": -7.674078039457e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIMBQP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -8.137183334990778e-09,
+    "ipopt_obj": -8.13718333495012e-09,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIMPLLPA",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.9999999882537522,
+    "ipopt_obj": 0.9999999882537524,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIMPLLPB",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.0999999900260142,
+    "ipopt_obj": 1.0999999900260142,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SINEVAL",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.7873626576614945e-43,
+    "ipopt_obj": 1.2208341026962682e-40,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SINVALNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIPOW1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.00000000998258,
+    "ipopt_obj": -1.0000000006341958,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIPOW1M",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.000001243681534,
+    "ipopt_obj": -1.0000012436815342,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIPOW2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.00000000999,
+    "ipopt_obj": -1.0000000092920736,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIPOW2M",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.0000049255516743,
+    "ipopt_obj": -1.000004944804342,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIPOW3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.5346586270004736,
+    "ipopt_obj": 0.5346586270004736,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SIPOW4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.27236198281547375,
+    "ipopt_obj": 0.27236198281547375,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SISSER",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.331104380766768e-13,
+    "ipopt_obj": 6.331104380766743e-13,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SISSER2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.121606171542865e-13,
+    "ipopt_obj": 8.121606171542864e-13,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SNAIL",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.3496667182063237e-32,
+    "ipopt_obj": 3.0267543980001946e-29,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SNAKE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.0001999999096608695,
+    "ipopt_obj": -0.0001999999096590039,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SPANHYD",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 241.1214237824321,
+    "ipopt_obj": 239.73800065831855,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SPIRAL",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": -199.9956411980725,
+    "ipopt_obj": 16850.970451288653,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "SSI",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": 1.3905945273771955e-09,
+    "ipopt_obj": 1.3814002825223903e-09,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "SSINE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "STANCMIN",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.249999958780025,
+    "ipopt_obj": 4.249999958780025,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "STRATEC",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2212.262290907369,
+    "ipopt_obj": 2212.262290907358,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "STREG",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.08901950131645903,
+    "ipopt_obj": 0.08901950131626797,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "STREGNE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SUPERSIM",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.6666666666666666,
+    "ipopt_obj": 0.6666666666666669,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SWOPF",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.06786018306255404,
+    "ipopt_obj": 0.06786018306248787,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SYNTHES1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.7592841841112757,
+    "ipopt_obj": 0.7592841841112793,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SYNTHES2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.554406285533589,
+    "ipopt_obj": -0.554406285533589,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "SYNTHES3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 15.082189912753302,
+    "ipopt_obj": 15.082189912753243,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TAME",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TAX13322",
+    "suite": "CUTEst",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "pounce_obj": -806546944.0237151,
+    "ipopt_obj": -1045018477671.6458,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "TAXR13322",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Acceptable",
+    "pounce_obj": -64494.18563977666,
+    "ipopt_obj": -342.9088661121257,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "TENBARS1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2295.3734345145012,
+    "ipopt_obj": 2295.3734345145012,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TENBARS2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2302.5484894305705,
+    "ipopt_obj": 2302.5484894305705,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TENBARS3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2247.129045059933,
+    "ipopt_obj": 2247.1290450599327,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TENBARS4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2374.988142423006,
+    "ipopt_obj": 2374.9881424230066,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TFI1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5.334687275776397,
+    "ipopt_obj": 5.334687275776397,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TFI2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.6490310990065249,
+    "ipopt_obj": 0.6490310990066457,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TFI3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.301157850340755,
+    "ipopt_obj": 4.301157850912337,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "THURBER",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "THURBERLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 5642.708239666995,
+    "ipopt_obj": 5642.708239666988,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TOINTGOR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1373.905460663644,
+    "ipopt_obj": 1373.9054606636444,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TOINTPSP",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 225.5604094218858,
+    "ipopt_obj": 225.5604094218858,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TOINTQOR",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1175.4722221461689,
+    "ipopt_obj": 1175.4722221461689,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TRIGGER",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TRO3X3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.912034574842048,
+    "ipopt_obj": 8.967478352707397,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TRO4X4",
+    "suite": "CUTEst",
+    "pounce_status": "Diverging_Iterates",
+    "ipopt_status": "Diverging_Iterates",
+    "pounce_obj": -1.5961085308430057e+20,
+    "ipopt_obj": -1.957476279591892e+20,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "TRO6X2",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Restoration_Failed",
+    "pounce_obj": -18858590431582.664,
+    "ipopt_obj": -317796557934275.44,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "TRUSPYR1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 11.228740541769795,
+    "ipopt_obj": 11.228740541769795,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TRUSPYR2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 11.22874000540945,
+    "ipopt_obj": 11.228740005409454,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TRY-B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 8.203374463458425e-24,
+    "ipopt_obj": 8.203374463458425e-24,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "TWOBARS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.508652402425226,
+    "ipopt_obj": 1.508652402425226,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "VESUVIA",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "VESUVIALS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 991.4100028650444,
+    "ipopt_obj": 991.4100028650444,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "VESUVIO",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "VESUVIOLS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 991.4100028650444,
+    "ipopt_obj": 991.4100028650444,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "VESUVIOU",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "VESUVIOULS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.47711376893353025,
+    "ipopt_obj": 0.4771137689335303,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "VIBRBEAM",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.3322376046050423,
+    "ipopt_obj": 0.332237604605044,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "VIBRBEAMNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "WACHBIEG",
+    "suite": "CUTEst",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": -0.8320413252604696,
+    "ipopt_obj": -0.9999999950003332,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "WATER",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 10549.379465230357,
+    "ipopt_obj": 10549.379465197322,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WAYSEA1",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.6949977149106207e-15,
+    "ipopt_obj": 2.694997714910621e-15,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WAYSEA1B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 4.542681561752429e-16,
+    "ipopt_obj": 4.542681561752429e-16,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WAYSEA1NE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WAYSEA2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.846533455862597e-18,
+    "ipopt_obj": 9.84654053217842e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WAYSEA2B",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 9.872782234368832e-18,
+    "ipopt_obj": 9.872782234368832e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WAYSEA2NE",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WEEDS",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.5872773952842136,
+    "ipopt_obj": 2.5872773952842056,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "WEEDSNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "WOMFLET",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.049999999078937,
+    "ipopt_obj": 6.049999999078937,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "YFIT",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.66972196555941e-13,
+    "ipopt_obj": 6.669721912437332e-13,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "YFITNE",
+    "suite": "CUTEst",
+    "pounce_status": "Not_Enough_Degrees_Of_Freedom",
+    "ipopt_status": "Not_Enough_Degrees_Of_Freedom",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "YFITU",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.66972068110515e-13,
+    "ipopt_obj": 6.669720635201503e-13,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ZANGWIL2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -18.200000000091,
+    "ipopt_obj": -18.200000000091,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ZANGWIL3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ZECEVIC2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -4.12500001999,
+    "ipopt_obj": -4.12500001999,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ZECEVIC3",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 97.30945006173832,
+    "ipopt_obj": 97.30945006173832,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ZECEVIC4",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.557507755101386,
+    "ipopt_obj": 7.557507755101386,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "ZY2",
+    "suite": "CUTEst",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.999999877529895,
+    "ipopt_obj": 1.999999877529895,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "BuOH-water LLE",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 7.825840587094076e-10,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CO2-water speciation",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": -0.006907755383750411,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "CaCl2+NaCl mixed",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": -0.7723714940980658,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "HCl mean activity",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 1.0038403216515415e-15,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "Multi-salt DH fit",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 4.2923935822490095e-12,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "NaCl solubility",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 1.9354286243224302e-17,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "NaCl speciation",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": -0.4832682434406487,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "Phosphoric acid",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": -0.05531314481052387,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "Pitzer NaCl fit",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 4.34589646545504e-15,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "Saturated brine",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 0.0,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "Seawater speciation",
+    "suite": "Electrolyte",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "N/A",
+    "pounce_obj": -1.3703740759415384,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "Water autoionization",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 2.629926384816484e-07,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "eNRTL T-dep fit",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 1.6855805127325955e-12,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "case14_ieee",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 2178.080410526244,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "case30_ieee",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 8208.51543982497,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "case3_lmbd",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 5812.642934996069,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
+    "name": "case5_pjm",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "N/A",
+    "pounce_obj": 17551.89089859606,
+    "ipopt_obj": null,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  }
+]
