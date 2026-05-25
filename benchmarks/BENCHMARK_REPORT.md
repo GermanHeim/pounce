@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-05-25 10:38:49
+Generated: 2026-05-25 16:20:14
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.1.0 (claude/release-prep-bench-docs @ 9eb217b-dirty) |
+| POUNCE | v0.2.0 (main @ 7a00ed2-dirty) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -21,11 +21,11 @@ not the Ipopt install above.
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Optimal (strict) | **2297/2611** (88.0%) | **2272/2611** (87.0%) |
-| Acceptable (informational, *not* counted as solved) | 4 | 5 |
-| Solved exclusively (strict Optimal) | 100 | 75 |
-| Both Optimal | 2197 | |
-| Matching objectives (< 0.01%) | 2077/2197 | |
+| Optimal (strict) | **2318/2633** (88.0%) | **2292/2633** (87.0%) |
+| Acceptable (informational, *not* counted as solved) | 4 | 6 |
+| Solved exclusively (strict Optimal) | 101 | 75 |
+| Both Optimal | 2217 | |
+| Matching objectives (< 0.01%) | 2097/2217 | |
 
 > **Note:** All headline counts use strict Optimal status only. `Acceptable`
 > means the iterate met relaxed tolerances but not the requested tolerance —
@@ -38,7 +38,11 @@ not the Ipopt install above.
 | Suite | Problems | POUNCE Optimal | Ipopt Optimal | POUNCE only | Ipopt only | Both Optimal | Match |
 |-------|----------|---------------|--------------|-------------|------------|--------------|-------|
 | CUTEst | 727 | 558 (76.8%) | 557 (76.6%) | 8 | 7 | 550 | 541/550 |
+| Electrolyte | 13 | 13 (100.0%) | 13 (100.0%) | 0 | 0 | 13 | 13/13 |
+| Grid | 4 | 4 (100.0%) | 4 (100.0%) | 0 | 0 | 4 | 4/4 |
+| CHO | 1 | 1 (100.0%) | 0 (0.0%) | 1 | 0 | 0 | 0/1 |
 | Water | 6 | 6 (100.0%) | 6 (100.0%) | 0 | 0 | 6 | 4/6 |
+| Gas | 4 | 3 (75.0%) | 3 (75.0%) | 0 | 0 | 3 | 3/3 |
 | Mittelmann | 47 | 44 (93.6%) | 0 (0.0%) | 44 | 0 | 0 | 0/1 |
 | LargeScale | 15 | 15 (100.0%) | 0 (0.0%) | 15 | 0 | 0 | 0/1 |
 | GAMS | 1816 | 1674 (92.2%) | 1709 (94.1%) | 33 | 68 | 1641 | 1532/1641 |
@@ -60,22 +64,73 @@ On 550 commonly-solved problems:
 - POUNCE 10x+ faster: 1/550
 - Ipopt faster: 63/550
 
+## Electrolyte Suite — Performance
+
+On 13 commonly-solved problems:
+
+| Metric | POUNCE | Ipopt |
+|--------|--------|-------|
+| Median time | 39.3ms | 51.6ms |
+| Total time | 519.5ms | 679.2ms |
+| Mean iterations | 12.0 | 12.2 |
+| Median iterations | 10 | 10 |
+
+- **Geometric mean speedup**: 1.3x
+- **Median speedup**: 1.3x
+- POUNCE faster: 13/13 (100%)
+- POUNCE 10x+ faster: 0/13
+- Ipopt faster: 0/13
+
+## Grid Suite — Performance
+
+On 4 commonly-solved problems:
+
+| Metric | POUNCE | Ipopt |
+|--------|--------|-------|
+| Median time | 44.9ms | 54.8ms |
+| Total time | 178.6ms | 201.1ms |
+| Mean iterations | 15.5 | 15.5 |
+| Median iterations | 17 | 17 |
+
+- **Geometric mean speedup**: 1.1x
+- **Median speedup**: 1.1x
+- POUNCE faster: 4/4 (100%)
+- POUNCE 10x+ faster: 0/4
+- Ipopt faster: 0/4
+
 ## Water Suite — Performance
 
 On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 113.1ms | 74.0ms |
-| Total time | 783.0ms | 422.6ms |
+| Median time | 116.3ms | 57.5ms |
+| Total time | 801.0ms | 414.6ms |
 | Mean iterations | 219.8 | 188.5 |
 | Median iterations | 183 | 163 |
 
 - **Geometric mean speedup**: 0.6x
-- **Median speedup**: 0.7x
+- **Median speedup**: 0.5x
 - POUNCE faster: 0/6 (0%)
 - POUNCE 10x+ faster: 0/6
 - Ipopt faster: 6/6
+
+## Gas Suite — Performance
+
+On 3 commonly-solved problems:
+
+| Metric | POUNCE | Ipopt |
+|--------|--------|-------|
+| Median time | 102.1ms | 88.9ms |
+| Total time | 331.3ms | 248.1ms |
+| Mean iterations | 39.0 | 39.7 |
+| Median iterations | 20 | 20 |
+
+- **Geometric mean speedup**: 0.8x
+- **Median speedup**: 1.0x
+- POUNCE faster: 2/3 (67%)
+- POUNCE 10x+ faster: 0/3
+- Ipopt faster: 1/3
 
 ## GAMS Suite — Performance
 
@@ -110,6 +165,18 @@ On 1617 commonly-solved problems:
 | Restoration_Failed | 4 | 4 |
 | Search_Direction_Becomes_Too_Small | 0 | 1 |
 | Timeout | 8 | 9 |
+
+### CHO Suite
+
+| Failure Mode | POUNCE | Ipopt |
+|-------------|--------|-------|
+| Acceptable | 0 | 1 |
+
+### Gas Suite
+
+| Failure Mode | POUNCE | Ipopt |
+|-------------|--------|-------|
+| Infeasible_Problem_Detected | 1 | 1 |
 
 ### Mittelmann Suite
 
@@ -224,7 +291,7 @@ On 1617 commonly-solved problems:
 | princetonlib.gms/structure_socp_vareps.gms | GAMS | 5135 | 1904 | GAMS_ms7_ss10 | 1.003269e-02 |
 | small.gms/st_e34.gms | GAMS | 7 | 5 | TerminatedBySolver | 1.561951e-02 |
 
-## Wins (POUNCE Optimal, Ipopt not Optimal) — 100 problems
+## Wins (POUNCE Optimal, Ipopt not Optimal) — 101 problems
 
 | Problem | Suite | n | m | Ipopt status | POUNCE obj |
 |---------|-------|---|---|-------------|------------|
@@ -257,6 +324,7 @@ On 1617 commonly-solved problems:
 | arki0009 | Mittelmann | 0 | 0 | N/A | -1.775525e+04 |
 | bearing_400 | Mittelmann | 0 | 0 | N/A | -1.546765e-01 |
 | camshape_6400 | Mittelmann | 0 | 0 | N/A | -4.448378e+00 |
+| cho_parmest | CHO | 21672 | 21660 | Acceptable | 4.746068e+04 |
 | clnlbeam | Mittelmann | 0 | 0 | N/A | 3.448761e+02 |
 | cont5_1_l | Mittelmann | 0 | 0 | N/A | 2.720975e+00 |
 | cont5_2_1_l | Mittelmann | 0 | 0 | N/A | 6.627472e-04 |
@@ -344,81 +412,89 @@ These problems converged within relaxed tolerances but not strict tolerances.
 
 These suites currently run POUNCE only — no Ipopt-side comparison is captured in their result files. Per-problem timing and iteration counts are shown so users can inspect the whole picture.
 
+### CHO
+
+| Problem | n | m | Status | Objective | Iters | Time |
+|---------|---|---|--------|-----------|-------|------|
+| cho_parmest | 21,672 | 21,660 | Optimal | 4.7461e+04 | 35 | 5.52s |
+
+POUNCE: **1/1 Optimal** in 5.52s total
+
 ### Mittelmann
 
 | Problem | n | m | Status | Objective | Iters | Time |
 |---------|---|---|--------|-----------|-------|------|
-| NARX_CFy | — | — | Optimal | 8.5894e-03 | 418 | 340.45s |
-| WM_CFy | — | — | Optimal | 1.2218e+00 | 605 | 2246.08s |
-| arki0003 | — | — | Optimal | 3.7952e+03 | 308 | 1.49s |
-| arki0009 | — | — | Optimal | -1.7755e+04 | 362 | 10.09s |
-| bearing_400 | — | — | Optimal | -1.5468e-01 | 16 | 4.66s |
-| camshape_6400 | — | — | Optimal | -4.4484e+00 | 87 | 1.99s |
-| clnlbeam | — | — | Optimal | 3.4488e+02 | 552 | 42.90s |
-| cont5_1_l | — | — | Optimal | 2.7210e+00 | 16 | 5.75s |
-| cont5_2_1_l | — | — | Optimal | 6.6275e-04 | 41 | 11.60s |
-| cont5_2_2_l | — | — | Optimal | 5.2000e-04 | 48 | 14.54s |
-| cont5_2_3_l | — | — | Optimal | 5.2078e-04 | 55 | 15.38s |
-| cont5_2_4_l | — | — | Optimal | 6.6371e-02 | 12 | 6.27s |
-| corkscrw | — | — | Optimal | 9.8096e+01 | 313 | 20.61s |
-| dirichlet120 | — | — | Optimal | 3.5036e-02 | 56 | 63.59s |
-| dtoc1nd | — | — | Optimal | 1.3646e+02 | 8 | 3.07s |
-| dtoc2 | — | — | Optimal | 2.8633e+00 | 5 | 4.92s |
-| elec_400 | — | — | Optimal | 1.0013e+02 | 126 | 40.62s |
-| ex1_160 | — | — | Optimal | 6.3861e-02 | 15 | 1.74s |
-| ex1_320 | — | — | Optimal | 6.5420e-02 | 8 | 5.18s |
-| ex4_2_160 | — | — | Optimal | 3.6461e+00 | 21 | 2.50s |
-| ex4_2_320 | — | — | Optimal | 3.6392e+00 | 17 | 10.80s |
-| ex8_2_2 | — | — | Optimal | -5.5267e+02 | 67 | 582.0ms |
-| ex8_2_3 | — | — | Optimal | -3.7311e+03 | 69 | 1.32s |
-| gasoil_3200 | — | — | Optimal | 5.2366e-03 | 14 | 3.59s |
-| henon120 | — | — | Optimal | 1.3329e+02 | 266 | 106.89s |
-| lane_emden120 | — | — | Optimal | 9.3403e+00 | 84 | 98.11s |
-| marine_1600 | — | — | Optimal | 1.9747e+07 | 13 | 70.44s |
-| nql180 | — | — | Optimal | -9.2772e-01 | 41 | 45.55s |
-| optmass | — | — | Optimal | -1.2040e-01 | 47 | 5.68s |
-| pinene_3200 | — | — | Optimal | 1.9872e+01 | 10 | 5.34s |
-| qcqp1000-1nc | — | — | Optimal | -1.8415e+06 | 192 | 19.63s |
-| qcqp1000-2c | — | — | Optimal | 1.1129e+04 | 102 | 265.14s |
-| qcqp1000-2nc | — | — | Optimal | 1.0988e+03 | 295 | 89.36s |
-| qcqp1500-1c | — | — | Optimal | 1.7518e+04 | 102 | 2528.78s |
-| qcqp1500-1nc | — | — | Optimal | 1.5377e+04 | 256 | 592.23s |
-| qcqp500-3c | — | — | Optimal | -8.5173e+03 | 397 | 385.33s |
-| qcqp500-3nc | — | — | Optimal | -1.3697e+04 | 121 | 50.17s |
-| qcqp750-2c | — | — | Optimal | -1.2028e+04 | 67 | 105.61s |
-| qcqp750-2nc | — | — | Optimal | -1.4452e+04 | 78 | 142.00s |
-| qssp180 | — | — | Optimal | -6.6394e+00 | 33 | 39.54s |
-| robot_1600 | — | — | Optimal | 9.1409e+00 | 38 | 1.82s |
-| robot_a | — | — | ERROR | 2.2161e+01 | 2999 | 882.36s |
-| robot_b | — | — | ERROR | 1.5177e+01 | 2999 | 820.35s |
-| robot_c | — | — | ERROR | 3.3746e+01 | 1660 | 464.19s |
-| rocket_12800 | — | — | Optimal | -1.0128e+00 | 24 | 16.56s |
-| steering_12800 | — | — | Optimal | 5.5457e-01 | 20 | 12.43s |
-| svanberg | — | — | Optimal | 8.3624e+04 | 34 | 8.77s |
+| NARX_CFy | — | — | Optimal | 8.5894e-03 | 418 | 407.18s |
+| WM_CFy | — | — | Optimal | 1.2218e+00 | 605 | 2310.72s |
+| arki0003 | — | — | Optimal | 3.7952e+03 | 308 | 1.82s |
+| arki0009 | — | — | Optimal | -1.7755e+04 | 362 | 11.82s |
+| bearing_400 | — | — | Optimal | -1.5468e-01 | 16 | 5.26s |
+| camshape_6400 | — | — | Optimal | -4.4484e+00 | 87 | 2.37s |
+| clnlbeam | — | — | Optimal | 3.4488e+02 | 552 | 48.24s |
+| cont5_1_l | — | — | Optimal | 2.7210e+00 | 16 | 6.89s |
+| cont5_2_1_l | — | — | Optimal | 6.6275e-04 | 41 | 14.41s |
+| cont5_2_2_l | — | — | Optimal | 5.2000e-04 | 48 | 17.17s |
+| cont5_2_3_l | — | — | Optimal | 5.2078e-04 | 55 | 17.73s |
+| cont5_2_4_l | — | — | Optimal | 6.6371e-02 | 12 | 7.29s |
+| corkscrw | — | — | Optimal | 9.8096e+01 | 313 | 24.72s |
+| dirichlet120 | — | — | Optimal | 3.5036e-02 | 56 | 75.65s |
+| dtoc1nd | — | — | Optimal | 1.3646e+02 | 8 | 3.32s |
+| dtoc2 | — | — | Optimal | 2.8633e+00 | 5 | 5.46s |
+| elec_400 | — | — | Optimal | 1.0013e+02 | 126 | 47.91s |
+| ex1_160 | — | — | Optimal | 6.3861e-02 | 15 | 1.96s |
+| ex1_320 | — | — | Optimal | 6.5420e-02 | 8 | 5.82s |
+| ex4_2_160 | — | — | Optimal | 3.6461e+00 | 21 | 2.46s |
+| ex4_2_320 | — | — | Optimal | 3.6392e+00 | 17 | 10.87s |
+| ex8_2_2 | — | — | Optimal | -5.5267e+02 | 67 | 628.0ms |
+| ex8_2_3 | — | — | Optimal | -3.7311e+03 | 69 | 1.41s |
+| gasoil_3200 | — | — | Optimal | 5.2366e-03 | 14 | 4.05s |
+| henon120 | — | — | Optimal | 1.3329e+02 | 266 | 125.21s |
+| lane_emden120 | — | — | Optimal | 9.3403e+00 | 84 | 98.92s |
+| marine_1600 | — | — | Optimal | 1.9747e+07 | 13 | 82.62s |
+| nql180 | — | — | Optimal | -9.2772e-01 | 41 | 54.62s |
+| optmass | — | — | Optimal | -1.2040e-01 | 47 | 6.41s |
+| pinene_3200 | — | — | Optimal | 1.9872e+01 | 10 | 6.95s |
+| qcqp1000-1nc | — | — | Optimal | -1.8415e+06 | 192 | 23.73s |
+| qcqp1000-2c | — | — | Optimal | 1.1129e+04 | 102 | 300.02s |
+| qcqp1000-2nc | — | — | Optimal | 1.0988e+03 | 295 | 101.83s |
+| qcqp1500-1c | — | — | Optimal | 1.7518e+04 | 102 | 2695.17s |
+| qcqp1500-1nc | — | — | Optimal | 1.5377e+04 | 256 | 600.29s |
+| qcqp500-3c | — | — | Optimal | -8.5173e+03 | 397 | 387.47s |
+| qcqp500-3nc | — | — | Optimal | -1.3697e+04 | 121 | 51.40s |
+| qcqp750-2c | — | — | Optimal | -1.2028e+04 | 67 | 107.41s |
+| qcqp750-2nc | — | — | Optimal | -1.4452e+04 | 78 | 144.03s |
+| qssp180 | — | — | Optimal | -6.6394e+00 | 33 | 40.35s |
+| robot_1600 | — | — | Optimal | 9.1409e+00 | 38 | 1.96s |
+| robot_a | — | — | ERROR | 2.2161e+01 | 2999 | 905.56s |
+| robot_b | — | — | ERROR | 1.5177e+01 | 2999 | 816.84s |
+| robot_c | — | — | ERROR | 3.3746e+01 | 1660 | 474.53s |
+| rocket_12800 | — | — | Optimal | -1.0128e+00 | 24 | 114.92s |
+| steering_12800 | — | — | Optimal | 5.5457e-01 | 20 | 13.28s |
+| svanberg | — | — | Optimal | 8.3624e+04 | 34 | 8.74s |
 
-POUNCE: **44/47 Optimal** in 9616.00s total
+POUNCE: **44/47 Optimal** in 10197.41s total
 
 ### LargeScale
 
 | Problem | n | m | Status | Objective | Iters | Time |
 |---------|---|---|--------|-----------|-------|------|
-| BratuProblem@s0.100 | 1,000 | 998 | Optimal | 0.0000e+00 | 2 | 2.9ms |
-| BratuProblem@s0.500 | 5,000 | 4,998 | Optimal | 0.0000e+00 | 2 | 12.5ms |
-| BratuProblem@s1.000 | 10,000 | 9,998 | Optimal | 0.0000e+00 | 1 | 24.1ms |
-| ChainedRosenbrock@s0.100 | 200 | — | Optimal | 1.0000e+00 | 146 | 34.0ms |
-| ChainedRosenbrock@s0.500 | 1,000 | — | Optimal | 1.0000e+00 | 765 | 555.1ms |
-| ChainedRosenbrock@s1.000 | 2,000 | — | Optimal | 1.0000e+00 | 1484 | 1.89s |
-| OptimalControl@s0.100 | 10,001 | 5,001 | Optimal | 1.1742e-01 | 1 | 33.9ms |
-| OptimalControl@s0.500 | 50,001 | 25,001 | Optimal | 1.1735e-01 | 1 | 238.9ms |
-| OptimalControl@s1.000 | 100,001 | 50,001 | Optimal | 1.1734e-01 | 1 | 275.8ms |
-| PoissonControl@s0.100 | 800 | 400 | Optimal | 9.9395e-02 | 1 | 2.9ms |
-| PoissonControl@s0.500 | 20,000 | 10,000 | Optimal | 9.9468e-02 | 1 | 129.9ms |
-| PoissonControl@s1.000 | 80,000 | 40,000 | Optimal | 9.9470e-02 | 1 | 394.6ms |
-| SparseQP@s0.100 | 5,000 | 5,000 | Optimal | -1.2498e+03 | 7 | 84.7ms |
-| SparseQP@s0.500 | 25,000 | 25,000 | Optimal | -6.2498e+03 | 7 | 569.0ms |
-| SparseQP@s1.000 | 50,000 | 50,000 | Optimal | -1.2500e+04 | 7 | 884.6ms |
+| BratuProblem@s0.100 | 1,000 | 998 | Optimal | 0.0000e+00 | 2 | 5.1ms |
+| BratuProblem@s0.500 | 5,000 | 4,998 | Optimal | 0.0000e+00 | 2 | 13.5ms |
+| BratuProblem@s1.000 | 10,000 | 9,998 | Optimal | 0.0000e+00 | 1 | 27.9ms |
+| ChainedRosenbrock@s0.100 | 200 | — | Optimal | 1.0000e+00 | 146 | 132.4ms |
+| ChainedRosenbrock@s0.500 | 1,000 | — | Optimal | 1.0000e+00 | 765 | 675.3ms |
+| ChainedRosenbrock@s1.000 | 2,000 | — | Optimal | 1.0000e+00 | 1484 | 2.28s |
+| OptimalControl@s0.100 | 10,001 | 5,001 | Optimal | 1.1742e-01 | 1 | 46.0ms |
+| OptimalControl@s0.500 | 50,001 | 25,001 | Optimal | 1.1735e-01 | 1 | 262.2ms |
+| OptimalControl@s1.000 | 100,001 | 50,001 | Optimal | 1.1734e-01 | 1 | 303.6ms |
+| PoissonControl@s0.100 | 800 | 400 | Optimal | 9.9395e-02 | 1 | 3.6ms |
+| PoissonControl@s0.500 | 20,000 | 10,000 | Optimal | 9.9468e-02 | 1 | 146.2ms |
+| PoissonControl@s1.000 | 80,000 | 40,000 | Optimal | 9.9470e-02 | 1 | 451.9ms |
+| SparseQP@s0.100 | 5,000 | 5,000 | Optimal | -1.2498e+03 | 7 | 112.1ms |
+| SparseQP@s0.500 | 25,000 | 25,000 | Optimal | -6.2498e+03 | 7 | 631.4ms |
+| SparseQP@s1.000 | 50,000 | 50,000 | Optimal | -1.2500e+04 | 7 | 982.0ms |
 
-POUNCE: **15/15 Optimal** in 5.13s total
+POUNCE: **15/15 Optimal** in 6.07s total
 
 ---
 *Generated by benchmark_report.py*

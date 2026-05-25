@@ -7270,6 +7270,186 @@
     "ipopt_solved": true
   },
   {
+    "name": "butanol_water_lle",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 7.825840587093889e-10,
+    "ipopt_obj": 7.825840587101685e-10,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "cacl2_nacl_mixed",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.7723713582598387,
+    "ipopt_obj": -0.7723713582598378,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "co2_water",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.006933374994510822,
+    "ipopt_obj": -0.0069333749945101174,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "enrtl_tdep_fit",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.1105612024058283e-17,
+    "ipopt_obj": 1.1511059016349691e-17,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "hcl_mean_activity",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 6.535046584679892e-19,
+    "ipopt_obj": 6.528254722218687e-19,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "multisalt_dh_fit",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 3.773493540677446e-15,
+    "ipopt_obj": 3.773493538097479e-15,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "nacl_solubility",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.6012794973903226e-21,
+    "ipopt_obj": 1.2163590088013141e-20,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "nacl_speciation",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.48326824276250957,
+    "ipopt_obj": -0.48326824223936515,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "phosphoric_acid",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -0.0553131454240308,
+    "ipopt_obj": -0.0553131454240308,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "pitzer_nacl_fit",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 2.6046311792440946e-16,
+    "ipopt_obj": 4.150161164321424e-18,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "saturated_brine",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.0,
+    "ipopt_obj": 0.0,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "seawater",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -1.3482746804150165,
+    "ipopt_obj": -1.3482746804150156,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "water_autoionization",
+    "suite": "Electrolyte",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": -7.332237172798061e-08,
+    "ipopt_obj": -7.339067835752686e-08,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "case14_ieee",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 93.60239680414513,
+    "ipopt_obj": 93.60239680414496,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "case30_ieee",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 157.30473099770572,
+    "ipopt_obj": 157.304730997684,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "case3_lmbd",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 25.833968610796187,
+    "ipopt_obj": 25.83396861079619,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "case5_pjm",
+    "suite": "Grid",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 438.79727096482065,
+    "ipopt_obj": 438.79727096482077,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "cho_parmest",
+    "suite": "CHO",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Acceptable",
+    "pounce_obj": 47460.677969223194,
+    "ipopt_obj": 47460.6779692187,
+    "pounce_solved": true,
+    "ipopt_solved": false
+  },
+  {
     "name": "water",
     "suite": "Water",
     "pounce_status": "Optimal",
@@ -7326,6 +7506,46 @@
     "ipopt_status": "Optimal",
     "pounce_obj": 207.25631457897035,
     "ipopt_obj": 210.7904967074633,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "gaslib11_dynamic",
+    "suite": "Gas",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.6986404527628447,
+    "ipopt_obj": 1.6986405294099916,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "gaslib11_steady",
+    "suite": "Gas",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 0.032855593944130956,
+    "ipopt_obj": 0.032855597137758014,
+    "pounce_solved": true,
+    "ipopt_solved": true
+  },
+  {
+    "name": "gaslib40_dynamic",
+    "suite": "Gas",
+    "pounce_status": "Infeasible_Problem_Detected",
+    "ipopt_status": "Infeasible_Problem_Detected",
+    "pounce_obj": 55.17035004927321,
+    "ipopt_obj": 56.10458048076884,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "gaslib40_steady",
+    "suite": "Gas",
+    "pounce_status": "Optimal",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 1.2899875389724,
+    "ipopt_obj": 1.2899875309882551,
     "pounce_solved": true,
     "ipopt_solved": true
   },

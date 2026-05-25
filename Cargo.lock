@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "iter-diff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-algorithm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
  "pounce-feral",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-cinterface"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -326,11 +326,11 @@ dependencies = [
 
 [[package]]
 name = "pounce-common"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "pounce-cutest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-feral"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "feral",
  "pounce-common",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-hsl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-l1penalty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-large-scale"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -383,14 +383,14 @@ dependencies = [
 
 [[package]]
 name = "pounce-linalg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
 ]
 
 [[package]]
 name = "pounce-linsol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-nlp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-presolve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "numpy",
  "pounce-algorithm",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-restoration"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-sensitivity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-studio-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-studio-pyo3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pounce-studio-core",
  "pyo3",

@@ -10,7 +10,8 @@ type: software
 license: EPL-2.0
 repository-code: "https://github.com/jkitchin/pounce"
 url: "https://github.com/jkitchin/pounce"
-version: 0.1.0
+version: 0.2.0
+date-released: 2026-05-25
 authors:
   - family-names: Kitchin
     given-names: John R.
