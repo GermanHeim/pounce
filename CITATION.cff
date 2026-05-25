@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use POUNCE in academic work, please cite it as below."
+title: "POUNCE: a pure-Rust port of the Ipopt interior-point NLP solver"
+abstract: >
+  POUNCE is a pure-Rust port of the Ipopt (Interior Point OPTimizer)
+  nonlinear programming solver. It solves continuous nonlinear
+  optimization problems with equality and inequality constraints using
+  a primal-dual interior-point method with a filter line search.
+type: software
+license: EPL-2.0
+repository-code: "https://github.com/jkitchin/pounce"
+url: "https://github.com/jkitchin/pounce"
+version: 0.1.0
+authors:
+  - family-names: Kitchin
+    given-names: John R.
+    affiliation: Carnegie Mellon University
+    orcid: "https://orcid.org/0000-0003-2625-9232"
+keywords:
+  - nonlinear optimization
+  - interior-point method
+  - ipopt
+  - rust
+  - numerical optimization
+references:
+  - type: article
+    title: "On the implementation of an interior-point filter line-search algorithm for large-scale nonlinear programming"
+    authors:
+      - family-names: "Wächter"
+        given-names: Andreas
+      - family-names: Biegler
+        given-names: "Lorenz T."
+    journal: "Mathematical Programming"
+    volume: 106
+    issue: 1
+    year: 2006
+    doi: "10.1007/s10107-004-0559-y"

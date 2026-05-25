@@ -1,0 +1,44 @@
+{
+  "title": "POUNCE: a pure-Rust port of the Ipopt interior-point NLP solver",
+  "description": "POUNCE is a pure-Rust port of the Ipopt (Interior Point OPTimizer) nonlinear programming solver. It solves continuous nonlinear optimization problems with equality and inequality constraints using a primal-dual interior-point method with a filter line search. The default build is pure Rust with no Fortran, HSL, or system BLAS dependencies; optional features link MA57 and other HSL solvers when available.",
+  "license": "EPL-2.0",
+  "upload_type": "software",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Kitchin, John R.",
+      "affiliation": "Carnegie Mellon University",
+      "orcid": "0000-0003-2625-9232"
+    }
+  ],
+  "keywords": [
+    "nonlinear optimization",
+    "interior-point method",
+    "ipopt",
+    "rust",
+    "numerical optimization",
+    "nlp",
+    "kkt",
+    "mathematical programming"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.19542664",
+      "relation": "isContinuationOf",
+      "scheme": "doi",
+      "resource_type": "software"
+    },
+    {
+      "identifier": "10.1007/s10107-004-0559-y",
+      "relation": "isDerivedFrom",
+      "scheme": "doi",
+      "resource_type": "publication-article"
+    },
+    {
+      "identifier": "https://github.com/coin-or/Ipopt",
+      "relation": "isDerivedFrom",
+      "scheme": "url",
+      "resource_type": "software"
+    }
+  ]
+}

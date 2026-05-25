@@ -1,6 +1,8 @@
 # POUNCE
 
 [![CI](https://github.com/jkitchin/pounce/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/pounce/actions/workflows/ci.yml)
+[![Docs](https://github.com/jkitchin/pounce/actions/workflows/docs.yml/badge.svg)](https://jkitchin.github.io/pounce/)
+[![DOI](https://zenodo.org/badge/DOI/PENDING-FIRST-RELEASE.svg)](https://doi.org/PENDING-FIRST-RELEASE)
 
 ![POUNCE](logos/pounce_A_pounce.png)
 
