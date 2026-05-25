@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare ripopt and Ipopt results on CUTEst test problems.
+Compare POUNCE and Ipopt results on CUTEst test problems.
 Reads a single JSON file with solver field per entry.
 
 Usage:
@@ -27,7 +27,7 @@ def obj_diff(ro, co):
     """Relative objective difference, using max(|r|, |c|, 1) as denominator.
 
     The 1.0 floor in the denominator prevents near-zero objectives (e.g.,
-    ripopt=+1e-12, ipopt=-1e-9) from producing artificially large relative
+    pounce=+1e-12, ipopt=-1e-9) from producing artificially large relative
     differences.  With this floor, two objectives that differ by < 1e-4 in
     absolute terms will always be classified as matching.
     """
@@ -90,20 +90,20 @@ def main():
         data = json.load(f)
 
     # Split by solver
-    ripopt_by_name = {}
+    pounce_by_name = {}
     ipopt_by_name = {}
     for r in data:
         if r['solver'] in ('pounce', 'ripopt'):
-            ripopt_by_name[r['name']] = r
+            pounce_by_name[r['name']] = r
         elif r['solver'] == 'ipopt':
             ipopt_by_name[r['name']] = r
 
-    all_names = sorted(set(ripopt_by_name.keys()) | set(ipopt_by_name.keys()))
+    all_names = sorted(set(pounce_by_name.keys()) | set(ipopt_by_name.keys()))
 
     # Comparisons
     comparisons = []
     for name in all_names:
-        rr = ripopt_by_name.get(name, {})
+        rr = pounce_by_name.get(name, {})
         cr = ipopt_by_name.get(name, {})
 
         r_solved = is_solved(rr.get('status', ''))
@@ -123,19 +123,19 @@ def main():
             'n': n,
             'm': m,
             'dof': dof,
-            'ripopt_status': rr.get('status', 'N/A'),
+            'pounce_status': rr.get('status', 'N/A'),
             'ipopt_status': cr.get('status', 'N/A'),
-            'ripopt_obj': rr.get('objective', float('nan')),
+            'pounce_obj': rr.get('objective', float('nan')),
             'ipopt_obj': cr.get('objective', float('nan')),
             'obj_diff': od,
-            'ripopt_iters': rr.get('iterations', 0),
+            'pounce_iters': rr.get('iterations', 0),
             'ipopt_iters': cr.get('iterations', 0),
-            'ripopt_time': rr.get('solve_time', 0),
+            'pounce_time': rr.get('solve_time', 0),
             'ipopt_time': cr.get('solve_time', 0),
-            'ripopt_cv': rr.get('constraint_violation', 0),
+            'pounce_cv': rr.get('constraint_violation', 0),
             'ipopt_cv': cr.get('constraint_violation', 0),
             'passed': passed,
-            'ripopt_solved': r_solved,
+            'pounce_solved': r_solved,
             'ipopt_solved': c_solved,
             'both_solved': both_solved,
             'category': classify_problem(n, m, dof, low_dof_max),
@@ -143,7 +143,7 @@ def main():
 
     # Statistics
     total = len(comparisons)
-    ripopt_solved = sum(1 for c in comparisons if c['ripopt_solved'])
+    pounce_solved = sum(1 for c in comparisons if c['pounce_solved'])
     ipopt_solved = sum(1 for c in comparisons if c['ipopt_solved'])
     both_solved = sum(1 for c in comparisons if c['both_solved'])
     passed = sum(1 for c in comparisons if c['passed'])
@@ -166,12 +166,12 @@ def main():
     pass_mean, pass_median, pass_max = compute_stats(pass_diffs)
 
     # Category breakdown
-    categories = defaultdict(lambda: {'total': 0, 'ripopt': 0, 'ipopt': 0, 'both': 0, 'passed': 0})
+    categories = defaultdict(lambda: {'total': 0, 'pounce': 0, 'ipopt': 0, 'both': 0, 'passed': 0})
     for c in comparisons:
         cat = c['category']
         categories[cat]['total'] += 1
-        if c['ripopt_solved']:
-            categories[cat]['ripopt'] += 1
+        if c['pounce_solved']:
+            categories[cat]['pounce'] += 1
         if c['ipopt_solved']:
             categories[cat]['ipopt'] += 1
         if c['both_solved']:
@@ -183,12 +183,12 @@ def main():
     lines = []
     lines.append("# CUTEst Benchmark Report")
     lines.append("")
-    lines.append("Comparison of ripopt vs Ipopt (C++) on the CUTEst test set.")
+    lines.append("Comparison of pounce vs Ipopt (C++) on the CUTEst test set.")
     lines.append("")
     lines.append("## Executive Summary")
     lines.append("")
     lines.append(f"- **Total problems**: {total}")
-    lines.append(f"- **ripopt solved**: {ripopt_solved}/{total} ({100*ripopt_solved/max(total,1):.1f}%)")
+    lines.append(f"- **pounce solved**: {pounce_solved}/{total} ({100*pounce_solved/max(total,1):.1f}%)")
     lines.append(f"- **Ipopt solved**: {ipopt_solved}/{total} ({100*ipopt_solved/max(total,1):.1f}%)")
     lines.append(f"- **Both solved**: {both_solved}/{total}")
     lines.append(f"- **Matching solutions** (rel obj diff < 1e-4): {passed}/{max(both_solved,1)}")
@@ -225,37 +225,37 @@ def main():
         f"`--low-dof-max N`."
     )
     lines.append("")
-    lines.append("| Category | Total | ripopt | Ipopt | Both | Match |")
+    lines.append("| Category | Total | pounce | Ipopt | Both | Match |")
     lines.append("|----------|-------|--------|-------|------|-------|")
     for cat in sorted(categories.keys()):
         d = categories[cat]
-        lines.append(f"| {cat} | {d['total']} | {d['ripopt']} | {d['ipopt']} | {d['both']} | {d['passed']} |")
+        lines.append(f"| {cat} | {d['total']} | {d['pounce']} | {d['ipopt']} | {d['both']} | {d['passed']} |")
     lines.append("")
 
     lines.append("## Detailed Results")
     lines.append("")
-    lines.append("| Problem | n | m | dof | ripopt | Ipopt | Obj Diff | r_iter | i_iter | r_time | i_time | Speedup | Status |")
+    lines.append("| Problem | n | m | dof | pounce | Ipopt | Obj Diff | r_iter | i_iter | r_time | i_time | Speedup | Status |")
     lines.append("|---------|---|---|-----|--------|-------|----------|--------|--------|--------|--------|---------|--------|")
     for c in comparisons:
         od = f"{c['obj_diff']:.2e}" if not math.isnan(c['obj_diff']) else "N/A"
-        rt_str = fmt_time(c['ripopt_time']) if c['ripopt_time'] > 0 else "N/A"
+        rt_str = fmt_time(c['pounce_time']) if c['pounce_time'] > 0 else "N/A"
         it_str = fmt_time(c['ipopt_time']) if c['ipopt_time'] > 0 else "N/A"
-        if c['ripopt_time'] > 0 and c['ipopt_time'] > 0:
-            sp_str = f"{c['ipopt_time']/c['ripopt_time']:.1f}x"
+        if c['pounce_time'] > 0 and c['ipopt_time'] > 0:
+            sp_str = f"{c['ipopt_time']/c['pounce_time']:.1f}x"
         else:
             sp_str = "N/A"
         if c['passed']:
             status = "PASS"
-        elif not c['ripopt_solved'] and not c['ipopt_solved']:
+        elif not c['pounce_solved'] and not c['ipopt_solved']:
             status = "BOTH_FAIL"
-        elif not c['ripopt_solved']:
-            status = "ripopt_FAIL"
+        elif not c['pounce_solved']:
+            status = "pounce_FAIL"
         elif not c['ipopt_solved']:
             status = "ipopt_FAIL"
         else:
             status = "MISMATCH"
         dof_str = str(c['dof']) if c['dof'] is not None else "N/A"
-        lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {dof_str} | {c['ripopt_status'][:12]} | {c['ipopt_status'][:12]} | {od} | {c['ripopt_iters']} | {c['ipopt_iters']} | {rt_str} | {it_str} | {sp_str} | {status} |")
+        lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {dof_str} | {c['pounce_status'][:12]} | {c['ipopt_status'][:12]} | {od} | {c['pounce_iters']} | {c['ipopt_iters']} | {rt_str} | {it_str} | {sp_str} | {status} |")
     lines.append("")
 
     # Performance comparison
@@ -264,14 +264,14 @@ def main():
         lines.append("## Performance Comparison (where both solve)")
         lines.append("")
 
-        r_iters = [c['ripopt_iters'] for c in both_data]
+        r_iters = [c['pounce_iters'] for c in both_data]
         i_iters = [c['ipopt_iters'] for c in both_data]
-        r_times = [c['ripopt_time'] for c in both_data if c['ripopt_time'] > 0]
+        r_times = [c['pounce_time'] for c in both_data if c['pounce_time'] > 0]
         i_times = [c['ipopt_time'] for c in both_data if c['ipopt_time'] > 0]
 
         lines.append("### Iteration Comparison")
         lines.append("")
-        lines.append("| Metric | ripopt | Ipopt |")
+        lines.append("| Metric | pounce | Ipopt |")
         lines.append("|--------|--------|-------|")
         lines.append(f"| Mean   | {sum(r_iters)/len(r_iters):.1f} | {sum(i_iters)/len(i_iters):.1f} |")
         lines.append(f"| Median | {sorted(r_iters)[len(r_iters)//2]} | {sorted(i_iters)[len(i_iters)//2]} |")
@@ -281,7 +281,7 @@ def main():
         r_fewer = sum(1 for r, i in zip(r_iters, i_iters) if r < i)
         i_fewer = sum(1 for r, i in zip(r_iters, i_iters) if i < r)
         tied = sum(1 for r, i in zip(r_iters, i_iters) if r == i)
-        lines.append(f"- ripopt fewer iterations: {r_fewer}/{len(r_iters)}")
+        lines.append(f"- pounce fewer iterations: {r_fewer}/{len(r_iters)}")
         lines.append(f"- Ipopt fewer iterations: {i_fewer}/{len(i_iters)}")
         lines.append(f"- Tied: {tied}/{len(r_iters)}")
         lines.append("")
@@ -291,52 +291,52 @@ def main():
             lines.append("")
             r_total = sum(r_times)
             i_total = sum(i_times)
-            lines.append("| Metric | ripopt | Ipopt |")
+            lines.append("| Metric | pounce | Ipopt |")
             lines.append("|--------|--------|-------|")
             lines.append(f"| Mean   | {fmt_time(r_total/len(r_times))} | {fmt_time(i_total/len(i_times))} |")
             lines.append(f"| Median | {fmt_time(sorted(r_times)[len(r_times)//2])} | {fmt_time(sorted(i_times)[len(i_times)//2])} |")
             lines.append(f"| Total  | {fmt_time(r_total)} | {fmt_time(i_total)} |")
             lines.append("")
 
-            speedups = [c['ipopt_time'] / c['ripopt_time']
+            speedups = [c['ipopt_time'] / c['pounce_time']
                         for c in both_data
-                        if c['ripopt_time'] > 0 and c['ipopt_time'] > 0]
+                        if c['pounce_time'] > 0 and c['ipopt_time'] > 0]
             if speedups:
                 geo_mean = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
                 r_faster = sum(1 for s in speedups if s > 1.0)
                 i_faster = sum(1 for s in speedups if s < 1.0)
-                lines.append(f"- Geometric mean speedup (Ipopt_time/ripopt_time): **{geo_mean:.2f}x**")
-                lines.append(f"  - \\>1 means ripopt is faster, <1 means Ipopt is faster")
-                lines.append(f"- ripopt faster: {r_faster}/{len(speedups)} problems")
+                lines.append(f"- Geometric mean speedup (Ipopt_time/pounce_time): **{geo_mean:.2f}x**")
+                lines.append(f"  - \\>1 means pounce is faster, <1 means Ipopt is faster")
+                lines.append(f"- pounce faster: {r_faster}/{len(speedups)} problems")
                 lines.append(f"- Ipopt faster: {i_faster}/{len(speedups)} problems")
                 lines.append(f"- Overall speedup (total time): {i_total/r_total:.2f}x")
                 lines.append("")
 
     # Failure analysis
-    ripopt_only_fails = [c for c in comparisons if not c['ripopt_solved'] and c['ipopt_solved']]
-    ipopt_only_fails = [c for c in comparisons if c['ripopt_solved'] and not c['ipopt_solved']]
-    both_fail = [c for c in comparisons if not c['ripopt_solved'] and not c['ipopt_solved']]
+    pounce_only_fails = [c for c in comparisons if not c['pounce_solved'] and c['ipopt_solved']]
+    ipopt_only_fails = [c for c in comparisons if c['pounce_solved'] and not c['ipopt_solved']]
+    both_fail = [c for c in comparisons if not c['pounce_solved'] and not c['ipopt_solved']]
 
-    if ripopt_only_fails or ipopt_only_fails or both_fail:
+    if pounce_only_fails or ipopt_only_fails or both_fail:
         lines.append("## Failure Analysis")
         lines.append("")
 
-    if ripopt_only_fails:
-        lines.append(f"### Problems where only ripopt fails ({len(ripopt_only_fails)})")
+    if pounce_only_fails:
+        lines.append(f"### Problems where only pounce fails ({len(pounce_only_fails)})")
         lines.append("")
-        lines.append("| Problem | n | m | ripopt status | Ipopt obj |")
+        lines.append("| Problem | n | m | pounce status | Ipopt obj |")
         lines.append("|---------|---|---|---------------|-----------|")
-        for c in ripopt_only_fails:
-            lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['ripopt_status']} | {c['ipopt_obj']:.6e} |")
+        for c in pounce_only_fails:
+            lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['pounce_status']} | {c['ipopt_obj']:.6e} |")
         lines.append("")
 
     if ipopt_only_fails:
         lines.append(f"### Problems where only Ipopt fails ({len(ipopt_only_fails)})")
         lines.append("")
-        lines.append("| Problem | n | m | Ipopt status | ripopt obj |")
+        lines.append("| Problem | n | m | Ipopt status | pounce obj |")
         lines.append("|---------|---|---|--------------|------------|")
         for c in ipopt_only_fails:
-            ro = c['ripopt_obj']
+            ro = c['pounce_obj']
             ro_str = f"{ro:.6e}" if isinstance(ro, (int, float)) and not math.isnan(ro) else "N/A"
             lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['ipopt_status']} | {ro_str} |")
         lines.append("")
@@ -344,10 +344,10 @@ def main():
     if both_fail:
         lines.append(f"### Problems where both fail ({len(both_fail)})")
         lines.append("")
-        lines.append("| Problem | n | m | ripopt status | Ipopt status |")
+        lines.append("| Problem | n | m | pounce status | Ipopt status |")
         lines.append("|---------|---|---|---------------|--------------|")
         for c in both_fail:
-            lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['ripopt_status']} | {c['ipopt_status']} |")
+            lines.append(f"| {c['name']} | {c['n']} | {c['m']} | {c['pounce_status']} | {c['ipopt_status']} |")
         lines.append("")
 
     # Mismatches — categorize by cause
@@ -357,15 +357,15 @@ def main():
         diff_local_min = []  # Both Optimal, different basins
         convergence_gap = []  # One Acceptable, didn't fully converge
         for c in mismatches:
-            r_opt = c['ripopt_status'] == 'Optimal'
+            r_opt = c['pounce_status'] == 'Optimal'
             i_opt = c['ipopt_status'] == 'Optimal'
             if r_opt and i_opt:
                 diff_local_min.append(c)
             else:
                 convergence_gap.append(c)
 
-        r_better = sum(1 for c in mismatches if c['ripopt_obj'] < c['ipopt_obj'])
-        i_better = sum(1 for c in mismatches if c['ipopt_obj'] < c['ripopt_obj'])
+        r_better = sum(1 for c in mismatches if c['pounce_obj'] < c['ipopt_obj'])
+        i_better = sum(1 for c in mismatches if c['ipopt_obj'] < c['pounce_obj'])
 
         lines.append(f"### Objective mismatches ({len(mismatches)})")
         lines.append("")
@@ -373,15 +373,15 @@ def main():
         lines.append("")
         lines.append(f"- **Different local minimum** (both Optimal): {len(diff_local_min)}")
         lines.append(f"- **Convergence gap** (one Acceptable): {len(convergence_gap)}")
-        lines.append(f"- **Better objective found by**: ripopt {r_better}, Ipopt {i_better}")
+        lines.append(f"- **Better objective found by**: pounce {r_better}, Ipopt {i_better}")
         lines.append("")
-        lines.append("| Problem | ripopt obj | Ipopt obj | Rel Diff | r_status | i_status | Better |")
+        lines.append("| Problem | pounce obj | Ipopt obj | Rel Diff | r_status | i_status | Better |")
         lines.append("|---------|-----------|-----------|----------|----------|----------|--------|")
         for c in sorted(mismatches, key=lambda c: -c['obj_diff']):
-            better = "ripopt" if c['ripopt_obj'] < c['ipopt_obj'] else "ipopt"
+            better = "pounce" if c['pounce_obj'] < c['ipopt_obj'] else "ipopt"
             lines.append(
-                f"| {c['name']} | {c['ripopt_obj']:.6e} | {c['ipopt_obj']:.6e} "
-                f"| {c['obj_diff']:.2e} | {c['ripopt_status'][:10]} | {c['ipopt_status'][:10]} | {better} |"
+                f"| {c['name']} | {c['pounce_obj']:.6e} | {c['ipopt_obj']:.6e} "
+                f"| {c['obj_diff']:.2e} | {c['pounce_status'][:10]} | {c['ipopt_status'][:10]} | {better} |"
             )
         lines.append("")
 
@@ -396,7 +396,7 @@ def main():
     print(f"Report written to {output_path}")
     print(f"\nSummary:")
     print(f"  Total: {total}")
-    print(f"  ripopt solved: {ripopt_solved}/{total}")
+    print(f"  pounce solved: {pounce_solved}/{total}")
     print(f"  Ipopt solved: {ipopt_solved}/{total}")
     print(f"  Both solved: {both_solved}/{total}")
     print(f"  Matching (rel diff < 1e-4): {passed}/{max(both_solved, 1)}")

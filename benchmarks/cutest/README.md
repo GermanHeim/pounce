@@ -14,12 +14,12 @@ mixed), with `problem_list_full.txt` covering all 1542 SIF problems.
 
 ## Contents
 
-- `run_cutest.rs` — the `cutest_suite` binary (POUNCE + optional Ipopt
-  comparison, runs each problem in a subprocess with timeout)
-- `cutest_ffi.rs`, `cutest_problem.rs` — thin Rust wrappers around the
-  CUTEst Fortran interface
-- `collect_kkt.rs` — `collect_kkt` binary that dumps per-iteration KKT
-  matrices for offline analysis
+- `src/bin/cutest_suite.rs` — the `cutest_suite` binary (POUNCE + optional
+  Ipopt comparison, runs each problem in a subprocess with timeout)
+- `src/cutest_ffi.rs`, `src/cutest_problem.rs` — thin Rust wrappers around
+  the CUTEst Fortran interface
+- `src/bin/kkt_compare.rs` — `kkt_compare` binary that dumps per-iteration
+  KKT matrices for offline analysis
 - `prepare.sh` — compiles SIF problems from `~/.local/cutest/mastsif/` into
   shared libraries under `problems/`
 - `compare.py` — per-problem comparison report from `results.json`

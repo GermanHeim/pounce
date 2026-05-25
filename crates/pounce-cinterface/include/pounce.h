@@ -284,9 +284,9 @@ void GetIpoptVersion(int* major, int* minor, int* release);
 /* -----------------------------------------------------------------
  * Pounce extensions — post-solve statistics
  *
- * These match the `ripopt_get_*` accessors in ripopt.h. All are valid
- * only after IpoptSolve() has returned; they yield zero before the
- * first solve.
+ * Convenience accessors not present in upstream Ipopt's C API. All are
+ * valid only after IpoptSolve() has returned; they yield zero before
+ * the first solve.
  * ----------------------------------------------------------------- */
 
 /** Number of IPM iterations in the most recent solve. */

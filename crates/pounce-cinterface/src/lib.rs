@@ -18,9 +18,9 @@
 //!   [`GetIpoptCurrentIterate`], [`GetIpoptCurrentViolations`].
 //! * Library info: [`GetIpoptVersion`].
 //!
-//! Pounce extensions, modelled on `ripopt.h`, for post-solve stats:
-//! [`GetIpoptIterCount`], [`GetIpoptSolveTime`], [`GetIpoptPrimalInf`],
-//! [`GetIpoptDualInf`], [`GetIpoptComplInf`].
+//! Pounce extensions for post-solve stats (not present in upstream
+//! Ipopt's C API): [`GetIpoptIterCount`], [`GetIpoptSolveTime`],
+//! [`GetIpoptPrimalInf`], [`GetIpoptDualInf`], [`GetIpoptComplInf`].
 //!
 //! All entry points are `extern "C"` and `#[no_mangle]`. Pointers are
 //! raw and the caller is responsible for lifetime; the `IpoptProblem`
@@ -851,9 +851,9 @@ fn parse_pkg_version(v: &str) -> (c_int, c_int, c_int) {
 // ----------------------------------------------------------------------
 // Pounce extensions: post-solve statistics accessors.
 //
-// These functions mirror the `ripopt_get_*` accessors in `ripopt.h`.
-// They are valid only after [`IpoptSolve`] has returned; calling them
-// on a never-solved problem yields zero. They expose the same
+// Convenience accessors not present in upstream Ipopt's C API. Valid
+// only after [`IpoptSolve`] has returned; calling them on a
+// never-solved problem yields zero. They expose the same
 // `SolveStatistics` data the Rust API surfaces via
 // [`IpoptApplication::statistics`].
 // ----------------------------------------------------------------------
