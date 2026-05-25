@@ -72,6 +72,10 @@ python/*.egg-info/
 # stays out of version control.
 .crucible/
 
+# Local research scratch — experiments, notes, drafts, downloaded
+# papers. Never tracked; nothing under here ships with the repo.
+/research/
+
 # macOS
 .DS_Store
 
