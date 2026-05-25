@@ -1,9 +1,9 @@
 # Large-Scale Synthetic Suite
 
 Large, sparse, synthetic NLPs designed to stress the sparse linear algebra
-path and the workspace sizing of both ripopt and Ipopt. Problems are
+path and the workspace sizing of both POUNCE and Ipopt. Problems are
 parameterised by a size `n` and scaled up to around 100K variables. The
-problems cover the main structural patterns ripopt needs to handle
+problems cover the main structural patterns POUNCE needs to handle
 efficiently:
 
 - **Bratu** — 2D Bratu nonlinear PDE discretisation (sparse symmetric
@@ -28,7 +28,7 @@ solvers see the exact same Rust `NlpProblem` struct for a fair comparison.
 
 ## Prerequisites
 
-None beyond ripopt itself; the comparison run requires `ipopt-native`.
+None beyond POUNCE itself; the comparison run requires `ipopt-native`.
 
 ## How to run
 

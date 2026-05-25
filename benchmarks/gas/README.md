@@ -1,7 +1,7 @@
 # Gas Pipeline Network NLP Benchmarks
 
 Benchmark problems from [Sakshi21299/gas_networks](https://github.com/Sakshi21299/gas_networks),
-exported as AMPL NL files. See [issue #12](https://github.com/jkitchin/ripopt/issues/12).
+exported as AMPL NL files.
 
 This suite lives under `benchmarks/gas/`. See `benchmarks/README.md` for an
 overview of all benchmark suites. Unlike the HS / CUTEst / domain benchmarks,
@@ -28,8 +28,8 @@ finite-volume PDE discretization of the Euler equations on a pipe network.
 # Test with ipopt
 ipopt benchmarks/gas/gaslib11_steady.nl
 
-# Test with ripopt
-ripopt benchmarks/gas/gaslib11_steady.nl print_level=5
+# Test with pounce
+pounce benchmarks/gas/gaslib11_steady.nl print_level=5
 ```
 
 Or run the full suite via the benchmarks Makefile:

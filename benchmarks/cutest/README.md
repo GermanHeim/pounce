@@ -8,13 +8,13 @@ Optimization and Applications* 60:545-557 (2015). The MASTSIF archive
 provides roughly 1500 problems spanning a few variables to 100K+, covering
 every constraint class and a wide range of numerical pathologies.
 
-The curated ripopt subset in `problem_list.txt` is 727 problems chosen to
+The curated POUNCE subset in `problem_list.txt` is 727 problems chosen to
 exercise every solver path (bounds, equality, inequality, NE, LS, and
 mixed), with `problem_list_full.txt` covering all 1542 SIF problems.
 
 ## Contents
 
-- `run_cutest.rs` — the `cutest_suite` binary (ripopt + optional Ipopt
+- `run_cutest.rs` — the `cutest_suite` binary (POUNCE + optional Ipopt
   comparison, runs each problem in a subprocess with timeout)
 - `cutest_ffi.rs`, `cutest_problem.rs` — thin Rust wrappers around the
   CUTEst Fortran interface
@@ -72,7 +72,7 @@ cargo run --release --bin cutest_suite --features cutest,ipopt-native -- \
 
 ## Output
 
-- `results.json` — ripopt and Ipopt per-problem results
+- `results.json` — POUNCE and Ipopt per-problem results
 - `benchmark_stderr.txt` — solver chatter
 - `problems/` — compiled SIF artefacts (gitignored)
 

@@ -13,7 +13,7 @@ files, and results are inspected manually.
 All instances are water network design problems. The underlying physics
 (Hazen-Williams head-loss, mass balance, pressure constraints) produces
 signomial / nonconvex nonlinear constraints. `water.nl` is the only pure NLP;
-the others include binary pipe-choice variables that both Ipopt and ripopt
+the others include binary pipe-choice variables that both Ipopt and POUNCE
 treat as continuous (MINLPLib stores them as a relaxation in `.nl`).
 
 | File | Type | n | m | Ipopt status | Ipopt obj | Ipopt iters |
@@ -26,7 +26,7 @@ treat as continuous (MINLPLib stores them as a relaxation in `.nl`).
 | `watersbp.nl` | MBNLP (relaxed) | — | — | Optimal | 2.0726e2 | 154 |
 
 The best-known primal bound for `water.nl` on MINLPLib is **963.1343**, which
-ripopt matches; the local minimum Ipopt reports (1001.16) is a different
+POUNCE matches; the local minimum Ipopt reports (1001.16) is a different
 stationary point.
 
 ## Sources
@@ -48,8 +48,8 @@ stationary point.
 # Test with system ipopt
 ipopt benchmarks/water/water.nl
 
-# Test with ripopt
-cargo run --bin ripopt --release -- benchmarks/water/water.nl
+# Test with pounce
+pounce benchmarks/water/water.nl
 ```
 
 Or run the full suite via the benchmarks Makefile:

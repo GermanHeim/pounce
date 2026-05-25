@@ -7,11 +7,11 @@ concentrations; the constraints are the differential mass balances for the
 kinetic ODEs after discretisation.
 
 The single-problem NLP is produced by exporting the Pyomo model to AMPL
-`.nl` format via `parmest_nl_export.py`, then solved through ripopt's
+`.nl` format via `parmest_nl_export.py`, then solved through POUNCE's
 AMPL NL parser. The problem exercises the NL-front end as well as a
 moderately sized dense NLP with bound constraints and nonlinear equalities.
 
-Neither ripopt nor Ipopt currently converges to a clean optimum on this
+Neither POUNCE nor Ipopt currently converges to a clean optimum on this
 problem (both hit numerical difficulties on the kinetic equations near
 steady state), so it is a useful stress test for restoration and fallback
 logic.
