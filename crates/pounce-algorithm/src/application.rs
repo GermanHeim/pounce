@@ -619,7 +619,12 @@ impl IpoptApplication {
         let warm = self.sqp_warm_start.take();
         let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
             Ok(r) => r,
-            Err(_) => return ApplicationReturnStatus::InternalError,
+            Err(e) => {
+                if std::env::var_os("POUNCE_DBG_SQP").is_some() {
+                    eprintln!("[SQP] optimize_with_warm_start error: {e:?}");
+                }
+                return ApplicationReturnStatus::InternalError;
+            }
         };
         // Stash the result's working set so the next solve in a
         // sequence can fetch it via `last_sqp_working_set`.
