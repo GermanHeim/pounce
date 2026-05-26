@@ -18,6 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # `Cargo.toml` has a `[patch.crates-io]` entry pointing at
+      # `../feral`, so cargo needs a sibling feral checkout to resolve
+      # the dependency graph. Public repo — no auth needed.
+      # `actions/checkout` restricts `path` to inside the workspace, so
+      # clone manually to the sibling location cargo expects.
+      - name: Checkout feral sibling
+        run: git clone --depth 1 https://github.com/jkitchin/feral.git ../feral
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -53,6 +61,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Checkout feral sibling
+        run: git clone --depth 1 https://github.com/jkitchin/feral.git ../feral
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -94,6 +104,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Checkout feral sibling
+        run: git clone --depth 1 https://github.com/jkitchin/feral.git ../feral
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
