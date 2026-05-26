@@ -193,25 +193,180 @@ via the `LinearBackendFactory` at
 
 ## Implementation phasing
 
-Each phase is independently shippable.
+Each phase is independently shippable. The headline shift from the
+original plan is that `pounce-convex` is *the* in-house home for the
+entire IPM/conic family — LP, QP, SOCP, SDP, exponential cone, power
+cone — built incrementally on a single Mehrotra + HSDE scaffolding
+sharing `pounce-linsol`. Active-set QP stays in `pounce-qp` on its own
+track. Other algorithm families (ADMM, AL+semismooth Newton,
+banded/Riccati IPM, simplex) are explicitly *out of scope* — see the
+"Out of scope and why" section below.
 
-1. **Dispatch plumbing without new algorithms.** Add header parsing,
-   classifier, `solver_selection` option, dispatcher that only
-   supports `auto` and `nlp` (auto → nlp for now). Ship to verify no
-   regression.
-2. **IPM-QP in `pounce-convex`.** Bare IPM-QP (no Mehrotra yet); route
-   LP and QP problems to it under `auto`. Compare iteration counts and
-   wall-clock against the existing IPM-NLP path on the `quadratic`,
-   `bounded-quadratic`, `eq-quadratic` builtins.
-3. **Mehrotra predictor-corrector** in `pounce-convex`. Should reduce
-   iteration counts ~30-50% on convex QPs. Validate on Mittelmann LP
-   subset.
-4. **Simplex.** Separate effort, separate dev-note. Adds `pounce-lu`
-   or equivalent dependency.
+**Phase 1 — Dispatch scaffolding.** Header parsing, classifier,
+`solver_selection` option, dispatcher that supports only `auto` and
+`nlp` (auto → nlp for now). Ship to verify no regression. *No new
+algorithm.*
 
-Phases 1 and 2 are the minimum that justifies the dispatch
-architecture. Phases 3-4 are independent improvements once the
-scaffolding is in place.
+**Phase 2 — IPM-QP in `pounce-convex`.** Bare IPM-QP (no Mehrotra
+yet); route LP and QP problems to it under `auto`. Compare iteration
+counts and wall-clock against the existing IPM-NLP path on the
+`quadratic`, `bounded-quadratic`, `eq-quadratic` builtins. This is the
+minimum that justifies the `pounce-convex` crate.
+
+**Phase 3 — Mehrotra predictor-corrector + HSDE.** Add the
+predictor-corrector iteration and homogeneous self-dual embedding for
+infeasibility detection and a self-starting iterate. Should reduce
+iteration counts ~30-50% on convex QPs. Validate on Mittelmann LP
+subset and Maros-Mészáros QP set. After this phase `pounce-convex` is
+algorithmically competitive with Clarabel and HiGHS for the LP/QP
+problem class.
+
+**Phase 4 — SOCP via second-order cone.** Add the second-order cone as
+a constraint type. Nesterov-Todd scaling on the SOC block; rotated-SOC
+as a derived form. Validate on Mittelmann SOCP set. This is a cheap
+incremental win once Mehrotra is in place — the symmetric-cone IPM
+machinery extends from LP/QP unchanged.
+
+**Phase 5 — Exponential and power cones (non-symmetric).** Add the
+three-dimensional exponential cone, three-dimensional power cone, and
+generalized power cone via the dual-scaling Mehrotra implementation
+from Chen & Goulart 2023 (arXiv:2305.12275). The augmented system stays
+sparse quasi-definite, so `pounce-linsol` (feral/MA57) covers it
+unchanged. This unlocks geometric programming, logistic regression at
+high accuracy, entropy optimization, KL divergence, and $p$-norm
+constraints. Validate on the GP / entropy / KL benchmark sets used by
+Clarabel and MOSEK.
+
+**Phase 6 — SDP via PSD cone + chordal decomposition (optional).** Add
+the PSD cone with triangular storage, the Nesterov-Todd scaling for
+PSD (the cone is symmetric), and the clique-graph merging strategy of
+Garstka, Cannon & Goulart 2020 (arXiv:1911.05615) as a presolve step.
+This is the biggest lift in the conic family — the chordal
+decomposition is more engineering than the IPM iteration itself —
+and is gated on user demand. Skip until SDP is justified by a real
+application; for one-off SDP needs in the meantime, wrap MOSEK or
+Clarabel as a backend behind the dispatch layer.
+
+The active-set QP track in `crates/pounce-qp/` (currently 59 commits
+on `claude/active-set-sqp-warm-start-BnjLA`) runs *in parallel* and is
+not phase-ordered against `pounce-convex`. It targets a different sweet
+spot — parametric warm-start (MPC, SQP inner solver, B&B node QPs) —
+and ships when its own phases 5a–d are complete.
+
+### Cost summary (rough, single engineer)
+
+| Phase | Effort | Cumulative |
+|------|--------|-----------|
+| 1 — Dispatch | 2–4 weeks | 1 month |
+| 2 — Bare IPM-QP | 3–6 months | 4–7 months |
+| 3 — Mehrotra + HSDE | 2–3 months | 6–10 months |
+| 4 — SOCP | 1–2 months | 7–12 months |
+| 5 — Exp/power cones | 2–4 months | 9–16 months |
+| 6 — SDP + chordal | 6+ months | 15+ months (optional) |
+
+Phases 1–3 are the minimum to justify the dispatch architecture and
+deliver a credible LP/QP solver. Phases 4–5 are the natural extension
+that closes most of the convex-conic-IPM gap to Clarabel. Phase 6 is
+gated on demand.
+
+## Out of scope and why
+
+The "QP solver families" analysis (see
+[`/Users/jkitchin/projects/pounce/.crucible/wiki/concepts/qp-solver-families.org`](../.crucible/wiki/concepts/qp-solver-families.org))
+identifies five production-algorithm families for QP and several more
+for the conic generalizations. POUNCE deliberately *does not* plan to
+build the following families in-house:
+
+### ADMM / operator-splitting (OSQP-class)
+
+The first-order operator-splitting family (OSQP, SCS, ProxQP-ADMM) is
+the right answer for embedded MPC at moderate accuracy (1e-3 to 1e-5)
+and for very large structured QPs. The algorithm is well-documented and
+implementable, but the "leverage feral + consistency with NLP-IPM"
+argument is shallow here: ADMM factors a *different* matrix (typically
+$P + \sigma I + A^\top R A$) and uses it factor-once / solve-many
+without inertia checks. Feral can host the factor but the algorithm
+scaffolding (step-size adaptation, restarts, scaling, polishing) has no
+overlap with POUNCE's filter-IPM core.
+
+*Escape hatch:* wrap OSQP as a dispatch backend (`solver_selection =
+qp-osqp`) if a user needs it. OSQP is MIT-licensed and mature.
+
+### Augmented Lagrangian + semismooth Newton (QPALM-class)
+
+The robust-on-degeneracy family (QPALM, ProxQP-AL). Newer, less
+standardized, and overlaps significantly with what filter-IPM
+regularization already does in `pounce-algorithm`. The use case
+(ill-conditioned QPs with active-set degeneracy) is niche enough that
+POUNCE's IPM-QP path is likely good enough; the marginal value of a
+separate QPALM-class solver is low.
+
+*Escape hatch:* none planned. If the use case becomes a priority,
+revisit; otherwise skip.
+
+### Banded / Riccati IPM for MPC (HPIPM-class)
+
+The MPC-specialist family (HPIPM, FORCES Pro, acados-internal). Uses
+the IPM scaffolding but with banded LDLᵀ via Riccati recursion instead
+of generic sparse factor. The block-tridiagonal MPC structure gives an
+order-of-magnitude factor speedup that generic sparse linalg cannot
+match.
+
+The "feral consistency" argument cuts the *wrong* way here: feral is a
+general sparse symmetric-indefinite backend, and the right linsol for
+banded MPC is a different code path (a banded LDLᵀ implementation) that
+shares the `SparseSymLinearSolverInterface` trait but not feral's
+factorization. Building it would be a separate `pounce-mpc` crate with
+a banded `pounce-linsol` backend; only worth doing if optimal control
+is a deliberate POUNCE target. Currently it is not.
+
+*Escape hatch:* wrap HPIPM if MPC users emerge; or use the active-set
+`pounce-qp` warm-start path, which is the alternative MPC-friendly
+solver and is in flight.
+
+### Simplex (LP)
+
+Was Phase 4 in the original plan; removed. Simplex is the right answer
+for small LPs and warm-started LP sequences (B&B node relaxations,
+sensitivity analysis on degenerate LPs). It needs LU-with-updates,
+which is a substantial engineering effort separate from the
+LDLᵀ-based IPM/conic scaffolding.
+
+*Escape hatch:* IPM-LP from Phase 2/3 covers the medium-to-large LP
+case and benchmarks competitively with HiGHS-IPM on the Mittelmann
+sets. For small LPs and warm-start LP sequences, defer simplex until
+a specific application forces it; alternative is to wrap HiGHS as a
+backend.
+
+### Nonconvex QP / global optimization
+
+Inherently combinatorial (branch-and-bound + SDP relaxation). Out of
+scope for the entire POUNCE direction — neither the NLP-IPM nor the
+convex-IPM addresses global optimization.
+
+*Escape hatch:* none. Use BARON / Gurobi-nonconvex for problems with
+indefinite Hessians where local minima are insufficient.
+
+### Decision principle
+
+The criterion that puts a family *in-house* in `pounce-convex` versus
+*out-of-scope* is the strength of two consistency wins:
+
+1. **Sparse symmetric-indefinite augmented system.** If the per-iteration
+   linear system has the same shape as POUNCE's existing NLP-IPM, feral
+   is reused as-is and the regularization / inertia machinery in
+   `pounce-linsol` is shared. The conic-IPM family (LP/QP/SOCP/SDP/exp/pow)
+   passes this test cleanly; ADMM, AL, and banded-IPM do not.
+2. **`TNLP` + `Solver` + `OptionsList` integration.** Algorithms that
+   accept a `TNLP` problem and slot into the existing dispatch /
+   session / Python / C scaffolding get unified ergonomics for free.
+   IPM-class algorithms inherit this naturally; first-order and
+   operator-splitting methods need the same scaffolding but with
+   different convergence-criterion plumbing.
+
+When both wins are strong (conic IPM family), in-house is right. When
+both are weak (ADMM, AL), wrap or defer. When only one is strong
+(banded IPM), it's a judgment call gated on application demand.
 
 ## Files to modify or add
 
@@ -229,12 +384,19 @@ scaffolding is in place.
 ### Add
 - `crates/pounce-cli/src/dispatch.rs` — `classify_problem(&NlProblem)
   -> ProblemClass` plus the `match`-based router
-- `crates/pounce-convex/` — new crate scaffolded with `solve_lp_ipm`,
-  `solve_qp_ipm`, `solve_simplex` entry points; `src/ipm_qp.rs`
-  (covers LP via H=0) is the first implementation target
+- `crates/pounce-convex/` — new crate scaffolded with `solve_lp_ipm`
+  and `solve_qp_ipm` entry points; `src/ipm.rs` (the shared Mehrotra +
+  HSDE scaffolding) plus `src/cones/` (per-cone barrier, gradient,
+  Hessian, scaling-update — one module per cone: `nonneg.rs`, `soc.rs`,
+  `psd.rs`, `exp.rs`, `pow.rs`, `gpow.rs`). The first implementation
+  target is `cones/nonneg.rs` (covers LP) plus the IPM scaffolding; QP
+  comes for free via the explicit $P$ block in the augmented system.
+  Subsequent cones land incrementally per the phasing above.
 - (no new crate for active-set QP — `crates/pounce-qp/` already exists
   on the `claude/active-set-sqp-warm-start-BnjLA` branch and is the
   dispatch target for `qp-active-set`)
+- (no new crate for ADMM / AL / banded-IPM / simplex — see "Out of
+  scope and why" above)
 
 ## Verification
 
