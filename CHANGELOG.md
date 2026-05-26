@@ -130,6 +130,31 @@ test:
   with adaptive ν clamped by `sqp_l1_penalty_safety` /
   `sqp_l1_penalty_max`. SNOPT-style behaviour.
 
+### Added — AMPL imported (external) function support (issue #49)
+
+`.nl` files that declare imported functions in their `F` segments
+and call them via `f<id> <nargs>` tokens are now solved end-to-end.
+Set `AMPLFUNC` to a newline-separated list of shared-library paths;
+pounce loads each library via the standard AMPL `funcadd_ASL` ABI,
+binds every referenced funcall id to a `(library, name)` pair, and
+emits `TapeOp::Funcall` nodes that participate in full forward /
+reverse / Hessian sweeps (first- and second-derivative requests
+are issued back through the library on demand, with the packed
+upper-triangular Hessian indexed as `hes[lo + hi*(hi+1)/2]`).
+
+Tested against the IDAES `general_helmholtz_external.dylib`
+fixture from the issue report — pounce reaches
+`EXIT: Optimal Solution Found` on the 3-variable Helmholtz
+problem. Without `AMPLFUNC` set, problems that need external
+functions fail with a clear error naming the offending function
+and pointing at `AMPLFUNC`.
+
+Limitations: only the `Tape` (default) AD path supports external
+functions. The `HybridTape` partial-separability path and the
+JIT-style `HessianProgram` path panic on `TapeOp::Funcall` — both
+are alternative routes not on `NlTnlp::new`'s critical path, so
+the current production flow is unaffected.
+
 ### Added — Phase 5a `pounce-qp` crate
 
 Standalone sparse parametric active-set QP solver. Drives the
