@@ -286,6 +286,12 @@ pub struct MuOptions {
     /// Defaults from `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
     pub sigma_max: Number,
     pub sigma_min: Number,
+    /// `adaptive_mu_globalization` — globalization strategy for the
+    /// adaptive μ-selection mode. Mirrors
+    /// `IpAdaptiveMuUpdate.cpp:RegisterOptions`. Default is
+    /// `ObjConstrFilter`; the Mehrotra cascade switches to
+    /// `NeverMonotoneMode` to disable globalization entirely.
+    pub adaptive_mu_globalization: crate::mu::adaptive::AdaptiveMuGlobalization,
 }
 
 impl Default for MuOptions {
@@ -302,6 +308,8 @@ impl Default for MuOptions {
             barrier_tol_factor: 10.0,
             sigma_max: 1e2,
             sigma_min: 1e-6,
+            adaptive_mu_globalization:
+                crate::mu::adaptive::AdaptiveMuGlobalization::ObjConstrFilter,
         }
     }
 }
@@ -479,6 +487,7 @@ impl AlgorithmBuilder {
                 adaptive.barrier_tol_factor = self.mu.barrier_tol_factor;
                 adaptive.sigma_min = self.mu.sigma_min;
                 adaptive.sigma_max = self.mu.sigma_max;
+                adaptive.adaptive_mu_globalization = self.mu.adaptive_mu_globalization;
                 Box::new(adaptive)
             }
         };

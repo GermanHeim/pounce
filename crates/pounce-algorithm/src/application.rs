@@ -1299,13 +1299,22 @@ impl IpoptApplication {
                 builder.init.bound_frac = 0.2;
                 builder.init.slack_bound_push = 10.0;
                 builder.init.slack_bound_frac = 0.2;
-                builder.init.bound_mult_init_val = 1.0;
+                builder.init.bound_mult_init_val = 10.0;
+                builder.init.constr_mult_init_max = 0.0;
                 // `alpha_for_y=bound_mult` — Mehrotra wants the
                 // equality multipliers to advance with the dual
                 // alpha so they stay in step with z/v. Mirrors
-                // upstream `IpAlgBuilder.cpp:Mehrotra`.
+                // upstream `IpIpoptAlg.cpp:InitializeImpl`.
                 builder.line_search.alpha_for_y =
                     crate::line_search::backtracking::AlphaForY::BoundMult;
+                // `adaptive_mu_globalization=never-monotone-mode` —
+                // upstream `IpIpoptAlg.cpp:148-154` enforces this:
+                // Mehrotra disables the globalization switch entirely
+                // (no fallback to monotone mode when convergence
+                // stalls). Required for the unsafeguarded Mehrotra
+                // path to function.
+                builder.mu.adaptive_mu_globalization =
+                    crate::mu::adaptive::AdaptiveMuGlobalization::NeverMonotoneMode;
             }
         }
 
@@ -1335,6 +1344,16 @@ impl IpoptApplication {
                     "loqo" => crate::mu::adaptive::MuOracleKind::Loqo,
                     "probing" => crate::mu::adaptive::MuOracleKind::Probing,
                     _ => crate::mu::adaptive::MuOracleKind::QualityFunction,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("adaptive_mu_globalization", "") {
+            if found {
+                use crate::mu::adaptive::AdaptiveMuGlobalization;
+                builder.mu.adaptive_mu_globalization = match v.as_str() {
+                    "kkt-error" => AdaptiveMuGlobalization::KktError,
+                    "never-monotone-mode" => AdaptiveMuGlobalization::NeverMonotoneMode,
+                    _ => AdaptiveMuGlobalization::ObjConstrFilter,
                 };
             }
         }
