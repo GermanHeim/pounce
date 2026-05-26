@@ -317,6 +317,12 @@ impl FeralSolverInterface {
                 }
                 self.negevals = self.solver.num_negative_eigenvalues() as Index;
                 if check_neg_evals && self.negevals != number_of_neg_evals {
+                    if std::env::var_os("POUNCE_DBG_INERTIA").is_some() {
+                        eprintln!(
+                            "[INERTIA] mismatch: got_neg={} expected_neg={} dim={}",
+                            self.negevals, number_of_neg_evals, self.dim
+                        );
+                    }
                     return ESymSolverStatus::WrongInertia;
                 }
                 // Near-singularity (MA57 CNTL(2) analog). feral's default
