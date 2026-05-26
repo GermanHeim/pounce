@@ -453,6 +453,10 @@ impl HessianProgram {
                     dst,
                     a: v_slot(a as u32),
                 },
+                TapeOp::Funcall { .. } => panic!(
+                    "HessianProgram path does not support AMPL external functions; \
+                     use the Tape (build_with_externals) path instead."
+                ),
             };
             ops.push(op);
         }
@@ -564,6 +568,10 @@ impl HessianProgram {
                         dot_a: dot_slot(a as u32),
                         va: v_slot(a as u32),
                     },
+                    TapeOp::Funcall { .. } => panic!(
+                        "HessianProgram path does not support AMPL external functions; \
+                         use the Tape (build_with_externals) path instead."
+                    ),
                 };
                 ops.push(dot_op);
             }
@@ -709,6 +717,10 @@ impl HessianProgram {
                         va: v_slot(a as u32),
                         dot_a: dot_slot(a as u32),
                     },
+                    TapeOp::Funcall { .. } => panic!(
+                        "HessianProgram path does not support AMPL external functions; \
+                         use the Tape (build_with_externals) path instead."
+                    ),
                 };
                 ops.push(rev_op);
             }
@@ -1180,6 +1192,10 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Cos(a) => {
                 r[a] = true;
             }
+            TapeOp::Funcall { .. } => panic!(
+                "HessianProgram path does not support AMPL external functions; \
+                 use the Tape (build_with_externals) path instead."
+            ),
         }
     }
     r
@@ -1209,6 +1225,10 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Log10(a)
             | TapeOp::Sin(a)
             | TapeOp::Cos(a) => d[a],
+            TapeOp::Funcall { .. } => panic!(
+                "HessianProgram path does not support AMPL external functions; \
+                 use the Tape (build_with_externals) path instead."
+            ),
         };
     }
     d

@@ -147,6 +147,23 @@ A `.sol` is written even when the solve fails, so the
 (`--problem …`) have no `.nl` stub, so they only produce a `.sol`
 when `--sol-output` is given explicitly.
 
+### AMPL imported (external) functions
+
+`.nl` files that import functions from a shared library (declared in
+`F` segments, called via `f<id>` expression tokens) are supported.
+Set `AMPLFUNC` to a newline-separated list of library paths — the
+same convention upstream Ipopt uses — and pounce loads each library
+through the standard AMPL `funcadd_ASL` ABI:
+
+```sh
+AMPLFUNC=$HOME/.idaes/bin/general_helmholtz_external.dylib \
+  pounce helmholtz.nl
+```
+
+Multiple libraries: `AMPLFUNC=$(printf '%s\n%s\n' /path/lib1 /path/lib2) pounce …`.
+Without `AMPLFUNC` set, problems that need external functions fail
+with a clear error naming the offending function.
+
 ### Pyomo
 
 Because pounce speaks the AMPL NL/SOL protocol, it drops into

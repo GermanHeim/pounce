@@ -62,6 +62,31 @@ pub enum Expr {
     /// chain rule), so eval/grad/collect_vars just recurse into the
     /// inner `Expr`.
     Cse(Rc<Expr>),
+    /// AMPL imported (external) function call. `id` matches an entry in
+    /// `NlProblem.imported_funcs`; resolution to a live shared library
+    /// happens when the tape is built (see `nl_external::ExternalResolver`).
+    Funcall { id: usize, args: Vec<FuncallArg> },
+}
+
+/// One positional argument to an AMPL imported function call. AMPL splits
+/// arguments into reals (carried by `ra[]`) and strings (carried by `sa[]`);
+/// `FuncallArg` mirrors that split. Real args are arbitrary expressions.
+#[derive(Debug, Clone)]
+pub enum FuncallArg {
+    Real(Expr),
+    Str(String),
+}
+
+/// An AMPL imported (external) function declaration from a top-level
+/// `F<id> <type> <nargs> <name>` segment.
+#[derive(Debug, Clone)]
+pub struct ImportedFunc {
+    pub id: usize,
+    /// 0 = real-valued, 1 = string-args (per AMPL's funcadd ABI).
+    pub kind: usize,
+    /// Declared arg count. >=0 exact arity; <=-1 means at least `-(nargs+1)`.
+    pub nargs: i64,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +138,10 @@ pub struct NlProblem {
     /// <https://ampl.com/REFS/hooking2.pdf> §6 and the upstream `.nl`
     /// reader in `ref/Ipopt/src/Apps/AmplSolver/AmplTNLP.cpp`.
     pub suffixes: NlSuffixes,
+    /// AMPL imported (external) functions declared via top-level `F` segments.
+    /// Empty unless the `.nl` file calls compiled-C user functions (typically
+    /// emitted by IDAES property packages — see issue #49).
+    pub imported_funcs: Vec<ImportedFunc>,
 }
 
 /// Suffix data parsed out of `S`-segments. Sparse entries are scattered
@@ -167,6 +196,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
     let mut x0 = vec![0.0; n];
     let mut lambda0 = vec![0.0; m];
     let mut suffixes = NlSuffixes::default();
+    let mut imported_funcs: Vec<ImportedFunc> = Vec::new();
 
     while let Some(line) = p.peek_segment_line() {
         let tag = line
@@ -296,7 +326,26 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
             'S' => {
                 parse_suffix_segment(&mut p, n, m, num_obj, &mut suffixes)?;
             }
-            'F' => return Err("F (imported function) segments are not supported".into()),
+            'F' => {
+                // AMPL imported (external) function declaration:
+                // `F<k> <type> <nargs> <name>`.
+                let (hdr, _rest) = p.eat_segment_header()?;
+                let parts: Vec<&str> = hdr.split_whitespace().collect();
+                if parts.is_empty() {
+                    return Err(format!("malformed F-segment header: '{hdr}'"));
+                }
+                let id = parse_segment_index(parts[0], 'F')?;
+                let kind: usize = parts
+                    .get(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let nargs: i64 = parts
+                    .get(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let name = parts.get(3).copied().unwrap_or("").to_string();
+                imported_funcs.push(ImportedFunc { id, kind, nargs, name });
+            }
             other => return Err(format!("unknown .nl segment tag '{other}'")),
         }
     }
@@ -318,6 +367,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         x0,
         lambda0,
         suffixes,
+        imported_funcs,
     })
 }
 
@@ -527,6 +577,8 @@ struct Parser<'a> {
     n: usize,
     m: usize,
     num_obj: usize,
+    /// Number of AMPL imported (external) functions declared in the header.
+    n_funcs: usize,
     /// Common subexpressions (`V` segments). Index in this vec is the
     /// CSE-local index, i.e. the global `.nl` index minus `n`.
     cses: Vec<Rc<Expr>>,
@@ -541,6 +593,7 @@ impl<'a> Parser<'a> {
             n: 0,
             m: 0,
             num_obj: 0,
+            n_funcs: 0,
             cses: Vec::new(),
         }
     }
@@ -587,8 +640,19 @@ impl<'a> Parser<'a> {
         self.m = nums[1].parse().map_err(|e| format!("m: {e}"))?;
         self.num_obj = nums[2].parse().map_err(|e| format!("num_obj: {e}"))?;
 
-        // Lines 3..10 are metadata we don't need — skip 8 more lines.
-        for _ in 0..8 {
+        // Lines 3..5 are metadata we skip.
+        for _ in 0..3 {
+            self.next_data_line()?;
+        }
+        // Line 5 (0-indexed from `g`-header): `nwv nfunc arith flags`
+        let l5 = self.next_data_line()?;
+        let nums5: Vec<&str> = l5.split_whitespace().collect();
+        self.n_funcs = nums5
+            .get(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        // Lines 6..10 are metadata we don't need — skip 4 more lines.
+        for _ in 0..4 {
             self.next_data_line()?;
         }
         Ok(())
@@ -642,10 +706,61 @@ impl<'a> Parser<'a> {
                     .map_err(|e| format!("opcode: {e}"))?;
                 self.parse_opcode(code)
             }
-            'f' | 't' | 'u' => Err(format!("unsupported expression token '{tok}'")),
+            'f' => {
+                // AMPL imported (external) function call: `f<id> <nargs>`
+                // followed by nargs child expressions (or string literals).
+                let rest = &tok[1..];
+                let mut parts = rest.split_whitespace();
+                let id_str = parts
+                    .next()
+                    .ok_or_else(|| format!("missing function id in '{tok}'"))?;
+                let nargs_str = parts
+                    .next()
+                    .ok_or_else(|| format!("missing nargs in '{tok}'"))?;
+                let id: usize = id_str
+                    .parse()
+                    .map_err(|e| format!("bad function id '{id_str}': {e}"))?;
+                let nargs: usize = nargs_str
+                    .parse()
+                    .map_err(|e| format!("bad funcall nargs '{nargs_str}': {e}"))?;
+                let mut args: Vec<FuncallArg> = Vec::with_capacity(nargs);
+                for _ in 0..nargs {
+                    args.push(self.parse_funcall_arg()?);
+                }
+                Ok(Expr::Funcall { id, args })
+            }
+            't' | 'u' => Err(format!("unsupported expression token '{tok}'")),
             other => Err(format!(
                 "unexpected expression token start '{other}': '{tok}'"
             )),
+        }
+    }
+
+    /// Parse one argument to an AMPL imported function. An argument
+    /// is either a normal expression (real-valued) or a string literal
+    /// in the form `h<len>:<chars>`. AMPL emits string args only when the
+    /// function was declared `FUNCADD_STRING_ARGS` (e.g. component name
+    /// or a parameters-directory path for IDAES Helmholtz functions).
+    fn parse_funcall_arg(&mut self) -> Result<FuncallArg, String> {
+        // Peek the next non-blank line so we can route `h...` differently.
+        let saved = self.pos;
+        let raw = self
+            .next_line()
+            .ok_or_else(|| "expected funcall argument".to_string())?;
+        let tok = strip_comment(raw).trim().to_string();
+        let first = tok.chars().next().ok_or("empty funcall arg token")?;
+        if first == 'h' {
+            // `h<len>:<chars>` — strip the `<len>:` prefix.
+            let rest = &tok[1..];
+            let s = match rest.find(':') {
+                Some(i) => rest[i + 1..].to_string(),
+                None => String::new(),
+            };
+            Ok(FuncallArg::Str(s))
+        } else {
+            // Rewind: parse_expr re-consumes the line we just peeked.
+            self.pos = saved;
+            Ok(FuncallArg::Real(self.parse_expr()?))
         }
     }
 
@@ -819,6 +934,10 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
         }
         Expr::Sum(args) => args.iter().map(|a| eval_expr(a, x)).sum(),
         Expr::Cse(body) => eval_expr(body, x),
+        Expr::Funcall { .. } => panic!(
+            "eval_expr: AMPL imported function called without an external resolver; \
+             evaluate through the tape AD path (Tape::build_with_externals) instead"
+        ),
     }
 }
 
@@ -887,6 +1006,9 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
             }
         }
         Expr::Cse(body) => grad_expr(body, x, seed, grad),
+        Expr::Funcall { .. } => panic!(
+            "grad_expr: AMPL imported function called without an external resolver"
+        ),
     }
 }
 
@@ -908,6 +1030,13 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
             }
         }
         Expr::Cse(body) => collect_vars(body, out),
+        Expr::Funcall { args, .. } => {
+            for a in args {
+                if let FuncallArg::Real(e) = a {
+                    collect_vars(e, out);
+                }
+            }
+        }
     }
 }
 
@@ -1078,18 +1207,48 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
 
 impl NlTnlp {
     pub fn new(prob: NlProblem) -> Self {
+        // Resolve any AMPL imported (external) functions. Walk every
+        // nonlinear expression to collect the funcall ids actually
+        // referenced; load the libraries named in $AMPLFUNC and bind
+        // each id to its (library, registered-name) pair so the tape
+        // builder can emit live `TapeOp::Funcall` ops.
+        let mut referenced: BTreeSet<usize> = BTreeSet::new();
+        super::nl_external::collect_funcall_ids(&prob.obj_nonlinear, &mut referenced);
+        for c in &prob.con_nonlinear {
+            super::nl_external::collect_funcall_ids(c, &mut referenced);
+        }
+        let resolver = if referenced.is_empty() {
+            super::nl_external::ExternalResolver::default()
+        } else {
+            super::nl_external::ExternalResolver::build_for_problem(
+                &prob.imported_funcs,
+                &referenced,
+            )
+            .unwrap_or_else(|e| {
+                panic!("failed to resolve AMPL external functions: {e}")
+            })
+        };
+
         // Flatten objective and each constraint into independent
         // summands. Each summand becomes its own `Tape` (CSE bodies
         // are deduplicated within a tape via Rc identity in
         // `Tape::build`; bodies shared across summands are
         // duplicated, which we accept as a simplicity tradeoff).
         let obj_summands = split_top_sums(&prob.obj_nonlinear);
-        let obj_tapes: Vec<Tape> = obj_summands.iter().map(Tape::build).collect();
+        let obj_tapes: Vec<Tape> = obj_summands
+            .iter()
+            .map(|e| Tape::build_with_externals(e, &resolver))
+            .collect();
 
         let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
         for k in 0..prob.m {
             let summands = split_top_sums(&prob.con_nonlinear[k]);
-            con_tapes.push(summands.iter().map(Tape::build).collect());
+            con_tapes.push(
+                summands
+                    .iter()
+                    .map(|e| Tape::build_with_externals(e, &resolver))
+                    .collect(),
+            );
         }
 
         // Hessian-of-Lagrangian sparsity: union of each tape's own

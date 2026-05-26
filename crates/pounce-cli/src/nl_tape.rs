@@ -24,8 +24,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
-use super::nl_reader::{BinOp, Expr, UnaryOp};
+use super::nl_external::{ExternalArg, ExternalLibrary, ExternalResolver};
+use super::nl_reader::{BinOp, Expr, FuncallArg, UnaryOp};
 
 /// One operation in the flattened tape. Operand fields are tape-slot
 /// indices into the same tape; `Var(i)` references problem variable
@@ -47,6 +49,33 @@ pub enum TapeOp {
     Log10(usize),
     Sin(usize),
     Cos(usize),
+    /// AMPL imported (external) function call. The library is kept alive by
+    /// the `Arc`; `name` is the registered function name; `args` carries
+    /// positional arguments where real-valued args reference earlier tape
+    /// slots and string args are inline literals.
+    Funcall {
+        lib: Arc<ExternalLibrary>,
+        name: String,
+        args: Vec<TapeFuncallArg>,
+    },
+}
+
+/// One argument of a `TapeOp::Funcall`. Real arguments are tape-slot indices
+/// (their values come from the running `vals[]` during forward); string
+/// arguments are owned literals (AMPL `h<len>:<chars>` tokens).
+#[derive(Debug, Clone)]
+pub enum TapeFuncallArg {
+    Tape(usize),
+    Str(String),
+}
+
+fn funcall_to_ext_args<'a>(args: &'a [TapeFuncallArg], vals: &[f64]) -> Vec<ExternalArg<'a>> {
+    args.iter()
+        .map(|a| match a {
+            TapeFuncallArg::Tape(idx) => ExternalArg::Real(vals[*idx]),
+            TapeFuncallArg::Str(s) => ExternalArg::Str(s.as_str()),
+        })
+        .collect()
 }
 
 /// A flattened expression tape. The result of evaluation is the value
@@ -57,13 +86,21 @@ pub struct Tape {
 }
 
 impl Tape {
-    /// Build a tape from an `Expr` tree. CSE bodies (`Expr::Cse(rc)`)
-    /// are cached by `Rc` pointer identity so each body is emitted
-    /// once even when referenced many times.
+    /// Build a tape from an `Expr` tree (no AMPL external functions). CSE
+    /// bodies (`Expr::Cse(rc)`) are cached by `Rc` pointer identity so each
+    /// body is emitted once even when referenced many times.
     pub fn build(expr: &Expr) -> Self {
+        Self::build_with_externals(expr, &ExternalResolver::default())
+    }
+
+    /// Build a tape from an `Expr` tree, resolving any `Expr::Funcall`
+    /// nodes through `resolver`. Panics if the expression references a
+    /// funcall id that is not in the resolver — `NlProblem::resolve_externals`
+    /// must populate the resolver before tape construction.
+    pub fn build_with_externals(expr: &Expr, resolver: &ExternalResolver) -> Self {
         let mut ops = Vec::new();
         let mut cache: HashMap<*const Expr, usize> = HashMap::new();
-        build_recursive(expr, &mut ops, &mut cache);
+        build_recursive(expr, &mut ops, &mut cache, resolver);
         Tape { ops }
     }
 
@@ -88,6 +125,13 @@ impl Tape {
                 TapeOp::Log10(a) => vals[*a].log10(),
                 TapeOp::Sin(a) => vals[*a].sin(),
                 TapeOp::Cos(a) => vals[*a].cos(),
+                TapeOp::Funcall { lib, name, args } => {
+                    let call_args = funcall_to_ext_args(args, &vals);
+                    let res = lib.eval(name, &call_args, false, false).unwrap_or_else(|e| {
+                        panic!("external function '{name}' forward eval failed: {e}")
+                    });
+                    res.value
+                }
             };
             vals.push(v);
         }
@@ -184,6 +228,20 @@ impl Tape {
                 TapeOp::Cos(j) => {
                     adj[*j] -= a * vals[*j].sin();
                 }
+                TapeOp::Funcall { lib, name, args } => {
+                    let call_args = funcall_to_ext_args(args, vals);
+                    let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
+                        panic!("external function '{name}' reverse eval failed: {e}")
+                    });
+                    let derivs = res.derivs.expect("want_derivs=true returns derivs");
+                    let mut k = 0usize;
+                    for arg in args {
+                        if let TapeFuncallArg::Tape(idx) = arg {
+                            adj[*idx] += a * derivs[k];
+                            k += 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -258,6 +316,22 @@ impl Tape {
                 TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
                 TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
                 TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+                TapeOp::Funcall { lib, name, args } => {
+                    let call_args = funcall_to_ext_args(args, vals);
+                    let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
+                        panic!("external function '{name}' tangent eval failed: {e}")
+                    });
+                    let derivs = res.derivs.expect("want_derivs=true returns derivs");
+                    let mut acc = 0.0;
+                    let mut k = 0usize;
+                    for arg in args {
+                        if let TapeFuncallArg::Tape(idx) = arg {
+                            acc += derivs[k] * dot[*idx];
+                            k += 1;
+                        }
+                    }
+                    acc
+                }
             };
         }
     }
@@ -285,6 +359,13 @@ impl Tape {
                 TapeOp::Log10(a) => vals[*a].log10(),
                 TapeOp::Sin(a) => vals[*a].sin(),
                 TapeOp::Cos(a) => vals[*a].cos(),
+                TapeOp::Funcall { lib, name, args } => {
+                    let call_args = funcall_to_ext_args(args, &*vals);
+                    let res = lib.eval(name, &call_args, false, false).unwrap_or_else(|e| {
+                        panic!("external function '{name}' forward_into failed: {e}")
+                    });
+                    res.value
+                }
             };
         }
     }
@@ -373,6 +454,22 @@ impl Tape {
                 TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
                 TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
                 TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
+                TapeOp::Funcall { lib, name, args } => {
+                    let call_args = funcall_to_ext_args(args, vals);
+                    let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
+                        panic!("external function '{name}' tangent eval failed: {e}")
+                    });
+                    let derivs = res.derivs.expect("want_derivs=true returns derivs");
+                    let mut acc = 0.0;
+                    let mut k = 0usize;
+                    for arg in args {
+                        if let TapeFuncallArg::Tape(idx) = arg {
+                            acc += derivs[k] * dot[*idx];
+                            k += 1;
+                        }
+                    }
+                    acc
+                }
             };
         }
 
@@ -509,6 +606,31 @@ impl Tape {
                     let su = u.sin();
                     adj[*a] -= w * su;
                     adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+                }
+                TapeOp::Funcall { lib, name, args } => {
+                    let call_args = funcall_to_ext_args(args, vals);
+                    let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
+                        panic!("external function '{name}' 2nd-order eval failed: {e}")
+                    });
+                    let derivs = res.derivs.expect("want_derivs=true returns derivs");
+                    let hes = res.hessian.expect("want_hes=true returns hessian");
+                    let real_tape: Vec<usize> = args
+                        .iter()
+                        .filter_map(|a| match a {
+                            TapeFuncallArg::Tape(t) => Some(*t),
+                            TapeFuncallArg::Str(_) => None,
+                        })
+                        .collect();
+                    for (k, &tk) in real_tape.iter().enumerate() {
+                        adj[tk] += w * derivs[k];
+                        let mut second_term = 0.0;
+                        for (l, &tl) in real_tape.iter().enumerate() {
+                            let (lo, hi) = if k <= l { (k, l) } else { (l, k) };
+                            let h_kl = hes[lo + hi * (hi + 1) / 2];
+                            second_term += h_kl * dot[tl];
+                        }
+                        adj_dot[tk] += wd * derivs[k] + w * second_term;
+                    }
                 }
             }
         }
@@ -680,6 +802,31 @@ impl Tape {
                         adj[*a] -= w * su;
                         adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
                     }
+                    TapeOp::Funcall { lib, name, args } => {
+                        let call_args = funcall_to_ext_args(args, &v);
+                        let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
+                            panic!("external function '{name}' 2nd-order eval failed: {e}")
+                        });
+                        let derivs = res.derivs.expect("want_derivs=true returns derivs");
+                        let hes = res.hessian.expect("want_hes=true returns hessian");
+                        let real_tape: Vec<usize> = args
+                            .iter()
+                            .filter_map(|a| match a {
+                                TapeFuncallArg::Tape(t) => Some(*t),
+                                TapeFuncallArg::Str(_) => None,
+                            })
+                            .collect();
+                        for (k, &tk) in real_tape.iter().enumerate() {
+                            adj[tk] += w * derivs[k];
+                            let mut second_term = 0.0;
+                            for (l, &tl) in real_tape.iter().enumerate() {
+                                let (lo, hi) = if k <= l { (k, l) } else { (l, k) };
+                                let h_kl = hes[lo + hi * (hi + 1) / 2];
+                                second_term += h_kl * dot[tl];
+                            }
+                            adj_dot[tk] += wd * derivs[k] + w * second_term;
+                        }
+                    }
                 }
             }
         }
@@ -749,6 +896,18 @@ impl Tape {
                     emit_self(&var_sets[*a], &mut pairs);
                     var_sets[*a].clone()
                 }
+                TapeOp::Funcall { args, .. } => {
+                    let mut combined: BTreeSet<usize> = BTreeSet::new();
+                    for arg in args {
+                        if let TapeFuncallArg::Tape(t) = arg {
+                            for &vv in &var_sets[*t] {
+                                combined.insert(vv);
+                            }
+                        }
+                    }
+                    emit_self(&combined, &mut pairs);
+                    combined
+                }
             };
             var_sets.push(vset);
         }
@@ -760,6 +919,7 @@ fn build_recursive(
     expr: &Expr,
     ops: &mut Vec<TapeOp>,
     cache: &mut HashMap<*const Expr, usize>,
+    resolver: &ExternalResolver,
 ) -> usize {
     match expr {
         Expr::Const(c) => {
@@ -782,13 +942,13 @@ fn build_recursive(
             // through the much cheaper `Mul`/`Sqrt` arms.
             if let BinOp::Pow = op {
                 if let Some(c) = peek_const(b) {
-                    if let Some(idx) = try_emit_const_pow(a, c, ops, cache) {
+                    if let Some(idx) = try_emit_const_pow(a, c, ops, cache, resolver) {
                         return idx;
                     }
                 }
             }
-            let l = build_recursive(a, ops, cache);
-            let r = build_recursive(b, ops, cache);
+            let l = build_recursive(a, ops, cache, resolver);
+            let r = build_recursive(b, ops, cache, resolver);
             let idx = ops.len();
             ops.push(match op {
                 BinOp::Add => TapeOp::Add(l, r),
@@ -800,7 +960,7 @@ fn build_recursive(
             idx
         }
         Expr::Unary(op, a) => {
-            let v = build_recursive(a, ops, cache);
+            let v = build_recursive(a, ops, cache, resolver);
             let idx = ops.len();
             ops.push(match op {
                 UnaryOp::Neg => TapeOp::Neg(v),
@@ -820,9 +980,9 @@ fn build_recursive(
                 ops.push(TapeOp::Const(0.0));
                 return idx;
             }
-            let mut acc = build_recursive(&args[0], ops, cache);
+            let mut acc = build_recursive(&args[0], ops, cache, resolver);
             for a in &args[1..] {
-                let next = build_recursive(a, ops, cache);
+                let next = build_recursive(a, ops, cache, resolver);
                 let idx = ops.len();
                 ops.push(TapeOp::Add(acc, next));
                 acc = idx;
@@ -840,10 +1000,32 @@ fn build_recursive(
             if let Some(&idx) = cache.get(&key) {
                 idx
             } else {
-                let idx = build_recursive(body, ops, cache);
+                let idx = build_recursive(body, ops, cache, resolver);
                 cache.insert(key, idx);
                 idx
             }
+        }
+        Expr::Funcall { id, args } => {
+            let (lib, name) = resolver
+                .funcs_by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("unresolved AMPL funcall id {id}"));
+            let tape_args: Vec<TapeFuncallArg> = args
+                .iter()
+                .map(|a| match a {
+                    FuncallArg::Real(e) => {
+                        TapeFuncallArg::Tape(build_recursive(e, ops, cache, resolver))
+                    }
+                    FuncallArg::Str(s) => TapeFuncallArg::Str(s.clone()),
+                })
+                .collect();
+            let idx = ops.len();
+            ops.push(TapeOp::Funcall {
+                lib: Arc::clone(lib),
+                name: name.clone(),
+                args: tape_args,
+            });
+            idx
         }
     }
 }
@@ -871,6 +1053,7 @@ fn try_emit_const_pow(
     c: f64,
     ops: &mut Vec<TapeOp>,
     cache: &mut HashMap<*const Expr, usize>,
+    resolver: &ExternalResolver,
 ) -> Option<usize> {
     if c == 0.0 {
         let idx = ops.len();
@@ -878,10 +1061,10 @@ fn try_emit_const_pow(
         return Some(idx);
     }
     if c == 1.0 {
-        return Some(build_recursive(base_expr, ops, cache));
+        return Some(build_recursive(base_expr, ops, cache, resolver));
     }
     if c == 0.5 {
-        let b = build_recursive(base_expr, ops, cache);
+        let b = build_recursive(base_expr, ops, cache, resolver);
         let idx = ops.len();
         ops.push(TapeOp::Sqrt(b));
         return Some(idx);
@@ -898,7 +1081,7 @@ fn try_emit_const_pow(
             ops.push(TapeOp::Const(1.0));
             return Some(idx);
         }
-        let b = build_recursive(base_expr, ops, cache);
+        let b = build_recursive(base_expr, ops, cache, resolver);
         let pos = emit_int_pow(b, n, ops);
         if c < 0.0 {
             // x^-n = 1 / x^n. Saves the powf and its ln branch in
@@ -1328,6 +1511,13 @@ fn count_cse_appearances(
                 count_cse_appearances(body, seen_in_root, counts);
             }
         }
+        Expr::Funcall { args, .. } => {
+            for arg in args {
+                if let FuncallArg::Real(e) = arg {
+                    count_cse_appearances(e, seen_in_root, counts);
+                }
+            }
+        }
     }
 }
 
@@ -1432,7 +1622,7 @@ fn build_into_summand(
                 // `build_recursive(expr, ...)` hits the Cse arm,
                 // emits the body once into prelude, and caches it
                 // in `prelude_map` keyed by this Rc pointer.
-                let pslot = build_recursive(expr, prelude, prelude_map);
+                let pslot = build_recursive(expr, prelude, prelude_map, &ExternalResolver::default());
                 let li = local.len();
                 local.push(SummandOp::Shared(pslot));
                 local_cache.insert(key, li);
@@ -1443,6 +1633,13 @@ fn build_into_summand(
                 local_cache.insert(key, li);
                 li
             }
+        }
+        Expr::Funcall { .. } => {
+            panic!(
+                "HybridTape: AMPL external function calls are not supported on the \
+                 hybrid (partial-separability) tape path. Build with Tape::build_with_externals \
+                 instead."
+            );
         }
     }
 }
@@ -1632,6 +1829,10 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Log10(a)
             | TapeOp::Sin(a)
             | TapeOp::Cos(a) => out[*a].clone(),
+            TapeOp::Funcall { .. } => unreachable!(
+                "HybridTape prelude cannot contain TapeOp::Funcall; \
+                 build_into_summand panics on Expr::Funcall."
+            ),
         };
         out.push(vs);
     }
@@ -1704,6 +1905,10 @@ fn summand_sparsity(
                     emit_self(&var_sets[*a], pairs);
                     var_sets[*a].clone()
                 }
+                TapeOp::Funcall { .. } => unreachable!(
+                    "HybridTape summand cannot contain TapeOp::Funcall; \
+                     build_into_summand panics on Expr::Funcall."
+                ),
             },
         };
         var_sets.push(vset);
@@ -1729,6 +1934,7 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Log10(a)
         | TapeOp::Sin(a)
         | TapeOp::Cos(a) => (Some(*a), None),
+        TapeOp::Funcall { .. } => (None, None),
     }
 }
 
@@ -1762,6 +1968,13 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         TapeOp::Log10(a) => vals[*a].log10(),
         TapeOp::Sin(a) => vals[*a].sin(),
         TapeOp::Cos(a) => vals[*a].cos(),
+        TapeOp::Funcall { lib, name, args } => {
+            let call_args = funcall_to_ext_args(args, vals);
+            let res = lib
+                .eval(name, &call_args, false, false)
+                .unwrap_or_else(|e| panic!("external function '{name}' eval failed: {e}"));
+            res.value
+        }
     }
 }
 
@@ -1830,6 +2043,22 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
         TapeOp::Cos(j) => {
             adj[*j] -= a * vals[*j].sin();
         }
+        TapeOp::Funcall { lib, name, args } => {
+            let call_args = funcall_to_ext_args(args, vals);
+            let res = lib
+                .eval(name, &call_args, true, false)
+                .unwrap_or_else(|e| panic!("external function '{name}' reverse eval failed: {e}"));
+            let derivs = res.derivs.expect("want_derivs=true returns derivs");
+            let mut k = 0usize;
+            for arg in args {
+                if let TapeFuncallArg::Tape(idx) = arg {
+                    adj[*idx] += a * derivs[k];
+                    k += 1;
+                }
+            }
+            let _ = i;
+            let _ = grad;
+        }
     }
 }
 
@@ -1886,6 +2115,23 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
         TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
         TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+        TapeOp::Funcall { lib, name, args } => {
+            let call_args = funcall_to_ext_args(args, vals);
+            let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
+                panic!("external function '{name}' tangent eval failed: {e}")
+            });
+            let derivs = res.derivs.expect("want_derivs=true returns derivs");
+            let mut acc = 0.0;
+            let mut k = 0usize;
+            for arg in args {
+                if let TapeFuncallArg::Tape(idx) = arg {
+                    acc += derivs[k] * dot[*idx];
+                    k += 1;
+                }
+            }
+            let _ = seed_var;
+            acc
+        }
     }
 }
 
@@ -2024,6 +2270,36 @@ fn ror_step(
             adj[*a] -= w * su;
             adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
         }
+        TapeOp::Funcall { lib, name, args } => {
+            let call_args = funcall_to_ext_args(args, vals);
+            let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
+                panic!("external function '{name}' 2nd-order eval failed: {e}")
+            });
+            let derivs = res.derivs.expect("want_derivs=true returns derivs");
+            let hes = res.hessian.expect("want_hes=true returns hessian");
+            let real_tape: Vec<usize> = args
+                .iter()
+                .filter_map(|a| match a {
+                    TapeFuncallArg::Tape(t) => Some(*t),
+                    TapeFuncallArg::Str(_) => None,
+                })
+                .collect();
+            for (k, &tk) in real_tape.iter().enumerate() {
+                adj[tk] += w * derivs[k];
+                let mut second_term = 0.0;
+                for (l, &tl) in real_tape.iter().enumerate() {
+                    let (lo, hi) = if k <= l { (k, l) } else { (l, k) };
+                    let h_kl = hes[lo + hi * (hi + 1) / 2];
+                    second_term += h_kl * dot[tl];
+                }
+                adj_dot[tk] += wd * derivs[k] + w * second_term;
+            }
+            let _ = seed_var;
+            let _ = hess_map;
+            let _ = values;
+            let _ = weight;
+            let _ = i;
+        }
     }
 }
 
@@ -2089,6 +2365,18 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             | TapeOp::Cos(a) => {
                 emit_self(&var_sets[*a], &mut pairs);
                 var_sets[*a].clone()
+            }
+            TapeOp::Funcall { args, .. } => {
+                let mut combined: BTreeSet<usize> = BTreeSet::new();
+                for arg in args {
+                    if let TapeFuncallArg::Tape(t) = arg {
+                        for &vv in &var_sets[*t] {
+                            combined.insert(vv);
+                        }
+                    }
+                }
+                emit_self(&combined, &mut pairs);
+                combined
             }
         };
         var_sets.push(vset);
