@@ -335,16 +335,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                     return Err(format!("malformed F-segment header: '{hdr}'"));
                 }
                 let id = parse_segment_index(parts[0], 'F')?;
-                let kind: usize = parts
-                    .get(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                let nargs: i64 = parts
-                    .get(2)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                let kind: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let nargs: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 let name = parts.get(3).copied().unwrap_or("").to_string();
-                imported_funcs.push(ImportedFunc { id, kind, nargs, name });
+                imported_funcs.push(ImportedFunc {
+                    id,
+                    kind,
+                    nargs,
+                    name,
+                });
             }
             other => return Err(format!("unknown .nl segment tag '{other}'")),
         }
@@ -647,10 +646,7 @@ impl<'a> Parser<'a> {
         // Line 5 (0-indexed from `g`-header): `nwv nfunc arith flags`
         let l5 = self.next_data_line()?;
         let nums5: Vec<&str> = l5.split_whitespace().collect();
-        self.n_funcs = nums5
-            .get(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        self.n_funcs = nums5.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         // Lines 6..10 are metadata we don't need — skip 4 more lines.
         for _ in 0..4 {
             self.next_data_line()?;
@@ -1006,9 +1002,9 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
             }
         }
         Expr::Cse(body) => grad_expr(body, x, seed, grad),
-        Expr::Funcall { .. } => panic!(
-            "grad_expr: AMPL imported function called without an external resolver"
-        ),
+        Expr::Funcall { .. } => {
+            panic!("grad_expr: AMPL imported function called without an external resolver")
+        }
     }
 }
 
@@ -1224,9 +1220,7 @@ impl NlTnlp {
                 &prob.imported_funcs,
                 &referenced,
             )
-            .unwrap_or_else(|e| {
-                panic!("failed to resolve AMPL external functions: {e}")
-            })
+            .unwrap_or_else(|e| panic!("failed to resolve AMPL external functions: {e}"))
         };
 
         // Flatten objective and each constraint into independent

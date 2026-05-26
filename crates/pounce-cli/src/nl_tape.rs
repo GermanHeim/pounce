@@ -127,9 +127,11 @@ impl Tape {
                 TapeOp::Cos(a) => vals[*a].cos(),
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, &vals);
-                    let res = lib.eval(name, &call_args, false, false).unwrap_or_else(|e| {
-                        panic!("external function '{name}' forward eval failed: {e}")
-                    });
+                    let res = lib
+                        .eval(name, &call_args, false, false)
+                        .unwrap_or_else(|e| {
+                            panic!("external function '{name}' forward eval failed: {e}")
+                        });
                     res.value
                 }
             };
@@ -361,9 +363,11 @@ impl Tape {
                 TapeOp::Cos(a) => vals[*a].cos(),
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, &*vals);
-                    let res = lib.eval(name, &call_args, false, false).unwrap_or_else(|e| {
-                        panic!("external function '{name}' forward_into failed: {e}")
-                    });
+                    let res = lib
+                        .eval(name, &call_args, false, false)
+                        .unwrap_or_else(|e| {
+                            panic!("external function '{name}' forward_into failed: {e}")
+                        });
                     res.value
                 }
             };
@@ -1622,7 +1626,8 @@ fn build_into_summand(
                 // `build_recursive(expr, ...)` hits the Cse arm,
                 // emits the body once into prelude, and caches it
                 // in `prelude_map` keyed by this Rc pointer.
-                let pslot = build_recursive(expr, prelude, prelude_map, &ExternalResolver::default());
+                let pslot =
+                    build_recursive(expr, prelude, prelude_map, &ExternalResolver::default());
                 let li = local.len();
                 local.push(SummandOp::Shared(pslot));
                 local_cache.insert(key, li);
@@ -2117,9 +2122,9 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
-            let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
-                panic!("external function '{name}' tangent eval failed: {e}")
-            });
+            let res = lib
+                .eval(name, &call_args, true, false)
+                .unwrap_or_else(|e| panic!("external function '{name}' tangent eval failed: {e}"));
             let derivs = res.derivs.expect("want_derivs=true returns derivs");
             let mut acc = 0.0;
             let mut k = 0usize;

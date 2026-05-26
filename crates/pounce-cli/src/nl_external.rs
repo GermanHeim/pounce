@@ -64,10 +64,13 @@ impl ExternalResolver {
                 .to_string()
         })?;
         let mut libs: Vec<Arc<ExternalLibrary>> = Vec::new();
-        for path_str in amplfunc.split('\n').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        for path_str in amplfunc
+            .split('\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             let path = std::path::Path::new(path_str);
-            let lib = ExternalLibrary::load(path)
-                .map_err(|e| format!("AMPLFUNC: {e}"))?;
+            let lib = ExternalLibrary::load(path).map_err(|e| format!("AMPLFUNC: {e}"))?;
             libs.push(Arc::new(lib));
         }
 
@@ -141,20 +144,20 @@ pub const FUNCADD_RANDOM_VALUED: i32 = 4;
 /// The `arglist` struct from AMPL's `funcadd.h`. Layout must match exactly.
 #[repr(C)]
 pub struct Arglist {
-    pub n: c_int,                        // number of args
-    pub nr: c_int,                       // number of real input args
-    pub at: *mut c_int,                  // argument types
-    pub ra: *mut f64,                    // pure real args (IN/OUT/INOUT)
-    pub sa: *mut *const c_char,          // symbolic IN args
-    pub derivs: *mut f64,                // partial derivatives (if non-null)
-    pub hes: *mut f64,                   // second partials (if non-null)
-    pub dig: *mut c_char,                // skip-derivatives flags
-    pub funcinfo: *mut c_void,           // per-function cookie (set by Addfunc)
-    pub ae: *mut AmplExports,            // points back at our AmplExports
-    pub f: *mut c_void,                  // AMPL-internal
-    pub tva: *mut c_void,                // AMPL-internal
-    pub errmsg: *mut c_char,             // error description set by the function
-    pub tmi: *mut c_void,                // Tempmem cookie
+    pub n: c_int,               // number of args
+    pub nr: c_int,              // number of real input args
+    pub at: *mut c_int,         // argument types
+    pub ra: *mut f64,           // pure real args (IN/OUT/INOUT)
+    pub sa: *mut *const c_char, // symbolic IN args
+    pub derivs: *mut f64,       // partial derivatives (if non-null)
+    pub hes: *mut f64,          // second partials (if non-null)
+    pub dig: *mut c_char,       // skip-derivatives flags
+    pub funcinfo: *mut c_void,  // per-function cookie (set by Addfunc)
+    pub ae: *mut AmplExports,   // points back at our AmplExports
+    pub f: *mut c_void,         // AMPL-internal
+    pub tva: *mut c_void,       // AMPL-internal
+    pub errmsg: *mut c_char,    // error description set by the function
+    pub tmi: *mut c_void,       // Tempmem cookie
     pub private: *mut c_char,
     pub nin: c_int,
     pub nout: c_int,
@@ -180,18 +183,11 @@ pub type AddfuncFn = unsafe extern "C" fn(
 pub type RandSeedSetter = unsafe extern "C" fn(*mut c_void, std::os::raw::c_ulong);
 
 /// Pointer to the `Addrandinit` callback.
-pub type AddrandinitFn = unsafe extern "C" fn(
-    ae: *mut AmplExports,
-    setter: RandSeedSetter,
-    v: *mut c_void,
-);
+pub type AddrandinitFn =
+    unsafe extern "C" fn(ae: *mut AmplExports, setter: RandSeedSetter, v: *mut c_void);
 
 /// Pointer to the `AtReset` callback.
-pub type AtResetFn = unsafe extern "C" fn(
-    ae: *mut AmplExports,
-    f: *mut c_void,
-    v: *mut c_void,
-);
+pub type AtResetFn = unsafe extern "C" fn(ae: *mut AmplExports, f: *mut c_void, v: *mut c_void);
 
 /// The `AmplExports` struct from AMPL's `funcadd.h`. Layout must match
 /// exactly. Function pointers we don't implement are held as `*mut c_void`
@@ -402,7 +398,10 @@ impl ExternalLibrary {
         // has somewhere to deposit them without capturing Rust state.
         REGISTRY_SINK.with(|sink| {
             let mut guard = sink.borrow_mut();
-            assert!(guard.is_none(), "nested ExternalLibrary::load is not supported");
+            assert!(
+                guard.is_none(),
+                "nested ExternalLibrary::load is not supported"
+            );
             *guard = Some(HashMap::new());
         });
 
@@ -515,7 +514,11 @@ impl ExternalLibrary {
         } else {
             0
         };
-        let mut hes_buf: Vec<f64> = if want_hes { vec![0.0; hes_len] } else { Vec::new() };
+        let mut hes_buf: Vec<f64> = if want_hes {
+            vec![0.0; hes_len]
+        } else {
+            Vec::new()
+        };
 
         // Space for a library-set error message.
         let mut errmsg_buf: Vec<c_char> = vec![0; 1024];
@@ -670,11 +673,7 @@ unsafe extern "C" fn trampoline_addfunc(
 
 /// Stub — some libraries ask us to register an AtReset callback. Pyomo logs a
 /// warning and does nothing. We do the same.
-unsafe extern "C" fn trampoline_atreset(
-    _ae: *mut AmplExports,
-    _f: *mut c_void,
-    _v: *mut c_void,
-) {
+unsafe extern "C" fn trampoline_atreset(_ae: *mut AmplExports, _f: *mut c_void, _v: *mut c_void) {
     log::debug!("external library registered an AtReset callback; ignoring");
 }
 
@@ -694,8 +693,7 @@ mod tests {
 
     fn idaes_dylib() -> Option<std::path::PathBuf> {
         let home = std::env::var_os("HOME")?;
-        let p = std::path::PathBuf::from(home)
-            .join(".idaes/bin/general_helmholtz_external.dylib");
+        let p = std::path::PathBuf::from(home).join(".idaes/bin/general_helmholtz_external.dylib");
         if p.exists() {
             Some(p)
         } else {

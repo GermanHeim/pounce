@@ -31,7 +31,11 @@ fn fixture_path() -> PathBuf {
 fn helmholtz_dylib() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let dylib = PathBuf::from(home).join(".idaes/bin/general_helmholtz_external.dylib");
-    if dylib.exists() { Some(dylib) } else { None }
+    if dylib.exists() {
+        Some(dylib)
+    } else {
+        None
+    }
 }
 
 #[test]
@@ -39,9 +43,7 @@ fn pounce_solves_idaes_helmholtz_with_external_functions() {
     let dylib = match helmholtz_dylib() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "skipping: ~/.idaes/bin/general_helmholtz_external.dylib not installed"
-            );
+            eprintln!("skipping: ~/.idaes/bin/general_helmholtz_external.dylib not installed");
             return;
         }
     };
@@ -82,8 +84,7 @@ fn pounce_rejects_external_function_problem_without_amplfunc() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        combined.contains("AMPLFUNC")
-            || combined.to_lowercase().contains("external function"),
+        combined.contains("AMPLFUNC") || combined.to_lowercase().contains("external function"),
         "error should mention AMPLFUNC or external functions, got: {combined}"
     );
 }
