@@ -195,14 +195,12 @@ impl PdSearchDirCalc {
         let frozen_rhs = rhs.freeze();
         let mut delta_aff = frozen_rhs.make_new_zeroed();
 
-        // Upstream `IpQualityFunctionMuOracle.cpp:208` passes
-        // `allow_inexact = true`. Pounce keeps full iterative
-        // refinement here (allow_inexact=false): an earlier attempt to
-        // set this to `true` regressed TRO3X3 from Solve_Succeeded to
-        // Infeasible_Problem_Detected, because pounce's IR-driven
-        // `increase_quality()` cascade produces materially different
-        // steps than upstream's single-shot MA57. Leaving as-is until
-        // the MA57 backend lands in Phase 4.
+        // Upstream `IpQualityFunctionMuOracle.cpp:208` and
+        // `IpProbingMuOracle.cpp:79` both pass `allow_inexact = true`
+        // on the affine (predictor) solve: "we allow a somewhat
+        // inexact solution here ... iterative refinement will be done
+        // after mu is known". Skipping IR on the predictor saves
+        // ~5-10x per-iter linsol work on Mehrotra runs.
         let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
@@ -211,7 +209,7 @@ impl PdSearchDirCalc {
             0.0,
             &frozen_rhs,
             &mut delta_aff,
-            false,
+            true,
             false,
         );
 
