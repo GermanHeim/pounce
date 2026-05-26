@@ -217,10 +217,36 @@ impl PyProblem {
                          before solve(), or drop the working_set argument.",),
                 );
             }
+            // Seed the warm-start payload from the same x0 / dual
+            // inputs the bridge already received. Falling back to
+            // all-zeros here (the previous behavior) silently ignored
+            // the caller's `x0=` argument and started the SQP from
+            // x=0, which on bound-constrained or JAX-built NLPs is
+            // typically far outside the feasible region and produces
+            // a degenerate KKT at iter 0. See gh#57.
+            let bridge_ref = bridge.borrow();
+            let x_warm = bridge_ref.state.x0.clone();
+            let lambda_g_warm = bridge_ref
+                .state
+                .lam0
+                .clone()
+                .unwrap_or_else(|| vec![0.0; self.m as usize]);
+            let zl_warm = bridge_ref.state.z_l0.as_deref();
+            let zu_warm = bridge_ref.state.z_u0.as_deref();
+            // SQP's `lambda_x` follows IPOPT's user-facing
+            // convention `lambda_x = z_l − z_u`. When the caller
+            // supplies neither, leave it at zero.
+            let lambda_x_warm = match (zl_warm, zu_warm) {
+                (Some(zl), Some(zu)) => zl.iter().zip(zu).map(|(l, u)| l - u).collect(),
+                (Some(zl), None) => zl.to_vec(),
+                (None, Some(zu)) => zu.iter().map(|u| -u).collect(),
+                (None, None) => vec![0.0; self.n as usize],
+            };
+            drop(bridge_ref);
             app.set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
-                x: vec![0.0; self.n as usize],
-                lambda_g: vec![0.0; self.m as usize],
-                lambda_x: vec![0.0; self.n as usize],
+                x: x_warm,
+                lambda_g: lambda_g_warm,
+                lambda_x: lambda_x_warm,
                 working: Some(ws),
             });
         }
