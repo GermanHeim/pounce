@@ -653,7 +653,7 @@ impl OrigIpoptNlp {
     /// 1e-8). Cache state is invalidated so subsequent eval calls
     /// produce scaled values.
     pub fn determine_scaling_from_starting_point(
-        &self,
+        &mut self,
         method: ScalingMethod,
         max_gradient: Number,
         min_value: Number,
@@ -853,6 +853,32 @@ impl OrigIpoptNlp {
                     }
                 } else {
                     *self.d_scale.borrow_mut() = None;
+                }
+            }
+        }
+
+        // The algorithm consumes `d_l`/`d_u` alongside `d(x)`, which is
+        // now scaled by `d_scale`. Bring the bounds into the same scaled
+        // space so feasibility checks compare like with like; otherwise
+        // a row whose Jacobian shrinks under scaling (e.g. `1/150220`)
+        // would see a bound `cl=4e6` that the scaled `d` cannot reach,
+        // producing phantom infeasibility (gh#54). Upstream Ipopt does
+        // this via `Pd_L_->TransMultVector(scaling.apply_vec_d(...))` in
+        // `IpOrigIpoptNLP::Initialize`.
+        let cls = self.adapter.borrow().classification().clone();
+        if let Some(dd) = self.d_scale.borrow().as_ref() {
+            if let Some(d_l) = Rc::get_mut(&mut self.d_l) {
+                let xs = d_l.values_mut();
+                for (i, slot) in xs.iter_mut().enumerate() {
+                    let d_idx = cls.d_l_map[i] as usize;
+                    *slot *= dd[d_idx];
+                }
+            }
+            if let Some(d_u) = Rc::get_mut(&mut self.d_u) {
+                let xs = d_u.values_mut();
+                for (i, slot) in xs.iter_mut().enumerate() {
+                    let d_idx = cls.d_u_map[i] as usize;
+                    *slot *= dd[d_idx];
                 }
             }
         }
@@ -2174,6 +2200,115 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    /// One variable with a single one-sided inequality whose Jacobian
+    /// magnitude trips `nlp_scaling_max_gradient` (default 100): coeff
+    /// 1000, bound `lo = 4e6`. After gradient-based scaling the
+    /// `d_scale` for this row is `100/1000 = 0.1`, so the algorithm
+    /// sees `d(x) = 0.1 * 1000 * x`. The bound must be scaled to
+    /// `0.1 * 4e6 = 4e5` to match — otherwise the algorithm reads a
+    /// 10x-too-large lower bound and reports phantom infeasibility
+    /// (gh#54).
+    struct OneIneqLargeOffset;
+    impl TNLP for OneIneqLargeOffset {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1.0e19;
+            b.x_u[0] = 1.0e19;
+            b.g_l[0] = 4.0e6;
+            b.g_u[0] = 2.0e19;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 5000.0;
+            true
+        }
+        fn eval_f(&mut self, _: &[Number], _: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = 1000.0 * x[0];
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, m: SparsityRequest<'_>) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => values[0] = 1000.0,
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            _: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            _: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    #[test]
+    fn gradient_based_scaling_scales_d_l_and_d_u() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneIneqLargeOffset));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let mut nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+
+        // Pre-scaling: d_l carries the raw user bound 4e6.
+        assert_eq!(nlp.d_l().dim(), 1);
+        let pre = nlp
+            .d_l()
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .unwrap()
+            .values()[0];
+        assert_eq!(pre, 4.0e6);
+
+        nlp.determine_scaling_from_starting_point(ScalingMethod::GradientBased, 100.0, 1e-8);
+
+        // d_scale = 100 / 1000 = 0.1; bound must scale in step.
+        let post = nlp
+            .d_l()
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .unwrap()
+            .values()[0];
+        assert!(
+            (post - 4.0e5).abs() < 1e-9,
+            "d_l should be scaled by d_scale=0.1; got {}",
+            post
+        );
+
+        // And d(x) at the starting point must agree with the scaled
+        // bound: d(5000) = 0.1 * 1000 * 5000 = 5e5 > 4e5, so feasible.
+        let x = dense_x(&[5000.0], nlp.x_space());
+        let mut d = nlp.d_space().make_new_dense();
+        nlp.eval_d(&x, &mut d);
+        assert!(
+            (d.values()[0] - 5.0e5).abs() < 1e-6,
+            "scaled d(x) mismatch; got {}",
+            d.values()[0]
+        );
+        assert!(d.values()[0] >= post, "starting point must be feasible in scaled space");
     }
 
     #[test]
