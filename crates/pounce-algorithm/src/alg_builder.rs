@@ -206,6 +206,12 @@ pub struct InitOptions {
     /// `bound_mult_init_method`: `"constant"` (default) or `"mu-based"`
     /// (matches upstream's `IpDefaultIterateInitializer.cpp`).
     pub bound_mult_init_method: String,
+    /// `least_square_init_primal` — replace the user's starting `x`
+    /// with the min-norm primal that satisfies the linearized
+    /// constraints. Used by the Mehrotra cascade in `application.rs`
+    /// to drop iter-0 primal infeasibility on LP-shaped problems.
+    /// Mirrors upstream `IpDefaultIterateInitializer.cpp:200-222`.
+    pub least_square_init_primal: bool,
 }
 
 impl Default for InitOptions {
@@ -218,6 +224,7 @@ impl Default for InitOptions {
             constr_mult_init_max: 1e3,
             bound_mult_init_val: 1.0,
             bound_mult_init_method: "constant".into(),
+            least_square_init_primal: false,
         }
     }
 }
@@ -547,6 +554,7 @@ impl AlgorithmBuilder {
             d.constr_mult_init_max = self.init.constr_mult_init_max;
             d.bound_mult_init_val = self.init.bound_mult_init_val;
             d.bound_mult_init_method = self.init.bound_mult_init_method.clone();
+            d.least_square_init_primal = self.init.least_square_init_primal;
             Box::new(d)
         };
 

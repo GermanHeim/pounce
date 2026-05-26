@@ -1315,6 +1315,14 @@ impl IpoptApplication {
                 // path to function.
                 builder.mu.adaptive_mu_globalization =
                     crate::mu::adaptive::AdaptiveMuGlobalization::NeverMonotoneMode;
+                // `least_square_init_primal=yes` — upstream
+                // `IpIpoptAlg.cpp:182` enables this for the Mehrotra
+                // cascade. Replaces the user's starting `x` with the
+                // min-norm primal that satisfies the linearized
+                // equality+inequality constraints. Critical on
+                // LP-shaped problems where the user's starting point
+                // can be wildly infeasible (e.g. nuffield2_trap).
+                builder.init.least_square_init_primal = true;
             }
         }
 
@@ -1625,6 +1633,11 @@ impl IpoptApplication {
         if let Ok((v, found)) = self.options.get_string_value("bound_mult_init_method", "") {
             if found {
                 builder.init.bound_mult_init_method = v;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("least_square_init_primal", "") {
+            if found {
+                builder.init.least_square_init_primal = v == "yes";
             }
         }
         builder

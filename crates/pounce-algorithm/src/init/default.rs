@@ -32,8 +32,8 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
-use crate::kkt::aug_system_solver::AugSystemSolver;
-use pounce_common::types::Number;
+use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
+use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::Vector;
 use std::cell::RefCell;
@@ -53,6 +53,14 @@ pub struct DefaultIterateInitializer {
     /// matching upstream `IpDefaultIterateInitializer.cpp:334-341`. If
     /// `None`, the LS step is skipped (y_c, y_d remain at zero).
     pub eq_mult_calculator: Option<Box<dyn EqMultCalculator>>,
+    /// `least_square_init_primal` — port of
+    /// `IpDefaultIterateInitializer.cpp:200-222`. When on, the
+    /// initializer replaces the user's starting `x` with the min-norm
+    /// solution of the linearized equality + inequality constraints,
+    /// then pushes that to the interior. Used by the Mehrotra cascade
+    /// (`IpIpoptAlg.cpp:182`) to dramatically reduce iter-0 primal
+    /// infeasibility on LP-shaped problems.
+    pub least_square_init_primal: bool,
 }
 
 impl Default for DefaultIterateInitializer {
@@ -66,6 +74,7 @@ impl Default for DefaultIterateInitializer {
             bound_mult_init_val: 1.0,
             bound_mult_init_method: "constant".into(),
             eq_mult_calculator: None,
+            least_square_init_primal: false,
         }
     }
 }
@@ -97,6 +106,93 @@ impl DefaultIterateInitializer {
     /// The `Px_L`/`Px_U` selection-matrix dance in upstream collapses
     /// to exactly this per-coordinate formula once the bounds are
     /// expanded to the full primal space.
+    /// Port of `IpDefaultIterateInitializer.cpp:CalculateLeastSquarePrimals`.
+    /// Solves the augmented system with `W=0`, `D_x=I`, `D_s=I` and
+    /// `rhs=(0, 0, curr_c, curr_d)`; on success returns the min-norm
+    /// `x_ls` (negated per upstream `x_ls.Scal(-1)`). `s_ls` is
+    /// discarded — upstream overwrites it with `trial_d(trial_x)`
+    /// after pushing `x_ls` to the interior, so we save the allocation
+    /// and re-evaluate `d` later in `set_initial_iterates`. Assumes
+    /// `data.curr.x` already holds the point at which the constraints
+    /// and Jacobians should be linearized.
+    fn calculate_least_square_primals(
+        &self,
+        cq: &IpoptCqHandle,
+        _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        aug_solver: &mut dyn AugSystemSolver,
+        n_x: Index,
+    ) -> Option<Rc<dyn Vector>> {
+        let cq_ref = cq.borrow();
+        let curr_c = cq_ref.curr_c();
+        let curr_d = cq_ref.curr_d();
+        let j_c = cq_ref.curr_jac_c();
+        let j_d = cq_ref.curr_jac_d();
+        // `zeroW` pins the W triplet structure in the linsol so later
+        // calls with the real Hessian write into the right slots
+        // (mirrors `IpLeastSquareMults`).
+        let zero_w = cq_ref.curr_exact_hessian();
+        drop(cq_ref);
+
+        let n_s = curr_d.dim();
+        let n_c = curr_c.dim();
+        let n_d = curr_d.dim();
+
+        let mut rhs_x = DenseVectorSpace::new(n_x).make_new_dense();
+        rhs_x.set(0.0);
+        let mut rhs_s = DenseVectorSpace::new(n_s).make_new_dense();
+        rhs_s.set(0.0);
+        let mut rhs_c_v = curr_c.make_new();
+        rhs_c_v.copy(&*curr_c);
+        let mut rhs_d_v = curr_d.make_new();
+        rhs_d_v.copy(&*curr_d);
+
+        let mut sol_x = DenseVectorSpace::new(n_x).make_new_dense();
+        let mut sol_s = DenseVectorSpace::new(n_s).make_new_dense();
+        let mut sol_c = DenseVectorSpace::new(n_c).make_new_dense();
+        let mut sol_d = DenseVectorSpace::new(n_d).make_new_dense();
+
+        let coeffs = AugSysCoeffs {
+            w: Some(&*zero_w),
+            w_factor: 0.0,
+            d_x: None,
+            delta_x: 1.0,
+            d_s: None,
+            delta_s: 1.0,
+            j_c: &*j_c,
+            d_c: None,
+            delta_c: 0.0,
+            j_d: &*j_d,
+            d_d: None,
+            delta_d: 0.0,
+        };
+        let aug_rhs = AugSysRhs {
+            rhs_x: &rhs_x,
+            rhs_s: &rhs_s,
+            rhs_c: &*rhs_c_v,
+            rhs_d: &*rhs_d_v,
+        };
+        let mut sol = AugSysSol {
+            sol_x: &mut sol_x,
+            sol_s: &mut sol_s,
+            sol_c: &mut sol_c,
+            sol_d: &mut sol_d,
+        };
+
+        // Upstream `IpDefaultIterateInitializer.cpp:381` passes
+        // check_NegEVals=true, numberOfNegEVals=n_c+n_d (matches the
+        // expected inertia of the W=0,Dx=I,Ds=I augmented system).
+        let num_eq = n_c + n_d;
+        let check_neg = aug_solver.provides_inertia();
+        let status = aug_solver.solve(&coeffs, &aug_rhs, &mut sol, check_neg, num_eq);
+        if !matches!(status, pounce_linsol::ESymSolverStatus::Success) {
+            return None;
+        }
+        // Upstream `IpDefaultIterateInitializer.cpp:386-387`:
+        // x_ls.Scal(-1); s_ls.Scal(-1).
+        sol_x.scal(-1.0);
+        Some(Rc::new(sol_x))
+    }
+
     pub fn push_to_interior(
         bound_push: Number,
         bound_frac: Number,
@@ -152,6 +248,50 @@ impl IterateInitializer for DefaultIterateInitializer {
         // by walking the dense slot.
         let mut x = DenseVectorSpace::new(n_x).make_new_dense();
         nlp.borrow_mut().get_starting_x(&mut x);
+
+        // Step 1.5 (optional): replace `x` with the min-norm solution
+        // of the linearized equality + inequality constraints. Port of
+        // `IpDefaultIterateInitializer.cpp:200-222`. The Mehrotra
+        // cascade in `application.rs` turns this on; it is the iter-0
+        // feasibility correction that lets Mehrotra LPs land on the
+        // central path on the first solve. Failure leaves `x` as-is.
+        if self.least_square_init_primal && (n_yc + n_yd) > 0 {
+            // Stage a partial iterate with the user's starting `x` and
+            // zeros for everything else, so `cq.curr_*` evaluates at
+            // the right point.
+            let mut x_stage = DenseVectorSpace::new(n_x).make_new_dense();
+            x_stage.copy(&x);
+            let mut s_zero = DenseVectorSpace::new(n_s).make_new_dense();
+            s_zero.set(0.0);
+            let mut y_c_zero = DenseVectorSpace::new(n_yc).make_new_dense();
+            y_c_zero.set(0.0);
+            let mut y_d_zero = DenseVectorSpace::new(n_yd).make_new_dense();
+            y_d_zero.set(0.0);
+            let mut z_l_zero = DenseVectorSpace::new(n_zl).make_new_dense();
+            z_l_zero.set(0.0);
+            let mut z_u_zero = DenseVectorSpace::new(n_zu).make_new_dense();
+            z_u_zero.set(0.0);
+            let mut v_l_zero = DenseVectorSpace::new(n_vl).make_new_dense();
+            v_l_zero.set(0.0);
+            let mut v_u_zero = DenseVectorSpace::new(n_vu).make_new_dense();
+            v_u_zero.set(0.0);
+            let stage_iv = IteratesVector::new(
+                Rc::new(x_stage),
+                Rc::new(s_zero),
+                Rc::new(y_c_zero),
+                Rc::new(y_d_zero),
+                Rc::new(z_l_zero),
+                Rc::new(z_u_zero),
+                Rc::new(v_l_zero),
+                Rc::new(v_u_zero),
+            );
+            data.borrow_mut().set_curr(stage_iv);
+
+            if let Some(x_ls) = self.calculate_least_square_primals(cq, nlp, aug_solver, n_x) {
+                x.copy(&*x_ls);
+            }
+        }
+
         {
             let nlp_ref = nlp.borrow();
             push_x_into_interior(
