@@ -1286,6 +1286,12 @@ impl IpoptApplication {
                 builder.mehrotra_algorithm = true;
                 builder.mu_strategy = MuStrategyChoice::Adaptive;
                 builder.mu_oracle = crate::mu::adaptive::MuOracleKind::Probing;
+                // `accept_every_trial_step` short-circuits the alpha
+                // loop / filter — Mehrotra steps would otherwise be
+                // rejected by the filter on LP-shaped problems because
+                // the barrier objective is non-monotone along the
+                // corrector. Mirrors upstream `IpAlgBuilder.cpp:Mehrotra`.
+                builder.line_search.accept_every_trial_step = true;
             }
         }
 
@@ -1333,6 +1339,13 @@ impl IpoptApplication {
                     "penalty" => LineSearchChoice::Penalty,
                     _ => LineSearchChoice::Filter,
                 };
+            }
+        }
+        // `accept_every_trial_step` — direct user override. Parsed
+        // after the Mehrotra cascade so an explicit `no` still wins.
+        if let Ok((v, found)) = self.options.get_string_value("accept_every_trial_step", "") {
+            if found {
+                builder.line_search.accept_every_trial_step = v == "yes";
             }
         }
         // `nlp_scaling_method` is consumed NLP-side in
@@ -1649,6 +1662,9 @@ pub fn feral_config_from_options(
     }
     if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
         cfg.singular_pivot_floor = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("feral_pivtol", "") {
+        cfg.pivtol = v;
     }
     cfg
 }

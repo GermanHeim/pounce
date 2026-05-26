@@ -143,6 +143,13 @@ pub struct BacktrackingLineSearch {
     in_soft_resto_phase: bool,
     /// Count of consecutive soft-resto iterations taken so far.
     soft_resto_counter: i32,
+
+    /// `accept_every_trial_step` — when true, the alpha loop and filter
+    /// are bypassed: the FTB-truncated `alpha_init`/`alpha_dual` step
+    /// is set as the trial and accepted unconditionally. Mirrors
+    /// upstream's `IpBacktrackingLineSearch.cpp:accept_every_trial_step_`
+    /// short-circuit at the top of `FindAcceptableTrialPoint`.
+    pub accept_every_trial_step: bool,
 }
 
 /// Internal alpha-loop outcome. The watchdog wrapper translates this
@@ -200,6 +207,7 @@ impl BacktrackingLineSearch {
             max_soft_resto_iters: 10,
             in_soft_resto_phase: false,
             soft_resto_counter: 0,
+            accept_every_trial_step: false,
         }
     }
 
@@ -254,6 +262,29 @@ impl BacktrackingLineSearch {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Outcome {
+        // ---- `accept_every_trial_step` short-circuit. Mirrors the
+        // unglobalized path at the top of
+        // `IpBacktrackingLineSearch::FindAcceptableTrialPoint` (when
+        // `accept_every_trial_step_` is true): no soft-resto, no
+        // watchdog, no alpha loop, no filter update — just take the
+        // FTB-truncated step (`alpha_init`, `alpha_dual` already
+        // include the fraction-to-the-boundary rule) and accept it
+        // unconditionally. Used by the Mehrotra cascade.
+        if self.accept_every_trial_step {
+            let curr = match data.borrow().curr.clone() {
+                Some(c) => c,
+                None => return Outcome::Failed,
+            };
+            let trial_iv = scaled_step(&curr, delta, alpha_init, alpha_dual);
+            let mut d = data.borrow_mut();
+            d.set_trial(trial_iv);
+            d.info_alpha_primal = alpha_init;
+            d.info_alpha_dual = alpha_dual;
+            d.info_alpha_primal_char = ' ';
+            d.info_ls_count = 1;
+            return Outcome::Accepted;
+        }
+
         // ---- Soft-resto continuation. Already inside the phase: bump
         // the counter, bail to full restoration once it exceeds
         // `max_soft_resto_iters`, otherwise take another damped

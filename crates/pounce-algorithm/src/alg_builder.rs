@@ -285,6 +285,14 @@ pub struct LineSearchOptions {
     /// `max_soft_resto_iters` — cap on consecutive soft-resto
     /// iterations before full restoration is forced.
     pub max_soft_resto_iters: Index,
+    /// `accept_every_trial_step` — short-circuits the filter / alpha
+    /// loop and accepts the full fraction-to-the-boundary step every
+    /// outer iteration. Mirrors upstream's
+    /// `IpBacktrackingLineSearch::accept_every_trial_step_`. Drops
+    /// global convergence guarantees; only safe for problems where the
+    /// Newton step is already a descent step (LPs, convex QPs). The
+    /// Mehrotra cascade in `application.rs` flips this on.
+    pub accept_every_trial_step: bool,
 }
 
 impl Default for LineSearchOptions {
@@ -294,6 +302,7 @@ impl Default for LineSearchOptions {
             watchdog_trial_iter_max: 3,
             soft_resto_pderror_reduction_factor: 1.0 - 1e-4,
             max_soft_resto_iters: 10,
+            accept_every_trial_step: false,
         }
     }
 }
@@ -449,6 +458,7 @@ impl AlgorithmBuilder {
         line_search.soft_resto_pderror_reduction_factor =
             self.line_search.soft_resto_pderror_reduction_factor;
         line_search.max_soft_resto_iters = self.line_search.max_soft_resto_iters;
+        line_search.accept_every_trial_step = self.line_search.accept_every_trial_step;
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
             Box::new(OptErrorConvCheck {
