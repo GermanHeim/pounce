@@ -82,6 +82,12 @@ jobs:
           manylinux: manylinux2014
           args: --release --out dist
           sccache: "true"
+          # The manylinux container only mounts the workspace, so the
+          # host-side `../feral` clone isn't visible. Re-clone inside
+          # the container at the sibling path the `[patch.crates-io]`
+          # entry expects (`/io/../feral` = `/feral`).
+          before-script-linux: |
+            git clone --depth 1 https://github.com/jkitchin/feral.git /feral
       - name: Install + smoke (Python API + CLI)
         run: |
           ls -l python/dist/
