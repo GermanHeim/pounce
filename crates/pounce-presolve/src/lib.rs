@@ -49,7 +49,9 @@ pub mod reduction_frame;
 pub mod redundant;
 
 pub use bound_tighten::{tighten_bounds, LinearRow, TightenReport, INF_BOUND};
+pub use components::{SquareComponent, SquareComponents};
 pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReason};
+pub use dulmage_mendelsohn::{DMPart, DulmageMendelsohnPartition};
 pub use licq::{licq_check, EqRow, LicqVerdict};
 pub use options::{register_options, AuxiliaryCouplingPolicy, LicqAction, PresolveOptions};
 pub use reduction_frame::{ReductionFrame, ReductionStack};
