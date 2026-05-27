@@ -211,9 +211,11 @@ fn inf_norm(v: &[Number]) -> Number {
 /// In-place LU factorisation with partial pivoting on a row-major
 /// `n × n` matrix. Returns the row-permutation vector `piv` where
 /// `piv[k]` is the original row now in position `k`. Pivots smaller
-/// than `1e-14 * (max entry in column k below row k)` are treated
-/// as zero and cause a `Singular` error.
-fn lu_factor_partial_pivot(a: &mut [Number], n: usize) -> Result<Vec<usize>, ()> {
+/// than `1e-14` are treated as zero and cause a `Singular` error.
+///
+/// `pub(crate)` so PR 7's `reduction_frame` can reuse it for the
+/// multiplier-recovery solve.
+pub(crate) fn lu_factor_partial_pivot(a: &mut [Number], n: usize) -> Result<Vec<usize>, ()> {
     let mut piv: Vec<usize> = (0..n).collect();
     for k in 0..n {
         // Find pivot row.
@@ -252,7 +254,7 @@ fn lu_factor_partial_pivot(a: &mut [Number], n: usize) -> Result<Vec<usize>, ()>
 /// Solve `LUx = Pb` in place using a factorisation from
 /// [`lu_factor_partial_pivot`]. `b` is overwritten with the
 /// solution.
-fn lu_solve(a: &[Number], piv: &[usize], b: &mut [Number], n: usize) {
+pub(crate) fn lu_solve(a: &[Number], piv: &[usize], b: &mut [Number], n: usize) {
     // Permute b.
     let mut pb = vec![0.0; n];
     for i in 0..n {
