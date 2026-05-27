@@ -522,6 +522,207 @@ mod tests {
         assert_eq!(err, BlockSolveError::TooLarge);
     }
 
+    /// Small LCG-based RNG used by the fuzz tests below. Captures
+    /// state in a struct (not a closure) so the borrow checker
+    /// doesn't trip when we use both `next_u64` and `unit` in the
+    /// same scope.
+    struct FuzzRng(u64);
+    impl FuzzRng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 32
+        }
+        fn unit(&mut self) -> Number {
+            let raw = (self.next_u64() & 0x3fff_ffff) as Number;
+            raw / (1u64 << 29) as Number - 1.0
+        }
+    }
+
+    /// Random-linear fuzz: build a well-conditioned random N×N
+    /// linear system, solve it both via the public Newton path AND
+    /// via a direct LU solve, and check they agree to 1e-10. This
+    /// catches bugs in Newton's wrapper logic (line search,
+    /// convergence check, RHS sign, scratch buffer reuse) without
+    /// being a tautology — the LU pieces are tested independently
+    /// in the LU tests above.
+    #[test]
+    fn newton_fuzz_random_linear_vs_direct_lu() {
+        let mut rng = FuzzRng::new(0xfeed_face_dead_b33f);
+
+        let mut tested = 0usize;
+        for _ in 0..30 {
+            let n = 1 + (rng.next_u64() % 6) as usize; // N ∈ [1, 6]
+                                                       // Build A with strong diagonal + small off-diag entries so
+                                                       // it's well-conditioned regardless of the random seed.
+            let mut a = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = if i == j {
+                        2.0 + rng.unit().abs()
+                    } else {
+                        0.3 * rng.unit()
+                    };
+                }
+            }
+            // Pick a random target solution x_star and form b = A x_star.
+            let x_star: Vec<Number> = (0..n).map(|_| rng.unit()).collect();
+            let mut b = vec![0.0; n];
+            for i in 0..n {
+                let mut s = 0.0;
+                for j in 0..n {
+                    s += a[i * n + j] * x_star[j];
+                }
+                b[i] = s;
+            }
+
+            // Reference: direct LU solve.
+            let mut a_ref = a.clone();
+            let piv = lu_factor_partial_pivot(&mut a_ref, n).expect("well-conditioned");
+            let mut x_lu = b.clone();
+            lu_solve(&a_ref, &piv, &mut x_lu, n);
+
+            // Newton: F(x) = A x - b = 0.
+            struct LinSys {
+                a: Vec<Number>,
+                b: Vec<Number>,
+                n: usize,
+            }
+            impl BlockEquations for LinSys {
+                fn dim(&self) -> usize {
+                    self.n
+                }
+                fn eval(&mut self, x: &[Number], f: &mut [Number]) -> bool {
+                    for i in 0..self.n {
+                        let mut s = -self.b[i];
+                        for j in 0..self.n {
+                            s += self.a[i * self.n + j] * x[j];
+                        }
+                        f[i] = s;
+                    }
+                    true
+                }
+                fn jacobian(&mut self, _x: &[Number], j: &mut [Number]) -> bool {
+                    j.copy_from_slice(&self.a);
+                    true
+                }
+            }
+            let mut eqs = LinSys {
+                a: a.clone(),
+                b: b.clone(),
+                n,
+            };
+            // Start at the origin so Newton actually iterates.
+            let x0 = vec![0.0; n];
+            let opt = BlockSolveOptions::default();
+            let out = DampedNewtonSolver
+                .solve(&x0, &mut eqs, &opt)
+                .expect("Newton converges on a well-conditioned linear system");
+
+            // Agreement: Newton's solution matches the direct LU
+            // solution (which also matches x_star, by construction).
+            let mut max_diff: Number = 0.0;
+            for i in 0..n {
+                max_diff = max_diff.max((out.x[i] - x_lu[i]).abs());
+                max_diff = max_diff.max((out.x[i] - x_star[i]).abs());
+            }
+            assert!(
+                max_diff < 1e-10,
+                "Newton vs LU disagreement of {max_diff:.3e} on n={n}"
+            );
+            tested += 1;
+        }
+        assert_eq!(tested, 30);
+    }
+
+    /// Mildly-nonlinear fuzz: `F(x) = A (x - x*) + ε (x - x*) ⊙ (x - x*)`
+    /// has a root at `x = x*` and a non-trivial Jacobian. Verify
+    /// Newton finds the root starting close enough.
+    #[test]
+    fn newton_fuzz_nonlinear_quadratic_root() {
+        let mut rng = FuzzRng::new(0xcafe_b00b_1337_5eed);
+
+        for trial in 0..20 {
+            let n = 1 + (rng.next_u64() % 4) as usize; // N ∈ [1, 4]
+                                                       // Diagonally dominant A.
+            let mut a = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = if i == j {
+                        3.0 + rng.unit().abs()
+                    } else {
+                        0.2 * rng.unit()
+                    };
+                }
+            }
+            let x_star: Vec<Number> = (0..n).map(|_| rng.unit()).collect();
+            // ε small enough that linearization at x_star ≈ A.
+            let eps = 0.1;
+
+            struct Nl {
+                a: Vec<Number>,
+                x_star: Vec<Number>,
+                eps: Number,
+                n: usize,
+            }
+            impl BlockEquations for Nl {
+                fn dim(&self) -> usize {
+                    self.n
+                }
+                fn eval(&mut self, x: &[Number], f: &mut [Number]) -> bool {
+                    for i in 0..self.n {
+                        let mut s = 0.0;
+                        for j in 0..self.n {
+                            s += self.a[i * self.n + j] * (x[j] - self.x_star[j]);
+                        }
+                        let dxi = x[i] - self.x_star[i];
+                        s += self.eps * dxi * dxi;
+                        f[i] = s;
+                    }
+                    true
+                }
+                fn jacobian(&mut self, x: &[Number], j: &mut [Number]) -> bool {
+                    for i in 0..self.n {
+                        for k in 0..self.n {
+                            let mut v = self.a[i * self.n + k];
+                            if i == k {
+                                v += 2.0 * self.eps * (x[i] - self.x_star[i]);
+                            }
+                            j[i * self.n + k] = v;
+                        }
+                    }
+                    true
+                }
+            }
+
+            // Start near x_star.
+            let x0: Vec<Number> = x_star.iter().map(|&v| v + 0.1 * rng.unit()).collect();
+            let mut eqs = Nl {
+                a: a.clone(),
+                x_star: x_star.clone(),
+                eps,
+                n,
+            };
+            let opt = BlockSolveOptions::default();
+            let out = DampedNewtonSolver
+                .solve(&x0, &mut eqs, &opt)
+                .unwrap_or_else(|e| panic!("trial {trial} (n={n}): {e:?}"));
+            let mut max_err: Number = 0.0;
+            for i in 0..n {
+                max_err = max_err.max((out.x[i] - x_star[i]).abs());
+            }
+            assert!(
+                max_err < 1e-7,
+                "trial {trial}: Newton missed root by {max_err:.3e}"
+            );
+        }
+    }
+
     #[test]
     fn newton_eval_failure_propagates() {
         struct Failing;

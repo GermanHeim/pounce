@@ -475,6 +475,111 @@ mod tests {
         }
     }
 
+    /// Fuzz: build a synthetic full-space KKT solution `(x*, λ*)`,
+    /// declare a random subset of variables "fixed" and the
+    /// matching subset of rows "dropped", then verify the multiplier
+    /// recovery reproduces the original λ at the dropped indices to
+    /// within 1e-10.
+    struct FuzzRng(u64);
+    impl FuzzRng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 32
+        }
+        fn unit(&mut self) -> Number {
+            let raw = (self.next_u64() & 0x3fff_ffff) as Number;
+            raw / (1u64 << 29) as Number - 1.0
+        }
+    }
+
+    #[test]
+    fn frame_fuzz_recover_reproduces_synthetic_lambda() {
+        let mut rng = FuzzRng::new(0xface_b00c_baad_f00d);
+
+        for trial in 0..30 {
+            let n_vars = 2 + (rng.next_u64() % 3) as usize; // 2..=4
+            let n_rows = n_vars;
+            let k = 1 + (rng.next_u64() % n_vars as u64) as usize;
+
+            let mut perm_v: Vec<usize> = (0..n_vars).collect();
+            for i in (1..n_vars).rev() {
+                let j = (rng.next_u64() as usize) % (i + 1);
+                perm_v.swap(i, j);
+            }
+            let mut fixed_vars: Vec<usize> = perm_v[..k].to_vec();
+            fixed_vars.sort_unstable();
+
+            let mut perm_r: Vec<usize> = (0..n_rows).collect();
+            for i in (1..n_rows).rev() {
+                let j = (rng.next_u64() as usize) % (i + 1);
+                perm_r.swap(i, j);
+            }
+            let mut dropped_rows: Vec<usize> = perm_r[..k].to_vec();
+            dropped_rows.sort_unstable();
+
+            let mut jac = vec![0.0; n_rows * n_vars];
+            for r in 0..n_rows {
+                for c in 0..n_vars {
+                    jac[r * n_vars + c] = 0.2 * rng.unit();
+                }
+            }
+            for (&r, &c) in dropped_rows.iter().zip(fixed_vars.iter()) {
+                jac[r * n_vars + c] += 2.5;
+            }
+
+            let lambda_star: Vec<Number> = (0..n_rows).map(|_| rng.unit()).collect();
+            let mut grad_f = vec![0.0; n_vars];
+            let fixed_set: std::collections::BTreeSet<usize> = fixed_vars.iter().copied().collect();
+            for i in 0..n_vars {
+                if fixed_set.contains(&i) {
+                    let mut s = 0.0;
+                    for r in 0..n_rows {
+                        s += jac[r * n_vars + i] * lambda_star[r];
+                    }
+                    grad_f[i] = s;
+                } else {
+                    grad_f[i] = rng.unit();
+                }
+            }
+
+            let dropped_set: std::collections::BTreeSet<usize> =
+                dropped_rows.iter().copied().collect();
+            let mut lambda_given = vec![0.0; n_rows];
+            for r in 0..n_rows {
+                if !dropped_set.contains(&r) {
+                    lambda_given[r] = lambda_star[r];
+                }
+            }
+
+            let frame = ReductionFrame::new(
+                n_vars,
+                n_rows,
+                fixed_vars.clone(),
+                vec![0.0; k],
+                dropped_rows.clone(),
+            );
+
+            let lam_dropped = frame
+                .recover_dropped_multipliers(&grad_f, &jac, &lambda_given)
+                .unwrap_or_else(|e| panic!("trial {trial}: {e:?}"));
+
+            for (idx, &r) in dropped_rows.iter().enumerate() {
+                let expected = lambda_star[r];
+                let got = lam_dropped[idx];
+                assert!(
+                    (expected - got).abs() < 1e-10,
+                    "trial {trial}: λ[{r}] expected {expected:.6}, got {got:.6}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn reduction_stack_push_top_iter() {
         let mut stack = ReductionStack::default();
