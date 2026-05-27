@@ -1,0 +1,4 @@
+# AMPL `.sol` files are produced alongside their `.nl` inputs when the
+# integration tests run the solver against a fixture. They're not
+# fixtures themselves; the tests parse them in-process and discard.
+*.sol
