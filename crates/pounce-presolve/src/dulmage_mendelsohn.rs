@@ -71,6 +71,8 @@ impl DulmageMendelsohnPartition {
     ///     linearity: None,
     ///     one_based: false,
     ///     eq_tol: 1e-12,
+    ///     excluded_vars: None,
+    ///     excluded_rows: None,
     /// };
     /// let inc = EqualityIncidence::from_probe(&p);
     /// let m = hopcroft_karp(&inc);

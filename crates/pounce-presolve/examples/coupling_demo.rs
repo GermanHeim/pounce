@@ -48,6 +48,8 @@ fn main() {
         linearity: None,
         one_based: false,
         eq_tol: 1e-12,
+        excluded_vars: None,
+        excluded_rows: None,
     };
 
     let ineq = InequalityIncidence::from_probe(&probe);

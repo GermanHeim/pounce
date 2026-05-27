@@ -76,6 +76,8 @@ pub fn objective_gradient_support(grad_f: &[Number], zero_tol: Number) -> HashSe
 ///     linearity: None,
 ///     one_based: false,
 ///     eq_tol: 1e-12,
+///     excluded_vars: None,
+///     excluded_rows: None,
 /// };
 /// let ineq = InequalityIncidence::from_probe(&p);
 /// let block = BlockTriangularBlock { eq_rows: vec![0], cols: vec![0, 1] };
@@ -126,6 +128,8 @@ mod tests {
             linearity: None,
             one_based: false,
             eq_tol: 1e-12,
+            excluded_vars: None,
+            excluded_rows: None,
         }
     }
 

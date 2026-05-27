@@ -35,6 +35,14 @@ pub struct ProbeView<'a> {
     /// Tolerance for `g_l[i] == g_u[i]`. Rows tighter than this are
     /// treated as equalities.
     pub eq_tol: Number,
+    /// PR 13: per-variable mask. `true` entries are excluded from
+    /// the incidence graph. Used to drop trivially-fixed variables
+    /// (`x_l[i] == x_u[i]`) before matching.
+    pub excluded_vars: Option<&'a [bool]>,
+    /// PR 13: per-row mask. `true` entries are excluded from the
+    /// incidence graph. Used to drop free rows and trivially-slack
+    /// inequalities before matching.
+    pub excluded_rows: Option<&'a [bool]>,
 }
 
 /// CSR-style bipartite adjacency: equality rows ↔ variables.
@@ -61,6 +69,8 @@ pub struct ProbeView<'a> {
 ///     linearity: None,
 ///     one_based: false,
 ///     eq_tol: 1e-12,
+///     excluded_vars: None,
+///     excluded_rows: None,
 /// };
 /// let inc = EqualityIncidence::from_probe(&p);
 /// assert_eq!(inc.n_eq_rows(), 1);
@@ -83,9 +93,15 @@ impl EqualityIncidence {
     /// Build an incidence graph from a probe.
     pub fn from_probe(p: &ProbeView<'_>) -> Self {
         // 1. Identify equality rows in inner-row index order.
+        //    Excludes any row marked in `excluded_rows` (PR 13).
         let mut eq_row_inner_idx: Vec<usize> = Vec::new();
         let mut inner_to_eq: Vec<Option<usize>> = vec![None; p.m_rows];
         for (i, slot) in inner_to_eq.iter_mut().enumerate() {
+            if let Some(mask) = p.excluded_rows {
+                if mask[i] {
+                    continue;
+                }
+            }
             if (p.g_u[i] - p.g_l[i]).abs() <= p.eq_tol {
                 *slot = Some(eq_row_inner_idx.len());
                 eq_row_inner_idx.push(i);
@@ -119,6 +135,12 @@ impl EqualityIncidence {
             };
             if j >= p.n_vars {
                 continue;
+            }
+            // PR 13: drop entries touching trivially-fixed vars.
+            if let Some(mask) = p.excluded_vars {
+                if mask[j] {
+                    continue;
+                }
             }
             per_row[eq_k].push(j);
         }
@@ -183,10 +205,17 @@ impl InequalityIncidence {
     /// [`EqualityIncidence`] uses; we just invert the equality
     /// filter.
     pub fn from_probe(p: &ProbeView<'_>) -> Self {
-        // 1. Identify inequality rows.
+        // 1. Identify inequality rows. Excludes any row marked in
+        //    `excluded_rows` (PR 13: free rows + trivially-slack
+        //    inequalities).
         let mut ineq_row_inner_idx: Vec<usize> = Vec::new();
         let mut inner_to_ineq: Vec<Option<usize>> = vec![None; p.m_rows];
         for (i, slot) in inner_to_ineq.iter_mut().enumerate() {
+            if let Some(mask) = p.excluded_rows {
+                if mask[i] {
+                    continue;
+                }
+            }
             if (p.g_u[i] - p.g_l[i]).abs() > p.eq_tol {
                 *slot = Some(ineq_row_inner_idx.len());
                 ineq_row_inner_idx.push(i);
@@ -221,6 +250,12 @@ impl InequalityIncidence {
             };
             if j >= p.n_vars {
                 continue;
+            }
+            // PR 13: drop entries touching trivially-fixed vars.
+            if let Some(mask) = p.excluded_vars {
+                if mask[j] {
+                    continue;
+                }
             }
             per_row[ineq_k].push(j);
         }
@@ -314,6 +349,8 @@ mod tests {
             linearity: None,
             one_based: false,
             eq_tol: 1e-12,
+            excluded_vars: None,
+            excluded_rows: None,
         }
     }
 
@@ -377,6 +414,8 @@ mod tests {
             linearity: None,
             one_based: false,
             eq_tol: 1e-12,
+            excluded_vars: None,
+            excluded_rows: None,
         };
         let inc = EqualityIncidence::from_probe(&p);
         assert_eq!(inc.neighbors(0), &[0]);

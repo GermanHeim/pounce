@@ -51,6 +51,10 @@ pub struct Phase0Probe<'a> {
     pub eq_tol: Number,
     pub x_probe: &'a [Number],
     pub grad_f: &'a [Number],
+    /// PR 13: variable bounds — needed for the trivial-elimination
+    /// pre-pass that runs before incidence is built.
+    pub x_l: &'a [Number],
+    pub x_u: &'a [Number],
 }
 
 /// Callback the orchestrator uses for nonlinear block solves.
@@ -118,6 +122,50 @@ pub fn run_auxiliary_phase0(
 
     let start = std::time::Instant::now();
 
+    // -- 0. Trivial-elimination pre-pass (PR 13). Identifies fixed
+    // variables, free rows, and trivially-slack inequalities so the
+    // incidence graph below doesn't see them.
+    let trivial = crate::trivial_elim::find_trivial_eliminations(
+        probe.n_vars,
+        probe.n_rows,
+        probe.x_l,
+        probe.x_u,
+        probe.g_l,
+        probe.g_u,
+        probe.jac_irow,
+        probe.jac_jcol,
+        probe.jac_values,
+        probe.linearity,
+        probe.one_based,
+        probe.eq_tol,
+        1e19,
+    );
+    diag.trivially_fixed_vars = trivial.fixed_vars.len() as Index;
+    diag.trivially_free_rows = trivial.free_rows.len() as Index;
+    diag.trivially_slack_rows = trivial.trivially_slack_rows.len() as Index;
+    let excluded_vars_buf: Option<Vec<bool>> = if trivial.fixed_vars.is_empty() {
+        None
+    } else {
+        let mut v = vec![false; probe.n_vars];
+        for &i in &trivial.fixed_vars {
+            v[i] = true;
+        }
+        Some(v)
+    };
+    let excluded_rows_buf: Option<Vec<bool>> =
+        if trivial.free_rows.is_empty() && trivial.trivially_slack_rows.is_empty() {
+            None
+        } else {
+            let mut v = vec![false; probe.n_rows];
+            for &r in &trivial.free_rows {
+                v[r] = true;
+            }
+            for &r in &trivial.trivially_slack_rows {
+                v[r] = true;
+            }
+            Some(v)
+        };
+
     // -- 1. Build the structural graphs ------------------------------
     let pv = ProbeView {
         n_vars: probe.n_vars,
@@ -130,6 +178,8 @@ pub fn run_auxiliary_phase0(
         linearity: Some(probe.linearity),
         one_based: probe.one_based,
         eq_tol: probe.eq_tol,
+        excluded_vars: excluded_vars_buf.as_deref(),
+        excluded_rows: excluded_rows_buf.as_deref(),
     };
     let t_inc = std::time::Instant::now();
     let eq_inc = EqualityIncidence::from_probe(&pv);
@@ -660,6 +710,11 @@ mod tests {
         x_probe: &'a [Number],
         grad_f: &'a [Number],
     ) -> Phase0Probe<'a> {
+        // PR 13: default variable bounds are wide open so the
+        // trivial-elimination pre-pass doesn't accidentally mark
+        // anything as fixed in tests that don't care about bounds.
+        let x_l: Vec<Number> = vec![-1e19; n_vars];
+        let x_u: Vec<Number> = vec![1e19; n_vars];
         Phase0Probe {
             n_vars,
             n_rows,
@@ -674,6 +729,8 @@ mod tests {
             eq_tol: 1e-12,
             x_probe,
             grad_f,
+            x_l: Box::leak(x_l.into_boxed_slice()),
+            x_u: Box::leak(x_u.into_boxed_slice()),
         }
     }
 
@@ -949,6 +1006,8 @@ mod tests {
         let linearity = vec![Linearity::Linear; n];
         let x_probe = vec![0.0; n];
         let grad_f = vec![0.0; n];
+        let x_l_def = vec![-1e19; n];
+        let x_u_def = vec![1e19; n];
         Phase0Probe {
             n_vars: n,
             n_rows: n,
@@ -963,6 +1022,8 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: Box::leak(x_probe.into_boxed_slice()),
             grad_f: Box::leak(grad_f.into_boxed_slice()),
+            x_l: Box::leak(x_l_def.into_boxed_slice()),
+            x_u: Box::leak(x_u_def.into_boxed_slice()),
         }
     }
 
@@ -1008,6 +1069,8 @@ mod tests {
         let linearity = vec![Linearity::Linear; n];
         let x_probe = vec![0.0; n];
         let grad_f = vec![0.0; n];
+        let x_l_def = vec![-1e19; n];
+        let x_u_def = vec![1e19; n];
         let probe = Phase0Probe {
             n_vars: n,
             n_rows: n,
@@ -1022,6 +1085,8 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: &x_probe,
             grad_f: &grad_f,
+            x_l: &x_l_def,
+            x_u: &x_u_def,
         };
 
         let mut opts = PresolveOptions::defaults();
@@ -1048,5 +1113,53 @@ mod tests {
             let expected_approx = (i + 1) as Number / 5.0;
             assert!((frame.fixed_values[k] - expected_approx).abs() < 0.2);
         }
+    }
+
+    /// PR 13: diagnostics counts populate when the trivial pre-pass
+    /// finds anything. Build a probe with one fixed variable, one
+    /// free row, and one trivially-slack inequality.
+    #[test]
+    fn phase0_trivial_pre_pass_populates_diagnostics() {
+        // 2 vars, 2 rows.
+        // Var 0: x_l = x_u = 1.0 (fixed).
+        // Var 1: x_l = 0, x_u = 1 (free).
+        // Row 0: equality x[0] + x[1] = 0  (so g_l = g_u = 0).
+        // Row 1: inequality x[1] in [-100, 100]  → trivially slack
+        //        (activity range [0, 1] is strictly inside).
+        // No free rows here (g_l/g_u both finite).
+        let x_l = [1.0, 0.0];
+        let x_u = [1.0, 1.0];
+        let g_l = [0.0, -100.0];
+        let g_u = [0.0, 100.0];
+        let jac_irow: [Index; 3] = [0, 0, 1];
+        let jac_jcol: [Index; 3] = [0, 1, 1];
+        let jac_vals = [1.0, 1.0, 1.0];
+        let g_probe = [1.0, 0.5];
+        let linearity = [Linearity::Linear, Linearity::Linear];
+        let x_probe = [1.0, 0.5];
+        let grad_f = [0.0, 0.0];
+        let probe = Phase0Probe {
+            n_vars: 2,
+            n_rows: 2,
+            jac_irow: &jac_irow,
+            jac_jcol: &jac_jcol,
+            jac_values: &jac_vals,
+            g_l: &g_l,
+            g_u: &g_u,
+            g_at_probe: &g_probe,
+            linearity: &linearity,
+            one_based: false,
+            eq_tol: 1e-12,
+            x_probe: &x_probe,
+            grad_f: &grad_f,
+            x_l: &x_l,
+            x_u: &x_u,
+        };
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let plan = run_auxiliary_phase0(&opts, &probe, None, None);
+        assert_eq!(plan.diagnostics.trivially_fixed_vars, 1);
+        assert_eq!(plan.diagnostics.trivially_free_rows, 0);
+        assert_eq!(plan.diagnostics.trivially_slack_rows, 1);
     }
 }

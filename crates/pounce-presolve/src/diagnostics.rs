@@ -88,6 +88,17 @@ pub struct AuxiliaryPreprocessingDiagnostics {
     pub max_accepted_block_dim: Index,
     /// One entry per rejected candidate, in encounter order.
     pub rejection_reasons: Vec<AuxiliaryRejectionReason>,
+    /// PR 13: count of variables the trivial-elimination pre-pass
+    /// identified as already fixed (`x_l[i] == x_u[i]`). Excluded
+    /// from the incidence graph.
+    pub trivially_fixed_vars: Index,
+    /// PR 13: count of rows the trivial pre-pass identified as
+    /// "free" (`g_l <= -big && g_u >= +big`). Excluded.
+    pub trivially_free_rows: Index,
+    /// PR 13: count of linear inequality rows already implied by
+    /// the variable box. Excluded from the inequality incidence so
+    /// they don't trip coupling classification.
+    pub trivially_slack_rows: Index,
 }
 
 impl fmt::Display for AuxiliaryPreprocessingDiagnostics {

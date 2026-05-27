@@ -143,6 +143,8 @@ fn one_trial(seed: u64) {
         linearity: None,
         one_based: false,
         eq_tol: 1e-12,
+        excluded_vars: None,
+        excluded_rows: None,
     };
 
     // Stage 1: incidence + matching.

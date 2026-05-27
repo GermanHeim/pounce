@@ -47,6 +47,7 @@ pub mod matching;
 pub mod options;
 pub mod reduction_frame;
 pub mod redundant;
+pub mod trivial_elim;
 
 pub use block_solve::{
     BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
@@ -410,6 +411,8 @@ impl PresolveTnlp {
                 eq_tol: 1e-12,
                 x_probe: &x_probe,
                 grad_f: &grad_f_probe,
+                x_l: &x_l,
+                x_u: &x_u,
             };
             // Adapter: wrap `self.inner` so the orchestrator can
             // call eval_g / eval_jac_g for nonlinear blocks.
@@ -470,13 +473,7 @@ impl PresolveTnlp {
         let linear_rows: Vec<LinearRow> = linear_row_map
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| {
-                if row_kept_inner[i] {
-                    r.clone()
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(i, r)| if row_kept_inner[i] { r.clone() } else { None })
             .collect();
 
         // Phase 1: bound tightening using linear rows.
