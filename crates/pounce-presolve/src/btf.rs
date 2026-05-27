@@ -412,4 +412,245 @@ mod tests {
             assert_eq!(btf.blocks.len(), 1);
         }
     }
+
+    /// Independent SCC reference via Floyd-Warshall transitive
+    /// closure. For each pair `(i, j)`, two nodes share an SCC iff
+    /// they reach each other. Buckets nodes by their (sorted-rep)
+    /// reach-mate set; one bucket per SCC. Returns the SCCs in the
+    /// elimination order our BTF promises — a block must appear
+    /// strictly before any block it depends on, ties broken by
+    /// smallest node id.
+    fn reference_sccs_in_elim_order(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+        let n = adj.len();
+        // reach[i][j] = "is there a non-empty path i ⇒ j (length ≥ 1)?"
+        let mut reach = vec![vec![false; n]; n];
+        for (i, row) in reach.iter_mut().enumerate().take(n) {
+            for &j in &adj[i] {
+                row[j] = true;
+            }
+        }
+        // Floyd-Warshall transitive closure.
+        for k in 0..n {
+            for i in 0..n {
+                if reach[i][k] {
+                    for j in 0..n {
+                        if reach[k][j] {
+                            reach[i][j] = true;
+                        }
+                    }
+                }
+            }
+        }
+        // Pair nodes that mutually reach each other (or coincide).
+        let mut comp_of = vec![usize::MAX; n];
+        let mut comps: Vec<Vec<usize>> = Vec::new();
+        for i in 0..n {
+            if comp_of[i] != usize::MAX {
+                continue;
+            }
+            let id = comps.len();
+            let mut bucket = vec![i];
+            comp_of[i] = id;
+            for j in (i + 1)..n {
+                let mutual = (reach[i][j] || i == j) && (reach[j][i] || i == j);
+                if mutual {
+                    bucket.push(j);
+                    comp_of[j] = id;
+                }
+            }
+            bucket.sort_unstable();
+            comps.push(bucket);
+        }
+        // Build the condensation DAG and topologically sort.
+        let n_c = comps.len();
+        let mut c_adj: Vec<std::collections::BTreeSet<usize>> =
+            vec![std::collections::BTreeSet::new(); n_c];
+        let mut indeg = vec![0usize; n_c];
+        for (i, row) in adj.iter().enumerate().take(n) {
+            for &j in row {
+                let ci = comp_of[i];
+                let cj = comp_of[j];
+                if ci != cj && c_adj[ci].insert(cj) {
+                    indeg[cj] += 1;
+                }
+            }
+        }
+        // Kahn's algorithm — but elimination order means SINKS come
+        // first (a node with no outgoing edges in the condensation
+        // has nothing to depend on, so it solves first). So we run
+        // Kahn on the reverse graph.
+        let mut rev_indeg = vec![0usize; n_c];
+        for adj_set in &c_adj {
+            for &j in adj_set {
+                rev_indeg[j] += 1;
+            }
+        }
+        // Out-degree in condensation = "depends on N others".
+        // Sinks have out-degree 0.
+        let mut out_deg = vec![0usize; n_c];
+        for (i, adj_set) in c_adj.iter().enumerate().take(n_c) {
+            out_deg[i] = adj_set.len();
+            let _ = i; // silence unused-var lints in odd builds
+        }
+        let mut queue: std::collections::BTreeSet<usize> =
+            (0..n_c).filter(|&i| out_deg[i] == 0).collect();
+        let mut order: Vec<Vec<usize>> = Vec::with_capacity(n_c);
+        // Reverse the condensation so we can pop-by-incoming-edge.
+        let mut rev_adj: Vec<Vec<usize>> = vec![Vec::new(); n_c];
+        for (i, adj_set) in c_adj.iter().enumerate().take(n_c) {
+            for &j in adj_set {
+                rev_adj[j].push(i);
+            }
+        }
+        let _ = rev_indeg;
+        while let Some(&c) = queue.iter().next() {
+            queue.remove(&c);
+            order.push(comps[c].clone());
+            for &pred in &rev_adj[c] {
+                out_deg[pred] -= 1;
+                if out_deg[pred] == 0 {
+                    queue.insert(pred);
+                }
+            }
+        }
+        assert_eq!(order.len(), n_c, "topological sort lost an SCC");
+        order
+    }
+
+    /// Fuzz against the Floyd-Warshall SCC reference. For each
+    /// component of 30 random graphs we check:
+    ///   - same number of blocks as the reference;
+    ///   - blocks contain the same node sets in the same order;
+    ///   - elimination-order invariant: every cross-block reference
+    ///     points to an earlier block;
+    ///   - sum of block sizes equals component size.
+    #[test]
+    fn btf_fuzz_invariants() {
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = || -> u64 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 32
+        };
+
+        for trial in 0..30 {
+            let n_rows = 1 + (next() % 4) as usize;
+            let n_vars = 1 + (next() % 4) as usize;
+            let max_edges = (n_rows * n_vars).min(8);
+            let n_edges = (next() % (max_edges as u64 + 1)) as usize;
+
+            let mut edge_set = std::collections::BTreeSet::<(usize, usize)>::new();
+            let mut draws = 0usize;
+            while edge_set.len() < n_edges {
+                let r = (next() % n_rows as u64) as usize;
+                let v = (next() % n_vars as u64) as usize;
+                edge_set.insert((r, v));
+                draws += 1;
+                assert!(draws < 10_000);
+            }
+            let edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
+
+            let inc = eq_inc(n_vars, n_rows, &edges);
+            let m = hopcroft_karp(&inc);
+            let dm = DulmageMendelsohnPartition::from_matching(&inc, &m);
+            let comps = SquareComponents::of_square_part(&inc, &m, &dm);
+
+            for (ci, comp) in comps.components.iter().enumerate() {
+                let our_btf = BlockTriangularForm::of_component(&inc, &m, comp);
+                let n = comp.eq_rows.len();
+
+                // Build the same dependency adjacency BTF uses, in
+                // local-node space (0..n), for the reference impl.
+                let mut col_to_node: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::with_capacity(n);
+                for (i, &r) in comp.eq_rows.iter().enumerate() {
+                    let c = m.row_to_var[r].expect("matched");
+                    col_to_node.insert(c, i);
+                }
+                let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+                for (i, &r) in comp.eq_rows.iter().enumerate() {
+                    let own_col = m.row_to_var[r].expect("matched");
+                    for &c in inc.neighbors(r) {
+                        if c == own_col {
+                            continue;
+                        }
+                        if let Some(&j) = col_to_node.get(&c) {
+                            if j != i {
+                                adj[i].push(j);
+                            }
+                        }
+                    }
+                    adj[i].sort_unstable();
+                    adj[i].dedup();
+                }
+
+                let ref_sccs = reference_sccs_in_elim_order(&adj);
+
+                // Same number of blocks.
+                assert_eq!(
+                    our_btf.blocks.len(),
+                    ref_sccs.len(),
+                    "trial {trial} comp {ci}: block count differs (ours={}, ref={})",
+                    our_btf.blocks.len(),
+                    ref_sccs.len(),
+                );
+
+                // Same node sets per block. We compare sets of node
+                // indices (0..n in component-local space); ties in
+                // SCC ordering can break either way but the SCC
+                // PARTITIONS should be identical.
+                for (bi, (ours, theirs)) in our_btf.blocks.iter().zip(ref_sccs.iter()).enumerate() {
+                    let ours_nodes: std::collections::BTreeSet<usize> = ours
+                        .eq_rows
+                        .iter()
+                        .map(|r| {
+                            comp.eq_rows
+                                .iter()
+                                .position(|x| x == r)
+                                .expect("row in component")
+                        })
+                        .collect();
+                    let theirs_nodes: std::collections::BTreeSet<usize> =
+                        theirs.iter().copied().collect();
+                    assert_eq!(
+                        ours_nodes, theirs_nodes,
+                        "trial {trial} comp {ci} block {bi}: \
+                         node sets differ (ours={:?}, ref={:?})",
+                        ours_nodes, theirs_nodes
+                    );
+                }
+
+                // Sum of block sizes equals component size.
+                let sum: usize = our_btf.blocks.iter().map(|b| b.eq_rows.len()).sum();
+                assert_eq!(sum, n, "trial {trial} comp {ci}: block sizes don't add up");
+
+                // Elimination order: every cross-block ref is earlier.
+                let mut col_block = std::collections::HashMap::new();
+                for (b_idx, block) in our_btf.blocks.iter().enumerate() {
+                    for &c in &block.cols {
+                        col_block.insert(c, b_idx);
+                    }
+                }
+                for (k, block) in our_btf.blocks.iter().enumerate() {
+                    for &r in &block.eq_rows {
+                        for &c in inc.neighbors(r) {
+                            if !col_block.contains_key(&c) {
+                                continue; // col is outside this component
+                            }
+                            if block.cols.contains(&c) {
+                                continue;
+                            }
+                            let owner = col_block[&c];
+                            assert!(
+                                owner < k,
+                                "trial {trial} comp {ci}: block {k} uses col {c} \
+                                 from later block {owner}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

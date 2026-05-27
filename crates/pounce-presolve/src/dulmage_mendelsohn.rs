@@ -361,4 +361,134 @@ mod tests {
         assert_eq!(dm.square_cols, vec![0]);
         assert!(dm.under_cols.is_empty());
     }
+
+    /// Fuzz against the formal DM invariants. For 30 random small
+    /// bipartite graphs we check, on the output of `from_matching`:
+    ///
+    /// 1. **Partition is disjoint and complete** — every row and
+    ///    column appears in exactly one list, and the per-element
+    ///    `row_part` / `col_part` vectors agree with the lists.
+    /// 2. **Excess matches unmatched count** — the over block has
+    ///    exactly as many "extra rows" as there are unmatched rows
+    ///    reachable from it: `over_rows.len() - over_cols.len() ==
+    ///    (number of unmatched rows)`. Symmetric statement for the
+    ///    under block.
+    /// 3. **Square is balanced** — `square_rows.len() ==
+    ///    square_cols.len()` and the matching restricted to the
+    ///    square part is a perfect matching.
+    ///
+    /// These are characterisations of the coarse DM partition that
+    /// any correct implementation must satisfy — independent of how
+    /// the algorithm gets there.
+    #[test]
+    fn dm_fuzz_invariants() {
+        let mut state: u64 = 0xabad_1dea_cafe_d00d;
+        let mut next = || -> u64 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 32
+        };
+
+        for trial in 0..30 {
+            let n_rows = 1 + (next() % 4) as usize; // 1..=4
+            let n_vars = 1 + (next() % 4) as usize;
+            let max_edges = (n_rows * n_vars).min(8);
+            let n_edges = (next() % (max_edges as u64 + 1)) as usize;
+
+            let mut edge_set = std::collections::BTreeSet::<(usize, usize)>::new();
+            let mut draws = 0usize;
+            while edge_set.len() < n_edges {
+                let r = (next() % n_rows as u64) as usize;
+                let v = (next() % n_vars as u64) as usize;
+                edge_set.insert((r, v));
+                draws += 1;
+                assert!(draws < 10_000, "edge draw loop is not making progress");
+            }
+            let edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
+
+            let inc = eq_inc(n_vars, n_rows, &edges);
+            let m = hopcroft_karp(&inc);
+            let dm = DulmageMendelsohnPartition::from_matching(&inc, &m);
+
+            // --- 1. Partition is disjoint and complete ----------------
+            assert_eq!(dm.row_part.len(), n_rows, "trial {trial}");
+            assert_eq!(dm.col_part.len(), n_vars, "trial {trial}");
+            let total_rows = dm.over_rows.len() + dm.square_rows.len() + dm.under_rows.len();
+            assert_eq!(
+                total_rows, n_rows,
+                "trial {trial}: row partition incomplete"
+            );
+            let total_cols = dm.over_cols.len() + dm.square_cols.len() + dm.under_cols.len();
+            assert_eq!(
+                total_cols, n_vars,
+                "trial {trial}: col partition incomplete"
+            );
+            for (r, part) in dm.row_part.iter().enumerate() {
+                let in_over = dm.over_rows.contains(&r);
+                let in_sq = dm.square_rows.contains(&r);
+                let in_un = dm.under_rows.contains(&r);
+                let count = (in_over as u8) + (in_sq as u8) + (in_un as u8);
+                assert_eq!(count, 1, "trial {trial}: row {r} appears {count} times");
+                match part {
+                    DMPart::Over => assert!(in_over),
+                    DMPart::Square => assert!(in_sq),
+                    DMPart::Under => assert!(in_un),
+                }
+            }
+            for (c, part) in dm.col_part.iter().enumerate() {
+                let in_over = dm.over_cols.contains(&c);
+                let in_sq = dm.square_cols.contains(&c);
+                let in_un = dm.under_cols.contains(&c);
+                let count = (in_over as u8) + (in_sq as u8) + (in_un as u8);
+                assert_eq!(count, 1, "trial {trial}: col {c} appears {count} times");
+                match part {
+                    DMPart::Over => assert!(in_over),
+                    DMPart::Square => assert!(in_sq),
+                    DMPart::Under => assert!(in_un),
+                }
+            }
+
+            // --- 2. Excess matches unmatched count --------------------
+            let n_unmatched_rows = m.row_to_var.iter().filter(|x| x.is_none()).count();
+            let n_unmatched_cols = m.var_to_row.iter().filter(|x| x.is_none()).count();
+            assert_eq!(
+                dm.over_rows.len(),
+                dm.over_cols.len() + n_unmatched_rows,
+                "trial {trial}: over excess mismatch — \
+                 over_rows={}, over_cols={}, unmatched_rows={}",
+                dm.over_rows.len(),
+                dm.over_cols.len(),
+                n_unmatched_rows
+            );
+            assert_eq!(
+                dm.under_cols.len(),
+                dm.under_rows.len() + n_unmatched_cols,
+                "trial {trial}: under excess mismatch"
+            );
+
+            // --- 3. Square is balanced and perfectly matched ----------
+            assert_eq!(
+                dm.square_rows.len(),
+                dm.square_cols.len(),
+                "trial {trial}: square not balanced"
+            );
+            for &r in &dm.square_rows {
+                let v = m.row_to_var[r]
+                    .unwrap_or_else(|| panic!("trial {trial}: square row {r} unmatched"));
+                assert!(
+                    dm.col_part[v] == DMPart::Square,
+                    "trial {trial}: square row {r} matched to non-square col {v}"
+                );
+            }
+            for &v in &dm.square_cols {
+                let r = m.var_to_row[v]
+                    .unwrap_or_else(|| panic!("trial {trial}: square col {v} unmatched"));
+                assert!(
+                    dm.row_part[r] == DMPart::Square,
+                    "trial {trial}: square col {v} matched to non-square row {r}"
+                );
+            }
+        }
+    }
 }
