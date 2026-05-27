@@ -352,10 +352,15 @@ impl PresolveTnlp {
                 }
             })
             .collect();
-        let linear_rows: Vec<LinearRow> = linear_row_map.iter().filter_map(|r| r.clone()).collect();
+        // NOTE: `linear_rows` is materialised AFTER Phase 0 so it
+        // can filter out rows Phase 0 dropped — propagating bounds
+        // through aux-eliminated rows lets tighten_bounds derive
+        // contradictions (see issue #53 PR review).
 
         // Snapshot inner bounds before Phase 1 mutates them; needed
-        // for Phase 4 warm-start hints.
+        // for Phase 4 warm-start hints AND for rolling back Phase 0
+        // if its clamps later prove infeasible against the kept
+        // linear rows.
         let inner_x_l = x_l.clone();
         let inner_x_u = x_u.clone();
 
@@ -457,6 +462,23 @@ impl PresolveTnlp {
             AuxiliaryPreprocessingDiagnostics::default()
         };
 
+        // Build `linear_rows` excluding rows Phase 0 dropped. This
+        // is the headline fix from the #53 PR review: propagating
+        // bounds through an aux-dropped row lets tighten_bounds
+        // derive `x_l[j] > x_u[j]` for an aux-clamped variable and
+        // then hand corrupted bounds to the IPM.
+        let linear_rows: Vec<LinearRow> = linear_row_map
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                if row_kept_inner[i] {
+                    r.clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Phase 1: bound tightening using linear rows.
         let mut tighten_report = TightenReport::default();
         if self.opts.bound_tightening && !linear_rows.is_empty() {
@@ -467,6 +489,42 @@ impl PresolveTnlp {
                 self.opts.max_passes,
                 1e-12,
             );
+        }
+
+        // Defence in depth: if Phase 1 still flags infeasibility AND
+        // Phase 0 made changes, those changes are presumed to blame
+        // (aux solved a block to a point inconsistent with bounds
+        // from kept rows). Roll back Phase 0 — restore bounds, undo
+        // row drops, clear the reduction stack — and re-run Phase 1
+        // on the un-filtered linear rows. Without this guard,
+        // `report.infeasible` was previously never inspected and
+        // corrupted bounds reached the IPM (#53 PR review).
+        if tighten_report.infeasible && !reduction_stack.is_empty() {
+            eprintln!(
+                "pounce-presolve: auxiliary-equality elimination produced \
+                 bounds inconsistent with kept linear rows; rolling back \
+                 the elimination for this solve."
+            );
+            x_l.copy_from_slice(&inner_x_l);
+            x_u.copy_from_slice(&inner_x_u);
+            for kept in row_kept_inner.iter_mut() {
+                *kept = true;
+            }
+            reduction_stack = ReductionStack::default();
+            // Re-run tighten on the unfiltered linear rows now that
+            // the aux clamps are gone.
+            let full_linear_rows: Vec<LinearRow> =
+                linear_row_map.iter().filter_map(|r| r.clone()).collect();
+            tighten_report = TightenReport::default();
+            if self.opts.bound_tightening && !full_linear_rows.is_empty() {
+                tighten_report = tighten_bounds(
+                    &full_linear_rows,
+                    &mut x_l,
+                    &mut x_u,
+                    self.opts.max_passes,
+                    1e-12,
+                );
+            }
         }
 
         // Phase 4: any variable whose lower (upper) bound moved
@@ -1338,5 +1396,49 @@ mod tests {
         assert_eq!(info.m, 0);
         let diag = wrapped.auxiliary_diagnostics();
         assert_eq!(diag.blocks_eliminated, 1);
+    }
+
+    /// Regression for the #60 PR review blocker. The original
+    /// `TwoVarSquareEq` TNLP, when wrapped with BOTH
+    /// `presolve_auxiliary=yes` AND `presolve_bound_tightening=yes`
+    /// (the new defaults), used to:
+    ///   (1) let aux clamp x_l[0..2] = x_u[0..2] = solved values;
+    ///   (2) let `tighten_bounds` re-propagate the (dropped)
+    ///       equality rows over the clamped bounds, derive a
+    ///       contradiction, and set `tighten_report.infeasible`;
+    ///   (3) hand `x_l > x_u` to the IPM (because `infeasible` was
+    ///       never inspected), crashing it with
+    ///       `Invalid Problem Definition`.
+    /// The fix: build `linear_rows` AFTER Phase 0, filtered by
+    /// `row_kept_inner`, so dropped rows don't propagate. With this
+    /// test we just confirm the wrapper init still succeeds and the
+    /// final bounds remain self-consistent.
+    #[test]
+    fn phase0_via_tnlp_no_infeasible_with_default_bound_tightening() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoVarSquareEq));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            // Both phases on — this is the combination that crashed
+            // on `gaslib11_steady.nl` before the fix.
+            bound_tightening: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0); // aux dropped both rows
+        let bounds = wrapped.cached_bounds().expect("inited");
+        // x_l ≤ x_u must hold for every variable.
+        for i in 0..(info.n as usize) {
+            assert!(
+                bounds.x_l[i] <= bounds.x_u[i] + 1e-12,
+                "x_l[{i}] = {} > x_u[{i}] = {}",
+                bounds.x_l[i],
+                bounds.x_u[i]
+            );
+        }
+        // tighten_report must NOT have flagged infeasibility.
+        let rpt = wrapped.tighten_report();
+        assert!(!rpt.infeasible, "Phase 1 falsely flagged infeasibility");
     }
 }

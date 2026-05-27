@@ -1,23 +1,22 @@
 //! End-to-end CLI integration test for the auxiliary-equality
 //! preprocessing pass (issue #53).
 //!
-//! Drives the built `pounce` binary against the small
-//! `parametric.nl` fixture with `presolve_auxiliary=yes` /
-//! `presolve_auxiliary_diagnostics=yes` and verifies:
+//! ⚠️ Coverage limitation: the only `.nl` fixture in this repo
+//! today (`parametric.nl`) carries sensitivity suffixes, and
+//! `crates/pounce-cli/src/main.rs` silently disables presolve when
+//! either sensitivity or reduced-Hessian post-processing is active
+//! (see `main.rs:306-312`). That means tests against
+//! `parametric.nl` cannot exercise the orchestrator's solve path —
+//! they can only verify that the CLI plumbing accepts the new
+//! options, prints the documented warning, and reaches the same
+//! objective as the baseline.
 //!
-//! 1. The binary doesn't panic.
-//! 2. With diagnostics on, the stderr output contains the
-//!    `auxiliary-preprocessing:` header line emitted by the
-//!    diagnostics `Display` impl.
-//! 3. Turning `presolve_auxiliary=no` produces the same final
-//!    objective as a baseline solve (the pass really is a no-op
-//!    when off).
-//!
-//! The real acceptance criteria for issue #53 — zero IPM iterations
-//! on `tutorial_flow_density.nl` and the `gaslib11_steady.nl`
-//! reduction — require vendoring those fixtures from ripopt; see
-//! `crates/pounce-cli/tests/fixtures/aux_presolve/README.md` and
-//! `benchmarks/preprocessing/README.md`.
+//! The orchestrator's solve path is covered by inline tests in
+//! `crates/pounce-presolve/src/lib.rs` (the `phase0_via_tnlp_*`
+//! tests). The headline `.nl` acceptance criteria from issue #53
+//! require vendoring the ripopt fixtures into
+//! `crates/pounce-cli/tests/fixtures/aux_presolve/`; see that
+//! directory's `README.md`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -45,16 +44,21 @@ fn tmp_json(suffix: &str) -> PathBuf {
     p
 }
 
+/// `parametric.nl` carries sensitivity suffixes, so the CLI's
+/// sensitivity guard kicks in and silently disables presolve before
+/// the auxiliary pass would ever run. Confirm:
+///   - the binary doesn't panic with the new options;
+///   - the documented warning lands on stderr (proving the
+///     sens-disable code path is genuinely executed and the test
+///     isn't measuring nothing).
 #[test]
-fn presolve_auxiliary_yes_does_not_panic() {
+fn presolve_auxiliary_yes_disabled_by_sensitivity_warning() {
     let output = Command::new(pounce_exe())
         .arg(fixture_nl())
         .arg("presolve=yes")
         .arg("presolve_auxiliary=yes")
         .output()
         .expect("spawn pounce");
-    // Exit code 134 is SIGABRT (panic). 0 is success, 1 is a clean
-    // solver-fail; either is acceptable. The point is no panic.
     let code = output.status.code().unwrap_or(-1);
     assert!(
         code == 0 || code == 1,
@@ -66,30 +70,19 @@ fn presolve_auxiliary_yes_does_not_panic() {
         !stderr.contains("panicked at"),
         "pounce panicked: {stderr}"
     );
-}
-
-#[test]
-fn presolve_auxiliary_diagnostics_yes_emits_summary() {
-    let output = Command::new(pounce_exe())
-        .arg(fixture_nl())
-        .arg("presolve=yes")
-        .arg("presolve_auxiliary=yes")
-        .arg("presolve_auxiliary_diagnostics=yes")
-        .output()
-        .expect("spawn pounce");
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("auxiliary-preprocessing:"),
-        "expected diagnostics header in stderr, got:\n{stderr}"
+        stderr.contains("disabling presolve"),
+        "expected the sensitivity-disable warning in stderr; got:\n{stderr}"
     );
 }
 
-/// Sanity check: `presolve_auxiliary=no` and the baseline (no
-/// presolve at all) produce the same final objective to within a
-/// reasonable tolerance. This guards against accidental side effects
-/// of the wrapper.
+/// Sanity check: `presolve_auxiliary=no` and the baseline produce
+/// the same final objective. With the sens-disable in play above
+/// this reduces to "the solver is deterministic given identical CLI
+/// args" — but it still guards against a regression where the flag
+/// parser would mis-set state.
 #[test]
-fn presolve_auxiliary_no_unchanged_from_baseline() {
+fn presolve_auxiliary_no_matches_baseline_objective() {
     let baseline_json = tmp_json("baseline");
     let aux_off_json = tmp_json("aux_off");
 

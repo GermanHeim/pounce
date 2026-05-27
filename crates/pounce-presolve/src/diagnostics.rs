@@ -118,7 +118,7 @@ impl fmt::Display for AuxiliaryPreprocessingDiagnostics {
         {
             writeln!(
                 f,
-                "  coupling: pure={}, obj={}, ineq={}, both={}",
+                "  candidates by coupling class: pure={}, obj={}, ineq={}, both={}",
                 cc.pure_equality,
                 cc.objective_coupled,
                 cc.inequality_coupled,
@@ -196,6 +196,7 @@ mod tests {
         assert!(s.contains("2 of 3 candidate block(s) eliminated"));
         assert!(s.contains("max block dim: 2"));
         assert!(s.contains("max residual: 1.500e-13"));
+        assert!(s.contains("candidates by coupling class"));
         assert!(s.contains("pure=2"));
         assert!(s.contains("ineq=1"));
         assert!(s.contains("coupling-disallowed: 1"));

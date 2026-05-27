@@ -167,6 +167,15 @@ pub fn run_auxiliary_phase0(
     let mut accepted_fixed_values: Vec<Number> = Vec::new();
     let mut accepted_dropped_rows: Vec<usize> = Vec::new();
     let mut max_residual: Number = 0.0;
+    // Reject non-finite probe points up-front. Newton seeded with
+    // NaN returns NaN, and `NaN > tol` is `false`, so a block would
+    // otherwise spuriously "succeed". PR review #60.
+    if !probe.x_probe.iter().all(|v| v.is_finite()) {
+        return Phase0Plan {
+            diagnostics: diag,
+            frame: None,
+        };
+    }
     let mut x_running: Vec<Number> = probe.x_probe.to_vec();
 
     for comp in &comps.components {
@@ -571,7 +580,10 @@ where
         full_jac_vals: vec![0.0; nnz],
     };
     // Start at the probe's value for each block variable.
-    let x0: Vec<Number> = block_cols.iter().map(|&c| probe.x_probe[c]).collect();
+    // Seed Newton from `x_running` (which carries values fixed by
+    // earlier blocks in this same pass), falling back to the probe
+    // point for variables not yet touched. PR review #60.
+    let x0: Vec<Number> = block_cols.iter().map(|&c| x_running[c]).collect();
     solver_call(&x0, &mut eqs, bs_opts)
 }
 

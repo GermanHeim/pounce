@@ -128,10 +128,9 @@ pounce problem.nl presolve=yes presolve_auxiliary=yes \
 
 ## Limitations (v1)
 
-The current implementation eliminates **linear blocks only**. Blocks
-where any dropped row has a nonlinear Jacobian are rejected with a
-`BlockSolveDiverged` reason in the diagnostics. Nonlinear-block
-support arrives in a follow-up release.
+Both linear and nonlinear blocks are eliminated. The linear path
+reuses the pre-fetched Jacobian; the nonlinear path drives Newton
+through TNLP callbacks.
 
 Fixed variables are assumed to be interior to their original bounds
 at the optimum; postsolve sets their bound multipliers to zero
@@ -141,6 +140,33 @@ fixed variable is at an *original* bound — is a known follow-up.
 The pass currently runs once, at the start of the solve. Iterative
 re-elimination (running the pass again on the reduced problem) is
 not supported in v1.
+
+### Interaction with the rest of presolve
+
+The auxiliary pass runs **before** the existing bound-tightening
+phase (`presolve_bound_tightening=yes`). The two phases interact at
+the bounds: aux clamps `x_l[i] = x_u[i] = value` for variables it
+fixes; bound tightening then propagates the remaining constraints.
+The orchestrator filters out aux-dropped rows before tightening
+runs, so they can't propagate contradictions back over the clamps.
+If `tighten_bounds` still flags infeasibility — for example because
+an aux-fixed value disagrees with a kept-row's bound — the
+orchestrator rolls back the aux pass for that solve and re-runs
+tightening on the unfiltered rows. A one-line warning lands on
+stderr when this happens.
+
+### Interaction with sensitivity / reduced-Hessian post-processing
+
+When the input `.nl` file carries sensitivity suffixes
+(`sens_init_constr` / `sens_state_*`) or the CLI is invoked with
+`--compute-reduced-hessian`, the entire presolve layer — including
+auxiliary preprocessing — is **silently disabled**. The user sees a
+single warning on stderr (`pounce: disabling presolve — ...`) and
+the solve proceeds without any presolve transformation. This is
+because the existing sensitivity / reduced-Hessian code paths
+assume the IPM's variable and row indices match the user's
+original `.nl`. Lifting this restriction is tracked separately
+([pounce#19](https://github.com/jkitchin/pounce/issues/19)).
 
 ## Worked example
 

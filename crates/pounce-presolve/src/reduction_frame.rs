@@ -62,30 +62,36 @@ impl ReductionFrame {
             "fixed_vars and dropped_rows must be the same length (square block)"
         );
 
+        // Mark fixed positions on flat `bool` vectors (O(1) lookup);
+        // BTreeSet would cost O(log k) per probe. PR review #60.
+        let mut is_fixed_var = vec![false; n_vars];
+        for &i in &fixed_vars {
+            is_fixed_var[i] = true;
+        }
+        let mut is_dropped_row = vec![false; n_rows];
+        for &i in &dropped_rows {
+            is_dropped_row[i] = true;
+        }
+
         let mut var_map = vec![None; n_vars];
         let mut next_reduced = 0;
-        let mut fixed_set: std::collections::BTreeSet<usize> = fixed_vars.iter().copied().collect();
-        for i in 0..n_vars {
-            if fixed_set.contains(&i) {
+        for (i, slot) in var_map.iter_mut().enumerate().take(n_vars) {
+            if is_fixed_var[i] {
                 continue;
             }
-            var_map[i] = Some(next_reduced);
+            *slot = Some(next_reduced);
             next_reduced += 1;
         }
 
         let mut row_map = vec![None; n_rows];
         let mut next_reduced_row = 0;
-        let dropped_set: std::collections::BTreeSet<usize> = dropped_rows.iter().copied().collect();
-        for i in 0..n_rows {
-            if dropped_set.contains(&i) {
+        for (i, slot) in row_map.iter_mut().enumerate().take(n_rows) {
+            if is_dropped_row[i] {
                 continue;
             }
-            row_map[i] = Some(next_reduced_row);
+            *slot = Some(next_reduced_row);
             next_reduced_row += 1;
         }
-
-        // Avoid moving `fixed_set` out unnecessarily.
-        let _ = fixed_set.split_off(&0);
 
         Self {
             fixed_vars,
@@ -217,13 +223,12 @@ impl ReductionFrame {
             return Ok(Vec::new());
         }
 
+        // Use `row_map` for O(1) "is row r dropped?" — set in
+        // `new()`, no BTreeSet needed (PR review #60).
         // Build the k×k system M λ_dropped = rhs.
         //   M[i_idx][j_idx] = J[dropped_rows[j_idx]][fixed_vars[i_idx]]
         //   rhs[i_idx] = grad_f[fixed_vars[i_idx]]
         //              - Σ_{r kept} J[r][fixed_vars[i_idx]] * lambda_full[r]
-        let dropped_set: std::collections::BTreeSet<usize> =
-            self.dropped_rows.iter().copied().collect();
-
         let mut matrix = vec![0.0; k * k];
         for (i_idx, &i) in self.fixed_vars.iter().enumerate() {
             for (j_idx, &dr) in self.dropped_rows.iter().enumerate() {
@@ -235,7 +240,8 @@ impl ReductionFrame {
         for (i_idx, &i) in self.fixed_vars.iter().enumerate() {
             let mut sum = 0.0;
             for r in 0..n_rows {
-                if dropped_set.contains(&r) {
+                if self.row_map[r].is_none() {
+                    // Row was dropped.
                     continue;
                 }
                 sum += jac_full_row_major[r * n_vars + i] * lambda_full[r];
