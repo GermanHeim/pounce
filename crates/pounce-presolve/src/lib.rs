@@ -33,14 +33,26 @@ use pounce_nlp::tnlp::{
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
+pub mod auxiliary;
+pub mod block_solve;
 pub mod bound_tighten;
+pub mod btf;
+pub mod components;
+pub mod coupling;
+pub mod diagnostics;
+pub mod dulmage_mendelsohn;
+pub mod incidence;
 pub mod licq;
+pub mod matching;
 pub mod options;
+pub mod reduction_frame;
 pub mod redundant;
 
 pub use bound_tighten::{tighten_bounds, LinearRow, TightenReport, INF_BOUND};
+pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReason};
 pub use licq::{licq_check, EqRow, LicqVerdict};
-pub use options::{register_options, LicqAction, PresolveOptions};
+pub use options::{register_options, AuxiliaryCouplingPolicy, LicqAction, PresolveOptions};
+pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
 
 /// Errors that can arise while building a presolved TNLP.
@@ -141,6 +153,13 @@ struct PresolveState {
     scratch_g: Vec<Number>,
     scratch_jac: Vec<Number>,
     scratch_lambda: Vec<Number>,
+
+    /// Phase 0 (issue #53) diagnostics. Always present; defaulted to
+    /// zeros when the master switch is off.
+    aux_diagnostics: AuxiliaryPreprocessingDiagnostics,
+    /// Phase 0 postsolve stack. Empty until PR 7 wires real frames.
+    #[allow(dead_code)]
+    reduction_stack: ReductionStack,
 }
 
 impl PresolveTnlp {
@@ -188,6 +207,17 @@ impl PresolveTnlp {
         self.state
             .as_ref()
             .map(|s| (&s.z_l_warm[..], &s.z_u_warm[..]))
+    }
+
+    /// Phase 0 (issue #53) summary. Returns a zero-valued struct
+    /// until init has run; afterwards, populated by
+    /// [`auxiliary::run_auxiliary_phase0`]. PR 1 always returns
+    /// zeros even with the master switch on.
+    pub fn auxiliary_diagnostics(&self) -> AuxiliaryPreprocessingDiagnostics {
+        self.state
+            .as_ref()
+            .map(|s| s.aux_diagnostics.clone())
+            .unwrap_or_default()
     }
 
     /// Lazy initialization: pull inner dims, bounds, linearity tags,
@@ -320,6 +350,19 @@ impl PresolveTnlp {
         let inner_x_l = x_l.clone();
         let inner_x_u = x_u.clone();
 
+        // Phase 0 (issue #53): auxiliary-equality preprocessing.
+        // Owns the `row_kept_inner` mask so its (future) row drops are
+        // visible to Phase 2's redundant-row pass below. PR 1 is a
+        // no-op shell — the mask stays all-true and the reduction
+        // stack stays empty.
+        let mut row_kept_inner: Vec<bool> = vec![true; m_in];
+        let mut reduction_stack = ReductionStack::default();
+        let aux_diagnostics = if self.opts.auxiliary {
+            auxiliary::run_auxiliary_phase0(&self.opts, &mut row_kept_inner, &mut reduction_stack)
+        } else {
+            AuxiliaryPreprocessingDiagnostics::default()
+        };
+
         // Phase 1: bound tightening using linear rows.
         let mut tighten_report = TightenReport::default();
         if self.opts.bound_tightening && !linear_rows.is_empty() {
@@ -355,8 +398,8 @@ impl PresolveTnlp {
         };
 
         // Phase 2: detect redundant linear rows in the (possibly
-        // tightened) box. Non-linear rows are never dropped.
-        let mut row_kept_inner: Vec<bool> = vec![true; m_in];
+        // tightened) box. Non-linear rows are never dropped. The
+        // `row_kept_inner` mask was initialised above by Phase 0.
         let mut n_dropped_rows: Index = 0;
         if self.opts.redundant_constraint_removal {
             let redundant_mask = find_redundant_rows(&linear_rows, &x_l, &x_u, 1e-9);
@@ -472,6 +515,8 @@ impl PresolveTnlp {
             scratch_g: vec![0.0; m_in],
             scratch_jac: vec![0.0; nnz_in],
             scratch_lambda: vec![0.0; m_in],
+            aux_diagnostics,
+            reduction_stack,
         });
         self.state.as_ref()
     }
@@ -941,5 +986,46 @@ mod tests {
         register_options(&reg).unwrap();
         let opt = reg.get_option("presolve").expect("presolve registered");
         assert_eq!(opt.name, "presolve");
+    }
+
+    #[test]
+    fn auxiliary_phase0_noop_when_disabled() {
+        // Master switch off → Phase 0 returns zero diagnostics and
+        // does not perturb the inner problem's dimensions.
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Probe));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: false,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 1);
+        assert_eq!(info.m, 0);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 0);
+        assert_eq!(diag.vars_eliminated, 0);
+        assert_eq!(diag.rows_eliminated, 0);
+    }
+
+    #[test]
+    fn auxiliary_phase0_noop_when_enabled_no_algos_yet() {
+        // Master switch on, but PR 1 ships a no-op orchestrator —
+        // diagnostics must still be zero and the inner shape must
+        // be byte-identical to the disabled case.
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Probe));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Aggressive,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 1);
+        assert_eq!(info.m, 0);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 0);
+        assert!(diag.rejection_reasons.is_empty());
     }
 }
