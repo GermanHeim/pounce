@@ -46,16 +46,18 @@ fn aux_fixture(name: &str) -> PathBuf {
 
 fn tmp_json(suffix: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!(
-        "pounce_aux_{}_{suffix}.json",
-        std::process::id()
-    ));
+    p.push(format!("pounce_aux_{}_{suffix}.json", std::process::id()));
     p
 }
 
 fn run_for_report(fixture: &PathBuf, extra_args: &[&str]) -> SolveReport {
-    let json_path = tmp_json(&format!("e2e_{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let json_path = tmp_json(&format!(
+        "e2e_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let mut cmd = Command::new(pounce_exe());
     cmd.arg(fixture)
         .arg("--json-output")
@@ -99,10 +101,7 @@ fn presolve_auxiliary_yes_disabled_by_sensitivity_warning() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("panicked at"),
-        "pounce panicked: {stderr}"
-    );
+    assert!(!stderr.contains("panicked at"), "pounce panicked: {stderr}");
     assert!(
         stderr.contains("disabling presolve"),
         "expected the sensitivity-disable warning in stderr; got:\n{stderr}"
