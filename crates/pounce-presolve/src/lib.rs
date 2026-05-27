@@ -406,7 +406,27 @@ impl PresolveTnlp {
                 x_probe: &x_probe,
                 grad_f: &grad_f_probe,
             };
-            let plan = auxiliary::run_auxiliary_phase0(&self.opts, &probe_view);
+            // Adapter: wrap `self.inner` so the orchestrator can
+            // call eval_g / eval_jac_g for nonlinear blocks.
+            struct TnlpCallbackAdapter {
+                inner: Rc<RefCell<dyn TNLP>>,
+            }
+            impl auxiliary::Phase0TnlpCallback for TnlpCallbackAdapter {
+                fn eval_g_full(&mut self, x: &[Number], g: &mut [Number]) -> bool {
+                    self.inner.borrow_mut().eval_g(x, true, g)
+                }
+                fn eval_jac_g_values(&mut self, x: &[Number], values: &mut [Number]) -> bool {
+                    self.inner.borrow_mut().eval_jac_g(
+                        Some(x),
+                        true,
+                        SparsityRequest::Values { values },
+                    )
+                }
+            }
+            let mut adapter = TnlpCallbackAdapter {
+                inner: Rc::clone(&self.inner),
+            };
+            let plan = auxiliary::run_auxiliary_phase0(&self.opts, &probe_view, Some(&mut adapter));
             if let Some(frame) = plan.frame {
                 // Clamp fixed variables.
                 for (k, &i) in frame.fixed_vars.iter().enumerate() {

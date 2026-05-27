@@ -53,6 +53,20 @@ pub struct Phase0Probe<'a> {
     pub grad_f: &'a [Number],
 }
 
+/// Callback the orchestrator uses for nonlinear block solves.
+/// Implemented in `PresolveTnlp::ensure_init` by wrapping the inner
+/// TNLP. Linear blocks don't need this (they use the pre-fetched
+/// Jacobian); calling `run_auxiliary_phase0(_, _, None)` falls back
+/// to linear-only and is the cheaper path when no nonlinear rows
+/// participate.
+pub trait Phase0TnlpCallback {
+    /// Evaluate the full constraint vector `g(x)` (length `n_rows`).
+    fn eval_g_full(&mut self, x: &[Number], g: &mut [Number]) -> bool;
+    /// Evaluate the full Jacobian values at `x` into the user buffer
+    /// (length `nnz`), matching the sparsity pattern from the probe.
+    fn eval_jac_g_values(&mut self, x: &[Number], values: &mut [Number]) -> bool;
+}
+
 /// Output of one Phase-0 pass.
 #[derive(Debug, Clone)]
 pub struct Phase0Plan {
@@ -73,11 +87,19 @@ impl Default for Phase0Plan {
 
 /// Run the Phase-0 pipeline and return the resulting plan.
 ///
-/// When `opts.auxiliary` is `false` this is a true no-op. When `true`,
-/// the orchestrator walks every candidate block, accepts only those
-/// allowed by `opts.auxiliary_coupling`, and accumulates a single
-/// composite `ReductionFrame`.
-pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> Phase0Plan {
+/// When `opts.auxiliary` is `false` this is a true no-op. When
+/// `true`, the orchestrator walks every candidate block, accepts
+/// only those allowed by `opts.auxiliary_coupling`, and accumulates
+/// a single composite `ReductionFrame`.
+///
+/// `tnlp` is consulted for nonlinear blocks. Pass `None` for
+/// linear-only behaviour (PR 8 default); pass `Some` to also handle
+/// blocks where any dropped row has `Linearity::NonLinear`.
+pub fn run_auxiliary_phase0(
+    opts: &PresolveOptions,
+    probe: &Phase0Probe<'_>,
+    mut tnlp: Option<&mut dyn Phase0TnlpCallback>,
+) -> Phase0Plan {
     let mut diag = AuxiliaryPreprocessingDiagnostics::default();
     if !opts.auxiliary {
         return Phase0Plan {
@@ -151,13 +173,17 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
         diag.stage_time_ms.btf_ms += t_btf.elapsed().as_millis();
         for block in &btf.blocks {
             diag.candidate_blocks += 1;
-            // -- 3a. Linearity gate --
+            // -- 3a. Linearity classification --
+            // A block where every dropped row is linear uses the fast
+            // path (pre-fetched Jacobian, one-iteration Newton).
+            // Otherwise we need TNLP callbacks; reject if none was
+            // supplied.
             let all_linear = block
                 .eq_rows
                 .iter()
                 .map(|&k| eq_inc.eq_row_inner_idx[k])
                 .all(|r| is_linear_inner[r]);
-            if !all_linear {
+            if !all_linear && tnlp.is_none() {
                 diag.rejection_reasons
                     .push(AuxiliaryRejectionReason::BlockSolveDiverged);
                 continue;
@@ -195,13 +221,7 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
                 continue;
             }
 
-            // -- 3d. Build the linear block system --
-            // Each dropped row r (which is linear) reads:
-            //   g_r(x) = Σ_j J[r][j] x[j] + const_r
-            // where const_r = g_r(x_probe) - Σ_j J[r][j] x_probe[j].
-            // Setting g_r(x) = g_l[r] (= g_u[r] for an equality row):
-            //   Σ_{j fixed} J[r][j] x_fixed[j] = g_l[r] - const_r
-            //                                  - Σ_{j non-fixed} J[r][j] x_running[j]
+            // -- 3d/3e. Build + solve the block --
             let k = block.eq_rows.len();
             let inner_rows: Vec<usize> = block
                 .eq_rows
@@ -209,93 +229,24 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
                 .map(|&kk| eq_inc.eq_row_inner_idx[kk])
                 .collect();
             let block_cols = &block.cols;
-
-            let mut a_block = vec![0.0; k * k];
-            let mut b_block = vec![0.0; k];
-
-            for (ii, &r_inner) in inner_rows.iter().enumerate() {
-                // J[r][·] from the pre-fetched Jacobian: walk the
-                // triplets and pull entries whose row matches r_inner.
-                // (This is O(nnz) per block; for tiny blocks fine.)
-                // Also accumulate Σ_j J[r][j] x_probe[j] for the
-                // constant computation.
-                let mut sum_jx = 0.0;
-                let nnz = probe.jac_irow.len();
-                for kk in 0..nnz {
-                    let i = if probe.one_based {
-                        (probe.jac_irow[kk] as isize - 1) as usize
-                    } else {
-                        probe.jac_irow[kk] as usize
-                    };
-                    if i != r_inner {
-                        continue;
-                    }
-                    let j = if probe.one_based {
-                        (probe.jac_jcol[kk] as isize - 1) as usize
-                    } else {
-                        probe.jac_jcol[kk] as usize
-                    };
-                    let v = probe.jac_values[kk];
-                    sum_jx += v * probe.x_probe[j];
-                    if let Some(jj) = block_cols.iter().position(|&c| c == j) {
-                        a_block[ii * k + jj] = v;
-                    } else {
-                        // Non-block variable, value comes from x_running.
-                        // Subtract from RHS.
-                        b_block[ii] -= v * x_running[j];
-                    }
-                }
-                let const_r = probe.g_at_probe[r_inner] - sum_jx;
-                let g_target = probe.g_l[r_inner];
-                b_block[ii] += g_target - const_r;
-            }
-
-            // -- 3e. Solve via the lightweight Newton wrapper --
-            struct LinearBlock {
-                a: Vec<Number>,
-                b: Vec<Number>,
-                n: usize,
-            }
-            impl BlockEquations for LinearBlock {
-                fn dim(&self) -> usize {
-                    self.n
-                }
-                fn eval(&mut self, x: &[Number], f: &mut [Number]) -> bool {
-                    for i in 0..self.n {
-                        let mut s = -self.b[i];
-                        for j in 0..self.n {
-                            s += self.a[i * self.n + j] * x[j];
-                        }
-                        f[i] = s;
-                    }
-                    true
-                }
-                fn jacobian(&mut self, _x: &[Number], j: &mut [Number]) -> bool {
-                    j.copy_from_slice(&self.a);
-                    true
-                }
-            }
-            let mut eqs = LinearBlock {
-                a: a_block,
-                b: b_block,
-                n: k,
-            };
             let bs_opts = BlockSolveOptions {
                 tol: opts.auxiliary_tol,
                 max_dim: opts.auxiliary_max_block_dim as usize,
                 ..Default::default()
             };
-            let x0 = vec![0.0; k];
             let t_solve = std::time::Instant::now();
-            let solve_result = DampedNewtonSolver.solve(&x0, &mut eqs, &bs_opts);
+            let solve_result = if all_linear {
+                solve_linear_block(probe, &inner_rows, block_cols, &x_running, &bs_opts)
+            } else {
+                // SAFETY of `.as_mut().unwrap()`: the linearity gate
+                // above already rejects nonlinear blocks when
+                // `tnlp.is_none()`, so reaching here means it's Some.
+                let cb: &mut dyn Phase0TnlpCallback = *tnlp.as_mut().expect("checked above");
+                solve_nonlinear_block(probe, &inner_rows, block_cols, &x_running, &bs_opts, cb)
+            };
             diag.stage_time_ms.block_solve_ms += t_solve.elapsed().as_millis();
             let out = match solve_result {
                 Ok(o) => o,
-                Err(crate::block_solve::BlockSolveError::Singular) => {
-                    diag.rejection_reasons
-                        .push(AuxiliaryRejectionReason::BlockSolveDiverged);
-                    continue;
-                }
                 Err(_) => {
                     diag.rejection_reasons
                         .push(AuxiliaryRejectionReason::BlockSolveDiverged);
@@ -309,36 +260,24 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
             for (ii, &c) in block_cols.iter().enumerate() {
                 candidate_x[c] = out.x[ii];
             }
-            // Re-evaluate each dropped row's residual using the
-            // linear model g_r(x) = J[r][:] · x + const_r and check
-            // |g_r(x) - g_l[r]| < tol.
-            let mut row_resid: Number = 0.0;
-            for &r_inner in &inner_rows {
-                let mut s = 0.0;
-                let nnz = probe.jac_irow.len();
-                let mut sum_jx = 0.0;
-                for kk in 0..nnz {
-                    let i = if probe.one_based {
-                        (probe.jac_irow[kk] as isize - 1) as usize
-                    } else {
-                        probe.jac_irow[kk] as usize
-                    };
-                    if i != r_inner {
+            let row_resid = if all_linear {
+                // Re-evaluate using the linear model — same as the
+                // build code above.
+                residual_norm_linear(probe, &inner_rows, &candidate_x)
+            } else {
+                // Ask the TNLP for `g(candidate_x)` and compare each
+                // dropped row to `g_l`. Reuses the callback we
+                // already required above.
+                let cb: &mut dyn Phase0TnlpCallback = *tnlp.as_mut().expect("checked above");
+                match residual_norm_nonlinear(probe, &inner_rows, &candidate_x, cb) {
+                    Some(r) => r,
+                    None => {
+                        diag.rejection_reasons
+                            .push(AuxiliaryRejectionReason::BlockSolveDiverged);
                         continue;
                     }
-                    let j = if probe.one_based {
-                        (probe.jac_jcol[kk] as isize - 1) as usize
-                    } else {
-                        probe.jac_jcol[kk] as usize
-                    };
-                    let v = probe.jac_values[kk];
-                    s += v * candidate_x[j];
-                    sum_jx += v * probe.x_probe[j];
                 }
-                let const_r = probe.g_at_probe[r_inner] - sum_jx;
-                let residual = (s + const_r - probe.g_l[r_inner]).abs();
-                row_resid = row_resid.max(residual);
-            }
+            };
             diag.stage_time_ms.residual_check_ms += t_resid.elapsed().as_millis();
             if row_resid > opts.auxiliary_tol {
                 diag.rejection_reasons
@@ -395,6 +334,244 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
     }
 }
 
+// -- Helpers used by both the linear and nonlinear solve paths ------
+
+/// Solve a linear block from the pre-fetched Jacobian. Builds the
+/// k×k system from the probe data and dispatches to Newton (which
+/// converges in one iteration on linear systems).
+fn solve_linear_block(
+    probe: &Phase0Probe<'_>,
+    inner_rows: &[usize],
+    block_cols: &[usize],
+    x_running: &[Number],
+    bs_opts: &BlockSolveOptions,
+) -> Result<crate::block_solve::BlockSolveOutcome, crate::block_solve::BlockSolveError> {
+    let k = inner_rows.len();
+    let mut a_block = vec![0.0; k * k];
+    let mut b_block = vec![0.0; k];
+    for (ii, &r_inner) in inner_rows.iter().enumerate() {
+        let mut sum_jx = 0.0;
+        let nnz = probe.jac_irow.len();
+        for kk in 0..nnz {
+            let i = if probe.one_based {
+                (probe.jac_irow[kk] as isize - 1) as usize
+            } else {
+                probe.jac_irow[kk] as usize
+            };
+            if i != r_inner {
+                continue;
+            }
+            let j = if probe.one_based {
+                (probe.jac_jcol[kk] as isize - 1) as usize
+            } else {
+                probe.jac_jcol[kk] as usize
+            };
+            let v = probe.jac_values[kk];
+            sum_jx += v * probe.x_probe[j];
+            if let Some(jj) = block_cols.iter().position(|&c| c == j) {
+                a_block[ii * k + jj] = v;
+            } else {
+                b_block[ii] -= v * x_running[j];
+            }
+        }
+        let const_r = probe.g_at_probe[r_inner] - sum_jx;
+        b_block[ii] += probe.g_l[r_inner] - const_r;
+    }
+
+    struct LinearBlock {
+        a: Vec<Number>,
+        b: Vec<Number>,
+        n: usize,
+    }
+    impl BlockEquations for LinearBlock {
+        fn dim(&self) -> usize {
+            self.n
+        }
+        fn eval(&mut self, x: &[Number], f: &mut [Number]) -> bool {
+            for i in 0..self.n {
+                let mut s = -self.b[i];
+                for j in 0..self.n {
+                    s += self.a[i * self.n + j] * x[j];
+                }
+                f[i] = s;
+            }
+            true
+        }
+        fn jacobian(&mut self, _x: &[Number], j: &mut [Number]) -> bool {
+            j.copy_from_slice(&self.a);
+            true
+        }
+    }
+    let mut eqs = LinearBlock {
+        a: a_block,
+        b: b_block,
+        n: k,
+    };
+    let x0 = vec![0.0; k];
+    DampedNewtonSolver.solve(&x0, &mut eqs, bs_opts)
+}
+
+/// Solve a nonlinear block by feeding TNLP callbacks into Newton.
+fn solve_nonlinear_block(
+    probe: &Phase0Probe<'_>,
+    inner_rows: &[usize],
+    block_cols: &[usize],
+    x_running: &[Number],
+    bs_opts: &BlockSolveOptions,
+    tnlp: &mut dyn Phase0TnlpCallback,
+) -> Result<crate::block_solve::BlockSolveOutcome, crate::block_solve::BlockSolveError> {
+    let k = inner_rows.len();
+
+    struct NonlinearBlock<'a> {
+        n: usize,
+        nnz: usize,
+        inner_rows: &'a [usize],
+        block_cols: &'a [usize],
+        x_running: &'a [Number],
+        jac_irow: &'a [Index],
+        jac_jcol: &'a [Index],
+        g_l: &'a [Number],
+        one_based: bool,
+        tnlp: &'a mut dyn Phase0TnlpCallback,
+        // Scratch buffers reused across iterations.
+        full_x: Vec<Number>,
+        full_g: Vec<Number>,
+        full_jac_vals: Vec<Number>,
+    }
+    impl<'a> NonlinearBlock<'a> {
+        fn splice_full_x(&mut self, x_block: &[Number]) {
+            self.full_x.copy_from_slice(self.x_running);
+            for (ii, &c) in self.block_cols.iter().enumerate() {
+                self.full_x[c] = x_block[ii];
+            }
+        }
+    }
+    impl<'a> BlockEquations for NonlinearBlock<'a> {
+        fn dim(&self) -> usize {
+            self.n
+        }
+        fn eval(&mut self, x: &[Number], f: &mut [Number]) -> bool {
+            self.splice_full_x(x);
+            if !self.tnlp.eval_g_full(&self.full_x, &mut self.full_g) {
+                return false;
+            }
+            for (ii, &r) in self.inner_rows.iter().enumerate() {
+                f[ii] = self.full_g[r] - self.g_l[r];
+            }
+            true
+        }
+        fn jacobian(&mut self, x: &[Number], j: &mut [Number]) -> bool {
+            self.splice_full_x(x);
+            if !self
+                .tnlp
+                .eval_jac_g_values(&self.full_x, &mut self.full_jac_vals)
+            {
+                return false;
+            }
+            // Zero the dense submatrix, then scatter the nonzeros.
+            for v in j.iter_mut() {
+                *v = 0.0;
+            }
+            for kk in 0..self.nnz {
+                let i = if self.one_based {
+                    (self.jac_irow[kk] as isize - 1) as usize
+                } else {
+                    self.jac_irow[kk] as usize
+                };
+                let Some(ii) = self.inner_rows.iter().position(|&r| r == i) else {
+                    continue;
+                };
+                let col = if self.one_based {
+                    (self.jac_jcol[kk] as isize - 1) as usize
+                } else {
+                    self.jac_jcol[kk] as usize
+                };
+                let Some(jj) = self.block_cols.iter().position(|&c| c == col) else {
+                    continue;
+                };
+                j[ii * self.n + jj] = self.full_jac_vals[kk];
+            }
+            true
+        }
+    }
+
+    let nnz = probe.jac_irow.len();
+    let mut eqs = NonlinearBlock {
+        n: k,
+        nnz,
+        inner_rows,
+        block_cols,
+        x_running,
+        jac_irow: probe.jac_irow,
+        jac_jcol: probe.jac_jcol,
+        g_l: probe.g_l,
+        one_based: probe.one_based,
+        tnlp,
+        full_x: vec![0.0; probe.n_vars],
+        full_g: vec![0.0; probe.n_rows],
+        full_jac_vals: vec![0.0; nnz],
+    };
+    // Start at the probe's value for each block variable.
+    let x0: Vec<Number> = block_cols.iter().map(|&c| probe.x_probe[c]).collect();
+    DampedNewtonSolver.solve(&x0, &mut eqs, bs_opts)
+}
+
+/// Linear-model residual check: each dropped row should evaluate to
+/// `g_l[r]` after splicing the candidate point in.
+fn residual_norm_linear(
+    probe: &Phase0Probe<'_>,
+    inner_rows: &[usize],
+    candidate_x: &[Number],
+) -> Number {
+    let mut row_resid: Number = 0.0;
+    let nnz = probe.jac_irow.len();
+    for &r_inner in inner_rows {
+        let mut s = 0.0;
+        let mut sum_jx = 0.0;
+        for kk in 0..nnz {
+            let i = if probe.one_based {
+                (probe.jac_irow[kk] as isize - 1) as usize
+            } else {
+                probe.jac_irow[kk] as usize
+            };
+            if i != r_inner {
+                continue;
+            }
+            let j = if probe.one_based {
+                (probe.jac_jcol[kk] as isize - 1) as usize
+            } else {
+                probe.jac_jcol[kk] as usize
+            };
+            let v = probe.jac_values[kk];
+            s += v * candidate_x[j];
+            sum_jx += v * probe.x_probe[j];
+        }
+        let const_r = probe.g_at_probe[r_inner] - sum_jx;
+        row_resid = row_resid.max((s + const_r - probe.g_l[r_inner]).abs());
+    }
+    row_resid
+}
+
+/// TNLP-backed residual check: ask the inner TNLP for `g` at the
+/// candidate and compare each dropped row to `g_l[r]`. Returns
+/// `None` if the TNLP callback fails.
+fn residual_norm_nonlinear(
+    probe: &Phase0Probe<'_>,
+    inner_rows: &[usize],
+    candidate_x: &[Number],
+    tnlp: &mut dyn Phase0TnlpCallback,
+) -> Option<Number> {
+    let mut g_full = vec![0.0; probe.n_rows];
+    if !tnlp.eval_g_full(candidate_x, &mut g_full) {
+        return None;
+    }
+    let mut row_resid: Number = 0.0;
+    for &r in inner_rows {
+        row_resid = row_resid.max((g_full[r] - probe.g_l[r]).abs());
+    }
+    Some(row_resid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,7 +622,7 @@ mod tests {
             &[0.0, 0.0],
         );
         let opts = PresolveOptions::defaults();
-        let plan = run_auxiliary_phase0(&opts, &probe);
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 0);
         assert!(plan.frame.is_none());
     }
@@ -472,7 +649,7 @@ mod tests {
         );
         let mut opts = PresolveOptions::defaults();
         opts.auxiliary = true;
-        let plan = run_auxiliary_phase0(&opts, &probe);
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 1);
         assert_eq!(plan.diagnostics.vars_eliminated, 1);
         assert_eq!(plan.diagnostics.rows_eliminated, 1);
@@ -503,7 +680,7 @@ mod tests {
         );
         let mut opts = PresolveOptions::defaults();
         opts.auxiliary = true;
-        let plan = run_auxiliary_phase0(&opts, &probe);
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 1);
         let frame = plan.frame.expect("accepted");
         assert_eq!(frame.fixed_vars, vec![0, 1]);
@@ -531,7 +708,7 @@ mod tests {
         let mut opts = PresolveOptions::defaults();
         opts.auxiliary = true;
         opts.auxiliary_coupling = AuxiliaryCouplingPolicy::Safe;
-        let plan = run_auxiliary_phase0(&opts, &probe);
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 0);
         assert!(plan.frame.is_none());
         assert!(plan
@@ -560,7 +737,7 @@ mod tests {
         );
         let mut opts = PresolveOptions::defaults();
         opts.auxiliary = true;
-        let plan = run_auxiliary_phase0(&opts, &probe);
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 0);
         assert!(plan.frame.is_none());
     }
@@ -586,8 +763,102 @@ mod tests {
         let mut opts = PresolveOptions::defaults();
         opts.auxiliary = true;
         opts.auxiliary_coupling = AuxiliaryCouplingPolicy::None;
-        let plan = run_auxiliary_phase0(&opts, &probe);
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
         assert!(plan.frame.is_none());
         assert_eq!(plan.diagnostics.blocks_eliminated, 0);
+    }
+
+    /// Stub callback implementing `xy = 1, x + y = 3` for the
+    /// nonlinear-block test. The probe carries the static Jacobian
+    /// sparsity (every entry present) and the equality targets; the
+    /// callback returns `g(x)` and `J(x)`.
+    struct XyCallback;
+    impl Phase0TnlpCallback for XyCallback {
+        fn eval_g_full(&mut self, x: &[Number], g: &mut [Number]) -> bool {
+            g[0] = x[0] * x[1];
+            g[1] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g_values(&mut self, x: &[Number], values: &mut [Number]) -> bool {
+            // Sparsity layout (matches the probe below):
+            //   (0,0) = ∂(xy)/∂x = y
+            //   (0,1) = ∂(xy)/∂y = x
+            //   (1,0) = ∂(x+y)/∂x = 1
+            //   (1,1) = ∂(x+y)/∂y = 1
+            values[0] = x[1];
+            values[1] = x[0];
+            values[2] = 1.0;
+            values[3] = 1.0;
+            true
+        }
+    }
+
+    #[test]
+    fn phase0_eliminates_nonlinear_block() {
+        // 2 vars, 2 rows.  Row 0: x*y = 1  (nonlinear).  Row 1: x+y = 3.
+        // x_probe = (3.0, 0.5): off-symmetric so the Jacobian
+        // [[y, x], [1, 1]] = [[0.5, 3.0], [1, 1]] is non-singular.
+        // Newton converges to (1, 2) (or 2, 1).
+        let probe = linear_probe(
+            2,
+            2,
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[0.5, 3.0, 1.0, 1.0], // values at x_probe = (3.0, 0.5)
+            &[1.0, 3.0],
+            &[1.0, 3.0],
+            &[1.5, 3.5], // g(3.0, 0.5) = [3.0*0.5, 3.0+0.5]
+            &[Linearity::NonLinear, Linearity::Linear],
+            &[3.0, 0.5],
+            &[0.0, 0.0],
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let mut tnlp = XyCallback;
+        let plan = run_auxiliary_phase0(&opts, &probe, Some(&mut tnlp));
+        assert_eq!(plan.diagnostics.blocks_eliminated, 1);
+        let frame = plan.frame.expect("accepted");
+        // Newton from (1.5, 1.5) on this system converges to (1, 2)
+        // or (2, 1) depending on column ordering; either is a root.
+        let v0 = frame.fixed_values[0];
+        let v1 = frame.fixed_values[1];
+        assert!(
+            (v0 * v1 - 1.0).abs() < 1e-8,
+            "x*y should be 1, got {v0}*{v1}={}",
+            v0 * v1
+        );
+        assert!(
+            (v0 + v1 - 3.0).abs() < 1e-8,
+            "x+y should be 3, got {}",
+            v0 + v1
+        );
+    }
+
+    #[test]
+    fn phase0_nonlinear_rejected_without_callback() {
+        // Same probe as above but with `tnlp = None`.
+        let probe = linear_probe(
+            2,
+            2,
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[0.5, 3.0, 1.0, 1.0],
+            &[1.0, 3.0],
+            &[1.0, 3.0],
+            &[1.5, 3.5],
+            &[Linearity::NonLinear, Linearity::Linear],
+            &[3.0, 0.5],
+            &[0.0, 0.0],
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let plan = run_auxiliary_phase0(&opts, &probe, None);
+        assert_eq!(plan.diagnostics.blocks_eliminated, 0);
+        assert!(plan.frame.is_none());
+        assert!(plan
+            .diagnostics
+            .rejection_reasons
+            .iter()
+            .any(|r| matches!(r, AuxiliaryRejectionReason::BlockSolveDiverged)));
     }
 }
