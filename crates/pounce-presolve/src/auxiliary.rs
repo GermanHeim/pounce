@@ -279,6 +279,60 @@ pub fn run_auxiliary_phase0(
             let allowed = match class {
                 AuxiliaryCouplingClass::PureEquality => true,
                 AuxiliaryCouplingClass::ObjectiveCoupled => aggressive,
+                AuxiliaryCouplingClass::InequalityCoupled => {
+                    // PR 14: try to admit via inequality projection.
+                    // Conditions: all block equality rows linear, all
+                    // coupled inequality rows linear, coupled count ≤
+                    // `auxiliary_max_block_dim`, and every projected
+                    // inequality is implied by the variable box on
+                    // the surviving variables.
+                    let inner_rows_for_check: Vec<usize> = block
+                        .eq_rows
+                        .iter()
+                        .map(|&kk| eq_inc.eq_row_inner_idx[kk])
+                        .collect();
+                    let block_eqs_linear = inner_rows_for_check.iter().all(|&r| is_linear_inner[r]);
+                    let coupled_ineq_rows: Vec<usize> = block
+                        .cols
+                        .iter()
+                        .flat_map(|&c| ineq_inc.rows_for_var(c).iter().copied())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .map(|k| ineq_inc.ineq_row_inner_idx[k])
+                        .collect();
+                    let ineq_within_cap =
+                        coupled_ineq_rows.len() <= opts.auxiliary_max_block_dim as usize;
+                    let ineqs_linear = coupled_ineq_rows.iter().all(|&r| is_linear_inner[r]);
+                    if block_eqs_linear && ineqs_linear && ineq_within_cap {
+                        if let Some(res) = crate::inequality_projection::project_inequalities(
+                            &inner_rows_for_check,
+                            &block.cols,
+                            &coupled_ineq_rows,
+                            probe.n_vars,
+                            probe.x_l,
+                            probe.x_u,
+                            probe.g_l,
+                            probe.g_u,
+                            probe.jac_irow,
+                            probe.jac_jcol,
+                            probe.jac_values,
+                            probe.g_at_probe,
+                            probe.x_probe,
+                            probe.one_based,
+                        ) {
+                            if res.all_implied {
+                                diag.inequality_coupled_accepted_via_projection += 1;
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
                 _ => false,
             };
             if !allowed {
@@ -817,9 +871,11 @@ mod tests {
     }
 
     #[test]
-    fn phase0_rejects_inequality_coupled() {
-        // 2 vars, 2 rows. Row 0 equality, row 1 inequality touching
-        // var 1. Block on var 1 is InequalityCoupled → rejected.
+    fn phase0_inequality_coupled_admitted_via_projection() {
+        // PR 14: 2 vars, 2 rows. Row 0 equality `x[1] = 5`. Row 1
+        // inequality `x[1] in (-∞, 10]`. Block on var 1 is
+        // `InequalityCoupled`. Project: `x[1] = 5` is implied by
+        // the inequality (5 ≤ 10), so PR 14 admits the block.
         let probe = linear_probe(
             2,
             2,
@@ -827,7 +883,39 @@ mod tests {
             &[1, 1],
             &[1.0, 1.0],
             &[5.0, -1e19],
-            &[5.0, 10.0], // row 1 is inequality
+            &[5.0, 10.0], // row 1 is inequality, slack at the solution
+            &[0.0, 0.0],
+            &[Linearity::Linear, Linearity::Linear],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        opts.auxiliary_coupling = AuxiliaryCouplingPolicy::Safe;
+        let plan = run_auxiliary_phase0(&opts, &probe, None, None);
+        // Block is admitted via projection.
+        assert_eq!(plan.diagnostics.blocks_eliminated, 1);
+        assert_eq!(
+            plan.diagnostics.inequality_coupled_accepted_via_projection,
+            1
+        );
+        assert!(plan.frame.is_some());
+    }
+
+    #[test]
+    fn phase0_inequality_coupled_rejected_when_not_implied() {
+        // PR 14 negative case: same shape but the inequality bound
+        // is violated by the equality solution. Row 0: `x[1] = 5`.
+        // Row 1: `x[1] ≤ 4`. Projection gives `5 ≤ 4` → not
+        // implied. Block stays rejected as `InequalityCoupled`.
+        let probe = linear_probe(
+            2,
+            2,
+            &[0, 1],
+            &[1, 1],
+            &[1.0, 1.0],
+            &[5.0, -1e19],
+            &[5.0, 4.0],
             &[0.0, 0.0],
             &[Linearity::Linear, Linearity::Linear],
             &[0.0, 0.0],
@@ -838,6 +926,10 @@ mod tests {
         opts.auxiliary_coupling = AuxiliaryCouplingPolicy::Safe;
         let plan = run_auxiliary_phase0(&opts, &probe, None, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 0);
+        assert_eq!(
+            plan.diagnostics.inequality_coupled_accepted_via_projection,
+            0
+        );
         assert!(plan.frame.is_none());
         assert!(plan
             .diagnostics

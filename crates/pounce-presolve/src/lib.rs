@@ -42,6 +42,7 @@ pub mod coupling;
 pub mod diagnostics;
 pub mod dulmage_mendelsohn;
 pub mod incidence;
+pub mod inequality_projection;
 pub mod licq;
 pub mod matching;
 pub mod options;

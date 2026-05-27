@@ -99,6 +99,11 @@ pub struct AuxiliaryPreprocessingDiagnostics {
     /// the variable box. Excluded from the inequality incidence so
     /// they don't trip coupling classification.
     pub trivially_slack_rows: Index,
+    /// PR 14: count of `InequalityCoupled` candidate blocks the
+    /// orchestrator admitted because every coupled inequality
+    /// turned out to be implied by the variable box after
+    /// projecting the block's linear equality system.
+    pub inequality_coupled_accepted_via_projection: Index,
 }
 
 impl fmt::Display for AuxiliaryPreprocessingDiagnostics {
