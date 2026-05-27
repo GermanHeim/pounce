@@ -31,4 +31,8 @@
 //!
 //! [#62]: https://github.com/jkitchin/pounce/issues/62
 
+pub mod forward;
 pub mod interval;
+
+pub use forward::{forward_pass, ForwardError};
+pub use interval::Interval;
