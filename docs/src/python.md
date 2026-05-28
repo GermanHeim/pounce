@@ -89,6 +89,9 @@ function theorem applied to the KKT conditions.
 The notebooks under
 [`python/notebooks/`](https://github.com/jkitchin/pounce/tree/main/python/notebooks)
 work through getting started, JAX autodiff, implicit differentiation,
-sensitivity analysis, the Pyomo integration, and
+sensitivity analysis, the Pyomo integration,
 [NLP scaling](https://github.com/jkitchin/pounce/blob/main/python/notebooks/07_scaling.ipynb)
-(`set_problem_scaling` + `nlp_scaling_method=user-scaling`).
+(`set_problem_scaling` + `nlp_scaling_method=user-scaling`), and
+[FBBT](https://github.com/jkitchin/pounce/blob/main/python/notebooks/08_fbbt.ipynb)
+(nonlinear bound tightening via `presolve_fbbt=yes` on Pyomo
+models).
