@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! Pure-Rust analysis core for pounce-studio.
 //!
 //! Loads `pounce.solve-report/v1` JSON (see
@@ -20,8 +21,10 @@
 //! changes bump the major version and add a new branch here.
 
 pub mod analysis;
+pub mod glossary;
 pub mod iter_dump;
 pub mod markdown;
+pub mod preflight;
 pub mod report;
 
 pub use analysis::{
