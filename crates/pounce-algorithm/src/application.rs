@@ -1458,6 +1458,29 @@ impl IpoptApplication {
             };
         }
 
+        // `linear_system_scaling` — symmetric scaling of the augmented
+        // KKT matrix before factorization. Port of
+        // `IpTSymLinearSolver.cpp:RegisterOptions` plumbing. Default
+        // "none"; "ruiz" invokes the Ruiz-2001 symmetric ∞-norm
+        // equilibration in `RuizTSymScalingMethod`. "mc19" and
+        // "slack-based" are accepted by the registry but not yet
+        // implemented at this layer; they fall back to no scaling
+        // with a one-line stderr notice.
+        if let Ok((v, found)) = self.options.get_string_value("linear_system_scaling", "") {
+            if found {
+                builder.linear_system_scaling = match v.as_str() {
+                    "ruiz" => crate::alg_builder::LinearSystemScalingChoice::Ruiz,
+                    "mc19" => crate::alg_builder::LinearSystemScalingChoice::Mc19,
+                    _ => crate::alg_builder::LinearSystemScalingChoice::None,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_bool_value("linear_scaling_on_demand", "") {
+            if found {
+                builder.linear_scaling_on_demand = v;
+            }
+        }
+
         // Convergence tolerances (port of `IpOptErrorConvCheck.cpp`'s
         // `RegisterOptions` consumers). Defaults already match upstream
         // — only override when the user set the key explicitly.
@@ -1563,6 +1586,95 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("sigma_min") {
             builder.mu.sigma_min = v;
+        }
+
+        // Quality-function oracle knobs — consumers in
+        // `IpQualityFunctionMuOracle.cpp:RegisterOptions`. Forwarded
+        // to the oracle on every free-mode call.
+        if let Ok((v, found)) = self.options.get_string_value("quality_function_norm_type", "")
+        {
+            if found {
+                use crate::mu::oracle::quality_function::NormType;
+                builder.mu.quality_function_norm_type = match v.as_str() {
+                    "1-norm" => NormType::OneNorm,
+                    "2-norm" => NormType::TwoNorm,
+                    "max-norm" => NormType::MaxNorm,
+                    _ => NormType::TwoNormSquared,
+                };
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("quality_function_centrality", "")
+        {
+            if found {
+                use crate::mu::oracle::quality_function::CentralityType;
+                builder.mu.quality_function_centrality = match v.as_str() {
+                    "log" => CentralityType::LogCenter,
+                    "reciprocal" => CentralityType::ReciprocalCenter,
+                    "cubed-reciprocal" => CentralityType::CubedReciprocalCenter,
+                    _ => CentralityType::None,
+                };
+            }
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("quality_function_balancing_term", "")
+        {
+            if found {
+                use crate::mu::oracle::quality_function::BalancingTermType;
+                builder.mu.quality_function_balancing_term = match v.as_str() {
+                    "cubic" => BalancingTermType::CubicTerm,
+                    _ => BalancingTermType::None,
+                };
+            }
+        }
+        if let Some(v) = read_int("quality_function_max_section_steps") {
+            builder.mu.quality_function_max_section_steps = v;
+        }
+        if let Some(v) = read_num("quality_function_section_sigma_tol") {
+            builder.mu.quality_function_section_sigma_tol = v;
+        }
+        if let Some(v) = read_num("quality_function_section_qf_tol") {
+            builder.mu.quality_function_section_qf_tol = v;
+        }
+
+        // Adaptive-μ extras — consumers in
+        // `IpAdaptiveMuUpdate.cpp:RegisterOptions`. Only active when
+        // `mu_strategy=adaptive`.
+        if let Some(v) = read_num("adaptive_mu_safeguard_factor") {
+            builder.mu.adaptive_mu_safeguard_factor = v;
+        }
+        if let Some(v) = read_num("adaptive_mu_monotone_init_factor") {
+            builder.mu.adaptive_mu_monotone_init_factor = v;
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_bool_value("adaptive_mu_restore_previous_iterate", "")
+        {
+            if found {
+                builder.mu.adaptive_mu_restore_previous_iterate = v;
+            }
+        }
+        if let Some(v) = read_int("adaptive_mu_kkterror_red_iters") {
+            if v >= 0 {
+                builder.mu.adaptive_mu_kkterror_red_iters = v as usize;
+            }
+        }
+        if let Some(v) = read_num("adaptive_mu_kkterror_red_fact") {
+            builder.mu.adaptive_mu_kkterror_red_fact = v;
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("adaptive_mu_kkt_norm_type", "")
+        {
+            if found {
+                use crate::mu::adaptive::AdaptiveMuKktNorm;
+                builder.mu.adaptive_mu_kkt_norm_type = match v.as_str() {
+                    "1-norm" => AdaptiveMuKktNorm::OneNorm,
+                    "2-norm" => AdaptiveMuKktNorm::TwoNorm,
+                    "max-norm" => AdaptiveMuKktNorm::MaxNorm,
+                    _ => AdaptiveMuKktNorm::TwoNormSquared,
+                };
+            }
         }
 
         // Watchdog options — consumers in

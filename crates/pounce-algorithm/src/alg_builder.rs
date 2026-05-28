@@ -68,6 +68,25 @@ pub enum LinearSolverChoice {
     Feral,
 }
 
+/// Symmetric scaling method applied to the augmented KKT system by
+/// [`TSymLinearSolver`]. Mirrors the `linear_system_scaling` option
+/// in `IpAlgBuilder.cpp:302-318` and the `RuizTSymScalingMethod` /
+/// `Mc19TSymScalingMethod` strategies in upstream Ipopt.
+///
+/// * `None` (default) — no scaling; `TSymLinearSolver` runs with a
+///   null scaling method. Matches upstream's default.
+/// * `Ruiz` — iterative symmetric ∞-norm equilibration (Ruiz, 2001).
+///   Implemented in `pounce_linsol::RuizTSymScalingMethod`.
+/// * `Mc19` — Curtis-Reid (HSL MC19) scaling. Not yet implemented;
+///   falls back to `None` with a warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinearSystemScalingChoice {
+    #[default]
+    None,
+    Ruiz,
+    Mc19,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MuStrategyChoice {
     Monotone,
@@ -160,6 +179,17 @@ pub struct AlgorithmBuilder {
     /// vs SQP struct).
     pub algorithm: AlgorithmChoice,
     pub linear_solver: LinearSolverChoice,
+    /// Symmetric scaling method for the augmented KKT system. Wired
+    /// into [`TSymLinearSolver`] by [`Self::build_with_backend`].
+    /// Mirrors upstream `linear_system_scaling` (`IpAlgBuilder.cpp:538-560`).
+    pub linear_system_scaling: LinearSystemScalingChoice,
+    /// Lazy-vs-eager scaling toggle (`linear_scaling_on_demand`,
+    /// `IpTSymLinearSolver.cpp:50-58`). Only consulted when
+    /// `linear_system_scaling != None`. Upstream default is `true`
+    /// (compute scaling only on the first solve that fails / shows
+    /// poor conditioning); pounce mirrors that. Set to `false` to
+    /// scale every factorization.
+    pub linear_scaling_on_demand: bool,
     pub mu_strategy: MuStrategyChoice,
     /// Selector forwarded to [`AdaptiveMuUpdate`] when
     /// `mu_strategy = Adaptive`. Ignored for `Monotone`. Defaults to
@@ -299,6 +329,47 @@ pub struct MuOptions {
     /// `ObjConstrFilter`; the Mehrotra cascade switches to
     /// `NeverMonotoneMode` to disable globalization entirely.
     pub adaptive_mu_globalization: crate::mu::adaptive::AdaptiveMuGlobalization,
+    /// `quality_function_norm_type` — norm used inside the quality
+    /// function to aggregate the three KKT components. Forwarded to
+    /// `QualityFunctionMuOracle` when `mu_oracle=quality-function`.
+    pub quality_function_norm_type: crate::mu::oracle::quality_function::NormType,
+    /// `quality_function_centrality` — centrality penalty term added
+    /// to the quality function.
+    pub quality_function_centrality: crate::mu::oracle::quality_function::CentralityType,
+    /// `quality_function_balancing_term` — balancing penalty term in
+    /// the quality function (kicks in when complementarity is far
+    /// below infeasibilities).
+    pub quality_function_balancing_term:
+        crate::mu::oracle::quality_function::BalancingTermType,
+    /// `quality_function_max_section_steps` — cap on golden-section
+    /// iterations when picking σ. Default 8.
+    pub quality_function_max_section_steps: i32,
+    /// `quality_function_section_sigma_tol` — width tolerance in
+    /// σ-space for golden section. Default 1e-2.
+    pub quality_function_section_sigma_tol: Number,
+    /// `quality_function_section_qf_tol` — relative flatness
+    /// tolerance for golden section. Default 0.0.
+    pub quality_function_section_qf_tol: Number,
+    /// `adaptive_mu_safeguard_factor` — guard for the LOQO fallback
+    /// in adaptive mode. Default 0.0.
+    pub adaptive_mu_safeguard_factor: Number,
+    /// `adaptive_mu_monotone_init_factor` — multiplier on the
+    /// average complementarity when seeding monotone mode after a
+    /// free-mode bailout. Default 0.8.
+    pub adaptive_mu_monotone_init_factor: Number,
+    /// `adaptive_mu_restore_previous_iterate` — restore the most
+    /// recent free-mode iterate when switching to fixed mode.
+    /// Default `false`.
+    pub adaptive_mu_restore_previous_iterate: bool,
+    /// `adaptive_mu_kkterror_red_iters` — window length for the
+    /// `KKT_ERROR` globalization history. Default 4.
+    pub adaptive_mu_kkterror_red_iters: usize,
+    /// `adaptive_mu_kkterror_red_fact` — required relative reduction
+    /// of the KKT error over the window. Default 0.9999.
+    pub adaptive_mu_kkterror_red_fact: Number,
+    /// `adaptive_mu_kkt_norm_type` — norm used to score the iterate
+    /// in adaptive globalization decisions.
+    pub adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm,
 }
 
 impl Default for MuOptions {
@@ -317,6 +388,22 @@ impl Default for MuOptions {
             sigma_min: 1e-6,
             adaptive_mu_globalization:
                 crate::mu::adaptive::AdaptiveMuGlobalization::ObjConstrFilter,
+            quality_function_norm_type:
+                crate::mu::oracle::quality_function::NormType::TwoNormSquared,
+            quality_function_centrality:
+                crate::mu::oracle::quality_function::CentralityType::None,
+            quality_function_balancing_term:
+                crate::mu::oracle::quality_function::BalancingTermType::None,
+            quality_function_max_section_steps: 8,
+            quality_function_section_sigma_tol: 1e-2,
+            quality_function_section_qf_tol: 0.0,
+            adaptive_mu_safeguard_factor: 0.0,
+            adaptive_mu_monotone_init_factor: 0.8,
+            adaptive_mu_restore_previous_iterate: false,
+            adaptive_mu_kkterror_red_iters: 4,
+            adaptive_mu_kkterror_red_fact: 0.9999,
+            adaptive_mu_kkt_norm_type:
+                crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
         }
     }
 }
@@ -395,6 +482,8 @@ impl Default for AlgorithmBuilder {
         Self {
             algorithm: AlgorithmChoice::default(),
             linear_solver: LinearSolverChoice::Feral,
+            linear_system_scaling: LinearSystemScalingChoice::None,
+            linear_scaling_on_demand: true,
             mu_strategy: MuStrategyChoice::Monotone,
             mu_oracle: MuOracleKind::QualityFunction,
             hessian_approximation: HessianApproxChoice::Exact,
@@ -430,7 +519,20 @@ impl AlgorithmBuilder {
     /// PdSearchDirCalc` chain via the supplied `factory`.
     pub fn build_with_backend(&self, mut factory: LinearBackendFactory) -> AlgorithmBundle {
         let backend = factory(self.linear_solver);
-        let linsol = TSymLinearSolver::new(backend, None, false);
+        let scaling: Option<Box<dyn pounce_linsol::TSymScalingMethod>> =
+            match self.linear_system_scaling {
+                LinearSystemScalingChoice::None => None,
+                LinearSystemScalingChoice::Ruiz => {
+                    Some(Box::new(pounce_linsol::RuizTSymScalingMethod::new()))
+                }
+                LinearSystemScalingChoice::Mc19 => {
+                    eprintln!(
+                        "pounce: linear_system_scaling=mc19 not yet implemented; using no scaling"
+                    );
+                    None
+                }
+            };
+        let linsol = TSymLinearSolver::new(backend, scaling, self.linear_scaling_on_demand);
         let aug_solver = StdAugSystemSolver::new(linsol);
         let perturb = Rc::new(RefCell::new(PdPerturbationHandler::new()));
         let pd_solver = PdFullSpaceSolver::new(Box::new(aug_solver), perturb);
@@ -495,6 +597,22 @@ impl AlgorithmBuilder {
                 adaptive.sigma_min = self.mu.sigma_min;
                 adaptive.sigma_max = self.mu.sigma_max;
                 adaptive.adaptive_mu_globalization = self.mu.adaptive_mu_globalization;
+                adaptive.qf_norm_type = self.mu.quality_function_norm_type;
+                adaptive.qf_centrality_type = self.mu.quality_function_centrality;
+                adaptive.qf_balancing_term = self.mu.quality_function_balancing_term;
+                adaptive.qf_max_section_steps = self.mu.quality_function_max_section_steps;
+                adaptive.qf_section_sigma_tol = self.mu.quality_function_section_sigma_tol;
+                adaptive.qf_section_qf_tol = self.mu.quality_function_section_qf_tol;
+                adaptive.adaptive_mu_safeguard_factor = self.mu.adaptive_mu_safeguard_factor;
+                adaptive.adaptive_mu_monotone_init_factor =
+                    self.mu.adaptive_mu_monotone_init_factor;
+                adaptive.restore_accepted_iterate =
+                    self.mu.adaptive_mu_restore_previous_iterate;
+                adaptive.adaptive_mu_kkterror_red_iters =
+                    self.mu.adaptive_mu_kkterror_red_iters;
+                adaptive.adaptive_mu_kkterror_red_fact =
+                    self.mu.adaptive_mu_kkterror_red_fact;
+                adaptive.adaptive_mu_kkt_norm = self.mu.adaptive_mu_kkt_norm_type;
                 Box::new(adaptive)
             }
         };
@@ -655,6 +773,8 @@ mod tests {
                         let _ = AlgorithmBuilder {
                             algorithm: AlgorithmChoice::default(),
                             linear_solver,
+                            linear_system_scaling: LinearSystemScalingChoice::None,
+                            linear_scaling_on_demand: true,
                             mu_strategy,
                             mu_oracle: MuOracleKind::QualityFunction,
                             hessian_approximation,

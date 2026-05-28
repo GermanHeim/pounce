@@ -106,6 +106,28 @@ pub struct AdaptiveMuUpdate {
     /// from `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
     pub sigma_max: Number,
     pub sigma_min: Number,
+    /// `quality_function_norm_type` (default `2-norm-squared`) —
+    /// norm used to aggregate the three KKT components inside the
+    /// quality function. Forwarded to `QualityFunctionMuOracle` on
+    /// every free-mode call. Mirrors
+    /// `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
+    pub qf_norm_type: crate::mu::oracle::quality_function::NormType,
+    /// `quality_function_centrality` (default `none`) — penalty term
+    /// added to the quality function for centrality deviation.
+    pub qf_centrality_type: crate::mu::oracle::quality_function::CentralityType,
+    /// `quality_function_balancing_term` (default `none`) — penalty
+    /// term added to the quality function when the complementarity
+    /// is far smaller than the infeasibilities.
+    pub qf_balancing_term: crate::mu::oracle::quality_function::BalancingTermType,
+    /// `quality_function_max_section_steps` (default 8) — cap on
+    /// golden-section iterations when picking σ.
+    pub qf_max_section_steps: i32,
+    /// `quality_function_section_sigma_tol` (default 1e-2) — width
+    /// tolerance in σ-space for the golden-section search.
+    pub qf_section_sigma_tol: Number,
+    /// `quality_function_section_qf_tol` (default 0.0) — relative
+    /// flatness tolerance for the golden-section search.
+    pub qf_section_qf_tol: Number,
 
     /// Upstream tracks `init_*_inf` lazily — sentinel −1 means
     /// "not yet captured".
@@ -167,6 +189,12 @@ impl Default for AdaptiveMuUpdate {
             restore_accepted_iterate: false,
             sigma_max: 1e2,
             sigma_min: 1e-6,
+            qf_norm_type: crate::mu::oracle::quality_function::NormType::TwoNormSquared,
+            qf_centrality_type: crate::mu::oracle::quality_function::CentralityType::None,
+            qf_balancing_term: crate::mu::oracle::quality_function::BalancingTermType::None,
+            qf_max_section_steps: 8,
+            qf_section_sigma_tol: 1e-2,
+            qf_section_qf_tol: 0.0,
             init_dual_inf: -1.0,
             init_primal_inf: -1.0,
             free_mu_mode: true,
@@ -586,6 +614,12 @@ impl MuUpdate for AdaptiveMuUpdate {
                     oracle.mu_max = self.mu_max;
                     oracle.sigma_min = self.sigma_min;
                     oracle.sigma_max = self.sigma_max;
+                    oracle.norm_type = self.qf_norm_type;
+                    oracle.centrality_type = self.qf_centrality_type;
+                    oracle.balancing_term = self.qf_balancing_term;
+                    oracle.max_section_steps = self.qf_max_section_steps;
+                    oracle.section_sigma_tol = self.qf_section_sigma_tol;
+                    oracle.section_qf_tol = self.qf_section_qf_tol;
                     // Mirrors upstream's `quality_function_search` timer
                     // around `CalculateMu` in `IpQualityFunctionMuOracle.cpp`.
                     let timing = data.borrow().timing.clone();
