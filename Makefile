@@ -14,6 +14,8 @@
 #   make uninstall        # remove installed artifacts
 #   make install-mcp      # build studio/mcp + register with Claude Code
 #   make uninstall-mcp    # unregister + remove the studio/mcp venv
+#   make install-skill    # build pounce + pounce-studio, drop SKILL.md into ~/.claude/skills/
+#   make uninstall-skill  # remove the installed skill directory
 #   make clean            # cargo clean
 #
 # Benchmark targets — single source of truth in benchmarks/Makefile.
@@ -67,7 +69,7 @@ else
 endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book install uninstall clean help \
-        install-mcp uninstall-mcp \
+        install-mcp uninstall-mcp install-skill uninstall-skill \
         benchmark benchmark-rerun benchmark-report benchmark-gams
 
 all: build
@@ -183,3 +185,37 @@ uninstall-mcp:
 	  claude mcp remove pounce-studio --scope $(MCP_SCOPE) >/dev/null 2>&1 || true
 	rm -rf "$(MCP_VENV)"
 	@echo "Removed $(MCP_VENV) and unregistered pounce-studio (scope=$(MCP_SCOPE))"
+
+# ---- Claude skill (studio/skill) ---------------------------------------
+# Build the pounce + pounce-studio binaries, install them under $(PREFIX),
+# and drop the skill directory at ~/.claude/skills/pounce/ so any Claude
+# Code session picks it up. Override SKILL_DIR for a non-default location.
+#
+#   make install-skill                          # ~/.claude/skills/pounce
+#   make install-skill SKILL_DIR=$$HOME/elsewhere/pounce
+#   make uninstall-skill
+
+SKILL_DIR ?= $(HOME)/.claude/skills/pounce
+STUDIO_BIN := $(TARGET_DIR)/pounce-studio
+
+install-skill: build
+	@echo "Installing pounce + pounce-studio into $(PREFIX) and skill into $(SKILL_DIR)"
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(CLI_BIN)" "$(DESTDIR)$(BINDIR)/pounce"
+	install -m 0755 "$(STUDIO_BIN)" "$(DESTDIR)$(BINDIR)/pounce-studio"
+	install -d "$(SKILL_DIR)"
+	install -m 0644 studio/skill/SKILL.md "$(SKILL_DIR)/SKILL.md"
+	install -m 0644 studio/skill/README.md "$(SKILL_DIR)/README.md"
+	@echo
+	@echo "Done. Verify with:"
+	@echo "  $(BINDIR)/pounce-studio --version"
+	@echo "  ls $(SKILL_DIR)"
+	@echo
+	@echo "In a fresh Claude Code session, ask:"
+	@echo '  "diagnose studio/mcp/fixtures/rosenbrock-stalled.json"'
+
+uninstall-skill:
+	rm -rf "$(SKILL_DIR)"
+	rm -f "$(DESTDIR)$(BINDIR)/pounce-studio"
+	@echo "Removed $(SKILL_DIR) and $(BINDIR)/pounce-studio"
+	@echo "Note: $(BINDIR)/pounce was not removed (shared with \`make install\`)."

@@ -5,6 +5,13 @@ MCP client (Claude Code, Claude Desktop, Cursor, Zed, ...) load a
 `pounce.solve-report/v1` JSON file and ask questions about convergence,
 restoration, stalls, and per-iteration state.
 
+> **Lighter-weight alternative:** [`studio/skill/`](../skill/) ships the
+> same analysis surface as a Claude skill that drives the `pounce-studio`
+> CLI directly — no Python venv, no MCP registration, one-line install
+> via `make install-skill`. Use the MCP server if you want structured
+> tool-call UI or are driving a non-Claude MCP client; use the skill if
+> you just want it to work everywhere with the minimum setup.
+
 ## Status
 
 Phase 0. Post-mortem analysis of solve-report JSON and POUNCEIT v1
