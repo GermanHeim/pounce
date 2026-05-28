@@ -1031,8 +1031,10 @@ impl IpoptApplication {
         let scaling_method = match scaling_method.as_str() {
             "none" => ScalingMethod::None,
             "gradient-based" => ScalingMethod::GradientBased,
-            // user-scaling / equilibration not yet implemented; fall back
-            // to gradient-based which matches the upstream default.
+            "user-scaling" => ScalingMethod::UserScaling,
+            // `equilibration-based` is registered upstream but not yet
+            // implemented in pounce; fall back to gradient-based (the
+            // upstream default) to keep behavior predictable.
             _ => ScalingMethod::GradientBased,
         };
         let max_gradient = self
@@ -1047,7 +1049,25 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or(1e-8);
-        orig_nlp.determine_scaling_from_starting_point(scaling_method, max_gradient, min_value);
+        let obj_target_gradient = self
+            .options
+            .get_numeric_value("nlp_scaling_obj_target_gradient", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(0.0);
+        let constr_target_gradient = self
+            .options
+            .get_numeric_value("nlp_scaling_constr_target_gradient", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(0.0);
+        orig_nlp.determine_scaling_from_starting_point(
+            scaling_method,
+            max_gradient,
+            min_value,
+            obj_target_gradient,
+            constr_target_gradient,
+        );
 
         let nlp_handle: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 

@@ -22,6 +22,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod alg_types;
+pub mod expression_provider;
 pub mod ipopt_nlp;
 pub mod orig_ipopt_nlp;
 pub mod return_codes;
@@ -30,6 +31,7 @@ pub mod tnlp;
 pub mod tnlp_adapter;
 
 pub use alg_types::SolverReturn;
+pub use expression_provider::{ExpressionProvider, FbbtOp, FbbtTape};
 pub use ipopt_nlp::{IpoptNlp, Nlp};
 pub use orig_ipopt_nlp::{NlpScaling, NoScaling, OrigIpoptNlp};
 pub use return_codes::{AlgorithmMode, ApplicationReturnStatus};

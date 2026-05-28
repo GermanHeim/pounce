@@ -28,6 +28,7 @@ use pounce_common::exception::SolverException;
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::types::{Index, Number};
+use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
@@ -41,6 +42,7 @@ pub mod components;
 pub mod coupling;
 pub mod diagnostics;
 pub mod dulmage_mendelsohn;
+pub mod fbbt;
 pub mod incidence;
 pub mod inequality_projection;
 pub mod licq;
@@ -101,6 +103,25 @@ pub fn wrap_with_presolve(
     Ok(Rc::new(RefCell::new(PresolveTnlp::new(inner, opts))))
 }
 
+/// Same as [`wrap_with_presolve`] but also installs an
+/// [`ExpressionProvider`] so passes like FBBT (issue #62) can see
+/// constraint expression trees. Callers who have the concrete inner
+/// TNLP type (`pounce-cli` with `NlTnlp`) should prefer this; the
+/// plain `wrap_with_presolve` leaves `presolve_fbbt` as a silent
+/// no-op.
+pub fn wrap_with_presolve_provider(
+    inner: Rc<RefCell<dyn TNLP>>,
+    expr_provider: Rc<RefCell<dyn ExpressionProvider>>,
+    opts: PresolveOptions,
+) -> Result<Rc<RefCell<dyn TNLP>>, PresolveError> {
+    if !opts.enabled {
+        return Ok(inner);
+    }
+    Ok(Rc::new(RefCell::new(
+        PresolveTnlp::with_expression_provider(inner, expr_provider, opts),
+    )))
+}
+
 /// Convenience: read the `presolve_*` keys out of an `OptionsList`
 /// and call [`wrap_with_presolve`].
 pub fn wrap_from_options(
@@ -125,6 +146,14 @@ pub struct CachedBounds {
 /// TNLP wrapper that re-presents the inner problem after presolve.
 pub struct PresolveTnlp {
     inner: Rc<RefCell<dyn TNLP>>,
+    /// Optional structural-expression handle on the inner TNLP for
+    /// passes (FBBT, issue #62) that need DAG-level access. Callers
+    /// who know the concrete inner type (e.g. `pounce-cli` with
+    /// `NlTnlp`) install this via
+    /// [`Self::with_expression_provider`]. Callers without (e.g.
+    /// callback-based bridges) leave it `None` and the expression-
+    /// hungry passes silently become no-ops.
+    expr_provider: Option<Rc<RefCell<dyn ExpressionProvider>>>,
     opts: PresolveOptions,
 
     /// `None` until init has run; afterwards `Some(state)`.
@@ -149,6 +178,9 @@ struct PresolveState {
 
     /// Phase 1 report.
     tighten_report: TightenReport,
+    /// FBBT report (`None` when `presolve_fbbt` was off or the inner
+    /// TNLP did not expose an `ExpressionProvider`).
+    fbbt_report: Option<crate::fbbt::FbbtReport>,
     /// Number of rows dropped by Phase 2.
     n_dropped_rows: Index,
     /// Phase 3 verdict (`None` if the LICQ check was disabled).
@@ -181,9 +213,35 @@ impl PresolveTnlp {
     pub fn new(inner: Rc<RefCell<dyn TNLP>>, opts: PresolveOptions) -> Self {
         Self {
             inner,
+            expr_provider: None,
             opts,
             state: None,
         }
+    }
+
+    /// Build a presolve wrapper with an `ExpressionProvider` handle on
+    /// the same inner TNLP. The two handles should reference the
+    /// *same* object (typical pattern: clone an `Rc<RefCell<NlTnlp>>`
+    /// twice, once as `dyn TNLP` and once as `dyn ExpressionProvider`).
+    /// Required for `presolve_fbbt=yes` to fire — without a provider,
+    /// FBBT silently becomes a no-op.
+    pub fn with_expression_provider(
+        inner: Rc<RefCell<dyn TNLP>>,
+        expr_provider: Rc<RefCell<dyn ExpressionProvider>>,
+        opts: PresolveOptions,
+    ) -> Self {
+        Self {
+            inner,
+            expr_provider: Some(expr_provider),
+            opts,
+            state: None,
+        }
+    }
+
+    /// FBBT report (`None` until init runs, or when FBBT was disabled
+    /// or the inner TNLP did not expose an `ExpressionProvider`).
+    pub fn fbbt_report(&self) -> Option<crate::fbbt::FbbtReport> {
+        self.state.as_ref().and_then(|s| s.fbbt_report.clone())
     }
 
     /// Phase 1 report (zeroed until init has run).
@@ -525,6 +583,36 @@ impl PresolveTnlp {
             }
         }
 
+        // Phase 1b — FBBT (issue #62). Runs interval arithmetic over
+        // each nonlinear constraint's expression DAG to tighten
+        // variable bounds further. No-op when (a) `presolve_fbbt` is
+        // off, (b) the inner TNLP did not supply an
+        // `ExpressionProvider`, or (c) the problem has zero
+        // constraints. Honors `fbbt_tol`, `fbbt_max_iter`, and
+        // `fbbt_max_constraints`.
+        let mut fbbt_report: Option<crate::fbbt::FbbtReport> = None;
+        if self.opts.fbbt && m_in > 0 {
+            if let Some(provider) = self.expr_provider.as_ref() {
+                let cfg = crate::fbbt::FbbtConfig {
+                    tol: self.opts.fbbt_tol,
+                    max_iter: self.opts.fbbt_max_iter.max(1) as usize,
+                    max_constraints: self.opts.fbbt_max_constraints.max(0) as usize,
+                };
+                let provider_borrow = provider.borrow();
+                let report = crate::fbbt::run_fbbt(
+                    &*provider_borrow,
+                    n,
+                    m_in,
+                    &mut x_l,
+                    &mut x_u,
+                    &g_l_inner,
+                    &g_u_inner,
+                    &cfg,
+                );
+                fbbt_report = Some(report);
+            }
+        }
+
         // Phase 4: any variable whose lower (upper) bound moved
         // strictly inward is a candidate for a bound-multiplier warm
         // start. Zero entries leave that bound's multiplier on the
@@ -658,6 +746,7 @@ impl PresolveTnlp {
             jac_irow_outer,
             jac_jcol_outer,
             tighten_report,
+            fbbt_report,
             n_dropped_rows,
             licq_verdict,
             z_l_warm,

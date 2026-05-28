@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod factorization;
+pub mod ruiz;
 pub mod scaling;
 pub mod sparse_sym_iface;
 pub mod status;
@@ -27,6 +28,7 @@ pub mod t_sym_solver;
 
 pub use error::FactorizationError;
 pub use factorization::Factorization;
+pub use ruiz::RuizTSymScalingMethod;
 pub use scaling::{IdentityScalingMethod, TSymScalingMethod};
 pub use sparse_sym_iface::{EMatrixFormat, SparseSymLinearSolverInterface};
 pub use status::ESymSolverStatus;

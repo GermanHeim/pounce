@@ -148,6 +148,13 @@ pub fn main() -> ExitCode {
     // read off `NlProblem` before `NlTnlp` consumes it.
     let mut nl_suffixes: Option<nl_reader::NlSuffixes> = None;
     let mut nl_dims: Option<(usize, usize)> = None;
+    // `nl_expr_provider` shadows `inner_tnlp` for the `.nl`-file path:
+    // both point at the same `NlTnlp`, but the second handle is typed
+    // as `dyn ExpressionProvider` so the presolve wrapper can use it
+    // for FBBT (issue #62). For built-in problems we leave it `None`.
+    let mut nl_expr_provider: Option<
+        Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>,
+    > = None;
     let inner_tnlp: Rc<RefCell<dyn TNLP>> = match &args.problem {
         ProblemSource::Builtin(name) => match builtin::lookup(name) {
             Some(t) => t,
@@ -165,8 +172,10 @@ pub fn main() -> ExitCode {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
                     let elapsed = t0.elapsed().as_secs_f64();
-                    let t: Rc<RefCell<dyn TNLP>> =
-                        Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
+                    let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
+                    nl_expr_provider = Some(Rc::clone(&nl_rc)
+                        as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
+                    let t: Rc<RefCell<dyn TNLP>> = nl_rc;
                     if let Some(info) = t.borrow_mut().get_nlp_info() {
                         println!(
                             "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s",
@@ -311,10 +320,14 @@ pub fn main() -> ExitCode {
         presolve_opts.enabled = false;
     }
     let presolve_handle = if presolve_opts.enabled {
-        let p = Rc::new(RefCell::new(pounce_presolve::PresolveTnlp::new(
-            Rc::clone(&inner_tnlp),
-            presolve_opts,
-        )));
+        let p = Rc::new(RefCell::new(match &nl_expr_provider {
+            Some(ep) => pounce_presolve::PresolveTnlp::with_expression_provider(
+                Rc::clone(&inner_tnlp),
+                Rc::clone(ep),
+                presolve_opts,
+            ),
+            None => pounce_presolve::PresolveTnlp::new(Rc::clone(&inner_tnlp), presolve_opts),
+        }));
         // Force the lazy init now so we can print a one-line summary.
         let _ = p.borrow_mut().get_nlp_info();
         {
@@ -329,6 +342,15 @@ pub fn main() -> ExitCode {
                 "Presolve: tightened {} bounds ({} newly-finite), dropped {} redundant rows, LICQ={}",
                 tr.n_tightened, tr.n_new_finite, dropped, licq
             );
+            if let Some(fr) = h.fbbt_report() {
+                println!(
+                    "Presolve FBBT: {} sweeps, {} variable tightenings (Σ|Δ|={:.3e})",
+                    fr.iterations, fr.bound_updates, fr.total_tightening
+                );
+                if let Some(witness) = fr.infeasibility_witness {
+                    eprintln!("pounce: FBBT detected infeasibility (witness constraint {witness})");
+                }
+            }
         }
         Some(p)
     } else {

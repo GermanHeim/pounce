@@ -1406,6 +1406,23 @@ impl NlTnlp {
     }
 }
 
+impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
+    /// Per-`.nl`-row constraint expression tape, with the linear
+    /// part folded in. Returns `None` for constraints that contribute
+    /// neither a nonlinear expression nor any linear coefficients
+    /// (so FBBT skips them — there's nothing to tighten).
+    fn constraint_expression(&self, i: usize) -> Option<pounce_nlp::FbbtTape> {
+        let nonlinear = self.prob.con_nonlinear.get(i)?;
+        let linear = self
+            .prob
+            .con_linear
+            .get(i)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        crate::nl_fbbt_translate::translate_constraint(nonlinear, linear)
+    }
+}
+
 impl TNLP for NlTnlp {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
