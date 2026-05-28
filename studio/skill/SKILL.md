@@ -22,8 +22,9 @@ Use this skill when the user asks any of:
 ## Tools at your disposal
 
 All output is pretty-printed JSON on stdout — pipe through `jq` to
-slice. Set `POUNCE_BIN` to an absolute path to override binary
-discovery if `pounce-studio` is not on PATH.
+slice. If `pounce-studio` is not on `PATH`, invoke it via its absolute
+path (e.g. `~/.cargo/bin/pounce-studio` or `~/.local/bin/pounce-studio`,
+depending on how it was installed).
 
 ### Post-mortem on a JSON solve report
 
@@ -39,7 +40,8 @@ pounce-studio restoration-windows <report>    # restoration entry→exit cycles
 pounce-studio compare <r1> <r2> ...           # side-by-side
     [--labels A,B,C]
 pounce-studio linear-solver-summary <report>  # FERAL post-mortem
-pounce-studio inspect <report>                # Markdown summary (no JSON)
+pounce-studio inspect <report> [--json]       # Markdown summary by default;
+                                              # --json dumps the whole report
 ```
 
 The report must be at JSON detail `full` for the iter-level tools
@@ -228,7 +230,7 @@ The JSON file is not a `pounce.solve-report/v1` document — perhaps an
 AMPL `.sol`, a different solver's output, or a hand-written file.
 Re-run the solve with `--json-output <path>`.
 
-**`load_solve_report works but convergence-trace is empty`**
+**`summary` works but `convergence-trace` returns empty arrays**
 The report was written at `--json-detail summary`. Re-run the solve
 with `--json-detail full`.
 
