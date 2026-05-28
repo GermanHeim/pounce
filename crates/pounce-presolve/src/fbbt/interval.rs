@@ -364,7 +364,13 @@ const SIN_TROUGHS: Number = -std::f64::consts::FRAC_PI_2;
 const COS_PEAKS: Number = 0.0; // 0 + 2πk
 const COS_TROUGHS: Number = std::f64::consts::PI; // π + 2πk
 
-fn trig_image<F>(lo: Number, hi: Number, f: F, peak_offset: Number, trough_offset: Number) -> Interval
+fn trig_image<F>(
+    lo: Number,
+    hi: Number,
+    f: F,
+    peak_offset: Number,
+    trough_offset: Number,
+) -> Interval
 where
     F: Fn(Number) -> Number,
 {

@@ -152,7 +152,9 @@ pub fn main() -> ExitCode {
     // both point at the same `NlTnlp`, but the second handle is typed
     // as `dyn ExpressionProvider` so the presolve wrapper can use it
     // for FBBT (issue #62). For built-in problems we leave it `None`.
-    let mut nl_expr_provider: Option<Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>> = None;
+    let mut nl_expr_provider: Option<
+        Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>,
+    > = None;
     let inner_tnlp: Rc<RefCell<dyn TNLP>> = match &args.problem {
         ProblemSource::Builtin(name) => match builtin::lookup(name) {
             Some(t) => t,
@@ -346,9 +348,7 @@ pub fn main() -> ExitCode {
                     fr.iterations, fr.bound_updates, fr.total_tightening
                 );
                 if let Some(witness) = fr.infeasibility_witness {
-                    eprintln!(
-                        "pounce: FBBT detected infeasibility (witness constraint {witness})"
-                    );
+                    eprintln!("pounce: FBBT detected infeasibility (witness constraint {witness})");
                 }
             }
         }

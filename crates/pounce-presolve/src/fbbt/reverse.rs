@@ -51,11 +51,7 @@ pub struct ReverseResult {
 ///
 /// The forward pass MUST have been run first (`forward.len() ==
 /// tape.ops.len()`); we do not recompute it here.
-pub fn reverse_pass(
-    tape: &FbbtTape,
-    forward: &[Interval],
-    con_bound: Interval,
-) -> ReverseResult {
+pub fn reverse_pass(tape: &FbbtTape, forward: &[Interval], con_bound: Interval) -> ReverseResult {
     assert_eq!(
         forward.len(),
         tape.ops.len(),
@@ -329,10 +325,7 @@ mod tests {
         let tape = FbbtTape {
             ops: vec![FbbtOp::Var(0), FbbtOp::PowInt(0, 3)],
         };
-        let forward = vec![
-            Interval::new(-100.0, 100.0),
-            Interval::new(-1e6, 1e6),
-        ];
+        let forward = vec![Interval::new(-100.0, 100.0), Interval::new(-1e6, 1e6)];
         let r = run(&tape, &forward, Interval::new(-8.0, 27.0));
         assert!(!r.infeasible);
         let v0 = r.slots[0];
@@ -431,11 +424,7 @@ mod tests {
         let tape = FbbtTape {
             ops: vec![FbbtOp::Var(0), FbbtOp::Opaque, FbbtOp::Add(0, 1)],
         };
-        let forward = vec![
-            Interval::new(0.0, 10.0),
-            Interval::ENTIRE,
-            Interval::ENTIRE,
-        ];
+        let forward = vec![Interval::new(0.0, 10.0), Interval::ENTIRE, Interval::ENTIRE];
         let r = run(&tape, &forward, Interval::new(5.0, 5.0));
         assert!(!r.infeasible);
         // Slot 0 still gets some info: x + (anything) = 5 → x ⊆ ?
@@ -460,8 +449,8 @@ mod tests {
                 FbbtOp::Add(1, 3),
             ],
         };
-        let forward = crate::fbbt::forward::forward_pass(&tape, &[-3.0, -3.0], &[3.0, 3.0])
-            .unwrap();
+        let forward =
+            crate::fbbt::forward::forward_pass(&tape, &[-3.0, -3.0], &[3.0, 3.0]).unwrap();
         let r = run(&tape, &forward, Interval::point(5.0));
         assert!(!r.infeasible);
 

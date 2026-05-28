@@ -733,8 +733,7 @@ impl OrigIpoptNlp {
                 );
             }
             ScalingMethod::UserScaling => {
-                let applied =
-                    self.scale_user_supplied(&cls, user_obj_factor, min_value);
+                let applied = self.scale_user_supplied(&cls, user_obj_factor, min_value);
                 if !applied {
                     // TNLP declined to supply scaling — fall through to
                     // no automatic scaling (matches upstream's behavior

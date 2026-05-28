@@ -265,11 +265,7 @@ mod tests {
     #[test]
     fn pow_with_variable_rhs_is_opaque() {
         // x^y
-        let e = Expr::Binary(
-            BinOp::Pow,
-            Box::new(Expr::Var(0)),
-            Box::new(Expr::Var(1)),
-        );
+        let e = Expr::Binary(BinOp::Pow, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
         let tape = translate_constraint(&e, &[]).unwrap();
         assert!(matches!(tape.ops.last(), Some(FbbtOp::Opaque)));
     }

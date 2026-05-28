@@ -121,11 +121,11 @@ mod tests {
     fn quadratic_sum() {
         let tape = FbbtTape {
             ops: vec![
-                FbbtOp::Var(0),         // x
-                FbbtOp::PowInt(0, 2),   // x^2
-                FbbtOp::Var(1),         // y
-                FbbtOp::PowInt(2, 2),   // y^2
-                FbbtOp::Add(1, 3),      // x^2 + y^2
+                FbbtOp::Var(0),       // x
+                FbbtOp::PowInt(0, 2), // x^2
+                FbbtOp::Var(1),       // y
+                FbbtOp::PowInt(2, 2), // y^2
+                FbbtOp::Add(1, 3),    // x^2 + y^2
             ],
         };
         let vals = forward_pass(&tape, &[-2.0, 0.0], &[1.0, 3.0]).unwrap();
@@ -251,17 +251,17 @@ mod tests {
         // f(x, y) = (x - 1) * (y + 2) + sqrt(x + 10)
         let tape = FbbtTape {
             ops: vec![
-                FbbtOp::Var(0),           // x
+                FbbtOp::Var(0), // x
                 FbbtOp::Const(1.0),
-                FbbtOp::Sub(0, 1),        // x - 1
-                FbbtOp::Var(1),           // y
+                FbbtOp::Sub(0, 1), // x - 1
+                FbbtOp::Var(1),    // y
                 FbbtOp::Const(2.0),
-                FbbtOp::Add(3, 4),        // y + 2
-                FbbtOp::Mul(2, 5),        // (x-1)*(y+2)
+                FbbtOp::Add(3, 4), // y + 2
+                FbbtOp::Mul(2, 5), // (x-1)*(y+2)
                 FbbtOp::Const(10.0),
-                FbbtOp::Add(0, 7),        // x + 10
-                FbbtOp::Sqrt(8),          // sqrt(x+10)
-                FbbtOp::Add(6, 9),        // f
+                FbbtOp::Add(0, 7), // x + 10
+                FbbtOp::Sqrt(8),   // sqrt(x+10)
+                FbbtOp::Add(6, 9), // f
             ],
         };
         let x_lo = [-2.0, -1.0];
@@ -274,11 +274,7 @@ mod tests {
                 let x = x_lo[0] + (x_hi[0] - x_lo[0]) * (ix as f64) / 4.0;
                 let y = x_lo[1] + (x_hi[1] - x_lo[1]) * (iy as f64) / 4.0;
                 let f = (x - 1.0) * (y + 2.0) + (x + 10.0).sqrt();
-                assert!(
-                    res.contains(f),
-                    "x={x}, y={y}, f={f} not in {:?}",
-                    res
-                );
+                assert!(res.contains(f), "x={x}, y={y}, f={f} not in {:?}", res);
             }
         }
     }

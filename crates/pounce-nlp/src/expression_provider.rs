@@ -87,10 +87,9 @@ impl FbbtOp {
             | FbbtOp::Sin(a)
             | FbbtOp::Cos(a)
             | FbbtOp::PowInt(a, _) => ArrayVec2::one(a),
-            FbbtOp::Add(a, b)
-            | FbbtOp::Sub(a, b)
-            | FbbtOp::Mul(a, b)
-            | FbbtOp::Div(a, b) => ArrayVec2::two(a, b),
+            FbbtOp::Add(a, b) | FbbtOp::Sub(a, b) | FbbtOp::Mul(a, b) | FbbtOp::Div(a, b) => {
+                ArrayVec2::two(a, b)
+            }
         }
     }
 }

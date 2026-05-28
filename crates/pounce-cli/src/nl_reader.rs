@@ -1413,7 +1413,12 @@ impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
     /// (so FBBT skips them — there's nothing to tighten).
     fn constraint_expression(&self, i: usize) -> Option<pounce_nlp::FbbtTape> {
         let nonlinear = self.prob.con_nonlinear.get(i)?;
-        let linear = self.prob.con_linear.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+        let linear = self
+            .prob
+            .con_linear
+            .get(i)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         crate::nl_fbbt_translate::translate_constraint(nonlinear, linear)
     }
 }

@@ -272,12 +272,12 @@ mod tests {
         let vals = [4.0];
         let mut s = vec![0.0; 2];
         assert!(method.compute_sym_t_scaling_factors(2, 1, &irn, &jcn, &vals, &mut s));
+        assert!((s[0] - 0.5).abs() < 1e-6, "K_00=4 → s_0≈0.5, got {}", s[0]);
         assert!(
-            (s[0] - 0.5).abs() < 1e-6,
-            "K_00=4 → s_0≈0.5, got {}",
-            s[0]
+            (s[1] - 1.0).abs() < 1e-12,
+            "zero row keeps s=1, got {}",
+            s[1]
         );
-        assert!((s[1] - 1.0).abs() < 1e-12, "zero row keeps s=1, got {}", s[1]);
     }
 
     /// Fortran 1-based triplets must be handled the same as 0-based.
