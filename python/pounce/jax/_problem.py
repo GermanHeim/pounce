@@ -471,6 +471,167 @@ def _kkt_backsolve_pure_callback(
     )
 
 
+def _bwd_batched_factor_reuse(
+    f: Callable,
+    g: Callable | None,
+    n: int,
+    m: int,
+    jp: "JaxProblem",
+    B: int,
+    p_batch,
+    x_star_batch,
+    lam_batch,
+    stacked_sid,
+    cot_x_batch,
+):
+    """k_aug-style batched VJP composing pounce#76 (A)+(B): one stacked
+    :func:`Solver.kkt_solve` over the held stacked LDLᵀ factor, then
+    a per-block contraction with ``∂²L/∂x∂p`` and ``∂g/∂p``.
+
+    Why this beats the per-element dense path. The stacked IPM held one
+    block-diagonal compound KKT factor after the forward solve. The
+    per-element dense bwd assembles a fresh ``(n+m) × (n+m)`` block per
+    batch element and dispatches B independent ``jnp.linalg.solve``
+    calls; the factor-reuse stacked bwd packs a single block-major RHS
+    and calls ``Solver.kkt_solve`` *once* on the held factor — same
+    flops scaling in B (one block-diagonal back-solve = B per-block
+    back-solves modulo permutation overhead), but with one Rust
+    crossing and no JAX reassembly. For modest per-block ``n`` and
+    larger ``B`` this is the configuration the issue's "(A)+(B)
+    together" point was after.
+
+    The per-block ``dgradL_dp`` / ``dg_dp`` are still autodiff over the
+    user-supplied ``f`` / ``g`` callables — they depend on how ``f``
+    and ``g`` were *written*, not on the solve, so the IPM can't
+    produce them. We vmap that work across the batch.
+    """
+    # One stacked back-solve. Returns (u_x_batch (B, n), u_g_batch (B, m))
+    # already de-interleaved into per-block rows and scattered back into
+    # user g-order per block.
+    u_x_batch, u_g_batch = _kkt_backsolve_batched_pure_callback(
+        jp, B, stacked_sid, cot_x_batch, n, m,
+    )
+
+    def per_block(p_k, x_star_k, lam_k, u_x_k, u_g_k):
+        def lagrangian(x, p_):
+            base = f(x, p_)
+            if g is not None and m > 0:
+                base = base + jnp.dot(lam_k, g(x, p_))
+            return base
+
+        grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star_k, p_)
+        dgradL_dp = jax.jacrev(grad_L_of_p)(p_k)
+        dL_dp_k = -jnp.tensordot(u_x_k, dgradL_dp, axes=1)
+        if g is not None and m > 0:
+            dg_dp = jax.jacrev(lambda p_: g(x_star_k, p_))(p_k)
+            dL_dp_k = dL_dp_k - jnp.tensordot(u_g_k, dg_dp, axes=1)
+        return dL_dp_k
+
+    return jax.vmap(per_block)(
+        p_batch, x_star_batch, lam_batch, u_x_batch, u_g_batch,
+    )
+
+
+def _kkt_backsolve_batched_pure_callback(
+    jp: "JaxProblem",
+    B: int,
+    sid: jnp.ndarray,
+    cot_x_batch: jnp.ndarray,
+    n: int,
+    m: int,
+):
+    """Pure-callback for the stacked (A)+(B) back-solve.
+
+    Looks up the stacked Solver registered by :meth:`_host_batched_solve`,
+    packs the (B, n) cotangent batch into the stacked compound RHS at
+    the x-block (block-major flatten), back-solves once against the
+    held stacked LDLᵀ factor, then de-interleaves the result:
+
+    * ``u_x_batch`` from the stacked x-block, reshaped ``(B, n)``.
+    * ``u_y_c_batch`` from the stacked y_c-block, reshaped ``(B, n_c)``.
+    * ``u_y_d_batch`` from the stacked y_d-block, reshaped ``(B, n_d)``.
+
+    The stacked y_c / y_d sub-blocks are block-major because the
+    stacked problem's constraints are block-major (`[g^(1), g^(2),
+    ..., g^(B)]`) and ``cl``/``cu`` are tiled per-block, so the
+    classified ``c_map`` / ``d_map`` keeps block-k's equality
+    multipliers contiguous before block-(k+1)'s.
+
+    Then scatters per block back to user g-order via the per-block
+    ``cl == cu`` mask cached on the parent JaxProblem.
+
+    Returns ``(u_x_batch (B, n), u_g_batch (B, m))``.
+    """
+    result_shapes = (
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, m), jnp.float64),
+    )
+
+    def host_call(sid_h, cot_h):
+        sid_int = int(np.asarray(sid_h))
+        solver = jp._lookup_solver(sid_int)
+        if solver is None:
+            raise RuntimeError(
+                f"pounce.jax: missing stacked Solver for batched backward "
+                f"(id={sid_int}). The stacked factor was evicted from the "
+                "LRU registry. Bump `_solver_registry_capacity`, run grads "
+                "closer to the fwd, or use `factor_reuse=False`."
+            )
+        dims = solver.block_dims
+        if dims is None:
+            raise RuntimeError(
+                "pounce.jax: factor-reuse batched backward requires a "
+                "converged IPM factor on the stacked solve, but the "
+                "stacked IPM did not produce one. Either tighten the "
+                "stacked solve (loosen `tol`, supply a better `x0`, "
+                "rescale the problem), or rebuild the `JaxProblem` "
+                "with `factor_reuse=False` to fall back to the dense "
+                "per-element JAX backward."
+            )
+        n_x = dims[0]
+        n_s = dims[1]
+        n_y_c = dims[2]
+        n_y_d = dims[3]
+        # The stacked NLP has n_x = B * n_per_block by construction
+        # (no fixed-variable treatment is exposed on the batched path).
+        if n_x != B * n:
+            raise RuntimeError(
+                f"pounce.jax: stacked solver n_x={n_x} != B*n={B * n} "
+                f"(B={B}, n={n}). Internal invariant violated — please "
+                "file an issue."
+            )
+        rhs = np.zeros(solver.kkt_dim, dtype=np.float64)
+        cot_np = np.asarray(cot_h, dtype=np.float64)
+        # Block-major flatten: rhs[:B*n] = [cot^(1); cot^(2); ...; cot^(B)].
+        rhs[:n_x] = cot_np.reshape(-1)
+        u = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
+
+        u_x_batch = u[:n_x].reshape(B, n).copy()
+
+        u_g_batch = np.zeros((B, m), dtype=np.float64)
+        if m > 0:
+            cl_arr = jp._cl_for_classify
+            cu_arr = jp._cu_for_classify
+            is_eq = cl_arr == cu_arr
+            n_c_per = int(np.sum(is_eq))
+            n_d_per = m - n_c_per
+            y_c_off = n_x + n_s
+            y_d_off = y_c_off + n_y_c
+            if n_c_per > 0:
+                u_y_c_batch = u[y_c_off : y_c_off + n_y_c].reshape(B, n_c_per)
+                c_idx = np.flatnonzero(is_eq)
+                u_g_batch[:, c_idx] = u_y_c_batch
+            if n_d_per > 0:
+                u_y_d_batch = u[y_d_off : y_d_off + n_y_d].reshape(B, n_d_per)
+                d_idx = np.flatnonzero(~is_eq)
+                u_g_batch[:, d_idx] = u_y_d_batch
+        return u_x_batch, u_g_batch
+
+    return jax.pure_callback(
+        host_call, result_shapes, sid, cot_x_batch, vmap_method="sequential",
+    )
+
+
 def _bwd_single_kkt(
     f: Callable,
     g: Callable | None,
@@ -885,22 +1046,24 @@ class JaxProblem:
 
     def _host_batched_solve(self, p_batch_np: np.ndarray, x0_batch_np: np.ndarray):
         """Forward solve for the stacked block-diagonal problem
-        (pounce#76 (A)).
+        (pounce#76 (A), composes with (B) when ``factor_reuse=True``).
 
         Returns per-block residuals reshaped to leading-batch axis:
         ``x_batch: (B, n)``, ``lam_batch: (B, m)``, ``mult_xL_batch /
-        mult_xU_batch: (B, n)``. The IPM under the hood factors a
-        single ``(B*(n+m))^2`` block-diagonal KKT once and runs the
-        barrier homotopy across all blocks together — i.e. one
-        ``μ``-schedule for the whole batch.
+        mult_xU_batch: (B, n)``, plus a ``stacked_sid`` int that points
+        at the held stacked LDLᵀ factor in the bwd registry. The IPM
+        under the hood factors a single block-diagonal compound KKT
+        once and runs the barrier homotopy across all blocks together —
+        i.e. one ``μ``-schedule for the whole batch.
 
-        We don't register the stacked Solver in the factor-reuse
-        registry: the per-element bwd path uses ``_bwd_single_kkt``
-        vmapped over the batch, which doesn't consume a held compound
-        factor. A future variant that back-solves the stacked LDLᵀ
-        factor with a per-block-permuted RHS could land as ``(A)+(B)``
-        composition, but it's out of scope for the initial landing
-        (the wins overlap and isolating each track helps reasoning).
+        When ``factor_reuse=True`` the stacked Solver is registered so
+        the bwd can do *one* :func:`Solver.kkt_solve` against the held
+        stacked factor instead of B per-element dense JAX KKT solves.
+        That's the (A)+(B) composition: one factorisation reused for
+        both the forward and the per-block sensitivities. When
+        ``factor_reuse=False`` we don't register (the bwd uses the
+        dense per-element vmap path that doesn't consult the held
+        factor).
         """
         B = p_batch_np.shape[0]
         n, m = self._n, self._m
@@ -908,7 +1071,9 @@ class JaxProblem:
         obj._P = jnp.asarray(p_batch_np)
         # Initial X is the per-block ``x0`` tiled / concatenated.
         X0 = np.asarray(x0_batch_np, dtype=np.float64).reshape(B * n)
-        X_np, info = prob.solve(x0=X0)
+        solver = Solver(prob)
+        X_np, info = solver.solve(x0=X0)
+        sid = self._register_solver(solver) if self._factor_reuse else 0
         x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
         lam_batch = (
             np.asarray(info["mult_g"], dtype=np.float64).reshape(B, m)
@@ -916,7 +1081,7 @@ class JaxProblem:
         )
         mult_xL_batch = np.asarray(info["mult_x_L"], dtype=np.float64).reshape(B, n)
         mult_xU_batch = np.asarray(info["mult_x_U"], dtype=np.float64).reshape(B, n)
-        return x_batch, lam_batch, mult_xL_batch, mult_xU_batch
+        return x_batch, lam_batch, mult_xL_batch, mult_xU_batch, sid
 
     # ----- public: differentiable solve methods -----
 
@@ -1149,27 +1314,29 @@ class JaxProblem:
         return solve_fn
 
     def _batched_solve_fn(self, B: int):
-        """custom_vjp factory for :meth:`batched_solve` (pounce#76 (A)).
+        """custom_vjp factory for :meth:`batched_solve` (pounce#76 (A),
+        composes with (B) when ``factor_reuse=True``).
 
-        The bwd is ``jax.vmap`` over the per-element dense KKT
-        back-solve. Block-diagonal coupling in the stacked KKT means
-        ``∂x^(k)*/∂p^(j) = 0`` for ``k ≠ j``, so vmapping the
-        single-block bwd is exact — there's no cross-block correction
-        to assemble.
+        Two bwd paths, selected by ``self._factor_reuse``:
 
-        Why not reuse the stacked LDLᵀ factor (the ``(B)`` k_aug-style
-        path) here? The stacked factor *would* work — back-solve once
-        against the block-diagonal RHS ``diag(v^(1), ..., v^(B))`` —
-        but plumbing per-block RHS packing through the Rust
-        ``Solver.kkt_solve`` host_call is a separate surface, and the
-        per-element dense bwd is already fast for the block sizes
-        ``(A)`` is meant to win on (small per-block ``n``, large ``B``).
-        We can compose ``(A)+(B)`` later without changing the public
-        surface — the choice lives behind ``factor_reuse=``.
+        * ``factor_reuse=True`` ((A)+(B) composition): one
+          ``Solver.kkt_solve`` against the held stacked LDLᵀ factor
+          (see :func:`_bwd_batched_factor_reuse`). Per-block
+          ``∂²L/∂x∂p`` and ``∂g/∂p`` are still autodiff over the user's
+          ``f`` / ``g`` — those depend on how the functions were
+          written, not on the solve. One Rust crossing total for the
+          whole batched back-solve; the JAX work is just the per-block
+          contraction.
+        * ``factor_reuse=False`` ((A) only): ``jax.vmap`` of the
+          per-element dense KKT back-solve. Block-diagonal coupling in
+          the stacked KKT means ``∂x^(k)*/∂p^(j) = 0`` for ``k ≠ j``,
+          so vmapping the single-block bwd is exact — there's no
+          cross-block correction to assemble.
         """
         f, g, n, m = self._f, self._g, self._n, self._m
         cl, cu = self._cl, self._cu
         jp = self
+        factor_reuse = self._factor_reuse
 
         @jax.custom_vjp
         def solve_fn(p_batch, x0_batch):
@@ -1177,10 +1344,10 @@ class JaxProblem:
             return x_star
 
         def fwd(p_batch, x0_batch):
-            x_star, lam, mult_xL, mult_xU = _pure_callback_batched_solve(
+            x_star, lam, mult_xL, mult_xU, sid = _pure_callback_batched_solve(
                 jp, B, p_batch, x0_batch,
             )
-            return x_star, (p_batch, x_star, lam, mult_xL, mult_xU)
+            return x_star, (p_batch, x_star, lam, mult_xL, mult_xU, sid)
 
         def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
             return _bwd_single_kkt(
@@ -1190,12 +1357,18 @@ class JaxProblem:
         def bwd(residuals, cot_x_batch):
             (
                 p_batch, x_star_batch, lam_batch,
-                mult_xL_batch, mult_xU_batch,
+                mult_xL_batch, mult_xU_batch, sid,
             ) = residuals
-            dL_dp_batch = jax.vmap(bwd_single)(
-                p_batch, x_star_batch, lam_batch,
-                mult_xL_batch, mult_xU_batch, cot_x_batch,
-            )
+            if factor_reuse:
+                dL_dp_batch = _bwd_batched_factor_reuse(
+                    f, g, n, m, jp, B,
+                    p_batch, x_star_batch, lam_batch, sid, cot_x_batch,
+                )
+            else:
+                dL_dp_batch = jax.vmap(bwd_single)(
+                    p_batch, x_star_batch, lam_batch,
+                    mult_xL_batch, mult_xU_batch, cot_x_batch,
+                )
             return dL_dp_batch, jnp.zeros_like(x_star_batch)
 
         solve_fn.defvjp(fwd, bwd)
@@ -1273,6 +1446,12 @@ def _pure_callback_batched_solve(jp: JaxProblem, B: int, p_batch, x0_batch):
     custom_vjp factory bakes ``B`` in at construction time, so JAX
     tracing sees concrete shapes here even though ``B`` is a Python
     argument from the user's caller.
+
+    ``stacked_sid`` is a scalar int64 — the id of the held stacked
+    LDLᵀ factor in the JaxProblem's bwd registry (or 0 when
+    ``factor_reuse=False``). The bwd reads it back via the residual
+    pytree to do one stacked ``kkt_solve`` against the held factor
+    instead of B per-element dense KKT solves.
     """
     n, m = jp._n, jp._m
     result_shapes = (
@@ -1280,6 +1459,7 @@ def _pure_callback_batched_solve(jp: JaxProblem, B: int, p_batch, x0_batch):
         jax.ShapeDtypeStruct((B, m), jnp.float64),
         jax.ShapeDtypeStruct((B, n), jnp.float64),
         jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((), jnp.int64),
     )
 
     def host_call(p_h, x0_h):

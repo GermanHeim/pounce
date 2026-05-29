@@ -595,6 +595,99 @@ def test_batched_solve_unconstrained_pounce_76():
     np.testing.assert_allclose(np.asarray(x_b), np.asarray(p_batch), atol=1e-7)
 
 
+def test_batched_solve_factor_reuse_matches_dense_pounce_76():
+    """Issue #76 (A)+(B) composition: ``batched_solve`` with
+    ``factor_reuse=True`` routes the bwd through one stacked
+    ``Solver.kkt_solve`` against the held stacked LDLᵀ factor; with
+    ``factor_reuse=False`` it uses ``jax.vmap`` of the dense per-element
+    KKT back-solve. The two paths solve the same IFT system on a
+    block-diagonal compound KKT, so gradients must agree to IPM-tolerance.
+    """
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    def build(reuse: bool):
+        return JaxProblem(
+            f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+            lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+            cl=jnp.zeros(1), cu=jnp.zeros(1),
+            options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+            factor_reuse=reuse,
+        )
+
+    jp_reuse = build(True)
+    jp_dense = build(False)
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.1, 0.4], [0.8, -0.2]])
+
+    def loss(jp, P):
+        return jnp.sum(jp.batched_solve(P, x0=jnp.zeros(2)) ** 2)
+
+    # Forward must be identical (same IPM, same stacked NLP).
+    x_reuse = jp_reuse.batched_solve(p_batch, x0=jnp.zeros(2))
+    x_dense = jp_dense.batched_solve(p_batch, x0=jnp.zeros(2))
+    np.testing.assert_allclose(
+        np.asarray(x_reuse), np.asarray(x_dense), atol=1e-12,
+    )
+
+    g_reuse = jax.grad(lambda P: loss(jp_reuse, P))(p_batch)
+    g_dense = jax.grad(lambda P: loss(jp_dense, P))(p_batch)
+    np.testing.assert_allclose(
+        np.asarray(g_reuse), np.asarray(g_dense), atol=1e-7,
+    )
+
+
+def test_batched_solve_factor_reuse_jacobian_pounce_76():
+    """Issue #76 (A)+(B): ``jax.jacobian`` over ``batched_solve`` with
+    factor_reuse=True must produce a block-diagonal Jacobian (zero
+    off-block) and match the dense per-element vmap path within
+    IPM-tol. Exercises that the stacked back-solve's de-interleaving
+    handles single-direction cotangents correctly under JAX's outer
+    vmap.
+    """
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    jp_reuse = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+        factor_reuse=True,
+    )
+    jp_dense = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+        factor_reuse=False,
+    )
+
+    p_batch = jnp.array([[0.3, 0.7], [-0.5, 0.5], [1.1, -0.4]])
+    J_reuse = jax.jacobian(
+        lambda P: jp_reuse.batched_solve(P, x0=jnp.zeros(2))
+    )(p_batch)
+    J_dense = jax.jacobian(
+        lambda P: jp_dense.batched_solve(P, x0=jnp.zeros(2))
+    )(p_batch)
+    # Block-diagonal: J[k, :, j, :] = 0 for k != j.
+    B = p_batch.shape[0]
+    for k in range(B):
+        for j in range(B):
+            if k != j:
+                np.testing.assert_allclose(
+                    np.asarray(J_reuse[k, :, j, :]),
+                    0.0, atol=1e-7,
+                )
+    np.testing.assert_allclose(
+        np.asarray(J_reuse), np.asarray(J_dense), atol=1e-7,
+    )
+
+
 def test_factor_reuse_raises_clean_error_when_no_factor():
     """The factor-reuse backward must raise a clear, actionable
     ``RuntimeError`` (not crash with a low-level ``TypeError`` on
