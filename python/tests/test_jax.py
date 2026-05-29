@@ -822,3 +822,72 @@ def test_factor_reuse_bwd_offthread_pounce_77():
         f"batched worker raised: {result_holder2['exc']!r}"
     )
     assert jnp.allclose(result_holder2["grad"], grad_b_main, atol=1e-9)
+
+
+# Module-level callables for pounce#77 pickle test — local functions
+# inside a test body trip ``AttributeError: Can't get local object``
+# before they reach the JaxProblem's own state, which would mask the
+# real ``TypeError: cannot pickle '_thread.lock' object`` we want to
+# assert against.
+def _pounce_77_pickle_f(x, p):
+    return 0.5 * jnp.sum((x - p) ** 2)
+
+
+def _pounce_77_pickle_g(x, p):
+    return jnp.stack([jnp.sum(x) - 1.0])
+
+
+def test_jaxproblem_factor_reuse_not_picklable_pounce_77():
+    """Document the pickle gap left open by the pounce#77 fix.
+
+    The fix pins PySolver interactions to a ``ThreadPoolExecutor`` per
+    JaxProblem; the JaxProblem also holds a ``threading.Lock`` for the
+    bwd registry. Neither survives ``pickle.dumps``, which means
+    distributed-training paths that serialize a built JaxProblem
+    (``cloudpickle`` for Ray/Dask actors, ``multiprocessing`` with
+    ``start_method='spawn'``, naive checkpointing) will fail at the
+    pickle boundary.
+
+    The supported workaround today is to pickle the *construction
+    args* and rebuild the JaxProblem inside each worker — confirmed
+    working under ``multiprocessing.get_context('spawn')`` (probed
+    against ``_build_and_solve`` in the child).
+
+    This test locks in the current behaviour so we notice when someone
+    adds ``__reduce__`` / ``__getstate__`` support — at which point the
+    test should be rewritten to round-trip a JaxProblem through pickle
+    and assert that ``jp2.solve(...)`` matches ``jp.solve(...)``.
+    """
+    import pickle
+
+    from pounce.jax import JaxProblem
+
+    jp = JaxProblem(
+        f=_pounce_77_pickle_f, g=_pounce_77_pickle_g,
+        n=4, m=1, p_example=jnp.zeros(4),
+        lb=jnp.full(4, -2.0), ub=jnp.full(4, 2.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"print_level": 0, "sb": "yes"},
+        factor_reuse=True,
+    )
+
+    # Pickling fails at the threading.Lock first (registry lock /
+    # executor internals). Either of those is the same actionable
+    # signal for the user: rebuild in the child, don't ship a built
+    # JaxProblem across a process boundary.
+    with pytest.raises(TypeError, match=r"lock|thread"):
+        pickle.dumps(jp)
+
+    # And the dense path (factor_reuse=False) — no executor and no
+    # registry lock, but the threading.local pair cache is also
+    # unpicklable. Same story: rebuild in the child.
+    jp_dense = JaxProblem(
+        f=_pounce_77_pickle_f, g=_pounce_77_pickle_g,
+        n=4, m=1, p_example=jnp.zeros(4),
+        lb=jnp.full(4, -2.0), ub=jnp.full(4, 2.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"print_level": 0, "sb": "yes"},
+        factor_reuse=False,
+    )
+    with pytest.raises((TypeError, pickle.PicklingError)):
+        pickle.dumps(jp_dense)
