@@ -1028,6 +1028,21 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         1e-8,
         "Relative Bunch-Kaufman partial-pivoting threshold u: a candidate diagonal pivot is rejected when |d| < u * col_max. Direct analog of ma27_pivtol / ma57_pivtol. A smaller number pivots for sparsity (preserves the AMD ordering, keeps L sparse, factors faster but is less stable); a larger number pivots for stability (rejects more candidates, delays pivots, forces more 2x2 blocks, denser L but better backward error). LAPACK's textbook maximum-stability value is 0.5. Falls back to the FERAL_PIVTOL environment variable when not set on the OptionsList.",
     )?;
+    r.add_string_option(
+        "feral_ordering",
+        "Fill-reducing ordering method for the FERAL backend.",
+        "auto",
+        &[
+            ("auto", "Adaptive dispatcher: picks a concrete method per matrix from cheap pattern features (very-large-and-sparse → AMD; n ≤ 10000 → AMF; otherwise → MetisND). Pounce default."),
+            ("auto_race", "Race-based dispatcher: runs symbolic factorization on AMD, MetisND, ScotchND, KahipND and keeps the smallest factor_nnz. ~4× a single symbolic pass, paid once per problem because symbolic factorization is cached across numeric refactorizations with the same pattern. Use when symbolic cost is amortized over many numeric factorizations on a hard problem."),
+            ("amd", "Approximate Minimum Degree (feral-amd: external degree with aggressive element absorption). Matches SuiteSparse/faer; robust default for IPM workloads. Best for very-large-and-sparse (n > 100k, avg_deg < 5)."),
+            ("amf", "Approximate Minimum Fill (feral-amf, HAMF4 variant of Amestoy 1999). Strong on small-and-sparse populations (n ≤ 10000); aggregate fill ≈ 0.87× AMD on the IPM small-sparse inventory."),
+            ("metis", "feral-metis multilevel nested dissection. Tends to produce squarer fronts than AMD on banded / nearly-1D structure; preferred for large structured matrices."),
+            ("scotch", "feral-scotch nested dissection. Similar regime to METIS; alternative when METIS is unavailable or for cross-validation."),
+            ("kahip", "feral-kahip flow-based nested dissection with K1 preprocessing. Ties METIS on fill geomean at 4-6× per-call symbolic cost; reach for it only when ND fill matters and per-call cost is amortized."),
+        ],
+        "Pounce reads this option only when set explicitly. When unset, FeralConfig defaults to Auto, the same adaptive dispatcher that feral's `pick_default_method` uses internally. Concrete-method choices bypass the dispatcher and pin a single method for the run. AutoRace measures actual symbolic outcomes per problem and is the safest choice when the per-problem winner is uncertain. Falls back to the POUNCE_FERAL_ORDERING environment variable (same tag set) when not set on the OptionsList. See `crates/pounce-feral/src/lib.rs` (FeralConfig::ordering) and `feral/src/symbolic/mod.rs` (OrderingMethod) for per-variant rationale and evidence.",
+    )?;
 
     // ===== Ma77SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa77SolverInterface.cpp) =====
     r.set_registering_category("MA77 Linear Solver");

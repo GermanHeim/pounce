@@ -130,6 +130,29 @@ test:
   with adaptive ν clamped by `sqp_l1_penalty_safety` /
   `sqp_l1_penalty_max`. SNOPT-style behaviour.
 
+### Added — `feral_ordering` option (FERAL fill-reducing ordering)
+
+User-facing knob for the FERAL backend's fill-reducing ordering. New
+string option `feral_ordering` accepts `auto` (default; feral's
+adaptive dispatcher — picks AMD / AMF / MetisND from cheap pattern
+features), `auto_race` (runs symbolic factorization on AMD, MetisND,
+ScotchND, KahipND and keeps the smallest factor_nnz; ~4× a single
+symbolic pass, amortized across numeric refactorizations), and the
+concrete methods `amd`, `amf`, `metis`, `scotch`, `kahip`. Settable
+through every interface that consumes `pounce.opt` /
+`OptionsList` — Rust, Python, C, GAMS, CLI — and also via the
+`POUNCE_FERAL_ORDERING` environment variable for option-free
+callers. Reuses the same explicit-set semantics as the other
+`feral_*` options: leaving it unset keeps the `FeralConfig::from_env`
+default (`Auto`).
+
+The motivating case is `pinene_3200_0009`, where the cheap `Auto`
+heuristic picks MetisND (88 s numeric) but AMD factors in 19.5 s on
+the same matrix; `feral_ordering auto_race` measures both and lands
+on the winner without per-problem manual tuning. See
+`docs/src/options.md` "FERAL backend tuning" and
+`docs/src/troubleshooting.md` for guidance.
+
 ### Added — AMPL imported (external) function support (issue #49)
 
 `.nl` files that declare imported functions in their `F` segments

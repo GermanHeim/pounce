@@ -158,3 +158,42 @@ documented in [Auxiliary-Equality Preprocessing](auxiliary-presolve.md):
 | `presolve_auxiliary_max_block_dim`       | `8`     | Largest block the lightweight Newton solver will attempt (larger blocks rejected in v1). |
 | `presolve_auxiliary_wall_time_fraction`  | `0.1`   | Fraction of the solver's wall-time budget the pass is allowed to spend.                  |
 | `presolve_auxiliary_diagnostics`         | `no`    | Emit the diagnostics summary via the journalist after Phase 0 runs.                      |
+
+## FERAL backend tuning
+
+`linear_solver=feral` (the default — see
+[Commonly used options](#commonly-used-options)) is configurable
+through six `feral_*` options. Defaults are tuned for the IPM
+workload and rarely need changing; reach for these when profiling a
+specific problem.
+
+| Option                       | Default | Meaning                                                                                                                                                                                  |
+|------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `feral_ordering`             | `auto`  | Fill-reducing ordering method (see table below). `auto` lets feral's adaptive dispatcher pick per-matrix; `auto_race` measures the actual symbolic outcome and keeps the best.            |
+| `feral_pivtol`               | `1e-8`  | Relative Bunch-Kaufman partial-pivoting threshold `u`. Analog of `ma27_pivtol` / `ma57_pivtol`. Smaller → sparser `L`, faster, less stable; larger → more 2×2 blocks, denser, more stable. LAPACK's textbook maximum-stability value is `0.5`. |
+| `feral_refine`               | `yes`   | Iterative refinement on every back-solve. Closes the residual floor from cascade-break's `L`-factor perturbation; disable only when timing the bare factor + back-solve in isolation.     |
+| `feral_cascade_break`        | (unset) | Tri-state. Unset → inherit feral's Phase B default (CB on with bounded delayed-pivot catchment). `yes` records explicit intent (no behavioural change). `no` reproduces pre-Phase-B behaviour by surfacing `DelayBudgetExceeded` on non-root cascade victims.  |
+| `feral_fma`                  | `no`    | Dispatch dense kernels through fused multiply-add intrinsics. Roughly 2× throughput on aarch64 / x86_v3, at the cost of per-pivot rounding drift that trips more `WrongInertia` checks. Turn on when kernel throughput dominates and the IPM tolerates a noisier inertia signal. |
+| `feral_singular_pivot_floor` | `1e-20` | Pounce's analog of MA57's `CNTL(2)`. After a successful factor, the smallest accepted `D`-block pivot magnitude (scaled space) is compared against this absolute floor; if it falls below, the factor is reported `Singular` so the IPM bumps `δ_w`. `0` disables. |
+
+### `feral_ordering` variants
+
+All six concrete and adaptive options live under the same string
+option. `feral_ordering` also falls back to the
+`POUNCE_FERAL_ORDERING` environment variable when not set on the
+OptionsList.
+
+| Value       | Strategy                                                                                                                                                                                                                                                  |
+|-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `auto`      | **Default.** Adaptive dispatcher: picks a concrete method per matrix from cheap pattern features. Branches: very-large-and-sparse (`n > 100 000`, avg degree < 5) → AMD; `n ≤ 10 000` → AMF; otherwise → MetisND. One symbolic pass; right when the heuristic shape rules apply (the common case). |
+| `auto_race` | Race-based dispatcher: runs full symbolic factorization on AMD, MetisND, ScotchND, KahipND and keeps the smallest `factor_nnz`. ~4× a single symbolic pass, paid once per problem (symbolic factorization is cached across numeric refactorizations with the same pattern). Use when the cheap dispatcher's guess is suspect — e.g. `pinene_3200_0009`, where `auto` picks MetisND (88 s numeric factor) but `amd` factors in 19.5 s on the same matrix. |
+| `amd`       | Approximate Minimum Degree (Amestoy/Davis/Duff). Pins AMD regardless of problem shape; robust default for IPM workloads. Best for very-large-and-sparse cases that the adaptive dispatcher already routes here.                                            |
+| `amf`       | Approximate Minimum Fill (HAMF4 variant of Amestoy 1999). Strong on small-and-sparse populations (`n ≤ 10 000`); aggregate fill ≈ 0.87× AMD on feral's IPM small-sparse inventory.                                                                          |
+| `metis`     | feral-metis multilevel nested dissection. Tends to produce squarer fronts than AMD on banded / nearly-1D structure; preferred for large structured matrices.                                                                                              |
+| `scotch`    | feral-scotch nested dissection. Similar regime to METIS; alternative when METIS is unavailable or for cross-validation.                                                                                                                                   |
+| `kahip`     | feral-kahip flow-based nested dissection with K1 preprocessing. Ties METIS on fill geomean at 4–6× per-call symbolic cost. Reach for it only when ND fill matters and per-call cost is amortized.                                                          |
+
+When in doubt: leave `feral_ordering` at the default. When a hard
+problem looks linear-solver-bound, try `feral_ordering auto_race`
+before per-variant manual sweeping — it's the safe choice when the
+per-problem winner is uncertain.

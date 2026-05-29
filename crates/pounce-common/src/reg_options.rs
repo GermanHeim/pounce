@@ -403,6 +403,188 @@ impl RegisteredOptions {
             .filter_map(|k| opts.get(k).cloned())
             .collect()
     }
+
+    /// Render the registry as human-readable text grouped by category.
+    /// The output mirrors the categories produced by Ipopt's
+    /// `RegisteredOptions::OutputOptionDocumentation`. Options whose
+    /// short and long descriptions are both empty are dropped from
+    /// the listing. `include_advanced` controls whether options
+    /// flagged `advanced` appear (none in pounce today, but the gate
+    /// is honored so the flag stays meaningful for future additions).
+    ///
+    /// Set `mode` via [`PrintOptionsMode`]; `Text` is the default.
+    /// `Latex` / `Doxygen` are accepted (they prepend a one-line note
+    /// that they currently fall through to the text formatter) so
+    /// scripts that pass them through unconditionally still produce
+    /// readable output.
+    pub fn print_options_documentation(
+        &self,
+        mode: PrintOptionsMode,
+        include_advanced: bool,
+    ) -> String {
+        let opts = self.registered_options_in_order();
+        let mut out = String::new();
+        match mode {
+            PrintOptionsMode::Text => {}
+            PrintOptionsMode::Latex => {
+                out.push_str("% pounce: latex output for print_options_mode is not yet implemented; falling through to plain text.\n\n");
+            }
+            PrintOptionsMode::Doxygen => {
+                out.push_str("<!-- pounce: doxygen output for print_options_mode is not yet implemented; falling through to plain text. -->\n\n");
+            }
+        }
+        // Group by category in registration order.
+        let mut current_category: Option<String> = None;
+        for opt in opts.iter() {
+            if !include_advanced && opt.advanced {
+                continue;
+            }
+            // Skip undocumented stubs (Ipopt does the same — an option
+            // with neither short nor long description is internal-only).
+            if opt.short_description.is_empty() && opt.long_description.is_empty() {
+                continue;
+            }
+            let category = if opt.category.is_empty() {
+                "Uncategorized"
+            } else {
+                opt.category.as_str()
+            };
+            if current_category.as_deref() != Some(category) {
+                if current_category.is_some() {
+                    out.push('\n');
+                }
+                out.push_str("### ");
+                out.push_str(category);
+                out.push_str(" ###\n\n");
+                current_category = Some(category.to_string());
+            }
+            format_option_text(&mut out, opt);
+        }
+        out
+    }
+}
+
+/// Format selector for [`RegisteredOptions::print_options_documentation`].
+/// Matches the `print_options_mode` registered string option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintOptionsMode {
+    Text,
+    Latex,
+    Doxygen,
+}
+
+impl PrintOptionsMode {
+    /// Parse the `print_options_mode` tag (case-insensitive). Falls
+    /// back to [`PrintOptionsMode::Text`] for unrecognized values so
+    /// the option dump still appears.
+    pub fn from_tag(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "latex" => Self::Latex,
+            "doxygen" => Self::Doxygen,
+            _ => Self::Text,
+        }
+    }
+}
+
+fn format_option_text(out: &mut String, opt: &RegisteredOption) {
+    out.push_str(opt.name.as_str());
+    out.push_str(": ");
+    if !opt.short_description.is_empty() {
+        out.push_str(opt.short_description.as_str());
+    }
+    out.push('\n');
+    let type_str = match opt.option_type {
+        OptionType::OT_Number => "Number",
+        OptionType::OT_Integer => "Integer",
+        OptionType::OT_String => "String",
+        OptionType::OT_Unknown => "Unknown",
+    };
+    out.push_str("   type:    ");
+    out.push_str(type_str);
+    out.push('\n');
+    out.push_str("   default: ");
+    match &opt.default {
+        DefaultValue::None => out.push_str("(none)"),
+        DefaultValue::Number(v) => out.push_str(&format!("{}", v)),
+        DefaultValue::Integer(v) => out.push_str(&format!("{}", v)),
+        DefaultValue::String(v) => {
+            out.push('"');
+            out.push_str(v);
+            out.push('"');
+        }
+    }
+    out.push('\n');
+    if matches!(opt.option_type, OptionType::OT_Number | OptionType::OT_Integer)
+        && (opt.has_lower || opt.has_upper)
+    {
+        out.push_str("   range:   ");
+        if opt.has_lower {
+            out.push_str(&format!(
+                "{}{}",
+                if opt.lower_strict { "(" } else { "[" },
+                opt.lower
+            ));
+        } else {
+            out.push_str("(-inf");
+        }
+        out.push_str(", ");
+        if opt.has_upper {
+            out.push_str(&format!(
+                "{}{}",
+                opt.upper,
+                if opt.upper_strict { ")" } else { "]" }
+            ));
+        } else {
+            out.push_str("inf)");
+        }
+        out.push('\n');
+    }
+    if !opt.valid_strings.is_empty() {
+        out.push_str("   values:\n");
+        for entry in &opt.valid_strings {
+            if entry.description.is_empty() {
+                out.push_str(&format!("     - {}\n", entry.value));
+            } else {
+                out.push_str(&format!("     - {}: {}\n", entry.value, entry.description));
+            }
+        }
+    }
+    if !opt.long_description.is_empty() {
+        out.push('\n');
+        for line in wrap_paragraph(&opt.long_description, 76) {
+            out.push_str("   ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+}
+
+/// Soft-wrap on word boundaries to keep the dumped doc readable in a
+/// terminal. Doesn't break mid-word; long single tokens overflow the
+/// width rather than splitting.
+fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if line.is_empty() {
+                line.push_str(word);
+            } else if line.len() + 1 + word.len() <= width {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut line));
+                line.push_str(word);
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        } else if paragraph.is_empty() {
+            lines.push(String::new());
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -416,6 +598,60 @@ mod tests {
         r.add_number_option("Tol", "tolerance", 1e-8, "").unwrap();
         assert!(r.get_option("tol").is_some());
         assert!(r.get_option("TOL").is_some());
+    }
+
+    #[test]
+    fn print_options_documentation_renders_categories_and_metadata() {
+        let r = RegisteredOptions::new();
+        r.set_registering_category("Catty");
+        r.add_string_option(
+            "mode",
+            "How to do it.",
+            "auto",
+            &[
+                ("auto", "Decide for me."),
+                ("manual", "I will choose."),
+            ],
+            "Long description that explains the trade-off between auto and manual selection.",
+        )
+        .unwrap();
+        r.add_bounded_number_option("tol", "Tolerance.", 0.0, true, 1.0, false, 1e-8, "")
+            .unwrap();
+        r.set_registering_category("Hidden");
+        r.add_bool_option("internal", "", false, "").unwrap();
+
+        let out = r.print_options_documentation(PrintOptionsMode::Text, false);
+        assert!(out.contains("### Catty ###"), "category header missing");
+        assert!(out.contains("mode:"), "option name missing");
+        assert!(out.contains("default: \"auto\""), "default missing");
+        assert!(out.contains("- auto: Decide for me."), "valid string missing");
+        assert!(out.contains("tol:"), "second option missing");
+        assert!(out.contains("range:   (0, 1]"), "range formatting missing");
+        // The undocumented `internal` stub (empty short+long) is skipped.
+        assert!(
+            !out.contains("internal:"),
+            "undocumented option leaked into output: {out}"
+        );
+
+        // Latex/Doxygen prepend a one-line note and fall through.
+        let latex = r.print_options_documentation(PrintOptionsMode::Latex, false);
+        assert!(latex.starts_with("% pounce: latex"));
+        assert!(latex.contains("mode:"));
+        let dox = r.print_options_documentation(PrintOptionsMode::Doxygen, false);
+        assert!(dox.starts_with("<!-- pounce: doxygen"));
+        assert!(dox.contains("mode:"));
+    }
+
+    #[test]
+    fn print_options_mode_parses_tags() {
+        assert_eq!(PrintOptionsMode::from_tag("text"), PrintOptionsMode::Text);
+        assert_eq!(PrintOptionsMode::from_tag("LaTeX"), PrintOptionsMode::Latex);
+        assert_eq!(
+            PrintOptionsMode::from_tag("doxygen"),
+            PrintOptionsMode::Doxygen
+        );
+        // Unknown falls back to text.
+        assert_eq!(PrintOptionsMode::from_tag("html"), PrintOptionsMode::Text);
     }
 
     #[test]

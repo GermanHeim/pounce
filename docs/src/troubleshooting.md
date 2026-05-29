@@ -31,6 +31,7 @@ walks through adding it.
 | Restoration phase fires repeatedly | [ℓ₁ exact-penalty wrapper](#l1-exact-penalty-barrier-wrapper) |
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
+| Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
 
 ---
 
@@ -347,6 +348,35 @@ and a μ-reset spiral
 Pair with `ma57_automatic_scaling=yes` (default in HSL builds) and
 leave `linear_system_scaling=none` — MA57's internal scaling and a
 pounce-level Ruiz pass should not be stacked.
+
+### FERAL ordering: when the adaptive dispatcher guesses wrong
+
+When `linear_solver=feral` (the default) and per-iter wall time is
+dominated by the linear solve — typical on dense / quadratically-
+coupled KKT systems where iteration counts look reasonable but
+seconds-per-iter are high — the fill-reducing ordering choice often
+matters more than any other knob. By default, `feral_ordering=auto`
+picks AMD / AMF / METIS from cheap pattern features. This is right
+in the common case but can miss badly on a single hard problem.
+
+The safe recipe is to *measure* the right ordering rather than guess:
+
+```
+pounce problem.nl feral_ordering=auto_race
+```
+
+This runs symbolic factorization on AMD, METIS, SCOTCH and KaHIP and
+keeps the one with the smallest `factor_nnz`. Costs ~4× a single
+symbolic pass — paid once per problem because symbolic factorization
+is cached across numeric refactorizations with the same pattern, so
+the overhead is invisible to the per-iter cost on anything but a
+one-iter problem.
+
+`feral_ordering=amd` (concrete pin) is the right escalation when the
+race itself is showing AMD winning consistently — pinning skips the
+race entirely on subsequent runs. See the full
+[`feral_ordering` table](options.md#feral_ordering-variants) for the
+other variants.
 
 ## Diagnosing before you reach for a knob
 

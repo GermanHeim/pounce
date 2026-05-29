@@ -75,7 +75,7 @@ use pounce_common::diagnostics::DiagnosticsState;
 use pounce_common::exception::{ExceptionKind, SolverException};
 use pounce_common::journalist::{JournalLevel, Journalist};
 use pounce_common::options_list::OptionsList;
-use pounce_common::reg_options::RegisteredOptions;
+use pounce_common::reg_options::{PrintOptionsMode, RegisteredOptions};
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVectorSpace;
@@ -915,6 +915,40 @@ impl IpoptApplication {
             print!(
                 "\nList of user-set options:\n\n{}",
                 self.options.print_user_options()
+            );
+        }
+
+        // `print_options_documentation yes` — dump the full registry
+        // (every option with type, default, valid range/strings, and
+        // long description) before the solve. Honors
+        // `print_options_mode` (`text` / `latex` / `doxygen`; only
+        // `text` is implemented today, the others fall through with a
+        // one-line note) and `print_advanced_options`. Mirrors
+        // upstream `IpoptApplication::call_optimize`'s
+        // `print_options_documentation` branch and `Common/IpRegOptions.cpp`
+        // `OutputOptionDocumentation`.
+        let print_doc = self
+            .options
+            .get_bool_value("print_options_documentation", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(false);
+        if print_doc {
+            let mode = self
+                .options
+                .get_string_value("print_options_mode", "")
+                .ok()
+                .map(|(v, _)| PrintOptionsMode::from_tag(&v))
+                .unwrap_or(PrintOptionsMode::Text);
+            let advanced = self
+                .options
+                .get_bool_value("print_advanced_options", "")
+                .ok()
+                .map(|(v, _)| v)
+                .unwrap_or(false);
+            print!(
+                "\n# Pounce options registry\n\n{}",
+                self.reg_options.print_options_documentation(mode, advanced)
             );
         }
 
@@ -1921,6 +1955,15 @@ pub fn feral_config_from_options(
     }
     if let Ok((v, true)) = options.get_numeric_value("feral_pivtol", "") {
         cfg.pivtol = v;
+    }
+    // Only override on explicit set so `from_env` (which itself
+    // defaults to OrderingMethod::Auto) keeps governing unset cases.
+    // Unrecognized tags are silently ignored — the registered enum
+    // restricts inputs at the OptionsList layer.
+    if let Ok((v, true)) = options.get_string_value("feral_ordering", "") {
+        if let Some(m) = pounce_feral::parse_ordering_method(&v) {
+            cfg.ordering = m;
+        }
     }
     cfg
 }

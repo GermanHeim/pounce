@@ -22,6 +22,10 @@ use std::sync::{Arc, Mutex};
 
 use feral::symbolic::SupernodeParams;
 use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, Solver};
+
+/// Re-export so option-aware callers can construct a
+/// [`FeralConfig`] without taking a direct dependency on `feral`.
+pub use feral::symbolic::OrderingMethod;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::{
@@ -121,6 +125,18 @@ pub struct FeralConfig {
     /// blocks for accuracy. LAPACK's textbook maximum-stability value
     /// is `0.5`. Default `1e-8` matches feral's `NumericParams`.
     pub pivtol: f64,
+    /// Fill-reducing ordering method passed to
+    /// [`feral::Solver::with_ordering`]. Default
+    /// [`OrderingMethod::Auto`]: the adaptive dispatcher picks a
+    /// concrete method per matrix from cheap pattern features (very-
+    /// large-and-sparse → AMD; `n ≤ 10 000` → AMF; otherwise →
+    /// MetisND). Override via the `feral_ordering` OptionsList option
+    /// or the `POUNCE_FERAL_ORDERING` env var when a specific
+    /// concrete method (`amd`, `amf`, `metis`, `scotch`, `kahip`) or
+    /// the symbolic-time race (`auto_race`) is wanted. See
+    /// `feral/src/symbolic/mod.rs::OrderingMethod` for the
+    /// per-variant rationale.
+    pub ordering: OrderingMethod,
 }
 
 impl Default for FeralConfig {
@@ -134,6 +150,7 @@ impl Default for FeralConfig {
             // at the working-precision floor are flagged singular.
             singular_pivot_floor: 1e-20,
             pivtol: 1e-8,
+            ordering: OrderingMethod::Auto,
         }
     }
 }
@@ -141,9 +158,9 @@ impl Default for FeralConfig {
 impl FeralConfig {
     /// Read the knobs from `POUNCE_FERAL_CASCADE_BREAK`,
     /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE`,
-    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR` environment variables.
-    /// Used as a fallback when the IPM has no `OptionsList` to
-    /// consult (tests, legacy callers).
+    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR`, `POUNCE_FERAL_ORDERING`
+    /// environment variables. Used as a fallback when the IPM has no
+    /// `OptionsList` to consult (tests, legacy callers).
     pub fn from_env() -> Self {
         Self {
             cascade_break: match std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref() {
@@ -167,7 +184,29 @@ impl FeralConfig {
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(1e-8),
+            ordering: std::env::var("POUNCE_FERAL_ORDERING")
+                .ok()
+                .as_deref()
+                .and_then(parse_ordering_method)
+                .unwrap_or(OrderingMethod::Auto),
         }
+    }
+}
+
+/// Parse a case-insensitive ordering tag (the values accepted by the
+/// `feral_ordering` OptionsList option and the `POUNCE_FERAL_ORDERING`
+/// env var) into the corresponding [`OrderingMethod`]. Returns `None`
+/// for unrecognized tags so the caller can fall back to the default.
+pub fn parse_ordering_method(s: &str) -> Option<OrderingMethod> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(OrderingMethod::Auto),
+        "auto_race" | "autorace" | "race" => Some(OrderingMethod::AutoRace),
+        "amd" => Some(OrderingMethod::Amd),
+        "amf" => Some(OrderingMethod::Amf),
+        "metis" | "metis_nd" | "metisnd" => Some(OrderingMethod::MetisND),
+        "scotch" | "scotch_nd" | "scotchnd" => Some(OrderingMethod::ScotchND),
+        "kahip" | "kahip_nd" | "kahipnd" => Some(OrderingMethod::KahipND),
+        _ => None,
     }
 }
 
@@ -248,6 +287,11 @@ impl FeralSolverInterface {
         if cfg.fma {
             solver = solver.with_fma(true);
         }
+        // Fill-reducing ordering. `OrderingMethod::Auto` is pounce's
+        // default — it picks a concrete method per-matrix from cheap
+        // pattern features. Override via the `feral_ordering`
+        // OptionsList option or `POUNCE_FERAL_ORDERING` env var.
+        solver = solver.with_ordering(cfg.ordering);
         Self {
             solver,
             initialized: false,
@@ -817,5 +861,66 @@ mod tests {
         assert!((rhs[1] - 1.0).abs() < 1e-10);
         assert!((rhs[2] - 7.0 / 5.0).abs() < 1e-10);
         assert!((rhs[3] - 6.0 / 5.0).abs() < 1e-10);
+    }
+
+    /// `parse_ordering_method` accepts every documented tag (in either
+    /// case) and rejects unknown ones.
+    #[test]
+    fn parse_ordering_method_accepts_documented_tags() {
+        use OrderingMethod::*;
+        let cases: &[(&str, OrderingMethod)] = &[
+            ("auto", Auto),
+            ("AUTO", Auto),
+            ("auto_race", AutoRace),
+            ("autorace", AutoRace),
+            ("race", AutoRace),
+            ("amd", Amd),
+            ("AMD", Amd),
+            ("amf", Amf),
+            ("metis", MetisND),
+            ("metis_nd", MetisND),
+            ("MetisND", MetisND),
+            ("scotch", ScotchND),
+            ("kahip", KahipND),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(
+                parse_ordering_method(tag),
+                Some(*expected),
+                "tag {tag:?} should parse"
+            );
+        }
+        assert_eq!(parse_ordering_method("not_a_method"), None);
+        assert_eq!(parse_ordering_method(""), None);
+    }
+
+    /// Each `OrderingMethod` variant constructs a usable solver and
+    /// can factor a tiny SPD system.
+    #[test]
+    fn every_ordering_constructs_and_factors() {
+        use OrderingMethod::*;
+        for method in [Auto, AutoRace, Amd, Amf, MetisND, ScotchND, KahipND] {
+            let cfg = FeralConfig {
+                ordering: method,
+                ..FeralConfig::default()
+            };
+            let mut s = FeralSolverInterface::with_config(cfg);
+            let irn: [Index; 3] = [1, 2, 2];
+            let jcn: [Index; 3] = [1, 1, 2];
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success,
+                "structure init for {method:?}"
+            );
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success,
+                "solve for {method:?}"
+            );
+            assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for {method:?}");
+            assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for {method:?}");
+        }
     }
 }
