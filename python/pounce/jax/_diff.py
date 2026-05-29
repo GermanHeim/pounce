@@ -53,6 +53,7 @@ and silently returns the wrong gradient (pounce#73).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import jax
@@ -552,3 +553,202 @@ def vmap_solve(
     # ``jax.lax.map`` runs sequentially under the hood (one element at
     # a time), which is exactly what we want for an impure callback.
     return jax.lax.map(one, p_batch)
+
+
+def _solve_batch_threadpool(
+    f, g, p_batch_np, x0_np, n, m, lb, ub, cl, cu, options, workers,
+):
+    """Dispatch ``B`` independent solves across a ``ThreadPoolExecutor``.
+
+    Each worker builds its own ``Problem`` (no shared state) and runs
+    ``Problem.solve``. Genuine parallelism is unlocked by the
+    ``py.allow_threads`` block around ``optimize_tnlp`` in
+    ``pounce-py`` — the GIL is released across the IPM iteration so
+    threads actually run concurrently on the Rust side. JAX-traced
+    ``f`` / ``g`` callbacks reacquire the GIL the usual way; that's
+    serialized but the per-step cost is small relative to the linear
+    algebra.
+    """
+    B = p_batch_np.shape[0]
+    n_workers = workers or min(B, 8)
+    x_out = np.empty((B, n), dtype=np.float64)
+    lam_out = np.empty((B, m), dtype=np.float64)
+    zL_out = np.empty((B, n), dtype=np.float64)
+    zU_out = np.empty((B, n), dtype=np.float64)
+
+    def one(i):
+        x_np, info = _solve_once(
+            f=f, g=g,
+            p=jnp.asarray(p_batch_np[i]),
+            x0=jnp.asarray(x0_np[i]) if x0_np.ndim == 2 else jnp.asarray(x0_np),
+            n=n, m=m, lb=lb, ub=ub, cl=cl, cu=cu,
+            options=options,
+        )
+        x_out[i] = x_np
+        lam_out[i] = np.asarray(info["mult_g"], dtype=np.float64)
+        zL_out[i] = np.asarray(info["mult_x_L"], dtype=np.float64)
+        zU_out[i] = np.asarray(info["mult_x_U"], dtype=np.float64)
+
+    if n_workers <= 1 or B <= 1:
+        for i in range(B):
+            one(i)
+    else:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            list(pool.map(one, range(B)))
+    return x_out, lam_out, zL_out, zU_out
+
+
+def _make_vmap_solve_parallel_custom_vjp(
+    f: Callable,
+    g: Callable | None,
+    n: int,
+    m: int,
+    lb,
+    ub,
+    cl,
+    cu,
+    options: dict | None,
+    workers: int | None,
+):
+    @jax.custom_vjp
+    def solve_fn(p_batch, x0_batch):
+        x_star, *_ = _pure_callback_parallel_solve(
+            f, g, p_batch, x0_batch, n, m, lb, ub, cl, cu, options, workers,
+        )
+        return x_star
+
+    def fwd(p_batch, x0_batch):
+        x_star, lam, mult_xL, mult_xU = _pure_callback_parallel_solve(
+            f, g, p_batch, x0_batch, n, m, lb, ub, cl, cu, options, workers,
+        )
+        return x_star, (p_batch, x_star, lam, mult_xL, mult_xU)
+
+    def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
+        active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
+
+        def lagrangian(x, p_):
+            base = f(x, p_)
+            if g is not None and m > 0:
+                base = base + jnp.dot(lam, g(x, p_))
+            return base
+
+        H = jax.hessian(lagrangian, argnums=0)(x_star, p)
+        grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
+        dgradL_dp = jax.jacrev(grad_L_of_p)(p)
+
+        if g is not None and m > 0:
+            J = jax.jacrev(g, argnums=0)(x_star, p)
+            dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)
+            cl_arr = jnp.asarray(cl, dtype=H.dtype)
+            cu_arr = jnp.asarray(cu, dtype=H.dtype)
+            is_equality = cl_arr == cu_arr
+            cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
+            cons_inactive = ~cons_active
+        else:
+            J = jnp.zeros((0, n))
+            dg_dp = jnp.zeros((0,) + jnp.shape(p))
+            cons_inactive = jnp.zeros((0,), dtype=bool)
+
+        active_mat = jnp.diag(active.astype(H.dtype))
+        H_eff = jnp.where(
+            active[:, None] | active[None, :], 0.0, H
+        ) + active_mat
+        J_eff = jnp.where(
+            cons_inactive[:, None] | active[None, :], 0.0, J
+        )
+        v_eff = jnp.where(active, 0.0, v)
+
+        if m > 0:
+            cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
+            top = jnp.concatenate([H_eff, J_eff.T], axis=1)
+            bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
+            K = jnp.concatenate([top, bot], axis=0)
+            rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
+            u = jnp.linalg.solve(K, rhs)
+            u_x, u_lam = u[:n], u[n:]
+        else:
+            u_x = jnp.linalg.solve(H_eff, v_eff)
+            u_lam = jnp.zeros(0)
+
+        dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
+        if m > 0:
+            dL_dp = dL_dp - jnp.tensordot(u_lam, dg_dp, axes=1)
+        return dL_dp
+
+    def bwd(residuals, cotangent_x_batch):
+        p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch = residuals
+        dL_dp_batch = jax.vmap(bwd_single)(
+            p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch,
+            cotangent_x_batch,
+        )
+        # x0_batch carries no gradient (matches `solve`).
+        return dL_dp_batch, jnp.zeros_like(x_star_batch)
+
+    solve_fn.defvjp(fwd, bwd)
+    return solve_fn
+
+
+def _pure_callback_parallel_solve(
+    f, g, p_batch, x0_batch, n, m, lb, ub, cl, cu, options, workers,
+):
+    B = p_batch.shape[0]
+    result_shapes = (
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, m), jnp.float64),
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+    )
+
+    def host_call(p_h, x0_h):
+        return _solve_batch_threadpool(
+            f, g, np.asarray(p_h), np.asarray(x0_h),
+            n, m, lb, ub, cl, cu, options, workers,
+        )
+
+    return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)
+
+
+def vmap_solve_parallel(
+    p_batch,
+    *,
+    f: Callable,
+    g: Callable | None = None,
+    x0,
+    n: int,
+    m: int = 0,
+    lb=None,
+    ub=None,
+    cl=None,
+    cu=None,
+    options: dict | None = None,
+    workers: int | None = None,
+):
+    """Parallel batched solve. Drop-in for :func:`vmap_solve`.
+
+    Each of the ``B`` elements of ``p_batch`` is dispatched to a worker
+    in a ``ThreadPoolExecutor`` of size ``workers`` (default:
+    ``min(B, 8)``). Each worker owns an independent ``Problem`` so
+    there's no shared state. The ``py.allow_threads`` block around
+    ``optimize_tnlp`` in ``pounce-py`` releases the GIL across the
+    IPM iteration, so threads actually run concurrently on the Rust
+    side — the only cross-thread serialization is the Python
+    callbacks for ``f`` / ``g``, which reacquire the GIL the usual
+    way (typically a small fraction of total solve time for
+    JAX-jitted callables).
+
+    Differentiable w.r.t. ``p_batch`` via per-element implicit
+    function theorem. The backward pass vectorizes naturally via
+    ``jax.vmap`` because the KKT solve is pure JAX.
+
+    ``x0`` may be a single ``(n,)`` vector (broadcast to all batch
+    elements) or a ``(B, n)`` batch.
+    """
+    p_batch = jnp.asarray(p_batch)
+    B = p_batch.shape[0]
+    x0_arr = jnp.asarray(x0)
+    if x0_arr.ndim == 1:
+        x0_arr = jnp.broadcast_to(x0_arr, (B, n))
+    fn = _make_vmap_solve_parallel_custom_vjp(
+        f, g, n, m, lb, ub, cl, cu, options, workers,
+    )
+    return fn(p_batch, x0_arr)

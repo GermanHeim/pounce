@@ -266,8 +266,53 @@ impl PyProblem {
                 working: Some(ws),
             });
         }
-        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
-        let status: ApplicationReturnStatus = app.optimize_tnlp(bridge_for_solve);
+        // Release the GIL across `optimize_tnlp` so independent
+        // `Problem` instances on different OS threads can run their
+        // IPM iterations in parallel. Every TNLP callback (`eval_f`,
+        // `eval_grad_f`, `eval_g`, `eval_jac_g`, `eval_h`,
+        // `intermediate_callback`) in `tnlp_bridge.rs` already takes
+        // its own `Python::with_gil(...)` before touching Python
+        // state, so re-acquiring the GIL inside the call is safe
+        // and serialized by Python the usual way.
+        //
+        // SAFETY: `app` and `bridge` carry `Rc<RefCell<…>>` (because
+        // `pounce_nlp` uses single-threaded refcounting throughout).
+        // PyO3's `allow_threads` requires `Send`, so we wrap both
+        // moves in a transparent `SendGuard`. The closure does *not*
+        // actually cross OS threads — `Python::allow_threads` runs
+        // its body on the calling thread after `PyEval_SaveThread`,
+        // so the `Rc` refcount and `RefCell` borrow flag are only
+        // ever touched by this one thread (no concurrent access, no
+        // happens-before issue with the eventual `Drop`).
+        struct SendGuard<T>(T);
+        unsafe impl<T> Send for SendGuard<T> {}
+        impl<T> SendGuard<T> {
+            fn into_inner(self) -> T {
+                self.0
+            }
+            fn new(v: T) -> Self {
+                Self(v)
+            }
+        }
+        // Method-call captures (vs. field-access `.0`) defeat the
+        // 2021-edition disjoint-capture rule, so the closure captures
+        // the whole `SendGuard<T>` (which is `Send` by our `unsafe
+        // impl`) rather than peeking at the inner `Rc` directly.
+        let app_guard = SendGuard::new(app);
+        let bridge_guard = SendGuard::new(bridge);
+        let (status, app_back, bridge_back): (
+            ApplicationReturnStatus,
+            SendGuard<IpoptApplication>,
+            SendGuard<Rc<RefCell<PyTnlp>>>,
+        ) = py.allow_threads(move || {
+            let mut app = app_guard.into_inner();
+            let bridge = bridge_guard.into_inner();
+            let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+            let status = app.optimize_tnlp(bridge_for_solve);
+            (status, SendGuard::new(app), SendGuard::new(bridge))
+        });
+        let app = app_back.into_inner();
+        let bridge = bridge_back.into_inner();
         let stats = app.statistics();
         // Pick up any working set the SQP path produced; surface
         // it in the info dict and stash on the Problem instance.

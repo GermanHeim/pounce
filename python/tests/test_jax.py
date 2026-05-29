@@ -160,3 +160,91 @@ def test_solve_with_warm_reduces_iterations_pounce_74():
     # x*[0] = B is fixed (binding), so dL/dp[0] = 0; the others
     # contribute 2 * x*[i] = 2 * p[i] for i in {1, 2}.
     np.testing.assert_allclose(grad, np.array([0.0, 4.0, -6.0]), atol=1e-6)
+
+
+def test_vmap_solve_parallel_matches_vmap_solve_pounce_74():
+    """Parallel batched solve must agree numerically with the sequential
+    `vmap_solve` reference, both for the forward x* and for `jax.grad`
+    through a downstream loss (pounce#74-1)."""
+    from pounce.jax import solve as serial_solve
+    from pounce.jax import vmap_solve_parallel
+
+    n = 3
+    B = 4
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    # Unconstrained: x*(p) = p, dL/dp_i = 2 p_i.
+    rng = np.random.default_rng(0)
+    p_batch = jnp.asarray(rng.standard_normal((B, n)))
+    x0 = jnp.zeros(n)
+
+    x_parallel = vmap_solve_parallel(
+        p_batch, f=f, g=None, x0=x0, n=n, m=0,
+        options={"tol": 1e-10, "print_level": 0},
+        workers=4,
+    )
+
+    # Reference: serial loop in pure Python.
+    x_serial = np.stack([
+        np.asarray(serial_solve(
+            p_batch[i], f=f, g=None, x0=x0, n=n, m=0,
+            options={"tol": 1e-10, "print_level": 0},
+        ))
+        for i in range(B)
+    ])
+
+    np.testing.assert_allclose(np.asarray(x_parallel), x_serial, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(x_parallel), np.asarray(p_batch), atol=1e-7)
+
+    def loss(p_batch):
+        x_batch = vmap_solve_parallel(
+            p_batch, f=f, g=None, x0=x0, n=n, m=0,
+            options={"tol": 1e-10, "print_level": 0},
+            workers=4,
+        )
+        return jnp.sum(x_batch ** 2)
+
+    grad = np.asarray(jax.grad(loss)(p_batch))
+    # Closed form: ∂(Σ x*² )/∂p = 2 p (since x* = p).
+    np.testing.assert_allclose(grad, 2.0 * np.asarray(p_batch), atol=1e-6)
+
+
+def test_vmap_solve_parallel_with_constraints_pounce_74():
+    """Parallel solve with an active inequality on some batch elements
+    and not others — exercises the GIL-release path with re-entrant
+    JAX callbacks for f and g, and confirms the per-element active
+    set is respected (pounce#74-1)."""
+    from pounce.jax import vmap_solve_parallel
+
+    n, B_thresh = 3, 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):
+        return jnp.stack([x[0]])
+
+    # Mix: first row binds (p[0]=2 > 0.5), second is slack (p[0]=-1).
+    p_batch = jnp.array([
+        [2.0, 2.0, -3.0],
+        [-1.0, 2.0, -3.0],
+        [1.5, 0.0, 1.0],   # binds
+        [0.3, -0.5, 0.7],  # slack
+    ])
+    x0 = jnp.zeros(n)
+    x_parallel = vmap_solve_parallel(
+        p_batch, f=f, g=g, x0=x0, n=n, m=1,
+        lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+        cl=jnp.array([-1e19]), cu=jnp.array([B_thresh]),
+        options={"tol": 1e-10, "print_level": 0},
+        workers=4,
+    )
+    x_np = np.asarray(x_parallel)
+    # x*[0] = min(p[0], B_thresh); x*[1:] = p[1:].
+    expected_x0 = np.minimum(np.asarray(p_batch)[:, 0], B_thresh)
+    np.testing.assert_allclose(x_np[:, 0], expected_x0, atol=1e-7)
+    np.testing.assert_allclose(x_np[:, 1:], np.asarray(p_batch)[:, 1:], atol=1e-7)

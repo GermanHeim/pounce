@@ -43,6 +43,12 @@ from jax import config as _jax_config
 _jax_config.update("jax_enable_x64", True)
 
 from ._build import from_jax
-from ._diff import solve, solve_with_warm, vmap_solve
+from ._diff import solve, solve_with_warm, vmap_solve, vmap_solve_parallel
 
-__all__ = ["from_jax", "solve", "solve_with_warm", "vmap_solve"]
+__all__ = [
+    "from_jax",
+    "solve",
+    "solve_with_warm",
+    "vmap_solve",
+    "vmap_solve_parallel",
+]

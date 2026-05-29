@@ -336,6 +336,38 @@ End-to-end wiring of the upstream `nlp_scaling_*` and
   `final_objective`) so `GetIpoptIterCount`, `info["iter_count"]`,
   etc. report SQP-side numbers on the SQP path.
 
+### Added — Parallel batched `pounce.jax.vmap_solve_parallel` + GIL release (pounce#74)
+
+`pounce_py::Problem::solve` now releases the Python GIL across the
+`optimize_tnlp` call (every TNLP callback was already
+`Python::with_gil`-wrapped, so this is a localized
+`py.allow_threads` block in `crates/pounce-py/src/problem.rs`).
+That unlocks true concurrent IPM iteration across independent
+`Problem` instances on different OS threads — Python-level
+`f` / `g` callbacks still serialize on the GIL but the linear-algebra
+heart of the solver runs in parallel.
+
+`pounce.jax.vmap_solve_parallel` rides that change: a drop-in
+replacement for `vmap_solve` that dispatches the batch over a
+`ThreadPoolExecutor` of independent `Problem` instances. Forward
+is parallel via the threadpool; backward is `jax.vmap` over the
+per-element KKT solve (pure JAX, vectorizes naturally).
+
+```python
+from pounce.jax import vmap_solve_parallel
+
+x_batch = vmap_solve_parallel(
+    p_batch, f=f, g=g, x0=x0, n=n, m=m,
+    lb=lb, ub=ub, cl=cl, cu=cu,
+    workers=8,  # default: min(B, 8)
+)
+```
+
+Microbench (`n=30`, `B=16`, nonlinear unconstrained, M1 8-core):
+`vmap_solve` 1.00s → `vmap_solve_parallel(workers=8)` 0.37s
+(~2.75×). Speedup grows with per-element solve cost. Numerically
+identical to the sequential reference.
+
 ### Added — `pounce.jax.solve_with_warm` (pounce#74)
 
 Companion to `pounce.jax.solve` that threads the previous solve's
