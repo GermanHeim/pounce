@@ -45,6 +45,10 @@ libloading = "0.8"
 tracing.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
+# Line editing for the interactive debugger REPL (`--debug`): history,
+# Ctrl-R search, and Tab completion. Only used on an interactive TTY;
+# piped input and `--debug-json` fall back to a plain line reader.
+rustyline = { version = "14", features = ["derive"] }
 
 [features]
 default = []
