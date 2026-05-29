@@ -40,6 +40,15 @@ coordinates. We detect activity from the optimizer's bound multipliers
 ``info['mult_x_L']`` / ``info['mult_x_U']`` (above
 ``active_tol``) and project the cotangent / right-hand-side onto the
 inactive set before the KKT solve, then scatter back.
+
+General inequalities. A two-sided constraint row ``cl[i] <= g_i(x)
+<= cu[i]`` is *active* at the optimum iff (a) it is an equality
+(``cl[i] == cu[i]``) or (b) ``|mult_g_i| > active_tol`` (binding at
+one side). Slack inequality rows are dropped from the KKT block
+(zeroed and identity-augmented on the multiplier diagonal) so the
+sensitivity is taken over the active manifold only — including a
+slack row as if it were ``g_i(x) = 0`` over-constrains ``dx*/dp``
+and silently returns the wrong gradient (pounce#73).
 """
 
 from __future__ import annotations
@@ -138,9 +147,21 @@ def _make_solve_custom_vjp(
         if g is not None and m > 0:
             J = jax.jacrev(g, argnums=0)(x_star, p)
             dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)  # (m, *p_shape)
+            # Constraint-row active set: equalities are always active;
+            # inequalities are active iff their multiplier is non-zero.
+            # Slack inequality rows drop out of the KKT block via the
+            # same identity-augment trick used for active bounds —
+            # pounce#73 (without this, slack ineqs are kept as
+            # equalities and the gradient is silently wrong).
+            cl_arr = jnp.asarray(cl, dtype=H.dtype)
+            cu_arr = jnp.asarray(cu, dtype=H.dtype)
+            is_equality = cl_arr == cu_arr
+            cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
+            cons_inactive = ~cons_active
         else:
             J = jnp.zeros((0, n))
             dg_dp = jnp.zeros((0,) + jnp.shape(p))
+            cons_inactive = jnp.zeros((0,), dtype=bool)
 
         # Project to inactive variables.
         idx = jnp.where(inactive, jnp.arange(n), n)  # n sentinel for masked-out
@@ -154,15 +175,20 @@ def _make_solve_custom_vjp(
         H_eff = jnp.where(
             active[:, None] | active[None, :], 0.0, H
         ) + active_mat
-        J_eff = jnp.where(active[None, :], 0.0, J)
+        # Zero variable-active columns AND constraint-inactive rows.
+        J_eff = jnp.where(
+            cons_inactive[:, None] | active[None, :], 0.0, J
+        )
         v_eff = jnp.where(active, 0.0, v)
 
-        # Assemble [[H, Jᵀ], [J, 0]] u = [v; 0].
+        # Assemble [[H, Jᵀ], [J, D]] u = [v; 0]   where D = diag(cons_inactive)
+        # so each slack row reads `1 · u_lam[i] = 0` and drops out.
         if m > 0:
+            cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
             top = jnp.concatenate([H_eff, J_eff.T], axis=1)
-            bot = jnp.concatenate([J_eff, jnp.zeros((m, m))], axis=1)
+            bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
             K = jnp.concatenate([top, bot], axis=0)
-            rhs = jnp.concatenate([v_eff, jnp.zeros(m)])
+            rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
             u = jnp.linalg.solve(K, rhs)
             u_x, u_lam = u[:n], u[n:]
         else:
