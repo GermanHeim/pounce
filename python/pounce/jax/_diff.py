@@ -276,6 +276,248 @@ def solve(
     return fn(p, x0)
 
 
+def _solve_once_warm(
+    f: Callable,
+    g: Callable | None,
+    p: jnp.ndarray,
+    x0: jnp.ndarray,
+    n: int,
+    m: int,
+    lb,
+    ub,
+    cl,
+    cu,
+    options: dict | None,
+    lam_warm: np.ndarray,
+    zL_warm: np.ndarray,
+    zU_warm: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Forward solve with user-supplied dual warm-start."""
+
+    def f_of_x(x):
+        return f(x, p)
+
+    if g is not None:
+        def g_of_x(x):
+            return g(x, p)
+    else:
+        g_of_x = None
+
+    obj = _JaxProblem(f=f_of_x, g=g_of_x, n=n, m=m)
+    problem = Problem(n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu)
+    merged = dict(options or {})
+    merged.setdefault("warm_start_init_point", "yes")
+    for k, v in merged.items():
+        problem.add_option(k, v)
+    x_np, info = problem.solve(
+        x0=np.asarray(x0),
+        lagrange=np.asarray(lam_warm),
+        zl=np.asarray(zL_warm),
+        zu=np.asarray(zU_warm),
+    )
+    return (
+        np.asarray(x_np, dtype=np.float64),
+        np.asarray(info["mult_g"], dtype=np.float64),
+        np.asarray(info["mult_x_L"], dtype=np.float64),
+        np.asarray(info["mult_x_U"], dtype=np.float64),
+        info,
+    )
+
+
+def _pure_callback_warm_solve(
+    f, g, p, x0, n, m, lb, ub, cl, cu, options,
+    lam_warm, zL_warm, zU_warm,
+):
+    """Pure-callback wrapper around :func:`_solve_once_warm`.
+
+    Returns ``(x*, lam_out, zL_out, zU_out)`` — the four arrays the
+    bwd needs (lam_out, the bound multipliers) and the warm-state
+    triple the user threads into the next call.
+    """
+    result_shapes = (
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((m,), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+    )
+
+    def host_call(p_h, x0_h, lam_h, zL_h, zU_h):
+        x_np, lam_out, zL_out, zU_out, _info = _solve_once_warm(
+            f=f, g=g,
+            p=jnp.asarray(p_h),
+            x0=jnp.asarray(x0_h),
+            n=n, m=m, lb=lb, ub=ub, cl=cl, cu=cu,
+            options=options,
+            lam_warm=lam_h, zL_warm=zL_h, zU_warm=zU_h,
+        )
+        return x_np, lam_out, zL_out, zU_out
+
+    return jax.pure_callback(
+        host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm,
+    )
+
+
+def _make_solve_with_warm_custom_vjp(
+    f: Callable,
+    g: Callable | None,
+    n: int,
+    m: int,
+    lb,
+    ub,
+    cl,
+    cu,
+    options: dict | None,
+):
+    @jax.custom_vjp
+    def solve_fn(p, x0, lam_warm, zL_warm, zU_warm):
+        x_star, lam_out, zL_out, zU_out = _pure_callback_warm_solve(
+            f, g, p, x0, n, m, lb, ub, cl, cu, options,
+            lam_warm, zL_warm, zU_warm,
+        )
+        return x_star, lam_out, zL_out, zU_out
+
+    def fwd(p, x0, lam_warm, zL_warm, zU_warm):
+        x_star, lam_out, zL_out, zU_out = _pure_callback_warm_solve(
+            f, g, p, x0, n, m, lb, ub, cl, cu, options,
+            lam_warm, zL_warm, zU_warm,
+        )
+        return (
+            (x_star, lam_out, zL_out, zU_out),
+            (p, x_star, lam_out, zL_out, zU_out),
+        )
+
+    def bwd(residuals, cotangents):
+        p, x_star, lam, mult_xL, mult_xU = residuals
+        # Only the x* cotangent contributes a gradient w.r.t. p.
+        # Cotangents on (lam_out, zL_out, zU_out) are dropped — same
+        # pattern existing `solve` uses for x0: warm dual outputs
+        # don't carry differentiable info back to p in the implicit
+        # rule (they're consequences of the active set, not inputs).
+        v = cotangents[0]
+
+        active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
+        inactive = ~active
+
+        def lagrangian(x, p_):
+            base = f(x, p_)
+            if g is not None and m > 0:
+                base = base + jnp.dot(lam, g(x, p_))
+            return base
+
+        H = jax.hessian(lagrangian, argnums=0)(x_star, p)
+        grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
+        dgradL_dp = jax.jacrev(grad_L_of_p)(p)
+
+        if g is not None and m > 0:
+            J = jax.jacrev(g, argnums=0)(x_star, p)
+            dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)
+            cl_arr = jnp.asarray(cl, dtype=H.dtype)
+            cu_arr = jnp.asarray(cu, dtype=H.dtype)
+            is_equality = cl_arr == cu_arr
+            cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
+            cons_inactive = ~cons_active
+        else:
+            J = jnp.zeros((0, n))
+            dg_dp = jnp.zeros((0,) + jnp.shape(p))
+            cons_inactive = jnp.zeros((0,), dtype=bool)
+
+        active_mat = jnp.diag(active.astype(H.dtype))
+        H_eff = jnp.where(
+            active[:, None] | active[None, :], 0.0, H
+        ) + active_mat
+        J_eff = jnp.where(
+            cons_inactive[:, None] | active[None, :], 0.0, J
+        )
+        v_eff = jnp.where(active, 0.0, v)
+
+        if m > 0:
+            cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
+            top = jnp.concatenate([H_eff, J_eff.T], axis=1)
+            bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
+            K = jnp.concatenate([top, bot], axis=0)
+            rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
+            u = jnp.linalg.solve(K, rhs)
+            u_x, u_lam = u[:n], u[n:]
+        else:
+            u_x = jnp.linalg.solve(H_eff, v_eff)
+            u_lam = jnp.zeros(0)
+
+        dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
+        if m > 0:
+            dL_dp = dL_dp - jnp.tensordot(u_lam, dg_dp, axes=1)
+
+        return (
+            dL_dp,
+            jnp.zeros((n,), dtype=jnp.float64),
+            jnp.zeros((m,), dtype=jnp.float64),
+            jnp.zeros((n,), dtype=jnp.float64),
+            jnp.zeros((n,), dtype=jnp.float64),
+        )
+
+    solve_fn.defvjp(fwd, bwd)
+    return solve_fn
+
+
+def solve_with_warm(
+    p,
+    *,
+    f: Callable,
+    g: Callable | None = None,
+    x0,
+    n: int,
+    m: int = 0,
+    lb=None,
+    ub=None,
+    cl=None,
+    cu=None,
+    options: dict | None = None,
+    warm_start: tuple | None = None,
+):
+    """Parametric solve that consumes and returns dual warm-state.
+
+    Like :func:`solve`, but:
+
+    * ``warm_start=(lam, zL, zU)`` seeds the solver's dual variables
+      via IPOPT's ``warm_start_init_point=yes`` machinery. Pass
+      ``None`` to start from zeros (still warm-starts the option,
+      but with no informative duals — useful for the *first* call
+      in a sequence where you want a uniform code path).
+    * Returns ``(x*, (lam_out, zL_out, zU_out))`` so the caller
+      can thread the dual triple into the next call.
+
+    The forward call is differentiable w.r.t. ``p`` only — cotangents
+    on the warm-output duals and the warm-input duals are dropped
+    (zero), matching how :func:`solve` handles ``x0``. This is the
+    implicit-function-theorem fix point: at the optimum the duals
+    are a function of ``p`` and the active set, not an independent
+    input feeding into ``dx*/dp``.
+
+    Typical use::
+
+        x0, lam, zL, zU = init_state(...)
+        for p_k in trajectory:
+            x_star, (lam, zL, zU) = solve_with_warm(
+                p_k, f=f, g=g, x0=x0, n=n, m=m,
+                lb=lb, ub=ub, cl=cl, cu=cu,
+                warm_start=(lam, zL, zU),
+            )
+            x0 = x_star  # primal warm-start for free
+    """
+    if warm_start is None:
+        lam_warm = jnp.zeros(m, dtype=jnp.float64)
+        zL_warm = jnp.zeros(n, dtype=jnp.float64)
+        zU_warm = jnp.zeros(n, dtype=jnp.float64)
+    else:
+        lam_warm, zL_warm, zU_warm = warm_start
+        lam_warm = jnp.asarray(lam_warm, dtype=jnp.float64)
+        zL_warm = jnp.asarray(zL_warm, dtype=jnp.float64)
+        zU_warm = jnp.asarray(zU_warm, dtype=jnp.float64)
+
+    fn = _make_solve_with_warm_custom_vjp(f, g, n, m, lb, ub, cl, cu, options)
+    x_star, lam_out, zL_out, zU_out = fn(p, x0, lam_warm, zL_warm, zU_warm)
+    return x_star, (lam_out, zL_out, zU_out)
+
+
 def vmap_solve(
     p_batch,
     *,

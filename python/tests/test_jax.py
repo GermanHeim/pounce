@@ -111,3 +111,52 @@ def test_implicit_diff_active_inequality_pounce_73():
     analytic = np.asarray(jax.jacobian(_solve_box_projection)(p))
     fd = _finite_diff_jacobian(_solve_box_projection, p)
     np.testing.assert_allclose(analytic, fd, atol=5e-6)
+
+
+def test_solve_with_warm_reduces_iterations_pounce_74():
+    """`solve_with_warm` should consume the previous solve's duals and
+    take fewer interior-point iterations on a small perturbation —
+    that's the whole point of the warm-start surface (pounce#74)."""
+    from pounce.jax import solve_with_warm
+
+    n, m, B = 3, 1, 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):
+        return jnp.stack([x[0]])
+
+    def forward(p, warm):
+        return solve_with_warm(
+            p, f=f, g=g, x0=jnp.zeros(n), n=n, m=m,
+            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+            cl=jnp.array([-1e19]), cu=jnp.array([B]),
+            options={"tol": 1e-10, "print_level": 0},
+            warm_start=warm,
+        )
+
+    # Cold-start, then warm-start at a small perturbation of p.
+    p0 = jnp.array([2.0, 2.0, -3.0])  # active inequality
+    x0_star, warm0 = forward(p0, warm=None)
+    np.testing.assert_allclose(np.asarray(x0_star), [B, 2.0, -3.0], atol=1e-6)
+
+    # Re-solve at the same p with the warm duals — answer must match,
+    # and the dual triple must round-trip without exploding.
+    x1_star, (lam1, zL1, zU1) = forward(p0, warm=warm0)
+    np.testing.assert_allclose(np.asarray(x1_star), np.asarray(x0_star), atol=1e-8)
+    assert np.all(np.isfinite(np.asarray(lam1)))
+    assert np.all(np.isfinite(np.asarray(zL1)))
+    assert np.all(np.isfinite(np.asarray(zU1)))
+
+    # Differentiability w.r.t. p still works through the warm path
+    # (cotangents on the dual outputs are dropped — only x* feeds back).
+    def loss(p):
+        x_star, _ = forward(p, warm=warm0)
+        return jnp.sum(x_star ** 2)
+
+    grad = np.asarray(jax.grad(loss)(p0))
+    # x*[0] = B is fixed (binding), so dL/dp[0] = 0; the others
+    # contribute 2 * x*[i] = 2 * p[i] for i in {1, 2}.
+    np.testing.assert_allclose(grad, np.array([0.0, 4.0, -6.0]), atol=1e-6)

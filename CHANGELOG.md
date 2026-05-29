@@ -9,6 +9,8 @@ changes.
 
 ## Unreleased
 
+## [0.3.0] — 2026-05-29
+
 ### Added — Active-set SQP with working-set warm start (Phase 5b + 5c + 5d)
 
 A new sequential-quadratic-programming driver sits alongside the
@@ -21,7 +23,7 @@ set is a strong starting point.
 **Python notebook:** `python/notebooks/06_sqp_parametric_continuation.ipynb`.
 **C example:** `crates/pounce-cinterface/examples/sqp_warm_start.c`.
 **GAMS example:** `gams/examples/parametric_sqp_warm_start.gms`.
-**Design note:** `docs/research/active-set-sqp-warm-start.md`.
+**Design note:** `dev-notes/research/active-set-sqp-warm-start.md`.
 
 #### Algorithm selection (cross-cutting)
 
@@ -201,6 +203,128 @@ opt-in via `QpOptions::use_schur_updates`).
 - `crates/pounce-algorithm/tests/sqp_filter_vs_l1_elastic.rs` —
   parity between the two globalizations.
 
+### Added — Auxiliary-equality preprocessing (Phase 0 presolve, issue #53)
+
+A 14-PR series that scaffolds an opt-in *Phase 0* presolve pass:
+detects block-triangular structure in the equality system, solves
+the dependent blocks ahead of the IPM, and substitutes the
+recovered variables back into the user TNLP. Targets gas-network,
+power-flow, and process-design problems where a few hundred
+algebraic state variables eliminate cleanly.
+
+The algorithm and reference implementation are a port of
+[ripopt PR #32](https://github.com/jkitchin/ripopt/pull/32) by
+**David Bernal Neira** ([@bernalde](https://github.com/bernalde)).
+The ripopt work also vendored the
+`tutorial_flow_density{,_perturbed}.nl` and `gaslib11_steady.nl`
+fixtures we now use for end-to-end testing.
+
+- Hopcroft-Karp incidence matching, Dulmage-Mendelsohn decomposition,
+  Tarjan SCC → block-triangular form.
+- Coupling classification (linear / nonlinear / inequality-coupled)
+  plus a damped-Newton block solver with large-block fallback.
+- Trivial-elimination pre-pass; inequality-coupled blocks handled
+  by projection.
+- Reduction-frame bookkeeping with full multiplier recovery so
+  `final_zL` / `final_zU` round-trip back to the user space.
+- Orchestrator wired into `PresolveTnlp`, gated by
+  `presolve_auxiliary` (default off). Diagnostics surfaced via
+  `presolve_auxiliary_diagnostics`.
+- Design note: `dev-notes/auxiliary-equality-preprocessing.md`;
+  user docs in `docs/src/auxiliary-presolve.md`.
+
+### Added — FBBT (Feasibility-Based Bound Tightening, #62)
+
+Three-commit landing of FBBT inside `pounce-presolve`:
+
+- `pounce-presolve::interval` — outward-rounded interval arithmetic
+  on `f64`, with `Interval::div` reciprocal endpoints rounded
+  outward (fixes a subtle near-zero straddle case discovered in
+  review).
+- `ExpressionProvider` trait + forward pass walks each constraint
+  expression and tightens variable bounds from the constraint's
+  `g_l`/`g_u` envelope.
+- Reverse propagation + orchestrator wired through `PresolveTnlp`
+  end-to-end. New options: `presolve_fbbt` (master switch,
+  default off), `fbbt_tol`, `fbbt_max_iter`, `fbbt_max_constraints`.
+- Docs: `docs/src/fbbt.md`; demo notebook
+  `python/notebooks/08_fbbt.ipynb`.
+
+### Added — Problem and KKT-system scaling (#61, f00c1f9)
+
+End-to-end wiring of the upstream `nlp_scaling_*` and
+`linear_system_scaling` option families:
+
+- `nlp_scaling_method`: `none` / `user-scaling` (new — pulled from
+  `set_problem_scaling` Python API or `SetIpoptProblemScaling`
+  C API) / `gradient-based` (existing, now with target-gradient
+  knobs `nlp_scaling_obj_target_gradient` and
+  `nlp_scaling_constr_target_gradient`).
+- `linear_system_scaling`: `none` / `mc19` / `ruiz` (iterative
+  symmetric infinity-norm equilibration, new) / `slack-based`.
+  Applied to the augmented system independent of NLP-level
+  scaling.
+- Python `Problem.set_problem_scaling(obj_scaling, x_scaling=None,
+  g_scaling=None)` plus a worked example in
+  `python/notebooks/07_scaling.ipynb`.
+- Documentation: `docs/src/scaling.md`.
+
+### Added — Mehrotra adaptive-μ defaults and init cascade (upstream parity)
+
+- `mehrotra_algorithm` option routed through `PdSearchDirCalc`
+  (previously parsed but inert).
+- `adaptive_mu_globalization` cascade finished per upstream Ipopt;
+  `bound_push` / `bound_frac` / `bound_mult_init_val` / `alpha_for_y`
+  cascade from `mehrotra_algorithm yes`.
+- `least_square_init_primal` implemented in
+  `DefaultIterateInitializer`.
+- `accept_every_trial_step` honored in the line search and
+  cascaded from `mehrotra_algorithm` (matches upstream
+  initialization behavior).
+
+### Added — FERAL backend tunables and 0.8.0 bump
+
+- `feral_pivtol` exposed as an `OptionsList` option with
+  `FERAL_PIVTOL` environment-variable fallback.
+- Tri-state `cascade_break` (#55): `auto` / `on` / `off`, inheriting
+  the FERAL Phase B default unless explicitly set.
+- Workspace bump to `feral 0.8.0`, which ships the SSIDS-aligned
+  strict-zero-pivot inertia policy (feral gh#54 / pounce gh#52,
+  *nuffield2_trap*). The temporary `[patch.crates-io]` block
+  pointing at the local feral checkout has been removed.
+
+### Added — `pounce-solve-report` crate + `IpoptWriteSolveReport` C API
+
+- New publishable crate `pounce-solve-report` (first crates.io
+  release) emits the machine-readable `pounce.solve-report/v1`
+  JSON shared by the CLI, the C ABI, and the GAMS driver.
+- C ABI: `IpoptWriteSolveReport(IpoptProblem, const char *path)`
+  writes the report to disk after `IpoptSolve`.
+- GAMS driver now emits `pounce.solve-report/v1` alongside the
+  `.lst` so studio tooling can consume it directly.
+
+### Added — Diagnostics dumps
+
+- `--dump iterates:{summary,full}` (#68) — per-iteration trajectory
+  artefacts the studio can replay. `summary` writes one JSON line
+  per outer iteration; `full` adds the primal/dual vectors and
+  KKT residuals.
+- `--dump kkt:*+L` (#69) — augments the existing KKT-system dump
+  with the LDLᵀ factor pattern (block structure, fill-in, pivot
+  signs) for inertia post-mortems.
+- `print_options_documentation yes` now actually walks the
+  registered options and emits a categorized dump (previously a
+  registered-but-inert toggle).
+
+### Added — Studio Claude-skill and MCP GAMS tools
+
+- `studio/skill/` — Claude-skill front-end as an alternative to the
+  MCP server. Lighter-weight install path for users who just want
+  the studio prompts and don't need an MCP runtime.
+- `studio/mcp` — new GAMS problem tools (`run_gams_problem`,
+  `analyze_gams_problem`, `parse_gams_listing`,
+  `list_gams_examples`) plus an install script.
+
 ### Changed
 
 - `pounce-qp::ParametricActiveSetSolver::solve_equality_plus_bounds`
@@ -212,6 +336,34 @@ opt-in via `QpOptions::use_schur_updates`).
   `final_objective`) so `GetIpoptIterCount`, `info["iter_count"]`,
   etc. report SQP-side numbers on the SQP path.
 
+### Added — `pounce.jax.solve_with_warm` (pounce#74)
+
+Companion to `pounce.jax.solve` that threads the previous solve's
+dual triple `(mult_g, mult_x_L, mult_x_U)` into the next call via
+IPOPT's `warm_start_init_point=yes` machinery.
+
+```python
+from pounce.jax import solve_with_warm
+
+x_star, warm = solve_with_warm(
+    p, f=f, g=g, x0=x0, n=n, m=m,
+    lb=lb, ub=ub, cl=cl, cu=cu,
+    warm_start=None,                # cold first call
+)
+for p_k in trajectory[1:]:
+    x_star, warm = solve_with_warm(
+        p_k, f=f, g=g, x0=x_star, n=n, m=m,
+        lb=lb, ub=ub, cl=cl, cu=cu,
+        warm_start=warm,            # threaded duals
+    )
+```
+
+Differentiable w.r.t. `p` via the same implicit-function rule as
+`solve`. Cotangents on the warm-state outputs and the warm-state
+inputs are dropped (zero) — at the optimum the duals are a
+function of `p` and the active set, not an independent input to
+`dx*/dp`. `solve` itself is unchanged (non-breaking).
+
 ### Fixed
 
 - SQP `check_kkt` stationarity formula: was `∇f + Jᵀ λ_g + λ_x`,
@@ -219,6 +371,59 @@ opt-in via `QpOptions::use_schur_updates`).
   `λ_x = z_l − z_u = −λ_sat`). Latent — only triggered by problems
   with an active variable bound. Discovered on a 3-D simplex
   projection.
+- `fix(mu): guard probing oracle against corrupted iterate (#58)`
+  — the probing oracle no longer dereferences fields of an
+  iterate that the line-search rejected mid-update.
+- `fix(mu/probing)`: σ denominator uses `curr_avrg_compl`, not
+  `data.curr_mu`, matching upstream.
+- `fix(mu-oracle)`: allow inexact affine predictor solves to feed
+  the quality-function oracle (upstream parity).
+- `fix(l1-wrapper): use multi-pass restoration factory provider
+  (#24)` — the ℓ₁ penalty wrapper now nests a restoration sub-IPM
+  whose own restoration provider is the multi-pass factory,
+  matching the outer IPM path.
+- `fix(restoration)`: restoration sub-IPM inherits the outer
+  `mu_strategy` rather than resetting to `monotone`.
+- `fix(feral)`: zero-pivot factorizations on LP-shape KKT
+  systems route to `Singular` instead of bubbling up as
+  `Internal`.
+- `fix(fbbt)`: outward-round reciprocal endpoints in
+  `Interval::div` for the near-zero straddle case.
+- `fix(presolve)`: auxiliary preprocessing + `presolve_bound_tightening`
+  infeasibility paths (#60).
+- `fix(init/ls)`: perturb `delta_c`/`delta_d` by 1e-8 in the
+  least-squares-init augmented system to avoid exact rank
+  deficiency.
+- `fix(scaling)`: scale `d_l` / `d_u` in step with `d(x)` under
+  gradient-based scaling.
+- `fix(hsl)`: HSL build script is a no-op when `COINHSL_DIR` is
+  unset, so `cargo build` works on machines without HSL
+  installed even with the `ma57` feature off.
+- `fix(benchmark-report)`: composite report now globs the newest
+  `pounce_*.json` under `benchmarks/mittelmann/results/` instead
+  of hard-coding `pounce_v0.1.0.json`.
+- `fix(jax)`: `pounce.jax.solve` backward pass now respects the
+  constraint active set, not just variable bounds. Slack inequality
+  rows are dropped from the implicit-function-theorem KKT block via
+  the same identity-augment trick used for active bounds; previously
+  they were kept as equalities, silently returning the wrong
+  `dx*/dp` whenever an inequality was inactive at the optimum
+  (pounce#73).
+
+### Docs
+
+- `docs: adaptive-μ option tables, scaling worked example,
+  troubleshooting guide` — `docs/src/options.md`,
+  `docs/src/scaling.md`, `docs/src/troubleshooting.md` refreshed.
+- FBBT reference page (`docs/src/fbbt.md`) and Pyomo demo
+  notebook `python/notebooks/08_fbbt.ipynb` (#62).
+- Scaling docs page (`docs/src/scaling.md`) + Python demo notebook
+  `python/notebooks/07_scaling.ipynb` (#61).
+- `studio/skill` README: corrected `POUNCE_BIN` claim,
+  `inspect --json`, sibling-feral layout.
+- README badges: PyPI version + downloads for `pounce-solver` and
+  `pyomo-pounce`; Zenodo DOI
+  `10.5281/zenodo.20387011` published.
 
 ### Compatibility
 
@@ -367,4 +572,5 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
+[0.3.0]: https://github.com/jkitchin/pounce/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jkitchin/pounce/releases/tag/v0.2.0
