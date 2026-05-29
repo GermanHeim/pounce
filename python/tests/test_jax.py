@@ -723,3 +723,102 @@ def test_factor_reuse_raises_clean_error_when_no_factor():
     # the actionable text to land somewhere in the chain.
     chain = msg + " " + str(excinfo.value.__cause__ or "")
     assert "factor_reuse=False" in chain, f"missing fallback hint in: {chain}"
+
+
+def test_factor_reuse_bwd_offthread_pounce_77():
+    """Regression for pounce#77: ``jax.grad`` through a
+    ``factor_reuse=True`` JaxProblem must survive being invoked from a
+    worker thread.
+
+    PySolver is ``#[pyclass(unsendable)]`` because ``RustSolver`` holds
+    ``Rc<RefCell<dyn TNLP>>`` — touching it from any thread other than
+    the one that built it triggers a PyO3 panic ("PySolver is
+    unsendable, but sent to another thread"). JAX's ``pure_callback``
+    dispatches ``host_call`` from XLA worker threads in jit'd training
+    loops, which made the factor-reuse bwd unusable in practice.
+
+    The fix pins all solver creation, ``solve()``, and ``kkt_solve``
+    calls to a per-JaxProblem dedicated single-thread executor. This
+    test confirms the fix end-to-end by running the entire forward +
+    backward from a ``threading.Thread`` worker (which the pre-fix code
+    would have panicked under).
+    """
+    import threading
+
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return 0.5 * jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([jnp.sum(x) - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=4, m=1, p_example=jnp.zeros(4),
+        lb=jnp.full(4, -2.0), ub=jnp.full(4, 2.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+        factor_reuse=True,
+    )
+
+    p_val = jnp.array([0.1, 0.2, 0.3, 0.4])
+    x0 = jnp.zeros(4)
+
+    def loss(p):
+        x_star = jp.solve(p, x0)
+        return jnp.sum(x_star ** 2)
+
+    # Reference from the main thread — the existing tests cover this
+    # path, so it should always work.
+    grad_main = jax.grad(loss)(p_val)
+    assert jnp.all(jnp.isfinite(grad_main))
+
+    # Now invoke from a worker thread. Pre-fix this raised PyO3's
+    # unsendable panic at the bwd's first kkt_solve call.
+    result_holder: dict = {}
+
+    def worker():
+        try:
+            result_holder["grad"] = jax.grad(loss)(p_val)
+        except BaseException as exc:  # pragma: no cover - defensive
+            result_holder["exc"] = exc
+
+    t = threading.Thread(target=worker, name="pounce-77-worker")
+    t.start()
+    t.join(timeout=60.0)
+    assert not t.is_alive(), "worker did not finish (pounce#77 regression?)"
+    assert "exc" not in result_holder, (
+        f"worker raised: {result_holder['exc']!r}"
+    )
+    grad_thread = result_holder["grad"]
+    assert jnp.all(jnp.isfinite(grad_thread))
+    # The pinned executor serializes solves, but the answer must match
+    # the main-thread gradient to floating-point tolerance.
+    assert jnp.allclose(grad_thread, grad_main, atol=1e-9)
+
+    # And the batched path — the (A)+(B) composition uses the same
+    # pinned executor for the stacked Solver and its bwd kkt_solve.
+    p_batch = jnp.stack([p_val, p_val + 0.1, p_val - 0.1])
+
+    def batched_loss(p_b):
+        X = jp.batched_solve(p_b, x0)
+        return jnp.sum(X ** 2)
+
+    grad_b_main = jax.grad(batched_loss)(p_batch)
+
+    result_holder2: dict = {}
+
+    def worker_b():
+        try:
+            result_holder2["grad"] = jax.grad(batched_loss)(p_batch)
+        except BaseException as exc:  # pragma: no cover - defensive
+            result_holder2["exc"] = exc
+
+    t2 = threading.Thread(target=worker_b, name="pounce-77-worker-batched")
+    t2.start()
+    t2.join(timeout=60.0)
+    assert not t2.is_alive(), "batched worker did not finish"
+    assert "exc" not in result_holder2, (
+        f"batched worker raised: {result_holder2['exc']!r}"
+    )
+    assert jnp.allclose(result_holder2["grad"], grad_b_main, atol=1e-9)

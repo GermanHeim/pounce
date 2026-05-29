@@ -386,56 +386,69 @@ def _kkt_backsolve_pure_callback(
                 "`_solver_registry_capacity`, run grads closer to the "
                 "fwd, or use `factor_reuse=False`."
             )
-        dims = solver.block_dims  # [n_x, n_s, n_y_c, n_y_d, n_z_l, n_z_u, n_v_l, n_v_u]
-        if dims is None:
-            # The Solver exists but its inner state holds no converged
-            # factor — the IPM didn't converge to acceptable accuracy.
-            # The factor-reuse bwd has no way forward here: kkt_solve
-            # would crash on a missing factor, and silently returning
-            # zeros (or NaNs) would mask the divergence in upstream
-            # training loops. Raise loudly so the caller either
-            # tightens the solve (loosen tol / better x0 / scale the
-            # problem) or switches to `factor_reuse=False` — the dense
-            # JAX backward assembles `(n+m) × (n+m)` from `f`, `g` at
-            # `x*` without needing the held factor, so it still
-            # produces *a* gradient (of whatever the IPM terminated
-            # at, possibly poor quality) instead of crashing.
-            raise RuntimeError(
-                "pounce.jax: factor-reuse backward requires a "
-                "converged IPM factor, but the forward solve did not "
-                "produce one (the IPM terminated without an "
-                "acceptable factorisation). Either tighten the solve "
-                "(check `info['status']` from `JaxProblem` callbacks, "
-                "loosen `tol`, supply a better `x0`, or rescale the "
-                "problem), or build the `JaxProblem` with "
-                "`factor_reuse=False` to fall back to the dense JAX "
-                "backward, which doesn't depend on the held factor."
-            )
-        n_x = dims[0]
-        n_s = dims[1]
-        n_y_c = dims[2]
-        n_y_d = dims[3]
-        kkt = solver.kkt_dim
-        rhs = np.zeros(kkt, dtype=np.float64)
+
+        # All PySolver access must run on the same thread that
+        # constructed it (pounce#77). The fwd pinned solver creation to
+        # ``jp._factor_executor``; we pin every attribute read and the
+        # ``kkt_solve`` call here to the same executor so JAX's
+        # off-thread pure_callback dispatch (training loops, jit'd
+        # outer wrappers, ...) doesn't trigger PyO3's unsendable panic.
         v_np = np.asarray(v_h, dtype=np.float64)
-        # The JAX user-space n equals n_x exactly when no variables are
-        # fixed (which is the JaxProblem's contract — fixed-variable
-        # treatment isn't exposed). Assert and pack.
-        if v_np.shape[0] != n_x:
-            raise RuntimeError(
-                f"pounce.jax: cotangent length {v_np.shape[0]} != "
-                f"Solver n_x={n_x} (fixed-variable treatment is not "
-                "supported on the JaxProblem factor-reuse path)."
-            )
-        # Embed the cotangent into the compound KKT RHS:
-        # ``rhs = [v; 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``.
-        # We're computing ``u = K^{-T} · e_x v`` (K is symmetric here),
-        # then contracting with ``∂R/∂p`` whose only nonzero blocks
-        # are the x-row (``dgradL_dp``), y_c-row (``dg_c/dp``), and
-        # y_d-row (``dg_d/dp``) — bounds and slacks don't depend on p
-        # in the JAX path, so the corresponding RHS blocks are zero.
-        rhs[:n_x] = v_np
-        u = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
+
+        def _do_kkt():
+            dims = solver.block_dims  # [n_x, n_s, n_y_c, n_y_d, ...]
+            if dims is None:
+                # The Solver exists but its inner state holds no converged
+                # factor — the IPM didn't converge to acceptable accuracy.
+                # The factor-reuse bwd has no way forward here: kkt_solve
+                # would crash on a missing factor, and silently returning
+                # zeros (or NaNs) would mask the divergence in upstream
+                # training loops. Raise loudly so the caller either
+                # tightens the solve (loosen tol / better x0 / scale the
+                # problem) or switches to `factor_reuse=False` — the dense
+                # JAX backward assembles `(n+m) × (n+m)` from `f`, `g` at
+                # `x*` without needing the held factor, so it still
+                # produces *a* gradient (of whatever the IPM terminated
+                # at, possibly poor quality) instead of crashing.
+                raise RuntimeError(
+                    "pounce.jax: factor-reuse backward requires a "
+                    "converged IPM factor, but the forward solve did "
+                    "not produce one (the IPM terminated without an "
+                    "acceptable factorisation). Either tighten the "
+                    "solve (check `info['status']` from `JaxProblem` "
+                    "callbacks, loosen `tol`, supply a better `x0`, "
+                    "or rescale the problem), or build the "
+                    "`JaxProblem` with `factor_reuse=False` to fall "
+                    "back to the dense JAX backward, which doesn't "
+                    "depend on the held factor."
+                )
+            n_x_ = dims[0]
+            n_s_ = dims[1]
+            n_y_c_ = dims[2]
+            n_y_d_ = dims[3]
+            # The JAX user-space n equals n_x exactly when no variables
+            # are fixed (which is the JaxProblem's contract —
+            # fixed-variable treatment isn't exposed). Assert and pack.
+            if v_np.shape[0] != n_x_:
+                raise RuntimeError(
+                    f"pounce.jax: cotangent length {v_np.shape[0]} != "
+                    f"Solver n_x={n_x_} (fixed-variable treatment is "
+                    "not supported on the JaxProblem factor-reuse path)."
+                )
+            rhs = np.zeros(solver.kkt_dim, dtype=np.float64)
+            # Embed the cotangent into the compound KKT RHS:
+            # ``rhs = [v; 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``.
+            # We're computing ``u = K^{-T} · e_x v`` (K is symmetric
+            # here), then contracting with ``∂R/∂p`` whose only nonzero
+            # blocks are the x-row (``dgradL_dp``), y_c-row
+            # (``dg_c/dp``), and y_d-row (``dg_d/dp``) — bounds and
+            # slacks don't depend on p in the JAX path, so the
+            # corresponding RHS blocks are zero.
+            rhs[:n_x_] = v_np
+            u_ = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
+            return n_x_, n_s_, n_y_c_, n_y_d_, u_
+
+        n_x, n_s, n_y_c, n_y_d, u = jp._run_pinned(_do_kkt)
         u_x = u[:n_x].copy()
         y_c_off = n_x + n_s
         y_d_off = y_c_off + n_y_c
@@ -577,34 +590,43 @@ def _kkt_backsolve_batched_pure_callback(
                 "LRU registry. Bump `_solver_registry_capacity`, run grads "
                 "closer to the fwd, or use `factor_reuse=False`."
             )
-        dims = solver.block_dims
-        if dims is None:
-            raise RuntimeError(
-                "pounce.jax: factor-reuse batched backward requires a "
-                "converged IPM factor on the stacked solve, but the "
-                "stacked IPM did not produce one. Either tighten the "
-                "stacked solve (loosen `tol`, supply a better `x0`, "
-                "rescale the problem), or rebuild the `JaxProblem` "
-                "with `factor_reuse=False` to fall back to the dense "
-                "per-element JAX backward."
-            )
-        n_x = dims[0]
-        n_s = dims[1]
-        n_y_c = dims[2]
-        n_y_d = dims[3]
-        # The stacked NLP has n_x = B * n_per_block by construction
-        # (no fixed-variable treatment is exposed on the batched path).
-        if n_x != B * n:
-            raise RuntimeError(
-                f"pounce.jax: stacked solver n_x={n_x} != B*n={B * n} "
-                f"(B={B}, n={n}). Internal invariant violated — please "
-                "file an issue."
-            )
-        rhs = np.zeros(solver.kkt_dim, dtype=np.float64)
         cot_np = np.asarray(cot_h, dtype=np.float64)
-        # Block-major flatten: rhs[:B*n] = [cot^(1); cot^(2); ...; cot^(B)].
-        rhs[:n_x] = cot_np.reshape(-1)
-        u = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
+
+        # Pin all PySolver access to the executor thread that built
+        # the stacked solver (pounce#77) so XLA-thread pure_callback
+        # dispatch in training loops doesn't trip PyO3 unsendable.
+        def _do_kkt():
+            dims = solver.block_dims
+            if dims is None:
+                raise RuntimeError(
+                    "pounce.jax: factor-reuse batched backward "
+                    "requires a converged IPM factor on the stacked "
+                    "solve, but the stacked IPM did not produce one. "
+                    "Either tighten the stacked solve (loosen `tol`, "
+                    "supply a better `x0`, rescale the problem), or "
+                    "rebuild the `JaxProblem` with `factor_reuse="
+                    "False` to fall back to the dense per-element JAX "
+                    "backward."
+                )
+            n_x_ = dims[0]
+            n_s_ = dims[1]
+            n_y_c_ = dims[2]
+            n_y_d_ = dims[3]
+            # The stacked NLP has n_x = B * n_per_block by construction
+            # (no fixed-variable treatment is exposed on the batched path).
+            if n_x_ != B * n:
+                raise RuntimeError(
+                    f"pounce.jax: stacked solver n_x={n_x_} != "
+                    f"B*n={B * n} (B={B}, n={n}). Internal invariant "
+                    "violated — please file an issue."
+                )
+            rhs = np.zeros(solver.kkt_dim, dtype=np.float64)
+            # Block-major flatten: rhs[:B*n] = [cot^(1); cot^(2); ...; cot^(B)].
+            rhs[:n_x_] = cot_np.reshape(-1)
+            u_ = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
+            return n_x_, n_s_, n_y_c_, n_y_d_, u_
+
+        n_x, n_s, n_y_c, n_y_d, u = jp._run_pinned(_do_kkt)
 
         u_x_batch = u[:n_x].reshape(B, n).copy()
 
@@ -867,7 +889,42 @@ class JaxProblem:
         # from the calling thread.
         self._tls = threading.local()
 
+        # Dedicated single-thread executor for all PySolver
+        # interactions on the factor-reuse path (pounce#77). PySolver
+        # is ``#[pyclass(unsendable)]`` because the inner ``RustSolver``
+        # holds ``Rc<RefCell<dyn TNLP>>``; PyO3 panics if a PySolver is
+        # touched from any thread other than the one that constructed
+        # it. JAX's ``pure_callback`` may dispatch ``host_call`` from
+        # XLA worker threads (training loops that run ``jax.grad``
+        # under ``jit`` or ``jax.lax.map``, dataloader workers, ...),
+        # so we pin every solver creation / ``solve`` / ``block_dims``
+        # / ``kkt_dim`` / ``kkt_solve`` to one thread by routing them
+        # through a single-worker pool. Only allocated when the factor
+        # is held across calls (``factor_reuse=True``); the dense path
+        # constructs the Solver, runs ``solve``, and drops it inline on
+        # the calling thread, so unsendable never bites there. Also
+        # bypassed by :meth:`vmap_solve_parallel` (it calls
+        # :meth:`_host_solve` with ``register=False`` — the solver is
+        # dropped inside ``_host_solve`` without crossing threads), so
+        # the parallel batched path keeps its B-way concurrency.
+        self._factor_executor = (
+            ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"pounce-jp-factor-{id(self)}",
+            ) if self._factor_reuse else None
+        )
+
     # ----- internal: per-thread cached Problem -----
+
+    def _run_pinned(self, fn):
+        """Run ``fn()`` on the dedicated single-thread executor (pounce#77).
+
+        Use for any block that touches a held :class:`pounce.Solver`
+        (creation, ``solve``, ``block_dims``, ``kkt_dim``, or
+        ``kkt_solve``). Only valid when ``factor_reuse=True``; callers
+        on the dense path must branch and call ``fn()`` inline.
+        """
+        return self._factor_executor.submit(fn).result()
 
     def _build_problem(self) -> tuple[_ReusableJaxNlp, Problem]:
         obj = _ReusableJaxNlp(self)
@@ -1008,16 +1065,27 @@ class JaxProblem:
         whose backward doesn't consume the factor (the parallel batched
         bwd is JAX-vmapped over the dense kernel), so we don't pin
         memory on factors nobody will read.
+
+        When ``factor_reuse=True and register=True`` the solver is
+        constructed and run on the dedicated single-thread executor
+        (pounce#77) so the held PySolver — and any later
+        :meth:`Solver.kkt_solve` call from the bwd — stay on one
+        thread. Otherwise the solver lives and dies on the calling
+        thread (no cross-thread access, no unsendable concern), so we
+        skip the executor hop to keep ``vmap_solve_parallel``'s B-way
+        concurrency.
         """
-        obj, prob = self._thread_problem()
-        obj._p = jnp.asarray(p_np)
-        solver = Solver(prob)
-        x_np, info = solver.solve(x0=np.asarray(x0_np, dtype=np.float64))
-        sid = (
-            self._register_solver(solver)
-            if (self._factor_reuse and register)
-            else 0
-        )
+        use_pin = self._factor_reuse and register
+
+        def _do():
+            obj, prob = self._thread_problem()
+            obj._p = jnp.asarray(p_np)
+            solver = Solver(prob)
+            x_np, info = solver.solve(x0=np.asarray(x0_np, dtype=np.float64))
+            return solver, x_np, info
+
+        solver, x_np, info = self._run_pinned(_do) if use_pin else _do()
+        sid = self._register_solver(solver) if use_pin else 0
         info_out = dict(info)
         info_out["solver_id"] = sid
         return x_np, info_out
@@ -1030,14 +1098,22 @@ class JaxProblem:
         zL_np: np.ndarray,
         zU_np: np.ndarray,
     ):
-        obj, prob = self._thread_problem_warm()
-        obj._p = jnp.asarray(p_np)
-        solver = Solver(prob)
-        x_np, info = solver.solve(
-            x0=np.asarray(x0_np, dtype=np.float64),
-            lagrange=np.asarray(lam_np, dtype=np.float64),
-            zl=np.asarray(zL_np, dtype=np.float64),
-            zu=np.asarray(zU_np, dtype=np.float64),
+        def _do():
+            obj, prob = self._thread_problem_warm()
+            obj._p = jnp.asarray(p_np)
+            solver = Solver(prob)
+            x_np, info = solver.solve(
+                x0=np.asarray(x0_np, dtype=np.float64),
+                lagrange=np.asarray(lam_np, dtype=np.float64),
+                zl=np.asarray(zL_np, dtype=np.float64),
+                zu=np.asarray(zU_np, dtype=np.float64),
+            )
+            return solver, x_np, info
+
+        # Warm-start path always registers when factor_reuse=True, so
+        # pin together with the bwd kkt_solve (pounce#77).
+        solver, x_np, info = (
+            self._run_pinned(_do) if self._factor_reuse else _do()
         )
         sid = self._register_solver(solver) if self._factor_reuse else 0
         info_out = dict(info)
@@ -1067,12 +1143,21 @@ class JaxProblem:
         """
         B = p_batch_np.shape[0]
         n, m = self._n, self._m
-        obj, prob = self._thread_stacked_problem(B)
-        obj._P = jnp.asarray(p_batch_np)
         # Initial X is the per-block ``x0`` tiled / concatenated.
         X0 = np.asarray(x0_batch_np, dtype=np.float64).reshape(B * n)
-        solver = Solver(prob)
-        X_np, info = solver.solve(x0=X0)
+
+        def _do():
+            obj, prob = self._thread_stacked_problem(B)
+            obj._P = jnp.asarray(p_batch_np)
+            solver = Solver(prob)
+            X_np, info = solver.solve(x0=X0)
+            return solver, X_np, info
+
+        # Stacked solve registers when factor_reuse=True, so pin
+        # together with the bwd's stacked kkt_solve (pounce#77).
+        solver, X_np, info = (
+            self._run_pinned(_do) if self._factor_reuse else _do()
+        )
         sid = self._register_solver(solver) if self._factor_reuse else 0
         x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
         lam_batch = (
