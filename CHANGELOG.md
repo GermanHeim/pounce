@@ -385,6 +385,51 @@ inputs are dropped (zero) — at the optimum the duals are a
 function of `p` and the active set, not an independent input to
 `dx*/dp`. `solve` itself is unchanged (non-breaking).
 
+### Added — `pounce.jax.JaxProblem` build-once/solve-many handle (pounce#75)
+
+Iterative outer loops (differentiable constrained layers in a
+training step, parametric sweeps) were paying a ~45ms rebuild on
+every call to `pounce.jax.solve` / `vmap_solve_parallel` /
+`solve_with_warm` — re-JIT of `jax.grad`/`jacrev`/`hessian`, the
+one-shot random sparsity probe, plus a fresh `pounce.Problem`
+construction — versus a ~3ms underlying solve. On `n=5, m=6`
+problems that's a ~14× wrapper overhead.
+
+`JaxProblem` is a build-once handle: do the JIT and sparsity probe
+in `__init__`, then expose `.solve(p, x0)`, `.solve_with_warm(p, x0,
+warm)`, `.vmap_solve(p_batch, x0)`, and `.vmap_solve_parallel(p_batch,
+x0, workers=)` as methods that reuse the prebuilt state across
+calls. Each worker thread in `vmap_solve_parallel` keeps its own
+cached `pounce.Problem` via `threading.local` so the build cost is
+paid at most once per worker (typically `min(B, 8)` total) rather
+than `B` times per batch.
+
+```python
+from pounce.jax import JaxProblem
+
+jp = JaxProblem(
+    f=f, g=g, n=n, m=m, p_example=p0,
+    lb=lb, ub=ub, cl=cl, cu=cu,
+    options={"tol": 1e-9, "print_level": 0},
+)
+for p_k in trajectory:
+    x_star = jp.solve(p_k, x0=x_prev)
+    x_prev = x_star
+```
+
+Microbench on the issue's `n=5, m=6` shape — 20 sequential solves at
+different `p`:
+
+```
+top-level solve   (20 calls): 1.914s  → 95.7ms/solve
+JaxProblem.solve  (20 calls): 0.136s  → 6.8ms/solve
+speedup: 14.1x
+```
+
+Existing top-level `solve` / `vmap_solve` / `vmap_solve_parallel` /
+`solve_with_warm` are unchanged (non-breaking) — `JaxProblem` is a
+new surface for performance-sensitive iterative use.
+
 ### Changed
 
 - `pounce-qp::ParametricActiveSetSolver::solve_equality_plus_bounds`

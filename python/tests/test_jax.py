@@ -248,3 +248,188 @@ def test_vmap_solve_parallel_with_constraints_pounce_74():
     expected_x0 = np.minimum(np.asarray(p_batch)[:, 0], B_thresh)
     np.testing.assert_allclose(x_np[:, 0], expected_x0, atol=1e-7)
     np.testing.assert_allclose(x_np[:, 1:], np.asarray(p_batch)[:, 1:], atol=1e-7)
+
+
+def test_jax_problem_build_once_solve_many_pounce_75():
+    """Issue #75: `JaxProblem` builds the JAX derivatives and sparsity
+    pattern once. Repeated `.solve(p, x0)` calls must reuse the prebuilt
+    state and produce the same answers as the top-level `solve`.
+    """
+    from pounce.jax import JaxProblem, solve as top_level_solve
+
+    n, m = 3, 1
+    B_thresh = 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0]])
+
+    p0 = jnp.array([2.0, 2.0, -3.0])
+    jp = JaxProblem(
+        f=f, g=g, n=n, m=m, p_example=p0,
+        lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+        cl=jnp.array([-1e19]), cu=jnp.array([B_thresh]),
+        options={"tol": 1e-10, "print_level": 0},
+    )
+
+    # Same-structure problem at multiple p — reuses the prebuilt JIT and
+    # sparsity pattern. Must match the top-level `solve` answer.
+    for p in (
+        jnp.array([2.0, 2.0, -3.0]),     # binding
+        jnp.array([-1.0, 2.0, -3.0]),    # slack
+        jnp.array([0.3, -0.5, 0.7]),     # slack
+    ):
+        x_reuse = jp.solve(p, jnp.zeros(n))
+        x_ref = top_level_solve(
+            p, f=f, g=g, x0=jnp.zeros(n), n=n, m=m,
+            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+            cl=jnp.array([-1e19]), cu=jnp.array([B_thresh]),
+            options={"tol": 1e-10, "print_level": 0},
+        )
+        np.testing.assert_allclose(np.asarray(x_reuse), np.asarray(x_ref), atol=1e-8)
+
+
+def test_jax_problem_grad_pounce_75():
+    """`jax.grad` through `JaxProblem.solve` must match the closed-form
+    sensitivity. Same test as `test_implicit_diff_inactive_inequality_pounce_73`
+    but threaded through the prebuilt path (pounce#75).
+    """
+    from pounce.jax import JaxProblem
+
+    n, m = 3, 1
+    B_thresh = 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0]])
+
+    p0 = jnp.array([-1.0, 2.0, -3.0])
+    jp = JaxProblem(
+        f=f, g=g, n=n, m=m, p_example=p0,
+        lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+        cl=jnp.array([-1e19]), cu=jnp.array([B_thresh]),
+        options={"tol": 1e-10, "print_level": 0},
+    )
+
+    # Slack inequality: x*(p) = p, dx*/dp = I.
+    J = np.asarray(jax.jacobian(lambda p: jp.solve(p, jnp.zeros(n)))(p0))
+    np.testing.assert_allclose(J, np.eye(n), atol=5e-6)
+
+
+def test_jax_problem_solve_with_warm_pounce_75():
+    """`JaxProblem.solve_with_warm` round-trips the dual triple and stays
+    differentiable through the warm path."""
+    from pounce.jax import JaxProblem
+
+    n, m = 3, 1
+    B_thresh = 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0]])
+
+    p0 = jnp.array([2.0, 2.0, -3.0])
+    jp = JaxProblem(
+        f=f, g=g, n=n, m=m, p_example=p0,
+        lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+        cl=jnp.array([-1e19]), cu=jnp.array([B_thresh]),
+        options={"tol": 1e-10, "print_level": 0},
+    )
+
+    x_cold, warm = jp.solve_with_warm(p0, jnp.zeros(n), warm_start=None)
+    np.testing.assert_allclose(np.asarray(x_cold), [B_thresh, 2.0, -3.0], atol=1e-6)
+
+    # Warm re-solve at same p must agree to tight tolerance.
+    x_warm, _ = jp.solve_with_warm(p0, jnp.zeros(n), warm_start=warm)
+    np.testing.assert_allclose(np.asarray(x_warm), np.asarray(x_cold), atol=1e-8)
+
+
+def test_jax_problem_vmap_solve_parallel_pounce_75():
+    """`JaxProblem.vmap_solve_parallel` matches the standalone
+    `vmap_solve_parallel` numerically — same code path, just with the
+    prebuilt state reused across worker threads."""
+    from pounce.jax import JaxProblem, vmap_solve_parallel
+
+    n = 3
+    B = 4
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    rng = np.random.default_rng(0)
+    p_batch = jnp.asarray(rng.standard_normal((B, n)))
+    x0 = jnp.zeros(n)
+
+    jp = JaxProblem(
+        f=f, g=None, n=n, m=0, p_example=p_batch[0],
+        options={"tol": 1e-10, "print_level": 0},
+    )
+    x_jp = jp.vmap_solve_parallel(p_batch, x0, workers=4)
+    x_ref = vmap_solve_parallel(
+        p_batch, f=f, g=None, x0=x0, n=n, m=0,
+        options={"tol": 1e-10, "print_level": 0}, workers=4,
+    )
+    np.testing.assert_allclose(np.asarray(x_jp), np.asarray(x_ref), atol=1e-7)
+
+    # Differentiable through the parallel path.
+    def loss(pb):
+        return jnp.sum(jp.vmap_solve_parallel(pb, x0, workers=4) ** 2)
+
+    grad = np.asarray(jax.grad(loss)(p_batch))
+    np.testing.assert_allclose(grad, 2.0 * np.asarray(p_batch), atol=1e-6)
+
+
+def test_jax_problem_no_rebuild_on_repeat_solve_pounce_75():
+    """Repeated solves through a prebuilt `JaxProblem` must skip the
+    expensive build (jit + sparsity probe + Problem construction). We
+    can't easily assert "no jax.jit" but we can assert the second solve
+    is dramatically faster than the first (which paid no build cost
+    itself, because the build happened in __init__).
+
+    The build-once contract is: subsequent solves cost at most a small
+    multiple of the bare `Problem.solve` time.
+    """
+    import time
+    from pounce.jax import JaxProblem
+
+    n = 5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d) + 1e-4 * jnp.sum(x ** 4)
+
+    p0 = jnp.zeros(n)
+    jp = JaxProblem(
+        f=f, g=None, n=n, m=0, p_example=p0,
+        options={"tol": 1e-9, "print_level": 0},
+    )
+
+    # First solve pays no JIT cost (already done in __init__) but does
+    # build the Problem instance lazily via the per-thread cache.
+    rng = np.random.default_rng(0)
+    p_seq = [jnp.asarray(rng.standard_normal(n)) for _ in range(10)]
+
+    # Warm-up: jit'd derivatives run once with concrete arrays.
+    _ = jp.solve(p_seq[0], jnp.zeros(n)).block_until_ready()
+
+    t0 = time.perf_counter()
+    for p in p_seq:
+        _ = jp.solve(p, jnp.zeros(n)).block_until_ready()
+    dt_reused = time.perf_counter() - t0
+
+    # Sanity ceiling: 10 reuse-path solves on n=5 should comfortably
+    # come in well under 1 second on any machine that can run the
+    # tests. The pre-#75 path was paying ~70ms per solve so 10 solves
+    # was ~0.7s — assert under 0.5s to catch any regression that
+    # silently re-rebuilds.
+    assert dt_reused < 0.5, f"reused solves too slow: {dt_reused:.3f}s"

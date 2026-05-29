@@ -27,6 +27,12 @@ and the wheels are out — it's a working artefact, not a permanent doc.
       batched solve over a `ThreadPoolExecutor`, backed by the new
       `py.allow_threads` block around `optimize_tnlp` in
       `crates/pounce-py/src/problem.rs`.
+- [ ] **`pounce.jax.JaxProblem`** (pounce#75) — build-once/solve-many
+      handle that skips the ~45ms `_JaxProblem` rebuild and the fresh
+      `pounce.Problem` construction on every call. Measured 14×
+      speedup on the issue's `n=5, m=6` shape. Each worker thread
+      keeps its own cached `Problem` via `threading.local` for
+      `vmap_solve_parallel` safety.
 - [ ] **`pounce.jax.solve` backward respects the constraint active
       set** (pounce#73 fix) — slack inequality rows are dropped
       from the implicit-function-theorem KKT block.

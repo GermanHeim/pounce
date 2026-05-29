@@ -44,6 +44,7 @@ _jax_config.update("jax_enable_x64", True)
 
 from ._build import from_jax
 from ._diff import solve, solve_with_warm, vmap_solve, vmap_solve_parallel
+from ._problem import JaxProblem
 
 __all__ = [
     "from_jax",
@@ -51,4 +52,5 @@ __all__ = [
     "solve_with_warm",
     "vmap_solve",
     "vmap_solve_parallel",
+    "JaxProblem",
 ]
