@@ -68,6 +68,18 @@ print(res.fun, res.x)
 
 ## JAX integration
 
+The `pounce.jax` subpackage provides five entry points:
+
+| Surface | Use it for |
+|---------|-----------|
+| `from_jax(f, g, …)` | Build a one-shot `pounce.Problem` from JAX-traced `f(x)` and `g(x)`. |
+| `solve(p, …)`       | `custom_vjp`-wrapped differentiable solve over a parameter `p`. |
+| `solve_with_warm(p, …, warm_start=)` | `solve` + dual-triple (`x, λ, z`) warm-start hand-off across calls. |
+| `vmap_solve(p_batch, …)` / `vmap_solve_parallel(…)` | Batched solve over a leading axis of `p`; the `_parallel` variant uses a `ThreadPoolExecutor` and releases the GIL inside each solve. |
+| `JaxProblem(f, g, n, m, p_example=, …)` | Build-once / solve-many handle that caches JIT artefacts, the sparsity probe, and the underlying `pounce.Problem` across calls. |
+
+### One-shot build with `from_jax`
+
 ```python
 import jax.numpy as jnp
 from pounce.jax import from_jax
@@ -80,9 +92,133 @@ prob = from_jax(f, g, n=4, m=1, lb=jnp.zeros(4), ub=jnp.full(4, 10.0),
 x, info = prob.solve(x0=jnp.ones(4))
 ```
 
-`pounce.jax.solve` is a differentiable solve — you can take
-`jax.grad` through it, with the gradient supplied by the implicit
-function theorem applied to the KKT conditions.
+### Differentiable solve
+
+`pounce.jax.solve(p, f=, g=, …)` is a `custom_vjp`-wrapped solve that
+differentiates `x*(p)` through the implicit function theorem on the
+converged KKT system. Inequality rows that are *not* active at `x*`
+are dropped from the KKT block before the implicit-diff back-solve, so
+the gradient matches the analytic active-set sensitivity even on
+slack-inequality problems (pounce#73).
+
+```python
+import jax, jax.numpy as jnp
+from pounce.jax import solve as psolve
+
+def f(x, p): return jnp.sum((x - p) ** 2)
+def g(x, p): return jnp.stack([x[0] + x[1] - 1.0])   # equality
+
+def x_star(p):
+    return psolve(
+        p, f=f, g=g, x0=jnp.zeros(2), n=2, m=1,
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1),       cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0},
+    )
+
+# Gradient of the L2 distance to the target as p moves:
+loss = lambda p: jnp.sum(x_star(p) ** 2)
+print(jax.grad(loss)(jnp.array([0.3, 0.7])))
+```
+
+### Warm-start across a parameter trajectory
+
+`solve_with_warm` returns the full primal-dual triple alongside `x*`,
+and consumes one on the next call. The warm-state is opaque from the
+JAX side (`pytree of jnp arrays`) but maps directly onto the
+`x0` / `λ0` / `z0` ports of the underlying solver — for a sequence of
+nearby `p` values this often cuts solver iterations by an order of
+magnitude (pounce#74).
+
+```python
+from pounce.jax import solve_with_warm
+
+trajectory = [jnp.array([0.3 + 0.01 * k, 0.7 - 0.01 * k]) for k in range(50)]
+
+x, warm = solve_with_warm(
+    trajectory[0], f=f, g=g, x0=jnp.zeros(2), n=2, m=1,
+    lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+    cl=jnp.zeros(1), cu=jnp.zeros(1),
+    warm_start=None,                           # first call → cold start
+    options={"tol": 1e-10, "print_level": 0},
+)
+xs = [x]
+for p_k in trajectory[1:]:
+    x, warm = solve_with_warm(
+        p_k, f=f, g=g, x0=x, n=2, m=1,
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        warm_start=warm,                       # reuse λ, z
+        options={"tol": 1e-10, "print_level": 0},
+    )
+    xs.append(x)
+```
+
+### Batched solve (`vmap_solve` / `vmap_solve_parallel`)
+
+`vmap_solve` runs one solve per row of `p_batch` sequentially.
+`vmap_solve_parallel` is the same surface but dispatches each row to a
+`ThreadPoolExecutor`; the underlying Rust solve releases the GIL via
+`py.allow_threads`, so workers actually run in parallel on multi-core
+CPUs (pounce#74).
+
+```python
+import numpy as np
+from pounce.jax import vmap_solve_parallel
+
+rng   = np.random.default_rng(0)
+batch = jnp.asarray(rng.standard_normal((32, 2)))
+
+X = vmap_solve_parallel(
+    batch, f=f, g=g, x0=jnp.zeros(2), n=2, m=1,
+    lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+    cl=jnp.zeros(1), cu=jnp.zeros(1),
+    workers=8,                                 # ThreadPoolExecutor size
+    options={"tol": 1e-9, "print_level": 0},
+)
+assert X.shape == (32, 2)
+```
+
+Both batched surfaces are `custom_vjp`-wrapped, so a downstream
+`jax.grad`/`jax.jacobian` over a batched loss works end-to-end.
+
+### Build once, solve many: `JaxProblem`
+
+For iterative use — a parameter trajectory in a continuation loop, a
+training step that calls the solver inside a batch, a notebook cell
+that sweeps a knob — `from_jax`/`solve` rebuild the JIT artefacts, the
+sparsity probe, and the underlying `pounce.Problem` on *every* call.
+`JaxProblem` does that work once at construction and exposes the same
+four method shapes against the cached state. On the
+`pounce#75` microbench shape (`n=5, m=6`, 20 sequential solves at
+different `p`) this is roughly a 14× speedup, taking per-solve time
+from ~96 ms down to ~7 ms (pounce#75).
+
+```python
+from pounce.jax import JaxProblem
+
+jp = JaxProblem(
+    f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),     # p_example fixes shape/dtype only
+    lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+    cl=jnp.zeros(1),       cu=jnp.zeros(1),
+    options={"tol": 1e-9, "print_level": 0},
+)
+
+# Sequential, differentiable:
+x = jp.solve(jnp.array([0.3, 0.7]), x0=jnp.zeros(2))
+
+# Dual-warm-start trajectory (composes warm-state hand-off with reuse):
+x, warm = jp.solve_with_warm(trajectory[0], x0=jnp.zeros(2), warm_start=None)
+for p_k in trajectory[1:]:
+    x, warm = jp.solve_with_warm(p_k, x0=x, warm_start=warm)
+
+# Batched parallel solve over a row-axis of p_batch:
+X = jp.vmap_solve_parallel(batch, x0=jnp.zeros(2), workers=8)
+```
+
+Each worker thread in `vmap_solve_parallel` keeps its own cached
+`pounce.Problem` via `threading.local`, so the per-thread build cost
+is paid at most once per worker rather than once per batch row.
 
 ## Notebooks
 
