@@ -75,7 +75,7 @@ pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.2.0" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.2.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.2.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.2.0" }
-feral = "0.7.0"
+feral = "0.8.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
@@ -89,10 +89,4 @@ expect_used = "warn"
 lto = "thin"
 codegen-units = 1
 debug = 1
-
-# Temporary: point at the local feral checkout to pick up the SSIDS-
-# aligned strict-zero-pivot inertia policy (feral gh#54 / pounce gh#52,
-# nuffield2_trap). Revert once the fix ships on crates.io.
-[patch.crates-io]
-feral = { path = "../feral" }
 
