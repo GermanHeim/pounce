@@ -61,10 +61,11 @@ impl RestoIterationOutput {
         Self::default()
     }
 
-    /// Header line — identical literal to the orig formatter
-    /// (`IpRestoIterationOutput.cpp:71`).
+    /// Header line — matches [`pounce_algorithm::output::OrigIterationOutput::HEADER`]
+    /// so the resto-phase block reads as a continuation of the
+    /// orig-phase log under the same column widths.
     pub const HEADER: &'static str =
-        "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls\n";
+        "iter      objective   inf_pr   inf_du lg(mu)    ||d|| lg(rg) alpha_du alpha_pr  ls\n";
 
     /// Build the single-line restoration iteration row, mirroring the
     /// `Snprintf` block at `IpRestoIterationOutput.cpp:156`:
@@ -94,24 +95,48 @@ impl RestoIterationOutput {
     ) -> String {
         let lg_mu = mu.log10();
         let regu_str: String = if regu_x == 0.0 {
-            "   - ".to_string()
+            "     -".to_string()
         } else {
-            format!("{:5.1}", regu_x.log10())
+            format!("{:6.1}", regu_x.log10())
         };
         format!(
-            "{:>4}r{:14.7e} {:7.2e} {:7.2e} {:5.1} {:7.2e} {:>5} {:7.2e} {:7.2e}{}{:>3}",
+            "{:>4}r{:>14} {:>8} {:>8} {:6.1} {:>8} {:>6} {:>8} {:>8}{}{:>3}",
             iter,
-            f,
-            inf_pr,
-            inf_du,
+            format_e(f, 7),
+            format_e(inf_pr, 2),
+            format_e(inf_du, 2),
             lg_mu,
-            dnrm,
+            format_e(dnrm, 2),
             regu_str,
-            alpha_dual,
-            alpha_primal,
+            format_e(alpha_dual, 2),
+            format_e(alpha_primal, 2),
             alpha_char,
             ls_count,
         )
+    }
+}
+
+/// C-style `%.Ne` formatter — see
+/// [`pounce_algorithm::output::orig::format_e`] for the rationale.
+/// Duplicated here to avoid widening the orig-output API surface for
+/// a single helper.
+fn format_e(x: f64, precision: usize) -> String {
+    if !x.is_finite() {
+        return format!("{}", x);
+    }
+    let s = format!("{:.*e}", precision, x);
+    let (mantissa, exp) = match s.split_once('e') {
+        Some(pair) => pair,
+        None => return s,
+    };
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(rest) => ('-', rest),
+        None => ('+', exp),
+    };
+    if digits.len() == 1 {
+        format!("{}e{}0{}", mantissa, sign, digits)
+    } else {
+        format!("{}e{}{}", mantissa, sign, digits)
     }
 }
 
@@ -263,10 +288,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_matches_upstream_literal() {
+    fn header_matches_orig_layout() {
+        // Resto rows continue under the orig header — both must use the
+        // same right-aligned column widths.
         assert_eq!(
             RestoIterationOutput::HEADER,
-            "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls\n"
+            "iter      objective   inf_pr   inf_du lg(mu)    ||d|| lg(rg) alpha_du alpha_pr  ls\n"
         );
     }
 
@@ -284,24 +311,23 @@ mod tests {
     fn regu_field_dashes_when_zero() {
         let out = RestoIterationOutput::new();
         let row = out.format_row_explicit(0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, ' ', 0);
-        // Look for the exact "   - " regu segment in the row.
-        assert!(row.contains("   - "), "row = {row:?}");
+        // Width-6 right-aligned dash.
+        assert!(row.contains("     -"), "row = {row:?}");
     }
 
     #[test]
     fn regu_field_logs_value_when_nonzero() {
         let out = RestoIterationOutput::new();
         let row = out.format_row_explicit(0, 1.0, 1.0, 1.0, 1.0, 1.0, 1e-3, 1.0, 1.0, ' ', 0);
-        // log10(1e-3) = -3.0 → " -3.0".
-        assert!(row.contains(" -3.0"), "row = {row:?}");
+        // log10(1e-3) = -3.0 → "  -3.0" (width 6).
+        assert!(row.contains("  -3.0"), "row = {row:?}");
     }
 
     #[test]
     fn alpha_char_appears_immediately_before_ls_field() {
         let out = RestoIterationOutput::new();
         let row = out.format_row_explicit(0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 'h', 12);
-        // …7.2e + 'h' + 3-wide ls = "1.0000e0h 12" (no space between
-        // alpha_pr and the char).
+        // alpha_pr (8) + alpha_char ('h') + ls (3 right-aligned).
         assert!(row.ends_with("h 12"), "row = {row:?}");
     }
 

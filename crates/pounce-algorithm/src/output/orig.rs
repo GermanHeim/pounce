@@ -1,8 +1,17 @@
 //! Original iteration output — port of
 //! `Algorithm/IpOrigIterationOutput.{hpp,cpp}`.
 //!
-//! Reproduces upstream's column layout byte-exactly so iteration
-//! logs can be text-diffed against an Ipopt 3.14.x run.
+//! Column layout follows upstream's literal `Snprintf` schema but
+//! widens the `lg(mu)` / `lg(rg)` / e-format fields by one or two
+//! characters so that:
+//!
+//! * the e-format columns no longer wiggle by one character when a
+//!   value transitions between 1-digit and 2-digit exponent
+//!   magnitudes (`1.44e-7` vs `8.83e-13`), since [`format_e`] always
+//!   emits the C `%.Ne` form (signed, zero-padded 2-digit exponent);
+//! * each header label right-aligns exactly to the right edge of its
+//!   data column, instead of inheriting upstream's hand-rolled spacing
+//!   that left several labels off by 1–2 characters.
 
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
@@ -47,10 +56,11 @@ impl OrigIterationOutput {
         Self::default()
     }
 
-    /// Header line printed every ten iterations; matches the literal
-    /// in `IpOrigIterationOutput.cpp:75`.
+    /// Header line printed every ten iterations. Each label is
+    /// right-aligned to the right edge of its data column under the
+    /// new widths (see module docs).
     pub const HEADER: &'static str =
-        "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls\n";
+        "iter      objective   inf_pr   inf_du lg(mu)    ||d|| lg(rg) alpha_du alpha_pr  ls\n";
 }
 
 impl IterationOutput for OrigIterationOutput {
@@ -88,9 +98,9 @@ impl IterationOutput for OrigIterationOutput {
 
         let regu_x = d.info_regu_x;
         let regu_str: String = if regu_x == 0.0 {
-            "   - ".to_string()
+            "     -".to_string()
         } else {
-            format_field_5_1(regu_x.log10())
+            format!("{:6.1}", regu_x.log10())
         };
 
         let alpha_dual = d.info_alpha_dual;
@@ -99,16 +109,16 @@ impl IterationOutput for OrigIterationOutput {
         let ls_count = d.info_ls_count;
 
         let mut row = format!(
-            "{:>4} {:14.7e} {:7.2e} {:7.2e} {:5.1} {:7.2e} {:>5} {:7.2e} {:7.2e}{}{:>3}",
+            "{:>4} {:>14} {:>8} {:>8} {:6.1} {:>8} {:>6} {:>8} {:>8}{}{:>3}",
             iter,
-            unscaled_f,
-            inf_pr,
-            inf_du,
+            format_e(unscaled_f, 7),
+            format_e(inf_pr, 2),
+            format_e(inf_du, 2),
             lg_mu,
-            dnrm,
+            format_e(dnrm, 2),
             regu_str,
-            alpha_dual,
-            alpha_primal,
+            format_e(alpha_dual, 2),
+            format_e(alpha_primal, 2),
             alpha_char,
             ls_count,
         );
@@ -126,11 +136,34 @@ impl IterationOutput for OrigIterationOutput {
     }
 }
 
-/// Width-5, precision-1 fixed-point — emulates upstream's
-/// `Snprintf(buf, 7, "%5.1f", x)`. The format!() spec
-/// `"{:5.1}"` already matches `%5.1f` for `f64` in Rust.
-fn format_field_5_1(x: f64) -> String {
-    format!("{:5.1}", x)
+/// Format `x` in C printf `%.{precision}e` style — signed exponent,
+/// zero-padded to at least two digits. E.g. `0.178` with precision 2
+/// → `"1.78e-01"`, `1.0` → `"1.00e+00"`, `8.83e-13` → `"8.83e-13"`.
+///
+/// Rust's native `{:.Ne}` formatter emits the exponent with no sign
+/// and no zero-pad (so `1e0`, `1.78e-1`, `8.83e-13` are 6 / 7 / 8
+/// chars respectively), which causes the e-format columns in the
+/// iteration log to wiggle as the exponent magnitude changes. This
+/// helper normalises to the C `%e` form, which is always 8 chars for
+/// 1-precision e-fields with 1- or 2-digit exponents.
+pub(crate) fn format_e(x: f64, precision: usize) -> String {
+    if !x.is_finite() {
+        return format!("{}", x);
+    }
+    let s = format!("{:.*e}", precision, x);
+    let (mantissa, exp) = match s.split_once('e') {
+        Some(pair) => pair,
+        None => return s,
+    };
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(rest) => ('-', rest),
+        None => ('+', exp),
+    };
+    if digits.len() == 1 {
+        format!("{}e{}0{}", mantissa, sign, digits)
+    } else {
+        format!("{}e{}{}", mantissa, sign, digits)
+    }
 }
 
 #[cfg(test)]
@@ -138,16 +171,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_matches_upstream_literal() {
-        assert_eq!(
-            OrigIterationOutput::HEADER,
-            "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls\n"
-        );
+    fn header_layout_right_aligns_each_label() {
+        // Width budget: iter(4) sp obj(14) sp inf_pr(8) sp inf_du(8)
+        // sp lg_mu(6) sp dnrm(8) sp regu(6) sp alpha_du(8) sp
+        // alpha_pr(8) alpha_char(1) ls(3) = 82 chars.
+        assert_eq!(OrigIterationOutput::HEADER.len(), 83); // 82 + \n
+        // Spot-check the right-edges of a few labels.
+        let h = OrigIterationOutput::HEADER.trim_end_matches('\n');
+        assert!(h.ends_with("ls"), "h = {h:?}");
+        assert_eq!(&h[10..19], "objective");
+        assert_eq!(&h[22..28], "inf_pr");
+        assert_eq!(&h[61..69], "alpha_du");
+        assert_eq!(&h[70..78], "alpha_pr");
     }
 
     #[test]
-    fn regu_field_dashes_when_zero() {
-        // `regu_x == 0` → "   - " (5 chars including trailing space).
-        assert_eq!(format_field_5_1(-1.0), " -1.0");
+    fn format_e_pads_short_exponents() {
+        assert_eq!(format_e(0.0, 2), "0.00e+00");
+        assert_eq!(format_e(1.0, 2), "1.00e+00");
+        assert_eq!(format_e(0.178, 2), "1.78e-01");
+        assert_eq!(format_e(8.83e-13, 2), "8.83e-13");
+        assert_eq!(format_e(7.74, 2), "7.74e+00");
+        // 2-digit exponent: no padding needed.
+        assert_eq!(format_e(1.0e10, 2), "1.00e+10");
+    }
+
+    #[test]
+    fn format_e_passes_through_non_finite() {
+        assert_eq!(format_e(f64::NAN, 2), "NaN");
+        assert_eq!(format_e(f64::INFINITY, 2), "inf");
     }
 }
