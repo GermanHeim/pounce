@@ -107,6 +107,7 @@ gams/nlpbench.zip
 # AMPL .sol files written next to the .nl test fixtures when the CLI is
 # run on them — generated output, not fixtures.
 crates/pounce-cli/tests/fixtures/*.sol
+crates/pounce-cli/tests/fixtures_issue_49/*.sol
 
 # pyomo-pounce plugin build artifacts.
 pyomo-pounce/build/
