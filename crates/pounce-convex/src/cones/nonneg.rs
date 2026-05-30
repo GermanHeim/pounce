@@ -47,6 +47,20 @@ impl Cone for NonnegCone {
         }
     }
 
+    fn comp_residual_corrector(
+        &self,
+        s: &[f64],
+        z: &[f64],
+        ds_aff: &[f64],
+        dz_aff: &[f64],
+        sigma_mu: f64,
+        out: &mut [f64],
+    ) {
+        for i in 0..self.n {
+            out[i] = s[i] * z[i] + ds_aff[i] * dz_aff[i] - sigma_mu;
+        }
+    }
+
     fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
         for i in 0..self.n {
             ds[i] = -(r_comp[i] / z[i]) - (s[i] / z[i]) * dz[i];

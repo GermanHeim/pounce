@@ -54,6 +54,19 @@ impl QpProblem {
         self.h.len()
     }
 
+    /// Public `y += P x` (full symmetric product from the stored lower
+    /// triangle). Exposed so external callers — e.g. a TNLP adapter
+    /// reusing the same problem data — can evaluate the objective
+    /// gradient consistently with the solver.
+    pub fn p_mul_add_pub(&self, x: &[f64], y: &mut [f64]) {
+        self.p_mul_add(x, y);
+    }
+
+    /// Public `y += A x`.
+    pub fn a_mul_add_pub(&self, x: &[f64], y: &mut [f64]) {
+        self.a_mul_add(x, y);
+    }
+
     /// `y += P x` using the stored lower triangle (mirrors the implicit
     /// upper triangle for off-diagonal entries).
     pub(crate) fn p_mul_add(&self, x: &[f64], y: &mut [f64]) {

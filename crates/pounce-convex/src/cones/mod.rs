@@ -39,9 +39,26 @@ pub trait Cone {
     /// this is `s ⊘ z`; the IPM places `-scaling` on that diagonal.
     fn scaling_diag(&self, s: &[f64], z: &[f64], out: &mut [f64]);
 
-    /// Complementarity residual `r = s ∘ z - σμ e` (combined affine +
-    /// centering target for the bare path-following step).
+    /// Complementarity residual `r = s ∘ z - σμ e`. With `sigma_mu = 0`
+    /// this is the affine (predictor) target; with `σμ > 0` it is the
+    /// centered path-following target.
     fn comp_residual(&self, s: &[f64], z: &[f64], sigma_mu: f64, out: &mut [f64]);
+
+    /// Mehrotra corrector complementarity residual
+    /// `r = s ∘ z + ds_aff ∘ dz_aff - σμ e`, where `ds_aff`/`dz_aff` are
+    /// the affine-predictor steps. The `ds_aff ∘ dz_aff` second-order
+    /// term is what gives Mehrotra its faster convergence; it is
+    /// cone-specific (elementwise for the orthant), so it lives behind
+    /// this trait rather than in the driver.
+    fn comp_residual_corrector(
+        &self,
+        s: &[f64],
+        z: &[f64],
+        ds_aff: &[f64],
+        dz_aff: &[f64],
+        sigma_mu: f64,
+        out: &mut [f64],
+    );
 
     /// Recover the slack step `ds` from the dual step `dz` and the
     /// complementarity residual, given the current `(s, z)`:

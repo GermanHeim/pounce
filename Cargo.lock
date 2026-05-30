@@ -911,6 +911,7 @@ dependencies = [
  "nix",
  "pounce-algorithm",
  "pounce-common",
+ "pounce-convex",
  "pounce-feral",
  "pounce-hsl",
  "pounce-linalg",

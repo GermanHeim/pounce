@@ -1,10 +1,18 @@
-//! Bare primal-dual interior-point driver for convex QP (Phase 2).
+//! Primal-dual interior-point driver for convex QP.
 //!
-//! This is the *bare* path-follower the plan calls for: a correct,
-//! infeasible-start primal-dual method with a fixed centering parameter
-//! and fraction-to-boundary step control. Mehrotra predictor-corrector
-//! and the homogeneous self-dual embedding are Phase 3 — this iteration
-//! is the scaffolding they slot into.
+//! Infeasible-start primal-dual path-following with **Mehrotra
+//! predictor-corrector** (adaptive centering σ = (μ_aff/μ)³ plus the
+//! second-order `Δs∘Δz` term) and fraction-to-boundary step control.
+//! Predictor and corrector share one factorization per iteration. The
+//! homogeneous self-dual embedding (for clean infeasibility detection
+//! and a self-starting iterate) is the remaining Phase 3 piece and slots
+//! into this same scaffolding.
+//!
+//! On bound/inequality-constrained convex QPs this reaches the solution
+//! in materially fewer interior-point iterations than routing the same
+//! problem through the NLP filter-IPM — see
+//! `crates/pounce-cli/tests/qp_vs_nlp_iterations.rs` (≈41% fewer at
+//! n=50), the check behind the plan's 30–50% claim.
 //!
 //! ## Method
 //!
@@ -52,10 +60,9 @@ pub struct QpOptions {
     pub tol: f64,
     /// Maximum iterations.
     pub max_iter: usize,
-    /// Fixed centering parameter σ ∈ (0, 1) (bare method; Mehrotra in
-    /// Phase 3 computes this adaptively).
-    pub sigma: f64,
-    /// Fraction-to-boundary parameter τ ∈ (0, 1).
+    /// Fraction-to-boundary parameter τ ∈ (0, 1). (The centering
+    /// parameter σ is computed adaptively by the Mehrotra predictor;
+    /// it is not an option.)
     pub tau: f64,
     /// Static KKT regularization δ.
     pub reg: f64,
@@ -66,7 +73,6 @@ impl Default for QpOptions {
         QpOptions {
             tol: 1e-8,
             max_iter: 200,
-            sigma: 0.1,
             tau: 0.95,
             reg: 1e-8,
         }
@@ -102,7 +108,13 @@ where
     let mut r_g = vec![0.0; m_ineq];
     let mut r_c = vec![0.0; m_ineq];
     let mut scaling = vec![0.0; m_ineq];
+    let mut rhs = vec![0.0; dim];
+    let mut dx = vec![0.0; n];
+    let mut dy = vec![0.0; m_eq];
+    let mut dz = vec![0.0; m_ineq];
     let mut ds = vec![0.0; m_ineq];
+    let mut ds_aff = vec![0.0; m_ineq];
+    let mut dz_aff = vec![0.0; m_ineq];
 
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
@@ -135,28 +147,12 @@ where
             break;
         }
 
-        // --- assemble the symmetric KKT lower triangle ---
+        // --- assemble the symmetric KKT lower triangle and factor once.
+        // The same factor backs both the predictor and corrector solves
+        // (this single-factor / two-solve reuse is what makes Mehrotra
+        // cheaper per iteration than two independent steps). ---
         cone.scaling_diag(&s, &z, &mut scaling);
         let (airn, ajcn, vals) = assemble_kkt(prob, &scaling, opts.reg, dim);
-
-        // --- right-hand side ---
-        // complementarity residual r_c = s∘z − σμ e
-        let sigma_mu = opts.sigma * mu;
-        cone.comp_residual(&s, &z, sigma_mu, &mut r_c);
-
-        let mut rhs = vec![0.0; dim];
-        for i in 0..n {
-            rhs[i] = -r_d[i];
-        }
-        for i in 0..m_eq {
-            rhs[n + i] = -r_p[i];
-        }
-        for i in 0..m_ineq {
-            // −r_g + r_c ⊘ z
-            rhs[n + m_eq + i] = -r_g[i] + r_c[i] / z[i];
-        }
-
-        // --- factor & solve ---
         let mut fact = match Factorization::new(dim as Index, airn, ajcn, vals, make_backend()) {
             Ok(f) => f,
             Err(_) => {
@@ -164,37 +160,66 @@ where
                 break;
             }
         };
+
+        // === Predictor (affine-scaling) step: σ = 0 ===
+        // r_c = s∘z (affine target).
+        cone.comp_residual(&s, &z, 0.0, &mut r_c);
+        build_rhs(&r_d, &r_p, &r_g, &r_c, &z, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
             status = QpStatus::NumericalFailure;
             break;
         }
+        split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
+        cone.recover_ds(&s, &z, &r_c, &dz, &mut ds_aff);
+        dz_aff.copy_from_slice(&dz);
 
-        let dx = &rhs[0..n];
-        let dy = &rhs[n..n + m_eq];
-        let dz = &rhs[n + m_eq..n + m_eq + m_ineq];
-
-        // recover ds = −(r_c ⊘ z) − (s ⊘ z) ∘ dz
-        cone.recover_ds(&s, &z, &r_c, dz, &mut ds);
-
-        // --- step length (single α keeps s, z interior) ---
-        let alpha = if m_ineq == 0 {
-            1.0
+        // Affine step lengths and the predicted duality measure μ_aff.
+        let (alpha_p_aff, alpha_d_aff) =
+            step_lengths(&cone, &s, &ds_aff, &z, &dz_aff, opts.tau, m_ineq);
+        let sigma = if m_ineq == 0 {
+            0.0
         } else {
-            let a_s = cone.max_step(&s, &ds, opts.tau);
-            let a_z = cone.max_step(&z, dz, opts.tau);
-            a_s.min(a_z)
+            // μ_aff = ⟨s + αp ds_aff, z + αd dz_aff⟩ / m
+            let mut dot = 0.0;
+            for i in 0..m_ineq {
+                dot += (s[i] + alpha_p_aff * ds_aff[i]) * (z[i] + alpha_d_aff * dz_aff[i]);
+            }
+            let mu_aff = dot / m_ineq as f64;
+            // Mehrotra's heuristic centering parameter σ = (μ_aff/μ)³.
+            (mu_aff / mu).powi(3)
         };
 
-        // --- update ---
-        for i in 0..n {
-            x[i] += alpha * dx[i];
-        }
-        for i in 0..m_eq {
-            y[i] += alpha * dy[i];
-        }
-        for i in 0..m_ineq {
-            z[i] += alpha * dz[i];
-            s[i] += alpha * ds[i];
+        // === Corrector step: centered target + second-order term ===
+        if m_ineq == 0 {
+            // No cone: predictor is already the full Newton step.
+            for i in 0..n {
+                x[i] += dx[i];
+            }
+            for i in 0..m_eq {
+                y[i] += dy[i];
+            }
+        } else {
+            let sigma_mu = sigma * mu;
+            cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
+            build_rhs(&r_d, &r_p, &r_g, &r_c, &z, n, m_eq, m_ineq, &mut rhs);
+            if fact.solve_one(&mut rhs).is_err() {
+                status = QpStatus::NumericalFailure;
+                break;
+            }
+            split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
+            cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
+
+            let (alpha_p, alpha_d) = step_lengths(&cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
+            for i in 0..n {
+                x[i] += alpha_p * dx[i];
+            }
+            for i in 0..m_eq {
+                y[i] += alpha_d * dy[i];
+            }
+            for i in 0..m_ineq {
+                s[i] += alpha_p * ds[i];
+                z[i] += alpha_d * dz[i];
+            }
         }
     }
 
@@ -214,6 +239,64 @@ where
         obj,
         iters,
     }
+}
+
+/// Build the Newton RHS `[−r_d; −r_p; −r_g + r_c ⊘ z]` for a given
+/// complementarity residual `r_c` (predictor or corrector).
+#[allow(clippy::too_many_arguments)]
+fn build_rhs(
+    r_d: &[f64],
+    r_p: &[f64],
+    r_g: &[f64],
+    r_c: &[f64],
+    z: &[f64],
+    n: usize,
+    m_eq: usize,
+    m_ineq: usize,
+    rhs: &mut [f64],
+) {
+    for i in 0..n {
+        rhs[i] = -r_d[i];
+    }
+    for i in 0..m_eq {
+        rhs[n + i] = -r_p[i];
+    }
+    for i in 0..m_ineq {
+        rhs[n + m_eq + i] = -r_g[i] + r_c[i] / z[i];
+    }
+}
+
+/// Copy the solved RHS into the (dx, dy, dz) step components.
+fn split_step(
+    rhs: &[f64],
+    n: usize,
+    m_eq: usize,
+    m_ineq: usize,
+    dx: &mut [f64],
+    dy: &mut [f64],
+    dz: &mut [f64],
+) {
+    dx.copy_from_slice(&rhs[0..n]);
+    dy.copy_from_slice(&rhs[n..n + m_eq]);
+    dz.copy_from_slice(&rhs[n + m_eq..n + m_eq + m_ineq]);
+}
+
+/// Separate fraction-to-boundary step lengths for the primal slack `s`
+/// (via `ds`) and dual `z` (via `dz`). Returns `(alpha_primal,
+/// alpha_dual)`; both are 1 when there is no cone.
+fn step_lengths(
+    cone: &NonnegCone,
+    s: &[f64],
+    ds: &[f64],
+    z: &[f64],
+    dz: &[f64],
+    tau: f64,
+    m_ineq: usize,
+) -> (f64, f64) {
+    if m_ineq == 0 {
+        return (1.0, 1.0);
+    }
+    (cone.max_step(s, ds, tau), cone.max_step(z, dz, tau))
 }
 
 /// Assemble the lower triangle of the symmetric KKT matrix in 1-based

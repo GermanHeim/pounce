@@ -61,6 +61,11 @@ rustyline = { version = "14", features = ["derive"] }
 # at the next iteration (second Ctrl-C aborts). Already in the tree.
 nix = { version = "0.28", features = ["signal"] }
 
+[dev-dependencies]
+# Head-to-head iteration-count comparison: the same convex QP solved by
+# the NLP filter-IPM (this crate's solver) and the pounce-convex QP IPM.
+pounce-convex.workspace = true
+
 [features]
 default = []
 # Enable the HSL MA57 backend (requires libcoinhsl). When enabled, also

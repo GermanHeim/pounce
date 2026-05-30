@@ -76,6 +76,7 @@ pounce-restoration = { path = "crates/pounce-restoration", version = "0.3.1-dev"
 pounce-presolve = { path = "crates/pounce-presolve", version = "0.3.1-dev" }
 pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.1-dev" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.3.1-dev" }
+pounce-convex = { path = "crates/pounce-convex", version = "0.3.1-dev" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.1-dev" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.1-dev" }
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.3.1-dev" }
