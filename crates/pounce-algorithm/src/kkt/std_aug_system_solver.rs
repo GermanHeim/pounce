@@ -529,14 +529,9 @@ impl AugSystemSolver for StdAugSystemSolver {
             .timing
             .as_deref()
             .map(|t| t.linear_system_back_solve.guard());
-        let status = self.linsol.multi_solve(
-            &self.vals,
-            false,
-            nrhs as Index,
-            packed_rhs,
-            false,
-            0,
-        );
+        let status =
+            self.linsol
+                .multi_solve(&self.vals, false, nrhs as Index, packed_rhs, false, 0);
         drop(_back_guard);
         self.last_status = Some(status);
         Some(status)

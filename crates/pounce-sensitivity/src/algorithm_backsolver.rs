@@ -225,13 +225,7 @@ impl PdSensBacksolver {
         {
             let mut pd_ref = self.pd.borrow_mut();
             let fast_flat = pd_ref.solve_many_cached_flat(
-                &self.data,
-                &self.cq,
-                &self.nlp,
-                n_rhs,
-                rhs_flat,
-                lhs_flat,
-                self.dims,
+                &self.data, &self.cq, &self.nlp, n_rhs, rhs_flat, lhs_flat, self.dims,
             );
             match fast_flat {
                 Some(true) => return true,
@@ -341,10 +335,7 @@ impl PdSensBacksolver {
 /// the fast path's `write_rhs` closure, where the new
 /// `PdFullSpaceSolver::solve_many_cached` API hands back an
 /// `IteratesVectorMut` (Box-backed blocks).
-fn write_rhs_box(
-    b: &mut Box<dyn pounce_linalg::vector::Vector>,
-    slice: &[Number],
-) -> bool {
+fn write_rhs_box(b: &mut Box<dyn pounce_linalg::vector::Vector>, slice: &[Number]) -> bool {
     if slice.is_empty() {
         return true;
     }
@@ -360,14 +351,13 @@ fn write_rhs_box(
 /// `PdFullSpaceSolver::solve`'s borrow discipline — it should never
 /// `Rc::clone` from the rhs vector) or if the block is not a
 /// `DenseVector`.
-fn write_rhs_block(
-    rc: &mut Rc<dyn pounce_linalg::vector::Vector>,
-    slice: &[Number],
-) -> bool {
+fn write_rhs_block(rc: &mut Rc<dyn pounce_linalg::vector::Vector>, slice: &[Number]) -> bool {
     if slice.is_empty() {
         return true;
     }
-    let Some(v) = Rc::get_mut(rc) else { return false };
+    let Some(v) = Rc::get_mut(rc) else {
+        return false;
+    };
     let Some(dv) = v.as_any_mut().downcast_mut::<DenseVector>() else {
         return false;
     };

@@ -466,9 +466,7 @@ impl PdFullSpaceSolver {
             blocks.sigma_x.as_tagged().get_tag(),
             blocks.sigma_s.as_tagged().get_tag(),
         ];
-        if !self.matrix_considered
-            || !self.last_dep_tags.map_or(false, |prev| prev == cur_tags)
-        {
+        if !self.matrix_considered || !self.last_dep_tags.map_or(false, |prev| prev == cur_tags) {
             return None;
         }
 
@@ -535,10 +533,7 @@ impl PdFullSpaceSolver {
             let col = &mut aug_packed[k * aug_dim..(k + 1) * aug_dim];
             copy_vector_to_slice(&*aug_rhs_x_box, &mut col[..n_x]);
             copy_vector_to_slice(&*aug_rhs_s_box, &mut col[n_x..n_x + n_s]);
-            copy_vector_to_slice(
-                &*rhs_iv.y_c,
-                &mut col[n_x + n_s..n_x + n_s + n_y_c],
-            );
+            copy_vector_to_slice(&*rhs_iv.y_c, &mut col[n_x + n_s..n_x + n_s + n_y_c]);
             copy_vector_to_slice(&*rhs_iv.y_d, &mut col[n_x + n_s + n_y_c..]);
         }
 
@@ -563,10 +558,7 @@ impl PdFullSpaceSolver {
             let col = &aug_packed[k * aug_dim..(k + 1) * aug_dim];
             set_vector_from_slice(&mut *sol_iv.x, &col[..n_x]);
             set_vector_from_slice(&mut *sol_iv.s, &col[n_x..n_x + n_s]);
-            set_vector_from_slice(
-                &mut *sol_iv.y_c,
-                &col[n_x + n_s..n_x + n_s + n_y_c],
-            );
+            set_vector_from_slice(&mut *sol_iv.y_c, &col[n_x + n_s..n_x + n_s + n_y_c]);
             set_vector_from_slice(&mut *sol_iv.y_d, &col[n_x + n_s + n_y_c..]);
 
             // Inline expand_bound_multipliers — that helper takes
@@ -709,9 +701,7 @@ impl PdFullSpaceSolver {
             sigma_x.as_tagged().get_tag(),
             sigma_s.as_tagged().get_tag(),
         ];
-        if !self.matrix_considered
-            || !self.last_dep_tags.map_or(false, |prev| prev == cur_tags)
-        {
+        if !self.matrix_considered || !self.last_dep_tags.map_or(false, |prev| prev == cur_tags) {
             return None;
         }
 
@@ -826,11 +816,43 @@ impl PdFullSpaceSolver {
             let (lhs_v_l, lhs_v_u) = rest.split_at_mut(block_dims[6]);
 
             // sol_z_l[i] = (rhs_z_l[i] − z_l[i] · sol_x[exp_x_l[i]]) / slack_x_l[i]
-            expand_bound_mult(lhs_z_l, rhs_z_l, blocks_z_l_d, sol_x, exp_x_l, slack_x_l_d, -1.0);
+            expand_bound_mult(
+                lhs_z_l,
+                rhs_z_l,
+                blocks_z_l_d,
+                sol_x,
+                exp_x_l,
+                slack_x_l_d,
+                -1.0,
+            );
             // sol_z_u[i] = (rhs_z_u[i] + z_u[i] · sol_x[exp_x_u[i]]) / slack_x_u[i]
-            expand_bound_mult(lhs_z_u, rhs_z_u, blocks_z_u_d, sol_x, exp_x_u, slack_x_u_d, 1.0);
-            expand_bound_mult(lhs_v_l, rhs_v_l, blocks_v_l_d, sol_s, exp_s_l, slack_s_l_d, -1.0);
-            expand_bound_mult(lhs_v_u, rhs_v_u, blocks_v_u_d, sol_s, exp_s_u, slack_s_u_d, 1.0);
+            expand_bound_mult(
+                lhs_z_u,
+                rhs_z_u,
+                blocks_z_u_d,
+                sol_x,
+                exp_x_u,
+                slack_x_u_d,
+                1.0,
+            );
+            expand_bound_mult(
+                lhs_v_l,
+                rhs_v_l,
+                blocks_v_l_d,
+                sol_s,
+                exp_s_l,
+                slack_s_l_d,
+                -1.0,
+            );
+            expand_bound_mult(
+                lhs_v_u,
+                rhs_v_u,
+                blocks_v_u_d,
+                sol_s,
+                exp_s_u,
+                slack_s_u_d,
+                1.0,
+            );
         }
 
         Some(true)
