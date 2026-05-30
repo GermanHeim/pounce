@@ -1,7 +1,9 @@
 //! Phase-0 orchestrator for auxiliary-equality preprocessing.
 //!
-//! PR 8 of the auxiliary-presolve port (issue #53). This module runs
-//! the full pipeline assembled in PRs 2-7:
+//! Port of [ripopt PR #32](https://github.com/jkitchin/ripopt/pull/32)
+//! by David Bernal Neira (`@bernalde`). PR 8 of the auxiliary-presolve
+//! port (issue #53). This module runs the full pipeline assembled in
+//! PRs 2-7:
 //!
 //! ```text
 //!   incidence  → matching  → DM  → components  → BTF
