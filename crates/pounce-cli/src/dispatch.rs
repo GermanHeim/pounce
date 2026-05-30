@@ -231,9 +231,15 @@ pub fn resolve_solver(
     let is_convex_qp = matches!(class, P::Lp | P::ConvexQp);
 
     match selection {
-        // Phase 1: auto always routes to NLP (no specialized solver
-        // exists yet). This is the documented no-regression path.
-        S::Auto => Ok(SolverChoice::Nlp),
+        // `auto`: route LP and convex QP to the specialized convex IPM
+        // (`pounce-convex`); everything else (QCQP until the conic
+        // solver lands, nonconvex QP, general NLP) falls through to the
+        // NLP filter-IPM. LP is solved by the same QP IPM (P = 0), so it
+        // resolves to `QpIpm` rather than a distinct LP entry point.
+        S::Auto => match class {
+            P::Lp | P::ConvexQp => Ok(SolverChoice::QpIpm),
+            _ => Ok(SolverChoice::Nlp),
+        },
         S::Nlp => Ok(SolverChoice::Nlp),
         S::LpIpm => {
             if is_lp {
@@ -275,7 +281,7 @@ fn mismatch_msg(class: ProblemClass, forced: &str, expected: &str) -> String {
 /// The symmetric Hessian of a quadratic form, stored as a sparse upper-
 /// triangular (i ≤ j) map of `(i, j) -> ∂²/∂xᵢ∂xⱼ`. Empty means the
 /// expression is (at most) linear.
-type QuadHessian = BTreeMap<(usize, usize), f64>;
+pub(crate) type QuadHessian = BTreeMap<(usize, usize), f64>;
 
 /// Attempt to read an expression as a polynomial of total degree ≤ 2 and
 /// return its Hessian (constant, since the form is quadratic). Returns
@@ -283,7 +289,7 @@ type QuadHessian = BTreeMap<(usize, usize), f64>;
 /// prove is degree-≤2 polynomial (transcendental ops, division by a
 /// non-constant, `Pow` with exponent ∉ {0,1,2}, products of degree > 2,
 /// external calls, …). `None` ⇒ treat as general nonlinear.
-fn analyze_quadratic(e: &Expr, _n: usize) -> Option<QuadHessian> {
+pub(crate) fn analyze_quadratic(e: &Expr, _n: usize) -> Option<QuadHessian> {
     let poly = to_poly(e)?;
     if poly.max_degree() > 2 {
         return None;
@@ -586,21 +592,34 @@ mod tests {
         assert_eq!(SolverSelection::parse("bogus"), None);
     }
 
-    // --- resolve_solver: auto is always NLP in Phase 1 ---
+    // --- resolve_solver: auto routes LP/convex-QP to the convex IPM,
+    // everything else to NLP ---
 
     #[test]
-    fn auto_routes_to_nlp_for_every_class() {
+    fn auto_routes_convex_qp_family_to_qp_ipm() {
+        assert_eq!(
+            resolve_solver(ProblemClass::Lp, SolverSelection::Auto),
+            Ok(SolverChoice::QpIpm),
+            "auto should route LP to the convex IPM (P=0)"
+        );
+        assert_eq!(
+            resolve_solver(ProblemClass::ConvexQp, SolverSelection::Auto),
+            Ok(SolverChoice::QpIpm),
+            "auto should route convex QP to the convex IPM"
+        );
+    }
+
+    #[test]
+    fn auto_routes_everything_else_to_nlp() {
         for class in [
-            ProblemClass::Lp,
-            ProblemClass::ConvexQp,
-            ProblemClass::ConvexQcqp,
+            ProblemClass::ConvexQcqp, // until the conic solver lands
             ProblemClass::NonconvexQp,
             ProblemClass::Nlp,
         ] {
             assert_eq!(
                 resolve_solver(class, SolverSelection::Auto),
                 Ok(SolverChoice::Nlp),
-                "auto must resolve to Nlp for {:?} in Phase 1",
+                "auto must resolve to Nlp for {:?}",
                 class
             );
         }

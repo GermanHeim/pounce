@@ -41,6 +41,9 @@ pounce-sensitivity.workspace = true
 pounce-solve-report.workspace = true
 pounce-studio-core.workspace = true
 pounce-observability.workspace = true
+# Specialized convex LP/QP interior-point solver, dispatched to for
+# classified LP / convex-QP `.nl` inputs.
+pounce-convex.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing.workspace = true
@@ -60,11 +63,6 @@ rustyline = { version = "14", features = ["derive"] }
 # SIGINT handler so Ctrl-C during a debug run breaks into the debugger
 # at the next iteration (second Ctrl-C aborts). Already in the tree.
 nix = { version = "0.28", features = ["signal"] }
-
-[dev-dependencies]
-# Head-to-head iteration-count comparison: the same convex QP solved by
-# the NLP filter-IPM (this crate's solver) and the pounce-convex QP IPM.
-pounce-convex.workspace = true
 
 [features]
 default = []

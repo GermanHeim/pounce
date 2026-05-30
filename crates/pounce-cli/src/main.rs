@@ -73,10 +73,11 @@ pub fn main() -> ExitCode {
     let mut app = IpoptApplication::new();
 
     // Register the LP/QP routing option so `solver_selection=...` is
-    // accepted by the (validating) options parser. Phase 1 of the
-    // dispatch plan (see dev-notes/lp-qp-routing.md): the option is
-    // recognized and validated, but `auto`/`nlp` both route to the
-    // existing NLP solver, so there is no behavior change yet.
+    // accepted by the (validating) options parser. See the dispatch plan
+    // (dev-notes/lp-qp-routing.md): `auto` routes classified LP / convex
+    // QP problems to the specialized `pounce-convex` IPM and everything
+    // else to the NLP filter-IPM; forcing values are validated against
+    // the detected class.
     if let Err(e) = app.registered_options().add_string_option(
         "solver_selection",
         "Which solver to route the problem to.",
@@ -103,9 +104,11 @@ pub fn main() -> ExitCode {
                 "Force active-set QP; errors if not LP/convex-QP.",
             ),
         ],
-        "Selects the solver by problem class. In the current release only \
-         the NLP solver is wired, so `auto` and `nlp` are equivalent and the \
-         forcing values exist for forward compatibility and validation.",
+        "Selects the solver by problem class. `auto` routes LP and convex \
+         QP to the specialized convex interior-point solver (pounce-convex) \
+         and all other classes to the NLP filter-IPM. `qp-active-set` is \
+         reserved for the active-set QP track and currently falls through \
+         to NLP.",
     ) {
         eprintln!("pounce: failed to register solver_selection option: {e}");
         return ExitCode::from(2);
@@ -398,7 +401,9 @@ pub fn main() -> ExitCode {
     // that does not match the detected class is rejected with a clear
     // message, instead of being silently ignored.
     {
-        use pounce_cli::dispatch::{classify_problem, resolve_solver, SolverSelection};
+        use pounce_cli::dispatch::{
+            classify_problem, resolve_solver, ProblemClass, SolverChoice, SolverSelection,
+        };
         let sel_str = app
             .options()
             .get_string_value("solver_selection", "")
@@ -414,24 +419,39 @@ pub fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        // Only the `.nl` path carries enough structure to classify; for
-        // forced non-NLP selections we re-read the parsed problem.
-        if !matches!(selection, SolverSelection::Auto | SolverSelection::Nlp) {
-            let class = match &args.problem {
-                ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
-                    Ok(prob) => classify_problem(&prob),
-                    Err(_) => pounce_cli::dispatch::ProblemClass::Nlp,
-                },
-                // Builtins are general NLP test problems.
-                ProblemSource::Builtin(_) => pounce_cli::dispatch::ProblemClass::Nlp,
-            };
-            if let Err(msg) = resolve_solver(class, selection) {
+
+        // Classify the problem. Only the `.nl` path carries enough
+        // structure; builtins are treated as general NLP. (Re-reading the
+        // `.nl` here is cheap relative to a solve and keeps the dispatch
+        // self-contained.)
+        let (class, reparsed) = match &args.problem {
+            ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
+                Ok(prob) => (classify_problem(&prob), Some(prob)),
+                Err(_) => (ProblemClass::Nlp, None),
+            },
+            ProblemSource::Builtin(_) => (ProblemClass::Nlp, None),
+        };
+
+        let choice = match resolve_solver(class, selection) {
+            Ok(c) => c,
+            Err(msg) => {
                 eprintln!("pounce: {msg}");
                 return ExitCode::from(2);
             }
+        };
+
+        // Dispatch to the specialized convex LP/QP IPM when resolved.
+        // `LpIpm` and `QpIpm` both use the convex solver (LP is P = 0).
+        if matches!(choice, SolverChoice::LpIpm | SolverChoice::QpIpm) {
+            if let Some(prob) = reparsed {
+                return run_convex_qp(&prob, class, sol_path.as_deref());
+            }
+            // Should not happen (only `.nl` classifies non-NLP), but be
+            // safe: fall through to NLP rather than mis-dispatch.
         }
-        // `auto`/`nlp` and any matching forced selection fall through to
-        // the existing NLP solve below — no behavior change in Phase 1.
+        // `nlp`, `qp-active-set` (not yet wired), and unmatched cases
+        // fall through to the existing NLP solve below.
+        let _ = choice;
     }
 
     // Does the `.nl` ask for a parametric sensitivity step? When it
@@ -992,6 +1012,82 @@ fn build_debugger(
     match script {
         Some(p) => dbg.with_script(p.to_string_lossy().into_owned()),
         None => dbg,
+    }
+}
+
+/// Solve a classified LP / convex-QP `.nl` problem through the
+/// specialized `pounce-convex` interior-point method, write a `.sol`,
+/// and return the process exit code. This is the LP/QP dispatch target
+/// (see `dev-notes/lp-qp-routing.md`).
+///
+/// The primal solution `x` is the deliverable here; constraint duals are
+/// written as zeros for now (mapping the QP's `(y, z)` — including the
+/// bound-row split — back to per-`.nl`-constraint multipliers is a
+/// follow-up). The objective is reported including the `.nl`'s constant
+/// term, which the standard-form QP drops.
+fn run_convex_qp(
+    prob: &nl_reader::NlProblem,
+    class: pounce_cli::dispatch::ProblemClass,
+    sol_path: Option<&std::path::Path>,
+) -> ExitCode {
+    use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
+
+    let qp = match pounce_cli::qp_extract::extract_qp(prob) {
+        Some(q) => q,
+        None => {
+            eprintln!(
+                "pounce: internal error: {} not extractable as QP",
+                class.name()
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    let obj_const = prob.obj_constant;
+    let sign = if prob.minimize { 1.0 } else { -1.0 };
+
+    let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    };
+    let t0 = std::time::Instant::now();
+    let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    // Report the objective in the user's original sense, including the
+    // dropped constant term: f_user = sign * (½xᵀPx + cᵀx) + const.
+    let reported_obj = sign * sol.obj + obj_const;
+
+    let (msg, ok) = match sol.status {
+        QpStatus::Optimal => ("Optimal Solution Found.", true),
+        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false),
+        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false),
+    };
+    println!(
+        "POUNCE ({} IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
+        class.name(),
+        sol.iters,
+    );
+
+    // Write a `.sol` if requested: primal x, zero duals.
+    if let Some(path) = sol_path {
+        let lambda = vec![0.0; prob.m];
+        let payload = nl_writer::SolutionFile {
+            message: &format!("POUNCE {} IPM (pounce-convex): {msg}", class.name()),
+            x: &sol.x,
+            lambda: &lambda,
+            solve_result_num: if ok { 0 } else { 400 },
+            suffixes: &[],
+        };
+        if let Err(e) = nl_writer::write_sol_file(path, &payload) {
+            eprintln!("pounce: failed to write {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+    }
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

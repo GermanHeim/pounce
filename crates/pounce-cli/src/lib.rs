@@ -18,6 +18,7 @@ pub mod minima;
 pub mod nl_hessian_program;
 pub mod nl_writer;
 pub mod print;
+pub mod qp_extract;
 pub mod seeded_tnlp;
 pub mod sens;
 pub mod solve_report;
