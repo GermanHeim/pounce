@@ -207,6 +207,17 @@ impl SensBacksolver for PdSensBacksolver {
 
         // K · lhs = rhs   ⇒   solve(α=1, β=0, rhs, res) writes
         // res = K⁻¹ · rhs.
+        //
+        // `allow_inexact=true` mirrors upstream sIPOPT's
+        // `SensSimpleBacksolver`: skip `PdFullSpaceSolver`'s iterative-
+        // refinement loop and accept the first back-solve against the
+        // held factor. The IPM-level refinement (`min_refinement_steps
+        // = 1`, residual_ratio_max = 1e-10`) is there to clean up
+        // numerical noise during forward IPM steps; for the held-factor
+        // back-solve used by sens / JaxProblem bwd, it ~doubles the
+        // per-call cost and produces gains that are below `tol`. Under
+        // `jax.jacrev` over a JaxProblem solve this dominates the wall
+        // time at moderate `n+m` (pounce#77 follow-up).
         let ok = {
             let mut pd_ref = self.pd.borrow_mut();
             pd_ref.solve(
@@ -217,8 +228,8 @@ impl SensBacksolver for PdSensBacksolver {
                 0.0,
                 &rhs_iv,
                 &mut res_iv,
-                false,
-                false,
+                /* allow_inexact = */ true,
+                /* improve_solution = */ false,
             )
         };
         if !ok {
