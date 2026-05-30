@@ -941,6 +941,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-convex"
+version = "0.3.0"
+dependencies = [
+ "pounce-common",
+ "pounce-feral",
+ "pounce-linsol",
+]
+
+[[package]]
 name = "pounce-feral"
 version = "0.3.1-dev"
 dependencies = [
