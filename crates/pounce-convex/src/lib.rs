@@ -20,6 +20,7 @@
 
 pub mod cones;
 pub mod ipm;
+pub mod presolve;
 pub mod qp;
 
 pub use ipm::{solve_qp_ipm, QpOptions};
