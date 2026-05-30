@@ -368,7 +368,18 @@ def _kkt_backsolve_pure_callback(
     )
 
     def host_call(sid_h, v_h):
-        sid = int(np.asarray(sid_h))
+        # Under ``vmap_method="broadcast_all"`` (pounce#77 follow-up),
+        # JAX prepends a leading batch axis to *every* input when this
+        # callback is hit through a vmap — most importantly ``jax.jacrev``
+        # over a JaxProblem solve, which fans out N cotangents and
+        # otherwise paid one FFI hop per fan-out. Here we accept either:
+        #   - unbatched: ``sid_h`` scalar, ``v_h`` shape ``(n,)``
+        #   - batched:   ``sid_h`` shape ``(N,)``, ``v_h`` shape ``(N, n)``
+        # The solver_id is the same for every fan-out cotangent (jacrev
+        # holds the primal fixed and only varies cotangents), so we
+        # extract a single int via ``np.ravel(...)[0]``.
+        sid_arr = np.asarray(sid_h)
+        sid = int(sid_arr.reshape(-1)[0])
         solver = jp._lookup_solver(sid)
         if solver is None:
             # The registered Solver was evicted from the bounded LRU
@@ -394,6 +405,13 @@ def _kkt_backsolve_pure_callback(
         # off-thread pure_callback dispatch (training loops, jit'd
         # outer wrappers, ...) doesn't trigger PyO3's unsendable panic.
         v_np = np.asarray(v_h, dtype=np.float64)
+        # Unbatched: shape (n,). Batched (from jax.jacrev / jax.vmap of
+        # the bwd): shape (N, n). Normalise to a 2D (N, n) and remember
+        # whether to squeeze on return.
+        squeeze = v_np.ndim == 1
+        if squeeze:
+            v_np = v_np[None, :]
+        N = v_np.shape[0]
 
         def _do_kkt():
             dims = solver.block_dims  # [n_x, n_s, n_y_c, n_y_d, ...]
@@ -426,61 +444,66 @@ def _kkt_backsolve_pure_callback(
             n_s_ = dims[1]
             n_y_c_ = dims[2]
             n_y_d_ = dims[3]
+            kkt_dim_ = solver.kkt_dim
             # The JAX user-space n equals n_x exactly when no variables
             # are fixed (which is the JaxProblem's contract —
             # fixed-variable treatment isn't exposed). Assert and pack.
-            if v_np.shape[0] != n_x_:
+            if v_np.shape[1] != n_x_:
                 raise RuntimeError(
-                    f"pounce.jax: cotangent length {v_np.shape[0]} != "
+                    f"pounce.jax: cotangent length {v_np.shape[1]} != "
                     f"Solver n_x={n_x_} (fixed-variable treatment is "
                     "not supported on the JaxProblem factor-reuse path)."
                 )
-            rhs = np.zeros(solver.kkt_dim, dtype=np.float64)
-            # Embed the cotangent into the compound KKT RHS:
-            # ``rhs = [v; 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``.
-            # We're computing ``u = K^{-T} · e_x v`` (K is symmetric
-            # here), then contracting with ``∂R/∂p`` whose only nonzero
-            # blocks are the x-row (``dgradL_dp``), y_c-row
-            # (``dg_c/dp``), and y_d-row (``dg_d/dp``) — bounds and
-            # slacks don't depend on p in the JAX path, so the
-            # corresponding RHS blocks are zero.
-            rhs[:n_x_] = v_np
-            u_ = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
-            return n_x_, n_s_, n_y_c_, n_y_d_, u_
+            # Embed the N cotangents into the compound KKT RHS rows:
+            # ``rhs[k] = [v[k]; 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``.
+            # We're computing ``u[k] = K^{-T} · e_x v[k]`` (K symmetric),
+            # then contracting with ``∂R/∂p`` whose only nonzero blocks
+            # are the x-row (``dgradL_dp``), y_c-row (``dg_c/dp``), and
+            # y_d-row (``dg_d/dp``) — bounds and slacks don't depend on
+            # p in the JAX path, so the corresponding RHS blocks are
+            # zero. One `kkt_solve_many` call per jacrev amortises the
+            # FFI / executor-pin overhead across the N cotangents.
+            rhs_flat = np.zeros((N, kkt_dim_), dtype=np.float64)
+            rhs_flat[:, :n_x_] = v_np
+            u_flat = np.asarray(
+                solver.kkt_solve_many(rhs_flat.reshape(-1), N),
+                dtype=np.float64,
+            ).reshape(N, kkt_dim_)
+            return n_x_, n_s_, n_y_c_, n_y_d_, u_flat
 
-        n_x, n_s, n_y_c, n_y_d, u = jp._run_pinned(_do_kkt)
-        u_x = u[:n_x].copy()
+        n_x, n_s, n_y_c, n_y_d, u_mat = jp._run_pinned(_do_kkt)
+        u_x_batch = u_mat[:, :n_x].copy()
         y_c_off = n_x + n_s
         y_d_off = y_c_off + n_y_c
-        u_y_c = u[y_c_off : y_c_off + n_y_c]
-        u_y_d = u[y_d_off : y_d_off + n_y_d]
+        u_y_c_batch = u_mat[:, y_c_off : y_c_off + n_y_c]
+        u_y_d_batch = u_mat[:, y_d_off : y_d_off + n_y_d]
 
         # Scatter (u_y_c, u_y_d) back to user-g order via the cl == cu
         # mask. c_map and d_map preserve user order within each group,
         # which matches pounce-nlp's classification (tnlp_adapter.rs:388-413).
-        u_g = np.zeros(m, dtype=np.float64)
+        u_g_batch = np.zeros((N, m), dtype=np.float64)
         if m > 0:
             cl_arr = np.asarray(jp._cl_for_classify, dtype=np.float64)
             cu_arr = np.asarray(jp._cu_for_classify, dtype=np.float64)
             is_eq = cl_arr == cu_arr
             c_idx = np.flatnonzero(is_eq)
             d_idx = np.flatnonzero(~is_eq)
-            u_g[c_idx] = u_y_c
-            u_g[d_idx] = u_y_d
-        return u_x, u_g
+            u_g_batch[:, c_idx] = u_y_c_batch
+            u_g_batch[:, d_idx] = u_y_d_batch
+        if squeeze:
+            return u_x_batch[0], u_g_batch[0]
+        return u_x_batch, u_g_batch
 
-    # vmap_method="sequential" tells JAX to loop over the batch axis
-    # rather than calling our impure host function on a batched RHS.
-    # Needed for `jax.jacobian` (which vmaps the bwd over the n
-    # cotangents) and for plain `jax.vmap` of the loss-gradient. The
-    # host_call itself is single-direction: one v, one solver_id, one
-    # back-solve. The Solver's underlying LDLᵀ factor *could* fan out
-    # to multiple RHSes at once for true cost amortisation; doing
-    # that needs a `kkt_solve_many(rhs_mat)` on the Rust side, which
-    # is a worthwhile follow-up but out of scope for the initial
-    # factor-reuse landing.
+    # vmap_method="broadcast_all" lets JAX hand us a batched RHS in a
+    # single callback dispatch, which we fan out on the Rust side via
+    # ``Solver.kkt_solve_many`` against the held LDLᵀ factor (pounce#77
+    # follow-up). The host_call detects the leading batch axis on ``v``
+    # and packs an ``(N, kkt_dim)`` RHS matrix. Critical for
+    # ``jax.jacrev``, which vmaps the bwd over the N cotangents — under
+    # the previous ``vmap_method="sequential"`` that was N separate
+    # cross-thread ``pure_callback`` round-trips per jacrev call.
     return jax.pure_callback(
-        host_call, result_shapes, solver_id, v, vmap_method="sequential",
+        host_call, result_shapes, solver_id, v, vmap_method="broadcast_all",
     )
 
 
@@ -581,7 +604,17 @@ def _kkt_backsolve_batched_pure_callback(
     )
 
     def host_call(sid_h, cot_h):
-        sid_int = int(np.asarray(sid_h))
+        # Under ``vmap_method="broadcast_all"`` (pounce#77 follow-up),
+        # both inputs gain a leading batch axis when this callback is
+        # invoked through a vmap — most importantly ``jax.jacrev`` over
+        # ``batched_solve``, which fans out N = B*n cotangents.
+        # Accept either:
+        #   - unbatched: ``sid_h`` scalar,   ``cot_h`` shape ``(B, n)``
+        #   - batched:   ``sid_h`` (N,),     ``cot_h`` shape ``(N, B, n)``
+        # solver_id is constant across cotangents in a jacrev (one
+        # primal, N varying cotangents); pull the first.
+        sid_arr = np.asarray(sid_h)
+        sid_int = int(sid_arr.reshape(-1)[0])
         solver = jp._lookup_solver(sid_int)
         if solver is None:
             raise RuntimeError(
@@ -591,6 +624,10 @@ def _kkt_backsolve_batched_pure_callback(
                 "closer to the fwd, or use `factor_reuse=False`."
             )
         cot_np = np.asarray(cot_h, dtype=np.float64)
+        squeeze = cot_np.ndim == 2  # (B, n) unbatched; (N, B, n) batched
+        if squeeze:
+            cot_np = cot_np[None, ...]
+        N = cot_np.shape[0]
 
         # Pin all PySolver access to the executor thread that built
         # the stacked solver (pounce#77) so XLA-thread pure_callback
@@ -612,6 +649,7 @@ def _kkt_backsolve_batched_pure_callback(
             n_s_ = dims[1]
             n_y_c_ = dims[2]
             n_y_d_ = dims[3]
+            kkt_dim_ = solver.kkt_dim
             # The stacked NLP has n_x = B * n_per_block by construction
             # (no fixed-variable treatment is exposed on the batched path).
             if n_x_ != B * n:
@@ -620,17 +658,25 @@ def _kkt_backsolve_batched_pure_callback(
                     f"B*n={B * n} (B={B}, n={n}). Internal invariant "
                     "violated — please file an issue."
                 )
-            rhs = np.zeros(solver.kkt_dim, dtype=np.float64)
-            # Block-major flatten: rhs[:B*n] = [cot^(1); cot^(2); ...; cot^(B)].
-            rhs[:n_x_] = cot_np.reshape(-1)
-            u_ = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
-            return n_x_, n_s_, n_y_c_, n_y_d_, u_
+            # Block-major flatten per cotangent: each row k of
+            # ``rhs_flat`` is ``[cot^(1)_k; cot^(2)_k; ...; cot^(B)_k;
+            # 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``. One
+            # ``kkt_solve_many`` against the held stacked LDLᵀ factor
+            # amortises FFI / executor-pin overhead across the N
+            # cotangents from ``jax.jacrev``.
+            rhs_flat = np.zeros((N, kkt_dim_), dtype=np.float64)
+            rhs_flat[:, :n_x_] = cot_np.reshape(N, B * n)
+            u_flat = np.asarray(
+                solver.kkt_solve_many(rhs_flat.reshape(-1), N),
+                dtype=np.float64,
+            ).reshape(N, kkt_dim_)
+            return n_x_, n_s_, n_y_c_, n_y_d_, u_flat
 
-        n_x, n_s, n_y_c, n_y_d, u = jp._run_pinned(_do_kkt)
+        n_x, n_s, n_y_c, n_y_d, u_mat = jp._run_pinned(_do_kkt)
 
-        u_x_batch = u[:n_x].reshape(B, n).copy()
+        u_x_batch = u_mat[:, :n_x].reshape(N, B, n).copy()
 
-        u_g_batch = np.zeros((B, m), dtype=np.float64)
+        u_g_batch = np.zeros((N, B, m), dtype=np.float64)
         if m > 0:
             cl_arr = jp._cl_for_classify
             cu_arr = jp._cu_for_classify
@@ -640,17 +686,23 @@ def _kkt_backsolve_batched_pure_callback(
             y_c_off = n_x + n_s
             y_d_off = y_c_off + n_y_c
             if n_c_per > 0:
-                u_y_c_batch = u[y_c_off : y_c_off + n_y_c].reshape(B, n_c_per)
+                u_y_c_batch = u_mat[:, y_c_off : y_c_off + n_y_c].reshape(
+                    N, B, n_c_per
+                )
                 c_idx = np.flatnonzero(is_eq)
-                u_g_batch[:, c_idx] = u_y_c_batch
+                u_g_batch[:, :, c_idx] = u_y_c_batch
             if n_d_per > 0:
-                u_y_d_batch = u[y_d_off : y_d_off + n_y_d].reshape(B, n_d_per)
+                u_y_d_batch = u_mat[:, y_d_off : y_d_off + n_y_d].reshape(
+                    N, B, n_d_per
+                )
                 d_idx = np.flatnonzero(~is_eq)
-                u_g_batch[:, d_idx] = u_y_d_batch
+                u_g_batch[:, :, d_idx] = u_y_d_batch
+        if squeeze:
+            return u_x_batch[0], u_g_batch[0]
         return u_x_batch, u_g_batch
 
     return jax.pure_callback(
-        host_call, result_shapes, sid, cot_x_batch, vmap_method="sequential",
+        host_call, result_shapes, sid, cot_x_batch, vmap_method="broadcast_all",
     )
 
 
@@ -761,9 +813,37 @@ class JaxProblem:
         back-solve (k_aug-style; pounce#76) — drops the
         ``jnp.linalg.solve`` on a freshly assembled
         ``(n+m) × (n+m)`` block and avoids the explicit active-set
-        masking. Set ``False`` to fall back to the original dense path
+        masking. Set ``False`` to fall back to the dense JAX path
         (useful for higher-order differentiation, since the dense path
         stays inside JAX and is itself differentiable).
+
+        **When to pick which (pounce#77 follow-up).** The dense path
+        ``factor_reuse=False`` is itself a form of factor reuse: it
+        builds the per-block ``(n+m) × (n+m)`` KKT at pounce's
+        converged ``(x*, λ*, μ_l*, μ_u*)`` (saved in the custom_vjp
+        residual) and solves it under ``jax.vmap`` / ``jax.jacrev``
+        with a JIT-fused per-block ``jnp.linalg.solve``. Choose by
+        access pattern:
+
+        * **Single solve + many sensitivities** —
+          ``jp.solve(p, x0)`` followed by ``jax.grad`` /
+          ``jax.jacrev`` over ``p`` — use ``factor_reuse=True``. One
+          stacked LDLᵀ back-solve per cotangent against the held
+          factor is cheaper than JAX assembling and dense-solving the
+          full ``(n+m) × (n+m)`` block.
+        * **Batched solve + jacrev / vmap** —
+          ``jax.jacrev(lambda P: jp.batched_solve(P, x0))(pb)`` and
+          similar minibatch projections — use ``factor_reuse=False``.
+          On a batch of B problems with ``n+m`` ≲ 100 per block, JAX's
+          fused per-block dense solve beats back-solving the full
+          stacked LDLᵀ at every measured scale (n=3 through n=48,
+          B=64). The crossover never lands inside the regime where
+          ``batched_solve`` is competitive against a pure-JAX
+          implementation, because dense linalg at small per-block
+          dimension is already optimal.
+
+        If you are using ``batched_solve`` and notice the backward is
+        slower than you expect, try ``factor_reuse=False`` first.
 
     Notes
     -----

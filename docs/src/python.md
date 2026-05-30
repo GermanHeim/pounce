@@ -236,7 +236,7 @@ parameter, which sits well below `tol` after convergence.
 
 ```python
 jp = JaxProblem(..., factor_reuse=True)   # default; reuse the IPM factor
-jp = JaxProblem(..., factor_reuse=False)  # legacy dense JAX backward
+jp = JaxProblem(..., factor_reuse=False)  # dense JAX backward
 ```
 
 Pick `factor_reuse=False` when you want higher-order differentiation
@@ -244,6 +244,50 @@ Pick `factor_reuse=False` when you want higher-order differentiation
 stays JAX-traced and is itself differentiable, the factor-reuse one
 crosses to the Rust host via `pure_callback` and is opaque to a
 second-order trace.
+
+#### When to pick which on `batched_solve` workloads (pounce#77)
+
+`factor_reuse=False` is itself a form of factor reuse — it builds
+the per-block `(n+m) × (n+m)` KKT at pounce's converged
+`(x*, λ*, μ_l*, μ_u*)` (saved in the custom_vjp residual) and
+solves it under `jax.vmap` with a JIT-fused per-block
+`jnp.linalg.solve`. So both modes reuse pounce's converged solution;
+they differ only in **what** they back-solve:
+
+* `factor_reuse=True` — back-solves pounce's held LDLᵀ factor of the
+  full stacked KKT (Rust-side, via FFI through a single-thread
+  executor pin).
+* `factor_reuse=False` — back-solves a freshly assembled per-block
+  dense KKT in JAX, fused under `vmap`.
+
+For `batched_solve` + `jax.jacrev` / `jax.vmap` minibatch projections
+**`factor_reuse=False` is faster at every scale we measured**
+(n = 3 through 48 per block, B = 64 stacked):
+
+```
+n=3   reuse bwd =  16.6 ms   dense bwd =  20.6 ms   reuse/dense = 0.80×
+n=8   reuse bwd =  52.5 ms   dense bwd =  38.5 ms   reuse/dense = 1.36×
+n=16  reuse bwd = 157.6 ms   dense bwd =  57.2 ms   reuse/dense = 2.76×
+n=32  reuse bwd = 558.6 ms   dense bwd = 103.6 ms   reuse/dense = 5.39×
+n=48  reuse bwd =1262.9 ms   dense bwd = 137.4 ms   reuse/dense = 9.19×
+```
+
+The dense path scales as `B · (n+m)³`; the factor-reuse path scales
+as `N · kkt_dim ≈ B² · n · (n+m)` because `jax.jacrev` fans out
+`N = B·n` cotangents and each triggers a back-solve of the **full**
+stacked LDLᵀ even though only one block has nonzero signal.
+
+**Guidance:**
+
+* **Single solve + many sensitivities** —
+  `jax.jacrev(jp.solve, argnums=0)(p, x0)` and friends — keep
+  `factor_reuse=True`. One LDLᵀ back-solve per cotangent against
+  the held factor beats JAX dense-solving a fresh `(n+m) × (n+m)`
+  block.
+* **Batched solve + jacrev / vmap** —
+  `jax.jacrev(lambda P: jp.batched_solve(P, x0))(pb)` — set
+  `factor_reuse=False`. Treat the dense path as the default for
+  minibatch projections.
 
 Each fwd registers its converged factor in a bounded LRU on the
 `JaxProblem` (default capacity 128). For very long-running training

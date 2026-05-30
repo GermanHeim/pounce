@@ -120,12 +120,53 @@ def test_solver_kkt_solve_zero_rhs_returns_zero():
     np.testing.assert_allclose(lhs, np.zeros(dim), atol=1e-12)
 
 
+def test_solver_kkt_solve_many_matches_kkt_solve():
+    """Batched back-solve equals the per-RHS loop (pounce#77).
+
+    `kkt_solve_many` is the single-FFI-hop fan-out of `kkt_solve` —
+    same factor, same per-RHS work, just amortised marshalling. Build
+    a (k, kkt_dim) row-major buffer with the x-block of each row set
+    to a different unit cotangent (the shape the JAX backward picks
+    up from `jax.jacrev`), back-solve in one call, compare to a
+    Python loop over `kkt_solve`.
+    """
+    solver = pounce.Solver(_make())
+    solver.solve(x0=X0)
+    dim = solver.kkt_dim
+    n_x = solver.block_dims[0]
+    k = 3
+    rhs_mat = np.zeros((k, dim))
+    for j in range(k):
+        rhs_mat[j, j % n_x] = 1.0 + 0.25 * j  # vary amplitude per row
+    lhs_many = solver.kkt_solve_many(rhs_mat.reshape(-1), k).reshape(k, dim)
+    for j in range(k):
+        lhs_loop = solver.kkt_solve(rhs_mat[j])
+        np.testing.assert_allclose(lhs_many[j], lhs_loop, atol=1e-12)
+
+
+def test_solver_kkt_solve_many_zero_rhs_count():
+    solver = pounce.Solver(_make())
+    solver.solve(x0=X0)
+    out = solver.kkt_solve_many(np.zeros(0), 0)
+    assert out.shape == (0,)
+
+
+def test_solver_kkt_solve_many_bad_shape():
+    solver = pounce.Solver(_make())
+    solver.solve(x0=X0)
+    dim = solver.kkt_dim
+    with pytest.raises(ValueError):
+        solver.kkt_solve_many(np.zeros(dim + 1), 1)  # 1 * dim, not dim+1
+
+
 def test_solver_methods_before_solve_error():
     solver = pounce.Solver(_make())
     assert solver.converged is False
     assert solver.kkt_dim is None
     with pytest.raises(RuntimeError):
         solver.kkt_solve(np.zeros(10))
+    with pytest.raises(RuntimeError):
+        solver.kkt_solve_many(np.zeros(10), 1)
     with pytest.raises(RuntimeError):
         solver.parametric_step([2, 3], [0.1, 0.0])
     with pytest.raises(RuntimeError):

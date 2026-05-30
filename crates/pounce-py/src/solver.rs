@@ -103,6 +103,52 @@ impl PySolver {
         Ok(lhs.into_pyarray_bound(py))
     }
 
+    /// Batched-RHS back-solve. `rhs_flat` is a row-major
+    /// `(n_rhs, kkt_dim)` buffer (one RHS per row); the returned flat
+    /// array has the same length and layout. Equivalent to looping
+    /// [`Self::kkt_solve`] over each row, but with a single FFI hop —
+    /// which matters for `jax.jacrev` over a JaxProblem batched solve,
+    /// where the JAX backward is vmap'd once per cotangent and each
+    /// cross-thread `pure_callback` dispatch otherwise dominates the
+    /// real back-solve cost (pounce#77 follow-up). Same converged
+    /// factor and same per-RHS work — only the per-call FFI / executor
+    /// pin overhead is amortised.
+    fn kkt_solve_many<'py>(
+        &self,
+        py: Python<'py>,
+        rhs_flat: Vec<Number>,
+        n_rhs: usize,
+    ) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("kkt_solve_many: no converged factor (call solve() first)")
+        })?;
+        let dim = s.inner.kkt_dim().ok_or_else(|| {
+            PyRuntimeError::new_err("kkt_solve_many: no converged factor (call solve() first)")
+        })?;
+        if n_rhs == 0 {
+            return Ok(Vec::<Number>::new().into_pyarray_bound(py));
+        }
+        if rhs_flat.len() != n_rhs * dim {
+            return Err(PyValueError::new_err(format!(
+                "kkt_solve_many: rhs_flat length {} != n_rhs ({}) * kkt_dim ({}) = {}",
+                rhs_flat.len(),
+                n_rhs,
+                dim,
+                n_rhs * dim,
+            )));
+        }
+        let mut lhs_flat = vec![0.0; n_rhs * dim];
+        let mut scratch = vec![0.0; dim];
+        for i in 0..n_rhs {
+            let rhs_row = &rhs_flat[i * dim..(i + 1) * dim];
+            s.inner
+                .kkt_solve(rhs_row, &mut scratch)
+                .map_err(solver_error_to_py)?;
+            lhs_flat[i * dim..(i + 1) * dim].copy_from_slice(&scratch);
+        }
+        Ok(lhs_flat.into_pyarray_bound(py))
+    }
+
     /// First-order parametric step `Δx ≈ ∂x*/∂p · Δp` against the held
     /// factor. `pin_constraint_indices` are 0-based indices into
     /// `g(x)` (must equal the parameter-pin equality constraints).
