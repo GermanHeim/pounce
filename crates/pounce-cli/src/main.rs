@@ -72,6 +72,45 @@ pub fn main() -> ExitCode {
 
     let mut app = IpoptApplication::new();
 
+    // Register the LP/QP routing option so `solver_selection=...` is
+    // accepted by the (validating) options parser. Phase 1 of the
+    // dispatch plan (see dev-notes/lp-qp-routing.md): the option is
+    // recognized and validated, but `auto`/`nlp` both route to the
+    // existing NLP solver, so there is no behavior change yet.
+    if let Err(e) = app.registered_options().add_string_option(
+        "solver_selection",
+        "Which solver to route the problem to.",
+        "auto",
+        &[
+            (
+                "auto",
+                "Most specialized solver matching the detected problem class.",
+            ),
+            (
+                "nlp",
+                "Always the filter-IPM NLP solver (current default behavior).",
+            ),
+            (
+                "lp-ipm",
+                "Force IPM-LP; errors if the problem is not an LP.",
+            ),
+            (
+                "qp-ipm",
+                "Force IPM-QP; errors if the problem is not LP/convex-QP.",
+            ),
+            (
+                "qp-active-set",
+                "Force active-set QP; errors if not LP/convex-QP.",
+            ),
+        ],
+        "Selects the solver by problem class. In the current release only \
+         the NLP solver is wired, so `auto` and `nlp` are equivalent and the \
+         forcing values exist for forward compatibility and validation.",
+    ) {
+        eprintln!("pounce: failed to register solver_selection option: {e}");
+        return ExitCode::from(2);
+    }
+
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they
     // didn't.
@@ -348,6 +387,51 @@ pub fn main() -> ExitCode {
     // problem and the clean objective is evaluated directly) and return.
     if let Some(mcfg) = &args.minima {
         return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
+    }
+
+    // LP/QP routing (Phase 1). Resolve the `solver_selection` option
+    // against the detected problem class. For `.nl` inputs we classify
+    // the parsed problem; for builtins we conservatively treat the class
+    // as NLP (they are general nonlinear test problems). `auto`/`nlp`
+    // both route to the existing solver — the only observable effect in
+    // Phase 1 is that an explicit forcing value (e.g. `--solver=lp`)
+    // that does not match the detected class is rejected with a clear
+    // message, instead of being silently ignored.
+    {
+        use pounce_cli::dispatch::{classify_problem, resolve_solver, SolverSelection};
+        let sel_str = app
+            .options()
+            .get_string_value("solver_selection", "")
+            .map(|(v, _)| v)
+            .unwrap_or_else(|_| "auto".to_string());
+        let selection = match SolverSelection::parse(&sel_str) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "pounce: invalid solver_selection '{sel_str}'; valid values: {}",
+                    SolverSelection::VALUES.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+        };
+        // Only the `.nl` path carries enough structure to classify; for
+        // forced non-NLP selections we re-read the parsed problem.
+        if !matches!(selection, SolverSelection::Auto | SolverSelection::Nlp) {
+            let class = match &args.problem {
+                ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
+                    Ok(prob) => classify_problem(&prob),
+                    Err(_) => pounce_cli::dispatch::ProblemClass::Nlp,
+                },
+                // Builtins are general NLP test problems.
+                ProblemSource::Builtin(_) => pounce_cli::dispatch::ProblemClass::Nlp,
+            };
+            if let Err(msg) = resolve_solver(class, selection) {
+                eprintln!("pounce: {msg}");
+                return ExitCode::from(2);
+            }
+        }
+        // `auto`/`nlp` and any matching forced selection fall through to
+        // the existing NLP solve below — no behavior change in Phase 1.
     }
 
     // Does the `.nl` ask for a parametric sensitivity step? When it
