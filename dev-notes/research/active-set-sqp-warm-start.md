@@ -1,12 +1,15 @@
 # Design note — Active-set SQP for warm-started NLP sequences
 
-**Status: design / proposed. Not yet implemented.** Research → plan
-half of the research → plan → implement workflow; written for review
-before any solver code lands. This note operationalizes the C1
-active-set SQP entry of
-[`future-work-roadmap.md`](future-work-roadmap.md) (§3.2, §5 Phase 5)
-and pins each algorithmic choice to the literature so the
-implementation phase has no remaining design discretion.
+**Status: implemented.** This note was originally the research →
+plan half of the research → plan → implement workflow that
+operationalized the C1 active-set SQP entry of
+[`future-work-roadmap.md`](future-work-roadmap.md) (§3.2, §5 Phase 5).
+The driver (Phase 5b/5c) has since landed and is wired through the
+Rust API, C ABI, Python bindings, and the GAMS link; see the user
+tutorial at
+[`docs/tutorials/active-set-sqp.md`](../../docs/tutorials/active-set-sqp.md).
+The note is retained as design rationale and pins each algorithmic
+choice to the literature.
 
 The target is a **state-of-the-art sparse active-set SQP solver** that
 (a) reuses pounce's NLP / derivative / sparse-linalg foundation, (b)

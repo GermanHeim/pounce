@@ -65,7 +65,8 @@ even while the rest of the solver is under churn.
   "problem":       { ... },
   "solution":      { ... },
   "statistics":    { ... },
-  "iterations":    [ ... ]   // optional, omitted when empty
+  "iterations":    [ ... ],  // optional, omitted when empty
+  "linear_solver": { ... }   // optional, omitted when backend did not report
 }
 ```
 
@@ -212,6 +213,27 @@ table. Fields:
 | `alpha_primal` | float | Primal step length. |
 | `alpha_primal_char` | string (1 char) | Single-character tag (`f`, `h`, `r`, etc.) matching the alpha-primal column of upstream's iter table. |
 | `ls_trials` | integer | Number of backtracking line-search trials this iter. |
+
+### `linear_solver` (object, optional)
+
+Aggregate post-mortem from the symmetric-indefinite linear backend
+that solved the KKT systems. Populated only when the backend
+self-instruments (the default FERAL backend does; HSL MA57 and
+custom backends plugged through `set_linear_backend_factory` do not).
+Omitted from JSON when no backend reported.
+
+| Field | Type | Notes |
+|---|---|---|
+| `solver_name` | string | Backend identifier (e.g. `"feral"`). |
+| `n_factors` | integer | Total numeric factorizations performed. |
+| `n_pattern_reuse` | integer | Factor calls that reused the existing symbolic pattern. |
+| `n_pattern_changes` | integer | Factor calls that triggered a re-analysis. |
+| `max_fill_ratio` | float \| omitted | Peak `nnz(L) / nnz(A)` observed across all factorizations. |
+| `min_abs_pivot` | float \| omitted | Smallest absolute pivot magnitude seen across all factorizations (diagnostic for near-singularity). |
+| `max_abs_pivot` | float \| omitted | Largest absolute pivot magnitude. |
+| `last_inertia` | `[int, int, int]` \| omitted | `(positive, negative, zero)` inertia of the final factor. Should match `(n, m, 0)` at a regular KKT optimum. |
+| `last_nnz_a` | integer \| omitted | Non-zero count of the assembled KKT matrix at the final factor. |
+| `last_nnz_l` | integer \| omitted | Non-zero count of the L-factor at the final factor. |
 
 ## Detail levels
 

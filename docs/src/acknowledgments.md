@@ -11,6 +11,19 @@ earlier memory-safe interior-point NLP optimizer in Rust by the same
 author (DOI
 [10.5281/zenodo.19542664](https://doi.org/10.5281/zenodo.19542664)).
 
+## Contributors
+
+- **David Bernal Neira** ([@bernalde](https://github.com/bernalde))
+  designed and prototyped the auxiliary-equality preprocessing pass
+  in [ripopt PR #32](https://github.com/jkitchin/ripopt/pull/32).
+  POUNCE's `pounce-presolve::auxiliary` Phase-0 orchestrator (issue
+  [#53](https://github.com/jkitchin/pounce/issues/53)) is a port of
+  that work — Hopcroft-Karp matching, Dulmage-Mendelsohn partition,
+  Tarjan SCC, block-triangular reduction, damped-Newton block
+  solver, reduction frame with multiplier recovery — and ships
+  with the `tutorial_flow_density{,_perturbed}.nl` and
+  `gaslib11_steady.nl` test fixtures David vendored.
+
 ## Key references
 
 - Wächter, A., Biegler, L.T. "On the implementation of an

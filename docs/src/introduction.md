@@ -26,14 +26,18 @@ factorization. The HSL MA57 backend is available behind the optional
 
 ## Status
 
-Work in progress. The algorithm-side core, NLP interface, line search,
-filter, barrier update, KKT solve, restoration phase, AMPL `.nl`
-reader, and CLI are in place and solve a wide range of NLPs from the
-standard test suites (Hock-Schittkowski, CUTEst, Mittelmann ampl-nlp,
-CHO parameter estimation, gas/water network design). The C ABI shim
-(`pounce-cinterface`) is scaffolded so existing PyIpopt / cyipopt /
-JuMP / AMPL clients can link against it; full coverage lands
-incrementally.
+Production-ready for the core IPM workflow. The algorithm-side core,
+NLP interface, line search, filter, barrier update (monotone +
+Mehrotra adaptive), KKT solve, restoration phase, AMPL `.nl` reader,
+the C ABI (`pounce-cinterface`), the Python wrapper (`pounce-solver`),
+and the CLI all solve a wide range of NLPs from the standard test
+suites (Hock-Schittkowski, CUTEst, Mittelmann ampl-nlp, CHO parameter
+estimation, gas/water network design). Sensitivity analysis (sIPOPT
+port), reduced-Hessian computation, the auxiliary-equality + FBBT
+presolve, and the active-set SQP path are all wired in and available
+behind option keys. Existing PyIpopt / cyipopt / JuMP / AMPL clients
+link against `libpounce_cinterface` in place of `libipopt`
+unchanged.
 
 ## License
 

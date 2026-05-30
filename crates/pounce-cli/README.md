@@ -131,6 +131,24 @@ The `pounce_sens` binary is retained as a thin backward-compatibility
 alias — `pounce_sens in.nl out.sol` is identical to `pounce in.nl
 out.sol` — so existing AMPL/solver scripts keep working unchanged.
 
+### Diagnostic dumps
+
+```sh
+pounce problem.nl --dump iterates:summary
+pounce problem.nl --dump kkt:5-10+L --dump-dir ./my-dump
+pounce problem.nl --dump kkt:5-10+L+Lvals
+```
+
+Per-iteration diagnostic captures land in `<dump-dir>` (default
+`./pounce-dump-<ts>/`) as JSONL streams. Categories:
+
+- `iterates:{summary,full}` — outer/restoration trajectory (issue #68).
+  Consumed by [`pounce-studio`](../pounce-studio-core).
+- `kkt[:spec][+L][+Lvals]` — augmented-system snapshots; `+L` adds the
+  LDLᵀ factor pattern, `+Lvals` adds factor values (issue #69).
+
+See `pounce --help` for the full grammar (`:5`, `:2-10`, `:5-:full`, …).
+
 ### Built-in problems
 
 ```sh
@@ -167,7 +185,35 @@ pounce as a Pyomo `SolverFactory` solver on top of this.
 ```sh
 pounce --help
 pounce --version          # also -v, -V
+pounce --about            # solver, license, FERAL/HSL backend, build target
 ```
+
+### Flag reference
+
+The recipes above cover the common paths; this is the full flag set for
+look-up. Trailing `KEY=VALUE` pairs are option overrides, not flags.
+
+| Flag | Argument | Notes |
+|------|----------|-------|
+| `--problem` | `NAME` | Run a built-in TNLP. See `--list-problems`. |
+| `--nl-file` | `PATH` | Explicit form of the positional `.nl` argument; useful when scripting alongside other flags. |
+| `--options-file` | `PATH` | Upstream-format options file; trailing `KEY=VALUE` pairs override it. |
+| `--sol-output` | `PATH` | Override the default `<input>.sol` output path. |
+| `--no-sol` | — | Suppress `.sol` writing entirely (used by harnesses that only consume `--json-output`). |
+| `--json-output` | `PATH` | Emit a `pounce.solve-report/v1` JSON report. |
+| `--json-detail` | `summary` \| `full` | Detail level for the JSON report (default `summary`). |
+| `--dump` | `cat[:spec][+L][+Lvals]` | Per-iteration diagnostic capture. May be repeated. |
+| `--dump-dir` | `PATH` | Override the default `./pounce-dump-<ts>/` location. |
+| `--dump-format` | `jsonl` | Reserved; `jsonl` is the only format today. |
+| `--sens-boundcheck` | — | Clamp the sensitivity-perturbed primal onto `[x_l, x_u]`. |
+| `--sens-bound-eps` | `EPS` | Tolerance for the boundcheck clamp. |
+| `--compute-red-hessian` | — | Compute the reduced Hessian over the `red_hessian` var-suffix set. |
+| `--rh-eigendecomp` | — | Also return the reduced-Hessian eigendecomposition. |
+| `-AMPL` | — | AMPL solver-protocol mode (exit-code contract; see [Exit codes](#exit-codes)). |
+| `--list-problems` | — | List the built-in TNLP names. |
+| `--about` | — | Print solver identity, license, linked linear backends, build target. |
+| `-h` / `--help` | — | Show the full grammar. |
+| `-v` / `-V` / `--version` | — | Crate version. |
 
 ## Exit codes
 

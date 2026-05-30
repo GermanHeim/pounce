@@ -124,6 +124,7 @@ structurally. All are off by default — set the master switch first:
 | `presolve`                              | `no`    | Master switch for the whole presolve layer. Off → wrapper is a no-op.          |
 | `presolve_bound_tightening`             | `yes`   | Phase 1 — Andersen-style bound propagation from linear rows.                   |
 | `presolve_redundant_constraint_removal` | `yes`   | Phase 2 — drop linear constraints already implied by current bounds.           |
+| `presolve_linear_eq_reduction`          | `no`    | Phase ≥2 — eliminate fixed singleton variables exposed by linear equalities.   |
 | `presolve_licq_check`                   | `yes`   | Phase 3 — detect rank-deficient equality blocks before the IPM starts.         |
 | `presolve_licq_action`                  | `warn`  | What to do on degeneracy: `warn` (just report) or `auto_l1` (turn on ℓ₁).      |
 | `presolve_warm_z_bounds`                | `yes`   | Phase 4 — warm-start bound multipliers when bounds get tightened by Phase 1.   |

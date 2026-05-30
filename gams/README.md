@@ -71,6 +71,23 @@ If a GAMS model sets `mymodel.optfile = 1`, POUNCE reads `pounce.opt`
 `keyword value` pair using POUNCE's option names; lines starting with `*`
 or `#` are comments. Integer, real, and string options are auto-detected.
 
+### Machine-readable solve report
+
+The GAMS link can write a structured `pounce.solve-report/v1` JSON
+report alongside the regular GAMS solution channels — set the
+`json_output` option in `pounce.opt`:
+
+```
+json_output  my_solve.json
+json_detail  full       * "summary" or "full"; default is "full"
+```
+
+At `json_detail full` the per-iteration trajectory is included. The
+file is identical to the CLI's `--json-output` and is consumable by
+the [`pounce-studio`](../crates/pounce-studio-core) tooling for
+post-hoc inspection. Schema reference:
+[`docs/src/schema/solve-report-v1.md`](../docs/src/schema/solve-report-v1.md).
+
 ### Active-set SQP with working-set warm start
 
 The Phase 5c SQP driver is opt-in via `pounce.opt`:
@@ -87,7 +104,7 @@ configuration is required — the GAMS-native marginal carry IS the
 warm-start channel.
 
 This mechanism (the §7.4(a) **marginal-based reconstruction** in
-`docs/research/active-set-sqp-warm-start.md`) is the same idiom
+`dev-notes/research/active-set-sqp-warm-start.md`) is the same idiom
 CONOPT, IPOPT, and KNITRO use under GAMS, and shares the same
 caveat: at degenerate active sets the marginal signs are
 ambiguous, so the reconstructed working set may differ from the

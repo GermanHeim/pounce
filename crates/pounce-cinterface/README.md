@@ -30,6 +30,23 @@ in the workspace root drops `libpounce_cinterface.{dylib,so}` into
 - `AddIpoptStrOption` / `AddIpoptIntOption` / `AddIpoptNumOption` —
   forward to the application's `OptionsList`.
 - `SetIntermediateCallback`.
+- Post-solve accessors: `GetIpoptIterCount`, `GetIpoptSolveTime`,
+  termination-detail getters.
+- `IpoptWriteSolveReport` — emits the structured
+  `pounce.solve-report/v1` JSON (see
+  [`pounce-solve-report`](../pounce-solve-report)) from the most
+  recent solve. Schema-compatible with the CLI's `--json-output`.
+- Working-set warm start: `IpoptGetWorkingSet`,
+  `IpoptSetWarmStartWorkingSet`, `IpoptClearWarmStartWorkingSet`,
+  `IpoptSolveWarmStart`.
+- Factor-once / solve-many session: `IpoptCreateSolver`,
+  `IpoptSolverSolve`, `IpoptSolverGetKktDim`, `IpoptSolverKktSolve`,
+  `IpoptSolverParametricStep`, `IpoptSolverReducedHessian`,
+  `IpoptFreeSolver`. Reuses the converged KKT factor across
+  parametric sweeps, reduced-Hessian queries, and raw back-solves.
+  The classic `IpoptSolve` API is unchanged and unaffected. See
+  [`docs/src/sessions.md`](../../docs/src/sessions.md) for the
+  walkthrough.
 
 All entry points are `extern "C"` and `#[no_mangle]`. Pointers are raw
 and the caller owns lifetimes; the `IpoptProblem` handle is opaque
@@ -37,13 +54,12 @@ and the caller owns lifetimes; the `IpoptProblem` handle is opaque
 
 ## Status
 
-Phase 11 of the port. The FFI surface, option setters, and
-`FreeIpoptProblem` / `SetIntermediateCallback` are working. `IpoptSolve`
-currently returns `InternalError`; end-to-end solve through the C ABI
-lands when the algorithm-side optimizer is fully driving real TNLPs
-through the option-table path (it already solves real problems through
-the native Rust `optimize_tnlp` entry point — see
-[`pounce-nlp`](../pounce-nlp)).
+Feature-complete for the upstream Ipopt C ABI surface. End-to-end
+solves run via `IpoptSolve` through the regular algorithm path; option
+forwarding, intermediate callback, post-solve stats, and the JSON
+solve-report writer are all wired. The C ABI is the path PyIpopt /
+cyipopt / JuMP / AMPL drivers take when they link
+`libpounce_cinterface` in place of `libipopt`.
 
 ## License
 

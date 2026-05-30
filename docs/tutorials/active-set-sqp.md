@@ -6,7 +6,7 @@ default IPM via the standard interface (`Problem.solve` in Python,
 `IpoptSolve` in C, `option nlp = pounce` in GAMS).
 
 The design rationale and algorithmic choices live in the
-[design note](../research/active-set-sqp-warm-start.md) — read
+[design note](../../dev-notes/research/active-set-sqp-warm-start.md) — read
 that if you want to know *why* the solver works the way it does.
 This tutorial covers *how to use* the solver: switching to the
 SQP path, carrying a working set across solves, and stitching
@@ -437,7 +437,7 @@ when the dense `n²` BFGS storage is the bottleneck (n ≥ ~1000).
 | C ABI                   | `crates/pounce-cinterface/src/lib.rs` + `include/pounce.h` |
 | Python binding          | `crates/pounce-py/src/{problem,warm_start}.rs`           |
 | GAMS link               | `gams/gams_pounce.c`                                     |
-| Design rationale        | `docs/research/active-set-sqp-warm-start.md`             |
+| Design rationale        | `dev-notes/research/active-set-sqp-warm-start.md`        |
 
 ## 9. Reading list
 

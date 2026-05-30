@@ -19,15 +19,16 @@ implement [`TNLP`](../pounce-nlp) and call
 | `ipopt_cq`      | Lazy-cached derived quantities (norms, residuals, ...)     | `IpIpoptCalculatedQuantities.*`   |
 | `kkt`           | Augmented system, perturbation handler, PD full-space solver, search-direction calculator | `Ip{AugSystemSolver,PdFullSpaceSolver,SearchDirCalculator}.*` |
 | `line_search`   | Filter + backtracking, second-order correction, watchdog   | `IpFilterLineSearch.{hpp,cpp}`    |
-| `mu`            | Barrier-parameter update (monotone)                        | `IpMonotoneMuUpdate.{hpp,cpp}`    |
+| `mu`            | Barrier-parameter update (monotone + Mehrotra adaptive)    | `IpMonotoneMuUpdate.{hpp,cpp}`, `IpAdaptiveMuUpdate.*` |
 | `conv_check`    | Optimality / acceptable-level / iteration-cap termination  | `IpOptErrorConvCheck.{hpp,cpp}`   |
 | `eq_mult`       | Equality-multiplier initial estimate                       | `IpEqMultCalculator.{hpp,cpp}`    |
 | `init`          | Starting-point projection and bound-multiplier seeding     | `IpDefaultIterateInitializer.*`   |
 | `hess`          | Exact / quasi-Newton Hessian dispatch                      | `IpHessianUpdater.{hpp,cpp}`      |
-| `scaling`       | NLP-side rescaling chain                                   | `IpNLPScalingObject.{hpp,cpp}`    |
 | `ipopt_alg`     | The main optimize() loop                                   | `IpIpoptAlg.{hpp,cpp}`            |
 | `alg_builder`   | Strategy wire-up (`BuildBasicAlgorithm`)                   | `IpAlgBuilder.{hpp,cpp}`          |
 | `application`   | `IpoptApplication` entry point                             | `IpoptApplication.{hpp,cpp}`      |
+| `sqp`           | Active-set SQP outer loop (Phase 5b)                       | new (pounce-only)                 |
+| `iterate_dump`  | `--dump iterates:{summary,full}` trajectory writer (#68)   | new (pounce-only)                 |
 | `timing_stats`  | Wall-clock accumulators                                    | `IpTimingStatistics.{hpp,cpp}`    |
 | `output`        | Per-iteration table                                        | `IpOrigIterationOutput.{hpp,cpp}` |
 
@@ -35,10 +36,14 @@ implement [`TNLP`](../pounce-nlp) and call
 
 `AlgorithmBuilder` carries enum knobs:
 
+- `AlgorithmChoice` — `IpoptAlgorithm` (default, the interior-point
+  filter line-search) or `ActiveSetSqp` (Phase 5b parametric active-set
+  SQP, backed by [`pounce-qp`](../pounce-qp)).
 - `LinearSolverChoice` — `Feral` (default) or `Ma57` (requires `ma57`).
-- `MuStrategyChoice` — `Monotone`. (Adaptive lands in Phase 10.)
-- `HessianApproxChoice` — `Exact` or `LBfgs` (exact landed first; L-BFGS
-  is wired up but not yet validated for all problem classes).
+- `LinearSystemScalingChoice` — `None`, `Mc19` (HSL), or `Ruiz` (pure-Rust).
+- `MuStrategyChoice` — `Monotone` (default) or `Adaptive` (Mehrotra
+  probing-corrector cascade).
+- `HessianApproxChoice` — `Exact` (default) or `LimitedMemory` (L-BFGS).
 - `LineSearchChoice` — `Filter`.
 - `NlpScalingChoice` — `None`, `Gradient`, `User`.
 

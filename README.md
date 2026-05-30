@@ -35,13 +35,17 @@ License: EPL-2.0 (same as upstream Ipopt).
 
 ## Status
 
-Work in progress. The algorithm-side core, NLP interface, line search,
-filter, barrier update, KKT solve, restoration phase, AMPL `.nl` reader,
-and CLI are in place and solve a wide range of NLPs from the standard
-test suites (Hock-Schittkowski, CUTEst, Mittelmann ampl-nlp, CHO
-parameter estimation, gas/water network design). The C ABI shim
-(`pounce-cinterface`) is scaffolded so existing PyIpopt / cyipopt / JuMP
-/ AMPL clients can link against it; full coverage lands incrementally.
+Production-ready for the core IPM workflow. The algorithm-side core,
+NLP interface, line search, filter, barrier update (monotone + Mehrotra
+adaptive), KKT solve, restoration phase, AMPL `.nl` reader, the C ABI
+(`pounce-cinterface`), the Python wrapper (`pounce-solver`), and the
+CLI all solve a wide range of NLPs from the standard test suites
+(Hock-Schittkowski, CUTEst, Mittelmann ampl-nlp, CHO parameter
+estimation, gas/water network design). Sensitivity analysis (sIPOPT
+port) and reduced-Hessian computation are wired end-to-end; the
+`pounce-presolve` pass (auxiliary-equality elimination + FBBT +
+bound-tightening) and the active-set SQP path (`pounce-qp`-backed)
+are available behind option keys.
 
 See `benchmarks/` for the comparison harness against upstream Ipopt.
 
@@ -69,8 +73,14 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-nlp`](crates/pounce-nlp)                 | TNLP trait, TNLPAdapter, `IpoptApplication` entry point (Ipopt `src/Interfaces`).                                             |
 | [`pounce-algorithm`](crates/pounce-algorithm)     | IteratesVector, IpoptData, calculated quantities, KKT, line search, mu update, conv check, main loop (Ipopt `src/Algorithm`). |
 | [`pounce-restoration`](crates/pounce-restoration) | Restoration phase (Ipopt `Algorithm/Resto*`).                                                                                 |
-| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem`.                                                               |
+| [`pounce-presolve`](crates/pounce-presolve)       | NLP preprocessing — auxiliary-equality elimination, FBBT, bound tightening, redundant-row removal.                            |
+| [`pounce-l1penalty`](crates/pounce-l1penalty)     | Thierry-Biegler ℓ₁-exact penalty-barrier wrapper for degenerate / MPCC problems.                                              |
+| [`pounce-sensitivity`](crates/pounce-sensitivity) | Post-optimal sensitivity + reduced-Hessian (port of upstream sIPOPT).                                                         |
+| [`pounce-qp`](crates/pounce-qp)                   | Sparse parametric active-set QP subproblem solver — drives the SQP path and the sensitivity corrector.                        |
+| [`pounce-solve-report`](crates/pounce-solve-report) | `pounce.solve-report/v1` JSON writer (shared by `pounce-cli --json-output` and `IpoptWriteSolveReport`).                     |
+| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem` / `IpoptWriteSolveReport`.                                     |
 | [`pounce-cli`](crates/pounce-cli)                 | The `pounce` command-line driver.                                                                                             |
+| [`pounce-studio-core`](crates/pounce-studio-core) | Solve-report / iter-dump parsers and diagnostic analysis (foundation for the `pounce-studio` GUI / MCP server).               |
 
 ## Build
 

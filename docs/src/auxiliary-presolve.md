@@ -8,15 +8,17 @@ problem the IPM sees. The IPM then handles the reduced problem,
 which is smaller, often better-conditioned, and sometimes solvable
 in zero iterations.
 
-The pass is a port of [ripopt PR #32][ripopt32] to pounce's TNLP
-wrapper. It lives entirely inside `pounce-presolve` and is enabled
-by setting two options:
+The pass is a port of [ripopt PR #32][ripopt32] by
+[David Bernal Neira][bernalde] to pounce's TNLP wrapper. It lives
+entirely inside `pounce-presolve` and is enabled by setting two
+options:
 
 ```sh
 pounce problem.nl presolve=yes presolve_auxiliary=yes
 ```
 
 [ripopt32]: https://github.com/jkitchin/ripopt/pull/32
+[bernalde]: https://github.com/bernalde
 
 ## What it does, in words
 
@@ -213,7 +215,11 @@ elimination + multiplier recovery.
 ## References
 
 - Issue tracking the port: [pounce#53][pounce53].
-- Upstream: [ripopt PR #32][ripopt32].
+- Upstream: [ripopt PR #32][ripopt32] by David Bernal Neira
+  ([@bernalde][bernalde]). The
+  `tutorial_flow_density{,_perturbed}.nl` and `gaslib11_steady.nl`
+  fixtures vendored into `benchmarks/preprocessing/` originate
+  from that ripopt PR.
 - Design notes: `dev-notes/auxiliary-equality-preprocessing.md` in
   the pounce repo.
 

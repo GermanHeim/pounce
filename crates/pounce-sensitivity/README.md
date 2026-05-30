@@ -6,11 +6,14 @@ computation for POUNCE. Port of upstream Ipopt's
 
 ## Status
 
-Internal crate; **Phase A** (this commit) — `SchurData` and `PCalculator`
-trait surface plus the `Index`-flavored implementations. Pure data-shuttling;
-no IPM interaction yet. The numerical machinery (`SensStepCalc`,
-`DenseGenSchurDriver`, `ReducedHessianCalculator`, `SensApplication`)
-lands in Phases B–E per the plan in [pounce#7][issue].
+Feature-complete for the standard sIPOPT workflow. The post-optimal
+sensitivity step (`SensStepCalc` + `DenseGenSchurDriver`), reduced-
+Hessian computation, and end-to-end `SensApplication` are all wired
+into the CLI: an AMPL `.nl` file declaring `sens_state_*` / `sens_init_constr`
+suffixes triggers auto-detection — no separate binary needed. Matches
+upstream sIPOPT's golden output to ~6e-9/component on the `parametric_cpp`
+fixture (see `pounce-cli/tests/pounce_sens_end_to_end.rs`). See the
+[CLI README](../pounce-cli/README.md#sensitivity-analysis) for usage.
 
 ## Algorithmic reference
 

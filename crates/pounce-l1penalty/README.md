@@ -19,21 +19,22 @@ stock filter line search thrashes on.
 
 ## Status
 
-- **Phase 1 (this crate today):** TNLP wrapper with fixed `ρ`,
-  default-off behind `SolverOptions::l1_exact_penalty_barrier`. Solution
-  back-projection (truncate `x`, recompute `f(x*)` and `c(x*)`) lives
-  here; multiplier mapping refines in Phase 2.
-- **Phase 2:** algorithm-side wiring tightens, including correct
-  multiplier reporting.
-- **Phase 3:** Byrd-Nocedal-Waltz dynamic ρ + honest infeasibility
-  upgrade.
-- **Phase 3.5:** opt-in auto-fallback on `Restoration_Failed` /
-  `Infeasible_Problem_Detected` / `Solved_To_Acceptable_Level` /
-  `Maximum_Iterations_Exceeded` / `Not_Enough_Degrees_Of_Freedom`.
-- **Phase 4:** MPCC paper reproduction (`benchmarks/mpcc/`).
+Feature-complete through Phase 3.5. Available in the CLI as both an
+explicit mode (`l1_exact_penalty_barrier=yes`) and an auto-fallback
+(`l1_fallback_on_restoration_failure=yes`) — see the
+[CLI README](../pounce-cli/README.md#degenerate-mpcc-nlps-l-exact-penalty-barrier-wrapper)
+for usage. The wrapper carries:
 
-See [pounce#10](https://github.com/jkitchin/pounce/issues/10) for the
-full plan.
+- TNLP wrapper with full solution back-projection and multiplier
+  recovery into the original variable space;
+- Byrd-Nocedal-Waltz dynamic-ρ outer loop with honest infeasibility
+  upgrade (saturated slacks → `Infeasible_Problem_Detected`);
+- opt-in auto-fallback on `Restoration_Failed`,
+  `Infeasible_Problem_Detected`, `Solved_To_Acceptable_Level`,
+  `Maximum_Iterations_Exceeded`, `Not_Enough_Degrees_Of_Freedom`.
+
+Outstanding: MPCC paper reproduction sweep (`benchmarks/mpcc/`).
+Tracking: [pounce#10](https://github.com/jkitchin/pounce/issues/10).
 
 ## Algorithmic reference
 

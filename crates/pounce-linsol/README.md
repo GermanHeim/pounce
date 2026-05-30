@@ -33,9 +33,14 @@ IPM's [`PdFullSpaceSolver`] depends on it.
 ## Scaling
 
 `TSymScalingMethod` is the scaling-strategy trait (port of
-`IpTSymScalingMethod.hpp`). `IdentityScalingMethod` is the ship-by-
-default null scaling; MC19-style equilibration plugs in here when
-needed.
+`IpTSymScalingMethod.hpp`). Three implementations ship:
+
+- `IdentityScalingMethod` — null scaling, the default.
+- `RuizScalingMethod` (this crate) — symmetric Ruiz ∞-norm
+  equilibration. Pure Rust. Selected by `linear_system_scaling = ruiz`.
+- `Mc19TSymScalingMethod` (in [`pounce-hsl`](../pounce-hsl)) — HSL
+  MC19 (Curtis-Reid) via `libcoinhsl`. Selected by
+  `linear_system_scaling = mc19`.
 
 ## License
 
