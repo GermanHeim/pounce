@@ -554,9 +554,7 @@ fn bench_warmup() -> usize {
 /// `solve_time`. The inner closure takes the problem by value and
 /// returns it so we can reuse the same `CutestProblem` across reps
 /// without re-loading the .dylib.
-fn best_of_n_pounce(
-    mut problem: CutestProblem,
-) -> (CutestResult, CutestProblem) {
+fn best_of_n_pounce(mut problem: CutestProblem) -> (CutestResult, CutestProblem) {
     let warmup = bench_warmup();
     let reps = bench_reps();
     for _ in 0..warmup {
