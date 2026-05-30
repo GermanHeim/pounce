@@ -423,6 +423,101 @@ Bool IpoptWriteSolveReport(
     const char   *detail
 );
 
+/* ===========================================================
+ * Factor-once / solve-many session API
+ *
+ * The Solver session keeps the converged KKT factor alive
+ * between calls so several follow-up operations (parametric
+ * sensitivity sweep, reduced Hessian over different pin
+ * sets, raw KKT back-solve) reuse the same factorization.
+ *
+ *   IpoptProblem prob = CreateIpoptProblem(...);
+ *   // ... AddIpoptStrOption / SetIntermediateCallback as usual
+ *   IpoptSolver sol = IpoptCreateSolver(&prob);       // consumes prob
+ *   IpoptSolverSolve(sol, x, g, &obj, ...);            // run the IPM
+ *   IpoptSolverParametricStep(sol, n_pins, pins, deltas, dx);
+ *   IpoptSolverReducedHessian(sol, n_pins, pins, 1.0, hr);
+ *   IpoptSolverKktSolve(sol, rhs, lhs);
+ *   IpoptFreeSolver(sol);
+ *
+ * The classic `IpoptSolve` API is unchanged and unaffected.
+ * =========================================================== */
+
+/** Opaque solver-session handle. */
+typedef struct IpoptSolverInfo* IpoptSolver;
+
+/**
+ * Construct a session from a prepared IpoptProblem. Consumes
+ * `*prob_handle` (the inner pointer is nulled out so the caller
+ * cannot accidentally double-free). Returns NULL on a NULL/empty
+ * input handle.
+ */
+IpoptSolver IpoptCreateSolver(IpoptProblem* prob_handle);
+
+/** Release a session handle. After this call the pointer is invalid. */
+void IpoptFreeSolver(IpoptSolver solver);
+
+/**
+ * Run the IPM. Same output buffer contract as IpoptSolve: `x` is
+ * in/out (initial guess in, solution out); `g`, `obj_val`,
+ * `mult_g`, `mult_x_L`, `mult_x_U` are out-only and may be NULL.
+ * `user_data` is threaded into the C callbacks unchanged.
+ */
+enum ApplicationReturnStatus IpoptSolverSolve(
+    IpoptSolver  solver,
+    Number      *x,
+    Number      *g,
+    Number      *obj_val,
+    Number      *mult_g,
+    Number      *mult_x_L,
+    Number      *mult_x_U,
+    UserDataPtr  user_data
+);
+
+/**
+ * Dimension of the augmented KKT system held by the session.
+ * Returns -1 on a NULL handle or before a successful Solve.
+ */
+Index IpoptSolverGetKktDim(IpoptSolver solver);
+
+/**
+ * Apply the converged KKT factor to `rhs` (length = KKT dim).
+ * Writes the result into `lhs`. Returns 1 (TRUE) on success,
+ * 0 (FALSE) on NULL inputs or absent factor.
+ */
+Bool IpoptSolverKktSolve(
+    IpoptSolver    solver,
+    const Number  *rhs,
+    Number        *lhs
+);
+
+/**
+ * Parametric step: given perturbations `deltas` on the constraints
+ * named by `pin_indices` (length `n_pins`), write the predicted
+ * primal step `dx` into `dx_out` (length n).
+ */
+Bool IpoptSolverParametricStep(
+    IpoptSolver    solver,
+    Index          n_pins,
+    const Index   *pin_indices,
+    const Number  *deltas,
+    Number        *dx_out
+);
+
+/**
+ * Reduced Hessian over the free directions left when the
+ * constraints in `pin_indices` are pinned. Writes a dense
+ * `(n - n_pins) x (n - n_pins)` matrix in row-major order to
+ * `hr_out`. `obj_scal` scales the objective contribution.
+ */
+Bool IpoptSolverReducedHessian(
+    IpoptSolver    solver,
+    Index          n_pins,
+    const Index   *pin_indices,
+    Number         obj_scal,
+    Number        *hr_out
+);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
