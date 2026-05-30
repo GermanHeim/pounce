@@ -394,7 +394,7 @@ fn pounce_status_label(s: SolverReturn) -> String {
     .to_string()
 }
 
-fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
+fn solve_with_ipopt_once(problem: &mut CutestProblem) -> CutestResult {
     let n = problem.n;
     let m = problem.m;
     let n_eq = problem.n_eq;
@@ -525,7 +525,84 @@ fn ma57_backend_factory() -> LinearBackendFactory {
     )
 }
 
+/// Number of timed repetitions per problem (best-of-N → report
+/// minimum solve_time). Override with `BENCH_REPS=N`. Default 5 keeps
+/// the variance on few-ms problems tractable (single-shot gave us
+/// ~7× run-to-run noise on tiny problems where thermal/OS-scheduling
+/// tail latency dominates the actual solve cost).
+fn bench_reps() -> usize {
+    std::env::var("BENCH_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+        .max(1)
+}
+
+/// Number of discarded warmup solves before timing begins. Override
+/// with `BENCH_WARMUP=K`. The warmup primes the allocator and any
+/// per-process state (linear-solver workspace allocations etc.) so
+/// the first *measured* solve isn't unfairly slow.
+fn bench_warmup() -> usize {
+    std::env::var("BENCH_WARMUP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+}
+
+/// Warmup + best-of-N driver. Calls the inner solve closure
+/// `warmup + reps` times, returns the result with the smallest
+/// `solve_time`. The inner closure takes the problem by value and
+/// returns it so we can reuse the same `CutestProblem` across reps
+/// without re-loading the .dylib.
+fn best_of_n_pounce(
+    mut problem: CutestProblem,
+) -> (CutestResult, CutestProblem) {
+    let warmup = bench_warmup();
+    let reps = bench_reps();
+    for _ in 0..warmup {
+        let (_, p) = solve_with_pounce_once(problem);
+        problem = p;
+    }
+    let mut best: Option<CutestResult> = None;
+    for _ in 0..reps {
+        let (r, p) = solve_with_pounce_once(problem);
+        problem = p;
+        match &best {
+            None => best = Some(r),
+            Some(b) if r.solve_time < b.solve_time => best = Some(r),
+            _ => {}
+        }
+    }
+    (best.unwrap(), problem)
+}
+
+fn best_of_n_ipopt(problem: &mut CutestProblem) -> CutestResult {
+    let warmup = bench_warmup();
+    let reps = bench_reps();
+    for _ in 0..warmup {
+        let _ = solve_with_ipopt_once(problem);
+    }
+    let mut best: Option<CutestResult> = None;
+    for _ in 0..reps {
+        let r = solve_with_ipopt_once(problem);
+        match &best {
+            None => best = Some(r),
+            Some(b) if r.solve_time < b.solve_time => best = Some(r),
+            _ => {}
+        }
+    }
+    best.unwrap()
+}
+
 fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
+    best_of_n_pounce(problem)
+}
+
+fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
+    best_of_n_ipopt(problem)
+}
+
+fn solve_with_pounce_once(problem: CutestProblem) -> (CutestResult, CutestProblem) {
     let n = problem.n;
     let m = problem.m;
     let n_eq = problem.n_eq;
