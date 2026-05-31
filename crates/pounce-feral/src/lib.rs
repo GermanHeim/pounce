@@ -898,7 +898,10 @@ mod tests {
         let ser = solve(FeralSolverInterface::serial());
         // [[2,1],[1,3]] x = [3,4] ⇒ x = [1, 1], same both ways.
         assert!((par[0] - 1.0).abs() < 1e-12 && (par[1] - 1.0).abs() < 1e-12);
-        assert_eq!(par, ser, "serial and parallel factors must agree bit-for-bit");
+        assert_eq!(
+            par, ser,
+            "serial and parallel factors must agree bit-for-bit"
+        );
     }
 
     /// Pounce emits some symmetric entries as upper-triangle

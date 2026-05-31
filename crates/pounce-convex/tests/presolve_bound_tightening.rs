@@ -34,7 +34,10 @@ fn assert_kkt(prob: &QpProblem, sol: &QpSolution, tol: f64) {
     for i in 0..n {
         let stat = g[i] + sol.z_ub[i] - sol.z_lb[i];
         assert!(stat.abs() < tol, "stationarity[{i}] = {stat}");
-        assert!(sol.z_lb[i] > -tol && sol.z_ub[i] > -tol, "bound dual sign [{i}]");
+        assert!(
+            sol.z_lb[i] > -tol && sol.z_ub[i] > -tol,
+            "bound dual sign [{i}]"
+        );
         assert!(
             sol.x[i] >= prob.lb_of(i) - tol && sol.x[i] <= prob.ub_of(i) + tol,
             "box [{i}]: {} in [{}, {}]",
@@ -42,8 +45,14 @@ fn assert_kkt(prob: &QpProblem, sol: &QpSolution, tol: f64) {
             prob.lb_of(i),
             prob.ub_of(i)
         );
-        assert!((sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < 1e-4, "lb comp [{i}]");
-        assert!((sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < 1e-4, "ub comp [{i}]");
+        assert!(
+            (sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < 1e-4,
+            "lb comp [{i}]"
+        );
+        assert!(
+            (sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < 1e-4,
+            "ub comp [{i}]"
+        );
     }
     let mut gx = vec![0.0; prob.m_ineq()];
     prob.g_mul(&sol.x, &mut gx);
@@ -64,7 +73,10 @@ fn assert_kkt(prob: &QpProblem, sol: &QpSolution, tol: f64) {
 struct Rng(u64);
 impl Rng {
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn unif(&mut self, lo: f64, hi: f64) -> f64 {
@@ -93,7 +105,10 @@ fn singleton_inequality_tightens_and_reattributes() {
     };
     match presolve(&prob) {
         PresolveOutcome::Reduced(ps) => assert!(ps.stats().tightened_bounds >= 1),
-        other => panic!("expected Reduced, got {:?}", matches!(other, PresolveOutcome::Reduced(_))),
+        other => panic!(
+            "expected Reduced, got {:?}",
+            matches!(other, PresolveOutcome::Reduced(_))
+        ),
     }
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
@@ -102,8 +117,16 @@ fn singleton_inequality_tightens_and_reattributes() {
     assert_kkt(&prob, &sol, 1e-5);
     // The force holding x0 is the row, not the (slack) real bound: the
     // inequality multiplier is positive and the bound multiplier ~0.
-    assert!(sol.z[0] > 0.1, "row multiplier should carry the force: {}", sol.z[0]);
-    assert!(sol.z_ub[0].abs() < 1e-5, "real bound slack ⇒ z_ub≈0: {}", sol.z_ub[0]);
+    assert!(
+        sol.z[0] > 0.1,
+        "row multiplier should carry the force: {}",
+        sol.z[0]
+    );
+    assert!(
+        sol.z_ub[0].abs() < 1e-5,
+        "real bound slack ⇒ z_ub≈0: {}",
+        sol.z_ub[0]
+    );
     let d = direct(&prob);
     assert!((sol.obj - d.obj).abs() < 1e-5);
 }
@@ -129,7 +152,12 @@ fn pair_inequality_tightening() {
     assert_kkt(&prob, &sol, 1e-5);
     let d = direct(&prob);
     for i in 0..2 {
-        assert!((sol.x[i] - d.x[i]).abs() < 1e-5, "x[{i}]: {} vs {}", sol.x[i], d.x[i]);
+        assert!(
+            (sol.x[i] - d.x[i]).abs() < 1e-5,
+            "x[{i}]: {} vs {}",
+            sol.x[i],
+            d.x[i]
+        );
     }
 }
 
@@ -145,8 +173,9 @@ fn randomized_bound_tightening_roundtrip() {
     for _ in 0..300 {
         let n = 6usize;
         // Strictly convex diagonal P and random linear cost.
-        let p_lower: Vec<Triplet> =
-            (0..n).map(|i| Triplet::new(i, i, rng.unif(0.5, 3.0))).collect();
+        let p_lower: Vec<Triplet> = (0..n)
+            .map(|i| Triplet::new(i, i, rng.unif(0.5, 3.0)))
+            .collect();
         let c: Vec<f64> = (0..n).map(|_| rng.unif(-8.0, 8.0)).collect();
         let lb = vec![0.0; n];
         let ub = vec![10.0; n];
@@ -208,7 +237,12 @@ fn randomized_bound_tightening_roundtrip() {
                 d.x[i]
             );
         }
-        assert!((sol.obj - d.obj).abs() < 1e-4, "obj {} vs {}", sol.obj, d.obj);
+        assert!(
+            (sol.obj - d.obj).abs() < 1e-4,
+            "obj {} vs {}",
+            sol.obj,
+            d.obj
+        );
         checked += 1;
     }
 
@@ -228,8 +262,9 @@ fn randomized_overlapping_tightening_roundtrip() {
 
     for _ in 0..300 {
         let n = 6usize;
-        let p_lower: Vec<Triplet> =
-            (0..n).map(|i| Triplet::new(i, i, rng.unif(0.5, 3.0))).collect();
+        let p_lower: Vec<Triplet> = (0..n)
+            .map(|i| Triplet::new(i, i, rng.unif(0.5, 3.0)))
+            .collect();
         let c: Vec<f64> = (0..n).map(|_| rng.unif(-8.0, 8.0)).collect();
 
         // Chain of overlapping pair inequalities: row i couples x_i, x_{i+1}.

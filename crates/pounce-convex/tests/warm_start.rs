@@ -64,7 +64,12 @@ fn warm_start_matches_cold_solution() {
 
     let pert = capped_qp(&[-1.2, -1.8, -0.6], 1.1);
     let cold = solve_qp_ipm(&pert, &opts, backend);
-    let warm = solve_qp_ipm_warm(&pert, &opts, &QpWarmStart::from_solution(&base_sol), backend);
+    let warm = solve_qp_ipm_warm(
+        &pert,
+        &opts,
+        &QpWarmStart::from_solution(&base_sol),
+        backend,
+    );
 
     assert_eq!(cold.status, QpStatus::Optimal);
     assert_eq!(warm.status, QpStatus::Optimal);
@@ -90,7 +95,12 @@ fn warm_start_matches_cold_with_bounds() {
 
     let pert = box_qp(&[-3.5, 5.5, -9.0]);
     let cold = solve_qp_ipm(&pert, &opts, backend);
-    let warm = solve_qp_ipm_warm(&pert, &opts, &QpWarmStart::from_solution(&base_sol), backend);
+    let warm = solve_qp_ipm_warm(
+        &pert,
+        &opts,
+        &QpWarmStart::from_solution(&base_sol),
+        backend,
+    );
 
     assert_eq!(warm.status, QpStatus::Optimal);
     for i in 0..pert.n {
@@ -120,7 +130,12 @@ fn warm_start_reduces_iterations_on_nearby_problem() {
     let pert = capped_qp(&c1, 5.1);
 
     let cold = solve_qp_ipm(&pert, &opts, backend);
-    let warm = solve_qp_ipm_warm(&pert, &opts, &QpWarmStart::from_solution(&base_sol), backend);
+    let warm = solve_qp_ipm_warm(
+        &pert,
+        &opts,
+        &QpWarmStart::from_solution(&base_sol),
+        backend,
+    );
     assert_eq!(cold.status, QpStatus::Optimal);
     assert_eq!(warm.status, QpStatus::Optimal);
 

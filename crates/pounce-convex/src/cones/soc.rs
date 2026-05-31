@@ -216,7 +216,11 @@ impl Cone for SecondOrderCone {
         // (which seeds `s = h − Gx` and the residuals), while the cone duals
         // restart centered. Magnitude is preserved so the scale is sensible.
         let center = |u: &mut [f64]| {
-            let mag = u.iter().fold(0.0_f64, |m, &v| m.max(v.abs())).max(floor).max(1.0);
+            let mag = u
+                .iter()
+                .fold(0.0_f64, |m, &v| m.max(v.abs()))
+                .max(floor)
+                .max(1.0);
             u.iter_mut().for_each(|v| *v = 0.0);
             u[0] = mag;
         };
@@ -350,7 +354,11 @@ mod tests {
         // Either on the determinant boundary or the step was capped at 1.
         assert!(alpha <= 1.0 + 1e-12);
         if alpha < 1.0 - 1e-9 {
-            assert!(SecondOrderCone::det(&p).abs() < 1e-7, "det={}", SecondOrderCone::det(&p));
+            assert!(
+                SecondOrderCone::det(&p).abs() < 1e-7,
+                "det={}",
+                SecondOrderCone::det(&p)
+            );
         }
     }
 
@@ -393,7 +401,12 @@ mod tests {
         let mut got = [0.0; 4];
         SecondOrderCone::apply_w2(eta, &w_bar, &dz, &mut got);
         for k in 0..4 {
-            assert!((got[k] - want[k]).abs() < 1e-12, "k={k}: {} vs {}", got[k], want[k]);
+            assert!(
+                (got[k] - want[k]).abs() < 1e-12,
+                "k={k}: {} vs {}",
+                got[k],
+                want[k]
+            );
         }
     }
 

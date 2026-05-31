@@ -208,7 +208,12 @@ fn soc_warm_start_matches_cold() {
     assert_socp_kkt(&pert, &warm, 1e-6);
     // SOC warm restarts the duals centered (stable), so the win is from
     // the primal proximity; it must not regress vs cold.
-    assert!(warm.iters <= cold.iters, "warm {} cold {}", warm.iters, cold.iters);
+    assert!(
+        warm.iters <= cold.iters,
+        "warm {} cold {}",
+        warm.iters,
+        cold.iters
+    );
 }
 
 /// A larger second-order cone (dim 12) — exercises the sparse
@@ -245,7 +250,12 @@ fn larger_soc_projection_sparse_kkt() {
     let sol = solve_socp_ipm(&prob, &[ConeSpec::SecondOrder(m)], &opts, backend);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
     for k in 0..m {
-        assert!((sol.x[k] - expect[k]).abs() < 1e-5, "x[{k}]={} want {}", sol.x[k], expect[k]);
+        assert!(
+            (sol.x[k] - expect[k]).abs() < 1e-5,
+            "x[{k}]={} want {}",
+            sol.x[k],
+            expect[k]
+        );
     }
     assert_socp_kkt(&prob, &sol, 1e-6);
 }

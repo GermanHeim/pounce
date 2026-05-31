@@ -53,11 +53,18 @@ fn conic_presolve_roundtrip_mixed() {
 
     let ps = match presolve_conic(&prob, &cones) {
         PresolveOutcome::Reduced(ps) => ps,
-        other => panic!("expected Reduced, got {:?}", matches!(other, PresolveOutcome::Reduced(_))),
+        other => panic!(
+            "expected Reduced, got {:?}",
+            matches!(other, PresolveOutcome::Reduced(_))
+        ),
     };
     // The duplicate orthant row is dropped; the SOC block survives intact.
     let rc = ps.reduced_cones(&cones);
-    assert_eq!(rc, vec![ConeSpec::SecondOrder(3), ConeSpec::Nonneg(1)], "reduced cones {rc:?}");
+    assert_eq!(
+        rc,
+        vec![ConeSpec::SecondOrder(3), ConeSpec::Nonneg(1)],
+        "reduced cones {rc:?}"
+    );
     assert_eq!(ps.reduced.m_ineq(), 4, "5 → 4 inequality rows");
 
     // Solve the reduced SOCP and postsolve to the original space.

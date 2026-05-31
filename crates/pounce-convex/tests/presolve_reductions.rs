@@ -65,7 +65,10 @@ fn assert_kkt_bounds(prob: &QpProblem, sol: &pounce_convex::QpSolution, tol: f64
     for i in 0..n {
         let stat = g[i] + sol.z_ub[i] - sol.z_lb[i];
         assert!(stat.abs() < tol, "stationarity[{i}] = {stat}");
-        assert!(sol.z_lb[i] > -tol && sol.z_ub[i] > -tol, "bound dual sign [{i}]");
+        assert!(
+            sol.z_lb[i] > -tol && sol.z_ub[i] > -tol,
+            "bound dual sign [{i}]"
+        );
         assert!(
             sol.x[i] >= prob.lb_of(i) - tol && sol.x[i] <= prob.ub_of(i) + tol,
             "box [{i}]: {} in [{}, {}]",
@@ -73,8 +76,14 @@ fn assert_kkt_bounds(prob: &QpProblem, sol: &pounce_convex::QpSolution, tol: f64
             prob.lb_of(i),
             prob.ub_of(i)
         );
-        assert!((sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < 1e-4, "lb comp [{i}]");
-        assert!((sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < 1e-4, "ub comp [{i}]");
+        assert!(
+            (sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < 1e-4,
+            "lb comp [{i}]"
+        );
+        assert!(
+            (sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < 1e-4,
+            "ub comp [{i}]"
+        );
     }
     let mut ax = vec![0.0; prob.m_eq()];
     prob.a_mul(&sol.x, &mut ax);
@@ -296,7 +305,12 @@ fn fixpoint_cascades_chain_of_fixings() {
     assert_eq!(sol.status, QpStatus::Optimal);
     let expect = [4.0, 5.0, 2.0, 3.0];
     for i in 0..4 {
-        assert!((sol.x[i] - expect[i]).abs() < 1e-6, "x[{i}]={} want {}", sol.x[i], expect[i]);
+        assert!(
+            (sol.x[i] - expect[i]).abs() < 1e-6,
+            "x[{i}]={} want {}",
+            sol.x[i],
+            expect[i]
+        );
     }
     assert_kkt(&prob, &sol, 1e-5);
 }
@@ -481,7 +495,12 @@ fn dominated_column_fixed_to_lower() {
     assert_kkt_bounds(&prob, &sol, 1e-5);
     let d = direct(&prob);
     for i in 0..3 {
-        assert!((sol.x[i] - d.x[i]).abs() < 1e-5, "x[{i}]: {} vs {}", sol.x[i], d.x[i]);
+        assert!(
+            (sol.x[i] - d.x[i]).abs() < 1e-5,
+            "x[{i}]: {} vs {}",
+            sol.x[i],
+            d.x[i]
+        );
     }
 }
 
@@ -516,7 +535,12 @@ fn dominated_column_fixed_to_upper() {
     assert_kkt_bounds(&prob, &sol, 1e-5);
     let d = direct(&prob);
     for i in 0..3 {
-        assert!((sol.x[i] - d.x[i]).abs() < 1e-5, "x[{i}]: {} vs {}", sol.x[i], d.x[i]);
+        assert!(
+            (sol.x[i] - d.x[i]).abs() < 1e-5,
+            "x[{i}]: {} vs {}",
+            sol.x[i],
+            d.x[i]
+        );
     }
 }
 
@@ -574,7 +598,11 @@ fn dominated_column_lp() {
     }
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
-    assert!(sol.x[1].abs() < 1e-6 && (sol.x[0] - 2.0).abs() < 1e-6, "x={:?}", sol.x);
+    assert!(
+        sol.x[1].abs() < 1e-6 && (sol.x[0] - 2.0).abs() < 1e-6,
+        "x={:?}",
+        sol.x
+    );
     assert_kkt_bounds(&prob, &sol, 1e-5);
 }
 

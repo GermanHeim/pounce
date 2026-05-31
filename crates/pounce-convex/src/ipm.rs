@@ -809,7 +809,14 @@ impl QpFactorization {
         // `run_ipm` refactors numerically per iteration). The same factor
         // object is reused across solves, so the AMD ordering / symbolic
         // factor is paid once at `build`.
-        let sol = run_ipm(&expanded, &self.cone, &self.opts, &kkt, &mut self.fact, warm);
+        let sol = run_ipm(
+            &expanded,
+            &self.cone,
+            &self.opts,
+            &kkt,
+            &mut self.fact,
+            warm,
+        );
         split_bound_duals(prob, &bound_rows, sol)
     }
 }
@@ -1043,8 +1050,9 @@ impl KktStructure {
         for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
             let zbase = n + m_eq + off;
-            let diag_pos: Vec<usize> =
-                (0..d).map(|i| coord_to_pos[&(zbase + i, zbase + i)]).collect();
+            let diag_pos: Vec<usize> = (0..d)
+                .map(|i| coord_to_pos[&(zbase + i, zbase + i)])
+                .collect();
             if *dense {
                 let u_pos = (0..d).map(|i| coord_to_pos[&(aux, zbase + i)]).collect();
                 let aux_pos = coord_to_pos[&(aux, aux)];

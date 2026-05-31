@@ -223,7 +223,8 @@ where
         cone.recover_ds(&s, &z, &r_c, &dz_aff, &mut ds_aff);
 
         // Affine step length over the cone and the τ/κ rays.
-        let mut alpha_aff = ray_step(tau, dtau_aff, opts.tau).min(ray_step(kappa, dkappa_aff, opts.tau));
+        let mut alpha_aff =
+            ray_step(tau, dtau_aff, opts.tau).min(ray_step(kappa, dkappa_aff, opts.tau));
         if m_ineq > 0 {
             alpha_aff = alpha_aff
                 .min(cone.max_step(&s, &ds_aff, opts.tau))
@@ -454,7 +455,11 @@ mod tests {
             lb: vec![],
             ub: vec![],
         };
-        assert_agrees(&prob, &[ConeSpec::Nonneg(1), ConeSpec::SecondOrder(3)], 1e-5);
+        assert_agrees(
+            &prob,
+            &[ConeSpec::Nonneg(1), ConeSpec::SecondOrder(3)],
+            1e-5,
+        );
     }
 
     /// Equality-constrained QP with a closed-form optimum:
@@ -532,7 +537,11 @@ mod tests {
         };
         let sol = assert_agrees(&prob, &[ConeSpec::SecondOrder(3)], 1e-5);
         // Constraint active: the optimum lies on the unit ball.
-        assert!((sol.x[0].hypot(sol.x[1]) - 1.0).abs() < 1e-5, "x {:?}", sol.x);
+        assert!(
+            (sol.x[0].hypot(sol.x[1]) - 1.0).abs() < 1e-5,
+            "x {:?}",
+            sol.x
+        );
     }
 
     /// Primal-infeasible LP: x ≥ 2 and x ≤ 1.

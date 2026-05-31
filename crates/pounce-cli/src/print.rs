@@ -220,6 +220,7 @@ pub fn logo_rows(color: bool) -> Vec<String> {
             r as f64 / (rows - 1) as f64
         }
     };
+    // Molten color for a claw cell at row `r` (0 = top, hottest).
     let molten = |r: usize| {
         let t = vfrac(r);
         if t < 0.5 {

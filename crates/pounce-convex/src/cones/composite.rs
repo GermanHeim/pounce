@@ -191,7 +191,11 @@ impl Cone for CompositeCone {
     fn scaling_diag(&self, s: &[f64], z: &[f64], out: &mut [f64]) {
         for (off, k) in &self.blocks {
             let d = k.dim();
-            k.scaling_diag(&s[*off..off + d], &z[*off..off + d], &mut out[*off..off + d]);
+            k.scaling_diag(
+                &s[*off..off + d],
+                &z[*off..off + d],
+                &mut out[*off..off + d],
+            );
         }
     }
 

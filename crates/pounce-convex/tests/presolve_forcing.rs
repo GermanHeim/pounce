@@ -41,12 +41,22 @@ fn assert_kkt(prob: &QpProblem, sol: &QpSolution) {
     let mut ax = vec![0.0; me];
     prob.a_mul(&sol.x, &mut ax);
     for i in 0..me {
-        assert!((ax[i] - prob.b[i]).abs() < TOL, "Ax=b row {i}: {} vs {}", ax[i], prob.b[i]);
+        assert!(
+            (ax[i] - prob.b[i]).abs() < TOL,
+            "Ax=b row {i}: {} vs {}",
+            ax[i],
+            prob.b[i]
+        );
     }
     let mut gx = vec![0.0; mi];
     prob.g_mul(&sol.x, &mut gx);
     for i in 0..mi {
-        assert!(gx[i] <= prob.h[i] + TOL, "Gx≤h row {i}: {} vs {}", gx[i], prob.h[i]);
+        assert!(
+            gx[i] <= prob.h[i] + TOL,
+            "Gx≤h row {i}: {} vs {}",
+            gx[i],
+            prob.h[i]
+        );
     }
     for i in 0..n {
         assert!(
@@ -87,8 +97,14 @@ fn assert_kkt(prob: &QpProblem, sol: &QpSolution) {
         );
     }
     for i in 0..n {
-        assert!((sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < TOL, "lb comp {i}");
-        assert!((sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < TOL, "ub comp {i}");
+        assert!(
+            (sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < TOL,
+            "lb comp {i}"
+        );
+        assert!(
+            (sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < TOL,
+            "ub comp {i}"
+        );
     }
 }
 
@@ -114,16 +130,29 @@ fn inequality_forcing_to_lower_bounds() {
         lb: vec![0.0, 0.0],
         ub: vec![5.0, 5.0],
     };
-    assert_eq!(forcing_rows(&prob), 1, "the row should be detected as forcing");
+    assert_eq!(
+        forcing_rows(&prob),
+        1,
+        "the row should be detected as forcing"
+    );
 
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
-    assert!(sol.x[0].abs() < TOL && sol.x[1].abs() < TOL, "x pinned to 0: {:?}", sol.x);
+    assert!(
+        sol.x[0].abs() < TOL && sol.x[1].abs() < TOL,
+        "x pinned to 0: {:?}",
+        sol.x
+    );
     assert_kkt(&prob, &sol);
     // Primal matches the direct solve (unique for strictly convex P).
     let d = direct(&prob);
     assert!((sol.x[0] - d.x[0]).abs() < TOL && (sol.x[1] - d.x[1]).abs() < TOL);
-    assert!((sol.obj - d.obj).abs() < TOL, "obj {} vs {}", sol.obj, d.obj);
+    assert!(
+        (sol.obj - d.obj).abs() < TOL,
+        "obj {} vs {}",
+        sol.obj,
+        d.obj
+    );
 }
 
 #[test]
@@ -144,7 +173,11 @@ fn inequality_forcing_with_mixed_signs() {
     assert_eq!(forcing_rows(&prob), 1);
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
-    assert!((sol.x[0]).abs() < TOL && (sol.x[1] - 5.0).abs() < TOL, "x={:?}", sol.x);
+    assert!(
+        (sol.x[0]).abs() < TOL && (sol.x[1] - 5.0).abs() < TOL,
+        "x={:?}",
+        sol.x
+    );
     assert_kkt(&prob, &sol);
 }
 
@@ -165,7 +198,11 @@ fn equality_forcing_min_vertex() {
     assert_eq!(forcing_rows(&prob), 1);
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
-    assert!(sol.x[0].abs() < TOL && sol.x[1].abs() < TOL, "x={:?}", sol.x);
+    assert!(
+        sol.x[0].abs() < TOL && sol.x[1].abs() < TOL,
+        "x={:?}",
+        sol.x
+    );
     assert_kkt(&prob, &sol);
 }
 
@@ -186,7 +223,11 @@ fn equality_forcing_max_vertex() {
     assert_eq!(forcing_rows(&prob), 1);
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
-    assert!((sol.x[0] - 4.0).abs() < TOL && (sol.x[1] - 4.0).abs() < TOL, "x={:?}", sol.x);
+    assert!(
+        (sol.x[0] - 4.0).abs() < TOL && (sol.x[1] - 4.0).abs() < TOL,
+        "x={:?}",
+        sol.x
+    );
     assert_kkt(&prob, &sol);
 }
 
@@ -216,7 +257,11 @@ fn overlapping_forcing_rows_resolved_by_fixpoint() {
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
     for i in 0..3 {
-        assert!(sol.x[i].abs() < 1e-6, "x[{i}]={} (all pinned to 0)", sol.x[i]);
+        assert!(
+            sol.x[i].abs() < 1e-6,
+            "x[{i}]={} (all pinned to 0)",
+            sol.x[i]
+        );
     }
     assert_kkt(&prob, &sol);
 }
@@ -245,10 +290,19 @@ fn forcing_combined_with_other_rows() {
     assert_eq!(forcing_rows(&prob), 1);
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
-    assert!(sol.x[0].abs() < TOL && sol.x[1].abs() < TOL, "forced x={:?}", &sol.x[..2]);
+    assert!(
+        sol.x[0].abs() < TOL && sol.x[1].abs() < TOL,
+        "forced x={:?}",
+        &sol.x[..2]
+    );
     assert_kkt(&prob, &sol);
     let d = direct(&prob);
     for i in 0..4 {
-        assert!((sol.x[i] - d.x[i]).abs() < TOL, "x[{i}]: {} vs {}", sol.x[i], d.x[i]);
+        assert!(
+            (sol.x[i] - d.x[i]).abs() < TOL,
+            "x[{i}]: {} vs {}",
+            sol.x[i],
+            d.x[i]
+        );
     }
 }

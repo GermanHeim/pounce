@@ -620,46 +620,49 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     // vertex when `at_max` is false), recording the reduction. Returns
     // false (skipped) if any column is already fixed/substituted/forced.
     // `row_entries` is the row's `(col, coef)` list, all coefficients nonzero.
-    let try_force =
-        |row_entries: &[(usize, f64)],
-         orig_row: usize,
-         is_equality: bool,
-         at_max: bool,
-         fixed: &mut [Option<f64>],
-         forced_touched: &mut [bool],
-         stack: &mut Vec<Reduction>|
-         -> bool {
-            // Every involved column must be free to fix and not shared with
-            // another forcing row.
-            for &(c, _) in row_entries {
-                if fixed[c].is_some() || substituted[c] || forced_touched[c] {
-                    return false;
-                }
+    let try_force = |row_entries: &[(usize, f64)],
+                     orig_row: usize,
+                     is_equality: bool,
+                     at_max: bool,
+                     fixed: &mut [Option<f64>],
+                     forced_touched: &mut [bool],
+                     stack: &mut Vec<Reduction>|
+     -> bool {
+        // Every involved column must be free to fix and not shared with
+        // another forcing row.
+        for &(c, _) in row_entries {
+            if fixed[c].is_some() || substituted[c] || forced_touched[c] {
+                return false;
             }
-            let mut cols = Vec::with_capacity(row_entries.len());
-            for &(c, coef) in row_entries {
-                // Vertex bound: min-activity puts coef>0 at lb, coef<0 at
-                // ub; max-activity is the mirror.
-                let at_upper = if at_max { coef > 0.0 } else { coef < 0.0 };
-                let value = if at_upper { prob.ub_of(c) } else { prob.lb_of(c) };
-                // A forcing vertex requires finite bounds; guard anyway.
-                if !value.is_finite() || value.abs() >= BOUND_INF {
-                    return false;
-                }
-                cols.push((c, coef, value, at_upper));
+        }
+        let mut cols = Vec::with_capacity(row_entries.len());
+        for &(c, coef) in row_entries {
+            // Vertex bound: min-activity puts coef>0 at lb, coef<0 at
+            // ub; max-activity is the mirror.
+            let at_upper = if at_max { coef > 0.0 } else { coef < 0.0 };
+            let value = if at_upper {
+                prob.ub_of(c)
+            } else {
+                prob.lb_of(c)
+            };
+            // A forcing vertex requires finite bounds; guard anyway.
+            if !value.is_finite() || value.abs() >= BOUND_INF {
+                return false;
             }
-            for &(c, _, value, _) in &cols {
-                fixed[c] = Some(value);
-                forced_touched[c] = true;
-            }
-            stack.push(Reduction::ForcingRow {
-                row: orig_row,
-                is_equality,
-                at_max,
-                cols,
-            });
-            true
-        };
+            cols.push((c, coef, value, at_upper));
+        }
+        for &(c, _, value, _) in &cols {
+            fixed[c] = Some(value);
+            forced_touched[c] = true;
+        }
+        stack.push(Reduction::ForcingRow {
+            row: orig_row,
+            is_equality,
+            at_max,
+            cols,
+        });
+        true
+    };
 
     for row in 0..m_ineq {
         if ineq_dropped[row] || is_soc_row(row) || g_by_row[row].is_empty() {
@@ -788,8 +791,9 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     // columns are kept (not fixed/substituted) and disjoint from every
     // other accepted source row — a conservative but always-correct
     // restriction, exactly like forcing's disjoint-column rule.
-    let reduction_touched: Vec<bool> =
-        (0..n).map(|c| fixed[c].is_some() || substituted[c]).collect();
+    let reduction_touched: Vec<bool> = (0..n)
+        .map(|c| fixed[c].is_some() || substituted[c])
+        .collect();
     let mut bt_col_used = vec![false; n];
     let row_is_clean = |entries: &[(usize, f64)], used: &[bool]| {
         entries
@@ -801,73 +805,72 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     // (inequality `≤ h`: `lo = −∞, hi = h`; equality: `lo = hi = b`).
     // `None` ⇒ a detected empty domain (infeasible); `Some(k)` ⇒ `k` bounds
     // were tightened.
-    let tighten_from_row =
-        |entries: &[(usize, f64)],
-         lo: f64,
-         hi: f64,
-         row_idx: usize,
-         is_eq: bool,
-         tlb: &mut [f64],
-         tub: &mut [f64],
-         ub_src: &mut [Option<(usize, f64, bool)>],
-         lb_src: &mut [Option<(usize, f64, bool)>]|
-         -> Option<usize> {
-            let (amin, amax) = activity(entries, &|c| tlb[c], &|c| tub[c]);
-            // Compute all implied bounds against the row-start state, then
-            // apply (so within-row order doesn't matter).
-            let mut updates: Vec<(usize, bool, f64, f64)> = Vec::new(); // (col,is_upper,val,coef)
-            for &(k, a) in entries {
-                if fixed[k].is_some() || a == 0.0 {
-                    continue;
-                }
-                let contrib_min = if a > 0.0 { a * tlb[k] } else { a * tub[k] };
-                let contrib_max = if a > 0.0 { a * tub[k] } else { a * tlb[k] };
-                let amin_mk = amin - contrib_min;
-                let amax_mk = amax - contrib_max;
-                if hi.is_finite() {
-                    let val = (hi - amin_mk) / a;
-                    if val.is_finite() {
-                        if a > 0.0 {
-                            if val < tub[k] - BOUND_FEAS_TOL {
-                                updates.push((k, true, val, a));
-                            }
-                        } else if val > tlb[k] + BOUND_FEAS_TOL {
-                            updates.push((k, false, val, a));
-                        }
-                    }
-                }
-                if lo.is_finite() {
-                    let val = (lo - amax_mk) / a;
-                    if val.is_finite() {
-                        if a > 0.0 {
-                            if val > tlb[k] + BOUND_FEAS_TOL {
-                                updates.push((k, false, val, a));
-                            }
-                        } else if val < tub[k] - BOUND_FEAS_TOL {
+    let tighten_from_row = |entries: &[(usize, f64)],
+                            lo: f64,
+                            hi: f64,
+                            row_idx: usize,
+                            is_eq: bool,
+                            tlb: &mut [f64],
+                            tub: &mut [f64],
+                            ub_src: &mut [Option<(usize, f64, bool)>],
+                            lb_src: &mut [Option<(usize, f64, bool)>]|
+     -> Option<usize> {
+        let (amin, amax) = activity(entries, &|c| tlb[c], &|c| tub[c]);
+        // Compute all implied bounds against the row-start state, then
+        // apply (so within-row order doesn't matter).
+        let mut updates: Vec<(usize, bool, f64, f64)> = Vec::new(); // (col,is_upper,val,coef)
+        for &(k, a) in entries {
+            if fixed[k].is_some() || a == 0.0 {
+                continue;
+            }
+            let contrib_min = if a > 0.0 { a * tlb[k] } else { a * tub[k] };
+            let contrib_max = if a > 0.0 { a * tub[k] } else { a * tlb[k] };
+            let amin_mk = amin - contrib_min;
+            let amax_mk = amax - contrib_max;
+            if hi.is_finite() {
+                let val = (hi - amin_mk) / a;
+                if val.is_finite() {
+                    if a > 0.0 {
+                        if val < tub[k] - BOUND_FEAS_TOL {
                             updates.push((k, true, val, a));
                         }
+                    } else if val > tlb[k] + BOUND_FEAS_TOL {
+                        updates.push((k, false, val, a));
                     }
                 }
             }
-            let mut tightened = 0usize;
-            for (k, is_upper, val, a) in updates {
-                if is_upper {
-                    if val < tub[k] - BOUND_FEAS_TOL {
-                        tub[k] = val;
-                        ub_src[k] = Some((row_idx, a, is_eq));
-                        tightened += 1;
+            if lo.is_finite() {
+                let val = (lo - amax_mk) / a;
+                if val.is_finite() {
+                    if a > 0.0 {
+                        if val > tlb[k] + BOUND_FEAS_TOL {
+                            updates.push((k, false, val, a));
+                        }
+                    } else if val < tub[k] - BOUND_FEAS_TOL {
+                        updates.push((k, true, val, a));
                     }
-                } else if val > tlb[k] + BOUND_FEAS_TOL {
-                    tlb[k] = val;
-                    lb_src[k] = Some((row_idx, a, is_eq));
+                }
+            }
+        }
+        let mut tightened = 0usize;
+        for (k, is_upper, val, a) in updates {
+            if is_upper {
+                if val < tub[k] - BOUND_FEAS_TOL {
+                    tub[k] = val;
+                    ub_src[k] = Some((row_idx, a, is_eq));
                     tightened += 1;
                 }
-                if tlb[k] > tub[k] + BOUND_FEAS_TOL {
-                    return None;
-                }
+            } else if val > tlb[k] + BOUND_FEAS_TOL {
+                tlb[k] = val;
+                lb_src[k] = Some((row_idx, a, is_eq));
+                tightened += 1;
             }
-            Some(tightened)
-        };
+            if tlb[k] > tub[k] + BOUND_FEAS_TOL {
+                return None;
+            }
+        }
+        Some(tightened)
+    };
 
     // A source row claims its columns (blocking overlapping sources, so the
     // re-attributions stay independent) only when it *actually* tightens —
@@ -905,7 +908,9 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         }
     }
     for row in 0..m_eq {
-        if eq_dropped[row] || a_by_row[row].is_empty() || !row_is_clean(&a_by_row[row], &bt_col_used)
+        if eq_dropped[row]
+            || a_by_row[row].is_empty()
+            || !row_is_clean(&a_by_row[row], &bt_col_used)
         {
             continue;
         }
@@ -1068,8 +1073,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     };
     // SOC rows are coupled and must survive verbatim — exclude them from
     // parallel/duplicate merging.
-    let ineq_rows =
-        dedup_rows(ineq_rows, false, soc_row).expect("ineq dedup never infeasible");
+    let ineq_rows = dedup_rows(ineq_rows, false, soc_row).expect("ineq dedup never infeasible");
 
     // --- flatten surviving rows to triplets + kept-row maps ---
     let mut kept_eq = Vec::with_capacity(eq_rows.len());
@@ -1288,8 +1292,10 @@ fn dedup_rows(rows: Vec<Row>, is_equality: bool, protected: &[bool]) -> Result<V
 
     // Parallel: normalize + hash each row (PaPILO-style hashing-based
     // pairing, generalized to scalar multiples).
-    let norms: Vec<Vec<(usize, f64)>> =
-        rows.par_iter().map(|r| normalized_coeffs(r, is_equality)).collect();
+    let norms: Vec<Vec<(usize, f64)>> = rows
+        .par_iter()
+        .map(|r| normalized_coeffs(r, is_equality))
+        .collect();
     let sigs: Vec<u64> = norms.par_iter().map(|n| parallel_signature(n)).collect();
 
     // Group row indices by signature (serial; small). Protected rows are
@@ -1608,7 +1614,11 @@ impl Presolve {
                 cols,
             } = r
             {
-                let mut mult = if *at_max { f64::INFINITY } else { f64::NEG_INFINITY };
+                let mut mult = if *at_max {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                };
                 for &(col, coef, _, _) in cols {
                     let t = -grad[col] / coef;
                     mult = if *at_max { mult.min(t) } else { mult.max(t) };
