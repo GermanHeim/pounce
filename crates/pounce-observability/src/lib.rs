@@ -267,7 +267,14 @@ fn install() {
     // it carries its own target filter. It is constructed inside each
     // branch so its subscriber type parameter is inferred per-branch.
     if want_json {
-        let collector = IterCollectorLayer.with_filter(filter_fn(|m| m.target() == ITER_TARGET));
+        let collector = IterCollectorLayer.with_filter(filter_fn(|m| {
+            // Admit spans (so `event_scope` can see the `restoration`
+            // ancestor for scoping) plus the iteration event itself.
+            // A per-layer filter is required so the collector does not
+            // force every callsite globally enabled; without admitting
+            // spans here the filtered Context would hide span ancestry.
+            m.is_span() || m.target() == ITER_TARGET
+        }));
         let json_layer = tracing_subscriber::fmt::layer()
             .json()
             .with_writer(std::io::stderr)
@@ -277,7 +284,14 @@ fn install() {
             .with(collector)
             .try_init();
     } else {
-        let collector = IterCollectorLayer.with_filter(filter_fn(|m| m.target() == ITER_TARGET));
+        let collector = IterCollectorLayer.with_filter(filter_fn(|m| {
+            // Admit spans (so `event_scope` can see the `restoration`
+            // ancestor for scoping) plus the iteration event itself.
+            // A per-layer filter is required so the collector does not
+            // force every callsite globally enabled; without admitting
+            // spans here the filtered Context would hide span ancestry.
+            m.is_span() || m.target() == ITER_TARGET
+        }));
         let ansi = ansi_enabled();
         let text_layer = tracing_subscriber::fmt::layer()
             .event_format(TigerFormat)
@@ -375,6 +389,48 @@ mod tests {
         assert_eq!(outer_got.len(), 2);
         assert_eq!(outer_got[0].iter, 0);
         assert_eq!(outer_got[1].iter, 1);
+    }
+
+    #[test]
+    fn collector_excludes_restoration_nested_iterations() {
+        use tracing_subscriber::filter::filter_fn;
+        use tracing_subscriber::prelude::*;
+
+        fn emit(iter: i64, ch: char) {
+            let s = ch.to_string();
+            tracing::info!(
+                target: ITER_TARGET,
+                iter = iter,
+                objective = 0.0,
+                alpha_primal = 1.0,
+                alpha_char = s.as_str(),
+            );
+        }
+
+        // Same layer wiring as `install()`: the filter must admit spans
+        // so the collector's `event_scope` can see the `restoration`
+        // ancestor. Regression guard for the per-layer-filter bug where
+        // a `target`-only filter hid span ancestry and let inner
+        // restoration iterations leak into the report.
+        let collector = IterCollectorLayer
+            .with_filter(filter_fn(|m| m.is_span() || m.target() == ITER_TARGET));
+        let subscriber = tracing_subscriber::registry().with(collector);
+
+        let captured = tracing::subscriber::with_default(subscriber, || {
+            let guard = IterCaptureGuard::start();
+            emit(0, ' '); // outer -> captured
+            {
+                let _resto = tracing::info_span!("restoration").entered();
+                let _inner_solve = tracing::info_span!("solve").entered();
+                let _inner_iter = tracing::info_span!("iteration").entered();
+                emit(99, 'R'); // inner restoration sub-solve -> excluded
+            }
+            emit(1, ' '); // outer -> captured
+            guard.finish()
+        });
+
+        let iters: Vec<i32> = captured.iter().map(|r| r.iter).collect();
+        assert_eq!(iters, vec![0, 1], "inner restoration iteration leaked: {iters:?}");
     }
 
     #[test]
