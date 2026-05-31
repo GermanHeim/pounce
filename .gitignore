@@ -85,6 +85,9 @@ python/dist/
 python/examples/*.png
 python/*.egg-info/
 
+# Local virtualenvs (e.g. for building the extension + running notebooks)
+.venv/
+
 # Claude Code local state
 .claude/
 
