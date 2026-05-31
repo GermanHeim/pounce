@@ -56,10 +56,11 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.scipy.linalg import block_diag
 
 from .. import _pounce
 
-__all__ = ["solve_qp", "solve_qp_batch", "QpLayer"]
+__all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
 # Active-set tolerance for the backward pass: an inequality counts as
 # active when its multiplier is above this (complementarity slackness).
@@ -583,3 +584,152 @@ class QpLayer:
             max_iter=self._max_iter,
             warm_start=warm_start,
         )
+
+
+# --- Differentiable SOCP (cone-aware OptNet implicit differentiation) ----
+#
+# Generalizes the QP backward to a product of nonnegative-orthant and
+# second-order cones. The only change in the KKT differential is the
+# complementarity row: the orthant's diagonal scalings `diag(z)`,
+# `diag(slack)` become the cone's **arrow operators** `Arw(z)`, `Arw(slack)`
+# (block-diagonal; an orthant block stays diagonal). The forward solve calls
+# the cone-capable `_pounce.solve_socp`.
+
+
+def _normalize_socp_cones(cones):
+    """Coerce cone specs into ``((is_soc, dim), …)`` (static) and the
+    ``[(kind, dim), …]`` form the binding wants. Ints are second-order."""
+    static = []
+    specs = []
+    for spec in cones:
+        if isinstance(spec, (tuple, list)) and len(spec) == 2:
+            kind, d = str(spec[0]).lower(), int(spec[1])
+        elif isinstance(spec, int):
+            kind, d = "soc", int(spec)
+        else:
+            raise ValueError(f"bad cone spec {spec!r}")
+        is_soc = kind in ("soc", "q", "secondorder")
+        static.append((is_soc, d))
+        specs.append(("soc" if is_soc else "nonneg", d))
+    return tuple(static), specs
+
+
+def _arrow(v):
+    """Arrow matrix ``Arw(v) = [[v₀, v₁ᵀ], [v₁, v₀ I]]`` of a cone block."""
+    m = v.shape[0]
+    if m == 1:
+        return v.reshape(1, 1)
+    v0, v1 = v[0], v[1:]
+    top = jnp.concatenate([v0.reshape(1, 1), v1.reshape(1, -1)], axis=1)
+    bot = jnp.concatenate([v1.reshape(-1, 1), v0 * jnp.eye(m - 1)], axis=1)
+    return jnp.concatenate([top, bot], axis=0)
+
+
+def _scaling_blockdiag(v, cones):
+    """Block-diagonal cone scaling: ``Arw(v_block)`` for a second-order
+    block, ``diag(v_block)`` for an orthant block."""
+    blocks = []
+    off = 0
+    for is_soc, d in cones:
+        vb = v[off : off + d]
+        blocks.append(_arrow(vb) if is_soc else jnp.diag(vb))
+        off += d
+    return block_diag(*blocks) if blocks else jnp.zeros((0, 0))
+
+
+def _socp_backward(P, G, A, h, x, lam, nu, gx, cones):
+    """Cone-aware OptNet backward (cf. :func:`_kkt_backward`). The
+    complementarity row uses the arrow operators of the cones."""
+    n = x.shape[0]
+    m_g = G.shape[0]
+    m_a = A.shape[0]
+    slack = G @ x - h
+    arw_z = _scaling_blockdiag(lam, cones)
+    arw_slack = _scaling_blockdiag(slack, cones)
+    zero_ga = jnp.zeros((m_g, m_a))
+    zero_ag = jnp.zeros((m_a, m_g))
+    zero_aa = jnp.zeros((m_a, m_a))
+    top = jnp.concatenate([P, G.T, A.T], axis=1)
+    mid = jnp.concatenate([arw_z @ G, arw_slack, zero_ga], axis=1)
+    bot = jnp.concatenate([A, zero_ag, zero_aa], axis=1)
+    kkt = jnp.concatenate([top, mid, bot], axis=0)
+    rhs = -jnp.concatenate([gx, jnp.zeros(m_g), jnp.zeros(m_a)])
+    d = jnp.linalg.solve(kkt, rhs)
+    d_x = d[:n]
+    d_lam = d[n : n + m_g]
+    d_nu = d[n + m_g :]
+    grad_c = d_x
+    grad_h = -d_lam
+    grad_b = -d_nu
+    grad_P = 0.5 * (jnp.outer(d_x, x) + jnp.outer(x, d_x))
+    grad_G = jnp.outer(d_lam, x) + jnp.outer(lam, d_x)
+    grad_A = jnp.outer(d_nu, x) + jnp.outer(nu, d_x)
+    return grad_P, grad_c, grad_G, grad_h, grad_A, grad_b
+
+
+def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
+    """Host-side SOCP forward via pounce-convex. Returns (x, z, y)."""
+    m_g = G.shape[0]
+    m_a = A.shape[0]
+    prob = _build_problem(P, c, G, h, A, b)
+    d = _pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter)
+    x = np.asarray(d["x"], dtype=np.float64)
+    lam, nu = _split_duals(d, m_g, m_a)
+    return x, lam, nu
+
+
+def _make_socp_vjp(n, m_g, m_a, cones, specs, tol, max_iter):
+    shapes = (
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((m_g,), jnp.float64),
+        jax.ShapeDtypeStruct((m_a,), jnp.float64),
+    )
+
+    def forward(P, c, G, h, A, b):
+        def host(P_h, c_h, G_h, h_h, A_h, b_h):
+            return _forward_solve_socp(
+                np.asarray(P_h), np.asarray(c_h), np.asarray(G_h),
+                np.asarray(h_h), np.asarray(A_h), np.asarray(b_h),
+                specs, tol, max_iter,
+            )
+
+        return jax.pure_callback(host, shapes, P, c, G, h, A, b)
+
+    @jax.custom_vjp
+    def socp(P, c, G, h, A, b):
+        x, _, _ = forward(P, c, G, h, A, b)
+        return x
+
+    def fwd(P, c, G, h, A, b):
+        x, lam, nu = forward(P, c, G, h, A, b)
+        return x, (P, G, A, h, x, lam, nu)
+
+    def bwd(res, gx):
+        P, G, A, h, x, lam, nu = res
+        return _socp_backward(P, G, A, h, x, lam, nu, gx, cones)
+
+    socp.defvjp(fwd, bwd)
+    return socp
+
+
+def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
+    """Differentiable convex-SOCP solve ``x*(P, c, G, h, A, b)`` over a
+    product of cones.
+
+    Solves ``min ½xᵀPx+cᵀx s.t. Gx ⪯_K h, Ax=b`` where the inequality block
+    is partitioned by ``cones`` — a sequence of ``(kind, dim)`` specs
+    (``"nonneg"``/``"soc"``; an int means a second-order cone). Each slack
+    ``s = h − Gx`` block must lie in its cone. Differentiable w.r.t.
+    ``P, c, G, h, A, b`` via cone-aware OptNet implicit differentiation
+    (``diag`` → the cones' arrow operators).
+    """
+    P = jnp.asarray(P, dtype=jnp.float64)
+    c = jnp.asarray(c, dtype=jnp.float64)
+    n = c.shape[0]
+    G = jnp.asarray(G, dtype=jnp.float64)
+    h = jnp.asarray(h, dtype=jnp.float64)
+    A0 = jnp.zeros((0, n)) if A is None else jnp.asarray(A, dtype=jnp.float64)
+    b0 = jnp.zeros((0,)) if b is None else jnp.asarray(b, dtype=jnp.float64)
+    static, specs = _normalize_socp_cones(cones)
+    fn = _make_socp_vjp(n, G.shape[0], A0.shape[0], static, specs, tol, max_iter)
+    return fn(P, c, G, h, A0, b0)
