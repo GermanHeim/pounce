@@ -31,6 +31,8 @@ fn unconstrained_quadratic() {
         b: vec![],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
@@ -51,6 +53,8 @@ fn equality_constrained_quadratic() {
         b: vec![2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
@@ -72,6 +76,8 @@ fn inequality_active_at_optimum() {
         b: vec![],
         g: vec![Triplet::new(0, 0, -1.0), Triplet::new(0, 1, -1.0)],
         h: vec![-2.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
@@ -98,6 +104,8 @@ fn inequality_inactive_at_optimum() {
         b: vec![],
         g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
         h: vec![100.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
@@ -123,6 +131,8 @@ fn bound_constrained_quadratic() {
         b: vec![],
         g: vec![Triplet::new(0, 0, 1.0)], // x0 ≤ 1
         h: vec![1.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
@@ -148,6 +158,8 @@ fn lp_via_empty_hessian() {
             Triplet::new(3, 1, -1.0), // −x1 ≤ 0  (x1 ≥ 0)
         ],
         h: vec![1.0, 1.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
@@ -174,6 +186,8 @@ fn coupled_hessian_equality() {
         b: vec![2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);

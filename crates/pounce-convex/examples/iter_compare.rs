@@ -33,6 +33,8 @@ fn main() {
             b: vec![],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         },
     );
 
@@ -53,6 +55,8 @@ fn main() {
                 Triplet::new(3, 1, -1.0), // x1 ≥ 0
             ],
             h: vec![2.0, 2.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
         },
     );
 
@@ -67,6 +71,8 @@ fn main() {
             b: vec![1.0],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         },
     );
 }

@@ -24,4 +24,4 @@ pub mod presolve;
 pub mod qp;
 
 pub use ipm::{solve_qp_ipm, QpOptions};
-pub use qp::{QpProblem, QpSolution, QpStatus, Triplet};
+pub use qp::{QpProblem, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};

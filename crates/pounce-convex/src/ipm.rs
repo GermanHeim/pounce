@@ -87,12 +87,84 @@ impl Default for QpOptions {
     }
 }
 
-/// Solve a convex QP with the bare primal-dual IPM, using `backend` for
-/// the augmented-system factorization. `make_backend` is called once per
-/// iteration (the KKT pattern is rebuilt each step in this first
-/// increment; constant-pattern symbolic reuse is a documented follow-up,
-/// see `dev-notes/performance-engineering.md`).
-pub fn solve_qp_ipm<F>(prob: &QpProblem, opts: &QpOptions, mut make_backend: F) -> QpSolution
+/// Solve a convex QP, honoring any per-variable bounds (`lb`/`ub`).
+///
+/// Variable bounds are a first-class part of [`QpProblem`] so presolve
+/// can reason about boxes; the solver itself expands the *finite* bounds
+/// into internal inequality rows, runs the bounds-agnostic Mehrotra core
+/// ([`solve_qp_core`]), and splits the returned inequality multipliers
+/// back into the original `z` and the bound multipliers `z_lb`/`z_ub`.
+/// The iteration math is unchanged by the presence of bounds.
+pub fn solve_qp_ipm<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if !prob.has_bounds() {
+        return solve_qp_core(prob, opts, make_backend);
+    }
+
+    // Expand finite bounds into extra G rows appended after the existing
+    // inequalities: `x_i ≤ ub_i` and `-x_i ≤ -lb_i`. Remember each new
+    // row's variable and side so the dual can be attributed back.
+    let n = prob.n;
+    let base_m = prob.m_ineq();
+    let mut g = prob.g.clone();
+    let mut h = prob.h.clone();
+    // (row_index, var, is_upper)
+    let mut bound_rows: Vec<(usize, usize, bool)> = Vec::new();
+    for i in 0..n {
+        let ub = prob.ub_of(i);
+        if ub < crate::qp::BOUND_INF {
+            let r = h.len();
+            g.push(crate::qp::Triplet::new(r, i, 1.0));
+            h.push(ub);
+            bound_rows.push((r, i, true));
+        }
+        let lb = prob.lb_of(i);
+        if lb > -crate::qp::BOUND_INF {
+            let r = h.len();
+            g.push(crate::qp::Triplet::new(r, i, -1.0));
+            h.push(-lb);
+            bound_rows.push((r, i, false));
+        }
+    }
+
+    let expanded = QpProblem {
+        n,
+        p_lower: prob.p_lower.clone(),
+        c: prob.c.clone(),
+        a: prob.a.clone(),
+        b: prob.b.clone(),
+        g,
+        h,
+        lb: Vec::new(),
+        ub: Vec::new(),
+    };
+
+    let mut sol = solve_qp_core(&expanded, opts, make_backend);
+
+    // Split duals: keep the original inequality multipliers, attribute
+    // the appended bound-row multipliers to z_lb / z_ub.
+    let mut z = vec![0.0; base_m];
+    z.copy_from_slice(&sol.z[..base_m]);
+    let mut z_lb = vec![0.0; n];
+    let mut z_ub = vec![0.0; n];
+    for &(r, var, is_upper) in &bound_rows {
+        if is_upper {
+            z_ub[var] = sol.z[r];
+        } else {
+            z_lb[var] = sol.z[r];
+        }
+    }
+    sol.z = z;
+    sol.z_lb = z_lb;
+    sol.z_ub = z_ub;
+    sol
+}
+
+/// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
+/// ignored here; the public [`solve_qp_ipm`] handles bound expansion.
+fn solve_qp_core<F>(prob: &QpProblem, opts: &QpOptions, mut make_backend: F) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -269,11 +341,14 @@ where
         obj += 0.5 * x[i] * px[i] + prob.c[i] * x[i];
     }
 
+    let nn = n;
     QpSolution {
         status,
         x,
         y,
         z,
+        z_lb: vec![0.0; nn],
+        z_ub: vec![0.0; nn],
         obj,
         iters,
     }
@@ -299,6 +374,8 @@ fn failed_solution(
         x,
         y,
         z,
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
         obj,
         iters,
     }

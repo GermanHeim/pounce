@@ -152,6 +152,10 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
             b,
             g,
             h,
+            // Variable bounds are currently emitted as `G` rows (see the
+            // bound-handling above), so the explicit box is left empty.
+            lb: Vec::new(),
+            ub: Vec::new(),
         },
         con_map,
     ))

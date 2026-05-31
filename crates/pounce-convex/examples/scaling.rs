@@ -46,6 +46,8 @@ fn dense_box_qp(n: usize) -> QpProblem {
         b: vec![],
         g,
         h,
+        lb: vec![],
+        ub: vec![],
     }
 }
 
@@ -68,6 +70,8 @@ fn sparse_box_qp(n: usize) -> QpProblem {
         b: vec![],
         g,
         h,
+        lb: vec![],
+        ub: vec![],
     }
 }
 

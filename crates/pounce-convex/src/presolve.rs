@@ -59,7 +59,7 @@
 //! (scalar-multiple) detection, as opposed to the exact-duplicate
 //! detection here, is likewise a follow-up.
 
-use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet};
+use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -94,9 +94,11 @@ enum Reduction {
         eq_row: usize,
         a_coef: f64,
     },
-    /// A free column (absent from `P`, `A`, `G`) with zero objective
-    /// coefficient was set to 0 and dropped. Reduced cost is 0.
-    FreeColumnZero { col: usize },
+    /// A column absent from `P`, `A`, `G` (linear-only) was fixed at
+    /// `value` — its optimal box position given the sign of `c_col` —
+    /// and dropped. Its reduced cost equals `c_col` (carried by the
+    /// active variable bound).
+    FreeColumnFixed { col: usize, value: f64 },
 }
 
 /// Captured presolve state: the reduced problem plus the transaction
@@ -125,6 +127,8 @@ pub struct Presolve {
 
 /// Coefficients are treated as nonzero unless exactly 0.0.
 const ZERO_TOL: f64 = 0.0;
+/// Slack allowed when checking a fixed value against its variable box.
+const BOUND_FEAS_TOL: f64 = 1e-9;
 
 /// A single constraint row in the reduced column space, tagged with its
 /// original row index. Used for duplicate detection and final assembly.
@@ -185,6 +189,12 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
                 let (col, a) = eq_single[row].expect("singleton has an entry");
                 if fixed[col].is_none() {
                     let value = prob.b[row] / a;
+                    // The fixed value must satisfy the variable's box.
+                    if value < prob.lb_of(col) - BOUND_FEAS_TOL
+                        || value > prob.ub_of(col) + BOUND_FEAS_TOL
+                    {
+                        return PresolveOutcome::Infeasible;
+                    }
                     fixed[col] = Some(value);
                     eq_dropped[row] = true;
                     stack.push(Reduction::FixedVar {
@@ -210,8 +220,12 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         }
     }
 
-    // --- free/empty columns ---
-    // A column absent from P, A, G is free; its only effect is c_k x_k.
+    // --- free / linear-only columns ---
+    // A column absent from P, A, G contributes only `c_k x_k`, so its
+    // optimum is at a bound dictated by the sign of c_k:
+    //   c_k > 0 → minimize by pushing to lb  (unbounded if lb = −∞)
+    //   c_k < 0 → push to ub                 (unbounded if ub = +∞)
+    //   c_k = 0 → irrelevant; pin to lb if finite else ub if finite else 0
     let mut dropped_col = vec![false; n];
     for c in 0..n {
         if fixed[c].is_some() {
@@ -219,12 +233,26 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
             continue;
         }
         if col_nnz[c] == 0 {
-            if prob.c[c] != 0.0 {
-                return PresolveOutcome::Unbounded;
-            }
-            // c_k == 0: variable is irrelevant; pin to 0 and drop.
+            let (lb, ub) = (prob.lb_of(c), prob.ub_of(c));
+            let value = if prob.c[c] > 0.0 {
+                if lb <= -BOUND_INF {
+                    return PresolveOutcome::Unbounded;
+                }
+                lb
+            } else if prob.c[c] < 0.0 {
+                if ub >= BOUND_INF {
+                    return PresolveOutcome::Unbounded;
+                }
+                ub
+            } else if lb > -BOUND_INF {
+                lb
+            } else if ub < BOUND_INF {
+                ub
+            } else {
+                0.0
+            };
             dropped_col[c] = true;
-            stack.push(Reduction::FreeColumnZero { col: c });
+            stack.push(Reduction::FreeColumnFixed { col: c, value });
         }
     }
 
@@ -248,6 +276,12 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     for c in 0..n {
         if let Some(v) = fixed[c] {
             offset += prob.c[c] * v;
+        }
+    }
+    // Free/linear-only columns fixed to a bound contribute `c_k · value`.
+    for r in &stack {
+        if let Reduction::FreeColumnFixed { col, value } = r {
+            offset += prob.c[*col] * value;
         }
     }
     let mut new_p: Vec<Triplet> = Vec::new();
@@ -314,6 +348,17 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         }
     }
 
+    // Carry the kept columns' bounds into the reduced problem (empty if
+    // none of the kept variables is bounded).
+    let (new_lb, new_ub) = if prob.has_bounds() {
+        (
+            kept_cols.iter().map(|&c| prob.lb_of(c)).collect(),
+            kept_cols.iter().map(|&c| prob.ub_of(c)).collect(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let reduced = QpProblem {
         n: kept_cols.len(),
         p_lower: new_p,
@@ -322,6 +367,8 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         b: new_b,
         g: new_g,
         h: new_h,
+        lb: new_lb,
+        ub: new_ub,
     };
 
     PresolveOutcome::Reduced(Presolve {
@@ -542,7 +589,7 @@ impl Presolve {
         for r in self.stack.iter().rev() {
             match r {
                 Reduction::FixedVar { col, value, .. } => x[*col] = *value,
-                Reduction::FreeColumnZero { col } => x[*col] = 0.0,
+                Reduction::FreeColumnFixed { col, value } => x[*col] = *value,
             }
         }
 
@@ -568,6 +615,34 @@ impl Presolve {
             }
         }
 
+        // Bound multipliers: map the reduced kept-column bound duals back,
+        // then attribute each free/linear-only fixed column's reduced cost
+        // (= c_k) to whichever bound it was pinned at.
+        let mut z_lb = vec![0.0; n];
+        let mut z_ub = vec![0.0; n];
+        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+            if newc < red.z_lb.len() {
+                z_lb[oldc] = red.z_lb[newc];
+            }
+            if newc < red.z_ub.len() {
+                z_ub[oldc] = red.z_ub[newc];
+            }
+        }
+        for r in &self.stack {
+            if let Reduction::FreeColumnFixed { col, value } = r {
+                let ck = self.orig.c[*col];
+                // Stationarity for a linear-only var at a bound:
+                //   c_k − z_lb + z_ub = 0. At lb: z_lb = c_k (c_k ≥ 0);
+                //   at ub: z_ub = −c_k (c_k ≤ 0).
+                if (*value - self.orig.lb_of(*col)).abs() <= (*value - self.orig.ub_of(*col)).abs()
+                {
+                    z_lb[*col] = ck.max(0.0);
+                } else {
+                    z_ub[*col] = (-ck).max(0.0);
+                }
+            }
+        }
+
         // Objective in the original problem.
         let mut px = vec![0.0; n];
         self.orig.p_mul(&x, &mut px);
@@ -581,6 +656,8 @@ impl Presolve {
             x,
             y,
             z,
+            z_lb,
+            z_ub,
             obj,
             iters: red.iters,
         }
@@ -600,6 +677,8 @@ where
         x: vec![0.0; prob.n],
         y: vec![0.0; prob.m_eq()],
         z: vec![0.0; prob.m_ineq()],
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
         obj: 0.0,
         iters: 0,
     };

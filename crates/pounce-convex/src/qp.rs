@@ -43,7 +43,25 @@ pub struct QpProblem {
     pub g: Vec<Triplet>,
     /// Inequality right-hand side `h` (length m_ineq).
     pub h: Vec<f64>,
+    /// Per-variable lower bounds `lb ≤ x`. Either empty (all `-∞`) or
+    /// length `n`. Use [`NEG_INF`] for an unbounded entry. Bounds are a
+    /// first-class part of the problem (not encoded as `G` rows), so
+    /// presolve can reason about variable boxes; the solver expands the
+    /// finite ones into internal inequality rows.
+    pub lb: Vec<f64>,
+    /// Per-variable upper bounds `x ≤ ub`. Either empty (all `+∞`) or
+    /// length `n`. Use [`POS_INF`] for an unbounded entry.
+    pub ub: Vec<f64>,
 }
+
+/// Sentinel for an absent lower bound (`-∞`). Anything `≤ -BOUND_INF` is
+/// treated as no bound.
+pub const NEG_INF: f64 = f64::NEG_INFINITY;
+/// Sentinel for an absent upper bound (`+∞`). Anything `≥ BOUND_INF` is
+/// treated as no bound.
+pub const POS_INF: f64 = f64::INFINITY;
+/// Magnitude past which a bound is considered infinite.
+pub(crate) const BOUND_INF: f64 = 1e20;
 
 impl QpProblem {
     pub fn m_eq(&self) -> usize {
@@ -52,6 +70,21 @@ impl QpProblem {
 
     pub fn m_ineq(&self) -> usize {
         self.h.len()
+    }
+
+    /// Lower bound of variable `i` (`-∞` when `lb` is empty).
+    pub fn lb_of(&self, i: usize) -> f64 {
+        self.lb.get(i).copied().unwrap_or(NEG_INF)
+    }
+
+    /// Upper bound of variable `i` (`+∞` when `ub` is empty).
+    pub fn ub_of(&self, i: usize) -> f64 {
+        self.ub.get(i).copied().unwrap_or(POS_INF)
+    }
+
+    /// Whether the problem carries any finite variable bound.
+    pub fn has_bounds(&self) -> bool {
+        self.lb.iter().any(|&v| v > -BOUND_INF) || self.ub.iter().any(|&v| v < BOUND_INF)
     }
 
     /// Public `y += P x` (full symmetric product from the stored lower
@@ -160,6 +193,11 @@ pub struct QpSolution {
     pub y: Vec<f64>,
     /// Inequality multipliers `z ≥ 0` (length m_ineq).
     pub z: Vec<f64>,
+    /// Lower-bound multipliers `z_lb ≥ 0` for `lb ≤ x` (length `n`; zero
+    /// where there is no finite lower bound or it is inactive).
+    pub z_lb: Vec<f64>,
+    /// Upper-bound multipliers `z_ub ≥ 0` for `x ≤ ub` (length `n`).
+    pub z_ub: Vec<f64>,
     /// Objective value `½ xᵀP x + cᵀx`.
     pub obj: f64,
     /// Iterations taken.

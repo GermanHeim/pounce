@@ -48,6 +48,8 @@ fn main() {
             b: vec![2.0],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         },
     );
 
@@ -62,6 +64,8 @@ fn main() {
             b: vec![],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         },
     );
 
@@ -80,6 +84,8 @@ fn main() {
             b: vec![3.0, 1.0],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         },
     );
 
@@ -99,6 +105,8 @@ fn main() {
             b: vec![2.0, 3.0],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         },
     );
 
@@ -123,6 +131,8 @@ fn main() {
             b: vec![n as f64; k],
             g: vec![],
             h: vec![],
+            lb: vec![],
+            ub: vec![],
         };
         let t0 = Instant::now();
         let reduced_rows = match presolve(&prob) {

@@ -56,6 +56,8 @@ fn fixed_variable_roundtrip_matches_direct() {
         b: vec![3.0, 2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let d = direct(&prob);
     let p = with_presolve(&prob);
@@ -84,6 +86,8 @@ fn fixed_variable_with_hessian_coupling_roundtrip() {
         b: vec![1.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let d = direct(&prob);
     let p = with_presolve(&prob);
@@ -106,6 +110,8 @@ fn fixed_variable_adjusts_inequality_rhs() {
         b: vec![1.0],
         g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)], // x0+x1≤3
         h: vec![3.0],
+        lb: vec![],
+        ub: vec![],
     };
     let d = direct(&prob);
     let p = with_presolve(&prob);
@@ -134,6 +140,8 @@ fn empty_row_roundtrip() {
         b: vec![0.0, 2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let d = direct(&prob);
     let p = with_presolve(&prob);
@@ -153,6 +161,8 @@ fn empty_row_infeasible_detected() {
         b: vec![5.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
     assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
@@ -176,6 +186,8 @@ fn noop_presolve_roundtrip() {
             Triplet::new(3, 1, -1.0), // x1 ≥ 0
         ],
         h: vec![1.0, 5.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
     };
     let d = direct(&prob);
     let p = with_presolve(&prob);

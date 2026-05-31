@@ -30,6 +30,8 @@ fn primal_infeasible_contradictory_equalities() {
         b: vec![1.0, 2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(
@@ -56,6 +58,8 @@ fn primal_infeasible_contradictory_inequalities() {
             Triplet::new(1, 0, -1.0), // −x0 ≤ −1  (x0 ≥ 1)
         ],
         h: vec![0.0, -1.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(
@@ -79,6 +83,8 @@ fn dual_infeasible_unbounded_lp() {
         b: vec![],
         g: vec![Triplet::new(0, 0, -1.0)], // −x0 ≤ 0  (x0 ≥ 0)
         h: vec![0.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(
@@ -103,6 +109,8 @@ fn dual_infeasible_unbounded_qp_singular_hessian() {
         b: vec![],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(
@@ -131,6 +139,8 @@ fn feasible_bounded_still_optimal() {
             Triplet::new(3, 1, -1.0),
         ],
         h: vec![5.0, 5.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = solve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);

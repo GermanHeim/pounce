@@ -66,6 +66,8 @@ fn make_qp(n: usize) -> QpProblem {
         b: vec![],
         g,
         h,
+        lb: vec![],
+        ub: vec![],
     }
 }
 

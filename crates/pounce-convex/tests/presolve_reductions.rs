@@ -68,6 +68,8 @@ fn free_column_zero_cost_dropped() {
         b: vec![2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
@@ -91,6 +93,8 @@ fn free_column_nonzero_cost_unbounded() {
         b: vec![],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     assert!(matches!(presolve(&prob), PresolveOutcome::Unbounded));
     assert_eq!(with_presolve(&prob).status, QpStatus::DualInfeasible);
@@ -116,6 +120,8 @@ fn duplicate_equality_rows_redundant() {
         b: vec![2.0, 2.0],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
@@ -140,6 +146,8 @@ fn duplicate_equality_rows_conflicting_infeasible() {
         b: vec![2.0, 3.0], // x0+x1 can't be both 2 and 3
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
     assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
@@ -164,6 +172,8 @@ fn duplicate_inequality_keeps_tightest() {
             Triplet::new(1, 1, 1.0), // x0+x1 ≤ 1  (tighter)
         ],
         h: vec![3.0, 1.0],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
@@ -197,6 +207,8 @@ fn many_duplicate_rows_parallel_path() {
         b: vec![n as f64; k],
         g: vec![],
         h: vec![],
+        lb: vec![],
+        ub: vec![],
     };
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
