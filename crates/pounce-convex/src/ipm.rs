@@ -498,6 +498,7 @@ fn run_ipm(
     let mut r_p = vec![0.0; m_eq];
     let mut r_g = vec![0.0; m_ineq];
     let mut r_c = vec![0.0; m_ineq];
+    let mut rhs_term = vec![0.0; m_ineq];
     let mut scaling = vec![0.0; m_ineq];
     let mut rhs = vec![0.0; n + m_eq + m_ineq];
     let mut dx = vec![0.0; n];
@@ -562,7 +563,8 @@ fn run_ipm(
         // === Predictor (affine-scaling) step: σ = 0 ===
         // r_c = s∘z (affine target).
         cone.comp_residual(&s, &z, 0.0, &mut r_c);
-        build_rhs(&r_d, &r_p, &r_g, &r_c, &z, n, m_eq, m_ineq, &mut rhs);
+        cone.rhs_comp_term(&s, &z, &r_c, &mut rhs_term);
+        build_rhs(&r_d, &r_p, &r_g, &rhs_term, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
             status = QpStatus::NumericalFailure;
             break;
@@ -599,7 +601,8 @@ fn run_ipm(
         } else {
             let sigma_mu = sigma * mu;
             cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
-            build_rhs(&r_d, &r_p, &r_g, &r_c, &z, n, m_eq, m_ineq, &mut rhs);
+            cone.rhs_comp_term(&s, &z, &r_c, &mut rhs_term);
+            build_rhs(&r_d, &r_p, &r_g, &rhs_term, n, m_eq, m_ineq, &mut rhs);
             if fact.solve_one(&mut rhs).is_err() {
                 status = QpStatus::NumericalFailure;
                 break;
@@ -774,12 +777,15 @@ fn failed_solution(
 /// Build the Newton RHS `[−r_d; −r_p; −r_g + r_c ⊘ z]` for a given
 /// complementarity residual `r_c` (predictor or corrector).
 #[allow(clippy::too_many_arguments)]
+/// Assemble the reduced KKT right-hand side `[-r_d; -r_p; -r_g + comp_term]`.
+/// `comp_term` is the cone's contribution at the `(z)` rows (the orthant's
+/// is `r_c ⊘ z`), computed by the caller via [`Cone::rhs_comp_term`] so the
+/// block is cone-specific rather than baked in here.
 fn build_rhs(
     r_d: &[f64],
     r_p: &[f64],
     r_g: &[f64],
-    r_c: &[f64],
-    z: &[f64],
+    comp_term: &[f64],
     n: usize,
     m_eq: usize,
     m_ineq: usize,
@@ -792,7 +798,7 @@ fn build_rhs(
         rhs[n + i] = -r_p[i];
     }
     for i in 0..m_ineq {
-        rhs[n + m_eq + i] = -r_g[i] + r_c[i] / z[i];
+        rhs[n + m_eq + i] = -r_g[i] + comp_term[i];
     }
 }
 

@@ -18,9 +18,25 @@
 
 pub mod composite;
 pub mod nonneg;
+pub mod soc;
 
-pub use composite::{CompositeCone, ConeKind};
+pub use composite::{CompositeCone, ConeKind, ConeSpec};
 pub use nonneg::NonnegCone;
+pub use soc::SecondOrderCone;
+
+/// The `(z, z)` scaling block a cone contributes to the symmetric KKT
+/// system. The driver places `-(block) - reg·I` at the cone's diagonal /
+/// dense positions. The nonnegative orthant is [`ConeBlock::Diagonal`]
+/// (`sᵢ/zᵢ`); the second-order cone is [`ConeBlock::DenseLower`] (its
+/// Nesterov–Todd Hessian `W²`, dense within the cone).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConeBlock {
+    /// One value per row — the `(z, z)` diagonal (orthant: `sᵢ/zᵢ`).
+    Diagonal(Vec<f64>),
+    /// Dense symmetric `dim × dim` block, lower triangle row-major
+    /// (`[ (0,0); (1,0),(1,1); (2,0),(2,1),(2,2); … ]`).
+    DenseLower { dim: usize, lower: Vec<f64> },
+}
 
 /// A symmetric cone over which the IPM maintains a primal slack `s` and
 /// dual `z`. Phase 2 ships only [`NonnegCone`]; the trait exists so the
@@ -66,6 +82,17 @@ pub trait Cone {
     /// complementarity residual, given the current `(s, z)`:
     /// `ds = -(r_comp ⊘ z) - (s ⊘ z) ∘ dz`.
     fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]);
+
+    /// The cone's `(z, z)` scaling block for the symmetric KKT system (see
+    /// [`ConeBlock`]). For the orthant this is the diagonal `sᵢ/zᵢ`; richer
+    /// cones return their dense Nesterov–Todd Hessian. The driver assembles
+    /// `-(block) - reg·I`.
+    fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock;
+
+    /// The cone's contribution to the reduced KKT right-hand side at the
+    /// `(z)` rows: the term added to `-r_g`. For the orthant this is
+    /// `r_comp ⊘ z`; richer cones apply their scaling. Writes `dim` values.
+    fn rhs_comp_term(&self, s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]);
 
     /// Largest `α ∈ (0, 1]` such that `v + α dv` stays inside the cone,
     /// scaled by the fraction-to-boundary parameter `tau`. For the

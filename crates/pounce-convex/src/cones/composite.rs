@@ -12,7 +12,27 @@
 //! previous bare [`NonnegCone`] path; the seam exists so SOC (and later
 //! cones) plug in as new [`ConeKind`] variants without touching the driver.
 
-use super::{Cone, NonnegCone};
+use super::{Cone, ConeBlock, NonnegCone, SecondOrderCone};
+
+/// Declarative description of one cone block in a problem's inequality
+/// partition (the data form; [`ConeKind`] is the runtime form). The blocks
+/// stack in order to cover the `m_ineq` inequality rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConeSpec {
+    /// Nonnegative orthant of the given number of rows.
+    Nonneg(usize),
+    /// Second-order cone of the given dimension (`≥ 1`).
+    SecondOrder(usize),
+}
+
+impl ConeSpec {
+    /// Number of inequality rows this block spans.
+    pub fn dim(&self) -> usize {
+        match self {
+            ConeSpec::Nonneg(n) | ConeSpec::SecondOrder(n) => *n,
+        }
+    }
+}
 
 /// A single cone in the product. A closed enum (rather than `dyn Cone`) so
 /// dispatch is a cheap match and new cones are added as variants.
@@ -20,34 +40,35 @@ use super::{Cone, NonnegCone};
 pub enum ConeKind {
     /// Nonnegative orthant (LP/QP, and expanded variable bounds).
     Nonneg(NonnegCone),
-    // Phase 2: SecondOrder(SecondOrderCone),
+    /// Second-order (Lorentz) cone.
+    SecondOrder(SecondOrderCone),
+}
+
+/// Dispatch a `Cone` call to whichever concrete cone this variant wraps.
+macro_rules! dispatch {
+    ($self:ident, $c:ident => $body:expr) => {
+        match $self {
+            ConeKind::Nonneg($c) => $body,
+            ConeKind::SecondOrder($c) => $body,
+        }
+    };
 }
 
 impl Cone for ConeKind {
     fn degree(&self) -> usize {
-        match self {
-            ConeKind::Nonneg(c) => c.degree(),
-        }
+        dispatch!(self, c => c.degree())
     }
     fn dim(&self) -> usize {
-        match self {
-            ConeKind::Nonneg(c) => c.dim(),
-        }
+        dispatch!(self, c => c.dim())
     }
     fn mu(&self, s: &[f64], z: &[f64]) -> f64 {
-        match self {
-            ConeKind::Nonneg(c) => c.mu(s, z),
-        }
+        dispatch!(self, c => c.mu(s, z))
     }
     fn scaling_diag(&self, s: &[f64], z: &[f64], out: &mut [f64]) {
-        match self {
-            ConeKind::Nonneg(c) => c.scaling_diag(s, z, out),
-        }
+        dispatch!(self, c => c.scaling_diag(s, z, out))
     }
     fn comp_residual(&self, s: &[f64], z: &[f64], sigma_mu: f64, out: &mut [f64]) {
-        match self {
-            ConeKind::Nonneg(c) => c.comp_residual(s, z, sigma_mu, out),
-        }
+        dispatch!(self, c => c.comp_residual(s, z, sigma_mu, out))
     }
     fn comp_residual_corrector(
         &self,
@@ -58,21 +79,19 @@ impl Cone for ConeKind {
         sigma_mu: f64,
         out: &mut [f64],
     ) {
-        match self {
-            ConeKind::Nonneg(c) => {
-                c.comp_residual_corrector(s, z, ds_aff, dz_aff, sigma_mu, out)
-            }
-        }
+        dispatch!(self, c => c.comp_residual_corrector(s, z, ds_aff, dz_aff, sigma_mu, out))
     }
     fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
-        match self {
-            ConeKind::Nonneg(c) => c.recover_ds(s, z, r_comp, dz, ds),
-        }
+        dispatch!(self, c => c.recover_ds(s, z, r_comp, dz, ds))
     }
     fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64 {
-        match self {
-            ConeKind::Nonneg(c) => c.max_step(v, dv, tau),
-        }
+        dispatch!(self, c => c.max_step(v, dv, tau))
+    }
+    fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock {
+        dispatch!(self, c => c.kkt_block(s, z))
+    }
+    fn rhs_comp_term(&self, s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
+        dispatch!(self, c => c.rhs_comp_term(s, z, r_comp, out))
     }
 }
 
@@ -109,6 +128,26 @@ impl CompositeCone {
     /// LP/QP (and the Phase-1 default for any inequality block).
     pub fn single_nonneg(n: usize) -> Self {
         Self::new(vec![ConeKind::Nonneg(NonnegCone::new(n))])
+    }
+
+    /// Build from a declarative [`ConeSpec`] partition of the inequality
+    /// rows. An empty `specs` (or `m_ineq == 0`) yields an empty cone; the
+    /// common LP/QP case is a single `Nonneg` spec.
+    pub fn from_specs(specs: &[ConeSpec]) -> Self {
+        let kinds = specs
+            .iter()
+            .map(|s| match s {
+                ConeSpec::Nonneg(n) => ConeKind::Nonneg(NonnegCone::new(*n)),
+                ConeSpec::SecondOrder(m) => ConeKind::SecondOrder(SecondOrderCone::new(*m)),
+            })
+            .collect();
+        Self::new(kinds)
+    }
+
+    /// The `(offset, cone)` blocks, in row order. Used by the KKT assembly
+    /// to place each block's scaling contribution (diagonal or dense).
+    pub fn blocks(&self) -> &[(usize, ConeKind)] {
+        &self.blocks
     }
 }
 
@@ -197,6 +236,25 @@ impl Cone for CompositeCone {
             alpha = alpha.min(k.max_step(&v[*off..off + d], &dv[*off..off + d], tau));
         }
         alpha
+    }
+
+    fn rhs_comp_term(&self, s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.rhs_comp_term(
+                &s[*off..off + d],
+                &z[*off..off + d],
+                &r_comp[*off..off + d],
+                &mut out[*off..off + d],
+            );
+        }
+    }
+
+    fn kkt_block(&self, _s: &[f64], _z: &[f64]) -> ConeBlock {
+        // A product cone has *multiple* blocks; the KKT assembly iterates
+        // `blocks()` and calls each block's `kkt_block` rather than asking
+        // the composite for a single one.
+        unimplemented!("use CompositeCone::blocks() for per-block kkt_block")
     }
 }
 

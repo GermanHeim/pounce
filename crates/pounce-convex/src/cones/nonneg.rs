@@ -4,7 +4,7 @@
 //! Phase 2; richer cones (SOC, PSD, exp, pow) plug in behind the same
 //! [`Cone`](super::Cone) trait in later phases.
 
-use super::Cone;
+use super::{Cone, ConeBlock};
 
 /// The nonnegative orthant `{ x : x_i ≥ 0 }` of a given dimension.
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +78,16 @@ impl Cone for NonnegCone {
             }
         }
         alpha
+    }
+
+    fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock {
+        ConeBlock::Diagonal((0..self.n).map(|i| s[i] / z[i]).collect())
+    }
+
+    fn rhs_comp_term(&self, _s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
+        for i in 0..self.n {
+            out[i] = r_comp[i] / z[i];
+        }
     }
 }
 
