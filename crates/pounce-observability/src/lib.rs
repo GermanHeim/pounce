@@ -54,6 +54,27 @@ thread_local! {
     static CAPTURE: RefCell<Option<Vec<IterRecord>>> = const { RefCell::new(None) };
 }
 
+/// Set once at subscriber install when `POUNCE_LOG_FORMAT=json`, so the
+/// per-iteration event is emitted (for the JSON sink) even when no
+/// in-process capture is active.
+static JSON_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the per-iteration `pounce::iteration` event has a consumer
+/// right now, so the algorithm can skip emitting it (and the field
+/// evaluation it entails) when nothing would observe it.
+///
+/// True when either an [`IterCaptureGuard`] is active on this thread
+/// (the JSON report wants the trajectory) or JSON logging is installed
+/// (the stderr sink wants it). In the common default run — text logs,
+/// no iter-history capture — this is `false`, so the event costs
+/// nothing.
+pub fn iteration_event_wanted() -> bool {
+    if JSON_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    CAPTURE.with(|c| c.borrow().is_some())
+}
+
 /// RAII activation of per-iteration capture for one solve.
 ///
 /// Construct with [`IterCaptureGuard::start`] immediately before the
@@ -261,6 +282,10 @@ fn install() {
     let want_json = std::env::var("POUNCE_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
+    // Record the JSON-sink decision so `iteration_event_wanted()` keeps
+    // emitting the per-iteration event for the stderr stream even when
+    // no in-process capture is active.
+    JSON_LOGGING.store(want_json, std::sync::atomic::Ordering::Relaxed);
 
     // The collector only ever wants the iteration event; it must NOT be
     // subject to the console's `pounce::iteration=off` suppression, so
@@ -350,6 +375,17 @@ mod tests {
             alpha_primal_char: c,
             ls_trials: 1,
         }
+    }
+
+    #[test]
+    fn iteration_event_wanted_tracks_active_capture() {
+        // Default (no capture on this thread, JSON sink off): nothing
+        // consumes the event, so it should be suppressed.
+        assert!(!iteration_event_wanted());
+        let guard = IterCaptureGuard::start();
+        assert!(iteration_event_wanted(), "capture active → event wanted");
+        let _ = guard.finish();
+        assert!(!iteration_event_wanted(), "capture ended → event suppressed");
     }
 
     #[test]

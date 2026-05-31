@@ -404,11 +404,13 @@ impl IpoptAlgorithm {
         // of truth for the per-iteration trajectory. The JSON log sink
         // and the solve-report collector
         // (`pounce_observability::IterCollectorLayer`) both derive from
-        // it. Emitted unconditionally (even when the console table is
-        // off) so the report captures every iteration; the text console
-        // layer filters this target out (its human form is the colored
-        // table above).
-        {
+        // it. The text console layer filters this target out (its human
+        // form is the colored table above).
+        //
+        // Skipped entirely when nothing consumes it (no iter-history
+        // capture active and JSON logging off) so the default run pays
+        // no per-iteration field-evaluation / allocation cost.
+        if pounce_observability::iteration_event_wanted() {
             let d = self.data.borrow();
             let c = self.cq.borrow();
             let alpha_char = d.info_alpha_primal_char;
