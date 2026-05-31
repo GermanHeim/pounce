@@ -17,12 +17,22 @@ use super::{Cone, ConeBlock, NonnegCone, SecondOrderCone};
 /// Declarative description of one cone block in a problem's inequality
 /// partition (the data form; [`ConeKind`] is the runtime form). The blocks
 /// stack in order to cover the `m_ineq` inequality rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Eq` is intentionally not derived: `Power(f64)` carries a float exponent.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConeSpec {
     /// Nonnegative orthant of the given number of rows.
     Nonneg(usize),
     /// Second-order cone of the given dimension (`≥ 1`).
     SecondOrder(usize),
+    /// 3-dimensional exponential cone. **Non-symmetric** — a problem
+    /// containing this routes to the non-symmetric HSDE driver
+    /// ([`crate::hsde_nonsym`]), not the symmetric path; it is *not* a
+    /// [`ConeKind`] and must be intercepted before [`CompositeCone`] assembly.
+    Exponential,
+    /// 3-dimensional power cone `K_α = {|x₁| ≤ x₂^α x₃^{1−α}}` with exponent
+    /// `α ∈ (0, 1)`. **Non-symmetric** — routes to the non-symmetric HSDE
+    /// driver like [`ConeSpec::Exponential`].
+    Power(f64),
 }
 
 impl ConeSpec {
@@ -30,6 +40,7 @@ impl ConeSpec {
     pub fn dim(&self) -> usize {
         match self {
             ConeSpec::Nonneg(n) | ConeSpec::SecondOrder(n) => *n,
+            ConeSpec::Exponential | ConeSpec::Power(_) => 3,
         }
     }
 }
@@ -145,6 +156,10 @@ impl CompositeCone {
             .map(|s| match s {
                 ConeSpec::Nonneg(n) => ConeKind::Nonneg(NonnegCone::new(*n)),
                 ConeSpec::SecondOrder(m) => ConeKind::SecondOrder(SecondOrderCone::new(*m)),
+                ConeSpec::Exponential | ConeSpec::Power(_) => unreachable!(
+                    "non-symmetric cones (exponential/power) must route to \
+                     hsde_nonsym before CompositeCone assembly"
+                ),
             })
             .collect();
         Self::new(kinds)

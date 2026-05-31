@@ -233,15 +233,20 @@ def solve_qp(
 def _normalize_cones(cones):
     """Coerce a cone partition into the binding's ``[(kind, dim), …]``.
 
-    Accepts ``("soc", 3)`` / ``("nonneg", 2)`` tuples, or the shorthands
-    ``3`` (a second-order cone of that dim), and case-insensitive kind
-    strings (``"soc"``/``"q"``, ``"nonneg"``/``"nn"``/``"+"``)."""
+    Accepts ``("soc", 3)`` / ``("nonneg", 2)`` / ``("exp", 3)`` /
+    ``("pow", 0.5)`` tuples, or the shorthand ``3`` (a second-order cone of
+    that dim). Kind strings are case-insensitive (``"soc"``/``"q"``,
+    ``"nonneg"``/``"nn"``/``"+"``, ``"exp"``/``"exponential"``,
+    ``"pow"``/``"power"``). The second element is the dimension for
+    ``soc``/``nonneg`` and the exponent ``α`` for ``pow``."""
     out = []
     for spec in cones:
         if isinstance(spec, (tuple, list)) and len(spec) == 2:
-            out.append((str(spec[0]), int(spec[1])))
+            # Pass the value through as a float; the binding interprets it as a
+            # dimension (soc/nonneg) or an exponent (pow).
+            out.append((str(spec[0]), float(spec[1])))
         elif isinstance(spec, int):
-            out.append(("soc", int(spec)))
+            out.append(("soc", float(spec)))
         else:
             raise ValueError(f"bad cone spec {spec!r}; use (kind, dim) or an int")
     return out
@@ -259,20 +264,47 @@ def solve_socp(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
 ) -> QpResult:
-    """Solve a standard-form SOCP (or mixed LP/QP + second-order cones).
+    """Solve a standard-form conic program (LP/QP + second-order and/or
+    exponential cones).
 
     Same form as :func:`solve_qp` minus variable bounds, but the inequality
     block ``Gx ≤ h`` is partitioned by ``cones`` — a sequence of
-    ``(kind, dim)`` specs (``"nonneg"`` or ``"soc"``) covering the rows of
-    ``G`` in order. Each slack block ``s = h − Gx`` must lie in its cone; a
-    second-order cone is ``{ (t, x) : t ≥ ‖x‖₂ }``. An int is shorthand for
-    a second-order cone of that dimension.
+    ``(kind, dim)`` specs covering the rows of ``G`` in order. Each slack
+    block ``s = h − Gx`` must lie in its cone:
 
-    Example
-    -------
+    - ``("nonneg", d)`` — the nonnegative orthant ``s ≥ 0``;
+    - ``("soc", d)`` — the second-order cone ``{ (t, x) : t ≥ ‖x‖₂ }``
+      (an int ``d`` is shorthand for this);
+    - ``("exp", 3)`` — the 3-D exponential cone
+      ``{ (x, y, z) : y·exp(x/y) ≤ z, y > 0 }``, which routes to the
+      non-symmetric HSDE solver and unlocks geometric programming, entropy,
+      log-sum-exp, and logistic models;
+    - ``("pow", α)`` — the 3-D power cone
+      ``{ (x, y, z) : |x| ≤ y^α z^{1−α}, y,z ≥ 0 }`` with ``α ∈ (0, 1)``
+      (the second tuple element is the **exponent**, not a dimension); the
+      building block for ``p``-norm and general geometric constraints.
+
+    A second-order cone may be freely mixed with an exp/power cone (the
+    non-symmetric driver handles both).
+
+    Examples
+    --------
     >>> # min t  s.t.  (t, x − x*) ∈ SOC   (minimize ‖x − x*‖)
     >>> r = solve_socp(c=[1, 0, 0], G=-np.eye(3), h=[0, -2, 1],
     ...                cones=[("soc", 3)])
+
+    >>> # Geometric program  min x + 1/x = min_u e^u + e^{-u}  (optimum 2).
+    >>> # Variables (u, t1, t2); (u,1,t1)∈Kexp, (-u,1,t2)∈Kexp.
+    >>> import numpy as np
+    >>> G = np.zeros((6, 3))
+    >>> G[0, 0] = -1.0   # s0 = u
+    >>> G[2, 1] = -1.0   # s2 = t1
+    >>> G[3, 0] = 1.0    # s3 = -u
+    >>> G[5, 2] = -1.0   # s5 = t2
+    >>> r = solve_socp(c=[0, 1, 1], G=G, h=[0, 1, 0, 0, 1, 0],
+    ...                cones=[("exp", 3), ("exp", 3)])
+    >>> round(r.obj, 6)
+    2.0
     """
     if c is None:
         raise ValueError("solve_socp: `c` is required")

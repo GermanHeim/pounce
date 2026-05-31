@@ -309,6 +309,7 @@ where
         z_ub: vec![0.0; n],
         obj,
         iters,
+        iterates: Vec::new(),
     }
 }
 
@@ -322,6 +323,7 @@ fn failed(prob: &QpProblem) -> QpSolution {
         z_ub: vec![0.0; prob.n],
         obj: 0.0,
         iters: 0,
+        iterates: Vec::new(),
     }
 }
 

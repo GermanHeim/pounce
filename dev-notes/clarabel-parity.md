@@ -71,22 +71,28 @@ randomized KKT-residual check).
 `K_pow^α = { (x,y,z) : x^α y^{1-α} ≥ |z|, x,y≥0 }` are **not** self-scaled:
 there is no `W` with `W²z = s`, no `s∘z`, no symmetric `μ`. They need the
 non-symmetric path-following machinery (Nesterov–Todd 1997; Skajaa–Ye
-2015; the approach Clarabel and Hypatia use):
+2015; Dahl–Andersen 2021 — the MOSEK exp-cone algorithm; the approach
+Clarabel and Hypatia use):
 
 - **Barrier oracles.** Each cone supplies its logarithmically-homogeneous
   self-concordant barrier `f`, gradient `g=∇f`, and Hessian `H=∇²f`
   (exp-cone barrier `−log(y log(z/y) − x) − log y − log z`, degree 3). The
   trait grows `barrier_grad`/`barrier_hess` (symmetric cones can supply
   closed forms too, unifying the code).
-- **Scaling.** Replace the NT point with a **primal–dual scaling** built
-  from `H` (Clarabel uses the "primal-dual scaling" of the Hessian; a
-  cheaper option is the Hessian at the current primal). The `kkt_block`
-  becomes that (dense, small: 3×3 for exp/power) scaling.
+- **Scaling.** Replace the NT point with a **dual-aware primal–dual
+  scaling** built from *both* cone iterates — the Tunçel scaling (Tunçel
+  2001; Myklebust–Tunçel 2014), specialized to 3-D and computed by a BFGS
+  update as in Dahl–Andersen 2021. The `kkt_block` becomes that dense, small
+  (3×3 for exp/power) `WᵀW`. The cheaper primal-only Hessian scaling was
+  tried and **stalls** (the dual races to the boundary); see the worked
+  construction and prototype findings in `hsde.md` (§"The dual-aware scaling
+  (item #1)").
 - **Centrality & step.** `μ = ⟨s,z⟩/Σdegree` still defines the target, but
-  the corrector uses a **third-order** correction term (not `ds∘dz`), and
-  the step length needs a **neighborhood / line search on the barrier**
-  (stay where `f` is finite and the iterate is in the wider neighborhood),
-  since there is no closed-form boundary root.
+  the corrector uses a **third-order** correction term (not `ds∘dz`) —
+  Dahl–Andersen's Mehrotra-like nonsymmetric corrector — and the step
+  length needs a **neighborhood / line search on the barrier** (stay where
+  `f` is finite and inside the wider neighborhood), since there is no
+  closed-form boundary root.
 - **Robustness ⇒ HSDE (decision point).** Non-symmetric cones are far more
   robustly handled inside a **homogeneous self-dual embedding** (Clarabel,
   SCS, ECOS-exp all do). Our solver currently uses a direct primal–dual

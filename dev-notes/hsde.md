@@ -1,7 +1,12 @@
 # Homogeneous self-dual embedding for the convex IPM — design note
 
 **Status: Phases H2–H4 landed — HSDE solves LP/QP/SOCP and is a
-selectable driver (`QpOptions::use_hsde`). H5 (exponential cone) next.**
+selectable driver (`QpOptions::use_hsde`). H5 (exponential cone) core
+landed: the dual-aware scaling, the non-symmetric driver
+(`hsde_nonsym::solve_conic_hsde_nonsym`), the third-order corrector, and
+public-API routing (`ConeSpec::Exponential` → the driver) solve exp-cone
+problems to known optima — see "H5 status" below. Remaining: broader
+benchmarks (`pounce-nlp` cross-checks, CBLIB).**
 Chosen as the foundation for Clarabel cone parity (see
 `clarabel-parity.md`): reformulate the interior-point driver into a
 homogeneous self-dual embedding (HSDE), prove it reproduces every existing
@@ -237,7 +242,12 @@ first; a Mehrotra/RK corrector is a later optimization.
 4. **Validate** on known optima: an entropy maximization / `log-sum-exp`
    epigraph and a tiny geometric program (posynomial), plus a randomized
    KKT-residual check, all to intrinsic tolerance; the orthant/SOC paths
-   stay byte-identical.
+   stay byte-identical. **Cross-check against NLP solves:** each of these
+   problems also has a smooth-NLP form — solve it through `pounce-nlp` and
+   require the conic optimum to agree with the NLP optimum (objective and
+   primal point) to tolerance. This is the strongest intrinsic check: two
+   independent solvers (a conic IPM and a general NLP IPM) landing on the
+   same KKT point.
 
 ### Prototype findings (what works, what's still needed)
 
@@ -256,17 +266,264 @@ and across a central-path-neighborhood line search — it is the known
 weakness of naive primal scaling, *not* a sign/algebra bug (the symmetric
 reduction holds and the first step is correct).
 
-**What's needed:** the **dual-aware symmetric scaling** of Dahl–Andersen /
-MOSEK — a scaling built from *both* `s` and `z` (a Tunçel-style primal–dual
-scaling, or explicit predictor + Skajaa–Ye Runge–Kutta corrector iterations
-that re-center the dual), rather than `H(s)` alone. Pinning down its exact
-form needs the reference (currently network-blocked from this environment),
-so the prototype was **not** committed (the project does not ship a
-non-converging solver). The validated barrier oracles and this derivation
-stand; the driver resumes once the dual-aware scaling is in hand.
+**What's needed (resolved — item #1 in hand).** The stall is the known
+weakness of primal-only Hessian scaling. The fix is a **dual-aware
+primal–dual scaling** built from *both* the primal and dual cone iterates —
+the Tunçel scaling, specialized to 3-D and computed by a BFGS update, exactly
+as in MOSEK's exponential-cone solver. The construction is transcribed below
+from **Dahl & Andersen (2021)** — the local copy is `~/Desktop/hsde-reference.pdf`
+(this reference was *not* network-blocked after all; it was on disk).
+Equation tags `(DA n)` below refer to that paper.
 
-Sources for the non-symmetric algorithm:
-[Skajaa & Ye, *A homogeneous interior-point algorithm for nonsymmetric
-convex conic optimization*, Math. Prog. 2015](https://link.springer.com/article/10.1007/s10107-014-0773-1);
-[Dahl & Andersen, *A primal-dual interior-point algorithm for nonsymmetric
-exponential-cone optimization*, Math. Prog. 2021](https://link.springer.com/article/10.1007/s10107-021-01631-4).
+### The dual-aware scaling (item #1) — Tunçel/BFGS primal–dual scaling [Dahl & Andersen 2021]
+
+This **replaces** the primal-only `−(1/μ)H(s)⁻¹` block of "Central path and
+the scaling block" above, and supersedes the fixed-σ path-follower of "Why a
+separate loop" (Dahl–Andersen fold predictor + corrector + centering into one
+combined direction). Implements `[Dahl & Andersen 2021]`, which itself
+specializes the primal–dual scalings of `[Tunçel 2001]` / `[Myklebust &
+Tunçel 2014]` to the exponential cone.
+
+**Notation / convention alignment (read this first).** Dahl–Andersen put the
+*primal* cone variable in `x` and the *dual* in `s`; pounce's HSDE uses
+`s ∈ K` (primal slack) and `z ∈ K*` (dual). Map **DA `x` → pounce `s`**,
+**DA `s` → pounce `z`**. Their exp-cone ordering also differs:
+`K_exp = cl{x₁ ≥ x₂·e^{x₃/x₂}}`, barrier `F = −log(x₂log(x₁/x₂) − x₃) − log x₁
+− log x₂` (DA 2) — a coordinate **permutation** of pounce's `(x,y,z)` with
+`ψ = y·log(z/y) − x` (`cones/exp.rs`): pounce `(x,y,z) = DA (x₃, x₂, x₁)`. Port
+the appendix derivatives through that permutation, **or** (cheaper, less
+error-prone) re-derive `F'''` directly in pounce's order and FD-check it
+alongside the existing `F, ∇F, ∇²F` oracles.
+
+In DA's convention (`x` = primal cone var, `s` = dual cone var), for an iterate
+off the central path:
+
+**Shadow iterates and scalars** (DA 7):
+```
+  x̃ := −F'_*(s)      (gradient of the conjugate barrier at the dual point)
+  s̃ := −F'(x)        (gradient of the primal barrier at the primal point)
+  μ  := ⟨x,s⟩/ϑ,     μ̃ := ⟨x̃,s̃⟩/ϑ          (μ·μ̃ ≥ 1, equality only on path)
+```
+`s̃ = −F'(x)` is free (reuse `∇F`). `x̃ = −F'_*(s)` has no closed form for the
+exp cone: it is `x̃ = argminₓ{−⟨s,x⟩ − F(x)}`, i.e. solve `F'(x̃) = −s` by a
+damped Newton iteration (DA p. 347); then `F''_*(s) = [F''(x̃)]⁻¹`.
+`Y^T S ≻ 0` (with `S, Y` below) ⇔ the iterate is off the path.
+
+**Secant equations — definition of a primal–dual scaling** (DA 8, DA 29). A
+nonsingular `W` with the *double* secant property
+```
+  W x = W^{-T} s,     W x̃ = W^{-T} s̃        ⇔   (WᵀW)⁻¹ ∈ T₁(x,s),
+```
+where Tunçel's set is `T₁(x,s) = {T≻0 : T²s = x, T²F''(x) = F'_*(s)}` (DA 20).
+On the central path this collapses to the self-scaled `WᵀW = μF''(x)` (DA 21);
+**off** the path the dual data `s, s̃` genuinely enter — that is exactly the
+"dual awareness" the primal-only block lacked.
+
+**3-D closed form (this is what to implement).** In 3-D every such scaling is
+(DA §5, end):
+```
+  WᵀW          = Y(YᵀS)⁻¹Yᵀ + t·z zᵀ
+  W⁻¹W⁻ᵀ       = S(YᵀS)⁻¹Sᵀ + t⁻¹·r rᵀ          S := [x  x̃],  Y := [s  s̃]
+```
+with `Sᵀz = 0, Yᵀr = 0, ⟨r,z⟩ = 1, ‖z‖ = 1` — computed by **cross products**:
+```
+  z = (x × x̃) / ‖x × x̃‖ ,        r = (s × s̃) / ⟨s × s̃, z⟩ .
+```
+The entire non-symmetry is carried by the single scalar `t > 0`.
+
+**Choosing `t` — the BFGS value** (DA 32):
+```
+  t = μ·‖ F''(x) − s̃s̃ᵀ/ϑ − (F''(x)x̃ − μ̃s̃)(F''(x)x̃ − μ̃s̃)ᵀ / (⟨x̃,F''(x)x̃⟩ − ϑμ̃²) ‖_F
+```
+— the Frobenius norm of the rank-3 BFGS update `H_BFGS − μF''(x)` (DA 30). DA
+also give an "optimally bounded" `t` via bisection (DA 31; conjectured bound
+`ξ* ≈ 1.253` for the exp cone), but report **no practical difference** vs the
+BFGS `t` (largest observed `ξ ≤ 1.72`). **Use the BFGS `t` (DA 32)** — closed
+form, no bisection.
+
+**Factored scalings used in the loop** (DA §6) — the columns of `Wᵀ` / `W⁻¹`:
+```
+  Wᵀ   columns:  x/√⟨x,s⟩ ,   δ_s/√⟨δ_x,δ_s⟩ ,   √t · z
+  W⁻¹  columns:  s/√⟨x,s⟩ ,   δ_x/√⟨δ_x,δ_s⟩ ,   r/√t
+  δ_x := x − μ x̃ ,    δ_s := s − μ s̃ .
+```
+This dense 3×3 `WᵀW` is the `DenseLower` cone block of implementation step #1
+— now `WᵀW` rather than `−(1/σμ)H⁻¹`. **Reconcile placement and signs with
+pounce's elimination** (pounce keeps `Δz`, eliminates `Δs`; DA keep `Δx`,
+eliminate `Δs` in *their* convention) using the **orthant-reduction anchor**:
+on the path `WᵀW → μF''(s)`, and the block must collapse to the existing
+`−W²` orthant/SOC block — pin the sign there, exactly as the `−(1/μ)H⁻¹`
+derivation was pinned.
+
+**The corrector (DA's headline contribution)** (DA 16) — a Mehrotra-like
+*third-order* corrector for the non-symmetric case:
+```
+  η := −½ F'''(x)[ Δxᵃ , (F''(x))⁻¹ Δsᵃ ]
+```
+where `(Δxᵃ, Δsᵃ)` is the affine/predictor direction (DA 11). Evaluate via
+(DA 34): `η = −½ F'''(x)[u, v]`, `u = Δxᵃ`, `v` solving `F''(x)v = Δsᵃ` (use
+the factored `F'' = RRᵀ`, DA App. A.2, for stability). The exp-cone third
+derivative `F'''(x)[u]` is DA App. A.3 (DA 33). DA Table 1 / Fig 2: this
+corrector cuts iteration counts to roughly the symmetric-cone level — it is
+the reason their method is competitive and the reason to prefer it over the
+Skajaa–Ye Runge–Kutta corrector (which needs extra KKT factorizations).
+
+**Centering and the combined step** (DA §6):
+```
+  α_a := step-to-boundary of the affine direction   (bisection on membership)
+  γ   := (1 − α_a)·min{(1 − α_a)², 1/4}              (centering parameter)
+  combined (DA 18):  G(Δz) = −(1 − γ)·G(z),
+                     W Δx + W^{-T} Δs = −v + γμ ṽ − W^{-T} η,
+                     v = Wx = W^{-T}s ,   ṽ = W x̃ = W^{-T} s̃ .
+  update:  z ← z + α Δz,  largest α keeping the iterate in N(β),  β = 1e-6.
+```
+`N(β)` is the one-sided ∞-norm neighborhood `ϑ·⟨F'(xᵢ), F'_*(sᵢ)⟩⁻¹ ≥ βμ`
+(DA §3). The reduced bordered linear system is DA §7.2: the cone block is
+`WᵀW`, solved through an `LDLᵀ` of `[ −WᵀW  Aᵀ ; A  0 ]` — structurally the
+**same** bordered two-solve already in `hsde.rs`, with the dense `WᵀW` in
+place of the symmetric `W²`.
+
+**Starting point** (DA §6): `x = s = −F'(x)` (solve `x + F'(x) = 0`, the min
+of `½‖x‖² + F(x)`), `y = 0`, `τ = κ = 1`. For the exp cone DA give the constant
+`x⁰ = s⁰ ≈ (1.290928, 0.805102, −0.827838)` (their ordering — permute to
+pounce's). Then `z⁰ ∈ N(1)`, perfectly centered.
+
+**Termination** (DA §7.3): relative primal/dual feasibility `ρ_p, ρ_d` and gap
+`ρ_g`, plus infeasibility metrics `ρ_pi, ρ_di` and ill-posedness `ρ_ip` —
+these mirror the relative optimal/infeasible checks already in "Initial point,
+step, termination", so the existing certificate path is reused.
+
+### H5 status — what landed
+
+Implemented and validated (all to intrinsic tolerance, `cargo test -p
+pounce-convex`):
+
+- **Conjugate-barrier gradient** `x̃ = −F'_*(z)` (`cones/exp.rs`,
+  `ExponentialCone::conjugate_grad`) — damped self-concordant Newton,
+  validated by exact round-trip (`p → −∇F(p) → recover p`) and the residual
+  equation `∇F(x̃) = −z`.
+- **Dual-aware scaling** `M = WᵀW` (`ExponentialCone::scaling` →
+  `ExpScaling`) — the closed form `Y(YᵀS)⁻¹Yᵀ + t·z_cp z_cpᵀ` with the BFGS
+  `t` (DA 32). The driver needs only `M` (not `W`/`W⁻¹`): the secants
+  pre-multiplied by `Wᵀ` are the exact, `W`-free identities `M·s = z`,
+  `M·x̃ = s̃`, which the tests confirm; `M` is SPD and reduces to `μ∇²F` near
+  the path.
+- **Non-symmetric driver** (`hsde_nonsym::solve_conic_hsde_nonsym`) — the
+  same homogeneous embedding + two-solve τ scheme as `hsde.rs`, with the
+  cone `(z,z)` block `−M⁻¹` (dense 3×3, genuine off-diagonals reserved in a
+  local `NsKkt`), `comp_term = −M⁻¹·rc`, `rc = −z + σμ·s̃`, and a
+  backtracking step on cone membership. **For the orthant it reduces exactly
+  to the symmetric Mehrotra step** (the correctness anchor). Validated on
+  `min z : (1,1,z)∈K_exp` → `z = e`; `log-sum-exp` (2 exp + 1 orthant) →
+  `log 2`; and a geometric program `min x + 1/x` → `2`.
+- **Third-order corrector** (DA 16/34) — `ExponentialCone::third_dir_apply`
+  computes `F'''(s)[u, v]` as a directional derivative of the Hessian
+  (validated against the exact identity `F'''(s)[s,v] = −2∇²F·v`); the driver
+  forms `η = −½ F'''(s)[ds_aff, ∇²F⁻¹ dz_aff]` and folds `−η` into `rc`. For
+  the orthant `η_i = ds_aff_i dz_aff_i/s_i` — exactly the Mehrotra
+  second-order term, so the orthant corrector *is* standard Mehrotra. Two
+  safeguards keep it robust: a step-collapse fallback to pure centering, and
+  gating the corrector off within `~1e3·tol` of convergence (its
+  finite-difference perturbation otherwise stalls the endgame). The FD step is
+  scaled `∝ 1/‖u‖` so the third derivative stays accurate for a tiny affine
+  step.
+- **Public-API routing** — `ConeSpec::Exponential`; `solve_socp_ipm` detects
+  any exp spec and routes to `hsde_nonsym` (`solve_nonsym`), with bound
+  expansion into a trailing orthant block and bound-dual splitting exactly as
+  the symmetric path. SOC mixed with exp is not yet supported (returns
+  `NumericalFailure`). End-to-end routing test
+  (`routes_exponential_through_public_entry`) passes.
+- **Python access** — `pounce.qp.solve_socp(..., cones=[("exp", 3), ...])`
+  reaches the driver via `pounce-py`'s cone parser (`"exp"`/`"exponential"`,
+  fixed dimension 3 validated; the SOC+exp mix raises a clear `ValueError`
+  up front rather than returning an opaque status). Verified from Python on
+  the GP (`→ 2`) and log-sum-exp (`→ log 2`) problems
+  (`python/tests/test_socp.py`).
+- **QP solve report** — the convex/QP CLI path (`run_convex_qp`) now emits the
+  `pounce.solve-report/v1` JSON report (`--json-output`) like the NLP path,
+  with real final KKT residuals via `QpSolution::kkt_residuals` →
+  `QpResiduals` (in `pounce-convex`, tested with active bounds and a binding
+  inequality), so the benchmark harness can compare QP/exp-cone solves to NLP
+  solves uniformly. At `--json-detail full` the report also carries the
+  **per-iteration convergence trace** (`iterations` array, same `IterRecord`
+  schema as the NLP path): an opt-in `QpOptions::collect_iterates` makes the
+  convex IPM record `obj / inf_pr / inf_du / μ / α` per iteration into
+  `QpSolution::iterates` (off by default — no overhead), which `run_convex_qp`
+  maps into the report.
+- **Bug fixed:** `in_dual_cone` had `ψ* = v − u·log(−u/w)` instead of the
+  correct `v − u + u·log(−u/w)` (it mislabeled dual-infeasible points as
+  interior); cross-checked against DA p. 346 and regression-tested.
+
+- **NLP cross-checks** (`crates/pounce-cli/tests/exp_cone_vs_nlp.rs`) — the
+  geometric program (`= 2`), log-sum-exp (`= log 2`), and entropy
+  maximization (`= −log n`) are each solved *twice*: as an exp-cone conic
+  program (this driver) and as a smooth NLP (the independent IPOPT-style
+  filter-IPM in `pounce-algorithm`). The two optima agree to ~1e-7 — strong
+  evidence of correctness, since the conic and NLP paths share no code.
+- **Endgame acceptance:** near the cone boundary `ψ → 0` makes `∇²F` blow up,
+  so the scaling/factorization can break down a hair short of `tol`. When that
+  happens with KKT residuals already within `~1e3·tol`, the driver accepts the
+  current iterate (IPOPT's "solved to acceptable level") instead of reporting a
+  spurious `NumericalFailure`.
+
+**H6 (power cone) — landed.** The non-symmetric machinery was generalized
+(`cones/nonsym.rs`): `conjugate_grad`, the dual-aware scaling
+(`NonsymScaling`), and `third_dir_apply` are now generic over any 3-D
+`BarrierCone` (which gained an `interior_reference` returning a point in
+`K ∩ K*`). The exp and power cones supply only their barrier oracles. The
+`PowerCone { alpha }` (`cones/power.rs`) implements `K_α = {|x| ≤ y^α z^{1−α}}`
+with the degree-3 barrier `−log(y^{2α}z^{2−2α} − x²) − (1−α)log y − α log z`
+(FD- and identity-validated). The driver dispatches over a `NonsymCone`
+enum (Exp/Power) that implements `BarrierCone`, so the loop, corrector, and
+step length are cone-agnostic; the generic machinery is validated on both
+cones via the secants `M·s=z`, `M·x̃=s̃`. Wired through `ConeSpec::Power(α)` →
+`solve_socp_ipm` → `solve_nonsym`, and Python `solve_socp(cones=[("pow", α)])`
+(exponent validated to `(0,1)`). Known-optimum tests
+(`max x s.t. (x, 2, 0.5) ∈ K_α` → `2^α 0.5^{1−α}`) pass for several α in Rust
+and Python.
+
+**SOC mixing — landed.** The non-symmetric driver now also accepts
+second-order-cone blocks (`NsBlock::SecondOrder`): they are self-scaled, so
+they reuse `SecondOrderCone`'s NT machinery — a dense `W² = diag(d)+uuᵀ`
+block, the Jordan `comp_residual`/corrector, the arrow `rhs_comp_term`, and
+the closed-form `max_step` — alongside the dual-aware exp/power blocks in one
+KKT. A SOC may be freely mixed with an exp/power cone (`solve_socp_ipm` routes
+any exp/power/SOC mix to `solve_nonsym`; Python `solve_socp` likewise). Tested:
+SOC-only and `min t + z s.t. (t,3,4)∈SOC ∧ (1,1,z)∈K_exp` → `t=5, z=e` in Rust
+and Python.
+
+**Warm-start — landed (primal hook).** `solve_conic_hsde_nonsym_warm` seeds
+the primal `x` from a previous (nearby) solution while keeping the cones
+centered, lowering the initial primal residual. Honest scope: the HSDE
+embedding's iteration count is start-dependent and not guaranteed to drop, so
+this is a primal hook, **not** a promised speedup — the property tested is
+*start-independence* (warm from the optimum, a bad point, or an ignored
+mismatched vector all reach the same optimum). Higher-level routing
+(`solve_socp_ipm_warm` for the non-symmetric path, Python) and factor reuse
+remain optional follow-ups, gated on a demonstrated need.
+
+Remaining: the CBLIB exp/power benchmark set (broad/adversarial validation),
+and — if a need emerges — embedded factor-reuse for the non-symmetric path.
+
+## Sources (local copies — read and transcribed)
+
+- **Skajaa, A. & Ye, Y. (2015).** *A homogeneous interior-point algorithm for
+  nonsymmetric convex conic optimization.* Mathematical Programming Ser. A
+  **150**(2), 391–422. DOI [10.1007/s10107-014-0773-1](https://doi.org/10.1007/s10107-014-0773-1).
+  Local copy: `~/Desktop/hsde-2.pdf`. Provides the homogeneous model and the
+  primal-only Hessian scaling with a separate centering corrector — the `μH`
+  scaling the prototype used (and the Runge–Kutta corrector DA improve on).
+- **Dahl, J. & Andersen, E. D. (2021).** *A primal-dual interior-point
+  algorithm for nonsymmetric exponential-cone optimization.* Mathematical
+  Programming Ser. A **194**(1–2), 341–370. DOI
+  [10.1007/s10107-021-01631-4](https://doi.org/10.1007/s10107-021-01631-4).
+  Local copy: `~/Desktop/hsde-reference.pdf`. **Source of item #1**: the
+  Tunçel/BFGS dual-aware primal–dual scaling (this is MOSEK's exp-cone
+  algorithm), the third-order corrector, and the exp-cone barrier derivatives
+  (Appendix A) — the `(DA n)` equations cited above.
+- Underlying scaling theory: **Tunçel, L. (2001)**, *Generalization of
+  primal–dual interior-point methods to convex optimization problems in conic
+  form*, Found. Comput. Math. **1**(3), 229–254; **Myklebust, T. & Tunçel, L.
+  (2014)**, *Interior-point algorithms for convex optimization based on
+  primal–dual metrics*, arXiv:1411.2129 — the secant / multiple-secant BFGS
+  scalings DA build on.

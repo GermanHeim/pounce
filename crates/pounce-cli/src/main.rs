@@ -29,6 +29,7 @@ use pounce_common::diagnostics::{
 };
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
@@ -467,7 +468,21 @@ pub fn main() -> ExitCode {
                     .get_string_value("qp_presolve", "")
                     .map(|(v, _)| v != "no")
                     .unwrap_or(true);
-                return run_convex_qp(&prob, class, sol_path.as_deref(), presolve_on);
+                // JSON solve report, when requested — same schema as the NLP
+                // path, so the benchmark harness can compare QP and NLP solves.
+                let json_cfg = args.json_output.as_deref().map(|p| {
+                    let input = match &args.problem {
+                        ProblemSource::Builtin(name) => {
+                            InputDescriptor::Builtin { name: name.clone() }
+                        }
+                        ProblemSource::NlFile(f) => InputDescriptor::NlFile {
+                            path: f.clone(),
+                            size_bytes: std::fs::metadata(f).ok().map(|m| m.len()),
+                        },
+                    };
+                    (p, args.json_detail, input)
+                });
+                return run_convex_qp(&prob, class, sol_path.as_deref(), presolve_on, json_cfg);
             }
             // Should not happen (only `.nl` classifies non-NLP), but be
             // safe: fall through to NLP rather than mis-dispatch.
@@ -1047,11 +1062,26 @@ fn build_debugger(
 /// from the QP multipliers (`pounce_cli::qp_extract::recover_duals`).
 /// The objective is reported in the user's original sense, including the
 /// `.nl`'s constant term, which the standard-form QP drops.
+/// Map the convex solver's status onto the NLP-side `ApplicationReturnStatus`
+/// used by the JSON solve report, so QP and NLP reports share one status
+/// vocabulary.
+fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
+    use pounce_convex::QpStatus;
+    match s {
+        QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+        QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
+        QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
+        QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+        QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
+    }
+}
+
 fn run_convex_qp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
     sol_path: Option<&std::path::Path>,
     presolve_on: bool,
+    json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
 ) -> ExitCode {
     use pounce_convex::presolve::{presolve, PresolveOutcome};
     use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
@@ -1087,6 +1117,15 @@ fn run_convex_qp(
         z_ub: vec![0.0; qp.n],
         obj: 0.0,
         iters: 0,
+        iterates: Vec::new(),
+    };
+    // Collect the per-iteration convergence trace only when a Full-detail
+    // JSON report was requested (it carries the `iterations` array); the
+    // default solve stays trace-free.
+    let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
+    let qp_opts = QpOptions {
+        collect_iterates: want_trace,
+        ..QpOptions::default()
     };
     let sol = if presolve_on {
         match presolve(&qp) {
@@ -1108,14 +1147,14 @@ fn run_convex_qp(
                         st.tightened_bounds,
                     );
                 }
-                let red = solve_qp_ipm(&ps.reduced, &QpOptions::default(), backend);
+                let red = solve_qp_ipm(&ps.reduced, &qp_opts, backend);
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),
             PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
         }
     } else {
-        solve_qp_ipm(&qp, &QpOptions::default(), backend)
+        solve_qp_ipm(&qp, &qp_opts, backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -1138,11 +1177,14 @@ fn run_convex_qp(
         sol.iters,
     );
 
-    // Write a `.sol` if requested: primal x and recovered constraint
-    // duals (mapped from the QP multipliers back to per-`.nl`-constraint
-    // order in the AMPL `.sol` convention).
+    // Recover per-constraint duals once (mapped from the QP multipliers back
+    // to per-`.nl`-constraint order); used by both the `.sol` and the JSON
+    // report.
+    let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
+
+    // Write a `.sol` if requested: primal x and recovered constraint duals in
+    // the AMPL `.sol` convention.
     if let Some(path) = sol_path {
-        let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
         let payload = nl_writer::SolutionFile {
             message: &format!("POUNCE {} IPM (pounce-convex): {msg}", class.name()),
             x: &sol.x,
@@ -1153,6 +1195,62 @@ fn run_convex_qp(
         if let Err(e) = nl_writer::write_sol_file(path, &payload) {
             eprintln!("pounce: failed to write {}: {e}", path.display());
             return ExitCode::from(2);
+        }
+    }
+
+    // Emit the JSON solve report, when requested — same `pounce.solve-report/v1`
+    // schema as the NLP path, so the benchmark harness can compare QP and NLP
+    // solves uniformly. (Per-iteration history is NLP-only for now; the convex
+    // driver does not yet feed the iterate trace, so `iterations` stays empty
+    // even at Full detail.)
+    if let Some((json_path, detail, input)) = json_cfg {
+        let mut builder = ReportBuilder::new(detail, input);
+        builder.problem.n_variables = qp.n as _;
+        builder.problem.n_constraints = lambda.len() as _;
+        builder.problem.n_objectives = 1;
+        builder.problem.minimize = prob.minimize;
+        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.solve_result_num = srn;
+        builder.solution.objective = reported_obj;
+        builder.solution.x = sol.x.clone();
+        builder.solution.lambda = lambda.clone();
+        builder.stats.iteration_count = sol.iters as _;
+        builder.stats.final_objective = reported_obj;
+        builder.stats.total_wallclock_time_secs = elapsed;
+        // Real final KKT residuals (from pounce-convex), so the harness sees
+        // genuine convergence numbers rather than zeros.
+        let res = sol.kkt_residuals(&qp);
+        builder.stats.final_constr_viol = res.primal_infeasibility;
+        builder.stats.final_dual_inf = res.dual_infeasibility;
+        builder.stats.final_compl = res.complementarity;
+        builder.stats.final_kkt_error = res.kkt_error();
+        // Per-iteration convergence trace at Full detail (the convex IPM's
+        // iterate records map onto the report's IterRecord schema, shared with
+        // the NLP path so the harness reads one format).
+        if matches!(detail, ReportDetail::Full) {
+            builder.iterations = sol
+                .iterates
+                .iter()
+                .map(|it| IterRecord {
+                    iter: it.iter as _,
+                    objective: it.objective,
+                    inf_pr: it.primal_infeasibility,
+                    inf_du: it.dual_infeasibility,
+                    mu: it.mu,
+                    alpha_primal: it.alpha_primal,
+                    alpha_dual: it.alpha_dual,
+                    ..IterRecord::default()
+                })
+                .collect();
+        }
+        let report = builder.finish();
+        if let Err(e) = write_report_file(json_path, &report) {
+            eprintln!(
+                "pounce: failed to write JSON report to {}: {e}",
+                json_path.display()
+            );
+        } else {
+            eprintln!("pounce: wrote {}", json_path.display());
         }
     }
 

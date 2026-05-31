@@ -207,16 +207,25 @@ fn warm_from_dict(warm: &Bound<'_, PyDict>) -> PyResult<QpWarmStart> {
     })
 }
 
-/// Parse `(kind, dim)` tuples into [`ConeSpec`]s. `kind` is
-/// case-insensitive: `"nonneg"`/`"nn"`/`"+"` or `"soc"`/`"q"`.
-fn parse_cones(specs: Vec<(String, usize)>) -> PyResult<Vec<ConeSpec>> {
+/// Parse `(kind, value)` tuples into [`ConeSpec`]s. `kind` is
+/// case-insensitive. The float `value` means the **dimension** for
+/// `"nonneg"`/`"nn"`/`"+"` and `"soc"`/`"q"` (rounded to an integer), and the
+/// **exponent α** for `"pow"`/`"power"` (the 3-D power cone, `α ∈ (0,1)`).
+/// `"exp"`/`"exponential"` is the fixed-dimension-3 exponential cone (its
+/// `value` is ignored).
+fn parse_cones(specs: Vec<(String, f64)>) -> PyResult<Vec<ConeSpec>> {
     specs
         .into_iter()
-        .map(|(kind, d)| match kind.to_ascii_lowercase().as_str() {
-            "nonneg" | "nn" | "+" => Ok(ConeSpec::Nonneg(d)),
-            "soc" | "q" | "secondorder" => Ok(ConeSpec::SecondOrder(d)),
+        .map(|(kind, v)| match kind.to_ascii_lowercase().as_str() {
+            "nonneg" | "nn" | "+" => Ok(ConeSpec::Nonneg(v.round() as usize)),
+            "soc" | "q" | "secondorder" => Ok(ConeSpec::SecondOrder(v.round() as usize)),
+            "exp" | "exponential" | "e" => Ok(ConeSpec::Exponential),
+            "pow" | "power" | "p" if v > 0.0 && v < 1.0 => Ok(ConeSpec::Power(v)),
+            "pow" | "power" | "p" => Err(PyValueError::new_err(format!(
+                "power-cone exponent α must be in (0, 1), got {v}"
+            ))),
             other => Err(PyValueError::new_err(format!(
-                "unknown cone kind '{other}' (use 'nonneg' or 'soc')"
+                "unknown cone kind '{other}' (use 'nonneg', 'soc', 'exp', or 'pow')"
             ))),
         })
         .collect()
@@ -259,18 +268,23 @@ pub fn solve_qp<'py>(
     solution_dict(py, sol)
 }
 
-/// Solve a standard-form SOCP (or mixed LP/QP + second-order cones). The
-/// inequality block `Gx ≤ h` is partitioned by `cones`, a list of
-/// `(kind, dim)` tuples (`"nonneg"` / `"soc"`) covering the `m_ineq` rows
-/// in order; each `s = h − Gx` block must lie in its cone. Variable bounds
-/// are appended as a trailing nonnegative block. Returns the usual result
-/// dict.
+/// Solve a standard-form conic program (LP/QP plus second-order, exponential,
+/// and/or **power** cones). The inequality block `Gx ≤ h` is partitioned by
+/// `cones`, a list of `(kind, value)` tuples covering the `m_ineq` rows in
+/// order; each `s = h − Gx` block must lie in its cone. `value` is the
+/// dimension for `"nonneg"`/`"soc"` and the exponent α for `"pow"`; `"exp"`
+/// is the fixed 3-D exponential cone. Variable bounds are appended as a
+/// trailing nonnegative block. Returns the usual result dict.
+///
+/// Problems containing an exponential or power cone route to the
+/// non-symmetric HSDE driver, which also handles second-order cones — so a
+/// SOC may be freely mixed with an exp/power cone.
 #[pyfunction]
 #[pyo3(signature = (prob, cones, tol=None, max_iter=None))]
 pub fn solve_socp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
-    cones: Vec<(String, usize)>,
+    cones: Vec<(String, f64)>,
     tol: Option<f64>,
     max_iter: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {

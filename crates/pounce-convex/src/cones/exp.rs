@@ -34,7 +34,7 @@
 use super::BarrierCone;
 
 /// The 3-dimensional exponential cone `K_exp` and its degree-3 barrier.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ExponentialCone;
 
 impl ExponentialCone {
@@ -108,14 +108,25 @@ impl BarrierCone for ExponentialCone {
     }
 
     fn in_dual_cone(&self, point: &[f64], tol: f64) -> bool {
-        // K_exp* = cl{ (u,v,w) : −u·exp(v/u) ≤ e·w, u<0 }; strict interior
-        // uses ψ* = v − u·log(−u/w) > 0 with u<0, w>0  (the conjugate slack).
+        // K_exp* = cl{ (u,v,w) : −u·exp(v/u) ≤ e·w, u<0 }. Strict interior:
+        // −u·e^{v/u} < e·w ⟺ v/u < 1 + log(w/−u) ⟺ (u<0, flip) the conjugate
+        // slack ψ* = v − u + u·log(−u/w) = v − u·(1 − log(−u/w)) > 0, with
+        // u<0, w>0. (Derivation: Dahl–Andersen 2021 §2 give the dual exp cone
+        // `e·z₁ ≥ −z₃ e^{z₂/z₃}`, mapped through pounce's coordinate order.)
         let (u, v, w) = (point[0], point[1], point[2]);
         if -u <= tol || w <= tol {
             return false;
         }
-        let psi_d = v - u * ((-u) / w).ln();
+        let psi_d = v - u * (1.0 - ((-u) / w).ln());
         psi_d > tol * (1.0 + u.abs())
+    }
+
+    fn interior_reference(&self, out: &mut [f64]) {
+        // The self-dual central point (the fixed point of x = −∇F(x), in
+        // pounce coordinate order), which lies in int K and int K*.
+        out[0] = -0.827838;
+        out[1] = 0.805102;
+        out[2] = 1.290928;
     }
 }
 

@@ -1432,6 +1432,10 @@ impl Presolve {
             out.push(match cones[ci] {
                 ConeSpec::Nonneg(_) => ConeSpec::Nonneg(count),
                 ConeSpec::SecondOrder(_) => ConeSpec::SecondOrder(count),
+                // Non-symmetric cones are fixed at 3 rows and are not split or
+                // merged by presolve.
+                ConeSpec::Exponential => ConeSpec::Exponential,
+                ConeSpec::Power(a) => ConeSpec::Power(a),
             });
             i = j;
         }
@@ -1728,6 +1732,7 @@ impl Presolve {
             z_ub,
             obj,
             iters: red.iters,
+            iterates: red.iterates.clone(),
         }
     }
 }
@@ -1749,6 +1754,7 @@ where
         z_ub: vec![0.0; prob.n],
         obj: 0.0,
         iters: 0,
+        iterates: Vec::new(),
     };
     match presolve(prob) {
         PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),

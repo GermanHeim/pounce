@@ -202,4 +202,236 @@ pub struct QpSolution {
     pub obj: f64,
     /// Iterations taken.
     pub iters: usize,
+    /// Per-iteration convergence trace, populated only when
+    /// [`crate::QpOptions::collect_iterates`] was set (otherwise empty, with
+    /// no per-solve overhead). Each entry is one interior-point iteration.
+    pub iterates: Vec<QpIterate>,
+}
+
+/// One interior-point iteration's convergence record — the per-iteration data
+/// a solve report or benchmark harness wants (residuals, the duality measure,
+/// and the step lengths). Collected by the convex IPM when
+/// [`crate::QpOptions::collect_iterates`] is set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QpIterate {
+    /// Iteration index (0-based).
+    pub iter: usize,
+    /// Objective `½ xᵀP x + cᵀx` at the start of this iteration.
+    pub objective: f64,
+    /// Primal infeasibility `max(‖Ax − b‖∞, ‖(Gx + s − h)‖∞)`.
+    pub primal_infeasibility: f64,
+    /// Dual infeasibility `‖Px + c + Aᵀy + Gᵀz‖∞`.
+    pub dual_infeasibility: f64,
+    /// Duality measure `μ = ⟨s, z⟩ / degree`.
+    pub mu: f64,
+    /// Primal step length taken this iteration.
+    pub alpha_primal: f64,
+    /// Dual step length taken this iteration.
+    pub alpha_dual: f64,
+}
+
+/// Final KKT residuals of a [`QpSolution`] with respect to its [`QpProblem`]
+/// — the convergence quantities a caller (e.g. a solve report or benchmark
+/// harness) needs but that aren't otherwise carried on the solution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QpResiduals {
+    /// Primal infeasibility: `max(|Ax − b|, max(0, Gx − h), bound violations)`.
+    pub primal_infeasibility: f64,
+    /// Dual infeasibility (stationarity):
+    /// `‖Px + c + Aᵀy + Gᵀz − z_lb + z_ub‖∞`.
+    pub dual_infeasibility: f64,
+    /// Complementarity: `max |zᵢ · slackᵢ|` over inequalities and finite bounds.
+    pub complementarity: f64,
+}
+
+impl QpResiduals {
+    /// Overall KKT error — the max of the three components.
+    pub fn kkt_error(&self) -> f64 {
+        self.primal_infeasibility
+            .max(self.dual_infeasibility)
+            .max(self.complementarity)
+    }
+}
+
+impl QpSolution {
+    /// Recompute the final KKT residuals of this solution against `prob`.
+    ///
+    /// Uses the convex solver's standard-form conventions —
+    /// `min ½xᵀPx + cᵀx s.t. Ax = b, Gx ≤ h, lb ≤ x ≤ ub`, with equality dual
+    /// `y`, inequality dual `z ≥ 0`, and bound duals `z_lb, z_ub ≥ 0`. The
+    /// stationarity residual is `∇ₓL = Px + c + Aᵀy + Gᵀz − z_lb + z_ub`, the
+    /// `−z_lb + z_ub` matching how variable bounds expand into `G`-rows and
+    /// split back into the bound multipliers.
+    pub fn kkt_residuals(&self, prob: &QpProblem) -> QpResiduals {
+        let n = prob.n;
+
+        // Dual infeasibility (stationarity).
+        let mut r = vec![0.0; n];
+        prob.p_mul(&self.x, &mut r);
+        for i in 0..n {
+            r[i] += prob.c[i] - self.z_lb[i] + self.z_ub[i];
+        }
+        prob.at_mul(&self.y, &mut r);
+        prob.gt_mul(&self.z, &mut r);
+        let dual_infeasibility = r.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+
+        // Primal infeasibility.
+        let mut primal_infeasibility = 0.0_f64;
+        let mut ax = vec![0.0; prob.m_eq()];
+        prob.a_mul(&self.x, &mut ax);
+        for i in 0..prob.m_eq() {
+            primal_infeasibility = primal_infeasibility.max((ax[i] - prob.b[i]).abs());
+        }
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(&self.x, &mut gx);
+        for i in 0..prob.m_ineq() {
+            primal_infeasibility = primal_infeasibility.max((gx[i] - prob.h[i]).max(0.0));
+        }
+        for i in 0..n {
+            primal_infeasibility = primal_infeasibility.max((prob.lb_of(i) - self.x[i]).max(0.0));
+            primal_infeasibility = primal_infeasibility.max((self.x[i] - prob.ub_of(i)).max(0.0));
+        }
+
+        // Complementarity.
+        let mut complementarity = 0.0_f64;
+        for i in 0..prob.m_ineq() {
+            complementarity = complementarity.max((self.z[i] * (prob.h[i] - gx[i])).abs());
+        }
+        for i in 0..n {
+            let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
+            if lb > -1e19 {
+                complementarity = complementarity.max((self.z_lb[i] * (self.x[i] - lb)).abs());
+            }
+            if ub < 1e19 {
+                complementarity = complementarity.max((self.z_ub[i] * (ub - self.x[i])).abs());
+            }
+        }
+
+        QpResiduals {
+            primal_infeasibility,
+            dual_infeasibility,
+            complementarity,
+        }
+    }
+}
+
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+    use crate::ipm::{solve_qp_ipm, QpOptions};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linsol::SparseSymLinearSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// KKT residuals vanish at the optimum even when **variable bounds are
+    /// active** — the sharp check of the `−z_lb + z_ub` stationarity sign.
+    /// `min x0²+x1² −3x0 −4x1 s.t. 0 ≤ x ≤ 0.5` clamps to the upper bounds
+    /// `(0.5, 0.5)` (unconstrained optimum is `(1.5, 2)`), so `z_ub > 0` and
+    /// the stationarity term must carry it with the right sign.
+    #[test]
+    fn kkt_residuals_vanish_with_active_bounds() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-3.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![0.5, 0.5],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.x[0] - 0.5).abs() < 1e-5 && (sol.x[1] - 0.5).abs() < 1e-5);
+        let res = sol.kkt_residuals(&prob);
+        assert!(
+            res.kkt_error() < 1e-6,
+            "active-bound residuals not small: {res:?}"
+        );
+    }
+
+    /// The opt-in iterate trace is populated only when requested, records one
+    /// entry per interior-point iteration, and reflects convergence (μ and the
+    /// residuals shrink toward the optimum).
+    #[test]
+    fn iterate_trace_is_opt_in_and_records_convergence() {
+        // A bounded QP (inequalities ⇒ a non-trivial central path, μ > 0).
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-3.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        // Off by default: no trace, no overhead.
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert!(
+            sol.iterates.is_empty(),
+            "default solve must not collect a trace"
+        );
+
+        // On: one record per iteration, μ and residuals decreasing to the end.
+        let opts = QpOptions {
+            collect_iterates: true,
+            ..QpOptions::default()
+        };
+        let sol = solve_qp_ipm(&prob, &opts, backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!(!sol.iterates.is_empty(), "trace should be populated");
+        let first = &sol.iterates[0];
+        let last = sol.iterates.last().unwrap();
+        assert!(first.iter == 0);
+        assert!(first.mu > 0.0, "early μ should be positive");
+        assert!(
+            last.mu < first.mu,
+            "μ should decrease: {} -> {}",
+            first.mu,
+            last.mu
+        );
+        // The trace ends at a (near-)converged iterate (this problem starts
+        // primal-feasible, so μ — not primal infeasibility — is the signal).
+        assert!(last.mu < 1e-6, "final traced μ {} should be tiny", last.mu);
+        assert!(
+            last.dual_infeasibility < 1e-5,
+            "final traced dual infeasibility {} should be small",
+            last.dual_infeasibility
+        );
+        for r in &sol.iterates {
+            assert!(r.alpha_primal > 0.0 && r.alpha_primal <= 1.0);
+            assert!(r.alpha_dual > 0.0 && r.alpha_dual <= 1.0);
+        }
+    }
+
+    /// Inequality complementarity: a binding general inequality must show
+    /// `z·slack ≈ 0`, and stationarity must vanish with the `Gᵀz` term.
+    /// `min x0²+x1² −3x0 −4x1 s.t. x0+x1 ≤ 1` → optimum on the face (0.25, 0.75).
+    #[test]
+    fn kkt_residuals_vanish_with_binding_inequality() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-3.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let res = sol.kkt_residuals(&prob);
+        assert!(
+            res.kkt_error() < 1e-6,
+            "binding-inequality residuals not small: {res:?}"
+        );
+    }
 }

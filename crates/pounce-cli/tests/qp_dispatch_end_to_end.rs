@@ -10,6 +10,7 @@
 //!   - `solver_selection=nlp` still solves the same file (no regression /
 //!     same answer via the general path).
 
+use pounce_solve_report::SolveReport;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -163,6 +164,105 @@ fn qp_and_nlp_duals_agree() {
     assert!(
         (qp_dual - nlp_dual).abs() < 1e-5,
         "QP dual {qp_dual} disagrees with NLP dual {nlp_dual}"
+    );
+}
+
+/// The convex-QP path emits a `pounce.solve-report/v1` JSON report
+/// (`--json-output`), matching the schema the NLP path produces — so the
+/// benchmark harness can compare QP and NLP solves uniformly. Validates the
+/// schema, status, objective, problem dimensions, and iteration count.
+#[test]
+fn qp_path_emits_json_report() {
+    let dir = std::env::temp_dir();
+    let json = dir.join("pounce_convex_qp_report.json");
+    let _ = std::fs::remove_file(&json);
+    let out = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json)
+        .arg("solver_selection=qp-ipm")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(0), "QP solve should succeed");
+
+    let text = std::fs::read_to_string(&json).expect("JSON report should be written");
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize report");
+
+    assert_eq!(report.schema, "pounce.solve-report/v1");
+    // min x0²+x1² s.t. x0+x1=2 → optimum (1,1), objective 2.
+    assert!(
+        (report.solution.objective - 2.0).abs() < 1e-5,
+        "objective {} != 2",
+        report.solution.objective
+    );
+    assert_eq!(report.solution.solve_result_num, 0, "AMPL srn 0 = solved");
+    assert_eq!(report.problem.n_variables, 2);
+    assert_eq!(report.problem.n_constraints, 1);
+    assert!(report.problem.minimize);
+    // The convex IPM ran at least one iteration and recorded it.
+    assert!(
+        report.statistics.iteration_count >= 1,
+        "iteration_count = {}",
+        report.statistics.iteration_count
+    );
+    // Real final KKT residuals (recomputed from the solution), tiny at the
+    // optimum — not the placeholder zeros.
+    assert!(
+        report.statistics.final_constr_viol < 1e-6,
+        "constr_viol = {}",
+        report.statistics.final_constr_viol
+    );
+    assert!(
+        report.statistics.final_dual_inf < 1e-6,
+        "dual_inf = {}",
+        report.statistics.final_dual_inf
+    );
+    assert!(
+        report.statistics.final_kkt_error < 1e-6,
+        "kkt_error = {}",
+        report.statistics.final_kkt_error
+    );
+    // FAIR provenance is present (solver name, license).
+    assert!(!report.fair_metadata.solver.name.is_empty());
+}
+
+/// At `--json-detail full` the convex-QP report carries the per-iteration
+/// convergence trace (the `iterations` array), the same schema the NLP path
+/// uses — so the benchmark harness gets per-iteration data for QP solves too.
+#[test]
+fn qp_full_report_has_iteration_trace() {
+    let dir = std::env::temp_dir();
+    let json = dir.join("pounce_convex_qp_full.json");
+    let _ = std::fs::remove_file(&json);
+    let out = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json)
+        .arg("--json-detail")
+        .arg("full")
+        .arg("solver_selection=qp-ipm")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(0));
+
+    let text = std::fs::read_to_string(&json).expect("report written");
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
+    assert!(
+        !report.iterations.is_empty(),
+        "full-detail QP report should carry an iteration trace"
+    );
+    // Iteration indices are 0-based and contiguous; the last iterate is the
+    // (near-)optimal one.
+    for (k, rec) in report.iterations.iter().enumerate() {
+        assert_eq!(rec.iter as usize, k, "iteration indices contiguous");
+    }
+    let last = report.iterations.last().unwrap();
+    assert!(
+        (last.objective - 2.0).abs() < 1e-4,
+        "final traced objective {} ~ 2",
+        last.objective
     );
 }
 

@@ -19,11 +19,15 @@
 pub mod composite;
 pub mod exp;
 pub mod nonneg;
+pub mod nonsym;
+pub mod power;
 pub mod soc;
 
 pub use composite::{CompositeCone, ConeKind, ConeSpec};
 pub use exp::ExponentialCone;
 pub use nonneg::NonnegCone;
+pub use nonsym::NonsymScaling;
+pub use power::PowerCone;
 pub use soc::SecondOrderCone;
 
 /// Barrier oracles for a convex cone — the interface a **non-symmetric**
@@ -66,6 +70,14 @@ pub trait BarrierCone {
 
     /// Whether `point` is in the strict interior of the dual cone.
     fn in_dual_cone(&self, point: &[f64], tol: f64) -> bool;
+
+    /// A fixed strictly-interior reference point that lies in **both** the
+    /// primal cone `K` and the dual cone `K*` (writes `dim` values). It is
+    /// used (a) as the Newton start for the conjugate-gradient shadow iterate
+    /// and (b) as the self-dual starting iterate `s = z = e` for the
+    /// non-symmetric HSDE driver — both of which need a point interior to `K`
+    /// and `K*`.
+    fn interior_reference(&self, out: &mut [f64]);
 }
 
 /// The `(z, z)` scaling block a cone contributes to the symmetric KKT

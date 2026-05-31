@@ -48,7 +48,7 @@
 //! that Phases 4–6 extend rather than rewrite this driver.
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
@@ -81,6 +81,11 @@ pub struct QpOptions {
     /// default path keeps those advantages for symmetric cones; this opts a
     /// single solve into the embedding. Default `false`.
     pub use_hsde: bool,
+    /// Collect a per-iteration convergence trace into
+    /// [`crate::QpSolution::iterates`]. Off by default so a normal solve has
+    /// no recording overhead; turn on when a solve report or benchmark
+    /// harness wants the per-iteration history. Default `false`.
+    pub collect_iterates: bool,
 }
 
 impl Default for QpOptions {
@@ -92,6 +97,7 @@ impl Default for QpOptions {
             reg: 1e-8,
             infeas_tol: 1e-7,
             use_hsde: false,
+            collect_iterates: false,
         }
     }
 }
@@ -170,6 +176,13 @@ pub fn solve_socp_ipm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // Non-symmetric cones (exponential) route to the dedicated HSDE driver.
+    if cones
+        .iter()
+        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)))
+    {
+        return solve_nonsym(prob, cones, opts, make_backend);
+    }
     if !prob.has_bounds() {
         let cone = CompositeCone::from_specs(cones);
         return solve_qp_core(prob, &cone, opts, None, make_backend);
@@ -209,6 +222,48 @@ where
         z: warm.z.clone(),
     };
     solve_qp_core(prob, &cone, opts, Some(&w), make_backend)
+}
+
+/// Route a problem whose cone product contains an **exponential** cone to the
+/// non-symmetric HSDE driver ([`crate::hsde_nonsym`]). Orthant, second-order,
+/// exponential, and power blocks are all supported (a second-order cone may be
+/// mixed with a non-symmetric one). Variable bounds expand into a trailing
+/// orthant block exactly as in the symmetric path.
+fn solve_nonsym<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    use crate::hsde_nonsym::{solve_conic_hsde_nonsym, NsBlock};
+
+    fn blocks_of(cones: &[ConeSpec], extra_orthant: usize) -> Vec<NsBlock> {
+        let mut blocks = Vec::with_capacity(cones.len() + 1);
+        for c in cones {
+            match c {
+                ConeSpec::Nonneg(n) => blocks.push(NsBlock::Orthant(*n)),
+                ConeSpec::SecondOrder(m) => blocks.push(NsBlock::SecondOrder(*m)),
+                ConeSpec::Exponential => blocks.push(NsBlock::exp()),
+                ConeSpec::Power(a) => blocks.push(NsBlock::power(*a)),
+            }
+        }
+        if extra_orthant > 0 {
+            blocks.push(NsBlock::Orthant(extra_orthant));
+        }
+        blocks
+    }
+
+    if !prob.has_bounds() {
+        let blocks = blocks_of(cones, 0);
+        return solve_conic_hsde_nonsym(prob, &blocks, opts, make_backend);
+    }
+    let (expanded, bound_rows) = expand_bounds(prob);
+    let blocks = blocks_of(cones, bound_rows.len());
+    let sol = solve_conic_hsde_nonsym(&expanded, &blocks, opts, make_backend);
+    split_bound_duals(prob, &bound_rows, sol)
 }
 
 /// Expand a problem's finite variable bounds into extra `G` rows
@@ -575,6 +630,7 @@ fn run_ipm(
 
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
+    let mut iterates: Vec<QpIterate> = Vec::new();
 
     for it in 0..opts.max_iter {
         iters = it;
@@ -595,14 +651,21 @@ fn run_ipm(
         prob.g_mul_add(&x, &mut r_g);
 
         let mu = cone.mu(&s, &z);
-        let res = inf_norm(&r_d)
-            .max(inf_norm(&r_p))
-            .max(inf_norm(&r_g))
-            .max(mu);
+        let pinf = inf_norm(&r_p).max(inf_norm(&r_g));
+        let dinf = inf_norm(&r_d);
+        let res = dinf.max(pinf).max(mu);
         if res < opts.tol {
             status = QpStatus::Optimal;
             break;
         }
+        // Per-iteration objective, only when a trace is being collected.
+        let obj_it = if opts.collect_iterates {
+            let mut px = vec![0.0; n];
+            prob.p_mul_add(&x, &mut px);
+            (0..n).map(|i| 0.5 * x[i] * px[i] + prob.c[i] * x[i]).sum()
+        } else {
+            0.0
+        };
 
         // Verified infeasibility / unboundedness detection. Checked
         // (not assumed), so a positive result is a proof and a false
@@ -652,6 +715,8 @@ fn run_ipm(
         };
 
         // === Corrector step: centered target + second-order term ===
+        // Step lengths taken this iteration (full step when there is no cone).
+        let (mut step_p, mut step_d) = (1.0_f64, 1.0_f64);
         if m_ineq == 0 {
             // No cone: predictor is already the full Newton step.
             for i in 0..n {
@@ -673,6 +738,8 @@ fn run_ipm(
             cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
 
             let (alpha_p, alpha_d) = step_lengths(&cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
+            step_p = alpha_p;
+            step_d = alpha_d;
             for i in 0..n {
                 x[i] += alpha_p * dx[i];
             }
@@ -683,6 +750,18 @@ fn run_ipm(
                 s[i] += alpha_p * ds[i];
                 z[i] += alpha_d * dz[i];
             }
+        }
+
+        if opts.collect_iterates {
+            iterates.push(QpIterate {
+                iter: it,
+                objective: obj_it,
+                primal_infeasibility: pinf,
+                dual_infeasibility: dinf,
+                mu,
+                alpha_primal: step_p,
+                alpha_dual: step_d,
+            });
         }
     }
 
@@ -704,6 +783,7 @@ fn run_ipm(
         z_ub: vec![0.0; nn],
         obj,
         iters,
+        iterates,
     }
 }
 
@@ -845,6 +925,7 @@ fn failed_solution(
         z_ub: vec![0.0; prob.n],
         obj,
         iters,
+        iterates: Vec::new(),
     }
 }
 

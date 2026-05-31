@@ -21,6 +21,7 @@
 pub mod batch;
 pub mod cones;
 pub mod hsde;
+pub mod hsde_nonsym;
 pub mod ipm;
 pub mod presolve;
 pub mod qp;
@@ -34,4 +35,4 @@ pub use ipm::{
     solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_warm, QpFactorization,
     QpOptions, QpWarmStart,
 };
-pub use qp::{QpProblem, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
+pub use qp::{QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
