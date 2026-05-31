@@ -186,19 +186,24 @@ a centered target `σμ` linearizes `z + σμ∇F(s) = 0`:
 ```text
   dz + σμ H(s) ds = −(z + σμ ∇F(s)),     H = ∇²F(s).
 ```
-Eliminating `ds` (so the cone contributes a `(z,z)` block exactly as the
-symmetric path does) gives
+The scaling block uses the **current** `μ` (the `σ` enters only the target
+`r_c`); linearizing `z + dz = −σμ(∇F(s) + H ds)` and eliminating `ds`
+(so the cone contributes a `(z,z)` block exactly as the symmetric path
+does) gives
 ```text
-  (z,z) block      :  −(1/σμ) H(s)⁻¹          [dense; exp cone is 3×3]
+  (z,z) block      :  −(1/μ) H(s)⁻¹           [dense; exp cone is 3×3]
   r_c              :  z + σμ ∇F(s)
-  rhs_comp_term    :  (1/σμ) H(s)⁻¹ r_c
-  recover_ds       :  ds = −rhs_comp_term − (1/σμ)H(s)⁻¹ dz
+  rhs_comp_term    :  (1/μ) H(s)⁻¹ r_c
+  recover_ds       :  ds = −rhs_comp_term − (1/μ)H(s)⁻¹ dz
 ```
 **Orthant-reduction check (the correctness anchor).** For the orthant,
-`F = −Σ log sᵢ`, `H⁻¹ = diag(sᵢ²)`, and on the path `zᵢ = σμ/sᵢ`, so the
-block `(1/σμ)sᵢ² = sᵢ/zᵢ = W²` — it reduces *exactly* to the orthant
-scaling. The whole derivation collapses to the symmetric one in 1-D, the
-same anchor that de-risked the SOC reduced system.
+`F = −Σ log sᵢ`, `H⁻¹ = diag(sᵢ²)`, and on the path `zᵢ = μ/sᵢ`, so the
+block `(1/μ)sᵢ² = sᵢ/zᵢ = W²` — it reduces *exactly* to the orthant
+scaling, and `r_c = z − σμ/sᵢ` matches the symmetric `(s∘z − σμe)/s`. The
+whole derivation collapses to the symmetric one in 1-D, the same anchor
+that de-risked the SOC reduced system. (Putting `σμ` in the *block*
+instead of `μ` — an early mistake — both mis-scales the step and
+reintroduces a `σ=0` singularity; the `μ` form is the correct one.)
 
 ### Why a separate loop (fixed-σ single step, not Mehrotra)
 
@@ -233,6 +238,32 @@ first; a Mehrotra/RK corrector is a later optimization.
    epigraph and a tiny geometric program (posynomial), plus a randomized
    KKT-residual check, all to intrinsic tolerance; the orthant/SOC paths
    stay byte-identical.
+
+### Prototype findings (what works, what's still needed)
+
+A standalone prototype driver (assembling the dense bordered system and
+reusing the two-solve τ handling) confirmed the **math is right**:
+
+- the barrier oracles are exact (FD + the three log-homogeneity identities);
+- the `(1/μ)H⁻¹` block and `r_c = z + σμ∇F(s)` give a correct first step —
+  on `min z s.t. (0,1,z)∈K_exp` the opening iteration cuts primal and dual
+  residuals by ~2× in the right direction.
+
+But it **stalls** after a few iterations: with primal-only Hessian scaling
+the **dual** iterate races to `∂K*` (proximity `ψ* → 0`) while `μ` is still
+large, and the line search throttles `α → 0`. This persists across all `σ`
+and across a central-path-neighborhood line search — it is the known
+weakness of naive primal scaling, *not* a sign/algebra bug (the symmetric
+reduction holds and the first step is correct).
+
+**What's needed:** the **dual-aware symmetric scaling** of Dahl–Andersen /
+MOSEK — a scaling built from *both* `s` and `z` (a Tunçel-style primal–dual
+scaling, or explicit predictor + Skajaa–Ye Runge–Kutta corrector iterations
+that re-center the dual), rather than `H(s)` alone. Pinning down its exact
+form needs the reference (currently network-blocked from this environment),
+so the prototype was **not** committed (the project does not ship a
+non-converging solver). The validated barrier oracles and this derivation
+stand; the driver resumes once the dual-aware scaling is in hand.
 
 Sources for the non-symmetric algorithm:
 [Skajaa & Ye, *A homogeneous interior-point algorithm for nonsymmetric
