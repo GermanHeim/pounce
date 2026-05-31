@@ -168,7 +168,9 @@ pub fn print_logo() {
     use std::io::Write as _;
 
     fn lerp(a: u8, b: u8, t: f64) -> u8 {
-        (a as f64 + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
+        (a as f64 + (b as f64 - a as f64) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
     }
     fn mix(a: anstyle::RgbColor, b: anstyle::RgbColor, t: f64) -> anstyle::RgbColor {
         anstyle::RgbColor(lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
@@ -179,8 +181,19 @@ pub fn print_logo() {
     const STEEL_LO: anstyle::RgbColor = anstyle::RgbColor(0x5c, 0x60, 0x68);
 
     let rows = LOGO.len();
-    let width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(1).max(2);
-    let vfrac = |r: usize| if rows <= 1 { 0.0 } else { r as f64 / (rows - 1) as f64 };
+    let width = LOGO
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(2);
+    let vfrac = |r: usize| {
+        if rows <= 1 {
+            0.0
+        } else {
+            r as f64 / (rows - 1) as f64
+        }
+    };
     // Molten color for a claw cell at row `r` (0 = top, hottest).
     let molten = |r: usize| {
         let t = vfrac(r);
