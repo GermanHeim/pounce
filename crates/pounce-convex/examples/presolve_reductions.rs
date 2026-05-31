@@ -144,6 +144,41 @@ fn main() {
         },
     );
 
+    // Forcing inequality: with x ∈ [0,5]², `x0+x1 ≤ 0` has min activity
+    // 0 = h, so it holds only at x0=x1=0 — both variables pinned, row
+    // dropped. (Dual recovered exactly in postsolve.)
+    report(
+        "forcing ineq (pins to bounds)",
+        &QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![-2.0, -3.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![0.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![5.0, 5.0],
+        },
+    );
+
+    // Forcing equality at the max vertex: with x ∈ [0,4]², `x0+x1 = 8`
+    // equals the max activity 8, pinning x0=x1=4.
+    report(
+        "forcing eq (max vertex)",
+        &QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![1.0, 5.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            b: vec![8.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![4.0, 4.0],
+        },
+    );
+
     // Free column singleton: x2 (free, only in the equality row) is
     // substituted out, eliminating both the variable and the row.
     report(

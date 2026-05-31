@@ -49,11 +49,21 @@
 //!   the box. If `max ≤ h` the row is always satisfied → **redundant**,
 //!   drop it (dual 0). If `min > h` the row can never hold →
 //!   **infeasible**. For each equality `a·x = b`, infeasible when `b`
-//!   lies outside `[min, max]`. (Bound *tightening* — propagating a
-//!   row's implied bound back onto a variable — is deferred: when a
-//!   tightened bound is active at the optimum its multiplier must be
-//!   re-attributed to the source constraint, which is the harder PaPILO
-//!   postsolve; see the follow-up note below.)
+//!   lies outside `[min, max]`.
+//! - **Forcing constraints**: when a row's activity range *touches* its
+//!   right-hand side it can hold only at one vertex of the box, pinning
+//!   every involved variable to a bound (inequality `g·x ≤ h` with
+//!   `min = h`; equality `a·x = b` with `min = b` or `max = b`). The row
+//!   is dropped and each variable fixed. The dual recovery — the reason
+//!   this was the hard PaPILO postsolve — is exact: the forcing row's
+//!   multiplier is the tightest value making every pinned variable's bound
+//!   multiplier correctly signed (`max`/`min` over `−gradⱼ/coefⱼ`, clamped
+//!   `≥ 0` for inequalities), and each pinned variable's bound multiplier
+//!   is then its full reduced cost. The multiplier is generally *not
+//!   unique* (it ranges over an interval), so postsolve emits a valid
+//!   representative; correctness is checked as KKT validity, not dual
+//!   equality (`tests/presolve_forcing.rs`). Forcing rows are required to
+//!   have disjoint column sets so the recovery stays independent.
 //!
 //! # Relationship to PaPILO
 //!
@@ -70,15 +80,23 @@
 //! PaPILO is the catalog to mine for the next reductions — singleton /
 //! doubleton rows, dominated columns, coefficient strengthening, probing
 //! — and, importantly, for each one's *postsolve transform*, since the
-//! dual recovery is the hard part. Remaining activity-bound work that
-//! needs more than the redundancy/feasibility checks above: **bound
-//! tightening** (propagate a row's implied bound back onto a variable —
-//! the dual of an active tightened bound must be re-attributed to the
-//! source row in postsolve), **forcing constraints** (a row at its
-//! activity extreme pins every involved variable to a bound), and
-//! **dominated columns**. Parallel-row (scalar-multiple) detection, as
-//! opposed to the exact-duplicate detection here, is likewise a
-//! follow-up.
+//! dual recovery is the hard part.
+//!
+//! Implemented from that catalog so far: the transaction stack, fixed /
+//! free / free-singleton columns, empty + duplicate rows, activity-based
+//! redundancy/feasibility, and **forcing constraints** (above) — which
+//! capture the dual-safe slice of activity/bound reasoning, since a
+//! forcing row is exactly a model-changing bound deduction whose dual
+//! re-attributes to the source row.
+//!
+//! Still deferred (each for a genuine dual-recovery reason): **standalone
+//! bound tightening** that replaces a variable's bound without pinning it
+//! (the active tightened bound's multiplier must be split between the
+//! variable and the source row in proportion to the binding — strictly
+//! more general than forcing); **dominated columns** (fixing on a
+//! reduced-cost domination argument); and **parallel-row** (scalar-
+//! multiple) detection generalizing the exact-duplicate pass, where a
+//! dropped row's multiplier folds — scaled — into the kept row.
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -132,6 +150,22 @@ enum Reduction {
         a_coef: f64,
         /// `c_col`, used to recover `y_eq_row = −c_col / a_coef`.
         c_col: f64,
+    },
+    /// A **forcing constraint**: a row whose activity range touches its
+    /// right-hand side, so the row can only hold at one vertex of the box,
+    /// pinning every involved variable to a bound. The row is dropped and
+    /// each variable fixed; postsolve recovers the row's multiplier and the
+    /// pinned variables' bound multipliers (see [`Presolve::postsolve`]).
+    ForcingRow {
+        /// Original row index.
+        row: usize,
+        /// Equality row? (else inequality.)
+        is_equality: bool,
+        /// The forced-to vertex is the *max*-activity one (only possible
+        /// for equalities); else the min-activity vertex.
+        at_max: bool,
+        /// Each pinned variable: `(col, coef, value, at_upper)`.
+        cols: Vec<(usize, f64, f64, bool)>,
     },
 }
 
@@ -385,6 +419,119 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         let (amin, amax) = activity(&a_by_row[row], &eff_lb, &eff_ub);
         if prob.b[row] < amin - ACTIVITY_TOL || prob.b[row] > amax + ACTIVITY_TOL {
             return PresolveOutcome::Infeasible;
+        }
+    }
+
+    // --- forcing constraints ---
+    // A row whose activity range touches its RHS can hold only at one
+    // vertex of the box, pinning every involved variable to a bound:
+    //   inequality g·x ≤ h with min-activity == h  ⇒ pin to the min vertex;
+    //   equality   a·x = b with min-activity == b  ⇒ pin to the min vertex;
+    //   equality   a·x = b with max-activity == b  ⇒ pin to the max vertex.
+    // Each pinned variable becomes fixed (substituted out like any fixed
+    // var); the row is dropped. Dual recovery (the reason this is subtle)
+    // is handled in postsolve. We require each forcing row's columns to be
+    // disjoint from every other forcing row's, so the multiplier recovery
+    // stays independent (a conservative but always-correct restriction).
+    let eff_lb_at = |fixed: &[Option<f64>], c: usize| fixed[c].unwrap_or_else(|| prob.lb_of(c));
+    let eff_ub_at = |fixed: &[Option<f64>], c: usize| fixed[c].unwrap_or_else(|| prob.ub_of(c));
+    let mut forced_touched = vec![false; n];
+
+    // Pin the variables of one forcing row to `at_max` vertex (or the min
+    // vertex when `at_max` is false), recording the reduction. Returns
+    // false (skipped) if any column is already fixed/substituted/forced.
+    // `row_entries` is the row's `(col, coef)` list, all coefficients nonzero.
+    let try_force =
+        |row_entries: &[(usize, f64)],
+         orig_row: usize,
+         is_equality: bool,
+         at_max: bool,
+         fixed: &mut [Option<f64>],
+         forced_touched: &mut [bool],
+         stack: &mut Vec<Reduction>|
+         -> bool {
+            // Every involved column must be free to fix and not shared with
+            // another forcing row.
+            for &(c, _) in row_entries {
+                if fixed[c].is_some() || substituted[c] || forced_touched[c] {
+                    return false;
+                }
+            }
+            let mut cols = Vec::with_capacity(row_entries.len());
+            for &(c, coef) in row_entries {
+                // Vertex bound: min-activity puts coef>0 at lb, coef<0 at
+                // ub; max-activity is the mirror.
+                let at_upper = if at_max { coef > 0.0 } else { coef < 0.0 };
+                let value = if at_upper { prob.ub_of(c) } else { prob.lb_of(c) };
+                // A forcing vertex requires finite bounds; guard anyway.
+                if !value.is_finite() || value.abs() >= BOUND_INF {
+                    return false;
+                }
+                cols.push((c, coef, value, at_upper));
+            }
+            for &(c, _, value, _) in &cols {
+                fixed[c] = Some(value);
+                forced_touched[c] = true;
+            }
+            stack.push(Reduction::ForcingRow {
+                row: orig_row,
+                is_equality,
+                at_max,
+                cols,
+            });
+            true
+        };
+
+    for row in 0..m_ineq {
+        if ineq_dropped[row] || g_by_row[row].is_empty() {
+            continue;
+        }
+        let (amin, _) = activity(&g_by_row[row], &|c| eff_lb_at(&fixed, c), &|c| {
+            eff_ub_at(&fixed, c)
+        });
+        if amin.is_finite()
+            && (prob.h[row] - amin).abs() <= ACTIVITY_TOL
+            && try_force(
+                &g_by_row[row],
+                row,
+                false,
+                false,
+                &mut fixed,
+                &mut forced_touched,
+                &mut stack,
+            )
+        {
+            ineq_dropped[row] = true;
+        }
+    }
+
+    for row in 0..m_eq {
+        if eq_dropped[row] || a_by_row[row].len() < 2 {
+            continue;
+        }
+        let (amin, amax) = activity(&a_by_row[row], &|c| eff_lb_at(&fixed, c), &|c| {
+            eff_ub_at(&fixed, c)
+        });
+        let b = prob.b[row];
+        let at_max = if amin.is_finite() && (b - amin).abs() <= ACTIVITY_TOL {
+            Some(false)
+        } else if amax.is_finite() && (amax - b).abs() <= ACTIVITY_TOL {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(at_max) = at_max {
+            if try_force(
+                &a_by_row[row],
+                row,
+                true,
+                at_max,
+                &mut fixed,
+                &mut forced_touched,
+                &mut stack,
+            ) {
+                eq_dropped[row] = true;
+            }
         }
     }
 
@@ -751,6 +898,8 @@ pub struct PresolveStats {
     pub free_cols_fixed: usize,
     /// Free column singletons substituted out (each also removes a row).
     pub free_col_singletons: usize,
+    /// Forcing rows: each pins all its variables to a bound and is dropped.
+    pub forcing_rows: usize,
 }
 
 impl PresolveStats {
@@ -775,6 +924,7 @@ impl Presolve {
                 Reduction::FixedVar { .. } => s.fixed_vars += 1,
                 Reduction::FreeColumnFixed { .. } => s.free_cols_fixed += 1,
                 Reduction::FreeColSingleton { .. } => s.free_col_singletons += 1,
+                Reduction::ForcingRow { .. } => s.forcing_rows += 1,
             }
         }
         s
@@ -822,6 +972,12 @@ impl Presolve {
                         }
                     }
                     x[*col] = acc / a_coef;
+                }
+                Reduction::ForcingRow { cols, .. } => {
+                    // Each forced variable sits at the stored bound value.
+                    for &(col, _, value, _) in cols {
+                        x[col] = value;
+                    }
                 }
             }
         }
@@ -887,6 +1043,50 @@ impl Presolve {
                     z_lb[*col] = ck.max(0.0);
                 } else {
                     z_ub[*col] = (-ck).max(0.0);
+                }
+            }
+        }
+
+        // Forcing-row multipliers and the pinned variables' bound
+        // multipliers. `grad[col]` (above) is each forced variable's reduced
+        // cost *excluding* the forcing row (its multiplier is still 0 in
+        // `grad`). Pick the row multiplier as the tightest value that makes
+        // every pinned variable's bound multiplier correctly signed:
+        //   min-vertex  ⇒ mult = maxⱼ(−gradⱼ/coefⱼ)  (clamped ≥ 0 if ≤-row);
+        //   max-vertex  ⇒ mult = minⱼ(−gradⱼ/coefⱼ)  (equalities only).
+        // Each pinned variable's full reduced cost `gradⱼ + coefⱼ·mult` is
+        // then its active bound multiplier — nonnegative by construction.
+        for r in &self.stack {
+            if let Reduction::ForcingRow {
+                row,
+                is_equality,
+                at_max,
+                cols,
+            } = r
+            {
+                let mut mult = if *at_max { f64::INFINITY } else { f64::NEG_INFINITY };
+                for &(col, coef, _, _) in cols {
+                    let t = -grad[col] / coef;
+                    mult = if *at_max { mult.min(t) } else { mult.max(t) };
+                }
+                if !*is_equality {
+                    mult = mult.max(0.0); // inequality multiplier ≥ 0
+                }
+                if !mult.is_finite() {
+                    mult = 0.0;
+                }
+                if *is_equality {
+                    y[*row] = mult;
+                } else {
+                    z[*row] = mult;
+                }
+                for &(col, coef, _, at_upper) in cols {
+                    let dcost = grad[col] + coef * mult;
+                    if at_upper {
+                        z_ub[col] = (-dcost).max(0.0);
+                    } else {
+                        z_lb[col] = dcost.max(0.0);
+                    }
                 }
             }
         }
