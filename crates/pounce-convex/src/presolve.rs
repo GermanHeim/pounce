@@ -142,6 +142,7 @@
 //! over *overlapping* constraint chains
 //! (`tests/presolve_bound_tightening.rs`).
 
+use crate::cones::ConeSpec;
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -334,7 +335,7 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     let mut chain: Vec<Presolve> = Vec::new();
     let mut current = prob.clone();
     loop {
-        match presolve_once(&current) {
+        match presolve_once(&current, &[]) {
             PresolveOutcome::Infeasible => return PresolveOutcome::Infeasible,
             PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
             PresolveOutcome::Reduced(ps) => {
@@ -372,12 +373,58 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     })
 }
 
+/// Cone-aware presolve for a problem whose inequality block is partitioned
+/// by `cones`. Applies only the cone-safe reductions (equality singletons,
+/// free columns / free-column singletons, fixed-variable substitution; and
+/// the orthant `≤`-row reductions on the *nonnegative* blocks), leaving
+/// second-order-cone rows and the columns coupled to them untouched. A
+/// **single pass** (the fixpoint loop is orthant-only), so the reduced cone
+/// partition is recoverable from the kept rows — see
+/// [`Presolve::reduced_cones`].
+pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
+    // SOC rows are the inequality rows belonging to a non-`Nonneg` block.
+    let mut soc_row = vec![false; prob.m_ineq()];
+    let mut row = 0;
+    for spec in cones {
+        let d = spec.dim();
+        if matches!(spec, ConeSpec::SecondOrder(_)) {
+            for r in row..row + d {
+                if r < soc_row.len() {
+                    soc_row[r] = true;
+                }
+            }
+        }
+        row += d;
+    }
+    presolve_once(prob, &soc_row)
+}
+
 /// A single presolve pass (the reduction catalog applied once). [`presolve`]
 /// iterates this to a fixpoint.
-fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
+///
+/// `soc_row` (length `m_ineq`, or empty for the all-orthant QP path) marks
+/// inequality rows that belong to a *non-orthant* cone (e.g. a second-order
+/// cone). Such rows are coupled, so the `≤`-row reductions (empty-row,
+/// activity, forcing, bound-tightening, parallel/duplicate) must not touch
+/// them, and columns appearing in them are not eligible for the dominated-
+/// column reduction. The cone-safe reductions (equality singletons, free
+/// columns, free-column singletons, fixed-variable substitution) apply
+/// regardless. Marked rows are never dropped, so the conic partition is
+/// recoverable from the kept rows.
+fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
+    let is_soc_row = |i: usize| soc_row.get(i).copied().unwrap_or(false);
+    // A column is conic-coupled if it appears in any SOC inequality row.
+    let mut soc_col = vec![false; n];
+    if !soc_row.is_empty() {
+        for t in &prob.g {
+            if is_soc_row(t.row) && t.val != ZERO_TOL {
+                soc_col[t.col] = true;
+            }
+        }
+    }
 
     let mut stack: Vec<Reduction> = Vec::new();
 
@@ -502,9 +549,11 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
     }
 
     // --- empty inequality rows ---
+    // (SOC rows are coupled — an "empty" SOC row is part of a cone block and
+    // must be kept; skip.)
     let mut ineq_dropped = vec![false; m_ineq];
     for row in 0..m_ineq {
-        if ineq_nnz[row] == 0 {
+        if !is_soc_row(row) && ineq_nnz[row] == 0 {
             if prob.h[row] < 0.0 {
                 return PresolveOutcome::Infeasible;
             }
@@ -526,7 +575,7 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
     //   max-activity ≤ h  ⇒ redundant (always satisfied) → drop;
     //   min-activity > h   ⇒ infeasible.
     for row in 0..m_ineq {
-        if ineq_dropped[row] {
+        if ineq_dropped[row] || is_soc_row(row) {
             continue;
         }
         let (amin, amax) = activity(&g_by_row[row], &eff_lb, &eff_ub);
@@ -613,7 +662,7 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
         };
 
     for row in 0..m_ineq {
-        if ineq_dropped[row] || g_by_row[row].is_empty() {
+        if ineq_dropped[row] || is_soc_row(row) || g_by_row[row].is_empty() {
             continue;
         }
         let (amin, _) = activity(&g_by_row[row], &|c| eff_lb_at(&fixed, c), &|c| {
@@ -696,6 +745,7 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
                 || p_col_present[col]
                 || a_col_count[col] != 0
                 || g_col_count[col] == 0
+                || soc_col[col]
             {
                 continue;
             }
@@ -827,7 +877,10 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
     // overlapping tightenings (each round the previous round's sources are
     // at their fixpoint and no longer claim columns).
     for row in 0..m_ineq {
-        if ineq_dropped[row] || g_by_row[row].is_empty() || !row_is_clean(&g_by_row[row], &bt_col_used)
+        if ineq_dropped[row]
+            || is_soc_row(row)
+            || g_by_row[row].is_empty()
+            || !row_is_clean(&g_by_row[row], &bt_col_used)
         {
             continue;
         }
@@ -1009,11 +1062,14 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
         Err(()) => return PresolveOutcome::Infeasible,
     };
 
-    let eq_rows = match dedup_rows(eq_rows, true) {
+    let eq_rows = match dedup_rows(eq_rows, true, &[]) {
         Ok(rows) => rows,
         Err(()) => return PresolveOutcome::Infeasible,
     };
-    let ineq_rows = dedup_rows(ineq_rows, false).expect("ineq dedup never infeasible");
+    // SOC rows are coupled and must survive verbatim — exclude them from
+    // parallel/duplicate merging.
+    let ineq_rows =
+        dedup_rows(ineq_rows, false, soc_row).expect("ineq dedup never infeasible");
 
     // --- flatten surviving rows to triplets + kept-row maps ---
     let mut kept_eq = Vec::with_capacity(eq_rows.len());
@@ -1222,10 +1278,13 @@ fn approx_parallel(a: &[(usize, f64)], b: &[(usize, f64)]) -> bool {
 /// - inequalities — positive multiples of one direction; keep the **most
 ///   restrictive** original row (smallest normalized rhs `h / |pivot|`)
 ///   and drop the looser ones, which it implies.
-fn dedup_rows(rows: Vec<Row>, is_equality: bool) -> Result<Vec<Row>, ()> {
+fn dedup_rows(rows: Vec<Row>, is_equality: bool, protected: &[bool]) -> Result<Vec<Row>, ()> {
     if rows.len() < 2 {
         return Ok(rows);
     }
+    // A row is protected (never merged) when its *original* index is marked
+    // — used to keep coupled cone rows verbatim.
+    let is_protected = |i: usize| protected.get(rows[i].orig).copied().unwrap_or(false);
 
     // Parallel: normalize + hash each row (PaPILO-style hashing-based
     // pairing, generalized to scalar multiples).
@@ -1233,10 +1292,14 @@ fn dedup_rows(rows: Vec<Row>, is_equality: bool) -> Result<Vec<Row>, ()> {
         rows.par_iter().map(|r| normalized_coeffs(r, is_equality)).collect();
     let sigs: Vec<u64> = norms.par_iter().map(|n| parallel_signature(n)).collect();
 
-    // Group row indices by signature (serial; small).
+    // Group row indices by signature (serial; small). Protected rows are
+    // excluded from grouping, so they are never dropped and never drop
+    // others.
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, &s) in sigs.iter().enumerate() {
-        buckets.entry(s).or_default().push(i);
+        if !is_protected(i) {
+            buckets.entry(s).or_default().push(i);
+        }
     }
 
     // Normalized rhs of a row, for the tightness / consistency decisions.
@@ -1333,6 +1396,42 @@ impl PresolveStats {
 }
 
 impl Presolve {
+    /// The cone partition of the *reduced* inequality block, given the
+    /// original `cones`. Walks the kept inequality rows (a cone-aware
+    /// presolve never drops or reorders a second-order-cone block, so each
+    /// cone's surviving rows stay contiguous) and run-length-encodes them by
+    /// source cone. Orthant blocks may shrink (or vanish); SOC blocks keep
+    /// their full dimension. Use after [`presolve_conic`] (a single pass).
+    pub fn reduced_cones(&self, cones: &[ConeSpec]) -> Vec<ConeSpec> {
+        // Original inequality row → cone index.
+        let mut row_cone = vec![usize::MAX; self.orig_m_ineq];
+        let mut r = 0;
+        for (ci, spec) in cones.iter().enumerate() {
+            for _ in 0..spec.dim() {
+                if r < row_cone.len() {
+                    row_cone[r] = ci;
+                }
+                r += 1;
+            }
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.kept_ineq.len() {
+            let ci = row_cone[self.kept_ineq[i]];
+            let mut j = i;
+            while j < self.kept_ineq.len() && row_cone[self.kept_ineq[j]] == ci {
+                j += 1;
+            }
+            let count = j - i;
+            out.push(match cones[ci] {
+                ConeSpec::Nonneg(_) => ConeSpec::Nonneg(count),
+                ConeSpec::SecondOrder(_) => ConeSpec::SecondOrder(count),
+            });
+            i = j;
+        }
+        out
+    }
+
     /// Did this single pass change anything (a reduction, or a dropped
     /// row)? Used by [`presolve`] to detect the fixpoint.
     fn changed(&self) -> bool {
