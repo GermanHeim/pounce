@@ -22,7 +22,6 @@ fn with_presolve(prob: &QpProblem) -> pounce_convex::QpSolution {
 
 /// Assert the solution satisfies the original problem's KKT conditions.
 fn assert_kkt(prob: &QpProblem, sol: &pounce_convex::QpSolution, tol: f64) {
-    let n = prob.n;
     // Stationarity: Px + c + Aᵀy + Gᵀz = 0.
     let mut g = prob.c.clone();
     prob.p_mul(&sol.x, &mut g);
@@ -351,4 +350,141 @@ fn status_of(o: &PresolveOutcome) -> &'static str {
         PresolveOutcome::Infeasible => "Infeasible",
         PresolveOutcome::Unbounded => "Unbounded",
     }
+}
+
+// --- free column singleton substitution ---
+
+fn direct(prob: &QpProblem) -> pounce_convex::QpSolution {
+    solve_qp_ipm(prob, &QpOptions::default(), backend)
+}
+
+/// A free variable in exactly one equality row is substituted out,
+/// eliminating both the variable and the row; the recovered (x, y) must
+/// match a direct solve.
+///
+/// min x0² + x1²  s.t.  x0 + x1 + x2 = 3,  with x2 free (no bounds, not
+/// in P/G). x2 is a free column singleton in the single equality row; it
+/// is substituted as x2 = 3 − x0 − x1. The reduced problem has 2 vars
+/// and 0 equality rows. Optimum: x0 = x1 = 0, x2 = 3.
+#[test]
+fn free_column_singleton_substituted() {
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)], // x2 absent from P
+        c: vec![0.0, 0.0, 0.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0),
+        ],
+        b: vec![3.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![NEG_INF, NEG_INF, NEG_INF],
+        ub: vec![POS_INF, POS_INF, POS_INF],
+    };
+    // Presolve must eliminate the row and the free column.
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            assert_eq!(ps.reduced.n, 2, "x2 should be substituted out");
+            assert_eq!(ps.reduced.m_eq(), 0, "the equality row should be consumed");
+        }
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+    let d = direct(&prob);
+    let p = with_presolve(&prob);
+    assert_eq!(p.status, QpStatus::Optimal);
+    for i in 0..3 {
+        assert!(
+            (p.x[i] - d.x[i]).abs() < 1e-5,
+            "x[{i}]: presolve {} vs direct {}",
+            p.x[i],
+            d.x[i]
+        );
+    }
+    assert!((p.x[2] - 3.0).abs() < 1e-5, "x2={}", p.x[2]);
+    // The consumed row's multiplier must match the direct solve.
+    assert!(
+        (p.y[0] - d.y[0]).abs() < 1e-5,
+        "y[0]: presolve {} vs direct {}",
+        p.y[0],
+        d.y[0]
+    );
+    assert_kkt(&prob, &p, 1e-5);
+}
+
+/// Free column singleton with a nonzero objective on the free variable,
+/// so the substitution shifts cost onto the surviving variables.
+///
+/// min x0² + 2·x1  s.t.  x0 + 3·x1 = 6, x1 free (linear-only, not in
+/// P/G). x1 = (6 − x0)/3 is substituted; the reduced objective becomes
+/// x0² + 2·(6−x0)/3 = x0² − (2/3)x0 + 4. Optimum x0 = 1/3.
+#[test]
+fn free_column_singleton_shifts_cost() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0)],
+        c: vec![0.0, 2.0],
+        a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 3.0)],
+        b: vec![6.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![NEG_INF, NEG_INF],
+        ub: vec![POS_INF, POS_INF],
+    };
+    let d = direct(&prob);
+    let p = with_presolve(&prob);
+    assert_eq!(p.status, QpStatus::Optimal);
+    assert!((p.x[0] - (1.0 / 3.0)).abs() < 1e-5, "x0={}", p.x[0]);
+    for i in 0..2 {
+        assert!(
+            (p.x[i] - d.x[i]).abs() < 1e-5,
+            "x[{i}]: {} vs {}",
+            p.x[i],
+            d.x[i]
+        );
+    }
+    assert!(
+        (p.obj - d.obj).abs() < 1e-5,
+        "obj: presolve {} vs direct {}",
+        p.obj,
+        d.obj
+    );
+    assert!(
+        (p.y[0] - d.y[0]).abs() < 1e-5,
+        "y[0]: {} vs {}",
+        p.y[0],
+        d.y[0]
+    );
+    assert_kkt(&prob, &p, 1e-5);
+}
+
+/// A bounded variable in one row is *not* a free column singleton (its
+/// box can bind), so it must not be substituted.
+#[test]
+fn bounded_variable_not_substituted() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0)],
+        c: vec![0.0, 0.0],
+        a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+        b: vec![3.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0], // x1 has a finite lower bound → not free
+        ub: vec![POS_INF, POS_INF],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            // Neither var is substituted; the equality row survives.
+            assert_eq!(ps.reduced.m_eq(), 1, "bounded var must keep its row");
+        }
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    // Degenerate vertex (bound and constraint both active), so the IPM
+    // converges to looser KKT tolerance — the point of this test is the
+    // *non*-substitution above, not solver precision.
+    assert_kkt(&prob, &sol, 1e-3);
 }

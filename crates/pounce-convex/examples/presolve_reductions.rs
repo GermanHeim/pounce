@@ -144,6 +144,27 @@ fn main() {
         },
     );
 
+    // Free column singleton: x2 (free, only in the equality row) is
+    // substituted out, eliminating both the variable and the row.
+    report(
+        "free col singleton (subst)",
+        &QpProblem {
+            n: 3,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![0.0, 0.0, 0.0],
+            a: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(0, 2, 1.0),
+            ],
+            b: vec![3.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY],
+            ub: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY],
+        },
+    );
+
     println!("\n=== rayon-parallel duplicate-row detection at scale ===");
     for &(n, k) in &[(50usize, 200usize), (100, 1000), (200, 4000)] {
         let mut p_lower = Vec::new();

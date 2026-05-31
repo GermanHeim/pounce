@@ -36,6 +36,14 @@
 //!   right-hand sides ⇒ infeasible; inequality duplicates keep the
 //!   tightest bound. A dropped duplicate's dual is zero (it is inactive
 //!   / its share is carried by the kept row), which is a valid KKT point.
+//! - **Free column singleton substitution**: an unbounded variable,
+//!   absent from `P` and `G`, that appears in exactly one (multi-entry)
+//!   equality row is substituted out via `x_col = (b_r − Σ_{j≠col} a_j
+//!   x_j) / a_col`, eliminating both the variable *and* the row. The
+//!   substitution shifts cost onto the surviving variables; the consumed
+//!   row's multiplier is the unique value `y_r = −c_col / a_col`. This is
+//!   a clean PaPILO reduction (uniquely determined dual), unlike forcing
+//!   constraints / bound tightening.
 //! - **Activity-bound reductions** (need the variable box): for each
 //!   inequality `g·x ≤ h`, compute the activity range `[min, max]` over
 //!   the box. If `max ≤ h` the row is always satisfied → **redundant**,
@@ -112,6 +120,19 @@ enum Reduction {
     /// and dropped. Its reduced cost equals `c_col` (carried by the
     /// active variable bound).
     FreeColumnFixed { col: usize, value: f64 },
+    /// A *free column singleton*: variable `col` is unbounded, absent
+    /// from `P` and `G`, and appears in exactly one equality row
+    /// `eq_row` (coefficient `a_coef`). It is substituted out via
+    /// `x_col = (b_r − Σ_{j≠col} a_j x_j) / a_coef`, consuming the row.
+    /// Postsolve recovers `x_col` from that expression and sets the
+    /// consumed row's multiplier to the unique value `y_r = −c_col / a_coef`.
+    FreeColSingleton {
+        col: usize,
+        eq_row: usize,
+        a_coef: f64,
+        /// `c_col`, used to recover `y_eq_row = −c_col / a_coef`.
+        c_col: f64,
+    },
 }
 
 /// Captured presolve state: the reduced problem plus the transaction
@@ -199,12 +220,22 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     // --- per-row / per-column nonzero structure ---
     let mut eq_nnz = vec![0usize; m_eq];
     let mut eq_single: Vec<Option<(usize, f64)>> = vec![None; m_eq];
+    // Finer per-column appearance counts: total (`col_nnz`), and split
+    // by where the variable appears, so we can recognize a free *column
+    // singleton* (a variable in exactly one equality row, nowhere else).
     let mut col_nnz = vec![0usize; n];
+    let mut a_col_count = vec![0usize; n];
+    let mut g_col_count = vec![0usize; n];
+    let mut p_col_present = vec![false; n];
+    // For a column singleton: which equality row holds it, with coef.
+    let mut col_eq_single: Vec<Option<(usize, f64)>> = vec![None; n];
     for t in &prob.a {
         if t.val != ZERO_TOL {
             eq_nnz[t.row] += 1;
             eq_single[t.row] = Some((t.col, t.val));
             col_nnz[t.col] += 1;
+            a_col_count[t.col] += 1;
+            col_eq_single[t.col] = Some((t.row, t.val));
         }
     }
     let mut ineq_nnz = vec![0usize; m_ineq];
@@ -212,13 +243,16 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         if t.val != ZERO_TOL {
             ineq_nnz[t.row] += 1;
             col_nnz[t.col] += 1;
+            g_col_count[t.col] += 1;
         }
     }
     for t in &prob.p_lower {
         if t.val != ZERO_TOL {
             col_nnz[t.row] += 1;
+            p_col_present[t.row] = true;
             if t.row != t.col {
                 col_nnz[t.col] += 1;
+                p_col_present[t.col] = true;
             }
         }
     }
@@ -256,6 +290,51 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
             }
             _ => {}
         }
+    }
+
+    // --- free column singletons ---
+    // A free variable (unbounded both ways), absent from P and G, that
+    // appears in exactly one equality row whose row has ≥ 2 nonzeros, is
+    // substituted out: `x_col = (b_r − Σ_{j≠col} a_j x_j) / a_col`. This
+    // consumes both the variable and the row. The substitution shifts the
+    // cost of the row's other variables (`c_adjust`) and a constant into
+    // the objective offset; the consumed row's dual is the unique value
+    // `−c_col / a_col`, recovered in postsolve.
+    let mut substituted = vec![false; n];
+    let mut c_adjust = vec![0.0; n];
+    let mut subst_offset = 0.0;
+    for col in 0..n {
+        if fixed[col].is_some() || substituted[col] {
+            continue;
+        }
+        let free = prob.lb_of(col) <= -BOUND_INF && prob.ub_of(col) >= BOUND_INF;
+        let only_in_one_eq = a_col_count[col] == 1 && g_col_count[col] == 0 && !p_col_present[col];
+        if !(free && only_in_one_eq) {
+            continue;
+        }
+        let (row, a_col) = col_eq_single[col].expect("column singleton entry");
+        // The row must still be live and non-trivial (≥ 2 vars: a plain
+        // singleton row was already turned into a FixedVar above).
+        if eq_dropped[row] || eq_nnz[row] < 2 {
+            continue;
+        }
+        // Substitute: c_col·x_col = (c_col·b_r/a_col) − Σ_{j≠col}
+        // (c_col·a_jr/a_col)·x_j.
+        let c_col = prob.c[col];
+        subst_offset += c_col * prob.b[row] / a_col;
+        for t in &prob.a {
+            if t.row == row && t.col != col && t.val != ZERO_TOL {
+                c_adjust[t.col] -= c_col * t.val / a_col;
+            }
+        }
+        substituted[col] = true;
+        eq_dropped[row] = true;
+        stack.push(Reduction::FreeColSingleton {
+            col,
+            eq_row: row,
+            a_coef: a_col,
+            c_col,
+        });
     }
 
     // --- empty inequality rows ---
@@ -317,8 +396,8 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     //   c_k = 0 → irrelevant; pin to lb if finite else ub if finite else 0
     let mut dropped_col = vec![false; n];
     for c in 0..n {
-        if fixed[c].is_some() {
-            dropped_col[c] = true; // fixed columns are removed too
+        if fixed[c].is_some() || substituted[c] {
+            dropped_col[c] = true; // fixed / substituted columns are removed
             continue;
         }
         if col_nnz[c] == 0 {
@@ -357,11 +436,13 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     let fixval = |c: usize| fixed[c].unwrap_or(0.0);
 
     // --- objective: P, c, offset with fixed vars substituted ---
+    // Surviving variables' linear cost is their original `c` plus any
+    // cost shifted onto them by a free-column-singleton substitution.
     let mut new_c = vec![0.0; kept_cols.len()];
     for (newc, &oldc) in kept_cols.iter().enumerate() {
-        new_c[newc] = prob.c[oldc];
+        new_c[newc] = prob.c[oldc] + c_adjust[oldc];
     }
-    let mut offset = 0.0;
+    let mut offset = subst_offset;
     for c in 0..n {
         if let Some(v) = fixed[c] {
             offset += prob.c[c] * v;
@@ -674,11 +755,44 @@ impl Presolve {
             z[oldr] = red.z[newr];
         }
 
-        // Restore eliminated primals: fixed vars and zeroed free columns.
+        // Restore eliminated primals (reverse order, so a substitution's
+        // dependencies are already in place). Fixed and free-fixed columns
+        // take their stored value; a free-column-singleton is recovered
+        // from its consumed equality row using the other variables.
         for r in self.stack.iter().rev() {
             match r {
                 Reduction::FixedVar { col, value, .. } => x[*col] = *value,
                 Reduction::FreeColumnFixed { col, value } => x[*col] = *value,
+                Reduction::FreeColSingleton {
+                    col,
+                    eq_row,
+                    a_coef,
+                    ..
+                } => {
+                    // x_col = (b_r − Σ_{j≠col} a_jr x_j) / a_col.
+                    let mut acc = self.orig.b[*eq_row];
+                    for t in &self.orig.a {
+                        if t.row == *eq_row && t.col != *col {
+                            acc -= t.val * x[t.col];
+                        }
+                    }
+                    x[*col] = acc / a_coef;
+                }
+            }
+        }
+
+        // Free-column-singleton consumed-row multipliers have the unique
+        // value y_r = −c_col / a_col (from stationarity of the eliminated
+        // free variable, which has no P/G terms).
+        for r in &self.stack {
+            if let Reduction::FreeColSingleton {
+                eq_row,
+                a_coef,
+                c_col,
+                ..
+            } = r
+            {
+                y[*eq_row] = -c_col / a_coef;
             }
         }
 
