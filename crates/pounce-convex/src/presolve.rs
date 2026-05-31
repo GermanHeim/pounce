@@ -29,13 +29,18 @@
 //!   `c_k x_k`. If `c_k = 0` the variable is irrelevant (set to 0, drop);
 //!   if `c_k ≠ 0` the problem is unbounded below (detected as
 //!   [`PresolveOutcome::Unbounded`]).
-//! - **Duplicate-row removal** (equality / inequality): rows with an
-//!   identical coefficient pattern (after substitution) are redundant or
-//!   expose infeasibility. Detection uses rayon-parallel per-row hashing
-//!   (PaPILO's hashing-based pairing). Equality duplicates with differing
-//!   right-hand sides ⇒ infeasible; inequality duplicates keep the
-//!   tightest bound. A dropped duplicate's dual is zero (it is inactive
-//!   / its share is carried by the kept row), which is a valid KKT point.
+//! - **Parallel-row removal** (equality / inequality): rows that are
+//!   **scalar multiples** of one another (after substitution) — exact
+//!   duplicates being the unit-scale case — are redundant or expose
+//!   infeasibility. Detection normalizes each row by a canonical pivot and
+//!   uses rayon-parallel per-row hashing (PaPILO's hashing-based pairing),
+//!   confirming candidates with a tolerance so a wrong merge is
+//!   impossible (a quantization split only ever *misses* a pair).
+//!   Parallel equalities with inconsistent (scaled) right-hand sides ⇒
+//!   infeasible; parallel inequalities (positive multiples — same
+//!   direction) keep the most restrictive row. Dual recovery stays
+//!   trivial because the *kept* row is an original one in its own frame
+//!   and every dropped row's multiplier is zero — a valid KKT point.
 //! - **Free column singleton substitution**: an unbounded variable,
 //!   absent from `P` and `G`, that appears in exactly one (multi-entry)
 //!   equality row is substituted out via `x_col = (b_r − Σ_{j≠col} a_j
@@ -89,14 +94,15 @@
 //! forcing row is exactly a model-changing bound deduction whose dual
 //! re-attributes to the source row.
 //!
+//! Parallel-row detection (scalar multiples) generalizes the exact-
+//! duplicate pass and is implemented above.
+//!
 //! Still deferred (each for a genuine dual-recovery reason): **standalone
 //! bound tightening** that replaces a variable's bound without pinning it
 //! (the active tightened bound's multiplier must be split between the
 //! variable and the source row in proportion to the binding — strictly
-//! more general than forcing); **dominated columns** (fixing on a
-//! reduced-cost domination argument); and **parallel-row** (scalar-
-//! multiple) detection generalizing the exact-duplicate pass, where a
-//! dropped row's multiplier folds — scaled — into the kept row.
+//! more general than forcing); and **dominated columns** (fixing on a
+//! reduced-cost domination argument).
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -781,41 +787,79 @@ fn merge_sort_coeffs(coeffs: &mut Vec<(usize, f64)>) {
     *coeffs = merged;
 }
 
-/// Hash a row's coefficient pattern (`(col, value-bits)`), canonicalized
-/// by [`merge_sort_coeffs`]. Two rows collide here iff they have the same
-/// coefficient pattern (modulo the negligible hash-collision rate, which
-/// the caller guards against by comparing patterns directly).
-fn row_signature(row: &Row) -> u64 {
+/// Relative tolerance for confirming two rows are scalar multiples.
+const PARALLEL_TOL: f64 = 1e-9;
+
+/// Canonical pivot used to normalize a row for *parallel* (scalar-
+/// multiple) detection: its first coefficient (the rows' coeffs are
+/// sorted by column). For inequalities we divide by the pivot's
+/// **magnitude** so only *positive* multiples — same inequality direction
+/// — normalize alike; for equalities we divide by the **signed** pivot so
+/// `±` multiples (the same constraint either way) match.
+fn pivot_divisor(row: &Row, is_equality: bool) -> f64 {
+    let p = row.coeffs[0].1;
+    if is_equality {
+        p
+    } else {
+        p.abs()
+    }
+}
+
+/// Normalized coefficient values (parallel detection): `coeffs / divisor`.
+fn normalized_coeffs(row: &Row, is_equality: bool) -> Vec<(usize, f64)> {
+    let d = pivot_divisor(row, is_equality);
+    row.coeffs.iter().map(|&(c, v)| (c, v / d)).collect()
+}
+
+/// Hash a normalized coefficient pattern. Values are quantized so exact
+/// scalar multiples hash together; the hash is only a *filter* (a quantize
+/// boundary can split a true pair into different buckets, which merely
+/// misses a reduction — never a wrong merge, since membership is confirmed
+/// by [`approx_parallel`]).
+fn parallel_signature(norm: &[(usize, f64)]) -> u64 {
     let mut h = DefaultHasher::new();
-    row.coeffs.len().hash(&mut h);
-    for &(c, v) in &row.coeffs {
+    norm.len().hash(&mut h);
+    for &(c, v) in norm {
         c.hash(&mut h);
-        v.to_bits().hash(&mut h);
+        ((v / PARALLEL_TOL).round() as i64).hash(&mut h);
     }
     h.finish()
 }
 
-/// Exact coefficient-pattern equality (values compared bit-for-bit).
-fn same_pattern(a: &Row, b: &Row) -> bool {
-    a.coeffs.len() == b.coeffs.len()
-        && a.coeffs
-            .iter()
-            .zip(&b.coeffs)
-            .all(|(&(ca, va), &(cb, vb))| ca == cb && va.to_bits() == vb.to_bits())
+/// Confirm two normalized patterns are equal to `PARALLEL_TOL` (same
+/// columns, matching values). Conservative: only true scalar multiples
+/// pass, so a wrong merge is impossible.
+fn approx_parallel(a: &[(usize, f64)], b: &[(usize, f64)]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(&(ca, va), &(cb, vb))| {
+            ca == cb && (va - vb).abs() <= PARALLEL_TOL * (1.0 + va.abs().max(vb.abs()))
+        })
 }
 
-/// Remove duplicate rows (identical coefficient pattern). Signatures are
-/// computed in parallel (rayon); grouping and the per-group decision are
-/// serial and cheap. For `is_equality`, duplicates with differing rhs are
-/// infeasible (`Err(())`); otherwise keep the first. For inequalities,
-/// keep the tightest (smallest rhs) of each duplicate group.
+/// Remove **parallel** rows (scalar multiples of one another), the
+/// generalization of exact-duplicate removal (PaPILO's parallel-row
+/// reduction). Normalized signatures are computed in parallel (rayon);
+/// grouping and the per-group decision are serial and cheap.
+///
+/// Dual recovery stays trivial because we always keep an *original* row in
+/// its own frame and set every dropped row's multiplier to 0 (the kept row
+/// carries the constraint):
+/// - equalities — all scalar multiples represent one constraint; their
+///   *normalized* right-hand sides must agree, else the system is
+///   infeasible. Keep the first; drop the rest.
+/// - inequalities — positive multiples of one direction; keep the **most
+///   restrictive** original row (smallest normalized rhs `h / |pivot|`)
+///   and drop the looser ones, which it implies.
 fn dedup_rows(rows: Vec<Row>, is_equality: bool) -> Result<Vec<Row>, ()> {
     if rows.len() < 2 {
         return Ok(rows);
     }
 
-    // Parallel: one signature per row (PaPILO-style hashing-based pairing).
-    let sigs: Vec<u64> = rows.par_iter().map(row_signature).collect();
+    // Parallel: normalize + hash each row (PaPILO-style hashing-based
+    // pairing, generalized to scalar multiples).
+    let norms: Vec<Vec<(usize, f64)>> =
+        rows.par_iter().map(|r| normalized_coeffs(r, is_equality)).collect();
+    let sigs: Vec<u64> = norms.par_iter().map(|n| parallel_signature(n)).collect();
 
     // Group row indices by signature (serial; small).
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -823,23 +867,25 @@ fn dedup_rows(rows: Vec<Row>, is_equality: bool) -> Result<Vec<Row>, ()> {
         buckets.entry(s).or_default().push(i);
     }
 
+    // Normalized rhs of a row, for the tightness / consistency decisions.
+    let norm_rhs = |i: usize| rows[i].rhs / pivot_divisor(&rows[i], is_equality);
+
     let mut keep = vec![true; rows.len()];
     for idxs in buckets.values() {
         if idxs.len() < 2 {
             continue;
         }
-        // Within a signature bucket, partition into confirmed-equal
-        // pattern groups (guards against hash collisions).
+        // Within a signature bucket, partition into confirmed-parallel
+        // groups (guards against quantization collisions).
         let mut handled = vec![false; idxs.len()];
         for a in 0..idxs.len() {
             if handled[a] {
                 continue;
             }
-            // Collect all members sharing the pattern of idxs[a].
             let mut group = vec![idxs[a]];
             handled[a] = true;
             for b in (a + 1)..idxs.len() {
-                if !handled[b] && same_pattern(&rows[idxs[a]], &rows[idxs[b]]) {
+                if !handled[b] && approx_parallel(&norms[idxs[a]], &norms[idxs[b]]) {
                     handled[b] = true;
                     group.push(idxs[b]);
                 }
@@ -848,22 +894,23 @@ fn dedup_rows(rows: Vec<Row>, is_equality: bool) -> Result<Vec<Row>, ()> {
                 continue;
             }
             if is_equality {
-                // Same lhs: all rhs must agree, else infeasible.
-                let r0 = rows[group[0]].rhs;
+                // Parallel equalities: normalized rhs must agree, else the
+                // two scaled-identical constraints are contradictory.
+                let r0 = norm_rhs(group[0]);
                 for &g in &group[1..] {
-                    if (rows[g].rhs - r0).abs() > 0.0 {
+                    if (norm_rhs(g) - r0).abs() > PARALLEL_TOL * (1.0 + r0.abs()) {
                         return Err(());
                     }
                 }
-                // Keep the first, drop the rest.
                 for &g in &group[1..] {
                     keep[g] = false;
                 }
             } else {
-                // Keep the tightest (smallest rhs); drop the rest.
+                // Parallel inequalities: keep the most restrictive original
+                // row (smallest normalized rhs); it implies the rest.
                 let tightest = *group
                     .iter()
-                    .min_by(|&&p, &&q| rows[p].rhs.partial_cmp(&rows[q].rhs).unwrap())
+                    .min_by(|&&p, &&q| norm_rhs(p).partial_cmp(&norm_rhs(q)).unwrap())
                     .unwrap();
                 for &g in &group {
                     if g != tightest {

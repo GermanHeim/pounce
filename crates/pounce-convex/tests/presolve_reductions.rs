@@ -217,6 +217,149 @@ fn many_duplicate_rows_parallel_path() {
     assert_kkt(&prob, &sol, 1e-4);
 }
 
+// --- parallel rows (scalar multiples, not just exact duplicates) ---
+
+/// Parallel equality rows: `x0 + x1 = 2` and `3x0 + 3x1 = 6` are the same
+/// constraint scaled by 3. One is dropped; the recovered point is valid.
+#[test]
+fn parallel_equality_rows_redundant() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![0.0, 0.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0), // x0 + x1 = 2
+            Triplet::new(1, 0, 3.0),
+            Triplet::new(1, 1, 3.0), // 3x0 + 3x1 = 6  (= 3×row0)
+        ],
+        b: vec![2.0, 6.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![],
+        ub: vec![],
+    };
+    // One equality row removed by parallel detection.
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.reduced.m_eq(), 1),
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[0] - 1.0).abs() < 1e-6 && (sol.x[1] - 1.0).abs() < 1e-6);
+    assert_kkt(&prob, &sol, 1e-5);
+}
+
+/// Negatively-scaled parallel equalities: `x0 + x1 = 2` and
+/// `−2x0 − 2x1 = −4` are the same constraint. Detected and merged.
+#[test]
+fn parallel_equality_negative_scale() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![0.0, 0.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(1, 0, -2.0),
+            Triplet::new(1, 1, -2.0), // −2×row0
+        ],
+        b: vec![2.0, -4.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![],
+        ub: vec![],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.reduced.m_eq(), 1),
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_kkt(&prob, &sol, 1e-5);
+}
+
+/// Parallel equalities with inconsistent scaled rhs are infeasible:
+/// `x0 + x1 = 2` and `2x0 + 2x1 = 5` (≠ 4).
+#[test]
+fn parallel_equality_inconsistent_infeasible() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![0.0, 0.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(1, 1, 2.0),
+        ],
+        b: vec![2.0, 5.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![],
+        ub: vec![],
+    };
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+}
+
+/// Parallel inequalities (positive multiple): `x0 + x1 ≤ 3` and
+/// `2x0 + 2x1 ≤ 2` (⟺ x0 + x1 ≤ 1). The tighter (second) is kept; the
+/// optimum lands on x0 + x1 = 1.
+#[test]
+fn parallel_inequality_keeps_tightest() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-10.0, -10.0], // pull both up; constraint binds
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0), // x0 + x1 ≤ 3
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(1, 1, 2.0), // 2x0 + 2x1 ≤ 2  ⟺  x0 + x1 ≤ 1
+        ],
+        h: vec![3.0, 2.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.reduced.m_ineq(), 1),
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[0] + sol.x[1] - 1.0).abs() < 1e-5, "x={:?}", sol.x);
+    assert_kkt(&prob, &sol, 1e-5);
+    // Matches the direct solve's primal.
+    let d = direct(&prob);
+    assert!((sol.x[0] - d.x[0]).abs() < 1e-5 && (sol.x[1] - d.x[1]).abs() < 1e-5);
+}
+
+/// Opposite-direction inequalities are *not* merged: `x0 ≤ 3` and
+/// `−x0 ≤ −1` (i.e. x0 ≥ 1) form a range, not a duplicate — both kept.
+#[test]
+fn antiparallel_inequalities_not_merged() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 2.0)],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 0, -1.0)],
+        h: vec![3.0, -1.0], // x0 ≤ 3 and x0 ≥ 1
+        lb: vec![],
+        ub: vec![],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.reduced.m_ineq(), 2, "both kept"),
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_kkt(&prob, &sol, 1e-5);
+}
+
 // --- activity-bound reductions (need the variable box) ---
 
 use pounce_convex::{NEG_INF, POS_INF};

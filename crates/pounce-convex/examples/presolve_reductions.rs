@@ -162,6 +162,28 @@ fn main() {
         },
     );
 
+    // Parallel inequalities (scalar multiple): `x0+x1 ≤ 3` and
+    // `2x0+2x1 ≤ 2` (⟺ x0+x1 ≤ 1). The tighter is kept, the other dropped.
+    report(
+        "parallel ineq (keep tightest)",
+        &QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-10.0, -10.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, 2.0),
+                Triplet::new(1, 1, 2.0),
+            ],
+            h: vec![3.0, 2.0],
+            lb: vec![],
+            ub: vec![],
+        },
+    );
+
     // Forcing equality at the max vertex: with x ∈ [0,4]², `x0+x1 = 8`
     // equals the max activity 8, pinning x0=x1=4.
     report(
