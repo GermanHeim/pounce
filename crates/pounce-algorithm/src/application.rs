@@ -621,7 +621,7 @@ impl IpoptApplication {
             Ok(r) => r,
             Err(e) => {
                 if std::env::var_os("POUNCE_DBG_SQP").is_some() {
-                    eprintln!("[SQP] optimize_with_warm_start error: {e:?}");
+                    tracing::warn!(target: "pounce::sqp", "[SQP] optimize_with_warm_start error: {e:?}");
                 }
                 return ApplicationReturnStatus::InternalError;
             }
@@ -1417,7 +1417,7 @@ impl IpoptApplication {
                     // Upstream Ipopt refuses this combination: Mehrotra
                     // needs an affine step every iter, which only the
                     // adaptive path computes. Keep adaptive and warn.
-                    eprintln!(
+                    tracing::warn!(target: "pounce::algorithm", 
                         "pounce: mehrotra_algorithm=yes requires \
                          mu_strategy=adaptive; ignoring \
                          mu_strategy=monotone."

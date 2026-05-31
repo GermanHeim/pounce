@@ -476,6 +476,7 @@ dependencies = [
  "feral",
  "pounce-common",
  "pounce-linsol",
+ "tracing",
 ]
 
 [[package]]
@@ -508,6 +509,7 @@ version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
+ "tracing",
 ]
 
 [[package]]
@@ -537,6 +539,7 @@ version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
+ "tracing",
 ]
 
 [[package]]
@@ -554,6 +557,7 @@ dependencies = [
  "pounce-restoration",
  "pounce-sensitivity",
  "pyo3",
+ "tracing",
 ]
 
 [[package]]
