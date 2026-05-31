@@ -20,6 +20,7 @@
 
 pub mod batch;
 pub mod cones;
+pub mod hsde;
 pub mod ipm;
 pub mod presolve;
 pub mod qp;

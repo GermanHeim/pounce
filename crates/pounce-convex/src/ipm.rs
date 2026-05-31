@@ -385,7 +385,7 @@ where
 /// it (seeded with the initial scaling). Shared by the single-shot path
 /// and the reusable [`QpFactorization`] handle. `Err(())` ⇒ the initial
 /// factorization failed.
-fn build_factorization<F>(
+pub(crate) fn build_factorization<F>(
     prob: &QpProblem,
     cone: &CompositeCone,
     opts: &QpOptions,
@@ -831,7 +831,7 @@ fn failed_solution(
 /// `comp_term` is the cone's contribution at the `(z)` rows (the orthant's
 /// is `r_c ⊘ z`), computed by the caller via [`Cone::rhs_comp_term`] so the
 /// block is cone-specific rather than baked in here.
-fn build_rhs(
+pub(crate) fn build_rhs(
     r_d: &[f64],
     r_p: &[f64],
     r_g: &[f64],
@@ -859,7 +859,7 @@ fn build_rhs(
 }
 
 /// Copy the solved RHS into the (dx, dy, dz) step components.
-fn split_step(
+pub(crate) fn split_step(
     rhs: &[f64],
     n: usize,
     m_eq: usize,
@@ -939,14 +939,14 @@ enum ZBlockPos {
     },
 }
 
-struct KktStructure {
-    airn: Vec<Index>,
-    ajcn: Vec<Index>,
+pub(crate) struct KktStructure {
+    pub(crate) airn: Vec<Index>,
+    pub(crate) ajcn: Vec<Index>,
     /// Constant values (everything except the scaling block; the `(z, z)`
     /// diagonal entries hold their `-reg` term here).
-    values: Vec<Number>,
+    pub(crate) values: Vec<Number>,
     /// Total KKT dimension, including the per-SOC auxiliary variables.
-    dim: usize,
+    pub(crate) dim: usize,
     /// Per-cone `(z, z)` block positions, in `cone.blocks()` order.
     z_blocks: Vec<ZBlockPos>,
 }
@@ -958,7 +958,7 @@ impl KktStructure {
     /// position; all seeded with `-reg` on the diagonal. The pattern is
     /// constant across iterations — only the scaling values change — so the
     /// solver `refactor`s rather than re-analyzing.
-    fn build(prob: &QpProblem, cone: &CompositeCone, reg: f64) -> Self {
+    pub(crate) fn build(prob: &QpProblem, cone: &CompositeCone, reg: f64) -> Self {
         let n = prob.n;
         let m_eq = prob.m_eq();
         let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
@@ -1054,7 +1054,7 @@ impl KktStructure {
     /// Write the per-iteration cone scaling into `out` (a copy of
     /// `self.values`): each block's `(z, z)` entries become `-(block) -
     /// reg·I`, from the cone's [`Cone::kkt_block`].
-    fn update_blocks(
+    pub(crate) fn update_blocks(
         &self,
         cone: &CompositeCone,
         s: &[f64],
@@ -1109,11 +1109,11 @@ fn block_shapes(cone: &CompositeCone) -> Vec<bool> {
         .collect()
 }
 
-fn inf_norm(v: &[f64]) -> f64 {
+pub(crate) fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |m, &x| m.max(x.abs()))
 }
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
+pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
@@ -1139,7 +1139,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 ///   `bᵀy + hᵀz < 0` (Farkas). `z ≥ 0` is maintained by the IPM.
 /// - **Dual infeasible / unbounded:** direction `d` (= `x`) with
 ///   `Pd ≈ 0, Ad ≈ 0, Gd ≤ 0, cᵀd < 0`.
-fn detect_infeasibility(
+pub(crate) fn detect_infeasibility(
     prob: &QpProblem,
     x: &[f64],
     y: &[f64],
