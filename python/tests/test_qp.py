@@ -110,6 +110,41 @@ def test_solve_qp_detects_unbounded():
     assert r["status"] == "dual_infeasible"
 
 
+def test_solve_qp_warm_start_matches_cold():
+    # Warm starting from a nearby solution must reach the same optimum and
+    # not increase iterations.
+    base = p.QpProblem(
+        n=3,
+        c=[-1.0, -2.0, -0.5],
+        p_rows=[0, 1, 2],
+        p_cols=[0, 1, 2],
+        p_vals=[2.0, 2.0, 2.0],
+        g_rows=[0, 0, 0],
+        g_cols=[0, 1, 2],
+        g_vals=[1.0, 1.0, 1.0],
+        h=[1.0],
+    )
+    base_sol = p.solve_qp(base)
+    pert = p.QpProblem(
+        n=3,
+        c=[-1.1, -1.9, -0.55],
+        p_rows=[0, 1, 2],
+        p_cols=[0, 1, 2],
+        p_vals=[2.0, 2.0, 2.0],
+        g_rows=[0, 0, 0],
+        g_cols=[0, 1, 2],
+        g_vals=[1.0, 1.0, 1.0],
+        h=[1.05],
+    )
+    cold = p.solve_qp(pert)
+    warm = p.solve_qp(pert, warm_start=base_sol)
+    assert warm["status"] == "optimal"
+    np.testing.assert_allclose(
+        np.asarray(warm["x"]), np.asarray(cold["x"]), atol=1e-6
+    )
+    assert int(warm["iters"]) <= int(cold["iters"])
+
+
 def test_qp_problem_validation():
     import pytest
 

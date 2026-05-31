@@ -37,13 +37,16 @@ instances that share matrix structure, use :func:`solve_qp_batch`, which
 routes the forward solves to the rayon-parallel ``solve_qp_batch`` binding
 and differentiates each instance independently.
 
-Warm starting. The interior-point core does not currently accept a warm
-*iterate* (a seeded ``x``/``λ``/``ν``); IPMs need a well-centered interior
-start, so naive iterate seeding is not generally beneficial and is a
-deferred core-solver item. What *is* available for repeated solves on a
-fixed structure is **symbolic-factor reuse** (skip the AMD analysis /
-KKT-pattern setup) via :class:`pounce.qp.QpFactorization` on the host
-side; see that class for the parametric (``c``/``b``/``h`` varying) case.
+Warm starting. Pass ``warm_start=`` a previous primal ``x`` to seed the
+interior-point iteration on a nearby problem. The core applies a
+Mehrotra-style recentering (it keeps the warm primal but pushes the
+slacks/multipliers back into the interior with a scale-aware floor, since
+a converged point lies on the complementarity boundary — the worst IPM
+restart). The warm start is **not** differentiated and never changes the
+solution or its gradients; it only reduces the iteration count. For
+repeated solves on a *fixed structure*, the host API
+:class:`pounce.qp.QpFactorization` additionally reuses the symbolic
+factorization (AMD analysis / KKT pattern).
 """
 
 from __future__ import annotations
@@ -141,15 +144,19 @@ def _split_duals(d, m_g, m_a):
     return lam, nu
 
 
-def _forward_solve(P, c, G, h, A, b, tol, max_iter):
+def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     """Host-side forward solve via pounce-convex. Returns (x, lam, nu).
 
     ``lam`` are the inequality (``G``) multipliers, ``nu`` the equality
-    (``A``) multipliers."""
+    (``A``) multipliers. ``warm_x`` (if its length is ``n``) seeds the
+    iteration with that primal; it only affects the iteration count."""
     m_g = G.shape[0]
     m_a = A.shape[0]
     prob = _build_problem(P, c, G, h, A, b)
-    d = _pounce.solve_qp(prob, tol=tol, max_iter=max_iter)
+    warm = None
+    if warm_x is not None and np.asarray(warm_x).size == c.shape[0]:
+        warm = {"x": np.asarray(warm_x, dtype=np.float64).tolist()}
+    d = _pounce.solve_qp(prob, tol=tol, max_iter=max_iter, warm_start=warm)
     x = np.asarray(d["x"], dtype=np.float64)
     lam, nu = _split_duals(d, m_g, m_a)
     return x, lam, nu
@@ -232,18 +239,24 @@ def _kkt_backward(P, G, A, h, x, lam, nu, gx):
 
 
 def _make_qp_vjp(n, m_g, m_a, tol, max_iter):
+    # `warm_x` is a primal input so it threads cleanly through jit/grad,
+    # but it never affects the solution (only the iteration count), so its
+    # cotangent is zero.
     @jax.custom_vjp
-    def qp(P, c, G, h, A, b):
-        x, _, _ = _pure_forward(P, c, G, h, A, b, n, m_g, m_a, tol, max_iter)
+    def qp(P, c, G, h, A, b, warm_x):
+        x, _, _ = _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter)
         return x
 
-    def fwd(P, c, G, h, A, b):
-        x, lam, nu = _pure_forward(P, c, G, h, A, b, n, m_g, m_a, tol, max_iter)
-        return x, (P, G, A, h, x, lam, nu)
+    def fwd(P, c, G, h, A, b, warm_x):
+        x, lam, nu = _pure_forward(
+            P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter
+        )
+        return x, (P, G, A, h, x, lam, nu, warm_x)
 
     def bwd(res, gx):
-        P, G, A, h, x, lam, nu = res
-        return _kkt_backward(P, G, A, h, x, lam, nu, gx)
+        P, G, A, h, x, lam, nu, warm_x = res
+        gP, gc, gG, gh, gA, gb = _kkt_backward(P, G, A, h, x, lam, nu, gx)
+        return (gP, gc, gG, gh, gA, gb, jnp.zeros_like(warm_x))
 
     qp.defvjp(fwd, bwd)
     return qp
@@ -288,15 +301,18 @@ def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
     return qp
 
 
-def _pure_forward(P, c, G, h, A, b, n, m_g, m_a, tol, max_iter):
-    """custom_vjp-friendly forward via pure_callback. Returns (x, lam, nu)."""
+def _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter):
+    """custom_vjp-friendly forward via pure_callback. Returns (x, lam, nu).
+
+    ``warm_x`` is an extra (non-differentiated) operand carrying an optional
+    warm-start primal; an empty array means cold start."""
     shapes = (
         jax.ShapeDtypeStruct((n,), jnp.float64),
         jax.ShapeDtypeStruct((m_g,), jnp.float64),
         jax.ShapeDtypeStruct((m_a,), jnp.float64),
     )
 
-    def host(P_h, c_h, G_h, h_h, A_h, b_h):
+    def host(P_h, c_h, G_h, h_h, A_h, b_h, w_h):
         return _forward_solve(
             np.asarray(P_h),
             np.asarray(c_h),
@@ -306,6 +322,7 @@ def _pure_forward(P, c, G, h, A, b, n, m_g, m_a, tol, max_iter):
             np.asarray(b_h),
             tol,
             max_iter,
+            warm_x=np.asarray(w_h),
         )
 
     # `vmap_method="sequential"` lets the layer be used under jax.vmap
@@ -313,10 +330,10 @@ def _pure_forward(P, c, G, h, A, b, n, m_g, m_a, tol, max_iter):
     # don't accept the kwarg, so fall back gracefully.
     try:
         return jax.pure_callback(
-            host, shapes, P, c, G, h, A, b, vmap_method="sequential"
+            host, shapes, P, c, G, h, A, b, warm_x, vmap_method="sequential"
         )
     except TypeError:
-        return jax.pure_callback(host, shapes, P, c, G, h, A, b)
+        return jax.pure_callback(host, shapes, P, c, G, h, A, b, warm_x)
 
 
 def _pure_forward_batch(P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter):
@@ -344,6 +361,20 @@ def _pure_forward_batch(P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter):
     return jax.pure_callback(host, shapes, P, cs, G, hs, A, bs)
 
 
+def _warm_primal(warm_start, n):
+    """Extract a warm-start primal ``x`` (length ``n``) from a previous
+    solution, returning an empty array (cold start) when absent."""
+    if warm_start is None:
+        return jnp.zeros((0,))
+    wx = getattr(warm_start, "x", None)
+    if wx is None:
+        wx = warm_start.get("x") if hasattr(warm_start, "get") else warm_start
+    if wx is None:
+        return jnp.zeros((0,))
+    wx = jnp.asarray(wx, dtype=jnp.float64).ravel()
+    return wx if wx.shape[0] == n else jnp.zeros((0,))
+
+
 def solve_qp(
     *,
     P,
@@ -356,6 +387,7 @@ def solve_qp(
     ub=None,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    warm_start=None,
 ):
     """Differentiable convex-QP solve ``x*(P, c, G, h, A, b)``.
 
@@ -366,6 +398,13 @@ def solve_qp(
     All array args are dense jnp/np arrays. Bounds are folded into the
     inequality block as constant rows (no gradient flows to ``lb``/``ub``;
     pass differentiable bound levels through ``G``/``h`` instead).
+
+    ``warm_start`` (optional) supplies a previous primal ``x`` (an array, or
+    anything with an ``x`` attribute/key — e.g. a prior result) to seed the
+    interior-point iteration on a nearby problem. It is **not**
+    differentiated and does not change the solution or its gradients; it
+    only reduces the iteration count. This is the natural fit here, since
+    the layer returns the primal — feed the previous output back in.
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     c = jnp.asarray(c, dtype=jnp.float64)
@@ -377,9 +416,10 @@ def solve_qp(
 
     # Fold finite bounds into G/h (constants w.r.t. differentiation here).
     G_full, h_full = _expand_bounds(G0, h0, lb, ub, n)
+    warm_x = _warm_primal(warm_start, n)
 
     fn = _make_qp_vjp(n, G_full.shape[0], A0.shape[0], tol, max_iter)
-    return fn(P, c, G_full, h_full, A0, b0)
+    return fn(P, c, G_full, h_full, A0, b0, warm_x)
 
 
 def solve_qp_batch(
@@ -457,10 +497,10 @@ class QpLayer:
     :func:`solve_qp`, w.r.t. the captured matrices too). Suitable for use
     inside a larger JAX model (``jax.grad`` / ``jacrev`` / ``vmap``).
 
-    Note on warm starting: for many sequential same-structure solves, the
-    win comes from reusing the symbolic factorization rather than seeding
-    the iterate. That reuse lives in :class:`pounce.qp.QpFactorization`
-    (host API); the IPM core does not yet accept a warm iterate.
+    Pass ``warm_start=`` (a previous primal ``x``) to ``__call__`` to seed
+    the iteration on a nearby problem; for fixed-structure repeated solves,
+    :class:`pounce.qp.QpFactorization` (host API) additionally reuses the
+    symbolic factorization.
     """
 
     def __init__(self, P, G=None, A=None, lb=None, ub=None, *, tol=None, max_iter=None):
@@ -472,7 +512,7 @@ class QpLayer:
         self._tol = tol
         self._max_iter = max_iter
 
-    def __call__(self, c, *, b=None, h=None):
+    def __call__(self, c, *, b=None, h=None, warm_start=None):
         return solve_qp(
             P=self._P,
             c=c,
@@ -484,6 +524,7 @@ class QpLayer:
             ub=self._ub,
             tol=self._tol,
             max_iter=self._max_iter,
+            warm_start=warm_start,
         )
 
     def batch(self, cs, *, b=None, h=None):

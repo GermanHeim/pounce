@@ -18,8 +18,8 @@
 
 use numpy::IntoPyArray;
 use pounce_convex::{
-    solve_qp_batch_parallel, solve_qp_ipm, QpFactorization, QpOptions, QpProblem, QpSolution,
-    QpStatus, Triplet,
+    solve_qp_batch_parallel, solve_qp_ipm, solve_qp_ipm_warm, QpFactorization, QpOptions,
+    QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -179,6 +179,26 @@ fn solution_dict<'py>(py: Python<'py>, sol: QpSolution) -> PyResult<Bound<'py, P
     Ok(d)
 }
 
+/// Extract a `QpWarmStart` from a Python mapping (typically a previous
+/// result dict). Missing vector keys default to empty, so a partial warm
+/// start (e.g. only `x`) is accepted; the solver validates dimensions and
+/// falls back to a cold start if they don't match.
+fn warm_from_dict(warm: &Bound<'_, PyDict>) -> PyResult<QpWarmStart> {
+    let get = |key: &str| -> PyResult<Vec<f64>> {
+        match warm.get_item(key)? {
+            Some(v) => v.extract::<Vec<f64>>(),
+            None => Ok(Vec::new()),
+        }
+    };
+    Ok(QpWarmStart {
+        x: get("x")?,
+        y: get("y")?,
+        z: get("z")?,
+        z_lb: get("z_lb")?,
+        z_ub: get("z_ub")?,
+    })
+}
+
 fn opts(tol: Option<f64>, max_iter: Option<usize>) -> QpOptions {
     let mut o = QpOptions::default();
     if let Some(t) = tol {
@@ -193,16 +213,26 @@ fn opts(tol: Option<f64>, max_iter: Option<usize>) -> QpOptions {
 /// Solve one convex QP. Returns a dict with the primal `x`, duals `y`
 /// (equalities), `z` (inequalities), bound duals `z_lb`/`z_ub`, the
 /// objective, iteration count, and a status string.
+///
+/// `warm_start` (optional) is a mapping with `x`/`y`/`z`/`z_lb`/`z_ub`
+/// keys — e.g. a previous result dict for a nearby problem. It only
+/// affects the iteration count, not the solution; a dimension mismatch is
+/// ignored (cold start).
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None))]
 pub fn solve_qp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
     tol: Option<f64>,
     max_iter: Option<usize>,
+    warm_start: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let o = opts(tol, max_iter);
-    let sol = py.allow_threads(|| solve_qp_ipm(&prob.inner, &o, backend));
+    let warm = warm_start.map(warm_from_dict).transpose()?;
+    let sol = py.allow_threads(|| match &warm {
+        Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
+        None => solve_qp_ipm(&prob.inner, &o, backend),
+    });
     solution_dict(py, sol)
 }
 
@@ -278,8 +308,20 @@ impl PyQpFactorization {
     /// Solve `prob`, reusing the captured symbolic factor. `prob` must
     /// share the captured structure; otherwise the result dict has
     /// status `"numerical_failure"`.
-    fn solve<'py>(&mut self, py: Python<'py>, prob: &PyQpProblem) -> PyResult<Bound<'py, PyDict>> {
-        let sol = self.inner.solve(&prob.inner);
+    ///
+    /// `warm_start` (optional) seeds the iteration from a nearby problem's
+    /// solution, combining symbolic-factor reuse with warm starting.
+    #[pyo3(signature = (prob, warm_start=None))]
+    fn solve<'py>(
+        &mut self,
+        py: Python<'py>,
+        prob: &PyQpProblem,
+        warm_start: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let sol = match warm_start {
+            Some(w) => self.inner.solve_warm(&prob.inner, &warm_from_dict(w)?),
+            None => self.inner.solve(&prob.inner),
+        };
         solution_dict(py, sol)
     }
 }

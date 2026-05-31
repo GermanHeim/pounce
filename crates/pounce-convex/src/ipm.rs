@@ -100,10 +100,45 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     if !prob.has_bounds() {
-        return solve_qp_core(prob, opts, make_backend);
+        return solve_qp_core(prob, opts, None, make_backend);
     }
     let (expanded, bound_rows) = expand_bounds(prob);
-    let sol = solve_qp_core(&expanded, opts, make_backend);
+    let sol = solve_qp_core(&expanded, opts, None, make_backend);
+    split_bound_duals(prob, &bound_rows, sol)
+}
+
+/// Solve a convex QP starting from a warm point (typically a previous
+/// solution of a nearby problem). See [`QpWarmStart`] for the centering
+/// strategy and when warm starting helps.
+///
+/// Identical to [`solve_qp_ipm`] except the interior-point iteration is
+/// seeded from `warm` instead of the cold default. The *solution* is
+/// independent of the start (the IPM converges to the same KKT point); a
+/// good warm start only reduces the iteration count.
+pub fn solve_qp_ipm_warm<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    warm: &QpWarmStart,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if !prob.has_bounds() {
+        let w = WarmStart {
+            x: warm.x.clone(),
+            y: warm.y.clone(),
+            z: warm.z.clone(),
+        };
+        return solve_qp_core(prob, opts, Some(&w), make_backend);
+    }
+    let (expanded, bound_rows) = expand_bounds(prob);
+    let w = WarmStart {
+        x: warm.x.clone(),
+        y: warm.y.clone(),
+        z: merge_bound_duals(prob, &bound_rows, warm),
+    };
+    let sol = solve_qp_core(&expanded, opts, Some(&w), make_backend);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -145,6 +180,89 @@ fn expand_bounds(prob: &QpProblem) -> (QpProblem, Vec<(usize, usize, bool)>) {
     (expanded, bound_rows)
 }
 
+/// A warm-start iterate: a previous primal/dual solution to seed the
+/// interior-point iteration for a *nearby* problem (same structure, mildly
+/// perturbed `c`/`b`/`h`/bounds). Its fields mirror [`QpSolution`], so the
+/// idiomatic use is to feed back the prior solve's solution.
+///
+/// ## Why warm starting an IPM needs care
+///
+/// Unlike active-set/simplex methods, a primal-dual interior-point method
+/// converges *to* the complementarity boundary (`s∘z → 0`). A converged
+/// warm point therefore lies essentially **on** that boundary — the worst
+/// place to restart, since the IPM needs a well-centered interior iterate.
+/// Seeding `(x, s, z)` verbatim typically stalls.
+///
+/// [`solve_qp_ipm_warm`] handles this with a Mehrotra-style recentering
+/// ([`init_iterate`]): it keeps the warm primal `x` (whose slack pattern
+/// `h − Gx` encodes the active set) but pushes the slacks `s` and
+/// multipliers `z` back into the interior with a **scale-aware floor**, so
+/// the start is genuinely interior and centered while still benefiting
+/// from the warm `x`. The benefit is real but bounded — it is largest when
+/// the active set is stable across the perturbation, and modest or absent
+/// when it changes substantially (a known property of IPM warm starts).
+#[derive(Debug, Clone)]
+pub struct QpWarmStart {
+    /// Primal iterate (length `n`).
+    pub x: Vec<f64>,
+    /// Equality multipliers (length `m_eq`).
+    pub y: Vec<f64>,
+    /// Inequality multipliers for the original `G` rows (length `m_ineq`).
+    pub z: Vec<f64>,
+    /// Lower-bound multipliers (length `n`).
+    pub z_lb: Vec<f64>,
+    /// Upper-bound multipliers (length `n`).
+    pub z_ub: Vec<f64>,
+}
+
+impl QpWarmStart {
+    /// Build a warm start from a previous [`QpSolution`].
+    pub fn from_solution(sol: &QpSolution) -> Self {
+        QpWarmStart {
+            x: sol.x.clone(),
+            y: sol.y.clone(),
+            z: sol.z.clone(),
+            z_lb: sol.z_lb.clone(),
+            z_ub: sol.z_ub.clone(),
+        }
+    }
+}
+
+/// Internal warm start expressed in the *expanded* space (variable bounds
+/// already folded into the inequality block, so `z` covers `G`-rows then
+/// the appended bound rows).
+struct WarmStart {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+}
+
+/// Build the expanded-space `z` for a warm start: the original `G`-row
+/// multipliers followed by each appended bound row's `z_lb`/`z_ub` value,
+/// in the same append order as [`expand_bounds`]. Inverse of
+/// [`split_bound_duals`]'s `z` handling.
+fn merge_bound_duals(
+    prob: &QpProblem,
+    bound_rows: &[(usize, usize, bool)],
+    warm: &QpWarmStart,
+) -> Vec<f64> {
+    let base_m = prob.m_ineq();
+    let mut z = vec![0.0; base_m + bound_rows.len()];
+    let copy = base_m.min(warm.z.len());
+    z[..copy].copy_from_slice(&warm.z[..copy]);
+    for &(r, var, is_upper) in bound_rows {
+        let v = if is_upper {
+            warm.z_ub.get(var).copied().unwrap_or(0.0)
+        } else {
+            warm.z_lb.get(var).copied().unwrap_or(0.0)
+        };
+        if r < z.len() {
+            z[r] = v;
+        }
+    }
+    z
+}
+
 /// Move the appended bound rows' multipliers from the expanded solution's
 /// `z` into `z_lb`/`z_ub`, and trim `z` back to the original rows.
 fn split_bound_duals(
@@ -172,7 +290,12 @@ fn split_bound_duals(
 
 /// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
 /// ignored here; the public [`solve_qp_ipm`] handles bound expansion.
-fn solve_qp_core<F>(prob: &QpProblem, opts: &QpOptions, mut make_backend: F) -> QpSolution
+fn solve_qp_core<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    warm: Option<&WarmStart>,
+    mut make_backend: F,
+) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -194,7 +317,7 @@ where
             );
         }
     };
-    run_ipm(prob, opts, &kkt, &mut fact)
+    run_ipm(prob, opts, &kkt, &mut fact, warm)
 }
 
 /// Build the constant KKT pattern for `prob` and a `Factorization` over
@@ -230,6 +353,102 @@ where
     Ok((kkt, fact))
 }
 
+/// Build the starting iterate `(x, y, z, s)` for [`run_ipm`].
+///
+/// With no warm start (`warm = None`) this is the cold default
+/// `x = 0, y = 0, z = 1, s = 1` — a perfectly centered interior point
+/// (`s∘z = 1`) — preserving the established cold-start behavior exactly.
+///
+/// With a warm start it applies a **Mehrotra-style recentering** seeded
+/// from the warm point (Mehrotra 1992, §7, adapted for warm starting):
+///
+/// 1. Keep the warm primal `x` and equality multipliers `y`.
+/// 2. Take the implied slacks `s̃ = h − Gx` (their signs encode which
+///    inequalities the warm `x` makes active/violated) and the warm `z`.
+/// 3. Shift both into the strict interior by
+///    `δ = max(−1.5·min(·), 0.1·scale)` with
+///    `scale = max(1, ‖s̃‖∞, ‖z‖∞)`. The `0.1·scale` floor is the crucial
+///    part for warm starting *from a converged solution*: such a point is
+///    on the complementarity boundary (`s̃ᵢ` or `zᵢ ≈ 0`), and the floor
+///    guarantees a genuinely interior, well-scaled restart instead of a
+///    boundary-hugging one.
+/// 4. A final centering shift `½(s·z)/Σz`, `½(s·z)/Σs` balances `s` and
+///    `z` (Mehrotra's second step).
+///
+/// The returned iterate always satisfies `s > 0, z > 0`. If `warm`'s
+/// dimensions don't match the (expanded) problem it is ignored and the
+/// cold start is used, so a stale warm start can never corrupt a solve.
+fn init_iterate(
+    prob: &QpProblem,
+    n: usize,
+    m_eq: usize,
+    m_ineq: usize,
+    warm: Option<&WarmStart>,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let cold = || {
+        (
+            vec![0.0; n],
+            vec![0.0; m_eq],
+            vec![1.0; m_ineq],
+            vec![1.0; m_ineq],
+        )
+    };
+    // A matching primal `x` is enough to warm start; `y`/`z` fall back to
+    // the cold values when they don't match (so a primal-only warm start —
+    // e.g. feeding back just the previous primal — is supported).
+    let w = match warm {
+        Some(w) if w.x.len() == n => w,
+        _ => return cold(),
+    };
+
+    let x = w.x.clone();
+    let y = if w.y.len() == m_eq {
+        w.y.clone()
+    } else {
+        vec![0.0; m_eq]
+    };
+    let mut z = if w.z.len() == m_ineq {
+        w.z.clone()
+    } else {
+        vec![1.0; m_ineq]
+    };
+
+    // No cone: x/y are the whole iterate, s/z are empty.
+    if m_ineq == 0 {
+        return (x, y, z, Vec::new());
+    }
+
+    // Implied slacks s̃ = h − Gx.
+    let mut gx = vec![0.0; m_ineq];
+    prob.g_mul(&x, &mut gx);
+    let mut s: Vec<f64> = (0..m_ineq).map(|i| prob.h[i] - gx[i]).collect();
+
+    let scale = 1.0_f64
+        .max(inf_norm(&s))
+        .max(inf_norm(&z));
+    let s_min = s.iter().cloned().fold(f64::INFINITY, f64::min);
+    let z_min = z.iter().cloned().fold(f64::INFINITY, f64::min);
+    // Positivity shift with a scale-aware floor (keeps a near-optimal warm
+    // point off the boundary).
+    let ds = (-1.5 * s_min).max(0.1 * scale);
+    let dz = (-1.5 * z_min).max(0.1 * scale);
+    for i in 0..m_ineq {
+        s[i] += ds;
+        z[i] += dz;
+    }
+    // Mehrotra centering shift to balance s and z.
+    let sz: f64 = s.iter().zip(&z).map(|(a, b)| a * b).sum();
+    let sum_s: f64 = s.iter().sum();
+    let sum_z: f64 = z.iter().sum();
+    let ds2 = 0.5 * sz / sum_z;
+    let dz2 = 0.5 * sz / sum_s;
+    for i in 0..m_ineq {
+        s[i] += ds2;
+        z[i] += dz2;
+    }
+    (x, y, z, s)
+}
+
 /// Run the Mehrotra predictor-corrector iteration for `prob` given an
 /// already-built KKT pattern (`kkt`) and a live `Factorization` (`fact`)
 /// over that pattern. The factorization is re-numeric-factored each
@@ -241,16 +460,14 @@ fn run_ipm(
     opts: &QpOptions,
     kkt: &KktStructure,
     fact: &mut Factorization,
+    warm: Option<&WarmStart>,
 ) -> QpSolution {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
     let cone = NonnegCone::new(m_ineq);
 
-    let mut x = vec![0.0; n];
-    let mut y = vec![0.0; m_eq];
-    let mut z = vec![1.0; m_ineq];
-    let mut s = vec![1.0; m_ineq];
+    let (mut x, mut y, mut z, mut s) = init_iterate(prob, n, m_eq, m_ineq, warm);
 
     let mut r_d = vec![0.0; n];
     let mut r_p = vec![0.0; m_eq];
@@ -451,6 +668,31 @@ impl QpFactorization {
     /// share the captured structure (see the type docs); otherwise a
     /// `NumericalFailure` solution is returned.
     pub fn solve(&mut self, prob: &QpProblem) -> QpSolution {
+        self.solve_inner(prob, None)
+    }
+
+    /// Solve `prob` reusing the captured symbolic factor **and** warm
+    /// starting from `warm` (a nearby problem's solution). Combines the
+    /// two reuse axes: the symbolic factorization is paid once at `build`,
+    /// and the interior-point iteration is seeded from the warm point (see
+    /// [`QpWarmStart`]). Same structure requirement as [`Self::solve`].
+    pub fn solve_warm(&mut self, prob: &QpProblem, warm: &QpWarmStart) -> QpSolution {
+        let (expanded_z, _) = if prob.has_bounds() {
+            // `merge_bound_duals` needs the bound-row provenance.
+            let (_, bound_rows) = expand_bounds(prob);
+            (merge_bound_duals(prob, &bound_rows, warm), ())
+        } else {
+            (warm.z.clone(), ())
+        };
+        let w = WarmStart {
+            x: warm.x.clone(),
+            y: warm.y.clone(),
+            z: expanded_z,
+        };
+        self.solve_inner(prob, Some(&w))
+    }
+
+    fn solve_inner(&mut self, prob: &QpProblem, warm: Option<&WarmStart>) -> QpSolution {
         let (expanded, bound_rows) = if prob.has_bounds() {
             expand_bounds(prob)
         } else {
@@ -472,7 +714,7 @@ impl QpFactorization {
         // `run_ipm` refactors numerically per iteration). The same factor
         // object is reused across solves, so the AMD ordering / symbolic
         // factor is paid once at `build`.
-        let sol = run_ipm(&expanded, &self.opts, &kkt, &mut self.fact);
+        let sol = run_ipm(&expanded, &self.opts, &kkt, &mut self.fact, warm);
         split_bound_duals(prob, &bound_rows, sol)
     }
 }

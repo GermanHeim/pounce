@@ -165,6 +165,29 @@ def _to_result(d: dict) -> QpResult:
     )
 
 
+def _warm_dict(warm):
+    """Coerce a warm start (a :class:`QpResult` or a mapping) into the
+    ``{x, y, z, z_lb, z_ub}`` dict the binding expects, or ``None``."""
+    if warm is None:
+        return None
+    if isinstance(warm, QpResult):
+        src = {
+            "x": warm.x,
+            "y": warm.y,
+            "z": warm.z,
+            "z_lb": warm.z_lb,
+            "z_ub": warm.z_ub,
+        }
+    else:
+        src = warm
+    out = {}
+    for k in ("x", "y", "z", "z_lb", "z_ub"):
+        v = src.get(k) if hasattr(src, "get") else src[k]
+        if v is not None:
+            out[k] = np.asarray(v, dtype=np.float64).ravel().tolist()
+    return out
+
+
 def solve_qp(
     P=None,
     c=None,
@@ -177,17 +200,27 @@ def solve_qp(
     *,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    warm_start=None,
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
     ``P`` (lower triangle is used; assumed symmetric) and ``A``/``G`` may
     be scipy-sparse or dense; ``None`` matrices are empty. ``c`` is
     required and sets ``n``.
+
+    ``warm_start`` (optional) is a previous :class:`QpResult` (or a mapping
+    with ``x``/``y``/``z``/``z_lb``/``z_ub``) for a *nearby* problem. It
+    seeds the interior-point iteration to reduce the iteration count; it
+    does not change the solution, and a dimension mismatch is ignored.
     """
     if c is None:
         raise ValueError("solve_qp: `c` is required")
     prob = _build(P, c, A, b, G, h, lb, ub)
-    return _to_result(_pounce.solve_qp(prob, tol=tol, max_iter=max_iter))
+    return _to_result(
+        _pounce.solve_qp(
+            prob, tol=tol, max_iter=max_iter, warm_start=_warm_dict(warm_start)
+        )
+    )
 
 
 def solve_qp_batch(
@@ -248,10 +281,25 @@ class QpFactorization:
         self._inner = _pounce.QpFactorization(base, tol=tol, max_iter=max_iter)
 
     def solve(
-        self, P=None, c=None, A=None, b=None, G=None, h=None, lb=None, ub=None
+        self,
+        P=None,
+        c=None,
+        A=None,
+        b=None,
+        G=None,
+        h=None,
+        lb=None,
+        ub=None,
+        *,
+        warm_start=None,
     ) -> QpResult:
-        """Solve a same-structure instance, reusing the symbolic factor."""
+        """Solve a same-structure instance, reusing the symbolic factor.
+
+        Pass ``warm_start`` (a previous :class:`QpResult` for a nearby
+        problem) to also seed the iteration — combining symbolic-factor
+        reuse with warm starting.
+        """
         if c is None:
             raise ValueError("QpFactorization.solve: `c` is required")
         prob = _build(P, c, A, b, G, h, lb, ub)
-        return _to_result(self._inner.solve(prob))
+        return _to_result(self._inner.solve(prob, warm_start=_warm_dict(warm_start)))
