@@ -1,0 +1,8425 @@
+{
+  "_meta": {
+    "counts": {
+      "hard": 14,
+      "infeasible": 3,
+      "optimum": 684,
+      "unbounded": 1,
+      "untabulated": 31
+    },
+    "description": "Reference status per problem for the Vanderbei CUTE-in-AMPL suite, derived from cute_table.pdf (SNOPT/NITRO/LOQO). status: optimum (finite reference optimum -> expected-solvable) | hard (in table, all solvers hit time/iter limit) | infeasible | unbounded | untabulated (not in the table). 'optimum' wins whenever any solver reported a finite objective.",
+    "source": "https://vanderbei.princeton.edu/cute_table.pdf",
+    "suite_size": 733
+  },
+  "problems": {
+    "3pk": {
+      "m": 0,
+      "n": 30,
+      "ref_obj": 1.720119,
+      "solvers": {
+        "loqo": 1.720119,
+        "nitro": 1.720119,
+        "snopt": 1.720119
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aircrfta": {
+      "m": 0,
+      "n": 5,
+      "ref_obj": 9.764862e-18,
+      "solvers": {
+        "loqo": 9.764862e-18,
+        "nitro": 4.024272e-20,
+        "snopt": 2.470109e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aircrftb": {
+      "m": 0,
+      "n": 5,
+      "ref_obj": 1.46181e-18,
+      "solvers": {
+        "loqo": 1.46181e-18,
+        "nitro": 2.130979e-11,
+        "snopt": 9.617174e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "airport": {
+      "m": 42,
+      "n": 84,
+      "ref_obj": 47952.7,
+      "solvers": {
+        "loqo": 47952.7,
+        "nitro": 47952.74,
+        "snopt": 47952.7
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aljazzaf": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 75.005,
+      "solvers": {
+        "loqo": 75.005,
+        "nitro": 75.00503,
+        "snopt": 75.005
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "allinit": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 16.70597,
+      "solvers": {
+        "loqo": 16.70597,
+        "nitro": 16.70597,
+        "snopt": 16.70597
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "allinitc": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 30.49655,
+      "solvers": {
+        "loqo": 30.49655,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "allinitu": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 5.744385,
+      "solvers": {
+        "loqo": 5.744385,
+        "nitro": 5.744385,
+        "snopt": 5.744385
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "alsotame": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 0.082085,
+      "solvers": {
+        "loqo": 0.082085,
+        "nitro": 0.08208525,
+        "snopt": 0.082085
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "argauss": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.127933e-08,
+      "solvers": {
+        "loqo": 1.127933e-08,
+        "nitro": 1.127933e-08,
+        "snopt": 1.128222e-08
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "arglina": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 100.0,
+      "solvers": {
+        "loqo": 100.0,
+        "nitro": 100.0,
+        "snopt": 100.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "arglinb": {
+      "m": 0,
+      "n": 10,
+      "ref_obj": 4.634146,
+      "solvers": {
+        "loqo": 4.634146,
+        "nitro": 4.634146,
+        "snopt": 4.634146
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "arglinc": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 6.135135,
+      "solvers": {
+        "loqo": 6.135135,
+        "nitro": 6.135135,
+        "snopt": 6.135135
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "argtrig": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 3.030941e-17,
+      "solvers": {
+        "loqo": 3.030941e-17,
+        "nitro": 8.340949e-14,
+        "snopt": 7.816759e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "artif": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 1.135495e-19,
+      "solvers": {
+        "loqo": 1.135495e-19,
+        "nitro": 1.949936e-13,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "arwhead": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 1.309566e-09,
+      "solvers": {
+        "loqo": 1.309566e-09,
+        "nitro": 1.376861e-09,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug2d": {
+      "m": 9996,
+      "n": 20192,
+      "ref_obj": 1687412.0,
+      "solvers": {
+        "loqo": 1687412.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug2dc": {
+      "m": 9996,
+      "n": 20200,
+      "ref_obj": 1818393.0,
+      "solvers": {
+        "loqo": 1818393.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug2dcqp": {
+      "m": 9996,
+      "n": 20200,
+      "ref_obj": 6498179.0,
+      "solvers": {
+        "loqo": 6498179.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug2dqp": {
+      "m": 9996,
+      "n": 20192,
+      "ref_obj": 6237012.0,
+      "solvers": {
+        "loqo": 6237012.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug3d": {
+      "m": 1000,
+      "n": 3873,
+      "ref_obj": 554.0677,
+      "solvers": {
+        "loqo": 554.0677,
+        "nitro": 554.0677,
+        "snopt": 554.0677
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug3dc": {
+      "m": 1000,
+      "n": 3873,
+      "ref_obj": 771.2624,
+      "solvers": {
+        "loqo": 771.2624,
+        "nitro": 771.2624,
+        "snopt": 771.2624
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug3dcqp": {
+      "m": 1000,
+      "n": 3873,
+      "ref_obj": 993.3622,
+      "solvers": {
+        "loqo": 993.3622,
+        "nitro": 993.3656,
+        "snopt": 993.3621
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "aug3dqp": {
+      "m": 1000,
+      "n": 3873,
+      "ref_obj": 675.2377,
+      "solvers": {
+        "loqo": 675.2377,
+        "nitro": 675.2418,
+        "snopt": 675.2377
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "avgasa": {
+      "m": 6,
+      "n": 6,
+      "ref_obj": -4.631926,
+      "solvers": {
+        "loqo": -4.631926,
+        "nitro": -4.1687,
+        "snopt": -4.168702
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "avgasb": {
+      "m": 6,
+      "n": 6,
+      "ref_obj": -4.132819,
+      "solvers": {
+        "loqo": -4.132819,
+        "nitro": -4.132819,
+        "snopt": -4.132819
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "avion2": {
+      "m": 15,
+      "n": 49,
+      "ref_obj": 94680170.0,
+      "solvers": {
+        "loqo": 94680170.0,
+        "nitro": 94680130.0,
+        "snopt": 94680130.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bard": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 0.008214877,
+      "solvers": {
+        "loqo": 0.008214877,
+        "nitro": 0.008214877,
+        "snopt": 0.008214877
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "batch": {
+      "m": 69,
+      "n": 46,
+      "ref_obj": 259180.4,
+      "solvers": {
+        "loqo": 259180.4,
+        "nitro": 259180.4,
+        "snopt": 259180.4
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bdexp": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 4.549506e-10,
+      "solvers": {
+        "loqo": 4.549506e-10,
+        "nitro": 0.001719538,
+        "snopt": null
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "bdqrtic": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 3983.818,
+      "solvers": {
+        "loqo": 3983.818,
+        "nitro": 3983.818,
+        "snopt": 3983.818
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bdvalue": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 9.294696e-12,
+      "solvers": {
+        "loqo": 9.294696e-12,
+        "nitro": 9.917776e-12,
+        "snopt": 1.039368e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "beale": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 6.470951e-17,
+      "solvers": {
+        "loqo": 6.470951e-17,
+        "nitro": 1.950864e-16,
+        "snopt": 1.742837e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bigbank": {
+      "m": 814,
+      "n": 1773,
+      "ref_obj": -4205696.0,
+      "solvers": {
+        "loqo": -4205696.0,
+        "nitro": -4205696.0,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "biggs3": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 4.223971e-16,
+      "solvers": {
+        "loqo": 4.223971e-16,
+        "nitro": 7.067257e-16,
+        "snopt": 4.998132e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "biggs5": {
+      "m": 0,
+      "n": 5,
+      "ref_obj": 5.040928e-17,
+      "solvers": {
+        "loqo": 5.040928e-17,
+        "nitro": 6.654668e-12,
+        "snopt": 0.00565565
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "biggs6": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 1.878222e-18,
+      "solvers": {
+        "loqo": 1.878222e-18,
+        "nitro": 9.536169e-08,
+        "snopt": 2.632366e-06
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "biggsb1": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 0.01500001,
+      "solvers": {
+        "loqo": 0.01500001,
+        "nitro": 0.01512453,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "biggsc4": {
+      "m": 7,
+      "n": 4,
+      "ref_obj": -24.5,
+      "solvers": {
+        "loqo": -24.5,
+        "nitro": -24.5,
+        "snopt": -24.375
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "blockqp1": {
+      "m": 1001,
+      "n": 2005,
+      "ref_obj": -996.5,
+      "solvers": {
+        "loqo": -996.5,
+        "nitro": -996.4938,
+        "snopt": -996.5
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "blockqp2": {
+      "m": 1001,
+      "n": 2005,
+      "ref_obj": -995.1,
+      "solvers": {
+        "loqo": -995.1,
+        "nitro": -996.0949,
+        "snopt": -996.1012
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "blockqp3": {
+      "m": 1001,
+      "n": 2005,
+      "ref_obj": -497.5,
+      "solvers": {
+        "loqo": -497.5,
+        "nitro": -497.4927,
+        "snopt": -497.4999
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "blockqp4": {
+      "m": 1001,
+      "n": 2005,
+      "ref_obj": -498.0982,
+      "solvers": {
+        "loqo": -498.0982,
+        "nitro": -498.092,
+        "snopt": -498.0982
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "blockqp5": {
+      "m": 1001,
+      "n": 2005,
+      "ref_obj": -497.5,
+      "solvers": {
+        "loqo": -497.5,
+        "nitro": -497.4935,
+        "snopt": -497.4999
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bloweya": {
+      "m": 1002,
+      "n": 2002,
+      "ref_obj": -0.04552552,
+      "solvers": {
+        "loqo": -0.04552552,
+        "nitro": -0.01563419,
+        "snopt": -8.04e-06
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "bloweyb": {
+      "m": 1002,
+      "n": 2002,
+      "ref_obj": -0.03045254,
+      "solvers": {
+        "loqo": -0.03045254,
+        "nitro": 0.02712506,
+        "snopt": -3.245843e-20
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "bloweyc": {
+      "m": 1002,
+      "n": 2002,
+      "ref_obj": -0.03029773,
+      "solvers": {
+        "loqo": -0.03029773,
+        "nitro": -0.01325157,
+        "snopt": -3.208e-05
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "booth": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 5.197941e-20,
+      "solvers": {
+        "loqo": 5.197941e-20,
+        "nitro": 8.914128e-29,
+        "snopt": 3.661158e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "box2": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 6.827752e-18,
+      "solvers": {
+        "loqo": 6.827752e-18,
+        "nitro": 4.971098e-12,
+        "snopt": 3.708436e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "box3": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 2.616617e-15,
+      "solvers": {
+        "loqo": 2.616617e-15,
+        "nitro": 6.569534e-12,
+        "snopt": 1.222427e-10
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bqp1var": {
+      "m": 0,
+      "n": 1,
+      "ref_obj": 6.269242e-09,
+      "solvers": {
+        "loqo": 6.269242e-09,
+        "nitro": 1.2801e-06,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bqpgabim": {
+      "m": 0,
+      "n": 46,
+      "ref_obj": -3.789657e-05,
+      "solvers": {
+        "loqo": -3.789657e-05,
+        "nitro": -3.53707e-05,
+        "snopt": -3.790342e-05
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bqpgasim": {
+      "m": 0,
+      "n": 50,
+      "ref_obj": -5.518949e-05,
+      "solvers": {
+        "loqo": -5.518949e-05,
+        "nitro": -5.256934e-05,
+        "snopt": -5.51981e-05
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc0": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 0.001499638,
+      "solvers": {
+        "loqo": 0.001499638,
+        "nitro": null,
+        "snopt": 0.001499639
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc1": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 6.61189e-07,
+      "solvers": {
+        "loqo": 6.61189e-07,
+        "nitro": null,
+        "snopt": 6.768999e-08
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc2": {
+      "m": 13800,
+      "n": 13805,
+      "ref_obj": 6.548094e-07,
+      "solvers": {
+        "loqo": 6.548094e-07,
+        "nitro": null,
+        "snopt": 2.658104e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc3": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 7.237545e-07,
+      "solvers": {
+        "loqo": 7.237545e-07,
+        "nitro": null,
+        "snopt": 1.29764e-06
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc4": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 1.838167e-06,
+      "solvers": {
+        "loqo": 1.838167e-06,
+        "nitro": null,
+        "snopt": 1.29764e-06
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc5": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 2.317698e-06,
+      "solvers": {
+        "loqo": 2.317698e-06,
+        "nitro": null,
+        "snopt": 1.362258e-06
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc6": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 6.074896e-07,
+      "solvers": {
+        "loqo": 6.074896e-07,
+        "nitro": null,
+        "snopt": 1.390755e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc7": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 7.397032e-07,
+      "solvers": {
+        "loqo": 7.397032e-07,
+        "nitro": null,
+        "snopt": 1.198811e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc8": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 0.0004045464,
+      "solvers": {
+        "loqo": 0.0004045464,
+        "nitro": null,
+        "snopt": 2.167122e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brainpc9": {
+      "m": 6900,
+      "n": 6905,
+      "ref_obj": 9.66109e-07,
+      "solvers": {
+        "loqo": 9.66109e-07,
+        "nitro": null,
+        "snopt": 8.45303e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bratu1d": {
+      "m": 0,
+      "n": 1001,
+      "ref_obj": -8.518927,
+      "solvers": {
+        "loqo": -8.518927,
+        "nitro": -8.518927,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bratu2d": {
+      "m": 0,
+      "n": 4900,
+      "ref_obj": 4.679723e-16,
+      "solvers": {
+        "loqo": 4.679723e-16,
+        "nitro": 1.935939e-10,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bratu2dt": {
+      "m": 0,
+      "n": 4900,
+      "ref_obj": 1.230021e-08,
+      "solvers": {
+        "loqo": 1.230021e-08,
+        "nitro": 8.01985e-05,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bratu3d": {
+      "m": 0,
+      "n": 3375,
+      "ref_obj": 1.978948e-18,
+      "solvers": {
+        "loqo": 1.978948e-18,
+        "nitro": 9.102678e-13,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "britgas": {
+      "m": 360,
+      "n": 450,
+      "ref_obj": 2.313955e-08,
+      "solvers": {
+        "loqo": 2.313955e-08,
+        "nitro": null,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brkmcc": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 0.1690427,
+      "solvers": {
+        "loqo": 0.1690427,
+        "nitro": 0.1690427,
+        "snopt": 0.1690427
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brownal": {
+      "m": 0,
+      "n": 10,
+      "ref_obj": 1.90598e-19,
+      "solvers": {
+        "loqo": 1.90598e-19,
+        "nitro": 8.54016e-15,
+        "snopt": 7.604124e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brownbs": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.56511e-22,
+      "solvers": {
+        "loqo": 1.56511e-22,
+        "nitro": 1.972152e-31,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brownden": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 85822.2,
+      "solvers": {
+        "loqo": 85822.2,
+        "nitro": 85822.2,
+        "snopt": 85822.2
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "broydn3d": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 4.708649e-23,
+      "solvers": {
+        "loqo": 4.708649e-23,
+        "nitro": 2.630958e-13,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "broydn7d": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 3.823419,
+      "solvers": {
+        "loqo": null,
+        "nitro": null,
+        "snopt": 3.823419
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "broydnbd": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 6.17678e-24,
+      "solvers": {
+        "loqo": 6.17678e-24,
+        "nitro": 1.442182e-16,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "brybnd": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 6.17678e-24,
+      "solvers": {
+        "loqo": 6.17678e-24,
+        "nitro": 1.442182e-16,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt1": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -0.9999926,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt10": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt11": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 0.8248918,
+      "solvers": {
+        "loqo": 0.8248918,
+        "nitro": 0.8248906,
+        "snopt": 0.8248918
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt12": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 6.188119,
+      "solvers": {
+        "loqo": 6.188119,
+        "nitro": 6.188119,
+        "snopt": 6.188119
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt13": {
+      "m": 1,
+      "n": 5,
+      "ref_obj": 6.709441e-21,
+      "solvers": {
+        "loqo": 6.709441e-21,
+        "nitro": 2.56e-07,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt2": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 0.0325682,
+      "solvers": {
+        "loqo": 0.0325682,
+        "nitro": 0.0325682,
+        "snopt": 0.0325682
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt3": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 4.093023,
+      "solvers": {
+        "loqo": 4.093023,
+        "nitro": 4.093023,
+        "snopt": 4.093023
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt4": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -45.51055,
+      "solvers": {
+        "loqo": -45.51055,
+        "nitro": -45.51055,
+        "snopt": -45.51055
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt5": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 961.7152,
+      "solvers": {
+        "loqo": 961.7152,
+        "nitro": 961.7152,
+        "snopt": 961.7152
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt6": {
+      "m": 2,
+      "n": 5,
+      "ref_obj": 0.2770448,
+      "solvers": {
+        "loqo": 0.2770448,
+        "nitro": 0.2770444,
+        "snopt": 0.2770448
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt7": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 360.3798,
+      "solvers": {
+        "loqo": 360.3798,
+        "nitro": 306.5,
+        "snopt": 306.5
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "bt8": {
+      "m": 2,
+      "n": 5,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000004,
+        "snopt": 1.000001
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "bt9": {
+      "m": 2,
+      "n": 4,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "byrdsphr": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -4.6833,
+      "solvers": {
+        "loqo": -4.6833,
+        "nitro": -4.6833,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "camel6": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -1.031628,
+      "solvers": {
+        "loqo": -1.031628,
+        "nitro": -1.031628,
+        "snopt": -1.031628
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cantilvr": {
+      "m": 1,
+      "n": 5,
+      "ref_obj": 1.339956,
+      "solvers": {
+        "loqo": 1.339956,
+        "nitro": 1.339957,
+        "snopt": 1.339956
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "catena": {
+      "m": 11,
+      "n": 32,
+      "ref_obj": -23077.75,
+      "solvers": {
+        "loqo": -23077.75,
+        "nitro": -23077.75,
+        "snopt": -23077.75
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "catenary": {
+      "m": 166,
+      "n": 496,
+      "ref_obj": -348403.2,
+      "solvers": {
+        "loqo": -348403.2,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cb2": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 1.952224,
+      "solvers": {
+        "loqo": 1.952224,
+        "nitro": 1.952227,
+        "snopt": 1.952224
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cb3": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 2.0,
+      "solvers": {
+        "loqo": 2.0,
+        "nitro": 2.000004,
+        "snopt": 2.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cbratu2d": {
+      "m": 0,
+      "n": 882,
+      "ref_obj": 3.741008e-16,
+      "solvers": {
+        "loqo": 3.741008e-16,
+        "nitro": 4.593075e-12,
+        "snopt": 2.175377e-08
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cbratu3d": {
+      "m": 0,
+      "n": 1024,
+      "ref_obj": 3.592899e-18,
+      "solvers": {
+        "loqo": 3.592899e-18,
+        "nitro": 1.105293e-12,
+        "snopt": 1.636332e-10
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "chaconn1": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 1.952224,
+      "solvers": {
+        "loqo": 1.952224,
+        "nitro": 1.952227,
+        "snopt": 1.952223
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "chaconn2": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 2.0,
+      "solvers": {
+        "loqo": 2.0,
+        "nitro": 2.000004,
+        "snopt": 2.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "chainwoo": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 63.62471,
+      "solvers": {
+        "loqo": 63.62471,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "chandheq": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 2.716976e-16,
+      "solvers": {
+        "loqo": 2.716976e-16,
+        "nitro": 1.811886e-07,
+        "snopt": 2.424352e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "chebyqad": {
+      "m": 0,
+      "n": 50,
+      "ref_obj": 0.005386315,
+      "solvers": {
+        "loqo": 0.005386315,
+        "nitro": 0.00538656,
+        "snopt": 0.005386315
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "chemrcta": {
+      "status": "untabulated"
+    },
+    "chemrctb": {
+      "status": "untabulated"
+    },
+    "chenhark": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": -2.0,
+      "solvers": {
+        "loqo": -2.0,
+        "nitro": -1.994804,
+        "snopt": null
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "chnrosnb": {
+      "m": 0,
+      "n": 50,
+      "ref_obj": 4.055991e-20,
+      "solvers": {
+        "loqo": 4.055991e-20,
+        "nitro": 2.070639e-16,
+        "snopt": 1.006774e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cliff": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 0.1997866,
+      "solvers": {
+        "loqo": 0.1997866,
+        "nitro": 0.1997866,
+        "snopt": 0.1997866
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "clnlbeam": {
+      "m": 1000,
+      "n": 1499,
+      "ref_obj": 344.8762,
+      "solvers": {
+        "loqo": 344.8762,
+        "nitro": 344.8775,
+        "snopt": 350.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "clplatea": {
+      "m": 0,
+      "n": 4970,
+      "ref_obj": -0.01259209,
+      "solvers": {
+        "loqo": -0.01259209,
+        "nitro": -0.01259209,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "clplateb": {
+      "m": 0,
+      "n": 4970,
+      "ref_obj": -6.988222,
+      "solvers": {
+        "loqo": -6.988222,
+        "nitro": -6.988222,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "clplatec": {
+      "m": 0,
+      "n": 4970,
+      "ref_obj": -0.005020724,
+      "solvers": {
+        "loqo": -0.005020724,
+        "nitro": -0.005020724,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cluster": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.761931e-14,
+      "solvers": {
+        "loqo": 1.761931e-14,
+        "nitro": 1.378744e-08,
+        "snopt": 7.350274e-10
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "concon": {
+      "m": 11,
+      "n": 15,
+      "ref_obj": -6230.796,
+      "solvers": {
+        "loqo": -6230.796,
+        "nitro": -6230.796,
+        "snopt": -6230.796
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "congigmz": {
+      "m": 5,
+      "n": 3,
+      "ref_obj": 28.0,
+      "solvers": {
+        "loqo": 28.0,
+        "nitro": 28.0,
+        "snopt": 28.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "coolhans": {
+      "m": 0,
+      "n": 9,
+      "ref_obj": 3.740476e-49,
+      "solvers": {
+        "loqo": 3.740476e-49,
+        "nitro": null,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "core1": {
+      "m": 50,
+      "n": 65,
+      "ref_obj": 91.05624,
+      "solvers": {
+        "loqo": 91.05624,
+        "nitro": 91.05637,
+        "snopt": 91.05624
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "core2": {
+      "m": 122,
+      "n": 157,
+      "ref_obj": 72.90003,
+      "solvers": {
+        "loqo": null,
+        "nitro": 72.90003,
+        "snopt": 72.9
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "corkscrw": {
+      "m": 7000,
+      "n": 8997,
+      "ref_obj": 90.68782,
+      "solvers": {
+        "loqo": 90.68782,
+        "nitro": null,
+        "snopt": 90.68782
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "coshfun": {
+      "m": 20,
+      "n": 61,
+      "ref_obj": -0.7732666,
+      "solvers": {
+        "loqo": -0.7732666,
+        "nitro": null,
+        "snopt": -0.7732661
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cosine": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -9999.0,
+      "solvers": {
+        "loqo": -9999.0,
+        "nitro": -9999.0,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cragglvy": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 1688.215,
+      "solvers": {
+        "loqo": 1688.215,
+        "nitro": 1688.215,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cresc100": {
+      "m": 200,
+      "n": 6,
+      "ref_obj": 0.5676027,
+      "solvers": {
+        "loqo": 0.5676027,
+        "nitro": null,
+        "snopt": 0.5676027
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cresc132": {
+      "m": 2654,
+      "n": 6,
+      "ref_obj": 0.684846,
+      "solvers": {
+        "loqo": null,
+        "nitro": null,
+        "snopt": 0.684846
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cresc4": {
+      "m": 8,
+      "n": 6,
+      "ref_obj": 0.8718976,
+      "solvers": {
+        "loqo": 0.8718976,
+        "nitro": null,
+        "snopt": 0.8718976
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cresc50": {
+      "m": 100,
+      "n": 6,
+      "ref_obj": 0.5932123,
+      "solvers": {
+        "loqo": null,
+        "nitro": null,
+        "snopt": 0.5932123
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "csfi1": {
+      "m": 4,
+      "n": 5,
+      "ref_obj": -49.0752,
+      "solvers": {
+        "loqo": -49.0752,
+        "nitro": -49.07519,
+        "snopt": -49.07521
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "csfi2": {
+      "m": 4,
+      "n": 5,
+      "ref_obj": 55.01761,
+      "solvers": {
+        "loqo": 55.01761,
+        "nitro": 55.01762,
+        "snopt": 55.01761
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cube": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 7.329705e-19,
+      "solvers": {
+        "loqo": 7.329705e-19,
+        "nitro": 2.102828e-16,
+        "snopt": 1.062833e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "curly10": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -1003163.0,
+      "solvers": {
+        "loqo": -1003163.0,
+        "nitro": -1003163.0,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "curly20": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -1003163.0,
+      "solvers": {
+        "loqo": -1003163.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "curly30": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -1003163.0,
+      "solvers": {
+        "loqo": -1003163.0,
+        "nitro": -1003163.0,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cvxbqp1": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 2250225.0,
+      "solvers": {
+        "loqo": 2250225.0,
+        "nitro": null,
+        "snopt": 2250225.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cvxqp1": {
+      "m": 500,
+      "n": 1000,
+      "ref_obj": 1087512.0,
+      "solvers": {
+        "loqo": 1087512.0,
+        "nitro": 1087519.0,
+        "snopt": 1087512.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cvxqp2": {
+      "m": 2500,
+      "n": 10000,
+      "ref_obj": 81842460.0,
+      "solvers": {
+        "loqo": 81842460.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "cvxqp3": {
+      "m": 7500,
+      "n": 10000,
+      "ref_obj": 115711100.0,
+      "solvers": {
+        "loqo": null,
+        "nitro": null,
+        "snopt": 115711100.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dallasl": {
+      "m": 598,
+      "n": 837,
+      "ref_obj": -202604.1,
+      "solvers": {
+        "loqo": -202604.1,
+        "nitro": -202604.1,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dallasm": {
+      "m": 119,
+      "n": 164,
+      "ref_obj": -48198.19,
+      "solvers": {
+        "loqo": -48198.19,
+        "nitro": -48198.19,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dallass": {
+      "m": 29,
+      "n": 44,
+      "ref_obj": -32393.23,
+      "solvers": {
+        "loqo": -32393.23,
+        "nitro": null,
+        "snopt": -32393.23
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "deconvb": {
+      "m": 0,
+      "n": 51,
+      "ref_obj": 0.002713484,
+      "solvers": {
+        "loqo": 0.002713484,
+        "nitro": 2.163616e-06,
+        "snopt": 1.480838e-08
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "deconvc": {
+      "m": 1,
+      "n": 51,
+      "ref_obj": 0.002713492,
+      "solvers": {
+        "loqo": 0.002713492,
+        "nitro": 1.11978e-05,
+        "snopt": 1.344233e-08
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "deconvu": {
+      "m": 0,
+      "n": 51,
+      "ref_obj": 1.866442e-11,
+      "solvers": {
+        "loqo": 1.866442e-11,
+        "nitro": 1.028296e-06,
+        "snopt": 2.428423e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "degenlpa": {
+      "m": 14,
+      "n": 20,
+      "ref_obj": 3.060349,
+      "solvers": {
+        "loqo": 3.060349,
+        "nitro": 3.024509,
+        "snopt": 3.060349
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "degenlpb": {
+      "m": 15,
+      "n": 20,
+      "ref_obj": -30.73125,
+      "solvers": {
+        "loqo": -30.73125,
+        "nitro": -30.79632,
+        "snopt": -30.73125
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "demymalo": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": -3.0,
+      "solvers": {
+        "loqo": -3.0,
+        "nitro": -2.999996,
+        "snopt": -3.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "denschna": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 9.088118e-14,
+      "solvers": {
+        "loqo": 9.088118e-14,
+        "nitro": 2.21391e-12,
+        "snopt": 7.057531e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "denschnb": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.221339e-17,
+      "solvers": {
+        "loqo": 1.221339e-17,
+        "nitro": 1.307258e-15,
+        "snopt": 1.779511e-18
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "denschnc": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.912916e-19,
+      "solvers": {
+        "loqo": 1.912916e-19,
+        "nitro": 3.576723e-14,
+        "snopt": 0.1833617
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "denschnd": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 2.817432e-10,
+      "solvers": {
+        "loqo": 2.817432e-10,
+        "nitro": 1.642266e-08,
+        "snopt": 7.286259e-10
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "denschne": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 4.307117e-14,
+      "solvers": {
+        "loqo": 4.307117e-14,
+        "nitro": 2.009304e-12,
+        "snopt": 7.497086e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "denschnf": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 6.026532e-20,
+      "solvers": {
+        "loqo": 6.026532e-20,
+        "nitro": 6.513246e-22,
+        "snopt": 5.122083e-18
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dipigri": {
+      "m": 4,
+      "n": 7,
+      "ref_obj": 680.6301,
+      "solvers": {
+        "loqo": 680.6301,
+        "nitro": 680.6301,
+        "snopt": 680.6301
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "disc2": {
+      "m": 23,
+      "n": 28,
+      "ref_obj": 1.5625,
+      "solvers": {
+        "loqo": 1.5625,
+        "nitro": 1.562501,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "discs": {
+      "m": 66,
+      "n": 33,
+      "ref_obj": 12.00008,
+      "solvers": {
+        "loqo": 12.00008,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dittert": {
+      "m": 264,
+      "n": 327,
+      "ref_obj": -1.997596,
+      "solvers": {
+        "loqo": -1.997596,
+        "nitro": -1.997597,
+        "snopt": -1.997597
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixchlng": {
+      "m": 5,
+      "n": 10,
+      "ref_obj": 2471.898,
+      "solvers": {
+        "loqo": 2471.898,
+        "nitro": 2471.898,
+        "snopt": 1837.842
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "dixchlnv": {
+      "m": 50,
+      "n": 100,
+      "ref_obj": 2.312161e-15,
+      "solvers": {
+        "loqo": null,
+        "nitro": 2.312161e-15,
+        "snopt": 1.577135e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaana": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaanb": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaanc": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaand": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaane": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaanf": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaang": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaanh": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaani": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaanj": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.090185
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "dixmaank": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000001,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixmaanl": {
+      "m": 0,
+      "n": 3000,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000001,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dixon3dq": {
+      "m": 0,
+      "n": 10,
+      "ref_obj": 6.634469e-16,
+      "solvers": {
+        "loqo": 6.634469e-16,
+        "nitro": 1.417484e-30,
+        "snopt": 1.217509e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "djtl": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -8951.545,
+      "solvers": {
+        "loqo": -8951.545,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dnieper": {
+      "m": 24,
+      "n": 57,
+      "ref_obj": 18744.01,
+      "solvers": {
+        "loqo": 18744.01,
+        "nitro": 18744.15,
+        "snopt": 18744.01
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dqdrtic": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 1.353416e-17,
+      "solvers": {
+        "loqo": 1.353416e-17,
+        "nitro": 5.737415e-18,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dqrtic": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 1.654558e-17,
+      "solvers": {
+        "loqo": 1.654558e-17,
+        "nitro": 1.182722e-05,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "drcav1lq": {
+      "m": 0,
+      "markers": "(Time) (Time) (Time)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "drcav2lq": {
+      "m": 0,
+      "markers": "(Time) (Time) (Time)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "drcav3lq": {
+      "m": 0,
+      "markers": "(Time) (Time) (Time)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "drcavty1": {
+      "m": 0,
+      "markers": "(Time) (Time) (Time)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "drcavty2": {
+      "m": 0,
+      "markers": "(Time) (Time) (Time)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "drcavty3": {
+      "m": 0,
+      "markers": "(Time) (Time) (Time)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "dtoc1l": {
+      "m": 9990,
+      "n": 14985,
+      "ref_obj": 125.3381,
+      "solvers": {
+        "loqo": 125.3381,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc1na": {
+      "m": 990,
+      "n": 1485,
+      "ref_obj": 12.70203,
+      "solvers": {
+        "loqo": 12.70203,
+        "nitro": 12.70203,
+        "snopt": 12.70201
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc1nb": {
+      "m": 990,
+      "n": 1485,
+      "ref_obj": 15.93778,
+      "solvers": {
+        "loqo": 15.93778,
+        "nitro": 15.93778,
+        "snopt": 15.93778
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc1nc": {
+      "m": 990,
+      "n": 1485,
+      "ref_obj": 24.96981,
+      "solvers": {
+        "loqo": 24.96981,
+        "nitro": 24.96982,
+        "snopt": 24.96981
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc1nd": {
+      "m": 490,
+      "n": 735,
+      "ref_obj": 12.64446,
+      "solvers": {
+        "loqo": 12.64446,
+        "nitro": 12.64446,
+        "snopt": 12.50176
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "dtoc2": {
+      "m": 3996,
+      "n": 5994,
+      "ref_obj": 0.5086762,
+      "solvers": {
+        "loqo": 0.5086762,
+        "nitro": 0.5086762,
+        "snopt": 0.5086847
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc3": {
+      "m": 9997,
+      "n": 14996,
+      "ref_obj": 235.2625,
+      "solvers": {
+        "loqo": 235.2625,
+        "nitro": null,
+        "snopt": 235.4119
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc4": {
+      "m": 9997,
+      "n": 14996,
+      "ref_obj": 2.868538,
+      "solvers": {
+        "loqo": 2.868538,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc5": {
+      "m": 4999,
+      "n": 9998,
+      "ref_obj": 1.535111,
+      "solvers": {
+        "loqo": 1.535111,
+        "nitro": 1.533728,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dtoc6": {
+      "m": 5000,
+      "n": 10000,
+      "ref_obj": 134850.6,
+      "solvers": {
+        "loqo": 134850.6,
+        "nitro": 134850.6,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "dual1": {
+      "status": "untabulated"
+    },
+    "dual2": {
+      "status": "untabulated"
+    },
+    "dual3": {
+      "status": "untabulated"
+    },
+    "dual4": {
+      "status": "untabulated"
+    },
+    "dualc1": {
+      "status": "untabulated"
+    },
+    "dualc2": {
+      "status": "untabulated"
+    },
+    "dualc5": {
+      "status": "untabulated"
+    },
+    "dualc8": {
+      "status": "untabulated"
+    },
+    "edensch": {
+      "m": 0,
+      "n": 2000,
+      "ref_obj": 12003.28,
+      "solvers": {
+        "loqo": 12003.28,
+        "nitro": 12003.28,
+        "snopt": 12003.28
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eg1": {
+      "status": "untabulated"
+    },
+    "eg2": {
+      "status": "untabulated"
+    },
+    "eg3": {
+      "status": "untabulated"
+    },
+    "eigena": {
+      "m": 0,
+      "n": 110,
+      "ref_obj": 2.296236e-09,
+      "solvers": {
+        "loqo": 2.296236e-09,
+        "nitro": 1.153829e-05,
+        "snopt": 1.778509e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigena2": {
+      "m": 55,
+      "n": 110,
+      "ref_obj": 82.5,
+      "solvers": {
+        "loqo": 82.5,
+        "nitro": 82.5,
+        "snopt": 82.5
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenaco": {
+      "m": 55,
+      "n": 110,
+      "ref_obj": 3.303035e-20,
+      "solvers": {
+        "loqo": 3.303035e-20,
+        "nitro": 0.0,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenals": {
+      "m": 0,
+      "n": 110,
+      "ref_obj": 5.441836e-21,
+      "solvers": {
+        "loqo": 5.441836e-21,
+        "nitro": 1.055749e-13,
+        "snopt": 1.901893e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenb": {
+      "m": 0,
+      "n": 110,
+      "ref_obj": 3.030767e-20,
+      "solvers": {
+        "loqo": 3.030767e-20,
+        "nitro": 2.638882e-11,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenb2": {
+      "m": 55,
+      "n": 110,
+      "ref_obj": 1.6,
+      "solvers": {
+        "loqo": 1.6,
+        "nitro": 1.6,
+        "snopt": 1.6
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenbco": {
+      "m": 55,
+      "n": 110,
+      "ref_obj": 9.0,
+      "solvers": {
+        "loqo": null,
+        "nitro": 9.0,
+        "snopt": 9.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenbls": {
+      "m": 0,
+      "n": 110,
+      "ref_obj": 1.175836e-19,
+      "solvers": {
+        "loqo": 1.175836e-19,
+        "nitro": 7.412289e-11,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigenc2": {
+      "m": 231,
+      "n": 462,
+      "ref_obj": 771.8095,
+      "solvers": {
+        "loqo": 771.8095,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigencco": {
+      "m": 15,
+      "n": 30,
+      "ref_obj": 1.084016e-18,
+      "solvers": {
+        "loqo": 1.084016e-18,
+        "nitro": 2.091671e-11,
+        "snopt": 5.69478e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigmaxa": {
+      "m": 101,
+      "n": 101,
+      "ref_obj": -2.0,
+      "solvers": {
+        "loqo": -2.0,
+        "nitro": -1.0,
+        "snopt": -7.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "eigmaxb": {
+      "m": 101,
+      "n": 101,
+      "ref_obj": -0.008701304,
+      "solvers": {
+        "loqo": -0.008701304,
+        "nitro": -0.07785812,
+        "snopt": -0.5748321
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "eigmaxc": {
+      "m": 22,
+      "n": 22,
+      "ref_obj": -2.0,
+      "solvers": {
+        "loqo": -2.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "eigmina": {
+      "m": 101,
+      "n": 101,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "eigminb": {
+      "m": 101,
+      "n": 101,
+      "ref_obj": 0.0009674354,
+      "solvers": {
+        "loqo": 0.0009674354,
+        "nitro": 0.07785812,
+        "snopt": 0.008701304
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "eigminc": {
+      "m": 22,
+      "n": 22,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "engval1": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 5548.668,
+      "solvers": {
+        "loqo": 5548.668,
+        "nitro": 5548.668,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "engval2": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 2.280503e-21,
+      "solvers": {
+        "loqo": 2.280503e-21,
+        "nitro": 9.86523e-17,
+        "snopt": 5.795381e-16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "errinros": {
+      "m": 0,
+      "n": 50,
+      "ref_obj": 39.90415,
+      "solvers": {
+        "loqo": 39.90415,
+        "nitro": 39.90415,
+        "snopt": 39.90415
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "expfit": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 0.2405106,
+      "solvers": {
+        "loqo": 0.2405106,
+        "nitro": 0.2405106,
+        "snopt": 0.2405106
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "expfita": {
+      "m": 21,
+      "n": 5,
+      "ref_obj": 0.001136612,
+      "solvers": {
+        "loqo": 0.001136612,
+        "nitro": 0.001137646,
+        "snopt": 0.001136612
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "expfitb": {
+      "m": 101,
+      "n": 5,
+      "ref_obj": 0.005019366,
+      "solvers": {
+        "loqo": 0.005019366,
+        "nitro": 0.005020327,
+        "snopt": 0.005019366
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "expfitc": {
+      "m": 501,
+      "n": 5,
+      "ref_obj": 0.02330257,
+      "solvers": {
+        "loqo": 0.02330257,
+        "nitro": 0.02330363,
+        "snopt": 0.02330257
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "explin": {
+      "m": 0,
+      "n": 120,
+      "ref_obj": -723756.3,
+      "solvers": {
+        "loqo": -723756.3,
+        "nitro": -723755.8,
+        "snopt": -723756.3
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "explin2": {
+      "m": 0,
+      "n": 120,
+      "ref_obj": -724459.1,
+      "solvers": {
+        "loqo": -724459.1,
+        "nitro": -724458.7,
+        "snopt": -724459.1
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "expquad": {
+      "m": 0,
+      "n": 120,
+      "ref_obj": -3624600.0,
+      "solvers": {
+        "loqo": -3624600.0,
+        "nitro": -3624600.0,
+        "snopt": -3624200.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "extrasim": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000001,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "extrosnb": {
+      "m": 0,
+      "n": 10,
+      "ref_obj": 6.864229e-20,
+      "solvers": {
+        "loqo": 6.864229e-20,
+        "nitro": null,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "fccu": {
+      "m": 8,
+      "n": 19,
+      "ref_obj": 11.14911,
+      "solvers": {
+        "loqo": 11.14911,
+        "nitro": 11.14911,
+        "snopt": 11.14911
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "fletcbv2": {
+      "status": "untabulated"
+    },
+    "fletcbv3": {
+      "m": 0,
+      "markers": "(Time) (IL) (IL)",
+      "n": 10000,
+      "status": "hard"
+    },
+    "fletchbv": {
+      "m": 0,
+      "markers": "(Time) (IL) (IL)",
+      "n": 100,
+      "status": "hard"
+    },
+    "fletchcr": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 1.145068e-20,
+      "solvers": {
+        "loqo": 1.145068e-20,
+        "nitro": 7.810772e-15,
+        "snopt": 1.697257e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "fletcher": {
+      "m": 4,
+      "n": 4,
+      "ref_obj": 19.52537,
+      "solvers": {
+        "loqo": 19.52537,
+        "nitro": 19.52538,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "flosp2hh": {
+      "m": 0,
+      "n": 650,
+      "ref_obj": 38.87126,
+      "solvers": {
+        "loqo": 38.87126,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "flosp2hl": {
+      "m": 0,
+      "n": 650,
+      "ref_obj": 38.87054,
+      "solvers": {
+        "loqo": 38.87054,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "flosp2hm": {
+      "m": 0,
+      "n": 650,
+      "ref_obj": 38.87126,
+      "solvers": {
+        "loqo": 38.87126,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "flosp2th": {
+      "m": 0,
+      "n": 650,
+      "ref_obj": 10.0,
+      "solvers": {
+        "loqo": 10.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "flosp2tl": {
+      "m": 0,
+      "n": 650,
+      "ref_obj": 10.0,
+      "solvers": {
+        "loqo": 10.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "flosp2tm": {
+      "m": 0,
+      "n": 650,
+      "ref_obj": 10.0,
+      "solvers": {
+        "loqo": 10.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "fminsrf2": {
+      "m": 0,
+      "n": 15625,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "fminsurf": {
+      "m": 0,
+      "n": 1024,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "freuroth": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 608159.2,
+      "solvers": {
+        "loqo": 608159.2,
+        "nitro": 608159.2,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gausselm": {
+      "m": 3690,
+      "n": 1495,
+      "ref_obj": -17.49101,
+      "solvers": {
+        "loqo": null,
+        "nitro": -17.49101,
+        "snopt": -1.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "genhs28": {
+      "m": 8,
+      "n": 10,
+      "ref_obj": 0.9271737,
+      "solvers": {
+        "loqo": 0.9271737,
+        "nitro": 0.9271737,
+        "snopt": 0.9271737
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "genhumps": {
+      "m": 0,
+      "n": 5,
+      "ref_obj": 4.623132e-13,
+      "solvers": {
+        "loqo": 4.623132e-13,
+        "nitro": 1.866856e-16,
+        "snopt": 6.899318e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "genrose": {
+      "m": 0,
+      "markers": "(IL) (IL) (IL)",
+      "n": 500,
+      "status": "hard"
+    },
+    "gigomez1": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": -3.0,
+      "solvers": {
+        "loqo": -3.0,
+        "nitro": -2.999996,
+        "snopt": -3.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gilbert": {
+      "m": 1,
+      "n": 1000,
+      "ref_obj": 482.0273,
+      "solvers": {
+        "loqo": 482.0273,
+        "nitro": 482.0273,
+        "snopt": 482.0273
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "goffin": {
+      "m": 50,
+      "n": 51,
+      "ref_obj": 4.014975e-09,
+      "solvers": {
+        "loqo": 4.014975e-09,
+        "nitro": 1.280026e-05,
+        "snopt": -1.612599e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gottfr": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 2.030951e-15,
+      "solvers": {
+        "loqo": 2.030951e-15,
+        "nitro": 1.424652e-09,
+        "snopt": 1.496546e-16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gouldqp2": {
+      "m": 349,
+      "n": 699,
+      "ref_obj": 0.0001880014,
+      "solvers": {
+        "loqo": 0.0001880014,
+        "nitro": 0.0001940013,
+        "snopt": 0.0001887481
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gouldqp3": {
+      "m": 349,
+      "n": 699,
+      "ref_obj": 2.065155,
+      "solvers": {
+        "loqo": 2.065155,
+        "nitro": 2.065382,
+        "snopt": 2.065155
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gpp": {
+      "m": 498,
+      "n": 250,
+      "ref_obj": 14400.93,
+      "solvers": {
+        "loqo": 14400.93,
+        "nitro": 14400.93,
+        "snopt": 14400.93
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridneta": {
+      "m": 6724,
+      "n": 8964,
+      "ref_obj": 304.983,
+      "solvers": {
+        "loqo": 304.983,
+        "nitro": 304.9909,
+        "snopt": 304.9851
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridnetb": {
+      "m": 6724,
+      "n": 13284,
+      "ref_obj": 143.3232,
+      "solvers": {
+        "loqo": 143.3232,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridnetc": {
+      "m": 3844,
+      "n": 7564,
+      "ref_obj": 161.8703,
+      "solvers": {
+        "loqo": 161.8703,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridnetd": {
+      "m": 2644,
+      "n": 3945,
+      "ref_obj": 566.4444,
+      "solvers": {
+        "loqo": 566.4444,
+        "nitro": 566.4467,
+        "snopt": 566.4454
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridnete": {
+      "m": 3844,
+      "n": 7565,
+      "ref_obj": 206.5547,
+      "solvers": {
+        "loqo": 206.5547,
+        "nitro": 206.5547,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridnetf": {
+      "m": 3844,
+      "n": 7565,
+      "ref_obj": 242.109,
+      "solvers": {
+        "loqo": 242.109,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridnetg": {
+      "m": 34,
+      "n": 44,
+      "ref_obj": 73.31703,
+      "solvers": {
+        "loqo": 73.31703,
+        "nitro": 73.31703,
+        "snopt": 73.31703
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridneth": {
+      "m": 36,
+      "n": 61,
+      "ref_obj": 39.62627,
+      "solvers": {
+        "loqo": 39.62627,
+        "nitro": 39.62627,
+        "snopt": 39.62627
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "gridneti": {
+      "m": 36,
+      "n": 61,
+      "ref_obj": 40.24746,
+      "solvers": {
+        "loqo": 40.24746,
+        "nitro": 40.24749,
+        "snopt": 40.24746
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "grouping": {
+      "m": 125,
+      "n": 100,
+      "ref_obj": 13.8504,
+      "solvers": {
+        "loqo": 13.8504,
+        "nitro": null,
+        "snopt": 13.8504
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "growth": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.004041,
+      "solvers": {
+        "loqo": 1.004041,
+        "nitro": 1.004041,
+        "snopt": 3542.149
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "growthls": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.004041,
+      "solvers": {
+        "loqo": 1.004041,
+        "nitro": 1.004041,
+        "snopt": 3542.149
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "gulf": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.088382e-16,
+      "solvers": {
+        "loqo": 1.088382e-16,
+        "nitro": 3.545246e-14,
+        "snopt": 2.847867e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hadamals": {
+      "m": 0,
+      "n": 90,
+      "ref_obj": 27.76962,
+      "solvers": {
+        "loqo": 27.76962,
+        "nitro": 26.30884,
+        "snopt": 25.31642
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hadamard": {
+      "m": 256,
+      "n": 65,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": null,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hager1": {
+      "m": 5000,
+      "n": 10000,
+      "ref_obj": 0.8807971,
+      "solvers": {
+        "loqo": 0.8807971,
+        "nitro": 0.8807978,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hager2": {
+      "m": 5000,
+      "n": 10000,
+      "ref_obj": 0.4320823,
+      "solvers": {
+        "loqo": 0.4320823,
+        "nitro": 0.4320823,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hager3": {
+      "m": 5000,
+      "n": 10000,
+      "ref_obj": 0.1409613,
+      "solvers": {
+        "loqo": 0.1409613,
+        "nitro": 0.1409613,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hager4": {
+      "m": 5000,
+      "n": 10000,
+      "ref_obj": 2.794031,
+      "solvers": {
+        "loqo": 2.794031,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "haifam": {
+      "m": 150,
+      "n": 85,
+      "ref_obj": -45.00069,
+      "solvers": {
+        "loqo": -45.00069,
+        "nitro": -45.00035,
+        "snopt": -45.00029
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "haifas": {
+      "m": 9,
+      "n": 7,
+      "ref_obj": -0.45,
+      "solvers": {
+        "loqo": -0.45,
+        "nitro": -0.4499962,
+        "snopt": -0.45
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hairy": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 20.0,
+      "solvers": {
+        "loqo": 20.0,
+        "nitro": 20.0,
+        "snopt": 20.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "haldmads": {
+      "m": 42,
+      "n": 6,
+      "ref_obj": 0.0001223712,
+      "solvers": {
+        "loqo": 0.0001223712,
+        "nitro": 0.0001241968,
+        "snopt": 0.0001223483
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hanging": {
+      "m": 180,
+      "n": 288,
+      "ref_obj": -620.176,
+      "solvers": {
+        "loqo": -620.176,
+        "nitro": -620.1749,
+        "snopt": -620.176
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "harkerp2": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": -0.5,
+      "solvers": {
+        "loqo": -0.5,
+        "nitro": -0.4993357,
+        "snopt": -0.5
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hart6": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": -3.322887,
+      "solvers": {
+        "loqo": -3.322887,
+        "nitro": -3.322887,
+        "snopt": -3.322887
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatflda": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 1.620361e-15,
+      "solvers": {
+        "loqo": 1.620361e-15,
+        "nitro": 1.887063e-10,
+        "snopt": 1.635036e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatfldb": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 0.005572811,
+      "solvers": {
+        "loqo": 0.005572811,
+        "nitro": 0.005573065,
+        "snopt": 0.005572809
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatfldc": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 7.619277e-22,
+      "solvers": {
+        "loqo": 7.619277e-22,
+        "nitro": 7.686482e-13,
+        "snopt": 7.983361e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatfldd": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 6.615114e-08,
+      "solvers": {
+        "loqo": 6.615114e-08,
+        "nitro": 8.568543e-08,
+        "snopt": 2.546895e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatflde": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 5.120377e-07,
+      "solvers": {
+        "loqo": 5.120377e-07,
+        "nitro": 5.145831e-07,
+        "snopt": 2.728742e-06
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatfldf": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.809171e-16,
+      "solvers": {
+        "loqo": 1.809171e-16,
+        "nitro": 1.010327e-07,
+        "snopt": 2.204565e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatfldg": {
+      "m": 0,
+      "n": 25,
+      "ref_obj": 1.725783e-17,
+      "solvers": {
+        "loqo": 1.725783e-17,
+        "nitro": 5.654608e-14,
+        "snopt": 8.362117e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hatfldh": {
+      "m": 7,
+      "n": 4,
+      "ref_obj": -24.5,
+      "solvers": {
+        "loqo": -24.5,
+        "nitro": -24.5,
+        "snopt": -24.5
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "heart6": {
+      "m": 0,
+      "markers": "(IL) (IL) (IL)",
+      "n": 6,
+      "status": "hard"
+    },
+    "heart6ls": {
+      "m": 0,
+      "markers": "(IL) (IL) (IL)",
+      "n": 6,
+      "status": "hard"
+    },
+    "heart8": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 3.359128e-22,
+      "solvers": {
+        "loqo": 3.359128e-22,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "heart8ls": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 2.29787e-19,
+      "solvers": {
+        "loqo": 2.29787e-19,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "helix": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 3.971305e-20,
+      "solvers": {
+        "loqo": 3.971305e-20,
+        "nitro": 1.53736e-21,
+        "snopt": 5.435146e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hilberta": {
+      "m": 0,
+      "n": 10,
+      "ref_obj": 1.622714e-13,
+      "solvers": {
+        "loqo": 1.622714e-13,
+        "nitro": 2.28437e-07,
+        "snopt": 2.287273e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hilbertb": {
+      "m": 0,
+      "n": 50,
+      "ref_obj": 4.902725e-16,
+      "solvers": {
+        "loqo": 4.902725e-16,
+        "nitro": 2.066375e-13,
+        "snopt": 5.523716e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelba": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.656001e-19,
+      "solvers": {
+        "loqo": 1.656001e-19,
+        "nitro": 5.04871e-29,
+        "snopt": 1.026951e-23
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbb": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 4.800729e-21,
+      "solvers": {
+        "loqo": 4.800729e-21,
+        "nitro": 1.951933e-20,
+        "snopt": 1.909359e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbc": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.678629e-20,
+      "solvers": {
+        "loqo": 1.678629e-20,
+        "nitro": 1.540377e-15,
+        "snopt": 7.060177e-16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbd": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 5.922563,
+      "solvers": {
+        "loqo": 5.922563,
+        "nitro": null,
+        "snopt": 5.922563
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbe": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.363248e-18,
+      "solvers": {
+        "loqo": 1.363248e-18,
+        "nitro": 2.040325e-11,
+        "snopt": 2.695575e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbf": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 318.5717,
+      "solvers": {
+        "loqo": 318.5717,
+        "nitro": 318.5717,
+        "snopt": 318.5717
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbg": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.801602e-15,
+      "solvers": {
+        "loqo": 1.801602e-15,
+        "nitro": 1.201872e-18,
+        "snopt": 1.718921e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbh": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbi": {
+      "m": 12,
+      "n": 100,
+      "ref_obj": -1755.0,
+      "solvers": {
+        "loqo": -1755.0,
+        "nitro": -1755.0,
+        "snopt": -1755.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbj": {
+      "m": 14,
+      "n": 43,
+      "ref_obj": -1910.345,
+      "solvers": {
+        "loqo": -1910.345,
+        "nitro": null,
+        "snopt": -1909.84
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelbk": {
+      "m": 14,
+      "n": 24,
+      "ref_obj": 0.05181434,
+      "solvers": {
+        "loqo": 0.05181434,
+        "nitro": 0.05183981,
+        "snopt": 0.05181434
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelp1": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -62.05387,
+      "solvers": {
+        "loqo": -62.05387,
+        "nitro": -62.05387,
+        "snopt": -23.89741
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "himmelp2": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -62.05387,
+      "solvers": {
+        "loqo": -62.05387,
+        "nitro": -62.05387,
+        "snopt": -8.198032
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "himmelp3": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -59.01312,
+      "solvers": {
+        "loqo": -59.01312,
+        "nitro": -59.01312,
+        "snopt": -59.01312
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelp4": {
+      "m": 3,
+      "n": 2,
+      "ref_obj": -59.01312,
+      "solvers": {
+        "loqo": -59.01312,
+        "nitro": -59.01312,
+        "snopt": -59.01312
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelp5": {
+      "m": 3,
+      "n": 2,
+      "ref_obj": -59.01312,
+      "solvers": {
+        "loqo": -59.01312,
+        "nitro": -59.01312,
+        "snopt": -59.01312
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "himmelp6": {
+      "m": 4,
+      "n": 2,
+      "ref_obj": -59.01312,
+      "solvers": {
+        "loqo": -59.01312,
+        "nitro": -59.01312,
+        "snopt": -59.01312
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hong": {
+      "m": 1,
+      "n": 4,
+      "ref_obj": 1.347307,
+      "solvers": {
+        "loqo": 1.347307,
+        "nitro": 1.347332,
+        "snopt": 1.347307
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs001": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 6.889873e-19,
+      "solvers": {
+        "loqo": 6.889873e-19,
+        "nitro": 2.627965e-13,
+        "snopt": 5.497753e-19
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs002": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 4.941229,
+      "solvers": {
+        "loqo": 4.941229,
+        "nitro": 4.941231,
+        "snopt": 0.05042619
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs003": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 6.094869e-09,
+      "solvers": {
+        "loqo": 6.094869e-09,
+        "nitro": 1.280017e-06,
+        "snopt": 5.04871e-34
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs004": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 2.666667,
+      "solvers": {
+        "loqo": 2.666667,
+        "nitro": 2.666669,
+        "snopt": 2.666667
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs005": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -1.913223,
+      "solvers": {
+        "loqo": -1.913223,
+        "nitro": -1.913223,
+        "snopt": -1.913223
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs006": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 8.063567e-18,
+      "solvers": {
+        "loqo": 8.063567e-18,
+        "nitro": 5.297624e-16,
+        "snopt": 4.930381e-32
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs007": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -1.732051,
+      "solvers": {
+        "loqo": -1.732051,
+        "nitro": -1.732051,
+        "snopt": -1.732051
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs008": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs009": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -0.5,
+      "solvers": {
+        "loqo": -0.5,
+        "nitro": -0.5,
+        "snopt": -0.5
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs010": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -0.9999987,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs011": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -8.498464,
+      "solvers": {
+        "loqo": -8.498464,
+        "nitro": -8.498463,
+        "snopt": -8.498469
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs012": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -30.0,
+      "solvers": {
+        "loqo": -30.0,
+        "nitro": -30.0,
+        "snopt": -30.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs013": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 1.006026,
+      "solvers": {
+        "loqo": null,
+        "nitro": 1.006026,
+        "snopt": 1.280716
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs014": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 1.393465,
+      "solvers": {
+        "loqo": 1.393465,
+        "nitro": 1.393466,
+        "snopt": 1.393465
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs015": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 360.3798,
+      "solvers": {
+        "loqo": 360.3798,
+        "nitro": 360.3799,
+        "snopt": 306.5
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs016": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 0.25,
+      "solvers": {
+        "loqo": 0.25,
+        "nitro": 23.14472,
+        "snopt": 23.14466
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs017": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000002,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs018": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 5.0,
+      "solvers": {
+        "loqo": 5.0,
+        "nitro": 5.0,
+        "snopt": 5.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs019": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -6961.814,
+      "solvers": {
+        "loqo": -6961.814,
+        "nitro": -6961.812,
+        "snopt": -6961.814
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs020": {
+      "m": 3,
+      "n": 2,
+      "ref_obj": 40.19873,
+      "solvers": {
+        "loqo": 40.19873,
+        "nitro": 40.19879,
+        "snopt": 40.19873
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs021": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -99.96,
+      "solvers": {
+        "loqo": -99.96,
+        "nitro": -99.96,
+        "snopt": -99.96
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs022": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000003,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs023": {
+      "m": 5,
+      "n": 2,
+      "ref_obj": 2.0,
+      "solvers": {
+        "loqo": 2.0,
+        "nitro": 2.000003,
+        "snopt": 2.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs024": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -0.9999974,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs025": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 6.513505e-18,
+      "solvers": {
+        "loqo": 6.513505e-18,
+        "nitro": 2.249151e-10,
+        "snopt": 32.835
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs026": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 2.494868e-10,
+      "solvers": {
+        "loqo": 2.494868e-10,
+        "nitro": 1.305235e-10,
+        "snopt": 2.109673e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs027": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 0.04,
+      "solvers": {
+        "loqo": 0.04,
+        "nitro": 0.04,
+        "snopt": 0.04
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs028": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 1.252233e-16,
+      "solvers": {
+        "loqo": 1.252233e-16,
+        "nitro": 6.409495e-31,
+        "snopt": 1.70193e-27
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs029": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": -22.62742,
+      "solvers": {
+        "loqo": -22.62742,
+        "nitro": -22.62742,
+        "snopt": -22.62742
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs030": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 0.9999991,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs031": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 6.0,
+      "solvers": {
+        "loqo": 6.0,
+        "nitro": 6.000001,
+        "snopt": 6.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs032": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000002,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs033": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -4.585786,
+      "solvers": {
+        "loqo": -4.585786,
+        "nitro": -4.585783,
+        "snopt": -3.99999
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs034": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -0.8340324,
+      "solvers": {
+        "loqo": -0.8340324,
+        "nitro": -0.8340317,
+        "snopt": -0.8340332
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs035": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 0.1111111,
+      "solvers": {
+        "loqo": 0.1111111,
+        "nitro": 0.1111114,
+        "snopt": 0.1111111
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs036": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": -3300.0,
+      "solvers": {
+        "loqo": -3300.0,
+        "nitro": -3300.0,
+        "snopt": -3300.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs037": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": -3456.0,
+      "solvers": {
+        "loqo": -3456.0,
+        "nitro": -3456.0,
+        "snopt": -3456.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs038": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 3.3235e-18,
+      "solvers": {
+        "loqo": 3.3235e-18,
+        "nitro": 2.372762e-14,
+        "snopt": 3.167088e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs039": {
+      "m": 2,
+      "n": 4,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs040": {
+      "m": 3,
+      "n": 4,
+      "ref_obj": -0.25,
+      "solvers": {
+        "loqo": -0.25,
+        "nitro": -0.25,
+        "snopt": -0.25
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs041": {
+      "m": 1,
+      "n": 4,
+      "ref_obj": 1.925926,
+      "solvers": {
+        "loqo": 1.925926,
+        "nitro": 1.925926,
+        "snopt": 1.925926
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs042": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 13.85786,
+      "solvers": {
+        "loqo": 13.85786,
+        "nitro": 13.85786,
+        "snopt": 13.85786
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs043": {
+      "m": 3,
+      "n": 4,
+      "ref_obj": -44.00001,
+      "solvers": {
+        "loqo": -44.00001,
+        "nitro": -44.0,
+        "snopt": -44.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs044": {
+      "m": 6,
+      "n": 4,
+      "ref_obj": -15.0,
+      "solvers": {
+        "loqo": -15.0,
+        "nitro": -14.99999,
+        "snopt": -15.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs045": {
+      "m": 0,
+      "n": 5,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000006,
+        "snopt": 2.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs046": {
+      "m": 2,
+      "n": 5,
+      "ref_obj": 1.338387e-11,
+      "solvers": {
+        "loqo": 1.338387e-11,
+        "nitro": 6.711535e-10,
+        "snopt": 2.896516e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs047": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 3.702732e-11,
+      "solvers": {
+        "loqo": 3.702732e-11,
+        "nitro": 3.958329e-09,
+        "snopt": 6.972378e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs048": {
+      "m": 2,
+      "n": 5,
+      "ref_obj": 9.131115e-17,
+      "solvers": {
+        "loqo": 9.131115e-17,
+        "nitro": 2.46519e-31,
+        "snopt": 1.211921e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs049": {
+      "m": 2,
+      "n": 5,
+      "ref_obj": 1.213106e-11,
+      "solvers": {
+        "loqo": 1.213106e-11,
+        "nitro": 1.178836e-07,
+        "snopt": 5.993149e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs050": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 7.656906e-15,
+      "solvers": {
+        "loqo": 7.656906e-15,
+        "nitro": 4.979684e-30,
+        "snopt": 2.067168e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs051": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 1.538886e-17,
+      "solvers": {
+        "loqo": 1.538886e-17,
+        "nitro": 2.46519e-32,
+        "snopt": 1.06402e-25
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs052": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 5.326647,
+      "solvers": {
+        "loqo": 5.326647,
+        "nitro": 5.326648,
+        "snopt": 5.326648
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs053": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 4.093023,
+      "solvers": {
+        "loqo": 4.093023,
+        "nitro": 4.093023,
+        "snopt": 4.093023
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs054": {
+      "m": 1,
+      "n": 6,
+      "ref_obj": 0.1928571,
+      "solvers": {
+        "loqo": 0.1928571,
+        "nitro": 0.1928571,
+        "snopt": 0.1928571
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs055": {
+      "m": 6,
+      "n": 6,
+      "ref_obj": 6.333333,
+      "solvers": {
+        "loqo": 6.333333,
+        "nitro": null,
+        "snopt": 6.666667
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs056": {
+      "m": 4,
+      "n": 7,
+      "ref_obj": -3.456,
+      "solvers": {
+        "loqo": -3.456,
+        "nitro": -3.456,
+        "snopt": -3.456
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs057": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 0.02845967,
+      "solvers": {
+        "loqo": 0.02845967,
+        "nitro": 0.03064762,
+        "snopt": 0.03064631
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs059": {
+      "m": 3,
+      "n": 2,
+      "ref_obj": -7.802789,
+      "solvers": {
+        "loqo": -7.802789,
+        "nitro": -6.749505,
+        "snopt": -7.802789
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs060": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 0.0325682,
+      "solvers": {
+        "loqo": 0.0325682,
+        "nitro": 0.0325682,
+        "snopt": 0.0325682
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs061": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -143.6461,
+      "solvers": {
+        "loqo": -143.6461,
+        "nitro": -143.6461,
+        "snopt": -143.6461
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs062": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": -26272.51,
+      "solvers": {
+        "loqo": -26272.51,
+        "nitro": -26272.51,
+        "snopt": -26272.51
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs063": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 961.7152,
+      "solvers": {
+        "loqo": 961.7152,
+        "nitro": 961.7152,
+        "snopt": 961.7152
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs064": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 6299.842,
+      "solvers": {
+        "loqo": 6299.842,
+        "nitro": 6299.843,
+        "snopt": 6299.842
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs065": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 0.9535289,
+      "solvers": {
+        "loqo": 0.9535289,
+        "nitro": 0.9535291,
+        "snopt": 0.9535288
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs066": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 0.5181633,
+      "solvers": {
+        "loqo": 0.5181633,
+        "nitro": 0.5181658,
+        "snopt": 0.5181631
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs067": {
+      "status": "untabulated"
+    },
+    "hs068": {
+      "status": "untabulated"
+    },
+    "hs069": {
+      "status": "untabulated"
+    },
+    "hs070": {
+      "m": 1,
+      "n": 4,
+      "ref_obj": 0.1751745,
+      "solvers": {
+        "loqo": 0.1751745,
+        "nitro": 0.009401973,
+        "snopt": 0.009401973
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs071": {
+      "m": 2,
+      "n": 4,
+      "ref_obj": 17.01402,
+      "solvers": {
+        "loqo": 17.01402,
+        "nitro": 17.01402,
+        "snopt": 17.01402
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs072": {
+      "m": 2,
+      "n": 4,
+      "ref_obj": 727.6793,
+      "solvers": {
+        "loqo": 727.6793,
+        "nitro": 727.6789,
+        "snopt": 726.7833
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs073": {
+      "m": 3,
+      "n": 4,
+      "ref_obj": 29.89438,
+      "solvers": {
+        "loqo": 29.89438,
+        "nitro": 29.8944,
+        "snopt": 29.89438
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs074": {
+      "m": 4,
+      "n": 4,
+      "ref_obj": 5126.498,
+      "solvers": {
+        "loqo": 5126.498,
+        "nitro": 5126.498,
+        "snopt": 5126.498
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs075": {
+      "m": 4,
+      "n": 4,
+      "ref_obj": 5174.413,
+      "solvers": {
+        "loqo": 5174.413,
+        "nitro": 5174.413,
+        "snopt": 5174.413
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs076": {
+      "m": 3,
+      "n": 4,
+      "ref_obj": -4.681818,
+      "solvers": {
+        "loqo": -4.681818,
+        "nitro": -4.681816,
+        "snopt": -4.681818
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs077": {
+      "m": 2,
+      "n": 5,
+      "ref_obj": 0.2415051,
+      "solvers": {
+        "loqo": 0.2415051,
+        "nitro": 0.241505,
+        "snopt": 0.2415051
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs078": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": -2.9197,
+      "solvers": {
+        "loqo": -2.9197,
+        "nitro": -2.9197,
+        "snopt": -2.9197
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs079": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 0.07877683,
+      "solvers": {
+        "loqo": 0.07877683,
+        "nitro": 0.07877692,
+        "snopt": 0.07877682
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs080": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 0.05394985,
+      "solvers": {
+        "loqo": 0.05394985,
+        "nitro": 0.05394985,
+        "snopt": 0.05394985
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs081": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 0.05394985,
+      "solvers": {
+        "loqo": 0.05394985,
+        "nitro": 0.05394985,
+        "snopt": 0.05394985
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs083": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": -30665.54,
+      "solvers": {
+        "loqo": -30665.54,
+        "nitro": -30665.54,
+        "snopt": -30665.54
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs084": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": -5280335.0,
+      "solvers": {
+        "loqo": -5280335.0,
+        "nitro": -5280335.0,
+        "snopt": -5280335.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs085": {
+      "m": 38,
+      "n": 5,
+      "ref_obj": -1.905155,
+      "solvers": {
+        "loqo": -1.905155,
+        "nitro": -1.905154,
+        "snopt": -1.905155
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs086": {
+      "m": 6,
+      "n": 5,
+      "ref_obj": -32.34868,
+      "solvers": {
+        "loqo": -32.34868,
+        "nitro": -32.34865,
+        "snopt": -32.34868
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs087": {
+      "m": 6,
+      "n": 11,
+      "ref_obj": 8827.598,
+      "solvers": {
+        "loqo": 8827.598,
+        "nitro": 8827.598,
+        "snopt": 8827.598
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs088": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 1.362657,
+      "solvers": {
+        "loqo": 1.362657,
+        "nitro": null,
+        "snopt": 1.362657
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs089": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 1.362657,
+      "solvers": {
+        "loqo": 1.362657,
+        "nitro": null,
+        "snopt": 1.362657
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs090": {
+      "m": 1,
+      "n": 4,
+      "ref_obj": 1.362657,
+      "solvers": {
+        "loqo": 1.362657,
+        "nitro": null,
+        "snopt": 1.362657
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs091": {
+      "m": 1,
+      "n": 5,
+      "ref_obj": 1.362657,
+      "solvers": {
+        "loqo": 1.362657,
+        "nitro": null,
+        "snopt": 1.362657
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs092": {
+      "m": 1,
+      "n": 6,
+      "ref_obj": 1.362657,
+      "solvers": {
+        "loqo": 1.362657,
+        "nitro": null,
+        "snopt": 1.362656
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs093": {
+      "m": 2,
+      "n": 6,
+      "ref_obj": 135.076,
+      "solvers": {
+        "loqo": 135.076,
+        "nitro": 135.076,
+        "snopt": 135.076
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs095": {
+      "m": 4,
+      "n": 6,
+      "ref_obj": 0.01561953,
+      "solvers": {
+        "loqo": 0.01561953,
+        "nitro": 0.01565788,
+        "snopt": 0.01561953
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs096": {
+      "m": 4,
+      "n": 6,
+      "ref_obj": 0.01561953,
+      "solvers": {
+        "loqo": 0.01561953,
+        "nitro": 0.01565788,
+        "snopt": 0.01561953
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs097": {
+      "m": 4,
+      "n": 6,
+      "ref_obj": 4.071246,
+      "solvers": {
+        "loqo": 4.071246,
+        "nitro": 3.135848,
+        "snopt": 3.135809
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs098": {
+      "m": 4,
+      "n": 6,
+      "ref_obj": 4.071246,
+      "solvers": {
+        "loqo": 4.071246,
+        "nitro": 3.135848,
+        "snopt": 3.135809
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs099": {
+      "m": 14,
+      "n": 19,
+      "ref_obj": -831079900.0,
+      "solvers": {
+        "loqo": -831079900.0,
+        "nitro": -831079900.0,
+        "snopt": -831079900.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs100": {
+      "m": 4,
+      "n": 7,
+      "ref_obj": 680.6301,
+      "solvers": {
+        "loqo": 680.6301,
+        "nitro": 680.6301,
+        "snopt": 680.6301
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs100lnp": {
+      "m": 2,
+      "n": 7,
+      "ref_obj": 680.6301,
+      "solvers": {
+        "loqo": 680.6301,
+        "nitro": 680.6301,
+        "snopt": 680.6301
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs100mod": {
+      "m": 4,
+      "n": 7,
+      "ref_obj": 678.7547,
+      "solvers": {
+        "loqo": 678.7547,
+        "nitro": 678.7547,
+        "snopt": 678.7547
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs101": {
+      "m": 6,
+      "n": 7,
+      "ref_obj": 1809.765,
+      "solvers": {
+        "loqo": 1809.765,
+        "nitro": 1809.766,
+        "snopt": 1809.765
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs102": {
+      "m": 6,
+      "n": 7,
+      "ref_obj": 911.8806,
+      "solvers": {
+        "loqo": 911.8806,
+        "nitro": 911.883,
+        "snopt": 911.8806
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs103": {
+      "m": 6,
+      "n": 7,
+      "ref_obj": 543.668,
+      "solvers": {
+        "loqo": 543.668,
+        "nitro": 543.6686,
+        "snopt": 543.668
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs104": {
+      "m": 6,
+      "n": 8,
+      "ref_obj": 3.951163,
+      "solvers": {
+        "loqo": 3.951163,
+        "nitro": 3.951169,
+        "snopt": 3.951163
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs105": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 1136.361,
+      "solvers": {
+        "loqo": 1136.361,
+        "nitro": 1136.361,
+        "snopt": 1136.307
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs106": {
+      "m": 6,
+      "n": 8,
+      "ref_obj": 7049.248,
+      "solvers": {
+        "loqo": 7049.248,
+        "nitro": 7049.253,
+        "snopt": 7049.248
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs107": {
+      "m": 6,
+      "n": 9,
+      "ref_obj": 5055.012,
+      "solvers": {
+        "loqo": 5055.012,
+        "nitro": null,
+        "snopt": 5055.012
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs108": {
+      "m": 13,
+      "n": 9,
+      "ref_obj": -0.8660254,
+      "solvers": {
+        "loqo": -0.8660254,
+        "nitro": -0.6749799,
+        "snopt": -0.8660254
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hs109": {
+      "m": 10,
+      "n": 9,
+      "ref_obj": 5326.851,
+      "solvers": {
+        "loqo": 5326.851,
+        "nitro": 5326.851,
+        "snopt": 5326.851
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs110": {
+      "m": 0,
+      "n": 10,
+      "ref_obj": -45.77847,
+      "solvers": {
+        "loqo": -45.77847,
+        "nitro": -45.77847,
+        "snopt": -45.77847
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs111": {
+      "m": 3,
+      "n": 10,
+      "ref_obj": -47.76109,
+      "solvers": {
+        "loqo": -47.76109,
+        "nitro": -47.76109,
+        "snopt": -47.7604
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs111lnp": {
+      "m": 3,
+      "n": 10,
+      "ref_obj": -47.76109,
+      "solvers": {
+        "loqo": -47.76109,
+        "nitro": -47.76109,
+        "snopt": -47.7324
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs112": {
+      "m": 3,
+      "n": 10,
+      "ref_obj": -47.76109,
+      "solvers": {
+        "loqo": -47.76109,
+        "nitro": -47.76109,
+        "snopt": -47.76109
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs113": {
+      "m": 8,
+      "n": 10,
+      "ref_obj": 24.30621,
+      "solvers": {
+        "loqo": 24.30621,
+        "nitro": 24.30622,
+        "snopt": 24.30621
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs114": {
+      "m": 11,
+      "n": 10,
+      "ref_obj": -1768.807,
+      "solvers": {
+        "loqo": -1768.807,
+        "nitro": -1768.806,
+        "snopt": -1768.807
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs116": {
+      "m": 15,
+      "n": 13,
+      "ref_obj": 97.58751,
+      "solvers": {
+        "loqo": 97.58751,
+        "nitro": 97.5896,
+        "snopt": 97.58751
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs117": {
+      "m": 5,
+      "n": 15,
+      "ref_obj": 32.34868,
+      "solvers": {
+        "loqo": 32.34868,
+        "nitro": 32.34875,
+        "snopt": 32.34868
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs118": {
+      "m": 17,
+      "n": 15,
+      "ref_obj": 664.8205,
+      "solvers": {
+        "loqo": 664.8205,
+        "nitro": 664.8205,
+        "snopt": 664.8205
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs119": {
+      "m": 8,
+      "n": 16,
+      "ref_obj": 244.8997,
+      "solvers": {
+        "loqo": 244.8997,
+        "nitro": 244.8999,
+        "snopt": 244.8997
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs21mod": {
+      "m": 1,
+      "n": 7,
+      "ref_obj": -95.96,
+      "solvers": {
+        "loqo": -95.96,
+        "nitro": -95.96,
+        "snopt": -95.96
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs268": {
+      "m": 5,
+      "n": 5,
+      "ref_obj": 6.525624e-09,
+      "solvers": {
+        "loqo": 6.525624e-09,
+        "nitro": 2.558747e-07,
+        "snopt": -7.219114e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs35mod": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 0.25,
+      "solvers": {
+        "loqo": 0.25,
+        "nitro": 0.2500003,
+        "snopt": 0.25
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs3mod": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 3.07543e-09,
+      "solvers": {
+        "loqo": 3.07543e-09,
+        "nitro": 1.28e-06,
+        "snopt": 7.34684e-38
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs44new": {
+      "m": 5,
+      "n": 4,
+      "ref_obj": -15.0,
+      "solvers": {
+        "loqo": -15.0,
+        "nitro": -14.99999,
+        "snopt": -15.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hs99exp": {
+      "m": 21,
+      "n": 28,
+      "ref_obj": -1008063000.0,
+      "solvers": {
+        "loqo": -1008063000.0,
+        "nitro": -1008062000.0,
+        "snopt": -1008063000.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hubfit": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 0.0168935,
+      "solvers": {
+        "loqo": 0.0168935,
+        "nitro": 0.01689375,
+        "snopt": 0.01689349
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hues-mod": {
+      "m": 2,
+      "n": 10000,
+      "ref_obj": 34824490.0,
+      "solvers": {
+        "loqo": 34824490.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "huestis": {
+      "m": 2,
+      "n": 10000,
+      "ref_obj": 348244900000.0,
+      "solvers": {
+        "loqo": 348244900000.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "humps": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 8.035389e-13,
+      "solvers": {
+        "loqo": 8.035389e-13,
+        "nitro": 6.108646e-10,
+        "snopt": 5.411037e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "hvycrash": {
+      "m": 150,
+      "n": 201,
+      "ref_obj": -0.2185,
+      "solvers": {
+        "loqo": -0.2185,
+        "nitro": -0.0001681462,
+        "snopt": -0.2185
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "hypcir": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 1.640156e-19,
+      "solvers": {
+        "loqo": 1.640156e-19,
+        "nitro": 1.002242e-17,
+        "snopt": 2.641053e-18
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "indef": {
+      "m": 0,
+      "markers": "(Unb) (IL) (IL)",
+      "n": 1000,
+      "status": "unbounded"
+    },
+    "integreq": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 1.004239e-17,
+      "solvers": {
+        "loqo": 1.004239e-17,
+        "nitro": 8.948869e-13,
+        "snopt": 4.371511e-14
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "jensmp": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 124.3622,
+      "solvers": {
+        "loqo": 124.3622,
+        "nitro": 124.3622,
+        "snopt": 124.3622
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "kissing": {
+      "m": 903,
+      "n": 127,
+      "ref_obj": 1.000001,
+      "solvers": {
+        "loqo": 1.000001,
+        "nitro": 0.8446393,
+        "snopt": null
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "kiwcresc": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -1.414534e-08,
+      "solvers": {
+        "loqo": -1.414534e-08,
+        "nitro": 2.560016e-06,
+        "snopt": -1.662398e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "kowosb": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 0.0003075056,
+      "solvers": {
+        "loqo": 0.0003075056,
+        "nitro": 0.0003075056,
+        "snopt": 0.0003075056
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ksip": {
+      "m": 1000,
+      "n": 20,
+      "ref_obj": 0.5757979,
+      "solvers": {
+        "loqo": 0.5757979,
+        "nitro": 0.5758009,
+        "snopt": 0.5757979
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "lakes": {
+      "m": 78,
+      "n": 90,
+      "ref_obj": 350524.8,
+      "solvers": {
+        "loqo": 350524.8,
+        "nitro": null,
+        "snopt": 350524.8
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "launch": {
+      "m": 29,
+      "markers": "(Inf) ERROR (IL)",
+      "n": 25,
+      "status": "infeasible"
+    },
+    "lch": {
+      "m": 1,
+      "n": 600,
+      "ref_obj": -4.318289,
+      "solvers": {
+        "loqo": -4.318289,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "lewispol": {
+      "m": 9,
+      "markers": "(Inf) ERROR (IL)",
+      "n": 6,
+      "status": "infeasible"
+    },
+    "liarwhd": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 7.97139e-23,
+      "solvers": {
+        "loqo": 7.97139e-23,
+        "nitro": 1.104901e-09,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "linspanh": {
+      "m": 32,
+      "n": 72,
+      "ref_obj": -77.0,
+      "solvers": {
+        "loqo": -77.0,
+        "nitro": -77.0,
+        "snopt": -77.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet1": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 25.00304,
+      "solvers": {
+        "loqo": 25.00304,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet10": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99967,
+      "solvers": {
+        "loqo": 24.99967,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet11": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99971,
+      "solvers": {
+        "loqo": 24.99971,
+        "nitro": null,
+        "snopt": 49.51573
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "liswet12": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": -5026.353,
+      "solvers": {
+        "loqo": -5026.353,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet2": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99971,
+      "solvers": {
+        "loqo": 24.99971,
+        "nitro": null,
+        "snopt": 25.00554
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet3": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99981,
+      "solvers": {
+        "loqo": 24.99981,
+        "nitro": null,
+        "snopt": 25.00729
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet4": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99981,
+      "solvers": {
+        "loqo": 24.99981,
+        "nitro": null,
+        "snopt": 25.00729
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet5": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99982,
+      "solvers": {
+        "loqo": 24.99982,
+        "nitro": null,
+        "snopt": 25.0072
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet6": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99986,
+      "solvers": {
+        "loqo": 24.99986,
+        "nitro": null,
+        "snopt": 25.00699
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet7": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99979,
+      "solvers": {
+        "loqo": 24.99979,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet8": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99977,
+      "solvers": {
+        "loqo": 24.99977,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "liswet9": {
+      "m": 10000,
+      "n": 10002,
+      "ref_obj": 24.99976,
+      "solvers": {
+        "loqo": 24.99976,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "lminsurf": {
+      "m": 0,
+      "n": 15129,
+      "ref_obj": 9.0,
+      "solvers": {
+        "loqo": 9.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "loadbal": {
+      "m": 31,
+      "n": 31,
+      "ref_obj": 0.452851,
+      "solvers": {
+        "loqo": 0.452851,
+        "nitro": 0.4528537,
+        "snopt": 0.452851
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "loghairy": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 0.1823216,
+      "solvers": {
+        "loqo": 0.1823216,
+        "nitro": 6.337444,
+        "snopt": 0.1823216
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "logros": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 0.0,
+      "solvers": {
+        "loqo": 0.0,
+        "nitro": 1.474376e-13,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "lootsma": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 1.414214,
+      "solvers": {
+        "loqo": 1.414214,
+        "nitro": 1.414217,
+        "snopt": 2.00001
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "lotschd": {
+      "m": 7,
+      "n": 12,
+      "ref_obj": 2398.416,
+      "solvers": {
+        "loqo": 2398.416,
+        "nitro": 2398.416,
+        "snopt": 2398.416
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "lsnnodoc": {
+      "m": 4,
+      "n": 5,
+      "ref_obj": 123.1124,
+      "solvers": {
+        "loqo": 123.1124,
+        "nitro": 123.1125,
+        "snopt": 123.1124
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "lsqfit": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 0.03378701,
+      "solvers": {
+        "loqo": 0.03378701,
+        "nitro": 0.03378724,
+        "snopt": 0.03378699
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "madsen": {
+      "m": 6,
+      "n": 3,
+      "ref_obj": 0.6164324,
+      "solvers": {
+        "loqo": 0.6164324,
+        "nitro": 0.616435,
+        "snopt": 0.6164324
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "madsschj": {
+      "m": 158,
+      "n": 81,
+      "ref_obj": -797.2837,
+      "solvers": {
+        "loqo": -797.2837,
+        "nitro": -797.2837,
+        "snopt": -797.2837
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "makela1": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -1.414214,
+      "solvers": {
+        "loqo": -1.414214,
+        "nitro": -1.414211,
+        "snopt": -1.414214
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "makela2": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 7.2,
+      "solvers": {
+        "loqo": 7.2,
+        "nitro": 7.200003,
+        "snopt": 7.2
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "makela3": {
+      "m": 20,
+      "n": 21,
+      "ref_obj": 1.647742e-09,
+      "solvers": {
+        "loqo": 1.647742e-09,
+        "nitro": 5.12e-06,
+        "snopt": -2.005109e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "makela4": {
+      "m": 40,
+      "n": 21,
+      "ref_obj": 1.353583e-08,
+      "solvers": {
+        "loqo": 1.353583e-08,
+        "nitro": 1.024e-05,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mancino": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 3.124897e-21,
+      "solvers": {
+        "loqo": 3.124897e-21,
+        "nitro": 2.807908e-18,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "manne": {
+      "m": 730,
+      "n": 1094,
+      "ref_obj": -0.9745726,
+      "solvers": {
+        "loqo": null,
+        "nitro": null,
+        "snopt": -0.9745726
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "maratos": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "maratosb": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "matrix2": {
+      "m": 2,
+      "n": 6,
+      "ref_obj": 2.032059e-08,
+      "solvers": {
+        "loqo": 2.032059e-08,
+        "nitro": 6.783238e-06,
+        "snopt": 1.490156e-08
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "maxlika": {
+      "status": "untabulated"
+    },
+    "mccormck": {
+      "m": 0,
+      "n": 50000,
+      "ref_obj": -45661.61,
+      "solvers": {
+        "loqo": -45661.61,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mconcon": {
+      "m": 11,
+      "n": 15,
+      "ref_obj": -6230.796,
+      "solvers": {
+        "loqo": -6230.796,
+        "nitro": -6230.796,
+        "snopt": -6230.796
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mdhole": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 2.035453e-10,
+      "solvers": {
+        "loqo": 2.035453e-10,
+        "nitro": 1.28e-06,
+        "snopt": 3.009266e-32
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "methanb8": {
+      "status": "untabulated"
+    },
+    "methanl8": {
+      "status": "untabulated"
+    },
+    "mexhat": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -0.0401,
+      "solvers": {
+        "loqo": -0.0401,
+        "nitro": -0.0401,
+        "snopt": -0.0401
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "meyer3": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 87.94586,
+      "solvers": {
+        "loqo": 87.94586,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mifflin1": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -0.9999974,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mifflin2": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -0.9999974,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "minc44": {
+      "m": 262,
+      "n": 303,
+      "ref_obj": 0.002574637,
+      "solvers": {
+        "loqo": null,
+        "nitro": 0.002574637,
+        "snopt": 0.002573029
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "minmaxbd": {
+      "m": 20,
+      "n": 5,
+      "ref_obj": 115.7064,
+      "solvers": {
+        "loqo": 115.7064,
+        "nitro": 115.7064,
+        "snopt": 115.7064
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "minmaxrb": {
+      "m": 4,
+      "n": 3,
+      "ref_obj": 8.710465e-09,
+      "solvers": {
+        "loqo": 8.710465e-09,
+        "nitro": 5.120009e-06,
+        "snopt": 8.881784e-16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "minperm": {
+      "status": "untabulated"
+    },
+    "minsurf": {
+      "m": 0,
+      "n": 36,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.0,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mistake": {
+      "status": "untabulated"
+    },
+    "model": {
+      "m": 32,
+      "n": 60,
+      "ref_obj": 5742.163,
+      "solvers": {
+        "loqo": 5742.163,
+        "nitro": 5742.171,
+        "snopt": 5742.163
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "morebv": {
+      "m": 0,
+      "n": 5000,
+      "ref_obj": 9.29712e-12,
+      "solvers": {
+        "loqo": 9.29712e-12,
+        "nitro": 9.919786e-12,
+        "snopt": 1.039542e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mosarqp1": {
+      "m": 700,
+      "n": 2500,
+      "ref_obj": -952.8754,
+      "solvers": {
+        "loqo": -952.8754,
+        "nitro": -952.8659,
+        "snopt": -952.8754
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mosarqp2": {
+      "m": 600,
+      "n": 900,
+      "ref_obj": -1597.482,
+      "solvers": {
+        "loqo": -1597.482,
+        "nitro": -1597.48,
+        "snopt": -1597.482
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "msqrta": {
+      "m": 0,
+      "n": 1024,
+      "ref_obj": 8.198382e-20,
+      "solvers": {
+        "loqo": 8.198382e-20,
+        "nitro": 7.086819e-12,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "msqrtals": {
+      "m": 0,
+      "n": 1024,
+      "ref_obj": 8.198382e-20,
+      "solvers": {
+        "loqo": 8.198382e-20,
+        "nitro": 7.086819e-12,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "msqrtb": {
+      "m": 0,
+      "n": 1024,
+      "ref_obj": 2.693251e-19,
+      "solvers": {
+        "loqo": 2.693251e-19,
+        "nitro": 4.010158e-11,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "msqrtbls": {
+      "m": 0,
+      "n": 1024,
+      "ref_obj": 2.693251e-19,
+      "solvers": {
+        "loqo": 2.693251e-19,
+        "nitro": 4.010158e-11,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "mwright": {
+      "m": 3,
+      "n": 5,
+      "ref_obj": 24.97881,
+      "solvers": {
+        "loqo": 24.97881,
+        "nitro": 24.97881,
+        "snopt": 24.97881
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "nasty": {
+      "status": "untabulated"
+    },
+    "ncvxbqp1": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -19855440000.0,
+      "solvers": {
+        "loqo": -19855440000.0,
+        "nitro": null,
+        "snopt": -19855440000.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ncvxbqp2": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -13311050000.0,
+      "solvers": {
+        "loqo": -13311050000.0,
+        "nitro": null,
+        "snopt": -13340200000.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxbqp3": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -6520234000.0,
+      "solvers": {
+        "loqo": -6520234000.0,
+        "nitro": null,
+        "snopt": -6559391000.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp1": {
+      "m": 500,
+      "n": 1000,
+      "ref_obj": -71591690.0,
+      "solvers": {
+        "loqo": -71591690.0,
+        "nitro": -71585540.0,
+        "snopt": -71512260.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp2": {
+      "m": 500,
+      "n": 1000,
+      "ref_obj": -57812690.0,
+      "solvers": {
+        "loqo": -57812690.0,
+        "nitro": -57788190.0,
+        "snopt": -57792290.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ncvxqp3": {
+      "m": 500,
+      "n": 1000,
+      "ref_obj": -31384590.0,
+      "solvers": {
+        "loqo": -31384590.0,
+        "nitro": -30807700.0,
+        "snopt": -31412580.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp4": {
+      "m": 250,
+      "n": 1000,
+      "ref_obj": -93978790.0,
+      "solvers": {
+        "loqo": -93978790.0,
+        "nitro": -93967110.0,
+        "snopt": -93934310.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ncvxqp5": {
+      "m": 250,
+      "n": 1000,
+      "ref_obj": -66292770.0,
+      "solvers": {
+        "loqo": -66292770.0,
+        "nitro": -66251370.0,
+        "snopt": -66363070.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp6": {
+      "m": 250,
+      "n": 1000,
+      "ref_obj": -34826710.0,
+      "solvers": {
+        "loqo": -34826710.0,
+        "nitro": -34620290.0,
+        "snopt": -35304720.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp7": {
+      "m": 750,
+      "n": 1000,
+      "ref_obj": -43524300.0,
+      "solvers": {
+        "loqo": -43524300.0,
+        "nitro": -43386510.0,
+        "snopt": -43519400.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp8": {
+      "m": 750,
+      "n": 1000,
+      "ref_obj": -30457330.0,
+      "solvers": {
+        "loqo": -30457330.0,
+        "nitro": -30472390.0,
+        "snopt": -30492060.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ncvxqp9": {
+      "m": 750,
+      "n": 1000,
+      "ref_obj": -21574750.0,
+      "solvers": {
+        "loqo": -21574750.0,
+        "nitro": -21539530.0,
+        "snopt": -21578400.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "ngone": {
+      "m": 1273,
+      "n": 97,
+      "ref_obj": -0.6332839,
+      "solvers": {
+        "loqo": -0.6332839,
+        "nitro": -0.6408969,
+        "snopt": -0.609102
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "noncvxu2": {
+      "status": "untabulated"
+    },
+    "noncvxun": {
+      "status": "untabulated"
+    },
+    "nondia": {
+      "m": 0,
+      "n": 9999,
+      "ref_obj": 2.463476e-22,
+      "solvers": {
+        "loqo": 2.463476e-22,
+        "nitro": 5.755539e-10,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "nondquar": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 7.176692e-11,
+      "solvers": {
+        "loqo": 7.176692e-11,
+        "nitro": 3.101972e-06,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "nonmsqrt": {
+      "m": 0,
+      "n": 9,
+      "ref_obj": 0.751801,
+      "solvers": {
+        "loqo": 0.751801,
+        "nitro": 0.7520437,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "nonscomp": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 2.409421e-09,
+      "solvers": {
+        "loqo": 2.409421e-09,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "obstclal": {
+      "status": "untabulated"
+    },
+    "obstclbl": {
+      "status": "untabulated"
+    },
+    "obstclbu": {
+      "status": "untabulated"
+    },
+    "odfits": {
+      "m": 6,
+      "n": 10,
+      "ref_obj": -2380.027,
+      "solvers": {
+        "loqo": -2380.027,
+        "nitro": -2380.027,
+        "snopt": -2380.027
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "oet1": {
+      "m": 1002,
+      "n": 3,
+      "ref_obj": 0.5382431,
+      "solvers": {
+        "loqo": 0.5382431,
+        "nitro": null,
+        "snopt": 0.5382431
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "oet2": {
+      "m": 1002,
+      "n": 3,
+      "ref_obj": 0.08715963,
+      "solvers": {
+        "loqo": 0.08715963,
+        "nitro": 0.08716027,
+        "snopt": 0.08716015
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "oet3": {
+      "m": 1002,
+      "n": 4,
+      "ref_obj": 0.004505056,
+      "solvers": {
+        "loqo": 0.004505056,
+        "nitro": 0.004512137,
+        "snopt": 0.004504547
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "oet7": {
+      "m": 1002,
+      "n": 7,
+      "ref_obj": 4.445575e-05,
+      "solvers": {
+        "loqo": 4.445575e-05,
+        "nitro": 0.002089089,
+        "snopt": 4.424883e-05
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "optcdeg2": {
+      "m": 799,
+      "n": 1198,
+      "ref_obj": 229.5734,
+      "solvers": {
+        "loqo": 229.5734,
+        "nitro": 229.5891,
+        "snopt": 229.5734
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "optcdeg3": {
+      "m": 799,
+      "n": 1198,
+      "ref_obj": 46.14567,
+      "solvers": {
+        "loqo": 46.14567,
+        "nitro": 46.14775,
+        "snopt": 46.14569
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "optcntrl": {
+      "m": 20,
+      "n": 28,
+      "ref_obj": 550.0,
+      "solvers": {
+        "loqo": 550.0,
+        "nitro": 549.9991,
+        "snopt": 550.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "optctrl3": {
+      "m": 80,
+      "n": 118,
+      "ref_obj": 2048.017,
+      "solvers": {
+        "loqo": 2048.017,
+        "nitro": 2048.017,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "optctrl6": {
+      "m": 80,
+      "n": 118,
+      "ref_obj": 2048.017,
+      "solvers": {
+        "loqo": 2048.017,
+        "nitro": 2048.017,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "optmass": {
+      "m": 55,
+      "n": 66,
+      "ref_obj": -0.1895425,
+      "solvers": {
+        "loqo": -0.1895425,
+        "nitro": -0.1895284,
+        "snopt": -0.1895425
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "optprloc": {
+      "m": 29,
+      "n": 30,
+      "ref_obj": -16.41977,
+      "solvers": {
+        "loqo": -16.41977,
+        "nitro": -16.41974,
+        "snopt": -16.41977
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "orthrdm2": {
+      "m": 2000,
+      "n": 4003,
+      "ref_obj": 10538.85,
+      "solvers": {
+        "loqo": 10538.85,
+        "nitro": 155.5328,
+        "snopt": 155.5328
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "orthrds2": {
+      "m": 100,
+      "n": 203,
+      "ref_obj": 1044.332,
+      "solvers": {
+        "loqo": 1044.332,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "orthrega": {
+      "m": 256,
+      "n": 517,
+      "ref_obj": 1414.056,
+      "solvers": {
+        "loqo": 1414.056,
+        "nitro": 1664.801,
+        "snopt": 1664.801
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "orthregb": {
+      "m": 6,
+      "n": 27,
+      "ref_obj": 4.442932e-19,
+      "solvers": {
+        "loqo": 4.442932e-19,
+        "nitro": 4.057493e-17,
+        "snopt": 7.263541e-12
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "orthregc": {
+      "m": 5000,
+      "n": 10005,
+      "ref_obj": 189.5946,
+      "solvers": {
+        "loqo": 189.5946,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "orthregd": {
+      "m": 5000,
+      "n": 10003,
+      "ref_obj": 42458.01,
+      "solvers": {
+        "loqo": 42458.01,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "orthrege": {
+      "m": 20,
+      "n": 36,
+      "ref_obj": 5.898964,
+      "solvers": {
+        "loqo": 5.898964,
+        "nitro": 3.662142,
+        "snopt": 3.87487
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "orthrgdm": {
+      "m": 5000,
+      "n": 10003,
+      "ref_obj": 1513.802,
+      "solvers": {
+        "loqo": 1513.802,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "orthrgds": {
+      "m": 5000,
+      "n": 10003,
+      "ref_obj": 26035.09,
+      "solvers": {
+        "loqo": 26035.09,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "osbornea": {
+      "m": 0,
+      "n": 5,
+      "ref_obj": 5.464895e-05,
+      "solvers": {
+        "loqo": 5.464895e-05,
+        "nitro": 5.465699e-05,
+        "snopt": 5.464895e-05
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "osborneb": {
+      "m": 0,
+      "n": 11,
+      "ref_obj": 0.08759472,
+      "solvers": {
+        "loqo": 0.08759472,
+        "nitro": 0.04013774,
+        "snopt": 0.04013774
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "oslbqp": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 6.25,
+      "solvers": {
+        "loqo": 6.25,
+        "nitro": 6.250006,
+        "snopt": 6.25
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer1": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 11754.6,
+      "solvers": {
+        "loqo": 11754.6,
+        "nitro": null,
+        "snopt": 11754.6
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer1a": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 0.08988363,
+      "solvers": {
+        "loqo": 0.08988363,
+        "nitro": 0.08988363,
+        "snopt": 0.08988363
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer1b": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 3.447355,
+      "solvers": {
+        "loqo": 3.447355,
+        "nitro": 3.447355,
+        "snopt": 3.447355
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer1c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.09759799,
+      "solvers": {
+        "loqo": 0.09759799,
+        "nitro": null,
+        "snopt": 0.09759799
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer1d": {
+      "m": 0,
+      "n": 7,
+      "ref_obj": 0.6526826,
+      "solvers": {
+        "loqo": 0.6526826,
+        "nitro": null,
+        "snopt": 0.6526826
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer1e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.0008352683,
+      "solvers": {
+        "loqo": 0.0008352683,
+        "nitro": null,
+        "snopt": 0.0008352683
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer2": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 3651.09,
+      "solvers": {
+        "loqo": 3651.09,
+        "nitro": null,
+        "snopt": 3651.09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer2a": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 0.01716074,
+      "solvers": {
+        "loqo": 0.01716074,
+        "nitro": null,
+        "snopt": 0.01716074
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer2b": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 0.6233947,
+      "solvers": {
+        "loqo": 0.6233947,
+        "nitro": 0.6233947,
+        "snopt": 0.6233947
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer2c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.01442139,
+      "solvers": {
+        "loqo": 0.01442139,
+        "nitro": null,
+        "snopt": 0.01442139
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer2e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.0002153525,
+      "solvers": {
+        "loqo": 0.0002153525,
+        "nitro": null,
+        "snopt": 0.0002153525
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer3": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 2265.958,
+      "solvers": {
+        "loqo": 2265.958,
+        "nitro": null,
+        "snopt": 2416.98
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "palmer3a": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 0.02043142,
+      "solvers": {
+        "loqo": 0.02043142,
+        "nitro": null,
+        "snopt": 0.02043142
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer3b": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 4.227647,
+      "solvers": {
+        "loqo": 4.227647,
+        "nitro": 4.227647,
+        "snopt": 4.227647
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer3c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.01953764,
+      "solvers": {
+        "loqo": 0.01953764,
+        "nitro": null,
+        "snopt": 0.01953764
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer3e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 5.074084e-05,
+      "solvers": {
+        "loqo": 5.074084e-05,
+        "nitro": null,
+        "snopt": 5.074084e-05
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer4": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 2285.383,
+      "solvers": {
+        "loqo": 2285.383,
+        "nitro": null,
+        "snopt": 2424.016
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "palmer4a": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 0.04060614,
+      "solvers": {
+        "loqo": 0.04060614,
+        "nitro": null,
+        "snopt": 0.04060614
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer4b": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 6.835139,
+      "solvers": {
+        "loqo": 6.835139,
+        "nitro": 6.835139,
+        "snopt": 6.835139
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer4c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.0503107,
+      "solvers": {
+        "loqo": 0.0503107,
+        "nitro": null,
+        "snopt": 0.0503107
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer4e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.0001480042,
+      "solvers": {
+        "loqo": 0.0001480042,
+        "nitro": null,
+        "snopt": 0.0001480042
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer5a": {
+      "m": 0,
+      "markers": "(IL) (IL) (IL)",
+      "n": 8,
+      "status": "hard"
+    },
+    "palmer5b": {
+      "m": 0,
+      "n": 9,
+      "ref_obj": 0.009752493,
+      "solvers": {
+        "loqo": 0.009752493,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer5c": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 2.128087,
+      "solvers": {
+        "loqo": 2.128087,
+        "nitro": 2.128087,
+        "snopt": 2.128087
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer5d": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 87.3394,
+      "solvers": {
+        "loqo": 87.3394,
+        "nitro": 87.3394,
+        "snopt": 87.3394
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer5e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 1.630506,
+      "solvers": {
+        "loqo": 1.630506,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer6a": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 0.05594884,
+      "solvers": {
+        "loqo": 0.05594884,
+        "nitro": null,
+        "snopt": 0.05594884
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer6c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.01638742,
+      "solvers": {
+        "loqo": 0.01638742,
+        "nitro": 0.01638742,
+        "snopt": 0.01638742
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer6e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.000223955,
+      "solvers": {
+        "loqo": 0.000223955,
+        "nitro": 0.000223955,
+        "snopt": 0.000223955
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer7a": {
+      "m": 0,
+      "markers": "(IL) (IL) (IL)",
+      "n": 6,
+      "status": "hard"
+    },
+    "palmer7c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.6019857,
+      "solvers": {
+        "loqo": 0.6019857,
+        "nitro": null,
+        "snopt": 0.6019857
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer7e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 10.1539,
+      "solvers": {
+        "loqo": 10.1539,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer8a": {
+      "m": 0,
+      "n": 6,
+      "ref_obj": 0.0740097,
+      "solvers": {
+        "loqo": 0.0740097,
+        "nitro": null,
+        "snopt": 0.0740097
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer8c": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.1597681,
+      "solvers": {
+        "loqo": 0.1597681,
+        "nitro": 0.1597681,
+        "snopt": 0.1597681
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "palmer8e": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": 0.006339307,
+      "solvers": {
+        "loqo": 0.006339307,
+        "nitro": null,
+        "snopt": 0.006339307
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "penalty1": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 0.009686175,
+      "solvers": {
+        "loqo": 0.009686175,
+        "nitro": 0.009686191,
+        "snopt": 0.009686275
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "penalty2": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 97096.08,
+      "solvers": {
+        "loqo": 97096.08,
+        "nitro": 97096.08,
+        "snopt": 97096.08
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pentagon": {
+      "m": 12,
+      "n": 6,
+      "ref_obj": 0.0001365217,
+      "solvers": {
+        "loqo": 0.0001365217,
+        "nitro": 0.0001378273,
+        "snopt": 0.0001365218
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pentdi": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": -0.75,
+      "solvers": {
+        "loqo": -0.75,
+        "nitro": -0.7450021,
+        "snopt": -0.75
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "pfit1": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.128807e-22,
+      "solvers": {
+        "loqo": 1.128807e-22,
+        "nitro": 5.314327e-07,
+        "snopt": 4.868916e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit1ls": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.128807e-22,
+      "solvers": {
+        "loqo": 1.128807e-22,
+        "nitro": 5.314327e-07,
+        "snopt": 4.868916e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit2": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.079845e-20,
+      "solvers": {
+        "loqo": 1.079845e-20,
+        "nitro": null,
+        "snopt": 4.176697e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit2ls": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.079845e-20,
+      "solvers": {
+        "loqo": 1.079845e-20,
+        "nitro": null,
+        "snopt": 4.176697e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit3": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 2.40581e-22,
+      "solvers": {
+        "loqo": 2.40581e-22,
+        "nitro": 2.147884e-09,
+        "snopt": 2.37191e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit3ls": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 2.40581e-22,
+      "solvers": {
+        "loqo": 2.40581e-22,
+        "nitro": 2.147884e-09,
+        "snopt": 2.37191e-17
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit4": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.672852e-20,
+      "solvers": {
+        "loqo": 1.672852e-20,
+        "nitro": null,
+        "snopt": 2.096587e-19
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pfit4ls": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.672852e-20,
+      "solvers": {
+        "loqo": 1.672852e-20,
+        "nitro": null,
+        "snopt": 2.096587e-19
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "polak1": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 2.718282,
+      "solvers": {
+        "loqo": 2.718282,
+        "nitro": 2.718284,
+        "snopt": 2.718282
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "polak2": {
+      "m": 2,
+      "n": 11,
+      "ref_obj": 54.59815,
+      "solvers": {
+        "loqo": 54.59815,
+        "nitro": 54.59815,
+        "snopt": 54.59815
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "polak3": {
+      "m": 10,
+      "n": 12,
+      "ref_obj": 5.933003,
+      "solvers": {
+        "loqo": 5.933003,
+        "nitro": 5.933004,
+        "snopt": 5.933003
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "polak4": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 2.285833e-13,
+      "solvers": {
+        "loqo": 2.285833e-13,
+        "nitro": 3.840014e-06,
+        "snopt": -1.180822e-08
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "polak5": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 50.0,
+      "solvers": {
+        "loqo": 50.0,
+        "nitro": 50.0,
+        "snopt": 50.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "polak6": {
+      "m": 4,
+      "n": 5,
+      "ref_obj": -44.0,
+      "solvers": {
+        "loqo": -44.0,
+        "nitro": -44.0,
+        "snopt": -44.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "porous1": {
+      "m": 0,
+      "n": 4900,
+      "ref_obj": 7.815033e-13,
+      "solvers": {
+        "loqo": 7.815033e-13,
+        "nitro": 1.606012e-15,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "porous2": {
+      "m": 0,
+      "n": 4900,
+      "ref_obj": 2.162161e-20,
+      "solvers": {
+        "loqo": 2.162161e-20,
+        "nitro": 2.385093e-17,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "portfl1": {
+      "m": 1,
+      "n": 12,
+      "ref_obj": 0.02048628,
+      "solvers": {
+        "loqo": 0.02048628,
+        "nitro": 0.02048788,
+        "snopt": 0.02048627
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "portfl2": {
+      "m": 1,
+      "n": 12,
+      "ref_obj": 0.02968924,
+      "solvers": {
+        "loqo": 0.02968924,
+        "nitro": 0.02969125,
+        "snopt": 0.02968924
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "portfl3": {
+      "m": 1,
+      "n": 12,
+      "ref_obj": 0.03274971,
+      "solvers": {
+        "loqo": 0.03274971,
+        "nitro": 0.03275127,
+        "snopt": 0.03274971
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "portfl4": {
+      "m": 1,
+      "n": 12,
+      "ref_obj": 0.02630696,
+      "solvers": {
+        "loqo": 0.02630696,
+        "nitro": 0.02630854,
+        "snopt": 0.02630695
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "portfl6": {
+      "m": 1,
+      "n": 12,
+      "ref_obj": 0.0257918,
+      "solvers": {
+        "loqo": 0.0257918,
+        "nitro": 0.02579342,
+        "snopt": 0.0257918
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "powell20": {
+      "m": 1000,
+      "n": 1000,
+      "ref_obj": 52145780.0,
+      "solvers": {
+        "loqo": 52145780.0,
+        "nitro": 52145640.0,
+        "snopt": 52145780.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "powellbs": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 2.151572e-17,
+      "solvers": {
+        "loqo": 2.151572e-17,
+        "nitro": 4.487135e-06,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "powellsq": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 8.56188e-17,
+      "solvers": {
+        "loqo": 8.56188e-17,
+        "nitro": 7.691456e-16,
+        "snopt": 1.615581e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "power": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 7.250221e-20,
+      "solvers": {
+        "loqo": 7.250221e-20,
+        "nitro": 4.015392e-15,
+        "snopt": 2.573182e-16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "probpenl": {
+      "m": 0,
+      "n": 500,
+      "ref_obj": -1.390891e-05,
+      "solvers": {
+        "loqo": -1.390891e-05,
+        "nitro": 3.991984e-07,
+        "snopt": 3.991984e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "prodpl0": {
+      "m": 29,
+      "n": 60,
+      "ref_obj": 60.91924,
+      "solvers": {
+        "loqo": 60.91924,
+        "nitro": 60.91949,
+        "snopt": 60.91924
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "prodpl1": {
+      "m": 29,
+      "n": 60,
+      "ref_obj": 53.03702,
+      "solvers": {
+        "loqo": 53.03702,
+        "nitro": 53.03727,
+        "snopt": 53.03702
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pspdoc": {
+      "m": 0,
+      "n": 4,
+      "ref_obj": 2.414214,
+      "solvers": {
+        "loqo": 2.414214,
+        "nitro": 2.414215,
+        "snopt": 2.414214
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "pt": {
+      "m": 501,
+      "n": 2,
+      "ref_obj": 0.1783942,
+      "solvers": {
+        "loqo": 0.1783942,
+        "nitro": 0.1783949,
+        "snopt": 0.1783942
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qpcboei1": {
+      "m": 288,
+      "n": 372,
+      "ref_obj": 14433870.0,
+      "solvers": {
+        "loqo": 14433870.0,
+        "nitro": 14433870.0,
+        "snopt": 14433870.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qpcboei2": {
+      "m": 125,
+      "n": 143,
+      "ref_obj": 8293666.0,
+      "solvers": {
+        "loqo": 8293666.0,
+        "nitro": null,
+        "snopt": 8293666.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qpcstair": {
+      "m": 356,
+      "n": 385,
+      "ref_obj": 6204391.0,
+      "solvers": {
+        "loqo": 6204391.0,
+        "nitro": 6204392.0,
+        "snopt": 6204392.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qpnboei1": {
+      "m": 288,
+      "n": 372,
+      "ref_obj": 8514858.0,
+      "solvers": {
+        "loqo": null,
+        "nitro": 8514858.0,
+        "snopt": 8461184.0
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "qpnboei2": {
+      "m": 125,
+      "n": 143,
+      "ref_obj": 1271826.0,
+      "solvers": {
+        "loqo": 1271826.0,
+        "nitro": 1271824.0,
+        "snopt": 1271826.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qpnstair": {
+      "m": 356,
+      "n": 385,
+      "ref_obj": 5146033.0,
+      "solvers": {
+        "loqo": 5146033.0,
+        "nitro": 5146036.0,
+        "snopt": 5146033.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qr3d": {
+      "status": "untabulated"
+    },
+    "qr3dbd": {
+      "status": "untabulated"
+    },
+    "qr3dls": {
+      "m": 0,
+      "n": 155,
+      "ref_obj": 9.517934e-21,
+      "solvers": {
+        "loqo": 9.517934e-21,
+        "nitro": 1.061916e-12,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qrtquad": {
+      "m": 0,
+      "n": 120,
+      "ref_obj": -3648088.0,
+      "solvers": {
+        "loqo": -3648088.0,
+        "nitro": -3648088.0,
+        "snopt": -3648088.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "quartc": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 2.406057e-18,
+      "solvers": {
+        "loqo": 2.406057e-18,
+        "nitro": 3.689021e-05,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "qudlin": {
+      "m": 0,
+      "n": 12,
+      "ref_obj": -7200.0,
+      "solvers": {
+        "loqo": -7200.0,
+        "nitro": -7200.0,
+        "snopt": -7200.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "reading1": {
+      "m": 5000,
+      "n": 10001,
+      "ref_obj": -0.1604803,
+      "solvers": {
+        "loqo": -0.1604803,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "reading2": {
+      "m": 10000,
+      "n": 15001,
+      "ref_obj": -0.01258248,
+      "solvers": {
+        "loqo": -0.01258248,
+        "nitro": null,
+        "snopt": -0.00814091
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "reading3": {
+      "m": 102,
+      "n": 202,
+      "ref_obj": -4.509156e-13,
+      "solvers": {
+        "loqo": -4.509156e-13,
+        "nitro": -4.82505e-07,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "recipe": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 2.419923e-09,
+      "solvers": {
+        "loqo": 2.419923e-09,
+        "nitro": 7.066037e-09,
+        "snopt": 1.744585e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "res": {
+      "m": 2,
+      "n": 18,
+      "ref_obj": 9.510216e-09,
+      "solvers": {
+        "loqo": 9.510216e-09,
+        "nitro": 1.27964e-06,
+        "snopt": 1.717753e-28
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "rk23": {
+      "m": 11,
+      "n": 17,
+      "ref_obj": 0.08333333,
+      "solvers": {
+        "loqo": 0.08333333,
+        "nitro": 0.08333973,
+        "snopt": 0.08333333
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "robot": {
+      "m": 2,
+      "n": 7,
+      "ref_obj": 6.593299,
+      "solvers": {
+        "loqo": 6.593299,
+        "nitro": 6.593299,
+        "snopt": 38.49053
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "rosenbr": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 4.6237e-20,
+      "solvers": {
+        "loqo": 4.6237e-20,
+        "nitro": 5.371382e-21,
+        "snopt": 2.230406e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "rosenmmx": {
+      "m": 4,
+      "n": 5,
+      "ref_obj": -44.00001,
+      "solvers": {
+        "loqo": -44.00001,
+        "nitro": -44.0,
+        "snopt": -44.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "s332": {
+      "m": 1,
+      "markers": "ERROR ERROR (IL)",
+      "n": 2,
+      "status": "hard"
+    },
+    "s365mod": {
+      "m": 5,
+      "n": 7,
+      "ref_obj": 52.18908,
+      "solvers": {
+        "loqo": 52.18908,
+        "nitro": 124.2388,
+        "snopt": 52.1399
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "s368": {
+      "m": 0,
+      "n": 8,
+      "ref_obj": -2.842171e-14,
+      "solvers": {
+        "loqo": -2.842171e-14,
+        "nitro": 0.0,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sawpath": {
+      "m": 782,
+      "n": 589,
+      "ref_obj": 181.573,
+      "solvers": {
+        "loqo": 181.573,
+        "nitro": 181.5899,
+        "snopt": 181.573
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "scon1dls": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 4.615502e-20,
+      "solvers": {
+        "loqo": 4.615502e-20,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "scosine": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -9999.0,
+      "solvers": {
+        "loqo": -9999.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "scurly10": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -1003163.0,
+      "solvers": {
+        "loqo": -1003163.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "scurly20": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -1003163.0,
+      "solvers": {
+        "loqo": -1003163.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "scurly30": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": -1003163.0,
+      "solvers": {
+        "loqo": -1003163.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "semicon1": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 4.615502e-20,
+      "solvers": {
+        "loqo": 4.615502e-20,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "semicon2": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": 1.490633e-16,
+      "solvers": {
+        "loqo": 1.490633e-16,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sensors": {
+      "m": 0,
+      "n": 1000,
+      "ref_obj": -201986.2,
+      "solvers": {
+        "loqo": -201986.2,
+        "nitro": null,
+        "snopt": -210632.9
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "sim2bqp": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 6.309541e-09,
+      "solvers": {
+        "loqo": 6.309541e-09,
+        "nitro": 1.280151e-06,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "simbqp": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 2.068606e-09,
+      "solvers": {
+        "loqo": 2.068606e-09,
+        "nitro": 1.280141e-06,
+        "snopt": 9.62965e-34
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "simpllpa": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 1.0,
+      "solvers": {
+        "loqo": 1.0,
+        "nitro": 1.000003,
+        "snopt": 1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "simpllpb": {
+      "m": 3,
+      "n": 2,
+      "ref_obj": 1.1,
+      "solvers": {
+        "loqo": 1.1,
+        "nitro": 1.100003,
+        "snopt": 1.1
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sineali": {
+      "m": 0,
+      "n": 20,
+      "ref_obj": -1900.962,
+      "solvers": {
+        "loqo": -1900.962,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sineval": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 4.986912e-18,
+      "solvers": {
+        "loqo": 4.986912e-18,
+        "nitro": 1.498352e-16,
+        "snopt": 3.527634e-19
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sinquad": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 6.16546e-12,
+      "solvers": {
+        "loqo": 6.16546e-12,
+        "nitro": 2.219531e-06,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sinrosnb": {
+      "m": 999,
+      "n": 1000,
+      "ref_obj": -99901.0,
+      "solvers": {
+        "loqo": -99901.0,
+        "nitro": null,
+        "snopt": -99901.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sipow1": {
+      "m": 10000,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": null,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sipow1m": {
+      "m": 10000,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": null,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sipow2": {
+      "m": 5000,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -0.999999,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sipow2m": {
+      "m": 5000,
+      "n": 2,
+      "ref_obj": -1.0,
+      "solvers": {
+        "loqo": -1.0,
+        "nitro": -1.0,
+        "snopt": -1.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sipow3": {
+      "m": 9998,
+      "n": 4,
+      "ref_obj": 0.5356508,
+      "solvers": {
+        "loqo": 0.5356508,
+        "nitro": null,
+        "snopt": 0.5356496
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sipow4": {
+      "m": 10000,
+      "n": 4,
+      "ref_obj": 0.2728283,
+      "solvers": {
+        "loqo": 0.2728283,
+        "nitro": null,
+        "snopt": 0.2728266
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sisser": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": 8.706233e-10,
+      "solvers": {
+        "loqo": 8.706233e-10,
+        "nitro": 1.018813e-08,
+        "snopt": 2.688361e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "smbank": {
+      "m": 64,
+      "n": 117,
+      "ref_obj": -7129292.0,
+      "solvers": {
+        "loqo": -7129292.0,
+        "nitro": -7129292.0,
+        "snopt": -7129292.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "smmpsf": {
+      "m": 263,
+      "n": 720,
+      "ref_obj": 1046985.0,
+      "solvers": {
+        "loqo": 1046985.0,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "snake": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -3.633797e-09,
+      "solvers": {
+        "loqo": -3.633797e-09,
+        "nitro": null,
+        "snopt": 0.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sosqp1": {
+      "status": "untabulated"
+    },
+    "sosqp2": {
+      "m": 10001,
+      "n": 20000,
+      "ref_obj": -4998.7,
+      "solvers": {
+        "loqo": -4998.7,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "spanhyd": {
+      "m": 32,
+      "n": 72,
+      "ref_obj": 239.738,
+      "solvers": {
+        "loqo": 239.738,
+        "nitro": null,
+        "snopt": 239.738
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "spiral": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": -2.192938e-08,
+      "solvers": {
+        "loqo": -2.192938e-08,
+        "nitro": null,
+        "snopt": -1.596845e-10
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sreadin3": {
+      "m": 5000,
+      "n": 10000,
+      "ref_obj": -7.308257e-05,
+      "solvers": {
+        "loqo": -7.308257e-05,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "srosenbr": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 1.379055e-21,
+      "solvers": {
+        "loqo": 1.379055e-21,
+        "nitro": 8.593491e-09,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "sseblin": {
+      "m": 72,
+      "n": 192,
+      "ref_obj": 16170600.0,
+      "solvers": {
+        "loqo": 16170600.0,
+        "nitro": 16170600.0,
+        "snopt": 16170600.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ssebnln": {
+      "m": 96,
+      "n": 192,
+      "ref_obj": 16170600.0,
+      "solvers": {
+        "loqo": 16170600.0,
+        "nitro": null,
+        "snopt": 16170600.0
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ssnlbeam": {
+      "m": 20,
+      "n": 31,
+      "ref_obj": 337.7725,
+      "solvers": {
+        "loqo": 337.7725,
+        "nitro": 337.7726,
+        "snopt": 341.8772
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "stancmin": {
+      "m": 2,
+      "n": 3,
+      "ref_obj": 4.25,
+      "solvers": {
+        "loqo": 4.25,
+        "nitro": 4.250004,
+        "snopt": 4.25
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "static3": {
+      "m": 96,
+      "markers": "(IL) (P/D I)",
+      "n": 434,
+      "status": "infeasible"
+    },
+    "steenbra": {
+      "m": 108,
+      "n": 432,
+      "ref_obj": 16957.67,
+      "solvers": {
+        "loqo": 16957.67,
+        "nitro": 16957.68,
+        "snopt": 16957.67
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "steenbrb": {
+      "m": 108,
+      "n": 468,
+      "ref_obj": 9075.855,
+      "solvers": {
+        "loqo": 9075.855,
+        "nitro": null,
+        "snopt": 9075.855
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "steenbrc": {
+      "m": 126,
+      "n": 540,
+      "ref_obj": 18274.72,
+      "solvers": {
+        "loqo": null,
+        "nitro": null,
+        "snopt": 18274.72
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "steenbrd": {
+      "m": 108,
+      "n": 468,
+      "ref_obj": 9030.082,
+      "solvers": {
+        "loqo": 9030.082,
+        "nitro": 9030.085,
+        "snopt": 9030.082
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "steenbre": {
+      "m": 126,
+      "n": 540,
+      "ref_obj": 27459.16,
+      "solvers": {
+        "loqo": 27459.16,
+        "nitro": null,
+        "snopt": 27459.16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "steenbrf": {
+      "m": 108,
+      "n": 468,
+      "ref_obj": 282.7578,
+      "solvers": {
+        "loqo": null,
+        "nitro": 282.7578,
+        "snopt": 319.0946
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "steenbrg": {
+      "m": 126,
+      "n": 540,
+      "ref_obj": 27420.93,
+      "solvers": {
+        "loqo": 27420.93,
+        "nitro": null,
+        "snopt": 28393.78
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "supersim": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 0.6666667,
+      "solvers": {
+        "loqo": 0.6666667,
+        "nitro": 0.6666667,
+        "snopt": 0.6666667
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "svanberg": {
+      "m": 5000,
+      "n": 5000,
+      "ref_obj": 8361.423,
+      "solvers": {
+        "loqo": 8361.423,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "swopf": {
+      "m": 91,
+      "n": 82,
+      "ref_obj": 0.06786018,
+      "solvers": {
+        "loqo": 0.06786018,
+        "nitro": 0.06786403,
+        "snopt": 0.06786018
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "synthes1": {
+      "m": 6,
+      "n": 6,
+      "ref_obj": 0.7592844,
+      "solvers": {
+        "loqo": 0.7592844,
+        "nitro": 0.7592908,
+        "snopt": 0.7592844
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "tame": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 0.0,
+      "solvers": {
+        "loqo": 0.0,
+        "nitro": 0.0,
+        "snopt": 1e-16
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "tfi2": {
+      "m": 10000,
+      "n": 3,
+      "ref_obj": 0.6490421,
+      "solvers": {
+        "loqo": 0.6490421,
+        "nitro": null,
+        "snopt": 0.6490285
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "tointqor": {
+      "m": 0,
+      "n": 50,
+      "ref_obj": 1175.472,
+      "solvers": {
+        "loqo": 1175.472,
+        "nitro": 1175.472,
+        "snopt": 1175.472
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "trainf": {
+      "m": 10002,
+      "n": 20000,
+      "ref_obj": 3.103384,
+      "solvers": {
+        "loqo": 3.103384,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "trainh": {
+      "m": 10002,
+      "n": 20000,
+      "ref_obj": 12.36996,
+      "solvers": {
+        "loqo": 12.36996,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "tridia": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 9.993144e-19,
+      "solvers": {
+        "loqo": 9.993144e-19,
+        "nitro": 5.235093e-13,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "trimloss": {
+      "m": 72,
+      "n": 142,
+      "ref_obj": 9.06,
+      "solvers": {
+        "loqo": 9.06,
+        "nitro": 9.060136,
+        "snopt": 9.06
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "try-b": {
+      "m": 1,
+      "n": 2,
+      "ref_obj": 5.326753e-22,
+      "solvers": {
+        "loqo": 5.326753e-22,
+        "nitro": 4.096086e-13,
+        "snopt": 1.000003
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "twirism1": {
+      "m": 313,
+      "n": 343,
+      "ref_obj": -1.006758,
+      "solvers": {
+        "loqo": -1.006758,
+        "nitro": null,
+        "snopt": -1.006834
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "twobars": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 1.508652,
+      "solvers": {
+        "loqo": 1.508652,
+        "nitro": 1.508654,
+        "snopt": 1.508652
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ubh1": {
+      "m": 12000,
+      "n": 17997,
+      "ref_obj": 1.116001,
+      "solvers": {
+        "loqo": 1.116001,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "ubh5": {
+      "m": 14000,
+      "n": 19997,
+      "ref_obj": 1.116001,
+      "solvers": {
+        "loqo": 1.116001,
+        "nitro": null,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "vanderm1": {
+      "m": 99,
+      "n": 100,
+      "ref_obj": 5.60553e-14,
+      "solvers": {
+        "loqo": 5.60553e-14,
+        "nitro": 8.343746e-08,
+        "snopt": 1.612609e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "vanderm2": {
+      "m": 99,
+      "n": 100,
+      "ref_obj": 5.60553e-14,
+      "solvers": {
+        "loqo": 5.60553e-14,
+        "nitro": 8.350231e-08,
+        "snopt": 5.975677e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "vanderm3": {
+      "m": 99,
+      "n": 100,
+      "ref_obj": 2.21149e-14,
+      "solvers": {
+        "loqo": 2.21149e-14,
+        "nitro": 1.004593e-07,
+        "snopt": 5.732745e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "vanderm4": {
+      "m": 8,
+      "n": 9,
+      "ref_obj": 3.787218e-12,
+      "solvers": {
+        "loqo": 3.787218e-12,
+        "nitro": 8.368316e-08,
+        "snopt": 4.216892e-09
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "vardim": {
+      "m": 0,
+      "n": 100,
+      "ref_obj": 1.071671e-20,
+      "solvers": {
+        "loqo": 1.071671e-20,
+        "nitro": 2.068144e-25,
+        "snopt": 2.618752e-11
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "watson": {
+      "m": 0,
+      "n": 31,
+      "ref_obj": 9.158552e-13,
+      "solvers": {
+        "loqo": 9.158552e-13,
+        "nitro": 1.135134e-08,
+        "snopt": 2.591724e-07
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "womflet": {
+      "m": 3,
+      "n": 3,
+      "ref_obj": 6.05,
+      "solvers": {
+        "loqo": 6.05,
+        "nitro": 3.84e-06,
+        "snopt": -4.77049e-18
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "woods": {
+      "m": 0,
+      "n": 10000,
+      "ref_obj": 4.473711e-22,
+      "solvers": {
+        "loqo": 4.473711e-22,
+        "nitro": 1.32485e-14,
+        "snopt": null
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "yao": {
+      "m": 1999,
+      "n": 2000,
+      "ref_obj": 197.7046,
+      "solvers": {
+        "loqo": 197.7046,
+        "nitro": 186.9451,
+        "snopt": 273.1285
+      },
+      "solvers_agree": false,
+      "status": "optimum"
+    },
+    "yfit": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 6.669721e-13,
+      "solvers": {
+        "loqo": 6.669721e-13,
+        "nitro": 2.196974e-10,
+        "snopt": 6.669721e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "yfitu": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 6.669721e-13,
+      "solvers": {
+        "loqo": 6.669721e-13,
+        "nitro": 1.407123e-12,
+        "snopt": 6.669721e-13
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zangwil2": {
+      "m": 0,
+      "n": 2,
+      "ref_obj": -18.2,
+      "solvers": {
+        "loqo": -18.2,
+        "nitro": -18.2,
+        "snopt": -18.2
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zangwil3": {
+      "m": 0,
+      "n": 3,
+      "ref_obj": 1.140915e-15,
+      "solvers": {
+        "loqo": 1.140915e-15,
+        "nitro": 1.388395e-28,
+        "snopt": 5.993305e-15
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zecevic2": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": -4.125,
+      "solvers": {
+        "loqo": -4.125,
+        "nitro": -4.124999,
+        "snopt": -4.125
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zecevic3": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 97.30945,
+      "solvers": {
+        "loqo": 97.30945,
+        "nitro": null,
+        "snopt": 97.30945
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zecevic4": {
+      "m": 2,
+      "n": 2,
+      "ref_obj": 7.557508,
+      "solvers": {
+        "loqo": 7.557508,
+        "nitro": 7.557509,
+        "snopt": 7.557508
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zigzag": {
+      "m": 50,
+      "n": 58,
+      "ref_obj": 3.161735,
+      "solvers": {
+        "loqo": 3.161735,
+        "nitro": 3.161749,
+        "snopt": 3.161735
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    },
+    "zy2": {
+      "m": 1,
+      "n": 3,
+      "ref_obj": 2.0,
+      "solvers": {
+        "loqo": 2.0,
+        "nitro": 2.000004,
+        "snopt": 2.000011
+      },
+      "solvers_agree": true,
+      "status": "optimum"
+    }
+  }
+}
