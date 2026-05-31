@@ -141,3 +141,57 @@ fn large_batch_parallel_path() {
         }
     }
 }
+
+// --- QpFactorization: build-once / solve-many across instances ---
+
+use pounce_convex::QpFactorization;
+
+#[test]
+fn factorization_handle_matches_one_shot() {
+    // Fixed structure (P = 2I, 0 ≤ x ≤ 1), many objectives; the handle's
+    // reused symbolic factor must give the same answers as one-shot solves.
+    let base = boxed_qp(vec![0.0, 0.0]);
+    let opts = QpOptions::default();
+    let mut handle = QpFactorization::build(&base, &opts, backend).expect("build");
+
+    for c in [
+        vec![-1.0, -4.0],
+        vec![-4.0, 1.0],
+        vec![3.0, -2.0],
+        vec![0.0, 0.0],
+        vec![-2.0, -2.0],
+    ] {
+        let prob = boxed_qp(c.clone());
+        let reused = handle.solve(&prob);
+        let one_shot = solve_qp_ipm(&prob, &opts, backend);
+        assert_eq!(reused.status, QpStatus::Optimal, "c={c:?}");
+        for j in 0..base.n {
+            assert!(
+                (reused.x[j] - one_shot.x[j]).abs() < 1e-9,
+                "c={c:?} x[{j}] reused {} vs one-shot {}",
+                reused.x[j],
+                one_shot.x[j]
+            );
+            // Bound duals must match too.
+            assert!((reused.z_lb[j] - one_shot.z_lb[j]).abs() < 1e-6);
+            assert!((reused.z_ub[j] - one_shot.z_ub[j]).abs() < 1e-6);
+        }
+        assert!((reused.obj - one_shot.obj).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn factorization_handle_rejects_pattern_mismatch() {
+    // Built on a 2-var box QP; solving a 3-var problem must not silently
+    // reuse the wrong factor — it returns NumericalFailure.
+    let base = boxed_qp(vec![0.0, 0.0]);
+    let mut handle = QpFactorization::build(&base, &QpOptions::default(), backend).expect("build");
+
+    let mismatched = boxed_qp(vec![0.0, 0.0, 0.0]); // n = 3
+    let sol = handle.solve(&mismatched);
+    assert_eq!(sol.status, QpStatus::NumericalFailure);
+
+    // A matching-structure problem still solves fine afterward.
+    let ok = handle.solve(&boxed_qp(vec![-1.0, -1.0]));
+    assert_eq!(ok.status, QpStatus::Optimal);
+}

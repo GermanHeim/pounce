@@ -51,9 +51,12 @@ use rayon::prelude::*;
 /// does that internally). For many small QPs where cross-instance
 /// parallelism wins, use [`solve_qp_batch_parallel`].
 ///
-/// The problems are independent — there is no cross-instance warm-start
-/// (each is solved cold). Sharing the *symbolic* factor across instances
-/// with identical sparsity is a further optimization tracked separately.
+/// The problems are independent — each is solved cold. When the
+/// instances share a *fixed structure* (same `A`/`G`/`P` sparsity and the
+/// same set of finite bounds, varying only `c`/`b`/`h`/bound values),
+/// [`QpFactorization`](crate::QpFactorization) builds the KKT symbolic
+/// factor once and reuses it across solves, avoiding repeated AMD
+/// ordering / symbolic analysis.
 pub fn solve_qp_batch<F>(
     probs: &[QpProblem],
     opts: &QpOptions,

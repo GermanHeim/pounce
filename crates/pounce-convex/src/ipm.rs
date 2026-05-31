@@ -102,17 +102,20 @@ where
     if !prob.has_bounds() {
         return solve_qp_core(prob, opts, make_backend);
     }
+    let (expanded, bound_rows) = expand_bounds(prob);
+    let sol = solve_qp_core(&expanded, opts, make_backend);
+    split_bound_duals(prob, &bound_rows, sol)
+}
 
-    // Expand finite bounds into extra G rows appended after the existing
-    // inequalities: `x_i ≤ ub_i` and `-x_i ≤ -lb_i`. Remember each new
-    // row's variable and side so the dual can be attributed back.
-    let n = prob.n;
-    let base_m = prob.m_ineq();
+/// Expand a problem's finite variable bounds into extra `G` rows
+/// (`x_i ≤ ub_i` and `−x_i ≤ −lb_i`), returning the bounds-free expanded
+/// problem and the `(row, var, is_upper)` provenance of each appended row
+/// so the bound multipliers can be split back out.
+fn expand_bounds(prob: &QpProblem) -> (QpProblem, Vec<(usize, usize, bool)>) {
     let mut g = prob.g.clone();
     let mut h = prob.h.clone();
-    // (row_index, var, is_upper)
     let mut bound_rows: Vec<(usize, usize, bool)> = Vec::new();
-    for i in 0..n {
+    for i in 0..prob.n {
         let ub = prob.ub_of(i);
         if ub < crate::qp::BOUND_INF {
             let r = h.len();
@@ -128,9 +131,8 @@ where
             bound_rows.push((r, i, false));
         }
     }
-
     let expanded = QpProblem {
-        n,
+        n: prob.n,
         p_lower: prob.p_lower.clone(),
         c: prob.c.clone(),
         a: prob.a.clone(),
@@ -140,16 +142,22 @@ where
         lb: Vec::new(),
         ub: Vec::new(),
     };
+    (expanded, bound_rows)
+}
 
-    let mut sol = solve_qp_core(&expanded, opts, make_backend);
-
-    // Split duals: keep the original inequality multipliers, attribute
-    // the appended bound-row multipliers to z_lb / z_ub.
+/// Move the appended bound rows' multipliers from the expanded solution's
+/// `z` into `z_lb`/`z_ub`, and trim `z` back to the original rows.
+fn split_bound_duals(
+    prob: &QpProblem,
+    bound_rows: &[(usize, usize, bool)],
+    mut sol: QpSolution,
+) -> QpSolution {
+    let base_m = prob.m_ineq();
     let mut z = vec![0.0; base_m];
     z.copy_from_slice(&sol.z[..base_m]);
-    let mut z_lb = vec![0.0; n];
-    let mut z_ub = vec![0.0; n];
-    for &(r, var, is_upper) in &bound_rows {
+    let mut z_lb = vec![0.0; prob.n];
+    let mut z_ub = vec![0.0; prob.n];
+    for &(r, var, is_upper) in bound_rows {
         if is_upper {
             z_ub[var] = sol.z[r];
         } else {
@@ -168,57 +176,95 @@ fn solve_qp_core<F>(prob: &QpProblem, opts: &QpOptions, mut make_backend: F) -> 
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // Build the fixed KKT pattern and an initial factorization, then run
+    // the iteration. The pattern is constant across iterations (only the
+    // (z,z) scaling diagonal changes), so the loop `refactor`s rather than
+    // re-analyzing. Build-once / solve-many across *instances* with the
+    // same pattern is exposed via [`QpFactorization`].
+    let (kkt, mut fact) = match build_factorization(prob, opts, &mut make_backend) {
+        Ok(pair) => pair,
+        Err(()) => {
+            let n = prob.n;
+            return failed_solution(
+                prob,
+                vec![0.0; n],
+                vec![0.0; prob.m_eq()],
+                vec![1.0; prob.m_ineq()],
+                0,
+            );
+        }
+    };
+    run_ipm(prob, opts, &kkt, &mut fact)
+}
+
+/// Build the constant KKT pattern for `prob` and a `Factorization` over
+/// it (seeded with the initial scaling). Shared by the single-shot path
+/// and the reusable [`QpFactorization`] handle. `Err(())` ⇒ the initial
+/// factorization failed.
+fn build_factorization<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    make_backend: &mut F,
+) -> Result<(KktStructure, Factorization), ()>
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let dim = prob.n + prob.m_eq() + prob.m_ineq();
+    let cone = NonnegCone::new(prob.m_ineq());
+    // Initial interior scaling (s = z = 1 ⇒ S⊘Z = 1).
+    let mut scaling = vec![0.0; prob.m_ineq()];
+    let s0 = vec![1.0; prob.m_ineq()];
+    cone.scaling_diag(&s0, &s0, &mut scaling);
+
+    let kkt = KktStructure::build(prob, opts.reg);
+    let mut kkt_vals = kkt.values.clone();
+    kkt.update_scaling(&scaling, opts.reg, &mut kkt_vals);
+    let fact = Factorization::new(
+        dim as Index,
+        kkt.airn.clone(),
+        kkt.ajcn.clone(),
+        kkt_vals,
+        make_backend(),
+    )
+    .map_err(|_| ())?;
+    Ok((kkt, fact))
+}
+
+/// Run the Mehrotra predictor-corrector iteration for `prob` given an
+/// already-built KKT pattern (`kkt`) and a live `Factorization` (`fact`)
+/// over that pattern. The factorization is re-numeric-factored each
+/// iteration (symbolic reuse); when `fact` is reused across instances
+/// with the *same pattern*, the AMD ordering / symbolic factor is reused
+/// across instances too.
+fn run_ipm(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    kkt: &KktStructure,
+    fact: &mut Factorization,
+) -> QpSolution {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
-    let dim = n + m_eq + m_ineq;
-
     let cone = NonnegCone::new(m_ineq);
 
-    // Infeasible-start iterate: x = 0, y = 0, s = z = 1. Strictly
-    // interior for (s, z); primal/dual residuals are driven to zero.
     let mut x = vec![0.0; n];
     let mut y = vec![0.0; m_eq];
     let mut z = vec![1.0; m_ineq];
     let mut s = vec![1.0; m_ineq];
 
-    // Scratch.
     let mut r_d = vec![0.0; n];
     let mut r_p = vec![0.0; m_eq];
     let mut r_g = vec![0.0; m_ineq];
     let mut r_c = vec![0.0; m_ineq];
     let mut scaling = vec![0.0; m_ineq];
-    let mut rhs = vec![0.0; dim];
+    let mut rhs = vec![0.0; n + m_eq + m_ineq];
     let mut dx = vec![0.0; n];
     let mut dy = vec![0.0; m_eq];
     let mut dz = vec![0.0; m_ineq];
     let mut ds = vec![0.0; m_ineq];
     let mut ds_aff = vec![0.0; m_ineq];
     let mut dz_aff = vec![0.0; m_ineq];
-
-    // Build the fixed KKT pattern and the factorization *once*. The
-    // pattern never changes across iterations — only the (z,z) scaling
-    // diagonal — so each iteration recomputes O(m_ineq) values and
-    // `refactor`s (numeric-only, reusing the symbolic factor / ordering)
-    // instead of paying repeated symbolic analysis. This is what keeps
-    // the per-iteration cost tracking the sparse factor rather than
-    // blowing up on large sparse QPs.
-    let kkt = KktStructure::build(prob, opts.reg);
     let mut kkt_vals = kkt.values.clone();
-    cone.scaling_diag(&s, &z, &mut scaling);
-    kkt.update_scaling(&scaling, opts.reg, &mut kkt_vals);
-    let mut fact = match Factorization::new(
-        dim as Index,
-        kkt.airn.clone(),
-        kkt.ajcn.clone(),
-        kkt_vals.clone(),
-        make_backend(),
-    ) {
-        Ok(f) => f,
-        Err(_) => {
-            return failed_solution(prob, x, y, z, 0);
-        }
-    };
 
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
@@ -351,6 +397,83 @@ where
         z_ub: vec![0.0; nn],
         obj,
         iters,
+    }
+}
+
+/// A reusable convex-QP factorization: build the KKT symbolic factor
+/// (AMD ordering) **once** for a fixed problem *structure*, then solve
+/// many instances that share that structure, paying the symbolic
+/// analysis only on construction. This is the build-once / solve-many
+/// handle (cf. the JAX `JaxProblem` from pounce#75) at the convex-QP
+/// level.
+///
+/// "Same structure" means: same `n`, same `A`/`G`/`P` sparsity pattern,
+/// and the same *set* of finite variable bounds (so the bound-expanded
+/// KKT pattern is identical). Only the numeric data — `c`, `b`, `h`, and
+/// the bound *values* — may change between solves. A solve whose problem
+/// does not match the captured structure returns
+/// [`QpStatus::NumericalFailure`] rather than silently producing a wrong
+/// answer; use the one-shot [`solve_qp_ipm`] for heterogeneous problems.
+pub struct QpFactorization {
+    fact: Factorization,
+    opts: QpOptions,
+    /// Captured structure fingerprint for the per-solve compatibility
+    /// check (same `n` and same expanded KKT pattern).
+    n: usize,
+    airn: Vec<Index>,
+    ajcn: Vec<Index>,
+}
+
+impl QpFactorization {
+    /// Build the reusable factor from a representative `base` problem.
+    /// Returns `None` if the initial factorization fails (e.g. a
+    /// structurally singular KKT system).
+    pub fn build<F>(base: &QpProblem, opts: &QpOptions, mut make_backend: F) -> Option<Self>
+    where
+        F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+    {
+        let expanded = if base.has_bounds() {
+            expand_bounds(base).0
+        } else {
+            base.clone()
+        };
+        let (kkt, fact) = build_factorization(&expanded, opts, &mut make_backend).ok()?;
+        Some(QpFactorization {
+            airn: kkt.airn,
+            ajcn: kkt.ajcn,
+            n: base.n,
+            fact,
+            opts: *opts,
+        })
+    }
+
+    /// Solve `prob`, reusing the captured symbolic factor. `prob` must
+    /// share the captured structure (see the type docs); otherwise a
+    /// `NumericalFailure` solution is returned.
+    pub fn solve(&mut self, prob: &QpProblem) -> QpSolution {
+        let (expanded, bound_rows) = if prob.has_bounds() {
+            expand_bounds(prob)
+        } else {
+            (prob.clone(), Vec::new())
+        };
+        // Rebuild this instance's pattern and require it to match the
+        // captured one exactly (same nnz, same row/col indices).
+        let kkt = KktStructure::build(&expanded, self.opts.reg);
+        if prob.n != self.n || kkt.airn != self.airn || kkt.ajcn != self.ajcn {
+            return failed_solution(
+                prob,
+                vec![0.0; prob.n],
+                vec![0.0; prob.m_eq()],
+                vec![1.0; prob.m_ineq()],
+                0,
+            );
+        }
+        // Reuse the live factorization (it carries the symbolic analysis;
+        // `run_ipm` refactors numerically per iteration). The same factor
+        // object is reused across solves, so the AMD ordering / symbolic
+        // factor is paid once at `build`.
+        let sol = run_ipm(&expanded, &self.opts, &kkt, &mut self.fact);
+        split_bound_duals(prob, &bound_rows, sol)
     }
 }
 
