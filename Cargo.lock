@@ -1043,6 +1043,7 @@ dependencies = [
  "numpy",
  "pounce-algorithm",
  "pounce-common",
+ "pounce-convex",
  "pounce-feral",
  "pounce-linsol",
  "pounce-nl",
