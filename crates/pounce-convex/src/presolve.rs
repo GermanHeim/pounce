@@ -55,6 +55,14 @@
 //!   drop it (dual 0). If `min > h` the row can never hold →
 //!   **infeasible**. For each equality `a·x = b`, infeasible when `b`
 //!   lies outside `[min, max]`.
+//! - **Dominated columns**: a variable absent from `P` and the equalities
+//!   that appears in inequalities `Gx ≤ h` with sign-definite coefficients
+//!   matching its cost sign is optimal at a bound (pushing it there raises
+//!   neither the objective nor any row's activity), so it is fixed and
+//!   dropped. Its bound multiplier is its reduced cost `c_k + Σᵢ aᵢₖ zᵢ`,
+//!   which the sign conditions make nonnegative — a valid dual by
+//!   construction. (PaPILO's dominated-column reduction, restricted to the
+//!   clean sign-guaranteed case.)
 //! - **Forcing constraints**: when a row's activity range *touches* its
 //!   right-hand side it can hold only at one vertex of the box, pinning
 //!   every involved variable to a bound (inequality `g·x ≤ h` with
@@ -94,15 +102,20 @@
 //! forcing row is exactly a model-changing bound deduction whose dual
 //! re-attributes to the source row.
 //!
-//! Parallel-row detection (scalar multiples) generalizes the exact-
-//! duplicate pass and is implemented above.
+//! Parallel-row detection (scalar multiples) and **dominated columns**
+//! (a sign-definite column optimal at a bound, with a sign-guaranteed
+//! dual) are implemented above.
 //!
-//! Still deferred (each for a genuine dual-recovery reason): **standalone
-//! bound tightening** that replaces a variable's bound without pinning it
-//! (the active tightened bound's multiplier must be split between the
-//! variable and the source row in proportion to the binding — strictly
-//! more general than forcing); and **dominated columns** (fixing on a
-//! reduced-cost domination argument).
+//! Still deferred for a genuine dual-recovery reason: **standalone bound
+//! tightening** that replaces a variable's bound without pinning it. When
+//! such a tightened bound is active at the optimum, its multiplier must be
+//! re-attributed — split between the variable and the *source* row in
+//! proportion to the binding — which is strictly more general than the
+//! forcing case (where the whole row is consumed and the re-attribution is
+//! clean). Forcing already captures the dual-safe, model-changing slice of
+//! bound reasoning; the remaining standalone form needs PaPILO's
+//! provenance-tracking postsolve and is left out rather than shipped with
+//! a fragile dual.
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -172,6 +185,18 @@ enum Reduction {
         at_max: bool,
         /// Each pinned variable: `(col, coef, value, at_upper)`.
         cols: Vec<(usize, f64, f64, bool)>,
+    },
+    /// A **dominated column**: a variable absent from `P` and the
+    /// equalities, appearing in inequalities `Gx ≤ h` with sign-definite
+    /// coefficients that match the sign of its cost, so pushing it to one
+    /// bound never hurts the objective *or* feasibility — it is optimal
+    /// there. Fixed and dropped; its bound multiplier is its reduced cost,
+    /// which the sign conditions make valid by construction.
+    DominatedColumn {
+        col: usize,
+        value: f64,
+        /// Fixed at its upper bound? (else lower.)
+        at_upper: bool,
     },
 }
 
@@ -537,6 +562,61 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
                 &mut stack,
             ) {
                 eq_dropped[row] = true;
+            }
+        }
+    }
+
+    // --- dominated columns ---
+    // A variable absent from P and the equalities, present only in
+    // inequalities `Gx ≤ h`, whose live G-coefficients are sign-definite in
+    // a way that matches its cost sign, is optimal at a bound: pushing it
+    // there never raises the objective nor tightens a `≤` row, so an
+    // optimal solution with it at that bound always exists. Fix and drop
+    // it. Its bound multiplier is its reduced cost `c_k + Σᵢ aᵢₖ zᵢ`, which
+    // the sign conditions (`aᵢₖ ≥ 0, c_k ≥ 0` for the lower bound; mirror
+    // for the upper) make nonnegative — so the recovered dual is valid by
+    // construction. This is PaPILO's dominated-column reduction, restricted
+    // to the case with a clean, sign-guaranteed dual.
+    {
+        // Per-column G-coefficient sign summary over *live* inequality rows.
+        let mut g_all_nonneg = vec![true; n];
+        let mut g_all_nonpos = vec![true; n];
+        for t in &prob.g {
+            if t.val == ZERO_TOL || ineq_dropped[t.row] {
+                continue;
+            }
+            if t.val < 0.0 {
+                g_all_nonneg[t.col] = false;
+            } else if t.val > 0.0 {
+                g_all_nonpos[t.col] = false;
+            }
+        }
+        for col in 0..n {
+            if fixed[col].is_some()
+                || substituted[col]
+                || p_col_present[col]
+                || a_col_count[col] != 0
+                || g_col_count[col] == 0
+            {
+                continue;
+            }
+            let c_k = prob.c[col];
+            let lb = prob.lb_of(col);
+            let ub = prob.ub_of(col);
+            if g_all_nonneg[col] && c_k >= 0.0 && lb > -BOUND_INF {
+                fixed[col] = Some(lb);
+                stack.push(Reduction::DominatedColumn {
+                    col,
+                    value: lb,
+                    at_upper: false,
+                });
+            } else if g_all_nonpos[col] && c_k <= 0.0 && ub < BOUND_INF {
+                fixed[col] = Some(ub);
+                stack.push(Reduction::DominatedColumn {
+                    col,
+                    value: ub,
+                    at_upper: true,
+                });
             }
         }
     }
@@ -947,6 +1027,8 @@ pub struct PresolveStats {
     pub free_col_singletons: usize,
     /// Forcing rows: each pins all its variables to a bound and is dropped.
     pub forcing_rows: usize,
+    /// Dominated columns fixed to a bound and dropped.
+    pub dominated_cols: usize,
 }
 
 impl PresolveStats {
@@ -972,6 +1054,7 @@ impl Presolve {
                 Reduction::FreeColumnFixed { .. } => s.free_cols_fixed += 1,
                 Reduction::FreeColSingleton { .. } => s.free_col_singletons += 1,
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
+                Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
             }
         }
         s
@@ -1026,6 +1109,7 @@ impl Presolve {
                         x[col] = value;
                     }
                 }
+                Reduction::DominatedColumn { col, value, .. } => x[*col] = *value,
             }
         }
 
@@ -1134,6 +1218,20 @@ impl Presolve {
                     } else {
                         z_lb[col] = dcost.max(0.0);
                     }
+                }
+            }
+        }
+
+        // Dominated columns: the variable's bound multiplier is its full
+        // reduced cost `grad[col]` (= c_k + Σ aᵢₖ zᵢ, since it has no P/A
+        // terms), nonnegative by the sign conditions that triggered the
+        // reduction.
+        for r in &self.stack {
+            if let Reduction::DominatedColumn { col, at_upper, .. } = r {
+                if *at_upper {
+                    z_ub[*col] = (-grad[*col]).max(0.0);
+                } else {
+                    z_lb[*col] = grad[*col].max(0.0);
                 }
             }
         }

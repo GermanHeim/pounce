@@ -52,6 +52,45 @@ fn assert_kkt(prob: &QpProblem, sol: &pounce_convex::QpSolution, tol: f64) {
     }
 }
 
+/// Bound-aware KKT check (for reductions that leave a variable at an
+/// active box bound, e.g. dominated columns): stationarity carries the
+/// bound multipliers, `Px + c + Aᵀy + Gᵀz + z_ub − z_lb = 0`, and both the
+/// inequality and the bound complementarities must hold.
+fn assert_kkt_bounds(prob: &QpProblem, sol: &pounce_convex::QpSolution, tol: f64) {
+    let n = prob.n;
+    let mut g = prob.c.clone();
+    prob.p_mul(&sol.x, &mut g);
+    prob.at_mul(&sol.y, &mut g);
+    prob.gt_mul(&sol.z, &mut g);
+    for i in 0..n {
+        let stat = g[i] + sol.z_ub[i] - sol.z_lb[i];
+        assert!(stat.abs() < tol, "stationarity[{i}] = {stat}");
+        assert!(sol.z_lb[i] > -tol && sol.z_ub[i] > -tol, "bound dual sign [{i}]");
+        assert!(
+            sol.x[i] >= prob.lb_of(i) - tol && sol.x[i] <= prob.ub_of(i) + tol,
+            "box [{i}]: {} in [{}, {}]",
+            sol.x[i],
+            prob.lb_of(i),
+            prob.ub_of(i)
+        );
+        assert!((sol.z_lb[i] * (sol.x[i] - prob.lb_of(i))).abs() < 1e-4, "lb comp [{i}]");
+        assert!((sol.z_ub[i] * (prob.ub_of(i) - sol.x[i])).abs() < 1e-4, "ub comp [{i}]");
+    }
+    let mut ax = vec![0.0; prob.m_eq()];
+    prob.a_mul(&sol.x, &mut ax);
+    for (i, (&axi, &bi)) in ax.iter().zip(&prob.b).enumerate() {
+        assert!((axi - bi).abs() < tol, "Ax=b row {i}: {axi} vs {bi}");
+    }
+    let mut gx = vec![0.0; prob.m_ineq()];
+    prob.g_mul(&sol.x, &mut gx);
+    for i in 0..prob.m_ineq() {
+        let slack = prob.h[i] - gx[i];
+        assert!(slack > -tol, "Gx≤h row {i}: slack {slack}");
+        assert!(sol.z[i] > -tol, "z[{i}] < 0");
+        assert!((sol.z[i] * slack).abs() < 1e-4, "ineq comp row {i}");
+    }
+}
+
 // --- free / empty columns ---
 
 /// A variable absent from P, A, G with zero cost is irrelevant: presolve
@@ -358,6 +397,138 @@ fn antiparallel_inequalities_not_merged() {
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
     assert_kkt(&prob, &sol, 1e-5);
+}
+
+// --- dominated columns ---
+
+/// Dominated column fixed to its lower bound: x2 has no quadratic/equality
+/// term, appears only with a nonnegative coefficient in `≤` rows, and has
+/// cost c2 ≥ 0 — so pushing it down never hurts. Presolve fixes x2 = lb.
+#[test]
+fn dominated_column_fixed_to_lower() {
+    // min x0² + x1² + 0.5·x2  s.t.  x0 + x1 + x2 ≤ 3,  0 ≤ x ≤ 5.
+    // x2: not in P, only in the ≤ row with +1, cost +0.5 ≥ 0 ⇒ x2 = 0.
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-4.0, -4.0, 0.5],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0),
+        ],
+        h: vec![3.0],
+        lb: vec![0.0, 0.0, 0.0],
+        ub: vec![5.0, 5.0, 5.0],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            assert_eq!(ps.stats().dominated_cols, 1);
+            assert_eq!(ps.reduced.n, 2);
+        }
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!(sol.x[2].abs() < 1e-6, "x2 fixed to 0: {}", sol.x[2]);
+    assert_kkt_bounds(&prob, &sol, 1e-5);
+    let d = direct(&prob);
+    for i in 0..3 {
+        assert!((sol.x[i] - d.x[i]).abs() < 1e-5, "x[{i}]: {} vs {}", sol.x[i], d.x[i]);
+    }
+}
+
+/// Dominated column fixed to its upper bound (mirror): negative `≤`
+/// coefficient and nonpositive cost ⇒ pushing it up never hurts.
+#[test]
+fn dominated_column_fixed_to_upper() {
+    // min x0² + x1² − 0.5·x2  s.t.  x0 + x1 − x2 ≤ 1,  0 ≤ x ≤ 4.
+    // x2: not in P, coefficient −1 in the ≤ row, cost −0.5 ≤ 0 ⇒ x2 = 4.
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-1.0, -1.0, -0.5],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, -1.0),
+        ],
+        h: vec![1.0],
+        lb: vec![0.0, 0.0, 0.0],
+        ub: vec![4.0, 4.0, 4.0],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.stats().dominated_cols, 1),
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[2] - 4.0).abs() < 1e-6, "x2 fixed to 4: {}", sol.x[2]);
+    assert_kkt_bounds(&prob, &sol, 1e-5);
+    let d = direct(&prob);
+    for i in 0..3 {
+        assert!((sol.x[i] - d.x[i]).abs() < 1e-5, "x[{i}]: {} vs {}", sol.x[i], d.x[i]);
+    }
+}
+
+/// A column with *mixed-sign* inequality coefficients is NOT dominated
+/// (its effect on feasibility is not sign-definite) — left in place.
+#[test]
+fn mixed_sign_column_not_dominated() {
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-1.0, -1.0, 0.5],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 2, 1.0),  // +x2 in row 0
+            Triplet::new(1, 2, -1.0), // −x2 in row 1  → mixed sign
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(1, 1, 1.0),
+        ],
+        h: vec![3.0, 3.0],
+        lb: vec![0.0, 0.0, 0.0],
+        ub: vec![5.0, 5.0, 5.0],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.stats().dominated_cols, 0),
+        // A no-op presolve is also acceptable here.
+        _ => {}
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_kkt_bounds(&prob, &sol, 1e-5);
+}
+
+/// Dominated column in a pure LP (P = 0), the common case.
+#[test]
+fn dominated_column_lp() {
+    // min −x0 + x1  s.t.  x0 + x1 ≤ 2,  0 ≤ x ≤ 3.
+    // x1: cost +1 ≥ 0, coefficient +1 ≥ 0, not in P ⇒ x1 = 0; then x0 = 2.
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![],
+        c: vec![-1.0, 1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+        h: vec![2.0],
+        lb: vec![0.0, 0.0],
+        ub: vec![3.0, 3.0],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.stats().dominated_cols, 1),
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!(sol.x[1].abs() < 1e-6 && (sol.x[0] - 2.0).abs() < 1e-6, "x={:?}", sol.x);
+    assert_kkt_bounds(&prob, &sol, 1e-5);
 }
 
 // --- activity-bound reductions (need the variable box) ---

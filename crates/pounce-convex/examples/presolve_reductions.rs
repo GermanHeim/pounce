@@ -201,6 +201,28 @@ fn main() {
         },
     );
 
+    // Dominated column: x2 is not in P, appears only in the `≤` row with a
+    // nonnegative coefficient, and has cost ≥ 0 — so x2 = lb is optimal;
+    // it is fixed and dropped.
+    report(
+        "dominated column (→ bound)",
+        &QpProblem {
+            n: 3,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-4.0, -4.0, 0.5],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(0, 2, 1.0),
+            ],
+            h: vec![3.0],
+            lb: vec![0.0, 0.0, 0.0],
+            ub: vec![5.0, 5.0, 5.0],
+        },
+    );
+
     // Free column singleton: x2 (free, only in the equality row) is
     // substituted out, eliminating both the variable and the row.
     report(
