@@ -387,7 +387,11 @@ impl IpoptAlgorithm {
                 (d.iter_count, d.info_alpha_primal, d.info_alpha_primal_char)
             };
             let row = self.bundle.iter_output.format_row(&self.data, &self.cq);
-            let style = pounce_common::style::iteration_row_style(alpha_pr, alpha_char);
+            // Iteration 0 is the initial point — no step has been taken
+            // yet, so `alpha_primal` is 0; treat it as a full step
+            // (neutral black) rather than a stalling alarm (red).
+            let style_alpha = if iter_count == 0 { 1.0 } else { alpha_pr };
+            let style = pounce_common::style::iteration_row_style(style_alpha, alpha_char);
             let mut out = anstream::stdout();
             if iter_count % 10 == 0 {
                 let _ = write!(out, "{}", crate::output::orig::OrigIterationOutput::HEADER);
