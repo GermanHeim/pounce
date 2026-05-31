@@ -47,7 +47,7 @@
 //! step) all route through the [`Cone`](crate::cones::Cone) trait so
 //! that Phases 4–6 extend rather than rewrite this driver.
 
-use crate::cones::{Cone, NonnegCone};
+use crate::cones::{CompositeCone, Cone};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -333,7 +333,7 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     let dim = prob.n + prob.m_eq() + prob.m_ineq();
-    let cone = NonnegCone::new(prob.m_ineq());
+    let cone = CompositeCone::single_nonneg(prob.m_ineq());
     // Initial interior scaling (s = z = 1 ⇒ S⊘Z = 1).
     let mut scaling = vec![0.0; prob.m_ineq()];
     let s0 = vec![1.0; prob.m_ineq()];
@@ -490,7 +490,7 @@ fn run_ipm(
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
-    let cone = NonnegCone::new(m_ineq);
+    let cone = CompositeCone::single_nonneg(m_ineq);
 
     let (mut x, mut y, mut z, mut s) = init_iterate(prob, n, m_eq, m_ineq, warm);
 
@@ -815,7 +815,7 @@ fn split_step(
 /// (via `ds`) and dual `z` (via `dz`). Returns `(alpha_primal,
 /// alpha_dual)`; both are 1 when there is no cone.
 fn step_lengths(
-    cone: &NonnegCone,
+    cone: &CompositeCone,
     s: &[f64],
     ds: &[f64],
     z: &[f64],

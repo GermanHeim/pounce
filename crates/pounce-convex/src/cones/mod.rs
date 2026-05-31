@@ -16,8 +16,10 @@
 //! scaling block is the diagonal `s ⊘ z`; richer cones override these
 //! with their Nesterov–Todd scaling.
 
+pub mod composite;
 pub mod nonneg;
 
+pub use composite::{CompositeCone, ConeKind};
 pub use nonneg::NonnegCone;
 
 /// A symmetric cone over which the IPM maintains a primal slack `s` and

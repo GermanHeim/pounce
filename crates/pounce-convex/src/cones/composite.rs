@@ -1,0 +1,268 @@
+//! Composite cone — a Cartesian product of cones over which the IPM keeps
+//! one stacked slack `s` and dual `z`.
+//!
+//! The inequality block of a convex program is in general a product
+//! `K = R₊^{n₀} × SOC(m₁) × …`. [`CompositeCone`] owns an ordered list of
+//! `(offset, ConeKind)` blocks and implements [`Cone`] by dispatching every
+//! operation block-wise over the matching slices of `s`/`z`. The IPM driver
+//! holds a `CompositeCone` and stays cone-agnostic.
+//!
+//! Phase 1 of the SOCP extension (see `dev-notes/socp-extension.md`) ships
+//! only a single nonnegative-orthant block, so this is bit-identical to the
+//! previous bare [`NonnegCone`] path; the seam exists so SOC (and later
+//! cones) plug in as new [`ConeKind`] variants without touching the driver.
+
+use super::{Cone, NonnegCone};
+
+/// A single cone in the product. A closed enum (rather than `dyn Cone`) so
+/// dispatch is a cheap match and new cones are added as variants.
+#[derive(Debug, Clone)]
+pub enum ConeKind {
+    /// Nonnegative orthant (LP/QP, and expanded variable bounds).
+    Nonneg(NonnegCone),
+    // Phase 2: SecondOrder(SecondOrderCone),
+}
+
+impl Cone for ConeKind {
+    fn degree(&self) -> usize {
+        match self {
+            ConeKind::Nonneg(c) => c.degree(),
+        }
+    }
+    fn dim(&self) -> usize {
+        match self {
+            ConeKind::Nonneg(c) => c.dim(),
+        }
+    }
+    fn mu(&self, s: &[f64], z: &[f64]) -> f64 {
+        match self {
+            ConeKind::Nonneg(c) => c.mu(s, z),
+        }
+    }
+    fn scaling_diag(&self, s: &[f64], z: &[f64], out: &mut [f64]) {
+        match self {
+            ConeKind::Nonneg(c) => c.scaling_diag(s, z, out),
+        }
+    }
+    fn comp_residual(&self, s: &[f64], z: &[f64], sigma_mu: f64, out: &mut [f64]) {
+        match self {
+            ConeKind::Nonneg(c) => c.comp_residual(s, z, sigma_mu, out),
+        }
+    }
+    fn comp_residual_corrector(
+        &self,
+        s: &[f64],
+        z: &[f64],
+        ds_aff: &[f64],
+        dz_aff: &[f64],
+        sigma_mu: f64,
+        out: &mut [f64],
+    ) {
+        match self {
+            ConeKind::Nonneg(c) => {
+                c.comp_residual_corrector(s, z, ds_aff, dz_aff, sigma_mu, out)
+            }
+        }
+    }
+    fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
+        match self {
+            ConeKind::Nonneg(c) => c.recover_ds(s, z, r_comp, dz, ds),
+        }
+    }
+    fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64 {
+        match self {
+            ConeKind::Nonneg(c) => c.max_step(v, dv, tau),
+        }
+    }
+}
+
+/// A Cartesian product of cones, the cone of the IPM's stacked `(s, z)`.
+#[derive(Debug, Clone)]
+pub struct CompositeCone {
+    /// `(offset, cone)` for each block; offsets partition `0..dim`.
+    blocks: Vec<(usize, ConeKind)>,
+    dim: usize,
+    degree: usize,
+}
+
+impl CompositeCone {
+    /// Build from an ordered list of cone blocks. Offsets are assigned by
+    /// stacking the blocks in the given order.
+    pub fn new(kinds: Vec<ConeKind>) -> Self {
+        let mut blocks = Vec::with_capacity(kinds.len());
+        let mut dim = 0;
+        let mut degree = 0;
+        for k in kinds {
+            degree += k.degree();
+            let d = k.dim();
+            blocks.push((dim, k));
+            dim += d;
+        }
+        CompositeCone {
+            blocks,
+            dim,
+            degree,
+        }
+    }
+
+    /// A single nonnegative-orthant block of dimension `n` — the cone of
+    /// LP/QP (and the Phase-1 default for any inequality block).
+    pub fn single_nonneg(n: usize) -> Self {
+        Self::new(vec![ConeKind::Nonneg(NonnegCone::new(n))])
+    }
+}
+
+impl Cone for CompositeCone {
+    fn degree(&self) -> usize {
+        self.degree
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn mu(&self, s: &[f64], z: &[f64]) -> f64 {
+        if self.degree == 0 {
+            return 0.0;
+        }
+        // μ = ⟨s,z⟩_total / degree_total. Each block's μ is its own
+        // ⟨s_b,z_b⟩ / degree_b, so block.mu · block.degree recovers the
+        // block dot without a separate inner-product method.
+        let mut dot = 0.0;
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            dot += k.mu(&s[*off..off + d], &z[*off..off + d]) * k.degree() as f64;
+        }
+        dot / self.degree as f64
+    }
+
+    fn scaling_diag(&self, s: &[f64], z: &[f64], out: &mut [f64]) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.scaling_diag(&s[*off..off + d], &z[*off..off + d], &mut out[*off..off + d]);
+        }
+    }
+
+    fn comp_residual(&self, s: &[f64], z: &[f64], sigma_mu: f64, out: &mut [f64]) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.comp_residual(
+                &s[*off..off + d],
+                &z[*off..off + d],
+                sigma_mu,
+                &mut out[*off..off + d],
+            );
+        }
+    }
+
+    fn comp_residual_corrector(
+        &self,
+        s: &[f64],
+        z: &[f64],
+        ds_aff: &[f64],
+        dz_aff: &[f64],
+        sigma_mu: f64,
+        out: &mut [f64],
+    ) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.comp_residual_corrector(
+                &s[*off..off + d],
+                &z[*off..off + d],
+                &ds_aff[*off..off + d],
+                &dz_aff[*off..off + d],
+                sigma_mu,
+                &mut out[*off..off + d],
+            );
+        }
+    }
+
+    fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.recover_ds(
+                &s[*off..off + d],
+                &z[*off..off + d],
+                &r_comp[*off..off + d],
+                &dz[*off..off + d],
+                &mut ds[*off..off + d],
+            );
+        }
+    }
+
+    fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64 {
+        let mut alpha = 1.0_f64;
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            alpha = alpha.min(k.max_step(&v[*off..off + d], &dv[*off..off + d], tau));
+        }
+        alpha
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A single-nonneg composite reproduces NonnegCone exactly.
+    #[test]
+    fn single_nonneg_matches_bare_orthant() {
+        let n = 4;
+        let comp = CompositeCone::single_nonneg(n);
+        let bare = NonnegCone::new(n);
+        let s = [1.0, 2.0, 0.5, 3.0];
+        let z = [3.0, 1.0, 4.0, 0.5];
+
+        assert_eq!(comp.dim(), n);
+        assert_eq!(comp.degree(), n);
+        assert!((comp.mu(&s, &z) - bare.mu(&s, &z)).abs() < 1e-15);
+
+        let (mut a, mut b) = ([0.0; 4], [0.0; 4]);
+        comp.scaling_diag(&s, &z, &mut a);
+        bare.scaling_diag(&s, &z, &mut b);
+        assert_eq!(a, b);
+
+        comp.comp_residual(&s, &z, 0.7, &mut a);
+        bare.comp_residual(&s, &z, 0.7, &mut b);
+        assert_eq!(a, b);
+
+        let dv = [-1.0, 0.5, -2.0, 1.0];
+        assert!((comp.max_step(&s, &dv, 0.99) - bare.max_step(&s, &dv, 0.99)).abs() < 1e-15);
+    }
+
+    /// Two stacked nonneg blocks behave like one orthant of the total size
+    /// (μ over the whole vector, min step over blocks). Guards the
+    /// block-dispatch arithmetic that SOC will rely on.
+    #[test]
+    fn two_blocks_compose_like_one_orthant() {
+        let comp = CompositeCone::new(vec![
+            ConeKind::Nonneg(NonnegCone::new(2)),
+            ConeKind::Nonneg(NonnegCone::new(3)),
+        ]);
+        let whole = NonnegCone::new(5);
+        let s = [1.0, 2.0, 3.0, 0.5, 4.0];
+        let z = [2.0, 1.0, 0.5, 4.0, 1.0];
+        assert_eq!(comp.dim(), 5);
+        assert_eq!(comp.degree(), 5);
+        assert!((comp.mu(&s, &z) - whole.mu(&s, &z)).abs() < 1e-15);
+
+        let dv = [-0.5, 1.0, -3.0, 0.2, -1.0];
+        assert!((comp.max_step(&s, &dv, 0.95) - whole.max_step(&s, &dv, 0.95)).abs() < 1e-15);
+
+        let (mut a, mut b) = ([0.0; 5], [0.0; 5]);
+        comp.recover_ds(&s, &z, &[0.1, 0.2, 0.3, 0.4, 0.5], &dv, &mut a);
+        whole.recover_ds(&s, &z, &[0.1, 0.2, 0.3, 0.4, 0.5], &dv, &mut b);
+        for i in 0..5 {
+            assert!((a[i] - b[i]).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn empty_composite_is_inert() {
+        let comp = CompositeCone::single_nonneg(0);
+        assert_eq!(comp.dim(), 0);
+        assert_eq!(comp.degree(), 0);
+        assert_eq!(comp.mu(&[], &[]), 0.0);
+        assert_eq!(comp.max_step(&[], &[], 0.99), 1.0);
+    }
+}
