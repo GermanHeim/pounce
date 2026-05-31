@@ -1049,7 +1049,12 @@ fn run_convex_qp(
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
     let t0 = std::time::Instant::now();
-    let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+    // Run presolve, then the IPM on the reduced problem, then postsolve.
+    // The returned solution is in the extracted-QP space (same dims as
+    // `qp`), so `con_map`-based dual recovery below still applies.
+    let sol = pounce_convex::presolve::solve_with_presolve(&qp, |reduced| {
+        solve_qp_ipm(reduced, &QpOptions::default(), backend)
+    });
     let elapsed = t0.elapsed().as_secs_f64();
 
     // Report the objective in the user's original sense, including the
