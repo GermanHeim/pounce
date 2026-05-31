@@ -36,6 +36,16 @@
 //!   right-hand sides ⇒ infeasible; inequality duplicates keep the
 //!   tightest bound. A dropped duplicate's dual is zero (it is inactive
 //!   / its share is carried by the kept row), which is a valid KKT point.
+//! - **Activity-bound reductions** (need the variable box): for each
+//!   inequality `g·x ≤ h`, compute the activity range `[min, max]` over
+//!   the box. If `max ≤ h` the row is always satisfied → **redundant**,
+//!   drop it (dual 0). If `min > h` the row can never hold →
+//!   **infeasible**. For each equality `a·x = b`, infeasible when `b`
+//!   lies outside `[min, max]`. (Bound *tightening* — propagating a
+//!   row's implied bound back onto a variable — is deferred: when a
+//!   tightened bound is active at the optimum its multiplier must be
+//!   re-attributed to the source constraint, which is the harder PaPILO
+//!   postsolve; see the follow-up note below.)
 //!
 //! # Relationship to PaPILO
 //!
@@ -52,12 +62,15 @@
 //! PaPILO is the catalog to mine for the next reductions — singleton /
 //! doubleton rows, dominated columns, coefficient strengthening, probing
 //! — and, importantly, for each one's *postsolve transform*, since the
-//! dual recovery is the hard part. The activity-bound–based reductions
-//! (forcing / dominated constraints, bound tightening) require an
-//! explicit variable-bound form; the standard form here encodes bounds
-//! as `G` rows, so those land once a bounded form is added. Parallel-row
-//! (scalar-multiple) detection, as opposed to the exact-duplicate
-//! detection here, is likewise a follow-up.
+//! dual recovery is the hard part. Remaining activity-bound work that
+//! needs more than the redundancy/feasibility checks above: **bound
+//! tightening** (propagate a row's implied bound back onto a variable —
+//! the dual of an active tightened bound must be re-attributed to the
+//! source row in postsolve), **forcing constraints** (a row at its
+//! activity extreme pins every involved variable to a bound), and
+//! **dominated columns**. Parallel-row (scalar-multiple) detection, as
+//! opposed to the exact-duplicate detection here, is likewise a
+//! follow-up.
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -129,6 +142,42 @@ pub struct Presolve {
 const ZERO_TOL: f64 = 0.0;
 /// Slack allowed when checking a fixed value against its variable box.
 const BOUND_FEAS_TOL: f64 = 1e-9;
+/// Slack allowed in activity-bound comparisons (redundancy / feasibility).
+const ACTIVITY_TOL: f64 = 1e-9;
+
+/// Group nonzero entries by row index: `out[row] = [(col, val), …]`.
+fn group_by_row(triplets: &[Triplet], m: usize) -> Vec<Vec<(usize, f64)>> {
+    let mut out = vec![Vec::new(); m];
+    for t in triplets {
+        if t.val != ZERO_TOL {
+            out[t.row].push((t.col, t.val));
+        }
+    }
+    out
+}
+
+/// Minimum and maximum of `Σ a_j x_j` over the variable box, given each
+/// variable's effective lower/upper bound. An infinite contribution
+/// makes the corresponding extreme `±∞`.
+fn activity<L, U>(row: &[(usize, f64)], lb: &L, ub: &U) -> (f64, f64)
+where
+    L: Fn(usize) -> f64,
+    U: Fn(usize) -> f64,
+{
+    let mut amin = 0.0;
+    let mut amax = 0.0;
+    for &(c, a) in row {
+        let (lo, hi) = (lb(c), ub(c));
+        if a > 0.0 {
+            amin += a * lo; // a>0: min at lower bound
+            amax += a * hi;
+        } else {
+            amin += a * hi; // a<0: min at upper bound
+            amax += a * lo;
+        }
+    }
+    (amin, amax)
+}
 
 /// A single constraint row in the reduced column space, tagged with its
 /// original row index. Used for duplicate detection and final assembly.
@@ -217,6 +266,46 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
                 return PresolveOutcome::Infeasible;
             }
             ineq_dropped[row] = true;
+        }
+    }
+
+    // --- activity-bound reductions (need the variable box) ---
+    // Effective bounds: a fixed variable contributes its exact value;
+    // others contribute their declared box (±∞ when absent).
+    let eff_lb = |c: usize| fixed[c].unwrap_or_else(|| prob.lb_of(c));
+    let eff_ub = |c: usize| fixed[c].unwrap_or_else(|| prob.ub_of(c));
+
+    // Group nonzeros by row once, reused for inequalities and equalities.
+    let g_by_row = group_by_row(&prob.g, m_ineq);
+    let a_by_row = group_by_row(&prob.a, m_eq);
+
+    // Inequality `g·x ≤ h`:
+    //   max-activity ≤ h  ⇒ redundant (always satisfied) → drop;
+    //   min-activity > h   ⇒ infeasible.
+    for row in 0..m_ineq {
+        if ineq_dropped[row] {
+            continue;
+        }
+        let (amin, amax) = activity(&g_by_row[row], &eff_lb, &eff_ub);
+        if amin > prob.h[row] + ACTIVITY_TOL {
+            return PresolveOutcome::Infeasible;
+        }
+        if amax <= prob.h[row] + ACTIVITY_TOL {
+            ineq_dropped[row] = true;
+        }
+    }
+
+    // Equality `a·x = b`: feasible only if `b` lies in the activity
+    // range `[min, max]`. Out of range ⇒ infeasible. (A redundant
+    // equality whose range is the single point `b` is left in place; its
+    // dual is genuine, unlike a dropped inequality's zero multiplier.)
+    for row in 0..m_eq {
+        if eq_dropped[row] {
+            continue;
+        }
+        let (amin, amax) = activity(&a_by_row[row], &eff_lb, &eff_ub);
+        if prob.b[row] < amin - ACTIVITY_TOL || prob.b[row] > amax + ACTIVITY_TOL {
+            return PresolveOutcome::Infeasible;
         }
     }
 

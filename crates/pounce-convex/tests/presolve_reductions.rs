@@ -217,3 +217,138 @@ fn many_duplicate_rows_parallel_path() {
     }
     assert_kkt(&prob, &sol, 1e-4);
 }
+
+// --- activity-bound reductions (need the variable box) ---
+
+use pounce_convex::{NEG_INF, POS_INF};
+
+/// Redundant inequality: with x ∈ [0,1]², `x0 + x1 ≤ 5` has max activity
+/// 2 ≤ 5, so it is always satisfied → presolve drops it; the recovered
+/// point is KKT-valid for the original (un-dropped) problem.
+#[test]
+fn redundant_inequality_dropped() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-1.0, -1.0], // pull toward (0.5, 0.5), interior
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)], // x0+x1 ≤ 5
+        h: vec![5.0],
+        lb: vec![0.0, 0.0],
+        ub: vec![1.0, 1.0],
+    };
+    // Presolve should drop the redundant row (0 kept inequalities).
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            assert_eq!(ps.reduced.m_ineq(), 0, "redundant row should be dropped");
+        }
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[0] - 0.5).abs() < 1e-5, "x0={}", sol.x[0]);
+    assert!((sol.x[1] - 0.5).abs() < 1e-5, "x1={}", sol.x[1]);
+    // The dropped row's dual is 0 — still a valid KKT point.
+    assert_kkt(&prob, &sol, 1e-5);
+}
+
+/// Activity-infeasible inequality: with x ∈ [2,3], `x0 ≤ 1` has min
+/// activity 2 > 1, so no feasible point exists.
+#[test]
+fn activity_infeasible_inequality() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 2.0)],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0)], // x0 ≤ 1
+        h: vec![1.0],
+        lb: vec![2.0],
+        ub: vec![3.0],
+    };
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
+}
+
+/// Activity-infeasible equality: with x ∈ [0,1]², `x0 + x1 = 5` is
+/// outside the activity range [0, 2].
+#[test]
+fn activity_infeasible_equality() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![0.0, 0.0],
+        a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)], // x0+x1 = 5
+        b: vec![5.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0],
+        ub: vec![1.0, 1.0],
+    };
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
+}
+
+/// A negative-coefficient row exercises the `a < 0` branch of the
+/// activity computation: with x ∈ [0,1]², `−x0 − x1 ≤ 0.5` has min
+/// activity −2 ≤ 0.5 (not infeasible) and max activity 0 ≤ 0.5
+/// (redundant) → dropped.
+#[test]
+fn redundant_inequality_negative_coeffs() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-1.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, -1.0), Triplet::new(0, 1, -1.0)], // −x0−x1 ≤ 0.5
+        h: vec![0.5],
+        lb: vec![0.0, 0.0],
+        ub: vec![1.0, 1.0],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => assert_eq!(ps.reduced.m_ineq(), 0),
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_kkt(&prob, &sol, 1e-5);
+}
+
+/// Unbounded variables must *not* make a row look redundant: with x0
+/// free (no upper bound), `x0 ≤ 1` has max activity +∞, so the row is
+/// kept and genuinely binds the solution.
+#[test]
+fn unbounded_variable_row_not_dropped() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 2.0)],
+        c: vec![-10.0], // unconstrained optimum at 5, so x0 ≤ 1 binds
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0)], // x0 ≤ 1
+        h: vec![1.0],
+        lb: vec![NEG_INF],
+        ub: vec![POS_INF],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            assert_eq!(ps.reduced.m_ineq(), 1, "row must be kept (activity +∞)");
+        }
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[0] - 1.0).abs() < 1e-5, "x0={}", sol.x[0]);
+}
+
+/// Helper for panic messages: name the non-Reduced outcome.
+fn status_of(o: &PresolveOutcome) -> &'static str {
+    match o {
+        PresolveOutcome::Reduced(_) => "Reduced",
+        PresolveOutcome::Infeasible => "Infeasible",
+        PresolveOutcome::Unbounded => "Unbounded",
+    }
+}

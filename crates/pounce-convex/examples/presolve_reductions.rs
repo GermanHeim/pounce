@@ -110,6 +110,40 @@ fn main() {
         },
     );
 
+    // Activity-redundant inequality: with x ∈ [0,1]², `x0+x1 ≤ 5` has
+    // max activity 2 ≤ 5, so it is always satisfied and dropped.
+    report(
+        "redundant ineq (activity)",
+        &QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-1.0, -1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![5.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+        },
+    );
+
+    // Activity-infeasible equality: with x ∈ [0,1]², `x0+x1 = 5` is
+    // outside the activity range [0, 2].
+    report(
+        "infeasible eq (activity)",
+        &QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![0.0, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            b: vec![5.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+        },
+    );
+
     println!("\n=== rayon-parallel duplicate-row detection at scale ===");
     for &(n, k) in &[(50usize, 200usize), (100, 1000), (200, 4000)] {
         let mut p_lower = Vec::new();
