@@ -2002,19 +2002,9 @@ fn read_stdin_line() -> Option<String> {
     }
 }
 
-/// Block-letter `POUNCE` for the open banner (forged-steel body; the
-/// claw slashes and molten underline are added with colour).
-const POUNCE_ART: [&str; 5] = [
-    "██████   ██████  ██    ██ ███    ██  ██████ ███████",
-    "██   ██ ██    ██ ██    ██ ████   ██ ██      ██",
-    "██████  ██    ██ ██    ██ ██ ██  ██ ██      █████",
-    "██      ██    ██ ██    ██ ██  ██ ██ ██      ██",
-    "██       ██████   ██████  ██   ████  ██████ ███████",
-];
-
-/// Print the branded open banner (human REPL only). Steel-grey `POUNCE`
-/// with lava-orange claw slashes and a molten underline, in the logo's
-/// palette. Colours only on a TTY and unless `NO_COLOR` is set.
+/// Print the branded open banner (human REPL only): the project POUNCE
+/// wordmark (shared with the solve header) over a brief command cheat
+/// sheet. Colour only on a TTY and unless `NO_COLOR` is set.
 pub fn print_open_banner(mode: DebugMode) {
     if !matches!(mode, DebugMode::Repl) {
         return;
@@ -2028,29 +2018,54 @@ pub fn print_open_banner(mode: DebugMode) {
             s.to_string()
         }
     };
-    let steel = |s: &str| paint(0xC2, 0xCA, 0xD2, true, s);
-    let lava = |s: &str| paint(0xFF, 0x6A, 0x1A, true, s);
-    let ember = |s: &str| paint(0xFF, 0x45, 0x00, false, s);
+    // Project palette: tiger-orange accents, gold highlight, dim text.
+    let orange = |s: &str| paint(0xE8, 0x7A, 0x1E, true, s);
     let gold = |s: &str| paint(0xFF, 0xB0, 0x00, true, s);
     let dim = |s: &str| paint(0x7A, 0x7E, 0x88, false, s);
+    // One cheat-sheet item: orange key (with shortcut) + dim gloss.
+    let item = |key: &str, gloss: &str| format!("{} {}", orange(key), dim(gloss));
 
     let err = std::io::stderr();
     let mut h = err.lock();
     let _ = writeln!(h);
-    for (i, row) in POUNCE_ART.iter().enumerate() {
-        // Three claw slashes descend left-to-right for a swipe effect.
-        let claw = format!("{}╱╱╱", " ".repeat(i));
-        let _ = writeln!(h, "  {}{}", steel(&format!("{row:<52}")), lava(&claw));
+    // The official wordmark (steel sheen + molten claws), shared with the
+    // solve header, rendered to stderr with a small indent.
+    for row in crate::print::logo_rows(color) {
+        let _ = writeln!(h, "  {row}");
     }
-    let _ = writeln!(h, "  {}", ember(&"━".repeat(58)));
+    let _ = writeln!(h);
     let _ = writeln!(
         h,
-        "  {}   {}",
+        "  {}  {}",
         gold("interior-point debugger"),
-        dim(&format!(
-            "· pounce {} · pdb for the IPM · type `help`",
-            env!("CARGO_PKG_VERSION")
-        ))
+        dim(&format!("· pounce {} · pdb for the IPM", env!("CARGO_PKG_VERSION")))
+    );
+    let _ = writeln!(h);
+    // Most-common commands with their letter shortcuts.
+    let _ = writeln!(
+        h,
+        "  {}   {}   {}   {}   {}",
+        item("s", "step"),
+        item("c", "continue"),
+        item("b", "N break"),
+        item("r", "N run"),
+        item("q", "quit"),
+    );
+    let _ = writeln!(
+        h,
+        "  {}   {}   {}   {}   {}",
+        item("p", "x print"),
+        item("i", "info"),
+        item("set", "x[i] v"),
+        item("watch", "x"),
+        item("viz", "kkt"),
+    );
+    let _ = writeln!(
+        h,
+        "  {} {} {}",
+        dim("type"),
+        gold("help"),
+        dim("for all commands · `ask` to consult Claude · Ctrl-C breaks in"),
     );
     let _ = writeln!(h);
 }
