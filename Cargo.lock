@@ -527,9 +527,11 @@ version = "0.3.0"
 dependencies = [
  "anstyle",
  "anstyle-query",
+ "log",
  "pounce-common",
  "pounce-nlp",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

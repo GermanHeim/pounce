@@ -252,6 +252,12 @@ fn install() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
 
+    // Bridge the `log` crate into `tracing` so any remaining `log::*`
+    // call sites — chiefly transitive dependencies — surface through
+    // our subscriber and obey `RUST_LOG`. Idempotent; the `Err` when a
+    // logger is already installed is intentionally ignored.
+    let _ = tracing_log::LogTracer::init();
+
     let want_json = std::env::var("POUNCE_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
@@ -369,6 +375,52 @@ mod tests {
         assert_eq!(outer_got.len(), 2);
         assert_eq!(outer_got[0].iter, 0);
         assert_eq!(outer_got[1].iter, 1);
+    }
+
+    #[test]
+    fn log_records_bridge_into_tracing() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::*;
+
+        // Minimal layer that records each event's `message` field.
+        #[derive(Clone)]
+        struct CaptureLayer {
+            buf: Arc<Mutex<Vec<String>>>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct V<'a>(&'a mut Vec<String>);
+                impl tracing::field::Visit for V<'_> {
+                    fn record_debug(&mut self, f: &Field, value: &dyn std::fmt::Debug) {
+                        if f.name() == "message" {
+                            self.0.push(format!("{value:?}"));
+                        }
+                    }
+                }
+                let mut g = self.buf.lock().unwrap_or_else(|p| p.into_inner());
+                event.record(&mut V(&mut g));
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer { buf: buf.clone() });
+
+        // The same bridge `install()` sets up. Global + idempotent.
+        let _ = tracing_log::LogTracer::init();
+        tracing::subscriber::with_default(subscriber, || {
+            // A `log` record as a transitive dependency would emit.
+            log::error!(target: "some_transitive_dep", "bridged log record");
+        });
+
+        let got = buf.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            got.iter().any(|m| m.contains("bridged log record")),
+            "log record did not reach the tracing layer; captured: {got:?}"
+        );
     }
 
     #[test]

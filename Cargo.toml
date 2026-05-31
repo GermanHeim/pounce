@@ -82,6 +82,7 @@ feral = "0.9.0"
 # wrapper. `tracing` + `tracing-subscriber` provide structured logging.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi", "json"] }
+tracing-log = "0.2"
 anstyle = "1"
 anstyle-query = "1"
 anstream = "0.6"

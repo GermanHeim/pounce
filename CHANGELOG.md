@@ -37,6 +37,9 @@ per-iteration table in a tiger/rust branded color theme.
   in `docs/src/options.md` and `docs/src/troubleshooting.md`.
 - New `pounce-observability` crate (subscriber install + iteration
   collector) and a `pounce-common::style` palette module.
+- A `log` → `tracing` bridge (`tracing_log::LogTracer`) so any remaining
+  `log::*` call sites — chiefly transitive dependencies — surface through
+  the subscriber and obey `RUST_LOG`.
 
 ### Changed
 

@@ -16,8 +16,12 @@ pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-log.workspace = true
 anstyle.workspace = true
 anstyle-query.workspace = true
+
+[dev-dependencies]
+log = "0.4"
 
 [lints]
 workspace = true
