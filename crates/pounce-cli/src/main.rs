@@ -125,6 +125,8 @@ pub fn main() -> ExitCode {
         // modes are interruptible; this only changes Ctrl-C behavior
         // when a debugger is active.
         pounce_cli::debug_repl::interrupt::install();
+        // Branded open banner (human REPL only).
+        pounce_cli::debug_repl::print_open_banner(mode);
         let extra = if args.debug_on_error {
             ", on-error"
         } else if args.debug_on_interrupt {

@@ -2002,6 +2002,59 @@ fn read_stdin_line() -> Option<String> {
     }
 }
 
+/// Block-letter `POUNCE` for the open banner (forged-steel body; the
+/// claw slashes and molten underline are added with colour).
+const POUNCE_ART: [&str; 5] = [
+    "██████   ██████  ██    ██ ███    ██  ██████ ███████",
+    "██   ██ ██    ██ ██    ██ ████   ██ ██      ██",
+    "██████  ██    ██ ██    ██ ██ ██  ██ ██      █████",
+    "██      ██    ██ ██    ██ ██  ██ ██ ██      ██",
+    "██       ██████   ██████  ██   ████  ██████ ███████",
+];
+
+/// Print the branded open banner (human REPL only). Steel-grey `POUNCE`
+/// with lava-orange claw slashes and a molten underline, in the logo's
+/// palette. Colours only on a TTY and unless `NO_COLOR` is set.
+pub fn print_open_banner(mode: DebugMode) {
+    if !matches!(mode, DebugMode::Repl) {
+        return;
+    }
+    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let paint = |r: u8, g: u8, b: u8, bold: bool, s: &str| -> String {
+        if color {
+            let w = if bold { "1;" } else { "" };
+            format!("\x1b[{w}38;2;{r};{g};{b}m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    };
+    let steel = |s: &str| paint(0xC2, 0xCA, 0xD2, true, s);
+    let lava = |s: &str| paint(0xFF, 0x6A, 0x1A, true, s);
+    let ember = |s: &str| paint(0xFF, 0x45, 0x00, false, s);
+    let gold = |s: &str| paint(0xFF, 0xB0, 0x00, true, s);
+    let dim = |s: &str| paint(0x7A, 0x7E, 0x88, false, s);
+
+    let err = std::io::stderr();
+    let mut h = err.lock();
+    let _ = writeln!(h);
+    for (i, row) in POUNCE_ART.iter().enumerate() {
+        // Three claw slashes descend left-to-right for a swipe effect.
+        let claw = format!("{}╱╱╱", " ".repeat(i));
+        let _ = writeln!(h, "  {}{}", steel(&format!("{row:<52}")), lava(&claw));
+    }
+    let _ = writeln!(h, "  {}", ember(&"━".repeat(58)));
+    let _ = writeln!(
+        h,
+        "  {}   {}",
+        gold("interior-point debugger"),
+        dim(&format!(
+            "· pounce {} · pdb for the IPM · type `help`",
+            env!("CARGO_PKG_VERSION")
+        ))
+    );
+    let _ = writeln!(h);
+}
+
 /// Whether a command line is an in-band pause request (`pause`, or a JSON
 /// `{"cmd":"pause"}`), used for the async-pause-while-running path.
 fn is_pause_command(line: &str) -> bool {
