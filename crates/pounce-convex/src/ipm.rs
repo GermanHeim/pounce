@@ -73,6 +73,14 @@ pub struct QpOptions {
     /// proof — there are no false positives, only (rarely) an
     /// `IterationLimit` fallback when no certificate is verifiable.
     pub infeas_tol: f64,
+    /// Use the homogeneous self-dual embedding driver ([`crate::hsde`])
+    /// instead of the default infeasible-start primal–dual method. The HSDE
+    /// driver self-starts, produces infeasibility certificates natively, and
+    /// is the substrate for the non-symmetric cones (exp/power). It does not
+    /// (yet) exploit warm starts or reuse an external factorization, so the
+    /// default path keeps those advantages for symmetric cones; this opts a
+    /// single solve into the embedding. Default `false`.
+    pub use_hsde: bool,
 }
 
 impl Default for QpOptions {
@@ -83,6 +91,7 @@ impl Default for QpOptions {
             tau: 0.95,
             reg: 1e-8,
             infeas_tol: 1e-7,
+            use_hsde: false,
         }
     }
 }
@@ -360,6 +369,14 @@ fn solve_qp_core<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // Opt-in homogeneous self-dual embedding driver. It builds its own
+    // factorization and self-starts, so it bypasses the warm-start /
+    // factor-reuse plumbing below (warm is ignored — it cannot change the
+    // solution, only the iteration count, which HSDE does not exploit yet).
+    if opts.use_hsde {
+        return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend);
+    }
+
     // Build the fixed KKT pattern and an initial factorization, then run
     // the iteration. The pattern is constant across iterations (only the
     // cone scaling block changes), so the loop `refactor`s rather than

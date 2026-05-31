@@ -44,10 +44,6 @@ use pounce_linsol::SparseSymLinearSolverInterface;
 /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
 /// scaled by `tau` and capped at 1 (the scalar analogue of `Cone::max_step`
 /// for the homogenizing variables `τ`, `κ`).
-// Phase H2: the embedding is validated against the direct driver (see the
-// test module) but not yet wired into a public entry point — that is Phase
-// H4 (make HSDE the default). Until then these are exercised only by tests.
-#[cfg_attr(not(test), allow(dead_code))]
 fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
     if dv < 0.0 {
         (tau * (-v / dv)).min(1.0)
@@ -63,7 +59,6 @@ fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
 /// `cone` is the product cone `K` over the `m_ineq` inequality rows (built
 /// by the caller exactly as for [`crate::ipm::solve_socp_ipm`]). Variable
 /// bounds must already be expanded into `cone` rows by the caller.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn solve_conic_hsde<F>(
     prob: &QpProblem,
     cone: &CompositeCone,
@@ -316,7 +311,6 @@ where
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn failed(prob: &QpProblem) -> QpSolution {
     QpSolution {
         status: QpStatus::NumericalFailure,
@@ -334,7 +328,7 @@ fn failed(prob: &QpProblem) -> QpSolution {
 mod tests {
     use super::*;
     use crate::cones::ConeSpec;
-    use crate::ipm::solve_socp_ipm;
+    use crate::ipm::{solve_qp_ipm, solve_socp_ipm};
     use crate::qp::{QpProblem, Triplet};
     use pounce_feral::FeralSolverInterface;
     use pounce_linsol::SparseSymLinearSolverInterface;
@@ -558,6 +552,46 @@ mod tests {
         let cone = CompositeCone::from_specs(&[ConeSpec::Nonneg(2)]);
         let sol = solve_conic_hsde(&prob, &cone, &opts(), backend);
         assert_eq!(sol.status, QpStatus::PrimalInfeasible);
+    }
+
+    /// The `use_hsde` flag routes a bound-constrained QP through the
+    /// embedding via the *public* entry point (exercising bound expansion
+    /// into cone rows and the z_lb/z_ub split on the way back). The result
+    /// must match the default driver.
+    #[test]
+    fn flag_routes_through_public_entry_with_bounds() {
+        // min ‖x‖² − 3x0 − 4x1 s.t. x0+x1 ≤ 1, 0 ≤ x ≤ 1.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-3.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+        };
+        let direct = solve_qp_ipm(&prob, &opts(), backend);
+        let hsde_opts = QpOptions {
+            use_hsde: true,
+            ..opts()
+        };
+        let hsde = solve_qp_ipm(&prob, &hsde_opts, backend);
+        assert_eq!(direct.status, QpStatus::Optimal);
+        assert_eq!(hsde.status, QpStatus::Optimal);
+        for i in 0..2 {
+            assert!(
+                (direct.x[i] - hsde.x[i]).abs() < 1e-5,
+                "x[{i}] direct {} vs hsde {}",
+                direct.x[i],
+                hsde.x[i]
+            );
+            // Bound multipliers must survive the round-trip split.
+            assert!((direct.z_lb[i] - hsde.z_lb[i]).abs() < 1e-5);
+            assert!((direct.z_ub[i] - hsde.z_ub[i]).abs() < 1e-5);
+        }
+        assert!((direct.x[0] - 0.25).abs() < 1e-5 && (direct.x[1] - 0.75).abs() < 1e-5);
     }
 
     /// Dual-infeasible / unbounded LP: min −x s.t. x ≥ 0 (no upper bound).

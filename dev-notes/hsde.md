@@ -1,6 +1,7 @@
 # Homogeneous self-dual embedding for the convex IPM — design note
 
-**Status: Phases H2 + H3 landed — HSDE solves LP/QP/SOCP.**
+**Status: Phases H2–H4 landed — HSDE solves LP/QP/SOCP and is a
+selectable driver (`QpOptions::use_hsde`). H5 (exponential cone) next.**
 Chosen as the foundation for Clarabel cone parity (see
 `clarabel-parity.md`): reformulate the interior-point driver into a
 homogeneous self-dual embedding (HSDE), prove it reproduces every existing
@@ -112,8 +113,10 @@ shared exactly as today.
   - **primal infeasible:** `τ` small, `bᵀy + hᵀz < 0`, `‖Aᵀy+Gᵀz‖` small;
   - **dual infeasible:** `τ` small, `cᵀx < 0`, `‖Ax‖, ‖Gx+s‖` small.
   These are the *same* certificate inequalities `detect_infeasibility`
-  already checks — now produced natively by the embedding instead of a side
-  test, so that function retires once HSDE is the default.
+  already checks; the embedding drives the iterate onto the Farkas/recession
+  ray as `τ → 0`, and the HSDE driver **reuses** that verified relative check
+  on the homogeneous `(x, y, z)` (rather than retiring it) — so both drivers
+  share one certificate path.
 
 ## The quadratic objective (P ≠ 0)
 
@@ -149,7 +152,7 @@ a second-order cone) — all agree.
 | H1 | This note: exact embedding, two-solve scheme, termination. | low |
 | **H2** | ✅ HSDE driver for **linear** conic (`P=0`): orthant + SOC, reusing `KktStructure`/`Cone`. `solve_conic_hsde` alongside the current solver. Validated optima + both certificates vs the existing solver. | med-high — embedding signs, two-solve combination |
 | **H3** | ✅ Quadratic objective: the `(1q)/(4q)` τ-row with the `P` coupling. Validated on the QP suite (closed-form optima + QP-with-SOC) vs the direct driver. | high — τ-row P algebra |
-| H4 | Make HSDE the default driver; retire `detect_infeasibility`; warm start re-expressed in embedded space (`τ,κ` recentering). Whole convex + CLI + Python/JAX suite green. | med |
+| **H4** | ✅ *(revised)* HSDE promoted to a first-class **selectable** driver (`QpOptions::use_hsde`), routed through `solve_qp_core` and reachable from every public entry point (bound expansion + `z_lb`/`z_ub` split validated). **Not** forced as the universal default: doing so would regress warm starting — `warm_start_reduces_iterations_on_nearby_problem` asserts a *strict* iteration reduction that the direct method's adaptive recentering delivers and an IPM embedding inherently does not. End state is **automatic routing**: symmetric-only cones stay on the direct driver (warm start, factor reuse, differentiable layers); problems with non-symmetric cones (exp/power, H5+) use HSDE. Embedded warm start / factor reuse remain future work, gated on need. | med |
 | H5 | **Exponential cone** on HSDE: barrier oracles, non-symmetric scaling, third-order corrector, neighborhood line search. Known-optima (GP, logistic, entropy) + KKT-residual validation. | high |
 | H6 | **Power cone** (exp machinery + new barrier). | low after H5 |
 | H7 | **PSD cone**: pure-Rust symmetric eig, svec/smat, dense `W⊗ₛW` block; small dense SDPs first, chordal decomposition later. | med-high |
