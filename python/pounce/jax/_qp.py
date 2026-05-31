@@ -130,6 +130,28 @@ def _build_problem(P, c, G, h, A, b):
     )
 
 
+_SUCCESS_STATUS = "optimal"
+
+
+def _check_status(status, where):
+    """Raise unless the convex solver reached an optimal solution.
+
+    The differentiable layer reads the primal/dual iterate and solves a
+    KKT system for the gradient. If the forward solve did not converge
+    (``primal_infeasible`` / ``dual_infeasible`` / ``iteration_limit`` /
+    ``numerical_failure``), that iterate is not a KKT point and the
+    implicit-function gradient is meaningless — so fail loudly rather than
+    return silent NaNs/garbage into a downstream optimizer. Use the host
+    ``pounce.qp`` API (which surfaces ``QpResult.status``) to inspect the
+    failure."""
+    if status != _SUCCESS_STATUS:
+        raise RuntimeError(
+            f"{where}: convex solver returned status {status!r}, not "
+            f"{_SUCCESS_STATUS!r}; the differentiable layer cannot produce a "
+            f"meaningful gradient for a non-optimal solve."
+        )
+
+
 def _split_duals(d, m_g, m_a):
     """Extract (lam, nu) from a solver result dict, padding empty blocks."""
     lam = (
@@ -158,6 +180,7 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     if warm_x is not None and np.asarray(warm_x).size == c.shape[0]:
         warm = {"x": np.asarray(warm_x, dtype=np.float64).tolist()}
     d = _pounce.solve_qp(prob, tol=tol, max_iter=max_iter, warm_start=warm)
+    _check_status(d["status"], "QpLayer forward solve")
     x = np.asarray(d["x"], dtype=np.float64)
     lam, nu = _split_duals(d, m_g, m_a)
     return x, lam, nu
@@ -177,6 +200,8 @@ def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
         wx = np.asarray(warm_xs, dtype=np.float64)
         warms = [{"x": wx[i].tolist()} for i in range(b_sz)]
     dicts = _pounce.solve_qp_batch(probs, tol=tol, max_iter=max_iter, warm_starts=warms)
+    for i, d in enumerate(dicts):
+        _check_status(d["status"], f"QpLayer batch forward solve (row {i})")
     xs = np.stack([np.asarray(d["x"], dtype=np.float64) for d in dicts])
     if m_g:
         lams = np.stack([np.asarray(d["z"], dtype=np.float64) for d in dicts])
@@ -673,6 +698,7 @@ def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
     m_a = A.shape[0]
     prob = _build_problem(P, c, G, h, A, b)
     d = _pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter)
+    _check_status(d["status"], "SOCP differentiable forward solve")
     x = np.asarray(d["x"], dtype=np.float64)
     lam, nu = _split_duals(d, m_g, m_a)
     return x, lam, nu

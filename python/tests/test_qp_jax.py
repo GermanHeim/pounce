@@ -270,3 +270,30 @@ def test_solve_qp_batch_grad_shared_P_sums():
     g_batch = jax.grad(loss_batch)(P0)
     g_sum = sum(jax.grad(lambda Pm, c=c: loss_single(Pm, c))(P0) for c in cs)
     np.testing.assert_allclose(np.asarray(g_batch), np.asarray(g_sum), atol=1e-5)
+
+
+def test_infeasible_forward_raises():
+    """B3 regression: a non-optimal forward solve must raise, not return a
+    silent garbage iterate (which would feed meaningless gradients into a
+    downstream optimizer). Inconsistent equalities x0=1 and x0=2 are
+    primal-infeasible."""
+    P = jnp.array([[2.0]])
+    c = jnp.array([0.0])
+    A = jnp.array([[1.0], [1.0]])
+    b = jnp.array([1.0, 2.0])
+    with pytest.raises(RuntimeError, match="status"):
+        solve_qp(P=P, c=c, A=A, b=b)
+
+
+def test_infeasible_grad_raises():
+    """The differentiation path must also surface the failure rather than
+    differentiate through a non-KKT point."""
+    P = jnp.array([[2.0]])
+    A = jnp.array([[1.0], [1.0]])
+    b = jnp.array([1.0, 2.0])
+
+    def loss(c):
+        return jnp.sum(solve_qp(P=P, c=c, A=A, b=b) ** 2)
+
+    with pytest.raises(RuntimeError, match="status"):
+        jax.grad(loss)(jnp.array([0.0]))

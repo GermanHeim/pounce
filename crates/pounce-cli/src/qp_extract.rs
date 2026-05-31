@@ -25,7 +25,7 @@
 //!   (`−x_i ≤ −x_l`, `x_i ≤ x_u`); the `.nl` "infinity" sentinel
 //!   (`|v| ≥ 1e19`) is treated as no bound.
 
-use crate::dispatch::analyze_quadratic;
+use crate::dispatch::analyze_quadratic_full;
 use crate::nl_reader::NlProblem;
 use pounce_convex::{QpProblem, Triplet};
 
@@ -66,8 +66,8 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
     let n = prob.n;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
-    // --- objective Hessian P (lower triangle) ---
-    let hess = analyze_quadratic(&prob.obj_nonlinear, n)?;
+    // --- objective Hessian P (lower triangle) + nonlinear-tree linear part ---
+    let (hess, obj_nl_linear) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         // analyze_quadratic returns (i ≤ j) upper-ish keys; store as
@@ -77,8 +77,15 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
     }
 
     // --- objective linear term c ---
+    // Two disjoint sources, exactly as the NLP path's eval_f sums them:
+    // the `.nl` linear section (`obj_linear`) and the degree-1 terms AMPL
+    // kept inside the nonlinear objective tree (e.g. the `−6·x₀` of
+    // `(x₀−3)²`). Dropping the latter silently solves the wrong objective.
     let mut c = vec![0.0; n];
     for (var, coef) in &prob.obj_linear {
+        c[*var] += sign * coef;
+    }
+    for (var, coef) in &obj_nl_linear {
         c[*var] += sign * coef;
     }
 
@@ -260,6 +267,60 @@ mod tests {
             (lambda[0] - (-2.0)).abs() < 1e-5,
             "equality dual={}",
             lambda[0]
+        );
+    }
+
+    /// Regression for the dropped-linear-term bug: the objective `(x0-3)²`
+    /// lives entirely in the nonlinear tree, so its linear part (`−6·x0`)
+    /// must be folded into `c`. Without it the solve minimizes `x0²`
+    /// (optimum 0) instead of `(x0-3)²` (optimum 3).
+    #[test]
+    fn extract_keeps_linear_term_from_nonlinear_tree() {
+        // (x0 - 3)^2 = x0^2 - 6 x0 + 9, all in obj_nonlinear.
+        let obj = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Binary(
+                BinOp::Sub,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(3.0)),
+            )),
+            Box::new(Expr::Const(2.0)),
+        );
+        let prob = NlProblem {
+            n: 1,
+            m: 0,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: obj,
+            obj_linear: vec![],
+            obj_constant: 0.0,
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            x_l: vec![-2e19],
+            x_u: vec![2e19],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![0.0],
+            lambda0: vec![],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+        };
+        let qp = extract_qp(&prob).expect("extract");
+        assert_eq!(qp.c.len(), 1);
+        assert!(
+            (qp.c[0] - (-6.0)).abs() < 1e-12,
+            "c[0]={} — linear term from the nonlinear tree was dropped",
+            qp.c[0]
+        );
+        // P = 2 (one diagonal entry).
+        assert_eq!(qp.p_lower.len(), 1);
+
+        let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!(
+            (sol.x[0] - 3.0).abs() < 1e-6,
+            "x0={} (expected 3)",
+            sol.x[0]
         );
     }
 

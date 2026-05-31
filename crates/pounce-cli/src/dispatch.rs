@@ -171,10 +171,20 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
         }
     }
 
-    // Objective Hessian definiteness. An indefinite objective Hessian
-    // ⇒ nonconvex QP regardless of constraints.
-    if !obj_quad.is_empty() && !hessian_is_psd(&obj_quad, prob.n) {
-        return ProblemClass::NonconvexQp;
+    // Objective Hessian definiteness, as the *minimizer* sees it. A
+    // `maximize` problem is internally negated to a minimization, so a
+    // concave-up (PSD-Hessian) maximize is a nonconvex minimize. Test the
+    // sense-adjusted Hessian, not the raw one, or maximize-of-convex slips
+    // through to the convex IPM and produces a wrong (max/saddle) answer.
+    if !obj_quad.is_empty() {
+        let effective: QuadHessian = if prob.minimize {
+            obj_quad.clone()
+        } else {
+            obj_quad.iter().map(|(k, v)| (*k, -v)).collect()
+        };
+        if !hessian_is_psd(&effective, prob.n) {
+            return ProblemClass::NonconvexQp;
+        }
     }
 
     if any_quadratic_constraint {
@@ -289,16 +299,35 @@ pub(crate) type QuadHessian = BTreeMap<(usize, usize), f64>;
 /// prove is degree-≤2 polynomial (transcendental ops, division by a
 /// non-constant, `Pow` with exponent ∉ {0,1,2}, products of degree > 2,
 /// external calls, …). `None` ⇒ treat as general nonlinear.
-pub(crate) fn analyze_quadratic(e: &Expr, _n: usize) -> Option<QuadHessian> {
+pub(crate) fn analyze_quadratic(e: &Expr, n: usize) -> Option<QuadHessian> {
+    analyze_quadratic_full(e, n).map(|(h, _)| h)
+}
+
+/// Like [`analyze_quadratic`] but also returns the degree-1 (linear)
+/// coefficients of the form: `(Hessian, [(var, coef), …])`.
+///
+/// AMPL folds the linear part of a nonlinear term into the objective's
+/// nonlinear expression tree (the `−6·x₀` of `(x₀−3)²`, say) rather than
+/// the linear section. Callers building the QP objective vector `c` must
+/// add these in, exactly as the NLP path's `eval_f` sums the linear
+/// section *and* the nonlinear tree — otherwise the linear shift is
+/// silently dropped and the convex solve minimizes the wrong objective.
+pub(crate) fn analyze_quadratic_full(
+    e: &Expr,
+    _n: usize,
+) -> Option<(QuadHessian, Vec<(usize, f64)>)> {
     let poly = to_poly(e)?;
     if poly.max_degree() > 2 {
         return None;
     }
     let mut h: QuadHessian = BTreeMap::new();
+    let mut lin: Vec<(usize, f64)> = Vec::new();
     for (vars, coef) in &poly.terms {
         match vars.as_slice() {
-            // Constant / linear terms contribute nothing to the Hessian.
-            [] | [_] => {}
+            // Constant term contributes nothing to gradient or Hessian.
+            [] => {}
+            // Linear term c·xᵢ.
+            [i] => lin.push((*i, *coef)),
             // Quadratic term c·xᵢ·xⱼ.
             [i, j] => {
                 let (i, j) = (*i.min(j), *i.max(j));
@@ -311,7 +340,7 @@ pub(crate) fn analyze_quadratic(e: &Expr, _n: usize) -> Option<QuadHessian> {
     }
     // Drop explicit zeros so `is_empty()` means "linear".
     h.retain(|_, v| v.abs() > 0.0);
-    Some(h)
+    Some((h, lin))
 }
 
 /// A multivariate polynomial as a map from a sorted variable-index
@@ -804,6 +833,52 @@ mod tests {
         let obj = Expr::Unary(UnaryOp::Exp, Box::new(Expr::Var(0)));
         let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
         assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// Regression: a `maximize` of a PSD-Hessian objective is a *concave*
+    /// maximization ⇒ nonconvex minimization. The convexity test must run
+    /// on the sense-adjusted Hessian, or this slips through to the convex
+    /// IPM and returns a wrong (maximum/saddle) answer.
+    #[test]
+    fn classify_maximize_psd_objective_is_nonconvex() {
+        // maximize x0^2 + x1^2 (H = diag(2,2), PSD) — concave max.
+        let obj = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )),
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(1)),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let mut prob = qp_stub(obj, vec![Expr::Const(0.0)]);
+        prob.minimize = false;
+        assert_eq!(classify_problem(&prob), ProblemClass::NonconvexQp);
+    }
+
+    /// Mirror: `maximize` of a concave (NSD-Hessian) objective is a convex
+    /// minimization once negated, so it is a legitimate `ConvexQp`.
+    #[test]
+    fn classify_maximize_concave_objective_is_convex() {
+        // maximize −(x0^2 + x1^2) (H = diag(−2,−2)); negated ⇒ PSD.
+        let neg_sq = |v: usize| {
+            Expr::Unary(
+                UnaryOp::Neg,
+                Box::new(Expr::Binary(
+                    BinOp::Pow,
+                    Box::new(Expr::Var(v)),
+                    Box::new(Expr::Const(2.0)),
+                )),
+            )
+        };
+        let obj = Expr::Binary(BinOp::Add, Box::new(neg_sq(0)), Box::new(neg_sq(1)));
+        let mut prob = qp_stub(obj, vec![Expr::Const(0.0)]);
+        prob.minimize = false;
+        assert_eq!(classify_problem(&prob), ProblemClass::ConvexQp);
     }
 
     #[test]
