@@ -505,6 +505,38 @@ remain optional follow-ups, gated on a demonstrated need.
 Remaining: the CBLIB exp/power benchmark set (broad/adversarial validation),
 and — if a need emerges — embedded factor-reuse for the non-symmetric path.
 
+### CBLIB benchmark tier — plan (deferred to a focused session)
+
+The literal benchmark instances from the source papers live in CBLIB
+(`https://cblib.zib.de/download/all/<name>.cbf.gz`, reachable) and are the
+gold-standard broad validation:
+
+- **Geometric programs** (small, exp cones, pure-continuous): `demb761/762/763`,
+  `beck751/752/753`, `fang88`, `jha88`, `car`, `rijc786/787`, `mra01/02`.
+- **Logistic regression** (pure-continuous exp): `LogExpCR-n{20,100,500}-m{400…2000}`.
+- **Power cone**: `2013_fir*`.
+- (`batch*`/`rsyn*` are MINLPs — solve the *continuous relaxation* if used.)
+
+**CBF → pounce conversion** (verified against a full dump of `demb761`):
+the `.cbf` has `VAR` (cones over variables) and `CON` (cones over `Ax+b`),
+plus sparse `OBJACOORD` (obj `c`), `OBJBCOORD` (obj constant `c₀`), `ACOORD`
+(`A`), `BCOORD` (`b`).
+- VAR `EXP 3` → variable triple in `K_exp`; **CBF order `(a,b,c)` permutes to
+  pounce `(c,b,a)`** (CBF `x1 ≥ x2 e^{x3/x2}` vs pounce `z ≥ y e^{x/y}`).
+  Realize as `s = x_triple ∈ K` via `G = −I`, `h = 0`.
+- VAR `POW` → `K_α` (read the exponent); VAR `Q`/`QR` → SOC; `F` → free.
+- CON `L=` → equality `Ax = −b`; `L-` → `Ax ≤ −b`; `L+` → `Ax ≥ −b`
+  (nonneg slack `s = −(Ax+b)`); CON cone blocks (EXP/POW/Q) → cone rows.
+
+**Validation strategy (no published reference objectives — they 404):** use
+the same cross-check as `exp_cone_vs_nlp` — parse each `.cbf` into *both* a
+conic program (this driver) and a smooth NLP (`pounce-nlp`, with the exp/pow
+epigraph constraints and their analytic Jacobians) and assert the two
+independent solvers agree on the objective. Report status / iters / time /
+KKT residuals per instance (feeding the JSON solve report into the existing
+`benchmarks/` harness). Build the CBF reader as its own carefully-tested unit
+first (round-trip on `demb761`) before wiring the harness.
+
 ## Sources (local copies — read and transcribed)
 
 - **Skajaa, A. & Ye, Y. (2015).** *A homogeneous interior-point algorithm for
