@@ -1,9 +1,26 @@
 # SOCP extension for the convex IPM — design note
 
-**Status: design + Phase 1 landing.** Captures what it takes to add a
-second-order cone (SOC) to `pounce-convex`'s interior-point solver, so the
-later phases are cone *extensions* rather than a rewrite. Phase 1 (the
-`CompositeCone` refactor) lands with this note; Phases 2+ are scoped here.
+**Status: Phases 1 + 2 landed — pounce solves SOCPs.** Captures the design
+for adding a second-order cone (SOC) to `pounce-convex`'s interior-point
+solver. Phase 1 (the `CompositeCone` refactor) and Phase 2 (the NT scaling,
+the generalized dense-block KKT, and `solve_socp_ipm`) are implemented and
+validated; the remaining items (cone-aware presolve gating, SOC warm
+start, low-rank KKT for large cones, cone-aware differentiable layer) are
+scoped below.
+
+## Outcome (Phases 1–2)
+
+`solve_socp_ipm(prob, &[ConeSpec], …)` solves `min ½xᵀPx+cᵀx s.t. Ax=b,
+Gx ⪯_K h` over a product of nonnegative-orthant and second-order cones,
+with closed-form-validated optima (norm minimization, linear-over-SOC,
+Euclidean projection onto a cone) and a mixed orthant+SOC case — see
+`tests/socp.rs`. Correctness is **intrinsic**: the IPM only reports
+`Optimal` at a verified KKT point (residual below tolerance, `s,z` kept in
+the cone), so no external reference solver is needed. The NT reduced
+system (`block = W⁻² = η²Q_{w̄}`, `rhs = Arw(z)⁻¹ r_comp`, `recover_ds =
+−rhs − W⁻²dz`) was derived to be self-consistent and reduces exactly to
+the orthant in 1-D; the orthant LP/QP path is byte-identical (all prior
+tests pass).
 
 ## Motivation
 

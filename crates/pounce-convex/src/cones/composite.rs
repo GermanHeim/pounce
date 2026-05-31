@@ -58,6 +58,9 @@ impl Cone for ConeKind {
     fn degree(&self) -> usize {
         dispatch!(self, c => c.degree())
     }
+    fn identity(&self, out: &mut [f64]) {
+        dispatch!(self, c => c.identity(out))
+    }
     fn dim(&self) -> usize {
         dispatch!(self, c => c.dim())
     }
@@ -154,6 +157,13 @@ impl CompositeCone {
 impl Cone for CompositeCone {
     fn degree(&self) -> usize {
         self.degree
+    }
+
+    fn identity(&self, out: &mut [f64]) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.identity(&mut out[*off..off + d]);
+        }
     }
 
     fn dim(&self) -> usize {

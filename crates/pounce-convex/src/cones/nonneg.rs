@@ -23,6 +23,10 @@ impl Cone for NonnegCone {
         self.n
     }
 
+    fn identity(&self, out: &mut [f64]) {
+        out.iter_mut().for_each(|v| *v = 1.0);
+    }
+
     fn dim(&self) -> usize {
         self.n
     }

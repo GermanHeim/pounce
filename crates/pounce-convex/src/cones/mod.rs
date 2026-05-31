@@ -46,6 +46,11 @@ pub trait Cone {
     /// central-path parameter `μ = ⟨s, z⟩ / degree`.
     fn degree(&self) -> usize;
 
+    /// The cone's identity element `e` (the well-centered interior point
+    /// used to cold-start `s` and `z`). Orthant: all ones; second-order
+    /// cone: `(1, 0, …, 0)`. Writes `dim` values.
+    fn identity(&self, out: &mut [f64]);
+
     /// Dimension of the slack/dual vectors this cone owns.
     fn dim(&self) -> usize;
 

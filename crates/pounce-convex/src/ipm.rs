@@ -47,7 +47,7 @@
 //! step) all route through the [`Cone`](crate::cones::Cone) trait so
 //! that Phases 4–6 extend rather than rewrite this driver.
 
-use crate::cones::{CompositeCone, Cone};
+use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -100,10 +100,12 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     if !prob.has_bounds() {
-        return solve_qp_core(prob, opts, None, make_backend);
+        let cone = CompositeCone::single_nonneg(prob.m_ineq());
+        return solve_qp_core(prob, &cone, opts, None, make_backend);
     }
     let (expanded, bound_rows) = expand_bounds(prob);
-    let sol = solve_qp_core(&expanded, opts, None, make_backend);
+    let cone = CompositeCone::single_nonneg(expanded.m_ineq());
+    let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -130,7 +132,8 @@ where
             y: warm.y.clone(),
             z: warm.z.clone(),
         };
-        return solve_qp_core(prob, opts, Some(&w), make_backend);
+        let cone = CompositeCone::single_nonneg(prob.m_ineq());
+        return solve_qp_core(prob, &cone, opts, Some(&w), make_backend);
     }
     let (expanded, bound_rows) = expand_bounds(prob);
     let w = WarmStart {
@@ -138,7 +141,36 @@ where
         y: warm.y.clone(),
         z: merge_bound_duals(prob, &bound_rows, warm),
     };
-    let sol = solve_qp_core(&expanded, opts, Some(&w), make_backend);
+    let cone = CompositeCone::single_nonneg(expanded.m_ineq());
+    let sol = solve_qp_core(&expanded, &cone, opts, Some(&w), make_backend);
+    split_bound_duals(prob, &bound_rows, sol)
+}
+
+/// Solve a standard-form **SOCP** (or mixed LP/QP + second-order cones):
+/// `min ½xᵀPx+cᵀx s.t. Ax=b, Gx ⪯_K h`, where the inequality block `Gx ≤ h`
+/// is partitioned into the cones `K` described by `cones` (in row order;
+/// each `s = h − Gx` block must lie in its cone). `cones` must cover the
+/// `m_ineq` rows. Variable bounds (`lb`/`ub`) are appended as a trailing
+/// nonnegative block.
+pub fn solve_socp_ipm<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if !prob.has_bounds() {
+        let cone = CompositeCone::from_specs(cones);
+        return solve_qp_core(prob, &cone, opts, None, make_backend);
+    }
+    // Bounds expand into a trailing nonnegative block after the user cones.
+    let (expanded, bound_rows) = expand_bounds(prob);
+    let mut specs = cones.to_vec();
+    specs.push(ConeSpec::Nonneg(bound_rows.len()));
+    let cone = CompositeCone::from_specs(&specs);
+    let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -292,6 +324,7 @@ fn split_bound_duals(
 /// ignored here; the public [`solve_qp_ipm`] handles bound expansion.
 fn solve_qp_core<F>(
     prob: &QpProblem,
+    cone: &CompositeCone,
     opts: &QpOptions,
     warm: Option<&WarmStart>,
     mut make_backend: F,
@@ -301,10 +334,10 @@ where
 {
     // Build the fixed KKT pattern and an initial factorization, then run
     // the iteration. The pattern is constant across iterations (only the
-    // (z,z) scaling diagonal changes), so the loop `refactor`s rather than
+    // cone scaling block changes), so the loop `refactor`s rather than
     // re-analyzing. Build-once / solve-many across *instances* with the
     // same pattern is exposed via [`QpFactorization`].
-    let (kkt, mut fact) = match build_factorization(prob, opts, &mut make_backend) {
+    let (kkt, mut fact) = match build_factorization(prob, cone, opts, &mut make_backend) {
         Ok(pair) => pair,
         Err(()) => {
             let n = prob.n;
@@ -317,7 +350,7 @@ where
             );
         }
     };
-    run_ipm(prob, opts, &kkt, &mut fact, warm)
+    run_ipm(prob, cone, opts, &kkt, &mut fact, warm)
 }
 
 /// Build the constant KKT pattern for `prob` and a `Factorization` over
@@ -326,6 +359,7 @@ where
 /// factorization failed.
 fn build_factorization<F>(
     prob: &QpProblem,
+    cone: &CompositeCone,
     opts: &QpOptions,
     make_backend: &mut F,
 ) -> Result<(KktStructure, Factorization), ()>
@@ -333,15 +367,13 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     let dim = prob.n + prob.m_eq() + prob.m_ineq();
-    let cone = CompositeCone::single_nonneg(prob.m_ineq());
-    // Initial interior scaling (s = z = 1 ⇒ S⊘Z = 1).
-    let mut scaling = vec![0.0; prob.m_ineq()];
-    let s0 = vec![1.0; prob.m_ineq()];
-    cone.scaling_diag(&s0, &s0, &mut scaling);
+    // Seed the scaling at the cone identity (s = z = e ⇒ block = I).
+    let mut e = vec![0.0; prob.m_ineq()];
+    cone.identity(&mut e);
 
-    let kkt = KktStructure::build(prob, opts.reg);
+    let kkt = KktStructure::build(prob, cone, opts.reg);
     let mut kkt_vals = kkt.values.clone();
-    kkt.update_scaling(&scaling, opts.reg, &mut kkt_vals);
+    kkt.update_blocks(cone, &e, &e, opts.reg, &mut kkt_vals);
     let fact = Factorization::new(
         dim as Index,
         kkt.airn.clone(),
@@ -386,18 +418,18 @@ where
 /// cold start is used, so a stale warm start can never corrupt a solve.
 fn init_iterate(
     prob: &QpProblem,
+    cone: &CompositeCone,
     n: usize,
     m_eq: usize,
     m_ineq: usize,
     warm: Option<&WarmStart>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    // Cold start at the cone identity e (orthant: all ones; SOC: (1,0,…)),
+    // a perfectly centered interior point (s∘z = e).
     let cold = || {
-        (
-            vec![0.0; n],
-            vec![0.0; m_eq],
-            vec![1.0; m_ineq],
-            vec![1.0; m_ineq],
-        )
+        let mut e = vec![0.0; m_ineq];
+        cone.identity(&mut e);
+        (vec![0.0; n], vec![0.0; m_eq], e.clone(), e)
     };
     // A matching primal `x` is enough to warm start; `y`/`z` fall back to
     // the cold values when they don't match (so a primal-only warm start —
@@ -482,6 +514,7 @@ fn init_iterate(
 /// across instances too.
 fn run_ipm(
     prob: &QpProblem,
+    cone: &CompositeCone,
     opts: &QpOptions,
     kkt: &KktStructure,
     fact: &mut Factorization,
@@ -490,16 +523,14 @@ fn run_ipm(
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
-    let cone = CompositeCone::single_nonneg(m_ineq);
 
-    let (mut x, mut y, mut z, mut s) = init_iterate(prob, n, m_eq, m_ineq, warm);
+    let (mut x, mut y, mut z, mut s) = init_iterate(prob, cone, n, m_eq, m_ineq, warm);
 
     let mut r_d = vec![0.0; n];
     let mut r_p = vec![0.0; m_eq];
     let mut r_g = vec![0.0; m_ineq];
     let mut r_c = vec![0.0; m_ineq];
     let mut rhs_term = vec![0.0; m_ineq];
-    let mut scaling = vec![0.0; m_ineq];
     let mut rhs = vec![0.0; n + m_eq + m_ineq];
     let mut dx = vec![0.0; n];
     let mut dy = vec![0.0; m_eq];
@@ -549,12 +580,10 @@ fn run_ipm(
             break;
         }
 
-        // --- update only the (z,z) scaling diagonal and refactor
-        // (numeric-only; the symbolic factor / ordering is reused). The
-        // one factorization then backs both the predictor and corrector
-        // solves this iteration. ---
-        cone.scaling_diag(&s, &z, &mut scaling);
-        kkt.update_scaling(&scaling, opts.reg, &mut kkt_vals);
+        // --- update the cone scaling block(s) and refactor (numeric-only;
+        // the symbolic factor / ordering is reused). The one factorization
+        // then backs both the predictor and corrector solves. ---
+        kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
         if fact.refactor(&kkt_vals).is_err() {
             status = QpStatus::NumericalFailure;
             break;
@@ -662,6 +691,9 @@ fn run_ipm(
 pub struct QpFactorization {
     fact: Factorization,
     opts: QpOptions,
+    /// The (orthant) inequality cone of the expanded problem; reused for
+    /// the KKT pattern check and the per-solve scaling.
+    cone: CompositeCone,
     /// Captured structure fingerprint for the per-solve compatibility
     /// check (same `n` and same expanded KKT pattern).
     n: usize,
@@ -682,12 +714,14 @@ impl QpFactorization {
         } else {
             base.clone()
         };
-        let (kkt, fact) = build_factorization(&expanded, opts, &mut make_backend).ok()?;
+        let cone = CompositeCone::single_nonneg(expanded.m_ineq());
+        let (kkt, fact) = build_factorization(&expanded, &cone, opts, &mut make_backend).ok()?;
         Some(QpFactorization {
             airn: kkt.airn,
             ajcn: kkt.ajcn,
             n: base.n,
             fact,
+            cone,
             opts: *opts,
         })
     }
@@ -728,7 +762,7 @@ impl QpFactorization {
         };
         // Rebuild this instance's pattern and require it to match the
         // captured one exactly (same nnz, same row/col indices).
-        let kkt = KktStructure::build(&expanded, self.opts.reg);
+        let kkt = KktStructure::build(&expanded, &self.cone, self.opts.reg);
         if prob.n != self.n || kkt.airn != self.airn || kkt.ajcn != self.ajcn {
             return failed_solution(
                 prob,
@@ -742,7 +776,7 @@ impl QpFactorization {
         // `run_ipm` refactors numerically per iteration). The same factor
         // object is reused across solves, so the AMD ordering / symbolic
         // factor is paid once at `build`.
-        let sol = run_ipm(&expanded, &self.opts, &kkt, &mut self.fact, warm);
+        let sol = run_ipm(&expanded, &self.cone, &self.opts, &kkt, &mut self.fact, warm);
         split_bound_duals(prob, &bound_rows, sol)
     }
 }
@@ -844,9 +878,12 @@ pub fn assemble_kkt_for_bench(
     reg: f64,
     _dim: usize,
 ) -> (Vec<Index>, Vec<Index>, Vec<Number>) {
-    let kkt = KktStructure::build(prob, reg);
+    let cone = CompositeCone::single_nonneg(prob.m_ineq());
+    let kkt = KktStructure::build(prob, &cone, reg);
     let mut vals = kkt.values.clone();
-    kkt.update_scaling(scaling, reg, &mut vals);
+    // Orthant block s/z = scaling at z = 1.
+    let ones = vec![1.0; prob.m_ineq()];
+    kkt.update_blocks(&cone, scaling, &ones, reg, &mut vals);
     (kkt.airn, kkt.ajcn, vals)
 }
 
@@ -863,25 +900,37 @@ pub fn assemble_kkt_for_bench(
 /// is the constant-pattern symbolic reuse called for in
 /// `dev-notes/performance-engineering.md`; without it the per-iteration
 /// cost is dominated by repeated symbolic analysis on large sparse QPs.
+/// Value-array positions of one cone's `(z, z)` scaling block, aligned with
+/// the cone's [`CompositeCone::blocks`] order.
+enum ZBlockPos {
+    /// One position per row (orthant diagonal).
+    Diagonal(Vec<usize>),
+    /// Row-major lower-triangle positions of a dense block (SOC); the
+    /// dimension is the cone block's `dim()`.
+    Dense { lower_pos: Vec<usize> },
+}
+
 struct KktStructure {
     airn: Vec<Index>,
     ajcn: Vec<Index>,
-    /// Constant values (everything except the scaling block; the
-    /// `(z, z)` diagonal entries hold their `-reg` term here).
+    /// Constant values (everything except the scaling block; the `(z, z)`
+    /// diagonal entries hold their `-reg` term here).
     values: Vec<Number>,
-    /// `z_diag_pos[i]` = index into `values` of inequality `i`'s
-    /// `(z, z)` diagonal entry.
-    z_diag_pos: Vec<usize>,
+    /// Per-cone `(z, z)` block positions (orthant: diagonal; SOC: dense),
+    /// in `cone.blocks()` order. [`Self::update_blocks`] fills them.
+    z_blocks: Vec<ZBlockPos>,
 }
 
 impl KktStructure {
-    /// Build the pattern and constant values once. The `(z, z)` diagonal
-    /// entries are seeded with `-reg`; [`Self::update_scaling`] adds the
-    /// per-iteration `-scaling[i]` on top.
-    fn build(prob: &QpProblem, reg: f64) -> Self {
+    /// Build the pattern and constant values once for `prob`'s inequality
+    /// cone `cone`. Each cone block contributes either a diagonal entry per
+    /// row (orthant) or a dense lower-triangle block (SOC) at its `(z, z)`
+    /// position; all seeded with `-reg` on the diagonal. The pattern is
+    /// constant across iterations — only the scaling values change — so the
+    /// solver `refactor`s rather than re-analyzing.
+    fn build(prob: &QpProblem, cone: &CompositeCone, reg: f64) -> Self {
         let n = prob.n;
         let m_eq = prob.m_eq();
-        let m_ineq = prob.m_ineq();
         let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut add = |r: usize, c: usize, v: f64| {
             let (r, c) = if r >= c { (r, c) } else { (c, r) };
@@ -902,19 +951,34 @@ impl KktStructure {
         for i in 0..m_eq {
             add(n + i, n + i, -reg);
         }
-        // (z,x): G; (z,z): seed −δI (scaling added per iteration).
+        // (z,x): G.
         for t in &prob.g {
             add(n + m_eq + t.row, t.col, t.val);
         }
-        for i in 0..m_ineq {
-            add(n + m_eq + i, n + m_eq + i, -reg);
+        // (z,z): per cone block, seeded with −δI. The scaling is written
+        // per iteration by `update_blocks`.
+        let shapes = block_shapes(cone);
+        for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
+            let d = k.dim();
+            let base = n + m_eq + off;
+            if *dense {
+                for i in 0..d {
+                    for j in 0..=i {
+                        let v = if i == j { -reg } else { 0.0 };
+                        add(base + i, base + j, v);
+                    }
+                }
+            } else {
+                for i in 0..d {
+                    add(base + i, base + i, -reg);
+                }
+            }
         }
 
         let nnz = entries.len();
         let mut airn = Vec::with_capacity(nnz);
         let mut ajcn = Vec::with_capacity(nnz);
         let mut values = Vec::with_capacity(nnz);
-        // Map (z,z) diagonal coordinates → output position.
         let mut coord_to_pos: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for (pos, ((r, c), v)) in entries.into_iter().enumerate() {
             airn.push((r + 1) as Index);
@@ -922,26 +986,82 @@ impl KktStructure {
             values.push(v);
             coord_to_pos.insert((r, c), pos);
         }
-        let z_diag_pos: Vec<usize> = (0..m_ineq)
-            .map(|i| coord_to_pos[&(n + m_eq + i, n + m_eq + i)])
-            .collect();
+
+        // Record each cone block's positions in `blocks()` order.
+        let mut z_blocks = Vec::with_capacity(cone.blocks().len());
+        for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
+            let d = k.dim();
+            let base = n + m_eq + off;
+            if *dense {
+                let mut lower_pos = Vec::with_capacity(d * (d + 1) / 2);
+                for i in 0..d {
+                    for j in 0..=i {
+                        lower_pos.push(coord_to_pos[&(base + i, base + j)]);
+                    }
+                }
+                z_blocks.push(ZBlockPos::Dense { lower_pos });
+            } else {
+                let diag = (0..d).map(|i| coord_to_pos[&(base + i, base + i)]).collect();
+                z_blocks.push(ZBlockPos::Diagonal(diag));
+            }
+        }
 
         KktStructure {
             airn,
             ajcn,
             values,
-            z_diag_pos,
+            z_blocks,
         }
     }
 
-    /// Write the per-iteration scaling into `out` (which must start as a
-    /// copy of `self.values`): sets each `(z, z)` diagonal entry to
-    /// `-scaling[i] - reg`.
-    fn update_scaling(&self, scaling: &[f64], reg: f64, out: &mut [Number]) {
-        for (i, &pos) in self.z_diag_pos.iter().enumerate() {
-            out[pos] = -scaling[i] - reg;
+    /// Write the per-iteration cone scaling into `out` (a copy of
+    /// `self.values`): each block's `(z, z)` entries become `-(block) -
+    /// reg·I`, from the cone's [`Cone::kkt_block`].
+    fn update_blocks(
+        &self,
+        cone: &CompositeCone,
+        s: &[f64],
+        z: &[f64],
+        reg: f64,
+        out: &mut [Number],
+    ) {
+        for ((off, k), zb) in cone.blocks().iter().zip(&self.z_blocks) {
+            let d = k.dim();
+            let block = k.kkt_block(&s[*off..off + d], &z[*off..off + d]);
+            match (zb, block) {
+                (ZBlockPos::Diagonal(pos), ConeBlock::Diagonal(vals)) => {
+                    for (i, &p) in pos.iter().enumerate() {
+                        out[p] = -vals[i] - reg;
+                    }
+                }
+                (ZBlockPos::Dense { lower_pos }, ConeBlock::DenseLower { lower, .. }) => {
+                    let mut idx = 0;
+                    for i in 0..d {
+                        for j in 0..=i {
+                            let reg_ij = if i == j { reg } else { 0.0 };
+                            out[lower_pos[idx]] = -lower[idx] - reg_ij;
+                            idx += 1;
+                        }
+                    }
+                }
+                _ => unreachable!("cone block shape changed between build and update"),
+            }
         }
     }
+}
+
+/// Whether each cone block contributes a dense `(z, z)` block (SOC) vs a
+/// diagonal one (orthant), probed via `kkt_block` at the cone identity.
+fn block_shapes(cone: &CompositeCone) -> Vec<bool> {
+    cone.blocks()
+        .iter()
+        .map(|(_, k)| {
+            let d = k.dim();
+            let mut e = vec![0.0; d];
+            k.identity(&mut e);
+            matches!(k.kkt_block(&e, &e), ConeBlock::DenseLower { .. })
+        })
+        .collect()
 }
 
 fn inf_norm(v: &[f64]) -> f64 {

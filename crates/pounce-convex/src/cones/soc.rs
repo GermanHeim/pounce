@@ -94,11 +94,43 @@ impl SecondOrderCone {
         }
         lower
     }
+
+    /// Apply the scaling block `W² = η²(2 w̄ w̄ᵀ − J)` to a vector — the
+    /// matrix-free form of the dense block returned by [`Self::kkt_block`],
+    /// used in `recover_ds` so the recovered slack step is *exactly*
+    /// consistent with the assembled KKT block.
+    fn apply_w2(eta: f64, w_bar: &[f64], dz: &[f64], out: &mut [f64]) {
+        let eta2 = eta * eta;
+        let wd: f64 = w_bar.iter().zip(dz).map(|(w, d)| w * d).sum();
+        out[0] = eta2 * (2.0 * w_bar[0] * wd - dz[0]); // (J dz)₀ = dz₀
+        for k in 1..w_bar.len() {
+            out[k] = eta2 * (2.0 * w_bar[k] * wd + dz[k]); // (J dz)_k = −dz_k
+        }
+    }
+
+    /// Apply `Arw(z)⁻¹` to `b` (solve the arrow system `Arw(z) x = b`),
+    /// where `Arw(z) = [[z₀, z₁ᵀ], [z₁, z₀ I]]`. This is the cone's
+    /// "division by z"; for a 1-D cone it is `b / z`.
+    fn arw_inv(z: &[f64], b: &[f64], out: &mut [f64]) {
+        let m = z.len();
+        let z1_b1: f64 = z[1..].iter().zip(&b[1..]).map(|(p, q)| p * q).sum();
+        let det = Self::det(z);
+        let x0 = (z[0] * b[0] - z1_b1) / det;
+        out[0] = x0;
+        for k in 1..m {
+            out[k] = (b[k] - x0 * z[k]) / z[0];
+        }
+    }
 }
 
 impl Cone for SecondOrderCone {
     fn degree(&self) -> usize {
         2 // rank of the second-order cone, independent of dimension
+    }
+
+    fn identity(&self, out: &mut [f64]) {
+        out.iter_mut().for_each(|v| *v = 0.0);
+        out[0] = 1.0; // e = (1, 0, …, 0)
     }
 
     fn dim(&self) -> usize {
@@ -158,35 +190,50 @@ impl Cone for SecondOrderCone {
         (tau * alpha).min(1.0)
     }
 
-    // --- Phase 2b: reduced-system methods (NT scaling/sign conventions to
-    // be validated end-to-end against a reference solver). ---
-
     fn scaling_diag(&self, _s: &[f64], _z: &[f64], _out: &mut [f64]) {
-        // SOC's (z,z) block is dense (see `kkt_block`); the diagonal-only
-        // path is the orthant's. The driver consumes `kkt_block` once the
-        // KKT assembly is generalized (Phase 2b); until then SOC is not
-        // routed through the solver.
-        unimplemented!("Phase 2b: SOC uses kkt_block, not scaling_diag")
+        // SOC's (z,z) block is dense — the driver consumes `kkt_block`, not
+        // the orthant's diagonal-only `scaling_diag`.
+        unimplemented!("SOC uses kkt_block, not scaling_diag")
     }
 
     fn comp_residual_corrector(
         &self,
-        _s: &[f64],
-        _z: &[f64],
-        _ds_aff: &[f64],
-        _dz_aff: &[f64],
-        _sigma_mu: f64,
-        _out: &mut [f64],
+        s: &[f64],
+        z: &[f64],
+        ds_aff: &[f64],
+        dz_aff: &[f64],
+        sigma_mu: f64,
+        out: &mut [f64],
     ) {
-        unimplemented!("Phase 2b: SOC corrector (second-order term in NT-scaled space)")
+        // s∘z + ds_aff∘dz_aff − σμ e (Mehrotra second-order term, Jordan).
+        let mut second = vec![0.0; self.m];
+        Self::jordan(s, z, out);
+        Self::jordan(ds_aff, dz_aff, &mut second);
+        for k in 0..self.m {
+            out[k] += second[k];
+        }
+        out[0] -= sigma_mu;
     }
 
-    fn recover_ds(&self, _s: &[f64], _z: &[f64], _r_comp: &[f64], _dz: &[f64], _ds: &mut [f64]) {
-        unimplemented!("Phase 2b: SOC ds recovery via NT scaling")
+    fn rhs_comp_term(&self, _s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
+        // Reduced-KKT (z)-row term: Arw(z)⁻¹ r_comp. Coincides with the NT
+        // term −W⁻¹ r̂ via the identity W⁻¹λ⁻¹ = z⁻¹; reduces to r_comp/z in
+        // 1-D.
+        Self::arw_inv(z, r_comp, out);
     }
 
-    fn rhs_comp_term(&self, _s: &[f64], _z: &[f64], _r_comp: &[f64], _out: &mut [f64]) {
-        unimplemented!("Phase 2b: SOC reduced-system RHS term via NT scaling")
+    fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
+        // ds = −Arw(z)⁻¹ r_comp − W⁻² dz, exactly consistent with the
+        // assembled block (`apply_w2` ≡ `kkt_block` as an operator) and the
+        // rhs term above. Reduces to −r_comp/z − (s/z) dz in 1-D.
+        let (eta, w_bar) = Self::nt_scaling(s, z);
+        let mut rhs = vec![0.0; self.m];
+        Self::arw_inv(z, r_comp, &mut rhs);
+        let mut w2dz = vec![0.0; self.m];
+        Self::apply_w2(eta, &w_bar, dz, &mut w2dz);
+        for k in 0..self.m {
+            ds[k] = -rhs[k] - w2dz[k];
+        }
     }
 }
 
@@ -313,5 +360,65 @@ mod tests {
         let v = [5.0, 0.0, 0.0];
         let dv = [1.0, 0.1, -0.1]; // det(dv)=1-0.02>0, b>0 ⇒ stays interior
         assert!((c.max_step(&v, &dv, 0.99) - 1.0).abs() < 1e-12);
+    }
+
+    /// `arw_inv` is a genuine inverse: Arw(z)·arw_inv(z,b) = b. This is the
+    /// operator the reduced-system rhs / `recover_ds` rely on.
+    #[test]
+    fn arw_inv_inverts_the_arrow_operator() {
+        let z = [3.0, 1.0, -0.5]; // interior
+        let b = [0.7, -0.2, 0.4];
+        let mut x = [0.0; 3];
+        SecondOrderCone::arw_inv(&z, &b, &mut x);
+        // Arw(z) x = (z·x, z₀ x₁ + x₀ z₁).
+        let zx: f64 = z.iter().zip(&x).map(|(a, c)| a * c).sum();
+        assert!((zx - b[0]).abs() < 1e-12);
+        for k in 1..3 {
+            assert!((z[0] * x[k] + x[0] * z[k] - b[k]).abs() < 1e-12);
+        }
+    }
+
+    /// `apply_w2` (matrix-free) equals the dense `kkt_block` matrix times
+    /// the vector — so `recover_ds`'s `W⁻²dz` is *exactly* the assembled
+    /// KKT block, the consistency the reduced system depends on.
+    #[test]
+    fn apply_w2_matches_dense_kkt_block() {
+        let c = SecondOrderCone::new(4);
+        let s = [2.0, 0.5, -0.5, 0.3];
+        let z = [3.0, 1.0, 0.5, -0.2];
+        let w2 = dense(&c.kkt_block(&s, &z), 4);
+        let dz = [0.3, -0.7, 0.2, 0.9];
+        let want = matvec(&w2, &dz);
+        let (eta, w_bar) = SecondOrderCone::nt_scaling(&s, &z);
+        let mut got = [0.0; 4];
+        SecondOrderCone::apply_w2(eta, &w_bar, &dz, &mut got);
+        for k in 0..4 {
+            assert!((got[k] - want[k]).abs() < 1e-12, "k={k}: {} vs {}", got[k], want[k]);
+        }
+    }
+
+    /// Reduced-system triple reduces to the orthant in 1-D: for `m = 1`,
+    /// the block is `s/z`, the rhs term is `r/z`, and `recover_ds` is
+    /// `−r/z − (s/z)dz`.
+    #[test]
+    fn one_dimensional_cone_matches_orthant() {
+        let c = SecondOrderCone::new(1);
+        let s = [2.0];
+        let z = [5.0];
+        match c.kkt_block(&s, &z) {
+            ConeBlock::DenseLower { dim, lower } => {
+                assert_eq!(dim, 1);
+                assert!((lower[0] - s[0] / z[0]).abs() < 1e-12);
+            }
+            _ => panic!(),
+        }
+        let r = [0.6];
+        let mut term = [0.0];
+        c.rhs_comp_term(&s, &z, &r, &mut term);
+        assert!((term[0] - r[0] / z[0]).abs() < 1e-12);
+        let dz = [0.4];
+        let mut ds = [0.0];
+        c.recover_ds(&s, &z, &r, &dz, &mut ds);
+        assert!((ds[0] - (-r[0] / z[0] - (s[0] / z[0]) * dz[0])).abs() < 1e-12);
     }
 }
