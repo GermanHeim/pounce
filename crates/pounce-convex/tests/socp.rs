@@ -8,7 +8,10 @@
 //! recovered solution against the SOCP KKT conditions and, where the
 //! optimum is known in closed form, the primal.
 
-use pounce_convex::{solve_socp_ipm, ConeSpec, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{
+    solve_socp_ipm, solve_socp_ipm_warm, ConeSpec, QpOptions, QpProblem, QpStatus, QpWarmStart,
+    Triplet,
+};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -155,6 +158,57 @@ fn projection_onto_soc_qp() {
     assert!((sol.x[1] - 1.5).abs() < 1e-5, "x1={}", sol.x[1]);
     assert!(sol.x[2].abs() < 1e-5, "x2={}", sol.x[2]);
     assert_socp_kkt(&prob, &sol, 1e-6);
+}
+
+/// SOC warm start: from a nearby SOCP's solution, the warm solve reaches
+/// the same KKT point (the projection onto the cone) and takes no more
+/// iterations than cold. Exercises the SOC `λ_min` recentering.
+#[test]
+fn soc_warm_start_matches_cold() {
+    let base = QpProblem {
+        n: 3,
+        p_lower: (0..3).map(|i| Triplet::new(i, i, 1.0)).collect(),
+        c: vec![-1.0, -2.0, 0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, -1.0),
+            Triplet::new(1, 1, -1.0),
+            Triplet::new(2, 2, -1.0),
+        ],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let cones = [ConeSpec::SecondOrder(3)];
+    let opts = QpOptions::default();
+    let base_sol = solve_socp_ipm(&base, &cones, &opts, backend);
+    assert_eq!(base_sol.status, QpStatus::Optimal);
+
+    // Perturb the target slightly.
+    let mut pert = base.clone();
+    pert.c = vec![-1.1, -1.9, 0.05];
+    let cold = solve_socp_ipm(&pert, &cones, &opts, backend);
+    let warm = solve_socp_ipm_warm(
+        &pert,
+        &cones,
+        &QpWarmStart::from_solution(&base_sol),
+        &opts,
+        backend,
+    );
+    assert_eq!(warm.status, QpStatus::Optimal);
+    for i in 0..3 {
+        assert!(
+            (cold.x[i] - warm.x[i]).abs() < 1e-6,
+            "x[{i}]: cold={} warm={}",
+            cold.x[i],
+            warm.x[i]
+        );
+    }
+    assert_socp_kkt(&pert, &warm, 1e-6);
+    // SOC warm restarts the duals centered (stable), so the win is from
+    // the primal proximity; it must not regress vs cold.
+    assert!(warm.iters <= cold.iters, "warm {} cold {}", warm.iters, cold.iters);
 }
 
 /// Mixed cone: a nonnegative-orthant block and a second-order block in one

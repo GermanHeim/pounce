@@ -99,6 +99,14 @@ pub trait Cone {
     /// `r_comp ⊘ z`; richer cones apply their scaling. Writes `dim` values.
     fn rhs_comp_term(&self, s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]);
 
+    /// Project a warm `(s, z)` into the strict interior of this cone (in
+    /// place) and rebalance, lifting it off the boundary by at least
+    /// `floor`. For the orthant: shift each component positive, then a
+    /// Mehrotra centering step. For the second-order cone: lift the
+    /// "distance to boundary" `λ_min = s₀ − ‖s₁‖` to `≥ floor`. Used by the
+    /// warm-start path (see [`crate::QpWarmStart`]).
+    fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64);
+
     /// Largest `α ∈ (0, 1]` such that `v + α dv` stays inside the cone,
     /// scaled by the fraction-to-boundary parameter `tau`. For the
     /// orthant: `min over dv_i<0 of -tau * v_i / dv_i`, capped at 1.

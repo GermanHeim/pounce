@@ -222,6 +222,25 @@ impl Cone for SecondOrderCone {
         Self::arw_inv(z, r_comp, out);
     }
 
+    fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64) {
+        // A *converged* conic warm point sits on the cone boundary
+        // (λ_min = u₀ − ‖u₁‖ ≈ 0), where the NT scaling is singular
+        // (det → 0). Unlike the orthant, the IPM cannot dwell near that
+        // boundary without the factorization blowing up, so seeding the SOC
+        // duals there is unstable. We therefore **re-center** each block to
+        // a well-conditioned axis point `c·e` (so `s∘z = c²e`, perfectly
+        // centered): the warm benefit for SOC comes from the primal `x`
+        // (which seeds `s = h − Gx` and the residuals), while the cone duals
+        // restart centered. Magnitude is preserved so the scale is sensible.
+        let center = |u: &mut [f64]| {
+            let mag = u.iter().fold(0.0_f64, |m, &v| m.max(v.abs())).max(floor).max(1.0);
+            u.iter_mut().for_each(|v| *v = 0.0);
+            u[0] = mag;
+        };
+        center(s);
+        center(z);
+    }
+
     fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
         // ds = −Arw(z)⁻¹ r_comp − W⁻² dz, exactly consistent with the
         // assembled block (`apply_w2` ≡ `kkt_block` as an operator) and the

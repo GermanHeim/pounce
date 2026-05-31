@@ -30,6 +30,7 @@ pub use batch::{
 };
 pub use cones::ConeSpec;
 pub use ipm::{
-    solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm, QpFactorization, QpOptions, QpWarmStart,
+    solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_warm, QpFactorization,
+    QpOptions, QpWarmStart,
 };
 pub use qp::{QpProblem, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};

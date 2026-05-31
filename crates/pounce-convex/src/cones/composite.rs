@@ -96,6 +96,9 @@ impl Cone for ConeKind {
     fn rhs_comp_term(&self, s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
         dispatch!(self, c => c.rhs_comp_term(s, z, r_comp, out))
     }
+    fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64) {
+        dispatch!(self, c => c.recenter_warm(s, z, floor))
+    }
 }
 
 /// A Cartesian product of cones, the cone of the IPM's stacked `(s, z)`.
@@ -265,6 +268,13 @@ impl Cone for CompositeCone {
         // `blocks()` and calls each block's `kkt_block` rather than asking
         // the composite for a single one.
         unimplemented!("use CompositeCone::blocks() for per-block kkt_block")
+    }
+
+    fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64) {
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            k.recenter_warm(&mut s[*off..off + d], &mut z[*off..off + d], floor);
+        }
     }
 }
 

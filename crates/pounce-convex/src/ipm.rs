@@ -174,6 +174,34 @@ where
     split_bound_duals(prob, &bound_rows, sol)
 }
 
+/// Warm-started [`solve_socp_ipm`]: seed the iteration from `warm` (a nearby
+/// SOCP's solution). The warm `(s, z)` are projected into each cone's
+/// interior (orthant positivity / SOC `λ_min` floor); the solution is
+/// start-independent, so warm starting only reduces the iteration count.
+/// `prob` must be bound-free (use `G`/`h` rows for all constraints).
+pub fn solve_socp_ipm_warm<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    warm: &QpWarmStart,
+    opts: &QpOptions,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    assert!(
+        !prob.has_bounds(),
+        "solve_socp_ipm_warm: encode bounds as G/h rows (bound expansion + warm not combined)"
+    );
+    let cone = CompositeCone::from_specs(cones);
+    let w = WarmStart {
+        x: warm.x.clone(),
+        y: warm.y.clone(),
+        z: warm.z.clone(),
+    };
+    solve_qp_core(prob, &cone, opts, Some(&w), make_backend)
+}
+
 /// Expand a problem's finite variable bounds into extra `G` rows
 /// (`x_i ≤ ub_i` and `−x_i ≤ −lb_i`), returning the bounds-free expanded
 /// problem and the `(row, var, is_upper)` provenance of each appended row
@@ -448,7 +476,9 @@ fn init_iterate(
     let mut z = if w.z.len() == m_ineq {
         w.z.clone()
     } else {
-        vec![1.0; m_ineq]
+        let mut e = vec![0.0; m_ineq];
+        cone.identity(&mut e);
+        e
     };
 
     // No cone: x/y are the whole iterate, s/z are empty.
@@ -462,8 +492,6 @@ fn init_iterate(
     let mut s: Vec<f64> = (0..m_ineq).map(|i| prob.h[i] - gx[i]).collect();
 
     let scale = 1.0_f64.max(inf_norm(&s)).max(inf_norm(&z));
-    let s_min = s.iter().cloned().fold(f64::INFINITY, f64::min);
-    let z_min = z.iter().cloned().fold(f64::INFINITY, f64::min);
 
     // Adaptive interior floor sized to the warm point's KKT residual ρ on
     // *this* problem. ρ measures how far the warm point is from satisfying
@@ -486,23 +514,9 @@ fn init_iterate(
         let rho = inf_norm(&rd).max(inf_norm(&rp)).max(viol);
         rho.clamp(1e-9 * scale, 0.1 * scale)
     };
-    // Positivity shift: lift s and z off the boundary by at least `floor`.
-    let ds = (-1.5 * s_min).max(floor);
-    let dz = (-1.5 * z_min).max(floor);
-    for i in 0..m_ineq {
-        s[i] += ds;
-        z[i] += dz;
-    }
-    // Mehrotra centering shift to balance s and z.
-    let sz: f64 = s.iter().zip(&z).map(|(a, b)| a * b).sum();
-    let sum_s: f64 = s.iter().sum();
-    let sum_z: f64 = z.iter().sum();
-    let ds2 = 0.5 * sz / sum_z;
-    let dz2 = 0.5 * sz / sum_s;
-    for i in 0..m_ineq {
-        s[i] += ds2;
-        z[i] += dz2;
-    }
+    // Project (s, z) into the strict interior of each cone block and
+    // rebalance (orthant: positivity + Mehrotra; SOC: lift λ_min).
+    cone.recenter_warm(&mut s, &mut z, floor);
     (x, y, z, s)
 }
 

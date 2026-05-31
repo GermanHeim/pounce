@@ -93,6 +93,29 @@ impl Cone for NonnegCone {
             out[i] = r_comp[i] / z[i];
         }
     }
+
+    fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64) {
+        let n = self.n;
+        // Positivity shift: lift s and z off the boundary by ≥ floor.
+        let s_min = s.iter().cloned().fold(f64::INFINITY, f64::min);
+        let z_min = z.iter().cloned().fold(f64::INFINITY, f64::min);
+        let ds = (-1.5 * s_min).max(floor);
+        let dz = (-1.5 * z_min).max(floor);
+        for i in 0..n {
+            s[i] += ds;
+            z[i] += dz;
+        }
+        // Mehrotra centering shift to balance s and z.
+        let sz: f64 = s.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
+        let sum_s: f64 = s.iter().sum();
+        let sum_z: f64 = z.iter().sum();
+        let ds2 = 0.5 * sz / sum_z;
+        let dz2 = 0.5 * sz / sum_s;
+        for i in 0..n {
+            s[i] += ds2;
+            z[i] += dz2;
+        }
+    }
 }
 
 #[cfg(test)]
