@@ -18,12 +18,19 @@
 //! complement (the SCS/ECOS scheme): `M p = (−c, b, h)` (the constant
 //! direction) and `M q = residual`, combined with `Δτ` from the τ/κ row.
 //!
-//! ## Scope (Phase H2)
+//! ## Scope (Phases H2–H3)
 //!
-//! This driver implements the **linear-conic** embedding (`P = 0`) over a
-//! product of nonnegative-orthant and second-order cones — it solves LPs
-//! and SOCPs. The quadratic-objective τ-row (the `xᵀPx/τ` coupling, Phase
-//! H3) and the switch-over to make HSDE the default (Phase H4) follow; for
+//! This driver implements the embedding over a product of nonnegative-orthant
+//! and second-order cones — it solves LPs, QPs, and SOCPs (the full current
+//! problem class). The **quadratic objective** (`P ⪰ 0`) is handled via
+//! Clarabel's QP embedding: the τ-row gains the `xᵀPx/τ` coupling, so its
+//! gradient becomes `g̃ = (c + (2/τ)Px, b, h)` and its scalar Schur
+//! complement a `−xᵀPx/τ²` term. Crucially, `P` already sits in `M`'s
+//! `(x, x)` block and in the dual residual `ρ_x`, so the two M-solves, the
+//! cone elimination, and the step are *identical* to the linear case — only
+//! the τ-row scalar is new (and reduces to the linear case at `P = 0`).
+//!
+//! The switch-over to make HSDE the default (Phase H4) still follows; for
 //! now `solve_qp_ipm`/`solve_socp_ipm` remain the production path and this
 //! module is validated to reproduce their optima and certificates.
 
@@ -49,8 +56,9 @@ fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
     }
 }
 
-/// Solve `min cᵀx s.t. Ax = b, Gx ⪯_K h` (linear objective, `P = 0`) via the
-/// homogeneous self-dual embedding, returning the un-homogenized solution.
+/// Solve `min ½xᵀPx + cᵀx s.t. Ax = b, Gx ⪯_K h` via the homogeneous
+/// self-dual embedding, returning the un-homogenized solution. `P = 0` is an
+/// LP/SOCP; `P ⪰ 0` a QP (the τ-row picks up the `xᵀPx/τ` coupling).
 ///
 /// `cone` is the product cone `K` over the `m_ineq` inequality rows (built
 /// by the caller exactly as for [`crate::ipm::solve_socp_ipm`]). Variable
@@ -65,11 +73,6 @@ pub(crate) fn solve_conic_hsde<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    debug_assert!(
-        prob.p_lower.is_empty(),
-        "solve_conic_hsde is the linear-conic (P=0) embedding; quadratic is Phase H3"
-    );
-
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -100,6 +103,7 @@ where
     let mut rho_x = vec![0.0; n];
     let mut rho_y = vec![0.0; m_eq];
     let mut rho_z = vec![0.0; m_ineq];
+    let mut px_vec = vec![0.0; n]; // P x (quadratic-objective coupling)
     let mut r_c = vec![0.0; m_ineq];
     let mut comp = vec![0.0; m_ineq];
     let mut kkt_vals = kkt.values.clone();
@@ -123,10 +127,17 @@ where
     for it in 0..opts.max_iter {
         iters = it;
 
+        // --- quadratic-objective coupling: Px and xᵀPx (zero for an LP) ---
+        for v in px_vec.iter_mut() {
+            *v = 0.0;
+        }
+        prob.p_mul(&x, &mut px_vec);
+        let xpx = dot(&x, &px_vec);
+
         // --- homogeneous residuals ---
-        // ρ_x = Aᵀy + Gᵀz + c·τ
-        for (r, &ci) in rho_x.iter_mut().zip(&prob.c) {
-            *r = ci * tau;
+        // ρ_x = P x + Aᵀy + Gᵀz + c·τ
+        for (r, (&ci, &pxi)) in rho_x.iter_mut().zip(prob.c.iter().zip(&px_vec)) {
+            *r = ci * tau + pxi;
         }
         prob.at_mul(&y, &mut rho_x);
         prob.gt_mul(&z, &mut rho_x);
@@ -140,19 +151,20 @@ where
             rho_z[i] = s[i] - prob.h[i] * tau;
         }
         prob.g_mul(&x, &mut rho_z);
-        // ρ_τ = κ + cᵀx + bᵀy + hᵀz
+        // ρ_τ = κ + cᵀx + bᵀy + hᵀz + xᵀPx/τ
         let ctx = dot(&prob.c, &x);
         let bty = dot(&prob.b, &y);
         let htz = dot(&prob.h, &z);
-        let rho_tau = kappa + ctx + bty + htz;
+        let rho_tau = kappa + ctx + bty + htz + xpx / tau;
 
         let sz = dot(&s, &z);
         let mu = (sz + tau * kappa) / (degree as f64 + 1.0);
 
         // --- convergence (un-homogenized residuals; divide out τ) ---
+        // Gap = x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ = (xᵀPx/τ + cᵀx + bᵀy + hᵀz)/τ.
         let pres = inf_norm(&rho_y).max(inf_norm(&rho_z)) / tau;
         let dres = inf_norm(&rho_x) / tau;
-        let gap = (ctx + bty + htz).abs() / tau;
+        let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
         if pres < opts.tol && dres < opts.tol && gap < opts.tol {
             status = QpStatus::Optimal;
             break;
@@ -182,9 +194,15 @@ where
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut p_x, &mut p_y, &mut p_z);
-        // gᵀp with g = (c, b, h), and the scalar Schur denominator.
-        let gtp = dot(&prob.c, &p_x) + dot(&prob.b, &p_y) + dot(&prob.h, &p_z);
-        let denom = gtp - kappa / tau;
+        // τ-row gradient g̃ = (c + (2/τ)Px, b, h) and the scalar Schur
+        // denominator g̃ᵀp − κ/τ − xᵀPx/τ² (the last two terms are the τ/κ
+        // ray and the quadratic coupling; both vanish for an LP).
+        let two_over_tau = 2.0 / tau;
+        let gtp = dot(&prob.c, &p_x)
+            + two_over_tau * dot(&px_vec, &p_x)
+            + dot(&prob.b, &p_y)
+            + dot(&prob.h, &p_z);
+        let denom = gtp - kappa / tau - xpx / (tau * tau);
 
         // === Predictor (affine, σ = 0) ===
         cone.comp_residual(&s, &z, 0.0, &mut r_c);
@@ -195,8 +213,11 @@ where
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
-        let gtq = dot(&prob.c, &dx) + dot(&prob.b, &dy) + dot(&prob.h, &dz);
-        // Δτ = [−ρ_τ − gᵀq − (σμ − τκ)/τ] / (gᵀp − κ/τ); predictor σμ = 0,
+        let gtq = dot(&prob.c, &dx)
+            + two_over_tau * dot(&px_vec, &dx)
+            + dot(&prob.b, &dy)
+            + dot(&prob.h, &dz);
+        // Δτ = [−ρ_τ − g̃ᵀq − (σμ − τκ)/τ] / denom; predictor σμ = 0,
         // so −(0 − τκ)/τ = +κ.
         let dtau_aff = (-rho_tau - gtq + kappa) / denom;
         // Full affine directions dw = q + Δτ·p (only dz needed downstream).
@@ -231,7 +252,10 @@ where
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
-        let gtq = dot(&prob.c, &dx) + dot(&prob.b, &dy) + dot(&prob.h, &dz);
+        let gtq = dot(&prob.c, &dx)
+            + two_over_tau * dot(&px_vec, &dx)
+            + dot(&prob.b, &dy)
+            + dot(&prob.h, &dz);
         // τκ corrector residual: τκ + Δτ_aff·Δκ_aff (target σμ).
         let r_tk = tau * kappa + dtau_aff * dkappa_aff;
         let dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
@@ -275,7 +299,10 @@ where
     let x: Vec<f64> = x.iter().map(|v| v * inv).collect();
     let y: Vec<f64> = y.iter().map(|v| v * inv).collect();
     let z: Vec<f64> = z.iter().map(|v| v * inv).collect();
-    let obj = dot(&prob.c, &x); // P = 0.
+    // Objective ½xᵀPx + cᵀx.
+    let mut px = vec![0.0; n];
+    prob.p_mul(&x, &mut px);
+    let obj = 0.5 * dot(&x, &px) + dot(&prob.c, &x);
 
     QpSolution {
         status,
@@ -434,6 +461,84 @@ mod tests {
             ub: vec![],
         };
         assert_agrees(&prob, &[ConeSpec::Nonneg(1), ConeSpec::SecondOrder(3)], 1e-5);
+    }
+
+    /// Equality-constrained QP with a closed-form optimum:
+    /// min ½‖x‖² − pᵀx s.t. 1ᵀx = 1  →  x = p + (1 − Σp)/n.
+    #[test]
+    fn qp_equality_closed_form() {
+        let p = [0.2_f64, 0.5, 0.1];
+        let n = 3;
+        let prob = QpProblem {
+            n,
+            p_lower: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(1, 1, 1.0),
+                Triplet::new(2, 2, 1.0),
+            ],
+            c: vec![-p[0], -p[1], -p[2]],
+            a: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(0, 2, 1.0),
+            ],
+            b: vec![1.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = assert_agrees(&prob, &[], 1e-6);
+        let shift = (1.0 - p.iter().sum::<f64>()) / n as f64;
+        for i in 0..n {
+            assert!((sol.x[i] - (p[i] + shift)).abs() < 1e-6, "x {:?}", sol.x);
+        }
+    }
+
+    /// Inequality QP with a known optimum:
+    /// min ‖x‖² − 3x0 − 4x1 s.t. x0+x1 ≤ 1, x ≥ 0  →  x = (0.25, 0.75).
+    #[test]
+    fn qp_inequality_matches_direct() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-3.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(2, 1, -1.0),
+            ],
+            h: vec![1.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = assert_agrees(&prob, &[ConeSpec::Nonneg(3)], 1e-6);
+        assert!((sol.x[0] - 0.25).abs() < 1e-5 && (sol.x[1] - 0.75).abs() < 1e-5);
+        assert!((sol.obj + 3.125).abs() < 1e-5, "obj {}", sol.obj);
+    }
+
+    /// Quadratic objective *and* a second-order cone together (P in the
+    /// (x,x) block, SOC scaling in the (z,z) block):
+    /// min ‖x‖² − 3x0 − 4x1 s.t. ‖x‖ ≤ 1  (slack (1, x0, x1) ∈ SOC).
+    #[test]
+    fn qp_with_soc_matches_direct() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-3.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(1, 0, -1.0), Triplet::new(2, 1, -1.0)],
+            h: vec![1.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = assert_agrees(&prob, &[ConeSpec::SecondOrder(3)], 1e-5);
+        // Constraint active: the optimum lies on the unit ball.
+        assert!((sol.x[0].hypot(sol.x[1]) - 1.0).abs() < 1e-5, "x {:?}", sol.x);
     }
 
     /// Primal-infeasible LP: x ≥ 2 and x ≤ 1.

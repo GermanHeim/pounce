@@ -1,6 +1,6 @@
 # Homogeneous self-dual embedding for the convex IPM — design note
 
-**Status: scoping → Phase H2 (linear-conic embedding) in progress.**
+**Status: Phases H2 + H3 landed — HSDE solves LP/QP/SOCP.**
 Chosen as the foundation for Clarabel cone parity (see
 `clarabel-parity.md`): reformulate the interior-point driver into a
 homogeneous self-dual embedding (HSDE), prove it reproduces every existing
@@ -126,23 +126,29 @@ Clarabel's QP embedding. Stationarity (1) gains `Px`:
 ```
 
 (At `τ>0`, dividing recovers the QP duality-gap condition
-`x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ = 0`.) The `xᵀPx/τ` term makes the τ-row’s
-Newton linearization couple through `P`: the border column picks up a
-`2Px/τ` contribution in the τ-row and the τ-diagonal gains a
-`xᵀPx/τ²`-type term. `P` already sits in the `(x,x)` block of `M`, so the
-two-solve scheme still applies — **but the exact border coefficients must
-be derived and FD-checked carefully** (this is the single highest-risk
-algebra in the HSDE work, the analogue of the SOC reduced-system
-derivation). Phase H3 lands this against the QP suite; until then the
-linear-conic embedding (H2) is validated with `P = 0`.
+`x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ = 0`.) **Landed (H3).** The Newton linearization
+of (4q) shows the `P` coupling enters *only* the τ-row scalar:
+
+- `ρ_τ = κ + cᵀx + bᵀy + hᵀz + xᵀPx/τ`,
+- the τ-row gradient becomes `g̃ = (c + (2/τ)Px, b, h)` (used in `g̃ᵀp`,
+  `g̃ᵀq`),
+- the scalar Schur denominator gains a `−xᵀPx/τ²` term.
+
+The border *column* is unchanged — `(1q)`'s τ-coefficient is still `c`, so
+`p = M⁻¹(−c, b, h)` as in the linear case — and `P` already sits in `M`'s
+`(x,x)` block and in `ρ_x`. Hence the two M-solves, the cone elimination,
+and the step are **identical** to H2; only the τ-row scalar differs, and it
+reduces to the linear case at `P = 0`. Validated against the direct driver
+and closed-form optima (equality-constrained QP; box/inequality QP; QP with
+a second-order cone) — all agree.
 
 ## Phased plan
 
 | Phase | Scope | Risk |
 |---|---|---|
 | H1 | This note: exact embedding, two-solve scheme, termination. | low |
-| **H2** | HSDE driver for **linear** conic (`P=0`): orthant + SOC, reusing `KktStructure`/`Cone`. New `solve_conic_hsde` entry point alongside the current solver. Validate optima + certificates vs the existing solver on the LP/SOCP suites (P=0). | med-high — embedding signs, two-solve combination |
-| H3 | Quadratic objective: the `(1q)/(4q)` border with the `P` coupling, FD-checked. Validate on the full QP suite. | high — τ-row P algebra |
+| **H2** | ✅ HSDE driver for **linear** conic (`P=0`): orthant + SOC, reusing `KktStructure`/`Cone`. `solve_conic_hsde` alongside the current solver. Validated optima + both certificates vs the existing solver. | med-high — embedding signs, two-solve combination |
+| **H3** | ✅ Quadratic objective: the `(1q)/(4q)` τ-row with the `P` coupling. Validated on the QP suite (closed-form optima + QP-with-SOC) vs the direct driver. | high — τ-row P algebra |
 | H4 | Make HSDE the default driver; retire `detect_infeasibility`; warm start re-expressed in embedded space (`τ,κ` recentering). Whole convex + CLI + Python/JAX suite green. | med |
 | H5 | **Exponential cone** on HSDE: barrier oracles, non-symmetric scaling, third-order corrector, neighborhood line search. Known-optima (GP, logistic, entropy) + KKT-residual validation. | high |
 | H6 | **Power cone** (exp machinery + new barrier). | low after H5 |
