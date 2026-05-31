@@ -160,7 +160,15 @@ impl Visit for IterVisitor {
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.record_i64(field, value as i64);
+        // Match the field directly rather than routing through
+        // `record_i64` (which would `value as i64`-truncate a value
+        // above `i64::MAX`). `iter`/`ls_trials` never approach that, but
+        // matching here keeps the cast localized to the two real fields.
+        match field.name() {
+            "iter" => self.rec.iter = value as Index,
+            "ls_trials" => self.rec.ls_trials = value as Index,
+            _ => {}
+        }
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
@@ -270,6 +278,11 @@ pub fn init_subscriber() {
 /// Install a subscriber suitable for tests: same layers as
 /// [`init_subscriber`], so iteration capture works under
 /// [`IterCaptureGuard`]. Idempotent.
+///
+/// Currently identical to [`init_subscriber`]; kept as a distinct entry
+/// point so test setup can diverge (e.g. an in-memory sink) without
+/// touching the production install path. Tests needing an *isolated*
+/// subscriber should build their own with `with_default` instead.
 pub fn init_for_tests() {
     install();
 }
@@ -529,11 +542,13 @@ mod tests {
     }
 
     #[test]
-    fn visitor_reconstructs_record_fields() {
-        // Mimic what the collector does given the event field values.
+    fn iter_record_default_and_assignment() {
+        // This checks `IterRecord` field assignment, not the `Visit`
+        // impl — constructing a real `tracing::field::Field` standalone
+        // needs a callsite, so the visitor's record_* arms are covered
+        // end-to-end by `collector_excludes_restoration_nested_iterations`
+        // (which emits real events and asserts the rebuilt `iter`s).
         let mut v = IterVisitor::default();
-        // Direct field assignment exercises the same match arms the
-        // visitor uses at runtime via the typed record_* methods.
         v.rec.iter = 7;
         v.rec.alpha_primal = 0.25;
         v.rec.alpha_primal_char = 'S';

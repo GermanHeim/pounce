@@ -393,6 +393,9 @@ impl IpoptAlgorithm {
             let style_alpha = if iter_count == 0 { 1.0 } else { alpha_pr };
             let style = pounce_common::style::iteration_row_style(style_alpha, alpha_char);
             let mut out = anstream::stdout();
+            // Write errors (e.g. a closed pipe / `head` on the output)
+            // are deliberately ignored: a vanished terminal must not
+            // panic the solver, unlike the old `println!`.
             if iter_count % 10 == 0 {
                 let _ = write!(out, "{}", crate::output::orig::OrigIterationOutput::HEADER);
             }

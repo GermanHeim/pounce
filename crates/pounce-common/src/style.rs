@@ -111,6 +111,10 @@ pub fn alpha_gradient_rgb(alpha: f64, in_resto: bool) -> RgbColor {
 
 /// Snap an 8-bit value to its nearest index on the xterm 6×6×6 color
 /// cube's per-channel step ladder `[0, 95, 135, 175, 215, 255]`.
+///
+/// Returns the 0-based level *index* (0..=5), not the step value itself —
+/// `nearest_ansi256` combines three such indices into the cube offset
+/// `16 + 36*r + 6*g + b`.
 fn cube_level(v: u8) -> u8 {
     const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
     let mut best = 0u8;
