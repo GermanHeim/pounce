@@ -33,7 +33,7 @@ upstream Ipopt source tree:
 | `pounce-presolve`    | Presolve / problem-reduction pass run before the IPM.                                                                               |
 | `pounce-l1penalty`   | ℓ₁-exact penalty-barrier wrapper for degenerate / MPCC NLPs.                                                                        |
 | `pounce-sensitivity` | Parametric sensitivity (port of Ipopt `contrib/sIPOPT`).                                                                            |
-| `pounce-cinterface`  | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem`.                                                                     |
+| `pounce-cinterface`  | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem`.                                                              |
 | `pounce-py`          | Python bindings (the `pounce` Python package).                                                                                      |
 | `pounce-cli`         | The `pounce` command-line driver.                                                                                                   |
 

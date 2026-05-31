@@ -15,40 +15,41 @@ stress tests for dense KKT paths because the constraint Jacobian is
 moderately dense and the Hessian has many non-convex blocks from the
 voltage–angle coupling.
 
-The suite name is "grid" rather than "opf" so that the directory layout
-makes its purpose obvious at a glance — every problem here is an electrical
-grid optimization.
+This suite lives under `benchmarks/grid/`. See `benchmarks/README.md` for
+an overview of all suites. Like the other suites, problems are solved
+through the AMPL `.nl` interface by the shared NL driver
+(`benchmarks/scripts/run_nl_bench.sh`), which runs both POUNCE and Ipopt
+(linked against MA57) and feeds the composite `benchmarks/BENCHMARK_REPORT.md`.
 
 ## Contents
 
-- `problems.rs` — MATPOWER test cases wrapped as `NlpProblem` instances;
-  compiled into the `pounce-domain-bench` crate as a `#[path]` module
-- `grid_results.json` — latest POUNCE per-problem results
+- `nl/` — the AMPL `.nl` files solved by the harness (one per MATPOWER case)
+- `grid_nl_export.py` — regenerates the `.nl` files from the MATPOWER cases
+- `pounce.json` — latest POUNCE per-problem results
+- `ipopt_ma57.json` — Ipopt/MA57 reference results
 - `grid_benchmark_report.md` — per-problem analysis
-
-## Prerequisites
-
-A stable Rust toolchain. Nothing else — the harness is pure Rust and uses
-POUNCE's default FERAL linear-solver backend.
+- `problems.rs` — **retired** pure-Rust `NlpProblem` definitions, kept for
+  reference; no longer compiled (the suite is now `.nl`-driven)
 
 ## How to run
 
 From the repo root:
 
 ```bash
-make grid-run
+make -C benchmarks grid-run     # writes benchmarks/grid/pounce.json
+make -C benchmarks grid-rerun   # force a fresh run
 ```
 
-or directly:
+Or solve a single case directly:
 
 ```bash
-cargo run --release --bin grid_suite
+pounce benchmarks/grid/nl/case30_ieee.nl print_level=5
 ```
 
-Set `RESULTS_FILE=<path>` to override the output location.
+## Re-exporting
 
-## Output
+If the MATPOWER cases or export logic change, regenerate the `.nl` files:
 
-- `grid_results.json` — POUNCE per-problem results (status, objective,
-  iterations, wall time)
-- `grid_stderr.txt` — solver chatter (gitignored)
+```bash
+python benchmarks/grid/grid_nl_export.py
+```

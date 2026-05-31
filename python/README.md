@@ -78,14 +78,15 @@ gradient-based vs. user-scaling tradeoff.
 sensitivity step on the converged KKT factor — no second solve:
 
 ```python
-x_star, info, sens = prob.solve_with_sens(
-    x0=x0,
-    perturbed_indices=[2, 3],     # which constraints are parametric
-    deltas=[0.05, 0.0],            # perturbation magnitudes
-    rh_eigendecomp=True,           # also return reduced-Hessian eigendecomp
+x_star, info = prob.solve_with_sens(
+    x0,
+    pin_constraint_indices=[2, 3],  # which constraints are parametric (required)
+    deltas=[0.05, 0.0],             # perturbation magnitudes
+    rh_eigendecomp=True,            # also return reduced-Hessian eigendecomp
     sens_boundcheck=True,
 )
-# sens.dx, sens.reduced_hessian, sens.reduced_hessian_eigvals
+# Sensitivity outputs are keys in the returned info dict:
+# info["dx"], info["reduced_hessian"], info["reduced_hessian_eigenvalues"]
 ```
 
 ## Factor-once / solve-many: `Solver`
@@ -100,7 +101,7 @@ solver = pounce.Solver(prob)
 x_star, info = solver.solve(x0=x0)
 
 # Reuse the factor for downstream queries:
-dx = solver.parametric_step(perturbed_indices=[2], deltas=[0.05])
+dx = solver.parametric_step(pin_constraint_indices=[2], deltas=[0.05])
 rh = solver.reduced_hessian(pin_constraint_indices=[0, 1])
 y  = solver.kkt_solve(rhs)             # raw KKT back-solve
 print(solver.kkt_dim(), solver.converged())
@@ -126,7 +127,7 @@ ws = pounce.classify_working_set(...)
 
 ```python
 from pounce import minimize
-res = minimize(lambda x: (x-1)**2 @ (x-1) + 1, x0=np.zeros(5))
+res = minimize(lambda x: (x-1) @ (x-1) + 1, x0=np.zeros(5))
 print(res.fun, res.x)
 ```
 

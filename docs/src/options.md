@@ -55,8 +55,8 @@ current iterate's complementarity). See
 | `mu_oracle`                             | `quality-function` | Adaptive oracle: `quality-function` / `loqo` / `probing`.                                     |
 | `mu_init`                               | `0.1`              | Seed value for μ at the first iterate.                                                        |
 | `mu_min`                                | `1e-11`            | Floor on μ; the solver stops decreasing past this.                                            |
-| `mu_max`                                | (lazy)             | Cap on μ (adaptive mode). Default `-1` ⇒ `mu_max_fact · curr_avrg_compl` on first iterate.    |
-| `mu_max_fact`                           | `1e3`              | Multiplier for the lazy-init of `mu_max`.                                                     |
+| `mu_max`                                | `1e5`              | Cap on μ (adaptive mode). When set explicitly it overrides the `mu_max_fact` initialization.  |
+| `mu_max_fact`                           | `1e3`              | Initializes `mu_max` as `mu_max_fact · curr_avrg_compl` at the first iterate (adaptive mode). |
 | `mu_target`                             | `0.0`              | Stop target for μ in monotone mode.                                                           |
 | `mu_linear_decrease_factor`             | `0.2`              | κ_μ in `μ ← min(κ_μ · μ, μ^θ_μ)`.                                                             |
 | `mu_superlinear_decrease_power`         | `1.5`              | θ_μ in the same formula.                                                                      |

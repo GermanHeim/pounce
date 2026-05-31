@@ -78,9 +78,12 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-sensitivity`](crates/pounce-sensitivity) | Post-optimal sensitivity + reduced-Hessian (port of upstream sIPOPT).                                                         |
 | [`pounce-qp`](crates/pounce-qp)                   | Sparse parametric active-set QP subproblem solver — drives the SQP path and the sensitivity corrector.                        |
 | [`pounce-solve-report`](crates/pounce-solve-report) | `pounce.solve-report/v1` JSON writer (shared by `pounce-cli --json-output` and `IpoptWriteSolveReport`).                     |
-| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem` / `IpoptWriteSolveReport`.                                     |
+| [`pounce-observability`](crates/pounce-observability) | `tracing` subscriber install + per-iteration collector layer that feeds the iteration stream into the solve report.       |
+| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem` / `IpoptWriteSolveReport`.                              |
+| [`pounce-py`](crates/pounce-py)                   | PyO3 bindings — the cyipopt-compatible `pounce` Python package (the `pounce-solver` wheel).                                  |
 | [`pounce-cli`](crates/pounce-cli)                 | The `pounce` command-line driver.                                                                                             |
 | [`pounce-studio-core`](crates/pounce-studio-core) | Solve-report / iter-dump parsers and diagnostic analysis (foundation for the `pounce-studio` GUI / MCP server).               |
+| [`pounce-studio-pyo3`](crates/pounce-studio-pyo3) | PyO3 `_native` extension exposing `pounce-studio-core` to the `pounce-studio-mcp` Python MCP server.                          |
 
 ## Build
 
@@ -129,7 +132,7 @@ List available built-in test problems:
 
 ```sh
 pounce --list-problems
-pounce --problem hs071
+pounce --problem rosenbrock
 ```
 
 Full help:
@@ -215,6 +218,22 @@ per-iteration trajectory (`iter`, `objective`, `inf_pr`, `inf_du`, `mu`,
 The schema is versioned (`pounce.solve-report/v1`) so downstream
 tooling can pin against a major version. Consumers should tolerate
 unknown fields — additive changes don't bump the version.
+
+### Logging & diagnostics
+
+POUNCE emits diagnostics through the [`tracing`](https://docs.rs/tracing)
+ecosystem. Logs go to **stderr**; program output (the iteration table,
+summary, `--dump`) stays on **stdout**, so the two never collide when
+redirected. The per-iteration table is colored when stdout is a terminal.
+
+| Variable | Effect |
+|---|---|
+| `RUST_LOG` | Verbosity / per-target filtering (default `info`); e.g. `RUST_LOG=pounce::linsol=debug`. |
+| `POUNCE_LOG_FORMAT` | `text` (default) or `json` — structured JSON sink on stderr for Studio / CI. |
+| `NO_COLOR` / `CLICOLOR_FORCE` | Disable / force the colored iteration table. |
+
+See [`docs/src/options.md`](docs/src/options.md) and
+[`docs/src/troubleshooting.md`](docs/src/troubleshooting.md) for details.
 
 ### Sensitivity analysis (sIPOPT-compatible)
 

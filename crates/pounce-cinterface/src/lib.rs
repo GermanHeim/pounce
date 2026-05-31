@@ -1,7 +1,7 @@
 //! POUNCE C ABI — port of `Interfaces/IpStdCInterface.{h,cpp}`.
 //!
-//! Provides the `IpoptCreate / IpoptSolve / IpoptFreeProblem` C entry
-//! points that existing PyIpopt / cyipopt / JuMP wrappers link
+//! Provides the `CreateIpoptProblem / IpoptSolve / FreeIpoptProblem` C
+//! entry points that existing PyIpopt / cyipopt / JuMP wrappers link
 //! against. Function names and signatures match upstream Ipopt 3.14.x
 //! exactly so consumers can swap `libipopt.{dylib,so}` for
 //! `libpounce_cinterface` without rebuilding.

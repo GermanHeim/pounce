@@ -19,7 +19,7 @@ For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
 | `pounce-algorithm`     | yes        | IPM core                                     |
 | `pounce-restoration`   | yes        |                                              |
 | `pounce-sensitivity`   | yes        | sIPOPT port                                  |
-| `pounce-cinterface`    | yes        | C ABI (IpoptCreate / IpoptSolve)             |
+| `pounce-cinterface`    | yes        | C ABI (CreateIpoptProblem / IpoptSolve)      |
 | `pounce-cli`           | yes        | `pounce` and `pounce_sens` binaries          |
 | `pounce-py`            | **no**     | ships on PyPI as `pounce-solver` via maturin |
 | `pounce-cutest`        | **no**     | benchmark harness (gitignored crate too)     |

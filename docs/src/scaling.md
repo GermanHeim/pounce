@@ -84,7 +84,7 @@ that are above `nlp_scaling_max_gradient`.
 
 | Option | Default | Effect |
 |---|---|---|
-| `linear_system_scaling` | `none` | `none` / `mc19` / `ruiz` / `slack-based`. |
+| `linear_system_scaling` | `none` | `none` / `ruiz`. `mc19` and `slack-based` are accepted by the option registry but not yet implemented — both fall back to `none`. |
 | `linear_scaling_on_demand` | `yes` | Defer scaling computation until a linear solve is poor; reduces overhead for well-conditioned KKT systems. |
 
 The KKT augmented system is symmetric; all linear-system scalers in
@@ -96,16 +96,16 @@ FERAL/SSIDS).
   MUMPS, FERAL) often does its own scaling under some configurations;
   stacking pounce-level scaling on top can *hurt*. Default. Use
   `ma57_automatic_scaling=yes` to get MA57's internal scaling instead.
-* **`mc19`** — HSL MC19 row/column scaling (Curtis-Reid 1972;
-  minimizes Σ log²|a_ij|). FFI to `libcoinhsl`; requires the
-  `pounce-hsl` build.
 * **`ruiz`** — iterative symmetric ∞-norm equilibration (Ruiz,
   CERFACS TR/PA/01/14). Pure Rust, no Fortran dependency. Converges
-  geometrically; capped at 10 iterations. Recommended starting point
-  when MA57's internal scaling is off and you can't link MC19.
-* **`slack-based`** — slack-aware scaling driven by the current
-  barrier slacks. Used internally by the inexact algorithm; rarely
-  user-selected.
+  geometrically; capped at 10 iterations. The only implemented
+  scaler today; recommended starting point when MA57's internal
+  scaling is off.
+* **`mc19`** *(not yet implemented)* — intended HSL MC19 row/column
+  scaling (Curtis-Reid 1972; minimizes Σ log²|a_ij|). Accepted by the
+  registry but currently logs a warning and falls back to `none`.
+* **`slack-based`** *(not yet implemented)* — intended slack-aware
+  scaling. Accepted by the registry but falls back to `none`.
 
 ### Worked example — `nql180`
 

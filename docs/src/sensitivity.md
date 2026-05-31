@@ -57,11 +57,16 @@ let result = SensSolve::new(vec![2, 3])
 cyipopt-compatible Python wrapper:
 
 ```python
-result = prob.solve_with_sens(x0=x0, sens_boundcheck=True)
+# pin_constraint_indices is required; pass deltas=..., compute_reduced_hessian=True,
+# or both. Returns (x, info) — sensitivity outputs live in the info dict.
+x, info = prob.solve_with_sens(x0, pin_constraint_indices=[2, 3],
+                               deltas=[0.05, 0.0], sens_boundcheck=True)
+# info["dx"], info["reduced_hessian"], info["reduced_hessian_eigenvalues"], ...
 ```
 
-`rh_eigendecomp=True` requests the reduced-Hessian eigendecomposition;
-`sens_bound_eps=…` tunes the bound projection. See
+`compute_reduced_hessian=True` returns the reduced Hessian in
+`info["reduced_hessian"]`; `rh_eigendecomp=True` adds its
+eigendecomposition; `sens_bound_eps=…` tunes the bound projection. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
 

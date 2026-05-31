@@ -2,8 +2,8 @@
 
 C ABI for POUNCE. Port of Ipopt's `Interfaces/IpStdCInterface.{h,cpp}`.
 
-Provides the `IpoptCreate` / `IpoptSolve` / `IpoptFreeProblem` entry
-points so existing PyIpopt, cyipopt, JuMP, and AMPL wrappers can link
+Provides the `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem`
+entry points so existing PyIpopt, cyipopt, JuMP, and AMPL wrappers can link
 against POUNCE without source changes. Function names and signatures
 match upstream exactly: consumers swap `libipopt.{dylib,so}` for
 `libpounce_cinterface.{dylib,so}`.
@@ -21,12 +21,12 @@ in the workspace root drops `libpounce_cinterface.{dylib,so}` into
 
 ## Surface
 
-- `IpoptCreate(n, x_L, x_U, m, g_L, g_U, nele_jac, nele_hess,
+- `CreateIpoptProblem(n, x_L, x_U, m, g_L, g_U, nele_jac, nele_hess,
   index_style, eval_f, eval_grad_f, eval_g, eval_jac_g, eval_h)` →
   `IpoptProblem` handle.
 - `IpoptSolve(problem, x, g, obj_val, mult_g, mult_x_L, mult_x_U,
   user_data)` → `ApplicationReturnStatus`.
-- `IpoptFreeProblem(problem)`.
+- `FreeIpoptProblem(problem)`.
 - `AddIpoptStrOption` / `AddIpoptIntOption` / `AddIpoptNumOption` —
   forward to the application's `OptionsList`.
 - `SetIntermediateCallback`.
