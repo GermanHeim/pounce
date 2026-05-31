@@ -31,6 +31,13 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
+/// Inner-serial backend for the rayon-parallel batch / multi-RHS paths:
+/// each worker builds its own serial factor so the only parallelism is
+/// across instances (outer-parallel / inner-serial). No global state.
+fn serial_backend() -> Box<dyn SparseSymLinearSolverInterface> {
+    Box::new(FeralSolverInterface::serial())
+}
+
 /// Build a triplet list from `(rows, cols, vals)`, validating equal
 /// lengths and (for `lower_only`) that no strict-upper entry is given.
 fn triplets(
@@ -268,8 +275,8 @@ pub fn solve_qp_batch<'py>(
         None => None,
     };
     let sols = py.allow_threads(|| match &warms {
-        Some(w) => solve_qp_batch_parallel_warm(&inners, w, &o, backend),
-        None => solve_qp_batch_parallel(&inners, &o, backend),
+        Some(w) => solve_qp_batch_parallel_warm(&inners, w, &o, serial_backend),
+        None => solve_qp_batch_parallel(&inners, &o, serial_backend),
     });
     sols.into_iter().map(|s| solution_dict(py, s)).collect()
 }
@@ -298,7 +305,7 @@ pub fn solve_qp_multi_rhs<'py>(
     let o = opts(tol, max_iter);
     let base_inner = base.inner.clone();
     let sols = py.allow_threads(|| {
-        pounce_convex::solve_qp_multi_rhs_parallel(&base_inner, &cs, &o, backend)
+        pounce_convex::solve_qp_multi_rhs_parallel(&base_inner, &cs, &o, serial_backend)
     });
     sols.into_iter().map(|s| solution_dict(py, s)).collect()
 }

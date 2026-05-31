@@ -12,6 +12,11 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
+/// Inner-serial backend for the outer-parallel / inner-serial batch path.
+fn serial_backend() -> Box<dyn SparseSymLinearSolverInterface> {
+    Box::new(FeralSolverInterface::serial())
+}
+
 /// Box-constrained QP `min ½xᵀ(2I)x + cᵀx, 0 ≤ x ≤ 1` for a given `c`.
 fn boxed_qp(c: Vec<f64>) -> QpProblem {
     let n = c.len();
@@ -58,7 +63,7 @@ fn main() {
             .collect();
 
         let t0 = Instant::now();
-        let batched = solve_qp_batch_parallel(&probs, &opts, backend);
+        let batched = solve_qp_batch_parallel(&probs, &opts, serial_backend);
         let par = t0.elapsed().as_secs_f64() * 1e3;
 
         // Sequential reference for comparison.

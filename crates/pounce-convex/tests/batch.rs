@@ -13,6 +13,13 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
+/// Inner-serial backend for the parallel batch path (outer-parallel /
+/// inner-serial); feral's parallel and serial drivers are bit-identical, so
+/// results match `backend`.
+fn serial_backend() -> Box<dyn SparseSymLinearSolverInterface> {
+    Box::new(FeralSolverInterface::serial())
+}
+
 /// A simple box-constrained QP `min ½‖x − t‖²·2 ... ` parameterized by a
 /// target via the linear term. `c = −2·t` ⇒ unconstrained optimum at `t`,
 /// clamped to [0, 1] by the bounds.
@@ -130,7 +137,7 @@ fn large_batch_parallel_path() {
             boxed_qp(vec![-2.0 * t, -2.0 * (1.0 - t)])
         })
         .collect();
-    let batched = solve_qp_batch_parallel(&probs, &opts, backend);
+    let batched = solve_qp_batch_parallel(&probs, &opts, serial_backend);
     assert_eq!(batched.len(), probs.len());
     // Compare a sample against single solves (full sweep would be slow).
     for k in (0..probs.len()).step_by(97) {

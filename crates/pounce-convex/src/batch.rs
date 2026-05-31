@@ -30,8 +30,11 @@
 //! The right model for a batch of many smallish QPs is **outer-parallel,
 //! inner-serial**: parallelize across instances and make each factor
 //! serial. [`solve_qp_batch_parallel`] does exactly that — it runs the
-//! instances on a dedicated rayon pool (ample worker stack) with feral's
-//! internal parallelism disabled for the duration. The default
+//! instances on a dedicated rayon pool (ample worker stack) and each worker
+//! builds its **own serial backend** from the supplied `make_backend`
+//! factory. The factory is therefore expected to produce an inner-serial
+//! backend (e.g. `pounce_feral::FeralSolverInterface::serial`); the toggle
+//! is a per-backend setting, not global state. The default
 //! [`solve_qp_batch`] is sequential: predictable, contention-free, and
 //! the right choice when each individual factor is large enough to
 //! parallelize on its own. The `make_backend` factory is shared by
@@ -42,26 +45,20 @@ use crate::qp::{QpProblem, QpSolution};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use rayon::prelude::*;
 
-/// Run `run` under the batch's outer-parallel / inner-serial regime: a
-/// dedicated rayon pool with a 64 MiB worker stack and feral's internal
-/// parallelism disabled (via the process-wide `FERAL_PARALLEL`, saved and
-/// restored). Shared by the cold and warm parallel batch entry points.
-fn with_outer_parallel<R, G>(run: G) -> R
+/// Run `run` on a dedicated rayon pool with a 64 MiB worker stack (feral's
+/// recursive multifrontal factor can overflow the default ~2 MiB worker
+/// stack on large batches). Shared by the cold and warm parallel batch
+/// entry points. Inner-serial execution is the caller's `make_backend`
+/// concern (build a serial backend per worker), not a global toggle.
+fn on_batch_pool<R, G>(run: G) -> R
 where
     G: Fn() -> R + Send,
     R: Send,
 {
-    let prev = std::env::var("FERAL_PARALLEL").ok();
-    std::env::set_var("FERAL_PARALLEL", "off");
-    let out = match rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build() {
+    match rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build() {
         Ok(pool) => pool.install(run),
         Err(_) => run(),
-    };
-    match prev {
-        Some(v) => std::env::set_var("FERAL_PARALLEL", v),
-        None => std::env::remove_var("FERAL_PARALLEL"),
     }
-    out
 }
 
 /// Solve a batch of convex QPs in parallel, returning one solution per
@@ -93,23 +90,25 @@ where
         .collect()
 }
 
-/// Solve a batch in parallel **across instances**, with each instance's
-/// factor run **serially** (feral's internal parallelism disabled for the
-/// duration) to avoid oversubscription. Best for many small / medium QPs.
+/// Solve a batch in parallel **across instances**. Best for many small /
+/// medium QPs, where cross-instance throughput beats parallelizing each
+/// factor internally.
 ///
 /// Runs on a dedicated rayon pool with a 64 MiB worker stack (feral's
 /// recursive multifrontal factor can overflow the default ~2 MiB worker
 /// stack on large batches). `make_backend` must be `Sync`; it is called
-/// once per instance on the worker that runs it.
+/// once per instance on the worker that runs it, so each worker gets its
+/// **own** backend.
+///
+/// For the outer-parallel / inner-serial win, pass a `make_backend` that
+/// builds an *inner-serial* backend (e.g.
+/// `pounce_feral::FeralSolverInterface::serial`) — that keeps the only
+/// parallelism across instances, avoiding the oversubscription that makes a
+/// parallel-over-parallel batch slower. The toggle is a per-backend setting
+/// with no global state, so concurrent feral solves on other threads are
+/// unaffected.
 ///
 /// Results are returned in input order regardless of completion order.
-///
-/// **Note:** to enforce inner-serial factors this sets the process-wide
-/// `FERAL_PARALLEL` environment variable for the duration of the call and
-/// restores it afterward. That is a process-global side effect, so do not
-/// run another feral-backed solve on a *different* thread concurrently
-/// with this call if it relies on feral's internal parallelism — the two
-/// would race on the variable. Sequential or batched-only use is fine.
 pub fn solve_qp_batch_parallel<F>(
     probs: &[QpProblem],
     opts: &QpOptions,
@@ -118,7 +117,7 @@ pub fn solve_qp_batch_parallel<F>(
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
 {
-    with_outer_parallel(|| {
+    on_batch_pool(|| {
         probs
             .par_iter()
             .map(|prob| solve_qp_ipm(prob, opts, &make_backend))
@@ -152,7 +151,7 @@ where
         warms.len(),
         probs.len()
     );
-    with_outer_parallel(|| {
+    on_batch_pool(|| {
         probs
             .par_iter()
             .zip(warms.par_iter())
