@@ -127,6 +127,44 @@ pub fn main() -> ExitCode {
     );
     app.set_restoration_factory_provider(resto_provider);
 
+    // Branded logo + copyright banner, printed up-front — before the
+    // problem is even read — so they head the output. The registered
+    // default for `linear_solver` mirrors upstream IPOPT (`"ma57"`), but
+    // pounce's actual backend is FERAL; only treat `"ma57"` as user
+    // intent when explicitly set, else the banner would always claim
+    // "ma57 requested". `sb yes` suppresses both (mirrors upstream
+    // `IpoptApplication::Initialize`).
+    let backend_tag = {
+        let (v, explicit) = app
+            .options()
+            .get_string_value("linear_solver", "")
+            .unwrap_or_else(|_| ("feral".to_string(), false));
+        match (v.as_str(), explicit) {
+            ("ma57", true) => {
+                #[cfg(feature = "ma57")]
+                {
+                    "MA57 (HSL)"
+                }
+                #[cfg(not(feature = "ma57"))]
+                {
+                    "FERAL (ma57 requested but not compiled)"
+                }
+            }
+            ("ma57", false) => "FERAL",
+            _ => "FERAL",
+        }
+    };
+    let suppress_banner = app
+        .options()
+        .get_bool_value("sb", "")
+        .ok()
+        .and_then(|(v, f)| f.then_some(v))
+        .unwrap_or(false);
+    if !suppress_banner {
+        print::print_logo();
+        print::print_banner(backend_tag);
+    }
+
     // Snapshot the problem source as a string — needed downstream by
     // the diagnostics manifest.
     let problem_desc: String = match &args.problem {
@@ -376,44 +414,8 @@ pub fn main() -> ExitCode {
     let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&post_presolve))));
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&counting) as Rc<RefCell<dyn TNLP>>;
 
-    // Banner + problem-statistics block, before the iteration table.
-    // The registered default for `linear_solver` mirrors upstream IPOPT
-    // (`"ma57"`), but pounce's actual default backend is FERAL. Only
-    // treat `"ma57"` as user intent when the option was explicitly set
-    // — otherwise the banner would always claim "ma57 requested" on
-    // every default-config run.
-    let backend_tag = {
-        let (v, explicit) = app
-            .options()
-            .get_string_value("linear_solver", "")
-            .unwrap_or_else(|_| ("feral".to_string(), false));
-        match (v.as_str(), explicit) {
-            ("ma57", true) => {
-                #[cfg(feature = "ma57")]
-                {
-                    "MA57 (HSL)"
-                }
-                #[cfg(not(feature = "ma57"))]
-                {
-                    "FERAL (ma57 requested but not compiled)"
-                }
-            }
-            ("ma57", false) => "FERAL",
-            _ => "FERAL",
-        }
-    };
-    // `sb yes` skips the copyright banner. Mirrors upstream
-    // `IpoptApplication::Initialize` which also reads `sb` and gates
-    // the banner. Problem-stats and iter rows are unaffected.
-    let suppress_banner = app
-        .options()
-        .get_bool_value("sb", "")
-        .ok()
-        .and_then(|(v, f)| f.then_some(v))
-        .unwrap_or(false);
-    if !suppress_banner {
-        print::print_banner(backend_tag);
-    }
+    // Problem statistics. (The branded logo + copyright banner print
+    // up-front, before the problem is read — see near the top of `run`.)
     if let Some(stats) = print::collect_stats(&tnlp) {
         print::print_problem_stats(&stats);
     }

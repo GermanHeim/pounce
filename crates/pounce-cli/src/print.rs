@@ -139,12 +139,124 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
     })
 }
 
+/// POUNCE wordmark in block letters, printed above the copyright banner.
+const LOGO: [&str; 5] = [
+    "####    ###   #   #  #   #   ####  #####",
+    "#   #  #   #  #   #  ##  #  #      #    ",
+    "####   #   #  #   #  # # #  #      #### ",
+    "#      #   #  #   #  #  ##  #      #    ",
+    "#       ###    ###   #   #   ####  #####",
+];
+
+/// Width of the copyright banner's asterisk rules — wide enough to span
+/// the longest banner text line. The wordmark is centered against this,
+/// and a matching rule is printed above it.
+const BANNER_WIDTH: usize = 80;
+
+/// Print the branded POUNCE ASCII wordmark, mimicking the project logo.
+///
+/// Block letters get a top-lit **steel** sheen (light silver → dark
+/// steel down the rows); three diagonal **molten claw** slashes rake
+/// upper-right → lower-left, glowing bright gold at the top into deep
+/// red at the bottom — the brand logo's look. Emitted through
+/// `anstream::stdout()`, which strips the ANSI when stdout is redirected
+/// or `NO_COLOR` is set (non-TTY sinks get the plain text), with a
+/// 256-color downgrade on non-truecolor terminals. The metallic letters
+/// are tuned for a dark terminal background.
+pub fn print_logo() {
+    use pounce_common::style::{downgrade, truecolor_enabled, ALPHA_HOT, BRIGHT_YEL, TIGER_ORANGE};
+    use std::io::Write as _;
+
+    fn lerp(a: u8, b: u8, t: f64) -> u8 {
+        (a as f64 + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
+    }
+    fn mix(a: anstyle::RgbColor, b: anstyle::RgbColor, t: f64) -> anstyle::RgbColor {
+        anstyle::RgbColor(lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
+    }
+    // Steel sheen (top-lit): light silver at the top row → dark steel at
+    // the bottom. Molten ramp: gold → tiger-orange → deep red top-to-bottom.
+    const STEEL_HI: anstyle::RgbColor = anstyle::RgbColor(0xd2, 0xd6, 0xdc);
+    const STEEL_LO: anstyle::RgbColor = anstyle::RgbColor(0x5c, 0x60, 0x68);
+
+    let rows = LOGO.len();
+    let width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(1).max(2);
+    let vfrac = |r: usize| if rows <= 1 { 0.0 } else { r as f64 / (rows - 1) as f64 };
+    // Molten color for a claw cell at row `r` (0 = top, hottest).
+    let molten = |r: usize| {
+        let t = vfrac(r);
+        if t < 0.5 {
+            mix(BRIGHT_YEL, TIGER_ORANGE, t / 0.5)
+        } else {
+            mix(TIGER_ORANGE, ALPHA_HOT, (t - 0.5) / 0.5)
+        }
+    };
+
+    // Cell grid: letters take the steel sheen by row; the molten claws
+    // overwrite the cells they cross.
+    let mut grid: Vec<Vec<Option<(char, anstyle::RgbColor)>>> = vec![vec![None; width]; rows];
+    for (r, line) in LOGO.iter().enumerate() {
+        let steel = mix(STEEL_HI, STEEL_LO, vfrac(r));
+        for (c, ch) in line.chars().enumerate() {
+            if ch != ' ' {
+                grid[r][c] = Some((ch, steel));
+            }
+        }
+    }
+    // Three parallel molten claw slashes, upper-right → lower-left (`/`).
+    for &start in &[width / 4, width / 4 + 6, width / 4 + 12] {
+        for r in 0..rows {
+            let c = start + (rows - 1 - r);
+            if c < width {
+                grid[r][c] = Some(('/', molten(r)));
+            }
+        }
+    }
+
+    let truecolor = truecolor_enabled();
+    let mut out = anstream::stdout();
+    // Leading rule matching the copyright banner's width, then a blank
+    // line, then the centered wordmark. The rule is left in the terminal's
+    // default color (like the banner's own rules) so it stays distinct on
+    // any background.
+    let _ = writeln!(out, "{}", "*".repeat(BANNER_WIDTH));
+    let _ = writeln!(out);
+    let pad = " ".repeat(BANNER_WIDTH.saturating_sub(width) / 2);
+    for row in &grid {
+        let mut rendered = pad.clone();
+        for cell in row {
+            match cell {
+                Some((ch, rgb)) => {
+                    let style = anstyle::Style::new()
+                        .bold()
+                        .fg_color(Some(downgrade(*rgb, truecolor)));
+                    rendered.push_str(&format!("{}{}{}", style.render(), ch, style.render_reset()));
+                }
+                None => rendered.push(' '),
+            }
+        }
+        let _ = writeln!(out, "{}", rendered.trim_end());
+    }
+    let _ = writeln!(out);
+}
+
 pub fn print_banner(linear_solver: &str) {
-    println!("******************************************************************************");
+    use std::io::IsTerminal as _;
+
+    // OSC 8 hyperlink so supporting terminals make the URL clickable;
+    // only emitted to a TTY so redirected output stays plain text.
+    const URL: &str = "https://github.com/jkitchin/pounce";
+    let link = if std::io::stdout().is_terminal() {
+        format!("\x1b]8;;{URL}\x1b\\{URL}\x1b]8;;\x1b\\")
+    } else {
+        URL.to_string()
+    };
+
+    let rule = "*".repeat(BANNER_WIDTH);
+    println!("{rule}");
     println!("This program contains POUNCE, a Rust port of Ipopt for nonlinear optimization.");
-    println!(" Released under the Eclipse Public License (EPL) — drop-in compatible with Ipopt.");
-    println!("         For more information visit https://github.com/jkitchin/pounce");
-    println!("******************************************************************************");
+    println!("Released under the Eclipse Public License (EPL) — drop-in compatible with Ipopt.");
+    println!("         For more information visit {link}");
+    println!("{rule}");
     println!();
     println!(
         "This is POUNCE version {}, running with linear solver {}.",

@@ -443,6 +443,8 @@ dependencies = [
 name = "pounce-cli"
 version = "0.3.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "libloading",
  "pounce-algorithm",
  "pounce-common",
