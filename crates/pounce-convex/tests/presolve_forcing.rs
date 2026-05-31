@@ -191,6 +191,37 @@ fn equality_forcing_max_vertex() {
 }
 
 #[test]
+fn overlapping_forcing_rows_resolved_by_fixpoint() {
+    // Two forcing rows sharing x1: x0+x1 ≤ 0 and x1+x2 ≤ 0 (box [0,5]).
+    // A single round can only fire one (disjoint-column rule); the fixpoint
+    // fires the second next round once x1 is fixed — and the composed
+    // postsolve recovers a valid KKT point with both rows' multipliers.
+    let prob = QpProblem {
+        n: 3,
+        p_lower: (0..3).map(|i| Triplet::new(i, i, 1.0)).collect(),
+        c: vec![-2.0, -3.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0), // x0 + x1 ≤ 0
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(1, 2, 1.0), // x1 + x2 ≤ 0  (shares x1)
+        ],
+        h: vec![0.0, 0.0],
+        lb: vec![0.0; 3],
+        ub: vec![5.0; 3],
+    };
+    // Both rows forcing ⇒ all three variables pinned to 0.
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    for i in 0..3 {
+        assert!(sol.x[i].abs() < 1e-6, "x[{i}]={} (all pinned to 0)", sol.x[i]);
+    }
+    assert_kkt(&prob, &sol);
+}
+
+#[test]
 fn forcing_combined_with_other_rows() {
     // A forcing inequality x0 + x1 ≤ 0 (pins x0=x1=0) alongside a live
     // inequality x2 + x3 ≤ 3, on a strictly convex objective. Checks that

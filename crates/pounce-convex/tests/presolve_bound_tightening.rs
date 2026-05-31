@@ -215,3 +215,71 @@ fn randomized_bound_tightening_roundtrip() {
     assert!(checked > 50, "too few optimal instances checked: {checked}");
     assert!(total_tightened > 0, "no bound tightening exercised");
 }
+
+/// Randomized sweep with **overlapping** constraints (consecutive rows
+/// share a variable, forming a chain). Here tightening sources overlap, so
+/// no single round can use them all — the fixpoint must resolve them across
+/// rounds while keeping the re-attributed duals correct. KKT-validated.
+#[test]
+fn randomized_overlapping_tightening_roundtrip() {
+    let mut rng = Rng(0xC0FF_EE00_1234_5678);
+    let mut checked = 0usize;
+    let mut total_tightened = 0usize;
+
+    for _ in 0..300 {
+        let n = 6usize;
+        let p_lower: Vec<Triplet> =
+            (0..n).map(|i| Triplet::new(i, i, rng.unif(0.5, 3.0))).collect();
+        let c: Vec<f64> = (0..n).map(|_| rng.unif(-8.0, 8.0)).collect();
+
+        // Chain of overlapping pair inequalities: row i couples x_i, x_{i+1}.
+        let mut g = Vec::new();
+        let mut h = Vec::new();
+        for i in 0..n - 1 {
+            let s = if rng.unif(0.0, 1.0) < 0.5 { 1.0 } else { -1.0 };
+            g.push(Triplet::new(i, i, rng.unif(1.0, 2.0)));
+            g.push(Triplet::new(i, i + 1, s * rng.unif(1.0, 2.0)));
+            h.push(rng.unif(-2.0, 10.0));
+        }
+
+        let prob = QpProblem {
+            n,
+            p_lower,
+            c,
+            a: vec![],
+            b: vec![],
+            g,
+            h,
+            lb: vec![0.0; n],
+            ub: vec![10.0; n],
+        };
+
+        match presolve(&prob) {
+            PresolveOutcome::Infeasible => {
+                assert_eq!(direct(&prob).status, QpStatus::PrimalInfeasible);
+                continue;
+            }
+            PresolveOutcome::Unbounded => continue,
+            PresolveOutcome::Reduced(ps) => total_tightened += ps.stats().tightened_bounds,
+        }
+
+        let sol = with_presolve(&prob);
+        let d = direct(&prob);
+        if sol.status != QpStatus::Optimal || d.status != QpStatus::Optimal {
+            continue;
+        }
+        assert_kkt(&prob, &sol, 1e-4);
+        for i in 0..n {
+            assert!(
+                (sol.x[i] - d.x[i]).abs() < 1e-4,
+                "primal x[{i}]: presolve {} vs direct {}",
+                sol.x[i],
+                d.x[i]
+            );
+        }
+        checked += 1;
+    }
+
+    assert!(checked > 50, "too few optimal instances: {checked}");
+    assert!(total_tightened > 0, "no overlapping tightening exercised");
+}

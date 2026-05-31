@@ -124,13 +124,23 @@
 //!
 //! [`presolve`] iterates the single-pass catalog ([`presolve_once`]) to a
 //! **fixpoint**, so deductions cascade across rounds (a fixing exposes a
-//! new singleton; a tightened bound makes a row forcing; a forcing that
-//! shares a column with another — disallowed in one round — fires the next
-//! once the shared variable is gone). Because each pass is a correct
-//! solution-space transform, the iterate is their composition and reuses
-//! every pass's proven dual recovery. The disjoint-source restriction on
-//! forcing / tightening within a single round therefore costs little: the
-//! fixpoint progressively handles overlaps that a single round defers.
+//! new singleton; a tightened bound makes a row forcing). Because each pass
+//! is a correct solution-space transform, the iterate is their composition
+//! and reuses every pass's proven dual recovery — no new dual math.
+//!
+//! This is also how the disjoint-source restriction on forcing / tightening
+//! is *lifted*. Within one round, overlapping forcing / tightening sources
+//! must stay column-disjoint so their dual re-attributions don't couple.
+//! But the fixpoint resolves the overlap across rounds: a source claims its
+//! columns only when it actually fires, so the round after it reaches its
+//! own fixpoint it stops blocking its neighbours, which then fire — and the
+//! *composed* postsolve recovers the shared variable's bound multiplier
+//! with **both** rows' contributions present (each layer's global bound
+//! recovery sees the inner layers' row multipliers mapped through). The
+//! effect is a coupled re-attribution, achieved by composition rather than
+//! a within-round coupled solve, and validated by randomized KKT roundtrips
+//! over *overlapping* constraint chains
+//! (`tests/presolve_bound_tightening.rs`).
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -739,7 +749,8 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
 
     // Tighten variable boxes from one row whose activity lies in `[lo, hi]`
     // (inequality `≤ h`: `lo = −∞, hi = h`; equality: `lo = hi = b`).
-    // Returns true on a detected empty domain (infeasible).
+    // `None` ⇒ a detected empty domain (infeasible); `Some(k)` ⇒ `k` bounds
+    // were tightened.
     let tighten_from_row =
         |entries: &[(usize, f64)],
          lo: f64,
@@ -750,7 +761,7 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
          tub: &mut [f64],
          ub_src: &mut [Option<(usize, f64, bool)>],
          lb_src: &mut [Option<(usize, f64, bool)>]|
-         -> bool {
+         -> Option<usize> {
             let (amin, amax) = activity(entries, &|c| tlb[c], &|c| tub[c]);
             // Compute all implied bounds against the row-start state, then
             // apply (so within-row order doesn't matter).
@@ -788,29 +799,39 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
                     }
                 }
             }
+            let mut tightened = 0usize;
             for (k, is_upper, val, a) in updates {
                 if is_upper {
                     if val < tub[k] - BOUND_FEAS_TOL {
                         tub[k] = val;
                         ub_src[k] = Some((row_idx, a, is_eq));
+                        tightened += 1;
                     }
                 } else if val > tlb[k] + BOUND_FEAS_TOL {
                     tlb[k] = val;
                     lb_src[k] = Some((row_idx, a, is_eq));
+                    tightened += 1;
                 }
                 if tlb[k] > tub[k] + BOUND_FEAS_TOL {
-                    return true;
+                    return None;
                 }
             }
-            false
+            Some(tightened)
         };
 
+    // A source row claims its columns (blocking overlapping sources, so the
+    // re-attributions stay independent) only when it *actually* tightens —
+    // a clean row that tightens nothing must not block its neighbours, or a
+    // pair of overlapping rows where only one is useful would deadlock
+    // across fixpoint rounds. With this, the fixpoint progressively fires
+    // overlapping tightenings (each round the previous round's sources are
+    // at their fixpoint and no longer claim columns).
     for row in 0..m_ineq {
         if ineq_dropped[row] || g_by_row[row].is_empty() || !row_is_clean(&g_by_row[row], &bt_col_used)
         {
             continue;
         }
-        if tighten_from_row(
+        match tighten_from_row(
             &g_by_row[row],
             f64::NEG_INFINITY,
             prob.h[row],
@@ -821,10 +842,13 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
             &mut ub_src,
             &mut lb_src,
         ) {
-            return PresolveOutcome::Infeasible;
-        }
-        for &(c, _) in &g_by_row[row] {
-            bt_col_used[c] = true;
+            None => return PresolveOutcome::Infeasible,
+            Some(0) => {}
+            Some(_) => {
+                for &(c, _) in &g_by_row[row] {
+                    bt_col_used[c] = true;
+                }
+            }
         }
     }
     for row in 0..m_eq {
@@ -833,7 +857,7 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
             continue;
         }
         let b = prob.b[row];
-        if tighten_from_row(
+        match tighten_from_row(
             &a_by_row[row],
             b,
             b,
@@ -844,10 +868,13 @@ fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
             &mut ub_src,
             &mut lb_src,
         ) {
-            return PresolveOutcome::Infeasible;
-        }
-        for &(c, _) in &a_by_row[row] {
-            bt_col_used[c] = true;
+            None => return PresolveOutcome::Infeasible,
+            Some(0) => {}
+            Some(_) => {
+                for &(c, _) in &a_by_row[row] {
+                    bt_col_used[c] = true;
+                }
+            }
         }
     }
 
