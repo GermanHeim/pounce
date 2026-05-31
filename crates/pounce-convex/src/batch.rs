@@ -29,37 +29,24 @@
 //!
 //! The right model for a batch of many smallish QPs is **outer-parallel,
 //! inner-serial**: parallelize across instances and make each factor
-//! serial. [`solve_qp_batch_parallel`] does exactly that — it runs the
-//! instances on a dedicated rayon pool (ample worker stack) and each worker
-//! builds its **own serial backend** from the supplied `make_backend`
-//! factory. The factory is therefore expected to produce an inner-serial
-//! backend (e.g. `pounce_feral::FeralSolverInterface::serial`); the toggle
-//! is a per-backend setting, not global state. The default
-//! [`solve_qp_batch`] is sequential: predictable, contention-free, and
-//! the right choice when each individual factor is large enough to
-//! parallelize on its own. The `make_backend` factory is shared by
-//! reference and called once per instance, so it must be `Sync`.
+//! serial. [`solve_qp_batch_parallel`] runs the instances on rayon's global
+//! pool and each worker builds its **own serial backend** from the supplied
+//! `make_backend` factory. The factory is therefore expected to produce an
+//! inner-serial backend (e.g. `pounce_feral::FeralSolverInterface::serial`);
+//! the toggle is a per-backend setting, not global state. The serial feral
+//! driver factorizes supernodes in a flat postorder loop (bounded stack),
+//! so the batch needs no oversized worker stacks — unlike feral's *parallel*
+//! driver, which climbs the elimination tree recursively and was the reason
+//! an earlier version provisioned a custom 64 MiB-stack pool. The default
+//! [`solve_qp_batch`] is sequential: predictable, contention-free, and the
+//! right choice when each individual factor is large enough to parallelize
+//! on its own. The `make_backend` factory is shared by reference and called
+//! once per instance, so it must be `Sync`.
 
 use crate::ipm::{solve_qp_ipm, solve_qp_ipm_warm, QpOptions, QpWarmStart};
 use crate::qp::{QpProblem, QpSolution};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use rayon::prelude::*;
-
-/// Run `run` on a dedicated rayon pool with a 64 MiB worker stack (feral's
-/// recursive multifrontal factor can overflow the default ~2 MiB worker
-/// stack on large batches). Shared by the cold and warm parallel batch
-/// entry points. Inner-serial execution is the caller's `make_backend`
-/// concern (build a serial backend per worker), not a global toggle.
-fn on_batch_pool<R, G>(run: G) -> R
-where
-    G: Fn() -> R + Send,
-    R: Send,
-{
-    match rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build() {
-        Ok(pool) => pool.install(run),
-        Err(_) => run(),
-    }
-}
 
 /// Solve a batch of convex QPs in parallel, returning one solution per
 /// input in the same order.
@@ -94,9 +81,7 @@ where
 /// medium QPs, where cross-instance throughput beats parallelizing each
 /// factor internally.
 ///
-/// Runs on a dedicated rayon pool with a 64 MiB worker stack (feral's
-/// recursive multifrontal factor can overflow the default ~2 MiB worker
-/// stack on large batches). `make_backend` must be `Sync`; it is called
+/// Runs on rayon's global pool. `make_backend` must be `Sync`; it is called
 /// once per instance on the worker that runs it, so each worker gets its
 /// **own** backend.
 ///
@@ -106,7 +91,8 @@ where
 /// parallelism across instances, avoiding the oversubscription that makes a
 /// parallel-over-parallel batch slower. The toggle is a per-backend setting
 /// with no global state, so concurrent feral solves on other threads are
-/// unaffected.
+/// unaffected. The serial feral factor uses a flat (bounded-stack)
+/// supernode loop, so no oversized worker stacks are needed.
 ///
 /// Results are returned in input order regardless of completion order.
 pub fn solve_qp_batch_parallel<F>(
@@ -117,12 +103,10 @@ pub fn solve_qp_batch_parallel<F>(
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
 {
-    on_batch_pool(|| {
-        probs
-            .par_iter()
-            .map(|prob| solve_qp_ipm(prob, opts, &make_backend))
-            .collect()
-    })
+    probs
+        .par_iter()
+        .map(|prob| solve_qp_ipm(prob, opts, &make_backend))
+        .collect()
 }
 
 /// Warm-started parallel batch: like [`solve_qp_batch_parallel`] but each
@@ -151,13 +135,11 @@ where
         warms.len(),
         probs.len()
     );
-    on_batch_pool(|| {
-        probs
-            .par_iter()
-            .zip(warms.par_iter())
-            .map(|(prob, warm)| solve_qp_ipm_warm(prob, opts, warm, &make_backend))
-            .collect()
-    })
+    probs
+        .par_iter()
+        .zip(warms.par_iter())
+        .map(|(prob, warm)| solve_qp_ipm_warm(prob, opts, warm, &make_backend))
+        .collect()
 }
 
 /// Solve one QP structure against many linear objectives `c`
