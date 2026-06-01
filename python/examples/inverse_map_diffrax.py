@@ -149,6 +149,8 @@ def main() -> None:
 
     # POUNCE supplies the RHS; the output is the optimizer's solution
     # itself (identity), so ∂y/∂θ = ∂x*/∂θ and dθ/ds = J^{-1} dy/ds.
+    # Pass warm=True to warm-start each inner solve from the previous
+    # one (a modest ~1.3x; see python/benchmarks/inverse_map_warm.py).
     rhs = inverse_map_rhs(jp, output_velocity)
 
     y0 = output_path(0.0)

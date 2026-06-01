@@ -2122,3 +2122,36 @@ def test_pathfollower_corrector_failed_status_pounce_90():
     pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.5, ds_min=0.4, shrink=0.5)
     tr = pf.follow(theta, (0.0, 1.0), jnp.zeros(2))
     assert tr.status == "corrector_failed"
+
+
+def test_inverse_map_rhs_warm_matches_cold_pounce_91():
+    """Issue #91: warm=True changes only the inner solve's starting point,
+    not the result — the warm and cold inverse maps agree up to solver
+    tolerance, and warm is jittable."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2 + 0.05 * x[0] ** 4
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+
+    def y_of_s(s):
+        return jnp.array([0.5 + 0.3 * jnp.sin(2 * jnp.pi * s)])
+
+    def dy_ds(s):
+        return jnp.array([0.3 * 2 * jnp.pi * jnp.cos(2 * jnp.pi * s)])
+
+    y0 = float(y_of_s(0.0)[0])
+    theta0 = jnp.array([y0 + 0.1 * y0 ** 3])
+
+    TH_cold = _rk4(inverse_map_rhs(jp, dy_ds, warm=False), theta0, n_steps=120)
+    TH_warm = _rk4(inverse_map_rhs(jp, dy_ds, warm=True), theta0, n_steps=120)
+    assert float(np.max(np.abs(TH_cold - TH_warm))) < 1e-6
+
+    # Still jittable with the warm cache in the loop.
+    rhs_w = inverse_map_rhs(jp, dy_ds, warm=True)
+    jit_val = jax.jit(rhs_w)(0.3, theta0)
+    assert np.all(np.isfinite(np.asarray(jit_val)))

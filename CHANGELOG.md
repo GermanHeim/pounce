@@ -35,6 +35,13 @@ scipy) does the stepping — *no NLP inversion*.
   the optimizer onto the boundary (~1e-7). `diffrax` is an optional
   extra (`pip install pounce[diffrax]`); the example falls back to RK4
   if it's absent.
+- `inverse_map_rhs(..., warm=True)` warm-starts each inner solve from the
+  previous evaluation's primal/duals/μ (pounce#86). Result-invariant (up
+  to solver tolerance); a *modest* lever — ~1.4-1.7× fewer IPM iterations,
+  ~1.3× wall-clock, roughly flat in problem size (interior-point
+  warm-start ceiling + per-eval Jacobian-build overhead). Benchmark:
+  `python/benchmarks/inverse_map_warm.py`. For a real speedup on a smooth
+  map, prefer `PathFollower` (it skips solves, not just cheapens them).
 - Switch to `PathFollower` when the path folds or the active set changes.
 - Worked notebook `python/notebooks/14_path_following.ipynb` tours the
   whole family (sensitivity → margin → continuation → fold → inverse map).
