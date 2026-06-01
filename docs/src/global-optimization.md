@@ -128,6 +128,7 @@ nodes; adding sandwich cuts brings it to ~220, and OBBT to ~60.
 | `rlt` | `true` | level-1 RLT cuts |
 | `multilinear` | `true` | multi-grouping trilinear relaxation |
 | `branching` | `MostViolation` | branching rule: `Widest`, `MostViolation`, or `Reliability` |
+| `parallel` | `false` | run OBBT's `2n` solves on a thread pool (deterministic) |
 | `fbbt` | — | FBBT configuration |
 
 The branching rule (`BranchRule`) chooses the variable to split: `Widest` (box
@@ -141,6 +142,12 @@ on larger problems where variable choice dominates the node count.
 The defaults aim for robustness on small problems. OBBT dominates the per-node
 cost; turn `obbt_passes` down (or off) on larger problems where the LP solves
 outweigh the node savings.
+
+Because OBBT's `2n` solves per pass are independent, `parallel = true` runs them
+on a thread pool — *deterministically* (the same nodes and optimum as the serial
+sweep, only faster). On a 7-variable problem it cut wall-clock ≈2.3× on 14
+cores; the speedup is sub-linear because the relaxation build, sandwich cuts,
+αBB, RLT, the local NLP solve, and branching remain serial within a node.
 
 ## The SOS / Lasserre path (polynomials)
 

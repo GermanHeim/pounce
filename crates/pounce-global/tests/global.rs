@@ -423,6 +423,30 @@ fn reliability_branching_certifies_optimum() {
 }
 
 #[test]
+fn parallel_obbt_matches_serial() {
+    // Parallelizing OBBT's per-variable solves is deterministic: it must explore
+    // exactly the same nodes and return the same optimum as the serial sweep.
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+    let serial = solve_global(&prob, &GlobalOptions::default(), backend);
+    let parallel = solve_global(
+        &prob,
+        &GlobalOptions {
+            parallel: true,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    assert_eq!(serial.status, parallel.status);
+    assert_eq!(
+        serial.nodes, parallel.nodes,
+        "parallel must explore the same nodes"
+    );
+    assert!((serial.objective - parallel.objective).abs() < 1e-9);
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

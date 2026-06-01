@@ -22,6 +22,8 @@ pounce-convex.workspace = true
 pounce-linsol.workspace = true
 # Local NLP solves (filter line-search IPM) for upper bounds at a node.
 pounce-algorithm.workspace = true
+# Data-parallel OBBT (the 2n per-node bound-tightening LP solves are independent).
+rayon = "1"
 
 [dev-dependencies]
 # FERAL backs the relaxation LP solves end-to-end in the in-tree tests.

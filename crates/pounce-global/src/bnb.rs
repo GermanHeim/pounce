@@ -107,6 +107,11 @@ pub struct GlobalOptions {
     pub multilinear: bool,
     /// Which branching rule to use.
     pub branching: BranchRule,
+    /// Run OBBT's `2n` per-node bound-tightening solves on a thread pool. The
+    /// result is identical to the serial sweep (the solves are independent),
+    /// only faster; pays off when `n` and the relaxation are large enough to
+    /// amortize threading overhead.
+    pub parallel: bool,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -126,6 +131,7 @@ impl Default for GlobalOptions {
             rlt: true,
             multilinear: true,
             branching: BranchRule::MostViolation,
+            parallel: false,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -189,7 +195,7 @@ pub fn solve_global<F>(
     mut make_backend: F,
 ) -> GlobalSolution
 where
-    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
 {
     let n = prob.n_vars;
     let (g_lo, g_hi) = prob.constraint_bounds();
@@ -288,8 +294,9 @@ where
                 &mut hi,
                 cutoff,
                 opts.obbt_passes,
+                opts.parallel,
                 &qp_opts,
-                &mut make_backend,
+                &make_backend,
             ) {
                 continue;
             }
