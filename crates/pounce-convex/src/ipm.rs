@@ -207,6 +207,30 @@ where
     if has_nonsym {
         return solve_nonsym(prob, cones, opts, make_backend);
     }
+    // Sparsity: split any block-diagonal PSD cone into independent smaller
+    // cones (one dense O(m²) KKT block → several small ones, exploited by the
+    // sparse factorization). The transform is solution-equivalent; the dual
+    // `z` is scattered back to the original row layout afterward.
+    if has_psd {
+        let (prob2, cones2, row_map) = decompose_psd(prob, cones);
+        let sol2 = solve_socp_symmetric(&prob2, &cones2, opts, make_backend);
+        return remap_decomposed_z(sol2, &row_map, prob.m_ineq());
+    }
+    solve_socp_symmetric(prob, cones, opts, make_backend)
+}
+
+/// The symmetric-cone solve (orthant / SOC / PSD): expand finite bounds into
+/// a trailing orthant block, run the Mehrotra core, and split the bound
+/// duals back out. Shared by [`solve_socp_ipm`] and the PSD-decomposed path.
+fn solve_socp_symmetric<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
     if !prob.has_bounds() {
         let cone = CompositeCone::from_specs(cones);
         return solve_qp_core(prob, &cone, opts, None, make_backend);
@@ -218,6 +242,153 @@ where
     let cone = CompositeCone::from_specs(&specs);
     let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend);
     split_bound_duals(prob, &bound_rows, sol)
+}
+
+/// Scatter the inequality dual `z` of a PSD-decomposed solve back to the
+/// original inequality-row layout: new row `r` maps to `row_map[r]`, and the
+/// dropped cross-block rows (structurally zero; their `G` rows are empty so
+/// they carry no stationarity term) take dual `0`. Everything else
+/// (`x`/`y`/bound duals/objective) is unchanged by the decomposition.
+fn remap_decomposed_z(sol: QpSolution, row_map: &[usize], orig_m_ineq: usize) -> QpSolution {
+    let mut z = vec![0.0; orig_m_ineq];
+    for (new_r, &orig_r) in row_map.iter().enumerate() {
+        z[orig_r] = sol.z[new_r];
+    }
+    QpSolution { z, ..sol }
+}
+
+/// Split each block-diagonal `Psd(n)` cone into independent PSD cones over
+/// the connected components of its aggregate sparsity graph.
+///
+/// A `Psd(n)` cone occupies `n(n+1)/2` `svec` rows of `(G, h)`. Treating the
+/// matrix indices `0..n` as graph vertices and adding an edge `(i,j)` for
+/// every *structurally present* off-diagonal `svec` row (nonzero `h` or a
+/// non-empty `G` row), the connected components partition the matrix into
+/// diagonal blocks: cross-component entries are structurally zero, so
+/// `smat(s)` is block-diagonal and `⪰ 0` iff each block is. The cone is then
+/// replaced by one `Psd(|C|)` per component `C` (its lower triangle pulled
+/// from the original rows, in `svec` order), and the cross-component rows are
+/// dropped. Non-PSD cones and undecomposable PSD cones pass through unchanged.
+///
+/// Returns `(transformed problem, transformed cones, new→original ineq-row
+/// map)`. This turns one dense `O((n(n+1)/2)²)` KKT block into several small
+/// ones — the first (non-overlapping) rung of chordal sparsity for SDPs.
+pub(crate) fn decompose_psd(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+) -> (QpProblem, Vec<ConeSpec>, Vec<usize>) {
+    use crate::qp::Triplet;
+    let m_ineq = prob.m_ineq();
+    let mut rows_of_g: Vec<Vec<Triplet>> = vec![Vec::new(); m_ineq];
+    for t in &prob.g {
+        rows_of_g[t.row].push(*t);
+    }
+
+    let mut new_g: Vec<Triplet> = Vec::new();
+    let mut new_h: Vec<f64> = Vec::new();
+    let mut new_cones: Vec<ConeSpec> = Vec::new();
+    let mut row_map: Vec<usize> = Vec::new();
+
+    // Copy original ineq row `r` to a fresh row at the end of `new_g`/`new_h`.
+    let emit =
+        |r: usize, new_g: &mut Vec<Triplet>, new_h: &mut Vec<f64>, row_map: &mut Vec<usize>| {
+            let nr = new_h.len();
+            for t in &rows_of_g[r] {
+                new_g.push(Triplet::new(nr, t.col, t.val));
+            }
+            new_h.push(prob.h[r]);
+            row_map.push(r);
+        };
+
+    let mut off = 0usize;
+    for c in cones {
+        let d = c.dim();
+        match c {
+            ConeSpec::Psd(n) => {
+                let n = *n;
+                // svec local order: (i,j) for j in 0..n, i in j..n.
+                let mut kij: Vec<(usize, usize)> = Vec::with_capacity(d);
+                for j in 0..n {
+                    for i in j..n {
+                        kij.push((i, j));
+                    }
+                }
+                // Union-find over the matrix indices.
+                let mut parent: Vec<usize> = (0..n).collect();
+                fn find(parent: &mut [usize], x: usize) -> usize {
+                    let mut r = x;
+                    while parent[r] != r {
+                        r = parent[r];
+                    }
+                    let mut cur = x;
+                    while parent[cur] != r {
+                        let nxt = parent[cur];
+                        parent[cur] = r;
+                        cur = nxt;
+                    }
+                    r
+                }
+                for (k, &(i, j)) in kij.iter().enumerate() {
+                    if i != j {
+                        let r = off + k;
+                        let present = prob.h[r] != 0.0 || !rows_of_g[r].is_empty();
+                        if present {
+                            let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                            if ri != rj {
+                                parent[ri] = rj;
+                            }
+                        }
+                    }
+                }
+                // Components, in ascending-vertex order.
+                let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for v in 0..n {
+                    let root = find(&mut parent, v);
+                    comps.entry(root).or_default().push(v);
+                }
+                if comps.len() <= 1 {
+                    // Nothing to split: copy the cone's rows through unchanged.
+                    for k in 0..d {
+                        emit(off + k, &mut new_g, &mut new_h, &mut row_map);
+                    }
+                    new_cones.push(ConeSpec::Psd(n));
+                } else {
+                    // Global (i,j) → local svec index `k`.
+                    let mut idx = std::collections::HashMap::with_capacity(d);
+                    for (k, &(i, j)) in kij.iter().enumerate() {
+                        idx.insert((i, j), k);
+                    }
+                    for comp in comps.values() {
+                        let cn = comp.len();
+                        // Each component's own lower triangle, in svec order.
+                        for jj in 0..cn {
+                            for ii in jj..cn {
+                                // comp is ascending, so comp[ii] ≥ comp[jj].
+                                let k = idx[&(comp[ii], comp[jj])];
+                                emit(off + k, &mut new_g, &mut new_h, &mut row_map);
+                            }
+                        }
+                        new_cones.push(ConeSpec::Psd(cn));
+                    }
+                    // Cross-component rows are structurally zero → dropped.
+                }
+            }
+            _ => {
+                for k in 0..d {
+                    emit(off + k, &mut new_g, &mut new_h, &mut row_map);
+                }
+                new_cones.push(*c);
+            }
+        }
+        off += d;
+    }
+
+    let new_prob = QpProblem {
+        g: new_g,
+        h: new_h,
+        ..prob.clone()
+    };
+    (new_prob, new_cones, row_map)
 }
 
 /// Warm-started [`solve_socp_ipm`]: seed the iteration from `warm` (a nearby

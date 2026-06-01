@@ -671,4 +671,84 @@ mod tests {
         assert!((sol.x[0] - 1.0).abs() < 1e-5, "λ = {}", sol.x[0]);
         assert!((sol.obj + 1.0).abs() < 1e-5, "obj = {}", sol.obj);
     }
+
+    /// A block-diagonal PSD cone (4×4 = two 2×2 blocks, no cross coupling)
+    /// decomposes into two `Psd(2)` cones, dropping the structurally-zero
+    /// cross rows. svec(4×4) indices: diag at k∈{0,4,7,9}; the within-block
+    /// off-diagonals (1,0)=k1 and (3,2)=k8 are present; the cross entries
+    /// k∈{2,3,5,6} are absent.
+    #[test]
+    fn psd_decompose_splits_block_diagonal() {
+        use crate::ipm::decompose_psd;
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let (_p2, cones2, row_map) = decompose_psd(&prob, &[ConeSpec::Psd(4)]);
+        assert_eq!(cones2, vec![ConeSpec::Psd(2), ConeSpec::Psd(2)]);
+        assert_eq!(row_map, vec![0, 1, 4, 7, 8, 9]); // cross rows 2,3,5,6 dropped
+    }
+
+    /// A genuinely coupled PSD cone (a cross entry present) stays one block.
+    #[test]
+    fn psd_decompose_keeps_coupled() {
+        use crate::ipm::decompose_psd;
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            // k=2 is the cross entry (2,0); making it present couples the blocks.
+            h: vec![1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            g: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let (_p2, cones2, _) = decompose_psd(&prob, &[ConeSpec::Psd(4)]);
+        assert_eq!(cones2, vec![ConeSpec::Psd(4)]);
+    }
+
+    /// End-to-end: a block-diagonal SDP declared as a single `Psd(4)` cone
+    /// solves correctly through the auto-decomposition. `max λ s.t. M−λI⪰0`
+    /// with `M = blkdiag([[2,1],[1,2]], [[4,1],[1,4]])` has
+    /// `λ_min(M) = min(1, 3) = 1`. The decomposed cross rows get dual 0.
+    #[test]
+    fn psd_block_diagonal_solves_end_to_end() {
+        let r2 = std::f64::consts::SQRT_2;
+        // G column = svec(I₄): diagonal entries k ∈ {0,4,7,9}.
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(4, 0, 1.0),
+                Triplet::new(7, 0, 1.0),
+                Triplet::new(9, 0, 1.0),
+            ],
+            // svec(M): (0,0)=2,(1,0)=√2,(1,1)=2 | (2,2)=4,(3,2)=√2,(3,3)=4.
+            h: vec![2.0, r2, 0.0, 0.0, 2.0, 0.0, 0.0, 4.0, r2, 4.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_socp_ipm(&prob, &[ConeSpec::Psd(4)], &opts(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
+        assert!((sol.x[0] - 1.0).abs() < 1e-5, "λ = {}", sol.x[0]);
+        assert!((sol.obj + 1.0).abs() < 1e-5, "obj = {}", sol.obj);
+        // z is returned in the original 10-row layout (dropped rows = 0).
+        assert_eq!(sol.z.len(), 10);
+        for &k in &[2usize, 3, 5, 6] {
+            assert_eq!(sol.z[k], 0.0, "dropped cross row {k} should have dual 0");
+        }
+    }
 }
