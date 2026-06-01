@@ -702,11 +702,16 @@ difference gradient check; and (iv) a `vmap_*` batched form exists. The
 JAX work is *part of* each phase, not a trailing phase — that is the
 whole point of making differentiability first-class.
 
-**Phase 0 — Integer plumbing.** Parse integer-var counts from the `.nl`
-header; extend `ProblemClass`; carry `is_integer: BitVec` on the
-problem. Dispatch errors cleanly on integrality / nonconvexity it
-cannot yet handle. Mirrors LP/QP Phase 1. *No new algorithm, no JAX
-surface yet.*
+**Phase 0 — Integer plumbing (mostly already landing).** The
+`ProblemClass` classifier, NL-header parsing, and `solver_selection`
+routing are arriving on the LP/QP branch `claude/amazing-mayer-Xd0ag`.
+Phase 0 is therefore *additive*: extend the landing classifier with
+integer and nonconvexity flags, parse the integer-var counts from the
+`.nl` header, carry `is_integer: BitVec` on the problem, and run **root
+presolve** (the full `pounce-presolve` pipeline plus the LP reductions
+landing on that branch). Dispatch errors cleanly on integrality /
+nonconvexity it cannot yet handle. *No new algorithm, no JAX surface
+yet.*
 
 **Phase 1 — B&B shell + first convex MI + `solve_mip` VJP.** The unified
 tree with integer branching only, driven by **MIQP over `pounce-qp`**
@@ -723,11 +728,15 @@ spatial path needs. **DoD:** the LP solve emits `DiffHandoff` (LP KKT is
 trivially differentiable), so `solve_mip` over LP relaxations
 differentiates too.
 
-**Phase 3 — Cuts + node presolve.** Gomory / MIR / cover cuts; probing;
-coefficient tightening reusing `pounce-presolve`. Pseudocost /
-reliability branching. Closes the gap to real solvers for convex MI.
-Cuts must preserve the leaf's active-set hand-off so the backward stays
-valid. Mostly combinatorial engineering.
+**Phase 3 — Cuts + MIP presolve.** Gomory / MIR / cover cuts; the
+MIP-specific **root presolve** reductions (probing, coefficient
+strengthening, clique/implication, GCD on integer rows) and cheap
+**node presolve** (FBBT every node, selective OBBT) — all extending
+`pounce-presolve` on top of the LP reductions from the LP/QP branch, not
+a new crate. Pseudocost / reliability branching. This is where the
+"table-stakes performance" (Positioning #2) is actually earned. Cuts and
+reductions must preserve the leaf's active-set hand-off so the backward
+stays valid. Mostly combinatorial engineering.
 
 **Phase 4 — `pounce-relax`.** Factorable decomposition, McCormick
 envelopes (linearized to LP cuts per decision 7), αBB, OBBT. The
