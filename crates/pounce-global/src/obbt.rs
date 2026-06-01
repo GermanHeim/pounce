@@ -32,7 +32,7 @@ where
 {
     let n = prob.n_vars;
     for _ in 0..passes {
-        let relax = build_relaxation(prob, lo, hi);
+        let relax = build_relaxation(prob, lo, hi, true);
         if relax.trivially_infeasible {
             return false;
         }

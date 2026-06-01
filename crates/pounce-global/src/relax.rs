@@ -214,6 +214,43 @@ impl Builder {
         self.emit_le(&[(p, 1.0), (v, -ul), (u, -vu)], -ul * vu);
     }
 
+    /// Strengthen a trilinear product `w = f₀·f₁·f₂` (the standard grouping
+    /// `(f₀f₁)·f₂` is added by the caller). For the other two groupings, create
+    /// the pairwise product column and McCormick-relate both it and `w`;
+    /// intersecting all three groupings is tighter than any one alone.
+    fn trilinear(&mut self, w: usize, f: [(usize, f64, f64); 3]) {
+        for &(i, j, k) in &[(0usize, 2usize, 1usize), (1, 2, 0)] {
+            let (ci, li, ui) = f[i];
+            let (cj, lj, uj) = f[j];
+            let cands = [li * lj, li * uj, ui * lj, ui * uj];
+            let pl = cands.iter().copied().fold(f64::INFINITY, f64::min);
+            let pu = cands.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            if !pl.is_finite() || !pu.is_finite() {
+                continue;
+            }
+            let p = self.add_col(pl, pu);
+            self.bilinear(
+                Handle::Col(p),
+                Handle::Col(ci),
+                Handle::Col(cj),
+                li,
+                ui,
+                lj,
+                uj,
+            );
+            let (ck, lk, uk) = f[k];
+            self.bilinear(
+                Handle::Col(w),
+                Handle::Col(p),
+                Handle::Col(ck),
+                pl,
+                pu,
+                lk,
+                uk,
+            );
+        }
+    }
+
     /// Relax a univariate atom `w = f(a)` over `[al, au]` using the tight
     /// polyhedral [`Envelope`] from [`crate::envelope`]. `f` evaluates the atom
     /// (used to pin a constant/degenerate operand); `build` lazily produces the
@@ -258,9 +295,45 @@ impl Builder {
     }
 }
 
+/// Detect a 3-way product `Mul(a, c)` where one operand is itself a `Mul` of
+/// two columns and the other operand is a column — returning the three flat
+/// factors as `(column, lo, hi)`. `None` if it is an ordinary bilinear product
+/// (or any factor is a constant).
+fn trilinear_factors(
+    handle: &[Handle],
+    ivals: &[pounce_presolve::fbbt::Interval],
+    ops: &[FbbtOp],
+    a: usize,
+    c: usize,
+) -> Option<[(usize, f64, f64); 3]> {
+    let col = |s: usize| match handle[s] {
+        Handle::Col(ci) => Some((ci, ivals[s].lo, ivals[s].hi)),
+        Handle::Const(_) => None,
+    };
+    // Inner Mul on the left: (a1·a2)·c.
+    if let FbbtOp::Mul(a1, a2) = ops[a] {
+        if let (Some(f0), Some(f1), Some(f2)) = (col(a1), col(a2), col(c)) {
+            return Some([f0, f1, f2]);
+        }
+    }
+    // Inner Mul on the right: a·(c1·c2).
+    if let FbbtOp::Mul(c1, c2) = ops[c] {
+        if let (Some(f0), Some(f1), Some(f2)) = (col(a), col(c1), col(c2)) {
+            return Some([f0, f1, f2]);
+        }
+    }
+    None
+}
+
 /// Process one tape, appending its relaxation to `b`; return the root slot's
 /// handle (the LP representation of the whole expression's value).
-fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) -> Option<Handle> {
+fn process_tape(
+    b: &mut Builder,
+    tape: &FbbtTape,
+    x_lo: &[f64],
+    x_hi: &[f64],
+    multilinear: bool,
+) -> Option<Handle> {
     if tape.is_empty() {
         return None;
     }
@@ -313,7 +386,14 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                     _ => {
                         let (al, au) = bounds(ha, a);
                         let (cl, cu) = bounds(hc, c);
-                        b.bilinear(w, ha, hc, al, au, cl, cu);
+                        b.bilinear(w, ha, hc, al, au, cl, cu); // grouping (a·b)·c
+                                                               // Tighten a 3-way product x·y·z by intersecting the other
+                                                               // two groupings (recursive bilinear alone is loose).
+                        if multilinear {
+                            if let Some(f) = trilinear_factors(&handle, &ivals, &tape.ops, a, c) {
+                                b.trilinear(col, f);
+                            }
+                        }
                     }
                 }
                 w
@@ -417,16 +497,22 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
     handle.last().copied()
 }
 
-/// Build the relaxation LP for `prob` over the box `[x_lo, x_hi]`.
-pub(crate) fn build_relaxation(prob: &GlobalProblem, x_lo: &[f64], x_hi: &[f64]) -> Relaxation {
+/// Build the relaxation LP for `prob` over the box `[x_lo, x_hi]`. `multilinear`
+/// enables the tighter multi-grouping relaxation of 3-way products.
+pub(crate) fn build_relaxation(
+    prob: &GlobalProblem,
+    x_lo: &[f64],
+    x_hi: &[f64],
+    multilinear: bool,
+) -> Relaxation {
     let mut b = Builder::new(x_lo, x_hi);
 
     // Objective → LP cost on its root handle.
-    let obj_handle = process_tape(&mut b, &prob.objective, x_lo, x_hi);
+    let obj_handle = process_tape(&mut b, &prob.objective, x_lo, x_hi, multilinear);
 
     // Constraints: bracket each root handle by [lo, hi].
     for con in &prob.constraints {
-        match process_tape(&mut b, &con.tape, x_lo, x_hi) {
+        match process_tape(&mut b, &con.tape, x_lo, x_hi, multilinear) {
             Some(Handle::Col(c)) => {
                 let h = Handle::Col(c);
                 if con.hi < INF {

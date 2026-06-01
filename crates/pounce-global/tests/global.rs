@@ -319,6 +319,33 @@ fn rlt_affine_constraint_toggle() {
 }
 
 #[test]
+fn trilinear_product_toggle() {
+    // min x·y·z on [−1, 1]³: global minimum −1 (odd number of −1 factors). The
+    // 3-way product triggers the multi-grouping relaxation; both it and the
+    // single recursive grouping must certify the optimum.
+    let f = var(0) * var(1) * var(2);
+    let prob = GlobalProblem::new(vec![-1.0, -1.0, -1.0], vec![1.0, 1.0, 1.0], &f);
+
+    let on = solve_global(&prob, &GlobalOptions::default(), backend);
+    let off = solve_global(
+        &prob,
+        &GlobalOptions {
+            multilinear: false,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&on, &off] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective + 1.0).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+    }
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

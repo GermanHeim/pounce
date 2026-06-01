@@ -87,6 +87,9 @@ pub struct GlobalOptions {
     /// linearized with shared product columns). Tightens bilinearly coupled
     /// problems; a no-op when there are no affine constraints.
     pub rlt: bool,
+    /// Use the tighter multi-grouping relaxation of 3-way products (intersect
+    /// all three bilinear groupings instead of one nested grouping).
+    pub multilinear: bool,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -104,6 +107,7 @@ impl Default for GlobalOptions {
             obbt_passes: 2,
             alphabb_cuts: 1,
             rlt: true,
+            multilinear: true,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -263,7 +267,7 @@ where
         // 2. Relaxation lower bound, tightened by cutting-plane (sandwich)
         // rounds: re-solve with tangent cuts added at the LP point for loose
         // convex/concave atoms until the bound stops improving.
-        let relax = build_relaxation(prob, &lo, &hi);
+        let relax = build_relaxation(prob, &lo, &hi, opts.multilinear);
         if relax.trivially_infeasible {
             continue;
         }
