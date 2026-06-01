@@ -21,6 +21,7 @@ pub mod exp;
 pub mod nonneg;
 pub mod nonsym;
 pub mod power;
+pub mod psd;
 pub mod soc;
 
 pub use composite::{CompositeCone, ConeKind, ConeSpec};
@@ -28,6 +29,7 @@ pub use exp::ExponentialCone;
 pub use nonneg::NonnegCone;
 pub use nonsym::NonsymScaling;
 pub use power::PowerCone;
+pub use psd::PsdCone;
 pub use soc::SecondOrderCone;
 
 /// Barrier oracles for a convex cone — the interface a **non-symmetric**
