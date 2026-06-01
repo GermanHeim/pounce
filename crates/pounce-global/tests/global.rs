@@ -184,8 +184,8 @@ fn odd_power_straddling_zero() {
 #[test]
 fn sine_global_minimum() {
     // min sin(x) on [0, 6]: global minimum −1 at x = 3π/2 ≈ 4.712. The root box
-    // is wider than π (sin envelope declines, box bound only) — branching must
-    // narrow the box until the trig envelope engages, then certify.
+    // is wider than π, so the multi-inflection sloped trig relaxation engages
+    // (rather than the bare box bound) and the optimum certifies near the root.
     let f = var(0).sin();
     let prob = GlobalProblem::new(vec![0.0], vec![6.0], &f);
     let opts = GlobalOptions {
