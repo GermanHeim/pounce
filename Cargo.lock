@@ -963,6 +963,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-global"
+version = "0.3.0"
+dependencies = [
+ "pounce-common",
+ "pounce-convex",
+ "pounce-feral",
+ "pounce-linsol",
+ "pounce-nlp",
+ "pounce-presolve",
+]
+
+[[package]]
 name = "pounce-hsl"
 version = "0.3.1-dev"
 dependencies = [

@@ -1,0 +1,28 @@
+[package]
+name = "pounce-global"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deterministic global optimization for factorable nonconvex NLPs in POUNCE: spatial branch-and-bound with McCormick polyhedral relaxations (lower bounds via the convex LP solver), feasibility-based bound tightening, and local upper bounds."
+keywords = ["global-optimization", "branch-and-bound", "mccormick", "nonconvex", "solver"]
+categories = ["mathematics", "science"]
+
+[dependencies]
+pounce-common.workspace = true
+# Expression tape (FbbtTape / FbbtOp) and the ExpressionProvider trait FBBT consumes.
+pounce-nlp.workspace = true
+# Interval arithmetic + feasibility-based bound tightening (run_fbbt).
+pounce-presolve.workspace = true
+# Convex LP solver for the relaxation lower bounds.
+pounce-convex.workspace = true
+# The sparse symmetric linear-solver trait the LP backend is supplied as.
+pounce-linsol.workspace = true
+
+[dev-dependencies]
+# FERAL backs the relaxation LP solves end-to-end in the in-tree tests.
+pounce-feral.workspace = true
+
+[lints]
+workspace = true
