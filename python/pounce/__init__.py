@@ -28,6 +28,7 @@ from .qp import (
     solve_qp_batch,
     solve_qp_multi_rhs,
 )
+from .sos import sos_minimize, SosResult
 
 __all__ = [
     # Nonlinear programming (cyipopt-compatible)
@@ -56,5 +57,8 @@ __all__ = [
     "solve_socp",
     "solve_qp_batch",
     "solve_qp_multi_rhs",
+    # Polynomial global optimization (SOS / Lasserre)
+    "sos_minimize",
+    "SosResult",
     "__version__",
 ]

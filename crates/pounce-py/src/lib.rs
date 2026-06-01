@@ -23,6 +23,7 @@ mod nl_problem;
 mod problem;
 mod qp;
 mod solver;
+mod sos;
 mod tnlp_bridge;
 mod warm_start;
 
@@ -53,6 +54,8 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(qp::solve_socp, m)?)?;
     m.add_function(wrap_pyfunction!(qp::solve_qp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(qp::solve_qp_multi_rhs, m)?)?;
+    // SOS polynomial global optimizer (pounce-convex::sos).
+    m.add_function(wrap_pyfunction!(sos::sos_minimize, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
