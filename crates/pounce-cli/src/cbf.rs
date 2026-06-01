@@ -9,8 +9,10 @@
 //!
 //! - `VER` — format version (read and ignored).
 //! - `OBJSENSE` — `MIN` or `MAX`.
+//! - `POWCONES` — power-cone parameter table: each entry's weight vector
+//!   `(α₀, α₁)` gives the exponent `α = α₀/(α₀+α₁)`, referenced as `@k:POW`.
 //! - `VAR n k` — `n` scalar variables partitioned into `k` cones, one cone
-//!   per following line as `CONE dim` (`F`/`L+`/`L-`/`L=`/`EXP`/`Q`/`QR`).
+//!   per following line as `CONE dim` (`F`/`L+`/`L-`/`L=`/`EXP`/`Q`/`@k:POW`).
 //! - `CON m k` — `m` scalar constraint rows `Ax + b`, each lying in one of `k`
 //!   cones (same syntax). `L=` ⇒ `Ax+b = 0`, `L-` ⇒ `≤ 0`, `L+` ⇒ `≥ 0`.
 //! - `OBJACOORD` / `OBJBCOORD` — sparse objective `c` and constant `c₀`.
@@ -35,11 +37,15 @@ use std::fmt;
 pub struct ConeDecl {
     pub kind: ConeKind,
     pub dim: usize,
+    /// The power-cone exponent `α ∈ (0, 1)` for [`ConeKind::Pow`]; `None`
+    /// for every other kind.
+    pub alpha: Option<f64>,
 }
 
-/// The CBF cone kinds this reader supports. Unsupported kinds (PSD `DCOORD`,
-/// power cones needing a `POWCONES` parameter table) are rejected at parse
-/// time with a clear error rather than silently mis-handled.
+/// The CBF cone kinds this reader supports (`F`/`L=`/`L+`/`L-`/`EXP`/`Q`,
+/// plus the 3-D power cone `@k:POW` resolved against `POWCONES`). Unsupported
+/// kinds (PSD `DCOORD`, the rotated SOC `QR`, dual power cones) are rejected
+/// at parse time with a clear error rather than silently mis-handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConeKind {
     /// `F` — free (ℝ): no constraint.
@@ -54,9 +60,14 @@ pub enum ConeKind {
     Exp,
     /// `Q` — the second-order cone.
     SecondOrder,
+    /// `@k:POW` — the 3-D power cone, with the exponent `α` resolved from the
+    /// referenced `POWCONES` parameter set (stored on [`ConeDecl::alpha`]).
+    Pow,
 }
 
 impl ConeKind {
+    /// Parse a plain (non-parametric) cone token. Parametric cones
+    /// (`@k:POW`) are handled by [`parse_cone_token`].
     fn parse(tok: &str) -> Option<ConeKind> {
         Some(match tok {
             "F" => ConeKind::Free,
@@ -177,9 +188,48 @@ fn parse_f64(tok: &str, what: &str) -> Result<f64, CbfError> {
         .map_err(|_| CbfError::Malformed(format!("expected number for {what}, got '{tok}'")))
 }
 
+/// Resolve a cone token to its `(kind, alpha)`. Plain tokens (`F`, `EXP`,
+/// …) go through [`ConeKind::parse`]; a parametric `@k:POW` token looks up
+/// power-cone parameter set `k` in `pow_params` and resolves the exponent
+/// `α = α₀ / (α₀ + α₁)` for the 3-D power cone (parameter vector `(α₀, α₁)`).
+fn parse_cone_token(
+    tok: &str,
+    pow_params: &[Vec<f64>],
+) -> Result<(ConeKind, Option<f64>), CbfError> {
+    if let Some(rest) = tok.strip_prefix('@') {
+        // `@k:KIND` — a reference into a parameter table (only POW today).
+        let (idx, kind) = rest
+            .split_once(':')
+            .ok_or_else(|| CbfError::Malformed(format!("bad parametric cone '{tok}'")))?;
+        if kind != "POW" {
+            return Err(CbfError::UnsupportedCone(format!("@{idx}:{kind}")));
+        }
+        let k = parse_usize(idx, "POW reference index")?;
+        let params = pow_params
+            .get(k)
+            .ok_or_else(|| CbfError::Malformed(format!("POW references @{k}, not declared")))?;
+        if params.len() != 2 {
+            return Err(CbfError::UnsupportedCone(format!(
+                "POW with {} parameters (only the 3-D power cone, 2 parameters, is supported)",
+                params.len()
+            )));
+        }
+        let alpha = params[0] / (params[0] + params[1]);
+        Ok((ConeKind::Pow, Some(alpha)))
+    } else {
+        let kind =
+            ConeKind::parse(tok).ok_or_else(|| CbfError::UnsupportedCone(tok.to_string()))?;
+        Ok((kind, None))
+    }
+}
+
 /// Read a `VAR`/`CON`-style cone partition: a header `total k`, then `k`
 /// lines of `CONE dim`. Returns `(total, cones)` and validates the dims sum.
-fn parse_cone_block(lines: &mut Lines, what: &str) -> Result<(usize, Vec<ConeDecl>), CbfError> {
+fn parse_cone_block(
+    lines: &mut Lines,
+    what: &str,
+    pow_params: &[Vec<f64>],
+) -> Result<(usize, Vec<ConeDecl>), CbfError> {
     let header = lines.require(what)?;
     let mut it = header.split_whitespace();
     let total = parse_usize(it.next().unwrap_or(""), &format!("{what} total"))?;
@@ -190,14 +240,18 @@ fn parse_cone_block(lines: &mut Lines, what: &str) -> Result<(usize, Vec<ConeDec
         let line = lines.require(&format!("{what} cone"))?;
         let mut t = line.split_whitespace();
         let tok = t.next().unwrap_or("");
-        let kind =
-            ConeKind::parse(tok).ok_or_else(|| CbfError::UnsupportedCone(tok.to_string()))?;
+        let (kind, alpha) = parse_cone_token(tok, pow_params)?;
         let dim = parse_usize(t.next().unwrap_or(""), &format!("{what} cone dim"))?;
         if kind == ConeKind::Exp && dim != 3 {
             return Err(CbfError::BadExpDim(dim));
         }
+        if kind == ConeKind::Pow && dim != 3 {
+            return Err(CbfError::Malformed(format!(
+                "{what}: only the 3-D power cone is supported, got POW dim {dim}"
+            )));
+        }
         sum += dim;
-        cones.push(ConeDecl { kind, dim });
+        cones.push(ConeDecl { kind, dim, alpha });
     }
     if sum != total {
         return Err(CbfError::Malformed(format!(
@@ -221,12 +275,33 @@ pub fn parse(text: &str) -> Result<CbfModel, CbfError> {
     let mut c0 = 0.0;
     let mut a = Vec::new();
     let mut b = Vec::new();
+    let mut pow_params: Vec<Vec<f64>> = Vec::new();
     let mut seen_var = false;
 
     while let Some(kw) = lines.next() {
         match kw {
             "VER" => {
                 lines.require("VER value")?;
+            }
+            // Power-cone parameter table: `n total`, then for each of the `n`
+            // cones a length followed by that many α weights. Must precede the
+            // `VAR`/`CON` that reference it via `@k:POW`.
+            "POWCONES" => {
+                let header = lines.require("POWCONES header")?;
+                let mut it = header.split_whitespace();
+                let ncones = parse_usize(it.next().unwrap_or(""), "POWCONES count")?;
+                let _total = parse_usize(it.next().unwrap_or(""), "POWCONES total")?;
+                for _ in 0..ncones {
+                    let len = parse_usize(lines.require("POWCONES cone length")?, "POWCONES len")?;
+                    let mut params = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        params.push(parse_f64(
+                            lines.require("POWCONES alpha")?,
+                            "POWCONES alpha",
+                        )?);
+                    }
+                    pow_params.push(params);
+                }
             }
             "OBJSENSE" => {
                 let s = lines.require("OBJSENSE value")?;
@@ -239,14 +314,14 @@ pub fn parse(text: &str) -> Result<CbfModel, CbfError> {
                 };
             }
             "VAR" => {
-                let (n, cones) = parse_cone_block(&mut lines, "VAR")?;
+                let (n, cones) = parse_cone_block(&mut lines, "VAR", &pow_params)?;
                 num_var = n;
                 var_cones = cones;
                 c = vec![0.0; n];
                 seen_var = true;
             }
             "CON" => {
-                let (m, cones) = parse_cone_block(&mut lines, "CON")?;
+                let (m, cones) = parse_cone_block(&mut lines, "CON", &pow_params)?;
                 num_con = m;
                 con_cones = cones;
                 b = vec![0.0; m];
@@ -343,7 +418,8 @@ impl CbfModel {
     /// Map this instance to a pounce conic program. Variable cones become
     /// slack blocks `s = −Gx ∈ K` (a `G = −I` selection, `h = 0`);
     /// constraint cones use `s = h − Gx = Ax + b ∈ K`. `L=` rows become
-    /// equalities `Ax = −b`. Exponential triples are reversed to pounce order.
+    /// equalities `Ax = −b`. Exponential triples are reversed, and power
+    /// triples rotated, into pounce cone order (see the per-arm comments).
     pub fn to_conic(&self) -> Result<ConicProgram, CbfError> {
         let n = self.num_var;
         let a_rows = self.rows_of_a();
@@ -396,6 +472,18 @@ impl CbfModel {
                         push_row(&mut g, &mut h, &[(v + j, 1.0)], 0.0);
                     }
                     cones.push(ConeSpec::Exponential);
+                }
+                ConeKind::Pow => {
+                    // CBF power cone (x₀,x₁,x₂): x₀^β₀·x₁^β₁ ≥ |x₂|. pounce
+                    // K_α = {|x| ≤ y^α z^{1−α}} ⇒ (x,y,z) = (x₂, x₀, x₁) with
+                    // α = β₀. Emit slack rows in that pounce order.
+                    let alpha = cone.alpha.ok_or_else(|| {
+                        CbfError::Malformed("POW cone missing its exponent".into())
+                    })?;
+                    push_row(&mut g, &mut h, &[(v + 2, 1.0)], 0.0); // x ← x₂
+                    push_row(&mut g, &mut h, &[(v, 1.0)], 0.0); // y ← x₀
+                    push_row(&mut g, &mut h, &[(v + 1, 1.0)], 0.0); // z ← x₁
+                    cones.push(ConeSpec::Power(alpha));
                 }
                 ConeKind::Zero => {
                     // x = 0 — an equality on the variable.
@@ -454,6 +542,17 @@ impl CbfModel {
                         push_row(&mut g, &mut h, &a_rows[row], self.b[row]);
                     }
                     cones.push(ConeSpec::Exponential);
+                }
+                ConeKind::Pow => {
+                    // pounce (x,y,z) = ((Ax+b)₂, (Ax+b)₀, (Ax+b)₁), α = β₀.
+                    let alpha = cone.alpha.ok_or_else(|| {
+                        CbfError::Malformed("POW cone missing its exponent".into())
+                    })?;
+                    for &i in &[2usize, 0, 1] {
+                        let row = r + i;
+                        push_row(&mut g, &mut h, &a_rows[row], self.b[row]);
+                    }
+                    cones.push(ConeSpec::Power(alpha));
                 }
                 ConeKind::Free => {} // a free constraint row imposes nothing
             }
@@ -568,5 +667,61 @@ BCOORD
         let row0: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 0).collect();
         assert_eq!(row0.len(), 1);
         assert_eq!(row0[0].col, 3);
+    }
+
+    const TINY_POW: &str = "\
+VER
+2
+
+OBJSENSE
+MAX
+
+POWCONES
+1 2
+2
+3.0
+1.0
+
+VAR
+3 1
+@0:POW 3
+
+CON
+0 0
+
+OBJACOORD
+1
+2 1.0
+";
+
+    #[test]
+    fn parses_powcones_and_resolves_alpha() {
+        let m = parse(TINY_POW).unwrap();
+        assert_eq!(m.var_cones.len(), 1);
+        assert_eq!(m.var_cones[0].kind, ConeKind::Pow);
+        // α = α₀/(α₀+α₁) = 3/(3+1) = 0.75.
+        let a = m.var_cones[0].alpha.unwrap();
+        assert!((a - 0.75).abs() < 1e-12, "alpha {a}");
+    }
+
+    #[test]
+    fn to_conic_builds_power_cone_with_permutation() {
+        let m = parse(TINY_POW).unwrap();
+        let cp = m.to_conic().unwrap();
+        assert_eq!(cp.cones, vec![ConeSpec::Power(0.75)]);
+        assert_eq!(cp.prob.m_ineq(), 3); // the power cone's 3 rows
+                                         // pounce (x,y,z) = (CBF x₂, x₀, x₁): row 0 selects var 2.
+        let row0: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 0).collect();
+        assert_eq!(row0[0].col, 2);
+        let row1: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 1).collect();
+        assert_eq!(row1[0].col, 0);
+        let row2: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 2).collect();
+        assert_eq!(row2[0].col, 1);
+    }
+
+    #[test]
+    fn pow_reference_to_undeclared_set_errors() {
+        let bad = TINY_POW.replace("@0:POW", "@5:POW");
+        assert!(matches!(parse(&bad), Err(CbfError::Malformed(_))));
     }
 }

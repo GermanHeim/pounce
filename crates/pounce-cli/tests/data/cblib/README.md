@@ -10,8 +10,14 @@ broad validation for the non-symmetric (exp-cone) HSDE solver — see
 | `demb761.cbf` | Demberg geometric program | exp (over variables) |
 | `beck751.cbf` | Beck geometric program | exp (over variables) |
 | `fang88.cbf`  | Fang geometric program | exp (over variables) |
+| `pow3_synthetic.cbf` | hand-authored (not CBLIB) | power (`POWCONES`) |
 
-Each is in Conic Benchmark Format (`.cbf`, version 2), the plain-text format
-documented at <https://cblib.zib.de/format.html>. They are small
-(pure-continuous) and freely distributed by CBLIB for benchmarking; vendored
-here so the cross-check tests run offline.
+The first three are in Conic Benchmark Format (`.cbf`, version 2), the
+plain-text format documented at <https://cblib.zib.de/format.html>. They are
+small (pure-continuous) and freely distributed by CBLIB for benchmarking;
+vendored here so the cross-check tests run offline.
+
+`pow3_synthetic.cbf` is **not** a CBLIB instance — it is a tiny hand-authored
+power-cone problem (a valid CBF that exercises the `POWCONES` section and the
+power-cone mapping) with a known closed-form optimum (`x₂ = 1`). The real
+CBLIB power-cone instances (`2013_fir*`) are ~120 MB, impractical to vendor.

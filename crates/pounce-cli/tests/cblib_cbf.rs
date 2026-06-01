@@ -35,6 +35,7 @@ fn solve_instance(text: &str) -> (QpStatus, f64) {
 const DEMB761: &str = include_str!("data/cblib/demb761.cbf");
 const BECK751: &str = include_str!("data/cblib/beck751.cbf");
 const FANG88: &str = include_str!("data/cblib/fang88.cbf");
+const POW3: &str = include_str!("data/cblib/pow3_synthetic.cbf");
 
 #[test]
 fn demb761_solves_to_optimum() {
@@ -55,4 +56,14 @@ fn fang88_solves_to_optimum() {
     let (status, obj) = solve_instance(FANG88);
     assert_eq!(status, QpStatus::Optimal, "fang88 status");
     assert!(obj.is_finite(), "fang88 objective finite: {obj}");
+}
+
+#[test]
+fn power_cone_synthetic_hits_known_optimum() {
+    // max x2 s.t. (x0,x1,x2) ∈ POW(α=½), x0=2, x1=½  →  x2 = 2^½·½^½ = 1.
+    // Validates the POWCONES parse, the α = α₀/(α₀+α₁) resolution, and the
+    // CBF→pounce power-cone permutation end to end.
+    let (status, obj) = solve_instance(POW3);
+    assert_eq!(status, QpStatus::Optimal, "pow3 status");
+    assert!((obj - 1.0).abs() < 1e-6, "pow3 objective {obj} vs 1");
 }
