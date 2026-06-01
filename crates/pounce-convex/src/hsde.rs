@@ -751,4 +751,61 @@ mod tests {
             assert_eq!(sol.z[k], 0.0, "dropped cross row {k} should have dual 0");
         }
     }
+
+    /// Connected **sparse** PSD cone: chordal range-space decomposition.
+    /// `max λ s.t. M − λI ⪰ 0` with tridiagonal `M` (path 0–1–2, so the
+    /// (2,0) entry is structurally zero). The pattern is chordal with
+    /// overlapping cliques {0,1},{1,2}, so `solve_socp_ipm` rewrites it via
+    /// clique blocks + consistency equalities. The optimum (`λ = λ_min(M)`)
+    /// and objective must match a direct **dense** `Psd(3)` solve (the primal
+    /// is unique; the PSD dual is not, so only x/obj are compared).
+    #[test]
+    fn psd_chordal_matches_dense_on_path_sdp() {
+        let r2 = std::f64::consts::SQRT_2;
+        // svec(M), M tridiagonal diag 2, off 0.5: (2,0)=k2 is structurally 0.
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(3, 0, 1.0),
+                Triplet::new(5, 0, 1.0),
+            ],
+            h: vec![2.0, 0.5 * r2, 0.0, 2.0, 0.5 * r2, 2.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        // Dense reference: the HSDE driver on a single Psd(3) (no decomposition).
+        let dense = solve_conic_hsde(
+            &prob,
+            &CompositeCone::from_specs(&[ConeSpec::Psd(3)]),
+            &opts(),
+            backend,
+        );
+        // solve_socp_ipm auto-applies the chordal decomposition.
+        let decomp = solve_socp_ipm(&prob, &[ConeSpec::Psd(3)], &opts(), backend);
+        assert_eq!(dense.status, QpStatus::Optimal, "dense {:?}", dense.status);
+        assert_eq!(
+            decomp.status,
+            QpStatus::Optimal,
+            "decomp {:?}",
+            decomp.status
+        );
+        assert!(
+            (dense.x[0] - decomp.x[0]).abs() < 1e-5,
+            "λ: dense {} vs decomp {}",
+            dense.x[0],
+            decomp.x[0]
+        );
+        assert!(
+            (dense.obj - decomp.obj).abs() < 1e-5,
+            "obj: dense {} vs decomp {}",
+            dense.obj,
+            decomp.obj
+        );
+        assert_eq!(decomp.z.len(), 6, "dual returned in original svec layout");
+    }
 }

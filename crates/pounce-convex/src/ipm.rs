@@ -212,9 +212,15 @@ where
     // sparse factorization). The transform is solution-equivalent; the dual
     // `z` is scattered back to the original row layout afterward.
     if has_psd {
-        let (prob2, cones2, row_map) = decompose_psd(prob, cones);
+        // First the cheap block-diagonal split (disjoint blocks → no new
+        // variables); then chordal range-space decomposition of any still
+        // connected-but-sparse PSD cone (introduces clique blocks + overlap
+        // consistency equalities). Reconstruct the dual through both layers.
+        let (prob1, cones1, row_map) = decompose_psd(prob, cones);
+        let (prob2, cones2, recon) = chordal_decompose(&prob1, &cones1);
         let sol2 = solve_socp_symmetric(&prob2, &cones2, opts, make_backend);
-        return remap_decomposed_z(sol2, &row_map, prob.m_ineq());
+        let sol1 = chordal_reconstruct(sol2, &recon, &prob1);
+        return remap_decomposed_z(sol1, &row_map, prob.m_ineq());
     }
     solve_socp_symmetric(prob, cones, opts, make_backend)
 }
@@ -389,6 +395,217 @@ pub(crate) fn decompose_psd(
         ..prob.clone()
     };
     (new_prob, new_cones, row_map)
+}
+
+/// Where a (post-block-split) inequality row's dual comes from after the
+/// chordal range-space reformulation.
+enum ZSrc {
+    /// A row copied verbatim — its dual is `z[aug_ineq_row]`.
+    Ineq(usize),
+    /// A PSD entry that became a consistency equality — its dual is the
+    /// equality multiplier `y[aug_eq_row]`.
+    Eq(usize),
+    /// A dropped (out-of-pattern) entry — dual `0`.
+    Zero,
+}
+
+/// Bookkeeping to map an augmented solve back to the pre-chordal layout.
+pub(crate) struct ChordalRecon {
+    orig_n: usize,
+    orig_m_eq: usize,
+    orig_m_ineq: usize,
+    z_src: Vec<ZSrc>,
+}
+
+/// Range-space chordal decomposition of any connected-but-sparse PSD cone.
+///
+/// For a `Psd(n)` cone whose sparsity pattern is chordal with overlapping
+/// maximal cliques `C₁…C_p`, the slack `s ⪰ 0` is rewritten as
+/// `s = Σ_k Tᵀ_{C_k} S_k T_{C_k}` with each `S_k ⪰ 0` (Agler et al.). This
+/// introduces clique matrix variables `w_k = svec(S_k)` (appended to `x`,
+/// each constrained `⪰ 0` by a small `Psd(|C_k|)` cone), and one **consistency
+/// equality** per clique-covered entry — `(h − Gx)ᵢⱼ = Σ_{k∋(i,j)} (S_k)ᵢⱼ` —
+/// replacing the one dense `O(m²)` block with several small ones. Entries
+/// outside every clique are structurally zero and dropped.
+///
+/// Dense or already-decomposed PSD cones (and all non-PSD cones) pass through
+/// unchanged. Returns `(augmented problem, augmented cones, reconstruction)`.
+pub(crate) fn chordal_decompose(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+) -> (QpProblem, Vec<ConeSpec>, ChordalRecon) {
+    use crate::cones::chordal;
+    use crate::cones::psd::svec_index;
+    use crate::qp::Triplet;
+    use std::collections::HashMap;
+
+    let orig_n = prob.n;
+    let orig_m_eq = prob.m_eq();
+    let orig_m_ineq = prob.m_ineq();
+
+    let mut rows_of_g: Vec<Vec<Triplet>> = vec![Vec::new(); orig_m_ineq];
+    for t in &prob.g {
+        rows_of_g[t.row].push(*t);
+    }
+
+    let mut aug_g: Vec<Triplet> = Vec::new();
+    let mut aug_h: Vec<f64> = Vec::new();
+    let mut aug_cones: Vec<ConeSpec> = Vec::new();
+    let mut aug_a: Vec<Triplet> = prob.a.clone();
+    let mut aug_b: Vec<f64> = prob.b.clone();
+    let mut z_src: Vec<ZSrc> = (0..orig_m_ineq).map(|_| ZSrc::Zero).collect();
+    let mut aug_n = orig_n;
+    let mut eq_row = orig_m_eq; // next augmented equality row index
+
+    let mut off = 0usize;
+    for c in cones {
+        let d = c.dim();
+        let decompose = match c {
+            ConeSpec::Psd(n) if *n >= 2 => Some(*n),
+            _ => None,
+        };
+        let cliques = decompose.and_then(|n| {
+            let mut edges = Vec::new();
+            for j in 0..n {
+                for i in (j + 1)..n {
+                    let r = off + svec_index(n, i, j);
+                    if prob.h[r] != 0.0 || !rows_of_g[r].is_empty() {
+                        edges.push((i, j));
+                    }
+                }
+            }
+            let ch = chordal::analyze(n, &edges);
+            // Only worth it when it genuinely splits into >1 clique.
+            (ch.cliques.len() > 1).then_some((n, ch.cliques))
+        });
+
+        match cliques {
+            None => {
+                // Copy this cone's rows verbatim.
+                for k in 0..d {
+                    let nr = aug_h.len();
+                    for t in &rows_of_g[off + k] {
+                        aug_g.push(Triplet::new(nr, t.col, t.val));
+                    }
+                    aug_h.push(prob.h[off + k]);
+                    z_src[off + k] = ZSrc::Ineq(nr);
+                }
+                aug_cones.push(*c);
+            }
+            Some((n, cl_list)) => {
+                // Allocate a clique block per maximal clique and a Psd cone
+                // (s = w_k via G = −I) enforcing S_k ⪰ 0.
+                let mut clique_cols: Vec<(Vec<usize>, usize)> = Vec::new();
+                for cl in &cl_list {
+                    let cn = cl.len();
+                    let wbase = aug_n;
+                    aug_n += cn * (cn + 1) / 2;
+                    for jj in 0..cn {
+                        for ii in jj..cn {
+                            let nr = aug_h.len();
+                            aug_g.push(Triplet::new(nr, wbase + svec_index(cn, ii, jj), -1.0));
+                            aug_h.push(0.0);
+                        }
+                    }
+                    aug_cones.push(ConeSpec::Psd(cn));
+                    clique_cols.push((cl.clone(), wbase));
+                }
+                // Position of each vertex within each clique.
+                let pos: Vec<HashMap<usize, usize>> = cl_list
+                    .iter()
+                    .map(|cl| cl.iter().enumerate().map(|(p, &v)| (v, p)).collect())
+                    .collect();
+                // One consistency equality per clique-covered entry.
+                for j in 0..n {
+                    for i in j..n {
+                        let k = svec_index(n, i, j);
+                        let r = off + k;
+                        // Cliques containing both i and j contribute (S_k)ᵢⱼ.
+                        let mut w_terms: Vec<usize> = Vec::new();
+                        for (ci, (cl, wbase)) in clique_cols.iter().enumerate() {
+                            if let (Some(&pi), Some(&pj)) = (pos[ci].get(&i), pos[ci].get(&j)) {
+                                let (a, b) = if pi >= pj { (pi, pj) } else { (pj, pi) };
+                                let _ = cl;
+                                w_terms.push(wbase + svec_index(cl.len(), a, b));
+                            }
+                        }
+                        if w_terms.is_empty() {
+                            continue; // out-of-pattern entry: dropped (s = 0)
+                        }
+                        // (h − Gx)_r = Σ w  ⇔  Gx + Σ w = h_r  (equality `eq_row`).
+                        for t in &rows_of_g[r] {
+                            aug_a.push(Triplet::new(eq_row, t.col, t.val));
+                        }
+                        for &wc in &w_terms {
+                            aug_a.push(Triplet::new(eq_row, wc, 1.0));
+                        }
+                        aug_b.push(prob.h[r]);
+                        z_src[r] = ZSrc::Eq(eq_row);
+                        eq_row += 1;
+                    }
+                }
+            }
+        }
+        off += d;
+    }
+
+    // Augmented variable vector x' = (x, w): objective and Hessian carry no
+    // `w` terms, bounds (if any) extend as free.
+    let mut c_aug = prob.c.clone();
+    c_aug.resize(aug_n, 0.0);
+    let (lb, ub) = if prob.has_bounds() {
+        let mut lb = prob.lb.clone();
+        let mut ub = prob.ub.clone();
+        lb.resize(aug_n, crate::qp::NEG_INF);
+        ub.resize(aug_n, crate::qp::POS_INF);
+        (lb, ub)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let aug_prob = QpProblem {
+        n: aug_n,
+        p_lower: prob.p_lower.clone(),
+        c: c_aug,
+        a: aug_a,
+        b: aug_b,
+        g: aug_g,
+        h: aug_h,
+        lb,
+        ub,
+    };
+    let recon = ChordalRecon {
+        orig_n,
+        orig_m_eq,
+        orig_m_ineq,
+        z_src,
+    };
+    (aug_prob, aug_cones, recon)
+}
+
+/// Map a solve of the chordal-augmented problem back to the pre-chordal
+/// layout: the primal/objective are unchanged on the original variables, and
+/// each PSD dual entry is recovered from its consistency-equality multiplier
+/// (a clique-covered entry), a copied row's dual, or `0` (dropped entry).
+fn chordal_reconstruct(sol: QpSolution, recon: &ChordalRecon, _prob1: &QpProblem) -> QpSolution {
+    let mut z = vec![0.0; recon.orig_m_ineq];
+    for (r, src) in recon.z_src.iter().enumerate() {
+        z[r] = match *src {
+            ZSrc::Ineq(ar) => sol.z[ar],
+            ZSrc::Eq(er) => sol.y[er],
+            ZSrc::Zero => 0.0,
+        };
+    }
+    QpSolution {
+        status: sol.status,
+        x: sol.x[..recon.orig_n].to_vec(),
+        y: sol.y[..recon.orig_m_eq].to_vec(),
+        z,
+        z_lb: sol.z_lb[..recon.orig_n].to_vec(),
+        z_ub: sol.z_ub[..recon.orig_n].to_vec(),
+        obj: sol.obj,
+        iters: sol.iters,
+        iterates: sol.iterates,
+    }
 }
 
 /// Warm-started [`solve_socp_ipm`]: seed the iteration from `warm` (a nearby

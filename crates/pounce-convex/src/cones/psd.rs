@@ -63,6 +63,13 @@ pub fn svec(mat: &[f64], n: usize, out: &mut [f64]) {
     }
 }
 
+/// The `svec` index of the lower-triangle entry `(i, j)` (`i ≥ j`) for an
+/// `n×n` matrix, matching [`svec`]'s column-by-column lower-triangle order.
+pub fn svec_index(n: usize, i: usize, j: usize) -> usize {
+    debug_assert!(i >= j && i < n);
+    j * n - j * (j.wrapping_sub(1)) / 2 + (i - j)
+}
+
 /// Inverse of [`svec`]: rebuild the symmetric `n×n` matrix (row-major) from
 /// its `svec`, dividing off-diagonals by `√2`.
 pub fn smat(v: &[f64], n: usize, out: &mut [f64]) {

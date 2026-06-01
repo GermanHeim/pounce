@@ -16,6 +16,7 @@
 //! scaling block is the diagonal `s ⊘ z`; richer cones override these
 //! with their Nesterov–Todd scaling.
 
+pub mod chordal;
 pub mod composite;
 pub mod exp;
 pub mod nonneg;
