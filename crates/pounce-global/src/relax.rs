@@ -7,16 +7,17 @@
 //! McCormick inequalities (the exact convex hull of a single bilinear term);
 //! and every univariate atom (`x^n`, `√`, `exp`, `ln`, `sin`, `cos`, `|·|`) is
 //! relaxed by the tight polyhedral [`crate::envelope`] — secant + tangent cuts
-//! for convex/concave arcs, and the tangent-from-endpoint construction for
-//! single-inflection arcs (odd powers across 0, trig over a sub-`π` box). The
+//! for convex/concave arcs, the tangent-from-endpoint construction for
+//! single-inflection arcs (odd powers across 0, trig over a sub-`π` box), and
+//! slope-sampled supporting lines for `sin`/`cos` over wider boxes. The
 //! result is a **linear program** whose optimum is a valid lower bound on the
 //! true minimum over the box, exact in the zero-width-box limit (so spatial
 //! branch-and-bound converges).
 //!
-//! The few remaining hard cases — `sin`/`cos` over a box wider than `π`,
-//! division by an interval straddling zero, and `Opaque` — fall back to the
-//! interval box bound on `w_k`: valid, just weak, which branching then sharpens
-//! (and, for trig, narrows below `π` so the envelope engages).
+//! The few remaining hard cases — `sin`/`cos` over a box spanning many full
+//! periods (where the box bound is already near the convex hull), division by
+//! an interval straddling zero, and `Opaque` — fall back to the interval box
+//! bound on `w_k`: valid, just weak, which branching then sharpens.
 
 use crate::envelope::{self, Envelope};
 use crate::problem::GlobalProblem;

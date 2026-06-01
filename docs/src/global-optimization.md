@@ -120,7 +120,7 @@ the techniques a state-of-the-art global solver uses:
 
 | Component | Role |
 |---|---|
-| **Tight univariate envelopes** | The exact convex/concave hull of each atom (`xⁿ`, `√`, `exp`, `ln`, `sin`, `cos`, `|·|`): secant + tangent cuts on a convex/concave arc, and the *tangent-from-the-endpoint* construction for single-inflection arcs (odd powers across 0, trig over a sub-π box). |
+| **Tight univariate envelopes** | The exact convex/concave hull of each atom (`xⁿ`, `√`, `exp`, `ln`, `sin`, `cos`, `|·|`): secant + tangent cuts on a convex/concave arc, the *tangent-from-the-endpoint* construction for single-inflection arcs (odd powers across 0, trig over a sub-π box), and slope-sampled supporting lines for trig over wider boxes. |
 | **McCormick** | The exact convex hull of each bilinear product. |
 | **Sandwich cuts** | After the LP solve, tangent cuts are added at the solution for loose atoms and the LP re-solved — tightening the bound *without* branching. |
 | **OBBT** | Optimization-based bound tightening: the single biggest box reducer. |
@@ -222,10 +222,10 @@ yet at commercial-solver scale:
 - **Branching** offers widest, most-violation (default), and reliability
   (pseudocost + strong branching) rules; with OBBT every node the rule is
   usually second-order here, so it is a tunable knob rather than a fixed win.
-- The local upper-bound solve uses a finite-differenced Lagrangian Hessian (a
-  usable Newton direction, not exact second order).
-- Atoms outside the supported set, `sin`/`cos` over a box wider than π, and
-  division by an interval straddling zero fall back to the (valid but weak)
-  interval box bound, which branching sharpens.
+- Atoms outside the supported set, `sin`/`cos` over a box spanning more than a
+  few full periods, and division by an interval straddling zero fall back to the
+  (valid but weak) interval box bound, which branching sharpens. (`sin`/`cos`
+  over a box wider than π but within a few periods now gets a valid sloped
+  relaxation rather than the bare box.)
 
 For the classes it does cover, the answer is global and certified.
