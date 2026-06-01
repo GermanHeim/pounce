@@ -38,6 +38,9 @@ pounce = "pounce._cli:main"
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
 scipy = ["scipy>=1.11"]
+# diffrax is only needed to run the inverse-map ODE example/recipe
+# (pounce#91); the inverse_map_rhs helper itself depends only on jax.
+diffrax = ["diffrax>=0.5"]
 dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30"]
 
 [project.urls]

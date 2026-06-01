@@ -1933,3 +1933,120 @@ def test_warm_anchor_corrector_uses_mu_pounce_90():
     x_true, *_ = jp.solve_with_jacobian(jnp.array([0.32, 0.68]), jnp.zeros(2))
     np.testing.assert_allclose(np.asarray(st1.x_star[0]), np.asarray(x_true), atol=1e-6)
     st0.close(); st1.close()
+
+
+# ----- inverse-map ODE recipe (pounce#91) -----
+
+
+def test_jaxproblem_unconstrained_build_once_pounce_91():
+    """Issue #91 (prereq): the build-once / stacked path handles an
+    unconstrained problem (g=None, m=0) — the constraint callbacks must
+    not dereference the (None) jacobian jit."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.05 * jnp.sum(x ** 4)
+
+    jp = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    theta = jnp.array([0.4, -0.3])
+    x_star, duals, J = jp.solve_with_jacobian(theta, jnp.zeros(2))
+    Jref = jax.jacobian(lambda p: jp.solve(p, jnp.zeros(2)))(theta)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+    assert duals[0].shape == (0,)        # no equality multipliers
+
+
+def _rk4(rhs, theta0, n_steps=160):
+    h = 1.0 / n_steps
+    th = jnp.asarray(theta0, dtype=jnp.float64)
+    out = [np.asarray(th)]
+    for i in range(n_steps):
+        s = i * h
+        k1 = rhs(s, th)
+        k2 = rhs(s + h / 2, th + h / 2 * k1)
+        k3 = rhs(s + h / 2, th + h / 2 * k2)
+        k4 = rhs(s + h, th + h * k3)
+        th = th + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        out.append(np.asarray(th))
+    return np.asarray(out)
+
+
+def test_inverse_map_rhs_round_trip_pounce_91():
+    """Issue #91: integrating dθ/ds = (∂x*/∂θ)^{-1} dy/ds along a closed
+    output loop recovers the input path and round-trips back through the
+    optimizer onto the output boundary. For f=(x−θ)²+0.05x⁴ the inverse
+    map is explicit (θ = y + 0.1y³, since x*=y), giving an analytic
+    cross-check."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2 + 0.05 * x[0] ** 4
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+
+    def y_of_s(s):
+        return jnp.array([0.5 + 0.3 * jnp.sin(2 * jnp.pi * s)])
+
+    def dy_ds(s):
+        return jnp.array([0.3 * 2 * jnp.pi * jnp.cos(2 * jnp.pi * s)])
+
+    rhs = inverse_map_rhs(jp, dy_ds)               # output = identity
+
+    y0 = float(y_of_s(0.0)[0])
+    theta0 = jnp.array([y0 + 0.1 * y0 ** 3])       # x*(θ0) = y0
+    TH = _rk4(rhs, theta0, n_steps=160)            # (K, 1)
+
+    S = np.linspace(0.0, 1.0, TH.shape[0])
+    ys = 0.5 + 0.3 * np.sin(2 * np.pi * S)
+    theta_analytic = ys + 0.1 * ys ** 3
+
+    # Integrated input path matches the explicit inverse map.
+    assert float(np.max(np.abs(TH[:, 0] - theta_analytic))) < 1e-5
+    # Closed output loop ⇒ closed input loop.
+    assert abs(TH[-1, 0] - TH[0, 0]) < 1e-6
+    # Round-trip: pushing θ(s) back through the optimizer recovers y(s).
+    rt = 0.0
+    for k in range(0, len(S), 16):
+        x_star, *_ = jp.solve_with_jacobian(jnp.array([TH[k, 0]]), jnp.zeros(1))
+        rt = max(rt, abs(float(x_star[0]) - ys[k]))
+    assert rt < 1e-5
+
+
+def test_inverse_map_rhs_requires_1d_theta_pounce_91():
+    """Issue #91: the inverse-map RHS is defined for a 1-D parameter."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return jnp.sum((x - p.reshape(-1)) ** 2)
+
+    jp = JaxProblem(
+        f=f, g=None, n=4, m=0, p_example=jnp.zeros((2, 2)),
+        options={"print_level": 0, "sb": "yes"},
+    )
+    with pytest.raises(ValueError, match="1-D"):
+        inverse_map_rhs(jp, jnp.zeros(4))
+
+
+def test_inverse_map_rhs_is_jittable_pounce_91():
+    """Issue #91: the RHS composes under jax.jit (the solve rides a
+    pure_callback) — diffrax jit-compiles the vector field, so an
+    eager-only RHS would break integration."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2 + 0.05 * x[0] ** 4
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+    rhs = inverse_map_rhs(jp, lambda s: jnp.array([1.0]))
+    theta = jnp.array([0.5])
+    eager = rhs(0.3, theta)
+    jitted = jax.jit(rhs)(0.3, theta)
+    np.testing.assert_allclose(np.asarray(jitted), np.asarray(eager), atol=1e-9)

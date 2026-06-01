@@ -164,6 +164,8 @@ class _StackedJaxNlp:
 
     def constraints(self, X):
         n, m = self._jp._n, self._jp._m
+        if m == 0:
+            return np.zeros(0, dtype=np.float64)
         X_2d = jnp.asarray(X).reshape(self._B, n)
         G_2d = jax.vmap(self._jp._g_jit, in_axes=(0, 0))(X_2d, self._P)
         return _to_np(G_2d).reshape(self._B * m)
@@ -176,6 +178,8 @@ class _StackedJaxNlp:
         # nonzeros at the per-block sparsity pattern. We never assemble
         # the dense stacked Jacobian (would be (B*m, B*n)); the gather
         # below is order ``B * nnz_per_block`` work.
+        if self._jp._m == 0:
+            return np.zeros(0, dtype=np.float64)
         n = self._jp._n
         X_2d = jnp.asarray(X).reshape(self._B, n)
         J_3d = jax.vmap(self._jp._jac_g_jit, in_axes=(0, 0))(X_2d, self._P)
@@ -232,12 +236,16 @@ class _ReusableJaxNlp:
         return _to_np(self._jp._grad_f_jit(jnp.asarray(x), self._p))
 
     def constraints(self, x):
+        if self._jp._m == 0:
+            return np.zeros(0, dtype=np.float64)
         return _to_np(self._jp._g_jit(jnp.asarray(x), self._p))
 
     def jacobianstructure(self):
         return (self._jp._jac_rows, self._jp._jac_cols)
 
     def jacobian(self, x):
+        if self._jp._m == 0:
+            return np.zeros(0, dtype=np.float64)
         J = _to_np(self._jp._jac_g_jit(jnp.asarray(x), self._p))
         return J[self._jp._jac_rows, self._jp._jac_cols]
 

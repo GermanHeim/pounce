@@ -9,6 +9,39 @@ changes.
 
 ## Unreleased
 
+### Added — Inverse-map ODE recipe over a sensitivity RHS (pounce#91)
+
+`pounce.jax.inverse_map_rhs(jp, dy_ds, *, output=None, x0=None)` builds
+the right-hand side of the Alves–Kitchin–Lima inverse / uncertainty
+mapping ODE (pounce#84, Eq. 3):
+
+```
+dθ/ds = (∂y/∂θ)^{-1} · dy/ds
+```
+
+where ``y = output(x*(θ), θ)`` is an output of the embedded optimizer.
+POUNCE supplies the RHS; an off-the-shelf adaptive integrator (diffrax,
+scipy) does the stepping — *no NLP inversion*.
+
+- The inverse map is a **linear solve against** the total output
+  sensitivity ``∂y/∂θ = (∂h/∂x) J + ∂h/∂θ`` (with ``J = ∂x*/∂θ`` from
+  the held factor), not a Jacobian-vector product — so it wants the full
+  ``J`` and ``jnp.linalg.solve``.
+- The whole evaluation rides one `jax.pure_callback`, so the RHS is
+  JAX-traceable and composes under `jax.jit` and diffrax (which
+  jit-compiles the vector field).
+- Worked example `python/examples/inverse_map_diffrax.py` integrates a
+  closed output boundary with diffrax Dopri5 and round-trips back through
+  the optimizer onto the boundary (~1e-7). `diffrax` is an optional
+  extra (`pip install pounce[diffrax]`); the example falls back to RK4
+  if it's absent.
+- Switch to `PathFollower` when the path folds or the active set changes.
+
+Also fixes the build-once / stacked path for **unconstrained** problems
+(``g=None``, ``m=0``): the constraint callbacks no longer dereference the
+(``None``) constraint-Jacobian jit, so `JaxProblem.solve` /
+`solve_with_jacobian` / the batched solves now work with no constraints.
+
 ### Added — Predictor–corrector path-following engine (pounce#90)
 
 `pounce.jax.PathFollower` traces a solution path of a parametric NLP by

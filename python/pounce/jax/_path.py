@@ -46,6 +46,101 @@ import numpy as np
 _OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")
 
 
+def inverse_map_rhs(jp, dy_ds, *, output=None, x0=None):
+    """Build the right-hand side of the inverse / uncertainty-mapping ODE
+    (Alves–Kitchin–Lima, pounce#84 Eq. 3; pounce#91):
+
+    .. math::  \\frac{d\\theta}{ds} = \\Big(\\frac{\\partial y}{\\partial
+        \\theta}\\Big)^{-1} \\frac{dy}{ds},
+
+    where ``y = output(x*(θ), θ)`` is an output of the *embedded
+    optimizer* ``x*(θ) = argmin_x f(x, θ) s.t. …``. The map output→input
+    is traced by integrating this ODE along a prescribed output path
+    ``y(s)`` — *no NLP inversion, no brute force*; pounce supplies the
+    sensitivity RHS and an off-the-shelf integrator (diffrax, scipy) does
+    the stepping.
+
+    The inverse map is a **linear solve against** the total output
+    sensitivity, not a Jacobian-vector product: with ``J = ∂x*/∂θ`` from
+    the held KKT factor (:meth:`JaxProblem.solve_with_jacobian`) and the
+    output Jacobians ``∂h/∂x``, ``∂h/∂θ`` by autodiff,
+
+    .. math::  \\frac{\\partial y}{\\partial \\theta}
+        = \\frac{\\partial h}{\\partial x} J
+        + \\frac{\\partial h}{\\partial \\theta},
+        \\qquad
+        \\frac{d\\theta}{ds}
+        = \\Big(\\frac{\\partial y}{\\partial \\theta}\\Big)^{-1}
+        \\frac{dy}{ds}.
+
+    So the output and parameter dimensions must match (square
+    ``∂y/∂θ``). For the common case ``output = x*`` (identity), this is
+    exactly ``dθ/ds = J^{-1} dy/ds`` and requires ``n == p``.
+
+    Parameters
+    ----------
+    jp : JaxProblem
+        The embedded optimizer. ``θ`` must be 1-D (``p_shape == (p,)``).
+    dy_ds : callable or array
+        The prescribed output-path velocity ``dy/ds``: either a callable
+        ``s (float) -> (k,)`` or a constant ``(k,)`` array.
+    output : callable or None
+        ``h(x, θ) -> (k,)``; defaults to the identity ``h(x, θ) = x``
+        (the optimizer's solution itself is the output, ``k == n``).
+    x0 : (n,) or None
+        Initial guess for the inner solve at each RHS evaluation
+        (defaults to zeros). Each evaluation is an independent cold
+        solve — the integrator owns the stepping.
+
+    Returns
+    -------
+    callable ``f(s, theta) -> dtheta_ds`` of shape ``(p,)`` — drop-in for
+    a ``diffrax.ODETerm`` or ``scipy.integrate`` RHS. The whole
+    evaluation (NLP solve, ``∂x*/∂θ`` from the held factor, the output
+    Jacobians, and the linear solve) runs inside one ``jax.pure_callback``
+    on the host, so the callable is JAX-traceable and composes under
+    ``jax.jit`` and diffrax (which jit-compiles the vector field).
+
+    Notes
+    -----
+    When the path crosses a point where ``∂y/∂θ`` is singular (a fold) or
+    the optimizer's active set changes, the pure ODE is no longer
+    well-posed — switch to :class:`PathFollower` (predictor–corrector),
+    which monitors both conditions. This recipe is for the smooth,
+    fixed-active-set regime.
+    """
+    if len(jp._p_shape) != 1:
+        raise ValueError(
+            "inverse_map_rhs requires a 1-D θ "
+            f"(p_shape={jp._p_shape})."
+        )
+    n = jp._n
+    p = jp._p_shape[0]
+    x0_arr = jnp.zeros(n, dtype=jnp.float64) if x0 is None \
+        else jnp.asarray(x0, dtype=jnp.float64)
+    h = output if output is not None else (lambda x, theta: x)
+    result_shape = jax.ShapeDtypeStruct((p,), jnp.float64)
+
+    def _host(s_h, theta_h):
+        # Concrete (untraced) host evaluation: solve the NLP, read
+        # ∂x*/∂θ off the held factor, form ∂y/∂θ, and return
+        # (∂y/∂θ)^{-1} dy/ds. Wrapped in a pure_callback below so the
+        # callable composes under jit / diffrax.
+        theta = jnp.asarray(theta_h, dtype=jnp.float64)
+        x_star, _duals, J = jp.solve_with_jacobian(theta, x0_arr)   # J: (n, p)
+        h_x = jax.jacobian(lambda xx: h(xx, theta))(x_star)         # (k, n)
+        h_th = jax.jacobian(lambda th: h(x_star, th))(theta)        # (k, p)
+        dy_dtheta = h_x @ J + h_th                                  # (k, p)
+        v = dy_ds(s_h) if callable(dy_ds) else dy_ds
+        dtheta_ds = jnp.linalg.solve(dy_dtheta, jnp.asarray(v, dtype=jnp.float64))
+        return np.asarray(dtheta_ds, dtype=np.float64)
+
+    def f(s, theta):
+        return jax.pure_callback(_host, result_shape, s, theta)
+
+    return f
+
+
 @dataclass
 class PathTrace:
     """Result of a path-following run.
