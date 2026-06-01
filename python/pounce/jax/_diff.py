@@ -292,8 +292,17 @@ def _solve_once_warm(
     lam_warm: np.ndarray,
     zL_warm: np.ndarray,
     zU_warm: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Forward solve with user-supplied dual warm-start."""
+    mu_warm: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, dict]:
+    """Forward solve with user-supplied dual (and optional μ) warm-start.
+
+    ``mu_warm`` seeds the interior-point barrier parameter for the
+    corrector in predictor–corrector path following (pounce#86): when
+    finite it is fed to both ``mu_init`` (the monotone-strategy initial
+    μ) and ``warm_start_target_mu`` (the warm-start initializer's
+    target). ``NaN`` means "no μ seed" — fall back to the solver's
+    default initial barrier.
+    """
 
     def f_of_x(x):
         return f(x, p)
@@ -308,6 +317,12 @@ def _solve_once_warm(
     problem = Problem(n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu)
     merged = dict(options or {})
     merged.setdefault("warm_start_init_point", "yes")
+    if np.isfinite(mu_warm):
+        # Seed the barrier from the previous solve's converged μ so the
+        # corrector resumes near the central path instead of re-walking
+        # the homotopy from the default initial μ (pounce#86).
+        merged.setdefault("mu_init", float(mu_warm))
+        merged.setdefault("warm_start_target_mu", float(mu_warm))
     for k, v in merged.items():
         problem.add_option(k, v)
     x_np, info = problem.solve(
@@ -321,40 +336,44 @@ def _solve_once_warm(
         np.asarray(info["mult_g"], dtype=np.float64),
         np.asarray(info["mult_x_L"], dtype=np.float64),
         np.asarray(info["mult_x_U"], dtype=np.float64),
+        float(info["mu"]),
         info,
     )
 
 
 def _pure_callback_warm_solve(
     f, g, p, x0, n, m, lb, ub, cl, cu, options,
-    lam_warm, zL_warm, zU_warm,
+    lam_warm, zL_warm, zU_warm, mu_warm,
 ):
     """Pure-callback wrapper around :func:`_solve_once_warm`.
 
-    Returns ``(x*, lam_out, zL_out, zU_out)`` — the four arrays the
-    bwd needs (lam_out, the bound multipliers) and the warm-state
-    triple the user threads into the next call.
+    Returns ``(x*, lam_out, zL_out, zU_out, mu_out)`` — the arrays the
+    bwd needs (lam_out, the bound multipliers), the warm-state triple
+    the user threads into the next call, and the converged barrier
+    parameter ``mu_out`` (pounce#86).
     """
     result_shapes = (
         jax.ShapeDtypeStruct((n,), jnp.float64),
         jax.ShapeDtypeStruct((m,), jnp.float64),
         jax.ShapeDtypeStruct((n,), jnp.float64),
         jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((), jnp.float64),
     )
 
-    def host_call(p_h, x0_h, lam_h, zL_h, zU_h):
-        x_np, lam_out, zL_out, zU_out, _info = _solve_once_warm(
+    def host_call(p_h, x0_h, lam_h, zL_h, zU_h, mu_h):
+        x_np, lam_out, zL_out, zU_out, mu_out, _info = _solve_once_warm(
             f=f, g=g,
             p=jnp.asarray(p_h),
             x0=jnp.asarray(x0_h),
             n=n, m=m, lb=lb, ub=ub, cl=cl, cu=cu,
             options=options,
             lam_warm=lam_h, zL_warm=zL_h, zU_warm=zU_h,
+            mu_warm=float(np.asarray(mu_h)),
         )
-        return x_np, lam_out, zL_out, zU_out
+        return x_np, lam_out, zL_out, zU_out, np.float64(mu_out)
 
     return jax.pure_callback(
-        host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm,
+        host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm, mu_warm,
     )
 
 
@@ -370,30 +389,31 @@ def _make_solve_with_warm_custom_vjp(
     options: dict | None,
 ):
     @jax.custom_vjp
-    def solve_fn(p, x0, lam_warm, zL_warm, zU_warm):
-        x_star, lam_out, zL_out, zU_out = _pure_callback_warm_solve(
+    def solve_fn(p, x0, lam_warm, zL_warm, zU_warm, mu_warm):
+        x_star, lam_out, zL_out, zU_out, mu_out = _pure_callback_warm_solve(
             f, g, p, x0, n, m, lb, ub, cl, cu, options,
-            lam_warm, zL_warm, zU_warm,
+            lam_warm, zL_warm, zU_warm, mu_warm,
         )
-        return x_star, lam_out, zL_out, zU_out
+        return x_star, lam_out, zL_out, zU_out, mu_out
 
-    def fwd(p, x0, lam_warm, zL_warm, zU_warm):
-        x_star, lam_out, zL_out, zU_out = _pure_callback_warm_solve(
+    def fwd(p, x0, lam_warm, zL_warm, zU_warm, mu_warm):
+        x_star, lam_out, zL_out, zU_out, mu_out = _pure_callback_warm_solve(
             f, g, p, x0, n, m, lb, ub, cl, cu, options,
-            lam_warm, zL_warm, zU_warm,
+            lam_warm, zL_warm, zU_warm, mu_warm,
         )
         return (
-            (x_star, lam_out, zL_out, zU_out),
+            (x_star, lam_out, zL_out, zU_out, mu_out),
             (p, x_star, lam_out, zL_out, zU_out),
         )
 
     def bwd(residuals, cotangents):
         p, x_star, lam, mult_xL, mult_xU = residuals
         # Only the x* cotangent contributes a gradient w.r.t. p.
-        # Cotangents on (lam_out, zL_out, zU_out) are dropped — same
-        # pattern existing `solve` uses for x0: warm dual outputs
-        # don't carry differentiable info back to p in the implicit
-        # rule (they're consequences of the active set, not inputs).
+        # Cotangents on (lam_out, zL_out, zU_out, mu_out) are dropped —
+        # same pattern existing `solve` uses for x0: warm dual / barrier
+        # outputs don't carry differentiable info back to p in the
+        # implicit rule (they're consequences of the active set and the
+        # barrier homotopy, not inputs).
         v = cotangents[0]
 
         active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
@@ -453,6 +473,7 @@ def _make_solve_with_warm_custom_vjp(
             jnp.zeros((m,), dtype=jnp.float64),
             jnp.zeros((n,), dtype=jnp.float64),
             jnp.zeros((n,), dtype=jnp.float64),
+            jnp.zeros((), dtype=jnp.float64),
         )
 
     solve_fn.defvjp(fwd, bwd)
@@ -483,39 +504,62 @@ def solve_with_warm(
       ``None`` to start from zeros (still warm-starts the option,
       but with no informative duals — useful for the *first* call
       in a sequence where you want a uniform code path).
-    * Returns ``(x*, (lam_out, zL_out, zU_out))`` so the caller
-      can thread the dual triple into the next call.
+    * ``warm_start=(lam, zL, zU, mu)`` *additionally* seeds the
+      interior-point barrier parameter μ (pounce#86): the corrector
+      resumes near the central path at the supplied μ rather than
+      re-walking the barrier homotopy from the default initial μ.
+      Pass ``mu=None`` inside the 4-tuple to skip the μ seed but still
+      receive the converged μ on output (report-only).
+    * Returns ``(x*, (lam_out, zL_out, zU_out))`` for a 3-tuple /
+      ``None`` warm-start, or ``(x*, (lam_out, zL_out, zU_out,
+      mu_out))`` for a 4-tuple warm-start — the returned warm-state
+      arity matches the input, so threading μ in gives μ back out.
 
     The forward call is differentiable w.r.t. ``p`` only — cotangents
-    on the warm-output duals and the warm-input duals are dropped
+    on the warm-output duals/μ and the warm-input duals/μ are dropped
     (zero), matching how :func:`solve` handles ``x0``. This is the
-    implicit-function-theorem fix point: at the optimum the duals
-    are a function of ``p`` and the active set, not an independent
-    input feeding into ``dx*/dp``.
+    implicit-function-theorem fix point: at the optimum the duals and
+    the barrier are functions of ``p`` and the active set, not
+    independent inputs feeding into ``dx*/dp``.
 
-    Typical use::
+    Typical use (predictor–corrector corrector, with μ threading)::
 
-        x0, lam, zL, zU = init_state(...)
+        x0, lam, zL, zU, mu = init_state(...)
         for p_k in trajectory:
-            x_star, (lam, zL, zU) = solve_with_warm(
+            x_star, (lam, zL, zU, mu) = solve_with_warm(
                 p_k, f=f, g=g, x0=x0, n=n, m=m,
                 lb=lb, ub=ub, cl=cl, cu=cu,
-                warm_start=(lam, zL, zU),
+                warm_start=(lam, zL, zU, mu),
             )
             x0 = x_star  # primal warm-start for free
     """
+    want_mu = warm_start is not None and len(warm_start) == 4
     if warm_start is None:
         lam_warm = jnp.zeros(m, dtype=jnp.float64)
         zL_warm = jnp.zeros(n, dtype=jnp.float64)
         zU_warm = jnp.zeros(n, dtype=jnp.float64)
+        mu_warm = jnp.asarray(jnp.nan, dtype=jnp.float64)
     else:
-        lam_warm, zL_warm, zU_warm = warm_start
+        if want_mu:
+            lam_warm, zL_warm, zU_warm, mu_seed = warm_start
+        else:
+            lam_warm, zL_warm, zU_warm = warm_start
+            mu_seed = None
         lam_warm = jnp.asarray(lam_warm, dtype=jnp.float64)
         zL_warm = jnp.asarray(zL_warm, dtype=jnp.float64)
         zU_warm = jnp.asarray(zU_warm, dtype=jnp.float64)
+        # A ``None`` μ inside a 4-tuple means "report μ out, don't seed
+        # it in" — pass NaN to the host so it skips the mu_init seed.
+        mu_warm = jnp.asarray(
+            jnp.nan if mu_seed is None else mu_seed, dtype=jnp.float64
+        )
 
     fn = _make_solve_with_warm_custom_vjp(f, g, n, m, lb, ub, cl, cu, options)
-    x_star, lam_out, zL_out, zU_out = fn(p, x0, lam_warm, zL_warm, zU_warm)
+    x_star, lam_out, zL_out, zU_out, mu_out = fn(
+        p, x0, lam_warm, zL_warm, zU_warm, mu_warm,
+    )
+    if want_mu:
+        return x_star, (lam_out, zL_out, zU_out, mu_out)
     return x_star, (lam_out, zL_out, zU_out)
 
 

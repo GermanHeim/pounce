@@ -317,7 +317,13 @@ impl PyProblem {
         // Pick up any working set the SQP path produced; surface
         // it in the info dict and stash on the Problem instance.
         self.last_working_set = app.last_sqp_working_set().cloned();
-        let info = build_info_dict(py, &bridge.borrow(), status, stats.iteration_count)?;
+        let info = build_info_dict(
+            py,
+            &bridge.borrow(),
+            status,
+            stats.iteration_count,
+            stats.final_mu,
+        )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
             None => py.None(),
@@ -493,7 +499,13 @@ impl PyProblem {
         let result = builder.run(&mut app, bridge_for_solve);
         let stats = app.statistics();
 
-        let info = build_info_dict(py, &bridge.borrow(), result.status, stats.iteration_count)?;
+        let info = build_info_dict(
+            py,
+            &bridge.borrow(),
+            result.status,
+            stats.iteration_count,
+            stats.final_mu,
+        )?;
         let dx_obj: PyObject = match result.dx {
             Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
             None => py.None(),
@@ -675,6 +687,7 @@ pub(crate) fn build_info_dict<'py>(
     bridge: &PyTnlp,
     status: ApplicationReturnStatus,
     iter_count: i32,
+    final_mu: Number,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("status", status as i32)?;
@@ -694,6 +707,11 @@ pub(crate) fn build_info_dict<'py>(
         bridge.state.final_z_u.clone().into_pyarray_bound(py),
     )?;
     info.set_item("iter_count", iter_count)?;
+    // Converged barrier parameter μ. Thread this into the next
+    // warm-started solve's `mu_init` / `warm_start_target_mu` to seed
+    // the corrector in predictor–corrector path following (pounce#86).
+    // `0.0` on the barrier-free SQP path.
+    info.set_item("mu", final_mu)?;
     Ok(info)
 }
 

@@ -9,6 +9,29 @@ changes.
 
 ## Unreleased
 
+### Added — Barrier-μ warm start for predictor–corrector correctors (pounce#86)
+
+The interior-point barrier parameter μ is now reported on every solve and
+can be threaded into a warm-started re-solve, so a predictor–corrector
+corrector resumes near the central path instead of re-walking the barrier
+homotopy from the default initial μ.
+
+- **`info["mu"]`** — every `Problem.solve` / `Solver.solve` /
+  `solve_with_sens` info dict now carries the converged barrier parameter
+  (`0.0` on the barrier-free SQP path).
+- **`pounce.jax.solve_with_warm`** accepts a 4-element warm-state
+  `(lam, zL, zU, mu)` that seeds `mu_init` / `warm_start_target_mu`, and
+  returns the converged μ in a matching 4-tuple. The 3-tuple form is
+  unchanged; passing `mu=None` inside a 4-tuple reports μ out without
+  seeding it in. Differentiability w.r.t. `p` is preserved (the μ
+  input/output are stop-gradient, like the duals).
+
+On a small parametric NLP, seeding μ from the previous solve's converged
+barrier cut a warm-started corrector from 5 interior-point iterations to
+1 (same optimum). The `mu_init` / `warm_start_target_mu` algorithm
+options already existed; this exposes the converged μ needed to drive
+them along a path.
+
 ### Added — Post-solve Jacobian / sensitivity API from the held KKT factor (pounce#82)
 
 `JaxProblem` now exposes a first-class post-solve sensitivity surface

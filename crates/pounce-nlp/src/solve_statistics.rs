@@ -64,6 +64,13 @@ pub struct SolveStatistics {
     pub final_constr_viol: Number,
     pub final_compl: Number,
     pub final_kkt_error: Number,
+    /// Final barrier parameter μ at termination (the IPM's `curr_mu`
+    /// after the last iterate). Lets a caller thread the converged
+    /// barrier into a warm-started re-solve's `mu_init` /
+    /// `warm_start_target_mu` for predictor–corrector path following
+    /// (pounce#86). `0.0` on the barrier-free SQP path, where μ has
+    /// no meaning.
+    pub final_mu: Number,
 
     // ---- Restoration-phase audit counters (pounce#12). ----
     //

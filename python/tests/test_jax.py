@@ -162,6 +162,58 @@ def test_solve_with_warm_reduces_iterations_pounce_74():
     np.testing.assert_allclose(grad, np.array([0.0, 4.0, -6.0]), atol=1e-6)
 
 
+def test_solve_with_warm_threads_barrier_mu_pounce_86():
+    """A 4-element warm-state `(lam, zL, zU, mu)` seeds the barrier and
+    returns the converged μ, so a predictor–corrector loop can thread it
+    forward; the 3-tuple path is unchanged (pounce#86)."""
+    from pounce.jax import solve_with_warm
+
+    n, m, B = 3, 1, 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):
+        return jnp.stack([x[0]])
+
+    def forward(p, warm):
+        return solve_with_warm(
+            p, f=f, g=g, x0=jnp.zeros(n), n=n, m=m,
+            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+            cl=jnp.array([-1e19]), cu=jnp.array([B]),
+            options={"tol": 1e-10, "print_level": 0},
+            warm_start=warm,
+        )
+
+    p0 = jnp.array([2.0, 2.0, -3.0])  # active inequality
+
+    # 3-tuple / None warm-start: backward-compatible 3-element state.
+    x0_star, warm3 = forward(p0, warm=None)
+    assert len(warm3) == 3
+
+    # Report-only 4-tuple (mu=None): get μ out without seeding it in.
+    x_ro, warm_ro = forward(p0, warm=(*warm3, None))
+    assert len(warm_ro) == 4
+    mu_out = float(np.asarray(warm_ro[3]))
+    assert np.isfinite(mu_out) and 0.0 < mu_out < 1e-6
+
+    # Seed μ back in (full 4-tuple) — same optimum, μ still round-trips.
+    lam, zL, zU = warm3
+    x_seed, warm_seed = forward(p0, warm=(lam, zL, zU, mu_out))
+    assert len(warm_seed) == 4
+    np.testing.assert_allclose(np.asarray(x_seed), np.asarray(x0_star), atol=1e-8)
+    assert np.isfinite(float(np.asarray(warm_seed[3])))
+
+    # Differentiability w.r.t. p is preserved through the μ-threaded path.
+    def loss(p):
+        x_star, _ = forward(p, warm=(lam, zL, zU, mu_out))
+        return jnp.sum(x_star ** 2)
+
+    grad = np.asarray(jax.grad(loss)(p0))
+    np.testing.assert_allclose(grad, np.array([0.0, 4.0, -6.0]), atol=1e-6)
+
+
 def test_vmap_solve_parallel_matches_vmap_solve_pounce_74():
     """Parallel batched solve must agree numerically with the sequential
     `vmap_solve` reference, both for the forward x* and for `jax.grad`
