@@ -19,6 +19,7 @@
 //! Eigendecompositions reuse [`pounce_linalg::symmetric_eigen`] (the
 //! cyclic-Jacobi solver shared with the NLP sensitivity path).
 
+use super::{Cone, ConeBlock};
 use pounce_linalg::symmetric_eigen;
 
 /// The PSD cone over symmetric `n×n` matrices. Its slack/dual vectors have
@@ -259,6 +260,218 @@ impl PsdCone {
     }
 }
 
+impl PsdCone {
+    /// Jordan product `S ∘ Z = (SZ + ZS)/2`, in `svec` coordinates.
+    fn jordan(&self, s: &[f64], z: &[f64], out: &mut [f64]) {
+        let n = self.n;
+        let (mut sm, mut zm) = (vec![0.0; n * n], vec![0.0; n * n]);
+        smat(s, n, &mut sm);
+        smat(z, n, &mut zm);
+        let (mut sz, mut zs) = (vec![0.0; n * n], vec![0.0; n * n]);
+        matmul(&sm, &zm, n, &mut sz);
+        matmul(&zm, &sm, n, &mut zs);
+        let mut j = vec![0.0; n * n];
+        for i in 0..n * n {
+            j[i] = 0.5 * (sz[i] + zs[i]);
+        }
+        svec(&j, n, out);
+    }
+
+    /// Apply the NT scaling operator `W ⊗ₛ W` to a direction `d`:
+    /// `out = svec(W · smat(d) · W)` (`w` is the row-major `n×n` scaling).
+    fn apply_scaling(&self, w: &[f64], d: &[f64], out: &mut [f64]) {
+        let n = self.n;
+        let mut dm = vec![0.0; n * n];
+        smat(d, n, &mut dm);
+        let (mut tmp, mut res) = (vec![0.0; n * n], vec![0.0; n * n]);
+        matmul(w, &dm, n, &mut tmp);
+        matmul(&tmp, w, n, &mut res);
+        svec(&res, n, out);
+    }
+
+    /// Solve the Jordan system `z ∘ D = R` — i.e. the Lyapunov equation
+    /// `Z D + D Z = 2·smat(r)` — for symmetric `D`, returning `svec(D)`.
+    /// This is `Arw(z)⁻¹ r` for the PSD cone. Via `Z = QΛQᵀ`:
+    /// `D = Q [ (Qᵀ(2R)Q)_{ij} / (λᵢ+λⱼ) ] Qᵀ`.
+    #[allow(clippy::expect_used)]
+    fn lyapunov_solve(&self, z: &[f64], r: &[f64], out: &mut [f64]) {
+        let n = self.n;
+        let mut zm = vec![0.0; n * n];
+        smat(z, n, &mut zm);
+        let mut vals = vec![0.0; n];
+        let mut q = vec![0.0; n * n]; // column-major eigenvectors
+        assert!(
+            symmetric_eigen(&zm, n, &mut vals, &mut q),
+            "lyapunov: eig failed"
+        );
+        let mut rm = vec![0.0; n * n];
+        smat(r, n, &mut rm);
+        // R̃ = Qᵀ R Q. q column j: q[j*n + i] = Q[i][j].
+        let mut rtilde = vec![0.0; n * n];
+        for a in 0..n {
+            for b in 0..n {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    for j in 0..n {
+                        acc += q[a * n + i] * rm[i * n + j] * q[b * n + j];
+                    }
+                }
+                rtilde[a * n + b] = acc;
+            }
+        }
+        // D̃_{ab} = 2 R̃_{ab} / (λ_a + λ_b).
+        let mut dtilde = vec![0.0; n * n];
+        for a in 0..n {
+            for b in 0..n {
+                dtilde[a * n + b] = 2.0 * rtilde[a * n + b] / (vals[a] + vals[b]);
+            }
+        }
+        // D = Q D̃ Qᵀ.
+        let mut dm = vec![0.0; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                let mut acc = 0.0;
+                for a in 0..n {
+                    for b in 0..n {
+                        acc += q[a * n + i] * dtilde[a * n + b] * q[b * n + k];
+                    }
+                }
+                dm[i * n + k] = acc;
+            }
+        }
+        svec(&dm, n, out);
+    }
+}
+
+impl Cone for PsdCone {
+    fn degree(&self) -> usize {
+        self.n
+    }
+
+    fn identity(&self, out: &mut [f64]) {
+        PsdCone::identity(self, out);
+    }
+
+    fn dim(&self) -> usize {
+        PsdCone::dim(self)
+    }
+
+    fn mu(&self, s: &[f64], z: &[f64]) -> f64 {
+        // ⟨s, z⟩ = svec(S)·svec(Z) = tr(SZ); μ = ⟨s,z⟩ / degree.
+        let dot: f64 = s.iter().zip(z).map(|(a, b)| a * b).sum();
+        dot / self.n as f64
+    }
+
+    fn scaling_diag(&self, _s: &[f64], _z: &[f64], _out: &mut [f64]) {
+        unimplemented!("PSD uses kkt_block (dense), not scaling_diag")
+    }
+
+    fn comp_residual(&self, s: &[f64], z: &[f64], sigma_mu: f64, out: &mut [f64]) {
+        // s ∘ z − σμ·svec(I).
+        self.jordan(s, z, out);
+        let mut e = vec![0.0; self.dim()];
+        PsdCone::identity(self, &mut e);
+        for k in 0..self.dim() {
+            out[k] -= sigma_mu * e[k];
+        }
+    }
+
+    fn comp_residual_corrector(
+        &self,
+        s: &[f64],
+        z: &[f64],
+        ds_aff: &[f64],
+        dz_aff: &[f64],
+        sigma_mu: f64,
+        out: &mut [f64],
+    ) {
+        // s∘z + ds_aff∘dz_aff − σμ·svec(I).
+        self.jordan(s, z, out);
+        let mut second = vec![0.0; self.dim()];
+        self.jordan(ds_aff, dz_aff, &mut second);
+        let mut e = vec![0.0; self.dim()];
+        PsdCone::identity(self, &mut e);
+        for k in 0..self.dim() {
+            out[k] += second[k] - sigma_mu * e[k];
+        }
+    }
+
+    // The NT scaling always succeeds at strictly-interior (PD) iterates.
+    #[allow(clippy::expect_used)]
+    fn recover_ds(&self, s: &[f64], z: &[f64], r_comp: &[f64], dz: &[f64], ds: &mut [f64]) {
+        // ds = −Arw(z)⁻¹ r_comp − (W⊗ₛW) dz, consistent with `kkt_block`
+        // (the scaling operator) and `rhs_comp_term` (the Lyapunov solve).
+        let m = self.dim();
+        let mut inv = vec![0.0; m];
+        self.lyapunov_solve(z, r_comp, &mut inv);
+        let w = self.nt_scaling(s, z).expect("recover_ds: NT scaling");
+        let mut hdz = vec![0.0; m];
+        self.apply_scaling(&w, dz, &mut hdz);
+        for k in 0..m {
+            ds[k] = -inv[k] - hdz[k];
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock {
+        // The (z,z) block is the symmetric Kronecker H = W ⊗ₛ W, an m×m SPD
+        // matrix with H·svec(z) = svec(WZW) = svec(s). Form it column by
+        // column and return its lower triangle (row-major).
+        let m = self.dim();
+        let w = self.nt_scaling(s, z).expect("kkt_block: NT scaling");
+        let mut cols = vec![0.0; m * m]; // cols[b*m + a] = M[a][b]
+        let mut e = vec![0.0; m];
+        let mut col = vec![0.0; m];
+        for b in 0..m {
+            e.iter_mut().for_each(|v| *v = 0.0);
+            e[b] = 1.0;
+            self.apply_scaling(&w, &e, &mut col);
+            for a in 0..m {
+                cols[b * m + a] = col[a];
+            }
+        }
+        // Lower triangle, row-major: (0,0); (1,0),(1,1); …
+        let mut lower = Vec::with_capacity(m * (m + 1) / 2);
+        for a in 0..m {
+            for b in 0..=a {
+                lower.push(cols[b * m + a]);
+            }
+        }
+        ConeBlock::DenseLower { dim: m, lower }
+    }
+
+    fn rhs_comp_term(&self, _s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
+        // Arw(z)⁻¹ r_comp — the Lyapunov solve Z D + D Z = 2·smat(r_comp).
+        self.lyapunov_solve(z, r_comp, out);
+    }
+
+    fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64) {
+        // Like the SOC: a converged PSD point sits on the boundary (a zero
+        // eigenvalue), where the NT scaling is singular. Re-center each block
+        // to a well-conditioned multiple of the identity c·I (so S∘Z = c²I),
+        // preserving magnitude; the warm benefit comes from the primal x.
+        let n = self.n;
+        let center = |u: &mut [f64]| {
+            let mag = u
+                .iter()
+                .fold(0.0_f64, |m, &v| m.max(v.abs()))
+                .max(floor)
+                .max(1.0);
+            let mut e = vec![0.0; u.len()];
+            PsdCone { n }.identity(&mut e);
+            for k in 0..u.len() {
+                u[k] = mag * e[k];
+            }
+        };
+        center(s);
+        center(z);
+    }
+
+    fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64 {
+        PsdCone::max_step(self, v, dv, tau)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +620,96 @@ mod tests {
         let mut dv = vec![0.0; c.dim()];
         c.identity(&mut dv);
         assert!((c.max_step(&v, &dv, 0.99) - 1.0).abs() < 1e-9);
+    }
+
+    fn to_v(c: &PsdCone, x: &[f64]) -> Vec<f64> {
+        let mut v = vec![0.0; c.dim()];
+        svec(x, c.n, &mut v);
+        v
+    }
+
+    fn dense_lower_to_full(block: &ConeBlock) -> (usize, Vec<f64>) {
+        match block {
+            ConeBlock::DenseLower { dim, lower } => {
+                let m = *dim;
+                let mut full = vec![0.0; m * m];
+                let mut k = 0;
+                for a in 0..m {
+                    for b in 0..=a {
+                        full[a * m + b] = lower[k];
+                        full[b * m + a] = lower[k];
+                        k += 1;
+                    }
+                }
+                (m, full)
+            }
+            _ => panic!("expected DenseLower"),
+        }
+    }
+
+    /// The defining NT property of the `(z,z)` block: `H·svec(z) = svec(s)`.
+    #[test]
+    fn kkt_block_maps_z_to_s() {
+        use crate::cones::Cone;
+        let c = PsdCone::new(3);
+        let s = to_v(&c, &[4.0, 1.0, 0.0, 1.0, 3.0, 0.5, 0.0, 0.5, 2.0]);
+        let z = to_v(&c, &[2.0, -0.3, 0.2, -0.3, 1.0, 0.1, 0.2, 0.1, 1.5]);
+        let (m, h) = dense_lower_to_full(&c.kkt_block(&s, &z));
+        for a in 0..m {
+            let acc: f64 = (0..m).map(|b| h[a * m + b] * z[b]).sum();
+            assert!((acc - s[a]).abs() < 1e-7, "row {a}: {acc} vs {}", s[a]);
+        }
+    }
+
+    /// `rhs_comp_term` = `Arw(z)⁻¹ r`, so `z ∘ (Arw(z)⁻¹ r) = r`.
+    #[test]
+    fn lyapunov_inverts_jordan() {
+        use crate::cones::Cone;
+        let c = PsdCone::new(3);
+        let z = to_v(&c, &[2.0, -0.3, 0.2, -0.3, 1.0, 0.1, 0.2, 0.1, 1.5]);
+        let r = to_v(&c, &[0.5, 0.1, -0.2, 0.1, 0.3, 0.05, -0.2, 0.05, 0.4]);
+        let mut d = vec![0.0; c.dim()];
+        c.rhs_comp_term(&z, &z, &r, &mut d);
+        let mut zd = vec![0.0; c.dim()];
+        c.jordan(&z, &d, &mut zd);
+        for k in 0..c.dim() {
+            assert!((zd[k] - r[k]).abs() < 1e-9, "{k}: {} vs {}", zd[k], r[k]);
+        }
+    }
+
+    /// At `s = z = e`, `s∘z = I` and the centered residual is `(1−σμ)·e`.
+    #[test]
+    fn comp_residual_at_identity() {
+        use crate::cones::Cone;
+        let c = PsdCone::new(2);
+        let mut e = vec![0.0; c.dim()];
+        c.identity(&mut e);
+        let mut out = vec![0.0; c.dim()];
+        Cone::comp_residual(&c, &e, &e, 0.3, &mut out);
+        for k in 0..c.dim() {
+            assert!((out[k] - 0.7 * e[k]).abs() < 1e-12, "{k}");
+        }
+    }
+
+    /// `recover_ds` is consistent with the assembled block and rhs term:
+    /// it must reproduce `−Arw(z)⁻¹ r − H·dz`.
+    #[test]
+    fn recover_ds_matches_block_and_rhs() {
+        use crate::cones::Cone;
+        let c = PsdCone::new(3);
+        let s = to_v(&c, &[4.0, 1.0, 0.0, 1.0, 3.0, 0.5, 0.0, 0.5, 2.0]);
+        let z = to_v(&c, &[2.0, -0.3, 0.2, -0.3, 1.0, 0.1, 0.2, 0.1, 1.5]);
+        let r = to_v(&c, &[0.5, 0.1, -0.2, 0.1, 0.3, 0.05, -0.2, 0.05, 0.4]);
+        let dz = to_v(&c, &[0.2, 0.0, 0.1, 0.0, -0.1, 0.05, 0.1, 0.05, 0.3]);
+        let mut ds = vec![0.0; c.dim()];
+        c.recover_ds(&s, &z, &r, &dz, &mut ds);
+        // Reference: −rhs_comp_term − H·dz.
+        let mut rhs = vec![0.0; c.dim()];
+        c.rhs_comp_term(&s, &z, &r, &mut rhs);
+        let (m, h) = dense_lower_to_full(&c.kkt_block(&s, &z));
+        for a in 0..m {
+            let hdz: f64 = (0..m).map(|b| h[a * m + b] * dz[b]).sum();
+            assert!((ds[a] - (-rhs[a] - hdz)).abs() < 1e-9, "row {a}");
+        }
     }
 }
