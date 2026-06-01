@@ -708,6 +708,117 @@ def _kkt_backsolve_batched_pure_callback(
     )
 
 
+def _kkt_jvp_batched_pure_callback(
+    jp: "JaxProblem",
+    B: int,
+    sid: jnp.ndarray,
+    rhs_x_batch: jnp.ndarray,
+    rhs_g_batch: jnp.ndarray,
+    n: int,
+    m: int,
+):
+    """Forward (JVP) multi-RHS solve against the held stacked factor
+    (pounce#82 Phase 2).
+
+    Where the reverse back-solve (:func:`_kkt_backsolve_batched_pure_callback`)
+    sets the compound RHS to ``[v; 0]`` (cotangent on the x-block only)
+    and *reads* the constraint sub-blocks of the solution, the forward
+    JVP does the transpose: it *packs* the parameter-side RHS
+
+    ::
+
+        rhs = M · dp = [ ∂²L/∂x∂p · dp ;  ∂g/∂p · dp ]
+
+    into the x-block (``rhs_x_batch``) **and** the equality/inequality
+    constraint blocks (``rhs_g_batch``, scattered from user g-order into
+    the stacked block-major y_c / y_d blocks), back-solves ``K w = rhs``
+    once against the held LDLᵀ factor, and returns just the x-block of
+    ``w``. The caller forms ``J @ dp = -w_x``. The bound-multiplier
+    blocks stay zero on the RHS — the compound factor already encodes
+    active/inactive bound behaviour, same as the reverse path relies on.
+
+    Inputs are per-block, leading-batch (``rhs_x_batch (B, n)``,
+    ``rhs_g_batch (B, m)``); ``vmap_method="broadcast_all"`` also accepts
+    a leading direction axis so the JVP can be vmapped over several
+    ``dp`` directions in one FFI hop. Returns ``w_x_batch (B, n)``.
+    """
+    result_shapes = jax.ShapeDtypeStruct((B, n), jnp.float64)
+
+    def host_call(sid_h, rx_h, rg_h):
+        sid_int = int(np.asarray(sid_h).reshape(-1)[0])
+        solver = jp._lookup_solver(sid_int)
+        if solver is None:
+            raise RuntimeError(
+                f"pounce.jax: missing stacked Solver for batched JVP "
+                f"(id={sid_int}). The held factor was released — the "
+                "AnchorState was closed or evicted. Re-anchor with "
+                "jp.anchor(...) before calling batched_jvp_from_state."
+            )
+        rx = np.asarray(rx_h, dtype=np.float64)
+        rg = np.asarray(rg_h, dtype=np.float64)
+        squeeze = rx.ndim == 2  # (B, n) unbatched; (N, B, n) batched
+        if squeeze:
+            rx = rx[None, ...]
+            rg = rg[None, ...]
+        N = rx.shape[0]
+
+        def _do_kkt():
+            dims = solver.block_dims
+            if dims is None:
+                raise RuntimeError(
+                    "pounce.jax: JVP-from-state requires a converged IPM "
+                    "factor on the anchor solve, but the stacked IPM did "
+                    "not produce one. Tighten the anchor solve or rebuild "
+                    "the problem."
+                )
+            n_x_, n_s_, n_y_c_, n_y_d_ = dims[0], dims[1], dims[2], dims[3]
+            kkt_dim_ = solver.kkt_dim
+            if n_x_ != B * n:
+                raise RuntimeError(
+                    f"pounce.jax: stacked solver n_x={n_x_} != B*n={B * n} "
+                    f"(B={B}, n={n}). Internal invariant violated."
+                )
+            rhs_flat = np.zeros((N, kkt_dim_), dtype=np.float64)
+            rhs_flat[:, :n_x_] = rx.reshape(N, B * n)
+            if m > 0:
+                # Scatter the constraint-side RHS from user g-order into
+                # the stacked block-major y_c / y_d blocks — the inverse
+                # of the reverse path's de-interleave.
+                cl_arr = jp._cl_for_classify
+                cu_arr = jp._cu_for_classify
+                is_eq = cl_arr == cu_arr
+                n_c_per = int(np.sum(is_eq))
+                y_c_off = n_x_ + n_s_
+                y_d_off = y_c_off + n_y_c_
+                rg_arr = rg.reshape(N, B, m)
+                if n_c_per > 0:
+                    c_idx = np.flatnonzero(is_eq)
+                    rhs_flat[:, y_c_off : y_c_off + n_y_c_] = (
+                        rg_arr[:, :, c_idx].reshape(N, n_y_c_)
+                    )
+                if (m - n_c_per) > 0:
+                    d_idx = np.flatnonzero(~is_eq)
+                    rhs_flat[:, y_d_off : y_d_off + n_y_d_] = (
+                        rg_arr[:, :, d_idx].reshape(N, n_y_d_)
+                    )
+            w_flat = np.asarray(
+                solver.kkt_solve_many(rhs_flat.reshape(-1), N),
+                dtype=np.float64,
+            ).reshape(N, kkt_dim_)
+            return n_x_, w_flat
+
+        n_x, w_mat = jp._run_pinned(_do_kkt)
+        w_x_batch = w_mat[:, :n_x].reshape(N, B, n).copy()
+        if squeeze:
+            return w_x_batch[0]
+        return w_x_batch
+
+    return jax.pure_callback(
+        host_call, result_shapes, sid, rhs_x_batch, rhs_g_batch,
+        vmap_method="broadcast_all",
+    )
+
+
 def _bwd_single_kkt(
     f: Callable,
     g: Callable | None,
@@ -785,9 +896,9 @@ class AnchorState:
     Returned by :meth:`JaxProblem.anchor` and (with ``return_state=True``)
     :meth:`JaxProblem.batched_solve_with_jacobian`. Pins the converged
     stacked LDLᵀ factor so several post-solve sensitivity calls
-    (:meth:`JaxProblem.batched_vjp_from_state` and, once landed, the
-    JVP-from-state forward path) reuse one factorisation without a
-    re-solve and without risking LRU eviction between calls.
+    (:meth:`JaxProblem.batched_vjp_from_state` /
+    :meth:`JaxProblem.batched_jvp_from_state`) reuse one factorisation
+    without a re-solve and without risking LRU eviction between calls.
 
     Lifetime. The factor is held until :meth:`close` (or, as a safety
     net, until the handle is garbage-collected — a :func:`weakref.finalize`
@@ -2022,6 +2133,86 @@ class JaxProblem:
             state._p_batch, state._x_star, state._lam, state._sid, x_bar,
         )
         return self._slice_cols(dp, state._wrt_cols)
+
+    def batched_jvp_from_state(self, state: AnchorState, dp_batch):
+        """Jacobian-vector product ``J @ dp`` against a held factor
+        (pounce#82 Phase 2). The cheap path for linear updates: it never
+        materialises the full ``J`` — only the directional sensitivity
+        ``delta_x = J @ delta_p``.
+
+        Forward mode by the implicit function theorem: with the compound
+        KKT factor ``K`` held, ``J @ dp = -w_x`` where ``K w = M · dp``
+        and ``M = [∂²L/∂x∂p ; ∂g/∂p]`` is the parameter-side RHS. Per
+        block, the contraction ``M_k · dp_k`` is autodiff over the user's
+        ``f`` / ``g``; the single multi-block back-solve reuses the held
+        factor via ``Solver.kkt_solve_many`` (one FFI hop, no re-solve).
+
+        Parameters
+        ----------
+        state : AnchorState
+        dp_batch : ``(B,) + p_shape`` (or ``(B, len(wrt_cols))`` if the
+            state was anchored with ``wrt_cols``)
+            Per-block parameter perturbation. For an ``optlayer`` linear
+            update over the predicted block, fill the context columns
+            with zeros (or anchor with ``wrt_cols`` and pass only the
+            predicted columns).
+
+        Returns
+        -------
+        ``(B, n)`` — the per-block primal sensitivity ``delta_x``.
+        """
+        if state._jp is not self:
+            raise ValueError(
+                "pounce.jax: AnchorState belongs to a different "
+                "JaxProblem."
+            )
+        state._check_open()
+        f, g, n, m = self._f, self._g, self._n, self._m
+        cols = state._wrt_cols
+        dp = jnp.asarray(dp_batch, dtype=jnp.float64)
+        if dp.shape[0] != state._B:
+            raise ValueError(
+                f"pounce.jax: dp_batch leading dim {dp.shape[0]} != "
+                f"batch B={state._B}."
+            )
+        expected = (
+            self._p_shape if cols is None else (int(cols.shape[0]),)
+        )
+        if dp.shape[1:] != tuple(expected):
+            raise ValueError(
+                f"pounce.jax: dp_batch per-block shape {dp.shape[1:]} != "
+                f"expected {tuple(expected)} (anchor wrt_cols="
+                f"{'set' if cols is not None else 'None'})."
+            )
+
+        p_batch, x_star, lam = state._p_batch, state._x_star, state._lam
+
+        def per_block(p_k, x_k, lam_k, dp_k):
+            def lagrangian(x, p_):
+                base = f(x, p_)
+                if g is not None and m > 0:
+                    base = base + jnp.dot(lam_k, g(x, p_))
+                return base
+
+            grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_k, p_)
+            dgradL_dp = jax.jacrev(grad_L_of_p)(p_k)      # (n,) + p_shape
+            if cols is not None:
+                dgradL_dp = jnp.take(dgradL_dp, cols, axis=-1)
+            r_x = jnp.tensordot(dgradL_dp, dp_k, axes=dp_k.ndim)  # (n,)
+            if g is not None and m > 0:
+                dg_dp = jax.jacrev(lambda p_: g(x_k, p_))(p_k)    # (m,) + p_shape
+                if cols is not None:
+                    dg_dp = jnp.take(dg_dp, cols, axis=-1)
+                r_g = jnp.tensordot(dg_dp, dp_k, axes=dp_k.ndim)  # (m,)
+            else:
+                r_g = jnp.zeros((0,), dtype=jnp.float64)
+            return r_x, r_g
+
+        r_x_batch, r_g_batch = jax.vmap(per_block)(p_batch, x_star, lam, dp)
+        w_x = _kkt_jvp_batched_pure_callback(
+            self, state._B, state._sid, r_x_batch, r_g_batch, n, m,
+        )
+        return -w_x
 
     # ----- custom_vjp factories -----
 

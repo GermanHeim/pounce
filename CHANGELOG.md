@@ -37,6 +37,12 @@ state.close()
   post-solve sensitivity calls (linear-update pattern).
 - **`batched_vjp_from_state(state, x_bar)`** is the public reverse-mode
   product `Jᵀ x̄` against a held factor.
+- **`batched_jvp_from_state(state, dp)`** is the forward-mode product
+  `J @ dp` — the cheap path for linear updates that never materialise the
+  full `J`. It assembles the parameter-side RHS `[∂²L/∂x∂p · dp;
+  ∂g/∂p · dp]` into the compound x- and constraint-blocks and back-solves
+  once against the held factor. Accepts a reduced `dp` when the state was
+  anchored with `wrt_cols`.
 - **`AnchorState`** lifetime: works as a context manager
   (`with jp.anchor(...) as state:`) *and* supports explicit ownership
   (`state.close()`, `state.reanchor(...)`) for handles that outlive a
@@ -44,9 +50,6 @@ state.close()
   (`_pinned_capacity`, default 16) with a loud overflow error, and a
   `weakref` finalizer reclaims the factor if a handle is dropped without
   `close()`.
-
-JVP-from-state (forward-mode `J @ dp`, the cheaper path for linear
-updates that never materialise full `J`) is the next step.
 
 ### Added — Structured logging + colored iteration table (pounce#71)
 

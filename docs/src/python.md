@@ -421,8 +421,17 @@ sensitivity products — pin the factor with an `AnchorState` and reuse it:
 
 ```python
 with jp.anchor(p_batch, x0, wrt_cols=slice(0, ny)) as state:
-    dp_bar = jp.batched_vjp_from_state(state, x_bar)   # J^T @ x_bar
+    dx     = jp.batched_jvp_from_state(state, dp)      # J @ dp   (forward)
+    dp_bar = jp.batched_vjp_from_state(state, x_bar)   # J^T @ x_bar (reverse)
 ```
+
+`batched_jvp_from_state` is the cheap path for linear updates that only
+need the directional sensitivity `delta_x = J @ delta_p` and never the
+full `J`: it assembles the parameter-side RHS `[∂²L/∂x∂p · dp; ∂g/∂p · dp]`
+and back-solves once against the held factor. When the state was anchored
+with `wrt_cols`, pass the reduced `dp` (one entry per selected column);
+otherwise pass a full `(B,) + p_shape` perturbation (zero out the columns
+you don't want to move).
 
 `anchor(...)` (and `batched_solve_with_jacobian(..., return_state=True)`)
 return an `AnchorState` that holds the factor across calls. Prefer the

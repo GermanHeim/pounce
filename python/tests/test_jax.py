@@ -1364,3 +1364,113 @@ def test_vjp_from_state_rejects_foreign_state_pounce_82():
     with jp1.anchor(p_batch, x0) as state:
         with pytest.raises(ValueError, match="different"):
             jp2.batched_vjp_from_state(state, jnp.zeros((2, 2)))
+
+
+# --------------------------------------------------------------------------
+# pounce#82 Phase 2: forward-mode JVP from the held factor (J @ dp)
+# --------------------------------------------------------------------------
+
+
+def _fd_jvp(jp, p_batch, x0, dp, eps=1e-6):
+    """Central finite-difference directional derivative of batched_solve.
+    (batched_solve is a custom_vjp, so jax.jvp can't trace it directly.)"""
+    xp = jp.batched_solve(p_batch + eps * dp, x0)
+    xm = jp.batched_solve(p_batch - eps * dp, x0)
+    return (xp - xm) / (2.0 * eps)
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+@pytest.mark.parametrize("reuse", [True, False])
+def test_batched_jvp_from_state_matches_jacobian_pounce_82(bounded, reuse):
+    """Issue #82 Phase 2: ``J @ dp`` from the forward path equals the
+    contraction of the materialised Jacobian (machine precision) and a
+    finite-difference directional derivative (loose)."""
+    jp = _build_jac_qp(reuse=reuse, bounded=bounded)
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.05, 0.4]])
+    x0 = jnp.zeros(2)
+    dp = jnp.array([[1.0, 0.0], [0.2, -0.3], [0.5, 0.5]])
+
+    x_star, _, J, state = jp.batched_solve_with_jacobian(
+        p_batch, x0, return_state=True
+    )
+    try:
+        dx = jp.batched_jvp_from_state(state, dp)
+    finally:
+        state.close()
+
+    assert dx.shape == (3, 2)
+    dx_fromJ = jnp.einsum("knp,kp->kn", J, dp)
+    np.testing.assert_allclose(np.asarray(dx), np.asarray(dx_fromJ), atol=1e-10)
+    dx_fd = _fd_jvp(jp, p_batch, x0, dp)
+    np.testing.assert_allclose(np.asarray(dx), np.asarray(dx_fd), atol=1e-6)
+
+
+def test_batched_jvp_unconstrained_pounce_82():
+    """Issue #82 Phase 2: for ``min ||x - p||²`` (x* = p) the directional
+    derivative is the identity, so ``J @ dp = dp``."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    jp = JaxProblem(
+        f=f, g=None, n=3, m=0, p_example=jnp.zeros(3),
+        lb=jnp.full(3, -10.0), ub=jnp.full(3, 10.0),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    p_batch = jnp.array([[0.1, 0.2, 0.3], [-1.0, 0.5, 2.0]])
+    dp = jnp.array([[1.0, 2.0, 3.0], [0.5, 0.0, -1.0]])
+    x0 = jnp.zeros(3)
+
+    with jp.anchor(p_batch, x0) as state:
+        dx = jp.batched_jvp_from_state(state, dp)
+    np.testing.assert_allclose(np.asarray(dx), np.asarray(dp), atol=1e-7)
+
+
+def test_batched_jvp_respects_wrt_cols_pounce_82():
+    """Issue #82 Phase 2: a state anchored with ``wrt_cols`` takes a
+    reduced ``dp`` and matches the full-space JVP with zeros elsewhere."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    with jp.anchor(p_batch, x0, wrt_cols=slice(0, 1)) as state:
+        dx_red = jp.batched_jvp_from_state(state, jnp.array([[1.0], [0.4]]))
+    dx_fd = _fd_jvp(jp, p_batch, x0, jnp.array([[1.0, 0.0], [0.4, 0.0]]))
+    np.testing.assert_allclose(np.asarray(dx_red), np.asarray(dx_fd), atol=1e-6)
+
+
+def test_batched_jvp_shape_validation_pounce_82():
+    """Issue #82 Phase 2: a dp_batch with the wrong per-block shape or
+    batch size is rejected with a clear error."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    with jp.anchor(p_batch, x0) as state:
+        with pytest.raises(ValueError, match="per-block shape"):
+            jp.batched_jvp_from_state(state, jnp.zeros((2, 3)))
+        with pytest.raises(ValueError, match="leading dim"):
+            jp.batched_jvp_from_state(state, jnp.zeros((3, 2)))
+    # wrt_cols state expects the reduced width.
+    with jp.anchor(p_batch, x0, wrt_cols=slice(0, 1)) as state:
+        with pytest.raises(ValueError, match="per-block shape"):
+            jp.batched_jvp_from_state(state, jnp.zeros((2, 2)))
+
+
+def test_batched_jvp_rejects_closed_and_foreign_state_pounce_82():
+    """Issue #82 Phase 2: JVP-from-state guards lifetime and ownership
+    like the VJP path."""
+    jp1 = _build_jac_qp()
+    jp2 = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    state = jp1.anchor(p_batch, x0)
+    state.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        jp1.batched_jvp_from_state(state, jnp.zeros((2, 2)))
+
+    with jp1.anchor(p_batch, x0) as state:
+        with pytest.raises(ValueError, match="different"):
+            jp2.batched_jvp_from_state(state, jnp.zeros((2, 2)))
