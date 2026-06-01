@@ -18,8 +18,17 @@ from ._critical import (
     find_critical_points, find_saddles, reaction_network,
     CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
 )
+from .qp import (
+    QpResult,
+    QpFactorization,
+    solve_qp,
+    solve_socp,
+    solve_qp_batch,
+    solve_qp_multi_rhs,
+)
 
 __all__ = [
+    # Nonlinear programming (cyipopt-compatible)
     "Problem",
     "Solver",
     "NlProblem",
@@ -36,5 +45,12 @@ __all__ = [
     "Connection",
     "ReactionNetwork",
     "classify_working_set",
+    # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
+    "QpResult",
+    "QpFactorization",
+    "solve_qp",
+    "solve_socp",
+    "solve_qp_batch",
+    "solve_qp_multi_rhs",
     "__version__",
 ]

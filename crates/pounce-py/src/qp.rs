@@ -26,7 +26,7 @@ use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
@@ -172,13 +172,52 @@ fn status_str(s: QpStatus) -> &'static str {
     }
 }
 
-/// Build the Python result dict `{x, y, z, z_lb, z_ub, obj, iters,
-/// status}` from a `QpSolution`.
-fn solution_dict<'py>(py: Python<'py>, sol: QpSolution) -> PyResult<Bound<'py, PyDict>> {
+/// Build the Python result dict `{x, y, z, z_lb, z_ub, obj, iters, status,
+/// iterates, residuals}` from a `QpSolution`.
+///
+/// When `prob` is `Some`, the final KKT `residuals` block is attached — but
+/// only for the plain-QP path, where `Gx ≤ h` is an orthant constraint and
+/// [`QpSolution::kkt_residuals`] applies. Conic (SOCP/exp/power) solves pass
+/// `None`: there the slack lives in a non-orthant cone, so those orthant
+/// residuals would be meaningless. The `iterates` trace is always attached
+/// (empty unless `collect_iterates` was set, so there is no overhead off the
+/// opt-in path).
+fn solution_dict<'py>(
+    py: Python<'py>,
+    sol: QpSolution,
+    prob: Option<&QpProblem>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("status", status_str(sol.status))?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
+
+    // Final KKT residuals (plain QP only — see the doc comment).
+    if let Some(p) = prob {
+        let r = sol.kkt_residuals(p);
+        let rd = PyDict::new_bound(py);
+        rd.set_item("primal_infeasibility", r.primal_infeasibility)?;
+        rd.set_item("dual_infeasibility", r.dual_infeasibility)?;
+        rd.set_item("complementarity", r.complementarity)?;
+        rd.set_item("kkt_error", r.kkt_error())?;
+        d.set_item("residuals", rd)?;
+    }
+
+    // Per-iteration convergence trace (empty unless `collect_iterates` set).
+    let trace = PyList::empty_bound(py);
+    for it in &sol.iterates {
+        let row = PyDict::new_bound(py);
+        row.set_item("iter", it.iter)?;
+        row.set_item("objective", it.objective)?;
+        row.set_item("primal_infeasibility", it.primal_infeasibility)?;
+        row.set_item("dual_infeasibility", it.dual_infeasibility)?;
+        row.set_item("mu", it.mu)?;
+        row.set_item("alpha_primal", it.alpha_primal)?;
+        row.set_item("alpha_dual", it.alpha_dual)?;
+        trace.append(row)?;
+    }
+    d.set_item("iterates", trace)?;
+
     d.set_item("x", sol.x.into_pyarray_bound(py))?;
     d.set_item("y", sol.y.into_pyarray_bound(py))?;
     d.set_item("z", sol.z.into_pyarray_bound(py))?;
@@ -231,7 +270,7 @@ fn parse_cones(specs: Vec<(String, f64)>) -> PyResult<Vec<ConeSpec>> {
         .collect()
 }
 
-fn opts(tol: Option<f64>, max_iter: Option<usize>) -> QpOptions {
+fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> QpOptions {
     let mut o = QpOptions::default();
     if let Some(t) = tol {
         o.tol = t;
@@ -239,6 +278,7 @@ fn opts(tol: Option<f64>, max_iter: Option<usize>) -> QpOptions {
     if let Some(m) = max_iter {
         o.max_iter = m;
     }
+    o.collect_iterates = collect_iterates;
     o
 }
 
@@ -250,22 +290,26 @@ fn opts(tol: Option<f64>, max_iter: Option<usize>) -> QpOptions {
 /// keys — e.g. a previous result dict for a nearby problem. It only
 /// affects the iteration count, not the solution; a dimension mismatch is
 /// ignored (cold start).
+///
+/// `collect_iterates` (default `false`) opts into the per-iteration
+/// convergence trace, returned under the `iterates` key.
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false))]
 pub fn solve_qp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
     tol: Option<f64>,
     max_iter: Option<usize>,
     warm_start: Option<&Bound<'py, PyDict>>,
+    collect_iterates: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let o = opts(tol, max_iter);
+    let o = opts(tol, max_iter, collect_iterates);
     let warm = warm_start.map(warm_from_dict).transpose()?;
     let sol = py.allow_threads(|| match &warm {
         Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
         None => solve_qp_ipm(&prob.inner, &o, backend),
     });
-    solution_dict(py, sol)
+    solution_dict(py, sol, Some(&prob.inner))
 }
 
 /// Solve a standard-form conic program (LP/QP plus second-order, exponential,
@@ -280,18 +324,32 @@ pub fn solve_qp<'py>(
 /// non-symmetric HSDE driver, which also handles second-order cones — so a
 /// SOC may be freely mixed with an exp/power cone.
 #[pyfunction]
-#[pyo3(signature = (prob, cones, tol=None, max_iter=None))]
+#[pyo3(signature = (prob, cones, tol=None, max_iter=None, collect_iterates=false))]
 pub fn solve_socp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
     cones: Vec<(String, f64)>,
     tol: Option<f64>,
     max_iter: Option<usize>,
+    collect_iterates: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let o = opts(tol, max_iter);
+    let o = opts(tol, max_iter, collect_iterates);
     let specs = parse_cones(cones)?;
+    // The cones must partition the rows of G exactly (an exp/power cone is
+    // always 3 rows). Catch the mismatch here with a clear, catchable error
+    // rather than letting the conic driver index past the slack vector.
+    let cone_rows: usize = specs.iter().map(|c| c.dim()).sum();
+    if cone_rows != prob.inner.m_ineq() {
+        return Err(PyValueError::new_err(format!(
+            "cone dimensions sum to {cone_rows}, but G has {} inequality row(s); \
+             the cones must partition the rows of G exactly \
+             (an exponential or power cone is always 3 rows)",
+            prob.inner.m_ineq()
+        )));
+    }
     let sol = py.allow_threads(|| solve_socp_ipm(&prob.inner, &specs, &o, backend));
-    solution_dict(py, sol)
+    // Conic slack lives in a non-orthant cone: skip the orthant residuals.
+    solution_dict(py, sol, None)
 }
 
 /// Solve a batch of convex QPs in parallel (across instances). Returns a
@@ -310,7 +368,7 @@ pub fn solve_qp_batch<'py>(
     max_iter: Option<usize>,
     warm_starts: Option<Vec<Bound<'py, PyDict>>>,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let o = opts(tol, max_iter);
+    let o = opts(tol, max_iter, false);
     let inners: Vec<QpProblem> = probs.into_iter().map(|p| p.inner).collect();
     let warms: Option<Vec<QpWarmStart>> = match warm_starts {
         Some(ws) => {
@@ -329,7 +387,10 @@ pub fn solve_qp_batch<'py>(
         Some(w) => solve_qp_batch_parallel_warm(&inners, w, &o, serial_backend),
         None => solve_qp_batch_parallel(&inners, &o, serial_backend),
     });
-    sols.into_iter().map(|s| solution_dict(py, s)).collect()
+    sols.into_iter()
+        .zip(inners.iter())
+        .map(|(s, p)| solution_dict(py, s, Some(p)))
+        .collect()
 }
 
 /// Solve one QP structure (`base`) against many linear objectives `cs`
@@ -353,12 +414,21 @@ pub fn solve_qp_multi_rhs<'py>(
             )));
         }
     }
-    let o = opts(tol, max_iter);
+    let o = opts(tol, max_iter, false);
     let base_inner = base.inner.clone();
     let sols = py.allow_threads(|| {
         pounce_convex::solve_qp_multi_rhs_parallel(&base_inner, &cs, &o, serial_backend)
     });
-    sols.into_iter().map(|s| solution_dict(py, s)).collect()
+    // Each solve shares the base structure but uses its own objective `cs[k]`;
+    // attach residuals against that instance (a clone with `c` swapped in).
+    sols.into_iter()
+        .zip(cs.iter())
+        .map(|(s, c)| {
+            let mut prob = base_inner.clone();
+            prob.c = c.clone();
+            solution_dict(py, s, Some(&prob))
+        })
+        .collect()
 }
 
 /// Build-once / solve-many handle: builds the KKT symbolic factor once
@@ -376,7 +446,7 @@ impl PyQpFactorization {
     #[new]
     #[pyo3(signature = (base, tol=None, max_iter=None))]
     fn new(base: &PyQpProblem, tol: Option<f64>, max_iter: Option<usize>) -> PyResult<Self> {
-        let o = opts(tol, max_iter);
+        let o = opts(tol, max_iter, false);
         let inner = QpFactorization::build(&base.inner, &o, backend).ok_or_else(|| {
             PyValueError::new_err(
                 "QpFactorization: initial factorization failed (structurally singular KKT system)",
@@ -402,6 +472,6 @@ impl PyQpFactorization {
             Some(w) => self.inner.solve_warm(&prob.inner, &warm_from_dict(w)?),
             None => self.inner.solve(&prob.inner),
         };
-        solution_dict(py, sol)
+        solution_dict(py, sol, Some(&prob.inner))
     }
 }

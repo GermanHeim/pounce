@@ -31,7 +31,7 @@ Example
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import numpy as np
@@ -39,12 +39,12 @@ import numpy as np
 from . import _pounce
 
 __all__ = [
-    "QpProblem",
     "QpResult",
     "QpFactorization",
     "solve_qp",
     "solve_socp",
     "solve_qp_batch",
+    "solve_qp_multi_rhs",
 ]
 
 
@@ -70,6 +70,18 @@ class QpResult:
         Objective value ``½ xᵀP x + cᵀx``.
     iters:
         Interior-point iterations taken.
+    residuals:
+        Final KKT residuals as a dict with keys
+        ``primal_infeasibility``, ``dual_infeasibility``,
+        ``complementarity``, and ``kkt_error`` (the max of the three).
+        ``None`` for conic (:func:`solve_socp`) solves, where the slack
+        lives in a non-orthant cone and these orthant residuals do not
+        apply.
+    iterates:
+        Per-iteration convergence trace — a list of dicts with keys
+        ``iter``, ``objective``, ``primal_infeasibility``,
+        ``dual_infeasibility``, ``mu``, ``alpha_primal``, ``alpha_dual``.
+        Empty unless the solve was called with ``collect_iterates=True``.
     """
 
     status: str
@@ -80,10 +92,17 @@ class QpResult:
     z_ub: np.ndarray
     obj: float
     iters: int
+    residuals: Optional[dict] = None
+    iterates: list = field(default_factory=list)
 
     @property
     def success(self) -> bool:
         return self.status == "optimal"
+
+    @property
+    def kkt_error(self) -> Optional[float]:
+        """Overall KKT error (max residual), or ``None`` for conic solves."""
+        return None if self.residuals is None else self.residuals["kkt_error"]
 
 
 def _coo(mat, n_cols: int, what: str):
@@ -169,6 +188,8 @@ def _to_result(d: dict) -> QpResult:
         z_ub=np.asarray(d["z_ub"]),
         obj=float(d["obj"]),
         iters=int(d["iters"]),
+        residuals=d.get("residuals"),
+        iterates=list(d.get("iterates", [])),
     )
 
 
@@ -208,6 +229,7 @@ def solve_qp(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
+    collect_iterates: bool = False,
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
@@ -219,13 +241,21 @@ def solve_qp(
     with ``x``/``y``/``z``/``z_lb``/``z_ub``) for a *nearby* problem. It
     seeds the interior-point iteration to reduce the iteration count; it
     does not change the solution, and a dimension mismatch is ignored.
+
+    The returned :class:`QpResult` carries the final KKT ``residuals``;
+    pass ``collect_iterates=True`` to also capture the per-iteration
+    convergence trace in ``result.iterates``.
     """
     if c is None:
         raise ValueError("solve_qp: `c` is required")
     prob = _build(P, c, A, b, G, h, lb, ub)
     return _to_result(
         _pounce.solve_qp(
-            prob, tol=tol, max_iter=max_iter, warm_start=_warm_dict(warm_start)
+            prob,
+            tol=tol,
+            max_iter=max_iter,
+            warm_start=_warm_dict(warm_start),
+            collect_iterates=collect_iterates,
         )
     )
 
@@ -263,6 +293,7 @@ def solve_socp(
     cones,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    collect_iterates: bool = False,
 ) -> QpResult:
     """Solve a standard-form conic program (LP/QP + second-order and/or
     exponential cones).
@@ -310,7 +341,11 @@ def solve_socp(
         raise ValueError("solve_socp: `c` is required")
     prob = _build(P, c, A, b, G, h, None, None)
     specs = _normalize_cones(cones)
-    return _to_result(_pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter))
+    return _to_result(
+        _pounce.solve_socp(
+            prob, specs, tol=tol, max_iter=max_iter, collect_iterates=collect_iterates
+        )
+    )
 
 
 def solve_qp_batch(
@@ -351,6 +386,44 @@ def solve_qp_batch(
             )
         ws = [_warm_dict(w) or {} for w in warm_starts]
     dicts = _pounce.solve_qp_batch(built, tol=tol, max_iter=max_iter, warm_starts=ws)
+    return [_to_result(d) for d in dicts]
+
+
+def solve_qp_multi_rhs(
+    P=None,
+    c=None,
+    A=None,
+    b=None,
+    G=None,
+    h=None,
+    lb=None,
+    ub=None,
+    *,
+    cs: Sequence[Sequence[float]],
+    tol: Optional[float] = None,
+    max_iter: Optional[int] = None,
+) -> list[QpResult]:
+    """Solve one QP *structure* against many linear objectives, in parallel.
+
+    All of ``P``/``A``/``b``/``G``/``h``/``lb``/``ub`` are shared; only the
+    linear term varies, given as ``cs`` — a sequence of length-``n`` vectors
+    (one objective per solve). Returns one :class:`QpResult` per entry of
+    ``cs``, in order. The ``c`` argument here is only a placeholder for
+    shape; the per-solve objectives come from ``cs``.
+
+    This is the multiple-right-hand-side analog of :func:`solve_qp_batch`:
+    use it when the constraint geometry is fixed and you are sweeping the
+    objective (e.g. a family of cost vectors, a parametric linear term, or
+    the inner objective of a bilevel sweep).
+    """
+    if cs is None or len(cs) == 0:
+        raise ValueError("solve_qp_multi_rhs: `cs` must be a non-empty sequence")
+    n = len(np.asarray(cs[0], dtype=np.float64).ravel())
+    # `c` only fixes `n` for the base structure; the real objectives are `cs`.
+    base_c = c if c is not None else np.zeros(n)
+    base = _build(P, base_c, A, b, G, h, lb, ub)
+    cs_list = [np.asarray(ci, dtype=np.float64).ravel().tolist() for ci in cs]
+    dicts = _pounce.solve_qp_multi_rhs(base, cs_list, tol=tol, max_iter=max_iter)
     return [_to_result(d) for d in dicts]
 
 

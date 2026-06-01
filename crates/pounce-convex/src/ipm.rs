@@ -176,6 +176,18 @@ pub fn solve_socp_ipm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // The cones must partition the inequality rows exactly; otherwise the
+    // cone vectors and the `m_ineq` slack disagree and the driver would read
+    // out of bounds (an exp/power cone is always 3 rows). Fail cleanly here.
+    if !cone_dims_cover(cones, prob.m_ineq()) {
+        return failed_solution(
+            prob,
+            vec![0.0; prob.n],
+            vec![0.0; prob.m_eq()],
+            vec![0.0; prob.m_ineq()],
+            0,
+        );
+    }
     // Non-symmetric cones (exponential) route to the dedicated HSDE driver.
     if cones
         .iter()
@@ -215,6 +227,15 @@ where
         !prob.has_bounds(),
         "solve_socp_ipm_warm: encode bounds as G/h rows (bound expansion + warm not combined)"
     );
+    if !cone_dims_cover(cones, prob.m_ineq()) {
+        return failed_solution(
+            prob,
+            vec![0.0; prob.n],
+            vec![0.0; prob.m_eq()],
+            vec![0.0; prob.m_ineq()],
+            0,
+        );
+    }
     let cone = CompositeCone::from_specs(cones);
     let w = WarmStart {
         x: warm.x.clone(),
@@ -899,6 +920,14 @@ impl QpFactorization {
         );
         split_bound_duals(prob, &bound_rows, sol)
     }
+}
+
+/// Whether the cone specs partition exactly `m_ineq` inequality rows — the
+/// invariant the conic drivers assume (each `s = h − Gx` block sits in one
+/// cone, with an exp/power cone occupying exactly 3 rows). A mismatch is a
+/// caller error that would otherwise index past the slack vector.
+fn cone_dims_cover(cones: &[ConeSpec], m_ineq: usize) -> bool {
+    cones.iter().map(|c| c.dim()).sum::<usize>() == m_ineq
 }
 
 /// Build a `NumericalFailure` solution from the current iterate (used

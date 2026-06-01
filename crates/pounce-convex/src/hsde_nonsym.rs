@@ -1051,6 +1051,29 @@ mod tests {
         }
     }
 
+    /// An exponential cone is always 3 rows. Declaring it over a `G` with
+    /// only 2 inequality rows is a caller error: the driver must fail
+    /// cleanly (`NumericalFailure`) instead of indexing past the 2-row
+    /// slack and panicking — the guard in [`crate::ipm::solve_socp_ipm`].
+    #[test]
+    fn mismatched_cone_dims_fail_cleanly() {
+        use crate::cones::ConeSpec;
+        use crate::ipm::solve_socp_ipm;
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0), Triplet::new(1, 1, -1.0)],
+            h: vec![0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_socp_ipm(&prob, &[ConeSpec::Exponential], &opts(), backend);
+        assert_eq!(sol.status, QpStatus::NumericalFailure);
+    }
+
     /// `min z s.t. x = 1, y = 1, (x,y,z) ∈ K_exp`. The cone forces
     /// `z ≥ y·exp(x/y) = e`, so the optimum is `z = e` at `x = y = 1`.
     #[test]
