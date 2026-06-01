@@ -6,6 +6,10 @@
 # mdbook render output — `make book` regenerates it from docs/src/.
 /docs/book
 
+# Local Python venv used to build/test the native extension
+# (`maturin develop`). Machine-specific build artifact.
+/.venv
+
 # Local cargo config — holds a machine-specific CoinHSL rpath for the
 # optional `ma57` feature. Set COINHSL_DIR instead (see crates/pounce-hsl).
 /.cargo/config.toml
