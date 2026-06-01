@@ -448,7 +448,10 @@ state.close()                # release the held factor
 Pinned factors are exempt from the backward LRU but capped
 (`_pinned_capacity`, default 16) so a missed `close()` fails loudly
 rather than leaking; a `weakref` finalizer reclaims the factor if a
-handle is garbage-collected without `close()`.
+handle is garbage-collected without `close()`. A worked example —
+projection layer, full Jacobian, JVP/VJP-from-state, and the lifetime
+patterns — is in
+[`notebooks/13_post_solve_jacobian.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/13_post_solve_jacobian.ipynb).
 
 ## Notebooks
 
