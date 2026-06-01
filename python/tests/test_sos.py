@@ -41,6 +41,28 @@ def test_facial_reduction_nonunique_minimizers():
     assert all(abs(float(m[1])) < 1e-2 for m in r.minimizers)
 
 
+def test_facial_reduction_four_minimizers_order_three():
+    # (x²−1)² + (y²−1)² → four global minima (value 0) at (±1, ±1). Needs the
+    # order-3 relaxation, a larger degenerate SDP that the solver now carries to
+    # optimality (homogeneous self-dual embedding) so all four atoms come out.
+    p = {
+        (4, 0): 1.0,
+        (2, 0): -2.0,
+        (0, 4): 1.0,
+        (0, 2): -2.0,
+        (0, 0): 2.0,
+    }
+    r = sos_minimize(p, order=3)
+    assert r.success
+    assert abs(r.lower_bound) < 1e-5
+    assert r.is_exact and r.num_minimizers == 4
+    quads = {(float(m[0]) > 0, float(m[1]) > 0) for m in r.minimizers}
+    assert len(quads) == 4, f"expected all four quadrants, got {r.minimizers}"
+    for m in r.minimizers:
+        assert abs(abs(float(m[0])) - 1.0) < 2e-2
+        assert abs(abs(float(m[1])) - 1.0) < 2e-2
+
+
 def test_unique_minimizer_2d():
     # (x−1)² + (y−2)² → min 0 at (1, 2).
     p = {(2, 0): 1.0, (1, 0): -2.0, (0, 2): 1.0, (0, 1): -4.0, (0, 0): 5.0}

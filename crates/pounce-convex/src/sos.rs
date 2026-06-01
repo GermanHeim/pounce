@@ -135,7 +135,7 @@ pub fn sos_lower_bound<F>(p: &Polynomial, mut make_backend: F) -> SosBound
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    sos_lower_bound_opts(p, &QpOptions::default(), &mut make_backend)
+    sos_lower_bound_opts(p, &sos_opts(), &mut make_backend)
 }
 
 /// [`sos_lower_bound`] with explicit solver options.
@@ -166,7 +166,23 @@ pub fn sos_constrained_lower_bound<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    sos_constrained_lower_bound_opts(prob, order, &QpOptions::default(), make_backend)
+    sos_constrained_lower_bound_opts(prob, order, &sos_opts(), make_backend)
+}
+
+/// Default solver options for an SOS/moment SDP.
+///
+/// SOS relaxations are *degenerate by design*: an exact relaxation has a
+/// rank-deficient optimal moment matrix sitting on the PSD-cone boundary, where
+/// the Nesterov–Todd scaling has unbounded dynamic range. The infeasible-start
+/// symmetric driver stalls or diverges there (e.g. the order-3 trace-penalty
+/// refinement ran to the iteration limit and drifted to a `-6e7` "bound");
+/// the homogeneous self-dual embedding stays well-conditioned on the same
+/// problems (≈10 iterations), so SOS solves default to it.
+fn sos_opts() -> QpOptions {
+    QpOptions {
+        use_hsde: true,
+        ..QpOptions::default()
+    }
 }
 
 /// The moment-side bookkeeping needed to recover the solution from the SDP
@@ -385,8 +401,9 @@ pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, mut make_backen
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    let opts = sos_opts();
     let (qp, cones, mi) = build_sos_sdp(prob, order, None);
-    let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), &mut make_backend);
+    let sol = solve_socp_ipm(&qp, &cones, &opts, &mut make_backend);
     let lower_bound = sol.x.first().copied().unwrap_or(f64::NEG_INFINITY);
     if sol.status != QpStatus::Optimal {
         return SosSolution {
@@ -411,7 +428,7 @@ where
     if !rec.is_exact {
         const TRACE_EPS: f64 = 1e-4;
         let (qp2, cones2, mi2) = build_sos_sdp(prob, order, Some(TRACE_EPS));
-        let sol2 = solve_socp_ipm(&qp2, &cones2, &QpOptions::default(), &mut make_backend);
+        let sol2 = solve_socp_ipm(&qp2, &cones2, &opts, &mut make_backend);
         if sol2.status == QpStatus::Optimal {
             let rec2 = recover_from_moments(&mi2, &sol2.y);
             if rec2.is_exact {
@@ -611,8 +628,20 @@ fn extract_atoms(mi: &MomentInfo, r: usize, moment: impl Fn(&[usize]) -> f64) ->
     atoms
 }
 
-/// Numerical rank of a symmetric PSD matrix (row-major `n×n`): the number of
-/// eigenvalues exceeding `1e-6 · λ_max`.
+/// Numerical rank of a symmetric PSD matrix (row-major `n×n`) for flat
+/// truncation, by the **largest spectral gap**.
+///
+/// A fixed relative threshold is fragile here: a flat moment matrix has a few
+/// `O(1)` eigenvalues (one per atom) and a noise floor set by the solver's
+/// dual accuracy, but where that floor lands varies with the driver — the
+/// homogeneous self-dual embedding leaves an `O(1e-5)` residual while the
+/// symmetric driver reaches `O(1e-7)`, straddling any single cutoff. What is
+/// invariant is the *gap*: there are many orders of magnitude between the
+/// smallest true eigenvalue and the largest noise eigenvalue. So we sort the
+/// eigenvalues descending and cut at the largest consecutive ratio, searching
+/// only within the plausible band `(1e-9, 1e-2)·λ_max` — above the band an
+/// eigenvalue is certainly real, below it is certainly numerical zero. With no
+/// gap in the band the matrix is effectively full rank over that band.
 fn psd_rank(mat: &[f64], n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -622,9 +651,36 @@ fn psd_rank(mat: &[f64], n: usize) -> usize {
     if !symmetric_eigen(mat, n, &mut vals, &mut vecs) {
         return n;
     }
-    let max = vals.iter().cloned().fold(0.0_f64, f64::max);
-    let tol = 1e-6 * max.max(1e-12);
-    vals.iter().filter(|&&l| l > tol).count()
+    // Eigenvalues descending, floored at 0 (PSD; tiny negatives are noise),
+    // normalized by λ_max so the bands below are absolute.
+    let mut d: Vec<f64> = vals.iter().rev().map(|&v| v.max(0.0)).collect();
+    let max = d[0];
+    if max <= 1e-12 {
+        return 0;
+    }
+    for v in &mut d {
+        *v /= max;
+    }
+    const HI: f64 = 1e-2; // ≥ HI ⇒ certainly a real eigenvalue
+    const LO: f64 = 1e-9; // ≤ LO ⇒ certainly numerical zero
+    const MIN_GAP: f64 = 1e2; // a real rank cut spans ≥ this ratio
+    let r_certain = d.iter().filter(|&&v| v >= HI).count();
+    let r_possible = d.iter().filter(|&&v| v > LO).count();
+    if r_certain == r_possible {
+        return r_certain; // nothing in the ambiguous band
+    }
+    // Cut at the largest consecutive ratio gap within the ambiguous band; if no
+    // gap clears MIN_GAP, keep every eigenvalue above the numerical-zero floor.
+    let mut rank = r_possible;
+    let mut best = MIN_GAP;
+    for i in r_certain.max(1)..r_possible {
+        let ratio = d[i - 1] / d[i].max(1e-300);
+        if ratio > best {
+            best = ratio;
+            rank = i;
+        }
+    }
+    rank
 }
 
 #[cfg(test)]
@@ -839,5 +895,61 @@ mod tests {
         for atom in &s.minimizers {
             assert!(atom[1].abs() < 1e-2, "y = {}", atom[1]);
         }
+    }
+
+    #[test]
+    fn facial_reduction_three_minimizers_degree_six() {
+        // p(x) = x²(x−1)²(x+1)² = x⁶ − 2x⁴ + x², a nonnegative sextic with
+        // THREE global minima (value 0) at x = −1, 0, 1. The order-3 relaxation
+        // is degenerate (a boundary-rank optimum); the HSDE driver solves it and
+        // facial reduction recovers all three atoms.
+        let p = Polynomial::new(1, vec![(vec![6], 1.0), (vec![4], -2.0), (vec![2], 1.0)]);
+        let s = sos_minimize(&PolyProblem::new(p), None, backend);
+        assert_eq!(s.status, QpStatus::Optimal, "{:?}", s.status);
+        assert!(s.lower_bound.abs() < 1e-5, "bound = {}", s.lower_bound);
+        assert!(s.is_exact, "facial reduction should certify exactness");
+        assert_eq!(s.num_minimizers, 3, "three atoms at −1, 0, 1");
+        let mut roots: Vec<f64> = s.minimizers.iter().map(|m| m[0]).collect();
+        roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((roots[0] + 1.0).abs() < 1e-2, "{roots:?}");
+        assert!(roots[1].abs() < 1e-2, "{roots:?}");
+        assert!((roots[2] - 1.0).abs() < 1e-2, "{roots:?}");
+    }
+
+    #[test]
+    fn facial_reduction_four_minimizers_2d_order_three() {
+        // p(x,y) = (x²−1)² + (y²−1)², four global minima (value 0) at (±1, ±1).
+        // Four atoms need moment-matrix rank 4, which cannot stabilize against
+        // the 3-dimensional degree-≤1 subspace until order 3 — a larger, more
+        // degenerate SDP that only the HSDE driver carries to optimality.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 1.0),
+                (vec![2, 0], -2.0),
+                (vec![0, 4], 1.0),
+                (vec![0, 2], -2.0),
+                (vec![0, 0], 2.0),
+            ],
+        );
+        let s = sos_minimize(&PolyProblem::new(p), Some(3), backend);
+        assert_eq!(s.status, QpStatus::Optimal, "{:?}", s.status);
+        assert!(s.lower_bound.abs() < 1e-5, "bound = {}", s.lower_bound);
+        assert!(s.is_exact, "facial reduction should certify exactness");
+        assert_eq!(s.num_minimizers, 4, "four atoms at (±1, ±1)");
+        for atom in &s.minimizers {
+            assert!((atom[0].abs() - 1.0).abs() < 2e-2, "x = {}", atom[0]);
+            assert!((atom[1].abs() - 1.0).abs() < 2e-2, "y = {}", atom[1]);
+        }
+        // All four quadrants present.
+        let mut quad = [false; 4];
+        for atom in &s.minimizers {
+            quad[usize::from(atom[0] > 0.0) + 2 * usize::from(atom[1] > 0.0)] = true;
+        }
+        assert!(
+            quad.iter().all(|&q| q),
+            "missing a quadrant: {:?}",
+            s.minimizers
+        );
     }
 }
