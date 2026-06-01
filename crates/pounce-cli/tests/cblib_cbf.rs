@@ -36,6 +36,7 @@ const DEMB761: &str = include_str!("data/cblib/demb761.cbf");
 const BECK751: &str = include_str!("data/cblib/beck751.cbf");
 const FANG88: &str = include_str!("data/cblib/fang88.cbf");
 const POW3: &str = include_str!("data/cblib/pow3_synthetic.cbf");
+const SDP: &str = include_str!("data/cblib/sdp_synthetic.cbf");
 
 #[test]
 fn demb761_solves_to_optimum() {
@@ -66,4 +67,14 @@ fn power_cone_synthetic_hits_known_optimum() {
     let (status, obj) = solve_instance(POW3);
     assert_eq!(status, QpStatus::Optimal, "pow3 status");
     assert!((obj - 1.0).abs() < 1e-6, "pow3 objective {obj} vs 1");
+}
+
+#[test]
+fn sdp_psdcon_synthetic_hits_known_optimum() {
+    // max λ s.t. (M − λI) ⪰ 0, M = diag(2,5)  →  λ = λ_min(M) = 2.
+    // Validates the PSDCON / HCOORD / DCOORD reader (affine PSD constraint →
+    // a pounce Psd cone with √2-scaled svec rows) end to end.
+    let (status, obj) = solve_instance(SDP);
+    assert_eq!(status, QpStatus::Optimal, "sdp status");
+    assert!((obj - 2.0).abs() < 1e-5, "sdp objective {obj} vs 2");
 }

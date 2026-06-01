@@ -17,8 +17,11 @@
 //!   cones (same syntax). `L=` ⇒ `Ax+b = 0`, `L-` ⇒ `≤ 0`, `L+` ⇒ `≥ 0`.
 //! - `OBJACOORD` / `OBJBCOORD` — sparse objective `c` and constant `c₀`.
 //! - `ACOORD` / `BCOORD` — sparse `A` (`row col val`) and `b` (`row val`).
+//! - `PSDCON` + `HCOORD` / `DCOORD` — affine PSD constraints
+//!   `D_c + Σ_k x_k H_{c,k} ⪰ 0`, mapped to a `Psd` cone on the slack.
 //!
-//! The problem is `min/max cᵀx + c₀  s.t.  x ∈ K_var,  Ax + b ∈ K_con`.
+//! The problem is `min/max cᵀx + c₀  s.t.  x ∈ K_var,  Ax + b ∈ K_con`,
+//! plus any affine PSD constraints.
 //!
 //! # Exponential-cone convention
 //!
@@ -99,6 +102,17 @@ pub struct CbfModel {
     pub a: Vec<(usize, usize, f64)>,
     /// Constraint constant `b`, dense (length `num_con`).
     pub b: Vec<f64>,
+    /// Matrix sizes of the affine PSD constraints (`PSDCON`): constraint `c`
+    /// asserts `D_c + Σ_k x_k H_{c,k} ⪰ 0` over a `psdcon_dims[c]`-square
+    /// matrix.
+    pub psdcon_dims: Vec<usize>,
+    /// `HCOORD` entries `(con, var, i, j, val)`: `H_{con,var}[i][j] = val`
+    /// (lower triangle, `i ≥ j`) — the coefficient of scalar variable `var`
+    /// on entry `(i,j)` of PSD constraint `con`.
+    pub hcoord: Vec<(usize, usize, usize, usize, f64)>,
+    /// `DCOORD` entries `(con, i, j, val)`: `D_con[i][j] = val` (lower
+    /// triangle) — the constant term of PSD constraint `con`.
+    pub dcoord: Vec<(usize, usize, usize, f64)>,
 }
 
 /// A CBF instance mapped to a pounce conic program
@@ -276,6 +290,9 @@ pub fn parse(text: &str) -> Result<CbfModel, CbfError> {
     let mut a = Vec::new();
     let mut b = Vec::new();
     let mut pow_params: Vec<Vec<f64>> = Vec::new();
+    let mut psdcon_dims: Vec<usize> = Vec::new();
+    let mut hcoord: Vec<(usize, usize, usize, usize, f64)> = Vec::new();
+    let mut dcoord: Vec<(usize, usize, usize, f64)> = Vec::new();
     let mut seen_var = false;
 
     while let Some(kw) = lines.next() {
@@ -301,6 +318,41 @@ pub fn parse(text: &str) -> Result<CbfModel, CbfError> {
                         )?);
                     }
                     pow_params.push(params);
+                }
+            }
+            // Affine PSD constraints: header `count`, then one matrix size
+            // per constraint. The constraint `c` is `D_c + Σ_k x_k H_{c,k} ⪰ 0`.
+            "PSDCON" => {
+                let count = parse_usize(lines.require("PSDCON count")?, "PSDCON count")?;
+                for _ in 0..count {
+                    psdcon_dims.push(parse_usize(lines.require("PSDCON dim")?, "PSDCON dim")?);
+                }
+            }
+            // Variable coefficient matrices of the PSD constraints.
+            "HCOORD" => {
+                let nnz = parse_usize(lines.require("HCOORD nnz")?, "HCOORD nnz")?;
+                for _ in 0..nnz {
+                    let line = lines.require("HCOORD entry")?;
+                    let mut t = line.split_whitespace();
+                    let con = parse_usize(t.next().unwrap_or(""), "HCOORD con")?;
+                    let var = parse_usize(t.next().unwrap_or(""), "HCOORD var")?;
+                    let i = parse_usize(t.next().unwrap_or(""), "HCOORD i")?;
+                    let j = parse_usize(t.next().unwrap_or(""), "HCOORD j")?;
+                    let val = parse_f64(t.next().unwrap_or(""), "HCOORD val")?;
+                    hcoord.push((con, var, i, j, val));
+                }
+            }
+            // Constant matrices of the PSD constraints.
+            "DCOORD" => {
+                let nnz = parse_usize(lines.require("DCOORD nnz")?, "DCOORD nnz")?;
+                for _ in 0..nnz {
+                    let line = lines.require("DCOORD entry")?;
+                    let mut t = line.split_whitespace();
+                    let con = parse_usize(t.next().unwrap_or(""), "DCOORD con")?;
+                    let i = parse_usize(t.next().unwrap_or(""), "DCOORD i")?;
+                    let j = parse_usize(t.next().unwrap_or(""), "DCOORD j")?;
+                    let val = parse_f64(t.next().unwrap_or(""), "DCOORD val")?;
+                    dcoord.push((con, i, j, val));
                 }
             }
             "OBJSENSE" => {
@@ -401,6 +453,9 @@ pub fn parse(text: &str) -> Result<CbfModel, CbfError> {
         c0,
         a,
         b,
+        psdcon_dims,
+        hcoord,
+        dcoord,
     })
 }
 
@@ -557,6 +612,38 @@ impl CbfModel {
                 ConeKind::Free => {} // a free constraint row imposes nothing
             }
             r += cone.dim;
+        }
+
+        // --- Affine PSD constraints (PSDCON): D_c + Σ_k x_k H_{c,k} ⪰ 0. ---
+        // The slack svec entry (i,j) is `D[i][j] + Σ_k x_k H_k[i][j]`, scaled
+        // by √2 off the diagonal so smat(s) reconstructs the matrix. Appended
+        // after the VAR/CON cone rows as Psd blocks.
+        if !self.psdcon_dims.is_empty() {
+            use std::collections::HashMap;
+            let r2 = std::f64::consts::SQRT_2;
+            let mut h_by: HashMap<(usize, usize, usize), Vec<(usize, f64)>> = HashMap::new();
+            for &(con, var, i, j, val) in &self.hcoord {
+                h_by.entry((con, i, j)).or_default().push((var, val));
+            }
+            let mut d_by: HashMap<(usize, usize, usize), f64> = HashMap::new();
+            for &(con, i, j, val) in &self.dcoord {
+                *d_by.entry((con, i, j)).or_insert(0.0) += val;
+            }
+            for (con, &dim) in self.psdcon_dims.iter().enumerate() {
+                // svec order: column by column, lower triangle (j ≤ i).
+                for j in 0..dim {
+                    for i in j..dim {
+                        let scale = if i == j { 1.0 } else { r2 };
+                        let constant = scale * d_by.get(&(con, i, j)).copied().unwrap_or(0.0);
+                        let coeffs: Vec<(usize, f64)> = h_by
+                            .get(&(con, i, j))
+                            .map(|v| v.iter().map(|&(var, val)| (var, scale * val)).collect())
+                            .unwrap_or_default();
+                        push_row(&mut g, &mut h, &coeffs, constant);
+                    }
+                }
+                cones.push(ConeSpec::Psd(dim));
+            }
         }
 
         // Objective: minimize cᵀx (negate for MAX), constant carried out.
@@ -723,5 +810,58 @@ OBJACOORD
     fn pow_reference_to_undeclared_set_errors() {
         let bad = TINY_POW.replace("@0:POW", "@5:POW");
         assert!(matches!(parse(&bad), Err(CbfError::Malformed(_))));
+    }
+
+    const TINY_SDP: &str = "\
+VER
+2
+
+OBJSENSE
+MAX
+
+VAR
+1 1
+F 1
+
+PSDCON
+1
+2
+
+OBJACOORD
+1
+0 1.0
+
+HCOORD
+2
+0 0 0 0 -1.0
+0 0 1 1 -1.0
+
+DCOORD
+2
+0 0 0 2.0
+0 1 1 5.0
+";
+
+    #[test]
+    fn parses_psdcon_hcoord_dcoord() {
+        let m = parse(TINY_SDP).unwrap();
+        assert_eq!(m.psdcon_dims, vec![2]);
+        assert_eq!(m.hcoord.len(), 2);
+        assert_eq!(m.dcoord.len(), 2);
+    }
+
+    #[test]
+    fn to_conic_builds_psd_constraint() {
+        let m = parse(TINY_SDP).unwrap();
+        let cp = m.to_conic().unwrap();
+        // One affine PSD constraint of size 2 → a Psd(2) cone over 3 rows.
+        assert_eq!(cp.cones, vec![ConeSpec::Psd(2)]);
+        assert_eq!(cp.prob.m_ineq(), 3);
+        // s = svec(M − λI) = [2 − λ, 0, 5 − λ]: h = [2, 0, 5] and the diagonal
+        // svec rows (0 and 2) carry +λ from G (push_row negates H = −1).
+        assert_eq!(cp.prob.h, vec![2.0, 0.0, 5.0]);
+        let row0: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 0).collect();
+        assert_eq!(row0.len(), 1);
+        assert!((row0[0].val - 1.0).abs() < 1e-12); // −H = −(−1) = +1
     }
 }
