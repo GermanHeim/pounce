@@ -82,3 +82,45 @@ fn unknown_solver_selection_rejected() {
         .expect("spawn pounce");
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn global_on_builtin_errors_clearly() {
+    // `global` is a valid selection (not rejected as unknown), but the global
+    // solver needs the parsed `.nl` structure — a builtin must error tidily.
+    let output = Command::new(pounce_exe())
+        .arg("--problem")
+        .arg("rosenbrock")
+        .arg("solver_selection=global")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("global") && stderr.contains(".nl"),
+        "should explain global needs an .nl input: {stderr}"
+    );
+}
+
+#[test]
+fn global_solves_nl_fixture() {
+    // `--solver global` on a small bounded `.nl` (TAME: min (x−y)² on a box,
+    // optimum 0) must run the spatial branch-and-bound solver to a certified
+    // global optimum.
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tame.nl");
+    let output = Command::new(pounce_exe())
+        .arg(&fixture)
+        .arg("solver_selection=global")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "global should solve TAME; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("global B&B") && stdout.contains("Global optimum found"),
+        "stdout should report a global solve: {stdout}"
+    );
+}

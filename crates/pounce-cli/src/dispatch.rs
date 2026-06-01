@@ -99,6 +99,8 @@ pub enum SolverChoice {
     QpIpm,
     /// Active-set QP in `pounce-qp` (parallel track).
     QpActiveSet,
+    /// Spatial branch-and-bound global optimizer (`pounce-global`).
+    Global,
 }
 
 /// Parsed `solver_selection` option value.
@@ -114,6 +116,8 @@ pub enum SolverSelection {
     QpIpm,
     /// Force active-set QP; error if the problem is not LP/convex-QP.
     QpActiveSet,
+    /// Force the spatial branch-and-bound global solver (any class).
+    Global,
 }
 
 impl SolverSelection {
@@ -126,13 +130,14 @@ impl SolverSelection {
             "lp-ipm" => Some(SolverSelection::LpIpm),
             "qp-ipm" => Some(SolverSelection::QpIpm),
             "qp-active-set" => Some(SolverSelection::QpActiveSet),
+            "global" => Some(SolverSelection::Global),
             _ => None,
         }
     }
 
     /// The accepted values, for error messages and option registration.
     pub const VALUES: &'static [&'static str] =
-        &["auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set"];
+        &["auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set", "global"];
 }
 
 /// Classify a parsed `.nl` problem.
@@ -272,6 +277,9 @@ pub fn resolve_solver(
                 Err(mismatch_msg(class, "qp-active-set", "an LP or convex QP"))
             }
         }
+        // The global solver handles any factorable class (it just needs finite
+        // variable bounds); `auto` never selects it, so this is opt-in only.
+        S::Global => Ok(SolverChoice::Global),
     }
 }
 

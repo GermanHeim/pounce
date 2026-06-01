@@ -90,6 +90,28 @@ let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
 `.ge`, `.le`, `.equality`, and `.subject_to(g, lo, hi)` add constraints; an
 infeasible problem returns `GlobalStatus::Infeasible` with a proof.
 
+### From Python and the CLI
+
+The solver is reachable beyond the Rust API:
+
+- **Python** — `pounce.minimize_global` with an ergonomic expression DSL:
+
+  ```python
+  from pounce.global_opt import var, minimize_global, ge
+  x, y = var(0), var(1)
+  f = (4 - 2.1 * x**2 + x**4 / 3) * x**2 + x * y + (-4 + 4 * y**2) * y**2
+  r = minimize_global(f, lo=[-2, -1.5], hi=[2, 1.5])   # r.objective ≈ −1.0316
+  ```
+
+  All `GlobalOptions` knobs are keyword arguments (`obbt_passes`, `threads`, …);
+  constraints are `[ge(g, lb), le(g, ub), eq(g, rhs)]`.
+
+- **CLI** — `pounce model.nl solver_selection=global` runs the solver on an
+  AMPL `.nl` model. Because the relaxation needs a **finite box**, variables
+  left unbounded in the `.nl` are capped to a large default (with a warning),
+  and the certified optimum is then global only within that box — so the global
+  solver is most useful on `.nl` models with sensible finite variable bounds.
+
 ### The relaxation suite
 
 The lower bound is everything, and POUNCE's is built term by term over the

@@ -104,6 +104,10 @@ pub fn main() -> ExitCode {
                 "qp-active-set",
                 "Force active-set QP; errors if not LP/convex-QP.",
             ),
+            (
+                "global",
+                "Force the spatial branch-and-bound global solver (.nl only).",
+            ),
         ],
         "Selects the solver by problem class. `auto` routes LP and convex \
          QP to the specialized convex interior-point solver (pounce-convex) \
@@ -486,6 +490,27 @@ pub fn main() -> ExitCode {
             }
             // Should not happen (only `.nl` classifies non-NLP), but be
             // safe: fall through to NLP rather than mis-dispatch.
+        }
+        // `--solver global`: spatial branch-and-bound (pounce-global). Needs the
+        // parsed `.nl` structure (builtins don't reparse to one).
+        if matches!(choice, SolverChoice::Global) {
+            if let Some(prob) = reparsed {
+                let json_cfg = args.json_output.as_deref().map(|p| {
+                    let input = match &args.problem {
+                        ProblemSource::Builtin(name) => {
+                            InputDescriptor::Builtin { name: name.clone() }
+                        }
+                        ProblemSource::NlFile(f) => InputDescriptor::NlFile {
+                            path: f.clone(),
+                            size_bytes: std::fs::metadata(f).ok().map(|m| m.len()),
+                        },
+                    };
+                    (p, args.json_detail, input)
+                });
+                return run_global(&prob, sol_path.as_deref(), json_cfg);
+            }
+            eprintln!("pounce: solver_selection=global requires an .nl input (not a builtin)");
+            return ExitCode::from(2);
         }
         // `nlp`, `qp-active-set` (not yet wired), and unmatched cases
         // fall through to the existing NLP solve below.
@@ -1243,6 +1268,160 @@ fn run_convex_qp(
                 })
                 .collect();
         }
+        let report = builder.finish();
+        if let Err(e) = write_report_file(json_path, &report) {
+            eprintln!(
+                "pounce: failed to write JSON report to {}: {e}",
+                json_path.display()
+            );
+        } else {
+            eprintln!("pounce: wrote {}", json_path.display());
+        }
+    }
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Map a global-solver status to the report's `ApplicationReturnStatus`.
+fn global_status_to_ars(s: pounce_global::GlobalStatus) -> ApplicationReturnStatus {
+    use pounce_global::GlobalStatus;
+    match s {
+        GlobalStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+        GlobalStatus::Infeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
+        GlobalStatus::NodeLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+    }
+}
+
+/// Solve a parsed `.nl` to a certified global optimum via spatial
+/// branch-and-bound (`pounce-global`). Variables without finite bounds in the
+/// `.nl` are capped to a large box (with a warning), since the relaxation needs
+/// a bounded domain. A maximize objective is handled by negating it.
+fn run_global(
+    prob: &nl_reader::NlProblem,
+    sol_path: Option<&std::path::Path>,
+    json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
+) -> ExitCode {
+    use pounce_cli::nl_fbbt_translate::translate_constraint;
+    use pounce_global::{solve_global, Constraint, GlobalOptions, GlobalProblem, GlobalStatus};
+    use pounce_nlp::{FbbtOp, FbbtTape};
+
+    const BOUND_CAP: f64 = 1e6;
+    const INF_SENTINEL: f64 = 1e19;
+
+    // The relaxation needs a finite box; cap `.nl` ±inf sentinels and warn.
+    let mut x_lo = prob.x_l.clone();
+    let mut x_hi = prob.x_u.clone();
+    let mut capped = 0usize;
+    for i in 0..prob.n {
+        if x_lo[i] <= -INF_SENTINEL {
+            x_lo[i] = -BOUND_CAP;
+            capped += 1;
+        }
+        if x_hi[i] >= INF_SENTINEL {
+            x_hi[i] = BOUND_CAP;
+            capped += 1;
+        }
+    }
+    if capped > 0 {
+        eprintln!(
+            "pounce: warning: capped {capped} unbounded variable bound(s) to ±{BOUND_CAP:.0e}; \
+             the result is global only within that box (add explicit bounds to change it)."
+        );
+    }
+
+    // Objective tape (the var-dependent part; the constant is added back when
+    // reporting). For a maximize problem, negate so the solver minimizes −f.
+    let objective = match translate_constraint(&prob.obj_nonlinear, &prob.obj_linear) {
+        Some(mut t) => {
+            if !prob.minimize {
+                let root = t.ops.len() - 1;
+                t.ops.push(FbbtOp::Neg(root));
+            }
+            t
+        }
+        None => FbbtTape {
+            ops: vec![FbbtOp::Const(0.0)],
+        },
+    };
+    let constraints: Vec<Constraint> = (0..prob.m)
+        .filter_map(|i| {
+            translate_constraint(&prob.con_nonlinear[i], &prob.con_linear[i]).map(|tape| {
+                Constraint {
+                    tape,
+                    lo: prob.g_l[i],
+                    hi: prob.g_u[i],
+                }
+            })
+        })
+        .collect();
+
+    let gp = GlobalProblem {
+        n_vars: prob.n,
+        x_lo,
+        x_hi,
+        objective,
+        constraints,
+    };
+
+    let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    };
+    let t0 = std::time::Instant::now();
+    let sol = solve_global(&gp, &GlobalOptions::default(), backend);
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    let sign = if prob.minimize { 1.0 } else { -1.0 };
+    let reported_obj = sign * sol.objective + prob.obj_constant;
+    let gap = (sol.objective - sol.lower_bound).abs();
+
+    let (msg, ok, srn) = match sol.status {
+        GlobalStatus::Optimal => ("Global optimum found.", true, 0),
+        GlobalStatus::Infeasible => ("Problem is infeasible.", false, 200),
+        GlobalStatus::NodeLimit => ("Node limit exceeded (gap not closed).", false, 400),
+    };
+    println!(
+        "POUNCE (global B&B, pounce-global): {msg}  obj={reported_obj:.8}  gap={gap:.3e}  \
+         nodes={}  ({elapsed:.3}s)",
+        sol.nodes,
+    );
+
+    // Branch-and-bound does not produce constraint duals.
+    let lambda = vec![0.0; prob.m];
+    if let Some(path) = sol_path {
+        let payload = nl_writer::SolutionFile {
+            message: &format!("POUNCE global B&B (pounce-global): {msg}"),
+            x: &sol.x,
+            lambda: &lambda,
+            solve_result_num: srn,
+            suffixes: &[],
+        };
+        if let Err(e) = nl_writer::write_sol_file(path, &payload) {
+            eprintln!("pounce: failed to write {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+    }
+
+    if let Some((json_path, detail, input)) = json_cfg {
+        let mut builder = ReportBuilder::new(detail, input);
+        builder.problem.n_variables = prob.n as _;
+        builder.problem.n_constraints = prob.m as _;
+        builder.problem.n_objectives = 1;
+        builder.problem.minimize = prob.minimize;
+        builder.solution.status = global_status_to_ars(sol.status);
+        builder.solution.solve_result_num = srn;
+        builder.solution.objective = reported_obj;
+        builder.solution.x = sol.x.clone();
+        builder.solution.lambda = lambda;
+        builder.stats.iteration_count = sol.nodes as _;
+        builder.stats.final_objective = reported_obj;
+        builder.stats.total_wallclock_time_secs = elapsed;
+        // Report the optimality gap as the convergence proxy (B&B has no KKT
+        // residuals); a closed gap is the certificate of global optimality.
+        builder.stats.final_dual_inf = gap;
         let report = builder.finish();
         if let Err(e) = write_report_file(json_path, &report) {
             eprintln!(

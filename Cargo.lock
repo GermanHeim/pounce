@@ -913,6 +913,7 @@ dependencies = [
  "pounce-common",
  "pounce-convex",
  "pounce-feral",
+ "pounce-global",
  "pounce-hsl",
  "pounce-linalg",
  "pounce-linsol",

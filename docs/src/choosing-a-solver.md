@@ -118,7 +118,13 @@ pounce model.nl --solver nlp           # filter-IPM (or active-set-sqp via algor
 pounce model.nl --solver lp-ipm        # convex LP interior-point
 pounce model.nl --solver qp-ipm        # convex QP interior-point
 pounce model.nl --solver qp-active-set # active-set QP
+pounce model.nl --solver global        # spatial branch-and-bound (global)
 ```
+
+(The CLI spelling of the option is `solver_selection=<value>`, e.g.
+`pounce model.nl solver_selection=global`.) The global solver needs a **finite
+box**: variables left unbounded in the `.nl` are capped to a large default with
+a warning, and the certified optimum is then global only within that box.
 
 See [LP / QP Solver Routing](lp-qp-routing.md) for how classification works
 and when it falls back to the more general solver.
