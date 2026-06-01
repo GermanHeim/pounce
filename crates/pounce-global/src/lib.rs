@@ -32,8 +32,11 @@
 //! assert!((sol.objective - (-2.25)).abs() < 1e-4);
 //! ```
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod ad;
 pub mod bnb;
+mod envelope;
 pub mod expr;
 mod nlp;
 pub mod problem;

@@ -164,6 +164,47 @@ fn local_nlp_upper_bounds_toggle() {
 }
 
 #[test]
+fn odd_power_straddling_zero() {
+    // f(x) = x³ − 3x on [−2, 2]: critical points x = ±1, endpoints ±2.
+    // Global minimum −2 (attained at x = 1 and x = −2). The cube term straddles
+    // zero, so this needs the single-inflection envelope (previously box-only).
+    let f = var(0).powi(3) - 3.0 * var(0);
+    let prob = GlobalProblem::new(vec![-2.0], vec![2.0], &f);
+    let sol = solve_global(&prob, &GlobalOptions::default(), backend);
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    assert!(
+        (sol.objective + 2.0).abs() < 1e-3,
+        "obj = {}",
+        sol.objective
+    );
+}
+
+#[test]
+fn sine_global_minimum() {
+    // min sin(x) on [0, 6]: global minimum −1 at x = 3π/2 ≈ 4.712. The root box
+    // is wider than π (sin envelope declines, box bound only) — branching must
+    // narrow the box until the trig envelope engages, then certify.
+    let f = var(0).sin();
+    let prob = GlobalProblem::new(vec![0.0], vec![6.0], &f);
+    let opts = GlobalOptions {
+        max_nodes: 50_000,
+        ..GlobalOptions::default()
+    };
+    let sol = solve_global(&prob, &opts, backend);
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    assert!(
+        (sol.objective + 1.0).abs() < 1e-3,
+        "obj = {}",
+        sol.objective
+    );
+    assert!(
+        (sol.x[0] - 1.5 * std::f64::consts::PI).abs() < 1e-2,
+        "x = {}",
+        sol.x[0]
+    );
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

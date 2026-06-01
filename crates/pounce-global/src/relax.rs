@@ -4,17 +4,21 @@
 //! `w_k`, constrained to the convex/concave envelopes of the operation that
 //! produced it given **interval** bounds (from FBBT's forward pass) on its
 //! operands. Affine ops are exact equalities; bilinear products get the four
-//! McCormick inequalities; univariate convex/concave atoms (`x^n`, `√`, `exp`,
-//! `ln`, `|·|`) get a secant on one side and tangent cuts on the other. The
+//! McCormick inequalities (the exact convex hull of a single bilinear term);
+//! and every univariate atom (`x^n`, `√`, `exp`, `ln`, `sin`, `cos`, `|·|`) is
+//! relaxed by the tight polyhedral [`crate::envelope`] — secant + tangent cuts
+//! for convex/concave arcs, and the tangent-from-endpoint construction for
+//! single-inflection arcs (odd powers across 0, trig over a sub-`π` box). The
 //! result is a **linear program** whose optimum is a valid lower bound on the
-//! true minimum over the box — and, because every envelope is exact at the box
-//! corners, the bound tightens to the truth as the box shrinks (so spatial
+//! true minimum over the box, exact in the zero-width-box limit (so spatial
 //! branch-and-bound converges).
 //!
-//! Operations the relaxation cannot convexify cheaply (`sin`, `cos`, division
-//! by an interval straddling zero, `Opaque`) contribute only their interval
-//! box bound on `w_k` — valid, just weak, which branching then sharpens.
+//! The few remaining hard cases — `sin`/`cos` over a box wider than `π`,
+//! division by an interval straddling zero, and `Opaque` — fall back to the
+//! interval box bound on `w_k`: valid, just weak, which branching then sharpens
+//! (and, for trig, narrows below `π` so the envelope engages).
 
+use crate::envelope::{self, Envelope};
 use crate::problem::GlobalProblem;
 use pounce_convex::{QpProblem, Triplet};
 use pounce_nlp::{FbbtOp, FbbtTape};
@@ -136,51 +140,42 @@ impl Builder {
         self.emit_le(&[(p, 1.0), (v, -ul), (u, -vu)], -ul * vu);
     }
 
-    /// Secant + tangent envelope of a univariate `f` (convex or concave) on
-    /// `[al, au]`, linking `w = f(a)`.
-    #[allow(clippy::too_many_arguments)]
-    fn univariate(
+    /// Relax a univariate atom `w = f(a)` over `[al, au]` using the tight
+    /// polyhedral [`Envelope`] from [`crate::envelope`]. `f` evaluates the atom
+    /// (used to pin a constant/degenerate operand); `build` lazily produces the
+    /// envelope when the operand is a genuine variable with a bounded range,
+    /// returning `None` to decline (e.g. trig over a too-wide interval — the
+    /// column's interval box bound then carries the relaxation).
+    fn emit_univariate(
         &mut self,
         w: usize,
         a: Handle,
         al: f64,
         au: f64,
-        convex: bool,
         f: impl Fn(f64) -> f64,
-        df: impl Fn(f64) -> f64,
+        build: impl FnOnce() -> Option<Envelope>,
     ) {
         let wh = Handle::Col(w);
-        // Constant operand ⇒ w is a constant.
         if let Handle::Const(v) = a {
             self.emit_eq(&[(wh, 1.0)], f(v));
             return;
         }
         if !al.is_finite() || !au.is_finite() || au - al < 1e-12 {
-            // Degenerate or unbounded domain: pin to the point value if we can,
-            // else rely on the interval box bound already on column `w`.
             if al.is_finite() && au.is_finite() {
                 self.emit_eq(&[(wh, 1.0)], f(0.5 * (al + au)));
             }
-            return;
+            return; // unbounded domain: rely on the column's box bound
         }
-        let s = (f(au) - f(al)) / (au - al); // secant slope
-        let tangents = [al, 0.5 * (al + au), au];
-        if convex {
-            // Secant overestimates: w ≤ f(al) + s·(a − al).
-            self.emit_le(&[(wh, 1.0), (a, -s)], f(al) - s * al);
-            // Tangents underestimate: w ≥ f(c) + df(c)·(a − c).
-            for c in tangents {
-                let g = df(c);
-                self.emit_le(&[(wh, -1.0), (a, g)], g * c - f(c));
-            }
-        } else {
-            // Secant underestimates: w ≥ f(al) + s·(a − al).
-            self.emit_le(&[(wh, -1.0), (a, s)], -(f(al) - s * al));
-            // Tangents overestimate: w ≤ f(c) + df(c)·(a − c).
-            for c in tangents {
-                let g = df(c);
-                self.emit_le(&[(wh, 1.0), (a, -g)], f(c) - g * c);
-            }
+        let Some(env) = build() else {
+            return; // declined: box bound only
+        };
+        for c in &env.under {
+            // w ≥ slope·a + intercept  ⇔  slope·a − w ≤ −intercept
+            self.emit_le(&[(wh, -1.0), (a, c.slope)], -c.intercept);
+        }
+        for c in &env.over {
+            // w ≤ slope·a + intercept  ⇔  w − slope·a ≤ intercept
+            self.emit_le(&[(wh, 1.0), (a, -c.slope)], c.intercept);
         }
     }
 }
@@ -271,18 +266,16 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                 match n {
                     0 => b.emit_eq(&[(w, 1.0)], 1.0),
                     1 => b.emit_eq(&[(w, 1.0), (ha, -1.0)], 0.0),
-                    _ => {
-                        let ni = n as i32;
-                        let f = move |t: f64| t.powi(ni);
-                        let df = move |t: f64| n as f64 * t.powi(ni - 1);
-                        let even = n % 2 == 0;
-                        if even || al >= 0.0 {
-                            b.univariate(col, ha, al, au, true, f, df); // convex
-                        } else if au <= 0.0 {
-                            b.univariate(col, ha, al, au, false, f, df); // concave
-                        }
-                        // else straddles 0 with odd n: nonconvex → box bound only.
-                    }
+                    // n ≥ 2 — convex (even / nonneg), concave (nonpos), or the
+                    // single-inflection envelope when odd and straddling 0.
+                    _ => b.emit_univariate(
+                        col,
+                        ha,
+                        al,
+                        au,
+                        move |t| t.powi(n as i32),
+                        || Some(envelope::power(n, al, au)),
+                    ),
                 }
                 w
             }
@@ -290,16 +283,13 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                let al = al.max(0.0);
-                // √ is concave on [0, ∞).
-                b.univariate(
+                b.emit_univariate(
                     col,
                     ha,
                     al,
                     au,
-                    false,
-                    |t| t.sqrt(),
-                    |t| 0.5 / t.max(1e-300).sqrt(),
+                    |t| t.max(0.0).sqrt(),
+                    || Some(envelope::sqrt(al, au)),
                 );
                 Handle::Col(col)
             }
@@ -307,15 +297,49 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                b.univariate(col, ha, al, au, true, |t| t.exp(), |t| t.exp()); // convex
+                b.emit_univariate(col, ha, al, au, |t| t.exp(), || Some(envelope::exp(al, au)));
                 Handle::Col(col)
             }
             FbbtOp::Ln(a) => {
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                let al = al.max(1e-12);
-                b.univariate(col, ha, al, au, false, |t| t.ln(), |t| 1.0 / t); // concave
+                b.emit_univariate(
+                    col,
+                    ha,
+                    al,
+                    au,
+                    |t| t.max(1e-12).ln(),
+                    || Some(envelope::ln(al, au)),
+                );
+                Handle::Col(col)
+            }
+            FbbtOp::Sin(a) => {
+                let col = new_col!(k);
+                let ha = handle[a];
+                let (al, au) = bounds(ha, a);
+                b.emit_univariate(
+                    col,
+                    ha,
+                    al,
+                    au,
+                    |t| t.sin(),
+                    || envelope::trig(true, al, au),
+                );
+                Handle::Col(col)
+            }
+            FbbtOp::Cos(a) => {
+                let col = new_col!(k);
+                let ha = handle[a];
+                let (al, au) = bounds(ha, a);
+                b.emit_univariate(
+                    col,
+                    ha,
+                    al,
+                    au,
+                    |t| t.cos(),
+                    || envelope::trig(false, al, au),
+                );
                 Handle::Col(col)
             }
             FbbtOp::Abs(a) => {
@@ -332,8 +356,8 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                 }
                 w
             }
-            // Nonconvex / unsupported: interval box bound on the column only.
-            FbbtOp::Sin(_) | FbbtOp::Cos(_) | FbbtOp::Opaque => Handle::Col(new_col!(k)),
+            // Unsupported: interval box bound on the column only.
+            FbbtOp::Opaque => Handle::Col(new_col!(k)),
         };
         handle.push(h);
     }
