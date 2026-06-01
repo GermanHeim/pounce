@@ -64,6 +64,41 @@ impl Polynomial {
     }
 }
 
+/// A constrained polynomial program `min p(x) s.t. gᵢ(x) ≥ 0, hⱼ(x) = 0`.
+#[derive(Debug, Clone)]
+pub struct PolyProblem {
+    pub n_vars: usize,
+    pub objective: Polynomial,
+    /// Inequality constraints `gᵢ(x) ≥ 0`.
+    pub inequalities: Vec<Polynomial>,
+    /// Equality constraints `hⱼ(x) = 0`.
+    pub equalities: Vec<Polynomial>,
+}
+
+impl PolyProblem {
+    pub fn new(objective: Polynomial) -> Self {
+        let n_vars = objective.n_vars;
+        PolyProblem {
+            n_vars,
+            objective,
+            inequalities: Vec::new(),
+            equalities: Vec::new(),
+        }
+    }
+
+    /// Add an inequality `g(x) ≥ 0`.
+    pub fn ge(mut self, g: Polynomial) -> Self {
+        self.inequalities.push(g);
+        self
+    }
+
+    /// Add an equality `h(x) = 0`.
+    pub fn eq(mut self, h: Polynomial) -> Self {
+        self.equalities.push(h);
+        self
+    }
+}
+
 /// Result of the SOS relaxation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SosBound {
@@ -107,71 +142,145 @@ pub fn sos_lower_bound_opts<F>(p: &Polynomial, opts: &QpOptions, make_backend: F
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    let d = p.degree().div_ceil(2); // half-degree of the SOS basis
-    let basis = monomials(p.n_vars, d);
-    let big_n = basis.len(); // Gram-matrix size
-    let svec_dim = big_n * (big_n + 1) / 2;
+    sos_constrained_lower_bound_opts(&PolyProblem::new(p.clone()), None, opts, make_backend)
+}
 
-    // Decision variables x = (γ, svec(Q)); γ is column 0.
-    let n_x = 1 + svec_dim;
+/// SOS / Lasserre lower bound for a **constrained** polynomial program
+/// `min p s.t. gᵢ ≥ 0, hⱼ = 0` at relaxation order `order` (defaults to the
+/// minimum admissible). Uses Putinar's representation
+///
+/// ```text
+///   p(x) − γ = σ₀(x) + Σᵢ σᵢ(x) gᵢ(x) + Σⱼ λⱼ(x) hⱼ(x),
+/// ```
+///
+/// with `σ₀, σᵢ` SOS (PSD Gram blocks; the *localizing* multipliers `σᵢ`
+/// use the smaller basis of degree `d − ⌈deg gᵢ/2⌉`) and `λⱼ` free
+/// polynomials. The returned `γ*` is a certified lower bound on `min p` over
+/// the feasible set; raising `order` tightens it (the Lasserre hierarchy).
+pub fn sos_constrained_lower_bound<F>(
+    prob: &PolyProblem,
+    order: Option<usize>,
+    make_backend: F,
+) -> SosBound
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    sos_constrained_lower_bound_opts(prob, order, &QpOptions::default(), make_backend)
+}
 
-    // Group the Gram products by the monomial they contribute to: for each
-    // basis pair (i ≥ j), x^{basisᵢ + basisⱼ} gets coefficient (1 if i==j
-    // else √2) on the svec entry (i,j) — the √2 matching the svec scaling so
-    // that 2·Q_{ij} (the two symmetric off-diagonal terms) is reproduced.
+/// [`sos_constrained_lower_bound`] with explicit solver options.
+pub fn sos_constrained_lower_bound_opts<F>(
+    prob: &PolyProblem,
+    order: Option<usize>,
+    opts: &QpOptions,
+    make_backend: F,
+) -> SosBound
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let n = prob.n_vars;
     let r2 = std::f64::consts::SQRT_2;
-    let mut by_monomial: HashMap<Vec<usize>, Vec<(usize, f64)>> = HashMap::new();
-    for i in 0..big_n {
-        for j in 0..=i {
-            let alpha: Vec<usize> = basis[i].iter().zip(&basis[j]).map(|(a, b)| a + b).collect();
-            let col = 1 + svec_index(big_n, i, j);
-            let coef = if i == j { 1.0 } else { r2 };
-            by_monomial.entry(alpha).or_default().push((col, coef));
+
+    // Minimum relaxation order, then honor a user-requested (larger) order.
+    let mut d_min = prob.objective.degree().div_ceil(2);
+    for g in &prob.inequalities {
+        d_min = d_min.max(g.degree().div_ceil(2));
+    }
+    for h in &prob.equalities {
+        d_min = d_min.max(h.degree().div_ceil(2));
+    }
+    let d = order.map_or(d_min, |o| o.max(d_min));
+
+    // Column layout: x = (γ, svec(Q₀), svec(Q₁)…, free λ coefficients…).
+    let mut col = 1usize;
+    let mut cones: Vec<ConeSpec> = Vec::new();
+    let mut g_rows: Vec<Triplet> = Vec::new();
+    let mut g_h: Vec<f64> = Vec::new();
+    let mut by_mono: HashMap<Vec<usize>, Vec<(usize, f64)>> = HashMap::new();
+    let unit = [(vec![0usize; n], 1.0)]; // weight ≡ 1 for σ₀
+
+    // PSD (SOS) blocks: σ₀ (weight 1, basis degree d), then one localizing
+    // multiplier per inequality (weight gᵢ, basis degree d − ⌈deg gᵢ/2⌉).
+    let psd_specs = std::iter::once((d, &unit[..])).chain(
+        prob.inequalities
+            .iter()
+            .map(|g| (d - g.degree().div_ceil(2), &g.terms[..])),
+    );
+    for (deg, weight) in psd_specs {
+        let basis = monomials(n, deg);
+        let bn = basis.len();
+        let col_base = col;
+        // Cone rows s = svec(Qₖ) ⪰ 0, and the Gram contributions to each
+        // product monomial (× the weight polynomial's terms).
+        for i in 0..bn {
+            for j in 0..=i {
+                let coef0 = if i == j { 1.0 } else { r2 };
+                let qcol = col_base + svec_index(bn, i, j);
+                let base: Vec<usize> = basis[i].iter().zip(&basis[j]).map(|(a, b)| a + b).collect();
+                for (delta, wc) in weight {
+                    let alpha: Vec<usize> = base.iter().zip(delta).map(|(a, dd)| a + dd).collect();
+                    by_mono.entry(alpha).or_default().push((qcol, coef0 * wc));
+                }
+            }
         }
+        let sd = bn * (bn + 1) / 2;
+        for k in 0..sd {
+            let r = g_h.len();
+            g_rows.push(Triplet::new(r, col_base + k, -1.0));
+            g_h.push(0.0);
+        }
+        cones.push(ConeSpec::Psd(bn));
+        col += sd;
     }
 
-    // One coefficient-matching equality per distinct product monomial.
-    let pc = p.coeff_map();
-    let zero_exp = vec![0usize; p.n_vars];
+    // Free multipliers λⱼ for equalities: a free coefficient per monomial of
+    // degree ≤ 2d − deg(hⱼ), contributing (× hⱼ's terms) with no cone.
+    for h in &prob.equalities {
+        let basis = monomials(n, 2 * d - h.degree());
+        for nu in &basis {
+            let lcol = col;
+            col += 1;
+            for (delta, hc) in &h.terms {
+                let alpha: Vec<usize> = nu.iter().zip(delta).map(|(a, dd)| a + dd).collect();
+                by_mono.entry(alpha).or_default().push((lcol, *hc));
+            }
+        }
+    }
+    let n_x = col;
+
+    // One coefficient-matching equality per distinct monomial: the SOS/Putinar
+    // certificate's coefficient must equal p's, with the constant carrying −γ.
+    let pc = prob.objective.coeff_map();
+    let zero_exp = vec![0usize; n];
     let mut a: Vec<Triplet> = Vec::new();
     let mut b: Vec<f64> = Vec::new();
-    for (alpha, terms) in &by_monomial {
+    for (alpha, terms) in &by_mono {
         let row = b.len();
-        for &(col, coef) in terms {
-            a.push(Triplet::new(row, col, coef));
+        for &(c, coef) in terms {
+            a.push(Triplet::new(row, c, coef));
         }
-        // p(x) − γ: the constant monomial's coefficient carries the −γ.
         if *alpha == zero_exp {
-            a.push(Triplet::new(row, 0, 1.0)); // + γ on the left
+            a.push(Triplet::new(row, 0, 1.0)); // + γ
         }
         b.push(pc.get(alpha).copied().unwrap_or(0.0));
     }
-
-    // Q ⪰ 0: slack s = svec(Q) via G = −I on the svec columns, h = 0.
-    let mut g: Vec<Triplet> = Vec::with_capacity(svec_dim);
-    for k in 0..svec_dim {
-        g.push(Triplet::new(k, 1 + k, -1.0));
-    }
-    let h = vec![0.0; svec_dim];
 
     // Objective: maximize γ  ⇔  minimize −γ.
     let mut c = vec![0.0; n_x];
     c[0] = -1.0;
 
-    let prob = QpProblem {
+    let qp = QpProblem {
         n: n_x,
         p_lower: Vec::new(),
         c,
         a,
         b,
-        g,
-        h,
+        g: g_rows,
+        h: g_h,
         lb: Vec::new(),
         ub: Vec::new(),
     };
-
-    let sol = solve_socp_ipm(&prob, &[ConeSpec::Psd(big_n)], opts, make_backend);
-    // γ = x₀; the reported objective is −γ.
+    let sol = solve_socp_ipm(&qp, &cones, opts, make_backend);
     SosBound {
         lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY),
         status: sol.status,
@@ -248,6 +357,54 @@ mod tests {
         assert_eq!(r.status, QpStatus::Optimal);
         assert!(
             (r.lower_bound - 1.0).abs() < 1e-5,
+            "bound = {}",
+            r.lower_bound
+        );
+    }
+
+    #[test]
+    fn constrained_linear_lower_bound() {
+        // min x s.t. x − 1 ≥ 0  ⇒  min = 1 (the constraint binds).
+        let prob = PolyProblem::new(Polynomial::new(1, vec![(vec![1], 1.0)]))
+            .ge(Polynomial::new(1, vec![(vec![1], 1.0), (vec![0], -1.0)]));
+        let r = sos_constrained_lower_bound(&prob, None, backend);
+        assert_eq!(r.status, QpStatus::Optimal, "{:?}", r.status);
+        assert!(
+            (r.lower_bound - 1.0).abs() < 1e-5,
+            "bound = {}",
+            r.lower_bound
+        );
+    }
+
+    #[test]
+    fn constrained_nonconvex_box() {
+        // min −x s.t. 1 − x² ≥ 0  (x ∈ [−1,1])  ⇒  min = −1 at x = 1.
+        // The localizing multiplier σ₁ (a nonneg scalar) makes the bound
+        // exact — a nonconvex feasible-set bound from the SDP.
+        let prob = PolyProblem::new(Polynomial::new(1, vec![(vec![1], -1.0)]))
+            .ge(Polynomial::new(1, vec![(vec![0], 1.0), (vec![2], -1.0)]));
+        let r = sos_constrained_lower_bound(&prob, None, backend);
+        assert_eq!(r.status, QpStatus::Optimal, "{:?}", r.status);
+        assert!(
+            (r.lower_bound + 1.0).abs() < 1e-5,
+            "bound = {}",
+            r.lower_bound
+        );
+    }
+
+    #[test]
+    fn constrained_equality_lower_bound() {
+        // min x² + y² s.t. x + y − 2 = 0  ⇒  min = 2 at (1,1), via a free
+        // multiplier λ(x,y) for the equality.
+        let obj = Polynomial::new(2, vec![(vec![2, 0], 1.0), (vec![0, 2], 1.0)]);
+        let prob = PolyProblem::new(obj).eq(Polynomial::new(
+            2,
+            vec![(vec![1, 0], 1.0), (vec![0, 1], 1.0), (vec![0, 0], -2.0)],
+        ));
+        let r = sos_constrained_lower_bound(&prob, None, backend);
+        assert_eq!(r.status, QpStatus::Optimal, "{:?}", r.status);
+        assert!(
+            (r.lower_bound - 2.0).abs() < 1e-5,
             "bound = {}",
             r.lower_bound
         );
