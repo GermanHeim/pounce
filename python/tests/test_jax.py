@@ -1301,6 +1301,69 @@ def test_sensitivity_at_requires_dual_triple_pounce_87():
         jp.sensitivity_at(x_star[0], theta, (lam[0], zL[0]))
 
 
+def test_single_solve_with_jacobian_matches_batched_pounce_88():
+    """Issue #88: the single-problem ``solve_with_jacobian`` returns
+    un-batched shapes equal to the ``B=1`` batched call (and matches
+    ``jax.jacobian``)."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.3, 0.7])
+
+    x_star, (lam, zL, zU), J = jp.solve_with_jacobian(theta, x0)
+    assert x_star.shape == (2,)
+    assert lam.shape == (1,) and zL.shape == (2,) and zU.shape == (2,)
+    assert J.shape == (2, 2)
+
+    xb, (lb, zlb, zub), Jb = jp.batched_solve_with_jacobian(theta[None, :], x0)
+    np.testing.assert_allclose(np.asarray(x_star), np.asarray(xb[0]), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jb[0]), atol=1e-12)
+    Jref = jax.jacobian(lambda p: jp.solve(p, x0))(theta)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+
+
+def test_single_anchor_sensitivity_and_from_state_pounce_88():
+    """Issue #88: ``anchor`` accepts an un-batched point; ``sensitivity``
+    / ``jvp_from_state`` / ``vjp_from_state`` return un-batched results
+    consistent with the full Jacobian."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.5, 0.5])
+
+    state = jp.anchor(theta, x0)          # single point → B=1
+    assert state._B == 1
+
+    J = jp.sensitivity(state)
+    assert J.shape == (2, 2)
+    Jref = jax.jacobian(lambda p: jp.solve(p, x0))(theta)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+
+    # jvp: J @ dp, un-batched (n,).
+    dp = jnp.array([1.0, -2.0])
+    dx = jp.jvp_from_state(state, dp)
+    assert dx.shape == (2,)
+    np.testing.assert_allclose(np.asarray(dx), np.asarray(J @ dp), atol=1e-6)
+
+    # vjp: J^T @ x_bar, un-batched (p,).
+    x_bar = jnp.array([0.7, -0.3])
+    dpb = jp.vjp_from_state(state, x_bar)
+    assert dpb.shape == (2,)
+    np.testing.assert_allclose(np.asarray(dpb), np.asarray(J.T @ x_bar), atol=1e-6)
+    state.close()
+
+
+def test_single_wrappers_reject_batched_state_pounce_88():
+    """Issue #88: the single-problem from-state wrappers reject a state
+    anchored with B>1 rather than silently mis-shaping."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    state = jp.anchor(p_batch, x0)        # B=2
+    assert state._B == 2
+    with pytest.raises(ValueError, match="single-problem form"):
+        jp.jvp_from_state(state, jnp.array([1.0, 0.0]))
+    state.close()
+
+
 def test_batched_vjp_from_state_matches_jax_vjp_pounce_82():
     """Issue #82: ``batched_vjp_from_state`` equals ``jax.vjp`` over
     ``batched_solve`` (J^T @ x_bar), and equals J^T @ x_bar from the

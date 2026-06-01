@@ -2025,9 +2025,19 @@ class JaxProblem:
         subsequent from-state products to the selected columns, e.g.
         ``slice(0, ny)`` to keep only the predicted block and drop
         context columns.
+
+        Accepts either a batched ``p_batch`` (``(B,) + p_shape``) or a
+        single un-batched point (``p_shape``) — a single point yields a
+        ``B=1`` state for the single-problem wrappers (pounce#88:
+        :meth:`jvp_from_state` / :meth:`vjp_from_state` /
+        :meth:`sensitivity`).
         """
         cols = self._normalize_cols(wrt_cols)
-        x_star, duals, sid, (pb, xs, lam) = self._anchor_forward(p_batch, x0)
+        p_arr = jnp.asarray(p_batch, dtype=jnp.float64)
+        # Un-batched single point (ndim matches p_shape) → wrap to B=1.
+        if p_arr.ndim == len(self._p_shape):
+            p_arr = p_arr[None]
+        x_star, duals, sid, (pb, xs, lam) = self._anchor_forward(p_arr, x0)
         return AnchorState(self, sid, pb.shape[0], pb, xs, lam, duals, cols)
 
     def batched_solve_with_jacobian(
@@ -2292,6 +2302,89 @@ class JaxProblem:
 
         J = jax.vmap(jac_row)(basis)          # (n,) + p_shape
         return self._slice_cols(J, cols)
+
+    # ----- single-problem ergonomic wrappers (pounce#88) -----
+    #
+    # Thin sugar over the batched_* methods for the scalar /
+    # path-following user (one NLP at a time, e.g. the inverse-map
+    # continuation): accept and return un-batched shapes, delegate to a
+    # ``B=1`` batched call, squeeze. No new numerics — the batched
+    # methods remain the canonical surface.
+
+    def _require_single(self, state: "AnchorState", who: str) -> None:
+        if state._B != 1:
+            raise ValueError(
+                f"pounce.jax: {who} is the single-problem form (B=1); the "
+                f"state was anchored with B={state._B}. Use the batched_* "
+                "method, or anchor a single point."
+            )
+
+    def solve_with_jacobian(self, p, x0, *, wrt_cols=None, return_state=False):
+        """Single-problem :meth:`batched_solve_with_jacobian` (pounce#88).
+
+        Solve at one ``p`` and return the full primal sensitivity
+        ``J = ∂x*/∂p`` of shape ``(n, p_dim)`` (or ``(n, len(wrt_cols))``)
+        from the held KKT factor — no leading batch axis. Thin sugar:
+        delegates to the batched method with ``B=1`` and squeezes.
+
+        Returns ``(x_star (n,), (lam (m,), zL (n,), zU (n,)), J)`` or,
+        with ``return_state=True``, also a ``B=1`` :class:`AnchorState`
+        for follow-up :meth:`jvp_from_state` / :meth:`vjp_from_state`.
+        """
+        p1 = jnp.asarray(p, dtype=jnp.float64)[None]
+        out = self.batched_solve_with_jacobian(
+            p1, x0, wrt_cols=wrt_cols, return_state=return_state,
+        )
+        if return_state:
+            x_star, (lam, zL, zU), J, state = out
+            return x_star[0], (lam[0], zL[0], zU[0]), J[0], state
+        x_star, (lam, zL, zU), J = out
+        return x_star[0], (lam[0], zL[0], zU[0]), J[0]
+
+    def sensitivity(self, state: "AnchorState"):
+        """Full primal sensitivity ``∂x*/∂p`` (shape ``(n, p_dim)``, or
+        ``(n, len(wrt_cols))`` if the state was anchored with
+        ``wrt_cols``) from a held single-problem state — one multi-RHS
+        back-solve over the held factor, no re-solve (pounce#88).
+
+        Single-problem analog of :meth:`batched_solve_with_jacobian`'s
+        ``J`` for an already-anchored state: row ``i`` is the VJP at
+        cotangent ``e_i`` (the KKT is symmetric). For the sensitivity at
+        a *different* supplied point use :meth:`sensitivity_at`
+        (re-factor); this evaluates at the state's own anchor point via
+        the held factor.
+        """
+        self._require_single(state, "sensitivity")
+        f, g, n, m = self._f, self._g, self._n, self._m
+        basis = jnp.eye(n, dtype=jnp.float64)
+
+        def jac_row(e_i):
+            v = jnp.broadcast_to(e_i, (state._B, n))
+            return _bwd_batched_factor_reuse(
+                f, g, n, m, self, state._B,
+                state._p_batch, state._x_star, state._lam, state._sid, v,
+            )
+
+        J_rows = jax.vmap(jac_row)(basis)        # (n, 1, p_dim)
+        J = jnp.transpose(J_rows, (1, 0, 2))      # (1, n, p_dim)
+        return self._slice_cols(J, state._wrt_cols)[0]
+
+    def jvp_from_state(self, state: "AnchorState", dp):
+        """Single-problem :meth:`batched_jvp_from_state` — ``J @ dp`` for
+        a state anchored at one point. ``dp`` has shape ``p_shape`` (or
+        ``(len(wrt_cols),)`` if the state was anchored with ``wrt_cols``)
+        and the result is ``(n,)`` (pounce#88)."""
+        self._require_single(state, "jvp_from_state")
+        dp1 = jnp.asarray(dp, dtype=jnp.float64)[None]
+        return self.batched_jvp_from_state(state, dp1)[0]
+
+    def vjp_from_state(self, state: "AnchorState", x_bar):
+        """Single-problem :meth:`batched_vjp_from_state` — ``J^T @ x_bar``
+        for a state anchored at one point. ``x_bar`` has shape ``(n,)``;
+        the result is ``(p_dim,)`` (or ``(len(wrt_cols),)``) (pounce#88)."""
+        self._require_single(state, "vjp_from_state")
+        xb1 = jnp.asarray(x_bar, dtype=jnp.float64)[None]
+        return self.batched_vjp_from_state(state, xb1)[0]
 
     # ----- custom_vjp factories -----
 

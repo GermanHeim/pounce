@@ -9,6 +9,29 @@ changes.
 
 ## Unreleased
 
+### Added — Single-problem ergonomic sensitivity wrappers (pounce#88)
+
+Thin un-batched wrappers over the `batched_*` post-solve sensitivity
+methods, for the scalar / path-following user (one NLP at a time):
+
+```python
+x_star, (lam, zL, zU), J = jp.solve_with_jacobian(theta, x0)   # J: (n, p)
+state = jp.anchor(theta, x0)             # un-batched point → B=1 state
+J  = jp.sensitivity(state)               # (n, p) from the held factor
+dx = jp.jvp_from_state(state, dtheta)    # J @ dtheta  -> (n,)
+dp = jp.vjp_from_state(state, x_bar)     # J^T @ x_bar -> (p,)
+```
+
+- `solve_with_jacobian` / `sensitivity` / `jvp_from_state` /
+  `vjp_from_state` accept and return un-batched shapes, delegating to
+  the batched methods with `B=1` and squeezing — no new numerics.
+- `anchor` now accepts a single un-batched point (`p_shape`) in addition
+  to a batch (`(B,) + p_shape`); a single point yields a `B=1`
+  `AnchorState`. The single-problem from-state wrappers reject a `B>1`
+  state rather than silently mis-shaping.
+- Implemented as `JaxProblem` methods (mirroring the `batched_*` names)
+  rather than free functions, for consistency with the existing surface.
+
 ### Added — Exact post-solve sensitivity at a supplied point (pounce#87)
 
 `JaxProblem.sensitivity_at(x_star, theta, duals, *, wrt_cols=None)`
