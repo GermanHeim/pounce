@@ -74,6 +74,10 @@ pub struct GlobalOptions {
     /// LP, add tangent cuts at the solution for loose convex/concave atoms and
     /// re-solve, tightening the lower bound without branching. `0` disables.
     pub sandwich_rounds: usize,
+    /// Optimization-based bound-tightening passes per node (each pass is `2n` LP
+    /// solves that minimize/maximize every variable over the relaxation, with an
+    /// incumbent cutoff). The strongest box reducer, but costly — `0` disables.
+    pub obbt_passes: usize,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -88,6 +92,7 @@ impl Default for GlobalOptions {
             max_nodes: 5000,
             local_solve_iters: 50,
             sandwich_rounds: 4,
+            obbt_passes: 2,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -225,6 +230,23 @@ where
         }
         if (0..n).any(|i| lo[i] > hi[i] + 1e-12) {
             continue; // empty box
+        }
+
+        // 1b. Optimization-based bound tightening (with the incumbent cutoff),
+        // a stronger box reducer than FBBT — prune if it collapses the box.
+        if opts.obbt_passes > 0 {
+            let cutoff = incumbent_ub.is_finite().then_some(incumbent_ub);
+            if !crate::obbt::tighten(
+                prob,
+                &mut lo,
+                &mut hi,
+                cutoff,
+                opts.obbt_passes,
+                &qp_opts,
+                &mut make_backend,
+            ) {
+                continue;
+            }
         }
 
         // 2. Relaxation lower bound, tightened by cutting-plane (sandwich)

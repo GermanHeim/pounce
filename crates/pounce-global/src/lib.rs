@@ -39,6 +39,7 @@ pub mod bnb;
 mod envelope;
 pub mod expr;
 mod nlp;
+mod obbt;
 pub mod problem;
 mod relax;
 

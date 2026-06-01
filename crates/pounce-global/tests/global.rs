@@ -232,6 +232,40 @@ fn sandwich_cuts_toggle() {
 }
 
 #[test]
+fn obbt_reduces_nodes() {
+    // min x + y s.t. x·y ≥ 4 on [1, 5]² (optimum 4 at (2, 2)). OBBT with the
+    // incumbent cutoff tightens the box aggressively; both settings certify the
+    // optimum and OBBT visits no more nodes.
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+
+    let with_obbt = solve_global(&prob, &GlobalOptions::default(), backend);
+    let without = solve_global(
+        &prob,
+        &GlobalOptions {
+            obbt_passes: 0,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&with_obbt, &without] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective - 4.0).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+    }
+    assert!(
+        with_obbt.nodes <= without.nodes,
+        "OBBT nodes {} should be ≤ {} without",
+        with_obbt.nodes,
+        without.nodes
+    );
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

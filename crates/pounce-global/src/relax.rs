@@ -108,6 +108,9 @@ pub(crate) struct Relaxation {
     pub qp: QpProblem,
     /// Univariate atoms for cutting-plane refinement.
     pub atoms: Vec<Atom>,
+    /// LP column holding the objective value (for an incumbent cutoff row in
+    /// OBBT). `None` for a constant/empty objective.
+    pub obj_col: Option<usize>,
     /// `true` if a constant constraint was found out of bounds — the box is
     /// then certifiably infeasible and the node can be pruned without solving.
     pub trivially_infeasible: bool,
@@ -446,9 +449,13 @@ pub(crate) fn build_relaxation(prob: &GlobalProblem, x_lo: &[f64], x_hi: &[f64])
     let mut c = vec![0.0; n_cols];
     // A constant or empty objective leaves the cost vector zero (the bound is
     // then just the constant / zero, refined by branching).
-    if let Some(Handle::Col(col)) = obj_handle {
-        c[col] = 1.0;
-    }
+    let obj_col = match obj_handle {
+        Some(Handle::Col(col)) => {
+            c[col] = 1.0;
+            Some(col)
+        }
+        _ => None,
+    };
 
     let qp = QpProblem {
         n: n_cols,
@@ -464,6 +471,7 @@ pub(crate) fn build_relaxation(prob: &GlobalProblem, x_lo: &[f64], x_hi: &[f64])
     Relaxation {
         qp,
         atoms: b.atoms,
+        obj_col,
         trivially_infeasible: b.infeasible,
     }
 }
