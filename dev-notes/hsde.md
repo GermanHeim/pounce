@@ -532,14 +532,26 @@ The semidefinite cone is **self-scaled**, so unlike exp/power it lives on the
   its sparsity graph (one dense `O(m²)` KKT block → several small ones,
   exploited by the sparse factorization). Solution-equivalent: the primal /
   objective are unchanged and the dropped (structurally-zero) cross rows have
-  empty `G` rows, so their dual is `0`. This is the first (non-overlapping)
-  rung of chordal sparsity.
+  empty `G` rows, so their dual is `0`.
+- **Sparsity (chordal range-space)** — `chordal_decompose` (built on
+  `cones/chordal.rs`: chordal extension + maximal cliques) handles the
+  *general* connected-sparse case via Agler's theorem: `s ⪰ 0` ⟺
+  `s = Σ_k Tᵀ S_k T`, introducing clique blocks `S_k ⪰ 0` and one consistency
+  equality per clique-covered entry. Runs after the block-diagonal split;
+  the dual is reconstructed through both layers (PSD entry duals from the
+  consistency-equality multipliers). Equivalence-tested against the dense
+  solve on a path-pattern SDP (`x`, objective).
+- **CBF SDP input** — the CBF reader parses affine PSD constraints
+  (`PSDCON` + `HCOORD`/`DCOORD`): `D_c + Σ_k x_k H_{c,k} ⪰ 0` maps directly
+  onto `s = svec(D) − Σ x_k svec(H_k) ∈ Psd` (√2-scaled). Validated on a
+  synthetic SDP (`max λ s.t. M − λI ⪰ 0`).
 
-Remaining for PSD: **overlapping-clique chordal decomposition** (general
-sparse — not just block-diagonal — SDPs) is the larger scaling follow-up;
-CBF `DCOORD` (read SDP instances from `.cbf`) is unexposed; and PSD cannot be
-mixed with exp/power cones in one problem (different drivers; the mix fails
-cleanly).
+Remaining for PSD: primal `PSDVAR` matrix variables in the CBF reader (the
+`OBJFCOORD`/`FCOORD` form) — affine `PSDCON` is done; and PSD cannot be mixed
+with exp/power cones in one problem (different drivers; the mix fails
+cleanly). The chordal elimination uses the natural variable order — a
+fill-reducing ordering (AMD) would shrink the cliques further on large
+instances.
 
 Remaining (overall): only — if a need emerges — embedded factor-reuse for the
 non-symmetric path. The CBLIB exp- and power-cone tiers, the cross-check,
