@@ -973,6 +973,7 @@ dependencies = [
  "pounce-linsol",
  "pounce-nlp",
  "pounce-presolve",
+ "rayon",
 ]
 
 [[package]]
