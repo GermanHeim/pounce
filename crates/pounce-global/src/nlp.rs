@@ -5,12 +5,13 @@
 //! a feasible point of the *original* problem far closer to a local minimum
 //! than the relaxation solution alone — a sharper incumbent, hence more
 //! pruning. First derivatives are the exact reverse-mode gradients from
-//! [`crate::ad`]; the Lagrangian Hessian is finite-differenced from those
-//! gradients (the local solve only needs a usable Newton direction, not an
-//! exact Hessian). The Jacobian's structural sparsity is read off the tapes;
-//! the Hessian is declared dense (problems here are low-dimensional).
+//! [`crate::ad`], and the Lagrangian Hessian is the exact point second-order
+//! AD sweep ([`crate::ad::hessian`]) — falling back to central differences of
+//! the gradient only at a singular domain or non-smooth atom. The Jacobian's
+//! structural sparsity is read off the tapes; the Hessian is declared dense
+//! (problems here are low-dimensional).
 
-use crate::ad::{accumulate_gradient, gradient, referenced_vars};
+use crate::ad::{accumulate_gradient, gradient, hessian, referenced_vars};
 use crate::expr::eval;
 use crate::problem::GlobalProblem;
 use pounce_algorithm::application::IpoptApplication;
@@ -51,6 +52,36 @@ impl TapeTnlp {
             }
         }
         g
+    }
+
+    /// Exact dense Lagrangian Hessian `obj_factor·∇²f + Σ λⱼ ∇²gⱼ` at `x`
+    /// (row-major `n×n`), via the point second-order AD sweep. `None` if any
+    /// active component declines (singular domain / non-smooth atom) — the
+    /// caller then falls back to the finite-difference estimate.
+    fn lagrangian_hessian_exact(
+        &self,
+        x: &[f64],
+        obj_factor: f64,
+        lambda: &[f64],
+    ) -> Option<Vec<f64>> {
+        let n = self.n;
+        let mut hmat = vec![0.0; n * n];
+        if obj_factor != 0.0 {
+            let ho = hessian(&self.objective, x, n)?;
+            for (acc, e) in hmat.iter_mut().zip(&ho) {
+                *acc += obj_factor * e;
+            }
+        }
+        for (j, t) in self.con_tapes.iter().enumerate() {
+            let lj = lambda.get(j).copied().unwrap_or(0.0);
+            if lj != 0.0 {
+                let hc = hessian(t, x, n)?;
+                for (acc, e) in hmat.iter_mut().zip(&hc) {
+                    *acc += lj * e;
+                }
+            }
+        }
+        Some(hmat)
     }
 }
 
@@ -160,21 +191,27 @@ impl TNLP for TapeTnlp {
                     None => return false,
                 };
                 let lambda = lambda.unwrap_or(&[]);
-                // Dense Lagrangian Hessian by central differences of the
-                // (exact) Lagrangian gradient.
-                let mut hmat = vec![0.0; n * n];
-                let mut xp = x.to_vec();
-                for kcol in 0..n {
-                    let hk = 1e-6 * (1.0 + x[kcol].abs());
-                    xp[kcol] = x[kcol] + hk;
-                    let gp = self.lagrangian_grad(&xp, obj_factor, lambda);
-                    xp[kcol] = x[kcol] - hk;
-                    let gm = self.lagrangian_grad(&xp, obj_factor, lambda);
-                    xp[kcol] = x[kcol];
-                    for i in 0..n {
-                        hmat[i * n + kcol] = (gp[i] - gm[i]) / (2.0 * hk);
-                    }
-                }
+                // Exact dense Lagrangian Hessian via point second-order AD;
+                // fall back to central differences of the (exact) Lagrangian
+                // gradient if any component declines (singular domain / |·|).
+                let hmat = self
+                    .lagrangian_hessian_exact(x, obj_factor, lambda)
+                    .unwrap_or_else(|| {
+                        let mut hmat = vec![0.0; n * n];
+                        let mut xp = x.to_vec();
+                        for kcol in 0..n {
+                            let hk = 1e-6 * (1.0 + x[kcol].abs());
+                            xp[kcol] = x[kcol] + hk;
+                            let gp = self.lagrangian_grad(&xp, obj_factor, lambda);
+                            xp[kcol] = x[kcol] - hk;
+                            let gm = self.lagrangian_grad(&xp, obj_factor, lambda);
+                            xp[kcol] = x[kcol];
+                            for i in 0..n {
+                                hmat[i * n + kcol] = (gp[i] - gm[i]) / (2.0 * hk);
+                            }
+                        }
+                        hmat
+                    });
                 let mut k = 0;
                 for i in 0..n {
                     for j in 0..=i {
