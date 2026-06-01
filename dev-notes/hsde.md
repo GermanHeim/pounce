@@ -160,7 +160,7 @@ a second-order cone) — all agree.
 | **H4** | ✅ *(revised)* HSDE promoted to a first-class **selectable** driver (`QpOptions::use_hsde`), routed through `solve_qp_core` and reachable from every public entry point (bound expansion + `z_lb`/`z_ub` split validated). **Not** forced as the universal default: doing so would regress warm starting — `warm_start_reduces_iterations_on_nearby_problem` asserts a *strict* iteration reduction that the direct method's adaptive recentering delivers and an IPM embedding inherently does not. End state is **automatic routing**: symmetric-only cones stay on the direct driver (warm start, factor reuse, differentiable layers); problems with non-symmetric cones (exp/power, H5+) use HSDE. Embedded warm start / factor reuse remain future work, gated on need. | med |
 | H5 | **Exponential cone** on HSDE: barrier oracles, non-symmetric scaling, third-order corrector, neighborhood line search. Known-optima (GP, logistic, entropy) + KKT-residual validation. | high |
 | H6 | **Power cone** (exp machinery + new barrier). | low after H5 |
-| H7 | **PSD cone**: pure-Rust symmetric eig, svec/smat, dense `W⊗ₛW` block; small dense SDPs first, chordal decomposition later. | med-high |
+| **H7** | ✅ **PSD cone**: pure-Rust symmetric eig, svec/smat, dense `W⊗ₛW` block; small dense SDPs (chordal decomposition later). Landed — see the H7 status note below. | med-high |
 | H8 | Cone-aware differentiable backward (JAX) for each new cone, FD-validated, as separate follow-ups. | med-high |
 
 Validation discipline is unchanged and intrinsic: the IPM reports
@@ -502,7 +502,34 @@ mismatched vector all reach the same optimum). Higher-level routing
 (`solve_socp_ipm_warm` for the non-symmetric path, Python) and factor reuse
 remain optional follow-ups, gated on a demonstrated need.
 
-Remaining: only — if a need emerges — embedded factor-reuse for the
+### H7 status — PSD cone landed (small dense SDPs)
+
+The semidefinite cone is **self-scaled**, so unlike exp/power it lives on the
+*symmetric* driver (`hsde.rs` / `solve_socp_ipm`), not the non-symmetric one.
+
+- **Oracles** (`cones/psd.rs`) — `svec`/`smat` (the `√2`-off-diagonal isometry
+  so `⟨X,Y⟩_F = svec·svec`), the `−log det` barrier + gradient `−X⁻¹` +
+  Hessian action, membership / fraction-to-boundary via eigenvalues, and the
+  Nesterov–Todd scaling `W = S^{1/2}(S^{1/2}ZS^{1/2})^{-1/2}S^{1/2}`, validated
+  against `W Z W = S`. Eigendecompositions reuse
+  `pounce_linalg::symmetric_eigen`.
+- **`Cone` impl** — the matrix-Jordan machinery: `kkt_block` → the dense
+  symmetric Kronecker `H = W ⊗ₛ W` (`ConeBlock::DenseLower`), validated to
+  satisfy `H·svec(z) = svec(s)`; `comp_residual` uses the Jordan product
+  `(SZ+ZS)/2`; `rhs_comp_term` = `Arw(z)⁻¹ r` via a Lyapunov solve
+  `ZD+DZ = 2·smat(r)`; `recover_ds = −Arw(z)⁻¹ r − H·dz`, all cross-checked.
+- **Driver integration** — `ConeSpec::Psd(n)` / `ConeKind::Psd`; `KktStructure`
+  gained a fully-dense `(z,z)` block path (a third `block_shapes` class
+  alongside the orthant's diagonal and the SOC's diag+rank-1 aux-var trick).
+  Validated end to end on `max λ s.t. M − λI ⪰ 0 ⇒ λ_min(M)` for a diagonal
+  and a non-diagonal `M` (the latter exercising the off-diagonal scaling).
+
+Remaining for PSD: Python/CBF (`DCOORD`) exposure, the dense block is `O(m²)`
+in the KKT (chordal/low-rank sparsity for large SDPs is the scaling follow-up),
+and PSD cannot currently be mixed with exp/power cones in one problem (the two
+cone families use different drivers; the mix fails cleanly).
+
+Remaining (overall): only — if a need emerges — embedded factor-reuse for the
 non-symmetric path. The CBLIB exp- and power-cone tiers, the cross-check,
 and the benchmarks-harness integration all landed (see below).
 

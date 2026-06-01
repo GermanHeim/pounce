@@ -19,7 +19,7 @@ turn drives a pluggable backend (FERAL by default, HSL MA57 optionally).
 | **NLP filter-IPM** | general smooth NLP (nonconvex OK) | local (KKT) | `pounce-algorithm` + `pounce-nlp` | CLI default; Python `Problem`/`minimize`; `--solver nlp` |
 | **NLP active-set SQP** | general smooth NLP | local | `pounce-algorithm` (subproblems via `pounce-qp`) | `algorithm=active-set-sqp` |
 | **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `--solver lp-ipm`/`qp-ipm` |
-| **Convex IPM (conic)** | SOCP, exponential, power cones | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `pounce <file>.cbf` |
+| **Convex IPM (conic)** | SOCP, exponential, power, PSD (small) cones | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `pounce <file>.cbf` |
 | **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `--solver qp-active-set` |
 
 ## When to choose each
@@ -60,12 +60,15 @@ an `.nl` and sends LP/convex-QP problems here automatically.
 
 ### Second-order, exponential, or power cones → **Convex IPM (conic)**
 
-The same convex solver, through its non-symmetric HSDE driver, handles
-conic programs: second-order cones, and the **exponential** and **power**
-cones that express geometric programming, entropy / log-sum-exp, logistic
-models, and `p`-norm constraints. Also **global**. This is the path to use
-when you can cast a nominally-nonconvex problem into a convex cone — you
-trade modeling effort for a global guarantee.
+The same convex solver handles conic programs: second-order cones, the
+**exponential** and **power** cones that express geometric programming,
+entropy / log-sum-exp, logistic models, and `p`-norm constraints, and the
+**positive-semidefinite** cone for small dense SDPs. Also **global**. This
+is the path to use when you can cast a nominally-nonconvex problem into a
+convex cone — you trade modeling effort for a global guarantee. (The PSD
+cone is self-scaled and runs on the symmetric driver; the exp/power cones
+run on the non-symmetric HSDE driver, so the two families can't yet be
+mixed in one problem.)
 
 - Python: `pounce.qp.solve_socp(..., cones=[("exp", 3), ("pow", 0.5), ...])`.
 - CLI: a Conic Benchmark Format file, `pounce model.cbf` (see the CBLIB
@@ -127,8 +130,10 @@ These are not solvers you select, but stages and tools the solvers share:
   steps and reduced Hessians for the NLP; `QpSensitivity` does the same for
   the convex QP. See [Sensitivity Analysis](sensitivity.md).
 - **Cone library** (`pounce-convex`) — nonnegative, second-order,
-  exponential, and power cones today; the positive-semidefinite (PSD) cone
-  is planned, which would add SDP as a convex class.
+  exponential, power, and (for small dense problems) positive-semidefinite
+  cones, so small SDPs solve as a convex class. The PSD cone cannot yet be
+  mixed with the exponential/power cones in one problem (they use different
+  drivers).
 - **Solve report** — every path can emit the machine-readable
   `pounce.solve-report/v1` JSON (status, iterations, residuals, timing).
   See [JSON Solve Report](json-output.md).
