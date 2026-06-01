@@ -26,6 +26,13 @@ path = "src/main.rs"
 name = "pounce_sens"
 path = "src/bin/pounce_sens.rs"
 
+# `pounce_cblib` solves a CBLIB Conic Benchmark Format (.cbf) instance
+# through the convex conic driver and emits a pounce.solve-report/v1 JSON
+# report. Used by the benchmarks/cblib harness (conic tier).
+[[bin]]
+name = "pounce_cblib"
+path = "src/bin/pounce_cblib.rs"
+
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
