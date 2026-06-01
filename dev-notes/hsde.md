@@ -502,45 +502,57 @@ mismatched vector all reach the same optimum). Higher-level routing
 (`solve_socp_ipm_warm` for the non-symmetric path, Python) and factor reuse
 remain optional follow-ups, gated on a demonstrated need.
 
-Remaining: the CBLIB **power-cone** set (the exp-cone GP set is done — see
-below), and — if a need emerges — embedded factor-reuse for the
-non-symmetric path.
+Remaining: only — if a need emerges — embedded factor-reuse for the
+non-symmetric path. The CBLIB exp- and power-cone tiers, the cross-check,
+and the benchmarks-harness integration all landed (see below).
 
-### CBLIB benchmark tier — exp-cone GP set landed
+### CBLIB benchmark tier — landed (exp + power cones)
 
-**Status: landed for exponential-cone geometric programs.** The reader, the
-CBF→pounce mapping, and the independent NLP cross-check are implemented and
-green; power cones and constraint-side exp/SOC cones remain the extensions.
+**Status: landed.** The reader, the CBF→pounce mapping, the independent NLP
+cross-check, and the benchmarks-harness integration are implemented and
+green for both the exponential-cone GPs and the 3-D power cone.
 
 - **CBF reader** (`pounce_cli::cbf`) — parses the Conic Benchmark Format
-  (`VER`/`OBJSENSE`/`VAR`/`CON`/`OBJACOORD`/`OBJBCOORD`/`ACOORD`/`BCOORD`)
-  with the cone kinds `F`/`L=`/`L+`/`L-`/`EXP`/`Q`. Unsupported kinds (PSD
-  `DCOORD`, power cones needing a `POWCONES` parameter table) are rejected
-  with a clear error rather than mis-parsed. Unit-tested on the section
-  grammar, the exp-dim and cone-sum checks, and unsupported-cone rejection.
+  (`VER`/`OBJSENSE`/`POWCONES`/`VAR`/`CON`/`OBJACOORD`/`OBJBCOORD`/`ACOORD`/`BCOORD`)
+  with the cone kinds `F`/`L=`/`L+`/`L-`/`EXP`/`Q` and the 3-D power cone
+  (`@k:POW` resolving its exponent `α = α₀/(α₀+α₁)` against the `POWCONES`
+  table). Unsupported kinds (PSD `DCOORD`, rotated SOC `QR`, dual power
+  cones) are rejected with a clear error rather than mis-parsed. Unit-tested
+  on the section grammar, the exp-dim and cone-sum checks, the `POWCONES`
+  α-resolution + permutation, and unsupported-cone / bad-`@k` rejection.
 - **`CbfModel::to_conic`** — maps an instance to a pounce conic program
   (`QpProblem` + `Vec<ConeSpec>`): VAR cones → slack `s = −Gx ∈ K`, CON
-  cones → `s = Ax+b ∈ K`, `L=` → equality `Ax = −b`, and the exp triple
-  **reversal** (CBF bound-first `(c,b,a)` → pounce bound-third `(a,b,c)`).
+  cones → `s = Ax+b ∈ K`, `L=` → equality `Ax = −b`. The non-symmetric
+  triples are permuted into pounce cone order: exp **reversed** (CBF
+  bound-first `(a,b,c)` → pounce bound-third `(c,b,a)`), power **rotated**
+  (CBF `x₀^β₀ x₁^β₁ ≥ |x₂|` → pounce `(x,y,z) = (x₂,x₀,x₁)`, `α = β₀`).
 - **Conic solve on real instances** (`tests/cblib_cbf.rs`) — three vendored
-  CBLIB GPs (`demb761`, `beck751`, `fang88`, under
-  `crates/pounce-cli/tests/data/cblib/`) each parse, map, and reach a
-  verified `Optimal` through the non-symmetric HSDE driver.
+  CBLIB GPs (`demb761`, `beck751`, `fang88`) plus a hand-authored synthetic
+  power-cone instance (`pow3_synthetic.cbf` — the real `2013_fir*` are
+  ~120 MB), each under `crates/pounce-cli/tests/data/cblib/`, parse, map,
+  and reach a verified `Optimal`. The power instance hits its closed-form
+  optimum `x₂ = 2^½·½^½ = 1`.
 - **Independent NLP cross-check** (`tests/cblib_vs_nlp.rs`) — exactly the
   `exp_cone_vs_nlp` strategy: each instance is also built as a smooth NLP
-  (each VAR exp triple → `u₀ − u₁·exp(u₂/u₁) ≥ 0`, `u₁ ≥ 0`, with exact
-  gradient + Hessian; `L=`/`L-` rows stay linear) and solved by the
-  filter-IPM, **cold-started independently** of the conic solution. The two
-  solvers — sharing no code — agree on the objective to ~1e-8 relative:
-  `demb761 → 22.31086`, `beck751 → 7.50095`, `fang88 → −10.38004`. (These
-  are the literal GP optima; CBLIB ships no reference solution files, so the
-  cross-check *is* the reference.)
+  (exp triple → `u₀ − u₁·exp(u₂/u₁) ≥ 0`; power cone → the epigraph
+  `u₀^α u₁^{1−α} ∓ x_bnd ≥ 0`; both with exact gradient + Hessian, `L=`/`L-`
+  rows linear) and solved by the filter-IPM, **cold-started independently**
+  of the conic solution. The two solvers — sharing no code — agree to ~1e-8
+  relative: `demb761 → 22.31086`, `beck751 → 7.50095`, `fang88 → −10.38004`,
+  `pow3 → 1.0`. (CBLIB ships no reference solution files, so the cross-check
+  *is* the reference.)
+- **Benchmarks-harness integration** — the `pounce_cblib` binary solves a
+  `.cbf` and emits a `pounce.solve-report/v1` JSON (status / iters / time /
+  objective, per-iteration trace at `--json-detail full`; input descriptor
+  kind `cbf-file`). `benchmarks/cblib/run_cblib.py` runs it over the
+  vendored instances (offline) — or a `--dir` of a local CBLIB checkout —
+  and projects each report into the composite suite schema at
+  `cblib/pounce.json`.
 
-Extensions left for when needed: power-cone instances (`2013_fir*`, ~120 MB
-— the CBF reader would need the `POWCONES` parameter section and the NLP
-form a `|x| ≤ y^α z^{1−α}` epigraph), constraint-side exp/SOC cones in the
-NLP form, and feeding the per-instance JSON solve report into the
-`benchmarks/` harness for status/iters/time/residual tracking.
+Extensions left for when needed: the large power-cone instances
+(`2013_fir*`, ~120 MB — fetch into a `--dir` rather than vendoring),
+constraint-side exp/SOC cones in the NLP cross-check form (the conic
+mapping already handles them), and the rotated SOC (`QR`) cone kind.
 
 #### Original plan (kept as the implementation record)
 
