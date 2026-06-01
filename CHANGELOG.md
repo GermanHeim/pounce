@@ -9,6 +9,32 @@ changes.
 
 ## Unreleased
 
+### Added — Active-set-proximity monitor (pounce#89)
+
+`JaxProblem.active_set_margin(state)` reports the distance to an
+active-set change at the anchor point — the "predictor is about to
+become invalid" signal for predictor–corrector path following. The
+post-solve sensitivity is a derivative on a *fixed* active set; this
+flags when a bound / inequality is about to cross its critical-region
+boundary (where the sensitivity is discontinuous).
+
+```python
+r = jp.active_set_margin(state)
+# r["margin"], r["min_mult"], r["min_slack"]  — each (B,)
+```
+
+- By complementarity: an **active** bound/inequality (multiplier `>
+  active_tol`) is about to leave the set — its *multiplier* heads to
+  zero; an **inactive** one is about to enter — its *slack* heads to
+  zero. `min_mult` / `min_slack` track each; `margin = min(min_mult,
+  min_slack)`.
+- Equalities (`cl == cu`) are excluded (always active); `±inf` bounds
+  and the slack side of a one-sided inequality drop out naturally.
+  An unconstrained interior point returns `inf`.
+- Pure-JAX reduction over state the `AnchorState` already holds — no
+  solve, no back-solve. Pairs with the caller-side KKT-residual
+  (smooth-drift) monitor: re-anchor when either trips.
+
 ### Added — Single-problem ergonomic sensitivity wrappers (pounce#88)
 
 Thin un-batched wrappers over the `batched_*` post-solve sensitivity

@@ -2386,6 +2386,105 @@ class JaxProblem:
         xb1 = jnp.asarray(x_bar, dtype=jnp.float64)[None]
         return self.batched_vjp_from_state(state, xb1)[0]
 
+    def active_set_margin(self, state: "AnchorState", *, active_tol=_ACTIVE_TOL):
+        """Distance to an active-set change at the anchor point (pounce#89).
+
+        The post-solve sensitivity ``∂x*/∂θ`` is a derivative on a *fixed*
+        active set; along a path it stays valid until a bound /
+        inequality crosses its critical-region boundary, where the
+        sensitivity is **discontinuous**. This is the monitor that says
+        "the predictor is about to become invalid": it reduces the held
+        state's multipliers and slacks to the smallest distance-to-zero,
+        with no solve and no back-solve — a pure reduction over state the
+        :class:`AnchorState` already holds.
+
+        Two ways the active set flips, by complementarity:
+
+        * an **active** bound / inequality (multiplier ``> active_tol``)
+          is about to leave the set — its *multiplier* heads to zero;
+        * an **inactive** bound / inequality is about to enter the set —
+          its *slack* heads to zero.
+
+        Equalities (``cl == cu``) are always active and never change set,
+        so they are excluded. Bounds at ``±inf`` (and the slack side of a
+        one-sided inequality) contribute ``inf`` and drop out naturally.
+
+        Pairs with the smooth-drift monitor (the KKT residual at the
+        predicted point, which the caller forms directly): re-solve /
+        re-anchor when *either* the residual grows *or* this margin gets
+        small.
+
+        Parameters
+        ----------
+        state : AnchorState
+        active_tol : float
+            Multiplier threshold for classifying a bound / inequality as
+            active. Matches the ``custom_vjp`` backward's
+            ``_ACTIVE_TOL``.
+
+        Returns
+        -------
+        dict of ``(B,)`` arrays:
+
+        * ``"margin"`` — ``min(min_mult, min_slack)`` per block; small ⇒
+          an active-set change is imminent. ``inf`` when no constraint is
+          active *and* none inactive-with-finite-slack (unconstrained at
+          this point).
+        * ``"min_mult"`` — smallest active multiplier (closest to
+          *leaving* the active set); ``inf`` when nothing is active.
+        * ``"min_slack"`` — smallest inactive slack (closest to
+          *entering* the active set); ``inf`` when nothing is inactive
+          with a finite bound.
+        """
+        n, m = self._n, self._m
+        B = state._B
+        INF = jnp.inf
+
+        x = jnp.asarray(state._x_star, dtype=jnp.float64).reshape(B, n)
+        lam_b, zL_b, zU_b = state.duals
+        zL = jnp.asarray(zL_b, dtype=jnp.float64).reshape(B, n)
+        zU = jnp.asarray(zU_b, dtype=jnp.float64).reshape(B, n)
+
+        def _bound(arr, fill):
+            if arr is None:
+                return jnp.full((B, n), fill, dtype=jnp.float64)
+            a = jnp.asarray(arr, dtype=jnp.float64)
+            return jnp.broadcast_to(a, (B, n))
+
+        lb = _bound(self._lb, -INF)
+        ub = _bound(self._ub, INF)
+
+        # Lower / upper bounds: active → its multiplier is the margin;
+        # inactive → its slack (x − lb / ub − x) is the margin.
+        act_L = zL > active_tol
+        act_U = zU > active_tol
+        mult_L = jnp.where(act_L, zL, INF)
+        mult_U = jnp.where(act_U, zU, INF)
+        slack_L = jnp.where(act_L, INF, x - lb)
+        slack_U = jnp.where(act_U, INF, ub - x)
+
+        mult_cols = [mult_L, mult_U]
+        slack_cols = [slack_L, slack_U]
+
+        if m > 0:
+            lam = jnp.asarray(lam_b, dtype=jnp.float64).reshape(B, m)
+            cl = jnp.asarray(self._cl_for_classify, dtype=jnp.float64)
+            cu = jnp.asarray(self._cu_for_classify, dtype=jnp.float64)
+            is_ineq = (cl != cu)[None, :]                         # (1, m)
+            p_batch = jnp.asarray(state._p_batch, dtype=jnp.float64)
+            g_val = jax.vmap(self._g_jit, in_axes=(0, 0))(x, p_batch)  # (B, m)
+            # Two-sided slack: the binding side; the ±inf side drops out.
+            ineq_slack = jnp.minimum(g_val - cl[None, :], cu[None, :] - g_val)
+            act_g = is_ineq & (jnp.abs(lam) > active_tol)
+            inact_g = is_ineq & ~act_g
+            mult_cols.append(jnp.where(act_g, jnp.abs(lam), INF))
+            slack_cols.append(jnp.where(inact_g, ineq_slack, INF))
+
+        min_mult = jnp.min(jnp.concatenate(mult_cols, axis=1), axis=1)   # (B,)
+        min_slack = jnp.min(jnp.concatenate(slack_cols, axis=1), axis=1)  # (B,)
+        margin = jnp.minimum(min_mult, min_slack)
+        return {"margin": margin, "min_mult": min_mult, "min_slack": min_slack}
+
     # ----- custom_vjp factories -----
 
     def _solve_fn(self):

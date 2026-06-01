@@ -1364,6 +1364,69 @@ def test_single_wrappers_reject_batched_state_pounce_88():
     state.close()
 
 
+def test_active_set_margin_binding_bound_pounce_89():
+    """Issue #89: with a binding upper bound, `min_mult` reflects the
+    active bound's multiplier and the margin equals min(min_mult,
+    min_slack). Equalities are excluded; the margin is positive at a
+    clean (non-degenerate) solution."""
+    jp = _build_jac_qp(bounded=True)     # ub[0] = 0.2, equality x0+x1=1
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.6, 0.4])        # pulls x0 against its upper bound
+    state = jp.anchor(theta, x0)
+    x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(theta[None, :], x0)
+
+    r = jp.active_set_margin(state)
+    for key in ("margin", "min_mult", "min_slack"):
+        assert r[key].shape == (1,)
+
+    # The upper bound on x0 binds → its multiplier is the active one.
+    assert float(zU[0, 0]) > 1e-6
+    np.testing.assert_allclose(
+        float(r["min_mult"][0]), float(zU[0, 0]), atol=1e-6
+    )
+    # Clean solution: a strictly positive distance to an active-set change.
+    assert float(r["margin"][0]) > 0.0
+    np.testing.assert_allclose(
+        float(r["margin"][0]),
+        min(float(r["min_mult"][0]), float(r["min_slack"][0])),
+        atol=1e-12,
+    )
+    state.close()
+
+
+def test_active_set_margin_interior_is_inf_pounce_89():
+    """Issue #89: an unconstrained interior solution (no active bound,
+    no finite inactive bound) has an infinite margin — no active-set
+    change is imminent."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    # No bounds, no constraints: the optimum is x* = p, interior.
+    jp = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    state = jp.anchor(jnp.array([0.3, -0.4]), jnp.zeros(2))
+    r = jp.active_set_margin(state)
+    assert not np.isfinite(float(r["min_mult"][0]))   # nothing active
+    assert not np.isfinite(float(r["margin"][0]))
+    state.close()
+
+
+def test_active_set_margin_batched_pounce_89():
+    """Issue #89: the margin is computed per block for a B>1 state."""
+    jp = _build_jac_qp(bounded=True)
+    x0 = jnp.zeros(2)
+    p_batch = jnp.array([[0.6, 0.4], [0.5, 0.5]])
+    state = jp.anchor(p_batch, x0)
+    r = jp.active_set_margin(state)
+    assert r["margin"].shape == (2,)
+    assert np.all(np.asarray(r["margin"]) > 0.0)
+    state.close()
+
+
 def test_batched_vjp_from_state_matches_jax_vjp_pounce_82():
     """Issue #82: ``batched_vjp_from_state`` equals ``jax.vjp`` over
     ``batched_solve`` (J^T @ x_bar), and equals J^T @ x_bar from the
