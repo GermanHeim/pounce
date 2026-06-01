@@ -35,10 +35,79 @@ enum Handle {
     Const(f64),
 }
 
+/// A univariate atom `w = kind(a)` (both LP columns), recorded so the
+/// cutting-plane ("sandwich") refinement can add tangent cuts at the LP point.
+#[derive(Clone, Copy)]
+pub(crate) struct Atom {
+    pub w: usize,
+    pub a: usize,
+    pub kind: AtomKind,
+}
+
+/// The univariate operations the relaxation knows how to convexify.
+#[derive(Clone, Copy)]
+pub(crate) enum AtomKind {
+    Pow(u32),
+    Exp,
+    Ln,
+    Sqrt,
+    Sin,
+    Cos,
+}
+
+impl AtomKind {
+    pub(crate) fn f(self, t: f64) -> f64 {
+        match self {
+            AtomKind::Pow(n) => t.powi(n as i32),
+            AtomKind::Exp => t.exp(),
+            AtomKind::Ln => t.max(1e-12).ln(),
+            AtomKind::Sqrt => t.max(0.0).sqrt(),
+            AtomKind::Sin => t.sin(),
+            AtomKind::Cos => t.cos(),
+        }
+    }
+
+    fn df(self, t: f64) -> f64 {
+        match self {
+            AtomKind::Pow(n) => n as f64 * t.powi(n as i32 - 1),
+            AtomKind::Exp => t.exp(),
+            AtomKind::Ln => 1.0 / t.max(1e-12),
+            AtomKind::Sqrt => 0.5 / t.max(1e-300).sqrt(),
+            AtomKind::Sin => t.cos(),
+            AtomKind::Cos => -t.sin(),
+        }
+    }
+
+    /// Curvature over `[l, u]`: `Some(true)` convex, `Some(false)` concave,
+    /// `None` mixed (a tangent at an interior point would not be globally valid,
+    /// so the sandwich step skips it).
+    fn curvature(self, l: f64, u: f64) -> Option<bool> {
+        match self {
+            AtomKind::Pow(n) if n % 2 == 0 => Some(true),
+            AtomKind::Pow(_) if l >= 0.0 => Some(true),
+            AtomKind::Pow(_) if u <= 0.0 => Some(false),
+            AtomKind::Pow(_) => None, // odd power straddling 0
+            AtomKind::Exp => Some(true),
+            AtomKind::Ln | AtomKind::Sqrt => Some(false),
+            AtomKind::Sin | AtomKind::Cos => {
+                if u - l > std::f64::consts::PI || self.f(l) * self.f(u) < 0.0 {
+                    None // an interior inflection (zero of sin/cos) may exist
+                } else if self.f(0.5 * (l + u)) < 0.0 {
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            }
+        }
+    }
+}
+
 /// The relaxation LP plus the bookkeeping to read a solution back. The first
 /// `n_vars` LP columns are the original problem variables.
 pub(crate) struct Relaxation {
     pub qp: QpProblem,
+    /// Univariate atoms for cutting-plane refinement.
+    pub atoms: Vec<Atom>,
     /// `true` if a constant constraint was found out of bounds — the box is
     /// then certifiably infeasible and the node can be pruned without solving.
     pub trivially_infeasible: bool,
@@ -52,6 +121,7 @@ struct Builder {
     eq_rhs: Vec<f64>,
     ineq: Vec<Triplet>,
     ineq_rhs: Vec<f64>,
+    atoms: Vec<Atom>,
     infeasible: bool,
 }
 
@@ -68,6 +138,7 @@ impl Builder {
             eq_rhs: Vec::new(),
             ineq: Vec::new(),
             ineq_rhs: Vec::new(),
+            atoms: Vec::new(),
             infeasible: false,
         }
     }
@@ -152,17 +223,21 @@ impl Builder {
         a: Handle,
         al: f64,
         au: f64,
-        f: impl Fn(f64) -> f64,
+        kind: AtomKind,
         build: impl FnOnce() -> Option<Envelope>,
     ) {
         let wh = Handle::Col(w);
         if let Handle::Const(v) = a {
-            self.emit_eq(&[(wh, 1.0)], f(v));
+            self.emit_eq(&[(wh, 1.0)], kind.f(v));
             return;
+        }
+        // Record the atom (operand is a genuine column) for sandwich refinement.
+        if let Handle::Col(ac) = a {
+            self.atoms.push(Atom { w, a: ac, kind });
         }
         if !al.is_finite() || !au.is_finite() || au - al < 1e-12 {
             if al.is_finite() && au.is_finite() {
-                self.emit_eq(&[(wh, 1.0)], f(0.5 * (al + au)));
+                self.emit_eq(&[(wh, 1.0)], kind.f(0.5 * (al + au)));
             }
             return; // unbounded domain: rely on the column's box bound
         }
@@ -268,14 +343,9 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                     1 => b.emit_eq(&[(w, 1.0), (ha, -1.0)], 0.0),
                     // n ≥ 2 — convex (even / nonneg), concave (nonpos), or the
                     // single-inflection envelope when odd and straddling 0.
-                    _ => b.emit_univariate(
-                        col,
-                        ha,
-                        al,
-                        au,
-                        move |t| t.powi(n as i32),
-                        || Some(envelope::power(n, al, au)),
-                    ),
+                    _ => b.emit_univariate(col, ha, al, au, AtomKind::Pow(n), || {
+                        Some(envelope::power(n, al, au))
+                    }),
                 }
                 w
             }
@@ -283,63 +353,43 @@ fn process_tape(b: &mut Builder, tape: &FbbtTape, x_lo: &[f64], x_hi: &[f64]) ->
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                b.emit_univariate(
-                    col,
-                    ha,
-                    al,
-                    au,
-                    |t| t.max(0.0).sqrt(),
-                    || Some(envelope::sqrt(al, au)),
-                );
+                b.emit_univariate(col, ha, al, au, AtomKind::Sqrt, || {
+                    Some(envelope::sqrt(al, au))
+                });
                 Handle::Col(col)
             }
             FbbtOp::Exp(a) => {
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                b.emit_univariate(col, ha, al, au, |t| t.exp(), || Some(envelope::exp(al, au)));
+                b.emit_univariate(col, ha, al, au, AtomKind::Exp, || {
+                    Some(envelope::exp(al, au))
+                });
                 Handle::Col(col)
             }
             FbbtOp::Ln(a) => {
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                b.emit_univariate(
-                    col,
-                    ha,
-                    al,
-                    au,
-                    |t| t.max(1e-12).ln(),
-                    || Some(envelope::ln(al, au)),
-                );
+                b.emit_univariate(col, ha, al, au, AtomKind::Ln, || Some(envelope::ln(al, au)));
                 Handle::Col(col)
             }
             FbbtOp::Sin(a) => {
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                b.emit_univariate(
-                    col,
-                    ha,
-                    al,
-                    au,
-                    |t| t.sin(),
-                    || envelope::trig(true, al, au),
-                );
+                b.emit_univariate(col, ha, al, au, AtomKind::Sin, || {
+                    envelope::trig(true, al, au)
+                });
                 Handle::Col(col)
             }
             FbbtOp::Cos(a) => {
                 let col = new_col!(k);
                 let ha = handle[a];
                 let (al, au) = bounds(ha, a);
-                b.emit_univariate(
-                    col,
-                    ha,
-                    al,
-                    au,
-                    |t| t.cos(),
-                    || envelope::trig(false, al, au),
-                );
+                b.emit_univariate(col, ha, al, au, AtomKind::Cos, || {
+                    envelope::trig(false, al, au)
+                });
                 Handle::Col(col)
             }
             FbbtOp::Abs(a) => {
@@ -413,6 +463,58 @@ pub(crate) fn build_relaxation(prob: &GlobalProblem, x_lo: &[f64], x_hi: &[f64])
     };
     Relaxation {
         qp,
+        atoms: b.atoms,
         trivially_infeasible: b.infeasible,
+    }
+}
+
+/// Valid tangent ("sandwich") cuts at the LP point `x` for atoms whose
+/// relaxation value is loose. For a convex atom the tangent at the operand's
+/// current value is a global underestimator (and a global overestimator for a
+/// concave one); adding it where the LP slack `w` sits on the wrong side of the
+/// true atom value tightens the bound without branching. Returned as
+/// `(row terms, rhs)` in `Σ coeff·col ≤ rhs` form.
+pub(crate) fn sandwich_cuts(
+    atoms: &[Atom],
+    lb: &[f64],
+    ub: &[f64],
+    x: &[f64],
+    tol: f64,
+) -> Vec<(Vec<(usize, f64)>, f64)> {
+    let mut cuts = Vec::new();
+    for atom in atoms {
+        let Some(convex) = atom.kind.curvature(lb[atom.a], ub[atom.a]) else {
+            continue;
+        };
+        let t = x[atom.a];
+        if !t.is_finite() {
+            continue;
+        }
+        let slope = atom.kind.df(t);
+        let ft = atom.kind.f(t);
+        if !slope.is_finite() || !ft.is_finite() {
+            continue;
+        }
+        let intercept = ft - slope * t;
+        let w = x[atom.w];
+        if convex && w < ft - tol {
+            // w ≥ slope·a + intercept  ⇔  slope·a − w ≤ −intercept
+            cuts.push((vec![(atom.w, -1.0), (atom.a, slope)], -intercept));
+        } else if !convex && w > ft + tol {
+            // w ≤ slope·a + intercept  ⇔  w − slope·a ≤ intercept
+            cuts.push((vec![(atom.w, 1.0), (atom.a, -slope)], intercept));
+        }
+    }
+    cuts
+}
+
+/// Append `≤` cuts (from [`sandwich_cuts`]) to the LP as new inequality rows.
+pub(crate) fn append_cuts(qp: &mut QpProblem, cuts: &[(Vec<(usize, f64)>, f64)]) {
+    for (terms, rhs) in cuts {
+        let row = qp.h.len();
+        for &(c, v) in terms {
+            qp.g.push(Triplet::new(row, c, v));
+        }
+        qp.h.push(*rhs);
     }
 }

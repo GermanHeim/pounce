@@ -205,6 +205,33 @@ fn sine_global_minimum() {
 }
 
 #[test]
+fn sandwich_cuts_toggle() {
+    // x⁴ − 3x² on [−2, 2] (global min −2.25). Solve with cutting-plane rounds
+    // on (default) and off — both must certify the global optimum, exercising
+    // the validity of the sandwich tangent cuts.
+    let f = var(0).powi(4) - 3.0 * var(0).powi(2);
+    let prob = GlobalProblem::new(vec![-2.0], vec![2.0], &f);
+
+    let on = solve_global(&prob, &GlobalOptions::default(), backend);
+    let off = solve_global(
+        &prob,
+        &GlobalOptions {
+            sandwich_rounds: 0,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&on, &off] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective + 2.25).abs() < 1e-3,
+            "obj = {}",
+            sol.objective
+        );
+    }
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

@@ -70,6 +70,10 @@ pub struct GlobalOptions {
     /// solve. `0` disables local solves (upper bounds then come only from
     /// probing the relaxation point and box center).
     pub local_solve_iters: usize,
+    /// Maximum cutting-plane ("sandwich") rounds per node: after the relaxation
+    /// LP, add tangent cuts at the solution for loose convex/concave atoms and
+    /// re-solve, tightening the lower bound without branching. `0` disables.
+    pub sandwich_rounds: usize,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -83,6 +87,7 @@ impl Default for GlobalOptions {
             box_tol: 1e-7,
             max_nodes: 5000,
             local_solve_iters: 50,
+            sandwich_rounds: 4,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -222,19 +227,43 @@ where
             continue; // empty box
         }
 
-        // 2. Relaxation lower bound.
+        // 2. Relaxation lower bound, tightened by cutting-plane (sandwich)
+        // rounds: re-solve with tangent cuts added at the LP point for loose
+        // convex/concave atoms until the bound stops improving.
         let relax = build_relaxation(prob, &lo, &hi);
         if relax.trivially_infeasible {
             continue;
         }
-        let sol = solve_qp_ipm(&relax.qp, &qp_opts, &mut make_backend);
-        let node_lb = match sol.status {
+        let mut qp = relax.qp;
+        let atoms = relax.atoms;
+        let (col_lo, col_hi) = (qp.lb.clone(), qp.ub.clone());
+        let sol = solve_qp_ipm(&qp, &qp_opts, &mut make_backend);
+        let mut node_lb = match sol.status {
             QpStatus::Optimal => sol.obj,
             QpStatus::PrimalInfeasible => continue, // box is infeasible → prune
             // Dual-infeasible (unbounded relaxation) or numerical trouble: keep
             // the inherited bound and keep branching rather than prune wrongly.
             _ => node.key,
         };
+        // Branch from and probe at the *original* relaxation point — it marks
+        // where the relaxation is loosest; the cuts only sharpen the bound.
+        let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
+        if sol.status == QpStatus::Optimal {
+            let mut cut_x = sol.x;
+            for _ in 0..opts.sandwich_rounds {
+                let cuts = crate::relax::sandwich_cuts(&atoms, &col_lo, &col_hi, &cut_x, 1e-7);
+                if cuts.is_empty() {
+                    break;
+                }
+                crate::relax::append_cuts(&mut qp, &cuts);
+                let s = solve_qp_ipm(&qp, &qp_opts, &mut make_backend);
+                if s.status != QpStatus::Optimal || s.obj <= node_lb + 1e-9 {
+                    break;
+                }
+                node_lb = s.obj;
+                cut_x = s.x;
+            }
+        }
         if incumbent_ub.is_finite() && gap_ok(node_lb, incumbent_ub) {
             continue;
         }
@@ -242,7 +271,6 @@ where
         // 3. Upper bound: probe the relaxation point and box center, and (when
         // enabled) polish the relaxation point with a local NLP solve over the
         // node box for a much sharper feasible incumbent.
-        let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
         let center: Vec<f64> = (0..n).map(|i| 0.5 * (lo[i] + hi[i])).collect();
         let mut candidates = vec![relax_pt.clone(), center];
         if opts.local_solve_iters > 0 {
