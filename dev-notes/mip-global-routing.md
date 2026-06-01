@@ -364,6 +364,65 @@ Upper bounds come from multi-start local NLP solves
 branching subdivides the box on the variable contributing most to the
 relaxation gap until the gap closes to tolerance.
 
+## Presolve: the highest-ROI performance lever
+
+Presolve is the single largest practical speedup in modern MIP
+(Achterberg & Wunderling 2013 attribute order-of-magnitude factors to
+it). For the positioning where *competitive performance is the
+table-stakes that make the differentiator trustworthy* (Positioning #2),
+presolve is where credibility is bought most cheaply — so it gets a
+section, not a sub-bullet.
+
+### Build on what already exists — two presolve systems, not zero
+
+Far more presolve already ships or is in flight than a from-scratch plan
+would assume. There are **two** systems, and MIP builds on both:
+
+- **`pounce-presolve` (NLP / structural):** bound tightening, FBBT
+  (issue #62), redundant-row removal, BTF, Dulmage–Mendelsohn, connected
+  components, auxiliary-equality preprocessing (issue #53), incidence /
+  matching.
+- **Convex presolve in `pounce-convex` (PaPILO-style, landing on the
+  LP/QP branch `claude/amazing-mayer-Xd0ag`):** LP/QP activity-bound
+  reductions, free-column singleton substitution, forcing constraints,
+  parallel-row detection, dominated columns, dual bound tightening, all
+  iterated to a fixpoint — with **transaction-stack postsolve** and
+  `qp_presolve` / `presolve_conic` toggles. Pure-Rust, rayon-parallel,
+  PaPILO-informed.
+
+That same branch is executing far more than LP/QP — IPM-LP/QP (Mehrotra),
+an HSDE driver, full SOCP (NT scaling, `solve_socp`), exponential-cone
+groundwork, **and differentiable convex/cone layers** (`cone-aware
+OptNet`, JAX QP matrix gradients P/G/A). MIP/global inherits all of it.
+
+### Two distinct presolve phases in B&B
+
+- **Root presolve (once, aggressive).** Run both pipelines on the
+  original problem before the tree, adding MIP-specific reductions on top:
+  integer-aware bound tightening (round fractional bounds on integers),
+  coefficient strengthening, **probing** (fix a binary, propagate —
+  Savelsbergh 1994), clique / implication detection, GCD reductions on
+  all-integer rows, and (later) symmetry detection. Cost is amortized
+  over the whole tree.
+- **Node presolve (cheap, repeated thousands of times).** Propagate the
+  branching-tightened bounds: FBBT every node (shipped), light probing,
+  *selective* OBBT (Gleixner et al. 2017). The engine loop already
+  exposes the hook (`fbbt_and_obbt(&mut node, &relax)`).
+
+### Presolve under the differentiability requirement — already half-solved
+
+Presolve transforms the problem, so the backward pass must map gradients
+back through every reduction to the *original* variables. The
+**transaction-stack postsolve already on the branch is exactly this
+mechanism for the solution**; MIP extends it from solution-mapping to
+gradient-mapping, and the branch's differentiable cone layer
+(`cone-aware OptNet`) already demonstrates differentiating through a
+presolved-then-solved convex problem. Reductions that fix or substitute
+a variable contribute a known/zero gradient (pinned, like integers and
+active bounds in Seam 5). Per decision 6, a reduction does not land until
+its gradient pass-through is defined — but postsolve means the hard part
+is mostly built.
+
 ## Interfaces and crate skeletons
 
 The whole design rests on four trait seams. They are sketched here so
