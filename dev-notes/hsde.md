@@ -502,10 +502,47 @@ mismatched vector all reach the same optimum). Higher-level routing
 (`solve_socp_ipm_warm` for the non-symmetric path, Python) and factor reuse
 remain optional follow-ups, gated on a demonstrated need.
 
-Remaining: the CBLIB exp/power benchmark set (broad/adversarial validation),
-and — if a need emerges — embedded factor-reuse for the non-symmetric path.
+Remaining: the CBLIB **power-cone** set (the exp-cone GP set is done — see
+below), and — if a need emerges — embedded factor-reuse for the
+non-symmetric path.
 
-### CBLIB benchmark tier — plan (deferred to a focused session)
+### CBLIB benchmark tier — exp-cone GP set landed
+
+**Status: landed for exponential-cone geometric programs.** The reader, the
+CBF→pounce mapping, and the independent NLP cross-check are implemented and
+green; power cones and constraint-side exp/SOC cones remain the extensions.
+
+- **CBF reader** (`pounce_cli::cbf`) — parses the Conic Benchmark Format
+  (`VER`/`OBJSENSE`/`VAR`/`CON`/`OBJACOORD`/`OBJBCOORD`/`ACOORD`/`BCOORD`)
+  with the cone kinds `F`/`L=`/`L+`/`L-`/`EXP`/`Q`. Unsupported kinds (PSD
+  `DCOORD`, power cones needing a `POWCONES` parameter table) are rejected
+  with a clear error rather than mis-parsed. Unit-tested on the section
+  grammar, the exp-dim and cone-sum checks, and unsupported-cone rejection.
+- **`CbfModel::to_conic`** — maps an instance to a pounce conic program
+  (`QpProblem` + `Vec<ConeSpec>`): VAR cones → slack `s = −Gx ∈ K`, CON
+  cones → `s = Ax+b ∈ K`, `L=` → equality `Ax = −b`, and the exp triple
+  **reversal** (CBF bound-first `(c,b,a)` → pounce bound-third `(a,b,c)`).
+- **Conic solve on real instances** (`tests/cblib_cbf.rs`) — three vendored
+  CBLIB GPs (`demb761`, `beck751`, `fang88`, under
+  `crates/pounce-cli/tests/data/cblib/`) each parse, map, and reach a
+  verified `Optimal` through the non-symmetric HSDE driver.
+- **Independent NLP cross-check** (`tests/cblib_vs_nlp.rs`) — exactly the
+  `exp_cone_vs_nlp` strategy: each instance is also built as a smooth NLP
+  (each VAR exp triple → `u₀ − u₁·exp(u₂/u₁) ≥ 0`, `u₁ ≥ 0`, with exact
+  gradient + Hessian; `L=`/`L-` rows stay linear) and solved by the
+  filter-IPM, **cold-started independently** of the conic solution. The two
+  solvers — sharing no code — agree on the objective to ~1e-8 relative:
+  `demb761 → 22.31086`, `beck751 → 7.50095`, `fang88 → −10.38004`. (These
+  are the literal GP optima; CBLIB ships no reference solution files, so the
+  cross-check *is* the reference.)
+
+Extensions left for when needed: power-cone instances (`2013_fir*`, ~120 MB
+— the CBF reader would need the `POWCONES` parameter section and the NLP
+form a `|x| ≤ y^α z^{1−α}` epigraph), constraint-side exp/SOC cones in the
+NLP form, and feeding the per-instance JSON solve report into the
+`benchmarks/` harness for status/iters/time/residual tracking.
+
+#### Original plan (kept as the implementation record)
 
 The literal benchmark instances from the source papers live in CBLIB
 (`https://cblib.zib.de/download/all/<name>.cbf.gz`, reachable) and are the
