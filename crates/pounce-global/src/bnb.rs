@@ -675,7 +675,7 @@ where
                     &g_lo,
                     &g_hi,
                     &qp_opts,
-                    false, // OBBT serial inside a worker (no nested pools)
+                    false, // OBBT serial inside a worker — nesting oversubscribes
                     make_backend,
                 );
 
