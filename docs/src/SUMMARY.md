@@ -6,6 +6,7 @@
 
 - [Installation](installation.md)
 - [Quick Start](quick-start.md)
+- [Choosing a Solver](choosing-a-solver.md)
 
 # Command-Line Interface
 
