@@ -18,7 +18,6 @@ Usage:
     build_subset.py qap15 ex10 # only the named lpopt instances
 """
 import os
-import sys
 import subprocess
 import bz2
 
@@ -75,9 +74,25 @@ def dims(mps_path):
 
 
 def main():
+    global NL_DIR
+    import argparse
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("names", nargs="*",
+                    help="only these lpopt instance names (default: all)")
+    ap.add_argument("--out-dir", default=NL_DIR,
+                    help="where to write the .nl files "
+                         "(default: ./nl next to this script). Set this to a "
+                         "POUNCE_BENCH_DATA-rooted dir to keep the heavy .nl "
+                         "out of the checkout.")
+    args = ap.parse_args()
+
+    NL_DIR = args.out_dir
+
     os.makedirs(NL_DIR, exist_ok=True)
     os.makedirs(MPS_DIR, exist_ok=True)
-    names = sys.argv[1:] or list(CANDIDATES)
+    names = args.names or list(CANDIDATES)
     rows = []
     for name in names:
         if name not in CANDIDATES:

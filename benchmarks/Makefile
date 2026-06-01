@@ -13,6 +13,21 @@ REPO_ROOT := $(shell cd .. && pwd)
 CARGO_MANIFEST := $(REPO_ROOT)/Cargo.toml
 CARGO := cargo
 
+# ---- benchmark .nl data root --------------------------------------------
+# The .nl problem inputs are large (~2 GB) and gitignored. By default they
+# live in the in-repo benchmarks/ tree, but POUNCE_BENCH_DATA can point them
+# at a stable, syncable location outside the checkout (e.g. a Dropbox folder)
+# so the same dataset is shared across machines and runs work from any CWD:
+#
+#     export POUNCE_BENCH_DATA="$HOME/Dropbox/pounce-bench-data"
+#
+# The directory mirrors the in-repo layout (<root>/vanderbei/nl/*.nl,
+# <root>/gas/*.nl, <root>/cho/nl_export_results/*.nl, ...). Only the .nl
+# inputs (and the .sol scratch the solver writes beside them) live here;
+# pounce.json results, logs/, the committed ipopt_ma57.json references, and
+# the download/source caches (mps/, data/, source/) stay in the repo.
+POUNCE_BENCH_DATA ?= $(REPO_ROOT)/benchmarks
+
 # ---- ipopt-ma57 for the .nl-driven suites --------------------------------
 # Every suite is now .nl-driven and compares against the locally-built
 # MA57 Ipopt AMPL executable at ref/Ipopt/install-ma57/bin/ipopt (built
@@ -117,17 +132,17 @@ $(POUNCE_BIN):
 
 # Suite -> .nl directory map, shared by the pounce file-targets and the
 # ipopt-ref-% reference targets.
-nldir_vanderbei   := $(REPO_ROOT)/benchmarks/vanderbei/nl
-nldir_electrolyte := $(REPO_ROOT)/benchmarks/electrolyte/nl
-nldir_grid        := $(REPO_ROOT)/benchmarks/grid/nl
-nldir_cho         := $(REPO_ROOT)/benchmarks/cho/nl_export_results
-nldir_large_scale := $(LS_DIR)/nl
-nldir_gas         := $(REPO_ROOT)/benchmarks/gas
-nldir_water       := $(REPO_ROOT)/benchmarks/water
-nldir_mittelmann  := $(MITT_DIR)/nl
-nldir_qp          := $(QP_DIR)/nl
-nldir_lp          := $(LP_DIR)/nl
-nldir_lpopt       := $(LPOPT_DIR)/nl
+nldir_vanderbei   := $(POUNCE_BENCH_DATA)/vanderbei/nl
+nldir_electrolyte := $(POUNCE_BENCH_DATA)/electrolyte/nl
+nldir_grid        := $(POUNCE_BENCH_DATA)/grid/nl
+nldir_cho         := $(POUNCE_BENCH_DATA)/cho/nl_export_results
+nldir_large_scale := $(POUNCE_BENCH_DATA)/large_scale/nl
+nldir_gas         := $(POUNCE_BENCH_DATA)/gas
+nldir_water       := $(POUNCE_BENCH_DATA)/water
+nldir_mittelmann  := $(POUNCE_BENCH_DATA)/mittelmann/nl
+nldir_qp          := $(POUNCE_BENCH_DATA)/qp/nl
+nldir_lp          := $(POUNCE_BENCH_DATA)/lp/nl
+nldir_lpopt       := $(POUNCE_BENCH_DATA)/lpopt/nl
 
 # --- pounce release runs (incremental, pounce-only) ---
 # Each <suite>/pounce.json rebuilds when the pounce binary or the suite's
@@ -180,12 +195,12 @@ cho-rerun:
 # Bratu, optimal control, Poisson control, sparse QP) emitted as .nl by
 # generate_nl.py (Pyomo). The sparseqp stub stands in as the generation
 # stamp. Resize/regenerate via `make large-scale-generate`.
-$(LS_DIR)/nl/sparseqp.nl: $(LS_DIR)/generate_nl.py
-	python3 $(LS_DIR)/generate_nl.py --out-dir $(LS_DIR)/nl
+$(nldir_large_scale)/sparseqp.nl: $(LS_DIR)/generate_nl.py
+	python3 $(LS_DIR)/generate_nl.py --out-dir $(nldir_large_scale)
 
-large-scale-generate: $(LS_DIR)/nl/sparseqp.nl
+large-scale-generate: $(nldir_large_scale)/sparseqp.nl
 
-$(LS_DIR)/pounce.json: $(POUNCE_BIN) $(LS_DIR)/nl/sparseqp.nl
+$(LS_DIR)/pounce.json: $(POUNCE_BIN) $(nldir_large_scale)/sparseqp.nl
 	$(NL_DRIVER) large_scale $(nldir_large_scale) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
 large-scale: $(LS_DIR)/pounce.json
@@ -220,12 +235,12 @@ water-rerun:
 # rows and bounds) into a Pyomo model written as .nl. QPTEST.nl stands in
 # as the generation stamp (like large_scale's sparseqp.nl). Regenerate via
 # `make qp-generate`.
-$(QP_DIR)/nl/QPTEST.nl: $(QP_DIR)/generate_nl.py
-	python3 $(QP_DIR)/generate_nl.py --out-dir $(QP_DIR)/nl --data-dir $(QP_DIR)/data
+$(nldir_qp)/QPTEST.nl: $(QP_DIR)/generate_nl.py
+	python3 $(QP_DIR)/generate_nl.py --out-dir $(nldir_qp) --data-dir $(QP_DIR)/data
 
-qp-generate: $(QP_DIR)/nl/QPTEST.nl
+qp-generate: $(nldir_qp)/QPTEST.nl
 
-$(QP_DIR)/pounce.json: $(POUNCE_BIN) $(QP_DIR)/nl/QPTEST.nl
+$(QP_DIR)/pounce.json: $(POUNCE_BIN) $(nldir_qp)/QPTEST.nl
 	$(NL_DRIVER) qp $(nldir_qp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
 qp-run: $(QP_DIR)/pounce.json
@@ -240,12 +255,12 @@ qp-rerun:
 # the sources, size-screens, and converts to .nl (HiGHS parse -> Pyomo ->
 # .nl, see mps_to_nl.py). afiro.nl (the canonical smallest LP) stands in
 # as the generation stamp. Regenerate via `make lp-generate`.
-$(LP_DIR)/nl/afiro.nl: $(LP_DIR)/generate_nl.py $(LP_DIR)/mps_to_nl.py
-	python3 $(LP_DIR)/generate_nl.py
+$(nldir_lp)/afiro.nl: $(LP_DIR)/generate_nl.py $(LP_DIR)/mps_to_nl.py
+	python3 $(LP_DIR)/generate_nl.py --out-dir $(nldir_lp)
 
-lp-generate: $(LP_DIR)/nl/afiro.nl
+lp-generate: $(nldir_lp)/afiro.nl
 
-$(LP_DIR)/pounce.json: $(POUNCE_BIN) $(LP_DIR)/nl/afiro.nl
+$(LP_DIR)/pounce.json: $(POUNCE_BIN) $(nldir_lp)/afiro.nl
 	$(NL_DRIVER) lp $(nldir_lp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
 lp-run: $(LP_DIR)/pounce.json
@@ -261,12 +276,12 @@ lp-rerun:
 # bzip2'd MPS from the plato lptestset mirror and converts each (HiGHS ->
 # Pyomo -> .nl), size-gating anything too large. qap15.nl is the
 # generation stamp. Run with a long time limit (e.g. BENCH_TIMELIMIT=1800).
-$(LPOPT_DIR)/nl/qap15.nl: $(LPOPT_DIR)/build_subset.py $(LPOPT_DIR)/mps_to_nl.py
-	python3 $(LPOPT_DIR)/build_subset.py
+$(nldir_lpopt)/qap15.nl: $(LPOPT_DIR)/build_subset.py $(LPOPT_DIR)/mps_to_nl.py
+	python3 $(LPOPT_DIR)/build_subset.py --out-dir $(nldir_lpopt)
 
-lpopt-generate: $(LPOPT_DIR)/nl/qap15.nl
+lpopt-generate: $(nldir_lpopt)/qap15.nl
 
-$(LPOPT_DIR)/pounce.json: $(POUNCE_BIN) $(LPOPT_DIR)/nl/qap15.nl
+$(LPOPT_DIR)/pounce.json: $(POUNCE_BIN) $(nldir_lpopt)/qap15.nl
 	$(NL_DRIVER) lpopt $(nldir_lpopt) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
 lpopt-run: $(LPOPT_DIR)/pounce.json
@@ -280,9 +295,9 @@ lpopt-rerun:
 # The sub-Makefile's broader multi-solver comparison harness still lives
 # in benchmarks/mittelmann/Makefile for on-demand use.
 mittelmann-translate:
-	$(MAKE) -C $(MITT_DIR) fetch translate
+	$(MAKE) -C $(MITT_DIR) fetch translate NLDIR=$(nldir_mittelmann)
 
-$(MITT_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(MITT_DIR)/nl/*.nl)
+$(MITT_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(nldir_mittelmann)/*.nl)
 	$(NL_DRIVER) mittelmann $(nldir_mittelmann) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
 mittelmann-run: mittelmann-translate $(MITT_DIR)/pounce.json
@@ -309,11 +324,11 @@ ipopt-ref-%:
 		- $(IPOPT_MA57_BIN) $(REF_TIMELIMIT) ipopt
 
 # Suites whose .nl must be produced before ipopt can run on them.
-ipopt-ref-large_scale: $(LS_DIR)/nl/sparseqp.nl
+ipopt-ref-large_scale: $(nldir_large_scale)/sparseqp.nl
 ipopt-ref-mittelmann:  mittelmann-translate
-ipopt-ref-qp:          $(QP_DIR)/nl/QPTEST.nl
-ipopt-ref-lp:          $(LP_DIR)/nl/afiro.nl
-ipopt-ref-lpopt:       $(LPOPT_DIR)/nl/qap15.nl
+ipopt-ref-qp:          $(nldir_qp)/QPTEST.nl
+ipopt-ref-lp:          $(nldir_lp)/afiro.nl
+ipopt-ref-lpopt:       $(nldir_lpopt)/qap15.nl
 
 ipopt-reference: $(addprefix ipopt-ref-,$(REF_SUITES)) ipopt-reference-provenance
 	@echo "ipopt-ma57 reference written."
@@ -400,31 +415,33 @@ clean-bench: clean-bench-large-scale clean-bench-nl clean-bench-report
 	-$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench
 	@echo "clean-bench complete (committed ipopt-ma57 reference preserved)."
 
+# .sol scratch is written by the solver beside each .nl, so it now lives
+# under $(POUNCE_BENCH_DATA) (via nldir_*); pounce.json stays in the repo.
 clean-bench-large-scale:
-	rm -f $(REPO_ROOT)/benchmarks/large_scale/nl/*.sol \
+	rm -f $(nldir_large_scale)/*.sol \
 	      $(REPO_ROOT)/benchmarks/large_scale/pounce.json
 
 clean-bench-nl:
-	rm -f $(REPO_ROOT)/benchmarks/vanderbei/nl/*.sol \
+	rm -f $(nldir_vanderbei)/*.sol \
 	      $(REPO_ROOT)/benchmarks/vanderbei/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/electrolyte/nl/*.sol \
+	rm -f $(nldir_electrolyte)/*.sol \
 	      $(REPO_ROOT)/benchmarks/electrolyte/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/grid/nl/*.sol \
+	rm -f $(nldir_grid)/*.sol \
 	      $(REPO_ROOT)/benchmarks/grid/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/gas/*.sol \
+	rm -f $(nldir_gas)/*.sol \
 	      $(REPO_ROOT)/benchmarks/gas/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/water/*.sol \
+	rm -f $(nldir_water)/*.sol \
 	      $(REPO_ROOT)/benchmarks/water/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/cho/nl_export_results/*.sol \
+	rm -f $(nldir_cho)/*.sol \
 	      $(REPO_ROOT)/benchmarks/cho/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/cho/cho_stderr.txt
-	rm -f $(REPO_ROOT)/benchmarks/mittelmann/nl/*.sol \
+	rm -f $(nldir_mittelmann)/*.sol \
 	      $(REPO_ROOT)/benchmarks/mittelmann/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/qp/nl/*.sol \
+	rm -f $(nldir_qp)/*.sol \
 	      $(REPO_ROOT)/benchmarks/qp/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/lp/nl/*.sol \
+	rm -f $(nldir_lp)/*.sol \
 	      $(REPO_ROOT)/benchmarks/lp/pounce.json
-	rm -f $(REPO_ROOT)/benchmarks/lpopt/nl/*.sol \
+	rm -f $(nldir_lpopt)/*.sol \
 	      $(REPO_ROOT)/benchmarks/lpopt/pounce.json
 	rm -rf $(REPO_ROOT)/benchmarks/logs
 

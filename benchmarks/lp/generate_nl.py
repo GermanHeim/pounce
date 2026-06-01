@@ -304,6 +304,7 @@ def gen_meszaros(emps_bin, only, rows):
 # main
 # --------------------------------------------------------------------------
 def main():
+    global MAX_VARS, MAX_CONS, MAX_NNZ, NL_DIR
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="*", help="only these instance names")
@@ -315,10 +316,15 @@ def main():
     ap.add_argument("--max-vars", type=int, default=10_000)
     ap.add_argument("--max-cons", type=int, default=10_000)
     ap.add_argument("--max-nnz", type=int, default=200_000)
+    ap.add_argument("--out-dir", default=NL_DIR,
+                    help="where to write the .nl files "
+                         "(default: ./nl next to this script). Set this to a "
+                         "POUNCE_BENCH_DATA-rooted dir to keep the heavy .nl "
+                         "out of the checkout.")
     args = ap.parse_args()
 
-    global MAX_VARS, MAX_CONS, MAX_NNZ
     MAX_VARS, MAX_CONS, MAX_NNZ = args.max_vars, args.max_cons, args.max_nnz
+    NL_DIR = args.out_dir
 
     os.makedirs(NL_DIR, exist_ok=True)
     os.makedirs(MPS_DIR, exist_ok=True)

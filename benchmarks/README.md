@@ -14,6 +14,67 @@ reports) are regenerated locally and not tracked in the repository.
 The per-suite README files, the source harnesses, and
 `benchmarks/scripts/` are tracked.
 
+## Where the `.nl` live (`POUNCE_BENCH_DATA`)
+
+The `.nl` inputs are large (~2 GB) and gitignored, so they don't have to
+sit inside the checkout. Set `POUNCE_BENCH_DATA` to a stable, syncable
+path and the harness reads (and regenerates) every suite's `.nl` there
+instead — convenient for sharing one dataset across machines (e.g. via a
+Dropbox folder) and for running from any working directory:
+
+```sh
+export POUNCE_BENCH_DATA="$HOME/Dropbox/pounce-bench-data"
+```
+
+When unset it defaults to the in-repo `benchmarks/` tree, so nothing
+changes until you opt in. The data root mirrors the in-repo layout:
+
+```
+$POUNCE_BENCH_DATA/
+  vanderbei/nl/*.nl
+  electrolyte/nl/*.nl
+  grid/nl/*.nl
+  cho/nl_export_results/*.nl
+  large_scale/nl/*.nl
+  gas/*.nl
+  water/*.nl
+  mittelmann/nl/*.nl
+  qp/nl/*.nl
+  lp/nl/*.nl
+  lpopt/nl/*.nl
+```
+
+Only the `.nl` inputs (and the `.sol` scratch the solver writes beside
+them) live under `POUNCE_BENCH_DATA`. The `pounce.json` results, `logs/`,
+the committed `ipopt_ma57.json` references, and the download/source caches
+(`mps/`, `data/`, `source/`) stay in the repo.
+
+**Migrating an existing checkout** — copy the current `.nl` to the new
+root (mirroring the layout above), then point the env var at it. From the
+repo root, with the var exported:
+
+```sh
+mkdir -p "$POUNCE_BENCH_DATA"
+cd benchmarks
+# Suites with an nl/ subdir (plus cho's nl_export_results) — rsync --relative
+# reproduces the path under the new root:
+rsync -a --relative \
+  vanderbei/nl electrolyte/nl grid/nl cho/nl_export_results \
+  large_scale/nl mittelmann/nl qp/nl lp/nl lpopt/nl \
+  "$POUNCE_BENCH_DATA/"
+# gas/ and water/ keep their .nl flat alongside a tracked README — copy just
+# the .nl:
+mkdir -p "$POUNCE_BENCH_DATA/gas" "$POUNCE_BENCH_DATA/water"
+rsync -a gas/*.nl   "$POUNCE_BENCH_DATA/gas/"
+rsync -a water/*.nl "$POUNCE_BENCH_DATA/water/"
+cd ..
+```
+
+Verify a suite resolves (`make -C benchmarks -n vanderbei-run` should show
+the `$POUNCE_BENCH_DATA/...` path), then the old in-repo copies can be
+deleted — they're gitignored either way. The GAMS nlpbench harness under
+`gams/` is unaffected by this and keeps its own layout.
+
 ## Suites
 
 Every suite is `.nl`-driven: each is a directory of AMPL `.nl` files run
