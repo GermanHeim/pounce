@@ -1416,12 +1416,19 @@ fn run_global(
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();
         builder.solution.lambda = lambda;
+        // B&B counts nodes, not KKT iterations — the node count is the closest
+        // analog of `iteration_count`.
         builder.stats.iteration_count = sol.nodes as _;
         builder.stats.final_objective = reported_obj;
         builder.stats.total_wallclock_time_secs = elapsed;
-        // Report the optimality gap as the convergence proxy (B&B has no KKT
-        // residuals); a closed gap is the certificate of global optimality.
+        // Genuine residuals, mapped onto the shared schema so the harness reads
+        // global solves like any other: the incumbent's actual constraint
+        // violation as primal infeasibility, and the optimality gap as both the
+        // dual-side proxy and the overall convergence measure (a closed gap is
+        // the certificate of global optimality; B&B has no KKT dual residual).
+        builder.stats.final_constr_viol = gp.max_violation(&sol.x);
         builder.stats.final_dual_inf = gap;
+        builder.stats.final_kkt_error = gap;
         let report = builder.finish();
         if let Err(e) = write_report_file(json_path, &report) {
             eprintln!(

@@ -124,3 +124,35 @@ fn global_solves_nl_fixture() {
         "stdout should report a global solve: {stdout}"
     );
 }
+
+#[test]
+fn global_emits_json_report() {
+    // The global solver must emit the same `pounce.solve-report/v1` JSON as the
+    // other solvers: a `SolveSucceeded` status, the objective, the node count
+    // as `iteration_count`, and a genuine (small, near-feasible) constraint
+    // violation rather than a hard-coded zero.
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tame.nl");
+    let report = std::env::temp_dir().join("pounce_global_report_test.json");
+    let _ = std::fs::remove_file(&report);
+    let output = Command::new(pounce_exe())
+        .arg(&fixture)
+        .arg("solver_selection=global")
+        .arg("--json-output")
+        .arg(&report)
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(output.status.code(), Some(0));
+    let json = std::fs::read_to_string(&report).expect("JSON report written");
+    let _ = std::fs::remove_file(&report);
+    assert!(
+        json.contains("\"schema\": \"pounce.solve-report/v1\""),
+        "{json}"
+    );
+    assert!(json.contains("\"status\": \"SolveSucceeded\""), "{json}");
+    // TAME's optimum is 0; the node count is the iteration analog.
+    assert!(json.contains("\"final_objective\": 0.0"), "{json}");
+    assert!(json.contains("\"iteration_count\": 1"), "{json}");
+    // `final_constr_viol` is the incumbent's measured violation — present and
+    // tiny, not the default zero a stubbed field would leave.
+    assert!(json.contains("\"final_constr_viol\""), "{json}");
+}

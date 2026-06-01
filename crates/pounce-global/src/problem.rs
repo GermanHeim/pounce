@@ -77,6 +77,21 @@ impl GlobalProblem {
     pub(crate) fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
         self.constraints.iter().map(|c| (c.lo, c.hi)).unzip()
     }
+
+    /// The maximum constraint violation of a point `x` — `0` for a feasible
+    /// point, else the largest `max(lo − g, g − hi)` over the constraints. The
+    /// branch-and-bound analog of a primal-infeasibility residual: it measures
+    /// how feasible the returned incumbent actually is.
+    pub fn max_violation(&self, x: &[f64]) -> f64 {
+        self.constraints.iter().fold(0.0_f64, |worst, c| {
+            let g = *crate::ad::forward_vals(&c.tape, x)
+                .last()
+                .expect("a constraint tape has at least one op");
+            let lo_viol = if c.lo.is_finite() { c.lo - g } else { 0.0 };
+            let hi_viol = if c.hi.is_finite() { g - c.hi } else { 0.0 };
+            worst.max(lo_viol).max(hi_viol)
+        })
+    }
 }
 
 /// Exposes a problem's constraint tapes to FBBT. `run_fbbt` only reads
