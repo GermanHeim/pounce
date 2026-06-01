@@ -21,6 +21,7 @@ from ._critical import (
 from .qp import (
     QpResult,
     QpFactorization,
+    QpSensitivity,
     solve_qp,
     solve_socp,
     solve_qp_batch,
@@ -48,6 +49,7 @@ __all__ = [
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
     "QpResult",
     "QpFactorization",
+    "QpSensitivity",
     "solve_qp",
     "solve_socp",
     "solve_qp_batch",

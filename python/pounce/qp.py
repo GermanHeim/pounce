@@ -41,6 +41,7 @@ from . import _pounce
 __all__ = [
     "QpResult",
     "QpFactorization",
+    "QpSensitivity",
     "solve_qp",
     "solve_socp",
     "solve_qp_batch",
@@ -478,3 +479,84 @@ class QpFactorization:
             raise ValueError("QpFactorization.solve: `c` is required")
         prob = _build(P, c, A, b, G, h, lb, ub)
         return _to_result(self._inner.solve(prob, warm_start=_warm_dict(warm_start)))
+
+
+class QpSensitivity:
+    """Post-optimal sensitivity for a convex QP — the sIPOPT analog.
+
+    Solves the QP on construction and holds the active-set KKT
+    factorization, so each :meth:`parametric_step` is a single
+    back-substitution (build-once / solve-many). This mirrors the NLP
+    :class:`pounce.Solver` session — which caches the converged factor for
+    ``parametric_step`` / ``reduced_hessian`` — specialized to a QP, where
+    the Lagrangian Hessian is the constant ``P``.
+
+    The standard use is a *parametric* QP: designate one or more equality
+    constraints as parameters (their right-hand side ``b`` is the
+    parameter), then predict how the optimum moves as those values change.
+    ``sensitivity.x + sensitivity.parametric_step(pins, deltas)`` is the
+    first-order predictor of the perturbed solution — exact while the
+    active set is unchanged.
+
+    Example
+    -------
+    >>> import numpy as np
+    >>> from pounce.qp import QpSensitivity
+    >>> # min ½‖x‖²  s.t.  x0 + x1 = 2   → x* = (1, 1), dx/db = (½, ½)
+    >>> s = QpSensitivity(P=np.eye(2), c=[0.0, 0.0],
+    ...                   A=[[1.0, 1.0]], b=[2.0])
+    >>> dx = s.parametric_step([0], [1.0])     # perturb b0 by +1
+    >>> np.round(s.x + dx, 6)
+    array([1.5, 1.5])
+    """
+
+    def __init__(
+        self,
+        P=None,
+        c=None,
+        A=None,
+        b=None,
+        G=None,
+        h=None,
+        lb=None,
+        ub=None,
+        *,
+        tol: Optional[float] = None,
+        max_iter: Optional[int] = None,
+        active_tol: float = 1e-7,
+    ):
+        if c is None:
+            raise ValueError("QpSensitivity: `c` is required")
+        prob = _build(P, c, A, b, G, h, lb, ub)
+        self._inner = _pounce.QpSensitivity(
+            prob, tol=tol, max_iter=max_iter, active_tol=active_tol
+        )
+
+    @property
+    def x(self) -> np.ndarray:
+        """The optimal primal solution ``x*``."""
+        return np.asarray(self._inner.x)
+
+    @property
+    def obj(self) -> float:
+        """The optimal objective value."""
+        return float(self._inner.obj)
+
+    @property
+    def kkt_dim(self) -> int:
+        """Active-set KKT dimension ``n + m_eq + n_active``."""
+        return int(self._inner.kkt_dim)
+
+    def parametric_step(self, pin_constraint_indices, deltas) -> np.ndarray:
+        """First-order primal step ``dx ≈ x*(b + Δb) − x*(b)``.
+
+        Equality constraint ``pin_constraint_indices[k]`` (an index into
+        ``b``) is perturbed by ``deltas[k]``; all other data is held fixed.
+        Returns the length-``n`` sensitivity, so ``self.x + dx`` predicts
+        the perturbed solution (exact to first order while the active set is
+        unchanged). The factorization is reused, so a continuation sweep
+        costs one back-substitution per query.
+        """
+        pins = [int(i) for i in pin_constraint_indices]
+        ds = [float(d) for d in deltas]
+        return np.asarray(self._inner.parametric_step(pins, ds))

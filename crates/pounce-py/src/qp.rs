@@ -19,8 +19,8 @@
 use numpy::IntoPyArray;
 use pounce_convex::{
     solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
-    solve_socp_ipm, ConeSpec, QpFactorization, QpOptions, QpProblem, QpSolution, QpStatus,
-    QpWarmStart, Triplet,
+    solve_socp_ipm, ConeSpec, QpFactorization, QpOptions, QpProblem, QpSensitivity, QpSolution,
+    QpStatus, QpWarmStart, SensError, Triplet,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -473,5 +473,111 @@ impl PyQpFactorization {
             None => self.inner.solve(&prob.inner),
         };
         solution_dict(py, sol, Some(&prob.inner))
+    }
+}
+
+/// Post-optimal sensitivity for a convex QP — the sIPOPT analog. Solves the
+/// problem on construction, then holds the active-set KKT factorization so
+/// each `parametric_step` is a single back-substitution. Mirrors the NLP
+/// `Solver` session (which caches the converged factor for
+/// `parametric_step` / `reduced_hessian`), specialized to a QP.
+#[pyclass(name = "QpSensitivity", module = "pounce._pounce", unsendable)]
+pub struct PyQpSensitivity {
+    inner: QpSensitivity,
+    x: Vec<f64>,
+    obj: f64,
+    m_eq: usize,
+}
+
+#[pymethods]
+impl PyQpSensitivity {
+    /// Solve `prob` and build its sensitivity. `active_tol` (default `1e-7`)
+    /// is the multiplier threshold used to read the active set. Raises
+    /// `ValueError` if the QP does not solve to optimality, or if the
+    /// active-set KKT is singular (the parametric step is not unique).
+    #[new]
+    #[pyo3(signature = (prob, tol=None, max_iter=None, active_tol=1e-7))]
+    fn new(
+        prob: &PyQpProblem,
+        tol: Option<f64>,
+        max_iter: Option<usize>,
+        active_tol: f64,
+    ) -> PyResult<Self> {
+        let o = opts(tol, max_iter, false);
+        let sol = solve_qp_ipm(&prob.inner, &o, backend);
+        if sol.status != QpStatus::Optimal {
+            return Err(PyValueError::new_err(format!(
+                "QpSensitivity: the QP did not solve to optimality (status {}); \
+                 sensitivity is only defined at an optimum",
+                status_str(sol.status)
+            )));
+        }
+        let (x, obj) = (sol.x.clone(), sol.obj);
+        let inner = QpSensitivity::build(&prob.inner, &sol, &o, active_tol, backend).map_err(
+            |e| match e {
+                SensError::NotOptimal => {
+                    PyValueError::new_err("QpSensitivity: solution is not optimal")
+                }
+                SensError::FactorizationFailed => PyValueError::new_err(
+                    "QpSensitivity: the active-set KKT is singular (the active constraint \
+                     gradients are rank-deficient), so the parametric step is not unique",
+                ),
+            },
+        )?;
+        Ok(Self {
+            inner,
+            x,
+            obj,
+            m_eq: prob.inner.m_eq(),
+        })
+    }
+
+    /// First-order primal step `dx ≈ x*(b + Δb) − x*(b)` for a perturbation
+    /// of the equality right-hand side `b`: constraint
+    /// `pin_constraint_indices[k]` is perturbed by `deltas[k]`. Returns the
+    /// length-`n` sensitivity, so `sensitivity.x + dx` predicts the
+    /// perturbed solution (exact to first order while the active set holds).
+    fn parametric_step<'py>(
+        &mut self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<usize>,
+        deltas: Vec<f64>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        if pin_constraint_indices.len() != deltas.len() {
+            return Err(PyValueError::new_err(format!(
+                "pin_constraint_indices has length {} but deltas has length {}",
+                pin_constraint_indices.len(),
+                deltas.len()
+            )));
+        }
+        for &i in &pin_constraint_indices {
+            if i >= self.m_eq {
+                return Err(PyValueError::new_err(format!(
+                    "pin constraint index {i} out of range (the QP has {} equality \
+                     constraint(s); only equality-constraint RHS values are parameters)",
+                    self.m_eq
+                )));
+            }
+        }
+        let dx = self.inner.parametric_step(&pin_constraint_indices, &deltas);
+        Ok(dx.into_pyarray_bound(py))
+    }
+
+    /// The optimal primal solution `x*`.
+    #[getter]
+    fn x<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray1<f64>> {
+        self.x.clone().into_pyarray_bound(py)
+    }
+
+    /// The optimal objective value.
+    #[getter]
+    fn obj(&self) -> f64 {
+        self.obj
+    }
+
+    /// The active-set KKT dimension `n + m_eq + n_active`.
+    #[getter]
+    fn kkt_dim(&self) -> usize {
+        self.inner.kkt_dim()
     }
 }

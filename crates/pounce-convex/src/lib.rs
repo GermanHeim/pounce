@@ -25,6 +25,7 @@ pub mod hsde_nonsym;
 pub mod ipm;
 pub mod presolve;
 pub mod qp;
+pub mod sensitivity;
 
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
@@ -36,3 +37,4 @@ pub use ipm::{
     QpOptions, QpWarmStart,
 };
 pub use qp::{QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
+pub use sensitivity::{QpSensitivity, SensError};

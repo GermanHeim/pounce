@@ -28,7 +28,7 @@ mod warm_start;
 
 pub use nl_problem::{read_nl, PyNlProblem};
 pub use problem::PyProblem;
-pub use qp::{PyQpFactorization, PyQpProblem};
+pub use qp::{PyQpFactorization, PyQpProblem, PyQpSensitivity};
 pub use solver::PySolver;
 
 /// Python module entry point. The crate name (`_pounce`) and the
@@ -48,6 +48,7 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Convex LP/QP solver (pounce-convex) bindings.
     m.add_class::<PyQpProblem>()?;
     m.add_class::<PyQpFactorization>()?;
+    m.add_class::<PyQpSensitivity>()?;
     m.add_function(wrap_pyfunction!(qp::solve_qp, m)?)?;
     m.add_function(wrap_pyfunction!(qp::solve_socp, m)?)?;
     m.add_function(wrap_pyfunction!(qp::solve_qp_batch, m)?)?;
