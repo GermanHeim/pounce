@@ -9,6 +9,190 @@ changes.
 
 ## Unreleased
 
+### Added — Inverse-map ODE recipe over a sensitivity RHS (pounce#91)
+
+`pounce.jax.inverse_map_rhs(jp, dy_ds, *, output=None, x0=None)` builds
+the right-hand side of the Alves–Kitchin–Lima inverse / uncertainty
+mapping ODE (pounce#84, Eq. 3):
+
+```
+dθ/ds = (∂y/∂θ)^{-1} · dy/ds
+```
+
+where ``y = output(x*(θ), θ)`` is an output of the embedded optimizer.
+POUNCE supplies the RHS; an off-the-shelf adaptive integrator (diffrax,
+scipy) does the stepping — *no NLP inversion*.
+
+- The inverse map is a **linear solve against** the total output
+  sensitivity ``∂y/∂θ = (∂h/∂x) J + ∂h/∂θ`` (with ``J = ∂x*/∂θ`` from
+  the held factor), not a Jacobian-vector product — so it wants the full
+  ``J`` and ``jnp.linalg.solve``.
+- The whole evaluation rides one `jax.pure_callback`, so the RHS is
+  JAX-traceable and composes under `jax.jit` and diffrax (which
+  jit-compiles the vector field).
+- Worked example `python/examples/inverse_map_diffrax.py` integrates a
+  closed output boundary with diffrax Dopri5 and round-trips back through
+  the optimizer onto the boundary (~1e-7). `diffrax` is an optional
+  extra (`pip install pounce[diffrax]`); the example falls back to RK4
+  if it's absent.
+- `inverse_map_rhs(..., warm=True)` warm-starts each inner solve from the
+  previous evaluation's primal/duals/μ (pounce#86). Result-invariant (up
+  to solver tolerance); a *modest* lever — ~1.4-1.7× fewer IPM iterations,
+  ~1.3× wall-clock, roughly flat in problem size (interior-point
+  warm-start ceiling + per-eval Jacobian-build overhead). Benchmark:
+  `python/benchmarks/inverse_map_warm.py`. For a real speedup on a smooth
+  map, prefer `PathFollower` (it skips solves, not just cheapens them).
+- Switch to `PathFollower` when the path folds or the active set changes.
+- Worked notebook `python/notebooks/14_path_following.ipynb` tours the
+  whole family (sensitivity → margin → continuation → fold → inverse map).
+
+Also fixes the build-once / stacked path for **unconstrained** problems
+(``g=None``, ``m=0``): the constraint callbacks no longer dereference the
+(``None``) constraint-Jacobian jit, so `JaxProblem.solve` /
+`solve_with_jacobian` / the batched solves now work with no constraints.
+
+### Added — Predictor–corrector path-following engine (pounce#90)
+
+`pounce.jax.PathFollower` traces a solution path of a parametric NLP by
+*composing* the post-solve sensitivity primitives instead of re-solving
+at every step:
+
+```python
+from pounce.jax import PathFollower
+pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.05)
+trace = pf.follow(theta_of_s, (0.0, 1.0), x0)   # parameter continuation
+# trace.x, trace.theta, trace.s, trace.lam,
+# trace.n_correctors, trace.n_accepts, trace.active_set_changes
+```
+
+- **predict** — extrapolate primal *and duals* along the held-factor
+  sensitivity (`jvp_from_state(..., with_duals=True)`); **monitor**
+  (no solve) — KKT residual + active-set margin (#89) at the predicted
+  point; **correct** — only when the monitor trips, a warm-μ re-solve
+  that also re-anchors the factor in one solve (`warm_anchor`, #86).
+- Adaptive step size; detects and records active-set changes and
+  re-anchors on the new active set.
+- `PathFollower.trace_arclength(...)` — pseudo-arclength continuation for
+  a scalar-parameter, equality/unconstrained family, tracing **past
+  folds** where `∂x*/∂θ` is singular (parameter continuation cannot).
+  Reports turning points. Bifurcation/branch-switching and
+  inequality-active folds are out of scope for v1.
+- On a linear-response NLP the predictor is exact, so the whole path is
+  traced with **zero correctors** (one anchor solve vs one cold solve
+  per step); nonlinear paths correct adaptively and still trace to
+  tolerance.
+
+New supporting public surface:
+
+- `JaxProblem.warm_anchor(p, x0, *, duals=None, mu=None)` — a warm-started,
+  μ-seeded re-solve that pins the converged factor and returns a `B=1`
+  `AnchorState` (the corrector + anchor in one solve). Threads μ through
+  the reusable build-once path (the #86 follow-up).
+- `JaxProblem.jvp_from_state(..., with_duals=True)` /
+  `batched_jvp_from_state(..., with_duals=True)` — also return the dual
+  sensitivity `∂λ*/∂θ · dp` from the same held-factor back-solve.
+
+### Added — Active-set-proximity monitor (pounce#89)
+
+`JaxProblem.active_set_margin(state)` reports the distance to an
+active-set change at the anchor point — the "predictor is about to
+become invalid" signal for predictor–corrector path following. The
+post-solve sensitivity is a derivative on a *fixed* active set; this
+flags when a bound / inequality is about to cross its critical-region
+boundary (where the sensitivity is discontinuous).
+
+```python
+r = jp.active_set_margin(state)
+# r["margin"], r["min_mult"], r["min_slack"]  — each (B,)
+```
+
+- By complementarity: an **active** bound/inequality (multiplier `>
+  active_tol`) is about to leave the set — its *multiplier* heads to
+  zero; an **inactive** one is about to enter — its *slack* heads to
+  zero. `min_mult` / `min_slack` track each; `margin = min(min_mult,
+  min_slack)`.
+- Equalities (`cl == cu`) are excluded (always active); `±inf` bounds
+  and the slack side of a one-sided inequality drop out naturally.
+  An unconstrained interior point returns `inf`.
+- Pure-JAX reduction over state the `AnchorState` already holds — no
+  solve, no back-solve. Pairs with the caller-side KKT-residual
+  (smooth-drift) monitor: re-anchor when either trips.
+
+### Added — Single-problem ergonomic sensitivity wrappers (pounce#88)
+
+Thin un-batched wrappers over the `batched_*` post-solve sensitivity
+methods, for the scalar / path-following user (one NLP at a time):
+
+```python
+x_star, (lam, zL, zU), J = jp.solve_with_jacobian(theta, x0)   # J: (n, p)
+state = jp.anchor(theta, x0)             # un-batched point → B=1 state
+J  = jp.sensitivity(state)               # (n, p) from the held factor
+dx = jp.jvp_from_state(state, dtheta)    # J @ dtheta  -> (n,)
+dp = jp.vjp_from_state(state, x_bar)     # J^T @ x_bar -> (p,)
+```
+
+- `solve_with_jacobian` / `sensitivity` / `jvp_from_state` /
+  `vjp_from_state` accept and return un-batched shapes, delegating to
+  the batched methods with `B=1` and squeezing — no new numerics.
+- `anchor` now accepts a single un-batched point (`p_shape`) in addition
+  to a batch (`(B,) + p_shape`); a single point yields a `B=1`
+  `AnchorState`. The single-problem from-state wrappers reject a `B>1`
+  state rather than silently mis-shaping.
+- Implemented as `JaxProblem` methods (mirroring the `batched_*` names)
+  rather than free functions, for consistency with the existing surface.
+
+### Added — Exact post-solve sensitivity at a supplied point (pounce#87)
+
+`JaxProblem.sensitivity_at(x_star, theta, duals, *, wrt_cols=None)`
+returns the exact primal sensitivity `∂x*/∂θ` evaluated at a
+caller-supplied primal-dual point, by re-assembling and factoring the
+KKT system *there* — no IPM re-solve.
+
+```python
+J = jp.sensitivity_at(x_star, theta, (lam, zL, zU))   # (n, p_dim)
+```
+
+- **Re-factor, not reuse.** A held FERAL factor encodes the anchor
+  point's `H` / `J`, so back-solving it at a moved `x_star` gives a
+  first-order-stale sensitivity. `sensitivity_at` assembles the dense
+  `(n+m)×(n+m)` KKT at the supplied point, which is exact there
+  (assuming a KKT point for `theta`). The cheap-but-local reuse path
+  stays as the predictor `batched_jvp_from_state`; this is its
+  exact-refresh complement.
+- Active set is read from the supplied bound multipliers `(zL, zU)`,
+  exactly like the `custom_vjp` backward — the caller passes the duals
+  the anchoring solve / `solve_with_warm` returned at this point.
+- Pure-JAX, so itself differentiable (second-order sensitivities work);
+  matches `jax.jacobian` over a fresh solve to ~1e-6 at every point
+  along a swept path, including a binding bound.
+
+This is the exact-refresh primitive for the inverse map, where `x*`
+traces a known output boundary and the sensitivity must be evaluated at
+the known point without paying a full re-solve per RK stage.
+
+### Added — Barrier-μ warm start for predictor–corrector correctors (pounce#86)
+
+The interior-point barrier parameter μ is now reported on every solve and
+can be threaded into a warm-started re-solve, so a predictor–corrector
+corrector resumes near the central path instead of re-walking the barrier
+homotopy from the default initial μ.
+
+- **`info["mu"]`** — every `Problem.solve` / `Solver.solve` /
+  `solve_with_sens` info dict now carries the converged barrier parameter
+  (`0.0` on the barrier-free SQP path).
+- **`pounce.jax.solve_with_warm`** accepts a 4-element warm-state
+  `(lam, zL, zU, mu)` that seeds `mu_init` / `warm_start_target_mu`, and
+  returns the converged μ in a matching 4-tuple. The 3-tuple form is
+  unchanged; passing `mu=None` inside a 4-tuple reports μ out without
+  seeding it in. Differentiability w.r.t. `p` is preserved (the μ
+  input/output are stop-gradient, like the duals).
+
+On a small parametric NLP, seeding μ from the previous solve's converged
+barrier cut a warm-started corrector from 5 interior-point iterations to
+1 (same optimum). The `mu_init` / `warm_start_target_mu` algorithm
+options already existed; this exposes the converged μ needed to drive
+them along a path.
+
 ### Added — Post-solve Jacobian / sensitivity API from the held KKT factor (pounce#82)
 
 `JaxProblem` now exposes a first-class post-solve sensitivity surface

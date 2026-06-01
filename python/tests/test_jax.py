@@ -162,6 +162,58 @@ def test_solve_with_warm_reduces_iterations_pounce_74():
     np.testing.assert_allclose(grad, np.array([0.0, 4.0, -6.0]), atol=1e-6)
 
 
+def test_solve_with_warm_threads_barrier_mu_pounce_86():
+    """A 4-element warm-state `(lam, zL, zU, mu)` seeds the barrier and
+    returns the converged μ, so a predictor–corrector loop can thread it
+    forward; the 3-tuple path is unchanged (pounce#86)."""
+    from pounce.jax import solve_with_warm
+
+    n, m, B = 3, 1, 0.5
+
+    def f(x, p):
+        d = x - p
+        return jnp.dot(d, d)
+
+    def g(x, p):
+        return jnp.stack([x[0]])
+
+    def forward(p, warm):
+        return solve_with_warm(
+            p, f=f, g=g, x0=jnp.zeros(n), n=n, m=m,
+            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+            cl=jnp.array([-1e19]), cu=jnp.array([B]),
+            options={"tol": 1e-10, "print_level": 0},
+            warm_start=warm,
+        )
+
+    p0 = jnp.array([2.0, 2.0, -3.0])  # active inequality
+
+    # 3-tuple / None warm-start: backward-compatible 3-element state.
+    x0_star, warm3 = forward(p0, warm=None)
+    assert len(warm3) == 3
+
+    # Report-only 4-tuple (mu=None): get μ out without seeding it in.
+    x_ro, warm_ro = forward(p0, warm=(*warm3, None))
+    assert len(warm_ro) == 4
+    mu_out = float(np.asarray(warm_ro[3]))
+    assert np.isfinite(mu_out) and 0.0 < mu_out < 1e-6
+
+    # Seed μ back in (full 4-tuple) — same optimum, μ still round-trips.
+    lam, zL, zU = warm3
+    x_seed, warm_seed = forward(p0, warm=(lam, zL, zU, mu_out))
+    assert len(warm_seed) == 4
+    np.testing.assert_allclose(np.asarray(x_seed), np.asarray(x0_star), atol=1e-8)
+    assert np.isfinite(float(np.asarray(warm_seed[3])))
+
+    # Differentiability w.r.t. p is preserved through the μ-threaded path.
+    def loss(p):
+        x_star, _ = forward(p, warm=(lam, zL, zU, mu_out))
+        return jnp.sum(x_star ** 2)
+
+    grad = np.asarray(jax.grad(loss)(p0))
+    np.testing.assert_allclose(grad, np.array([0.0, 4.0, -6.0]), atol=1e-6)
+
+
 def test_vmap_solve_parallel_matches_vmap_solve_pounce_74():
     """Parallel batched solve must agree numerically with the sequential
     `vmap_solve` reference, both for the forward x* and for `jax.grad`
@@ -1192,6 +1244,189 @@ def test_batched_solve_with_jacobian_wrt_cols_pounce_82():
     np.testing.assert_allclose(np.asarray(Jidx), np.asarray(J0), atol=1e-12)
 
 
+@pytest.mark.parametrize("bounded", [False, True])
+def test_sensitivity_at_matches_jacobian_pounce_87(bounded):
+    """Issue #87: exact ``∂x*/∂θ`` re-factored at a supplied point must
+    equal the ground-truth ``jax.jacobian`` over a fresh solve — at the
+    solver's own converged point and at *other* parameter values along a
+    path. Covers a binding upper bound so the active-set read off the
+    supplied bound multipliers is exercised."""
+    jp = _build_jac_qp(bounded=bounded)
+    x0 = jnp.zeros(2)
+
+    # Sweep several θ as if walking a path. For each, get the converged
+    # primal + duals, then re-factor the sensitivity at that supplied
+    # point with no held factor in play.
+    for theta in (jnp.array([0.3, 0.7]),
+                  jnp.array([0.5, 0.5]),
+                  jnp.array([-0.1, 0.4])):
+        x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(
+            theta[None, :], x0,
+        )
+        J = jp.sensitivity_at(
+            x_star[0], theta, (lam[0], zL[0], zU[0]),
+        )
+        # Ground truth: jacobian through a single solve at this θ.
+        Jref = jax.jacobian(lambda p: jp.solve(p, x0))(theta)
+        assert J.shape == (2, 2)
+        np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+
+
+def test_sensitivity_at_wrt_cols_pounce_87():
+    """Issue #87: ``wrt_cols`` selects parameter columns of the
+    re-factored sensitivity, matching the corresponding slice."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.3, 0.7])
+    x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(theta[None, :], x0)
+    duals = (lam[0], zL[0], zU[0])
+
+    J = jp.sensitivity_at(x_star[0], theta, duals)
+    J0 = jp.sensitivity_at(x_star[0], theta, duals, wrt_cols=slice(0, 1))
+    assert J0.shape == (2, 1)
+    np.testing.assert_allclose(np.asarray(J0), np.asarray(J[:, :1]), atol=1e-12)
+
+    Jidx = jp.sensitivity_at(x_star[0], theta, duals, wrt_cols=[1])
+    np.testing.assert_allclose(np.asarray(Jidx), np.asarray(J[:, 1:2]), atol=1e-12)
+
+
+def test_sensitivity_at_requires_dual_triple_pounce_87():
+    """Issue #87: the duals argument must be the full ``(lam, zL, zU)``
+    triple — the active set is read from the bound multipliers."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.3, 0.7])
+    x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(theta[None, :], x0)
+    with pytest.raises(ValueError, match="lam, zL, zU"):
+        jp.sensitivity_at(x_star[0], theta, (lam[0], zL[0]))
+
+
+def test_single_solve_with_jacobian_matches_batched_pounce_88():
+    """Issue #88: the single-problem ``solve_with_jacobian`` returns
+    un-batched shapes equal to the ``B=1`` batched call (and matches
+    ``jax.jacobian``)."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.3, 0.7])
+
+    x_star, (lam, zL, zU), J = jp.solve_with_jacobian(theta, x0)
+    assert x_star.shape == (2,)
+    assert lam.shape == (1,) and zL.shape == (2,) and zU.shape == (2,)
+    assert J.shape == (2, 2)
+
+    xb, (lb, zlb, zub), Jb = jp.batched_solve_with_jacobian(theta[None, :], x0)
+    np.testing.assert_allclose(np.asarray(x_star), np.asarray(xb[0]), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jb[0]), atol=1e-12)
+    Jref = jax.jacobian(lambda p: jp.solve(p, x0))(theta)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+
+
+def test_single_anchor_sensitivity_and_from_state_pounce_88():
+    """Issue #88: ``anchor`` accepts an un-batched point; ``sensitivity``
+    / ``jvp_from_state`` / ``vjp_from_state`` return un-batched results
+    consistent with the full Jacobian."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.5, 0.5])
+
+    state = jp.anchor(theta, x0)          # single point → B=1
+    assert state._B == 1
+
+    J = jp.sensitivity(state)
+    assert J.shape == (2, 2)
+    Jref = jax.jacobian(lambda p: jp.solve(p, x0))(theta)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+
+    # jvp: J @ dp, un-batched (n,).
+    dp = jnp.array([1.0, -2.0])
+    dx = jp.jvp_from_state(state, dp)
+    assert dx.shape == (2,)
+    np.testing.assert_allclose(np.asarray(dx), np.asarray(J @ dp), atol=1e-6)
+
+    # vjp: J^T @ x_bar, un-batched (p,).
+    x_bar = jnp.array([0.7, -0.3])
+    dpb = jp.vjp_from_state(state, x_bar)
+    assert dpb.shape == (2,)
+    np.testing.assert_allclose(np.asarray(dpb), np.asarray(J.T @ x_bar), atol=1e-6)
+    state.close()
+
+
+def test_single_wrappers_reject_batched_state_pounce_88():
+    """Issue #88: the single-problem from-state wrappers reject a state
+    anchored with B>1 rather than silently mis-shaping."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    state = jp.anchor(p_batch, x0)        # B=2
+    assert state._B == 2
+    with pytest.raises(ValueError, match="single-problem form"):
+        jp.jvp_from_state(state, jnp.array([1.0, 0.0]))
+    state.close()
+
+
+def test_active_set_margin_binding_bound_pounce_89():
+    """Issue #89: with a binding upper bound, `min_mult` reflects the
+    active bound's multiplier and the margin equals min(min_mult,
+    min_slack). Equalities are excluded; the margin is positive at a
+    clean (non-degenerate) solution."""
+    jp = _build_jac_qp(bounded=True)     # ub[0] = 0.2, equality x0+x1=1
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.6, 0.4])        # pulls x0 against its upper bound
+    state = jp.anchor(theta, x0)
+    x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(theta[None, :], x0)
+
+    r = jp.active_set_margin(state)
+    for key in ("margin", "min_mult", "min_slack"):
+        assert r[key].shape == (1,)
+
+    # The upper bound on x0 binds → its multiplier is the active one.
+    assert float(zU[0, 0]) > 1e-6
+    np.testing.assert_allclose(
+        float(r["min_mult"][0]), float(zU[0, 0]), atol=1e-6
+    )
+    # Clean solution: a strictly positive distance to an active-set change.
+    assert float(r["margin"][0]) > 0.0
+    np.testing.assert_allclose(
+        float(r["margin"][0]),
+        min(float(r["min_mult"][0]), float(r["min_slack"][0])),
+        atol=1e-12,
+    )
+    state.close()
+
+
+def test_active_set_margin_interior_is_inf_pounce_89():
+    """Issue #89: an unconstrained interior solution (no active bound,
+    no finite inactive bound) has an infinite margin — no active-set
+    change is imminent."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    # No bounds, no constraints: the optimum is x* = p, interior.
+    jp = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    state = jp.anchor(jnp.array([0.3, -0.4]), jnp.zeros(2))
+    r = jp.active_set_margin(state)
+    assert not np.isfinite(float(r["min_mult"][0]))   # nothing active
+    assert not np.isfinite(float(r["margin"][0]))
+    state.close()
+
+
+def test_active_set_margin_batched_pounce_89():
+    """Issue #89: the margin is computed per block for a B>1 state."""
+    jp = _build_jac_qp(bounded=True)
+    x0 = jnp.zeros(2)
+    p_batch = jnp.array([[0.6, 0.4], [0.5, 0.5]])
+    state = jp.anchor(p_batch, x0)
+    r = jp.active_set_margin(state)
+    assert r["margin"].shape == (2,)
+    assert np.all(np.asarray(r["margin"]) > 0.0)
+    state.close()
+
+
 def test_batched_vjp_from_state_matches_jax_vjp_pounce_82():
     """Issue #82: ``batched_vjp_from_state`` equals ``jax.vjp`` over
     ``batched_solve`` (J^T @ x_bar), and equals J^T @ x_bar from the
@@ -1474,3 +1709,530 @@ def test_batched_jvp_rejects_closed_and_foreign_state_pounce_82():
     with jp1.anchor(p_batch, x0) as state:
         with pytest.raises(ValueError, match="different"):
             jp2.batched_jvp_from_state(state, jnp.zeros((2, 2)))
+
+
+# ----- predictor–corrector path following (pounce#90) -----
+
+
+def _circle_theta(s, c=0.5, r=0.4):
+    import jax.numpy as _jnp
+    ang = 2.0 * _jnp.pi * s
+    return _jnp.array([c + r * _jnp.cos(ang), r * _jnp.sin(ang)])
+
+
+def test_pathfollower_linear_qp_zero_correctors_pounce_90():
+    """Issue #90: on a linear-response NLP the sensitivity predictor is
+    exact, so the monitor accepts every step and the engine traces the
+    whole path with ZERO correctors (one anchor solve vs one cold solve
+    per step). Closes the loop and matches the per-point solver."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.05)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert tr.n_correctors == 0          # predictor exact → no re-solves
+    assert tr.n_accepts == tr.n_steps
+    # Closed loop: end returns to start.
+    np.testing.assert_allclose(tr.x[0], tr.x[-1], atol=1e-9)
+    # Every traced point is the true optimum at its θ.
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=1e-7)
+
+
+def test_pathfollower_nonlinear_traces_accurately_pounce_90():
+    """Issue #90: a nonlinear NLP traces accurately via correction; the
+    engine never does more solves than one-per-step."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.1 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-5, ds0=0.02, ds_max=0.1)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert tr.n_correctors <= tr.n_steps
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=1e-6)
+
+
+def test_pathfollower_skips_solves_pounce_90():
+    """Issue #90: with a loose monitor tolerance the predictor carries
+    several steps between corrections — strictly fewer solves than the
+    naive one-cold-solve-per-step baseline."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.02 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-3, ds0=0.05, ds_max=0.1)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert tr.n_accepts > 0
+    # Total NLP solves = 1 anchor + n_correctors; naive = n_steps + 1.
+    assert (1 + tr.n_correctors) < (tr.n_steps + 1)
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=2e-3)
+
+
+def test_pathfollower_active_set_change_pounce_90():
+    """Issue #90: a path that drives a bound in and out of the active set
+    is traced correctly, the change is detected/recorded, and the engine
+    re-anchors on the new active set (no stepping through the
+    discontinuity)."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    # Upper bound on x0 binds over part of the circle.
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.array([0.6, 10.0]),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-6, active_margin_tol=1e-3, ds0=0.03)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert len(tr.active_set_changes) >= 2   # bound activates then releases
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=1e-6)
+        assert tr.x[k][0] <= 0.6 + 1e-7      # respects the bound
+
+
+def test_trace_arclength_cubic_fold_pounce_90():
+    """Issue #90: pseudo-arclength continuation traces a cubic fold curve
+    past both turning points (where ∂x*/∂θ is singular), which parameter
+    continuation cannot. Stationarity of f = x⁴/4 − x²/2 − θx gives
+    θ = x³ − x, folds at x = ±1/√3 → θ = ∓0.3849."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        th = p[0]
+        return x[0] ** 4 / 4.0 - x[0] ** 2 / 2.0 - th * x[0]
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp)
+    tr = pf.trace_arclength(jnp.array([-1.3]), -0.4, ds=0.05, n_steps=120,
+                            direction=1.0)
+
+    assert tr.status == "ok"
+    # Two folds detected near |θ| = 1/√3·(2/3) = 0.3849.
+    assert len(tr.turning_points) == 2
+    fold_mag = sorted(abs(t) for t in tr.turning_points)
+    np.testing.assert_allclose(fold_mag, [0.3849, 0.3849], atol=5e-3)
+    # The traced curve actually satisfies stationarity θ = x³ − x.
+    resid = tr.theta - (tr.x[:, 0] ** 3 - tr.x[:, 0])
+    assert float(np.max(np.abs(resid))) < 1e-7
+    # It passes the fold: x sweeps from below −1/√3 to above +1/√3.
+    assert tr.x[:, 0].min() < -0.7 and tr.x[:, 0].max() > 0.7
+
+
+def test_jvp_from_state_with_duals_pounce_90():
+    """Issue #90: jvp_from_state(with_duals=True) returns the dual
+    sensitivity ∂λ*/∂θ·dp. For f=Σ(x−p)² s.t. x0+x1=1, λ*(p)=p0+p1−1, so
+    ∂λ/∂p=[1,1] and the dual step equals dp0+dp1."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    state, _ = jp.warm_anchor(jnp.array([0.3, 0.7]), jnp.zeros(2))
+    dp = jnp.array([0.1, -0.05])
+    dx, dlam = jp.jvp_from_state(state, dp, with_duals=True)
+    assert dx.shape == (2,) and dlam.shape == (1,)
+    np.testing.assert_allclose(np.asarray(dlam), [float(dp[0] + dp[1])], atol=1e-6)
+    # Primal-only call still returns just dx (backward compatible).
+    dx_only = jp.jvp_from_state(state, dp)
+    np.testing.assert_allclose(np.asarray(dx_only), np.asarray(dx), atol=1e-12)
+    state.close()
+
+
+def test_warm_anchor_corrector_uses_mu_pounce_90():
+    """Issue #90/#86: warm_anchor seeds μ and warm duals; a corrector
+    from a near-optimal point with the previous μ converges in fewer
+    iterations than a cold anchor."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.05 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    st0, i0 = jp.warm_anchor(jnp.array([0.3, 0.7]), jnp.zeros(2))
+    duals0 = tuple(np.asarray(d[0]) for d in st0.duals)
+    # Corrector at a nearby θ from the (near-optimal) previous primal +
+    # duals + μ.
+    st1, i1 = jp.warm_anchor(
+        jnp.array([0.32, 0.68]), st0.x_star[0],
+        duals=duals0, mu=i0["mu"],
+    )
+    assert i1["status_msg"] in ("Solve_Succeeded", "Solved_To_Acceptable_Level")
+    assert i1["iter_count"] <= i0["iter_count"]
+    # The corrected point is the true optimum.
+    x_true, *_ = jp.solve_with_jacobian(jnp.array([0.32, 0.68]), jnp.zeros(2))
+    np.testing.assert_allclose(np.asarray(st1.x_star[0]), np.asarray(x_true), atol=1e-6)
+    st0.close(); st1.close()
+
+
+# ----- inverse-map ODE recipe (pounce#91) -----
+
+
+def test_jaxproblem_unconstrained_build_once_pounce_91():
+    """Issue #91 (prereq): the build-once / stacked path handles an
+    unconstrained problem (g=None, m=0) — the constraint callbacks must
+    not dereference the (None) jacobian jit."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.05 * jnp.sum(x ** 4)
+
+    jp = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    theta = jnp.array([0.4, -0.3])
+    x_star, duals, J = jp.solve_with_jacobian(theta, jnp.zeros(2))
+    Jref = jax.jacobian(lambda p: jp.solve(p, jnp.zeros(2)))(theta)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+    assert duals[0].shape == (0,)        # no equality multipliers
+
+
+def _rk4(rhs, theta0, n_steps=160):
+    h = 1.0 / n_steps
+    th = jnp.asarray(theta0, dtype=jnp.float64)
+    out = [np.asarray(th)]
+    for i in range(n_steps):
+        s = i * h
+        k1 = rhs(s, th)
+        k2 = rhs(s + h / 2, th + h / 2 * k1)
+        k3 = rhs(s + h / 2, th + h / 2 * k2)
+        k4 = rhs(s + h, th + h * k3)
+        th = th + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        out.append(np.asarray(th))
+    return np.asarray(out)
+
+
+def test_inverse_map_rhs_round_trip_pounce_91():
+    """Issue #91: integrating dθ/ds = (∂x*/∂θ)^{-1} dy/ds along a closed
+    output loop recovers the input path and round-trips back through the
+    optimizer onto the output boundary. For f=(x−θ)²+0.05x⁴ the inverse
+    map is explicit (θ = y + 0.1y³, since x*=y), giving an analytic
+    cross-check."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2 + 0.05 * x[0] ** 4
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+
+    def y_of_s(s):
+        return jnp.array([0.5 + 0.3 * jnp.sin(2 * jnp.pi * s)])
+
+    def dy_ds(s):
+        return jnp.array([0.3 * 2 * jnp.pi * jnp.cos(2 * jnp.pi * s)])
+
+    rhs = inverse_map_rhs(jp, dy_ds)               # output = identity
+
+    y0 = float(y_of_s(0.0)[0])
+    theta0 = jnp.array([y0 + 0.1 * y0 ** 3])       # x*(θ0) = y0
+    TH = _rk4(rhs, theta0, n_steps=160)            # (K, 1)
+
+    S = np.linspace(0.0, 1.0, TH.shape[0])
+    ys = 0.5 + 0.3 * np.sin(2 * np.pi * S)
+    theta_analytic = ys + 0.1 * ys ** 3
+
+    # Integrated input path matches the explicit inverse map.
+    assert float(np.max(np.abs(TH[:, 0] - theta_analytic))) < 1e-5
+    # Closed output loop ⇒ closed input loop.
+    assert abs(TH[-1, 0] - TH[0, 0]) < 1e-6
+    # Round-trip: pushing θ(s) back through the optimizer recovers y(s).
+    rt = 0.0
+    for k in range(0, len(S), 16):
+        x_star, *_ = jp.solve_with_jacobian(jnp.array([TH[k, 0]]), jnp.zeros(1))
+        rt = max(rt, abs(float(x_star[0]) - ys[k]))
+    assert rt < 1e-5
+
+
+def test_inverse_map_rhs_requires_1d_theta_pounce_91():
+    """Issue #91: the inverse-map RHS is defined for a 1-D parameter."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return jnp.sum((x - p.reshape(-1)) ** 2)
+
+    jp = JaxProblem(
+        f=f, g=None, n=4, m=0, p_example=jnp.zeros((2, 2)),
+        options={"print_level": 0, "sb": "yes"},
+    )
+    with pytest.raises(ValueError, match="1-D"):
+        inverse_map_rhs(jp, jnp.zeros(4))
+
+
+def test_inverse_map_rhs_is_jittable_pounce_91():
+    """Issue #91: the RHS composes under jax.jit (the solve rides a
+    pure_callback) — diffrax jit-compiles the vector field, so an
+    eager-only RHS would break integration."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2 + 0.05 * x[0] ** 4
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+    rhs = inverse_map_rhs(jp, lambda s: jnp.array([1.0]))
+    theta = jnp.array([0.5])
+    eager = rhs(0.3, theta)
+    jitted = jax.jit(rhs)(0.3, theta)
+    np.testing.assert_allclose(np.asarray(jitted), np.asarray(eager), atol=1e-9)
+
+
+def test_pathfollower_unconstrained_follow_pounce_90():
+    """Issue #90: follow() works for an unconstrained (m=0) problem —
+    the m=0 branch of the predictor (no dual step) and the corrector."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)        # x*(θ) = θ, J = I
+
+    jp = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.05)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+    assert tr.status == "ok"
+    assert tr.n_correctors == 0             # predictor exact (J = I)
+    # x*(θ) = θ, so the traced primal equals the parameter path.
+    np.testing.assert_allclose(tr.x, tr.theta, atol=1e-6)
+
+
+def test_pathfollower_max_steps_status_pounce_90():
+    """Issue #90: hitting the step cap before s1 reports status
+    'max_steps' and a partial trace."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -5.0), ub=jnp.full(2, 5.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, ds0=0.05, max_steps=2)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+    assert tr.status == "max_steps"
+    assert tr.n_steps == 2
+    assert tr.s[-1] < 1.0
+
+
+def test_pathfollower_corrector_failed_status_pounce_90():
+    """Issue #90: a step into an infeasible region whose corrector can't
+    converge backs off to ds_min and reports 'corrector_failed'."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    # Equality x0 = θ0 with x0 ≤ 1 → infeasible once θ0 > 1.
+    def g(x, p):
+        return jnp.stack([x[0] - p[0]])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -5.0), ub=jnp.array([1.0, 5.0]),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+
+    def theta(s):                       # θ0: 0.5 (feasible) → 2.5 (infeasible)
+        return jnp.array([0.5 + 2.0 * s, 0.0])
+
+    # ds_min high + shrink so the first failed corrector trips the floor.
+    pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.5, ds_min=0.4, shrink=0.5)
+    tr = pf.follow(theta, (0.0, 1.0), jnp.zeros(2))
+    assert tr.status == "corrector_failed"
+
+
+def test_inverse_map_rhs_warm_matches_cold_pounce_91():
+    """Issue #91: warm=True changes only the inner solve's starting point,
+    not the result — the warm and cold inverse maps agree up to solver
+    tolerance, and warm is jittable."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2 + 0.05 * x[0] ** 4
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+
+    def y_of_s(s):
+        return jnp.array([0.5 + 0.3 * jnp.sin(2 * jnp.pi * s)])
+
+    def dy_ds(s):
+        return jnp.array([0.3 * 2 * jnp.pi * jnp.cos(2 * jnp.pi * s)])
+
+    y0 = float(y_of_s(0.0)[0])
+    theta0 = jnp.array([y0 + 0.1 * y0 ** 3])
+
+    TH_cold = _rk4(inverse_map_rhs(jp, dy_ds, warm=False), theta0, n_steps=120)
+    TH_warm = _rk4(inverse_map_rhs(jp, dy_ds, warm=True), theta0, n_steps=120)
+    assert float(np.max(np.abs(TH_cold - TH_warm))) < 1e-6
+
+    # Still jittable with the warm cache in the loop.
+    rhs_w = inverse_map_rhs(jp, dy_ds, warm=True)
+    jit_val = jax.jit(rhs_w)(0.3, theta0)
+    assert np.all(np.isfinite(np.asarray(jit_val)))
+
+
+def test_inverse_map_rhs_nonidentity_output_pounce_91():
+    """Issue #91: a NON-identity output exercises the
+    ``∂y/∂θ = ∂h/∂x · J + ∂h/∂θ`` branch — the general case the identity
+    round-trip test never touches (and a non-square ``n != p``: here ``n=1``,
+    ``p=2``, output dim ``k=2``).
+
+    Inner ``min_x (x − θ0)²`` ⇒ ``x*(θ) = θ0`` (so ``J = ∂x*/∂θ = [1, 0]``).
+    Output ``h = [x + θ1, x − θ1]`` ⇒ ``y = [θ0+θ1, θ0−θ1] = A θ`` with
+    ``A = [[1,1],[1,−1]]`` (and ``∂y/∂θ = A``), so the inverse map is the
+    constant linear solve ``θ(s) = A⁻¹ y(s)`` — an exact analytic check that
+    both the ``∂h/∂x · J`` and the ``∂h/∂θ`` terms are formed correctly.
+    """
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+
+    def output(x, theta):
+        return jnp.array([x[0] + theta[1], x[0] - theta[1]])
+
+    A = np.array([[1.0, 1.0], [1.0, -1.0]])
+    Ainv = np.linalg.inv(A)
+    y0 = np.array([0.3, -0.2])
+    y1 = np.array([1.0, 0.4])
+
+    # Straight-line output path y(s) = y0 + s (y1 − y0) ⇒ dy/ds constant.
+    rhs = inverse_map_rhs(jp, jnp.asarray(y1 - y0), output=output)
+    TH = _rk4(rhs, jnp.asarray(Ainv @ y0), n_steps=80)        # (K, 2)
+
+    S = np.linspace(0.0, 1.0, TH.shape[0])
+    ys = y0[None, :] + S[:, None] * (y1 - y0)                 # (K, 2)
+    theta_analytic = ys @ Ainv.T                              # θ = A⁻¹ y
+    assert float(np.max(np.abs(TH - theta_analytic))) < 1e-6
+    assert float(np.max(np.abs(TH[-1] - Ainv @ y1))) < 1e-6
+
+
+def test_inverse_map_rhs_requires_square_output_pounce_91():
+    """Issue #91: ``∂y/∂θ`` must be square (output dim ``k == p``). The default
+    identity output with ``n != p`` is non-square and is rejected up front with
+    a clear error, rather than a low-level LinAlgError inside the callback."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return jnp.sum((x - p[0]) ** 2)
+
+    jp = JaxProblem(
+        f=f, g=None, n=3, m=0, p_example=jnp.zeros(2),
+        options={"print_level": 0, "sb": "yes"},
+    )
+    with pytest.raises(ValueError, match="square"):
+        inverse_map_rhs(jp, jnp.zeros(3))               # identity ⇒ k=n=3 ≠ p=2
+
+
+def test_follow_rejects_inequality_constraints_pounce_90():
+    """Issue #90: ``follow`` / ``trace_arclength`` assume a fixed active set of
+    equalities; a two-sided inequality (``cl != cu``) makes the monitor's
+    ``max|g|`` residual invalid, so it is rejected explicitly."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):
+        return jnp.array([x[0] + x[1]])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1,
+        cl=jnp.array([-1.0]), cu=jnp.array([1.0]),     # inequality: cl != cu
+        p_example=jnp.zeros(2),
+        options={"print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp)
+    with pytest.raises(ValueError, match="inequality"):
+        pf.follow(lambda s: jnp.array([s, s]), (0.0, 1.0), jnp.zeros(2))

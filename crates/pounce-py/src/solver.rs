@@ -79,7 +79,13 @@ impl PySolver {
         let mut inner = RustSolver::new(app, bridge_for_solver);
         let status: ApplicationReturnStatus = inner.solve();
         let stats = inner.app().statistics();
-        let info = build_info_dict(py, &bridge.borrow(), status, stats.iteration_count)?;
+        let info = build_info_dict(
+            py,
+            &bridge.borrow(),
+            status,
+            stats.iteration_count,
+            stats.final_mu,
+        )?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         let _ = bridge; // alive via inner's Rc<RefCell<dyn TNLP>> clone
         self.state = Some(SessionState { inner, m });

@@ -52,6 +52,7 @@ rationale on the bounded LRU.
 from __future__ import annotations
 
 import itertools
+import math
 import threading
 import warnings
 import weakref
@@ -163,6 +164,8 @@ class _StackedJaxNlp:
 
     def constraints(self, X):
         n, m = self._jp._n, self._jp._m
+        if m == 0:
+            return np.zeros(0, dtype=np.float64)
         X_2d = jnp.asarray(X).reshape(self._B, n)
         G_2d = jax.vmap(self._jp._g_jit, in_axes=(0, 0))(X_2d, self._P)
         return _to_np(G_2d).reshape(self._B * m)
@@ -175,6 +178,8 @@ class _StackedJaxNlp:
         # nonzeros at the per-block sparsity pattern. We never assemble
         # the dense stacked Jacobian (would be (B*m, B*n)); the gather
         # below is order ``B * nnz_per_block`` work.
+        if self._jp._m == 0:
+            return np.zeros(0, dtype=np.float64)
         n = self._jp._n
         X_2d = jnp.asarray(X).reshape(self._B, n)
         J_3d = jax.vmap(self._jp._jac_g_jit, in_axes=(0, 0))(X_2d, self._P)
@@ -231,12 +236,16 @@ class _ReusableJaxNlp:
         return _to_np(self._jp._grad_f_jit(jnp.asarray(x), self._p))
 
     def constraints(self, x):
+        if self._jp._m == 0:
+            return np.zeros(0, dtype=np.float64)
         return _to_np(self._jp._g_jit(jnp.asarray(x), self._p))
 
     def jacobianstructure(self):
         return (self._jp._jac_rows, self._jp._jac_cols)
 
     def jacobian(self, x):
+        if self._jp._m == 0:
+            return np.zeros(0, dtype=np.float64)
         J = _to_np(self._jp._jac_g_jit(jnp.asarray(x), self._p))
         return J[self._jp._jac_rows, self._jp._jac_cols]
 
@@ -740,9 +749,16 @@ def _kkt_jvp_batched_pure_callback(
     Inputs are per-block, leading-batch (``rhs_x_batch (B, n)``,
     ``rhs_g_batch (B, m)``); ``vmap_method="broadcast_all"`` also accepts
     a leading direction axis so the JVP can be vmapped over several
-    ``dp`` directions in one FFI hop. Returns ``w_x_batch (B, n)``.
+    ``dp`` directions in one FFI hop. Returns ``(w_x_batch (B, n),
+    w_g_batch (B, m))`` — the primal block and the constraint-multiplier
+    block of ``w`` (the latter scattered back to user-g order), so the
+    caller can form both ``J @ dp = -w_x`` and the dual sensitivity
+    ``∂λ*/∂θ · dp = -w_g`` (pounce#90 predicts the duals too).
     """
-    result_shapes = jax.ShapeDtypeStruct((B, n), jnp.float64)
+    result_shapes = (
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, m), jnp.float64),
+    )
 
     def host_call(sid_h, rx_h, rg_h):
         sid_int = int(np.asarray(sid_h).reshape(-1)[0])
@@ -805,13 +821,34 @@ def _kkt_jvp_batched_pure_callback(
                 solver.kkt_solve_many(rhs_flat.reshape(-1), N),
                 dtype=np.float64,
             ).reshape(N, kkt_dim_)
-            return n_x_, w_flat
+            return n_x_, n_s_, n_y_c_, n_y_d_, w_flat
 
-        n_x, w_mat = jp._run_pinned(_do_kkt)
+        n_x, n_s, n_y_c, n_y_d, w_mat = jp._run_pinned(_do_kkt)
         w_x_batch = w_mat[:, :n_x].reshape(N, B, n).copy()
+
+        # De-interleave the constraint-multiplier blocks (block-major,
+        # like the reverse path) and scatter back to user-g order.
+        w_g_batch = np.zeros((N, B, m), dtype=np.float64)
+        if m > 0:
+            cl_arr = jp._cl_for_classify
+            cu_arr = jp._cu_for_classify
+            is_eq = cl_arr == cu_arr
+            n_c_per = int(np.sum(is_eq))
+            y_c_off = n_x + n_s
+            y_d_off = y_c_off + n_y_c
+            if n_c_per > 0:
+                w_y_c = w_mat[:, y_c_off : y_c_off + n_y_c].reshape(
+                    N, B, n_c_per
+                )
+                w_g_batch[:, :, np.flatnonzero(is_eq)] = w_y_c
+            if (m - n_c_per) > 0:
+                w_y_d = w_mat[:, y_d_off : y_d_off + n_y_d].reshape(
+                    N, B, m - n_c_per
+                )
+                w_g_batch[:, :, np.flatnonzero(~is_eq)] = w_y_d
         if squeeze:
-            return w_x_batch[0]
-        return w_x_batch
+            return w_x_batch[0], w_g_batch[0]
+        return w_x_batch, w_g_batch
 
     return jax.pure_callback(
         host_call, result_shapes, sid, rhs_x_batch, rhs_g_batch,
@@ -1447,6 +1484,24 @@ class JaxProblem:
             self._tls.pair_warm = cached
         return cached
 
+    def _thread_problem_corrector(self) -> tuple[_ReusableJaxNlp, Problem]:
+        """Per-thread warm-started Problem dedicated to the
+        predictor–corrector engine's corrector (pounce#90).
+
+        Separate from :meth:`_thread_problem_warm` because the corrector
+        sets the barrier-μ options (``mu_init`` / ``warm_start_target_mu``)
+        per call (pounce#86); keeping its own cached Problem prevents
+        those numeric options from leaking into the differentiable
+        ``solve_with_warm`` path that shares ``pair_warm``.
+        """
+        cached = getattr(self._tls, "pair_corrector", None)
+        if cached is None:
+            obj, prob = self._build_problem()
+            prob.add_option("warm_start_init_point", "yes")
+            cached = (obj, prob)
+            self._tls.pair_corrector = cached
+        return cached
+
     def _thread_stacked_problem_warm(self, B: int) -> tuple[_StackedJaxNlp, Problem]:
         """Per-thread LRU of *warm-started* stacked Problems keyed by
         batch size B (pounce#78). Mirrors :meth:`_thread_stacked_problem`
@@ -2025,10 +2080,114 @@ class JaxProblem:
         subsequent from-state products to the selected columns, e.g.
         ``slice(0, ny)`` to keep only the predicted block and drop
         context columns.
+
+        Accepts either a batched ``p_batch`` (``(B,) + p_shape``) or a
+        single un-batched point (``p_shape``) — a single point yields a
+        ``B=1`` state for the single-problem wrappers (pounce#88:
+        :meth:`jvp_from_state` / :meth:`vjp_from_state` /
+        :meth:`sensitivity`).
         """
         cols = self._normalize_cols(wrt_cols)
-        x_star, duals, sid, (pb, xs, lam) = self._anchor_forward(p_batch, x0)
+        p_arr = jnp.asarray(p_batch, dtype=jnp.float64)
+        # Un-batched single point (ndim matches p_shape) → wrap to B=1.
+        if p_arr.ndim == len(self._p_shape):
+            p_arr = p_arr[None]
+        x_star, duals, sid, (pb, xs, lam) = self._anchor_forward(p_arr, x0)
         return AnchorState(self, sid, pb.shape[0], pb, xs, lam, duals, cols)
+
+    def warm_anchor(self, p, x0, *, duals=None, mu=None, wrt_cols=None):
+        """Warm-started, barrier-μ-seeded re-solve that *also* pins the
+        converged factor — the corrector + anchor of predictor–corrector
+        path following in one solve (pounce#90).
+
+        Composes the family's primitives: it warm-starts the primal
+        (``x0``), the duals (``duals=(lam, zL, zU)``), and the barrier μ
+        (pounce#86), then holds the converged KKT factor as a ``B=1``
+        :class:`AnchorState` so the next predictor's
+        :meth:`jvp_from_state` / :meth:`sensitivity` reuse it with no
+        further solve. A single NLP solve serves both the correction and
+        the next anchor.
+
+        Not differentiable — this is the host-side engine corrector, not
+        a ``custom_vjp`` surface (use :func:`solve_with_warm` /
+        :meth:`solve_with_jacobian` for differentiable warm solves).
+
+        Parameters
+        ----------
+        p : ``p_shape``
+            Parameter value (single, un-batched).
+        x0 : ``(n,)``
+            Primal warm start (e.g. the predictor's extrapolated point).
+        duals : ``(lam, zL, zU)`` or None
+            Dual warm start. ``None`` starts the duals from zero (the
+            uninformed first/anchor call).
+        mu : float or None
+            Barrier-μ seed (pounce#86). ``None`` uses the solver default
+            initial μ. Thread the previous step's converged μ
+            (``info["mu"]``) here to resume near the central path.
+        wrt_cols : slice / index array / None
+            Parameter-column selection carried on the returned state.
+
+        Returns
+        -------
+        ``(state, info)`` — a ``B=1`` :class:`AnchorState` (with
+        ``state.duals`` the converged ``(lam, zL, zU)``) and the solve
+        ``info`` dict (``info["mu"]``, ``info["iter_count"]``,
+        ``info["status_msg"]``, …). Close the state when done (or let the
+        engine swap it via re-anchor).
+        """
+        n, m = self._n, self._m
+        cols = self._normalize_cols(wrt_cols)
+        p_arr = jnp.asarray(p, dtype=jnp.float64)
+        if p_arr.ndim != len(self._p_shape):
+            raise ValueError(
+                "pounce.jax: warm_anchor takes a single (un-batched) p; "
+                f"got shape {p_arr.shape} for p_shape {self._p_shape}."
+            )
+        x0_np = np.asarray(x0, dtype=np.float64)
+        if duals is None:
+            lam_np = np.zeros(m, dtype=np.float64)
+            zL_np = np.zeros(n, dtype=np.float64)
+            zU_np = np.zeros(n, dtype=np.float64)
+        else:
+            lam_in, zL_in, zU_in = duals
+            lam_np = np.asarray(lam_in, dtype=np.float64)
+            zL_np = np.asarray(zL_in, dtype=np.float64)
+            zU_np = np.asarray(zU_in, dtype=np.float64)
+        mu_f = float("nan") if mu is None else float(mu)
+
+        self._check_pinned_capacity()
+        p_host = np.asarray(p_arr)
+
+        def _do():
+            obj, prob = self._thread_problem_corrector()
+            obj._p = jnp.asarray(p_host)
+            # Barrier-μ seed (pounce#86). Always set explicitly so a
+            # prior call's value never lingers on the cached Problem;
+            # NaN/None → restore the solver defaults.
+            if math.isfinite(mu_f):
+                prob.add_option("mu_init", mu_f)
+                prob.add_option("warm_start_target_mu", mu_f)
+            else:
+                prob.add_option("mu_init", 0.1)
+                prob.add_option("warm_start_target_mu", 0.0)
+            solver = Solver(prob)
+            x_np, info = solver.solve(
+                x0=x0_np, lagrange=lam_np, zl=zL_np, zu=zU_np,
+            )
+            sid = self._register_pinned_solver(solver)
+            return x_np, info, sid
+
+        x_np, info, sid = self._run_pinned(_do)
+        x_star = jnp.asarray(x_np, dtype=jnp.float64)[None]
+        lam_out = jnp.asarray(info["mult_g"], dtype=jnp.float64)[None]
+        zL_out = jnp.asarray(info["mult_x_L"], dtype=jnp.float64)[None]
+        zU_out = jnp.asarray(info["mult_x_U"], dtype=jnp.float64)[None]
+        duals_out = (lam_out, zL_out, zU_out)
+        state = AnchorState(
+            self, sid, 1, p_arr[None], x_star, lam_out, duals_out, cols,
+        )
+        return state, dict(info)
 
     def batched_solve_with_jacobian(
         self,
@@ -2134,7 +2293,8 @@ class JaxProblem:
         )
         return self._slice_cols(dp, state._wrt_cols)
 
-    def batched_jvp_from_state(self, state: AnchorState, dp_batch):
+    def batched_jvp_from_state(self, state: AnchorState, dp_batch, *,
+                               with_duals: bool = False):
         """Jacobian-vector product ``J @ dp`` against a held factor
         (pounce#82 Phase 2). The cheap path for linear updates: it never
         materialises the full ``J`` — only the directional sensitivity
@@ -2159,7 +2319,10 @@ class JaxProblem:
 
         Returns
         -------
-        ``(B, n)`` — the per-block primal sensitivity ``delta_x``.
+        ``(B, n)`` — the per-block primal sensitivity ``delta_x``. With
+        ``with_duals=True``, returns ``(delta_x (B, n), delta_lam
+        (B, m))`` where ``delta_lam = ∂λ*/∂θ · dp`` — used by the
+        path-following predictor to step the multipliers too (pounce#90).
         """
         if state._jp is not self:
             raise ValueError(
@@ -2209,10 +2372,292 @@ class JaxProblem:
             return r_x, r_g
 
         r_x_batch, r_g_batch = jax.vmap(per_block)(p_batch, x_star, lam, dp)
-        w_x = _kkt_jvp_batched_pure_callback(
+        w_x, w_g = _kkt_jvp_batched_pure_callback(
             self, state._B, state._sid, r_x_batch, r_g_batch, n, m,
         )
+        if with_duals:
+            return -w_x, -w_g
         return -w_x
+
+    def sensitivity_at(self, x_star, theta, duals, *, wrt_cols=None):
+        """Exact ``∂x*/∂θ`` at a **supplied** primal-dual point — by
+        re-assembling and factoring the KKT *there*, with no IPM
+        re-solve (pounce#87).
+
+        Use this to refresh the sensitivity at a known point along a
+        path — e.g. the inverse map where ``x*`` traces a known output
+        boundary — where the requested point is not the one the solver
+        last converged at.
+
+        Why re-factor rather than reuse a held factor. The held FERAL
+        factor from :meth:`anchor` / :meth:`batched_solve_with_jacobian`
+        encodes the Hessian / Jacobian at the *anchor* point, so
+        back-solving it at a moved ``x_star`` returns a first-order-stale
+        sensitivity. This method instead assembles the dense
+        ``(n+m)×(n+m)`` KKT block at the supplied ``(x_star, duals,
+        theta)`` and solves it, which is **exact** at that point
+        (assuming it is a KKT point for ``theta``). The cost is one
+        dense factorisation per call — fine for the small/medium NLPs
+        path-following targets. It stays pure-JAX, so it is itself
+        differentiable (second-order sensitivities work).
+
+        The reuse path (cheap, locally valid, stale once the point
+        moves) is the predictor :meth:`batched_jvp_from_state` against a
+        held factor; this method is the exact-refresh complement.
+
+        Parameters
+        ----------
+        x_star : ``(n,)``
+            Primal point to evaluate at — must be (within the backward's
+            ``active_tol``) a KKT point for ``theta``.
+        theta : ``p_shape``
+            Parameter value.
+        duals : ``(lam, zL, zU)``
+            Multipliers at ``x_star``: equality/inequality multipliers
+            ``lam`` ``(m,)`` and bound multipliers ``zL`` / ``zU``
+            ``(n,)``. The active set is read from ``zL`` / ``zU`` exactly
+            as the ``custom_vjp`` backward does, so pass the values the
+            anchoring solve / :func:`solve_with_warm` returned at this
+            point.
+        wrt_cols : slice / index array / None
+            Parameter-column selection (1-D ``theta`` only), same
+            contract as :meth:`batched_solve_with_jacobian`.
+
+        Returns
+        -------
+        ``(n, p_dim)`` (or ``(n, len(wrt_cols))``) — the primal
+        sensitivity ``∂x*/∂θ`` at the supplied point.
+        """
+        f, g, n, m = self._f, self._g, self._n, self._m
+        cl, cu = self._cl, self._cu
+        cols = self._normalize_cols(wrt_cols)
+        x_star = jnp.asarray(x_star, dtype=jnp.float64)
+        theta = jnp.asarray(theta, dtype=jnp.float64)
+        if len(duals) != 3:
+            raise ValueError(
+                "pounce.jax: sensitivity_at requires duals=(lam, zL, zU); "
+                f"got a {len(duals)}-tuple."
+            )
+        lam, zL, zU = duals
+        lam = jnp.asarray(lam, dtype=jnp.float64)
+        zL = jnp.asarray(zL, dtype=jnp.float64)
+        zU = jnp.asarray(zU, dtype=jnp.float64)
+
+        # Row i of J is the VJP with cotangent e_i (the KKT is
+        # symmetric), so vmapping the single-point KKT backward over the
+        # identity output basis recovers the full Jacobian. XLA shares
+        # the dense factorisation across the n right-hand sides — one
+        # assemble-and-factor, n back-substitutions.
+        basis = jnp.eye(n, dtype=jnp.float64)
+
+        def jac_row(e_i):
+            return _bwd_single_kkt(
+                f, g, n, m, cl, cu, theta, x_star, lam, zL, zU, e_i,
+            )
+
+        J = jax.vmap(jac_row)(basis)          # (n,) + p_shape
+        return self._slice_cols(J, cols)
+
+    # ----- single-problem ergonomic wrappers (pounce#88) -----
+    #
+    # Thin sugar over the batched_* methods for the scalar /
+    # path-following user (one NLP at a time, e.g. the inverse-map
+    # continuation): accept and return un-batched shapes, delegate to a
+    # ``B=1`` batched call, squeeze. No new numerics — the batched
+    # methods remain the canonical surface.
+
+    def _require_single(self, state: "AnchorState", who: str) -> None:
+        if state._B != 1:
+            raise ValueError(
+                f"pounce.jax: {who} is the single-problem form (B=1); the "
+                f"state was anchored with B={state._B}. Use the batched_* "
+                "method, or anchor a single point."
+            )
+
+    def solve_with_jacobian(self, p, x0, *, wrt_cols=None, return_state=False):
+        """Single-problem :meth:`batched_solve_with_jacobian` (pounce#88).
+
+        Solve at one ``p`` and return the full primal sensitivity
+        ``J = ∂x*/∂p`` of shape ``(n, p_dim)`` (or ``(n, len(wrt_cols))``)
+        from the held KKT factor — no leading batch axis. Thin sugar:
+        delegates to the batched method with ``B=1`` and squeezes.
+
+        Returns ``(x_star (n,), (lam (m,), zL (n,), zU (n,)), J)`` or,
+        with ``return_state=True``, also a ``B=1`` :class:`AnchorState`
+        for follow-up :meth:`jvp_from_state` / :meth:`vjp_from_state`.
+        """
+        p1 = jnp.asarray(p, dtype=jnp.float64)[None]
+        out = self.batched_solve_with_jacobian(
+            p1, x0, wrt_cols=wrt_cols, return_state=return_state,
+        )
+        if return_state:
+            x_star, (lam, zL, zU), J, state = out
+            return x_star[0], (lam[0], zL[0], zU[0]), J[0], state
+        x_star, (lam, zL, zU), J = out
+        return x_star[0], (lam[0], zL[0], zU[0]), J[0]
+
+    def sensitivity(self, state: "AnchorState"):
+        """Full primal sensitivity ``∂x*/∂p`` (shape ``(n, p_dim)``, or
+        ``(n, len(wrt_cols))`` if the state was anchored with
+        ``wrt_cols``) from a held single-problem state — one multi-RHS
+        back-solve over the held factor, no re-solve (pounce#88).
+
+        Single-problem analog of :meth:`batched_solve_with_jacobian`'s
+        ``J`` for an already-anchored state: row ``i`` is the VJP at
+        cotangent ``e_i`` (the KKT is symmetric). For the sensitivity at
+        a *different* supplied point use :meth:`sensitivity_at`
+        (re-factor); this evaluates at the state's own anchor point via
+        the held factor.
+        """
+        self._require_single(state, "sensitivity")
+        f, g, n, m = self._f, self._g, self._n, self._m
+        basis = jnp.eye(n, dtype=jnp.float64)
+
+        def jac_row(e_i):
+            v = jnp.broadcast_to(e_i, (state._B, n))
+            return _bwd_batched_factor_reuse(
+                f, g, n, m, self, state._B,
+                state._p_batch, state._x_star, state._lam, state._sid, v,
+            )
+
+        J_rows = jax.vmap(jac_row)(basis)        # (n, 1, p_dim)
+        J = jnp.transpose(J_rows, (1, 0, 2))      # (1, n, p_dim)
+        return self._slice_cols(J, state._wrt_cols)[0]
+
+    def jvp_from_state(self, state: "AnchorState", dp, *, with_duals: bool = False):
+        """Single-problem :meth:`batched_jvp_from_state` — ``J @ dp`` for
+        a state anchored at one point. ``dp`` has shape ``p_shape`` (or
+        ``(len(wrt_cols),)`` if the state was anchored with ``wrt_cols``)
+        and the result is ``(n,)`` (pounce#88).
+
+        With ``with_duals=True`` returns ``(dx (n,), dlam (m,))`` — the
+        primal and dual sensitivity steps (pounce#90)."""
+        self._require_single(state, "jvp_from_state")
+        dp1 = jnp.asarray(dp, dtype=jnp.float64)[None]
+        if with_duals:
+            dx, dlam = self.batched_jvp_from_state(state, dp1, with_duals=True)
+            return dx[0], dlam[0]
+        return self.batched_jvp_from_state(state, dp1)[0]
+
+    def vjp_from_state(self, state: "AnchorState", x_bar):
+        """Single-problem :meth:`batched_vjp_from_state` — ``J^T @ x_bar``
+        for a state anchored at one point. ``x_bar`` has shape ``(n,)``;
+        the result is ``(p_dim,)`` (or ``(len(wrt_cols),)``) (pounce#88)."""
+        self._require_single(state, "vjp_from_state")
+        xb1 = jnp.asarray(x_bar, dtype=jnp.float64)[None]
+        return self.batched_vjp_from_state(state, xb1)[0]
+
+    def active_set_margin(self, state: "AnchorState", *, active_tol=_ACTIVE_TOL):
+        """Distance to an active-set change at the anchor point (pounce#89).
+
+        The post-solve sensitivity ``∂x*/∂θ`` is a derivative on a *fixed*
+        active set; along a path it stays valid until a bound /
+        inequality crosses its critical-region boundary, where the
+        sensitivity is **discontinuous**. This is the monitor that says
+        "the predictor is about to become invalid": it reduces the held
+        state's multipliers and slacks to the smallest distance-to-zero,
+        with no solve and no back-solve — a pure reduction over state the
+        :class:`AnchorState` already holds.
+
+        Two ways the active set flips, by complementarity:
+
+        * an **active** bound / inequality (multiplier ``> active_tol``)
+          is about to leave the set — its *multiplier* heads to zero;
+        * an **inactive** bound / inequality is about to enter the set —
+          its *slack* heads to zero.
+
+        Equalities (``cl == cu``) are always active and never change set,
+        so they are excluded. Bounds at ``±inf`` (and the slack side of a
+        one-sided inequality) contribute ``inf`` and drop out naturally.
+
+        Pairs with the smooth-drift monitor (the KKT residual at the
+        predicted point, which the caller forms directly): re-solve /
+        re-anchor when *either* the residual grows *or* this margin gets
+        small.
+
+        Parameters
+        ----------
+        state : AnchorState
+        active_tol : float
+            Multiplier threshold for classifying a bound / inequality as
+            active. Matches the ``custom_vjp`` backward's
+            ``_ACTIVE_TOL``.
+
+        Returns
+        -------
+        dict of ``(B,)`` arrays:
+
+        * ``"margin"`` — ``min(min_mult, min_slack)`` per block; small ⇒
+          an active-set change is imminent. ``inf`` when no constraint is
+          active *and* none inactive-with-finite-slack (unconstrained at
+          this point).
+        * ``"min_mult"`` — smallest active multiplier (closest to
+          *leaving* the active set); ``inf`` when nothing is active.
+        * ``"min_slack"`` — smallest inactive slack (closest to
+          *entering* the active set); ``inf`` when nothing is inactive
+          with a finite bound.
+        """
+        B = state._B
+        lam_b, zL_b, zU_b = state.duals
+        return self._margin_arrays(
+            state._x_star, lam_b, zL_b, zU_b, state._p_batch, B,
+            active_tol=active_tol,
+        )
+
+    def _margin_arrays(self, x_b, lam_b, zL_b, zU_b, p_b, B, *,
+                       active_tol=_ACTIVE_TOL):
+        """Active-set margin from explicit ``(B, ·)`` primal/dual arrays
+        (pounce#89). Shared by :meth:`active_set_margin` (held state) and
+        the path-following monitor, which evaluates the margin at a
+        *predicted* point that has no anchored state yet (pounce#90)."""
+        n, m = self._n, self._m
+        INF = jnp.inf
+
+        x = jnp.asarray(x_b, dtype=jnp.float64).reshape(B, n)
+        zL = jnp.asarray(zL_b, dtype=jnp.float64).reshape(B, n)
+        zU = jnp.asarray(zU_b, dtype=jnp.float64).reshape(B, n)
+
+        def _bound(arr, fill):
+            if arr is None:
+                return jnp.full((B, n), fill, dtype=jnp.float64)
+            a = jnp.asarray(arr, dtype=jnp.float64)
+            return jnp.broadcast_to(a, (B, n))
+
+        lb = _bound(self._lb, -INF)
+        ub = _bound(self._ub, INF)
+
+        # Lower / upper bounds: active → its multiplier is the margin;
+        # inactive → its slack (x − lb / ub − x) is the margin.
+        act_L = zL > active_tol
+        act_U = zU > active_tol
+        mult_L = jnp.where(act_L, zL, INF)
+        mult_U = jnp.where(act_U, zU, INF)
+        slack_L = jnp.where(act_L, INF, x - lb)
+        slack_U = jnp.where(act_U, INF, ub - x)
+
+        mult_cols = [mult_L, mult_U]
+        slack_cols = [slack_L, slack_U]
+
+        if m > 0:
+            lam = jnp.asarray(lam_b, dtype=jnp.float64).reshape(B, m)
+            cl = jnp.asarray(self._cl_for_classify, dtype=jnp.float64)
+            cu = jnp.asarray(self._cu_for_classify, dtype=jnp.float64)
+            is_ineq = (cl != cu)[None, :]                         # (1, m)
+            p_batch = jnp.asarray(p_b, dtype=jnp.float64).reshape(
+                (B,) + self._p_shape
+            )
+            g_val = jax.vmap(self._g_jit, in_axes=(0, 0))(x, p_batch)  # (B, m)
+            # Two-sided slack: the binding side; the ±inf side drops out.
+            ineq_slack = jnp.minimum(g_val - cl[None, :], cu[None, :] - g_val)
+            act_g = is_ineq & (jnp.abs(lam) > active_tol)
+            inact_g = is_ineq & ~act_g
+            mult_cols.append(jnp.where(act_g, jnp.abs(lam), INF))
+            slack_cols.append(jnp.where(inact_g, ineq_slack, INF))
+
+        min_mult = jnp.min(jnp.concatenate(mult_cols, axis=1), axis=1)   # (B,)
+        min_slack = jnp.min(jnp.concatenate(slack_cols, axis=1), axis=1)  # (B,)
+        margin = jnp.minimum(min_mult, min_slack)
+        return {"margin": margin, "min_mult": min_mult, "min_slack": min_slack}
 
     # ----- custom_vjp factories -----
 
