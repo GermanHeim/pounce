@@ -89,6 +89,46 @@ differing only in (a) what they branch on and (b) where the node lower
 bound comes from. Convex MINLP-global runs both branching modes at once
 — the BARON / Couenne architecture.
 
+## Local and global: one solver, tiered guarantees
+
+POUNCE is a **mixed local/global solver** — not two separate products.
+The user chooses where to sit on a guarantee-vs-cost spectrum via
+`solver_selection`, and the tiers share machinery rather than duplicating
+it:
+
+| Tier | What it does | Guarantee | Cost |
+|---|---|---|---|
+| `local` (default for NLP) | one IPM-NLP solve (`pounce-algorithm`) | local optimum, no certificate | one solve |
+| `multistart` | several local solves from sampled starts; keep best | better global odds, still no certificate | k solves |
+| `global` (opt-in) | spatial B&B over machine-built convex relaxations | numerical global optimum + gap certificate | a tree of solves |
+
+Three things make this *one* solver, not a bundle:
+
+1. **Global's upper bound *is* the local solver.** The `IncumbentSearch`
+   seam inside spatial B&B (Phase 5) gets its feasible points from
+   multi-start `pounce-algorithm` NLP solves. "Local solve" is therefore
+   a *component* of the global solver, not a throwaway path — building
+   the local tier well builds half the global tier. Likewise `multistart`
+   is just the upper-bounding loop run standalone, without the
+   lower-bounding tree.
+2. **The default never surprises.** A nonconvex problem with no explicit
+   `global` request gets the fast local solve it gets today — no silent
+   100× slowdown. Global is always a deliberate opt-in (the
+   convexity-undecidability dodge in "Limitations").
+3. **Differentiability is identical across tiers.** Seam 5 differentiates
+   through the *returned* solution's KKT — it does not know or care
+   whether that point came from a single local solve or the winning leaf
+   of a global tree. Same `DiffHandoff`, same `custom_vjp`, same `vmap`.
+   So `pj.solve` (local), `pj.solve_global`, and `pj.solve_mip` are the
+   same backward pass over different forward passes.
+
+Per problem class this is *already* mixed: convex-MI is "global over the
+integers (exact B&B), exact on the continuous relaxations"; nonconvex
+MINLP is "global over integers, **and** local-or-global on the continuous
+part per the chosen tier"; a pure nonconvex NLP is local-or-global by
+choice. The integer dimension is always handled by exact B&B; the
+*continuous* nonconvexity is the axis the local/global tier selects.
+
 ## The two consistency wins
 
 The LP/QP note's decision principle puts an algorithm family *in-house*
