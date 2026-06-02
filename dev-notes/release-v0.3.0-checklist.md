@@ -8,9 +8,9 @@ and the wheels are out — it's a working artefact, not a permanent doc.
 - [ ] `cargo check --workspace` clean.
 - [ ] `cargo test --workspace` passes (or the known-skipped list is
       explicitly known-skipped).
-- [ ] `cd python && python -m pytest tests/ -q` passes (all 36 incl.
-      the pounce#73 fix and the pounce#74 warm-start + parallel
-      `vmap_solve_parallel` regression tests).
+- [ ] `cd python && python -m pytest tests/ -q` passes (141 as of
+      0.3.0, incl. the find_minima/critical-point suite from PR #94 and
+      the pounce#73/#74 warm-start + parallel regression tests).
 - [ ] `git status` clean apart from the bump + changelog commit.
 - [ ] Logged in to crates.io (`cargo login <TOKEN>`).
 - [ ] Logged in to PyPI (`~/.pypirc` or `UV_PUBLISH_TOKEN`).
@@ -58,19 +58,25 @@ step fails otherwise). The order below is a topological sort of the
 internal dep DAG; each level can be published in parallel, but no
 level may start until the previous one is on the index.
 
-Excluded (publish=false): `pounce-py`, `pounce-studio-pyo3`. These
-ship through PyPI, not crates.io.
+Excluded (publish=false): `pounce-py`, `pounce-studio-pyo3`,
+`pounce-studio-core`. `pounce-py` ships through PyPI; the two studio
+crates are internal — nothing published depends on them, so they stay
+off crates.io for now (publish `pounce-studio-core` later if you want
+its solve-report parsers available as a standalone library).
 
 | Wave | Crates | Internal deps |
 |------|--------|---------------|
-| 1 | `pounce-common`, `pounce-studio-core` | (none) |
+| 1 | `pounce-common` | (none) |
 | 2 | `pounce-linalg` | common |
 | 3 | `pounce-linsol` | common, linalg |
 | 4 | `pounce-feral`, `pounce-hsl`, `pounce-nlp`, `pounce-solve-report` | through linsol |
-| 5 | `pounce-presolve`, `pounce-l1penalty`, `pounce-qp` | through nlp / feral |
-| 6 | `pounce-algorithm` | through qp + presolve |
+| 5 | `pounce-presolve`, `pounce-l1penalty`, `pounce-qp`, `pounce-observability` | through nlp / feral |
+| 6 | `pounce-algorithm` | through qp + presolve + observability |
 | 7 | `pounce-restoration`, `pounce-sensitivity` | through algorithm |
-| 8 | `pounce-cinterface`, `pounce-cli` | through restoration + sensitivity + solve-report |
+| 8 | `pounce-cinterface`, `pounce-cli` | through restoration + sensitivity + solve-report + observability |
+
+(`scripts/publish-crates.sh` automates this order — prefer it over
+publishing by hand.)
 
 Per crate:
 
@@ -98,10 +104,19 @@ python -m build
 twine upload --skip-existing dist/*
 ```
 
-The GitHub `wheels.yml` workflow runs on the tag push and builds the
-multi-platform `pounce-solver` wheels automatically; the manual
-`maturin publish` above is for the local macOS wheel only if the CI
-matrix doesn't already cover it.
+Preferred: let CI publish. `release-pounce.yml` builds and publishes
+the multi-platform `pounce-solver` wheels via PyPI Trusted Publishing —
+it fires on a **`python-v0.3.0`** tag push (NOT the bare `v0.3.0` tag).
+`release-pyomo-pounce.yml` likewise fires on **`pyomo-pounce-v0.3.0`**.
+So the Python release is driven by pushing those two prefixed tags:
+
+```sh
+git tag -a python-v0.3.0 -m "pounce-solver 0.3.0"   && git push origin python-v0.3.0
+git tag -a pyomo-pounce-v0.3.0 -m "pyomo-pounce 0.3.0" && git push origin pyomo-pounce-v0.3.0
+```
+
+The manual `maturin publish` / `twine upload` above are fallbacks for a
+local build if you're not publishing through CI.
 
 ## 4. GitHub release
 
