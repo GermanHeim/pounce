@@ -9,6 +9,44 @@ changes.
 
 ## Unreleased
 
+### Added — Interactive solver debugger (`--debug` / `--debug-json`)
+
+A "pdb for the interior-point loop." `pounce <problem> --debug` opens a
+branded REPL that pauses the solve to inspect and **mutate** live state;
+`--debug-json` speaks a newline-delimited JSON protocol so an LLM agent,
+a script, or a visual debugger (VS Code DAP / webview) can drive it.
+Full guide in `docs/src/debugger.md`. Zero effect on the solve when not
+attached.
+
+- **Checkpoints & stepping:** pauses at `iter_start`, the sub-iteration
+  phases (`after_mu` / `after_search_dir` / `after_step`), around
+  restoration (`pre_/post_restoration_entry/exit`), and `terminated`.
+  `step` / `stepi` / `continue` / `run N` / `stop-at <cp>` / `detach` /
+  `quit`. The same debugger **steps into the restoration inner IPM**
+  (pauses flagged `in_restoration`).
+- **Breakpoints:** by iteration (`break N`, one-shot `tbreak N`),
+  conditional with `&&`/`||`, on a solver **event** (`break on
+  regularized|resto_entered|tiny_step|ls_rejected|mu_stalled|nan`), and
+  **watchpoints** (`watchpoint x[3]`). `commands N …` auto-runs a list on
+  hit.
+- **Inspect:** `info`; `print` of blocks, search-direction blocks (`dx`),
+  scalars (`mu obj inf_pr inf_du err compl iter`), `kkt` (inertia +
+  regularization), and `active`; `watch`/`display`; `diff`.
+- **Mutate / what-if:** `set mu`, `set x[i]`, `set opt`; `goto`/`restart`
+  (soft rewind) and `resolve` (re-solve from the current point).
+- **Visualize:** `viz kkt`/`viz L`/`viz <block>` open via `pounce-dbg-viz`
+  — an interactive Plotly viewer (spy/heatmap for the KKT matrix & LDLᵀ
+  factor, bars for vectors); `save` dumps the iterate. `pip install
+  'pounce-solver[viz]'`.
+- **Attach & drive:** `--debug-on-error` (post-mortem), `--debug-on-
+  interrupt` / Ctrl-C / in-band `{"cmd":"pause"}` (async pause),
+  `--debug-script` / `source`, option discovery + Tab completion, `ask`
+  (consult Claude Code), and a branded REPL banner reusing the project
+  wordmark with a command cheat-sheet.
+- **JSON protocol:** `hello` → `pause` → `result` (with `request_id`) →
+  `progress` → `terminated`. Engine in `pounce-algorithm::debug`; front
+  end in `pounce-cli::debug_repl`.
+
 ## [0.3.0] — 2026-06-02
 
 ### Added — Multiple-minima & critical-point global search (PR #94)

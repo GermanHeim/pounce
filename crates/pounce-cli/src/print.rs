@@ -165,7 +165,12 @@ const BANNER_WIDTH: usize = 80;
 /// are tuned for a dark terminal background.
 pub fn print_logo() {
     use std::io::Write as _;
-    let width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(1).max(2);
+    let width = LOGO
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(2);
     let mut out = anstream::stdout();
     // Leading rule matching the copyright banner's width, then a blank
     // line, then the centered wordmark. The rule is left in the terminal's
@@ -189,7 +194,9 @@ pub fn logo_rows(color: bool) -> Vec<String> {
     use pounce_common::style::{downgrade, truecolor_enabled, ALPHA_HOT, BRIGHT_YEL, TIGER_ORANGE};
 
     fn lerp(a: u8, b: u8, t: f64) -> u8 {
-        (a as f64 + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
+        (a as f64 + (b as f64 - a as f64) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
     }
     fn mix(a: anstyle::RgbColor, b: anstyle::RgbColor, t: f64) -> anstyle::RgbColor {
         anstyle::RgbColor(lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
@@ -200,8 +207,19 @@ pub fn logo_rows(color: bool) -> Vec<String> {
     const STEEL_LO: anstyle::RgbColor = anstyle::RgbColor(0x5c, 0x60, 0x68);
 
     let rows = LOGO.len();
-    let width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(1).max(2);
-    let vfrac = |r: usize| if rows <= 1 { 0.0 } else { r as f64 / (rows - 1) as f64 };
+    let width = LOGO
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(2);
+    let vfrac = |r: usize| {
+        if rows <= 1 {
+            0.0
+        } else {
+            r as f64 / (rows - 1) as f64
+        }
+    };
     let molten = |r: usize| {
         let t = vfrac(r);
         if t < 0.5 {
@@ -255,7 +273,6 @@ pub fn logo_rows(color: bool) -> Vec<String> {
         })
         .collect()
 }
-
 
 pub fn print_banner(linear_solver: &str) {
     use std::io::IsTerminal as _;

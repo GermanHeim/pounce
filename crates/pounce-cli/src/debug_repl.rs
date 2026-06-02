@@ -2038,7 +2038,10 @@ pub fn print_open_banner(mode: DebugMode) {
         h,
         "  {}  {}",
         gold("interior-point debugger"),
-        dim(&format!("· pounce {} · pdb for the IPM", env!("CARGO_PKG_VERSION")))
+        dim(&format!(
+            "· pounce {} · pdb for the IPM",
+            env!("CARGO_PKG_VERSION")
+        ))
     );
     let _ = writeln!(h);
     // Most-common commands with their letter shortcuts.
@@ -2561,7 +2564,10 @@ fn write_json_and_open(
     let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
     match std::env::var("POUNCE_DBG_VIEWER") {
         Ok(tmpl) if !tmpl.trim().is_empty() => {
-            let mut parts = tmpl.split_whitespace().map(String::from).collect::<Vec<_>>();
+            let mut parts = tmpl
+                .split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>();
             let prog = parts.remove(0);
             let mut replaced = false;
             for a in parts.iter_mut() {
