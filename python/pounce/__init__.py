@@ -11,12 +11,15 @@ it is not installed.
 
 from ._pounce import Problem, Solver, classify_working_set, __version__
 from ._minimize import minimize, OptimizeResult
+from ._minima import find_minima, MinimaResult
 
 __all__ = [
     "Problem",
     "Solver",
     "minimize",
     "OptimizeResult",
+    "find_minima",
+    "MinimaResult",
     "classify_working_set",
     "__version__",
 ]

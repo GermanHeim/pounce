@@ -22,6 +22,11 @@
 - [Pyomo](pyomo.md)
 - [Python API](python.md)
 
+# Global Search
+
+- [Finding Multiple Minima](find-minima.md)
+  - [Choosing a Method](find-minima-choosing.md)
+
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
