@@ -48,7 +48,9 @@
 //! that Phases 4–6 extend rather than rewrite this driver.
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
+use crate::debug::{fire, ConvexDebugState};
 use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
+use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
@@ -121,6 +123,50 @@ where
     let (expanded, bound_rows) = expand_bounds(prob);
     let cone = CompositeCone::single_nonneg(expanded.m_ineq());
     let sol = solve_qp_core(&expanded, &cone, opts, None, make_backend);
+    split_bound_duals(prob, &bound_rows, sol)
+}
+
+/// Solve a convex LP / QP with an interactive [`DebugHook`] attached: the
+/// hook is fired at each interior-point checkpoint (iteration start, after
+/// the Newton step, after the step is applied, and at termination) so a
+/// debugger can step, inspect, and break on the solve.
+///
+/// Targets the direct (non-HSDE) convex IPM, so the debugged `x` block is
+/// the user's variables (finite bounds are expanded into a trailing
+/// nonnegative block, as in [`solve_qp_ipm`], and surface in the `s`/`z`
+/// blocks). Apart from the hook the result is identical to
+/// [`solve_qp_ipm`].
+pub fn solve_qp_ipm_debug<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    hook: &mut dyn DebugHook,
+    mut make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // Build the factorization and run the core loop directly with the hook
+    // (mirrors `solve_qp_core`'s non-HSDE path; `solve_qp_core` itself can't
+    // carry the borrowed hook through its generic plumbing).
+    let run = |p: &QpProblem, cone: &CompositeCone, mk: &mut F, hook: &mut dyn DebugHook| {
+        match build_factorization(p, cone, opts, mk) {
+            Ok((kkt, mut fact)) => run_ipm(p, cone, opts, &kkt, &mut fact, None, Some(hook)),
+            Err(()) => failed_solution(
+                p,
+                vec![0.0; p.n],
+                vec![0.0; p.m_eq()],
+                vec![1.0; p.m_ineq()],
+                0,
+            ),
+        }
+    };
+    if !prob.has_bounds() {
+        let cone = CompositeCone::single_nonneg(prob.m_ineq());
+        return run(prob, &cone, &mut make_backend, hook);
+    }
+    let (expanded, bound_rows) = expand_bounds(prob);
+    let cone = CompositeCone::single_nonneg(expanded.m_ineq());
+    let sol = run(&expanded, &cone, &mut make_backend, hook);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
@@ -877,7 +923,7 @@ where
             );
         }
     };
-    run_ipm(prob, cone, opts, &kkt, &mut fact, warm)
+    run_ipm(prob, cone, opts, &kkt, &mut fact, warm, None)
 }
 
 /// Build the constant KKT pattern for `prob` and a `Factorization` over
@@ -1032,6 +1078,7 @@ fn run_ipm(
     kkt: &KktStructure,
     fact: &mut Factorization,
     warm: Option<&WarmStart>,
+    mut hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution {
     let n = prob.n;
     let m_eq = prob.m_eq();
@@ -1081,18 +1128,49 @@ fn run_ipm(
         let pinf = inf_norm(&r_p).max(inf_norm(&r_g));
         let dinf = inf_norm(&r_d);
         let res = dinf.max(pinf).max(mu);
-        if res < opts.tol {
-            status = QpStatus::Optimal;
-            break;
-        }
-        // Per-iteration objective, only when a trace is being collected.
-        let obj_it = if opts.collect_iterates {
+        // Per-iteration objective, needed for the trace and for the
+        // debugger's `objective()` accessor.
+        let obj_it = if opts.collect_iterates || hook.is_some() {
             let mut px = vec![0.0; n];
             prob.p_mul_add(&x, &mut px);
             (0..n).map(|i| 0.5 * x[i] * px[i] + prob.c[i] * x[i]).sum()
         } else {
             0.0
         };
+
+        // Debugger checkpoint: top of iteration — residuals and the
+        // accepted iterate from the previous step are in place; the
+        // search direction (`dx`/…`) is the previous iteration's (zero on
+        // the first), as on the NLP path.
+        if hook.is_some() {
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::IterStart,
+                iter: it as i32,
+                mu,
+                pinf,
+                dinf,
+                res,
+                obj: obj_it,
+                alpha: (0.0, 0.0),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
+
+        if res < opts.tol {
+            status = QpStatus::Optimal;
+            break;
+        }
 
         // Verified infeasibility / unboundedness detection. Checked
         // (not assumed), so a positive result is a proof and a false
@@ -1142,17 +1220,12 @@ fn run_ipm(
         };
 
         // === Corrector step: centered target + second-order term ===
-        // Step lengths taken this iteration (full step when there is no cone).
+        // Compute the step direction (`dx`/`dy`/`dz`/`ds`) and the step
+        // lengths taken this iteration, but defer *applying* it until after
+        // the `AfterSearchDirection` checkpoint. With no cone the predictor
+        // is already the full Newton step (`dz`/`ds` empty, full step).
         let (mut step_p, mut step_d) = (1.0_f64, 1.0_f64);
-        if m_ineq == 0 {
-            // No cone: predictor is already the full Newton step.
-            for i in 0..n {
-                x[i] += dx[i];
-            }
-            for i in 0..m_eq {
-                y[i] += dy[i];
-            }
-        } else {
+        if m_ineq != 0 {
             let sigma_mu = sigma * mu;
             cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
             cone.rhs_comp_term(&s, &z, &r_c, &mut rhs_term);
@@ -1167,15 +1240,70 @@ fn run_ipm(
             let (alpha_p, alpha_d) = step_lengths(&cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
             step_p = alpha_p;
             step_d = alpha_d;
-            for i in 0..n {
-                x[i] += alpha_p * dx[i];
+        }
+
+        // Debugger checkpoint: the Newton step and its fraction-to-boundary
+        // lengths are known but not yet applied.
+        if hook.is_some() {
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::AfterSearchDirection,
+                iter: it as i32,
+                mu,
+                pinf,
+                dinf,
+                res,
+                obj: obj_it,
+                alpha: (step_p, step_d),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
             }
-            for i in 0..m_eq {
-                y[i] += alpha_d * dy[i];
-            }
-            for i in 0..m_ineq {
-                s[i] += alpha_p * ds[i];
-                z[i] += alpha_d * dz[i];
+        }
+
+        // Apply the step (the no-cone full step is `step_p = step_d = 1`).
+        for i in 0..n {
+            x[i] += step_p * dx[i];
+        }
+        for i in 0..m_eq {
+            y[i] += step_d * dy[i];
+        }
+        for i in 0..m_ineq {
+            s[i] += step_p * ds[i];
+            z[i] += step_d * dz[i];
+        }
+
+        // Debugger checkpoint: the new iterate is in place.
+        if hook.is_some() {
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::AfterStep,
+                iter: it as i32,
+                mu,
+                pinf,
+                dinf,
+                res,
+                obj: obj_it,
+                alpha: (step_p, step_d),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
             }
         }
 
@@ -1198,6 +1326,32 @@ fn run_ipm(
     let mut obj = 0.0;
     for i in 0..n {
         obj += 0.5 * x[i] * px[i] + prob.c[i] * x[i];
+    }
+
+    // Debugger post-mortem at the final iterate (the returned action is
+    // ignored — the solve is over).
+    if hook.is_some() {
+        let status_str = format!("{status:?}");
+        let mut st = ConvexDebugState {
+            cp: Checkpoint::Terminated,
+            iter: iters as i32,
+            mu: cone.mu(&s, &z),
+            pinf: inf_norm(&r_p).max(inf_norm(&r_g)),
+            dinf: inf_norm(&r_d),
+            res: 0.0,
+            obj,
+            alpha: (0.0, 0.0),
+            x: &x,
+            s: &s,
+            y: &y,
+            z: &z,
+            dx: &dx,
+            dy: &dy,
+            dz: &dz,
+            ds: &ds,
+            status: Some(&status_str),
+        };
+        let _ = fire(&mut hook, &mut st);
     }
 
     let nn = n;
@@ -1323,6 +1477,7 @@ impl QpFactorization {
             &kkt,
             &mut self.fact,
             warm,
+            None,
         );
         split_bound_duals(prob, &bound_rows, sol)
     }

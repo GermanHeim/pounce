@@ -20,6 +20,7 @@
 
 pub mod batch;
 pub mod cones;
+pub(crate) mod debug;
 pub mod hsde;
 pub mod hsde_nonsym;
 pub mod ipm;
@@ -34,8 +35,8 @@ pub use batch::{
 };
 pub use cones::ConeSpec;
 pub use ipm::{
-    solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_warm, QpFactorization,
-    QpOptions, QpWarmStart,
+    solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_warm,
+    QpFactorization, QpOptions, QpWarmStart,
 };
 pub use qp::{QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};

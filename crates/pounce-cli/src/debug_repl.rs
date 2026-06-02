@@ -1267,7 +1267,7 @@ impl SolverDebugger {
                 }
                 None => CmdOut::err("usage: tbreak <iteration>"),
             },
-            "watchpoint" | "wp" => self.cmd_watchpoint(rest),
+            "watchpoint" | "wp" => self.cmd_watchpoint(rest, ctx),
             "commands" => self.cmd_commands(rest),
             "stop-at" | "stopat" => self.cmd_stop_at(rest),
             "progress" => match rest.first().copied() {
@@ -1473,8 +1473,8 @@ impl SolverDebugger {
             };
         }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
-        let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
-        if BLOCK_NAMES.contains(&what) {
+        let delta = what.strip_prefix("d").filter(|b| is_block(ctx, b));
+        if is_block(ctx, what) {
             match ctx.block(what) {
                 Some(v) => CmdOut::ok(vec![fmt_vec(what, &v)])
                     .with_data(serde_json::json!({"name": what, "values": v})),
@@ -2350,7 +2350,7 @@ impl SolverDebugger {
             .unwrap_or_else(|| std::env::temp_dir().join(format!("pounce-dbg-iter{iter}.json")));
         let collect = |delta: bool| -> serde_json::Map<String, serde_json::Value> {
             let mut m = serde_json::Map::new();
-            for &b in BLOCK_NAMES.iter() {
+            for b in block_names(ctx) {
                 let v = if delta {
                     ctx.delta_block(b)
                 } else {
@@ -2842,7 +2842,7 @@ impl SolverDebugger {
     /// `watchpoint <blk>[<i>] [threshold] | clear | del <spec>` — pause
     /// when a watched value changes by more than `threshold` (default 0,
     /// any change) between iterations.
-    fn cmd_watchpoint(&mut self, rest: &[&str]) -> CmdOut {
+    fn cmd_watchpoint(&mut self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         match rest {
             [] => {
                 let v: Vec<&str> = self.watchpoints.iter().map(|w| w.raw.as_str()).collect();
@@ -2873,7 +2873,7 @@ impl SolverDebugger {
                     }
                     _ => (spec.to_string(), None),
                 };
-                if !BLOCK_NAMES.contains(&block.as_str()) {
+                if !is_block(ctx, block.as_str()) {
                     return CmdOut::err(format!("unknown block `{block}`"));
                 }
                 let raw = spec.to_string();
@@ -2948,7 +2948,7 @@ impl SolverDebugger {
         let dmu = ctx.mu() - prev.mu();
         lines.push(format!("  mu  = {:.6e}  (Δ {:+.3e})", ctx.mu(), dmu));
         let mut blocks = serde_json::Map::new();
-        for b in BLOCK_NAMES {
+        for b in block_names(ctx) {
             let (Some(cur), Some(old)) = (ctx.block(b), prev.block(b)) else {
                 continue;
             };
@@ -3091,12 +3091,12 @@ impl SolverDebugger {
             }
         }
         // Resolve the vector to visualize.
-        let (label, vals) = if BLOCK_NAMES.contains(&target) {
+        let (label, vals) = if is_block(ctx, target) {
             match ctx.block(target) {
                 Some(v) => (target.to_string(), v),
                 None => return CmdOut::err(format!("no data for block `{target}`")),
             }
-        } else if let Some(blk) = target.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b)) {
+        } else if let Some(blk) = target.strip_prefix("d").filter(|b| is_block(ctx, b)) {
             match ctx.delta_block(blk) {
                 Some(v) => (format!("d{blk}"), v),
                 None => return CmdOut::err(format!("no search direction for `d{blk}`")),
@@ -4013,6 +4013,19 @@ fn nlp_only(cmd: &str) -> CmdOut {
     CmdOut::err(format!(
         "`{cmd}` is only available for the NLP solver (not the convex/conic or global solvers)"
     ))
+}
+
+/// The iterate-block names the *current* solver exposes (NLP: the eight
+/// primal-dual blocks; convex IPM: `x`/`s`/`y`/`z`). Block commands use
+/// this rather than the static NLP [`BLOCK_NAMES`] so they work for any
+/// solver behind the [`DebugState`] trait.
+fn block_names(ctx: &dyn DebugState) -> Vec<&'static str> {
+    ctx.block_dims().into_iter().map(|(n, _)| n).collect()
+}
+
+/// Whether `name` is one of the current solver's iterate blocks.
+fn is_block(ctx: &dyn DebugState, name: &str) -> bool {
+    block_names(ctx).iter().any(|n| *n == name)
 }
 
 fn fmt_vec(name: &str, v: &[f64]) -> String {

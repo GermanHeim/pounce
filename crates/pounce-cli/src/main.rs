@@ -486,7 +486,14 @@ pub fn main() -> ExitCode {
                     };
                     (p, args.json_detail, input)
                 });
-                return run_convex_qp(&prob, class, sol_path.as_deref(), presolve_on, json_cfg);
+                return run_convex_qp(
+                    &prob,
+                    class,
+                    sol_path.as_deref(),
+                    presolve_on,
+                    json_cfg,
+                    debug_hook.as_ref(),
+                );
             }
             // Should not happen (only `.nl` classifies non-NLP), but be
             // safe: fall through to NLP rather than mis-dispatch.
@@ -1107,9 +1114,10 @@ fn run_convex_qp(
     sol_path: Option<&std::path::Path>,
     presolve_on: bool,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
+    debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
 ) -> ExitCode {
     use pounce_convex::presolve::{presolve, PresolveOutcome};
-    use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
+    use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
 
     let (qp, con_map) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
         Some(q) => q,
@@ -1152,7 +1160,13 @@ fn run_convex_qp(
         collect_iterates: want_trace,
         ..QpOptions::default()
     };
-    let sol = if presolve_on {
+    let sol = if let Some(hook) = debug_hook {
+        // Interactive debug: step the IPM on the extracted QP directly.
+        // Presolve is skipped so the debugger's `x`/`s`/`y`/`z` blocks
+        // correspond to the user's problem rather than a reduced one.
+        let mut h = hook.borrow_mut();
+        solve_qp_ipm_debug(&qp, &qp_opts, &mut *h, backend)
+    } else if presolve_on {
         match presolve(&qp) {
             PresolveOutcome::Reduced(ps) => {
                 let st = ps.stats();
