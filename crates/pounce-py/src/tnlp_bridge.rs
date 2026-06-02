@@ -266,6 +266,11 @@ impl TNLP for PyTnlp {
                 jcol.copy_from_slice(&self.state.jac_cols);
                 true
             }
+            // No constraints (m == 0) → no Jacobian entries to fill. Skip the
+            // Python call entirely: the user object may legitimately omit
+            // `jacobian` in the unconstrained case, so calling it would raise
+            // a spurious AttributeError on every iteration.
+            SparsityRequest::Values { values } if values.is_empty() => true,
             SparsityRequest::Values { values } => {
                 let xx = x.unwrap_or(&[]);
                 let res = match call1(&self.state.py_obj, "jacobian", xx) {

@@ -34,10 +34,6 @@ on the clean objective, checked against the bounds, and — when a Hessian is
 supplied — certified as a true minimum (positive-semidefinite Hessian, so
 saddles and maxima are rejected) before being de-duplicated and recorded.
 
-> **Logging note.** The unconstrained `minimize` facade emits a harmless
-> `jacobian(): AttributeError` line per solve. Because `find_minima` issues
-> many solves, set `RUST_LOG=off` (or `error`) to silence it.
-
 The six methods fall into three families by *how* they escape a minimum
 they have already found.
 

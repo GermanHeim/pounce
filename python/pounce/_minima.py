@@ -33,10 +33,6 @@ All methods reuse :func:`pounce.minimize`, so bounds and constraints carry
 through, and the acceptance test (polish on the clean objective, reject
 saddles via the Hessian) is shared. See ``docs/src/find-minima.md`` and the
 notebooks ``python/notebooks/15–17`` for walkthroughs and method selection.
-
-Note: the unconstrained ``minimize`` facade logs a harmless
-``jacobian(): AttributeError`` per solve. ``find_minima`` issues many
-solves, so set ``RUST_LOG=off`` (or ``error``) to quiet it.
 """
 
 from __future__ import annotations
