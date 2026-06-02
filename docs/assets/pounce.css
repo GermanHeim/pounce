@@ -1,0 +1,291 @@
+/* ==========================================================================
+   POUNCE mdBook theme — "Tiger" (dark) + "Cream" (light)
+   Palette mirrors the CLI brand colors in crates/pounce-common/src/style.rs:
+     RUST_DEEP #6e260e · AMBER #b56a12 · TAN #8a6d3b · TIGER_ORANGE #e87a1e
+     CREAM #f5e6c8 · BRIGHT_YEL #ffe03a · ALPHA_HOT #cc2200
+   Tiger reskins the built-in `navy` slot; Cream reskins the `light` slot.
+   ========================================================================== */
+
+/* ---- shared brand tokens ------------------------------------------------ */
+:root {
+  --pounce-rust: #6e260e;
+  --pounce-amber: #b56a12;
+  --pounce-tan: #8a6d3b;
+  --pounce-tiger: #e87a1e;
+  --pounce-cream: #f5e6c8;
+  --pounce-yellow: #ffe03a;
+  --pounce-hot: #cc2200;
+  --content-max-width: 760px;
+}
+
+/* ======================================================================== */
+/*  TIGER  — dark, default                                                   */
+/* ======================================================================== */
+html.navy {
+  --bg: #1a1411;
+  --fg: #f1e4cb;
+
+  --sidebar-bg: #140f0c;
+  --sidebar-fg: #d4c09c;
+  --sidebar-non-existant: #6a5a44;
+  --sidebar-active: #f08a2c;
+  --sidebar-spacer: #2a2018;
+  --sidebar-header-border-color: #2e231a;
+
+  --scrollbar: #5a4632;
+
+  --links: #ffb262;
+
+  --inline-code-color: #ffcf8f;
+  --quote-bg: #221a13;
+  --quote-border: var(--pounce-rust);
+
+  --warning-border: var(--pounce-tiger);
+
+  --table-border-color: #3a2c20;
+  --table-header-bg: var(--pounce-rust);
+  --table-alternate-bg: #1f1813;
+
+  --searchbar-border-color: #3a2c20;
+  --searchbar-bg: #1f1813;
+  --searchbar-fg: #f1e4cb;
+  --searchbar-shadow-color: var(--pounce-tiger);
+  --searchresults-header-fg: #c89b5e;
+  --searchresults-border-color: #3a2c20;
+  --searchresults-li-bg: #221a13;
+  --search-mark-bg: var(--pounce-amber);
+
+  --theme-popup-bg: #1f1813;
+  --theme-popup-border: #3a2c20;
+  --theme-hover: #2a2018;
+
+  --overlay-bg: rgba(20, 16, 13, 0.82);
+  --quote-bg: #211912;
+
+  --icons: #a88a5e;
+  --icons-hover: var(--pounce-tiger);
+  --copy-button-filter: invert(0.7) sepia(0.4) saturate(2) hue-rotate(-15deg);
+  --copy-button-filter-hover: invert(0.6) sepia(0.9) saturate(4) hue-rotate(-12deg);
+
+  --blockquote-note-color: #6cb0ff;
+  --blockquote-tip-color: #4cc24c;
+  --blockquote-important-color: #c39bff;
+  --blockquote-warning-color: var(--pounce-tiger);
+  --blockquote-caution-color: #ef6b63;
+
+  --color-scheme: dark;
+  scrollbar-color: #5a4632 #1a1411;
+}
+
+/* ======================================================================== */
+/*  CREAM — light                                                            */
+/* ======================================================================== */
+html.light {
+  --bg: #f5e7c9;
+  --fg: #3a2418;
+
+  --sidebar-bg: #ecdcb9;
+  --sidebar-fg: #4a3322;
+  --sidebar-non-existant: #ad9a78;
+  --sidebar-active: #b5430e;
+  --sidebar-spacer: #dccaa0;
+  --sidebar-header-border-color: #d8c49a;
+
+  --scrollbar: #c2ab80;
+
+  --links: #c0560f;
+
+  --inline-code-color: #9a3a0c;
+  --quote-bg: #ece0c4;
+  --quote-border: var(--pounce-tiger);
+
+  --warning-border: var(--pounce-tiger);
+
+  --table-border-color: #d8c49a;
+  --table-header-bg: #e7cfa0;
+  --table-alternate-bg: #efe2c6;
+
+  --searchbar-border-color: #d8c49a;
+  --searchbar-bg: #fbf1da;
+  --searchbar-fg: #3a2418;
+  --searchbar-shadow-color: var(--pounce-tiger);
+  --searchresults-header-fg: #8a6a36;
+  --searchresults-border-color: #d8c49a;
+  --searchresults-li-bg: #efe2c6;
+  --search-mark-bg: #eab84e;
+
+  --theme-popup-bg: #f3e6c6;
+  --theme-popup-border: #d8c49a;
+  --theme-hover: #e7d8b4;
+
+  --overlay-bg: rgba(245, 231, 201, 0.85);
+
+  --icons: #9a8458;
+  --icons-hover: #b5430e;
+
+  --blockquote-note-color: #2f6fd0;
+  --blockquote-tip-color: #1f9d1f;
+  --blockquote-important-color: #7b4fd0;
+  --blockquote-warning-color: #b5560e;
+  --blockquote-caution-color: #cf3030;
+
+  --color-scheme: light;
+  scrollbar-color: #c2ab80 #f5e7c9;
+}
+
+/* ======================================================================== */
+/*  Shared visual polish (applies to both themes)                            */
+/* ======================================================================== */
+
+/* Typography: warmer, roomier reading column. */
+.content {
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+.content main {
+  line-height: 1.65;
+}
+
+/* Headings — brand accents + clear hierarchy. */
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.content h1 {
+  color: var(--pounce-tiger);
+  font-size: 2.1rem;
+  padding-bottom: 0.3em;
+  border-bottom: 2px solid var(--quote-border);
+  margin-top: 0.4em;
+}
+.content h2 {
+  color: var(--sidebar-active);
+  margin-top: 1.8em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--table-border-color);
+}
+.content h3 {
+  color: var(--links);
+}
+/* Subtle anchored-section glow target. */
+.content :target {
+  scroll-margin-top: calc(var(--menu-bar-height) + 1rem);
+}
+
+/* Links — animated underline. */
+.content a:link,
+.content a:visited {
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.content a:hover {
+  color: var(--pounce-tiger);
+  border-bottom-color: var(--pounce-tiger);
+}
+
+/* Inline code — warm chip. */
+.content code {
+  background: var(--quote-bg);
+  border: 1px solid var(--table-border-color);
+  border-radius: 5px;
+  padding: 0.08em 0.4em;
+  font-size: 0.88em;
+}
+/* Don't double-chip code inside fenced blocks. */
+.content pre > code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* Fenced code blocks — rounded, framed, with a thin brand edge. */
+.content pre {
+  border-radius: 8px;
+  border: 1px solid var(--table-border-color);
+  border-left: 3px solid var(--pounce-tiger);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.content pre > code {
+  border-radius: 8px;
+}
+
+/* Tables — rounded frame, branded header, row hover. */
+.content table {
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--table-border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.content table thead th {
+  background: var(--table-header-bg);
+  color: var(--pounce-cream);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: none;
+}
+.content table td,
+.content table th {
+  border: none;
+  border-bottom: 1px solid var(--table-border-color);
+}
+.content table tbody tr:hover td {
+  background: var(--theme-hover);
+}
+
+/* Blockquotes — left accent bar. */
+.content blockquote {
+  border-inline-start: 4px solid var(--quote-border);
+  border-top: none;
+  border-bottom: none;
+  border-radius: 0 6px 6px 0;
+}
+
+/* Menu bar — thin tiger underline strip. */
+.menu-bar {
+  border-bottom: 1px solid var(--table-border-color);
+  box-shadow: 0 2px 0 0 var(--pounce-tiger);
+}
+
+/* Sidebar — active chapter gets a tiger marker + weight. */
+.chapter li.chapter-item a.active {
+  color: var(--sidebar-active);
+  font-weight: 600;
+}
+.chapter li.chapter-item a {
+  border-radius: 5px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.chapter li.chapter-item a:hover {
+  background: var(--theme-hover);
+}
+.sidebar .sidebar-scrollbox {
+  padding-block: 0.6rem;
+}
+
+/* Prev/next nav chevrons — brand on hover. */
+.nav-chapters:hover,
+.mobile-nav-chapters:hover {
+  color: var(--pounce-tiger);
+}
+
+/* Search hits + result links. */
+mark {
+  border-radius: 3px;
+  padding: 0 0.15em;
+}
+
+/* Theme popup: tighten + brand the active row. */
+.theme-popup .theme:hover {
+  background: var(--theme-hover);
+}
+.theme-popup .theme {
+  border-left: 3px solid transparent;
+}
+.theme-popup .theme.pounce-active {
+  border-left-color: var(--pounce-tiger);
+  color: var(--pounce-tiger);
+}
