@@ -9,6 +9,63 @@ changes.
 
 ## Unreleased
 
+## [0.3.0] — 2026-06-02
+
+### Added — Multiple-minima & critical-point global search (PR #94)
+
+`pounce.find_minima(fun, x0, n_minima=..., method=...)` returns several
+distinct local minima from a single call. Methods: `flooding` /
+`deflation` (add a repulsive Gaussian / pole "hump" — with analytic
+gradient and Hessian — at each found minimum and re-solve), `multistart`,
+`mlsl`, and `basinhopping`. Anisotropic auto bump widths and a
+curvature-derived auto amplitude; Hessian-based saddle rejection; global
+box restarts; bounds and constraints pass through `minimize` untouched.
+The six-hump-camel demo recovers all six minima.
+
+- `pounce.find_critical_points` / `pounce.find_saddles` — stationary
+  points via the squared-gradient merit `½‖∇f‖²`, classified by Morse
+  index from the Hessian eigenvalues (degenerate / non-Morse points are
+  *flagged*, not mislabeled); eigenvector-following saddle search with
+  box-clipped steps.
+- `pounce.reaction_network` — minima, transition states, and barriers
+  (Müller–Brown example).
+- Robustness: non-finite candidates and objectives are rejected before
+  acceptance; the de-duplication metric is the same per-dimension scaled
+  distance across the minima and saddle routes.
+- Examples (`gaussian_hump_minima.py`, `critical_points.py`,
+  `reaction_barrier.py`), notebooks 15–17, docs (`find-minima.md`,
+  `find-minima-choosing.md`), and 29 unit tests.
+
+### Fixed
+
+- **Acceptable-point termination now rejects a non-finite objective.** A
+  near-feasible iterate whose objective evaluates to NaN/Inf (e.g. CUTE
+  `himmelbj`) exits `Invalid_Number_Detected` instead of a spurious
+  `Solved_To_Acceptable_Level` carrying a `nan` objective; the benchmark
+  driver's objective scrape is null-safe to match.
+- **No spurious `jacobian()` call on unconstrained problems**
+  (`pounce-py`). `eval_jac_g` short-circuits when there are no constraint
+  entries (mirroring the Hessian guard), so the unconstrained `minimize`
+  facade — which legitimately omits `jacobian` — no longer logs an
+  `AttributeError` at ERROR level on every iteration.
+
+### Benchmarks & docs
+
+- The benchmark suite now runs **single-threaded and sequential** by
+  default (`OMP/VECLIB/RAYON=1`) so POUNCE and Ipopt solve times are
+  directly comparable on one host; the ipopt-ma57 reference was
+  regenerated and `BENCHMARK_REPORT.md` carries a threading/timing note
+  (POUNCE's `faer`/`rayon` dense linear algebra is up to ~2× faster
+  multi-threaded, so the single-threaded numbers are a controlled lower
+  bound).
+- Example notebooks re-executed against the current solver and corrected
+  where the prose had drifted: warm-starting now demonstrates the
+  `mu_init` + tight `warm_start_*_bound_push` tuning that actually cuts
+  iterations (11 → 5 on HS071); the scaling example uses a `1e12`
+  constraint where gradient scaling visibly helps (31 → 11 iters); the
+  FBBT notebook shows the domain-safety and false-infeasibility wins.
+- mdBook restyled in the POUNCE tiger / cream brand palette.
+
 ### Added — Inverse-map ODE recipe over a sensitivity RHS (pounce#91)
 
 `pounce.jax.inverse_map_rhs(jp, dy_ds, *, output=None, x0=None)` builds
@@ -283,8 +340,6 @@ per-iteration table in a tiger/rust branded color theme.
 ### Removed
 
 - Dropped the direct `log` crate dependency in favor of `tracing`.
-
-## [0.3.0] — 2026-05-29
 
 ### Added — Active-set SQP with working-set warm start (Phase 5b + 5c + 5d)
 

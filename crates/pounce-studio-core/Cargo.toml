@@ -9,6 +9,9 @@ description = "Pure-Rust parsers and analysis helpers for pounce solve reports a
 keywords = ["optimization", "nlp", "ipopt", "pounce"]
 categories = ["mathematics", "parser-implementations", "development-tools"]
 readme = "README.md"
+# Not published to crates.io: only the (publish = false) studio-pyo3 crate
+# depends on it, so it has no consumer on the registry.
+publish = false
 
 [lib]
 path = "src/lib.rs"
