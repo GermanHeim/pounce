@@ -910,6 +910,7 @@ impl IpoptAlgorithm {
         // debugger is installed — pulls nothing otherwise.
         if self.debug.is_some() {
             let want_l = self.data.borrow().want_l_factor;
+            let want_matrix = self.data.borrow().want_matrix;
             let info = self.search_dir.as_ref().map(|sd| {
                 let pd = sd.pd_solver_mut();
                 let aug = pd.aug_solver();
@@ -923,7 +924,11 @@ impl IpoptAlgorithm {
                     },
                     provides_inertia: provides,
                     status: format!("{:?}", aug.last_solve_status()),
-                    matrix: aug.kkt_triplets(),
+                    // Triplet assembly is O(nnz) — only when `viz kkt`/`save`
+                    // armed it, so attaching the debugger to a big problem
+                    // doesn't tax every iteration. (Inertia/status above are
+                    // cheap and always captured.)
+                    matrix: if want_matrix { aug.kkt_triplets() } else { None },
                     // The factor is the expensive piece — only when asked.
                     l_factor: if want_l { aug.l_factor(true) } else { None },
                 }

@@ -81,6 +81,11 @@ pub struct IpoptData {
     /// Set by the debugger to request the (expensive) `LDLᵀ` factor be
     /// captured into `kkt_debug.l_factor` on the next solve.
     pub want_l_factor: bool,
+    /// Set by the debugger to request the assembled KKT matrix triplets be
+    /// captured into `kkt_debug.matrix` on the next solve. Off by default so
+    /// merely attaching the debugger doesn't pay an O(nnz) triplet assembly
+    /// every iteration — only armed when `viz kkt` / `save` needs them.
+    pub want_matrix: bool,
 
     /// Set after a successful trial-acceptance step in the line
     /// search. Cleared on accept.
@@ -161,6 +166,7 @@ impl IpoptData {
             perturbations: PdPerturbations::default(),
             kkt_debug: None,
             want_l_factor: false,
+            want_matrix: false,
             info_alpha_primal: 0.0,
             info_alpha_dual: 0.0,
             info_regu_x: 0.0,

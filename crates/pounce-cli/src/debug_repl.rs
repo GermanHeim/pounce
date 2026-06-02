@@ -320,10 +320,23 @@ impl Atom {
     /// caller). Operators: `<`, `<=`, `>`, `>=`, `==`.
     fn parse(expr: &str) -> Result<Atom, String> {
         let expr = expr.trim();
-        // Longest operators first so `<=` isn't truncated to `<`.
-        let (op, pos, oplen) = ["<=", ">=", "==", "<", ">"]
-            .iter()
-            .find_map(|o| expr.find(o).map(|p| (*o, p, o.len())))
+        // Scan left-to-right for the *first* comparison operator, preferring
+        // the two-char form at each position so `<=` isn't truncated to `<`
+        // (and so we split on the leftmost op, not whichever the array lists
+        // first).
+        let mut found: Option<(&str, usize, usize)> = None;
+        for (i, _) in expr.char_indices() {
+            let rest = &expr[i..];
+            if rest.starts_with("<=") || rest.starts_with(">=") || rest.starts_with("==") {
+                found = Some((&expr[i..i + 2], i, 2));
+                break;
+            }
+            if rest.starts_with('<') || rest.starts_with('>') {
+                found = Some((&expr[i..i + 1], i, 1));
+                break;
+            }
+        }
+        let (op, pos, oplen) = found
             .ok_or_else(|| format!("no comparison operator in `{expr}` (use < <= > >= ==)"))?;
         let metric_s = expr[..pos].trim();
         let rhs_s = expr[pos + oplen..].trim();
@@ -1701,10 +1714,17 @@ impl SolverDebugger {
                     "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
                 );
             };
-            let matrix = ctx.kkt_matrix().map(|(dim, irn, jcn, vals)| {
-                serde_json::json!({"dim": dim, "irn": irn, "jcn": jcn, "vals": vals,
-                                   "format": "triplet_1based_lower"})
-            });
+            // Triplet capture is opt-in (O(nnz) assembly), so the first call
+            // arms it — same dance as `viz L`.
+            let Some((dim, irn, jcn, vals)) = ctx.kkt_matrix() else {
+                ctx.request_kkt_matrix();
+                return CmdOut::err(
+                    "KKT matrix capture enabled — re-run `viz kkt` after the next \
+                     `after_search_dir` stop (`stepi` or `continue`).",
+                );
+            };
+            let matrix = serde_json::json!({"dim": dim, "irn": irn, "jcn": jcn, "vals": vals,
+                                            "format": "triplet_1based_lower"});
             let payload = serde_json::json!({
                 "label": "kkt", "iter": ctx.iter(),
                 "dim": k.dim, "n_pos": k.n_pos, "n_neg": k.n_neg,

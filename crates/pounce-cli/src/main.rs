@@ -108,19 +108,26 @@ pub fn main() -> ExitCode {
     // Shared slot the debugger's `resolve` command writes to; the
     // post-solve loop below reads it to re-run with new options.
     let restart_cell: pounce_cli::debug_repl::RestartCell = Rc::new(RefCell::new(None));
+    // Held across `resolve` re-solves so the SAME debugger is reused rather
+    // than rebuilt — keeps its single stdin-reader thread (no leak/contention),
+    // its already-sent `hello`, and its breakpoints. The `--debug-script` is
+    // consumed at the first pause, so reuse won't re-run it.
+    let mut debug_hook: Option<Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>> = None;
     if let Some(mode) = args.debug {
         if json_dbg {
             let _ = app.options_mut().read_from_str("print_level 0\n", true);
         }
         let reg = Some(std::rc::Rc::clone(app.registered_options()));
-        app.set_debug_hook(std::rc::Rc::new(std::cell::RefCell::new(build_debugger(
+        let hook = Rc::new(RefCell::new(build_debugger(
             mode,
             args.debug_on_error,
             args.debug_on_interrupt,
             args.debug_script.as_deref(),
             reg,
             restart_cell.clone(),
-        ))));
+        )));
+        app.set_debug_hook(hook.clone());
+        debug_hook = Some(hook);
         // Install the Ctrl-C → break-into-debugger handler. All debug
         // modes are interruptible; this only changes Ctrl-C behavior
         // when a debugger is active.
@@ -532,18 +539,12 @@ pub fn main() -> ExitCode {
             Rc::clone(&tnlp),
             req.seed_x,
         )));
-        if let Some(mode) = args.debug {
-            let reg = Some(std::rc::Rc::clone(app.registered_options()));
-            // No script on re-solve — it ran once at the original first
-            // pause; the user now drives the re-solve interactively.
-            app.set_debug_hook(std::rc::Rc::new(std::cell::RefCell::new(build_debugger(
-                mode,
-                args.debug_on_error,
-                args.debug_on_interrupt,
-                None,
-                reg,
-                restart_cell.clone(),
-            ))));
+        if let Some(hook) = debug_hook.as_ref() {
+            // Re-arm the SAME debugger for the next solve (the hook is consumed
+            // per `optimize_tnlp`). Reusing it — rather than building a fresh
+            // one — preserves the stdin pump, the `hello` handshake, and any
+            // breakpoints, and avoids leaking a second stdin-reader thread.
+            app.set_debug_hook(hook.clone());
         }
         eprintln!(
             "pounce: re-solving from saved point with {} option override(s)…",

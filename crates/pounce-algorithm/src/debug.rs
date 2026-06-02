@@ -296,8 +296,12 @@ impl DebugCtx {
         Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
     }
 
-    /// Primal regularization δ_w applied to the KKT system this
-    /// iteration (0 when none was needed). Nonzero ⇒ inertia correction.
+    /// Primal regularization δ_w **as recorded for this iteration's info**
+    /// (`info_regu_x`) — the value reported in the iteration table's `lg(rg)`
+    /// column, reset to 0 at the start of each iteration. This is distinct
+    /// from [`Self::kkt`]'s `delta_w`, which reads the *live* perturbation
+    /// (`perturbations.delta_x`) applied during the inertia-correction loop;
+    /// the two can differ by timing at a given checkpoint.
     pub fn regularization(&self) -> Number {
         self.data.borrow().info_regu_x
     }
@@ -318,7 +322,10 @@ impl DebugCtx {
     /// direction has been computed this iteration (i.e. at/after the
     /// `after_search_dir` checkpoint). Combines the captured inertia with
     /// the applied regularization and the *expected* inertia derived from
-    /// the multiplier dimensions.
+    /// the multiplier dimensions. `delta_w`/`delta_c` are the **live**
+    /// primal/dual perturbations (`perturbations.delta_x/delta_c`) applied
+    /// during inertia correction — distinct from [`Self::regularization`]'s
+    /// recorded per-iteration info value (see its note).
     pub fn kkt(&self) -> Option<KktReport> {
         let d = self.data.borrow();
         let k = d.kkt_debug.as_ref()?;
@@ -376,6 +383,20 @@ impl DebugCtx {
             .unwrap_or(false)
     }
 
+    /// Ask the solver to assemble the KKT matrix triplets on subsequent
+    /// solves (so `viz kkt`/`save` has the matrix). Off by default so an
+    /// attached debugger doesn't pay the O(nnz) assembly every iteration.
+    /// Returns whether the triplets are already available now.
+    pub fn request_kkt_matrix(&mut self) -> bool {
+        self.data.borrow_mut().want_matrix = true;
+        self.data
+            .borrow()
+            .kkt_debug
+            .as_ref()
+            .map(|k| k.matrix.is_some())
+            .unwrap_or(false)
+    }
+
     // ---- vector reads --------------------------------------------------
 
     /// Dimensions of every named block, in [`BLOCK_NAMES`] order.
@@ -425,6 +446,18 @@ impl DebugCtx {
     /// Rebuilds `curr` from a deep copy with a fresh vector tag, so all
     /// tag-keyed CQ caches invalidate and downstream quantities recompute
     /// from the new point.
+    ///
+    /// **No invariant enforcement.** Only the dimension is checked. Mutating
+    /// the slacks (`s`) to ≤ 0, or the bound/inequality multipliers
+    /// (`z_l`/`z_u`/`v_l`/`v_u`) to ≤ 0, or pushing `x` past a bound, breaks
+    /// the interior-point feasibility invariant (`s > 0, z > 0`) — the next
+    /// step's σ = z/s and fraction-to-the-boundary rule can then produce
+    /// `NaN`/`Inf` or a non-descent direction rather than erroring here. The
+    /// solver's strategy history (filter, adaptive-μ oracle, quasi-Newton
+    /// memory) is **not** rewound to the mutated point either, so a resumed
+    /// solve may behave inconsistently. This is a debugging tool: "wrong"
+    /// states are allowed on purpose — it's on the caller to keep the point
+    /// sane if they intend to continue the solve.
     pub fn set_block(&mut self, name: &str, vals: &[Number]) -> Result<(), String> {
         if !BLOCK_NAMES.contains(&name) {
             return Err(format!(
