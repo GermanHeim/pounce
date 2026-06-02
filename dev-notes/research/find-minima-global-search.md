@@ -108,10 +108,11 @@ result = pounce.find_minima(
     method="flooding",          # "flooding" | "deflation" | "tunneling" | "multistart"
     jac=None, hess=None,
     bounds=None, constraints=None,
-    n_minima=10,                # stop after this many distinct minima
-    max_solves=None,            # hard cap on solver calls (default 4*n_minima)
+    n_minima=10,                # TARGET: stop once this many distinct minima found
+    max_solves=None,            # BUDGET: hard cap on solver calls (default 4*n_minima)
+    patience=8,                 # GIVE-UP: stop after this many solves in a row with nothing new
     dedup=1e-4,                 # distance below which two minima are "the same"
-    options=None,               # passed through to each minimize()
+    options=None,               # passed through to each minimize() (e.g. inner max_iter)
     strategy_kw=None,           # method-specific knobs (sigma, amplitude, pole power...)
     seed=None,
     callback=None,              # called with each accepted minimum
@@ -120,8 +121,34 @@ result = pounce.find_minima(
 # result.values  -> list[float]
 # result.x       -> best minimum
 # result.results -> list[OptimizeResult] (one per accepted minimum)
+# result.status  -> "target_reached" | "converged" | "budget_exhausted"
 # result.trace   -> per-solve diagnostics
 ```
+
+### Termination
+
+The driver stops on whichever fires first:
+
+| condition                              | meaning                          | `status`            |
+|----------------------------------------|----------------------------------|---------------------|
+| `len(minima) == n_minima`              | found what was asked for         | `"target_reached"`  |
+| `patience` consecutive empty solves    | landscape appears exhausted      | `"converged"`       |
+| `n_solves >= max_solves`               | spent the budget                 | `"budget_exhausted"`|
+
+The "there aren't that many minima" case is exactly why `patience` exists. A
+target alone never terminates when the function has fewer minima than
+requested (restarts keep rediscovering the same ones); `max_solves` alone
+terminates but wastes the whole remaining budget re-finding knowns before
+giving up. `patience` is the efficient early exit: ask for 4, find 2, try
+`patience` more times across the box, find nothing, return the 2 with
+`status="converged"` — signalling *believed-exhaustive*, not *out of gas*.
+`max_solves` remains as a hard backstop. `find_minima` always returns
+however many it actually found; falling short of `n_minima` is not an error.
+
+Granularity note: a *solve* is many function evaluations. The outer budget
+is counted in solver calls (`max_solves`); a true per-evaluation ceiling
+belongs inside each solve via `options` (e.g. `max_iter`), not conflated
+into the outer loop.
 
 ## Architecture (four layers)
 
@@ -179,8 +206,8 @@ lives in exactly one place.
 ### 4. Driver + `MinimaResult`
 
 Loop: `propose_start → augment/subproblem → minimize → polish → verify →
-archive`, until `n_minima`, `max_solves`, or stagnation (no new minimum in
-K consecutive attempts). `MinimaResult` is a sorted list of
+archive`, until `n_minima`, `patience` (stagnation), or `max_solves` — see
+the Termination table above. `MinimaResult` is a sorted list of
 `OptimizeResult`-shaped entries plus a trace.
 
 ## Design decisions / trade-offs
