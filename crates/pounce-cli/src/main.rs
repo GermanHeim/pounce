@@ -514,7 +514,13 @@ pub fn main() -> ExitCode {
                     };
                     (p, args.json_detail, input)
                 });
-                return run_global(&prob, sol_path.as_deref(), json_cfg);
+                return run_global(
+                    &prob,
+                    sol_path.as_deref(),
+                    json_cfg,
+                    args.debug,
+                    args.debug_script.as_deref(),
+                );
             }
             eprintln!("pounce: solver_selection=global requires an .nl input (not a builtin)");
             return ExitCode::from(2);
@@ -1333,6 +1339,8 @@ fn run_global(
     prob: &nl_reader::NlProblem,
     sol_path: Option<&std::path::Path>,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
+    debug: Option<pounce_cli::cli::DebugMode>,
+    debug_script: Option<&std::path::Path>,
 ) -> ExitCode {
     use pounce_cli::nl_fbbt_translate::translate_constraint;
     use pounce_global::{solve_global, Constraint, GlobalOptions, GlobalProblem, GlobalStatus};
@@ -1417,7 +1425,17 @@ fn run_global(
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
     let t0 = std::time::Instant::now();
-    let sol = solve_global(&gp, &opts, backend);
+    let sol = if let Some(mode) = debug {
+        // Interactive tree debugger: step the branch-and-bound search.
+        use pounce_cli::tree_debug::TreeDebugger;
+        let mut dbg = TreeDebugger::new(mode);
+        if let Some(p) = debug_script {
+            dbg = dbg.with_script(p);
+        }
+        pounce_global::solve_global_debug(&gp, &opts, &mut dbg, backend)
+    } else {
+        solve_global(&gp, &opts, backend)
+    };
     let elapsed = t0.elapsed().as_secs_f64();
 
     let sign = if prob.minimize { 1.0 } else { -1.0 };
