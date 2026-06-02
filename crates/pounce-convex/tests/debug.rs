@@ -215,6 +215,62 @@ fn nonsym_exp_cone_driver_is_debuggable() {
     }
 }
 
+/// The debugger can edit the iterate in place (`set`) and snapshot/restore
+/// it (`goto`). `set mu` is rejected (μ is derived).
+#[test]
+fn convex_debugger_supports_set_and_rewind() {
+    use std::cell::RefCell;
+
+    // A hook that, at the first IterStart, snapshots the iterate, perturbs
+    // `x`, confirms the edit took, then restores — all via the trait.
+    #[derive(Default)]
+    struct Mutator {
+        snap: RefCell<Option<Box<dyn pounce_common::debug::IterSnapshot>>>,
+        edited_x0: RefCell<Option<f64>>,
+        restored_x0: RefCell<Option<f64>>,
+        set_mu_err: RefCell<bool>,
+        done: bool,
+    }
+    impl DebugHook for Mutator {
+        fn at_checkpoint(&mut self, st: &mut dyn DebugState) -> DebugAction {
+            if self.done || st.checkpoint() != Checkpoint::IterStart {
+                return DebugAction::Resume;
+            }
+            self.done = true;
+            // Snapshot, then edit x[0].
+            *self.snap.borrow_mut() = st.snapshot();
+            let mut x = st.block("x").unwrap();
+            x[0] += 1.25;
+            st.set_block("x", &x).expect("set_block x");
+            *self.edited_x0.borrow_mut() = st.block("x").map(|v| v[0]);
+            // μ is derived — editing it must be refused.
+            *self.set_mu_err.borrow_mut() = st.set_mu(0.5).is_err();
+            // Restore the snapshot and read x[0] back.
+            let snap = self.snap.borrow_mut().take().unwrap();
+            assert!(st.restore(snap.as_ref()), "restore should succeed");
+            *self.restored_x0.borrow_mut() = st.block("x").map(|v| v[0]);
+            DebugAction::Resume
+        }
+    }
+
+    let prob = active_ineq_qp();
+    let opts = QpOptions::default();
+    let mut hook = Mutator::default();
+    let sol = solve_qp_ipm_debug(&prob, &opts, &mut hook, backend);
+
+    // The edit was observed, set_mu refused, and the restore undid the edit.
+    assert_eq!(hook.edited_x0.into_inner(), Some(1.25), "edit visible");
+    assert!(hook.set_mu_err.into_inner(), "set mu must be rejected");
+    assert_eq!(
+        hook.restored_x0.into_inner(),
+        Some(0.0),
+        "restore should bring x[0] back to the cold-start 0"
+    );
+    // The solve still converges (the edit+restore was a no-op net change).
+    assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
+    assert!((sol.x[0] - 1.0).abs() < 1e-6 && (sol.x[1] - 1.0).abs() < 1e-6);
+}
+
 /// A hook that requests `Stop` at the first checkpoint halts the solve
 /// short of convergence (the debugger `quit` path).
 #[test]

@@ -789,16 +789,16 @@ where
                 res,
                 obj: obj_hat,
                 alpha: (0.0, 0.0),
-                x: &x,
-                s: &s,
-                y: &y,
-                z: &z,
+                x: &mut x,
+                s: &mut s,
+                y: &mut y,
+                z: &mut z,
                 dx: &dx,
                 dy: &dy,
                 dz: &dz,
                 ds: &ds,
-                tau: Some(tau),
-                kappa: Some(kappa),
+                tau: Some(&mut tau),
+                kappa: Some(&mut kappa),
                 status: None,
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
@@ -1000,16 +1000,16 @@ where
                 res,
                 obj: obj_hat,
                 alpha: (alpha, alpha),
-                x: &x,
-                s: &s,
-                y: &y,
-                z: &z,
+                x: &mut x,
+                s: &mut s,
+                y: &mut y,
+                z: &mut z,
                 dx: &dx,
                 dy: &dy,
                 dz: &dz,
                 ds: &ds,
-                tau: Some(tau),
-                kappa: Some(kappa),
+                tau: Some(&mut tau),
+                kappa: Some(&mut kappa),
                 status: None,
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
@@ -1044,16 +1044,16 @@ where
                 res,
                 obj: obj_hat,
                 alpha: (alpha, alpha),
-                x: &x,
-                s: &s,
-                y: &y,
-                z: &z,
+                x: &mut x,
+                s: &mut s,
+                y: &mut y,
+                z: &mut z,
                 dx: &dx,
                 dy: &dy,
                 dz: &dz,
                 ds: &ds,
-                tau: Some(tau),
-                kappa: Some(kappa),
+                tau: Some(&mut tau),
+                kappa: Some(&mut kappa),
                 status: None,
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
@@ -1063,9 +1063,9 @@ where
     }
 
     let inv = if tau.abs() > 0.0 { 1.0 / tau } else { 1.0 };
-    let x: Vec<f64> = x.iter().map(|v| v * inv).collect();
-    let y: Vec<f64> = y.iter().map(|v| v * inv).collect();
-    let z: Vec<f64> = z.iter().map(|v| v * inv).collect();
+    let mut x: Vec<f64> = x.iter().map(|v| v * inv).collect();
+    let mut y: Vec<f64> = y.iter().map(|v| v * inv).collect();
+    let mut z: Vec<f64> = z.iter().map(|v| v * inv).collect();
     let mut px = vec![0.0; n];
     prob.p_mul(&x, &mut px);
     let obj = 0.5 * dot(&x, &px) + dot(&prob.c, &x);
@@ -1082,16 +1082,16 @@ where
             res: 0.0,
             obj,
             alpha: (0.0, 0.0),
-            x: &x,
-            s: &s,
-            y: &y,
-            z: &z,
+            x: &mut x,
+            s: &mut s,
+            y: &mut y,
+            z: &mut z,
             dx: &dx,
             dy: &dy,
             dz: &dz,
             ds: &ds,
-            tau: Some(tau),
-            kappa: Some(kappa),
+            tau: Some(&mut tau),
+            kappa: Some(&mut kappa),
             status: Some(&status_str),
         };
         let _ = fire(&mut hook, &mut st);
