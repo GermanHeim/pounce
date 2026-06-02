@@ -58,14 +58,34 @@ Molecular dynamics / chemistry:
 
 Energy-landscape search (related; hop via MC/MD rather than filling):
 
+- Li, Z. & Scheraga, H.A. "Monte Carlo-minimization approach to the
+  multiple-minima problem in protein folding." *PNAS* **84**(19),
+  6611–6615 (1987). doi:10.1073/pnas.84.19.6611 — the origin of
+  perturb-then-locally-minimize-then-Metropolis-accept (basin-hopping).
 - Wales, D.J. & Doye, J.P.K. "Global optimization by basin-hopping and the
   lowest energy structures of Lennard-Jones clusters containing up to 110
   atoms." *J. Phys. Chem. A* **101**(28), 5111–5116 (1997).
-  doi:10.1021/jp970984n.
+  doi:10.1021/jp970984n — the named, widely-used basin-hopping algorithm
+  (scipy parity: `scipy.optimize.basinhopping`).
+- Wales, D.J. & Scheraga, H.A. "Global optimization of clusters, crystals,
+  and biomolecules." *Science* **285**(5432), 1368–1372 (1999).
+  doi:10.1126/science.285.5432.1368 — survey of hypersurface-deformation
+  and hopping methods.
 - Goedecker, S. "Minima hopping: an efficient search method for the global
   minimum of the potential energy surface of complex molecular systems."
   *J. Chem. Phys.* **120**(21), 9911–9917 (2004). doi:10.1063/1.1724816 —
   keeps a history of visited minima and penalizes revisiting.
+
+Restart and clustering (the multistart family):
+
+- Rinnooy Kan, A.H.G. & Timmer, G.T. "Stochastic global optimization
+  methods part I: Clustering methods." *Mathematical Programming* **39**,
+  27–56 (1987). doi:10.1007/BF02592070.
+- Rinnooy Kan, A.H.G. & Timmer, G.T. "Stochastic global optimization
+  methods part II: Multi level methods." *Mathematical Programming* **39**,
+  57–78 (1987). doi:10.1007/BF02592071 — Multi-Level Single Linkage
+  (MLSL): start a local solve from a sample point only when no
+  already-found basin is nearby, so each basin is descended ~once.
 
 Deflation (the root-finding cousin; multiplicative repulsion for Newton):
 
@@ -81,21 +101,38 @@ Deflation (the root-finding cousin; multiplicative repulsion for Newton):
   "Deflation techniques for finding multiple local minima of a nonlinear
   least squares problem," arXiv:2409.14438, 2024.)
 
+Adjacent paradigms (deliberately out of scope — see "Scope boundary"):
+
+- Jones, D.R., Perttunen, C.D. & Stuckman, B.E. "Lipschitzian optimization
+  without the Lipschitz constant." *J. Optim. Theory Appl.* **79**(1),
+  157–181 (1993). doi:10.1007/BF00941892 — DIRECT; deterministic global
+  via rectangle subdivision (scipy `method="direct"`).
+- Breiding, P. & Timme, S. "HomotopyContinuation.jl: a package for homotopy
+  continuation in Julia." *ICMS 2018*, LNCS 10931, 458–465 (2018).
+  doi:10.1007/978-3-319-96418-8_54 — numerical polynomial homotopy
+  continuation; finds *all* solutions of polynomial systems.
+
 ## Unifying observation
 
-Flooding, tunneling, and deflation differ only in *how* they transform the
-problem between solves:
+Every method here drives the same inner local solver (`minimize`) and
+differs only in (a) how it transforms the problem between solves and/or
+(b) how it picks the next start. That is the inclusion test for this family
+(see "Scope boundary") and the axis the table organizes:
 
-| method      | transform                                            | acts on            |
-|-------------|------------------------------------------------------|--------------------|
-| flooding    | add Σ_k A_k·exp(−‖x−x*_k‖²/2σ_k²) to the objective    | objective (additive) |
-| deflation   | multiply ∇f (or residual) by ∏_k 1/‖x−x*_k‖^p         | gradient (multiplicative) |
-| tunneling   | replace solve with root-find f(x)=f*, poles at x*_k   | a different subproblem |
-| multistart  | nothing; just restart elsewhere                       | start point only   |
+| method        | transform between solves                            | start policy                | family     |
+|---------------|-----------------------------------------------------|-----------------------------|------------|
+| flooding      | add Σ_k A_k·exp(−‖x−x*_k‖²/2σ_k²) to the objective   | roll from newest min        | repulsion  |
+| deflation     | multiply ∇f (or residual) by ∏_k 1/‖x−x*_k‖^p        | reuse / warm start          | repulsion  |
+| tunneling     | replace solve with root-find f(x)=f*, poles at x*_k  | tunneled point              | repulsion  |
+| multistart    | none                                                 | random / Sobol box sample   | restart    |
+| MLSL          | none                                                 | clustered sample (skip near-basin) | restart |
+| basin-hopping | none                                                 | perturb current + Metropolis accept | hopping |
 
-So one driver loop + a pluggable "escape strategy" covers all four. The
-verification of what counts as a real minimum is identical across them and
-factors out.
+So one driver loop + a pluggable "escape strategy" covers all of them. Some
+strategies are *stateful* (hopping carries a current point + temperature;
+MLSL carries a sample pool + reduced distance threshold), so a strategy is
+an object, not just a function. The verification of what counts as a real
+minimum is identical across them and factors out.
 
 ## Proposed API
 
@@ -105,7 +142,8 @@ the spirit of `scipy.optimize.minimize(method=...)`.
 ```python
 result = pounce.find_minima(
     fun, x0,
-    method="flooding",          # "flooding" | "deflation" | "tunneling" | "multistart"
+    method="deflation",         # "deflation" | "flooding" | "tunneling"
+                                #  | "multistart" | "mlsl" | "basinhopping"
     jac=None, hess=None,
     bounds=None, constraints=None,
     n_minima=10,                # TARGET: stop once this many distinct minima found
@@ -169,26 +207,45 @@ Small protocol; a strategy implements whichever pair fits:
 
 ```python
 class EscapeStrategy(Protocol):
+    # A strategy may be stateful (hopping, MLSL) and implements whichever
+    # hooks it needs; the driver calls the ones that are defined.
     def augment(self, fun, jac, hess, archive): ...   # flooding, deflation
         # -> (fun2, jac2, hess2)
     def subproblem(self, archive): ...                # tunneling
         # -> problem-shaped object for minimize()
-    def propose_start(self, archive, rng, bounds): ...# restart policy
+    def propose_start(self, archive, rng, bounds): ...# restart / hopping
         # -> x0
+    def accept(self, candidate, archive, rng): ...    # hopping (Metropolis)
+        # -> bool  (default: always accept new, dedup elsewhere)
 ```
 
 Concrete implementations:
 
+*Repulsion (transform-and-resolve):*
+
+- `Deflation` — multiply the gradient by ∏_k (1/‖x−x*_k‖^p + shift). Most
+  Newton-natural; pairs with warm starts. Phase 1.
 - `GaussianFlooding` — additive Gaussian bumps with analytic grad/Hess
   (already prototyped). `sigma`/`amplitude` from `strategy_kw`, or `"auto"`
-  from local curvature (well-tempered: A ≈ c·σ²·λ_min).
-- `Deflation` — multiply the gradient by ∏_k (1/‖x−x*_k‖^p + shift). Most
-  Newton-natural; pairs with warm starts.
+  from local curvature (well-tempered: A ≈ c·σ²·λ_min). Phase 1.
 - `Tunneling` — build the root-find f(x)=f* with poles; run as a
   feasibility solve. Yields a monotonically non-increasing minima sequence
-  (good when the goal is the global min, not enumeration).
-- `MultiStart` — no augmentation; sample the box. The honest baseline to
-  benchmark the others against.
+  (good when the goal is the global min, not enumeration). Phase 3.
+
+*Restart (smart start point, no transform):*
+
+- `MultiStart` — sample the box (uniform or, better, Sobol/Halton
+  low-discrepancy for coverage). The honest baseline. Phase 1.
+- `MLSL` — Multi-Level Single Linkage: maintain a sample pool and start a
+  local solve from a point only when no accepted minimum lies within a
+  shrinking "reduced distance," so each basin is descended ~once. Provably
+  efficient multistart. Phase 2.
+
+*Hopping (Markov chain over minima):*
+
+- `BasinHopping` — perturb the current minimum, local-minimize, accept by
+  Metropolis on the objective. scipy parity; the chemistry/physics
+  workhorse. Phase 2.
 
 ### 3. Acceptance / verification — shared
 
@@ -232,10 +289,33 @@ the Termination table above. `MinimaResult` is a sorted list of
   tunneling / deflation are inherently sequential (each needs prior minima)
   but can parallelize within a round.
 - **Relationship to scipy.** scipy has `basinhopping`, `shgo`,
-  `dual_annealing`, `differential_evolution` for the *global minimum*, but
-  no tool that *enumerates distinct minima via deflation/flooding on a
-  deterministic NLP solver*. That gap is the value proposition — lean into
-  enumeration, not just "find the lowest."
+  `dual_annealing`, `differential_evolution`, `direct` for the *global
+  minimum*, but no tool that *enumerates distinct minima via
+  deflation/flooding on a deterministic NLP solver*. That gap is the value
+  proposition — lean into enumeration, not just "find the lowest." (We can
+  still offer `basinhopping`/`multistart` for parity and as baselines.)
+
+## Scope boundary
+
+Inclusion test: **a method belongs in `find_minima` iff it drives the
+existing local solver (`minimize`) as its inner loop**, differing only in
+how it transforms the problem and/or picks the next start. That keeps the
+package coherent and is exactly where it complements (rather than
+duplicates) scipy. Deliberately *out* of scope, as different machinery:
+
+- **Deterministic global / branch-and-bound** — DIRECT (Jones et al.
+  1993), αBB, BARON. Need convex relaxations or Lipschitz sampling; they do
+  not reuse the local solver. Rigorous global optimization is a separate
+  effort.
+- **Population / stochastic derivative-free globals** — differential
+  evolution, dual/simulated annealing, CMA-ES, particle swarm. Already in
+  scipy; do not exploit pounce's gradients/Hessians.
+- **Homotopy continuation** — numerical polynomial homotopy (Breiding &
+  Timme 2018) finds *all* stationary points, but only for polynomial /
+  algebraic systems, via entirely separate machinery. The rigorous
+  "all minima" cousin for that problem class.
+
+These are worth a one-paragraph "see also" in user docs, not strategies.
 
 ## Known limitations
 
@@ -250,10 +330,11 @@ the Termination table above. `MinimaResult` is a sorted list of
 
 ## Suggested phasing
 
-1. `GaussianFlooding` + `MultiStart` + archive + verification, unconstrained
-   and bound-constrained. Promote the prototype to `pounce/_minima.py`,
-   export as `pounce.find_minima`. Tests on six-hump camel, Rastrigin,
-   Ackley.
-2. `Deflation` strategy + warm-started re-solves via `Solver` sessions.
-3. `Tunneling` + general constraints + pluggable distance metrics
-   (PBC / symmetry) for the MD audience.
+1. `Deflation` + `GaussianFlooding` + `MultiStart` (uniform/Sobol) +
+   archive + verification, unconstrained and bound-constrained. Promote the
+   prototype to `pounce/_minima.py`, export as `pounce.find_minima`. Tests
+   on six-hump camel, Rastrigin, Ackley.
+2. Warm-started re-solves via `Solver` sessions; `MLSL` and `BasinHopping`
+   strategies (clustering restart + Metropolis hopping, scipy parity).
+3. `Tunneling` + general constraints (deflate the KKT residual) + pluggable
+   distance metrics (PBC / symmetry) for the MD audience.
