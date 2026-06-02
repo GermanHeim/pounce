@@ -35,10 +35,12 @@
 //! module is validated to reproduce their optima and certificates.
 
 use crate::cones::{CompositeCone, Cone};
+use crate::debug::{fire, ConvexDebugState};
 use crate::ipm::{
     build_factorization, build_rhs, detect_infeasibility, dot, inf_norm, split_step, QpOptions,
 };
 use crate::qp::{QpProblem, QpSolution, QpStatus};
+use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_linsol::SparseSymLinearSolverInterface;
 
 /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
@@ -64,6 +66,7 @@ pub(crate) fn solve_conic_hsde<F>(
     cone: &CompositeCone,
     opts: &QpOptions,
     mut make_backend: F,
+    mut hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -160,6 +163,39 @@ where
         let pres = inf_norm(&rho_y).max(inf_norm(&rho_z)) / tau;
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
+        let res = pres.max(dres).max(gap);
+
+        // Debugger checkpoint: top of iteration. Blocks expose the
+        // homogeneous iterate `(x, s, y, z, τ, κ)`; the objective is the
+        // un-homogenized `½x̂ᵀPx̂ + cᵀx̂` with `x̂ = x/τ` (what the user reads).
+        if hook.is_some() {
+            let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::IterStart,
+                iter: it as i32,
+                mu,
+                pinf: pres,
+                dinf: dres,
+                res,
+                obj: obj_hat,
+                alpha: (0.0, 0.0),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                tau: Some(tau),
+                kappa: Some(kappa),
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
+
         if pres < opts.tol && dres < opts.tol && gap < opts.tol {
             status = QpStatus::Optimal;
             break;
@@ -276,6 +312,37 @@ where
                 .min(cone.max_step(&z, &dz, opts.tau));
         }
 
+        // Debugger checkpoint: the combined Newton direction and the single
+        // symmetric step length are known but not yet applied (α reported
+        // in both the primal and dual slots).
+        if hook.is_some() {
+            let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::AfterSearchDirection,
+                iter: it as i32,
+                mu,
+                pinf: pres,
+                dinf: dres,
+                res,
+                obj: obj_hat,
+                alpha: (alpha, alpha),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                tau: Some(tau),
+                kappa: Some(kappa),
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
+
         for i in 0..n {
             x[i] += alpha * dx[i];
         }
@@ -288,6 +355,38 @@ where
         }
         tau += alpha * dtau;
         kappa += alpha * dkappa;
+
+        // Debugger checkpoint: the new homogeneous iterate is in place.
+        if hook.is_some() {
+            // Recompute the objective at the *new* point (`x`, `τ` just moved).
+            let mut pxn = vec![0.0; n];
+            prob.p_mul(&x, &mut pxn);
+            let obj_hat = 0.5 * dot(&x, &pxn) / (tau * tau) + dot(&prob.c, &x) / tau;
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::AfterStep,
+                iter: it as i32,
+                mu,
+                pinf: pres,
+                dinf: dres,
+                res,
+                obj: obj_hat,
+                alpha: (alpha, alpha),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                tau: Some(tau),
+                kappa: Some(kappa),
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
     }
 
     // Un-homogenize: divide by τ to recover the original-space solution.
@@ -299,6 +398,34 @@ where
     let mut px = vec![0.0; n];
     prob.p_mul(&x, &mut px);
     let obj = 0.5 * dot(&x, &px) + dot(&prob.c, &x);
+
+    // Debugger post-mortem at the recovered (un-homogenized) solution. `s`
+    // stays in its homogeneous scaling; `dx`/… are the last step.
+    if hook.is_some() {
+        let status_str = format!("{status:?}");
+        let mut st = ConvexDebugState {
+            cp: Checkpoint::Terminated,
+            iter: iters as i32,
+            mu: 0.0,
+            pinf: 0.0,
+            dinf: 0.0,
+            res: 0.0,
+            obj,
+            alpha: (0.0, 0.0),
+            x: &x,
+            s: &s,
+            y: &y,
+            z: &z,
+            dx: &dx,
+            dy: &dy,
+            dz: &dz,
+            ds: &ds,
+            tau: Some(tau),
+            kappa: Some(kappa),
+            status: Some(&status_str),
+        };
+        let _ = fire(&mut hook, &mut st);
+    }
 
     QpSolution {
         status,
@@ -351,7 +478,7 @@ mod tests {
     /// driver; assert both converge and agree on the primal.
     fn assert_agrees(prob: &QpProblem, specs: &[ConeSpec], tol: f64) -> QpSolution {
         let cone = CompositeCone::from_specs(specs);
-        let hsde = solve_conic_hsde(prob, &cone, &opts(), backend);
+        let hsde = solve_conic_hsde(prob, &cone, &opts(), backend, None);
         let direct = solve_socp_ipm(prob, specs, &opts(), backend);
         assert_eq!(hsde.status, QpStatus::Optimal, "HSDE not optimal");
         assert_eq!(direct.status, QpStatus::Optimal, "direct not optimal");
@@ -561,7 +688,7 @@ mod tests {
             ub: vec![],
         };
         let cone = CompositeCone::from_specs(&[ConeSpec::Nonneg(2)]);
-        let sol = solve_conic_hsde(&prob, &cone, &opts(), backend);
+        let sol = solve_conic_hsde(&prob, &cone, &opts(), backend, None);
         assert_eq!(sol.status, QpStatus::PrimalInfeasible);
     }
 
@@ -620,7 +747,7 @@ mod tests {
             ub: vec![],
         };
         let cone = CompositeCone::from_specs(&[ConeSpec::Nonneg(1)]);
-        let sol = solve_conic_hsde(&prob, &cone, &opts(), backend);
+        let sol = solve_conic_hsde(&prob, &cone, &opts(), backend, None);
         assert_eq!(sol.status, QpStatus::DualInfeasible);
     }
 
@@ -784,6 +911,7 @@ mod tests {
             &CompositeCone::from_specs(&[ConeSpec::Psd(3)]),
             &opts(),
             backend,
+            None,
         );
         // solve_socp_ipm auto-applies the chordal decomposition.
         let decomp = solve_socp_ipm(&prob, &[ConeSpec::Psd(3)], &opts(), backend);

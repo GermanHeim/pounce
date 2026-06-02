@@ -147,8 +147,13 @@ where
 {
     // Build the factorization and run the core loop directly with the hook
     // (mirrors `solve_qp_core`'s non-HSDE path; `solve_qp_core` itself can't
-    // carry the borrowed hook through its generic plumbing).
+    // carry the borrowed hook through its generic plumbing). When the HSDE
+    // driver is selected, debug it instead — it self-starts and builds its
+    // own factorization.
     let run = |p: &QpProblem, cone: &CompositeCone, mk: &mut F, hook: &mut dyn DebugHook| {
+        if opts.use_hsde {
+            return crate::hsde::solve_conic_hsde(p, cone, opts, mk, Some(hook));
+        }
         match build_factorization(p, cone, opts, mk) {
             Ok((kkt, mut fact)) => run_ipm(p, cone, opts, &kkt, &mut fact, None, Some(hook)),
             Err(()) => failed_solution(
@@ -902,7 +907,7 @@ where
     // factor-reuse plumbing below (warm is ignored — it cannot change the
     // solution, only the iteration count, which HSDE does not exploit yet).
     if opts.use_hsde {
-        return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend);
+        return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend, None);
     }
 
     // Build the fixed KKT pattern and an initial factorization, then run
@@ -1160,6 +1165,8 @@ fn run_ipm(
                 dy: &dy,
                 dz: &dz,
                 ds: &ds,
+                tau: None,
+                kappa: None,
                 status: None,
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
@@ -1262,6 +1269,8 @@ fn run_ipm(
                 dy: &dy,
                 dz: &dz,
                 ds: &ds,
+                tau: None,
+                kappa: None,
                 status: None,
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
@@ -1300,6 +1309,8 @@ fn run_ipm(
                 dy: &dy,
                 dz: &dz,
                 ds: &ds,
+                tau: None,
+                kappa: None,
                 status: None,
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
@@ -1349,6 +1360,8 @@ fn run_ipm(
             dy: &dy,
             dz: &dz,
             ds: &ds,
+            tau: None,
+            kappa: None,
             status: Some(&status_str),
         };
         let _ = fire(&mut hook, &mut st);

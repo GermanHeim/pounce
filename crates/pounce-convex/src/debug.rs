@@ -42,6 +42,12 @@ pub(crate) struct ConvexDebugState<'a> {
     pub dy: &'a [f64],
     pub dz: &'a [f64],
     pub ds: &'a [f64],
+    /// HSDE homogenizing variable τ (the iterate is the homogeneous
+    /// `(x, s, y, z, τ, κ)`; the recovered solution is `x/τ`). `None` for
+    /// the direct (non-homogeneous) driver.
+    pub tau: Option<f64>,
+    /// HSDE homogenizing variable κ. `None` for the direct driver.
+    pub kappa: Option<f64>,
     pub status: Option<&'a str>,
 }
 
@@ -73,12 +79,21 @@ impl DebugState for ConvexDebugState<'_> {
         self.alpha
     }
     fn block_dims(&self) -> Vec<(&'static str, usize)> {
-        vec![
+        let mut v = vec![
             ("x", self.x.len()),
             ("s", self.s.len()),
             ("y", self.y.len()),
             ("z", self.z.len()),
-        ]
+        ];
+        // The homogenizing scalars are addressable as 1-element blocks on
+        // the HSDE driver (`print tau` / `print kappa`).
+        if self.tau.is_some() {
+            v.push(("tau", 1));
+        }
+        if self.kappa.is_some() {
+            v.push(("kappa", 1));
+        }
+        v
     }
     fn block(&self, name: &str) -> Option<Vec<Number>> {
         match name {
@@ -86,6 +101,8 @@ impl DebugState for ConvexDebugState<'_> {
             "s" => Some(self.s.to_vec()),
             "y" => Some(self.y.to_vec()),
             "z" => Some(self.z.to_vec()),
+            "tau" => self.tau.map(|t| vec![t]),
+            "kappa" => self.kappa.map(|k| vec![k]),
             _ => None,
         }
     }

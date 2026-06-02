@@ -34,6 +34,7 @@ struct Recorder {
     checkpoints: Vec<Checkpoint>,
     max_mu: f64,
     saw_nonempty_z: bool,
+    saw_tau: bool,
     x_dim_at_iter_start: Option<usize>,
     terminal_status: Option<String>,
 }
@@ -46,6 +47,9 @@ impl DebugHook for Recorder {
             if !z.is_empty() {
                 self.saw_nonempty_z = true;
             }
+        }
+        if st.block("tau").is_some() {
+            self.saw_tau = true;
         }
         if st.checkpoint() == Checkpoint::IterStart {
             self.x_dim_at_iter_start = st.block("x").map(|v| v.len());
@@ -105,6 +109,53 @@ fn attaching_a_hook_does_not_change_the_result() {
         assert!((a - b).abs() < 1e-12, "x differs: {a} vs {b}");
     }
     assert!((plain.obj - debugged.obj).abs() < 1e-12, "obj differs");
+}
+
+/// The HSDE driver (`use_hsde`) is debuggable through the same entry: it
+/// fires the checkpoints, exposes the homogenizing τ/κ as blocks, and the
+/// hook does not change the recovered solution.
+#[test]
+fn hsde_driver_is_debuggable_and_exposes_tau_kappa() {
+    let prob = active_ineq_qp();
+    let opts = QpOptions {
+        use_hsde: true,
+        ..QpOptions::default()
+    };
+
+    let mut rec = Recorder::default();
+    let sol = solve_qp_ipm_debug(&prob, &opts, &mut rec, backend);
+
+    assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
+    assert!((sol.x[0] - 1.0).abs() < 1e-5, "x0={}", sol.x[0]);
+    assert!((sol.x[1] - 1.0).abs() < 1e-5, "x1={}", sol.x[1]);
+
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::IterStart),
+        "IterStart"
+    );
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::AfterStep),
+        "AfterStep"
+    );
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::Terminated),
+        "Terminated"
+    );
+    assert!(rec.saw_tau, "HSDE must expose the `tau` block");
+    assert_eq!(rec.terminal_status.as_deref(), Some("Optimal"));
+
+    // The attached hook leaves the HSDE result untouched.
+    let plain = {
+        let o = QpOptions {
+            use_hsde: true,
+            ..QpOptions::default()
+        };
+        solve_qp_ipm(&prob, &o, backend)
+    };
+    assert_eq!(plain.status, sol.status);
+    for (a, b) in plain.x.iter().zip(&sol.x) {
+        assert!((a - b).abs() < 1e-10, "x differs: {a} vs {b}");
+    }
 }
 
 /// A hook that requests `Stop` at the first checkpoint halts the solve
