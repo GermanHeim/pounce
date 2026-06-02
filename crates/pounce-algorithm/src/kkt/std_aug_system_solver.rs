@@ -371,6 +371,26 @@ impl AugSystemSolver for StdAugSystemSolver {
         self.last_neg_evals
     }
 
+    fn system_dim(&self) -> Index {
+        self.dim
+    }
+
+    fn kkt_triplets(&self) -> Option<(Index, Vec<Index>, Vec<Index>, Vec<Number>)> {
+        if self.irn.is_empty() {
+            return None;
+        }
+        Some((
+            self.dim,
+            self.irn.clone(),
+            self.jcn.clone(),
+            self.vals.clone(),
+        ))
+    }
+
+    fn l_factor(&self, want_values: bool) -> Option<FactorPattern> {
+        self.linsol.factor_pattern(want_values)
+    }
+
     fn increase_quality(&mut self) -> bool {
         // Quality bump → pivtol changed → next solve must refactor.
         // `resolve` would silently hand back stale numbers; force the

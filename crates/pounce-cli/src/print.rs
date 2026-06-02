@@ -164,8 +164,34 @@ const BANNER_WIDTH: usize = 80;
 /// 256-color downgrade on non-truecolor terminals. The metallic letters
 /// are tuned for a dark terminal background.
 pub fn print_logo() {
-    use pounce_common::style::{downgrade, truecolor_enabled, ALPHA_HOT, BRIGHT_YEL, TIGER_ORANGE};
     use std::io::Write as _;
+    let width = LOGO
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(2);
+    let mut out = anstream::stdout();
+    // Leading rule matching the copyright banner's width, then a blank
+    // line, then the centered wordmark. The rule is left in the terminal's
+    // default color (like the banner's own rules) so it stays distinct on
+    // any background. `anstream` strips the styling when stdout isn't a TTY.
+    let _ = writeln!(out, "{}", "*".repeat(BANNER_WIDTH));
+    let _ = writeln!(out);
+    let pad = " ".repeat(BANNER_WIDTH.saturating_sub(width) / 2);
+    for row in logo_rows(true) {
+        let _ = writeln!(out, "{pad}{row}");
+    }
+    let _ = writeln!(out);
+}
+
+/// Render the POUNCE wordmark as styled rows (one `String` per line):
+/// steel-sheen letters with three molten claw slashes, in the project
+/// palette. Emits ANSI styling only when `color`; otherwise plain
+/// `#`/`/` block characters. Shared by the solve header ([`print_logo`])
+/// and the interactive debugger's open banner (rendered to stderr).
+pub fn logo_rows(color: bool) -> Vec<String> {
+    use pounce_common::style::{downgrade, truecolor_enabled, ALPHA_HOT, BRIGHT_YEL, TIGER_ORANGE};
 
     fn lerp(a: u8, b: u8, t: f64) -> u8 {
         (a as f64 + (b as f64 - a as f64) * t)
@@ -194,7 +220,6 @@ pub fn print_logo() {
             r as f64 / (rows - 1) as f64
         }
     };
-    // Molten color for a claw cell at row `r` (0 = top, hottest).
     let molten = |r: usize| {
         let t = vfrac(r);
         if t < 0.5 {
@@ -204,8 +229,6 @@ pub fn print_logo() {
         }
     };
 
-    // Cell grid: letters take the steel sheen by row; the molten claws
-    // overwrite the cells they cross.
     let mut grid: Vec<Vec<Option<(char, anstyle::RgbColor)>>> = vec![vec![None; width]; rows];
     for (r, line) in LOGO.iter().enumerate() {
         let steel = mix(STEEL_HI, STEEL_LO, vfrac(r));
@@ -226,30 +249,29 @@ pub fn print_logo() {
     }
 
     let truecolor = truecolor_enabled();
-    let mut out = anstream::stdout();
-    // Leading rule matching the copyright banner's width, then a blank
-    // line, then the centered wordmark. The rule is left in the terminal's
-    // default color (like the banner's own rules) so it stays distinct on
-    // any background.
-    let _ = writeln!(out, "{}", "*".repeat(BANNER_WIDTH));
-    let _ = writeln!(out);
-    let pad = " ".repeat(BANNER_WIDTH.saturating_sub(width) / 2);
-    for row in &grid {
-        let mut rendered = pad.clone();
-        for cell in row {
-            match cell {
-                Some((ch, rgb)) => {
-                    let style = anstyle::Style::new()
-                        .bold()
-                        .fg_color(Some(downgrade(*rgb, truecolor)));
-                    rendered.push_str(&format!("{}{}{}", style.render(), ch, style.render_reset()));
+    grid.iter()
+        .map(|row| {
+            let mut rendered = String::new();
+            for cell in row {
+                match cell {
+                    Some((ch, rgb)) if color => {
+                        let style = anstyle::Style::new()
+                            .bold()
+                            .fg_color(Some(downgrade(*rgb, truecolor)));
+                        rendered.push_str(&format!(
+                            "{}{}{}",
+                            style.render(),
+                            ch,
+                            style.render_reset()
+                        ));
+                    }
+                    Some((ch, _)) => rendered.push(*ch),
+                    None => rendered.push(' '),
                 }
-                None => rendered.push(' '),
             }
-        }
-        let _ = writeln!(out, "{}", rendered.trim_end());
-    }
-    let _ = writeln!(out);
+            rendered.trim_end().to_string()
+        })
+        .collect()
 }
 
 pub fn print_banner(linear_solver: &str) {

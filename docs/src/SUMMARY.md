@@ -16,6 +16,7 @@
   - [Schema v1 Reference](schema/solve-report-v1.md)
 - [Sensitivity Analysis](sensitivity.md)
 - [Sessions: Factor-Once / Solve-Many](sessions.md)
+- [Interactive Debugger](debugger.md)
 
 # Integrations
 
@@ -30,6 +31,7 @@
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
+- [Color Theme](color-theme.md)
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)

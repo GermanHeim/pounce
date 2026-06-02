@@ -78,6 +78,33 @@ pub struct Args {
     /// reduced Hessian. Implies `--compute-red-hessian`. Mirrors
     /// upstream `rh_eigendecomp`.
     pub rh_eigendecomp: bool,
+    /// `--debug` / `--debug-json` — drop into the interactive solver
+    /// debugger at each iteration. `Repl` is the human line-oriented
+    /// front end; `Json` speaks newline-delimited JSON so an LLM agent
+    /// (or any program) can drive the loop. `None` disables it.
+    pub debug: Option<DebugMode>,
+    /// `--debug-on-error` — don't pause every iteration; instead run
+    /// freely and only drop into the debugger at the terminal checkpoint
+    /// *if the solve did not succeed*, for a post-mortem at the failing
+    /// iterate. Implies `--debug` (REPL) when no `--debug*` mode is given.
+    pub debug_on_error: bool,
+    /// `--debug-on-interrupt` — run normally but install a Ctrl-C handler
+    /// that drops into the debugger at the next iteration. No automatic
+    /// pauses. Implies `--debug` (REPL) when no `--debug*` mode is given.
+    pub debug_on_interrupt: bool,
+    /// `--debug-script <file>` — run debugger commands from a file at the
+    /// first pause (e.g. set breakpoints then `continue`). Implies
+    /// `--debug` when no `--debug*` mode is given.
+    pub debug_script: Option<PathBuf>,
+}
+
+/// Front end for the interactive solver debugger (`--debug*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugMode {
+    /// Human-facing line REPL on stdin/stdout.
+    Repl,
+    /// Newline-delimited JSON protocol for an agent / program.
+    Json,
 }
 
 impl Args {
@@ -125,6 +152,25 @@ Options:
                             tagged by the `red_hessian` integer var-suffix
   --rh-eigendecomp          also compute the reduced-Hessian eigendecomp;
                             implies --compute-red-hessian
+  --debug                   drop into the interactive solver debugger (a
+                            pdb-for-the-IPM): pause each iteration to
+                            inspect/mutate x, multipliers, mu, set
+                            breakpoints, step/continue. Type `help` at
+                            the pounce-dbg> prompt for commands.
+  --debug-json              same loop, but speak newline-delimited JSON on
+                            stdin/stdout so an LLM agent or program can
+                            drive it (one JSON state object per pause).
+  --debug-on-error          don't pause every iteration; run freely and
+                            drop into the debugger only if the solve fails,
+                            for a post-mortem at the final iterate. Implies
+                            --debug when no --debug* mode is given.
+  --debug-on-interrupt      run normally but install a Ctrl-C handler that
+                            drops into the debugger at the next iteration
+                            (second Ctrl-C aborts). Implies --debug when no
+                            --debug* mode is given.
+  --debug-script <file>     run debugger commands from a file at the first
+                            pause (e.g. set breakpoints then continue).
+                            Implies --debug when no --debug* mode is given.
   --list-problems           print available built-in problems and exit
   -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
                             drivers): convey termination via the .sol
@@ -179,6 +225,10 @@ Options:
         let mut sens_bound_eps: f64 = 1e-3;
         let mut compute_red_hessian = false;
         let mut rh_eigendecomp = false;
+        let mut debug: Option<DebugMode> = None;
+        let mut debug_on_error = false;
+        let mut debug_on_interrupt = false;
+        let mut debug_script: Option<PathBuf> = None;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -258,6 +308,16 @@ Options:
                         .map_err(|e| format!("--sens-bound-eps: {e}"))?;
                     sens_boundcheck = true;
                 }
+                "--debug" => debug = Some(DebugMode::Repl),
+                "--debug-json" => debug = Some(DebugMode::Json),
+                "--debug-on-error" => debug_on_error = true,
+                "--debug-on-interrupt" => debug_on_interrupt = true,
+                "--debug-script" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--debug-script requires a value".to_string())?;
+                    debug_script = Some(PathBuf::from(v));
+                }
                 "--compute-red-hessian" => compute_red_hessian = true,
                 "--rh-eigendecomp" => {
                     rh_eigendecomp = true;
@@ -289,6 +349,12 @@ Options:
             std::process::exit(0);
         }
 
+        // `--debug-on-error` / `--debug-on-interrupt` / `--debug-script`
+        // without an explicit mode imply the REPL.
+        if (debug_on_error || debug_on_interrupt || debug_script.is_some()) && debug.is_none() {
+            debug = Some(DebugMode::Repl);
+        }
+
         if !help && !version && !about {
             let problem = problem.ok_or_else(|| {
                 "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string()
@@ -312,6 +378,10 @@ Options:
                 sens_bound_eps,
                 compute_red_hessian,
                 rh_eigendecomp,
+                debug,
+                debug_on_error,
+                debug_on_interrupt,
+                debug_script,
             });
         }
 
@@ -334,6 +404,10 @@ Options:
             sens_bound_eps,
             compute_red_hessian,
             rh_eigendecomp,
+            debug,
+            debug_on_error,
+            debug_on_interrupt,
+            debug_script,
         })
     }
 }

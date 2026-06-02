@@ -18,7 +18,7 @@
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::{Matrix, SymMatrix, Vector};
-use pounce_linsol::ESymSolverStatus;
+use pounce_linsol::{ESymSolverStatus, FactorPattern};
 use std::rc::Rc;
 
 /// Bundle of the matrices/vectors that define one augmented-system
@@ -77,6 +77,26 @@ pub trait AugSystemSolver {
     /// Number of negative eigenvalues observed in the most recent
     /// factorization. Caller checks `provides_inertia()` first.
     fn number_of_neg_evals(&self) -> Index;
+
+    /// Dimension of the assembled augmented (KKT) system. Used by the
+    /// interactive debugger to report inertia; default 0 for backends
+    /// that don't track it.
+    fn system_dim(&self) -> Index {
+        0
+    }
+
+    /// Triplets of the assembled KKT matrix `(dim, irn, jcn, vals)`
+    /// (1-based lower triangle), for the debugger's `viz kkt`. Default
+    /// `None` for backends that don't expose them.
+    fn kkt_triplets(&self) -> Option<(Index, Vec<Index>, Vec<Index>, Vec<Number>)> {
+        None
+    }
+
+    /// The `LDLᵀ` factor pattern (and optionally values) of the most
+    /// recent factorization, for the debugger's `viz L`. Default `None`.
+    fn l_factor(&self, _want_values: bool) -> Option<FactorPattern> {
+        None
+    }
 
     /// Ask the underlying solver for higher-quality pivoting.
     fn increase_quality(&mut self) -> bool;

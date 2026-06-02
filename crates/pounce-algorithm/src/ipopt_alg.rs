@@ -174,6 +174,11 @@ pub struct IpoptAlgorithm {
     /// advances the state's iter counter and the augmented-system
     /// solver consults it to gate KKT dumps.
     diagnostics: Option<Rc<DiagnosticsState>>,
+    /// Optional interactive debugger. Shared (`Rc<RefCell<…>>`) so the
+    /// same debugger instance also drives the restoration inner IPM —
+    /// one debugger sees both levels. Fired at every
+    /// [`crate::debug::Checkpoint`]. See `crate::debug`.
+    debug: Option<Rc<RefCell<dyn crate::debug::DebugHook>>>,
 
     // ---- Restoration-phase audit counters (pounce#12). ----
     //
@@ -234,6 +239,7 @@ impl IpoptAlgorithm {
             acceptable_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
+            debug: None,
             resto_calls: 0,
             resto_inner_iters: 0,
             resto_outer_iters: 0,
@@ -350,6 +356,79 @@ impl IpoptAlgorithm {
     pub fn with_diagnostics(mut self, diag: Rc<DiagnosticsState>) -> Self {
         self.diagnostics = Some(diag);
         self
+    }
+
+    /// Install an interactive debugger hook. Fired at each checkpoint
+    /// in [`Self::optimize`]; returning [`crate::debug::DebugAction::Stop`]
+    /// ends the solve with `SolverReturn::UserRequestedStop`.
+    pub fn with_debug_hook(mut self, hook: Rc<RefCell<dyn crate::debug::DebugHook>>) -> Self {
+        self.debug = Some(hook);
+        self
+    }
+
+    /// Shared handle to the installed debugger, if any — used to forward
+    /// it into the restoration inner IPM.
+    pub fn debug_hook(&self) -> Option<Rc<RefCell<dyn crate::debug::DebugHook>>> {
+        self.debug.as_ref().map(Rc::clone)
+    }
+
+    /// Fire the debugger hook (if installed) at `cp`, building a live
+    /// [`crate::debug::DebugCtx`] over cheap handle clones. Returns the
+    /// requested action, defaulting to `Resume` when no hook is set.
+    fn fire_debug(&mut self, cp: crate::debug::Checkpoint) -> crate::debug::DebugAction {
+        use crate::debug::{DebugAction, DebugCtx};
+        let Some(hook) = self.debug.as_ref() else {
+            return DebugAction::Resume;
+        };
+        let mut ctx = DebugCtx::new(Rc::clone(&self.data), Rc::clone(&self.cq), cp);
+        hook.borrow_mut().at_checkpoint(&mut ctx)
+    }
+
+    /// Run the restoration phase, bracketed by the `PreRestoration` /
+    /// `PostRestoration` debug checkpoints so a debugger can inspect the
+    /// iterate just before entry and just after exit. With no debugger
+    /// installed this is exactly `invoke_restoration()`.
+    fn invoke_restoration_debugged(&mut self) -> IterateOutcome {
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::PreRestoration) {
+            return o;
+        }
+        let outcome = self.invoke_restoration();
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::PostRestoration) {
+            return o;
+        }
+        outcome
+    }
+
+    /// Fire a sub-iteration checkpoint from inside [`Self::iterate`].
+    /// Returns `Some(Terminate(UserRequestedStop))` if the debugger asked
+    /// to stop, so the caller can `return` it; `None` to continue.
+    fn debug_stop(&mut self, cp: crate::debug::Checkpoint) -> Option<IterateOutcome> {
+        if self.debug.is_none() {
+            return None;
+        }
+        if self.fire_debug(cp) == crate::debug::DebugAction::Stop {
+            Some(IterateOutcome::Terminate(SolverReturn::UserRequestedStop))
+        } else {
+            None
+        }
+    }
+
+    /// Fire the terminal post-mortem checkpoint (if a debugger is set),
+    /// carrying the solve outcome so the hook can decide whether to pause
+    /// at the final iterate. The action is advisory — the loop returns
+    /// `result` regardless — so the hook just gets a last look.
+    fn fire_debug_terminal(&mut self, result: SolverReturn) {
+        use crate::debug::{Checkpoint, DebugCtx};
+        let Some(hook) = self.debug.as_ref() else {
+            return;
+        };
+        let mut ctx = DebugCtx::new(
+            Rc::clone(&self.data),
+            Rc::clone(&self.cq),
+            Checkpoint::Terminated,
+        )
+        .with_status(format!("{result:?}"));
+        let _ = hook.borrow_mut().at_checkpoint(&mut ctx);
     }
 
     /// One iteration body — port of `Optimize()`'s inner loop.
@@ -578,7 +657,7 @@ impl IpoptAlgorithm {
         };
         if request_resto {
             if self.restoration.is_some() {
-                return self.invoke_restoration();
+                return self.invoke_restoration_debugged();
             } else {
                 tracing::warn!(target: "pounce::algorithm",
                     "[POUNCE] probing-oracle iterate-quality guard fired \
@@ -602,6 +681,11 @@ impl IpoptAlgorithm {
         // the intended distinction.
         if next_mu != mu_before {
             self.bundle.line_search.reset();
+        }
+
+        // Sub-iteration checkpoint: μ has been updated for this iteration.
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::AfterBarrierUpdate) {
+            return o;
         }
 
         // 5. Search direction. Skipped without an NLP + search_dir.
@@ -646,7 +730,7 @@ impl IpoptAlgorithm {
                 // fallback is available does upstream throw
                 // `STEP_COMPUTATION_FAILED`.
                 if self.restoration.is_some() {
-                    return self.invoke_restoration();
+                    return self.invoke_restoration_debugged();
                 }
                 return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
             }
@@ -821,6 +905,44 @@ impl IpoptAlgorithm {
             }
         }
 
+        // Capture KKT-factorization diagnostics (dim, inertia, status)
+        // for the debugger before the line search runs. Only when a
+        // debugger is installed — pulls nothing otherwise.
+        if self.debug.is_some() {
+            let want_l = self.data.borrow().want_l_factor;
+            let want_matrix = self.data.borrow().want_matrix;
+            let info = self.search_dir.as_ref().map(|sd| {
+                let pd = sd.pd_solver_mut();
+                let aug = pd.aug_solver();
+                let provides = aug.provides_inertia();
+                crate::ipopt_data::KktDebug {
+                    dim: aug.system_dim(),
+                    n_neg: if provides {
+                        aug.number_of_neg_evals()
+                    } else {
+                        -1
+                    },
+                    provides_inertia: provides,
+                    status: format!("{:?}", aug.last_solve_status()),
+                    // Triplet assembly is O(nnz) — only when `viz kkt`/`save`
+                    // armed it, so attaching the debugger to a big problem
+                    // doesn't tax every iteration. (Inertia/status above are
+                    // cheap and always captured.)
+                    matrix: if want_matrix { aug.kkt_triplets() } else { None },
+                    // The factor is the expensive piece — only when asked.
+                    l_factor: if want_l { aug.l_factor(true) } else { None },
+                }
+            });
+            self.data.borrow_mut().kkt_debug = info;
+        }
+
+        // Sub-iteration checkpoint: the Newton step `δ` (data.delta) and
+        // the applied regularization are now available, before the line
+        // search consumes them.
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::AfterSearchDirection) {
+            return o;
+        }
+
         // 6. Acceptable trial point — run the line search if we have a
         //    primal/dual step on `data.delta`. Wrap in a guard so all
         //    early-return paths (ErrorInStepComputation, InternalError,
@@ -914,12 +1036,22 @@ impl IpoptAlgorithm {
                         // the limit.
                     }
                     Outcome::TinyStep | Outcome::Failed => {
+                        // Debugger stop: the line search rejected the step
+                        // (tiny-step floor or all backtracks failed), before
+                        // we fall into restoration. Lets a "why did the line
+                        // search give up?" inspection happen at the failing
+                        // point distinctly from the restoration entry.
+                        if let Some(o) =
+                            self.debug_stop(crate::debug::Checkpoint::StepRejected)
+                        {
+                            return o;
+                        }
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
                         // `LINE_SEARCH_FAILED` when α drops below
                         // `alpha_min` or all retries reject, which in
                         // turn triggers `ActivateLineSearch` →
                         // restoration.
-                        return self.invoke_restoration();
+                        return self.invoke_restoration_debugged();
                     }
                 }
             }
@@ -941,6 +1073,14 @@ impl IpoptAlgorithm {
 
         // 8. Bound multiplier kappa_sigma reset.
         self.correct_bound_multiplier();
+
+        // Sub-iteration checkpoint: the trial point was accepted; α and
+        // the new iterate are in place (before the loop's iter bookkeeping
+        // and the next `IterStart`).
+        drop(_accept_guard);
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::AfterStep) {
+            return o;
+        }
 
         IterateOutcome::Continue
     }
@@ -1167,6 +1307,8 @@ impl IpoptAlgorithm {
             return IterateOutcome::Terminate(SolverReturn::RestorationFailure);
         };
         resto.set_orig_progress_check(orig_progress_cb);
+        // Forward the shared debugger so it can step the inner solve.
+        resto.set_debug_hook(self.debug.as_ref().map(Rc::clone));
         let mut pd_guard = sd.pd_solver_mut();
         let aug = pd_guard.aug_solver_mut();
         // Audit counters (pounce#12). Increment call count + outer-iter
@@ -1391,10 +1533,13 @@ impl IpoptAlgorithm {
         if !self.fire_intermediate() {
             return SolverReturn::UserRequestedStop;
         }
+        if self.fire_debug(crate::debug::Checkpoint::IterStart) == crate::debug::DebugAction::Stop {
+            return SolverReturn::UserRequestedStop;
+        }
 
-        loop {
+        let result = loop {
             match self.iterate() {
-                IterateOutcome::Terminate(ret) => return ret,
+                IterateOutcome::Terminate(ret) => break ret,
                 IterateOutcome::Continue => {
                     // Source the local counter from `data.iter_count`
                     // each pass so a pre-seeded counter (e.g. the inner
@@ -1409,7 +1554,7 @@ impl IpoptAlgorithm {
                     let mut iter_count: Index = self.data.borrow().iter_count;
                     iter_count += 1;
                     if iter_count >= self.max_iter {
-                        return SolverReturn::MaxiterExceeded;
+                        break SolverReturn::MaxiterExceeded;
                     }
                     self.data.borrow_mut().iter_count = iter_count;
                     // Keep the diagnostics counter in lock-step with
@@ -1434,11 +1579,24 @@ impl IpoptAlgorithm {
                     // `GetIpoptCurrent*` family) see live state for the
                     // duration of the user callback.
                     if !self.fire_intermediate() {
-                        return SolverReturn::UserRequestedStop;
+                        break SolverReturn::UserRequestedStop;
+                    }
+                    if self.fire_debug(crate::debug::Checkpoint::IterStart)
+                        == crate::debug::DebugAction::Stop
+                    {
+                        break SolverReturn::UserRequestedStop;
                     }
                 }
             }
+        };
+
+        // Terminal post-mortem checkpoint. Skipped when the user already
+        // asked to stop (they were just at a prompt); otherwise the
+        // debugger gets a last look at the final/failing iterate.
+        if !matches!(result, SolverReturn::UserRequestedStop) {
+            self.fire_debug_terminal(result);
         }
+        result
     }
 }
 
@@ -1516,7 +1674,7 @@ fn clamp_against_slack(
     Rc::from(out)
 }
 
-fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
+pub(crate) fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
     if let Some(dv) = v
         .as_any()
         .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
@@ -1543,13 +1701,13 @@ fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
     panic!("clamp_against_slack: unsupported Vector kind");
 }
 
-fn flat_read_owned(v: &dyn Vector) -> Vec<Number> {
+pub(crate) fn flat_read_owned(v: &dyn Vector) -> Vec<Number> {
     let mut out = vec![0.0; v.dim() as usize];
     flat_read_into(v, &mut out);
     out
 }
 
-fn flat_write_into(v: &mut dyn Vector, src: &[Number]) {
+pub(crate) fn flat_write_into(v: &mut dyn Vector, src: &[Number]) {
     if let Some(dv) = v
         .as_any_mut()
         .downcast_mut::<pounce_linalg::dense_vector::DenseVector>()
