@@ -8,9 +8,11 @@
 //! the frontier lower bound squeeze together and the search returns a globally
 //! optimal point with a certified optimality gap.
 
+use crate::debug::{fire_tree, BnbDebugState};
 use crate::expr::eval;
 use crate::problem::{ConstraintProvider, GlobalProblem};
 use crate::relax::build_relaxation;
+use pounce_common::debug::{DebugAction, PruneReason, TreeCheckpoint, TreeDebugHook};
 use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_presolve::fbbt::{run_fbbt, FbbtConfig};
@@ -178,6 +180,8 @@ struct Node {
     lo: Vec<f64>,
     hi: Vec<f64>,
     branch: Option<BranchInfo>,
+    /// Depth in the tree (root = 0); tracked for the tree debugger.
+    depth: usize,
 }
 
 // BinaryHeap is a max-heap; invert so the smallest `key` is popped first.
@@ -382,7 +386,7 @@ fn select_most_violation(b: &Bounded, box_tol: f64, n: usize) -> Option<usize> {
 }
 
 /// Build the two child nodes from a branched bounded node.
-fn children(b: &Bounded, k: usize, lb_for_children: f64) -> [Node; 2] {
+fn children(b: &Bounded, k: usize, lb_for_children: f64, parent_depth: usize) -> [Node; 2] {
     let split = crate::branching::split_point(b.relax_pt[k], b.lo[k], b.hi[k]);
     let f_down = (split - b.lo[k]).max(1e-12);
     let f_up = (b.hi[k] - split).max(1e-12);
@@ -390,6 +394,7 @@ fn children(b: &Bounded, k: usize, lb_for_children: f64) -> [Node; 2] {
     left_hi[k] = split;
     let mut right_lo = b.lo.clone();
     right_lo[k] = split;
+    let depth = parent_depth + 1;
     [
         Node {
             key: lb_for_children,
@@ -401,6 +406,7 @@ fn children(b: &Bounded, k: usize, lb_for_children: f64) -> [Node; 2] {
                 frac: f_down,
                 parent_lb: b.node_lb,
             }),
+            depth,
         },
         Node {
             key: lb_for_children,
@@ -412,6 +418,7 @@ fn children(b: &Bounded, k: usize, lb_for_children: f64) -> [Node; 2] {
                 frac: f_up,
                 parent_lb: b.node_lb,
             }),
+            depth,
         },
     ]
 }
@@ -431,15 +438,38 @@ where
     if opts.threads > 1 {
         solve_parallel(prob, opts, &make_backend, opts.threads)
     } else {
-        solve_serial(prob, opts, make_backend)
+        solve_serial(prob, opts, make_backend, None)
     }
 }
 
-/// Deterministic best-first serial driver.
+/// Globally minimize `prob` with an interactive [`TreeDebugHook`] attached:
+/// the hook is fired at each branch-and-bound checkpoint (node selection,
+/// relaxation, incumbent, prune, branch, termination) so a debugger can step
+/// the tree, inspect node boxes / global bounds / the gap, and break.
+///
+/// Always runs the **serial** driver (the parallel node pool is not
+/// debuggable — concurrent nodes have no single well-defined "current node");
+/// apart from the hook the result matches [`solve_global`] at `threads = 1`.
+pub fn solve_global_debug<F>(
+    prob: &GlobalProblem,
+    opts: &GlobalOptions,
+    hook: &mut dyn TreeDebugHook,
+    make_backend: F,
+) -> GlobalSolution
+where
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
+{
+    solve_serial(prob, opts, make_backend, Some(hook))
+}
+
+/// Deterministic best-first serial driver. `hook`, when present, is fired at
+/// each tree checkpoint (node selection, relaxation, incumbent, prune, branch,
+/// termination) and may stop the search.
 fn solve_serial<F>(
     prob: &GlobalProblem,
     opts: &GlobalOptions,
     mut make_backend: F,
+    mut hook: Option<&mut dyn TreeDebugHook>,
 ) -> GlobalSolution
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
@@ -454,6 +484,7 @@ where
         lo: prob.x_lo.clone(),
         hi: prob.x_hi.clone(),
         branch: None,
+        depth: 0,
     });
     let mut pseudo = crate::branching::PseudoCosts::new(n);
     let mut incumbent_x: Vec<f64> = Vec::new();
@@ -462,11 +493,72 @@ where
     let mut nodes = 0usize;
     let node_bytes = estimate_node_bytes(n);
     let mut peak_frontier = heap.len();
+    let mut node_id = 0u64;
 
-    while let Some(node) = heap.pop() {
+    // Single exit: a `break 'search` records the outcome here, the natural
+    // (frontier-exhausted) end fills it after the loop, then `Terminated`
+    // fires once and the solution is built.
+    let mut status = GlobalStatus::Infeasible;
+    let mut final_lb = global_lb;
+    let mut exited = false;
+
+    // Fire a tree checkpoint with the current search state; evaluates to
+    // `true` if the hook asked to stop. A no-op when no hook is attached.
+    macro_rules! fire_cp {
+        ($cp:expr, $lo:expr, $hi:expr, $node_lb:expr, $depth:expr, $bvar:expr, $prune:expr) => {{
+            if hook.is_some() {
+                let mut st = BnbDebugState {
+                    cp: $cp,
+                    node_id,
+                    depth: $depth,
+                    nodes: nodes as u64,
+                    frontier_len: heap.len(),
+                    lo: $lo,
+                    hi: $hi,
+                    node_lb: $node_lb,
+                    global_lb,
+                    incumbent: incumbent_ub.is_finite().then_some(incumbent_ub),
+                    incumbent_x: (!incumbent_x.is_empty()).then_some(incumbent_x.as_slice()),
+                    branch_var: $bvar,
+                    prune_reason: $prune,
+                    status: None,
+                };
+                matches!(fire_tree(&mut hook, &mut st), DebugAction::Stop)
+            } else {
+                false
+            }
+        }};
+    }
+    // Outcome to record when the debugger stops the search early.
+    let stop_status = |ub: f64| {
+        if ub.is_finite() {
+            GlobalStatus::NodeLimit
+        } else {
+            GlobalStatus::Infeasible
+        }
+    };
+
+    'search: while let Some(node) = heap.pop() {
+        node_id += 1;
         if node.key.is_finite() {
             global_lb = node.key;
         }
+
+        if fire_cp!(
+            TreeCheckpoint::NodeSelected,
+            &node.lo,
+            &node.hi,
+            f64::NAN,
+            node.depth,
+            None,
+            None
+        ) {
+            status = stop_status(incumbent_ub);
+            final_lb = global_lb.min(incumbent_ub);
+            exited = true;
+            break 'search;
+        }
+
         // Best-first: this node's key is the frontier minimum, so once it meets
         // the incumbent nothing unexplored can beat it.
         if incumbent_ub.is_finite() && gap_ok(node.key, incumbent_ub, opts) {
@@ -475,31 +567,20 @@ where
             } else {
                 global_lb
             };
-            return GlobalSolution {
-                status: GlobalStatus::Optimal,
-                x: incumbent_x,
-                objective: incumbent_ub,
-                lower_bound: lb.min(incumbent_ub),
-                nodes,
-                peak_frontier,
-                peak_memory_bytes: peak_frontier * node_bytes,
-            };
+            status = GlobalStatus::Optimal;
+            final_lb = lb.min(incumbent_ub);
+            exited = true;
+            break 'search;
         }
         if nodes >= opts.max_nodes {
-            let status = if incumbent_ub.is_finite() && (incumbent_ub - global_lb) <= opts.abs_gap {
+            status = if incumbent_ub.is_finite() && (incumbent_ub - global_lb) <= opts.abs_gap {
                 GlobalStatus::Optimal
             } else {
                 GlobalStatus::NodeLimit
             };
-            return GlobalSolution {
-                status,
-                x: incumbent_x,
-                objective: incumbent_ub,
-                lower_bound: global_lb.min(incumbent_ub),
-                nodes,
-                peak_frontier,
-                peak_memory_bytes: peak_frontier * node_bytes,
-            };
+            final_lb = global_lb.min(incumbent_ub);
+            exited = true;
+            break 'search;
         }
         nodes += 1;
 
@@ -516,6 +597,20 @@ where
             opts.parallel,
             &make_backend,
         ) else {
+            if fire_cp!(
+                TreeCheckpoint::NodePruned,
+                &node.lo,
+                &node.hi,
+                f64::NAN,
+                node.depth,
+                None,
+                Some(PruneReason::Infeasible)
+            ) {
+                status = stop_status(incumbent_ub);
+                final_lb = global_lb.min(incumbent_ub);
+                exited = true;
+                break 'search;
+            }
             continue;
         };
 
@@ -523,13 +618,57 @@ where
         if let Some(bi) = node.branch {
             pseudo.update(bi.var, bi.down, b.node_lb - bi.parent_lb, bi.frac);
         }
+
+        if fire_cp!(
+            TreeCheckpoint::RelaxationSolved,
+            &b.lo,
+            &b.hi,
+            b.node_lb,
+            node.depth,
+            None,
+            None
+        ) {
+            status = stop_status(incumbent_ub);
+            final_lb = global_lb.min(incumbent_ub);
+            exited = true;
+            break 'search;
+        }
+
         if let Some((x, obj)) = &b.incumbent {
             if *obj < incumbent_ub {
                 incumbent_ub = *obj;
                 incumbent_x = x.clone();
+                if fire_cp!(
+                    TreeCheckpoint::IncumbentFound,
+                    &b.lo,
+                    &b.hi,
+                    b.node_lb,
+                    node.depth,
+                    None,
+                    None
+                ) {
+                    status = stop_status(incumbent_ub);
+                    final_lb = global_lb.min(incumbent_ub);
+                    exited = true;
+                    break 'search;
+                }
             }
         }
         if incumbent_ub.is_finite() && gap_ok(b.node_lb, incumbent_ub, opts) {
+            if fire_cp!(
+                TreeCheckpoint::NodePruned,
+                &b.lo,
+                &b.hi,
+                b.node_lb,
+                node.depth,
+                None,
+                Some(PruneReason::BoundDominated)
+            ) {
+                status = stop_status(incumbent_ub);
+                final_lb = global_lb.min(incumbent_ub);
+                exited = true;
+                break 'search;
+            }
             continue;
         }
 
@@ -538,6 +677,20 @@ where
         if width <= opts.box_tol
             || (incumbent_ub.is_finite() && gap_ok(lb_for_children, incumbent_ub, opts))
         {
+            if fire_cp!(
+                TreeCheckpoint::NodePruned,
+                &b.lo,
+                &b.hi,
+                b.node_lb,
+                node.depth,
+                None,
+                Some(PruneReason::Leaf)
+            ) {
+                status = stop_status(incumbent_ub);
+                final_lb = global_lb.min(incumbent_ub);
+                exited = true;
+                break 'search;
+            }
             continue;
         }
         let k = match opts.branching {
@@ -561,33 +714,68 @@ where
             )
             .unwrap_or(widest_k),
         };
-        for child in children(&b, k, lb_for_children) {
+        if fire_cp!(
+            TreeCheckpoint::Branched,
+            &b.lo,
+            &b.hi,
+            b.node_lb,
+            node.depth,
+            Some(k),
+            None
+        ) {
+            status = stop_status(incumbent_ub);
+            final_lb = global_lb.min(incumbent_ub);
+            exited = true;
+            break 'search;
+        }
+        for child in children(&b, k, lb_for_children, node.depth) {
             heap.push(child);
         }
         peak_frontier = peak_frontier.max(heap.len());
     }
 
-    // Frontier exhausted: everything was pruned or shrunk to a leaf.
-    if incumbent_ub.is_finite() {
-        GlobalSolution {
-            status: GlobalStatus::Optimal,
-            x: incumbent_x,
-            objective: incumbent_ub,
-            lower_bound: incumbent_ub,
-            nodes,
-            peak_frontier,
-            peak_memory_bytes: peak_frontier * node_bytes,
+    // Natural exit (frontier exhausted): everything was pruned or hit a leaf.
+    if !exited {
+        if incumbent_ub.is_finite() {
+            status = GlobalStatus::Optimal;
+            final_lb = incumbent_ub;
+        } else {
+            status = GlobalStatus::Infeasible;
+            final_lb = global_lb;
         }
-    } else {
-        GlobalSolution {
-            status: GlobalStatus::Infeasible,
-            x: Vec::new(),
-            objective: f64::INFINITY,
-            lower_bound: global_lb,
-            nodes,
-            peak_frontier,
-            peak_memory_bytes: peak_frontier * node_bytes,
-        }
+    }
+
+    // Post-mortem tree checkpoint (the returned action is ignored).
+    if hook.is_some() {
+        let status_str = format!("{status:?}");
+        let empty: [f64; 0] = [];
+        let mut st = BnbDebugState {
+            cp: TreeCheckpoint::Terminated,
+            node_id,
+            depth: 0,
+            nodes: nodes as u64,
+            frontier_len: heap.len(),
+            lo: &empty,
+            hi: &empty,
+            node_lb: f64::NAN,
+            global_lb: final_lb,
+            incumbent: incumbent_ub.is_finite().then_some(incumbent_ub),
+            incumbent_x: (!incumbent_x.is_empty()).then_some(incumbent_x.as_slice()),
+            branch_var: None,
+            prune_reason: None,
+            status: Some(&status_str),
+        };
+        let _ = fire_tree(&mut hook, &mut st);
+    }
+
+    GlobalSolution {
+        status,
+        x: incumbent_x,
+        objective: incumbent_ub,
+        lower_bound: final_lb,
+        nodes,
+        peak_frontier,
+        peak_memory_bytes: peak_frontier * node_bytes,
     }
 }
 
@@ -635,6 +823,7 @@ where
         lo: prob.x_lo.clone(),
         hi: prob.x_hi.clone(),
         branch: None,
+        depth: 0,
     });
     let shared = Mutex::new(Shared {
         heap: root_heap,
@@ -726,7 +915,7 @@ where
                             if width > opts.box_tol && !dominated {
                                 let k =
                                     select_most_violation(&b, opts.box_tol, n).unwrap_or(widest_k);
-                                for child in children(&b, k, lb_for_children) {
+                                for child in children(&b, k, lb_for_children, node.depth) {
                                     s.heap.push(child);
                                 }
                                 s.peak_frontier = s.peak_frontier.max(s.heap.len());

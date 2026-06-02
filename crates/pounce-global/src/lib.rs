@@ -38,6 +38,7 @@ mod ad;
 mod alphabb;
 pub mod bnb;
 mod branching;
+pub(crate) mod debug;
 mod envelope;
 pub mod expr;
 mod nlp;
@@ -47,7 +48,8 @@ mod relax;
 mod rlt;
 
 pub use bnb::{
-    estimate_node_bytes, solve_global, BranchRule, GlobalOptions, GlobalSolution, GlobalStatus,
+    estimate_node_bytes, solve_global, solve_global_debug, BranchRule, GlobalOptions,
+    GlobalSolution, GlobalStatus,
 };
 pub use expr::Expr;
 pub use problem::{Constraint, GlobalProblem};
