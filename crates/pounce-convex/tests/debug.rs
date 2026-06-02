@@ -271,6 +271,51 @@ fn convex_debugger_supports_set_and_rewind() {
     assert!((sol.x[0] - 1.0).abs() < 1e-6 && (sol.x[1] - 1.0).abs() < 1e-6);
 }
 
+/// `solve_socp_ipm_debug` is the umbrella conic debug entry used by the
+/// `pounce_cblib --debug` CLI path: exp/power cones route to the
+/// non-symmetric driver, all others to the direct symmetric IPM. Here an
+/// exp-cone epigraph (optimum z = e) exercises the routing.
+#[test]
+fn solve_socp_ipm_debug_routes_and_fires() {
+    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, ConeSpec};
+
+    let e = std::f64::consts::E;
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![],
+        c: vec![0.0, 0.0, 1.0],
+        a: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+        b: vec![1.0, 1.0],
+        g: vec![
+            Triplet::new(0, 0, -1.0),
+            Triplet::new(1, 1, -1.0),
+            Triplet::new(2, 2, -1.0),
+        ],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let cones = [ConeSpec::Exponential];
+    let opts = QpOptions::default();
+
+    let mut rec = Recorder::default();
+    let sol = solve_socp_ipm_debug(&prob, &cones, &opts, &mut rec, backend);
+
+    assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
+    assert!((sol.x[2] - e).abs() < 1e-5, "z={} vs e", sol.x[2]);
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::IterStart),
+        "IterStart"
+    );
+    assert!(rec.saw_tau, "exp cone routes to HSDE → tau exposed");
+
+    let plain = solve_socp_ipm(&prob, &cones, &opts, backend);
+    assert_eq!(plain.status, sol.status);
+    for (a, b) in plain.x.iter().zip(&sol.x) {
+        assert!((a - b).abs() < 1e-9, "x differs: {a} vs {b}");
+    }
+}
+
 /// A hook that requests `Stop` at the first checkpoint halts the solve
 /// short of convergence (the debugger `quit` path).
 #[test]

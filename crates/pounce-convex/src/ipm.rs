@@ -256,7 +256,7 @@ where
         );
     }
     if has_nonsym {
-        return solve_nonsym(prob, cones, opts, make_backend);
+        return solve_nonsym(prob, cones, opts, make_backend, None);
     }
     // Sparsity: split any block-diagonal PSD cone into independent smaller
     // cones (one dense O(m²) KKT block → several small ones, exploited by the
@@ -274,6 +274,74 @@ where
         return remap_decomposed_z(sol1, &row_map, prob.m_ineq());
     }
     solve_socp_symmetric(prob, cones, opts, make_backend)
+}
+
+/// Debug-enabled [`solve_socp_ipm`]: fires the interactive [`DebugHook`] at
+/// each interior-point checkpoint. Exponential / power cones run on the
+/// non-symmetric HSDE driver; all other cones (orthant / SOC / PSD) run on
+/// the direct symmetric IPM. Under the debugger a PSD cone is solved
+/// *directly* (no chordal decomposition) so the debugged `x`/`s`/`y`/`z`
+/// blocks correspond to the user's problem; the solution is unchanged.
+pub fn solve_socp_ipm_debug<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    hook: &mut dyn DebugHook,
+    mut make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if !cone_dims_cover(cones, prob.m_ineq()) {
+        return failed_solution(
+            prob,
+            vec![0.0; prob.n],
+            vec![0.0; prob.m_eq()],
+            vec![0.0; prob.m_ineq()],
+            0,
+        );
+    }
+    let has_nonsym = cones
+        .iter()
+        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)));
+    let has_psd = cones.iter().any(|c| matches!(c, ConeSpec::Psd(_)));
+    if has_nonsym && has_psd {
+        return failed_solution(
+            prob,
+            vec![0.0; prob.n],
+            vec![0.0; prob.m_eq()],
+            vec![0.0; prob.m_ineq()],
+            0,
+        );
+    }
+    if has_nonsym {
+        return solve_nonsym(prob, cones, opts, make_backend, Some(hook));
+    }
+    // Symmetric cones: debug the direct IPM (build the factorization and run
+    // the core loop with the hook), bound-expanded as in
+    // `solve_socp_symmetric`. PSD is solved directly here (no decomposition).
+    let run = |p: &QpProblem, cone: &CompositeCone, mk: &mut F, hook: &mut dyn DebugHook| {
+        match build_factorization(p, cone, opts, mk) {
+            Ok((kkt, mut fact)) => run_ipm(p, cone, opts, &kkt, &mut fact, None, Some(hook)),
+            Err(()) => failed_solution(
+                p,
+                vec![0.0; p.n],
+                vec![0.0; p.m_eq()],
+                vec![1.0; p.m_ineq()],
+                0,
+            ),
+        }
+    };
+    if !prob.has_bounds() {
+        let cone = CompositeCone::from_specs(cones);
+        return run(prob, &cone, &mut make_backend, hook);
+    }
+    let (expanded, bound_rows) = expand_bounds(prob);
+    let mut specs = cones.to_vec();
+    specs.push(ConeSpec::Nonneg(bound_rows.len()));
+    let cone = CompositeCone::from_specs(&specs);
+    let sol = run(&expanded, &cone, &mut make_backend, hook);
+    split_bound_duals(prob, &bound_rows, sol)
 }
 
 /// The symmetric-cone solve (orthant / SOC / PSD): expand finite bounds into
@@ -706,11 +774,12 @@ fn solve_nonsym<F>(
     cones: &[ConeSpec],
     opts: &QpOptions,
     make_backend: F,
+    hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    use crate::hsde_nonsym::{solve_conic_hsde_nonsym, NsBlock};
+    use crate::hsde_nonsym::{solve_conic_hsde_nonsym, solve_conic_hsde_nonsym_debug, NsBlock};
 
     fn blocks_of(cones: &[ConeSpec], extra_orthant: usize) -> Vec<NsBlock> {
         let mut blocks = Vec::with_capacity(cones.len() + 1);
@@ -736,11 +805,17 @@ where
 
     if !prob.has_bounds() {
         let blocks = blocks_of(cones, 0);
-        return solve_conic_hsde_nonsym(prob, &blocks, opts, make_backend);
+        return match hook {
+            Some(h) => solve_conic_hsde_nonsym_debug(prob, &blocks, opts, h, make_backend),
+            None => solve_conic_hsde_nonsym(prob, &blocks, opts, make_backend),
+        };
     }
     let (expanded, bound_rows) = expand_bounds(prob);
     let blocks = blocks_of(cones, bound_rows.len());
-    let sol = solve_conic_hsde_nonsym(&expanded, &blocks, opts, make_backend);
+    let sol = match hook {
+        Some(h) => solve_conic_hsde_nonsym_debug(&expanded, &blocks, opts, h, make_backend),
+        None => solve_conic_hsde_nonsym(&expanded, &blocks, opts, make_backend),
+    };
     split_bound_duals(prob, &bound_rows, sol)
 }
 

@@ -43,6 +43,8 @@ struct Args {
     json_output: Option<PathBuf>,
     detail: ReportDetail,
     max_iter: usize,
+    debug: Option<pounce_cli::cli::DebugMode>,
+    debug_script: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,9 +52,18 @@ fn parse_args() -> Result<Args, String> {
     let mut json_output = None;
     let mut detail = ReportDetail::Summary;
     let mut max_iter = 500;
+    let mut debug = None;
+    let mut debug_script = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--debug" => debug = Some(pounce_cli::cli::DebugMode::Repl),
+            "--debug-json" => debug = Some(pounce_cli::cli::DebugMode::Json),
+            "--debug-script" => {
+                debug_script = Some(PathBuf::from(
+                    it.next().ok_or("--debug-script needs a PATH")?,
+                ));
+            }
             "--json-output" => {
                 json_output = Some(PathBuf::from(
                     it.next().ok_or("--json-output needs a PATH")?,
@@ -83,6 +94,8 @@ fn parse_args() -> Result<Args, String> {
         json_output,
         detail,
         max_iter,
+        debug,
+        debug_script,
     })
 }
 
@@ -124,7 +137,19 @@ fn main() -> ExitCode {
         ..QpOptions::default()
     };
     let t0 = std::time::Instant::now();
-    let sol = solve_socp_ipm(&cp.prob, &cp.cones, &opts, backend);
+    let sol = if let Some(mode) = args.debug {
+        // Interactive debug of the conic solve (exp/power → non-symmetric
+        // HSDE; orthant/SOC/PSD → direct symmetric IPM). A `--debug-script`
+        // drives it non-interactively.
+        use pounce_cli::debug_repl::SolverDebugger;
+        let mut dbg = SolverDebugger::new(mode, None);
+        if let Some(p) = &args.debug_script {
+            dbg = dbg.with_script(p.to_string_lossy().into_owned());
+        }
+        pounce_convex::solve_socp_ipm_debug(&cp.prob, &cp.cones, &opts, &mut dbg, backend)
+    } else {
+        solve_socp_ipm(&cp.prob, &cp.cones, &opts, backend)
+    };
     let elapsed = t0.elapsed().as_secs_f64();
     let obj = cp.cbf_objective(sol.obj, model.minimize);
     let status = qp_status_to_ars(sol.status);
