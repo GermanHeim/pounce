@@ -1,20 +1,32 @@
 # Introduction
 
-POUNCE is a pure-Rust port of the [Ipopt](https://github.com/coin-or/Ipopt)
-interior-point nonlinear programming solver. It solves problems of the
-form
+POUNCE is a pure-Rust interior-point optimization solver. Its
+nonlinear-programming core began as a faithful port of the
+[Ipopt](https://github.com/coin-or/Ipopt) filter line-search method —
+the algorithm, console output, and option semantics follow upstream Ipopt
+closely enough that anyone used to reading `ipopt` logs can drop in
+`pounce` without relearning where the numbers live — and it has since grown
+into a *family* of solvers sharing one numerical backbone:
 
-```text
-min  f(x)
-s.t. g_L <= g(x) <= g_U
-     x_L <=   x  <= x_U
-```
+- **Nonlinear programming** — the filter line-search interior-point method
+  (the Ipopt port) plus an active-set SQP path, for general smooth problems
 
-where `f` and `g` are twice-continuously-differentiable.
+  ```text
+  min  f(x)
+  s.t. g_L <= g(x) <= g_U
+       x_L <=   x  <= x_U
+  ```
 
-The algorithm, console output, and option semantics follow upstream
-Ipopt closely enough that anyone used to reading `ipopt` logs can drop
-in `pounce` without relearning where the numbers live.
+  where `f` and `g` are twice-continuously-differentiable.
+- **Conic & quadratic** — LP, convex QP, second-order (SOCP),
+  positive-semidefinite (SDP), and the non-symmetric exponential and power
+  cones, each solved to the global optimum.
+- **Global optimization** — certified global optima for nonconvex problems
+  via SOS / Lasserre relaxations (polynomials) and spatial branch-and-bound
+  (`pounce-global`, general factorable NLPs).
+
+See [Choosing a Solver](choosing-a-solver.md) for which solver fits which
+problem.
 
 ## Pure Rust by default
 
@@ -38,6 +50,14 @@ presolve, and the active-set SQP path are all wired in and available
 behind option keys. Existing PyIpopt / cyipopt / JuMP / AMPL clients
 link against `libpounce_cinterface` in place of `libipopt`
 unchanged.
+
+The conic and global solvers are wired end-to-end alongside the NLP
+core: the convex interior-point solver (`pounce-convex`) handles
+LP / QP, SOCP, exponential / power cones, and small SDPs — with a Conic
+Benchmark Format (`.cbf`) reader cross-checked against the CBLIB tier —
+while the global path adds SOS / Lasserre polynomial optimization and a
+deterministic spatial branch-and-bound solver (`pounce-global`). All are
+reachable from the CLI, the Python package, and the JSON solve report.
 
 ## License
 

@@ -1,12 +1,16 @@
-"""Python interface to POUNCE — a pure-Rust port of Ipopt.
+"""Python interface to POUNCE — a pure-Rust interior-point optimization solver.
 
-The public surface is intentionally cyipopt-compatible: Problem class
-construction, ``add_option``, and ``solve`` accept the same arguments
-and return the same shape of result. A scipy-style ``minimize`` facade
-is also provided. JAX integration (autodiff-built derivatives, implicit
-differentiation through ``x*(p)``) lives in the ``pounce.jax``
-submodule and is only imported on demand to avoid pulling in JAX when
-it is not installed.
+POUNCE began as a port of Ipopt and has grown into a family of solvers
+sharing one numerical backbone. The nonlinear-programming surface is
+intentionally cyipopt-compatible: Problem class construction,
+``add_option``, and ``solve`` accept the same arguments and return the
+same shape of result, with a scipy-style ``minimize`` facade alongside.
+Convex and conic programs (LP, QP, SOCP, exponential / power cones, small
+SDP) are exposed through ``solve_qp`` / ``solve_socp``; polynomial global
+optimization through ``sos_minimize``. JAX integration (autodiff-built
+derivatives, implicit differentiation through ``x*(p)``) lives in the
+``pounce.jax`` submodule and is only imported on demand to avoid pulling
+in JAX when it is not installed.
 """
 
 from ._pounce import (

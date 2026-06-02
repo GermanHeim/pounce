@@ -1,10 +1,10 @@
 # Acknowledgments
 
-POUNCE is a Rust port of [Ipopt](https://github.com/coin-or/Ipopt),
-the interior-point nonlinear programming solver by Andreas Wächter,
-Lorenz T. Biegler, and the COIN-OR community. Its algorithm, console
-output, and option semantics are modeled directly on that codebase,
-which is released under the EPL-2.0.
+POUNCE's nonlinear-programming core is a Rust port of
+[Ipopt](https://github.com/coin-or/Ipopt), the interior-point nonlinear
+programming solver by Andreas Wächter, Lorenz T. Biegler, and the COIN-OR
+community. Its algorithm, console output, and option semantics are modeled
+directly on that codebase, which is released under the EPL-2.0.
 
 It is a sibling of [ripopt](https://github.com/jkitchin/ripopt), an
 earlier memory-safe interior-point NLP optimizer in Rust by the same

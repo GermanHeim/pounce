@@ -10,7 +10,7 @@ build-backend = "maturin"
 # `python-source = "."` keep the package folder named `pounce`.
 name = "pounce-solver"
 version = "0.3.1.dev0"
-description = "Python interface to POUNCE — a pure-Rust port of the Ipopt interior-point NLP solver. cyipopt-style Problem class, scipy-style minimize() facade, and JAX-friendly autodiff / implicit differentiation."
+description = "Python interface to POUNCE — a pure-Rust interior-point optimization solver for nonlinear, conic (LP/QP/SOCP/SDP/exp/power), and global problems (NLP core ported from Ipopt). cyipopt-style Problem class, scipy-style minimize() facade, solve_qp/solve_socp/sos_minimize, and JAX-friendly autodiff / implicit differentiation."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "EPL-2.0" }

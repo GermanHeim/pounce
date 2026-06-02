@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-convex"
-version = "0.3.0"
+version = "0.3.1-dev"
 dependencies = [
  "pounce-common",
  "pounce-feral",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-global"
-version = "0.3.0"
+version = "0.3.1-dev"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",

@@ -4014,8 +4014,9 @@ fn build_ask_prompt(ctx: &DebugCtx, question: &str) -> String {
     use std::fmt::Write as _;
     let mut p = String::new();
     p.push_str(
-        "You are helping debug a paused run of POUNCE, a pure-Rust port of the Ipopt \
-         interior-point NLP solver. The solve is stopped at a debugger checkpoint. \
+        "You are helping debug a paused run of POUNCE, a pure-Rust interior-point \
+         optimization solver whose NLP core is ported from Ipopt. The solve is \
+         stopped at a debugger checkpoint. \
          Use the state below to answer concisely and suggest concrete next steps \
          (options to try, what to inspect). State:\n\n",
     );
