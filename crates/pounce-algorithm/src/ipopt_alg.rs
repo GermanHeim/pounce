@@ -928,7 +928,11 @@ impl IpoptAlgorithm {
                     // armed it, so attaching the debugger to a big problem
                     // doesn't tax every iteration. (Inertia/status above are
                     // cheap and always captured.)
-                    matrix: if want_matrix { aug.kkt_triplets() } else { None },
+                    matrix: if want_matrix {
+                        aug.kkt_triplets()
+                    } else {
+                        None
+                    },
                     // The factor is the expensive piece — only when asked.
                     l_factor: if want_l { aug.l_factor(true) } else { None },
                 }
@@ -1041,9 +1045,7 @@ impl IpoptAlgorithm {
                         // we fall into restoration. Lets a "why did the line
                         // search give up?" inspection happen at the failing
                         // point distinctly from the restoration entry.
-                        if let Some(o) =
-                            self.debug_stop(crate::debug::Checkpoint::StepRejected)
-                        {
+                        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::StepRejected) {
                             return o;
                         }
                         // Upstream `IpBacktrackingLineSearch.cpp` raises

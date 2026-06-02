@@ -653,11 +653,17 @@ mod tests {
         // protocol-breaking change rather than a silent one.
         assert_eq!(Checkpoint::IterStart.as_str(), "iter_start");
         assert_eq!(Checkpoint::AfterBarrierUpdate.as_str(), "after_mu");
-        assert_eq!(Checkpoint::AfterSearchDirection.as_str(), "after_search_dir");
+        assert_eq!(
+            Checkpoint::AfterSearchDirection.as_str(),
+            "after_search_dir"
+        );
         assert_eq!(Checkpoint::AfterStep.as_str(), "after_step");
         assert_eq!(Checkpoint::StepRejected.as_str(), "step_rejected");
         assert_eq!(Checkpoint::PreRestoration.as_str(), "pre_restoration_entry");
-        assert_eq!(Checkpoint::PostRestoration.as_str(), "post_restoration_exit");
+        assert_eq!(
+            Checkpoint::PostRestoration.as_str(),
+            "post_restoration_exit"
+        );
         assert_eq!(Checkpoint::Terminated.as_str(), "terminated");
     }
 
