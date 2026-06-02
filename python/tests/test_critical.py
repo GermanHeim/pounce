@@ -104,7 +104,6 @@ def test_muller_brown_reaction_barriers():
     states = pounce.find_minima(
         V, [-0.5, 1.4], method="flooding", jac=grad, hess=hess, bounds=bounds,
         n_minima=3, max_solves=120, patience=40, dedup=1e-2, seed=0,
-        strategy_kw={"sigma": 0.4, "amplitude": 150.0},
         options={"print_level": 0, "tol": 1e-8},
     )
     assert len(states) == 3
@@ -154,7 +153,7 @@ def test_reaction_network_muller_brown():
     net = pounce.reaction_network(
         V, [-0.5, 1.4], grad=grad, hess=hess, bounds=[(-1.5, 1.2), (-0.5, 2.2)],
         n_states=3, n_transition_states=2, dedup=1e-2, seed=0,
-        minima_kw={"sigma": 0.4, "amplitude": 150.0}, saddle_kw={"max_step": 0.05},
+        saddle_kw={"max_step": 0.05},
         options={"print_level": 0, "tol": 1e-8},
     )
     assert len(net.minima) == 3

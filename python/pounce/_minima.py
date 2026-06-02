@@ -57,22 +57,43 @@ __all__ = ["find_minima", "MinimaResult"]
 def _gauss_terms(x, centers, amplitude, sigma):
     """Σ A·exp(−½‖(x−c)/σ‖²) and its gradient / Hessian contributions.
 
-    ``sigma`` is a per-dimension width vector (anisotropic Gaussian), so the
-    bump is scaled independently in each variable.
+    ``sigma`` is a per-dimension width vector (anisotropic Gaussian).
+    ``amplitude`` may be a scalar (shared) or one value per center.
     """
     n = x.size
     val = 0.0
     grad = np.zeros(n)
     hess = np.zeros((n, n))
     m = 1.0 / (np.asarray(sigma, float) ** 2)   # per-dimension 1/σ²
-    for c in centers:
+    amps = np.atleast_1d(np.asarray(amplitude, float))
+    if amps.size == 1:
+        amps = np.full(len(centers), float(amps[0]))
+    for c, A in zip(centers, amps):
         d = x - c
-        g = amplitude * np.exp(-0.5 * float(np.sum(m * d * d)))
+        g = A * np.exp(-0.5 * float(np.sum(m * d * d)))
         md = m * d
         val += g
         grad += -g * md
         hess += g * (np.outer(md, md) - np.diag(m))
     return val, grad, hess
+
+
+def _auto_amplitude(hess, x, sigma, margin, floor=1e-12):
+    """Curvature-based bump height for escaping the minimum at ``x``.
+
+    The bump turns the minimum into a saddle once its height exceeds the
+    smallest generalized eigenvalue ``μ_min`` of ``H v = μ·diag(1/σ²) v`` —
+    i.e. of ``S = diag(σ)·H·diag(σ)``. Returns ``margin · μ_min`` (a few ×
+    over threshold), or ``None`` when no Hessian is available.
+    """
+    if hess is None:
+        return None
+    H = np.asarray(hess(x), float)
+    H = 0.5 * (H + H.T)
+    s = np.asarray(sigma, float)
+    S = s[:, None] * H * s[None, :]
+    mu_min = float(np.linalg.eigvalsh(S)[0])
+    return margin * max(mu_min, floor)
 
 
 def _pole_terms(x, centers, eta, power, soft, length):
@@ -373,19 +394,47 @@ def _run_flooding(ctx, state, x0, rng, kw):
     L, has_box = kw["_L"], kw["_has_box"]
     sigma = _resolve_lengths(kw.get("sigma", "auto"), L, has_box,
                              frac=kw.get("sigma_frac", 0.1), fallback=0.5)
-    amplitude = kw.get("amplitude", 2.0)
+    amp_spec = kw.get("amplitude", "auto")
+    margin = kw.get("amp_margin", 2.0)
+    bump_factor = kw.get("amp_bump", 3.0)
+    bump_cap = kw.get("amp_bump_cap", 1e3)
+    fallback_amp = kw.get("amp_fallback", 2.0)
     jitter = kw.get("restart_jitter", 0.5)
     sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
+
+    base_amp: list[float] = []   # per-center height
+    mult: list[float] = []       # per-center adaptive multiplier
     start = x0.copy()
+    last_center = None           # the basin we are trying to escape from
+    fails = 0
     while True:
         centers = list(state.archive.centers)
-        kernel = lambda x: _gauss_terms(x, centers, amplitude, sigma)
+        while len(base_amp) < len(centers):
+            k = len(base_amp)
+            if amp_spec == "auto":
+                a = _auto_amplitude(ctx.hess, centers[k], sigma, margin)
+                base_amp.append(fallback_amp if a is None else a)
+            else:
+                base_amp.append(float(amp_spec))
+            mult.append(1.0)
+        eff = [base_amp[k] * mult[k] for k in range(len(centers))]
+        kernel = lambda x, _c=centers, _a=eff: _gauss_terms(x, _c, _a, sigma)
         f2, j2, h2 = _augment(ctx, kernel)
         res = ctx.solve(f2, start, j2, h2)
         if state.consider(res.x, res.success, polish=bool(centers)):
             start = state.archive.xs[-1].copy()
+            last_center = len(state.archive.xs) - 1
+            fails = 0
+        elif last_center is not None and mult[last_center] < bump_cap and fails < 8:
+            # Under-flooded the basin we started from: raise its bump and retry.
+            mult[last_center] *= bump_factor
+            start = centers[last_center] + 0.05 * sigma * rng.standard_normal(x0.shape)
+            fails += 1
+            continue
         else:
             start = _sample(ctx.bounds, x0, rng, jitter, sobol)
+            last_center = None
+            fails = 0
 
 
 def _run_deflation(ctx, state, x0, rng, kw):
@@ -572,10 +621,14 @@ def find_minima(
         ``"auto"`` by default** — sized to a fraction (``sigma_frac`` /
         ``length_frac``, default 0.1) of each variable's bounds range, so
         disparate variable scales are handled automatically. Override with a
-        scalar (isotropic) or a length-``n`` vector. Examples:
-        ``sigma``/``amplitude`` (flooding), ``eta``/``power``/``length``
-        (deflation), ``step``/``temperature`` (basinhopping),
-        ``samples_per_round``/``gamma`` (mlsl).
+        scalar (isotropic) or a length-``n`` vector. The flooding
+        ``amplitude`` is also ``"auto"`` by default — set per minimum from
+        the local curvature (``amp_margin × μ_min``, the well-tempered
+        escape height) and raised adaptively if the solver returns to a
+        flooded basin — so no manual energy scale is needed (give a scalar
+        to override). Examples: ``sigma``/``amplitude`` (flooding),
+        ``eta``/``power``/``length`` (deflation), ``step``/``temperature``
+        (basinhopping), ``samples_per_round``/``gamma`` (mlsl).
     distance
         Custom metric ``d(a, b) -> float`` for dedup (e.g. periodic boxes).
         Defaults to Euclidean distance in the per-dimension scaled space.

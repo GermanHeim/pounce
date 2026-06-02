@@ -67,11 +67,13 @@ BOUNDS = [(-1.5, 1.2), (-0.5, 2.2)]
 
 
 def main():
-    # The whole reaction network in one call.
+    # The whole reaction network in one call. Bump widths and heights are
+    # "auto" (per-dimension widths from the bounds; amplitude from the local
+    # curvature), so no manual sigma/amplitude tuning is needed even though
+    # the energy scale here is ~150.
     net = pounce.reaction_network(
         V, [-0.5, 1.4], grad=grad, hess=hess, bounds=BOUNDS,
         n_states=3, n_transition_states=2, dedup=1e-2, seed=0,
-        minima_kw={"sigma": 0.4, "amplitude": 150.0},
         saddle_kw={"max_step": 0.05},
         options={"print_level": 0, "tol": 1e-8},
     )

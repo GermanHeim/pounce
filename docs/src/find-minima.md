@@ -61,11 +61,16 @@ taller than the basin's curvature — precisely when
 basin. The bump is smooth with an analytic gradient and Hessian, so the
 flooded problem is as solvable as the original.
 
-* **Knobs** (`strategy_kw`): `sigma` (width) and `amplitude` (taller than a
-  basin is deep). `sigma` is **per-dimension and `"auto"` by default** —
-  sized to a fraction (`sigma_frac`, default 0.1) of each variable's bounds
-  range, so variables on very different scales are handled automatically.
-  Override with a scalar (isotropic) or a length-`n` vector.
+* **Knobs** (`strategy_kw`): `sigma` (width) and `amplitude` (height). Both
+  are **`"auto"` by default**. `sigma` is per-dimension — a fraction
+  (`sigma_frac`, default 0.1) of each variable's bounds range — so variables
+  on very different scales are handled automatically. `amplitude` is set
+  per minimum from the local curvature (`amp_margin × μ_min`, the
+  well-tempered escape height, where `μ_min` is the smallest generalized
+  eigenvalue of the Hessian against the bump metric) and raised adaptively
+  if the solver returns to a flooded basin — so **no manual energy scale is
+  needed** (a steep PES whose wells are ~150 deep needs no `amplitude=150`).
+  Override either with a scalar or a length-`n` vector (`sigma`).
 * **Best for** broad enumeration of all minima of a smooth objective.
 * **References.** Ge, R. "A filled function method for finding a global
   minimizer of a function of several variables." *Mathematical Programming*

@@ -39,7 +39,7 @@ how they leave a minimum once found. Use this page to pick one.
 
 | method | key knobs | rule of thumb |
 |---|---|---|
-| `flooding` | `sigma`, `amplitude` | `sigma` is per-dimension and `"auto"` (a fraction of each variable's bounds range) by default — leave it; `amplitude` a few × basin depth |
+| `flooding` | `sigma`, `amplitude` | both `"auto"` by default (`sigma` per-dimension from the bounds; `amplitude` per-minimum from local curvature) — leave them; override only to force a specific width/height |
 | `deflation` | `eta`, `power`, `soft`, `length` | `length` is per-dimension `"auto"` by default; raise `eta` if the solver returns to a known minimum |
 | `tunneling` | `eta`, `power` | increase `patience`; it descends in a chain |
 | `multistart` | `sobol` | leave Sobol on for coverage |

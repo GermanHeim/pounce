@@ -126,3 +126,41 @@ def test_scaled_dedup_distinguishes_small_scale_minima():
         fun, [0.05, 0.0], dedup=0.5,
         distance=lambda a, b: float(np.linalg.norm(a - b)), **kw)
     assert len(r_raw) == 1
+
+
+def test_auto_amplitude_from_curvature():
+    """amp = margin × smallest generalized eigenvalue of (H, diag(1/σ²))."""
+    from pounce._minima import _auto_amplitude
+    hess = lambda x: np.diag([1.0, 100.0])
+    x = np.zeros(2)
+    # Isotropic σ: smallest eigenvalue is 1, so amp = margin·1.
+    assert _auto_amplitude(hess, x, np.array([1.0, 1.0]), margin=2.0) == pytest.approx(2.0)
+    # Narrow σ in the stiff direction rebalances the metric (S = diag([1,1])).
+    assert _auto_amplitude(hess, x, np.array([1.0, 0.1]), margin=2.0) == pytest.approx(2.0)
+    # No Hessian -> cannot derive an amplitude.
+    assert _auto_amplitude(None, x, np.array([1.0, 1.0]), margin=2.0) is None
+
+
+def test_auto_amplitude_handles_unknown_energy_scale():
+    """Flooding finds all minima of a 1000x-scaled objective with no manual
+    amplitude — the height is read from the Hessian."""
+    s = 1000.0
+
+    def fun(z):
+        x, y = z
+        return s * ((4 - 2.1*x**2 + x**4/3)*x**2 + x*y + (-4 + 4*y**2)*y**2)
+
+    def jac(z):
+        x, y = z
+        return s * np.array([(8 - 8.4*x**2 + 2*x**4)*x + y, x + (-8 + 16*y**2)*y])
+
+    def hess(z):
+        x, y = z
+        return s * np.array([[8 - 25.2*x**2 + 10*x**4, 1.0], [1.0, -8 + 48*y**2]])
+
+    r = pounce.find_minima(
+        fun, [0.5, 0.5], method="flooding", jac=jac, hess=hess,
+        bounds=[(-2.0, 2.0), (-1.5, 1.5)], n_minima=6, max_solves=120,
+        patience=40, dedup=1e-3, seed=0, options={"print_level": 0, "tol": 1e-9})
+    assert len(r) == 6
+    assert r.status == "target_reached"
