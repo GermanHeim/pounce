@@ -717,10 +717,13 @@ impl DebugState for DebugCtx {
         DebugCtx::kkt_captured_iter(self)
     }
     fn request_l_factor(&mut self) -> bool {
-        DebugCtx::request_l_factor(self)
+        // Arming for future solves is handled by `DebugHook::wants_kkt_capture`
+        // (the NLP solver captures the factor while the debugger steps); here we
+        // just report whether it is already available now.
+        DebugCtx::kkt_l_factor(self).is_some()
     }
     fn request_kkt_matrix(&mut self) -> bool {
-        DebugCtx::request_kkt_matrix(self)
+        DebugCtx::kkt_matrix(self).is_some()
     }
     fn set_mu(&mut self, mu: Number) -> Result<(), String> {
         DebugCtx::set_mu(self, mu)

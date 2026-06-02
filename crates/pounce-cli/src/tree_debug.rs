@@ -29,9 +29,12 @@
 //! ```
 
 use crate::cli::DebugMode;
+use crate::debug_repl::SharedScript;
 use pounce_common::debug::{DebugAction, TreeCheckpoint, TreeDebugHook, TreeDebugState};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::Path;
+use std::rc::Rc;
 
 /// A breakpoint condition for the tree search.
 enum TreeBreak {
@@ -73,8 +76,9 @@ enum Flow {
 /// The branch-and-bound REPL. Implements [`TreeDebugHook`].
 pub struct TreeDebugger {
     mode: DebugMode,
-    scripted: bool,
-    script: VecDeque<String>,
+    /// Scripted commands, shared with the interior-point sub-solve debugger
+    /// so one `--debug-script` interleaves tree and `into` commands.
+    script: Option<SharedScript>,
     editor: Option<rustyline::DefaultEditor>,
     /// Pause at the next checkpoint (one-shot; set by `step` and at start).
     step: bool,
@@ -86,8 +90,7 @@ impl TreeDebugger {
     pub fn new(mode: DebugMode) -> Self {
         Self {
             mode,
-            scripted: false,
-            script: VecDeque::new(),
+            script: None,
             editor: None,
             // Enter paused at the first checkpoint, like a debugger breaking in.
             step: true,
@@ -97,26 +100,35 @@ impl TreeDebugger {
     }
 
     /// Feed commands from a script file (one per line; `#` comments and blank
-    /// lines ignored). Once exhausted the search auto-continues.
+    /// lines ignored). Once exhausted the search auto-continues. The queue is
+    /// shared (see [`shared_script`](Self::shared_script)) so a stepped-into
+    /// relaxation reads its interior-point commands from the same script.
     pub fn with_script(mut self, path: &Path) -> Self {
+        let mut q = VecDeque::new();
         match std::fs::read_to_string(path) {
             Ok(text) => {
                 for line in text.lines() {
                     let l = line.trim();
                     if !l.is_empty() && !l.starts_with('#') {
-                        self.script.push_back(l.to_string());
+                        q.push_back(l.to_string());
                     }
                 }
             }
             Err(e) => eprintln!("pounce: cannot read debug script {}: {e}", path.display()),
         }
-        self.scripted = true;
+        self.script = Some(Rc::new(RefCell::new(q)));
         self
     }
 
+    /// The shared command queue (when scripted), to hand to the sub-solve
+    /// interior-point debugger so `into` replays scripted IP commands.
+    pub fn shared_script(&self) -> Option<SharedScript> {
+        self.script.clone()
+    }
+
     fn read_command(&mut self) -> Option<String> {
-        if self.scripted {
-            let c = self.script.pop_front();
+        if let Some(q) = &self.script {
+            let c = q.borrow_mut().pop_front();
             if let Some(cmd) = &c {
                 println!("[script] {cmd}");
             }

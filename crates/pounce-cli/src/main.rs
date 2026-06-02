@@ -1437,6 +1437,12 @@ fn run_global(
             dbg = dbg.with_script(p);
         }
         let mut subsolve = SolverDebugger::quiet(mode, None);
+        // Share the tree debugger's script queue with the sub-solve debugger
+        // so a single `--debug-script` can drive a stepped-into relaxation
+        // (the two REPLs read it sequentially, never concurrently).
+        if let Some(q) = dbg.shared_script() {
+            subsolve = subsolve.with_shared_script(q);
+        }
         pounce_global::solve_global_debug_into(&gp, &opts, &mut dbg, &mut subsolve, backend)
     } else {
         solve_global(&gp, &opts, backend)

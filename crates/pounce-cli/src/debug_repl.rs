@@ -999,7 +999,18 @@ pub struct SolverDebugger {
     /// `None` when no `.nl` model was wired in. See Lee et al. (2024,
     /// <https://doi.org/10.69997/sct.147875>).
     structure_book: Option<StructureBook>,
+    /// A command queue shared with another REPL (the branch-and-bound tree
+    /// debugger), used when this debugger drives a *sub-solve* under
+    /// `--debug-script`. When set, [`next_command_line`](Self::next_command_line)
+    /// pops from it instead of stdin, so a single script interleaves tree and
+    /// interior-point commands.
+    script_queue: Option<SharedScript>,
 }
+
+/// A command queue shared between the tree debugger and an interior-point
+/// sub-solve debugger so one `--debug-script` drives both (they run
+/// sequentially, never concurrently).
+pub type SharedScript = Rc<std::cell::RefCell<VecDeque<String>>>;
 
 impl SolverDebugger {
     /// Fully interactive: pause at the first iteration and at the
@@ -1042,6 +1053,7 @@ impl SolverDebugger {
             prompt_interrupts: 0,
             equation_book: None,
             structure_book: None,
+            script_queue: None,
         }
     }
 
@@ -1079,6 +1091,14 @@ impl SolverDebugger {
     /// <https://doi.org/10.69997/sct.147875>).
     pub fn set_structure_book(&mut self, book: StructureBook) {
         self.structure_book = Some(book);
+    }
+
+    /// Read commands from a queue shared with the tree debugger, so one
+    /// `--debug-script` drives both this sub-solve and the tree (see
+    /// [`SharedScript`]). Takes precedence over stdin / the editor.
+    pub fn with_shared_script(mut self, queue: SharedScript) -> Self {
+        self.script_queue = Some(queue);
+        self
     }
 
     /// Enable the `resolve` command, wiring the shared restart slot the
@@ -3355,6 +3375,16 @@ impl SolverDebugger {
     /// an editor is active (history / Tab / Ctrl-R); otherwise a plain
     /// reader with a stderr prompt (REPL) or no prompt (JSON).
     fn next_command_line(&mut self) -> Option<String> {
+        // A shared script (sub-solve under the tree debugger's --debug-script)
+        // takes precedence: pop the next command, echoing it. An empty queue
+        // returns None, which resumes this sub-solve back to the tree.
+        if let Some(q) = &self.script_queue {
+            let cmd = q.borrow_mut().pop_front();
+            if let Some(c) = &cmd {
+                let _ = writeln!(std::io::stderr(), "pounce-dbg> {c}");
+            }
+            return cmd;
+        }
         if let DebugMode::Repl = self.mode {
             if let Some(ed) = self.editor.as_mut() {
                 return match ed.readline("pounce-dbg> ") {
