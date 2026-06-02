@@ -37,7 +37,10 @@ import numpy as np
 
 from ._minima import find_minima
 
-__all__ = ["find_critical_points", "find_saddles", "CriticalPoint", "CriticalPointResult"]
+__all__ = [
+    "find_critical_points", "find_saddles", "reaction_network",
+    "CriticalPoint", "CriticalPointResult", "Connection", "ReactionNetwork",
+]
 
 
 # --------------------------------------------------------------------------
@@ -88,6 +91,13 @@ def _morse_index(H, eig_tol):
     H = 0.5 * (H + H.T)
     eig = np.linalg.eigvalsh(H)
     return int(np.sum(eig < -eig_tol)), eig
+
+
+def _critical_point(fun, grad, hess, x, eig_tol):
+    x = np.asarray(x, float)
+    gn = float(np.linalg.norm(np.asarray(grad(x), float).ravel()))
+    index, eig = _morse_index(np.asarray(hess(x), float), eig_tol)
+    return CriticalPoint(x, float(fun(x)), index, eig, gn)
 
 
 # --------------------------------------------------------------------------
@@ -257,3 +267,195 @@ def find_saddles(
         status = "budget_exhausted"
     found.sort(key=lambda p: p.f)
     return CriticalPointResult(found, status, n_solves, trace)
+
+
+# --------------------------------------------------------------------------
+# Reaction network: minima (states) + index-1 saddles (transition states)
+# + the connectivity / barrier table between them.
+# --------------------------------------------------------------------------
+@dataclass
+class Connection:
+    """A transition state and the two minima it joins."""
+
+    ts: CriticalPoint
+    minima: tuple[int, int]        # indices into ReactionNetwork.minima (-1 = unconnected)
+    barrier: tuple[float, float]   # E(ts) - E(min) for each side, matching `minima`
+    path: np.ndarray               # approximate min-energy path: min_i -> ts -> min_j
+
+
+@dataclass
+class ReactionNetwork:
+    minima: list[CriticalPoint]            # stable states, sorted by energy
+    transition_states: list[CriticalPoint]
+    connections: list[Connection]
+    status: str
+    n_solves: int
+
+    @property
+    def edges(self):
+        return [c.minima for c in self.connections]
+
+    def neighbors(self, i: int):
+        out = set()
+        for c in self.connections:
+            a, b = c.minima
+            if a == i and b >= 0:
+                out.add(b)
+            if b == i and a >= 0:
+                out.add(a)
+        return sorted(out)
+
+    def barrier(self, i: int, j: int) -> float:
+        """Lowest single-step barrier from minimum ``i`` to minimum ``j``
+        (``inf`` if no transition state directly connects them)."""
+        best = np.inf
+        for c in self.connections:
+            a, b = c.minima
+            if (a, b) == (i, j):
+                best = min(best, c.barrier[0])
+            elif (a, b) == (j, i):
+                best = min(best, c.barrier[1])
+        return best
+
+    def path_between(self, i: int, j: int):
+        """The connecting MEP oriented from minimum ``i`` to minimum ``j``."""
+        for c in self.connections:
+            a, b = c.minima
+            if (a, b) == (i, j):
+                return c.path
+            if (a, b) == (j, i):
+                return c.path[::-1]
+        return None
+
+    def summary(self) -> str:
+        lines = [f"{len(self.minima)} states, "
+                 f"{len(self.transition_states)} transition states "
+                 f"({self.status}, {self.n_solves} solves)"]
+        lines.append("states:")
+        for k, m in enumerate(self.minima):
+            tag = "  (global)" if k == 0 else ""
+            lines.append(f"  {k}: ({m.x[0]:+.4f}, {m.x[1]:+.4f})  E={m.f:8.3f}{tag}"
+                         if m.x.size == 2 else f"  {k}: E={m.f:8.3f}{tag}")
+        lines.append("barriers:")
+        for c in self.connections:
+            i, j = c.minima
+            lines.append(f"  state {i} <-> state {j}  via TS E={c.ts.f:8.3f}   "
+                         f"{i}->{j}: {c.barrier[0]:7.3f}   {j}->{i}: {c.barrier[1]:7.3f}")
+        return "\n".join(lines)
+
+    def __len__(self):
+        return len(self.minima)
+
+
+def _descend(grad, x_start, minima_x, ds, max_steps, reach):
+    """Normalized steepest-descent path; stop on reaching a known minimum."""
+    x = np.asarray(x_start, float).copy()
+    path = [x.copy()]
+    for _ in range(max_steps):
+        g = np.asarray(grad(x), float).ravel()
+        ng = np.linalg.norm(g)
+        if ng < 1e-12:
+            break
+        x = x - ds * g / ng
+        path.append(x.copy())
+        if minima_x:
+            d = [np.linalg.norm(x - m) for m in minima_x]
+            j = int(np.argmin(d))
+            if d[j] < reach:
+                path.append(np.asarray(minima_x[j], float))
+                return np.array(path), j
+    if minima_x:
+        d = [np.linalg.norm(x - m) for m in minima_x]
+        j = int(np.argmin(d))
+        if d[j] < reach:
+            return np.array(path), j
+    return np.array(path), -1
+
+
+def reaction_network(
+    fun: Callable,
+    x0,
+    *,
+    grad: Callable,
+    hess: Callable,
+    bounds: Sequence | None = None,
+    n_states: int = 10,
+    n_transition_states: int = 10,
+    minima_method: str = "flooding",
+    dedup: float = 1e-2,
+    max_solves: int | None = None,
+    patience: int = 40,
+    grad_tol: float = 1e-6,
+    eig_tol: float = 1e-8,
+    descent_step: float = 0.01,
+    descent_reach: float = 0.05,
+    connect_offset: float = 0.02,
+    options: Mapping[str, Any] | None = None,
+    minima_kw: Mapping[str, Any] | None = None,
+    saddle_kw: Mapping[str, Any] | None = None,
+    seed: int | None = None,
+) -> ReactionNetwork:
+    """Map the reaction network of a potential energy surface ``fun``.
+
+    Finds the stable states (minima) and the index-1 transition states
+    (saddles) between them, then connects each transition state to the two
+    minima it joins — by descending its unstable mode into each adjacent
+    basin — and tabulates the barrier heights.
+
+    Parameters mirror :func:`find_minima` / :func:`find_saddles`. Use
+    ``minima_method`` and ``minima_kw`` to tune the state search (e.g.
+    ``minima_kw={"sigma": 0.4, "amplitude": 150.0}`` for flooding), and
+    ``saddle_kw`` for the transition-state search (e.g.
+    ``{"max_step": 0.05, "grad_tol": 1e-5}``).
+
+    Returns
+    -------
+    ReactionNetwork
+        ``.minima`` (states, sorted by energy), ``.transition_states``,
+        ``.connections`` (each with the joined minima, both barriers, and the
+        minimum-energy path), plus ``.barrier(i, j)``, ``.neighbors(i)``,
+        ``.path_between(i, j)`` and ``.summary()``.
+    """
+    # Generous default budgets: locating every state/TS usually needs more
+    # than find_minima's lean 4*n default.
+    ms_min = max_solves if max_solves is not None else 40 * n_states
+    ms_ts = max_solves if max_solves is not None else 40 * n_transition_states
+
+    mres = find_minima(
+        fun, x0, method=minima_method, jac=grad, hess=hess, bounds=bounds,
+        n_minima=n_states, max_solves=ms_min, patience=patience,
+        dedup=dedup, options=options, strategy_kw=minima_kw, seed=seed,
+    )
+    minima = [_critical_point(fun, grad, hess, x, eig_tol) for x in mres.minima]
+    minima_x = [m.x for m in minima]
+
+    skw = dict(saddle_kw or {})
+    skw.setdefault("grad_tol", max(grad_tol, 1e-5))
+    sres = find_saddles(
+        fun, x0, grad=grad, hess=hess, bounds=bounds, index=1,
+        n_saddles=n_transition_states, max_solves=ms_ts,
+        patience=patience, dedup=dedup, eig_tol=eig_tol, seed=seed, **skw,
+    )
+
+    connections: list[Connection] = []
+    for p in sres.points:
+        H = 0.5 * (np.asarray(hess(p.x), float) + np.asarray(hess(p.x), float).T)
+        _, U = np.linalg.eigh(H)
+        v = U[:, 0]                      # unstable (softest) eigenvector
+        segs, ends = [], []
+        for sgn in (+1.0, -1.0):
+            seg, j = _descend(grad, p.x + connect_offset * sgn * v, minima_x,
+                              descent_step, 3000, descent_reach)
+            segs.append(seg)
+            ends.append(j)
+        i, j = ends
+        bi = p.f - minima[i].f if i >= 0 else float("nan")
+        bj = p.f - minima[j].f if j >= 0 else float("nan")
+        path = np.vstack([segs[0][::-1], p.x[None, :], segs[1]])
+        connections.append(Connection(p, (i, j), (bi, bj), path))
+
+    status = f"minima:{mres.status}, ts:{sres.status}"
+    return ReactionNetwork(
+        minima, list(sres.points), connections, status,
+        mres.n_solves + sres.n_solves,
+    )

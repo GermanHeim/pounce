@@ -227,6 +227,36 @@ Together with the minima, the index-1 saddles between them form the
 transition-state network / disconnectivity graph — flooding fills the
 basins, and the saddles are the barriers crossed between filled basins.
 
+### `reaction_network` — states, barriers, and connectivity in one call
+
+`reaction_network` packages the whole workflow: it finds the minima (stable
+states), finds the index-1 transition states, and **connects** each
+transition state to the two minima it joins — by descending its unstable
+mode into each adjacent basin — returning the barrier table and the
+minimum-energy paths.
+
+```python
+net = pounce.reaction_network(
+    fun, x0, grad=grad, hess=hess, bounds=bounds,
+    n_states=3, n_transition_states=2,
+    minima_kw={"sigma": 0.4, "amplitude": 150.0},   # find_minima tuning
+    saddle_kw={"max_step": 0.05},                    # find_saddles tuning
+)
+
+print(net.summary())
+net.minima                 # stable states, sorted by energy (CriticalPoint)
+net.transition_states      # index-1 saddles
+net.connections            # each: .ts, .minima=(i,j), .barrier=(fwd,rev), .path (MEP)
+net.barrier(i, j)          # lowest single-step barrier from state i to state j
+net.neighbors(i)           # states reachable from i over one transition state
+net.path_between(i, j)     # the connecting minimum-energy path, oriented i -> j
+```
+
+This is the natural high-level entry point for reaction-barrier and
+energy-landscape work: the connectivity it returns is the reaction network
+(equivalently, a disconnectivity graph), and the barrier of an elementary
+step `i → j` is `E(transition state) − E(state i)`.
+
 * **References.** Cerjan, C.J. & Miller, W.H. "On finding transition
   states." *J. Chem. Phys.* **75**, 2800 (1981). Henkelman, G. & Jónsson, H.
   "A dimer method for finding saddle points…" *J. Chem. Phys.* **111**,
@@ -239,10 +269,10 @@ basins, and the saddles are the barriers crossed between filled basins.
 
 Runnable demos: a landscape with 4 minima, 4 saddles, and 1 maximum in
 [`python/examples/critical_points.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/critical_points.py),
-and a **molecular reaction barrier** on the Müller-Brown potential —
-locating the stable states and the transition states between them, then
-reading off barrier heights and the minimum-energy path — in
-[`python/examples/reaction_barrier.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/reaction_barrier.py).
+and a **molecular reaction barrier** on the Müller-Brown potential — one
+`reaction_network` call locating the stable states and the transition states
+between them, then reading off barrier heights and the minimum-energy path —
+in [`python/examples/reaction_barrier.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/reaction_barrier.py).
 
 ## Termination
 

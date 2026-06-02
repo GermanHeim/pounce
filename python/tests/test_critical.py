@@ -122,6 +122,56 @@ def test_muller_brown_reaction_barriers():
     assert sorted(round(p.f, 1) for p in ts.points) == [-72.2, -40.7]
 
 
+def test_reaction_network_muller_brown():
+    """reaction_network assembles the Müller-Brown states + barriers."""
+    A = np.array([-200.0, -100.0, -170.0, 15.0])
+    a = np.array([-1.0, -1.0, -6.5, 0.7])
+    b = np.array([0.0, 0.0, 11.0, 0.6])
+    c = np.array([-10.0, -10.0, -6.5, 0.7])
+    x0 = np.array([1.0, 0.0, -0.5, -1.0])
+    y0 = np.array([0.0, 0.5, 1.5, 1.0])
+
+    def V(z):
+        x, y = z
+        dx, dy = x - x0, y - y0
+        return float(np.sum(A * np.exp(a * dx**2 + b * dx * dy + c * dy**2)))
+
+    def grad(z):
+        x, y = z
+        dx, dy = x - x0, y - y0
+        e = A * np.exp(a * dx**2 + b * dx * dy + c * dy**2)
+        return np.array([np.sum(e * (2 * a * dx + b * dy)),
+                         np.sum(e * (b * dx + 2 * c * dy))])
+
+    def hess(z):
+        x, y = z
+        dx, dy = x - x0, y - y0
+        e = A * np.exp(a * dx**2 + b * dx * dy + c * dy**2)
+        px, py = 2 * a * dx + b * dy, b * dx + 2 * c * dy
+        return np.array([[np.sum(e * (px * px + 2 * a)), np.sum(e * (px * py + b))],
+                         [np.sum(e * (px * py + b)), np.sum(e * (py * py + 2 * c))]])
+
+    net = pounce.reaction_network(
+        V, [-0.5, 1.4], grad=grad, hess=hess, bounds=[(-1.5, 1.2), (-0.5, 2.2)],
+        n_states=3, n_transition_states=2, dedup=1e-2, seed=0,
+        minima_kw={"sigma": 0.4, "amplitude": 150.0}, saddle_kw={"max_step": 0.05},
+        options={"print_level": 0, "tol": 1e-8},
+    )
+    assert len(net.minima) == 3
+    assert len(net.transition_states) == 2
+    assert len(net.connections) == 2
+    # All connections are fully resolved (both endpoints are found minima).
+    for c in net.connections:
+        assert c.minima[0] >= 0 and c.minima[1] >= 0
+    # State 0 is the global minimum; the intermediate joins the other two.
+    assert net.minima[0].f == pytest.approx(-146.7, abs=0.1)
+    hub = max(range(3), key=lambda i: len(net.neighbors(i)))
+    assert sorted(net.neighbors(hub)) == [k for k in range(3) if k != hub]
+    # A known barrier: deep well 0 over its transition state.
+    assert net.barrier(0, hub) == pytest.approx(106.0, abs=0.5)
+    assert net.path_between(0, hub) is not None
+
+
 def test_kind_labels():
     r = pounce.find_critical_points(
         fun, [0.3, 0.4], grad=grad, hess=hess, bounds=BOUNDS,
