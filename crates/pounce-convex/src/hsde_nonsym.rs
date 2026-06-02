@@ -29,8 +29,10 @@
 //! itself live in [`crate::cones::exp`]; this module is the outer iteration.
 
 use crate::cones::{BarrierCone, Cone, ConeBlock, ExponentialCone, PowerCone, SecondOrderCone};
+use crate::debug::{fire, ConvexDebugState};
 use crate::ipm::{build_rhs, detect_infeasibility, dot, inf_norm, split_step, QpOptions};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
+use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
@@ -660,6 +662,7 @@ fn run_nonsym<F>(
     opts: &QpOptions,
     warm_x: Option<&[f64]>,
     mut make_backend: F,
+    mut hook: Option<&mut dyn DebugHook>,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -771,6 +774,38 @@ where
         let pres = inf_norm(&rho_y).max(inf_norm(&rho_z)) / tau;
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
+        let res = pres.max(dres).max(gap);
+
+        // Debugger checkpoint: top of iteration. Same homogeneous-iterate
+        // view as the symmetric HSDE driver (blocks x/s/y/z + τ/κ).
+        if hook.is_some() {
+            let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::IterStart,
+                iter: it as i32,
+                mu,
+                pinf: pres,
+                dinf: dres,
+                res,
+                obj: obj_hat,
+                alpha: (0.0, 0.0),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                tau: Some(tau),
+                kappa: Some(kappa),
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
+
         if pres < opts.tol && dres < opts.tol && gap < opts.tol {
             status = QpStatus::Optimal;
             break;
@@ -780,7 +815,7 @@ where
         // of `tol`. If that happens while the KKT residuals are already tiny
         // (within `~1e3·tol`), the current iterate *is* essentially optimal —
         // accept it rather than reporting a spurious NumericalFailure.
-        let near_opt = pres.max(dres).max(gap) < 1e3 * opts.tol;
+        let near_opt = res < 1e3 * opts.tol;
         // Infeasibility certificate as τ → 0.
         if tau < 1e-2 * kappa.max(1.0) {
             if let Some(st) = detect_infeasibility(prob, &x, &y, &z, opts) {
@@ -952,6 +987,36 @@ where
             break;
         }
 
+        // Debugger checkpoint: combined Newton direction + step length known,
+        // not yet applied (single symmetric α in both slots).
+        if hook.is_some() {
+            let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::AfterSearchDirection,
+                iter: it as i32,
+                mu,
+                pinf: pres,
+                dinf: dres,
+                res,
+                obj: obj_hat,
+                alpha: (alpha, alpha),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                tau: Some(tau),
+                kappa: Some(kappa),
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
+
         for i in 0..n {
             x[i] += alpha * dx[i];
         }
@@ -964,6 +1029,37 @@ where
         }
         tau += alpha * dtau;
         kappa += alpha * dkappa;
+
+        // Debugger checkpoint: the new homogeneous iterate is in place.
+        if hook.is_some() {
+            let mut pxn = vec![0.0; n];
+            prob.p_mul(&x, &mut pxn);
+            let obj_hat = 0.5 * dot(&x, &pxn) / (tau * tau) + dot(&prob.c, &x) / tau;
+            let mut st = ConvexDebugState {
+                cp: Checkpoint::AfterStep,
+                iter: it as i32,
+                mu,
+                pinf: pres,
+                dinf: dres,
+                res,
+                obj: obj_hat,
+                alpha: (alpha, alpha),
+                x: &x,
+                s: &s,
+                y: &y,
+                z: &z,
+                dx: &dx,
+                dy: &dy,
+                dz: &dz,
+                ds: &ds,
+                tau: Some(tau),
+                kappa: Some(kappa),
+                status: None,
+            };
+            if fire(&mut hook, &mut st) == DebugAction::Stop {
+                break;
+            }
+        }
     }
 
     let inv = if tau.abs() > 0.0 { 1.0 / tau } else { 1.0 };
@@ -973,6 +1069,33 @@ where
     let mut px = vec![0.0; n];
     prob.p_mul(&x, &mut px);
     let obj = 0.5 * dot(&x, &px) + dot(&prob.c, &x);
+
+    // Debugger post-mortem at the recovered (un-homogenized) solution.
+    if hook.is_some() {
+        let status_str = format!("{status:?}");
+        let mut st = ConvexDebugState {
+            cp: Checkpoint::Terminated,
+            iter: iters as i32,
+            mu: 0.0,
+            pinf: 0.0,
+            dinf: 0.0,
+            res: 0.0,
+            obj,
+            alpha: (0.0, 0.0),
+            x: &x,
+            s: &s,
+            y: &y,
+            z: &z,
+            dx: &dx,
+            dy: &dy,
+            dz: &dz,
+            ds: &ds,
+            tau: Some(tau),
+            kappa: Some(kappa),
+            status: Some(&status_str),
+        };
+        let _ = fire(&mut hook, &mut st);
+    }
 
     QpSolution {
         status,
@@ -999,7 +1122,25 @@ pub fn solve_conic_hsde_nonsym<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    run_nonsym(prob, specs, opts, None, make_backend)
+    run_nonsym(prob, specs, opts, None, make_backend, None)
+}
+
+/// Debug-enabled [`solve_conic_hsde_nonsym`]: fires the interactive
+/// [`DebugHook`] at each interior-point checkpoint of the non-symmetric
+/// (exponential / power) HSDE solve. The iterate view matches the
+/// symmetric HSDE driver (homogeneous `x/s/y/z` plus `τ/κ`). Apart from
+/// the hook the result is identical.
+pub fn solve_conic_hsde_nonsym_debug<F>(
+    prob: &QpProblem,
+    specs: &[NsBlock],
+    opts: &QpOptions,
+    hook: &mut dyn DebugHook,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    run_nonsym(prob, specs, opts, None, make_backend, Some(hook))
 }
 
 /// Warm-started [`solve_conic_hsde_nonsym`]: seed the primal `x` from `warm_x`
@@ -1017,7 +1158,7 @@ pub fn solve_conic_hsde_nonsym_warm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    run_nonsym(prob, specs, opts, Some(warm_x), make_backend)
+    run_nonsym(prob, specs, opts, Some(warm_x), make_backend, None)
 }
 
 fn failed(prob: &QpProblem) -> QpSolution {

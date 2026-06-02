@@ -158,6 +158,63 @@ fn hsde_driver_is_debuggable_and_exposes_tau_kappa() {
     }
 }
 
+/// The non-symmetric (exponential/power) HSDE driver is debuggable too,
+/// through `solve_conic_hsde_nonsym_debug`. Uses the exp-cone epigraph
+/// `min z s.t. x=1, y=1, (x,y,z) ∈ K_exp` (optimum z = e).
+#[test]
+fn nonsym_exp_cone_driver_is_debuggable() {
+    use pounce_convex::hsde_nonsym::{
+        solve_conic_hsde_nonsym, solve_conic_hsde_nonsym_debug, NsBlock,
+    };
+
+    let e = std::f64::consts::E;
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![],
+        c: vec![0.0, 0.0, 1.0],
+        a: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+        b: vec![1.0, 1.0],
+        g: vec![
+            Triplet::new(0, 0, -1.0),
+            Triplet::new(1, 1, -1.0),
+            Triplet::new(2, 2, -1.0),
+        ],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let specs = [NsBlock::exp()];
+    let opts = QpOptions::default();
+
+    let mut rec = Recorder::default();
+    let sol = solve_conic_hsde_nonsym_debug(&prob, &specs, &opts, &mut rec, backend);
+
+    assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
+    assert!((sol.x[2] - e).abs() < 1e-5, "z={} vs e", sol.x[2]);
+
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::IterStart),
+        "IterStart"
+    );
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::AfterStep),
+        "AfterStep"
+    );
+    assert!(
+        rec.checkpoints.contains(&Checkpoint::Terminated),
+        "Terminated"
+    );
+    assert!(rec.saw_tau, "nonsym HSDE must expose the `tau` block");
+    assert_eq!(rec.terminal_status.as_deref(), Some("Optimal"));
+
+    // The hook leaves the recovered solution untouched.
+    let plain = solve_conic_hsde_nonsym(&prob, &specs, &opts, backend);
+    assert_eq!(plain.status, sol.status);
+    for (a, b) in plain.x.iter().zip(&sol.x) {
+        assert!((a - b).abs() < 1e-9, "x differs: {a} vs {b}");
+    }
+}
+
 /// A hook that requests `Stop` at the first checkpoint halts the solve
 /// short of convergence (the debugger `quit` path).
 #[test]
