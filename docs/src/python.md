@@ -66,6 +66,27 @@ res = minimize(lambda x: (x - 1) @ (x - 1) + 1, x0=np.zeros(5))
 print(res.fun, res.x)
 ```
 
+## Finding multiple minima
+
+`pounce.find_minima` is the global-search companion to `minimize`: it drives
+the same solver in a loop to discover *many* distinct minima (flooding,
+deflation, tunneling, multistart, MLSL, basin-hopping). See
+[Finding Multiple Minima](find-minima.md) for the methods and references,
+[Choosing a Method](find-minima-choosing.md) for selection guidance
+(including high-dimensional behavior), and notebooks
+[15](https://github.com/jkitchin/pounce/blob/main/python/notebooks/15_find_minima_repulsion.ipynb),
+[16](https://github.com/jkitchin/pounce/blob/main/python/notebooks/16_find_minima_restart.ipynb),
+[17](https://github.com/jkitchin/pounce/blob/main/python/notebooks/17_find_minima_hopping.ipynb)
+for the three families.
+
+```python
+from pounce import find_minima
+
+r = find_minima(fun, x0, method="deflation", jac=jac, hess=hess,
+                bounds=bounds, n_minima=6)
+print(r.status, len(r), "minima; best f =", r.fun)
+```
+
 ## JAX integration
 
 The `pounce.jax` subpackage provides five entry points:

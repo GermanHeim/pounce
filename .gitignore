@@ -81,6 +81,8 @@ python/pounce/bin/
 python/.pytest_cache/
 python/build/
 python/dist/
+# Figures rendered by example scripts (e.g. examples/critical_points.py)
+python/examples/*.png
 python/*.egg-info/
 
 # Claude Code local state
