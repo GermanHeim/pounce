@@ -719,6 +719,22 @@ impl OrigIpoptNlp {
             return;
         }
 
+        // Lift fixed variables (x_l == x_u) to their fixed value before
+        // sampling the gradient / Jacobian. Fixed vars never enter the
+        // algorithm's compressed x; every algorithm-side eval re-inserts
+        // their fixed value via `lift_x_to_full`, so scaling must be
+        // computed at that same point. Upstream achieves this implicitly:
+        // `TNLPAdapter::GetStartingPoint` projects the start onto the
+        // (relaxed) bounds, pinning fixed vars to their value. A raw `x0`
+        // that leaves them elsewhere can shift the objective gradient by
+        // orders of magnitude (pounce: flosp2hm — 41 fixed vars sitting at
+        // x0=0 instead of their fixed value 1 made ‖∇f‖∞ read 40 instead of
+        // 2.4e5, so obj_scale_factor stayed 1.0 and the solve stalled at
+        // max-iter while IPOPT, scaling correctly, converged in 5 iters).
+        for (i, &full_idx) in cls.x_fixed_map.iter().enumerate() {
+            full_x[full_idx as usize] = cls.x_fixed_vals[i];
+        }
+
         match method {
             ScalingMethod::None => unreachable!("handled above"),
             ScalingMethod::GradientBased => {
@@ -2558,6 +2574,94 @@ mod tests {
             (nlp2.obj_scale_factor() - 0.1).abs() < 1e-12,
             "target_gradient=1, max_grad_f=10 → df=0.1; got {}",
             nlp2.obj_scale_factor()
+        );
+    }
+
+    /// Regression (flosp2hm): gradient-based scaling must sample the
+    /// objective gradient at the point the algorithm actually operates
+    /// on — i.e. with fixed variables (`x_l == x_u`) lifted to their
+    /// fixed value — not at the raw `x0` returned by `get_starting_point`.
+    /// Here `x[1]` is fixed at 1000 but the starting point places it at 0,
+    /// and the only free-variable gradient is `df/dx0 = x[1]`. Sampling at
+    /// the raw `x0` gives `max_grad_f = 0` (df stays 1.0, no scaling);
+    /// lifting `x[1]→1000` gives `max_grad_f = 1000`, so df = 100/1000 = 0.1.
+    /// Pre-fix this left df=1 and stalled flosp2hm at max-iter.
+    struct FixedVarShiftsObjGrad;
+    impl TNLP for FixedVarShiftsObjGrad {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 0,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1.0e19;
+            b.x_u[0] = 1.0e19;
+            b.x_l[1] = 1000.0;
+            b.x_u[1] = 1000.0; // fixed at 1000
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 1.0;
+            sp.x[1] = 0.0; // deliberately NOT the fixed value
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
+            Some(x[0] * x[1])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[1];
+            g[1] = x[0];
+            true
+        }
+        fn eval_g(&mut self, _: &[Number], _: bool, _: &mut [Number]) -> bool {
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, _: SparsityRequest<'_>) -> bool {
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            _: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            _: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    #[test]
+    fn gradient_scaling_lifts_fixed_vars_to_their_value() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FixedVarShiftsObjGrad));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let mut nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+
+        // Sanity: x[1] is fixed out of the var-x space, fixed value 1000.
+        assert_eq!(nlp.n_full_x(), 2);
+        assert_eq!(nlp.n(), 1);
+
+        nlp.determine_scaling_from_starting_point(
+            ScalingMethod::GradientBased,
+            100.0,
+            1e-8,
+            0.0,
+            0.0,
+        );
+
+        // Lifted gradient ∞-norm over free vars is |df/dx0| = x[1] = 1000,
+        // so df = 100/1000 = 0.1. Sampling at the raw x0 (x[1]=0) would
+        // give 0 and leave df=1.0 (the pre-fix bug).
+        assert!(
+            (nlp.obj_scale_factor() - 0.1).abs() < 1e-12,
+            "fixed var must be lifted before scaling; expected df=0.1, got {}",
+            nlp.obj_scale_factor()
         );
     }
 
