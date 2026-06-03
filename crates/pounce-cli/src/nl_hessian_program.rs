@@ -453,7 +453,7 @@ impl HessianProgram {
                     dst,
                     a: v_slot(a as u32),
                 },
-                TapeOp::Funcall { .. } => panic!(
+                TapeOp::Funcall(_) => panic!(
                     "HessianProgram path does not support AMPL external functions; \
                      use the Tape (build_with_externals) path instead."
                 ),
@@ -591,7 +591,7 @@ impl HessianProgram {
                         dot_a: dot_slot(a as u32),
                         va: v_slot(a as u32),
                     },
-                    TapeOp::Funcall { .. } => panic!(
+                    TapeOp::Funcall(_) => panic!(
                         "HessianProgram path does not support AMPL external functions; \
                          use the Tape (build_with_externals) path instead."
                     ),
@@ -763,7 +763,7 @@ impl HessianProgram {
                         va: v_slot(a as u32),
                         dot_a: dot_slot(a as u32),
                     },
-                    TapeOp::Funcall { .. } => panic!(
+                    TapeOp::Funcall(_) => panic!(
                         "HessianProgram path does not support AMPL external functions; \
                          use the Tape (build_with_externals) path instead."
                     ),
@@ -1272,7 +1272,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Atanh(a) => {
                 r[a] = true;
             }
-            TapeOp::Funcall { .. } => panic!(
+            TapeOp::Funcall(_) => panic!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
             ),
@@ -1326,7 +1326,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
             | TapeOp::Atanh(a) => d[a],
-            TapeOp::Funcall { .. } => panic!(
+            TapeOp::Funcall(_) => panic!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
             ),

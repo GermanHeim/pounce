@@ -86,15 +86,25 @@ pub enum TapeOp {
     /// The condition contributes no derivative (the branch switch is a
     /// non-smooth event the AD ignores).
     Select(usize, usize, usize),
-    /// AMPL imported (external) function call. The library is kept alive by
-    /// the `Arc`; `name` is the registered function name; `args` carries
-    /// positional arguments where real-valued args reference earlier tape
-    /// slots and string args are inline literals.
-    Funcall {
-        lib: Arc<ExternalLibrary>,
-        name: String,
-        args: Vec<TapeFuncallArg>,
-    },
+    /// AMPL imported (external) function call. The payload (library
+    /// handle, name, and argument list) is boxed so this rare variant
+    /// does not inflate `size_of::<TapeOp>()`: without the box the
+    /// `Arc`+`String`+`Vec` make every op ~64 bytes, which on a
+    /// summand-split objective with millions of tiny tapes (e.g.
+    /// `sensors`) costs gigabytes. Boxing drops the common arithmetic
+    /// ops back to the size of the next-largest variant.
+    Funcall(Box<FuncallData>),
+}
+
+/// Boxed payload of [`TapeOp::Funcall`]. The library is kept alive by
+/// the `Arc`; `name` is the registered function name; `args` carries
+/// positional arguments where real-valued args reference earlier tape
+/// slots and string args are inline literals.
+#[derive(Debug, Clone)]
+pub struct FuncallData {
+    pub lib: Arc<ExternalLibrary>,
+    pub name: String,
+    pub args: Vec<TapeFuncallArg>,
 }
 
 /// One argument of a `TapeOp::Funcall`. Real arguments are tape-slot indices
@@ -200,7 +210,8 @@ impl Tape {
                         vals[*e]
                     }
                 }
-                TapeOp::Funcall { lib, name, args } => {
+                TapeOp::Funcall(fc) => {
+                    let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, &vals);
                     let res = lib
                         .eval(name, &call_args, false, false)
@@ -379,7 +390,8 @@ impl Tape {
                         adj[*e] += a;
                     }
                 }
-                TapeOp::Funcall { lib, name, args } => {
+                TapeOp::Funcall(fc) => {
+                    let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
                         panic!("external function '{name}' reverse eval failed: {e}")
@@ -530,7 +542,8 @@ impl Tape {
                         dot[*e]
                     }
                 }
-                TapeOp::Funcall { lib, name, args } => {
+                TapeOp::Funcall(fc) => {
+                    let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
                         panic!("external function '{name}' tangent eval failed: {e}")
@@ -597,7 +610,8 @@ impl Tape {
                         vals[*e]
                     }
                 }
-                TapeOp::Funcall { lib, name, args } => {
+                TapeOp::Funcall(fc) => {
+                    let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, &*vals);
                     let res = lib
                         .eval(name, &call_args, false, false)
@@ -757,7 +771,8 @@ impl Tape {
                         dot[*e]
                     }
                 }
-                TapeOp::Funcall { lib, name, args } => {
+                TapeOp::Funcall(fc) => {
+                    let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
                         panic!("external function '{name}' tangent eval failed: {e}")
@@ -1027,7 +1042,8 @@ impl Tape {
                     adj[br] += w;
                     adj_dot[br] += wd;
                 }
-                TapeOp::Funcall { lib, name, args } => {
+                TapeOp::Funcall(fc) => {
+                    let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
                         panic!("external function '{name}' 2nd-order eval failed: {e}")
@@ -1342,7 +1358,8 @@ impl Tape {
                         adj[br] += w;
                         adj_dot[br] += wd;
                     }
-                    TapeOp::Funcall { lib, name, args } => {
+                    TapeOp::Funcall(fc) => {
+                        let FuncallData { lib, name, args } = fc.as_ref();
                         let call_args = funcall_to_ext_args(args, &v);
                         let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
                             panic!("external function '{name}' 2nd-order eval failed: {e}")
@@ -1479,7 +1496,8 @@ impl Tape {
                 TapeOp::Min(a, b) | TapeOp::Max(a, b) => {
                     var_sets[*a].union(&var_sets[*b]).copied().collect()
                 }
-                TapeOp::Funcall { args, .. } => {
+                TapeOp::Funcall(fc) => {
+                    let args = &fc.args;
                     let mut combined: BTreeSet<usize> = BTreeSet::new();
                     for arg in args {
                         if let TapeFuncallArg::Tape(t) = arg {
@@ -1676,11 +1694,11 @@ fn build_recursive(
                 })
                 .collect();
             let idx = ops.len();
-            ops.push(TapeOp::Funcall {
+            ops.push(TapeOp::Funcall(Box::new(FuncallData {
                 lib: Arc::clone(lib),
                 name: name.clone(),
                 args: tape_args,
-            });
+            })));
             idx
         }
     }
@@ -2542,7 +2560,7 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
                 "HybridTape prelude cannot contain conditional / logical / min-max \
                  TapeOps; build_into_summand panics on those Expr variants."
             ),
-            TapeOp::Funcall { .. } => unreachable!(
+            TapeOp::Funcall(_) => unreachable!(
                 "HybridTape prelude cannot contain TapeOp::Funcall; \
                  build_into_summand panics on Expr::Funcall."
             ),
@@ -2638,7 +2656,7 @@ fn summand_sparsity(
                     "HybridTape summand cannot contain conditional / logical / min-max \
                      TapeOps; build_into_summand panics on those Expr variants."
                 ),
-                TapeOp::Funcall { .. } => unreachable!(
+                TapeOp::Funcall(_) => unreachable!(
                     "HybridTape summand cannot contain TapeOp::Funcall; \
                      build_into_summand panics on Expr::Funcall."
                 ),
@@ -2693,7 +2711,7 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
             "op_operands: TapeOp::Min/Max are unsupported on the HybridTape path \
              (build_into_summand rejects min/max lists)"
         ),
-        TapeOp::Funcall { .. } => (None, None),
+        TapeOp::Funcall(_) => (None, None),
     }
 }
 
@@ -2749,7 +2767,8 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
              / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
              instead."
         ),
-        TapeOp::Funcall { lib, name, args } => {
+        TapeOp::Funcall(fc) => {
+            let FuncallData { lib, name, args } = fc.as_ref();
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib
                 .eval(name, &call_args, false, false)
@@ -2880,7 +2899,8 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
              / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
              instead."
         ),
-        TapeOp::Funcall { lib, name, args } => {
+        TapeOp::Funcall(fc) => {
+            let FuncallData { lib, name, args } = fc.as_ref();
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib
                 .eval(name, &call_args, true, false)
@@ -3003,7 +3023,8 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
              / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
              instead."
         ),
-        TapeOp::Funcall { lib, name, args } => {
+        TapeOp::Funcall(fc) => {
+            let FuncallData { lib, name, args } = fc.as_ref();
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib
                 .eval(name, &call_args, true, false)
@@ -3264,7 +3285,8 @@ fn ror_step(
              / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
              instead."
         ),
-        TapeOp::Funcall { lib, name, args } => {
+        TapeOp::Funcall(fc) => {
+            let FuncallData { lib, name, args } = fc.as_ref();
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
                 panic!("external function '{name}' 2nd-order eval failed: {e}")
@@ -3370,7 +3392,8 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
                 emit_self(&var_sets[*a], &mut pairs);
                 var_sets[*a].clone()
             }
-            TapeOp::Funcall { args, .. } => {
+            TapeOp::Funcall(fc) => {
+                let args = &fc.args;
                 let mut combined: BTreeSet<usize> = BTreeSet::new();
                 for arg in args {
                     if let TapeFuncallArg::Tape(t) = arg {
