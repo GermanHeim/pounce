@@ -196,6 +196,98 @@ def test_multi_probe_union_recovers_pattern_pounce_83():
     assert set(zip(hr.tolist(), hc.tolist())) == {(0, 0), (1, 0), (1, 1)}
 
 
+# Module-level callables so the JaxProblem sparse pickle test can
+# round-trip ``self._f`` / ``self._g`` (local closures don't pickle).
+def _sparse83_f(x, p):
+    return jnp.sum((x - p) ** 2) + 0.1 * jnp.sum(x ** 4)
+
+
+def _sparse83_g(x, p):  # noqa: ARG001
+    # Genuinely sparse Jacobian/Hessian: each row touches a few vars.
+    return jnp.stack([x[0] + x[1] - 1.0, x[2] * x[3] - 0.5, x[5] + x[6]])
+
+
+def _build_sparse83(sparse):
+    from pounce.jax import JaxProblem
+
+    n, m = 8, 3
+    return JaxProblem(
+        f=_sparse83_f, g=_sparse83_g, n=n, m=m, p_example=jnp.zeros(n),
+        lb=jnp.full(n, -10.0), ub=jnp.full(n, 10.0),
+        cl=jnp.zeros(m), cu=jnp.zeros(m),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+        sparse=sparse,
+    )
+
+
+def test_jaxproblem_sparse_matches_dense_pounce_83():
+    """Issue #83 lifted into JaxProblem: the colored forward Jacobian /
+    Hessian must give the same solve, gradient, batched solve, and
+    batched gradient as the dense slice path. Same KKT data, cheaper
+    derivative values."""
+    jp_dense = _build_sparse83(False)
+    jp_sparse = _build_sparse83(True)
+    n = 8
+
+    # Structure must be reported identically.
+    rjp_d = jp_dense  # access pattern arrays directly
+    rjp_s = jp_sparse
+    np.testing.assert_array_equal(rjp_d._jac_rows, rjp_s._jac_rows)
+    np.testing.assert_array_equal(rjp_d._jac_cols, rjp_s._jac_cols)
+    np.testing.assert_array_equal(rjp_d._hess_rows, rjp_s._hess_rows)
+    np.testing.assert_array_equal(rjp_d._hess_cols, rjp_s._hess_cols)
+
+    rng = np.random.default_rng(3)
+    p = jnp.asarray(rng.standard_normal(n))
+    x0 = jnp.zeros(n)
+
+    np.testing.assert_allclose(
+        np.asarray(jp_sparse.solve(p, x0)),
+        np.asarray(jp_dense.solve(p, x0)),
+        atol=1e-8,
+    )
+
+    g_d = jax.grad(lambda p: jnp.sum(jp_dense.solve(p, x0) ** 2))(p)
+    g_s = jax.grad(lambda p: jnp.sum(jp_sparse.solve(p, x0) ** 2))(p)
+    np.testing.assert_allclose(np.asarray(g_s), np.asarray(g_d), atol=1e-7)
+
+    # Batched forward + gradient.
+    p_batch = jnp.asarray(rng.standard_normal((4, n)))
+    X0 = jnp.zeros((4, n))
+    np.testing.assert_allclose(
+        np.asarray(jp_sparse.batched_solve(p_batch, X0)),
+        np.asarray(jp_dense.batched_solve(p_batch, X0)),
+        atol=1e-8,
+    )
+    Gd = jax.grad(lambda P: jnp.sum(jp_dense.batched_solve(P, X0) ** 2))(p_batch)
+    Gs = jax.grad(lambda P: jnp.sum(jp_sparse.batched_solve(P, X0) ** 2))(p_batch)
+    np.testing.assert_allclose(np.asarray(Gs), np.asarray(Gd), atol=1e-7)
+
+
+def test_jaxproblem_sparse_pickle_roundtrip_pounce_83():
+    """A ``sparse=True`` JaxProblem must survive pickle: the compressed
+    closures aren't pickled (JAX JIT closures never are), but coloring is
+    deterministic from the pickled pattern arrays, so __setstate__
+    rebuilds them. Forward + grad must match the pre-pickle instance."""
+    import pickle
+
+    jp = _build_sparse83(True)
+    n = 8
+    p = jnp.asarray(np.random.default_rng(4).standard_normal(n))
+    x0 = jnp.zeros(n)
+
+    x_before = jp.solve(p, x0)
+    g_before = jax.grad(lambda p: jnp.sum(jp.solve(p, x0) ** 2))(p)
+
+    jp2 = pickle.loads(pickle.dumps(jp))
+    assert jp2._sparse
+    x_after = jp2.solve(p, x0)
+    g_after = jax.grad(lambda p: jnp.sum(jp2.solve(p, x0) ** 2))(p)
+
+    np.testing.assert_allclose(np.asarray(x_after), np.asarray(x_before), atol=1e-10)
+    np.testing.assert_allclose(np.asarray(g_after), np.asarray(g_before), atol=1e-10)
+
+
 def test_implicit_diff_parametric_qp():
     """Differentiate x*(p) for  min ||x - p||²   →   x*(p) = p,   dx*/dp = I.
 

@@ -262,18 +262,19 @@ class _JaxProblem:
 
         # HVP via jvp of the Lagrangian gradient: H @ s. (k, n).
         lag = self._lagrangian
+        grad_L = jax.grad(lag, argnums=0)
         if self._m > 0:
-            grad_L = jax.grad(lag, argnums=0)
-
             def hess_compressed(x, lam, sigma):
-                gl = lambda xx: grad_L(xx, lam, sigma)
-                return jax.vmap(lambda s: jax.jvp(gl, (x,), (s,))[1])(S_hess)
+                return jax.vmap(
+                    lambda s: jax.jvp(
+                        lambda xx: grad_L(xx, lam, sigma), (x,), (s,)
+                    )[1]
+                )(S_hess)
         else:
-            grad_L = jax.grad(lag, argnums=0)
-
             def hess_compressed(x, sigma):
-                gl = lambda xx: grad_L(xx, sigma)
-                return jax.vmap(lambda s: jax.jvp(gl, (x,), (s,))[1])(S_hess)
+                return jax.vmap(
+                    lambda s: jax.jvp(lambda xx: grad_L(xx, sigma), (x,), (s,))[1]
+                )(S_hess)
 
         self._hess_compressed = jax.jit(hess_compressed)
 
