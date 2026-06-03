@@ -106,7 +106,7 @@ pub fn collect_funcall_ids(e: &Expr, out: &mut std::collections::BTreeSet<usize>
             collect_funcall_ids(b, out);
         }
         Expr::Unary(_, a) => collect_funcall_ids(a, out),
-        Expr::Sum(args) => {
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
                 collect_funcall_ids(a, out);
             }

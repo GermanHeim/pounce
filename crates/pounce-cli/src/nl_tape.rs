@@ -62,6 +62,14 @@ pub enum TapeOp {
     /// Two-argument arctangent `atan2(vals[a], vals[b])` (operands are
     /// `(y, x)`, matching AMPL's `atan2(y, x)` / `.nl` opcode o48).
     Atan2(usize, usize),
+    /// Pairwise minimum `min(vals[a], vals[b])`. Piecewise linear: the
+    /// value/tangent/adjoint route through whichever operand is smaller
+    /// (ties pick the first), and the second derivative is identically
+    /// zero. n-ary AMPL `min` (opcode o11) folds to a chain of these.
+    Min(usize, usize),
+    /// Pairwise maximum `max(vals[a], vals[b])` — the `Min` mirror;
+    /// n-ary AMPL `max` (opcode o12) folds to a chain of these.
+    Max(usize, usize),
     /// Relational comparison `vals[a] OP vals[b]` → `1.0`/`0.0`.
     /// Piecewise constant, so its derivative is identically zero — the
     /// AD passes treat it as a constant w.r.t. its operands.
@@ -179,6 +187,8 @@ impl Tape {
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
+                TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
+                TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
                 TapeOp::Cmp(op, a, b) => f64::from(cmp_holds(*op, vals[*a], vals[*b])),
                 TapeOp::And(a, b) => f64::from(vals[*a] != 0.0 && vals[*b] != 0.0),
                 TapeOp::Or(a, b) => f64::from(vals[*a] != 0.0 || vals[*b] != 0.0),
@@ -340,6 +350,23 @@ impl Tape {
                     adj[*l] += a * (x / d);
                     adj[*r] += a * (-y / d);
                 }
+                // min/max are piecewise linear: the adjoint flows to the
+                // selected operand only (ties pick the first, a valid
+                // subgradient choice).
+                TapeOp::Min(l, r) => {
+                    if vals[*l] <= vals[*r] {
+                        adj[*l] += a;
+                    } else {
+                        adj[*r] += a;
+                    }
+                }
+                TapeOp::Max(l, r) => {
+                    if vals[*l] >= vals[*r] {
+                        adj[*l] += a;
+                    } else {
+                        adj[*r] += a;
+                    }
+                }
                 // Comparisons and logical connectives are piecewise
                 // constant: zero derivative, so no adjoint propagates.
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {}
@@ -480,6 +507,21 @@ impl Tape {
                     let d = y * y + x * x;
                     (x * dot[*a] - y * dot[*b]) / d
                 }
+                // min/max: the tangent follows the selected operand.
+                TapeOp::Min(a, b) => {
+                    if vals[*a] <= vals[*b] {
+                        dot[*a]
+                    } else {
+                        dot[*b]
+                    }
+                }
+                TapeOp::Max(a, b) => {
+                    if vals[*a] >= vals[*b] {
+                        dot[*a]
+                    } else {
+                        dot[*b]
+                    }
+                }
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => 0.0,
                 TapeOp::Select(c, t, e) => {
                     if vals[*c] != 0.0 {
@@ -542,6 +584,8 @@ impl Tape {
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
+                TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
+                TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
                 TapeOp::Cmp(op, a, b) => f64::from(cmp_holds(*op, vals[*a], vals[*b])),
                 TapeOp::And(a, b) => f64::from(vals[*a] != 0.0 && vals[*b] != 0.0),
                 TapeOp::Or(a, b) => f64::from(vals[*a] != 0.0 || vals[*b] != 0.0),
@@ -689,6 +733,21 @@ impl Tape {
                     let x = vals[*b];
                     let d = y * y + x * x;
                     (x * dot[*a] - y * dot[*b]) / d
+                }
+                // min/max: the tangent follows the selected operand.
+                TapeOp::Min(a, b) => {
+                    if vals[*a] <= vals[*b] {
+                        dot[*a]
+                    } else {
+                        dot[*b]
+                    }
+                }
+                TapeOp::Max(a, b) => {
+                    if vals[*a] >= vals[*b] {
+                        dot[*a]
+                    } else {
+                        dot[*b]
+                    }
                 }
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => 0.0,
                 TapeOp::Select(c, t, e) => {
@@ -945,6 +1004,19 @@ impl Tape {
                     adj[*b] += w * fb;
                     adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
                     adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                }
+                // min/max are piecewise linear (zero second derivative):
+                // route the adjoint and its tangent into the selected
+                // operand, exactly like the active branch of a Select.
+                TapeOp::Min(a, b) => {
+                    let br = if vals[*a] <= vals[*b] { *a } else { *b };
+                    adj[br] += w;
+                    adj_dot[br] += wd;
+                }
+                TapeOp::Max(a, b) => {
+                    let br = if vals[*a] >= vals[*b] { *a } else { *b };
+                    adj[br] += w;
+                    adj_dot[br] += wd;
                 }
                 // Zero derivative: no first- or second-order adjoint.
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {}
@@ -1245,6 +1317,19 @@ impl Tape {
                         adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
                         adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
                     }
+                    // min/max are piecewise linear (zero second
+                    // derivative): route adjoint and its tangent into
+                    // the selected operand, like an active Select branch.
+                    TapeOp::Min(a, b) => {
+                        let br = if v[*a] <= v[*b] { *a } else { *b };
+                        adj[br] += w;
+                        adj_dot[br] += wd;
+                    }
+                    TapeOp::Max(a, b) => {
+                        let br = if v[*a] >= v[*b] { *a } else { *b };
+                        adj[br] += w;
+                        adj_dot[br] += wd;
+                    }
                     // Zero derivative: no first- or second-order adjoint.
                     TapeOp::Cmp(_, _, _)
                     | TapeOp::And(_, _)
@@ -1385,6 +1470,15 @@ impl Tape {
                 // and correct for a structural superset). The condition
                 // contributes no derivative and is excluded.
                 TapeOp::Select(_c, t, e) => var_sets[*t].union(&var_sets[*e]).copied().collect(),
+                // min/max are piecewise linear: the active operand passes
+                // through with unit derivative, so the second derivative is
+                // identically zero (no pairs). Their dependence set is the
+                // union of both operands (either may become active as x
+                // varies — conservative and correct for a structural
+                // superset), mirroring Select.
+                TapeOp::Min(a, b) | TapeOp::Max(a, b) => {
+                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                }
                 TapeOp::Funcall { args, .. } => {
                     let mut combined: BTreeSet<usize> = BTreeSet::new();
                     for arg in args {
@@ -1485,6 +1579,33 @@ fn build_recursive(
                 let next = build_recursive(a, ops, cache, resolver);
                 let idx = ops.len();
                 ops.push(TapeOp::Add(acc, next));
+                acc = idx;
+            }
+            acc
+        }
+        // n-ary min/max fold to a left-associative chain of binary
+        // Min/Max TapeOps. The chain reproduces the list extremum, and
+        // the binary Min/Max AD arms route the (sub)gradient to the
+        // active operand at each step — equivalent to selecting the one
+        // active operand of the whole list. An empty list cannot arise
+        // from a well-formed `.nl` MINLIST/MAXLIST (count >= 1); guard
+        // with a 0 constant for safety rather than panicking.
+        Expr::MinList(args) | Expr::MaxList(args) => {
+            let is_min = matches!(expr, Expr::MinList(_));
+            if args.is_empty() {
+                let idx = ops.len();
+                ops.push(TapeOp::Const(0.0));
+                return idx;
+            }
+            let mut acc = build_recursive(&args[0], ops, cache, resolver);
+            for a in &args[1..] {
+                let next = build_recursive(a, ops, cache, resolver);
+                let idx = ops.len();
+                ops.push(if is_min {
+                    TapeOp::Min(acc, next)
+                } else {
+                    TapeOp::Max(acc, next)
+                });
                 acc = idx;
             }
             acc
@@ -2034,7 +2155,7 @@ fn count_cse_appearances(
             count_cse_appearances(b, seen_in_root, counts);
         }
         Expr::Unary(_, a) => count_cse_appearances(a, seen_in_root, counts),
-        Expr::Sum(args) => {
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
                 count_cse_appearances(a, seen_in_root, counts);
             }
@@ -2195,11 +2316,14 @@ fn build_into_summand(
         | Expr::And(_, _)
         | Expr::Or(_, _)
         | Expr::Not(_)
-        | Expr::Cond { .. } => {
+        | Expr::Cond { .. }
+        | Expr::MinList(_)
+        | Expr::MaxList(_) => {
             panic!(
-                "HybridTape: conditional / logical opcodes (comparisons, AND/OR/NOT, \
-                 if-then-else) are not supported on the hybrid (partial-separability) \
-                 tape path. Build with Tape::build_with_externals instead."
+                "HybridTape: conditional / logical / min-max opcodes (comparisons, \
+                 AND/OR/NOT, if-then-else, min/max lists) are not supported on the \
+                 hybrid (partial-separability) tape path. Build with \
+                 Tape::build_with_externals instead."
             );
         }
         Expr::Funcall { .. } => {
@@ -2412,9 +2536,11 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::And(_, _)
             | TapeOp::Or(_, _)
             | TapeOp::Not(_)
-            | TapeOp::Select(_, _, _) => unreachable!(
-                "HybridTape prelude cannot contain conditional / logical TapeOps; \
-                 build_into_summand panics on those Expr variants."
+            | TapeOp::Select(_, _, _)
+            | TapeOp::Min(_, _)
+            | TapeOp::Max(_, _) => unreachable!(
+                "HybridTape prelude cannot contain conditional / logical / min-max \
+                 TapeOps; build_into_summand panics on those Expr variants."
             ),
             TapeOp::Funcall { .. } => unreachable!(
                 "HybridTape prelude cannot contain TapeOp::Funcall; \
@@ -2506,9 +2632,11 @@ fn summand_sparsity(
                 | TapeOp::And(_, _)
                 | TapeOp::Or(_, _)
                 | TapeOp::Not(_)
-                | TapeOp::Select(_, _, _) => unreachable!(
-                    "HybridTape summand cannot contain conditional / logical TapeOps; \
-                     build_into_summand panics on those Expr variants."
+                | TapeOp::Select(_, _, _)
+                | TapeOp::Min(_, _)
+                | TapeOp::Max(_, _) => unreachable!(
+                    "HybridTape summand cannot contain conditional / logical / min-max \
+                     TapeOps; build_into_summand panics on those Expr variants."
                 ),
                 TapeOp::Funcall { .. } => unreachable!(
                     "HybridTape summand cannot contain TapeOp::Funcall; \
@@ -2561,6 +2689,10 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
             "op_operands: TapeOp::Select has three operands and is unsupported on \
              the HybridTape path"
         ),
+        TapeOp::Min(_, _) | TapeOp::Max(_, _) => unreachable!(
+            "op_operands: TapeOp::Min/Max are unsupported on the HybridTape path \
+             (build_into_summand rejects min/max lists)"
+        ),
         TapeOp::Funcall { .. } => (None, None),
     }
 }
@@ -2610,9 +2742,12 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         | TapeOp::And(_, _)
         | TapeOp::Or(_, _)
         | TapeOp::Not(_)
-        | TapeOp::Select(_, _, _) => panic!(
+        | TapeOp::Select(_, _, _)
+        | TapeOp::Min(_, _)
+        | TapeOp::Max(_, _) => panic!(
             "GlobalTape free-function kernels do not implement conditional / logical \
-             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+             / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
+             instead."
         ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
@@ -2738,9 +2873,12 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
         | TapeOp::And(_, _)
         | TapeOp::Or(_, _)
         | TapeOp::Not(_)
-        | TapeOp::Select(_, _, _) => panic!(
+        | TapeOp::Select(_, _, _)
+        | TapeOp::Min(_, _)
+        | TapeOp::Max(_, _) => panic!(
             "GlobalTape free-function kernels do not implement conditional / logical \
-             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+             / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
+             instead."
         ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
@@ -2858,9 +2996,12 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         | TapeOp::And(_, _)
         | TapeOp::Or(_, _)
         | TapeOp::Not(_)
-        | TapeOp::Select(_, _, _) => panic!(
+        | TapeOp::Select(_, _, _)
+        | TapeOp::Min(_, _)
+        | TapeOp::Max(_, _) => panic!(
             "GlobalTape free-function kernels do not implement conditional / logical \
-             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+             / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
+             instead."
         ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
@@ -3116,9 +3257,12 @@ fn ror_step(
         | TapeOp::And(_, _)
         | TapeOp::Or(_, _)
         | TapeOp::Not(_)
-        | TapeOp::Select(_, _, _) => panic!(
+        | TapeOp::Select(_, _, _)
+        | TapeOp::Min(_, _)
+        | TapeOp::Max(_, _) => panic!(
             "GlobalTape free-function kernels do not implement conditional / logical \
-             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+             / min-max TapeOps; use the Tape (build_with_externals) interpreter path \
+             instead."
         ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
@@ -3247,6 +3391,11 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
                 // Either branch may be active; the structural superset is the
                 // union of both branches' variable sets.
                 var_sets[*t].union(&var_sets[*e]).copied().collect()
+            }
+            TapeOp::Min(a, b) | TapeOp::Max(a, b) => {
+                // min/max are piecewise linear: zero second derivative (no
+                // pairs); dependence set is the union of both operands.
+                var_sets[*a].union(&var_sets[*b]).copied().collect()
             }
         };
         var_sets.push(vset);
@@ -3515,6 +3664,42 @@ mod tests {
         let atan2 = |a: Expr, b: Expr| Expr::Binary(BinOp::Atan2, Box::new(a), Box::new(b));
         let e = Expr::Sum(vec![atan2(var(0), var(1)), mul(var(0), var(1))]);
         grad_and_hess_match_fd(&e, &[1.2, 0.7], 1e-5);
+    }
+
+    #[test]
+    fn minmax_grad_and_hessian_match_fd() {
+        // f = min(x0, x1, x2) + max(x1, x2) + x0*x2
+        // Point chosen so each list has a UNIQUE strictly-active
+        // operand, so the subgradient equals the FD slope (the ±h
+        // probes never cross a kink):
+        //   min(0.5, 3.0, 2.0) = 0.5  -> active x0
+        //   max(3.0, 2.0)      = 3.0  -> active x1
+        let e = Expr::Sum(vec![
+            Expr::MinList(vec![var(0), var(1), var(2)]),
+            Expr::MaxList(vec![var(1), var(2)]),
+            mul(var(0), var(2)),
+        ]);
+        grad_and_hess_match_fd(&e, &[0.5, 3.0, 2.0], 1e-5);
+    }
+
+    #[test]
+    fn minmax_value_and_active_operand() {
+        // Spot-check the value and that the gradient routes entirely
+        // through the active operand (zero second derivative).
+        let e = Expr::Sum(vec![
+            Expr::MinList(vec![var(0), var(1)]),
+            Expr::MaxList(vec![var(0), var(1)]),
+        ]);
+        let t = Tape::build(&e);
+        // min(x0,x1) + max(x0,x1) == x0 + x1 for any inputs.
+        let x = [1.3, -0.4];
+        assert!((t.eval(&x) - (x[0] + x[1])).abs() < 1e-12);
+        let mut g = vec![0.0; 2];
+        t.gradient_seed(&x, 1.0, &mut g);
+        // min active = x1 (smaller), max active = x0 (larger):
+        // d/dx0 = 1 (from max), d/dx1 = 1 (from min).
+        assert!((g[0] - 1.0).abs() < 1e-12, "g0={}", g[0]);
+        assert!((g[1] - 1.0).abs() < 1e-12, "g1={}", g[1]);
     }
 
     #[test]

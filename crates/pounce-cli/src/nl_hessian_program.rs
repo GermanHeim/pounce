@@ -472,9 +472,11 @@ impl HessianProgram {
                 | TapeOp::And(_, _)
                 | TapeOp::Or(_, _)
                 | TapeOp::Not(_)
-                | TapeOp::Select(_, _, _) => panic!(
+                | TapeOp::Select(_, _, _)
+                | TapeOp::Min(_, _)
+                | TapeOp::Max(_, _) => panic!(
                     "HessianProgram path does not yet support tan/atan/acos, the \
-                     other transcendental opcodes, atan2, or \
+                     other transcendental opcodes, atan2, min/max, or \
                      conditional / logical opcodes; use the Tape \
                      (build_with_externals) interpreter path instead."
                 ),
@@ -608,9 +610,11 @@ impl HessianProgram {
                     | TapeOp::And(_, _)
                     | TapeOp::Or(_, _)
                     | TapeOp::Not(_)
-                    | TapeOp::Select(_, _, _) => panic!(
+                    | TapeOp::Select(_, _, _)
+                    | TapeOp::Min(_, _)
+                    | TapeOp::Max(_, _) => panic!(
                         "HessianProgram path does not yet support tan/atan/acos, the \
-                         other transcendental opcodes, atan2, or \
+                         other transcendental opcodes, atan2, min/max, or \
                          conditional / logical opcodes; use the Tape \
                          (build_with_externals) interpreter path instead."
                     ),
@@ -778,9 +782,11 @@ impl HessianProgram {
                     | TapeOp::And(_, _)
                     | TapeOp::Or(_, _)
                     | TapeOp::Not(_)
-                    | TapeOp::Select(_, _, _) => panic!(
+                    | TapeOp::Select(_, _, _)
+                    | TapeOp::Min(_, _)
+                    | TapeOp::Max(_, _) => panic!(
                         "HessianProgram path does not yet support tan/atan/acos, the \
-                         other transcendental opcodes, atan2, or \
+                         other transcendental opcodes, atan2, min/max, or \
                          conditional / logical opcodes; use the Tape \
                          (build_with_externals) interpreter path instead."
                     ),
@@ -1274,8 +1280,10 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::And(_, _)
             | TapeOp::Or(_, _)
             | TapeOp::Not(_)
-            | TapeOp::Select(_, _, _) => panic!(
-                "HessianProgram path does not support conditional / logical \
+            | TapeOp::Select(_, _, _)
+            | TapeOp::Min(_, _)
+            | TapeOp::Max(_, _) => panic!(
+                "HessianProgram path does not support conditional / logical / min-max \
                  opcodes; use the Tape (build_with_externals) path instead."
             ),
         }
@@ -1326,8 +1334,10 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::And(_, _)
             | TapeOp::Or(_, _)
             | TapeOp::Not(_)
-            | TapeOp::Select(_, _, _) => panic!(
-                "HessianProgram path does not support conditional / logical \
+            | TapeOp::Select(_, _, _)
+            | TapeOp::Min(_, _)
+            | TapeOp::Max(_, _) => panic!(
+                "HessianProgram path does not support conditional / logical / min-max \
                  opcodes; use the Tape (build_with_externals) path instead."
             ),
         };

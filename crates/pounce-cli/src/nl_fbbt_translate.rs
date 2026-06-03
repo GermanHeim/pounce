@@ -170,6 +170,16 @@ impl Builder {
                 );
                 self.emit(FbbtOp::Opaque)
             }
+            // n-ary min/max have no FbbtOp interval form yet. Translate
+            // the operands (so they remain well-formed sub-trees) and
+            // emit Opaque, keeping bound tightening sound without
+            // asserting a wrong interval.
+            Expr::MinList(args) | Expr::MaxList(args) => {
+                for a in args {
+                    let _ = self.translate(a);
+                }
+                self.emit(FbbtOp::Opaque)
+            }
             Expr::Funcall { .. } => {
                 // External / imported functions are opaque to FBBT.
                 self.emit(FbbtOp::Opaque)

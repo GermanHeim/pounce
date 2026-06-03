@@ -92,6 +92,15 @@ pub enum Expr {
         then_: Box<Expr>,
         else_: Box<Expr>,
     },
+    /// n-ary minimum (`o11` MINLIST). Value is the smallest operand.
+    /// Piecewise linear: the derivative flows through whichever operand
+    /// is currently smallest (a subgradient; ties resolve to the first
+    /// such operand), and the second derivative is identically zero —
+    /// the standard AD treatment for min/max, matching ASL/IPOPT.
+    MinList(Vec<Expr>),
+    /// n-ary maximum (`o12` MAXLIST). Value is the largest operand;
+    /// derivative routing mirrors [`Expr::MinList`].
+    MaxList(Vec<Expr>),
 }
 
 /// Relational operator carried by [`Expr::Compare`]. The variants map
@@ -908,6 +917,26 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Expr::Sum(args))
             }
+            // Variadic min (o11 MINLIST) / max (o12 MAXLIST): like o54,
+            // a count data line followed by that many operands.
+            11 | 12 => {
+                let count_line = self.next_data_line()?;
+                let count: usize = count_line
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| "missing min/max list count".to_string())?
+                    .parse()
+                    .map_err(|e| format!("min/max list count: {e}"))?;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    args.push(self.parse_expr()?);
+                }
+                if code == 11 {
+                    Ok(Expr::MinList(args))
+                } else {
+                    Ok(Expr::MaxList(args))
+                }
+            }
             other => Err(format!("unsupported opcode o{other}")),
         }
     }
@@ -1046,6 +1075,14 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
             }
         }
         Expr::Sum(args) => args.iter().map(|a| eval_expr(a, x)).sum(),
+        Expr::MinList(args) => args
+            .iter()
+            .map(|a| eval_expr(a, x))
+            .fold(Number::INFINITY, Number::min),
+        Expr::MaxList(args) => args
+            .iter()
+            .map(|a| eval_expr(a, x))
+            .fold(Number::NEG_INFINITY, Number::max),
         Expr::Compare(op, a, b) => {
             let va = eval_expr(a, x);
             let vb = eval_expr(b, x);
@@ -1097,6 +1134,29 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
              evaluate through the tape AD path (Tape::build_with_externals) instead"
         ),
     }
+}
+
+/// Index of the active operand of an n-ary min (`want_min = true`) or
+/// max (`want_min = false`) list at point `x`: the smallest / largest
+/// value, with ties resolved to the first such operand (the
+/// conventional subgradient choice). Returns `None` for an empty list.
+fn argmin_argmax(args: &[Expr], x: &[Number], want_min: bool) -> Option<usize> {
+    let mut best: Option<(usize, Number)> = None;
+    for (i, a) in args.iter().enumerate() {
+        let v = eval_expr(a, x);
+        match best {
+            None => best = Some((i, v)),
+            Some((_, bv)) => {
+                // Strict comparison keeps the FIRST extremal operand on
+                // ties, matching the subgradient convention used by Abs
+                // and Select elsewhere in the tape.
+                if (want_min && v < bv) || (!want_min && v > bv) {
+                    best = Some((i, v));
+                }
+            }
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// Reverse-mode gradient: accumulates `seed * d(expr)/dx_i` into `grad`.
@@ -1185,6 +1245,20 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 grad_expr(arg, x, seed, grad);
             }
         }
+        // min/max are piecewise linear: the seed flows only through the
+        // currently-active (smallest / largest) operand — a subgradient.
+        // Ties resolve to the first such operand. Empty list: no operand,
+        // no derivative (matches the ±inf eval fold).
+        Expr::MinList(args) => {
+            if let Some(k) = argmin_argmax(args, x, true) {
+                grad_expr(&args[k], x, seed, grad);
+            }
+        }
+        Expr::MaxList(args) => {
+            if let Some(k) = argmin_argmax(args, x, false) {
+                grad_expr(&args[k], x, seed, grad);
+            }
+        }
         // Comparisons and logical connectives are piecewise constant:
         // zero derivative, so no seed propagates into their operands.
         Expr::Compare(_, _, _) | Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => {}
@@ -1216,7 +1290,7 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
             collect_vars(b, out);
         }
         Expr::Unary(_, a) => collect_vars(a, out),
-        Expr::Sum(args) => {
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
                 collect_vars(a, out);
             }
