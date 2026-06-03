@@ -113,6 +113,61 @@ prob = from_jax(f, g, n=4, m=1, lb=jnp.zeros(4), ub=jnp.full(4, 10.0),
 x, info = prob.solve(x0=jnp.ones(4))
 ```
 
+### Sparse Jacobian/Hessian compression (`sparse=`)
+
+By default the constraint Jacobian and the Lagrangian Hessian are
+computed *densely* — `jax.jacrev`/`jacfwd`/`hessian` build the full
+matrix, which is then sliced to the detected sparsity pattern. The
+reported structure is sparse, but the AD work and memory are `O(m·n)`
+(Jacobian) and `O(n²)` (Hessian) **regardless of how sparse the true
+matrices are**. On a 10,000-variable banded system that means computing
+~10⁸ entries per iteration to keep ~50,000.
+
+Passing `sparse=True` switches both derivatives to CPR-style **colored
+AD** (pounce#83): structurally-orthogonal columns are colored, one
+JVP (Jacobian) / HVP (Hessian) is taken per color — `k ≪ n` colors —
+and the compressed result is scattered back to the known nonzeros. The
+per-iteration cost drops from `O(n)` to `O(k)` AD passes. This is the
+same compression strategy the Rust `.nl` tape path already uses for its
+Hessian.
+
+```python
+prob = from_jax(f, g, n=4, m=1, lb=jnp.zeros(4), ub=jnp.full(4, 10.0),
+                cl=jnp.zeros(1), cu=jnp.zeros(1),
+                sparse=True)              # colored JVP/HVP instead of dense slice
+```
+
+The flag is also accepted by [`JaxProblem`](#build-once-solve-many-jaxproblem),
+where it applies to both the single-solve and the batched
+block-diagonal paths. The reported structure, the values, and the
+solution are identical to the dense path either way — only the cost of
+producing the derivative values changes. The differentiable backward
+(`factor_reuse` / implicit diff) is unaffected.
+
+**When to use it.** `sparse=True` wins on problems whose Jacobian/Hessian
+are *genuinely* sparse with bounded per-row fill (banded, block, finite
+differences/elements, PDE-constrained, separable). On a dense problem
+the coloring finds no orthogonality (`k = n`) and the flag is a small,
+bounded overhead, so it is **opt-in rather than the default**. Measured
+on a banded family (`python/benchmarks/bench_sparse_ad_83.py`):
+
+| n | colors (Jac / Hess) | per-eval Jacobian | per-eval Hessian | full solve |
+|---|---|---|---|---|
+| 800  | 2 / 3 | 6.2× faster | 2.0× faster | 1.3× faster |
+| 2000 | 2 / 3 | 18.4× faster | 5.4× faster | 7.6× faster |
+| 5000 | 2 / 3 | **560× faster** | **200× faster** | — |
+
+The color count stays constant in `n` while the dense path grows
+linearly, so the gap widens without bound as the problem scales.
+
+**Pattern detection.** Sparsity is found by probing the dense derivative
+at random points and recording where entries are nonzero. Under
+`sparse=True` a mis-probe is costlier — it corrupts the compression
+seed, not just a reported nonzero — so detection unions **3 probes** by
+default (vs 1 for the dense path). Override with `n_probes=`. Truly
+value-dependent structure (branchy `where`/`abs`) should still be
+hand-rolled via the `Problem` API.
+
 ### Differentiable solve
 
 `pounce.jax.solve(p, f=, g=, …)` is a `custom_vjp`-wrapped solve that
@@ -223,6 +278,7 @@ jp = JaxProblem(
     lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
     cl=jnp.zeros(1),       cu=jnp.zeros(1),
     options={"tol": 1e-9, "print_level": 0},
+    # sparse=True,                                  # colored AD on sparse problems (see above)
 )
 
 # Sequential, differentiable:
