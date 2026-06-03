@@ -9,6 +9,28 @@ changes.
 
 ## Unreleased
 
+### Added — Sparse (colored) AD for the JAX front-ends (`sparse=`)
+
+`from_jax` and `JaxProblem` gained a `sparse=True` flag that computes the
+constraint Jacobian and the Lagrangian Hessian with CPR-style colored AD
+— one JVP/HVP per color (`k ≪ n` colors) scattered back to the detected
+nonzeros — instead of materializing the dense matrix and slicing it
+(pounce#83). Per-iteration derivative cost drops from `O(n)` to `O(k)`
+AD passes on genuinely sparse problems; benchmarked on a banded family at
+~560× (Jacobian) / ~200× (Hessian) per eval and 7.6× faster full solve
+by `n=2000`. Reported structure, values, and solutions are identical to
+the dense path; the differentiable backward is unaffected. Dense problems
+see a small bounded overhead, so the flag is opt-in.
+
+- Forward/reverse mode selection (`jacfwd` when `n < m`, else `jacrev`)
+  for the dense path / sparsity probe.
+- Multi-probe sparsity detection (`n_probes=`, default 3 under
+  `sparse=True`, 1 otherwise) unions several random probes to harden
+  against value-dependent structure.
+- Benchmark: `python/benchmarks/bench_sparse_ad_83.py`. Docs:
+  `docs/src/python.md` (JAX integration → "Sparse Jacobian/Hessian
+  compression").
+
 ### Added — Interactive solver debugger (`--debug` / `--debug-json`)
 
 A "pdb for the interior-point loop." `pounce <problem> --debug` opens a
