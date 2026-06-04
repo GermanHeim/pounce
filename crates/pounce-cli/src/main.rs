@@ -342,6 +342,14 @@ pub fn main() -> ExitCode {
         }
     };
 
+    // Multistart / find-minima: when a `--minima` method is set, drive the
+    // local solver in a loop over the *raw* problem TNLP (presolve / counting
+    // wrappers are intentionally bypassed so coordinates match the original
+    // problem and the clean objective is evaluated directly) and return.
+    if let Some(mcfg) = &args.minima {
+        return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
+    }
+
     // Does the `.nl` ask for a parametric sensitivity step? When it
     // does, the post-optimal step runs inside `on_converged` below and
     // its result is written back as the `sens_sol_state_1` suffix.

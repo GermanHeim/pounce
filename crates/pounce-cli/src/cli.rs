@@ -109,6 +109,127 @@ pub struct Args {
     /// first pause (e.g. set breakpoints then `continue`). Implies
     /// `--debug` when no `--debug*` mode is given.
     pub debug_script: Option<PathBuf>,
+    /// `--minima <method>` (or `--multistart`) — search for multiple local
+    /// minima instead of a single solve. `None` keeps the default
+    /// single-solve behaviour. See [`MinimaArgs`] for the strategy knobs.
+    /// Mirrors `pounce.find_minima` (`python/pounce/_minima.py`).
+    pub minima: Option<MinimaArgs>,
+}
+
+/// Global-search strategy for `--minima`. Mirrors the six methods of
+/// `pounce.find_minima` (`python/pounce/_minima.py`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinimaMethod {
+    /// Random / Sobol' box sampling (restart).
+    Multistart,
+    /// Multi-Level Single Linkage clustering (Rinnooy Kan & Timmer 1987).
+    Mlsl,
+    /// Metropolis chain over minima (Wales & Doye 1997).
+    Basinhopping,
+    /// Repulsive Gaussian bumps (filled-function; Ge 1990).
+    Flooding,
+    /// Softened `1/‖x−x*‖^p` poles (deflation; Farrell et al. 2015).
+    Deflation,
+    /// Equal-height tunnel between descents (Levy & Montalvo 1985).
+    Tunneling,
+}
+
+impl MinimaMethod {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "multistart" => Self::Multistart,
+            "mlsl" => Self::Mlsl,
+            "basinhopping" => Self::Basinhopping,
+            "flooding" => Self::Flooding,
+            "deflation" => Self::Deflation,
+            "tunneling" => Self::Tunneling,
+            other => {
+                return Err(format!(
+                    "unknown --minima method '{other}'; choose from \
+                     multistart, mlsl, basinhopping, flooding, deflation, tunneling"
+                ))
+            }
+        })
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Multistart => "multistart",
+            Self::Mlsl => "mlsl",
+            Self::Basinhopping => "basinhopping",
+            Self::Flooding => "flooding",
+            Self::Deflation => "deflation",
+            Self::Tunneling => "tunneling",
+        }
+    }
+}
+
+/// Parsed `--minima` configuration. Shared knobs have concrete defaults;
+/// strategy-specific knobs are `Option`s resolved per-method in the driver
+/// (so `"auto"` widths and curvature-based amplitudes match
+/// `pounce.find_minima`). Field semantics mirror `_minima.py` exactly.
+#[derive(Debug, Clone)]
+pub struct MinimaArgs {
+    pub method: MinimaMethod,
+    /// Target: stop once this many distinct minima are found (default 10).
+    pub n_minima: usize,
+    /// Budget: hard cap on solver calls (default `8 * n_minima`).
+    pub max_solves: Option<usize>,
+    /// Give-up: stop after this many solves in a row that find nothing new.
+    pub patience: usize,
+    /// Two minima within this scaled distance are the same (default 1e-4).
+    pub dedup: f64,
+    /// Smallest Hessian eigenvalue tolerated by saddle rejection (1e-6).
+    pub psd_tol: f64,
+    /// Seed for the sampler / Sobol' scramble (default 0; reproducible).
+    pub seed: u64,
+    /// Use a scrambled Sobol' sequence for box sampling (default true).
+    pub sobol: bool,
+    // ---- strategy-specific knobs (None ⇒ per-method default) ----
+    pub sigma: Option<f64>,
+    pub sigma_frac: Option<f64>,
+    pub amplitude: Option<f64>,
+    pub amp_margin: Option<f64>,
+    pub eta: Option<f64>,
+    pub power: Option<f64>,
+    pub soft: Option<f64>,
+    pub length: Option<f64>,
+    pub length_frac: Option<f64>,
+    pub gamma: Option<f64>,
+    pub samples_per_round: Option<usize>,
+    pub step: Option<f64>,
+    pub temperature: Option<f64>,
+    pub restart_jitter: Option<f64>,
+}
+
+impl Default for MinimaArgs {
+    fn default() -> Self {
+        Self {
+            // Matches `find_minima`'s default `method="deflation"`.
+            method: MinimaMethod::Deflation,
+            n_minima: 10,
+            max_solves: None,
+            patience: 8,
+            dedup: 1e-4,
+            psd_tol: 1e-6,
+            seed: 0,
+            sobol: true,
+            sigma: None,
+            sigma_frac: None,
+            amplitude: None,
+            amp_margin: None,
+            eta: None,
+            power: None,
+            soft: None,
+            length: None,
+            length_frac: None,
+            gamma: None,
+            samples_per_round: None,
+            step: None,
+            temperature: None,
+            restart_jitter: None,
+        }
+    }
 }
 
 /// Front end for the interactive solver debugger (`--debug*`).
@@ -221,6 +342,34 @@ Options:
                               --dump iterates:5-:full
   --dump-dir <path>         override dump root (default ./pounce-dump-<ts>)
   --dump-format <fmt>       dump format (default: jsonl)
+
+Multistart / find-minima (search for several local minima, not one):
+  --minima <method>         enable multistart with the given strategy:
+                            multistart | mlsl | basinhopping |
+                            flooding | deflation | tunneling
+  --multistart              shorthand for --minima multistart
+  --n-minima <N>            target number of distinct minima (default 10)
+  --max-solves <N>          hard cap on solver calls (default 8*n_minima)
+  --patience <N>            stop after N solves in a row that find nothing
+                            new (default 8)
+  --dedup <d>               minima within this per-dimension-scaled distance
+                            are the same (default 1e-4)
+  --psd-tol <t>             smallest Hessian eigenvalue tolerated by the
+                            saddle-rejection check (default 1e-6)
+  --seed <S>                seed for sampling / Sobol' scramble (default 0)
+  --sobol / --no-sobol      use a scrambled Sobol' sequence for box
+                            sampling (default: on)
+  Strategy knobs (used only by the relevant --minima method; all optional):
+    --sigma, --sigma-frac, --amplitude, --amp-margin   (flooding)
+    --eta, --power, --soft, --length, --length-frac    (deflation/tunneling)
+    --gamma, --samples-per-round                       (mlsl)
+    --step, --temperature                              (basinhopping)
+    --restart-jitter                                   (all restart fallbacks)
+
+  When --minima is set, the global best minimum is written to <stub>.sol
+  (the usual AMPL output), and the remaining minima, ranked by objective,
+  to siblings <stub>.min001.sol, <stub>.min002.sol, ….  The JSON report
+  (--json-output) gains a `minima` section listing every found minimum.
 "
     }
 
@@ -251,8 +400,30 @@ Options:
         let mut debug_on_error = false;
         let mut debug_on_interrupt = false;
         let mut debug_script: Option<PathBuf> = None;
+        let mut minima: Option<MinimaArgs> = None;
 
         let mut it = argv.into_iter().skip(1).peekable();
+        // Shorthand: fetch the value for a flag that requires one.
+        macro_rules! flag_val {
+            ($flag:expr) => {
+                it.next()
+                    .ok_or_else(|| format!("{} requires a value", $flag))?
+            };
+        }
+        // Parse a numeric value for a `--minima` knob, lazily creating the
+        // config (default method = deflation, overridden by `--minima <m>`).
+        macro_rules! minima_num {
+            ($flag:expr, $ty:ty, $field:ident) => {{
+                let v = flag_val!($flag);
+                let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
+                minima.get_or_insert_with(MinimaArgs::default).$field = parsed;
+            }};
+            ($flag:expr, $ty:ty, $field:ident, opt) => {{
+                let v = flag_val!($flag);
+                let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
+                minima.get_or_insert_with(MinimaArgs::default).$field = Some(parsed);
+            }};
+        }
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "-h" | "--help" => help = true,
@@ -358,6 +529,44 @@ Options:
                     rh_eigendecomp = true;
                     compute_red_hessian = true;
                 }
+                // ---- multistart / find-minima (`--minima`) ----
+                "--minima" => {
+                    let v = flag_val!("--minima");
+                    let method = MinimaMethod::parse(&v)?;
+                    minima.get_or_insert_with(MinimaArgs::default).method = method;
+                }
+                "--multistart" => {
+                    minima.get_or_insert_with(MinimaArgs::default).method =
+                        MinimaMethod::Multistart;
+                }
+                "--n-minima" => minima_num!("--n-minima", usize, n_minima),
+                "--max-solves" => minima_num!("--max-solves", usize, max_solves, opt),
+                "--patience" => minima_num!("--patience", usize, patience),
+                "--dedup" => minima_num!("--dedup", f64, dedup),
+                "--psd-tol" => minima_num!("--psd-tol", f64, psd_tol),
+                "--seed" => minima_num!("--seed", u64, seed),
+                "--sobol" => {
+                    minima.get_or_insert_with(MinimaArgs::default).sobol = true;
+                }
+                "--no-sobol" => {
+                    minima.get_or_insert_with(MinimaArgs::default).sobol = false;
+                }
+                "--sigma" => minima_num!("--sigma", f64, sigma, opt),
+                "--sigma-frac" => minima_num!("--sigma-frac", f64, sigma_frac, opt),
+                "--amplitude" => minima_num!("--amplitude", f64, amplitude, opt),
+                "--amp-margin" => minima_num!("--amp-margin", f64, amp_margin, opt),
+                "--eta" => minima_num!("--eta", f64, eta, opt),
+                "--power" => minima_num!("--power", f64, power, opt),
+                "--soft" => minima_num!("--soft", f64, soft, opt),
+                "--length" => minima_num!("--length", f64, length, opt),
+                "--length-frac" => minima_num!("--length-frac", f64, length_frac, opt),
+                "--gamma" => minima_num!("--gamma", f64, gamma, opt),
+                "--samples-per-round" => {
+                    minima_num!("--samples-per-round", usize, samples_per_round, opt)
+                }
+                "--step" => minima_num!("--step", f64, step, opt),
+                "--temperature" => minima_num!("--temperature", f64, temperature, opt),
+                "--restart-jitter" => minima_num!("--restart-jitter", f64, restart_jitter, opt),
                 other if !other.starts_with('-') => {
                     // `key=value` forms an option pair (matches upstream
                     // ipopt CLI). Otherwise the first bare arg is the
@@ -420,6 +629,7 @@ Options:
                 debug_on_error,
                 debug_on_interrupt,
                 debug_script,
+                minima,
             });
         }
 
@@ -449,6 +659,7 @@ Options:
             debug_on_error,
             debug_on_interrupt,
             debug_script,
+            minima,
         })
     }
 }
@@ -742,6 +953,85 @@ mod tests {
         let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--rh-eigendecomp"])).unwrap();
         assert!(a.rh_eigendecomp);
         assert!(a.compute_red_hessian);
+    }
+
+    #[test]
+    fn minima_absent_by_default() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl"])).unwrap();
+        assert!(a.minima.is_none());
+    }
+
+    #[test]
+    fn minima_method_and_shared_knobs() {
+        let a = Args::parse_argv(argv(&[
+            "/tmp/foo.nl",
+            "--minima",
+            "flooding",
+            "--n-minima",
+            "5",
+            "--max-solves",
+            "42",
+            "--patience",
+            "3",
+            "--dedup",
+            "1e-2",
+            "--psd-tol",
+            "1e-8",
+            "--seed",
+            "7",
+            "--no-sobol",
+        ]))
+        .unwrap();
+        let m = a.minima.expect("minima parsed");
+        assert_eq!(m.method, MinimaMethod::Flooding);
+        assert_eq!(m.n_minima, 5);
+        assert_eq!(m.max_solves, Some(42));
+        assert_eq!(m.patience, 3);
+        assert_eq!(m.dedup, 1e-2);
+        assert_eq!(m.psd_tol, 1e-8);
+        assert_eq!(m.seed, 7);
+        assert!(!m.sobol);
+    }
+
+    #[test]
+    fn multistart_shorthand_selects_multistart() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart"])).unwrap();
+        assert_eq!(a.minima.unwrap().method, MinimaMethod::Multistart);
+    }
+
+    #[test]
+    fn minima_strategy_knobs_are_optional_and_parsed() {
+        let a = Args::parse_argv(argv(&[
+            "/tmp/foo.nl",
+            "--minima",
+            "deflation",
+            "--eta",
+            "2.5",
+            "--power",
+            "3",
+            "--soft",
+            "1e-4",
+            "--length",
+            "0.2",
+            "--restart-jitter",
+            "0.9",
+        ]))
+        .unwrap();
+        let m = a.minima.unwrap();
+        assert_eq!(m.method, MinimaMethod::Deflation);
+        assert_eq!(m.eta, Some(2.5));
+        assert_eq!(m.power, Some(3.0));
+        assert_eq!(m.soft, Some(1e-4));
+        assert_eq!(m.length, Some(0.2));
+        assert_eq!(m.restart_jitter, Some(0.9));
+        // Untouched knobs stay None.
+        assert_eq!(m.sigma, None);
+        assert_eq!(m.gamma, None);
+    }
+
+    #[test]
+    fn minima_unknown_method_errors() {
+        assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--minima", "nope"])).is_err());
     }
 
     #[test]

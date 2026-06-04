@@ -27,6 +27,7 @@
 
 - [Finding Multiple Minima](find-minima.md)
   - [Choosing a Method](find-minima-choosing.md)
+  - [From the CLI](find-minima-cli.md)
 
 # Reference
 
