@@ -232,6 +232,7 @@ print x              # a primal/dual block (alias: p x)
 print dx             # a search-direction block (d + block name)
 print mu             # a scalar: mu|obj|inf_pr|inf_du|err|compl|iter
 print kkt            # KKT inertia + regularization (see below)
+print rank           # SVD numerical rank of the equality Jacobian J_c (see below)
 print active         # which bound categories are near-active (small slack)
 watch mu             # auto-print a target at every pause (alias: display)
 watch                # list watches; watch del mu; watch clear
@@ -389,6 +390,50 @@ free) the capture is dropped — so on a large problem a free run doesn't
 pay the O(nnz) assembly. If you `viz kkt`/`viz L` right after a free run,
 `step` once to re-capture.
 
+### `print rank` — numerical rank of the equality Jacobian
+
+`print kkt` tells you *that* the dual system needed regularization
+(`delta_c > 0`) or that the inertia was wrong; the `structural_singularity`
+finding names equations that are dependent *by sparsity pattern*. `print
+rank` closes the last gap: a **rank-revealing SVD of the equality Jacobian
+`J_c` at the current iterate**. It factors the matrix the solver actually
+sees (constraint scaling already applied), so it localizes the dependency
+to specific equations — *including dependencies that are numerical only*
+(values that cancel over a full sparsity pattern), which the structural
+Dulmage–Mendelsohn pass cannot detect.
+
+```text
+pounce-dbg> print rank
+equality Jacobian J_c: 3 row(s) × 4 column(s)
+numerical rank = 2 / 3  (deficiency 1)
+σ_max = 3.162e0   σ_min = 0.000e0   cond = inf (σ_min = 0)   (rank tol τ = 1.40e-15)
+singular values: [3.162e0, 1.414e0, 0.000e0]
+rank-deficient: 1 equation(s) lie in the near-null space (linearly dependent / redundant) — the source of δ_c regularization:
+  c[mass_balance]       (participation 0.50)
+  c[mass_balance_dup]   (participation 0.50)
+inspect a row with `print equation <name>` to see its terms and current residual
+```
+
+For the SVD `J_c = U Σ Vᵀ`, the left singular vectors `u_k` whose singular
+value `σ_k ≈ 0` span the left null space — the row combinations `u_kᵀ J_c ≈
+0` that vanish. Each row's **participation** `w_i = Σ_{k : σ_k ≤ τ} u[i,k]²
+∈ [0, 1]` localizes the dependency: a redundancy shared between two
+equations splits ≈ 0.5/0.5, while `w_i = 1` means row `i` lies entirely in
+the null space. The numerical-rank threshold is the standard LAPACK/NumPy
+`τ = σ_max · max(m, n) · ε`; the implicated rows are resolved to model
+names through the same `.row` plumbing as `print residuals` / `print
+equation`.
+
+When `J_c` has **full row rank**, that is reported as a positive signal
+(`J_c has full row rank at this iterate.`) with the σ_min/cond witnessing
+how far it is from degenerate — silence would be ambiguous. The command is
+available whenever the iterate has an equality block; a problem with no
+equality constraints returns a short explanatory error. The JSON payload is
+`{iter, n_rows, n_cols, rank, deficiency, rank_deficient, sigma_max,
+sigma_min, cond, tol, singular_values, culprits: [{row, kind, index, name,
+label, weight}]}` (`cond` is `null` when `σ_min = 0`, since JSON has no
+infinity).
+
 ### `diagnose` — a live, named health report
 
 `info`, `print residuals`, and `print kkt` each expose *one* facet of the
@@ -428,6 +473,7 @@ finding. The checks:
 | `heavy_regularization` | info | primal δ_w applied (Hessian indefinite) |
 | `dual_regularization` | warning | dual δ_c applied (linearly dependent / redundant equalities) |
 | `structural_singularity` | warning | a subset of equalities is over-determined → **names the dependent equations** |
+| `rank_deficient_jacobian` | warning | SVD of `J_c` is numerically rank-deficient → **names the equations in the near-null space** (catches value-only dependencies too) |
 | `large_multipliers` | warning | a multiplier exceeds 1e8 (constraint-qualification / scaling) |
 | `bounds_pinned` | info | variables pressed against their bounds |
 | `tiny_step` | warning | accepted α_pr collapsed |
@@ -476,6 +522,37 @@ degrees of freedom are pinned by the objective, bounds, and inequalities),
 so only the over-determined side is reported, never the under-determined
 one. Available on the `.nl` path; names fall back to `c[i]`/`x[i]` when no
 `.col`/`.row` auxiliary files were emitted.
+
+#### Numerical rank: the value-dependency the structure can't see
+
+`structural_singularity` reads only the *sparsity pattern*, so it is blind
+to a redundancy that lives in the **values** — three equations whose every
+entry is nonzero (a structurally full-rank pattern) but whose rows satisfy
+`row₂ = row₀ + row₁` numerically. `rank_deficient_jacobian` is the
+numerical complement: it runs the same SVD as [`print
+rank`](#print-rank--numerical-rank-of-the-equality-jacobian) over `J_c` at
+the current iterate and, when the numerical rank falls short, names the
+equations in the near-null space:
+
+```text
+pounce-dbg> diagnose
+[warning] rank_deficient_jacobian: Equality Jacobian J_c is numerically
+         rank-deficient at this iterate: rank 2/3 (deficiency 1),
+         σ_min=0.00e0, cond=inf (σ_min = 0). Linearly dependent or redundant
+         equality constraints — the root cause behind δ_c regularization /
+         wrong inertia. Implicated equations: c[mass_balance],
+         c[mass_balance_dup].
+```
+
+Unlike the structural check, this one is **iterate-dependent** — it factors
+`J_c` at the current `x`, so it reflects the matrix the solver is actually
+regularizing and catches dependencies that only appear at certain points.
+The two checks are deliberately layered: `structural_singularity` fires
+from iteration 0 on the pattern alone; `rank_deficient_jacobian` confirms
+it numerically and, more importantly, surfaces the value-only dependencies
+the structural pass provably cannot. See [`print
+rank`](#print-rank--numerical-rank-of-the-equality-jacobian) for the SVD
+math and the per-equation participation weights.
 
 ---
 
