@@ -91,7 +91,12 @@ They typically respond within a business day.
    and every entry in `[workspace.dependencies]` that points at one of
    our crates — they must all match the new version). If the version
    bump itself is non-trivial, do it as its own commit before tagging.
-3. Run `scripts/publish-crates.sh --dry-run` to catch any missing
+3. Bump `CITATION.cff` to match: set `version:` to the new release version
+   and `date-released:` to the release date. GitHub's "Cite this
+   repository" widget reads these, so a stale value misattributes the
+   citation. (The `doi:` is the Zenodo *concept* DOI and stays put — it
+   always resolves to the latest version.)
+4. Run `scripts/publish-crates.sh --dry-run` to catch any missing
    metadata, broken links, or dirty working tree errors. **This
    completes the dry-run for every crate end-to-end**, so any breakage
    appears here, not three crates into the real release.

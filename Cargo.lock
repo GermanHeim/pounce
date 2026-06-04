@@ -536,6 +536,7 @@ dependencies = [
  "pounce-restoration",
  "pounce-sensitivity",
  "pounce-solve-report",
+ "pounce-studio-core",
  "rustyline",
  "serde",
  "serde_json",

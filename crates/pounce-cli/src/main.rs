@@ -66,6 +66,9 @@ pub fn main() -> ExitCode {
         print_about();
         return ExitCode::SUCCESS;
     }
+    if args.cite {
+        return run_cite(&args);
+    }
 
     let mut app = IpoptApplication::new();
 
@@ -954,6 +957,44 @@ fn write_diagnostics_timing(diag: &DiagnosticsState, app: &IpoptApplication) {
         b = t.linear_system_back_solve.total_wallclock_time(),
     );
     let _ = diag.write_top_level("timing.json", &body);
+}
+
+/// `--cite` output: the papers/software a user should cite when
+/// publishing pounce results. Always lists the static core (pounce +
+/// Wächter-Biegler); when `--cite <report.json>` supplies a solve
+/// report, adds solve-aware extras for features the run used. `--bibtex`
+/// switches the rendering to BibTeX. See [`pounce_cli::citations`].
+fn run_cite(args: &Args) -> ExitCode {
+    let report = match &args.cite_report {
+        Some(path) => {
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("pounce: failed to read {}: {e}", path.display());
+                    return ExitCode::from(2);
+                }
+            };
+            match serde_json::from_str::<pounce_cli::solve_report::SolveReport>(&text) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    eprintln!(
+                        "pounce: {} is not a valid solve report: {e}",
+                        path.display()
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        None => None,
+    };
+
+    let selected = pounce_cli::citations::select(report.as_ref());
+    if args.cite_bibtex {
+        print!("{}", pounce_cli::citations::render_bibtex(&selected));
+    } else {
+        print!("{}", pounce_cli::citations::render_human(&selected));
+    }
+    ExitCode::SUCCESS
 }
 
 /// `--about` output: version, build provenance, compiled-in features,

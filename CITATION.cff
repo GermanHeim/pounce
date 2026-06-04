@@ -10,6 +10,11 @@ type: software
 license: EPL-2.0
 repository-code: "https://github.com/jkitchin/pounce"
 url: "https://github.com/jkitchin/pounce"
+doi: "10.5281/zenodo.20387011"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.20387011"
+    description: "Concept DOI — always resolves to the latest POUNCE release"
 version: 0.2.0
 date-released: 2026-05-25
 authors:

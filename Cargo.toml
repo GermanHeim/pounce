@@ -73,6 +73,7 @@ pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.1-dev" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.3.1-dev" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.1-dev" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.1-dev" }
+pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.3.1-dev" }
 pounce-observability = { path = "crates/pounce-observability", version = "0.3.1-dev" }
 # Temporarily pinned to the latest feral main (post-0.9.0) to pick up the
 # issue-63 diagnosis work (feral PR #68), the #67 thin-large ordering fix
