@@ -1741,6 +1741,34 @@ impl IpoptNlp for OrigIpoptNlp {
         Rc::clone(&self.pd_u)
     }
 
+    /// Install moved bounds from the safe-slack mechanism. Mirrors
+    /// `OrigIpoptNLP::AdjustVariableBounds` (`IpOrigIpoptNLP.cpp:990`):
+    /// upstream simply swaps in the new bound vectors. We copy the values
+    /// into the existing `Rc<DenseVector>` storage (falling back to a
+    /// fresh allocation if the bound is somehow shared), which leaves the
+    /// `Px_* / Pd_*` expansion matrices — keyed on the bound *spaces*,
+    /// not values — untouched.
+    fn adjust_variable_bounds(
+        &mut self,
+        new_x_l: &dyn Vector,
+        new_x_u: &dyn Vector,
+        new_d_l: &dyn Vector,
+        new_d_u: &dyn Vector,
+    ) {
+        // The bound `Rc`s are uniquely owned (nothing clones them — same
+        // invariant `relax_bounds` relies on), so `get_mut` always
+        // succeeds and we copy the moved values into the existing storage.
+        fn install(slot: &mut Rc<DenseVector>, new: &dyn Vector) {
+            Rc::get_mut(slot)
+                .expect("adjust_variable_bounds: bound vector is uniquely owned")
+                .copy(new);
+        }
+        install(&mut self.x_l, new_x_l);
+        install(&mut self.x_u, new_x_u);
+        install(&mut self.d_l, new_d_l);
+        install(&mut self.d_u, new_d_u);
+    }
+
     fn obj_scaling_factor(&self) -> Number {
         self.obj_scale_factor.get()
     }

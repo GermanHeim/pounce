@@ -1174,6 +1174,11 @@ impl IpoptApplication {
         let cq: crate::ipopt_cq::IpoptCqHandle = Rc::new(RefCell::new(
             IpoptCalculatedQuantities::new(Rc::clone(&data), Rc::clone(&nlp_handle)),
         ));
+        // Correction size for very small slacks (default mach_eps^{3/4});
+        // drives the safe-slack bound-adjustment mechanism.
+        if let Ok((v, true)) = self.options.get_numeric_value("slack_move", "") {
+            cq.borrow_mut().slack_move = v;
+        }
 
         // Seed `data.curr` with a zero-valued iterate of the correct
         // dimensions. The `IterateInitializer` consumes these as its

@@ -1110,6 +1110,14 @@ impl IpoptAlgorithm {
         //    `update_for_next_iteration`, mirroring upstream's call
         //    chain in `IpBacktrackingLineSearch.cpp:839`.
         let _accept_guard = timing.accept_trial_point.guard();
+
+        // 7a. Safe-slack bound adjustment. Before promoting `trial`, move
+        //     any `x_L/x_U/d_L/d_U` whose trial slack fell below
+        //     `eps*min(1,mu)` so the slack becomes representable (port of
+        //     the bound-adjustment block in
+        //     `IpoptAlgorithm::AcceptTrialPoint`, `IpIpoptAlg.cpp:664-706`).
+        self.adjust_variable_bounds_for_small_slacks();
+
         self.data.borrow_mut().accept_trial_point();
 
         // 8. Bound multiplier kappa_sigma reset.
@@ -1379,7 +1387,10 @@ impl IpoptAlgorithm {
         match outcome {
             RestorationOutcome::Recovered => {
                 // The driver has staged the recovered point on
-                // `data.trial`; promote it and continue iterating.
+                // `data.trial`; apply the safe-slack bound adjustment
+                // (as the main accept path does), then promote it and
+                // continue iterating.
+                self.adjust_variable_bounds_for_small_slacks();
                 self.data.borrow_mut().accept_trial_point();
                 // Snapshot the recovery iterate for the slow-cycle
                 // detector at the top of the next `invoke_restoration`.
@@ -1446,6 +1457,40 @@ impl IpoptAlgorithm {
                 IterateOutcome::Terminate(SolverReturn::LocalInfeasibility)
             }
         }
+    }
+
+    /// Safe-slack bound adjustment, applied to the staged `trial`
+    /// iterate before it is promoted to `curr`. When one or more trial
+    /// slacks fell below `eps*min(1,mu)`, [`IpoptCalculatedQuantities::
+    /// adjusted_trial_bounds`] returns the moved `x_L/x_U/d_L/d_U`; we
+    /// install them on the NLP so the slack becomes representable. Port
+    /// of the bound-adjustment block in `IpoptAlgorithm::AcceptTrialPoint`
+    /// (`IpIpoptAlg.cpp:664-706`).
+    fn adjust_variable_bounds_for_small_slacks(&mut self) {
+        // Compute the moved bounds (releases the CQ/NLP borrows on return).
+        let adjusted = {
+            let trial_set = self.data.borrow().trial.is_some();
+            if !trial_set {
+                return;
+            }
+            self.cq.borrow().adjusted_trial_bounds()
+        };
+        let Some(bounds) = adjusted else {
+            return;
+        };
+        tracing::debug!(
+            target: "pounce::algorithm",
+            "slack_move: {} slack(s) too small, adjusting variable bound(s) at iter {}",
+            bounds.adjusted,
+            self.data.borrow().iter_count,
+        );
+        let nlp = Rc::clone(self.cq.borrow().nlp());
+        nlp.borrow_mut().adjust_variable_bounds(
+            &*bounds.x_l,
+            &*bounds.x_u,
+            &*bounds.d_l,
+            &*bounds.d_u,
+        );
     }
 
     /// Port of `IpIpoptAlg::correct_bound_multiplier`

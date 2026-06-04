@@ -55,6 +55,20 @@ pub trait IpoptNlp: Nlp {
     fn pd_l(&self) -> Rc<dyn Matrix>;
     fn pd_u(&self) -> Rc<dyn Matrix>;
 
+    /// Replace the `x_L / x_U / d_L / d_U` bounds in place. Invoked by the
+    /// algorithm's accept step when the safe-slack mechanism moved one or
+    /// more bounds (port of `IpoptNLP::AdjustVariableBounds`,
+    /// `IpOrigIpoptNLP.cpp:990-1001`). Default is a no-op for NLP
+    /// implementations that do not own mutable bound storage.
+    fn adjust_variable_bounds(
+        &mut self,
+        _new_x_l: &dyn Vector,
+        _new_x_u: &dyn Vector,
+        _new_d_l: &dyn Vector,
+        _new_d_u: &dyn Vector,
+    ) {
+    }
+
     /// Fill `x` with the initial primal values (mirrors upstream
     /// `IpoptNLP::GetStartingPoint`'s `init_x` flag). Default impl
     /// leaves `x` at its current contents (typically the zero vector
