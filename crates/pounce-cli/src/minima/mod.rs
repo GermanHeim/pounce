@@ -174,11 +174,20 @@ impl<'a> Driver<'a> {
         self.base.borrow_mut().eval_f(x, true)
     }
 
+    /// Is `x` inside the box, allowing for the solver's bound relaxation?
+    ///
+    /// The IPM lets a converged primal sit slightly *outside* a bound — by up
+    /// to `bound_relax_factor · max(1, |bound|)` (the Ipopt default factor is
+    /// `1e-8`). On problems whose optimum binds a large-magnitude limit (e.g.
+    /// ACOPF generator/flow limits in the hundreds), that legal slack exceeds
+    /// any fixed absolute tolerance, so a purely absolute test wrongly rejects
+    /// every minimum (pounce#101). Use a bound-magnitude-relative tolerance
+    /// comfortably above the relaxation but far below any real basin spacing.
     fn in_bounds(&self, x: &[Number]) -> bool {
         x.iter()
             .zip(&self.x_l)
             .zip(&self.x_u)
-            .all(|((&xi, &lo), &hi)| xi >= lo - 1e-9 && xi <= hi + 1e-9)
+            .all(|((&xi, &lo), &hi)| coord_in_bounds(xi, lo, hi))
     }
 
     /// Dense objective Hessian at `x` (row-major n×n), or `None` when no
@@ -898,5 +907,43 @@ fn write_json_report(
             ),
         },
         Err(e) => eprintln!("pounce: failed to render minima report: {e}"),
+    }
+}
+
+/// Per-coordinate box test with a bound-magnitude-relative tolerance that
+/// absorbs the IPM's bound relaxation (`bound_relax_factor·max(1,|bound|)`,
+/// Ipopt default factor `1e-8`). A purely absolute tolerance rejects minima
+/// that legally bind large-magnitude limits (pounce#101); the relative term
+/// tracks the relaxation while staying far below any real basin spacing.
+fn coord_in_bounds(xi: Number, lo: Number, hi: Number) -> bool {
+    const ATOL: Number = 1e-9;
+    const RTOL: Number = 1e-6;
+    let tol_lo = ATOL + RTOL * lo.abs().max(1.0);
+    let tol_hi = ATOL + RTOL * hi.abs().max(1.0);
+    xi >= lo - tol_lo && xi <= hi + tol_hi
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coord_in_bounds;
+
+    #[test]
+    fn accepts_interior_point() {
+        assert!(coord_in_bounds(0.0, -1.0, 1.0));
+        assert!(coord_in_bounds(250.0, 0.0, 500.0));
+    }
+
+    #[test]
+    fn accepts_bound_relaxed_point_at_large_magnitude() {
+        // A converged primal may sit ~bound_relax_factor·|bound| (≈5e-6 at a
+        // 500-unit limit) past the bound; that point is a legal minimum.
+        assert!(coord_in_bounds(500.000005, 0.0, 500.0));
+        assert!(coord_in_bounds(-500.000005, -500.0, 0.0));
+    }
+
+    #[test]
+    fn rejects_genuinely_outside_point() {
+        assert!(!coord_in_bounds(500.1, 0.0, 500.0));
+        assert!(!coord_in_bounds(-1.1, -1.0, 1.0));
     }
 }

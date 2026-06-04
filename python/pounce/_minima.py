@@ -240,6 +240,17 @@ class _Context:
             options=self.options,
         )
 
+    # Acceptance must tolerate the solver's bound relaxation: the IPM lets a
+    # converged primal sit up to ``bound_relax_factor * max(1, |bound|)``
+    # outside a bound (the Ipopt default factor is 1e-8). On problems that
+    # bind a large-magnitude limit (e.g. ACOPF generator/flow limits in the
+    # hundreds), that legal slack dwarfs any fixed absolute tolerance, so a
+    # purely absolute test wrongly rejects every minimum (pounce#101). Use a
+    # bound-magnitude-relative tolerance, well above the relaxation but far
+    # below any real basin spacing.
+    _ATOL = 1e-9
+    _RTOL = 1e-6
+
     def in_bounds(self, x):
         if self.bounds is None:
             return True
@@ -247,10 +258,14 @@ class _Context:
             if bd is None:
                 continue
             lo, hi = bd
-            if lo is not None and xi < lo - 1e-9:
-                return False
-            if hi is not None and xi > hi + 1e-9:
-                return False
+            if lo is not None:
+                tol = self._ATOL + self._RTOL * max(1.0, abs(lo))
+                if xi < lo - tol:
+                    return False
+            if hi is not None:
+                tol = self._ATOL + self._RTOL * max(1.0, abs(hi))
+                if xi > hi + tol:
+                    return False
         return True
 
     def is_minimum(self, x):
