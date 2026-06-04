@@ -529,7 +529,6 @@ version = "0.3.1-dev"
 dependencies = [
  "anstream",
  "anstyle",
- "libloading",
  "nix",
  "pounce-algorithm",
  "pounce-common",
@@ -537,6 +536,7 @@ dependencies = [
  "pounce-hsl",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-nl",
  "pounce-nlp",
  "pounce-observability",
  "pounce-presolve",
@@ -598,6 +598,16 @@ version = "0.3.1-dev"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
+ "tracing",
+]
+
+[[package]]
+name = "pounce-nl"
+version = "0.3.1-dev"
+dependencies = [
+ "libloading",
+ "pounce-common",
+ "pounce-nlp",
  "tracing",
 ]
 

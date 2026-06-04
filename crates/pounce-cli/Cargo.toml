@@ -29,6 +29,7 @@ path = "src/bin/pounce_sens.rs"
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
+pounce-nl.workspace = true
 pounce-algorithm.workspace = true
 pounce-restoration.workspace = true
 pounce-feral.workspace = true
@@ -42,7 +43,6 @@ pounce-studio-core.workspace = true
 pounce-observability.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libloading = "0.8"
 tracing.workspace = true
 anstream.workspace = true
 anstyle.workspace = true

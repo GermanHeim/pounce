@@ -5,6 +5,7 @@ members = [
     "crates/pounce-linalg",
     "crates/pounce-linsol",
     "crates/pounce-nlp",
+    "crates/pounce-nl",
     "crates/pounce-hsl",
     "crates/pounce-feral",
     "crates/pounce-algorithm",
@@ -33,6 +34,7 @@ default-members = [
     "crates/pounce-linalg",
     "crates/pounce-linsol",
     "crates/pounce-nlp",
+    "crates/pounce-nl",
     "crates/pounce-feral",
     "crates/pounce-algorithm",
     "crates/pounce-restoration",
@@ -64,6 +66,7 @@ pounce-common = { path = "crates/pounce-common", version = "0.3.1-dev" }
 pounce-linalg = { path = "crates/pounce-linalg", version = "0.3.1-dev" }
 pounce-linsol = { path = "crates/pounce-linsol", version = "0.3.1-dev" }
 pounce-nlp = { path = "crates/pounce-nlp", version = "0.3.1-dev" }
+pounce-nl = { path = "crates/pounce-nl", version = "0.3.1-dev" }
 pounce-hsl = { path = "crates/pounce-hsl", version = "0.3.1-dev" }
 pounce-feral = { path = "crates/pounce-feral", version = "0.3.1-dev" }
 pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.3.1-dev" }
