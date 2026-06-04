@@ -389,6 +389,57 @@ free) the capture is dropped — so on a large problem a free run doesn't
 pay the O(nnz) assembly. If you `viz kkt`/`viz L` right after a free run,
 `step` once to re-capture.
 
+### `diagnose` — a live, named health report
+
+`info`, `print residuals`, and `print kkt` each expose *one* facet of the
+current iterate. `diagnose` (alias `diag`) runs a panel of heuristics over
+all of them at once and returns a ranked list of findings — and, crucially,
+**names the culprit equation or variable** behind each numerical symptom.
+That last step is the actionable-diagnostics path of Lee et al.
+(2024):[^lee2024] a report that says *"`mass_balance` is the worst
+constraint residual"* is worth far more than *"row 13 is infeasible."*
+
+```text
+pounce-dbg> diagnose
+[  error] primal_infeasible: Primal infeasibility 1.70e+02; worst constraint
+         residual is c[mass_balance] = +1.701e+02. Inspect this equation's
+         feasibility and scaling (`print equation mass_balance`).
+[warning] dual_infeasible: Dual infeasibility 9.84e-01; largest stationarity
+         residual is grad_x_L[T_reactor] = -9.838e-01.
+[warning] inertia_wrong: KKT inertia is wrong (n-=2 vs expected 1): the system
+         was indefinite/singular and the step had to be stabilized.
+[   info] bounds_pinned: 3 variable bound(s) are active (slack < 1e-6).
+```
+
+This is the **live** counterpart to the `pounce-studio` `diagnose` tool,
+which runs *temporal* heuristics over a finished solve report. The two
+share a `{severity, code, message}` shape so
+a client can treat them uniformly, but the live command sees what a saved
+report cannot: the **current KKT inertia and regularization**, and the
+**named** primal/dual residuals at this exact point. Findings are sorted
+`error` → `warning` → `info`; a clean iterate yields a single `healthy`
+finding. The checks:
+
+| code | severity | fires when |
+|---|---|---|
+| `primal_infeasible` | error/warning | `inf_pr` above tol → names the worst constraint residual |
+| `dual_infeasible` | warning | `inf_du` above tol → names the worst stationarity residual |
+| `inertia_wrong` | warning | KKT inertia ≠ expected (rank-deficient Jacobian / indefinite Hessian) |
+| `heavy_regularization` | info | primal δ_w applied (Hessian indefinite) |
+| `dual_regularization` | warning | dual δ_c applied (linearly dependent / redundant equalities) |
+| `large_multipliers` | warning | a multiplier exceeds 1e8 (constraint-qualification / scaling) |
+| `bounds_pinned` | info | variables pressed against their bounds |
+| `tiny_step` | warning | accepted α_pr collapsed |
+| `heavy_line_search` | warning | ≥10 backtracking trials for the accepted step |
+| `in_restoration` | warning | currently inside feasibility restoration |
+| `mu_stalled` | warning | μ flat for ≥3 consecutive iterations |
+
+KKT-derived findings (`inertia_wrong`, `*_regularization`) need a computed
+search direction, so they appear at/after `after_search_dir`. Names follow
+the same rule as `print residuals`: present on the `.nl` path with
+`.col`/`.row` files, index labels (`c[13]`) under presolve. The JSON payload
+is `{iter, findings: [{severity, code, message}], n_findings}`.
+
 ---
 
 ## Mutating state
@@ -830,6 +881,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `tbreak N` (`tb`) | one-shot iteration breakpoint |
 | `watchpoint <blk>[<i>] [τ]` (`wp`) | pause when a value changes by > τ |
 | `diff` | what changed in the iterate since the last iteration |
+| `diagnose` (`diag`) | live health report: named culprit residuals, KKT inertia, stalls |
 | `source <file>` | run debugger commands from a file |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |

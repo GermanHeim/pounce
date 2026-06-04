@@ -46,6 +46,7 @@ use pounce_algorithm::debug::{
     Residual, BLOCK_NAMES,
 };
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
+use pounce_nlp::ipopt_nlp::SplitNames;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
@@ -84,6 +85,7 @@ const COMMANDS: &[&str] = &[
     "ask",
     "watch",
     "diff",
+    "diagnose",
     "source",
     "progress",
     "detach",
@@ -1137,6 +1139,7 @@ impl SolverDebugger {
             "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
             "watch" | "display" => self.cmd_watch(rest),
             "diff" => self.cmd_diff(ctx),
+            "diagnose" | "diag" => self.cmd_diagnose(ctx),
             "source" => self.cmd_source(rest, ctx),
             "detach" => {
                 self.detached = true;
@@ -1228,6 +1231,7 @@ impl SolverDebugger {
             "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
             "  diff                     what changed in the iterate since the last iteration".into(),
+            "  diagnose | diag          live health report: named culprit residuals, KKT inertia, stalls".into(),
             "  source <file>            run debugger commands from a file".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
@@ -1418,19 +1422,7 @@ impl SolverDebugger {
         // gap Lee et al. (2024, <https://doi.org/10.69997/sct.147875>) flag
         // for equation-oriented debugging. `None` ⇒ index labels throughout.
         let names = ctx.split_names();
-        // Look up the model name for one residual, by its kind + split
-        // index. Equality residuals index the `eq` pool, inequality and
-        // `s`-space dual residuals share the `ineq` pool (one slack per
-        // inequality), and `x`-space dual residuals index `x_var`.
-        let name_of = |r: &Residual| -> Option<&str> {
-            let n = names.as_ref()?;
-            let pool = match r.kind {
-                ResidKind::Eq => &n.eq,
-                ResidKind::Ineq | ResidKind::DualS => &n.ineq,
-                ResidKind::DualX => &n.x_var,
-            };
-            pool.get(r.index).and_then(|o| o.as_deref())
-        };
+        let name_of = |r: &Residual| resid_name(r, &names);
 
         let lines = top
             .iter()
@@ -1495,6 +1487,221 @@ impl SolverDebugger {
             "name": book.names.get(i).filter(|n| !n.is_empty()),
             "equation": eq,
         }))
+    }
+
+    /// `diagnose` (`diag`) — a point-in-time health report for the
+    /// *current* iterate.
+    ///
+    /// Where the studio `diagnose` tool runs temporal heuristics over a
+    /// finished solve report, this runs **live**: it reads the current KKT
+    /// inertia / regularization, the named primal & dual residuals, the
+    /// iterate geometry, and the debugger's own restoration / μ-stall
+    /// tracking — and names the culprit equation or variable wherever it
+    /// can. Tracing a numerical symptom back to the *named* equation behind
+    /// it, rather than a bare row index, is the actionable-diagnostics path
+    /// of Lee et al. (2024, <https://doi.org/10.69997/sct.147875>).
+    ///
+    /// Each finding is `{severity, code, message}` — the same shape the
+    /// report-based `diagnose` emits — so a client can treat both uniformly.
+    fn cmd_diagnose(&self, ctx: &DebugCtx) -> CmdOut {
+        const TOL: f64 = 1e-6;
+        let names = ctx.split_names();
+        // (severity, code, message). Severity ranks error > warning > info.
+        let mut f: Vec<(&'static str, &'static str, String)> = Vec::new();
+
+        // --- Primal feasibility: the worst *named* constraint residual. ---
+        let inf_pr = ctx.inf_pr();
+        if inf_pr > TOL {
+            if let Some(resids) = ctx.constraint_residuals() {
+                if let Some((label, val)) = worst_named(resids, &names) {
+                    let sev = if inf_pr > 1e-2 { "error" } else { "warning" };
+                    f.push((
+                        sev,
+                        "primal_infeasible",
+                        format!(
+                            "Primal infeasibility {inf_pr:.2e}; worst constraint residual is \
+                         {label} = {val:+.3e}. Inspect this equation's feasibility and scaling \
+                         at the current point (`print equation {label}`)."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // --- Dual stationarity: the worst *named* ∇L component. ---
+        let inf_du = ctx.inf_du();
+        if inf_du > TOL {
+            if let Some(resids) = ctx.dual_residuals() {
+                if let Some((label, val)) = worst_named(resids, &names) {
+                    f.push((
+                        "warning",
+                        "dual_infeasible",
+                        format!(
+                            "Dual infeasibility {inf_du:.2e}; largest stationarity residual is \
+                         {label} = {val:+.3e}."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // --- KKT structural health (only once a search dir is computed). ---
+        if let Some(k) = ctx.kkt() {
+            if k.provides_inertia && !k.inertia_correct {
+                f.push((
+                    "warning",
+                    "inertia_wrong",
+                    format!(
+                        "KKT inertia is wrong (n-={} vs expected {}): the system was \
+                     indefinite/singular and the step had to be stabilized. A persistent \
+                     mismatch points at a rank-deficient Jacobian or an indefinite Hessian.",
+                        k.n_neg, k.expected_neg
+                    ),
+                ));
+            }
+            if k.delta_w > 1e-4 {
+                f.push((
+                    "info",
+                    "heavy_regularization",
+                    format!(
+                        "Primal regularization δ_w={:.2e} applied — the Hessian was indefinite at \
+                     this step. Normal near saddle points; persistent large δ_w suggests a \
+                     problematic Hessian.",
+                        k.delta_w
+                    ),
+                ));
+            }
+            if k.delta_c > 0.0 {
+                f.push((
+                    "warning",
+                    "dual_regularization",
+                    format!(
+                    "Dual regularization δ_c={:.2e} applied — the constraint Jacobian is (near) \
+                     rank-deficient (linearly dependent or redundant equalities). Inspect the \
+                     equality residuals by name (`print residuals primal`).",
+                    k.delta_c
+                ),
+                ));
+            }
+        }
+
+        // --- Multiplier magnitude: constraint-qualification / scaling. ---
+        let mut max_mult = 0.0_f64;
+        for blk in ["y_c", "y_d", "z_l", "z_u", "v_l", "v_u"] {
+            if let Some(v) = ctx.block(blk) {
+                max_mult = v.iter().fold(max_mult, |m, &x| m.max(x.abs()));
+            }
+        }
+        if max_mult > 1e8 {
+            f.push((
+                "warning",
+                "large_multipliers",
+                format!(
+                "Largest multiplier magnitude is {max_mult:.2e}. Very large multipliers signal a \
+                 constraint-qualification failure or poor scaling — consider rescaling the \
+                 offending rows."
+            ),
+            ));
+        }
+
+        // --- Iterate geometry: variable bounds pressed at this point. ---
+        let mut pinned = 0usize;
+        for cat in ["x_l", "x_u"] {
+            if let Some(sl) = ctx.bound_slack(cat) {
+                pinned += sl.iter().filter(|&&s| s.abs() < TOL).count();
+            }
+        }
+        if pinned > 0 {
+            f.push((
+                "info",
+                "bounds_pinned",
+                format!(
+                    "{pinned} variable bound(s) are active (slack < {TOL:.0e}). Active bounds are \
+                 expected at a solution, but a large count early can throttle the line search."
+                ),
+            ));
+        }
+
+        // --- Line search / step length at this iteration. ---
+        let (alpha_pr, _) = ctx.alpha();
+        if ctx.iter() > 0 && alpha_pr > 0.0 && alpha_pr < 1e-6 {
+            f.push((
+                "warning",
+                "tiny_step",
+                format!(
+                    "Accepted primal step α_pr={alpha_pr:.2e} is tiny — the line search is barely \
+                 moving. Often a poor search direction or an ill-conditioned KKT system."
+                ),
+            ));
+        }
+        let ls = ctx.ls_count();
+        if ls >= 10 {
+            f.push((
+                "warning",
+                "heavy_line_search",
+                format!(
+                "Line search needed {ls} trial points for the accepted step — search-direction \
+                 quality may be poor (check Hessian accuracy)."
+            ),
+            ));
+        }
+
+        // --- Temporal flags the debugger already tracks across iters. ---
+        if self.in_restoration {
+            f.push((
+                "warning",
+                "in_restoration",
+                "Currently inside feasibility restoration: the line search could not make \
+                 progress on the original problem at the working point."
+                    .to_string(),
+            ));
+        }
+        if self.mu_stall >= MU_STALL_ITERS {
+            f.push((
+                "warning",
+                "mu_stalled",
+                format!(
+                    "μ has not decreased for {} consecutive iterations — the barrier is stuck. \
+                 Try mu_strategy=adaptive or a smaller mu_init.",
+                    self.mu_stall
+                ),
+            ));
+        }
+
+        // --- Healthy fallback. ---
+        if f.is_empty() {
+            f.push((
+                "info",
+                "healthy",
+                format!(
+                    "No issues detected at iter {}: inf_pr={:.2e}, inf_du={:.2e}, μ={:.2e}.",
+                    ctx.iter(),
+                    inf_pr,
+                    inf_du,
+                    ctx.mu()
+                ),
+            ));
+        }
+
+        // Surface errors first, then warnings, then info.
+        let rank = |s: &str| match s {
+            "error" => 0,
+            "warning" => 1,
+            _ => 2,
+        };
+        f.sort_by_key(|(sev, _, _)| rank(sev));
+
+        let lines: Vec<String> = f
+            .iter()
+            .map(|(sev, code, msg)| format!("[{sev:>7}] {code}: {msg}"))
+            .collect();
+        let data: Vec<_> = f
+            .iter()
+            .map(|(sev, code, msg)| serde_json::json!({"severity": sev, "code": code, "message": msg}))
+            .collect();
+        let n = data.len();
+        CmdOut::ok(lines)
+            .with_data(serde_json::json!({"iter": ctx.iter(), "findings": data, "n_findings": n}))
     }
 
     /// `print kkt` — inertia + regularization of the factored augmented
@@ -2803,6 +3010,8 @@ impl SolverDebugger {
                 // `print equation <name|row>` is available when a source
                 // model (`.nl`) supplied constraint algebra to render.
                 "equations": self.equation_book.is_some(),
+                // Live `diagnose` — point-in-time named health findings.
+                "diagnose": true,
                 "llm_assist": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
@@ -2928,6 +3137,34 @@ fn rank_residuals(mut entries: Vec<Residual>, k: usize) -> Vec<Residual> {
     });
     entries.truncate(k);
     entries
+}
+
+/// Look up the model name for a residual by kind + split index, given
+/// optional split-space names. Equality residuals index the `eq` pool;
+/// inequality and `s`-space dual residuals share the `ineq` pool (one
+/// slack per inequality); `x`-space dual residuals index `x_var`. Returns
+/// `None` when the problem carries no names or the index is out of range.
+fn resid_name<'a>(r: &Residual, names: &'a Option<SplitNames>) -> Option<&'a str> {
+    let n = names.as_ref()?;
+    let pool = match r.kind {
+        ResidKind::Eq => &n.eq,
+        ResidKind::Ineq | ResidKind::DualS => &n.ineq,
+        ResidKind::DualX => &n.x_var,
+    };
+    pool.get(r.index).and_then(|o| o.as_deref())
+}
+
+/// The single largest-magnitude residual, labeled with its model name
+/// (`c[mass_balance]`) when available, else its split index (`c[3]`),
+/// paired with its signed value. `None` for an empty input.
+fn worst_named(resids: Vec<Residual>, names: &Option<SplitNames>) -> Option<(String, f64)> {
+    let top = rank_residuals(resids, 1);
+    let r = top.first()?;
+    let label = match resid_name(r, names) {
+        Some(name) => format!("{}[{}]", r.kind.tag(), name),
+        None => format!("{}[{}]", r.kind.tag(), r.index),
+    };
+    Some((label, r.value))
 }
 
 /// Print the branded open banner (human REPL only): the project POUNCE
@@ -3988,6 +4225,60 @@ mod tests {
             top.iter().map(|r| r.kind).collect::<Vec<_>>(),
             vec![Ineq, Eq, DualX]
         );
+    }
+
+    fn split_names_fixture() -> SplitNames {
+        SplitNames {
+            x_var: vec![Some("T_reactor".into()), None],
+            eq: vec![Some("mass_balance".into()), Some("energy_balance".into())],
+            ineq: vec![Some("pressure_cap".into())],
+        }
+    }
+
+    #[test]
+    fn resid_name_maps_each_kind_to_its_pool() {
+        use ResidKind::*;
+        let names = Some(split_names_fixture());
+        // Equality → eq pool; inequality and s-space dual → ineq pool;
+        // x-space dual → x_var pool.
+        assert_eq!(
+            resid_name(&resid(Eq, 1, 0.0), &names),
+            Some("energy_balance")
+        );
+        assert_eq!(
+            resid_name(&resid(Ineq, 0, 0.0), &names),
+            Some("pressure_cap")
+        );
+        assert_eq!(
+            resid_name(&resid(DualS, 0, 0.0), &names),
+            Some("pressure_cap")
+        );
+        assert_eq!(resid_name(&resid(DualX, 0, 0.0), &names), Some("T_reactor"));
+        // Unnamed slot (None) and out-of-range fall back to no name.
+        assert_eq!(resid_name(&resid(DualX, 1, 0.0), &names), None);
+        assert_eq!(resid_name(&resid(Eq, 9, 0.0), &names), None);
+        // No names at all ⇒ None.
+        assert_eq!(resid_name(&resid(Eq, 0, 0.0), &None), None);
+    }
+
+    #[test]
+    fn worst_named_picks_largest_and_labels_it() {
+        use ResidKind::*;
+        let names = Some(split_names_fixture());
+        // |−3.2| is the largest; it sits in the eq pool at index 1.
+        let resids = vec![resid(Eq, 0, 0.5), resid(Eq, 1, -3.2), resid(Ineq, 0, 1.1)];
+        assert_eq!(
+            worst_named(resids, &names),
+            Some(("c[energy_balance]".to_string(), -3.2))
+        );
+        // Without names, the label falls back to the split index.
+        let resids = vec![resid(DualX, 7, 9.0)];
+        assert_eq!(
+            worst_named(resids, &None),
+            Some(("grad_x_L[7]".to_string(), 9.0))
+        );
+        // Empty input ⇒ None.
+        assert_eq!(worst_named(vec![], &names), None);
     }
 
     #[test]
