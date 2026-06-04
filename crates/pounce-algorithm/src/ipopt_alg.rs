@@ -276,6 +276,30 @@ impl IpoptAlgorithm {
         true
     }
 
+    /// Terminal fallback for a near-feasible numerical breakdown (a
+    /// restoration cycle or a failed step computation). If a finite
+    /// acceptable iterate was recorded earlier in the solve, roll back
+    /// to it and stop at [`SolverReturn::StopAtAcceptablePoint`] (mapped
+    /// by the application layer to `Solved_To_Acceptable_Level`) rather
+    /// than surfacing the hard `fallback` error. This mirrors upstream
+    /// `IpBacktrackingLineSearch`'s `ACCEPTABLE_POINT_REACHED`
+    /// precedence: when the line search exhausts but an acceptable point
+    /// was stored, that point is returned instead of the failure. With
+    /// no snapshot — or if the restored objective is non-finite — the
+    /// original `fallback` status is surfaced unchanged, so genuinely
+    /// failed/infeasible solves keep their honest status. Catches
+    /// degenerate LPs (kleemin8, nsir2) whose μ-endgame reaches the
+    /// optimum, then destabilizes on the ill-conditioned vertex and
+    /// cycles in restoration instead of stopping at the acceptable
+    /// iterate it already passed through.
+    fn terminate_acceptable_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
+        if self.restore_acceptable_point() && self.cq.borrow().curr_f().is_finite() {
+            IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
+        } else {
+            IterateOutcome::Terminate(fallback)
+        }
+    }
+
     pub fn with_nlp(mut self, nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
         self.nlp = Some(nlp);
         self
@@ -1216,7 +1240,7 @@ impl IpoptAlgorithm {
         } else {
             SolverReturn::ErrorInStepComputation
         };
-        if let (Some(prev_x), Some(prev_s)) = (
+        let static_cycle = if let (Some(prev_x), Some(prev_s)) = (
             self.last_resto_entry_x.as_ref(),
             self.last_resto_entry_s.as_ref(),
         ) {
@@ -1228,11 +1252,17 @@ impl IpoptAlgorithm {
                     dx_rel, ds_rel
                 );
             }
-            if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
-                return IterateOutcome::Terminate(cycle_exit);
-            }
+            dx_rel <= 1e-10 && ds_rel <= 1e-10
+        } else {
+            false
+        };
+        if static_cycle {
+            // Prefer the last acceptable point over the cycle error —
+            // the borrows above are released, so the `&mut self` helper
+            // is free to roll back.
+            return self.terminate_acceptable_or(cycle_exit);
         }
-        if let (Some(prev_x), Some(prev_s)) = (
+        let recovery_cycle = if let (Some(prev_x), Some(prev_s)) = (
             self.last_resto_recovery_x.as_ref(),
             self.last_resto_recovery_s.as_ref(),
         ) {
@@ -1244,21 +1274,26 @@ impl IpoptAlgorithm {
                     dx_rel, ds_rel, self.resto_no_outer_progress_count
                 );
             }
-            if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
-                self.resto_no_outer_progress_count =
-                    self.resto_no_outer_progress_count.saturating_add(1);
-                // 10-strike limit: tuned to give OET7-style traces room
-                // to break through (inner inf_pr still decreasing across
-                // strikes) while still bounding DECONVBNE-style cycles
-                // (which need a guard but tolerate a wider window —
-                // ~3 outer steps per cycle, so 10 strikes ≈ 30 outer
-                // iters, well below the 2987-iter pathological run).
-                if self.resto_no_outer_progress_count >= 10 {
-                    return IterateOutcome::Terminate(cycle_exit);
-                }
-            } else {
-                self.resto_no_outer_progress_count = 0;
+            dx_rel <= 1e-10 && ds_rel <= 1e-10
+        } else {
+            false
+        };
+        if recovery_cycle {
+            self.resto_no_outer_progress_count =
+                self.resto_no_outer_progress_count.saturating_add(1);
+            // 10-strike limit: tuned to give OET7-style traces room
+            // to break through (inner inf_pr still decreasing across
+            // strikes) while still bounding DECONVBNE-style cycles
+            // (which need a guard but tolerate a wider window —
+            // ~3 outer steps per cycle, so 10 strikes ≈ 30 outer
+            // iters, well below the 2987-iter pathological run).
+            if self.resto_no_outer_progress_count >= 10 {
+                // Prefer the last acceptable point over the cycle error;
+                // borrows are released, so the `&mut self` helper is free.
+                return self.terminate_acceptable_or(cycle_exit);
             }
+        } else {
+            self.resto_no_outer_progress_count = 0;
         }
         // Near-feasible resto re-entry detector — matches the *intent*
         // of upstream `IpBacktrackingLineSearch.cpp:580-600`'s almost-
