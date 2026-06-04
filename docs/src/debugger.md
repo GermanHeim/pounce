@@ -256,6 +256,93 @@ in the pause event's `watches` array.
 Prefix any block with `d` (`dx`, `dz_l`, …) to print the corresponding
 block of the most recent Newton step.
 
+### Model names (`.col` / `.row`)
+
+A solver-internal diagnostic that says *"variable 132 in equation 3 looks
+singular"* is far less actionable than one that says *"`T_reactor` in
+`energy_balance`"*. Lee et al. (2024) identify this gap — between
+detecting an issue numerically and tracing it back to a *named* equation
+in the modeling environment — as a central roadblock for debugging
+equation-oriented models.[^lee2024]
+
+AMPL `.nl` files carry no names, but AMPL emits two optional sibling
+files when the modeler sets `option auxfiles rc;`:
+
+| File | Contents |
+|---|---|
+| `stub.col` | one **variable** name per line, in column order |
+| `stub.row` | one **constraint** name per line, in row order |
+
+When these sit next to the `.nl`, pounce captures them
+(`NlProblem::var_names` / `con_names`) and exposes them through the
+`ExpressionProvider::variable_name` / `constraint_name` seam. Missing or
+malformed name files are non-fatal — names are a diagnostic aid, never
+load-blocking, so the debugger simply falls back to index labels.
+
+`print residuals` uses these names directly. Residual values live in the
+solver's *split* space (equalities and inequalities separated, fixed
+variables removed), so a name only labels the right row if it is carried
+through the same permutations. The TNLP publishes its `.col`/`.row` names
+under the conventional `idx_names` metadata key, and `OrigIpoptNlp`
+projects them into split space (`x_not_fixed_map` for variables, `c_map`
+for equalities, `d_map` for inequalities) — the debugger reads the result
+via `DebugCtx::split_names`. So a near-singular equality residual prints as
+
+```
+c[energy_balance] = +3.142e-04   |3.142e-04|
+```
+
+instead of `c[3]`. The same `idx_names` pool labels `grad_x_L[...]`
+(variable names) and `grad_s_L[...]` / `d-s[...]` (inequality names). The
+JSON payload keeps the numeric `index` and adds a `name` field.
+
+> **Status.** Capture, exposure, and `print residuals` labeling are live
+> on the AMPL `.nl` path with names projected through the bound /
+> c-d-split permutations. **Presolve** renumbers rows, so `PresolveTnlp`
+> declines `idx_names` rather than risk mislabeling a permuted row — under
+> presolve the debugger safely falls back to index labels. Carrying names
+> through the presolve map and decorating `print active` are the next
+> steps built on this foundation.
+
+[^lee2024]: A. Lee, R. B. Parker, S. Poon, D. Gunter, A. W. Dowling, and
+    B. Nicholson, "Model Diagnostics for Equation-Oriented Models:
+    Roadblocks and the Path Forward," *Systems and Control Transactions*
+    3:966–974 (2024). <https://doi.org/10.69997/sct.147875>
+
+### `print equation` — the algebra of a named constraint
+
+Naming a culprit row is only half the story; the next question is always
+*what does that equation actually say?* Lee et al. (2024) make this the
+core of actionable equation-oriented diagnostics — a debugger should
+surface the **named equation**, not just a row index.[^lee2024] `print
+equation` closes that loop: once `print residuals` points at, say,
+`c[energy_balance]`, you read the constraint's source algebra directly.
+
+```text
+(dbg) print equation energy_balance
+energy_balance:  T_reactor*flow - 300*flow - Q = 0
+
+(dbg) print equation 14          # by original .nl row index
+c[14]:  x[3]^2 + x[7]^2 <= 1
+```
+
+A constraint is addressable by its **model name** (preferred, and robust
+to row reordering) or its **original `.nl` row index**. With no argument,
+`print equation` reports how many equations are available. The renderer
+works from the faithful `Expr` DAG the `.nl` parser built — not the lossy
+evaluation tape — so common-subexpressions, imported functions, and
+piecewise/conditional forms render as written. The affine part is printed
+with tidy signs (`a - 2*b`, not `a + -2*b`), zero-coefficient Jacobian
+placeholders are suppressed, and bounds render in their natural relation
+(`= rhs`, `lo <= body <= hi`, `>= lo`, `<= hi`). The JSON payload carries
+`{index, name, equation}`.
+
+Equations are *static model data* in original `.nl` row order, so unlike
+residuals they need no split-space projection — `print equation` works
+regardless of presolve. It is available whenever a model was loaded from
+an `.nl` file; the JSON `name` field is present only when a `.row` auxfile
+supplied one.
+
 ### `print kkt` — inertia and regularization
 
 Available at/after `after_search_dir` (use `stop-at kkt`). This is the
@@ -301,6 +388,94 @@ every iteration while the debugger is *stepping*; once you `detach` (run
 free) the capture is dropped — so on a large problem a free run doesn't
 pay the O(nnz) assembly. If you `viz kkt`/`viz L` right after a free run,
 `step` once to re-capture.
+
+### `diagnose` — a live, named health report
+
+`info`, `print residuals`, and `print kkt` each expose *one* facet of the
+current iterate. `diagnose` (alias `diag`) runs a panel of heuristics over
+all of them at once and returns a ranked list of findings — and, crucially,
+**names the culprit equation or variable** behind each numerical symptom.
+That last step is the actionable-diagnostics path of Lee et al.
+(2024):[^lee2024] a report that says *"`mass_balance` is the worst
+constraint residual"* is worth far more than *"row 13 is infeasible."*
+
+```text
+pounce-dbg> diagnose
+[  error] primal_infeasible: Primal infeasibility 1.70e+02; worst constraint
+         residual is c[mass_balance] = +1.701e+02. Inspect this equation's
+         feasibility and scaling (`print equation mass_balance`).
+[warning] dual_infeasible: Dual infeasibility 9.84e-01; largest stationarity
+         residual is grad_x_L[T_reactor] = -9.838e-01.
+[warning] inertia_wrong: KKT inertia is wrong (n-=2 vs expected 1): the system
+         was indefinite/singular and the step had to be stabilized.
+[   info] bounds_pinned: 3 variable bound(s) are active (slack < 1e-6).
+```
+
+This is the **live** counterpart to the `pounce-studio` `diagnose` tool,
+which runs *temporal* heuristics over a finished solve report. The two
+share a `{severity, code, message}` shape so
+a client can treat them uniformly, but the live command sees what a saved
+report cannot: the **current KKT inertia and regularization**, and the
+**named** primal/dual residuals at this exact point. Findings are sorted
+`error` → `warning` → `info`; a clean iterate yields a single `healthy`
+finding. The checks:
+
+| code | severity | fires when |
+|---|---|---|
+| `primal_infeasible` | error/warning | `inf_pr` above tol → names the worst constraint residual |
+| `dual_infeasible` | warning | `inf_du` above tol → names the worst stationarity residual |
+| `inertia_wrong` | warning | KKT inertia ≠ expected (rank-deficient Jacobian / indefinite Hessian) |
+| `heavy_regularization` | info | primal δ_w applied (Hessian indefinite) |
+| `dual_regularization` | warning | dual δ_c applied (linearly dependent / redundant equalities) |
+| `structural_singularity` | warning | a subset of equalities is over-determined → **names the dependent equations** |
+| `large_multipliers` | warning | a multiplier exceeds 1e8 (constraint-qualification / scaling) |
+| `bounds_pinned` | info | variables pressed against their bounds |
+| `tiny_step` | warning | accepted α_pr collapsed |
+| `heavy_line_search` | warning | ≥10 backtracking trials for the accepted step |
+| `in_restoration` | warning | currently inside feasibility restoration |
+| `mu_stalled` | warning | μ flat for ≥3 consecutive iterations |
+
+KKT-derived findings (`inertia_wrong`, `*_regularization`) need a computed
+search direction, so they appear at/after `after_search_dir`. Names follow
+the same rule as `print residuals`: present on the `.nl` path with
+`.col`/`.row` files, index labels (`c[13]`) under presolve. The JSON payload
+is `{iter, findings: [{severity, code, message}], n_findings}`.
+
+#### Structural rank: naming the dependent equations
+
+`inertia_wrong` and `dual_regularization` *detect* a rank-deficient
+Jacobian, but only as a scalar — they tell you a redundancy exists, not
+*which* equations are redundant. `structural_singularity` closes that gap
+with a **Dulmage–Mendelsohn decomposition** of the equality Jacobian's
+sparsity pattern (the same structural check at the heart of IDAES's
+`DiagnosticsToolbox`). A maximum bipartite matching between equality rows
+and variables partitions the system; any **over-determined block** — more
+equations than the variables they jointly touch — forces at least one of
+those equations to be redundant or mutually inconsistent (LICQ fails). The
+finding lists those equations *by model name*, e.g.:
+
+```text
+pounce-dbg> diagnose
+[warning] structural_singularity: Constraint Jacobian is structurally singular
+         (Dulmage–Mendelsohn): 2 equation(s) over-determine the 1 variable(s)
+         they jointly touch (flow_rate), so ≥1 of them must be redundant or
+         mutually inconsistent (LICQ fails on this block). Candidate dependent
+         equations: mass_balance, mass_balance_dup. Inspect them with
+         `print equation <name>`; this names the rows behind any δ_c
+         dual-regularization / wrong-inertia signal.
+```
+
+This is the **named-culprit** payoff of Lee et al. (2024):[^lee2024]
+reporting *"`mass_balance` and `mass_balance_dup` are linearly dependent"*
+rather than *"the Jacobian is singular."* The check is iterate-independent
+(it reads only the sparsity pattern), so unlike the KKT-derived findings it
+fires from iteration 0 — it can flag a structurally broken model before the
+solver ever stalls on it. It is suppressed for well-posed problems: an NLP
+with more variables than equality constraints is the normal case (the spare
+degrees of freedom are pinned by the objective, bounds, and inequalities),
+so only the over-determined side is reported, never the under-determined
+one. Available on the `.nl` path; names fall back to `c[i]`/`x[i]` when no
+`.col`/`.row` auxiliary files were emitted.
 
 ---
 
@@ -723,7 +898,8 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 |---|---|
 | `help` (`h`, `?`) | list commands |
 | `info` (`i`) | current-iterate summary |
-| `print <what>` (`p`) | block, `d`-block, scalar, or `kkt` |
+| `print <what>` (`p`) | block, `d`-block, scalar, `kkt`, or `residuals` |
+| `print equation <name\|row>` | source algebra of a constraint, by model name or `.nl` row |
 | `step` (`s`, `n`) | run to next `iter_start` |
 | `step sub` / `stepi` (`si`) | run to next checkpoint of any kind |
 | `continue` (`c`) | run to next breakpoint |
@@ -742,6 +918,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `tbreak N` (`tb`) | one-shot iteration breakpoint |
 | `watchpoint <blk>[<i>] [τ]` (`wp`) | pause when a value changes by > τ |
 | `diff` | what changed in the iterate since the last iteration |
+| `diagnose` (`diag`) | live health report: named culprit residuals, KKT inertia, stalls |
 | `source <file>` | run debugger commands from a file |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |

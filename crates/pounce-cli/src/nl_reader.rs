@@ -34,8 +34,8 @@
 use crate::nl_tape::Tape;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
+    SparsityRequest, StartingPoint, IDX_NAMES, TNLP,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -202,6 +202,21 @@ pub struct NlProblem {
     /// Empty unless the `.nl` file calls compiled-C user functions (typically
     /// emitted by IDAES property packages — see issue #49).
     pub imported_funcs: Vec<ImportedFunc>,
+    /// Variable names from the sibling `.col` file, index-aligned to `x`
+    /// (one name per line, column order). Empty when no `.col` file was
+    /// found — AMPL only emits it under `option auxfiles rc;`.
+    ///
+    /// Carrying names lets diagnostics report `flow_balance` / `T_reactor`
+    /// instead of `c[3]` / `x[132]`. Lee et al. (2024) identify the gap
+    /// between detecting an issue and tracing it to a *named* equation as a
+    /// central roadblock for equation-oriented model debugging; threading
+    /// names through to the solver/debugger is the prerequisite for closing
+    /// it. See <https://doi.org/10.69997/sct.147875>.
+    pub var_names: Vec<String>,
+    /// Constraint names from the sibling `.row` file, index-aligned to `g`
+    /// (one name per line, row order). Empty when no `.row` file was found.
+    /// See [`NlProblem::var_names`] for why names are captured.
+    pub con_names: Vec<String>,
 }
 
 /// Suffix data parsed out of `S`-segments. Sparse entries are scattered
@@ -230,10 +245,43 @@ pub struct NlSuffixes {
 }
 
 /// Parse an `.nl` file from disk.
+///
+/// After parsing the `.nl` body, this also looks for AMPL's optional
+/// sibling name files — `stub.col` (variable names) and `stub.row`
+/// (constraint names), emitted only when the modeler sets
+/// `option auxfiles rc;`. When present and well-formed they populate
+/// [`NlProblem::var_names`] / [`NlProblem::con_names`]; when absent or
+/// malformed the names stay empty and every downstream consumer falls
+/// back to indices. Names are a diagnostic nicety, never load-blocking
+/// (cf. Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
 pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
     let txt = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read {}: {}", path.display(), e))?;
-    parse_nl_text(&txt)
+    let mut prob = parse_nl_text(&txt)?;
+    prob.var_names = read_name_file(&path.with_extension("col"), prob.n);
+    prob.con_names = read_name_file(&path.with_extension("row"), prob.m);
+    Ok(prob)
+}
+
+/// Read an AMPL name file (`.col` / `.row`): one name per line, in index
+/// order. Returns the first `expected` names, or an empty vector when the
+/// file is missing, unreadable, or has fewer than `expected` lines.
+///
+/// Returning empty (rather than erroring) on any mismatch is deliberate:
+/// names are an optional diagnostic aid, so a missing or truncated file
+/// must never block a solve. The `.take(expected)` also drops AMPL's
+/// convention of appending the objective name after the constraint names
+/// in `.row`, keeping the result aligned 1:1 with `g`.
+fn read_name_file(path: &Path, expected: usize) -> Vec<String> {
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = txt.lines().take(expected).map(str::to_owned).collect();
+    if names.len() == expected {
+        names
+    } else {
+        Vec::new()
+    }
 }
 
 /// Parse `.nl` text content. Public so tests can use string literals.
@@ -427,6 +475,10 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         lambda0,
         suffixes,
         imported_funcs,
+        // `.nl` text carries no names; `read_nl_file` fills these from the
+        // sibling `.col`/`.row` files when present.
+        var_names: Vec::new(),
+        con_names: Vec::new(),
     })
 }
 
@@ -1386,11 +1438,339 @@ pub struct NlTnlp {
     compressed: Vec<Vec<f64>>,
 }
 
-/// Recursively flatten top-level Sum and binary-Add nodes into a list
-/// of independent summands. Non-Sum/Add expressions are returned as a
-/// single-element vector. This lets `NlTnlp` build one small tape per
-/// term so the per-variable Hessian sweep only walks the term that
-/// actually depends on that variable.
+// ---------------------------------------------------------------------
+// Human-readable equation rendering (`print equation` in the debugger).
+//
+// Turns a parsed constraint back into infix text using the model's
+// variable / constraint names, so the debugger can show the actual
+// equation a user wrote — `T_reactor*flow - 300 = 0` — instead of a
+// bare row index. This is the "print the specific equation, with
+// names" capability Lee et al. (2024, <https://doi.org/10.69997/sct.147875>)
+// argue makes equation-oriented model diagnostics actionable.
+//
+// The renderer is intentionally separate from the evaluation `Tape`:
+// tapes are lossy for display (CSEs flattened, externals opaque),
+// whereas the `Expr` DAG is the faithful source the `.nl` parser built.
+// ---------------------------------------------------------------------
+
+/// Binding strength for parenthesization. Higher binds tighter.
+const P_ADD: u8 = 10;
+const P_MUL: u8 = 20;
+const P_NEG: u8 = 30;
+const P_POW: u8 = 40;
+const P_ATOM: u8 = 100;
+
+/// Format a numeric literal compactly: integers without a trailing `.0`,
+/// everything else via the shortest round-tripping `f64` form.
+fn fmt_num(x: Number) -> String {
+    if x.is_finite() && x == x.trunc() && x.abs() < 1e15 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x}")
+    }
+}
+
+/// Display label for variable `i`: its `.col` name when present, else
+/// `x[i]`.
+fn var_label(i: usize, var_names: &[String]) -> String {
+    match var_names.get(i) {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => format!("x[{i}]"),
+    }
+}
+
+/// Precedence of an expression's top operator (for child wrapping).
+fn expr_prec(e: &Expr) -> u8 {
+    match e {
+        Expr::Binary(BinOp::Add, ..) | Expr::Binary(BinOp::Sub, ..) | Expr::Sum(_) => P_ADD,
+        Expr::Binary(BinOp::Mul, ..) | Expr::Binary(BinOp::Div, ..) => P_MUL,
+        Expr::Unary(UnaryOp::Neg, _) => P_NEG,
+        Expr::Binary(BinOp::Pow, ..) => P_POW,
+        Expr::Cse(inner) => expr_prec(inner),
+        // Everything else renders as an atom / `f(...)` form.
+        _ => P_ATOM,
+    }
+}
+
+/// Render `e`, wrapping in parentheses iff its precedence is looser than
+/// `min_prec`.
+fn render_prec(e: &Expr, min_prec: u8, vn: &[String], funcs: &[ImportedFunc]) -> String {
+    let s = render_expr(e, vn, funcs);
+    if expr_prec(e) < min_prec {
+        format!("({s})")
+    } else {
+        s
+    }
+}
+
+fn unary_name(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Neg => "-",
+        UnaryOp::Sqrt => "sqrt",
+        UnaryOp::Log => "log",
+        UnaryOp::Exp => "exp",
+        UnaryOp::Abs => "abs",
+        UnaryOp::Sin => "sin",
+        UnaryOp::Cos => "cos",
+        UnaryOp::Log10 => "log10",
+        UnaryOp::Tan => "tan",
+        UnaryOp::Atan => "atan",
+        UnaryOp::Acos => "acos",
+        UnaryOp::Sinh => "sinh",
+        UnaryOp::Cosh => "cosh",
+        UnaryOp::Tanh => "tanh",
+        UnaryOp::Asin => "asin",
+        UnaryOp::Acosh => "acosh",
+        UnaryOp::Asinh => "asinh",
+        UnaryOp::Atanh => "atanh",
+    }
+}
+
+fn cmp_sym(op: CmpOp) -> &'static str {
+    match op {
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Eq => "==",
+        CmpOp::Ge => ">=",
+        CmpOp::Gt => ">",
+        CmpOp::Ne => "!=",
+    }
+}
+
+/// Append an additive sub-term with a tidy sign: a rendered term that
+/// begins with `-` is folded into a ` - ` separator, so `a + -b` reads as
+/// `a - b`. The identity `a + (-b …) = a - b …` keeps this exact even when
+/// the term is itself a sum. The first term is emitted verbatim.
+fn push_additive(out: &mut String, rendered: &str, first: bool) {
+    if first {
+        out.push_str(rendered);
+    } else if let Some(rest) = rendered.strip_prefix('-') {
+        out.push_str(" - ");
+        out.push_str(rest);
+    } else {
+        out.push_str(" + ");
+        out.push_str(rendered);
+    }
+}
+
+/// Render an [`Expr`] DAG to infix text using model names.
+fn render_expr(e: &Expr, vn: &[String], funcs: &[ImportedFunc]) -> String {
+    match e {
+        Expr::Const(c) => fmt_num(*c),
+        Expr::Var(i) => var_label(*i, vn),
+        Expr::Binary(op, l, r) => match op {
+            BinOp::Add => {
+                let mut s = render_prec(l, P_ADD, vn, funcs);
+                push_additive(&mut s, &render_prec(r, P_ADD, vn, funcs), false);
+                s
+            }
+            // Right operand at P_ADD+1 so `a - (b - c)` keeps its parens.
+            BinOp::Sub => format!(
+                "{} - {}",
+                render_prec(l, P_ADD, vn, funcs),
+                render_prec(r, P_ADD + 1, vn, funcs)
+            ),
+            BinOp::Mul => format!(
+                "{}*{}",
+                render_prec(l, P_MUL, vn, funcs),
+                render_prec(r, P_MUL, vn, funcs)
+            ),
+            BinOp::Div => format!(
+                "{}/{}",
+                render_prec(l, P_MUL, vn, funcs),
+                render_prec(r, P_MUL + 1, vn, funcs)
+            ),
+            // Pow is right-associative: tighten the left operand instead.
+            BinOp::Pow => format!(
+                "{}^{}",
+                render_prec(l, P_POW + 1, vn, funcs),
+                render_prec(r, P_POW, vn, funcs)
+            ),
+            BinOp::Atan2 => format!(
+                "atan2({}, {})",
+                render_expr(l, vn, funcs),
+                render_expr(r, vn, funcs)
+            ),
+        },
+        Expr::Unary(UnaryOp::Neg, a) => format!("-{}", render_prec(a, P_NEG, vn, funcs)),
+        Expr::Unary(op, a) => format!("{}({})", unary_name(*op), render_expr(a, vn, funcs)),
+        Expr::Sum(xs) => {
+            if xs.is_empty() {
+                "0".to_string()
+            } else {
+                let mut s = String::new();
+                for (k, x) in xs.iter().enumerate() {
+                    push_additive(&mut s, &render_prec(x, P_ADD, vn, funcs), k == 0);
+                }
+                s
+            }
+        }
+        Expr::Cse(inner) => render_expr(inner, vn, funcs),
+        Expr::Funcall { id, args } => {
+            let name = funcs
+                .iter()
+                .find(|f| f.id == *id)
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| format!("extern#{id}"));
+            let parts: Vec<String> = args
+                .iter()
+                .map(|a| match a {
+                    FuncallArg::Real(x) => render_expr(x, vn, funcs),
+                    FuncallArg::Str(s) => format!("{s:?}"),
+                })
+                .collect();
+            format!("{name}({})", parts.join(", "))
+        }
+        Expr::Compare(op, a, b) => format!(
+            "({} {} {})",
+            render_expr(a, vn, funcs),
+            cmp_sym(*op),
+            render_expr(b, vn, funcs)
+        ),
+        Expr::And(a, b) => format!(
+            "({} && {})",
+            render_expr(a, vn, funcs),
+            render_expr(b, vn, funcs)
+        ),
+        Expr::Or(a, b) => format!(
+            "({} || {})",
+            render_expr(a, vn, funcs),
+            render_expr(b, vn, funcs)
+        ),
+        Expr::Not(a) => format!("!({})", render_expr(a, vn, funcs)),
+        Expr::Cond { cond, then_, else_ } => format!(
+            "if({}, {}, {})",
+            render_expr(cond, vn, funcs),
+            render_expr(then_, vn, funcs),
+            render_expr(else_, vn, funcs)
+        ),
+        Expr::MinList(xs) => format!(
+            "min({})",
+            xs.iter()
+                .map(|x| render_expr(x, vn, funcs))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::MaxList(xs) => format!(
+            "max({})",
+            xs.iter()
+                .map(|x| render_expr(x, vn, funcs))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Render the affine `Σ cᵢ·xᵢ` part with tidy signs (`a - 2*b`, not
+/// `a + -2*b`). Returns `""` when there are no linear terms.
+fn render_linear(linear: &[(usize, Number)], vn: &[String]) -> String {
+    let mut out = String::new();
+    // The `.nl` linear part carries an entry for every variable in the
+    // row's Jacobian, including a 0 coefficient for variables that appear
+    // only *nonlinearly* (they're rendered in the nonlinear part). Skip
+    // those zeros so the equation reads as written, not as a sparsity map.
+    let mut first = true;
+    for (var, coef) in linear {
+        if *coef == 0.0 {
+            continue;
+        }
+        let neg = *coef < 0.0;
+        let mag = coef.abs();
+        let term = if mag == 1.0 {
+            var_label(*var, vn)
+        } else {
+            format!("{}*{}", fmt_num(mag), var_label(*var, vn))
+        };
+        if first {
+            if neg {
+                out.push('-');
+            }
+            out.push_str(&term);
+            first = false;
+        } else {
+            out.push_str(if neg { " - " } else { " + " });
+            out.push_str(&term);
+        }
+    }
+    out
+}
+
+/// Render the constraint body (linear + nonlinear parts combined).
+fn render_body(linear: &[(usize, Number)], nonlinear: &Expr, prob: &NlProblem) -> String {
+    let mut s = render_linear(linear, &prob.var_names);
+    let nl_is_zero = matches!(nonlinear, Expr::Const(c) if *c == 0.0);
+    if !nl_is_zero {
+        let nl = render_prec(nonlinear, P_ADD, &prob.var_names, &prob.imported_funcs);
+        if s.is_empty() {
+            s = nl;
+        } else {
+            push_additive(&mut s, &nl, false);
+        }
+    }
+    if s.is_empty() {
+        s = "0".to_string();
+    }
+    s
+}
+
+/// Render constraint `k` as a full relation, e.g. `mass_in - mass_out = 0`
+/// or `0 <= T_reactor <= 500`. Bounds outside ±1e19 are treated as
+/// infinite (AMPL's convention), matching [`TNLPAdapter`]'s classifier.
+pub fn render_constraint_equation(prob: &NlProblem, k: usize) -> String {
+    let body = render_body(&prob.con_linear[k], &prob.con_nonlinear[k], prob);
+    let lo = prob.g_l[k];
+    let hi = prob.g_u[k];
+    const INF: Number = 1.0e19;
+    let has_lo = lo > -INF;
+    let has_hi = hi < INF;
+    match (has_lo, has_hi) {
+        (true, true) if lo == hi => format!("{body} = {}", fmt_num(lo)),
+        (true, true) => format!("{} <= {body} <= {}", fmt_num(lo), fmt_num(hi)),
+        (true, false) => format!("{body} >= {}", fmt_num(lo)),
+        (false, true) => format!("{body} <= {}", fmt_num(hi)),
+        (false, false) => format!("{body}  (free)"),
+    }
+}
+
+/// Render every constraint to text, index-aligned to `g` (original `.nl`
+/// row order). Used to build the debugger's static equation book.
+pub fn render_all_constraint_equations(prob: &NlProblem) -> Vec<String> {
+    (0..prob.m)
+        .map(|k| render_constraint_equation(prob, k))
+        .collect()
+}
+
+/// Structural sparsity of the constraint Jacobian as flat 0-based
+/// triplets `(irow, jcol)`: one pair per variable that constraint `k`
+/// structurally depends on — the union of its linear support and the
+/// `Var(i)` indices appearing anywhere in its nonlinear tree
+/// ([`collect_vars`]). Sorted and deduplicated within each row.
+///
+/// This is the input to the debugger's Dulmage–Mendelsohn
+/// structural-rank check (`diagnose`), which names the over-determined
+/// (candidate redundant / inconsistent) equations and under-determined
+/// variables. Naming the dependent rows — rather than reporting
+/// "equations 3, 15, …" — is the roadblock Lee et al. (2024) flag for
+/// equation-oriented model debugging. See
+/// <https://doi.org/10.69997/sct.147875>.
+pub fn constraint_jacobian_sparsity(prob: &NlProblem) -> (Vec<Index>, Vec<Index>) {
+    let mut irow: Vec<Index> = Vec::new();
+    let mut jcol: Vec<Index> = Vec::new();
+    let mut support: BTreeSet<usize> = BTreeSet::new();
+    for k in 0..prob.m {
+        support.clear();
+        for &(j, _coef) in &prob.con_linear[k] {
+            support.insert(j);
+        }
+        collect_vars(&prob.con_nonlinear[k], &mut support);
+        for &j in &support {
+            irow.push(k as Index);
+            jcol.push(j as Index);
+        }
+    }
+    (irow, jcol)
+}
+
 /// Flatten an additive expression tree into independent summand
 /// expressions, each of which becomes its own Hessian tape.
 ///
@@ -1405,10 +1785,12 @@ pub struct NlTnlp {
 ///
 /// We therefore descend through the *affine* envelope of the sum, not
 /// just `+`/`Sum`:
+///
 ///   * `Neg(x)`            → split `x`, negate each summand
 ///   * `Sub(l, r)`         → split `l`; split `r`, negate each summand
 ///   * `c * x` / `x * c`   → split `x`, scale each summand by `c`
 ///   * `x / c`             → split `x`, scale each summand by `1/c`
+///
 /// so that an objective like `-(Σ …)` or `0.5·(Σ …)` (the usual
 /// least-squares / max-entropy shapes) still decomposes to its leaf
 /// terms instead of collapsing into one giant tape. The carried
@@ -1761,6 +2143,18 @@ impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
             .unwrap_or(&[]);
         crate::nl_fbbt_translate::translate_constraint(nonlinear, linear)
     }
+
+    /// Variable name from the sibling `.col` file, if one was loaded.
+    /// Index is original `.nl` column order.
+    fn variable_name(&self, i: usize) -> Option<&str> {
+        self.prob.var_names.get(i).map(String::as_str)
+    }
+
+    /// Constraint name from the sibling `.row` file, if one was loaded.
+    /// Index is original `.nl` row order.
+    fn constraint_name(&self, i: usize) -> Option<&str> {
+        self.prob.con_names.get(i).map(String::as_str)
+    }
 }
 
 impl TNLP for NlTnlp {
@@ -1971,6 +2365,30 @@ impl TNLP for NlTnlp {
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
         self.final_x = Some(sol.x.to_vec());
         self.final_obj = sol.obj_value;
+    }
+
+    /// Publish the `.col` / `.row` names (captured at load time) under the
+    /// conventional `idx_names` metadata key, in original `.nl` order. The
+    /// adapter permutes these into split space (see
+    /// `OrigIpoptNlp::split_space_names`) so the debugger can report a
+    /// near-singular Jacobian row as the `mass_balance` equation rather
+    /// than "row 3" — the model-vs-index gap Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) flag for equation-oriented
+    /// model debugging. Declines (returns false) when the model shipped no
+    /// name files so callers fall back to index labels.
+    fn get_var_con_metadata(&mut self, var: &mut MetaData, con: &mut MetaData) -> bool {
+        let mut any = false;
+        if !self.prob.var_names.is_empty() {
+            var.strings
+                .insert(IDX_NAMES.to_string(), self.prob.var_names.clone());
+            any = true;
+        }
+        if !self.prob.con_names.is_empty() {
+            con.strings
+                .insert(IDX_NAMES.to_string(), self.prob.con_names.clone());
+            any = true;
+        }
+        any
     }
 
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
@@ -2362,5 +2780,233 @@ S1 2 sens_init_constr
         // d/dx0 at x=0: 2*(0-1) = -2; d/dx1: 2*(0-2) = -4
         assert!((g[0] - (-2.0)).abs() < 1e-12);
         assert!((g[1] - (-4.0)).abs() < 1e-12);
+    }
+
+    // ---- Sibling `.col` / `.row` name-file capture --------------------
+    //
+    // Names let diagnostics name the offending equation instead of "row 3"
+    // (Lee et al. 2024, https://doi.org/10.69997/sct.147875). These cover
+    // the read path and the documented fallback-to-empty behavior.
+
+    use pounce_nlp::expression_provider::ExpressionProvider;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Unique scratch dir for one test (no `tempfile` dev-dep available).
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let seq = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pounce_nlnames_{}_{}_{}",
+            std::process::id(),
+            tag,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn read_name_file_reads_in_order() {
+        let dir = scratch_dir("col_order");
+        let p = dir.join("m.col");
+        std::fs::write(&p, "x_in\nT_reactor\nflow\n").unwrap();
+        assert_eq!(read_name_file(&p, 3), vec!["x_in", "T_reactor", "flow"]);
+    }
+
+    #[test]
+    fn read_name_file_truncates_extra_lines() {
+        // `.row` conventionally appends the objective name after the m
+        // constraint names; `.take(expected)` must drop it so names stay
+        // 1:1 with `g`.
+        let dir = scratch_dir("row_obj");
+        let p = dir.join("m.row");
+        std::fs::write(&p, "mass_balance\nenergy_balance\nobj\n").unwrap();
+        assert_eq!(
+            read_name_file(&p, 2),
+            vec!["mass_balance", "energy_balance"]
+        );
+    }
+
+    #[test]
+    fn read_name_file_empty_on_short_or_missing() {
+        let dir = scratch_dir("short");
+        let short = dir.join("m.col");
+        std::fs::write(&short, "only_one\n").unwrap();
+        // Fewer lines than expected ⇒ empty (never a partial mapping).
+        assert!(read_name_file(&short, 3).is_empty());
+        // Missing file ⇒ empty, no error.
+        assert!(read_name_file(&dir.join("absent.col"), 2).is_empty());
+    }
+
+    #[test]
+    fn read_nl_file_captures_sibling_names() {
+        // SIMPLE is n=2, m=0. Drop a `.col` next to it and confirm the
+        // names ride through onto the TNLP's ExpressionProvider.
+        let dir = scratch_dir("sibling");
+        let nl = dir.join("m.nl");
+        std::fs::write(&nl, SIMPLE).unwrap();
+        std::fs::write(dir.join("m.col"), "alpha\nbeta\n").unwrap();
+
+        let prob = read_nl_file(&nl).expect("parse + name capture");
+        assert_eq!(prob.var_names, vec!["alpha", "beta"]);
+        assert!(prob.con_names.is_empty()); // no `.row` written, m=0 anyway
+
+        let tnlp = NlTnlp::new(prob);
+        assert_eq!(tnlp.variable_name(0), Some("alpha"));
+        assert_eq!(tnlp.variable_name(1), Some("beta"));
+        assert_eq!(tnlp.variable_name(2), None); // out of range ⇒ index fallback
+    }
+
+    #[test]
+    fn read_nl_file_without_names_yields_empty() {
+        let dir = scratch_dir("noname");
+        let nl = dir.join("m.nl");
+        std::fs::write(&nl, SIMPLE).unwrap();
+        let prob = read_nl_file(&nl).expect("parse");
+        assert!(prob.var_names.is_empty());
+        assert!(prob.con_names.is_empty());
+        let tnlp = NlTnlp::new(prob);
+        assert_eq!(tnlp.variable_name(0), None);
+    }
+
+    // ---- equation rendering (`print equation`) ----
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn render_uses_variable_names_when_present() {
+        let e = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        assert_eq!(render_expr(&e, &names(&["T", "flow"]), &[]), "T*flow");
+        // Falls back to x[i] when names are absent.
+        assert_eq!(render_expr(&e, &[], &[]), "x[0]*x[1]");
+    }
+
+    #[test]
+    fn render_parenthesizes_by_precedence() {
+        // (x0 + x1) * x2  must keep the parens around the sum.
+        let sum = Expr::Binary(BinOp::Add, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        let e = Expr::Binary(BinOp::Mul, Box::new(sum), Box::new(Expr::Var(2)));
+        assert_eq!(render_expr(&e, &[], &[]), "(x[0] + x[1])*x[2]");
+
+        // x0 + x1 * x2  needs no parens (mul binds tighter).
+        let mul = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(1)), Box::new(Expr::Var(2)));
+        let e2 = Expr::Binary(BinOp::Add, Box::new(Expr::Var(0)), Box::new(mul));
+        assert_eq!(render_expr(&e2, &[], &[]), "x[0] + x[1]*x[2]");
+    }
+
+    #[test]
+    fn render_subtraction_right_assoc_parens() {
+        // x0 - (x1 - x2) keeps the parens; x0 - x1 - x2 does not.
+        let inner = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(1)), Box::new(Expr::Var(2)));
+        let e = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(0)), Box::new(inner));
+        assert_eq!(render_expr(&e, &[], &[]), "x[0] - (x[1] - x[2])");
+    }
+
+    #[test]
+    fn render_functions_and_pow() {
+        let sq = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let e = Expr::Unary(UnaryOp::Exp, Box::new(sq));
+        assert_eq!(render_expr(&e, &names(&["q"]), &[]), "exp(q^2)");
+    }
+
+    #[test]
+    fn render_linear_signs_are_tidy() {
+        // 1*a - 2*b + c  (coef +1 omits the multiplier).
+        let lin = vec![(0usize, 1.0), (1, -2.0), (2, 1.0)];
+        assert_eq!(render_linear(&lin, &names(&["a", "b", "c"])), "a - 2*b + c");
+    }
+
+    #[test]
+    fn render_linear_skips_zero_coefficients() {
+        // A 0 coefficient (a variable present only in the nonlinear part)
+        // is dropped, not rendered as `0*x`.
+        let lin = vec![(0usize, 1.0), (1, 0.0), (2, -3.0)];
+        assert_eq!(render_linear(&lin, &names(&["a", "b", "c"])), "a - 3*c");
+        // Leading term zero ⇒ the first emitted term still has no ` + `.
+        let lin = vec![(0usize, 0.0), (1, 2.0)];
+        assert_eq!(render_linear(&lin, &names(&["a", "b"])), "2*b");
+    }
+
+    #[test]
+    fn render_sum_folds_negative_terms() {
+        // Σ(a², -b⁴, -c) reads `a^2 - b^4 - c`, not `a^2 + -b^4 + -c`.
+        let sq = |i| {
+            Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(i)),
+                Box::new(Expr::Const(2.0)),
+            )
+        };
+        let neg = |i| {
+            Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::Var(i)),
+            )
+        };
+        let e = Expr::Sum(vec![
+            sq(0),
+            neg(1),
+            Expr::Unary(UnaryOp::Neg, Box::new(Expr::Var(2))),
+        ]);
+        assert_eq!(
+            render_expr(&e, &names(&["a", "b", "c"]), &[]),
+            "a^2 - 1*b - c"
+        );
+    }
+
+    #[test]
+    fn render_constraint_equation_forms() {
+        // Build a 2-constraint problem by hand: an equality and a range.
+        let mut prob = parse_nl_text(SIMPLE).unwrap();
+        // Overwrite to a known small shape: 1 var, 2 cons.
+        prob.n = 2;
+        prob.m = 2;
+        prob.var_names = names(&["mass_in", "mass_out"]);
+        prob.con_names = names(&["balance", "window"]);
+        prob.con_linear = vec![
+            vec![(0, 1.0), (1, -1.0)], // mass_in - mass_out
+            vec![(0, 1.0)],            // mass_in
+        ];
+        prob.con_nonlinear = vec![Expr::Const(0.0), Expr::Const(0.0)];
+        prob.g_l = vec![0.0, 0.0];
+        prob.g_u = vec![0.0, 500.0];
+
+        assert_eq!(
+            render_constraint_equation(&prob, 0),
+            "mass_in - mass_out = 0"
+        );
+        assert_eq!(render_constraint_equation(&prob, 1), "0 <= mass_in <= 500");
+
+        let all = render_all_constraint_equations(&prob);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1], "0 <= mass_in <= 500");
+    }
+
+    #[test]
+    fn constraint_jacobian_sparsity_unions_linear_and_nonlinear() {
+        let mut prob = parse_nl_text(SIMPLE).unwrap();
+        prob.n = 3;
+        prob.m = 2;
+        // Row 0: linear in x1, nonlinear in x0 and x2 → support {0,1,2}.
+        // Row 1: linear in x2 only → support {2}.
+        prob.con_linear = vec![vec![(1, 4.0)], vec![(2, 1.0)]];
+        prob.con_nonlinear = vec![
+            Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(2))),
+            Expr::Const(0.0),
+        ];
+        prob.g_l = vec![0.0, 0.0];
+        prob.g_u = vec![0.0, 0.0];
+
+        let (irow, jcol) = constraint_jacobian_sparsity(&prob);
+        // Sorted, deduped per row: row 0 → cols 0,1,2; row 1 → col 2.
+        assert_eq!(irow, vec![0, 0, 0, 1]);
+        assert_eq!(jcol, vec![0, 1, 2, 2]);
     }
 }

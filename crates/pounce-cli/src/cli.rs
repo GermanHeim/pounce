@@ -50,6 +50,19 @@ pub struct Args {
     /// `--about`: print build metadata, compiled-in features, available
     /// linear solvers, and runtime paths. Used for bug reports.
     pub about: bool,
+    /// `--cite [REPORT.json]`: print the citations a user should include
+    /// when publishing pounce results, then exit. Always lists the static
+    /// core (pounce itself + Wächter-Biegler). When a solve-report JSON
+    /// path follows, adds solve-aware extras for features the run actually
+    /// used (v1: the restoration phase). A terminal mode like `--about` —
+    /// requires no problem.
+    pub cite: bool,
+    /// Optional solve-report path consumed by `--cite` (the immediately
+    /// following argument, iff present and not another flag).
+    pub cite_report: Option<PathBuf>,
+    /// `--bibtex`: render `--cite` output as BibTeX instead of the human
+    /// list. No effect without `--cite`.
+    pub cite_bibtex: bool,
     /// `--dump <cat>[:<iter-spec>]`, repeatable. Each entry asks the
     /// solver to dump one diagnostic category at the specified iter
     /// range (`all`, `N`, `N-M`, `N-`, `-M`); omitting the spec is
@@ -179,6 +192,12 @@ Options:
   --version, -v, -V         print version and exit
   --about                   print version, build info, features,
                             linear solvers, and runtime paths
+  --cite [REPORT.json]      print the papers to cite when publishing
+                            pounce results, then exit. Always lists pounce
+                            itself + Wächter-Biegler; pass a JSON solve
+                            report (from --json-output) to also list papers
+                            for features the run used (e.g. restoration).
+  --bibtex                  with --cite, emit BibTeX instead of a text list
   --dump <cat>[:<spec>]     dump diagnostic category to per-iter files.
                             Repeatable. Categories: kkt, iterate(s), step,
                             mu, ls, resto, convergence, timing.
@@ -217,6 +236,9 @@ Options:
         let mut help = false;
         let mut version = false;
         let mut about = false;
+        let mut cite = false;
+        let mut cite_report: Option<PathBuf> = None;
+        let mut cite_bibtex = false;
         let mut list_problems = false;
         let mut dump_specs: Vec<(String, String)> = Vec::new();
         let mut dump_dir: Option<PathBuf> = None;
@@ -230,12 +252,25 @@ Options:
         let mut debug_on_interrupt = false;
         let mut debug_script: Option<PathBuf> = None;
 
-        let mut it = argv.into_iter().skip(1);
+        let mut it = argv.into_iter().skip(1).peekable();
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "-h" | "--help" => help = true,
                 "-v" | "-V" | "--version" => version = true,
                 "--about" => about = true,
+                "--cite" => {
+                    cite = true;
+                    // Optional value: consume the next argument as the
+                    // solve-report path only if it's present and is not
+                    // itself a flag (so `--cite --bibtex` doesn't swallow
+                    // the modifier, and bare `--cite` stays report-less).
+                    if let Some(next) = it.peek() {
+                        if !next.starts_with('-') {
+                            cite_report = Some(PathBuf::from(it.next().unwrap()));
+                        }
+                    }
+                }
+                "--bibtex" => cite_bibtex = true,
                 // AMPL solver-protocol flag — see `Args::ampl`.
                 "-AMPL" => ampl = true,
                 "--list-problems" => list_problems = true,
@@ -355,7 +390,7 @@ Options:
             debug = Some(DebugMode::Repl);
         }
 
-        if !help && !version && !about {
+        if !help && !version && !about && !cite {
             let problem = problem.ok_or_else(|| {
                 "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string()
             })?;
@@ -371,6 +406,9 @@ Options:
                 help,
                 version,
                 about,
+                cite,
+                cite_report,
+                cite_bibtex,
                 dump_specs,
                 dump_dir,
                 dump_format,
@@ -397,6 +435,9 @@ Options:
             help,
             version,
             about,
+            cite,
+            cite_report,
+            cite_bibtex,
             dump_specs,
             dump_dir,
             dump_format,
@@ -476,6 +517,37 @@ mod tests {
     fn about_flag_does_not_require_problem() {
         let a = Args::parse_argv(argv(&["--about"])).unwrap();
         assert!(a.about);
+    }
+
+    #[test]
+    fn cite_flag_alone_needs_no_problem_or_report() {
+        let a = Args::parse_argv(argv(&["--cite"])).unwrap();
+        assert!(a.cite);
+        assert!(a.cite_report.is_none());
+        assert!(!a.cite_bibtex);
+    }
+
+    #[test]
+    fn cite_consumes_following_report_path() {
+        let a = Args::parse_argv(argv(&["--cite", "run.json"])).unwrap();
+        assert!(a.cite);
+        assert_eq!(a.cite_report.unwrap().to_str(), Some("run.json"));
+    }
+
+    #[test]
+    fn cite_does_not_swallow_a_following_flag() {
+        let a = Args::parse_argv(argv(&["--cite", "--bibtex"])).unwrap();
+        assert!(a.cite);
+        assert!(a.cite_report.is_none());
+        assert!(a.cite_bibtex);
+    }
+
+    #[test]
+    fn cite_with_report_and_bibtex() {
+        let a = Args::parse_argv(argv(&["--cite", "run.json", "--bibtex"])).unwrap();
+        assert!(a.cite);
+        assert_eq!(a.cite_report.unwrap().to_str(), Some("run.json"));
+        assert!(a.cite_bibtex);
     }
 
     #[test]

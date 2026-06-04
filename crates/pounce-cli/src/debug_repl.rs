@@ -42,10 +42,14 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, Residual,
-    BLOCK_NAMES,
+    is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, ResidKind,
+    Residual, BLOCK_NAMES,
 };
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
+use pounce_nlp::ipopt_nlp::SplitNames;
+use pounce_presolve::dulmage_mendelsohn::DulmageMendelsohnPartition;
+use pounce_presolve::incidence::EqualityIncidence;
+use pounce_presolve::matching::hopcroft_karp;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
@@ -84,6 +88,7 @@ const COMMANDS: &[&str] = &[
     "ask",
     "watch",
     "diff",
+    "diagnose",
     "source",
     "progress",
     "detach",
@@ -654,6 +659,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
                 "active",
                 "inactive",
                 "residuals",
+                "equation",
             ]));
             v
         }
@@ -702,6 +708,193 @@ impl Completer for DbgHelper {
             })
             .collect();
         Ok((start, pairs))
+    }
+}
+
+/// Rendered constraint equations from the source model, indexed in
+/// original `.nl` row order. Lets the debugger answer
+/// `print equation <name|row>` with the actual algebra — the source
+/// expression for a constraint, resolved by its model name. This closes
+/// the loop on the residual-name labeling (`print residuals`): once a
+/// culprit equation is named, the user can read it. Naming and printing
+/// culprit equations rather than bare indices is the diagnostic
+/// recommendation of Lee et al. (2024,
+/// <https://doi.org/10.69997/sct.147875>).
+pub struct EquationBook {
+    /// Constraint names in original `.nl` row order (empty `String` when a
+    /// row has no name, e.g. no `.row` auxfile was emitted).
+    names: Vec<String>,
+    /// Rendered equation text, parallel to `names`.
+    equations: Vec<String>,
+}
+
+impl EquationBook {
+    /// Build from parallel name / rendered-equation vectors (original
+    /// `.nl` row order). Lengths are zipped to the shorter of the two.
+    pub fn new(names: Vec<String>, equations: Vec<String>) -> Self {
+        Self { names, equations }
+    }
+
+    /// Number of constraints with a rendered equation.
+    pub fn len(&self) -> usize {
+        self.equations.len()
+    }
+
+    /// True when there are no equations.
+    pub fn is_empty(&self) -> bool {
+        self.equations.is_empty()
+    }
+
+    /// Human label for row `i`: its model name if present, else `c[i]`
+    /// (original `.nl` row index).
+    fn label(&self, i: usize) -> String {
+        match self.names.get(i) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("c[{i}]"),
+        }
+    }
+
+    /// Resolve a user key to an original row index: an exact name match
+    /// first, else the key parsed as a `usize` row index.
+    fn resolve(&self, key: &str) -> Option<usize> {
+        if let Some(i) = self.names.iter().position(|n| n == key) {
+            return Some(i);
+        }
+        key.parse::<usize>()
+            .ok()
+            .filter(|&i| i < self.equations.len())
+    }
+}
+
+/// Maximum number of named culprits listed inline in a structural
+/// finding before it switches to a "+N more" tail. Keeps a pathological
+/// model (hundreds of redundant rows) from flooding the report while
+/// still reporting the full count — no silent truncation.
+const MAX_STRUCT_NAMES: usize = 10;
+
+/// Structural rank analysis of the *equality* constraint Jacobian,
+/// after the Dulmage–Mendelsohn decomposition used by IDAES's
+/// `DiagnosticsToolbox`. The Hessian-free, iterate-independent sparsity
+/// pattern alone tells us whether a subset of equations is
+/// over-determined — more equations than the variables they jointly
+/// touch — which forces at least one of them to be redundant or
+/// mutually inconsistent (a structurally singular Jacobian, LICQ
+/// failure).
+///
+/// The payoff is *naming* those rows. The solver's δ_c dual
+/// regularization and wrong-inertia flags detect rank deficiency but
+/// report it as a scalar; this book maps the dependent rows back to the
+/// model's equation names so `diagnose` can say `mass_balance` instead
+/// of "equation 13". Tracing a singular system to *named* equations is
+/// exactly the roadblock Lee et al. (2024) identify for
+/// equation-oriented model debugging. See
+/// <https://doi.org/10.69997/sct.147875>.
+pub struct StructureBook {
+    /// Equality-row × variable incidence graph (built from the source
+    /// model's Jacobian sparsity).
+    inc: EqualityIncidence,
+    /// Constraint names in original `.nl` row order (empty `String`
+    /// when a row has no name).
+    con_names: Vec<String>,
+    /// Variable names in original column order (empty `String` when a
+    /// column has no name).
+    var_names: Vec<String>,
+}
+
+impl StructureBook {
+    /// Build from the equality incidence graph plus the model's
+    /// constraint and variable name vectors (original order). The
+    /// incidence rows index into `con_names` via
+    /// `inc.eq_row_inner_idx`; the incidence columns index `var_names`
+    /// directly.
+    pub fn new(inc: EqualityIncidence, con_names: Vec<String>, var_names: Vec<String>) -> Self {
+        Self {
+            inc,
+            con_names,
+            var_names,
+        }
+    }
+
+    /// Label for equality-incidence row `eq_row`: the source model's
+    /// constraint name if present, else `c[<orig row>]`.
+    fn con_label(&self, eq_row: usize) -> String {
+        let orig = self.inc.eq_row_inner_idx[eq_row];
+        match self.con_names.get(orig) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("c[{orig}]"),
+        }
+    }
+
+    /// Label for variable column `v`: the source model's variable name
+    /// if present, else `x[v]`.
+    fn var_label(&self, v: usize) -> String {
+        match self.var_names.get(v) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("x[{v}]"),
+        }
+    }
+
+    /// Join up to [`MAX_STRUCT_NAMES`] labels, appending an explicit
+    /// "+N more" tail when truncated so nothing is dropped silently.
+    fn join_capped(labels: &[String]) -> String {
+        if labels.len() <= MAX_STRUCT_NAMES {
+            labels.join(", ")
+        } else {
+            let head = labels[..MAX_STRUCT_NAMES].join(", ");
+            let more = labels.len() - MAX_STRUCT_NAMES;
+            format!("{head}, … (+{more} more)")
+        }
+    }
+
+    /// Run the structural pass and return `diagnose` findings.
+    ///
+    /// Only the *over-determined* block is reported: it names the
+    /// candidate dependent (redundant / inconsistent) equations behind
+    /// a singular Jacobian. The under-determined block is deliberately
+    /// suppressed — an NLP with more variables than equality
+    /// constraints is the normal, well-posed case (the remaining
+    /// degrees of freedom are pinned by the objective, bounds, and
+    /// inequalities), so flagging it would fire on nearly every model.
+    fn findings(&self) -> Vec<(&'static str, &'static str, String)> {
+        let mut out = Vec::new();
+        if self.inc.n_eq_rows() == 0 {
+            return out;
+        }
+        let matching = hopcroft_karp(&self.inc);
+        let dm = DulmageMendelsohnPartition::from_matching(&self.inc, &matching);
+        if dm.over_rows.is_empty() {
+            return out;
+        }
+
+        // over_rows.len() == over_cols.len() + (unmatched rows); the
+        // unmatched count is the minimum number of structurally
+        // redundant equations.
+        let excess = dm.over_rows.len().saturating_sub(dm.over_cols.len());
+        let eq_labels: Vec<String> = dm.over_rows.iter().map(|&r| self.con_label(r)).collect();
+        let var_labels: Vec<String> = dm.over_cols.iter().map(|&v| self.var_label(v)).collect();
+        let eqs = Self::join_capped(&eq_labels);
+        let shared = if var_labels.is_empty() {
+            "no variables".to_string()
+        } else {
+            Self::join_capped(&var_labels)
+        };
+        out.push((
+            "warning",
+            "structural_singularity",
+            format!(
+                "Constraint Jacobian is structurally singular (Dulmage–Mendelsohn): {} equation(s) \
+                 over-determine the {} variable(s) they jointly touch ({}), so ≥{} of them must be \
+                 redundant or mutually inconsistent (LICQ fails on this block). Candidate \
+                 dependent equations: {}. Inspect them with `print equation <name>`; this names \
+                 the rows behind any δ_c dual-regularization / wrong-inertia signal.",
+                dm.over_rows.len(),
+                dm.over_cols.len(),
+                shared,
+                excess.max(1),
+                eqs
+            ),
+        ));
+        out
     }
 }
 
@@ -786,6 +979,16 @@ pub struct SolverDebugger {
     /// quits the solve — a discoverable Ctrl-C escape hatch that mirrors the
     /// running-mode double-tap. Reset whenever a real line is entered.
     prompt_interrupts: u8,
+    /// Rendered constraint equations from the source model (`.nl`), for the
+    /// `print equation <name|row>` command. `None` when no model was wired in
+    /// (e.g. a non-`.nl` entry point). See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) on naming culprit equations.
+    equation_book: Option<EquationBook>,
+    /// Structural rank analysis of the source model's equality Jacobian,
+    /// for the `diagnose` command's `structural_singularity` finding.
+    /// `None` when no `.nl` model was wired in. See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    structure_book: Option<StructureBook>,
 }
 
 impl SolverDebugger {
@@ -827,6 +1030,8 @@ impl SolverDebugger {
             staged: Vec::new(),
             sweep: None,
             prompt_interrupts: 0,
+            equation_book: None,
+            structure_book: None,
         }
     }
 
@@ -834,6 +1039,22 @@ impl SolverDebugger {
     pub fn with_script(mut self, path: String) -> Self {
         self.pending_script = Some(path);
         self
+    }
+
+    /// Attach the source model's rendered constraint equations, enabling
+    /// `print equation <name|row>`. Wired in on the `.nl` entry path
+    /// (see Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
+    pub fn set_equation_book(&mut self, book: EquationBook) {
+        self.equation_book = Some(book);
+    }
+
+    /// Attach the source model's structural rank analysis, enabling the
+    /// `diagnose` command's `structural_singularity` finding (named
+    /// dependent equations). Wired in on the `.nl` entry path alongside
+    /// the equation book. See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    pub fn set_structure_book(&mut self, book: StructureBook) {
+        self.structure_book = Some(book);
     }
 
     /// Enable the `resolve` command, wiring the shared restart slot the
@@ -1068,6 +1289,7 @@ impl SolverDebugger {
             "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
             "watch" | "display" => self.cmd_watch(rest),
             "diff" => self.cmd_diff(ctx),
+            "diagnose" | "diag" => self.cmd_diagnose(ctx),
             "source" => self.cmd_source(rest, ctx),
             "detach" => {
                 self.detached = true;
@@ -1127,6 +1349,7 @@ impl SolverDebugger {
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
             "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active | inactive".into(),
             "  print residuals [pr|du] [k]  top-k largest-magnitude residuals (default k=10)".into(),
+            "  print equation [name|row]    source algebra of a constraint, by model name or row".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -1158,6 +1381,7 @@ impl SolverDebugger {
             "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
             "  diff                     what changed in the iterate since the last iteration".into(),
+            "  diagnose | diag          live health report: named culprit residuals, KKT inertia, stalls".into(),
             "  source <file>            run debugger commands from a file".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
@@ -1212,6 +1436,9 @@ impl SolverDebugger {
         }
         if what == "residuals" || what == "resid" {
             return self.cmd_print_residuals(&rest[1..], ctx);
+        }
+        if what == "equation" || what == "eqn" || what == "eq" {
+            return self.cmd_print_equation(&rest[1..]);
         }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
         let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
@@ -1339,16 +1566,22 @@ impl SolverDebugger {
                 .with_data(serde_json::json!({"k": k, "total": total, "top": []}));
         }
 
+        // Model names projected into the solver's split space, when the
+        // problem carries them (`.col`/`.row`, no presolve). Lets a residual
+        // print as `mass_balance` rather than `c[3]` — the model-vs-index
+        // gap Lee et al. (2024, <https://doi.org/10.69997/sct.147875>) flag
+        // for equation-oriented debugging. `None` ⇒ index labels throughout.
+        let names = ctx.split_names();
+        let name_of = |r: &Residual| resid_name(r, &names);
+
         let lines = top
             .iter()
             .map(|r| {
-                format!(
-                    "{:>8}[{}] = {:+.6e}   |{:.3e}|",
-                    r.kind.tag(),
-                    r.index,
-                    r.value,
-                    r.value.abs()
-                )
+                let label = match name_of(r) {
+                    Some(name) => format!("{}[{}]", r.kind.tag(), name),
+                    None => format!("{}[{}]", r.kind.tag(), r.index),
+                };
+                format!("{:>8} = {:+.6e}   |{:.3e}|", label, r.value, r.value.abs())
             })
             .collect();
         let data: Vec<_> = top
@@ -1358,11 +1591,274 @@ impl SolverDebugger {
                     "space": r.kind.tag(),
                     "primal": r.kind.is_primal(),
                     "index": r.index,
+                    "name": name_of(r),
                     "value": r.value,
                 })
             })
             .collect();
         CmdOut::ok(lines).with_data(serde_json::json!({"k": k, "total": total, "top": data}))
+    }
+
+    /// `print equation [name|row]` — the source algebra of a constraint,
+    /// resolved by its model name (preferred) or original `.nl` row index.
+    /// With no argument, reports how many equations are available and how
+    /// to address one. This is the read-side companion to the named
+    /// residual labels (`print residuals`): once a culprit constraint is
+    /// named, this prints what it actually says. Naming and surfacing
+    /// culprit equations rather than bare indices is the diagnostic path
+    /// urged by Lee et al. (2024, <https://doi.org/10.69997/sct.147875>).
+    fn cmd_print_equation(&self, rest: &[&str]) -> CmdOut {
+        let Some(book) = self.equation_book.as_ref() else {
+            return CmdOut::err(
+                "no equation source — `print equation` needs an .nl model (none was loaded)",
+            );
+        };
+        if book.is_empty() {
+            return CmdOut::err("the model has no constraint equations to print");
+        }
+        let Some(&key) = rest.first() else {
+            return CmdOut::ok(vec![format!(
+                "{} constraint equation(s) — `print equation <name|row>` to show one",
+                book.len()
+            )])
+            .with_data(serde_json::json!({"count": book.len()}));
+        };
+        let Some(i) = book.resolve(key) else {
+            return CmdOut::err(format!(
+                "no constraint named or indexed `{key}` (have {} equation(s); try a name or 0..{})",
+                book.len(),
+                book.len().saturating_sub(1)
+            ));
+        };
+        let label = book.label(i);
+        let eq = &book.equations[i];
+        CmdOut::ok(vec![format!("{label}:  {eq}")]).with_data(serde_json::json!({
+            "index": i,
+            "name": book.names.get(i).filter(|n| !n.is_empty()),
+            "equation": eq,
+        }))
+    }
+
+    /// `diagnose` (`diag`) — a point-in-time health report for the
+    /// *current* iterate.
+    ///
+    /// Where the studio `diagnose` tool runs temporal heuristics over a
+    /// finished solve report, this runs **live**: it reads the current KKT
+    /// inertia / regularization, the named primal & dual residuals, the
+    /// iterate geometry, and the debugger's own restoration / μ-stall
+    /// tracking — and names the culprit equation or variable wherever it
+    /// can. Tracing a numerical symptom back to the *named* equation behind
+    /// it, rather than a bare row index, is the actionable-diagnostics path
+    /// of Lee et al. (2024, <https://doi.org/10.69997/sct.147875>).
+    ///
+    /// Each finding is `{severity, code, message}` — the same shape the
+    /// report-based `diagnose` emits — so a client can treat both uniformly.
+    fn cmd_diagnose(&self, ctx: &DebugCtx) -> CmdOut {
+        const TOL: f64 = 1e-6;
+        let names = ctx.split_names();
+        // (severity, code, message). Severity ranks error > warning > info.
+        let mut f: Vec<(&'static str, &'static str, String)> = Vec::new();
+
+        // --- Primal feasibility: the worst *named* constraint residual. ---
+        let inf_pr = ctx.inf_pr();
+        if inf_pr > TOL {
+            if let Some(resids) = ctx.constraint_residuals() {
+                if let Some((label, val)) = worst_named(resids, &names) {
+                    let sev = if inf_pr > 1e-2 { "error" } else { "warning" };
+                    f.push((
+                        sev,
+                        "primal_infeasible",
+                        format!(
+                            "Primal infeasibility {inf_pr:.2e}; worst constraint residual is \
+                         {label} = {val:+.3e}. Inspect this equation's feasibility and scaling \
+                         at the current point (`print equation {label}`)."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // --- Dual stationarity: the worst *named* ∇L component. ---
+        let inf_du = ctx.inf_du();
+        if inf_du > TOL {
+            if let Some(resids) = ctx.dual_residuals() {
+                if let Some((label, val)) = worst_named(resids, &names) {
+                    f.push((
+                        "warning",
+                        "dual_infeasible",
+                        format!(
+                            "Dual infeasibility {inf_du:.2e}; largest stationarity residual is \
+                         {label} = {val:+.3e}."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // --- KKT structural health (only once a search dir is computed). ---
+        if let Some(k) = ctx.kkt() {
+            if k.provides_inertia && !k.inertia_correct {
+                f.push((
+                    "warning",
+                    "inertia_wrong",
+                    format!(
+                        "KKT inertia is wrong (n-={} vs expected {}): the system was \
+                     indefinite/singular and the step had to be stabilized. A persistent \
+                     mismatch points at a rank-deficient Jacobian or an indefinite Hessian.",
+                        k.n_neg, k.expected_neg
+                    ),
+                ));
+            }
+            if k.delta_w > 1e-4 {
+                f.push((
+                    "info",
+                    "heavy_regularization",
+                    format!(
+                        "Primal regularization δ_w={:.2e} applied — the Hessian was indefinite at \
+                     this step. Normal near saddle points; persistent large δ_w suggests a \
+                     problematic Hessian.",
+                        k.delta_w
+                    ),
+                ));
+            }
+            if k.delta_c > 0.0 {
+                f.push((
+                    "warning",
+                    "dual_regularization",
+                    format!(
+                    "Dual regularization δ_c={:.2e} applied — the constraint Jacobian is (near) \
+                     rank-deficient (linearly dependent or redundant equalities). Inspect the \
+                     equality residuals by name (`print residuals primal`).",
+                    k.delta_c
+                ),
+                ));
+            }
+        }
+
+        // --- Structural rank: name the dependent equations (DM). ---
+        // Iterate-independent; localizes the δ_c / wrong-inertia signal
+        // above to the specific over-determined rows by model name.
+        if let Some(book) = self.structure_book.as_ref() {
+            f.extend(book.findings());
+        }
+
+        // --- Multiplier magnitude: constraint-qualification / scaling. ---
+        let mut max_mult = 0.0_f64;
+        for blk in ["y_c", "y_d", "z_l", "z_u", "v_l", "v_u"] {
+            if let Some(v) = ctx.block(blk) {
+                max_mult = v.iter().fold(max_mult, |m, &x| m.max(x.abs()));
+            }
+        }
+        if max_mult > 1e8 {
+            f.push((
+                "warning",
+                "large_multipliers",
+                format!(
+                "Largest multiplier magnitude is {max_mult:.2e}. Very large multipliers signal a \
+                 constraint-qualification failure or poor scaling — consider rescaling the \
+                 offending rows."
+            ),
+            ));
+        }
+
+        // --- Iterate geometry: variable bounds pressed at this point. ---
+        let mut pinned = 0usize;
+        for cat in ["x_l", "x_u"] {
+            if let Some(sl) = ctx.bound_slack(cat) {
+                pinned += sl.iter().filter(|&&s| s.abs() < TOL).count();
+            }
+        }
+        if pinned > 0 {
+            f.push((
+                "info",
+                "bounds_pinned",
+                format!(
+                    "{pinned} variable bound(s) are active (slack < {TOL:.0e}). Active bounds are \
+                 expected at a solution, but a large count early can throttle the line search."
+                ),
+            ));
+        }
+
+        // --- Line search / step length at this iteration. ---
+        let (alpha_pr, _) = ctx.alpha();
+        if ctx.iter() > 0 && alpha_pr > 0.0 && alpha_pr < 1e-6 {
+            f.push((
+                "warning",
+                "tiny_step",
+                format!(
+                    "Accepted primal step α_pr={alpha_pr:.2e} is tiny — the line search is barely \
+                 moving. Often a poor search direction or an ill-conditioned KKT system."
+                ),
+            ));
+        }
+        let ls = ctx.ls_count();
+        if ls >= 10 {
+            f.push((
+                "warning",
+                "heavy_line_search",
+                format!(
+                "Line search needed {ls} trial points for the accepted step — search-direction \
+                 quality may be poor (check Hessian accuracy)."
+            ),
+            ));
+        }
+
+        // --- Temporal flags the debugger already tracks across iters. ---
+        if self.in_restoration {
+            f.push((
+                "warning",
+                "in_restoration",
+                "Currently inside feasibility restoration: the line search could not make \
+                 progress on the original problem at the working point."
+                    .to_string(),
+            ));
+        }
+        if self.mu_stall >= MU_STALL_ITERS {
+            f.push((
+                "warning",
+                "mu_stalled",
+                format!(
+                    "μ has not decreased for {} consecutive iterations — the barrier is stuck. \
+                 Try mu_strategy=adaptive or a smaller mu_init.",
+                    self.mu_stall
+                ),
+            ));
+        }
+
+        // --- Healthy fallback. ---
+        if f.is_empty() {
+            f.push((
+                "info",
+                "healthy",
+                format!(
+                    "No issues detected at iter {}: inf_pr={:.2e}, inf_du={:.2e}, μ={:.2e}.",
+                    ctx.iter(),
+                    inf_pr,
+                    inf_du,
+                    ctx.mu()
+                ),
+            ));
+        }
+
+        // Surface errors first, then warnings, then info.
+        let rank = |s: &str| match s {
+            "error" => 0,
+            "warning" => 1,
+            _ => 2,
+        };
+        f.sort_by_key(|(sev, _, _)| rank(sev));
+
+        let lines: Vec<String> = f
+            .iter()
+            .map(|(sev, code, msg)| format!("[{sev:>7}] {code}: {msg}"))
+            .collect();
+        let data: Vec<_> = f
+            .iter()
+            .map(|(sev, code, msg)| serde_json::json!({"severity": sev, "code": code, "message": msg}))
+            .collect();
+        let n = data.len();
+        CmdOut::ok(lines)
+            .with_data(serde_json::json!({"iter": ctx.iter(), "findings": data, "n_findings": n}))
     }
 
     /// `print kkt` — inertia + regularization of the factored augmented
@@ -2668,6 +3164,14 @@ impl SolverDebugger {
                 "load": true,
                 "sweep": self.restart.is_some(),
                 "kkt_inspect": true,
+                // `print equation <name|row>` is available when a source
+                // model (`.nl`) supplied constraint algebra to render.
+                "equations": self.equation_book.is_some(),
+                // Live `diagnose` — point-in-time named health findings.
+                "diagnose": true,
+                // `diagnose`'s structural rank pass (Dulmage–Mendelsohn)
+                // names dependent equations; available with a `.nl` model.
+                "structural_diagnose": self.structure_book.is_some(),
                 "llm_assist": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
@@ -2793,6 +3297,34 @@ fn rank_residuals(mut entries: Vec<Residual>, k: usize) -> Vec<Residual> {
     });
     entries.truncate(k);
     entries
+}
+
+/// Look up the model name for a residual by kind + split index, given
+/// optional split-space names. Equality residuals index the `eq` pool;
+/// inequality and `s`-space dual residuals share the `ineq` pool (one
+/// slack per inequality); `x`-space dual residuals index `x_var`. Returns
+/// `None` when the problem carries no names or the index is out of range.
+fn resid_name<'a>(r: &Residual, names: &'a Option<SplitNames>) -> Option<&'a str> {
+    let n = names.as_ref()?;
+    let pool = match r.kind {
+        ResidKind::Eq => &n.eq,
+        ResidKind::Ineq | ResidKind::DualS => &n.ineq,
+        ResidKind::DualX => &n.x_var,
+    };
+    pool.get(r.index).and_then(|o| o.as_deref())
+}
+
+/// The single largest-magnitude residual, labeled with its model name
+/// (`c[mass_balance]`) when available, else its split index (`c[3]`),
+/// paired with its signed value. `None` for an empty input.
+fn worst_named(resids: Vec<Residual>, names: &Option<SplitNames>) -> Option<(String, f64)> {
+    let top = rank_residuals(resids, 1);
+    let r = top.first()?;
+    let label = match resid_name(r, names) {
+        Some(name) => format!("{}[{}]", r.kind.tag(), name),
+        None => format!("{}[{}]", r.kind.tag(), r.index),
+    };
+    Some((label, r.value))
 }
 
 /// Print the branded open banner (human REPL only): the project POUNCE
@@ -3558,7 +4090,6 @@ if(D.matrix && D.matrix.irn){
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pounce_algorithm::debug::ResidKind;
 
     fn dbg(mode: DebugMode) -> SolverDebugger {
         SolverDebugger::new(mode, None)
@@ -3854,6 +4385,176 @@ mod tests {
             top.iter().map(|r| r.kind).collect::<Vec<_>>(),
             vec![Ineq, Eq, DualX]
         );
+    }
+
+    fn split_names_fixture() -> SplitNames {
+        SplitNames {
+            x_var: vec![Some("T_reactor".into()), None],
+            eq: vec![Some("mass_balance".into()), Some("energy_balance".into())],
+            ineq: vec![Some("pressure_cap".into())],
+        }
+    }
+
+    #[test]
+    fn resid_name_maps_each_kind_to_its_pool() {
+        use ResidKind::*;
+        let names = Some(split_names_fixture());
+        // Equality → eq pool; inequality and s-space dual → ineq pool;
+        // x-space dual → x_var pool.
+        assert_eq!(
+            resid_name(&resid(Eq, 1, 0.0), &names),
+            Some("energy_balance")
+        );
+        assert_eq!(
+            resid_name(&resid(Ineq, 0, 0.0), &names),
+            Some("pressure_cap")
+        );
+        assert_eq!(
+            resid_name(&resid(DualS, 0, 0.0), &names),
+            Some("pressure_cap")
+        );
+        assert_eq!(resid_name(&resid(DualX, 0, 0.0), &names), Some("T_reactor"));
+        // Unnamed slot (None) and out-of-range fall back to no name.
+        assert_eq!(resid_name(&resid(DualX, 1, 0.0), &names), None);
+        assert_eq!(resid_name(&resid(Eq, 9, 0.0), &names), None);
+        // No names at all ⇒ None.
+        assert_eq!(resid_name(&resid(Eq, 0, 0.0), &None), None);
+    }
+
+    #[test]
+    fn worst_named_picks_largest_and_labels_it() {
+        use ResidKind::*;
+        let names = Some(split_names_fixture());
+        // |−3.2| is the largest; it sits in the eq pool at index 1.
+        let resids = vec![resid(Eq, 0, 0.5), resid(Eq, 1, -3.2), resid(Ineq, 0, 1.1)];
+        assert_eq!(
+            worst_named(resids, &names),
+            Some(("c[energy_balance]".to_string(), -3.2))
+        );
+        // Without names, the label falls back to the split index.
+        let resids = vec![resid(DualX, 7, 9.0)];
+        assert_eq!(
+            worst_named(resids, &None),
+            Some(("grad_x_L[7]".to_string(), 9.0))
+        );
+        // Empty input ⇒ None.
+        assert_eq!(worst_named(vec![], &names), None);
+    }
+
+    #[test]
+    fn print_equation_resolves_by_name_index_and_errors() {
+        let mut d = dbg(DebugMode::Repl);
+        // No book wired in yet ⇒ a helpful error, not a panic.
+        let out = d.cmd_print_equation(&[]);
+        assert!(!out.ok);
+        assert!(out.lines[0].contains("needs an .nl model"));
+
+        d.set_equation_book(EquationBook::new(
+            vec!["mass_balance".into(), String::new()],
+            vec!["x[0] + x[1] = 10".into(), "x[0] - x[1] <= 2".into()],
+        ));
+
+        // No arg ⇒ count + usage hint.
+        let out = d.cmd_print_equation(&[]);
+        assert!(out.ok);
+        assert!(out.lines[0].contains("2 constraint equation"));
+
+        // By model name.
+        let out = d.cmd_print_equation(&["mass_balance"]);
+        assert!(out.ok);
+        assert_eq!(out.lines[0], "mass_balance:  x[0] + x[1] = 10");
+
+        // By original row index; the unnamed row falls back to `c[1]`.
+        let out = d.cmd_print_equation(&["1"]);
+        assert!(out.ok);
+        assert_eq!(out.lines[0], "c[1]:  x[0] - x[1] <= 2");
+
+        // Unknown key ⇒ error.
+        let out = d.cmd_print_equation(&["nope"]);
+        assert!(!out.ok);
+        assert!(out.lines[0].contains("no constraint named or indexed"));
+    }
+
+    /// Build an `EqualityIncidence` from an explicit row→vars adjacency,
+    /// carrying the original-row indices so `con_label`'s `c[orig]`
+    /// fallback can be exercised.
+    fn eq_inc(n_vars: usize, eq_row_inner_idx: Vec<usize>, rows: &[&[usize]]) -> EqualityIncidence {
+        let mut adj_ptr = vec![0usize];
+        let mut vars = Vec::new();
+        for r in rows {
+            let mut v = r.to_vec();
+            v.sort_unstable();
+            v.dedup();
+            vars.extend_from_slice(&v);
+            adj_ptr.push(vars.len());
+        }
+        EqualityIncidence {
+            n_vars,
+            eq_row_inner_idx,
+            adj_ptr,
+            vars,
+        }
+    }
+
+    #[test]
+    fn structural_singularity_names_overdetermined_equations() {
+        // 3 equality rows over 2 vars, each touching both → a maximum
+        // matching saturates the 2 columns, leaving 1 row unmatched;
+        // the alternating walk pulls all 3 rows into the over-determined
+        // block. The finding must name every candidate equation, the
+        // shared variables, and the ≥1 redundancy excess.
+        let inc = eq_inc(2, vec![0, 1, 2], &[&[0, 1], &[0, 1], &[0, 1]]);
+        let book = StructureBook::new(
+            inc,
+            vec!["balance_a".into(), "balance_b".into(), "balance_c".into()],
+            vec!["flow".into(), "temp".into()],
+        );
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let (sev, code, msg) = &f[0];
+        assert_eq!(*sev, "warning");
+        assert_eq!(*code, "structural_singularity");
+        assert!(msg.contains("balance_a"), "msg: {msg}");
+        assert!(msg.contains("balance_b"), "msg: {msg}");
+        assert!(msg.contains("balance_c"), "msg: {msg}");
+        assert!(msg.contains("flow") && msg.contains("temp"), "msg: {msg}");
+        assert!(msg.contains("≥1"), "msg: {msg}");
+    }
+
+    #[test]
+    fn structural_findings_silent_when_well_posed_and_fall_back_to_indices() {
+        // Square 2×2 with a perfect matching → structurally sound, no
+        // finding (and the normal "more vars than eqs" case is never
+        // flagged either, since we only report the over-determined side).
+        let inc = eq_inc(2, vec![0, 1], &[&[0], &[1]]);
+        let book = StructureBook::new(inc, vec![], vec![]);
+        assert!(book.findings().is_empty());
+
+        // Over-determined but unnamed: 3 rows over 1 var, with the
+        // original row indices skipping 2 (e.g. an interleaved
+        // inequality) → labels fall back to `c[<orig>]`.
+        let inc = eq_inc(1, vec![0, 1, 3], &[&[0], &[0], &[0]]);
+        let book = StructureBook::new(inc, vec![], vec![]);
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let msg = &f[0].2;
+        assert!(
+            msg.contains("c[0]") && msg.contains("c[1]") && msg.contains("c[3]"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn structural_singularity_handles_empty_row_with_no_variables() {
+        // An empty equality row (no variable support) is unmatched and
+        // touches no columns → over-determined with no shared variables.
+        let inc = eq_inc(1, vec![0, 1], &[&[0], &[]]);
+        let book = StructureBook::new(inc, vec!["real".into(), "ghost".into()], vec!["x".into()]);
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let msg = &f[0].2;
+        assert!(msg.contains("ghost"), "msg: {msg}");
+        assert!(msg.contains("no variables"), "msg: {msg}");
     }
 
     #[test]

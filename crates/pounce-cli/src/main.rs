@@ -66,6 +66,9 @@ pub fn main() -> ExitCode {
         print_about();
         return ExitCode::SUCCESS;
     }
+    if args.cite {
+        return run_cite(&args);
+    }
 
     let mut app = IpoptApplication::new();
 
@@ -276,6 +279,47 @@ pub fn main() -> ExitCode {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
                     let elapsed = t0.elapsed().as_secs_f64();
+                    // Render the source constraint equations and hand them to
+                    // the debugger so `print equation <name|row>` can show a
+                    // culprit constraint's algebra — the named-equation
+                    // diagnostic of Lee et al. (2024,
+                    // https://doi.org/10.69997/sct.147875). Built before
+                    // `NlTnlp::new` moves `prob`.
+                    if let Some(hook) = debug_hook.as_ref() {
+                        let book = pounce_cli::debug_repl::EquationBook::new(
+                            prob.con_names.clone(),
+                            nl_reader::render_all_constraint_equations(&prob),
+                        );
+                        // Structural rank analysis of the equality Jacobian
+                        // (Dulmage–Mendelsohn) so `diagnose` can name the
+                        // dependent equations behind a singular system —
+                        // Lee et al. (2024,
+                        // https://doi.org/10.69997/sct.147875).
+                        let (jac_irow, jac_jcol) = nl_reader::constraint_jacobian_sparsity(&prob);
+                        let probe = pounce_presolve::incidence::ProbeView {
+                            n_vars: prob.n,
+                            m_rows: prob.m,
+                            jac_irow: &jac_irow,
+                            jac_jcol: &jac_jcol,
+                            jac_values: None,
+                            g_l: &prob.g_l,
+                            g_u: &prob.g_u,
+                            linearity: None,
+                            one_based: false,
+                            eq_tol: 1e-12,
+                            excluded_vars: None,
+                            excluded_rows: None,
+                        };
+                        let inc = pounce_presolve::incidence::EqualityIncidence::from_probe(&probe);
+                        let structure = pounce_cli::debug_repl::StructureBook::new(
+                            inc,
+                            prob.con_names.clone(),
+                            prob.var_names.clone(),
+                        );
+                        let mut h = hook.borrow_mut();
+                        h.set_equation_book(book);
+                        h.set_structure_book(structure);
+                    }
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
@@ -954,6 +998,44 @@ fn write_diagnostics_timing(diag: &DiagnosticsState, app: &IpoptApplication) {
         b = t.linear_system_back_solve.total_wallclock_time(),
     );
     let _ = diag.write_top_level("timing.json", &body);
+}
+
+/// `--cite` output: the papers/software a user should cite when
+/// publishing pounce results. Always lists the static core (pounce +
+/// Wächter-Biegler); when `--cite <report.json>` supplies a solve
+/// report, adds solve-aware extras for features the run used. `--bibtex`
+/// switches the rendering to BibTeX. See [`pounce_cli::citations`].
+fn run_cite(args: &Args) -> ExitCode {
+    let report = match &args.cite_report {
+        Some(path) => {
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("pounce: failed to read {}: {e}", path.display());
+                    return ExitCode::from(2);
+                }
+            };
+            match serde_json::from_str::<pounce_cli::solve_report::SolveReport>(&text) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    eprintln!(
+                        "pounce: {} is not a valid solve report: {e}",
+                        path.display()
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        None => None,
+    };
+
+    let selected = pounce_cli::citations::select(report.as_ref());
+    if args.cite_bibtex {
+        print!("{}", pounce_cli::citations::render_bibtex(&selected));
+    } else {
+        print!("{}", pounce_cli::citations::render_human(&selected));
+    }
+    ExitCode::SUCCESS
 }
 
 /// `--about` output: version, build provenance, compiled-in features,
