@@ -1970,7 +1970,8 @@ impl SolverDebugger {
             );
         };
         let names = ctx.split_names();
-        let (lines, data) = render_rank_report(&rep, &names, ctx.iter());
+        let (lines, data) =
+            render_rank_report(&rep, &names, self.equation_book.as_ref(), ctx.iter());
         CmdOut::ok(lines).with_data(data)
     }
 
@@ -3382,6 +3383,7 @@ fn rank_residuals(mut entries: Vec<Residual>, k: usize) -> Vec<Residual> {
 fn render_rank_report(
     rep: &RankReport,
     names: &Option<SplitNames>,
+    equations: Option<&EquationBook>,
     iter: i32,
 ) -> (Vec<String>, serde_json::Value) {
     let m = rep.n_rows();
@@ -3423,9 +3425,18 @@ fn render_rank_report(
              (linearly dependent / redundant) — the source of δ_c regularization:",
             rep.deficiency()
         ));
+        let mut shown_any_eq = false;
         for c in rep.culprits.iter().take(MAX_RANK_CULPRITS) {
-            let label = rank_row_label(&rep.rows[c.row], names);
+            let row = &rep.rows[c.row];
+            let label = rank_row_label(row, names);
             lines.push(format!("  {label}   (participation {:.2})", c.weight));
+            // Print the offending equation's source algebra directly beneath
+            // it, so the dependency is readable without a second command.
+            // Resolves by model name, so it lands only when the row is named.
+            if let Some(eq) = culprit_equation(row, names, equations) {
+                lines.push(format!("      {eq}"));
+                shown_any_eq = true;
+            }
         }
         if rep.culprits.len() > MAX_RANK_CULPRITS {
             lines.push(format!(
@@ -3433,10 +3444,11 @@ fn render_rank_report(
                 rep.culprits.len() - MAX_RANK_CULPRITS
             ));
         }
-        lines.push(
-            "inspect a row with `print equation <name>` to see its terms and current residual"
-                .to_string(),
-        );
+        // Only nag about `print equation` when we couldn't show the algebra
+        // inline (no .nl model loaded, or the rows are unnamed).
+        if !shown_any_eq {
+            lines.push("inspect a row with `print equation <name>` to see its terms".to_string());
+        }
     } else {
         lines.push("J_c has full row rank at this iterate.".to_string());
     }
@@ -3453,6 +3465,7 @@ fn render_rank_report(
                 "name": rank_row_name(row, names),
                 "label": rank_row_label(row, names),
                 "weight": c.weight,
+                "equation": culprit_equation(row, names, equations),
             })
         })
         .collect();
@@ -3473,6 +3486,23 @@ fn render_rank_report(
     });
 
     (lines, data)
+}
+
+/// Rendered source algebra of a rank-report culprit row, resolved through
+/// the [`EquationBook`] by model name (the same DAG-faithful text `print
+/// equation` shows). `None` when no equation book is loaded, the row is
+/// unnamed, or the name doesn't resolve — the split equality index the
+/// rank report carries is *not* the original `.nl` row index the book keys
+/// on, so only named rows can be mapped.
+fn culprit_equation(
+    row: &RankRow,
+    names: &Option<SplitNames>,
+    equations: Option<&EquationBook>,
+) -> Option<String> {
+    let book = equations?;
+    let name = rank_row_name(row, names)?;
+    let i = book.resolve(&name)?;
+    Some(book.equations.get(i)?.clone())
 }
 
 /// Model name of a rank-report row, if the problem carries names — the
@@ -4692,7 +4722,8 @@ mod tests {
     fn render_rank_report_names_culprits_and_builds_json() {
         let names = Some(split_names_fixture());
         let rep = rank_report_fixture();
-        let (lines, data) = render_rank_report(&rep, &names, 7);
+        // No equation book ⇒ names only, plus the `print equation` hint.
+        let (lines, data) = render_rank_report(&rep, &names, None, 7);
 
         let text = lines.join("\n");
         assert!(text.contains("2 row(s) × 3 column(s)"), "{text}");
@@ -4703,8 +4734,11 @@ mod tests {
         assert!(text.contains("c[mass_balance]"), "{text}");
         assert!(text.contains("c[energy_balance]"), "{text}");
         assert!(text.contains("participation 0.50"), "{text}");
+        // No book ⇒ fall back to the inspect hint, no inline algebra.
+        assert!(text.contains("print equation"), "{text}");
 
-        // JSON payload: cond is null (non-finite), culprits carry names.
+        // JSON payload: cond is null (non-finite), culprits carry names but
+        // no resolved equation (no book).
         assert_eq!(data["iter"], 7);
         assert_eq!(data["rank"], 1);
         assert_eq!(data["deficiency"], 1);
@@ -4712,7 +4746,36 @@ mod tests {
         assert!(data["cond"].is_null(), "non-finite cond ⇒ null: {data}");
         assert_eq!(data["culprits"][0]["name"], "mass_balance");
         assert_eq!(data["culprits"][0]["label"], "c[mass_balance]");
+        assert!(data["culprits"][0]["equation"].is_null());
         assert_eq!(data["culprits"][1]["name"], "energy_balance");
+    }
+
+    #[test]
+    fn render_rank_report_prints_culprit_equations_inline() {
+        let names = Some(split_names_fixture());
+        let rep = rank_report_fixture();
+        // The equation book keys on original .nl row order; both eq names
+        // present so the rank culprits resolve by name.
+        let book = EquationBook::new(
+            vec!["mass_balance".into(), "energy_balance".into()],
+            vec![
+                "x[0] + x[1] - 10 = 0".into(),
+                "T_reactor*flow - Q = 0".into(),
+            ],
+        );
+        let (lines, data) = render_rank_report(&rep, &names, Some(&book), 7);
+
+        let text = lines.join("\n");
+        // The offending equations' algebra is printed inline, beneath each
+        // named culprit — no second command needed.
+        assert!(text.contains("x[0] + x[1] - 10 = 0"), "{text}");
+        assert!(text.contains("T_reactor*flow - Q = 0"), "{text}");
+        // With the algebra shown inline, the `print equation` nag is dropped.
+        assert!(!text.contains("inspect a row with"), "{text}");
+
+        // JSON carries the resolved equation per culprit.
+        assert_eq!(data["culprits"][0]["equation"], "x[0] + x[1] - 10 = 0");
+        assert_eq!(data["culprits"][1]["equation"], "T_reactor*flow - Q = 0");
     }
 
     #[test]
@@ -4735,7 +4798,7 @@ mod tests {
             cond: 2.0,
             culprits: vec![],
         };
-        let (lines, data) = render_rank_report(&rep, &None, 3);
+        let (lines, data) = render_rank_report(&rep, &None, None, 3);
         let text = lines.join("\n");
         assert!(text.contains("full row rank"), "{text}");
         assert!(!text.contains("rank-deficient"), "{text}");

@@ -402,6 +402,11 @@ to specific equations — *including dependencies that are numerical only*
 (values that cancel over a full sparsity pattern), which the structural
 Dulmage–Mendelsohn pass cannot detect.
 
+It doesn't just *name* the culprit equations — it **prints them**. When a
+`.nl` model is loaded, each implicated row's source algebra is rendered
+directly beneath it (the same DAG-faithful text `print equation` shows), so
+you read the dependency without a second command:
+
 ```text
 pounce-dbg> print rank
 equality Jacobian J_c: 3 row(s) × 4 column(s)
@@ -410,9 +415,13 @@ numerical rank = 2 / 3  (deficiency 1)
 singular values: [3.162e0, 1.414e0, 0.000e0]
 rank-deficient: 1 equation(s) lie in the near-null space (linearly dependent / redundant) — the source of δ_c regularization:
   c[mass_balance]       (participation 0.50)
+      x[0] + x[1] - 10 = 0
   c[mass_balance_dup]   (participation 0.50)
-inspect a row with `print equation <name>` to see its terms and current residual
+      x[0] + x[1] - 10 = 0
 ```
+
+The two equations print identically — that *is* the redundancy, now visible
+on its face.
 
 For the SVD `J_c = U Σ Vᵀ`, the left singular vectors `u_k` whose singular
 value `σ_k ≈ 0` span the left null space — the row combinations `u_kᵀ J_c ≈
@@ -424,15 +433,20 @@ the null space. The numerical-rank threshold is the standard LAPACK/NumPy
 names through the same `.row` plumbing as `print residuals` / `print
 equation`.
 
-When `J_c` has **full row rank**, that is reported as a positive signal
-(`J_c has full row rank at this iterate.`) with the σ_min/cond witnessing
-how far it is from degenerate — silence would be ambiguous. The command is
-available whenever the iterate has an equality block; a problem with no
-equality constraints returns a short explanatory error. The JSON payload is
-`{iter, n_rows, n_cols, rank, deficiency, rank_deficient, sigma_max,
-sigma_min, cond, tol, singular_values, culprits: [{row, kind, index, name,
-label, weight}]}` (`cond` is `null` when `σ_min = 0`, since JSON has no
-infinity).
+The inline algebra is resolved **by model name**, so it appears for named
+rows. The rank report's row index is the *split* equality position, not the
+original `.nl` row the equation source keys on, so an unnamed row can't be
+mapped — there `print rank` falls back to a `print equation <name>` hint
+instead of guessing. When `J_c` has **full row rank**, that is reported as a
+positive signal (`J_c has full row rank at this iterate.`) with the
+σ_min/cond witnessing how far it is from degenerate — silence would be
+ambiguous. The command is available whenever the iterate has an equality
+block; a problem with no equality constraints returns a short explanatory
+error. The JSON payload is `{iter, n_rows, n_cols, rank, deficiency,
+rank_deficient, sigma_max, sigma_min, cond, tol, singular_values, culprits:
+[{row, kind, index, name, label, weight, equation}]}` (`equation` is the
+rendered source or `null` when unresolved; `cond` is `null` when `σ_min =
+0`, since JSON has no infinity).
 
 ### `diagnose` — a live, named health report
 
