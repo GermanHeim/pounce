@@ -279,6 +279,19 @@ pub fn main() -> ExitCode {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
                     let elapsed = t0.elapsed().as_secs_f64();
+                    // Render the source constraint equations and hand them to
+                    // the debugger so `print equation <name|row>` can show a
+                    // culprit constraint's algebra — the named-equation
+                    // diagnostic of Lee et al. (2024,
+                    // https://doi.org/10.69997/sct.147875). Built before
+                    // `NlTnlp::new` moves `prob`.
+                    if let Some(hook) = debug_hook.as_ref() {
+                        let book = pounce_cli::debug_repl::EquationBook::new(
+                            prob.con_names.clone(),
+                            nl_reader::render_all_constraint_equations(&prob),
+                        );
+                        hook.borrow_mut().set_equation_book(book);
+                    }
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);

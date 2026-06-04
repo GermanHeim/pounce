@@ -1438,11 +1438,308 @@ pub struct NlTnlp {
     compressed: Vec<Vec<f64>>,
 }
 
-/// Recursively flatten top-level Sum and binary-Add nodes into a list
-/// of independent summands. Non-Sum/Add expressions are returned as a
-/// single-element vector. This lets `NlTnlp` build one small tape per
-/// term so the per-variable Hessian sweep only walks the term that
-/// actually depends on that variable.
+// ---------------------------------------------------------------------
+// Human-readable equation rendering (`print equation` in the debugger).
+//
+// Turns a parsed constraint back into infix text using the model's
+// variable / constraint names, so the debugger can show the actual
+// equation a user wrote — `T_reactor*flow - 300 = 0` — instead of a
+// bare row index. This is the "print the specific equation, with
+// names" capability Lee et al. (2024, <https://doi.org/10.69997/sct.147875>)
+// argue makes equation-oriented model diagnostics actionable.
+//
+// The renderer is intentionally separate from the evaluation `Tape`:
+// tapes are lossy for display (CSEs flattened, externals opaque),
+// whereas the `Expr` DAG is the faithful source the `.nl` parser built.
+// ---------------------------------------------------------------------
+
+/// Binding strength for parenthesization. Higher binds tighter.
+const P_ADD: u8 = 10;
+const P_MUL: u8 = 20;
+const P_NEG: u8 = 30;
+const P_POW: u8 = 40;
+const P_ATOM: u8 = 100;
+
+/// Format a numeric literal compactly: integers without a trailing `.0`,
+/// everything else via the shortest round-tripping `f64` form.
+fn fmt_num(x: Number) -> String {
+    if x.is_finite() && x == x.trunc() && x.abs() < 1e15 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x}")
+    }
+}
+
+/// Display label for variable `i`: its `.col` name when present, else
+/// `x[i]`.
+fn var_label(i: usize, var_names: &[String]) -> String {
+    match var_names.get(i) {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => format!("x[{i}]"),
+    }
+}
+
+/// Precedence of an expression's top operator (for child wrapping).
+fn expr_prec(e: &Expr) -> u8 {
+    match e {
+        Expr::Binary(BinOp::Add, ..) | Expr::Binary(BinOp::Sub, ..) | Expr::Sum(_) => P_ADD,
+        Expr::Binary(BinOp::Mul, ..) | Expr::Binary(BinOp::Div, ..) => P_MUL,
+        Expr::Unary(UnaryOp::Neg, _) => P_NEG,
+        Expr::Binary(BinOp::Pow, ..) => P_POW,
+        Expr::Cse(inner) => expr_prec(inner),
+        // Everything else renders as an atom / `f(...)` form.
+        _ => P_ATOM,
+    }
+}
+
+/// Render `e`, wrapping in parentheses iff its precedence is looser than
+/// `min_prec`.
+fn render_prec(e: &Expr, min_prec: u8, vn: &[String], funcs: &[ImportedFunc]) -> String {
+    let s = render_expr(e, vn, funcs);
+    if expr_prec(e) < min_prec {
+        format!("({s})")
+    } else {
+        s
+    }
+}
+
+fn unary_name(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Neg => "-",
+        UnaryOp::Sqrt => "sqrt",
+        UnaryOp::Log => "log",
+        UnaryOp::Exp => "exp",
+        UnaryOp::Abs => "abs",
+        UnaryOp::Sin => "sin",
+        UnaryOp::Cos => "cos",
+        UnaryOp::Log10 => "log10",
+        UnaryOp::Tan => "tan",
+        UnaryOp::Atan => "atan",
+        UnaryOp::Acos => "acos",
+        UnaryOp::Sinh => "sinh",
+        UnaryOp::Cosh => "cosh",
+        UnaryOp::Tanh => "tanh",
+        UnaryOp::Asin => "asin",
+        UnaryOp::Acosh => "acosh",
+        UnaryOp::Asinh => "asinh",
+        UnaryOp::Atanh => "atanh",
+    }
+}
+
+fn cmp_sym(op: CmpOp) -> &'static str {
+    match op {
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Eq => "==",
+        CmpOp::Ge => ">=",
+        CmpOp::Gt => ">",
+        CmpOp::Ne => "!=",
+    }
+}
+
+/// Append an additive sub-term with a tidy sign: a rendered term that
+/// begins with `-` is folded into a ` - ` separator, so `a + -b` reads as
+/// `a - b`. The identity `a + (-b …) = a - b …` keeps this exact even when
+/// the term is itself a sum. The first term is emitted verbatim.
+fn push_additive(out: &mut String, rendered: &str, first: bool) {
+    if first {
+        out.push_str(rendered);
+    } else if let Some(rest) = rendered.strip_prefix('-') {
+        out.push_str(" - ");
+        out.push_str(rest);
+    } else {
+        out.push_str(" + ");
+        out.push_str(rendered);
+    }
+}
+
+/// Render an [`Expr`] DAG to infix text using model names.
+fn render_expr(e: &Expr, vn: &[String], funcs: &[ImportedFunc]) -> String {
+    match e {
+        Expr::Const(c) => fmt_num(*c),
+        Expr::Var(i) => var_label(*i, vn),
+        Expr::Binary(op, l, r) => match op {
+            BinOp::Add => {
+                let mut s = render_prec(l, P_ADD, vn, funcs);
+                push_additive(&mut s, &render_prec(r, P_ADD, vn, funcs), false);
+                s
+            }
+            // Right operand at P_ADD+1 so `a - (b - c)` keeps its parens.
+            BinOp::Sub => format!(
+                "{} - {}",
+                render_prec(l, P_ADD, vn, funcs),
+                render_prec(r, P_ADD + 1, vn, funcs)
+            ),
+            BinOp::Mul => format!(
+                "{}*{}",
+                render_prec(l, P_MUL, vn, funcs),
+                render_prec(r, P_MUL, vn, funcs)
+            ),
+            BinOp::Div => format!(
+                "{}/{}",
+                render_prec(l, P_MUL, vn, funcs),
+                render_prec(r, P_MUL + 1, vn, funcs)
+            ),
+            // Pow is right-associative: tighten the left operand instead.
+            BinOp::Pow => format!(
+                "{}^{}",
+                render_prec(l, P_POW + 1, vn, funcs),
+                render_prec(r, P_POW, vn, funcs)
+            ),
+            BinOp::Atan2 => format!(
+                "atan2({}, {})",
+                render_expr(l, vn, funcs),
+                render_expr(r, vn, funcs)
+            ),
+        },
+        Expr::Unary(UnaryOp::Neg, a) => format!("-{}", render_prec(a, P_NEG, vn, funcs)),
+        Expr::Unary(op, a) => format!("{}({})", unary_name(*op), render_expr(a, vn, funcs)),
+        Expr::Sum(xs) => {
+            if xs.is_empty() {
+                "0".to_string()
+            } else {
+                let mut s = String::new();
+                for (k, x) in xs.iter().enumerate() {
+                    push_additive(&mut s, &render_prec(x, P_ADD, vn, funcs), k == 0);
+                }
+                s
+            }
+        }
+        Expr::Cse(inner) => render_expr(inner, vn, funcs),
+        Expr::Funcall { id, args } => {
+            let name = funcs
+                .iter()
+                .find(|f| f.id == *id)
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| format!("extern#{id}"));
+            let parts: Vec<String> = args
+                .iter()
+                .map(|a| match a {
+                    FuncallArg::Real(x) => render_expr(x, vn, funcs),
+                    FuncallArg::Str(s) => format!("{s:?}"),
+                })
+                .collect();
+            format!("{name}({})", parts.join(", "))
+        }
+        Expr::Compare(op, a, b) => format!(
+            "({} {} {})",
+            render_expr(a, vn, funcs),
+            cmp_sym(*op),
+            render_expr(b, vn, funcs)
+        ),
+        Expr::And(a, b) => format!(
+            "({} && {})",
+            render_expr(a, vn, funcs),
+            render_expr(b, vn, funcs)
+        ),
+        Expr::Or(a, b) => format!(
+            "({} || {})",
+            render_expr(a, vn, funcs),
+            render_expr(b, vn, funcs)
+        ),
+        Expr::Not(a) => format!("!({})", render_expr(a, vn, funcs)),
+        Expr::Cond { cond, then_, else_ } => format!(
+            "if({}, {}, {})",
+            render_expr(cond, vn, funcs),
+            render_expr(then_, vn, funcs),
+            render_expr(else_, vn, funcs)
+        ),
+        Expr::MinList(xs) => format!(
+            "min({})",
+            xs.iter()
+                .map(|x| render_expr(x, vn, funcs))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::MaxList(xs) => format!(
+            "max({})",
+            xs.iter()
+                .map(|x| render_expr(x, vn, funcs))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Render the affine `Σ cᵢ·xᵢ` part with tidy signs (`a - 2*b`, not
+/// `a + -2*b`). Returns `""` when there are no linear terms.
+fn render_linear(linear: &[(usize, Number)], vn: &[String]) -> String {
+    let mut out = String::new();
+    // The `.nl` linear part carries an entry for every variable in the
+    // row's Jacobian, including a 0 coefficient for variables that appear
+    // only *nonlinearly* (they're rendered in the nonlinear part). Skip
+    // those zeros so the equation reads as written, not as a sparsity map.
+    let mut first = true;
+    for (var, coef) in linear {
+        if *coef == 0.0 {
+            continue;
+        }
+        let neg = *coef < 0.0;
+        let mag = coef.abs();
+        let term = if mag == 1.0 {
+            var_label(*var, vn)
+        } else {
+            format!("{}*{}", fmt_num(mag), var_label(*var, vn))
+        };
+        if first {
+            if neg {
+                out.push('-');
+            }
+            out.push_str(&term);
+            first = false;
+        } else {
+            out.push_str(if neg { " - " } else { " + " });
+            out.push_str(&term);
+        }
+    }
+    out
+}
+
+/// Render the constraint body (linear + nonlinear parts combined).
+fn render_body(linear: &[(usize, Number)], nonlinear: &Expr, prob: &NlProblem) -> String {
+    let mut s = render_linear(linear, &prob.var_names);
+    let nl_is_zero = matches!(nonlinear, Expr::Const(c) if *c == 0.0);
+    if !nl_is_zero {
+        let nl = render_prec(nonlinear, P_ADD, &prob.var_names, &prob.imported_funcs);
+        if s.is_empty() {
+            s = nl;
+        } else {
+            push_additive(&mut s, &nl, false);
+        }
+    }
+    if s.is_empty() {
+        s = "0".to_string();
+    }
+    s
+}
+
+/// Render constraint `k` as a full relation, e.g. `mass_in - mass_out = 0`
+/// or `0 <= T_reactor <= 500`. Bounds outside ±1e19 are treated as
+/// infinite (AMPL's convention), matching [`TNLPAdapter`]'s classifier.
+pub fn render_constraint_equation(prob: &NlProblem, k: usize) -> String {
+    let body = render_body(&prob.con_linear[k], &prob.con_nonlinear[k], prob);
+    let lo = prob.g_l[k];
+    let hi = prob.g_u[k];
+    const INF: Number = 1.0e19;
+    let has_lo = lo > -INF;
+    let has_hi = hi < INF;
+    match (has_lo, has_hi) {
+        (true, true) if lo == hi => format!("{body} = {}", fmt_num(lo)),
+        (true, true) => format!("{} <= {body} <= {}", fmt_num(lo), fmt_num(hi)),
+        (true, false) => format!("{body} >= {}", fmt_num(lo)),
+        (false, true) => format!("{body} <= {}", fmt_num(hi)),
+        (false, false) => format!("{body}  (free)"),
+    }
+}
+
+/// Render every constraint to text, index-aligned to `g` (original `.nl`
+/// row order). Used to build the debugger's static equation book.
+pub fn render_all_constraint_equations(prob: &NlProblem) -> Vec<String> {
+    (0..prob.m)
+        .map(|k| render_constraint_equation(prob, k))
+        .collect()
+}
+
 /// Flatten an additive expression tree into independent summand
 /// expressions, each of which becomes its own Hessian tape.
 ///
@@ -1457,10 +1754,12 @@ pub struct NlTnlp {
 ///
 /// We therefore descend through the *affine* envelope of the sum, not
 /// just `+`/`Sum`:
+///
 ///   * `Neg(x)`            → split `x`, negate each summand
 ///   * `Sub(l, r)`         → split `l`; split `r`, negate each summand
 ///   * `c * x` / `x * c`   → split `x`, scale each summand by `c`
 ///   * `x / c`             → split `x`, scale each summand by `1/c`
+///
 /// so that an objective like `-(Σ …)` or `0.5·(Σ …)` (the usual
 /// least-squares / max-entropy shapes) still decomposes to its leaf
 /// terms instead of collapsing into one giant tape. The carried
@@ -2537,5 +2836,125 @@ S1 2 sens_init_constr
         assert!(prob.con_names.is_empty());
         let tnlp = NlTnlp::new(prob);
         assert_eq!(tnlp.variable_name(0), None);
+    }
+
+    // ---- equation rendering (`print equation`) ----
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn render_uses_variable_names_when_present() {
+        let e = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        assert_eq!(render_expr(&e, &names(&["T", "flow"]), &[]), "T*flow");
+        // Falls back to x[i] when names are absent.
+        assert_eq!(render_expr(&e, &[], &[]), "x[0]*x[1]");
+    }
+
+    #[test]
+    fn render_parenthesizes_by_precedence() {
+        // (x0 + x1) * x2  must keep the parens around the sum.
+        let sum = Expr::Binary(BinOp::Add, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        let e = Expr::Binary(BinOp::Mul, Box::new(sum), Box::new(Expr::Var(2)));
+        assert_eq!(render_expr(&e, &[], &[]), "(x[0] + x[1])*x[2]");
+
+        // x0 + x1 * x2  needs no parens (mul binds tighter).
+        let mul = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(1)), Box::new(Expr::Var(2)));
+        let e2 = Expr::Binary(BinOp::Add, Box::new(Expr::Var(0)), Box::new(mul));
+        assert_eq!(render_expr(&e2, &[], &[]), "x[0] + x[1]*x[2]");
+    }
+
+    #[test]
+    fn render_subtraction_right_assoc_parens() {
+        // x0 - (x1 - x2) keeps the parens; x0 - x1 - x2 does not.
+        let inner = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(1)), Box::new(Expr::Var(2)));
+        let e = Expr::Binary(BinOp::Sub, Box::new(Expr::Var(0)), Box::new(inner));
+        assert_eq!(render_expr(&e, &[], &[]), "x[0] - (x[1] - x[2])");
+    }
+
+    #[test]
+    fn render_functions_and_pow() {
+        let sq = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let e = Expr::Unary(UnaryOp::Exp, Box::new(sq));
+        assert_eq!(render_expr(&e, &names(&["q"]), &[]), "exp(q^2)");
+    }
+
+    #[test]
+    fn render_linear_signs_are_tidy() {
+        // 1*a - 2*b + c  (coef +1 omits the multiplier).
+        let lin = vec![(0usize, 1.0), (1, -2.0), (2, 1.0)];
+        assert_eq!(render_linear(&lin, &names(&["a", "b", "c"])), "a - 2*b + c");
+    }
+
+    #[test]
+    fn render_linear_skips_zero_coefficients() {
+        // A 0 coefficient (a variable present only in the nonlinear part)
+        // is dropped, not rendered as `0*x`.
+        let lin = vec![(0usize, 1.0), (1, 0.0), (2, -3.0)];
+        assert_eq!(render_linear(&lin, &names(&["a", "b", "c"])), "a - 3*c");
+        // Leading term zero ⇒ the first emitted term still has no ` + `.
+        let lin = vec![(0usize, 0.0), (1, 2.0)];
+        assert_eq!(render_linear(&lin, &names(&["a", "b"])), "2*b");
+    }
+
+    #[test]
+    fn render_sum_folds_negative_terms() {
+        // Σ(a², -b⁴, -c) reads `a^2 - b^4 - c`, not `a^2 + -b^4 + -c`.
+        let sq = |i| {
+            Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(i)),
+                Box::new(Expr::Const(2.0)),
+            )
+        };
+        let neg = |i| {
+            Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::Var(i)),
+            )
+        };
+        let e = Expr::Sum(vec![
+            sq(0),
+            neg(1),
+            Expr::Unary(UnaryOp::Neg, Box::new(Expr::Var(2))),
+        ]);
+        assert_eq!(
+            render_expr(&e, &names(&["a", "b", "c"]), &[]),
+            "a^2 - 1*b - c"
+        );
+    }
+
+    #[test]
+    fn render_constraint_equation_forms() {
+        // Build a 2-constraint problem by hand: an equality and a range.
+        let mut prob = parse_nl_text(SIMPLE).unwrap();
+        // Overwrite to a known small shape: 1 var, 2 cons.
+        prob.n = 2;
+        prob.m = 2;
+        prob.var_names = names(&["mass_in", "mass_out"]);
+        prob.con_names = names(&["balance", "window"]);
+        prob.con_linear = vec![
+            vec![(0, 1.0), (1, -1.0)], // mass_in - mass_out
+            vec![(0, 1.0)],            // mass_in
+        ];
+        prob.con_nonlinear = vec![Expr::Const(0.0), Expr::Const(0.0)];
+        prob.g_l = vec![0.0, 0.0];
+        prob.g_u = vec![0.0, 500.0];
+
+        assert_eq!(
+            render_constraint_equation(&prob, 0),
+            "mass_in - mass_out = 0"
+        );
+        assert_eq!(render_constraint_equation(&prob, 1), "0 <= mass_in <= 500");
+
+        let all = render_all_constraint_equations(&prob);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1], "0 <= mass_in <= 500");
     }
 }

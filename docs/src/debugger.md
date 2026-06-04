@@ -301,14 +301,47 @@ JSON payload keeps the numeric `index` and adds a `name` field.
 > c-d-split permutations. **Presolve** renumbers rows, so `PresolveTnlp`
 > declines `idx_names` rather than risk mislabeling a permuted row — under
 > presolve the debugger safely falls back to index labels. Carrying names
-> through the presolve map, decorating `print active`, and a tape
-> pretty-printer for `print equation` are the next steps built on this
-> foundation.
+> through the presolve map and decorating `print active` are the next
+> steps built on this foundation.
 
 [^lee2024]: A. Lee, R. B. Parker, S. Poon, D. Gunter, A. W. Dowling, and
     B. Nicholson, "Model Diagnostics for Equation-Oriented Models:
     Roadblocks and the Path Forward," *Systems and Control Transactions*
     3:966–974 (2024). <https://doi.org/10.69997/sct.147875>
+
+### `print equation` — the algebra of a named constraint
+
+Naming a culprit row is only half the story; the next question is always
+*what does that equation actually say?* Lee et al. (2024) make this the
+core of actionable equation-oriented diagnostics — a debugger should
+surface the **named equation**, not just a row index.[^lee2024] `print
+equation` closes that loop: once `print residuals` points at, say,
+`c[energy_balance]`, you read the constraint's source algebra directly.
+
+```text
+(dbg) print equation energy_balance
+energy_balance:  T_reactor*flow - 300*flow - Q = 0
+
+(dbg) print equation 14          # by original .nl row index
+c[14]:  x[3]^2 + x[7]^2 <= 1
+```
+
+A constraint is addressable by its **model name** (preferred, and robust
+to row reordering) or its **original `.nl` row index**. With no argument,
+`print equation` reports how many equations are available. The renderer
+works from the faithful `Expr` DAG the `.nl` parser built — not the lossy
+evaluation tape — so common-subexpressions, imported functions, and
+piecewise/conditional forms render as written. The affine part is printed
+with tidy signs (`a - 2*b`, not `a + -2*b`), zero-coefficient Jacobian
+placeholders are suppressed, and bounds render in their natural relation
+(`= rhs`, `lo <= body <= hi`, `>= lo`, `<= hi`). The JSON payload carries
+`{index, name, equation}`.
+
+Equations are *static model data* in original `.nl` row order, so unlike
+residuals they need no split-space projection — `print equation` works
+regardless of presolve. It is available whenever a model was loaded from
+an `.nl` file; the JSON `name` field is present only when a `.row` auxfile
+supplied one.
 
 ### `print kkt` — inertia and regularization
 
@@ -777,7 +810,8 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 |---|---|
 | `help` (`h`, `?`) | list commands |
 | `info` (`i`) | current-iterate summary |
-| `print <what>` (`p`) | block, `d`-block, scalar, or `kkt` |
+| `print <what>` (`p`) | block, `d`-block, scalar, `kkt`, or `residuals` |
+| `print equation <name\|row>` | source algebra of a constraint, by model name or `.nl` row |
 | `step` (`s`, `n`) | run to next `iter_start` |
 | `step sub` / `stepi` (`si`) | run to next checkpoint of any kind |
 | `continue` (`c`) | run to next breakpoint |

@@ -654,6 +654,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
                 "active",
                 "inactive",
                 "residuals",
+                "equation",
             ]));
             v
         }
@@ -702,6 +703,61 @@ impl Completer for DbgHelper {
             })
             .collect();
         Ok((start, pairs))
+    }
+}
+
+/// Rendered constraint equations from the source model, indexed in
+/// original `.nl` row order. Lets the debugger answer
+/// `print equation <name|row>` with the actual algebra — the source
+/// expression for a constraint, resolved by its model name. This closes
+/// the loop on the residual-name labeling (`print residuals`): once a
+/// culprit equation is named, the user can read it. Naming and printing
+/// culprit equations rather than bare indices is the diagnostic
+/// recommendation of Lee et al. (2024,
+/// <https://doi.org/10.69997/sct.147875>).
+pub struct EquationBook {
+    /// Constraint names in original `.nl` row order (empty `String` when a
+    /// row has no name, e.g. no `.row` auxfile was emitted).
+    names: Vec<String>,
+    /// Rendered equation text, parallel to `names`.
+    equations: Vec<String>,
+}
+
+impl EquationBook {
+    /// Build from parallel name / rendered-equation vectors (original
+    /// `.nl` row order). Lengths are zipped to the shorter of the two.
+    pub fn new(names: Vec<String>, equations: Vec<String>) -> Self {
+        Self { names, equations }
+    }
+
+    /// Number of constraints with a rendered equation.
+    pub fn len(&self) -> usize {
+        self.equations.len()
+    }
+
+    /// True when there are no equations.
+    pub fn is_empty(&self) -> bool {
+        self.equations.is_empty()
+    }
+
+    /// Human label for row `i`: its model name if present, else `c[i]`
+    /// (original `.nl` row index).
+    fn label(&self, i: usize) -> String {
+        match self.names.get(i) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("c[{i}]"),
+        }
+    }
+
+    /// Resolve a user key to an original row index: an exact name match
+    /// first, else the key parsed as a `usize` row index.
+    fn resolve(&self, key: &str) -> Option<usize> {
+        if let Some(i) = self.names.iter().position(|n| n == key) {
+            return Some(i);
+        }
+        key.parse::<usize>()
+            .ok()
+            .filter(|&i| i < self.equations.len())
     }
 }
 
@@ -786,6 +842,11 @@ pub struct SolverDebugger {
     /// quits the solve — a discoverable Ctrl-C escape hatch that mirrors the
     /// running-mode double-tap. Reset whenever a real line is entered.
     prompt_interrupts: u8,
+    /// Rendered constraint equations from the source model (`.nl`), for the
+    /// `print equation <name|row>` command. `None` when no model was wired in
+    /// (e.g. a non-`.nl` entry point). See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) on naming culprit equations.
+    equation_book: Option<EquationBook>,
 }
 
 impl SolverDebugger {
@@ -827,6 +888,7 @@ impl SolverDebugger {
             staged: Vec::new(),
             sweep: None,
             prompt_interrupts: 0,
+            equation_book: None,
         }
     }
 
@@ -834,6 +896,13 @@ impl SolverDebugger {
     pub fn with_script(mut self, path: String) -> Self {
         self.pending_script = Some(path);
         self
+    }
+
+    /// Attach the source model's rendered constraint equations, enabling
+    /// `print equation <name|row>`. Wired in on the `.nl` entry path
+    /// (see Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
+    pub fn set_equation_book(&mut self, book: EquationBook) {
+        self.equation_book = Some(book);
     }
 
     /// Enable the `resolve` command, wiring the shared restart slot the
@@ -1127,6 +1196,7 @@ impl SolverDebugger {
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
             "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active | inactive".into(),
             "  print residuals [pr|du] [k]  top-k largest-magnitude residuals (default k=10)".into(),
+            "  print equation [name|row]    source algebra of a constraint, by model name or row".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -1212,6 +1282,9 @@ impl SolverDebugger {
         }
         if what == "residuals" || what == "resid" {
             return self.cmd_print_residuals(&rest[1..], ctx);
+        }
+        if what == "equation" || what == "eqn" || what == "eq" {
+            return self.cmd_print_equation(&rest[1..]);
         }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
         let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
@@ -1382,6 +1455,46 @@ impl SolverDebugger {
             })
             .collect();
         CmdOut::ok(lines).with_data(serde_json::json!({"k": k, "total": total, "top": data}))
+    }
+
+    /// `print equation [name|row]` — the source algebra of a constraint,
+    /// resolved by its model name (preferred) or original `.nl` row index.
+    /// With no argument, reports how many equations are available and how
+    /// to address one. This is the read-side companion to the named
+    /// residual labels (`print residuals`): once a culprit constraint is
+    /// named, this prints what it actually says. Naming and surfacing
+    /// culprit equations rather than bare indices is the diagnostic path
+    /// urged by Lee et al. (2024, <https://doi.org/10.69997/sct.147875>).
+    fn cmd_print_equation(&self, rest: &[&str]) -> CmdOut {
+        let Some(book) = self.equation_book.as_ref() else {
+            return CmdOut::err(
+                "no equation source — `print equation` needs an .nl model (none was loaded)",
+            );
+        };
+        if book.is_empty() {
+            return CmdOut::err("the model has no constraint equations to print");
+        }
+        let Some(&key) = rest.first() else {
+            return CmdOut::ok(vec![format!(
+                "{} constraint equation(s) — `print equation <name|row>` to show one",
+                book.len()
+            )])
+            .with_data(serde_json::json!({"count": book.len()}));
+        };
+        let Some(i) = book.resolve(key) else {
+            return CmdOut::err(format!(
+                "no constraint named or indexed `{key}` (have {} equation(s); try a name or 0..{})",
+                book.len(),
+                book.len().saturating_sub(1)
+            ));
+        };
+        let label = book.label(i);
+        let eq = &book.equations[i];
+        CmdOut::ok(vec![format!("{label}:  {eq}")]).with_data(serde_json::json!({
+            "index": i,
+            "name": book.names.get(i).filter(|n| !n.is_empty()),
+            "equation": eq,
+        }))
     }
 
     /// `print kkt` — inertia + regularization of the factored augmented
@@ -2687,6 +2800,9 @@ impl SolverDebugger {
                 "load": true,
                 "sweep": self.restart.is_some(),
                 "kkt_inspect": true,
+                // `print equation <name|row>` is available when a source
+                // model (`.nl`) supplied constraint algebra to render.
+                "equations": self.equation_book.is_some(),
                 "llm_assist": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
@@ -3872,6 +3988,40 @@ mod tests {
             top.iter().map(|r| r.kind).collect::<Vec<_>>(),
             vec![Ineq, Eq, DualX]
         );
+    }
+
+    #[test]
+    fn print_equation_resolves_by_name_index_and_errors() {
+        let mut d = dbg(DebugMode::Repl);
+        // No book wired in yet ⇒ a helpful error, not a panic.
+        let out = d.cmd_print_equation(&[]);
+        assert!(!out.ok);
+        assert!(out.lines[0].contains("needs an .nl model"));
+
+        d.set_equation_book(EquationBook::new(
+            vec!["mass_balance".into(), String::new()],
+            vec!["x[0] + x[1] = 10".into(), "x[0] - x[1] <= 2".into()],
+        ));
+
+        // No arg ⇒ count + usage hint.
+        let out = d.cmd_print_equation(&[]);
+        assert!(out.ok);
+        assert!(out.lines[0].contains("2 constraint equation"));
+
+        // By model name.
+        let out = d.cmd_print_equation(&["mass_balance"]);
+        assert!(out.ok);
+        assert_eq!(out.lines[0], "mass_balance:  x[0] + x[1] = 10");
+
+        // By original row index; the unnamed row falls back to `c[1]`.
+        let out = d.cmd_print_equation(&["1"]);
+        assert!(out.ok);
+        assert_eq!(out.lines[0], "c[1]:  x[0] - x[1] <= 2");
+
+        // Unknown key ⇒ error.
+        let out = d.cmd_print_equation(&["nope"]);
+        assert!(!out.ok);
+        assert!(out.lines[0].contains("no constraint named or indexed"));
     }
 
     #[test]
