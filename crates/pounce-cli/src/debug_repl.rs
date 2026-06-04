@@ -136,9 +136,16 @@ const CHECKPOINTS: &[&str] = &[
 /// read by the CLI after the solve unwinds.
 pub struct RestartRequest {
     /// Primal seed (the algorithm-space `x` at the time of `resolve`).
+    /// Also drives `sweep` / `multistart`, where only `x` varies.
     pub seed_x: Vec<f64>,
     /// `set opt` edits staged during the session, to apply before re-solve.
     pub options: Vec<(String, String)>,
+    /// Full primal-dual iterate (all 8 blocks + μ) captured at the pause,
+    /// for a true warm `resolve` that continues from the current interior
+    /// point. `None` for primal-only restarts (sweep / multistart). When
+    /// present, the CLI installs it via `set_warm_start_iterate` and turns
+    /// on `warm_start_init_point` / `warm_start_target_mu`.
+    pub warm: Option<IterateSnapshot>,
 }
 
 /// Shared slot the debugger uses to hand a [`RestartRequest`] back to the
@@ -1953,6 +1960,7 @@ impl SolverDebugger {
         *cell.borrow_mut() = Some(RestartRequest {
             seed_x: first.clone(),
             options: self.staged.clone(),
+            warm: None,
         });
         // Run each sweep solve free; we intercept only at the terminal
         // checkpoint. Clear any one-shot arming so the re-solve doesn't pause.
@@ -1997,6 +2005,7 @@ impl SolverDebugger {
                 *cell.borrow_mut() = Some(RestartRequest {
                     seed_x: next,
                     options: self.staged.clone(),
+                    warm: None,
                 });
             }
             self.sweep = Some(sweep);
@@ -2117,10 +2126,13 @@ impl SolverDebugger {
         }
     }
 
-    /// `resolve` — capture the current primal `x` and the staged option
-    /// edits, then stop this solve so the CLI re-runs from that point with
-    /// the new options applied (a primal warm start). Needs a restart cell
-    /// (wired by the CLI); a no-op error otherwise.
+    /// `resolve` — capture the full primal-dual iterate (all 8 blocks +
+    /// μ) and the staged option edits, then stop this solve so the CLI
+    /// re-runs continuing from that interior point with the new options
+    /// applied (a true warm start: duals carry over, the barrier resumes
+    /// at the current μ rather than restarting at `mu_init`). Falls back
+    /// to a primal-only seed if the iterate can't be snapshotted. Needs a
+    /// restart cell (wired by the CLI); a no-op error otherwise.
     fn cmd_resolve(&mut self, ctx: &DebugCtx) -> CmdOut {
         let Some(cell) = self.restart.as_ref() else {
             return CmdOut::err("re-solve is not available in this context");
@@ -2128,14 +2140,32 @@ impl SolverDebugger {
         let Some(seed_x) = ctx.block("x") else {
             return CmdOut::err("no current iterate to seed from");
         };
+        let warm = ctx.snapshot();
+        let mu = warm.as_ref().map(|s| s.mu());
         let options = self.staged.clone();
         let n_opt = options.len();
-        *cell.borrow_mut() = Some(RestartRequest { seed_x, options });
-        CmdOut::ok(vec![format!(
-            "re-solving from current x with {n_opt} staged option override(s)…"
-        )])
-        .with_data(serde_json::json!({"resolve": true, "options": n_opt}))
-        .flow(Flow::Stop)
+        let warm_msg = match mu {
+            Some(mu) => format!(
+                "re-solving warm from the current primal-dual iterate (μ={mu:.3e}) \
+                 with {n_opt} staged option override(s)…"
+            ),
+            None => format!(
+                "re-solving from current x (primal-only) with {n_opt} staged option override(s)…"
+            ),
+        };
+        *cell.borrow_mut() = Some(RestartRequest {
+            seed_x,
+            options,
+            warm,
+        });
+        CmdOut::ok(vec![warm_msg])
+            .with_data(serde_json::json!({
+                "resolve": true,
+                "options": n_opt,
+                "warm": mu.is_some(),
+                "mu": mu,
+            }))
+            .flow(Flow::Stop)
     }
 
     /// `ask [question]` — hand the current solver state to Claude Code

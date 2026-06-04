@@ -258,6 +258,16 @@ impl IterateSnapshot {
         self.mu
     }
 
+    pub fn tau(&self) -> Number {
+        self.tau
+    }
+
+    /// The captured full primal-dual iterate (algorithm space), for the
+    /// debugger's `resolve` warm restart. Cloning is `Rc`-shallow.
+    pub(crate) fn iterates(&self) -> &crate::iterates_vector::IteratesVector {
+        &self.curr
+    }
+
     /// Read a named block of the snapshotted iterate as a flat `f64` vec.
     pub fn block(&self, name: &str) -> Option<Vec<Number>> {
         let v = block_ref(&self.curr, name)?;

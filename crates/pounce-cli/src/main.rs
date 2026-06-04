@@ -536,6 +536,24 @@ pub fn main() -> ExitCode {
                 eprintln!("pounce: re-solve could not set {k}={v}: {e}");
             }
         }
+        // Full primal-dual warm restart (`resolve`): install the captured
+        // 8-vector iterate and turn on the warm-start initializer so the
+        // duals carry over and the barrier resumes at the captured μ
+        // instead of cold-restarting at `mu_init`. The primal-only path
+        // (sweep / multistart, `warm == None`) leaves these off and just
+        // seeds `x` through `SeededTnlp` below.
+        if let Some(snap) = req.warm {
+            let mu = snap.mu();
+            app.set_warm_start_iterate(snap);
+            let _ = app
+                .options_mut()
+                .read_from_str("warm_start_init_point yes\n", true);
+            if mu.is_finite() && mu > 0.0 {
+                let _ = app
+                    .options_mut()
+                    .read_from_str(&format!("warm_start_target_mu {mu}\n"), true);
+            }
+        }
         solve_tnlp = Rc::new(RefCell::new(pounce_cli::seeded_tnlp::SeededTnlp::new(
             Rc::clone(&tnlp),
             req.seed_x,

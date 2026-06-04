@@ -171,6 +171,16 @@ pub struct IpoptApplication {
     /// Stays valid until the next solve (which overwrites it).
     /// Accessed via [`Self::last_sqp_working_set`].
     sqp_last_working_set: Option<pounce_qp::WorkingSet>,
+    /// Full primal-dual warm-start iterate for the IPM path, captured by
+    /// the interactive debugger's `resolve` command. When `Some`, the
+    /// next `optimize_tnlp` installs this 8-vector (algorithm space)
+    /// directly onto `data.curr` before the iterate initializer runs, so
+    /// a warm `resolve` continues from the paused interior point rather
+    /// than cold-restarting the duals. Consumed once per solve, then
+    /// auto-cleared. Requires `warm_start_init_point=yes` so the
+    /// re-optimize branch of `WarmStartIterateInitializer` keeps the
+    /// installed iterate. Wire-set via [`Self::set_warm_start_iterate`].
+    warm_start_iterate: Option<crate::debug::IterateSnapshot>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -216,6 +226,7 @@ impl IpoptApplication {
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
+            warm_start_iterate: None,
         }
     }
 
@@ -582,6 +593,17 @@ impl IpoptApplication {
     /// Drop any pending warm-start iterate without solving.
     pub fn clear_sqp_warm_start(&mut self) {
         self.sqp_warm_start = None;
+    }
+
+    /// Install a full primal-dual warm-start iterate for the next IPM
+    /// `optimize_tnlp`. Captured by the debugger's `resolve` so the
+    /// re-solve continues from the paused interior point. The caller is
+    /// responsible for also enabling `warm_start_init_point=yes` (and
+    /// usually `warm_start_target_mu=<μ>`) so the re-optimize branch of
+    /// `WarmStartIterateInitializer` preserves the installed iterate.
+    /// Consumed once per solve, then auto-cleared.
+    pub fn set_warm_start_iterate(&mut self, snap: crate::debug::IterateSnapshot) {
+        self.warm_start_iterate = Some(snap);
     }
 
     /// Return the final QP working set from the most recent SQP
@@ -1179,6 +1201,34 @@ impl IpoptApplication {
                 Rc::new(DenseVectorSpace::new(n_vu).make_new_dense()),
             );
             data.borrow_mut().set_curr(iv);
+        }
+
+        // Full primal-dual warm restart (debugger `resolve`): if a
+        // captured iterate is queued, install it onto `data.curr` over
+        // the placeholder so the `WarmStartIterateInitializer`'s
+        // re-optimize branch (x already initialized) keeps it and only
+        // clamps multipliers / sets target_mu — no cold re-seed from the
+        // NLP. Skipped (with a warning) if the dimensions don't line up,
+        // e.g. an option changed the problem structure between solves.
+        if let Some(snap) = self.warm_start_iterate.take() {
+            let dims_match = {
+                let borrow = data.borrow();
+                borrow
+                    .curr
+                    .as_ref()
+                    .map(|c| iterates_dims(c) == iterates_dims(snap.iterates()))
+                    .unwrap_or(false)
+            };
+            if dims_match {
+                data.borrow_mut().set_curr(snap.iterates().clone());
+                data.borrow_mut().curr_mu = snap.mu();
+            } else {
+                tracing::warn!(
+                    target: "pounce::warm_start",
+                    "debugger warm-restart iterate dimensions differ from the fresh \
+                     solve; ignoring the captured iterate and seeding normally"
+                );
+            }
         }
 
         let max_iter = self
@@ -1891,6 +1941,22 @@ impl IpoptApplication {
 /// Map the integer `print_level` / `file_print_level` option to the
 /// matching [`JournalLevel`] variant. Mirrors upstream's
 /// `static_cast<EJournalLevel>(int_value)` with clamping.
+/// The eight block dimensions of an iterate, in canonical order
+/// (x, s, y_c, y_d, z_l, z_u, v_l, v_u). Used to guard the debugger's
+/// warm-restart install against a structural mismatch between solves.
+fn iterates_dims(c: &IteratesVector) -> [i32; 8] {
+    [
+        c.x.dim(),
+        c.s.dim(),
+        c.y_c.dim(),
+        c.y_d.dim(),
+        c.z_l.dim(),
+        c.z_u.dim(),
+        c.v_l.dim(),
+        c.v_u.dim(),
+    ]
+}
+
 fn journal_level_from_int(v: i32) -> JournalLevel {
     match v.clamp(0, 12) {
         0 => JournalLevel::J_NONE,
