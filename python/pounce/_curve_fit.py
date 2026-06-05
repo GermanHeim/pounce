@@ -285,6 +285,70 @@ def _model_jac_fd(model: Callable, x: np.ndarray, p: np.ndarray) -> np.ndarray:
     return J
 
 
+def _initial_guess(model, xdata, ydata, w, lb, ub, n, loss_fn, fs2):
+    """Data-driven starting point used when ``p0`` is omitted.
+
+    ``curve_fit`` can't know what each parameter *means*, so instead of a flat
+    vector of ones we score a small, model-agnostic set of candidate seeds by
+    the actual (weighted, robust) objective and keep the best. Candidates are
+    bound-aware — a parameter with two finite bounds is seeded at the box
+    midpoint, a one-sided bound is offset safely into the feasible region, and
+    the remaining free parameters sweep a handful of magnitudes anchored on the
+    data scale. This gives a badly-scaled problem (true parameters ~1e6 or
+    ~1e-6) a far better seed than ones while staying inside the bounds; the
+    interior-point solver's own bound-push / barrier initialization takes it
+    from there.
+    """
+    lo = np.full(n, -np.inf) if lb is None else np.asarray(lb, dtype=float)
+    hi = np.full(n, np.inf) if ub is None else np.asarray(ub, dtype=float)
+
+    has_lo, has_hi = np.isfinite(lo), np.isfinite(hi)
+    both = has_lo & has_hi
+    only_lo = has_lo & ~has_hi
+    only_hi = ~has_lo & has_hi
+    free = ~has_lo & ~has_hi
+
+    # Per-parameter anchor that respects whatever bounds exist.
+    anchor = np.zeros(n)
+    anchor[both] = 0.5 * (lo[both] + hi[both])
+    anchor[only_lo] = lo[only_lo] + np.maximum(1.0, np.abs(lo[only_lo]))
+    anchor[only_hi] = hi[only_hi] - np.maximum(1.0, np.abs(hi[only_hi]))
+
+    # Magnitudes to try on the free parameters, anchored on the data scale (and
+    # its reciprocal) so neither very large nor very small true values are
+    # systematically out of reach. The same scalar is applied to all free
+    # parameters per candidate, keeping the count linear rather than n-D.
+    yscale = float(np.nanmax(np.abs(ydata))) if ydata.size else 1.0
+    if not np.isfinite(yscale) or yscale == 0.0:
+        yscale = 1.0
+    mags = {1.0, 0.1, yscale, 1.0 / yscale}
+    scales = sorted({sign * m for sign in (1.0, -1.0) for m in mags})
+
+    def score(p):
+        # Large/NaN residuals at a bad seed are expected; treat them as +inf so
+        # the candidate is simply discarded.
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            r = (model(xdata, p) - ydata) * w
+            s = float(fs2 * np.sum(loss_fn((r * r) / fs2)[0]))
+        return s if np.isfinite(s) else np.inf
+
+    candidates = [np.ones(n), anchor.copy()]
+    for s in scales:
+        cand = anchor.copy()
+        cand[free] = s
+        candidates.append(cand)
+
+    best_p, best_s = None, np.inf
+    for cand in candidates:
+        cand = np.clip(cand, lo, hi)
+        sc = score(cand)
+        if sc < best_s:
+            best_p, best_s = cand, sc
+    # Every candidate overflowed/NaN'd (pathological model): fall back to ones
+    # clipped into the box and let the solver sort it out.
+    return best_p if best_p is not None else np.clip(np.ones(n), lo, hi)
+
+
 def curve_fit(
     f: Callable,
     xdata,
@@ -309,6 +373,11 @@ def curve_fit(
     relations between parameters), ``sensitivity`` (compute ``dpopt/ddata``),
     and ``alpha`` (confidence level for the returned intervals).
 
+    ``p0`` is optional: when omitted, the number of parameters is read from the
+    signature of ``f`` and the starting point is chosen data-drivenly (a
+    bound-aware, data-scale sweep scored by the objective; see
+    :func:`_initial_guess`) rather than defaulting to ones.
+
     Returns
     -------
     CurveFitResult
@@ -319,13 +388,20 @@ def curve_fit(
 
     param_names = _infer_param_names(f)
 
-    # --- initial guess / parameter count -------------------------------
+    # --- parameter count -----------------------------------------------
+    # ``p0`` may be omitted. We only fix the parameter *count* here and defer
+    # the seed itself until the model and bounds are in hand, so an omitted
+    # guess gets a data-driven starting point rather than a flat vector of ones
+    # (see ``_initial_guess``).
     if p0 is None:
         if param_names is None:
             raise ValueError("cannot infer number of parameters; pass p0")
-        p0 = np.ones(len(param_names))
-    p0 = _to_array(p0).ravel()
-    n = p0.size
+        n = len(param_names)
+        auto_p0 = True
+    else:
+        p0 = _to_array(p0).ravel()
+        n = p0.size
+        auto_p0 = False
 
     # --- weights -------------------------------------------------------
     if sigma is None:
@@ -351,6 +427,12 @@ def curve_fit(
     # --- model in parameter-vector form --------------------------------
     def model(x, p):
         return _to_array(f(x, *np.asarray(p))).ravel()
+
+    # Normalize bounds here (not only at solve time) so the data-driven seed
+    # below can place each parameter inside the feasible box.
+    lb, ub = _normalize_bounds(_normalize_bound_arg(bounds, n), n)
+    if auto_p0:
+        p0 = _initial_guess(model, xdata, ydata, w, lb, ub, n, loss_fn, fs2)
 
     model_jac, jac_exact, jac_kind = _resolve_model_jac(f, model, jac, xdata, p0)
 
@@ -390,7 +472,6 @@ def curve_fit(
         return (Jw.T * weight) @ Jw
 
     # --- build pounce Problem object -----------------------------------
-    lb, ub = _normalize_bounds(_normalize_bound_arg(bounds, n), n)
     m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
 
     problem_obj = _make_problem_obj(
