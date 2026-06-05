@@ -9,6 +9,54 @@ changes.
 
 ## Unreleased
 
+### Added — `pounce.curve_fit` (Python)
+
+A `scipy.optimize.curve_fit`-style nonlinear fitter on top of the
+interior-point solver, returning much more than `(popt, pcov)`:
+
+- parameter covariance, standard errors, and Student-t confidence intervals
+  read pounce-natively from the converged factor's reduced Hessian
+  (`pcov = 2·s²·inv(H_S) = s²·(JᵀJ)⁻¹`; matches scipy / `pycse.nlinfit`);
+- a smooth (C²) loss family — ordinary/weighted least squares plus robust
+  Huber / Cauchy / soft-L1 with a sandwich covariance estimator (non-smooth
+  L1/MAE is intentionally out of scope for the IPM);
+- parameter constraints scipy can't express — positivity/negativity/ranges
+  via `bounds`, and relations between parameters via `constraints=`; an active
+  bound/constraint yields a covariance projected onto the free subspace;
+- data sensitivity `dpopt/ddata` (∂params/∂data) from a single batched
+  back-solve against the same factor (`Solver.kkt_solve_many`);
+- a `CurveFitResult` with `predict()`, `confidence_band()` (both `confidence`
+  and `prediction` kinds, heteroscedastic-aware), `correlation`, R²/χ²/dof,
+  and `summary()`.
+
+Derivatives resolve analytic `jac` → JAX autodiff (the default for
+`jax.numpy` models) → a finite-difference fallback; exact derivatives let the
+solve converge cleanly with scaling off, which is what makes the
+factor-based covariance and sensitivity exact. Docs:
+`docs/src/curve-fitting.md`; notebook `python/notebooks/18_curve_fit.ipynb`.
+
+### Added — `pounce verify` subcommand + signed receipts
+
+A `verify` subcommand that re-derives feasibility from the canonical `.nl`
+rather than trusting a `.sol`'s status line or the solver/agent that produced
+it — the trust anchor when pounce is a tool an agent calls: the agent
+proposes a solution, a small deterministic checker disposes.
+
+- `pounce verify <problem.nl> <claim.sol>` evaluates `g(x*)` and bounds
+  against the canonical model, reporting the worst constraint/bound violation
+  and (when the `.sol` carries duals) a bound-projected KKT stationarity
+  residual. Exit 0 = VERIFIED, 20 = REJECTED, 2 = usage/IO. Feasibility
+  gates; optimality is informational unless `--require-optimal`.
+- The JSON receipt content-addresses both inputs by SHA-256 (zero new deps);
+  with `POUNCE_VERIFY_KEY` set it signs the receipt with HMAC-SHA256 over a
+  float-free preimage so any language can re-derive it.
+- MCP `verify_solution` tool plus dependency-free `verify_sig` helpers and a
+  stdlib reference signer service.
+
+The check itself (recompute feasibility against the model + a content-addressed
+receipt) is ready to use and needs no secrets; the signing / remote-authority
+layer is an explicit proof of concept. Docs: `docs/src/verify.md`.
+
 ### Added — Debugger `load` / `sweep` / `multistart`
 
 The interactive solver debugger gained three commands for seeding solves
