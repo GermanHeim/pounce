@@ -597,6 +597,14 @@ Staged options are **not** applied to the strategies already built for
 the running solve (they don't re-read options mid-iteration). They take
 effect on a [`resolve`](#re-solve-from-a-saved-point) or the next solve.
 
+The read-side counterpart is `get opt <name>`, which reports an option's
+current (or staged) value and its registry metadata — so you can confirm
+what a `set opt` actually staged before you `resolve`:
+
+```text
+get opt mu_strategy        # → mu_strategy = adaptive  (staged)
+```
+
 ---
 
 ## Discovering options
@@ -1017,6 +1025,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `break …` (`b`) | iteration / `if` / `on` breakpoints; list; `clear`; `del N` |
 | `stop-at <cp>` | always pause at a checkpoint |
 | `set mu/x/<block>/opt …` | mutate μ, the iterate, or stage an option |
+| `get opt <name>` (`get <name>`) | report an option's current/staged value, source, and default |
 | `opt [filter]` | list/search registered options |
 | `complete <prefix>` | completion candidates |
 | `viz <target>` | open an artifact in a viewer |
@@ -1026,6 +1035,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `multistart <N> [rel]` | `N` restarts (uniform in each finite box; jitter elsewhere); tabulate |
 | `watch <target>` (`display`) | auto-print a target at every pause |
 | `tbreak N` (`tb`) | one-shot iteration breakpoint |
+| `commands N <c>;<c>…` | auto-run commands when iteration N's breakpoint hits (`commands N clear` removes) |
 | `watchpoint <blk>[<i>] [τ]` (`wp`) | pause when a value changes by > τ |
 | `diff` | what changed in the iterate since the last iteration |
 | `diagnose` (`diag`) | live health report: named culprit residuals, KKT inertia, stalls |
@@ -1120,23 +1130,28 @@ Write one per line to stdin, either a bare string or an object:
 ### `hello`
 
 ```json
-{"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.2.0",
+{"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.3.1-dev",
  "capabilities":{"inspect":true,"mutate_iterate":true,"mutate_mu":true,
    "conditional_breakpoints":"compound","request_ids":true,
    "viz":["block","delta"],"save":true,"load":true,"sweep":true,
-   "kkt_inspect":true,
+   "kkt_inspect":true,"diagnose":true,"llm_assist":true,
+   "pause_command":true,"equations":false,"structural_diagnose":false,
    "rewind":"primal_dual","resolve":true,"terminal_checkpoint":true,
    "interruptible":true,"progress_events":true,"async_pause":"checkpoint"},
  "checkpoints":["iter_start","after_mu","after_search_dir","after_step",
-                "pre_restoration_entry","post_restoration_exit","terminated"],
+                "step_rejected","pre_restoration_entry",
+                "post_restoration_exit","terminated"],
  "events":["resto_entered","resto_exited","regularized","tiny_step",
-           "ls_rejected","nan"],
+           "ls_rejected","mu_stalled","nan"],
  "commands":[…],"blocks":[…],"metrics":[…]}
 ```
 
 A client should **feature-detect off `capabilities` / `checkpoints` /
 `events`** rather than the protocol string — those lists are additive as
-the debugger grows.
+the debugger grows. A few capabilities are model-conditional: `equations`
+and `structural_diagnose` are `true` only when the solve came from an
+`.nl` file (which carries the source algebra and structural metadata) and
+`false` for a built-in problem, as shown above.
 
 ### `pause`
 
