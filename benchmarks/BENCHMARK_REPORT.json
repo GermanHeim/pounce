@@ -583,11 +583,11 @@
     "name": "brainpc5",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 0.00037504028978436717,
-    "ipopt_obj": 0.00037504028977856246,
+    "ipopt_obj": 0.00037504028977766046,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "brainpc6",
@@ -603,11 +603,11 @@
     "name": "brainpc7",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 0.0003927065332632101,
-    "ipopt_obj": 0.00039270653326480215,
+    "ipopt_obj": 0.0003927065332651018,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "brainpc8",
@@ -1224,7 +1224,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 8.159744676699376e-10,
+    "pounce_obj": 1731.891360256821,
     "ipopt_obj": -5.284832597191212e-08,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1234,7 +1234,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 2.5899554017341104e-07,
+    "pounce_obj": 2.2005282331818908e-07,
     "ipopt_obj": -4.447533416283649e-15,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1254,7 +1254,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 2.4759824433089463e-11,
+    "pounce_obj": 0.5051201481226997,
     "ipopt_obj": -4.6030278911203385e-12,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1532,11 +1532,11 @@
   {
     "name": "discs",
     "suite": "Vanderbei",
-    "pounce_status": "Infeasible_Problem_Detected",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 19.899078911041062,
+    "pounce_obj": 14.44951653118193,
     "ipopt_obj": 14.449516531152279,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -1745,7 +1745,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 8.871710016221977e-15,
-    "ipopt_obj": 2.2692375408494903e-14,
+    "ipopt_obj": 4.71290364770901e-14,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -1753,9 +1753,9 @@
     "name": "drcav2lq",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Acceptable",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 0.0015558696556467898,
-    "ipopt_obj": 0.001072229201379606,
+    "ipopt_obj": 0.0011682093070000683,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -1763,9 +1763,9 @@
     "name": "drcav3lq",
     "suite": "Vanderbei",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": 0.00020702099149785052,
+    "ipopt_obj": 0.00021389298317191238,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -1775,7 +1775,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 8.871710016221977e-15,
-    "ipopt_obj": 2.2692375408494903e-14,
+    "ipopt_obj": 4.71290364770901e-14,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -1783,9 +1783,9 @@
     "name": "drcavty2",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Acceptable",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 0.0015558696556467898,
-    "ipopt_obj": 0.001072229201379606,
+    "ipopt_obj": 0.0011244628817088,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -1793,9 +1793,9 @@
     "name": "drcavty3",
     "suite": "Vanderbei",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": 0.00020702099149785052,
+    "ipopt_obj": 0.0002140084104080879,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -2014,7 +2014,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0671799765664819,
+    "pounce_obj": 0.06717997656648235,
     "ipopt_obj": 0.06717998295376071,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4294,7 +4294,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 97.58747316316098,
+    "pounce_obj": 97.5874731631618,
     "ipopt_obj": 97.58747316316169,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4514,7 +4514,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.5757979196115518,
+    "pounce_obj": 0.5757979196089681,
     "ipopt_obj": 0.5757979196089682,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4534,7 +4534,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 6.431875241690316e-05,
+    "pounce_obj": 6.432016297729875e-05,
     "ipopt_obj": 4.025057815122093e-06,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -5054,7 +5054,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 77.64926470587167,
+    "pounce_obj": 77.64926470112225,
     "ipopt_obj": 77.64926470112226,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5554,7 +5554,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.868187843771626,
+    "pounce_obj": 7.873865636386158,
     "ipopt_obj": 3.8681878437716266,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6102,11 +6102,11 @@
   {
     "name": "polak3",
     "suite": "Vanderbei",
-    "pounce_status": "Infeasible_Problem_Detected",
+    "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 139522.8187561397,
+    "pounce_obj": 5.93300334633087,
     "ipopt_obj": 116235.9744191567,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -6724,7 +6724,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.0000000558862183,
+    "pounce_obj": -1.0000000525919954,
     "ipopt_obj": -1.0000000505685263,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7594,7 +7594,7 @@
     "suite": "Gas",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 55.667873742496965,
+    "pounce_obj": 55.42482678546715,
     "ipopt_obj": 57.02748996410721,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -7635,7 +7635,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.09947002322808285,
-    "ipopt_obj": 0.09947002322808178,
+    "ipopt_obj": 0.09947002322808185,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7663,11 +7663,11 @@
     "name": "NARX_CFy",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 0.008581943228104637,
-    "ipopt_obj": 0.008675495668633269,
+    "ipopt_obj": 0.008744872041951571,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "WM_CFy",
@@ -7675,7 +7675,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.3883069133675394,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -7724,7 +7724,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 344.87613141032995,
+    "pounce_obj": 344.8761314124327,
     "ipopt_obj": 344.87613141578004,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7735,7 +7735,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 2.720974797770026,
-    "ipopt_obj": 2.7209747976434064,
+    "ipopt_obj": 2.7209747977699883,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7745,7 +7745,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.0006627471557098048,
-    "ipopt_obj": 0.0006627471551313084,
+    "ipopt_obj": 0.000662747155522909,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7755,7 +7755,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.000519997452084717,
-    "ipopt_obj": 0.0005199974520846647,
+    "ipopt_obj": 0.0005199974520845755,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7765,7 +7765,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.0005207820832716669,
-    "ipopt_obj": 0.0005207820832729023,
+    "ipopt_obj": 0.00052078208327224,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7775,7 +7775,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.06637130830389394,
-    "ipopt_obj": 0.06637130830389411,
+    "ipopt_obj": 0.06637130830389396,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7793,11 +7793,11 @@
     "name": "dirichlet120",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 0.03503608563159526,
-    "ipopt_obj": 0.035036085631595236,
+    "ipopt_obj": 0.04076075910352173,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "dtoc1nd",
@@ -7823,11 +7823,11 @@
     "name": "elec_400",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 100.12921176818519,
-    "ipopt_obj": 100.12921176818722,
+    "ipopt_obj": 100.1778717798634,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "ex1_160",
@@ -7835,7 +7835,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.06389670128604388,
-    "ipopt_obj": 0.06389670128604544,
+    "ipopt_obj": 0.06389670128604541,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7845,7 +7845,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.06543514582281892,
-    "ipopt_obj": 0.06543514582308746,
+    "ipopt_obj": 0.06543514582308738,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7855,7 +7855,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 3.6461170616755947,
-    "ipopt_obj": 3.6461170616757244,
+    "ipopt_obj": 3.646117061675551,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7865,7 +7865,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 3.6391679595641397,
-    "ipopt_obj": 3.6391673276079475,
+    "ipopt_obj": 3.639167987901817,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7903,21 +7903,21 @@
     "name": "henon120",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 133.2947376354084,
-    "ipopt_obj": 133.29473763147269,
+    "ipopt_obj": 979.6301676776558,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "lane_emden120",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 9.340250718411866,
-    "ipopt_obj": 9.340250718411813,
+    "ipopt_obj": 8.047674016702086,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "marine_1600",
@@ -7973,11 +7973,11 @@
     "name": "qcqp1000-2c",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
-    "pounce_obj": 11129.49485442803,
-    "ipopt_obj": 11129.494854423863,
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "pounce_obj": 11129.494854438157,
+    "ipopt_obj": 11129.494514421356,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "qcqp1000-2nc",
@@ -7994,8 +7994,8 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 17518.290330744523,
-    "ipopt_obj": null,
+    "pounce_obj": 17518.29033076515,
+    "ipopt_obj": 17517.241230364394,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -8005,7 +8005,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 15377.138270840707,
-    "ipopt_obj": null,
+    "ipopt_obj": 15380.68717246334,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -8055,7 +8055,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -6.639447222846839,
-    "ipopt_obj": -6.639447264497423,
+    "ipopt_obj": -6.639447264497432,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -8225,7 +8225,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": null,
+    "ipopt_obj": 21.256770452454838,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -8245,7 +8245,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -4.644397874835733,
-    "ipopt_obj": -4.644397874835652,
+    "ipopt_obj": -4.6443978748356525,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -8255,7 +8255,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.19552732835231312,
-    "ipopt_obj": 0.19552732835231487,
+    "ipopt_obj": 0.19552732835231365,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -8275,7 +8275,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.1924833771908948,
-    "ipopt_obj": 0.19248337719089154,
+    "ipopt_obj": 0.19248337719088893,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -8285,7 +8285,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.19151229230382394,
-    "ipopt_obj": 0.19151229230382402,
+    "ipopt_obj": 0.19151229230382702,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -8353,11 +8353,11 @@
     "name": "CVXQP3_L",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 1102010.5157745956,
-    "ipopt_obj": 1102010.5157746142,
+    "ipopt_obj": 1102010.5248051912,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "CVXQP3_M",
@@ -8804,7 +8804,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 52088540527.51098,
+    "pounce_obj": 52088540527.57659,
     "ipopt_obj": 52088540527.57657,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9014,7 +9014,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 14398654.939563945,
+    "pounce_obj": 14398654.939564018,
     "ipopt_obj": 14398654.939560533,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9082,11 +9082,11 @@
   {
     "name": "QPCBOEI2",
     "suite": "QP",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8172617.558628016,
+    "pounce_obj": 8171960.274110578,
     "ipopt_obj": 8171960.274110591,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -9194,7 +9194,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 935.7630476192318,
+    "pounce_obj": 935.7630476189821,
     "ipopt_obj": 935.7630622221072,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9302,11 +9302,11 @@
   {
     "name": "QSHELL",
     "suite": "QP",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 267498008.17466062,
+    "pounce_obj": 267498008.1746607,
     "ipopt_obj": 267498008.1746595,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -9374,7 +9374,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 37625.68025798554,
+    "pounce_obj": 37625.68025802978,
     "ipopt_obj": 37625.68025802535,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9414,7 +9414,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -206248.61053168078,
+    "pounce_obj": -206248.6105316729,
     "ipopt_obj": -206248.6105287994,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9534,7 +9534,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2459.4948917227434,
+    "pounce_obj": 2459.494892408167,
     "ipopt_obj": 2459.4948923996626,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9544,8 +9544,8 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2668.9797415541557,
-    "ipopt_obj": 2668.979741519269,
+    "pounce_obj": 2668.979729374814,
+    "ipopt_obj": 2668.979741516901,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -9555,7 +9555,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 2668.979717371981,
-    "ipopt_obj": 2668.9797176696106,
+    "ipopt_obj": 2668.979717376222,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -9612,31 +9612,31 @@
   {
     "name": "agg",
     "suite": "LP",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -35962997.36863308,
+    "pounce_obj": -35962998.09774861,
     "ipopt_obj": -35962998.09774861,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "agg2",
     "suite": "LP",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -20223073.953654855,
+    "pounce_obj": -20223073.953654595,
     "ipopt_obj": -20223073.953654595,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "agg3",
     "suite": "LP",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 10470748.38167603,
+    "pounce_obj": 10303872.731802149,
     "ipopt_obj": 10303872.731802143,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -9654,7 +9654,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2459.4948917227434,
+    "pounce_obj": 2459.494892408167,
     "ipopt_obj": 2459.4948923996626,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9662,11 +9662,11 @@
   {
     "name": "air05",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 965.9419651383313,
+    "pounce_obj": 965.9419651486429,
     "ipopt_obj": 965.9419651486322,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -9674,8 +9674,8 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2668.9797415541557,
-    "ipopt_obj": 2668.979741519269,
+    "pounce_obj": 2668.979729374814,
+    "ipopt_obj": 2668.979741516901,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -9825,7 +9825,7 @@
     "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
     "pounce_obj": 5075.137783279897,
-    "ipopt_obj": 5075.137778527942,
+    "ipopt_obj": 5075.13777852795,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -9845,7 +9845,7 @@
     "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
     "pounce_obj": 2842.2963648680516,
-    "ipopt_obj": 2842.2963648680548,
+    "ipopt_obj": 2842.2963648680525,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -9934,7 +9934,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1435.1780162064424,
+    "pounce_obj": -1435.1780165769799,
     "ipopt_obj": -1435.1780165666119,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9944,7 +9944,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -987.294010984914,
+    "pounce_obj": -987.2940110079153,
     "ipopt_obj": -987.2940110081616,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10114,7 +10114,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 46.151563950460584,
+    "pounce_obj": 46.15156395628213,
     "ipopt_obj": 46.15156395533338,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10505,7 +10505,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -1.0975644106752015e-05,
-    "ipopt_obj": -1.0975079079540514e-05,
+    "ipopt_obj": -1.0974845560297915e-05,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -10515,7 +10515,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -1.0975644106752015e-05,
-    "ipopt_obj": -1.0975079079540514e-05,
+    "ipopt_obj": -1.0974845560297915e-05,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -10535,7 +10535,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -2.221475072712253e-05,
-    "ipopt_obj": -2.2214005025010733e-05,
+    "ipopt_obj": -2.221400501318905e-05,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -10544,7 +10544,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8412.347398121796,
+    "pounce_obj": 8412.347398118845,
     "ipopt_obj": 8412.347398118847,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10614,7 +10614,7 @@
     "suite": "LP",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 2714.404055008471,
+    "pounce_obj": 2641.299114071313,
     "ipopt_obj": 2714.404056580304,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -10692,21 +10692,21 @@
   {
     "name": "kleemin7",
     "suite": "LP",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -100000000.00000113,
+    "pounce_obj": -100000000.0000011,
     "ipopt_obj": -100000000.00000109,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "kleemin8",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1000000000.0000008,
+    "pounce_obj": -1000000000.0000012,
     "ipopt_obj": -1000000000.0000012,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11264,7 +11264,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 19617.180905454003,
+    "pounce_obj": 19617.180905557154,
     "ipopt_obj": 19617.180905431207,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11284,7 +11284,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -8203512.02924504,
+    "pounce_obj": -8203512.029245058,
     "ipopt_obj": -8203512.029245055,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11302,11 +11302,11 @@
   {
     "name": "nsir2",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -27175593.929630764,
-    "ipopt_obj": -27175593.906056955,
-    "pounce_solved": false,
+    "pounce_obj": -27175593.906178776,
+    "ipopt_obj": -27175593.90605695,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11442,11 +11442,11 @@
   {
     "name": "p0201",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Solver_Error",
     "ipopt_status": "Optimal",
-    "pounce_obj": 71.6145816853753,
+    "pounce_obj": 71.61458195420917,
     "ipopt_obj": 71.61458194921107,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -11454,7 +11454,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 110.09766379452074,
+    "pounce_obj": 110.0976637948016,
     "ipopt_obj": 110.0976637948016,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11514,7 +11514,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2581.354208373111,
+    "pounce_obj": -2581.3542081756377,
     "ipopt_obj": -2581.3542081756377,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11524,7 +11524,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 19794.235726176048,
+    "pounce_obj": 19794.235726198887,
     "ipopt_obj": 19794.235726178766,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11534,7 +11534,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 32953.57763176145,
+    "pounce_obj": 32953.57763181923,
     "ipopt_obj": 32953.57763181934,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11825,7 +11825,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 1999531.662820777,
-    "ipopt_obj": 1999531.6628207783,
+    "ipopt_obj": 1999531.6628207779,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -12324,7 +12324,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 934.5763785298852,
+    "pounce_obj": 934.5763785286937,
     "ipopt_obj": 934.5763931572659,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -13225,7 +13225,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": null,
+    "ipopt_obj": 133.8157121438819,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -13235,7 +13235,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": null,
+    "ipopt_obj": 2456442.494729854,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -13243,11 +13243,11 @@
     "name": "qap15",
     "suite": "LPopt",
     "pounce_status": "Optimal",
-    "ipopt_status": "Optimal",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 867.4941333883583,
-    "ipopt_obj": 867.4941333882293,
+    "ipopt_obj": 867.5219790771223,
     "pounce_solved": true,
-    "ipopt_solved": true
+    "ipopt_solved": false
   },
   {
     "name": "supportcase10",
@@ -13255,7 +13255,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.7812121701830286,
     "pounce_solved": false,
     "ipopt_solved": false
   }
