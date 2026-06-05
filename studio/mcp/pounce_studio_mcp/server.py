@@ -3,7 +3,9 @@
 Spike scope: post-mortem analysis of `pounce.solve-report/v1` JSON files,
 plus a `run_problem` batch tool that shells out to the `pounce` CLI to
 produce a fresh report. No state held between calls; every tool takes a
-file path. Live streaming is still out of scope here (Phase 3).
+file path. Live streaming is out of scope for this server; for a live,
+steppable solve, drive the CLI's `pounce --debug-json` protocol — the
+`debug_session_guide` tool returns that contract and a launch snippet.
 """
 from __future__ import annotations
 
@@ -555,6 +557,10 @@ def find_stalls(
     log10(inf_pr) or log10(inf_du) moved by less than
     `max_log10_progress` total — the canonical "stuck" symptom.
 
+    Post-mortem over a finished report. To pause *live* the moment a
+    stall develops, drive `pounce --debug-json` (`break on mu_stalled`);
+    see `debug_session_guide`.
+
     Args:
         path: Path to the solve report.
         min_window: Minimum consecutive iterations to count as a stall.
@@ -579,6 +585,11 @@ def diagnose(path: str) -> dict[str, Any]:
     regularization, and convergence stalls. Each finding has a severity
     (info | warning | error) and a human message.
 
+    This is a *post-mortem* over a finished report. To step through a
+    solve live — pausing on these same conditions, inspecting and mutating
+    the iterate — drive `pounce --debug-json`; call `debug_session_guide`
+    for the protocol and a launch snippet.
+
     Args:
         path: Path to the solve report.
 
@@ -587,6 +598,59 @@ def diagnose(path: str) -> dict[str, Any]:
         `n_findings`: total count.
     """
     return R.diagnose(R.load_report(path))
+
+
+@mcp.tool()
+def debug_session_guide() -> dict[str, Any]:
+    """How to drive POUNCE's *live* interactive debugger (`--debug-json`).
+
+    The MCP tools here (diagnose, find_stalls, restoration_windows, …)
+    analyze a *finished* solve report. For a live, steppable session —
+    pause at each iteration, inspect/mutate the iterate and barrier
+    parameter, set conditional/event breakpoints, rewind, re-solve — the
+    `pounce` CLI speaks a self-describing newline-delimited JSON protocol.
+
+    This tool needs no arguments; it returns the contract plus a
+    ready-to-run launch snippet so an agent can start a session directly.
+
+    Returns:
+        Dict with `launch`, `protocol`, `contract` (the step-by-step
+        loop), `metrics` (the scalar field names carried by every event),
+        and `docs` (path to the full spec).
+    """
+    return {
+        "launch": "pounce <model.nl> --debug-json   "
+        "# or: pounce --problem rosenbrock --debug-json",
+        "transport": "Spawn the CLI with stdin and stdout piped. Read one "
+        "JSON object per line from stdout; write one command object "
+        "(or bare string) per line to stdin.",
+        "protocol": "pounce-dbg/1",
+        "contract": [
+            "Read the first line: a `hello` event enumerating `commands`, "
+            "`events`, `checkpoints`, `metrics`, `blocks`, and a "
+            "`capabilities` map. Feature-detect off these lists, not the "
+            "version string.",
+            "Send commands as `{\"cmd\": \"...\", \"id\": N}` lines, e.g. "
+            "`{\"cmd\": \"break if inf_pr<1e-6\", \"id\": 1}` then "
+            "`{\"cmd\": \"continue\", \"id\": 2}`. The `id` is echoed back "
+            "as `request_id` on the matching `result` event.",
+            "Read `pause` / `progress` / `terminated` events. Each carries "
+            "the scalar metrics under the names in `hello.metrics`, so you "
+            "can index them directly.",
+            "Finish with `{\"cmd\": \"continue\"}` to run to completion "
+            "(then read `terminated`), or `{\"cmd\": \"quit\"}` to stop.",
+        ],
+        "metrics": [
+            "iter",
+            "mu",
+            "objective",
+            "inf_pr",
+            "inf_du",
+            "nlp_error",
+            "complementarity",
+        ],
+        "docs": "docs/src/debugger.md",
+    }
 
 
 @mcp.tool()

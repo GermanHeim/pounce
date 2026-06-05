@@ -1027,6 +1027,49 @@ objects** (the banner, problem stats, and final summary are routed to
 stderr, and `print_level` is forced to 0). A program reads one JSON
 object per line.
 
+### For an LLM agent: the whole contract
+
+You do **not** need this page to drive the debugger — the protocol is
+self-describing. The contract is five lines:
+
+1. **Launch** `pounce <model> --debug-json` (or `--problem <name>`), with
+   the child's stdin and stdout piped.
+2. **Read the first line — `hello`.** It enumerates everything you can do:
+   `commands` (the verbs), `events` (breakpoint triggers), `checkpoints`
+   (where you can pause), `metrics` (the scalar field names), `blocks`
+   (the inspectable vectors), and a `capabilities` map. **Feature-detect
+   off these lists**, never off the version string.
+3. **Send commands**, one JSON object (or bare string) per line, e.g.
+   `{"cmd":"break if inf_pr<1e-6","id":1}` then `{"cmd":"continue","id":2}`.
+   Set `id` to correlate the matching `result`.
+4. **Read events** until you see the one you want. Every `pause` /
+   `progress` / `terminated` event carries the same scalar metric fields,
+   under the exact names listed in `hello.metrics`
+   (`objective`, `mu`, `inf_pr`, `inf_du`, `nlp_error`,
+   `complementarity`, `iter`) — so you can index them directly.
+5. **Finish** with `{"cmd":"continue"}` to run to completion (then read
+   `terminated`), or `{"cmd":"quit"}` to stop early.
+
+A complete minimal transcript (→ sent, ← received), eliding long lines:
+
+```text
+←  {"event":"hello","protocol":"pounce-dbg/1","commands":[…],"metrics":[…],…}
+←  {"event":"pause","checkpoint":"iter_start","iter":0,"objective":24.2,…}
+→  {"cmd":"break if inf_du<1e-6","id":1}
+←  {"event":"result","request_id":1,"command":"break","ok":true,…}
+→  {"cmd":"continue","id":2}
+←  {"event":"progress","iter":1,"objective":4.7,"inf_du":2.1e1,…}
+   … more progress events …
+←  {"event":"pause","checkpoint":"iter_start","iter":21,"inf_du":8.7e-7,"reason":"inf_du<1e-6"}
+→  {"cmd":"continue","id":3}
+←  {"event":"terminated","status":"SolveSucceeded","iterations":21,…}
+```
+
+If you are wired in through the **pounce-studio MCP server**, call its
+`debug_session_guide` tool for this same contract plus a ready-to-run
+launch snippet. The MCP analysis tools (`diagnose`, `find_stalls`, …) are
+*post-mortem* over a finished report; `--debug-json` is the *live* loop.
+
 ### Session lifecycle
 
 1. `hello` — emitted once, up front. The handshake.

@@ -292,8 +292,12 @@ Options:
                             breakpoints, step/continue. Type `help` at
                             the pounce-dbg> prompt for commands.
   --debug-json              same loop, but speak newline-delimited JSON on
-                            stdin/stdout so an LLM agent or program can
-                            drive it (one JSON state object per pause).
+                            stdin/stdout so an LLM agent or program can drive
+                            it. The first line is a self-describing `hello`
+                            handshake (protocol version + every command,
+                            event, checkpoint, metric, and capability), so a
+                            client needs no out-of-band docs; each pause is one
+                            JSON state object. Full spec: docs/src/debugger.md.
   --debug-on-error          don't pause every iteration; run freely and
                             drop into the debugger only if the solve fails,
                             for a post-mortem at the final iterate. Implies

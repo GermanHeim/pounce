@@ -235,6 +235,29 @@ redirected. The per-iteration table is colored when stdout is a terminal.
 See [`docs/src/options.md`](docs/src/options.md) and
 [`docs/src/troubleshooting.md`](docs/src/troubleshooting.md) for details.
 
+### Interactive solver debugger (`--debug`)
+
+POUNCE ships an interactive debugger for the interior-point loop — a *pdb
+for the IPM*. Pause the solve at well-defined checkpoints, inspect and
+**mutate** the live state (iterate, multipliers, the barrier parameter μ),
+set breakpoints by iteration / numeric condition / solver event, step
+through an iteration's internal phases, rewind, and re-solve with new
+options. It has **zero effect on the solve when not attached**.
+
+```sh
+pounce problem.nl --debug             # human REPL (history, Tab-complete)
+pounce problem.nl --debug-on-error    # run freely; drop in only on failure
+pounce problem.nl --debug-json        # newline-delimited JSON for agents/tools
+```
+
+`--debug-json` speaks a self-describing protocol: the first line is a
+`hello` handshake advertising every command, event, checkpoint, metric,
+and capability, so an **LLM agent, script, or visual debugger** can drive
+the solver with no out-of-band docs. Full guide:
+[`docs/src/debugger.md`](docs/src/debugger.md). Post-mortem analysis of a
+finished solve is also available through the **pounce-studio MCP server**
+([`studio/mcp`](studio/mcp)) and the JSON solve report.
+
 ### Sensitivity analysis (sIPOPT-compatible)
 
 The `pounce-sensitivity` crate is a Rust port of upstream Ipopt's
