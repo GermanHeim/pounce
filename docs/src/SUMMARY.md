@@ -32,6 +32,8 @@
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
+- [Active-Set SQP & Warm Starts](active-set-sqp.md)
+  - [Design Note](active-set-sqp-warm-start.md)
 - [Color Theme](color-theme.md)
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)

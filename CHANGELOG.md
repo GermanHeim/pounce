@@ -456,11 +456,11 @@ Designed for **warm-started NLP sequences** (MPC, parametric
 continuation, homotopy sweeps), where the previous solve's active
 set is a strong starting point.
 
-**Tutorial:** `docs/tutorials/active-set-sqp.md`.
+**Tutorial:** `docs/src/active-set-sqp.md`.
 **Python notebook:** `python/notebooks/06_sqp_parametric_continuation.ipynb`.
 **C example:** `crates/pounce-cinterface/examples/sqp_warm_start.c`.
 **GAMS example:** `gams/examples/parametric_sqp_warm_start.gms`.
-**Design note:** `dev-notes/research/active-set-sqp-warm-start.md`.
+**Design note:** `docs/src/active-set-sqp-warm-start.md`.
 
 #### Algorithm selection (cross-cutting)
 
