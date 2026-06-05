@@ -182,6 +182,16 @@ attached.
 - **Inspect:** `info`; `print` of blocks, search-direction blocks (`dx`),
   scalars (`mu obj inf_pr inf_du err compl iter`), `kkt` (inertia +
   regularization), and `active`; `watch`/`display`; `diff`.
+- **Named-equation diagnostics:** `print residuals` labels primal/dual
+  residuals with their original `.nl` constraint/variable names; `print
+  equation <name|row>` renders the source algebra of a named constraint
+  (by model name or `.nl` row index); `print rank` reports the SVD
+  numerical rank of the equality Jacobian J_c and names the implicated
+  rows. `diagnose` (alias `diag`) runs a panel of heuristics over the
+  current iterate and emits a **named** health report — *"the worst
+  constraint residual is c[mass_balance]"* rather than *"row 13 is
+  infeasible"* — the live counterpart to the `pounce-studio` `diagnose`
+  tool.
 - **Mutate / what-if:** `set mu`, `set x[i]`, `set opt`; `goto`/`restart`
   (soft rewind) and `resolve` (re-solve from the current point).
 - **Visualize:** `viz kkt`/`viz L`/`viz <block>` open via `pounce-dbg-viz`
@@ -191,11 +201,17 @@ attached.
 - **Attach & drive:** `--debug-on-error` (post-mortem), `--debug-on-
   interrupt` / Ctrl-C / in-band `{"cmd":"pause"}` (async pause),
   `--debug-script` / `source`, option discovery + Tab completion, `ask`
-  (consult Claude Code), and a branded REPL banner reusing the project
-  wordmark with a command cheat-sheet.
+  (consult an LLM about the paused state; provider-selectable via
+  `$POUNCE_DBG_LLM` = `claude` / `codex` / `gemini` / `llm` or a custom
+  command template, default Claude Code), and a branded REPL banner
+  reusing the project wordmark with a command cheat-sheet.
 - **JSON protocol:** `hello` → `pause` → `result` (with `request_id`) →
   `progress` → `terminated`. Engine in `pounce-algorithm::debug`; front
   end in `pounce-cli::debug_repl`.
+- **MCP live-debug proxy:** `pounce-studio` exposes the debugger over the
+  Model Context Protocol (`debug_start` / `debug_command` / `debug_state`
+  / `debug_sessions` / `debug_close`), proxying the `--debug-json`
+  protocol so an MCP client can start, drive, and inspect a live solve.
 
 ### Added — `read_nl` / `NlProblem` (Python)
 
@@ -244,6 +260,18 @@ with FD-verified first/second derivatives on the smooth interior.
     and active by default;
   - NLP gradient-based scaling now lifts fixed variables to their value before
     sampling, so the computed scale factors match the operating point.
+- **Auto-retry on local infeasibility (default on).** New option
+  `feral_infeasibility_scaling_retry` (default `yes`): when a solve ends in
+  `Infeasible_Problem_Detected` under a non-MC64 effective scaling, pounce
+  re-solves once with `feral_scaling=mc64` (main IPM and restoration sub-IPM).
+  This rescues problems where a backward-stable scaling choice lands in a
+  spurious infeasible basin under sensitive dependence (`discs.nl` is the
+  canonical case); every individual solve along both trajectories is itself
+  backward-stable, so an a-priori scaling router can't distinguish them. Set
+  to `no` to restore the single-solve behavior.
+- **New option `feral_scaling`** (default `auto`, mirrors `feral_ordering`):
+  pins FERAL's diagonal KKT scaling strategy; also settable via the
+  `POUNCE_FERAL_SCALING` env var.
 - **Dependency:** `feral` pinned to crates.io `0.10.0` (was a git rev),
   bringing AMF ordering by default and MC64 inertia-guided scaling fallback.
 - **Internal:** the `.nl` pipeline was extracted into a new leaf crate

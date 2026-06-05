@@ -1130,10 +1130,10 @@ Write one per line to stdin, either a bare string or an object:
 ### `hello`
 
 ```json
-{"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.3.1-dev",
+{"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.4.0",
  "capabilities":{"inspect":true,"mutate_iterate":true,"mutate_mu":true,
    "conditional_breakpoints":"compound","request_ids":true,
-   "viz":["block","delta"],"save":true,"load":true,"sweep":true,
+   "viz":["block","delta","kkt","L"],"save":true,"load":true,"sweep":true,
    "kkt_inspect":true,"diagnose":true,"llm_assist":true,
    "pause_command":true,"equations":false,"structural_diagnose":false,
    "rewind":"primal_dual","resolve":true,"terminal_checkpoint":true,

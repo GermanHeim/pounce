@@ -97,3 +97,31 @@ def test_read_nl_accepts_lists_and_reports_bounds():
 def test_read_nl_missing_file_raises():
     with pytest.raises(ValueError):
         pounce.read_nl("/no/such/model.nl")
+
+
+# A `.nl` that references AMPL imported (external) functions whose `$AMPLFUNC`
+# library can't be resolved.
+_EXTERNAL_NL = (
+    Path(__file__).resolve().parents[2]
+    / "crates"
+    / "pounce-cli"
+    / "tests"
+    / "fixtures_issue_49"
+    / "idaes_helmholtz.nl"
+)
+
+
+@pytest.mark.skipif(not _EXTERNAL_NL.exists(), reason="idaes_helmholtz.nl fixture missing")
+def test_read_nl_unresolvable_external_raises_catchable_error(monkeypatch):
+    """Regression: a model naming an AMPL external function with no resolvable
+    ``$AMPLFUNC`` library must raise a *catchable* Python exception, not a
+    ``pyo3_runtime.PanicException`` (a ``BaseException`` that ``except
+    Exception`` would miss). Before the fix, ``NlTnlp::new`` panicked across
+    the pyo3 boundary on this path."""
+    monkeypatch.delenv("AMPLFUNC", raising=False)
+    # `Exception` (not just `ValueError`) is the load-bearing assertion: a
+    # PanicException is NOT an `Exception`, so this would not catch it.
+    with pytest.raises(Exception) as exc_info:
+        pounce.read_nl(str(_EXTERNAL_NL))
+    assert isinstance(exc_info.value, Exception)
+    assert "PanicException" not in type(exc_info.value).__name__
