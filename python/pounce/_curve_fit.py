@@ -349,39 +349,53 @@ def _initial_guess(model, xdata, ydata, w, lb, ub, n, loss_fn, fs2):
     return best_p if best_p is not None else np.clip(np.ones(n), lo, hi)
 
 
-def curve_fit(
-    f: Callable,
-    xdata,
-    ydata,
-    p0=None,
-    *,
-    sigma=None,
-    absolute_sigma: bool = False,
-    bounds: Sequence | tuple = (-np.inf, np.inf),
-    constraints: Sequence | Mapping | None = None,
-    loss: str | Callable = "sse",
-    f_scale: float = 1.0,
-    jac: Callable | str | None = None,
-    alpha: float = 0.05,
-    sensitivity: bool = False,
-    options: Mapping[str, Any] | None = None,
-) -> CurveFitResult:
-    """Fit ``f(x, *params)`` to ``(xdata, ydata)`` using pounce.
+@dataclass
+class _FitProblem:
+    """Everything needed to run (and re-run) a pounce curve fit.
 
-    Parameters mirror :func:`scipy.optimize.curve_fit` where they overlap.
-    Extras: ``loss`` (smooth/robust loss family), ``constraints`` (general
-    relations between parameters), ``sensitivity`` (compute ``dpopt/ddata``),
-    and ``alpha`` (confidence level for the returned intervals).
-
-    ``p0`` is optional: when omitted, the number of parameters is read from the
-    signature of ``f`` and the starting point is chosen data-drivenly (a
-    bound-aware, data-scale sweep scored by the objective; see
-    :func:`_initial_guess`) rather than defaulting to ones.
-
-    Returns
-    -------
-    CurveFitResult
+    Built once by :func:`_build_fit_problem` and consumed by :func:`_solve_fit`,
+    so :func:`curve_fit` and :func:`curve_fit_minima` share an *identical*
+    objective, weighting, robust loss, and resolved Jacobian — the latter just
+    drives the same setup from many starting points.
     """
+
+    f: Callable
+    model: Callable
+    model_jac: Callable
+    residual: Callable
+    objective: Callable
+    gradient: Callable
+    gn_hessian: Callable
+    loss_fn: Callable
+    loss_name: str
+    is_robust: bool
+    fs2: float
+    w: np.ndarray
+    sigma: np.ndarray | None
+    lb: np.ndarray | None
+    ub: np.ndarray | None
+    n: int
+    param_names: list[str] | None
+    m_con: int
+    g_combined: Callable | None
+    jac_combined: Callable | None
+    cl: np.ndarray | None
+    cu: np.ndarray | None
+    jac_exact: bool
+    xdata: np.ndarray
+    ydata: np.ndarray
+    m_data: int
+    x0: np.ndarray
+    bounds: Any
+    constraints: Any
+
+
+def _build_fit_problem(
+    f, xdata, ydata, p0, sigma, bounds, constraints, loss, f_scale, jac
+) -> _FitProblem:
+    """Assemble the model, weights, loss, Jacobian, objective/gradient/Hessian,
+    bounds, and constraints for a curve fit — without solving. ``x0`` is the
+    starting seed (the user's ``p0`` or the data-driven default)."""
     xdata = _to_array(xdata)
     ydata = _to_array(ydata).ravel()
     m_data = ydata.size
@@ -406,11 +420,12 @@ def curve_fit(
     # --- weights -------------------------------------------------------
     if sigma is None:
         w = np.ones(m_data)
+        sigma_arr = None
     else:
-        sigma = _to_array(sigma).ravel()
-        if sigma.shape != (m_data,):
+        sigma_arr = _to_array(sigma).ravel()
+        if sigma_arr.shape != (m_data,):
             raise ValueError("sigma must be a 1-D array matching ydata")
-        w = 1.0 / sigma  # residual weight 1/sigma
+        w = 1.0 / sigma_arr  # residual weight 1/sigma
 
     # --- loss ----------------------------------------------------------
     if callable(loss):
@@ -434,7 +449,7 @@ def curve_fit(
     if auto_p0:
         p0 = _initial_guess(model, xdata, ydata, w, lb, ub, n, loss_fn, fs2)
 
-    model_jac, jac_exact, jac_kind = _resolve_model_jac(f, model, jac, xdata, p0)
+    model_jac, jac_exact, _ = _resolve_model_jac(f, model, jac, xdata, p0)
 
     # weighted residual and its building blocks
     def residual(p):
@@ -471,16 +486,37 @@ def curve_fit(
         Jw = J * (w[:, None])
         return (Jw.T * weight) @ Jw
 
-    # --- build pounce Problem object -----------------------------------
     m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
 
+    return _FitProblem(
+        f=f, model=model, model_jac=model_jac, residual=residual,
+        objective=objective, gradient=gradient, gn_hessian=gn_hessian,
+        loss_fn=loss_fn, loss_name=loss_name, is_robust=is_robust, fs2=fs2,
+        w=w, sigma=sigma_arr, lb=lb, ub=ub, n=n, param_names=param_names,
+        m_con=m_con, g_combined=g_combined, jac_combined=jac_combined,
+        cl=cl, cu=cu, jac_exact=jac_exact, xdata=xdata, ydata=ydata,
+        m_data=m_data, x0=np.asarray(p0, dtype=float),
+        bounds=bounds, constraints=constraints,
+    )
+
+
+def _solve_fit(
+    prob: _FitProblem, p0, *, absolute_sigma, alpha, sensitivity, options
+) -> CurveFitResult:
+    """Run one pounce solve from ``p0`` against a built ``_FitProblem`` and
+    assemble the full :class:`CurveFitResult` (covariance, CIs, sensitivity)."""
+    pr = prob
     problem_obj = _make_problem_obj(
-        objective, gradient, gn_hessian, n, m_con, g_combined, jac_combined
+        pr.objective, pr.gradient, pr.gn_hessian, pr.n, pr.m_con,
+        pr.g_combined, pr.jac_combined,
     )
 
     from ._pounce import Problem
 
-    problem = Problem(n=n, m=m_con, problem_obj=problem_obj, lb=lb, ub=ub, cl=cl, cu=cu)
+    problem = Problem(
+        n=pr.n, m=pr.m_con, problem_obj=problem_obj,
+        lb=pr.lb, ub=pr.ub, cl=pr.cl, cu=pr.cu,
+    )
     problem.add_option("print_level", 0)
     problem.add_option("sb", "yes")
     # With exact derivatives (analytic/JAX) the IPM converges cleanly with no
@@ -489,14 +525,14 @@ def curve_fit(
     # finite-difference fallback we leave scaling on for convergence robustness
     # (and read covariance from the scaling-independent Jacobian instead).
     user_opts = dict(options or {})
-    if jac_exact and "nlp_scaling_method" not in user_opts:
+    if pr.jac_exact and "nlp_scaling_method" not in user_opts:
         problem.add_option("nlp_scaling_method", "none")
     for k, v in user_opts.items():
         problem.add_option(k, v)
-    scaling_off = jac_exact and user_opts.get("nlp_scaling_method", "none") == "none"
+    scaling_off = pr.jac_exact and user_opts.get("nlp_scaling_method", "none") == "none"
 
     solver = Solver(problem)
-    popt, info = solver.solve(x0=p0)
+    popt, info = solver.solve(x0=np.asarray(p0, dtype=float))
     popt = np.asarray(popt)
     success = int(info["status"]) == 0
     # The converged factor is only trustworthy as an *unscaled* Hessian when
@@ -504,27 +540,27 @@ def curve_fit(
     factor_ok = bool(scaling_off and solver.converged)
 
     # --- residual diagnostics (unweighted, for reporting) --------------
-    yhat = model(xdata, popt)
-    resid = ydata - yhat
-    rw = residual(popt)  # weighted
+    yhat = pr.model(pr.xdata, popt)
+    resid = pr.ydata - yhat
+    rw = pr.residual(popt)  # weighted
     sse = float(resid @ resid)
     chi2 = float(rw @ rw)
-    dof = max(m_data - n, 1)
+    dof = max(pr.m_data - pr.n, 1)
     reduced_chi2 = chi2 / dof
-    rmse = math.sqrt(sse / m_data)
+    rmse = math.sqrt(sse / pr.m_data)
     mae = float(np.mean(np.abs(resid)))
-    ss_tot = float(np.sum((ydata - ydata.mean()) ** 2))
+    ss_tot = float(np.sum((pr.ydata - pr.ydata.mean()) ** 2))
     r2 = 1.0 - sse / ss_tot if ss_tot > 0 else float("nan")
-    adj_r2 = 1.0 - (1.0 - r2) * (m_data - 1) / dof if ss_tot > 0 else float("nan")
+    adj_r2 = 1.0 - (1.0 - r2) * (pr.m_data - 1) / dof if ss_tot > 0 else float("nan")
 
     # scale factor s^2 (scipy's absolute_sigma rule)
     s2 = 1.0 if absolute_sigma else reduced_chi2
 
     # --- covariance ----------------------------------------------------
-    active_mask = _active_bounds(popt, lb, ub, info)
+    active_mask = _active_bounds(popt, pr.lb, pr.ub, info)
     pcov, cov_source = _covariance(
-        solver, popt, model_jac, xdata, w, s2, is_robust,
-        residual, loss_fn, fs2, active_mask, n, m_con, factor_ok,
+        solver, popt, pr.model_jac, pr.xdata, pr.w, s2, pr.is_robust,
+        pr.residual, pr.loss_fn, pr.fs2, active_mask, pr.n, pr.m_con, factor_ok,
     )
     perr = np.sqrt(np.clip(np.diag(pcov), 0.0, None))
     tval = _t_ppf(1.0 - alpha / 2.0, dof)
@@ -533,7 +569,9 @@ def curve_fit(
     # --- sensitivity dpopt/ddata --------------------------------------
     dpopt = None
     if sensitivity:
-        dpopt = _data_sensitivity(solver, model_jac, xdata, w, m_con, popt, factor_ok)
+        dpopt = _data_sensitivity(
+            solver, pr.model_jac, pr.xdata, pr.w, pr.m_con, popt, factor_ok
+        )
 
     return CurveFitResult(
         popt=popt,
@@ -549,25 +587,200 @@ def curve_fit(
         chi_square=chi2,
         reduced_chi_square=reduced_chi2,
         dof=dof,
-        n_data=m_data,
-        n_params=n,
+        n_data=pr.m_data,
+        n_params=pr.n,
         alpha=alpha,
-        loss=loss_name,
+        loss=pr.loss_name,
         success=success,
         status=int(info["status"]),
         message=str(info["status_msg"]),
         nit=int(info["iter_count"]),
         cov_source=cov_source,
         optimize_result=info,
-        param_names=param_names,
+        param_names=pr.param_names,
         active_mask=active_mask,
         dpopt_ddata=dpopt,
-        _model=model,
-        _model_jac=model_jac,
+        _model=pr.model,
+        _model_jac=pr.model_jac,
         _s2=s2,
-        _sigma=(None if sigma is None else _to_array(sigma).ravel()),
-        _xdata=xdata,
+        _sigma=pr.sigma,
+        _xdata=pr.xdata,
     )
+
+
+def _minima_bounds(bounds, n):
+    """Translate curve_fit-style ``bounds`` into the per-parameter ``(lo, hi)``
+    list :func:`find_minima` expects, mapping infinite limits to ``None``
+    (unbounded) so a fully finite box is recognised as a sampling box."""
+    pairs = _normalize_bound_arg(bounds, n)
+    if pairs is None:
+        return None
+    out = []
+    for bd in pairs:
+        if bd is None:
+            out.append(None)
+            continue
+        lo, hi = bd
+        lo = None if (lo is None or not np.isfinite(lo)) else float(lo)
+        hi = None if (hi is None or not np.isfinite(hi)) else float(hi)
+        out.append((lo, hi))
+    return out
+
+
+def curve_fit(
+    f: Callable,
+    xdata,
+    ydata,
+    p0=None,
+    *,
+    sigma=None,
+    absolute_sigma: bool = False,
+    bounds: Sequence | tuple = (-np.inf, np.inf),
+    constraints: Sequence | Mapping | None = None,
+    loss: str | Callable = "sse",
+    f_scale: float = 1.0,
+    jac: Callable | str | None = None,
+    alpha: float = 0.05,
+    sensitivity: bool = False,
+    options: Mapping[str, Any] | None = None,
+) -> CurveFitResult:
+    """Fit ``f(x, *params)`` to ``(xdata, ydata)`` using pounce.
+
+    Parameters mirror :func:`scipy.optimize.curve_fit` where they overlap.
+    Extras: ``loss`` (smooth/robust loss family), ``constraints`` (general
+    relations between parameters), ``sensitivity`` (compute ``dpopt/ddata``),
+    and ``alpha`` (confidence level for the returned intervals).
+
+    ``p0`` is optional: when omitted, the number of parameters is read from the
+    signature of ``f`` and the starting point is chosen data-drivenly (a
+    bound-aware, data-scale sweep scored by the objective; see
+    :func:`_initial_guess`) rather than defaulting to ones.
+
+    Returns
+    -------
+    CurveFitResult
+    """
+    prob = _build_fit_problem(
+        f, xdata, ydata, p0, sigma, bounds, constraints, loss, f_scale, jac
+    )
+    return _solve_fit(
+        prob, prob.x0,
+        absolute_sigma=absolute_sigma, alpha=alpha,
+        sensitivity=sensitivity, options=options,
+    )
+
+
+def curve_fit_minima(
+    f: Callable,
+    xdata,
+    ydata,
+    p0=None,
+    *,
+    sigma=None,
+    absolute_sigma: bool = False,
+    bounds: Sequence | tuple = (-np.inf, np.inf),
+    constraints: Sequence | Mapping | None = None,
+    loss: str | Callable = "sse",
+    f_scale: float = 1.0,
+    jac: Callable | str | None = None,
+    alpha: float = 0.05,
+    sensitivity: bool = False,
+    options: Mapping[str, Any] | None = None,
+    method: str = "multistart",
+    n_minima: int = 10,
+    max_solves: int | None = None,
+    patience: int = 8,
+    dedup: float = 1e-4,
+    seed: int | None = None,
+    find_minima_kw: Mapping[str, Any] | None = None,
+) -> list[CurveFitResult]:
+    """Find **multiple** parameter sets that fit ``f`` to ``(xdata, ydata)``.
+
+    Nonlinear least squares is generally non-convex, so the objective
+    :func:`curve_fit` minimizes can have several local minima — distinct
+    parameter sets that each explain the data (peak-assignment ambiguity,
+    frequency aliasing in sinusoids, amplitude/decay trade-offs in sums of
+    exponentials, sign/label symmetry, …). This drives
+    :func:`pounce.find_minima` over *exactly* that objective — the same
+    weighting (``sigma``), robust ``loss``, ``f_scale``, ``constraints``, and
+    resolved Jacobian as :func:`curve_fit` — to enumerate the distinct minima,
+    then refines each into a full :class:`CurveFitResult` (covariance,
+    confidence intervals, optional ``dpopt/ddata``).
+
+    The model Jacobian is reused as the search **gradient** and the
+    Gauss-Newton matrix as the search **Hessian**, which both sharpens the
+    basin escapes and lets ``find_minima`` certify each point as a true minimum
+    (rejecting saddles) before recording it.
+
+    Finite ``bounds`` are strongly recommended: they define the box that
+    ``find_minima`` samples / repels within. With the default unbounded box the
+    search degrades to jittered restarts around the (data-driven) seed.
+
+    Parameters
+    ----------
+    f, xdata, ydata, p0, sigma, absolute_sigma, bounds, constraints, loss, \
+f_scale, jac, alpha, sensitivity, options
+        As in :func:`curve_fit`. ``p0`` (or the data-driven default) is used as
+        the search's initial point.
+    method, n_minima, max_solves, patience, dedup, seed
+        Forwarded to :func:`pounce.find_minima` — the enumeration strategy
+        (``"multistart"`` | ``"deflation"`` | ``"flooding"`` | ``"tunneling"``
+        | ``"mlsl"`` | ``"basinhopping"``), the target count, the solve budget,
+        the give-up patience, the de-duplication distance, and the RNG seed.
+    find_minima_kw
+        Extra keyword arguments forwarded to :func:`find_minima` (e.g.
+        ``strategy_kw`` for per-method knobs, ``psd_tol``, ``distance``).
+
+    Returns
+    -------
+    list[CurveFitResult]
+        One fully-populated result per distinct parameter set, ranked by SSE
+        (best first). May be empty if no minimum was found, and may contain
+        fewer than ``n_minima`` entries when the landscape has fewer minima.
+
+    See Also
+    --------
+    curve_fit : single fit from one starting point.
+    pounce.find_minima : the underlying multi-minimum search.
+    """
+    from ._minima import find_minima
+
+    prob = _build_fit_problem(
+        f, xdata, ydata, p0, sigma, bounds, constraints, loss, f_scale, jac
+    )
+
+    # Keep the inner local solves quiet by default; the user's options win.
+    search_options = {"print_level": 0, "sb": "yes"}
+    search_options.update(options or {})
+
+    res = find_minima(
+        prob.objective, prob.x0,
+        method=method,
+        jac=prob.gradient,
+        hess=prob.gn_hessian,
+        bounds=_minima_bounds(prob.bounds, prob.n),
+        constraints=prob.constraints,
+        n_minima=n_minima,
+        max_solves=max_solves,
+        patience=patience,
+        dedup=dedup,
+        seed=seed,
+        options=search_options,
+        **dict(find_minima_kw or {}),
+    )
+
+    # Refine every distinct minimum into a full CurveFitResult, then rank by
+    # goodness of fit so the best explanation comes first.
+    fits = [
+        _solve_fit(
+            prob, p,
+            absolute_sigma=absolute_sigma, alpha=alpha,
+            sensitivity=sensitivity, options=options,
+        )
+        for p in res.minima
+    ]
+    fits.sort(key=lambda r: r.sse)
+    return fits
 
 
 # --------------------------------------------------------------------------

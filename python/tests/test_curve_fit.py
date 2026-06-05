@@ -313,3 +313,55 @@ def test_initial_guess_never_worse_than_ones():
         return float(r @ r)
 
     assert sse(seed) <= sse(np.ones(n))
+
+
+# --------------------------------------------------------------------------
+# curve_fit_minima: multiple parameter sets via find_minima
+# --------------------------------------------------------------------------
+
+def _gauss_np(x, a, mu, sig):
+    return a * np.exp(-(x - mu) ** 2 / (2.0 * sig ** 2))
+
+
+def test_curve_fit_minima_finds_multiple_parameter_sets():
+    # A single Gaussian fit to a two-peak signal: with sigma constrained so no
+    # one Gaussian can straddle both peaks, the LS surface has two minima --
+    # "sit on the left peak" vs "sit on the right peak".
+    rng = np.random.default_rng(0)
+    x = np.linspace(-10, 10, 200)
+    y = _gauss_np(x, 1.0, -4.0, 1.0) + _gauss_np(x, 0.7, 4.0, 1.5)
+    y = y + rng.normal(0, 0.01, x.size)
+    bounds = [(0.0, 3.0), (-10.0, 10.0), (0.1, 2.5)]
+
+    fits = pounce.curve_fit_minima(
+        _gauss_np, x, y, bounds=bounds, jac="fd",
+        method="multistart", n_minima=4, seed=3,
+    )
+    # at least the two genuine basins
+    assert len(fits) >= 2
+    # every entry is a fully-formed result, ranked best-SSE-first
+    assert all(isinstance(r, pounce.CurveFitResult) for r in fits)
+    assert all(fits[i].sse <= fits[i + 1].sse for i in range(len(fits) - 1))
+    # the recovered centers include both peaks
+    centers = sorted(round(float(r.popt[1])) for r in fits)
+    assert -4 in centers and 4 in centers
+    # results carry the usual machinery
+    assert fits[0].pcov.shape == (3, 3)
+    assert fits[0].ci.shape == (3, 2)
+
+
+def test_curve_fit_minima_single_basin_matches_curve_fit():
+    # A line has one minimum; curve_fit_minima should return a single result
+    # equal to plain curve_fit.
+    rng = np.random.default_rng(5)
+    x = np.linspace(0.0, 5.0, 40)
+    y = 2.0 * x + 1.0 + rng.normal(0, 0.02, x.size)
+    bounds = [(-5.0, 5.0), (-5.0, 5.0)]
+
+    single = pounce.curve_fit(line_j, x, y, p0=[0.0, 0.0], bounds=bounds, jac="fd")
+    multi = pounce.curve_fit_minima(
+        line_j, x, y, bounds=bounds, jac="fd", method="multistart",
+        n_minima=3, seed=1,
+    )
+    assert len(multi) == 1
+    np.testing.assert_allclose(multi[0].popt, single.popt, atol=1e-4)
