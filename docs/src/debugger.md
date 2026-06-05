@@ -1084,10 +1084,15 @@ A complete minimal transcript (→ sent, ← received), eliding long lines:
 ←  {"event":"terminated","status":"SolveSucceeded","iterations":21,…}
 ```
 
-If you are wired in through the **pounce-studio MCP server**, call its
-`debug_session_guide` tool for this same contract plus a ready-to-run
-launch snippet. The MCP analysis tools (`diagnose`, `find_stalls`, …) are
-*post-mortem* over a finished report; `--debug-json` is the *live* loop.
+If you are wired in through the **pounce-studio MCP server**, you don't
+even spawn the CLI yourself: call `debug_start` to open a live session and
+`debug_command` to step it (`debug_state` / `debug_sessions` /
+`debug_close` round it out) — the server owns the child process and the
+framing, and `debug_start` hands you the same `hello` handshake. Call
+`debug_session_guide` for the contract and a launch snippet if you'd
+rather drive `--debug-json` directly. The MCP analysis tools (`diagnose`,
+`find_stalls`, …) are *post-mortem* over a finished report; the
+`debug_*` tools and `--debug-json` are the *live* loop.
 
 ### Session lifecycle
 

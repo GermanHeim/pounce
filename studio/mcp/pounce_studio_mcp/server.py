@@ -1,19 +1,33 @@
 """MCP server exposing pounce solve reports as Claude-callable tools.
 
-Spike scope: post-mortem analysis of `pounce.solve-report/v1` JSON files,
-plus a `run_problem` batch tool that shells out to the `pounce` CLI to
-produce a fresh report. No state held between calls; every tool takes a
-file path. Live streaming is out of scope for this server; for a live,
-steppable solve, drive the CLI's `pounce --debug-json` protocol — the
-`debug_session_guide` tool returns that contract and a launch snippet.
+Two families of tools:
+
+  * **Post-mortem** (the majority) — stateless analysis of a finished
+    `pounce.solve-report/v1` JSON file, plus `run_problem`/`run_gams_problem`
+    batch tools that shell out to produce a fresh report. Every such tool
+    takes a file path and holds no state between calls.
+
+  * **Live debug sessions** (`debug_start` / `debug_command` / `debug_state`
+    / `debug_sessions` / `debug_close`) — a stateful proxy over the CLI's
+    `pounce --debug-json` protocol. `debug_start` spawns a long-lived solver
+    child and parks it; `debug_command` steps it one command at a time. This
+    lets an agent drive a *live*, steppable interior-point solve over MCP.
+    `debug_session_guide` documents the underlying wire protocol (for callers
+    who'd rather drive the CLI directly).
 """
 from __future__ import annotations
 
+import atexit
+import itertools
+import json
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -610,15 +624,30 @@ def debug_session_guide() -> dict[str, Any]:
     parameter, set conditional/event breakpoints, rewind, re-solve — the
     `pounce` CLI speaks a self-describing newline-delimited JSON protocol.
 
+    Two ways to use it from here:
+      * **Through this server (recommended):** call `debug_start` to spawn
+        and park a session, then `debug_command` to step it. The server
+        manages the child process and the wire protocol for you.
+      * **Driving the CLI yourself:** spawn `pounce --debug-json` with
+        piped stdio and speak the protocol below directly.
+
     This tool needs no arguments; it returns the contract plus a
-    ready-to-run launch snippet so an agent can start a session directly.
+    ready-to-run launch snippet either way.
 
     Returns:
-        Dict with `launch`, `protocol`, `contract` (the step-by-step
-        loop), `metrics` (the scalar field names carried by every event),
-        and `docs` (path to the full spec).
+        Dict with `proxy_tools` (the in-server path), `launch`, `protocol`,
+        `contract` (the step-by-step loop), `metrics` (the scalar field
+        names carried by every event), and `docs` (path to the full spec).
     """
     return {
+        "proxy_tools": {
+            "start": "debug_start(builtin=… | nl_file=…) → {session_id, hello, pause}",
+            "step": "debug_command(session_id, cmd=…, args=[…]) → {result, state, …}",
+            "inspect": "debug_state(session_id); debug_sessions()",
+            "close": "debug_close(session_id)",
+            "note": "Prefer these over spawning the CLI yourself; the server "
+            "owns the child process and the framing.",
+        },
         "launch": "pounce <model.nl> --debug-json   "
         "# or: pounce --problem rosenbrock --debug-json",
         "transport": "Spawn the CLI with stdin and stdout piped. Read one "
@@ -650,6 +679,555 @@ def debug_session_guide() -> dict[str, Any]:
             "complementarity",
         ],
         "docs": "docs/src/debugger.md",
+    }
+
+
+# ---- live debug session proxy (--debug-json) ------------------------
+#
+# Unlike every other tool here, the debug_* tools hold STATE between
+# calls. `debug_start` spawns a long-lived `pounce --debug-json` child and
+# parks it in `_SESSIONS` under an opaque id; `debug_command` writes one
+# command to that child's stdin and reads its response events back off
+# stdout, so an agent can step a *live* interior-point solve over MCP.
+# `debug_close` (or process exit) reaps the child.
+#
+# Event model (verified against the CLI):
+#   * Every command emits one `result` echoing the request `id`.
+#   * "Flow" verbs (continue/step/run/resolve/sweep/multistart/quit/…)
+#     then stream `progress` events and end at a `pause`; at solve end the
+#     stop is a `pause` with checkpoint "terminated" followed by a
+#     `terminated` event.
+#   * Every other verb (print/info/break/set/diagnose/goto/…) emits only
+#     the `result` and parks back at the prompt.
+
+_SESSIONS: dict[str, "_DebugSession"] = {}
+_SESSIONS_LOCK = threading.Lock()
+_MAX_SESSIONS = 8
+
+# Verbs that resume the solver and therefore stream events until the next
+# stop. Keyed on the command's first whitespace token.
+_FLOW_VERBS = frozenset({
+    "continue", "c", "step", "s", "n", "stepi", "si", "run", "r",
+    "detach", "resolve", "sweep", "multistart", "quit", "q", "exit",
+})
+
+_STARTUP_TIMEOUT = 30.0   # seconds to see hello + the first pause
+_PAUSE_GRACE = 30.0       # after an in-band pause, seconds to reach a checkpoint
+
+
+class _DebugSession:
+    """One live `pounce --debug-json` child, driven one command at a time.
+
+    A daemon thread drains the child's stdout into a queue (so we never
+    fight Python's read-ahead buffering with select); `command` writes to
+    stdin and pulls the response back off the queue under a per-session
+    lock.
+    """
+
+    def __init__(self, sid: str, proc: subprocess.Popen, stderr_path: str,
+                 stderr_fh: Any, argv: list[str], label: str) -> None:
+        self.id = sid
+        self.proc = proc
+        self.stderr_path = stderr_path
+        self._stderr_fh = stderr_fh
+        self.argv = argv
+        self.label = label
+        self.hello: dict[str, Any] | None = None
+        self.last_pause: dict[str, Any] | None = None
+        self.terminated: dict[str, Any] | None = None
+        self.finished = False  # parked at the `terminated` checkpoint
+        self.n_commands = 0
+        self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+        self._q: queue.Queue = queue.Queue()
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    # --- low-level io ---------------------------------------------------
+
+    def _pump(self) -> None:
+        """Drain stdout → queue, parsing each line as JSON. Daemon thread."""
+        try:
+            for raw in self.proc.stdout:  # type: ignore[union-attr]
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    self._q.put(("event", json.loads(raw)))
+                except json.JSONDecodeError:
+                    self._q.put(("noise", raw))
+        finally:
+            self._q.put(("eof", None))
+
+    def _read(self, timeout: float) -> tuple[str, Any]:
+        try:
+            return self._q.get(timeout=max(timeout, 0.0))
+        except queue.Empty:
+            return ("timeout", None)
+
+    def _send(self, obj: dict[str, Any]) -> None:
+        self.proc.stdin.write(json.dumps(obj) + "\n")  # type: ignore[union-attr]
+        self.proc.stdin.flush()  # type: ignore[union-attr]
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def stderr_tail(self, n: int = 2000) -> str:
+        try:
+            data = Path(self.stderr_path).read_text(errors="replace")
+        except OSError:
+            return ""
+        return data if len(data) <= n else "...\n" + data[-n:]
+
+    # --- handshake ------------------------------------------------------
+
+    def read_startup(self, timeout: float) -> None:
+        """Block until both `hello` and the initial `pause` arrive."""
+        deadline = time.monotonic() + timeout
+        while self.hello is None or self.last_pause is None:
+            kind, ev = self._read(deadline - time.monotonic())
+            if kind == "timeout":
+                raise TimeoutError(
+                    "pounce --debug-json did not emit hello+pause within "
+                    f"{timeout}s. stderr tail:\n{self.stderr_tail()}"
+                )
+            if kind == "eof":
+                raise RuntimeError(
+                    "pounce --debug-json exited before the handshake "
+                    f"(exit {self.proc.poll()}). stderr tail:\n{self.stderr_tail()}"
+                )
+            if kind != "event":
+                continue
+            e = ev.get("event")
+            if e == "hello":
+                self.hello = ev
+            elif e == "pause":
+                self.last_pause = ev
+            elif e == "terminated":
+                self.terminated = ev
+                return
+
+    # --- command --------------------------------------------------------
+
+    def command(self, cmd: str, args: list[str] | None,
+                timeout: float) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+        """Send one command; return (result, streamed_events, outcome)."""
+        with self._lock:
+            if self.terminated is not None:
+                raise RuntimeError(
+                    f"session {self.id} already terminated "
+                    f"({self.terminated.get('status')}); start a new one."
+                )
+            if not self.alive():
+                raise RuntimeError(
+                    f"session {self.id} process is dead (exit "
+                    f"{self.proc.poll()}). stderr tail:\n{self.stderr_tail()}"
+                )
+
+            rid = next(self._ids)
+            verb = (cmd.split()[0] if cmd.strip() else "").lower()
+            payload: dict[str, Any] = {"cmd": cmd, "id": rid}
+            if args:
+                payload["args"] = [str(a) for a in args]
+            self._send(payload)
+            self.n_commands += 1
+
+            # 1) read up to the matching result; stash any stray events.
+            result: dict[str, Any] | None = None
+            pre: list[dict[str, Any]] = []
+            r_deadline = time.monotonic() + timeout
+            while result is None:
+                kind, ev = self._read(r_deadline - time.monotonic())
+                if kind == "timeout":
+                    raise TimeoutError(
+                        f"no `result` for command {cmd!r} within {timeout}s"
+                    )
+                if kind == "eof":
+                    raise RuntimeError(
+                        f"process exited awaiting result for {cmd!r}. "
+                        f"stderr tail:\n{self.stderr_tail()}"
+                    )
+                if kind != "event":
+                    continue
+                if ev.get("event") == "result" and ev.get("request_id") == rid:
+                    result = ev
+                    break
+                if ev.get("event") == "pause":
+                    self.last_pause = ev
+                elif ev.get("event") == "terminated":
+                    self.terminated = ev
+                pre.append(ev)
+
+            # 2) flow verbs stream until the next stop; others park now.
+            if verb in _FLOW_VERBS and self.terminated is None:
+                tail, outcome = self._drain(timeout)
+                return result, pre + tail, outcome
+            outcome = "terminated" if self.terminated is not None else "parked"
+            return result, pre, outcome
+
+    def _drain(self, timeout: float) -> tuple[list[dict[str, Any]], str]:
+        """Read streamed events until the next stop, with timeout recovery.
+
+        If the solve outruns `timeout`, send an in-band `pause` so it stops
+        at the next checkpoint rather than leaving the protocol mid-stream.
+        """
+        events: list[dict[str, Any]] = []
+        deadline = time.monotonic() + timeout
+        pause_sent = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if not pause_sent:
+                    try:
+                        self._send({"cmd": "pause"})
+                    except OSError:
+                        return events, "eof"
+                    pause_sent = True
+                    deadline = time.monotonic() + _PAUSE_GRACE
+                    continue
+                return events, "stuck"
+            kind, ev = self._read(remaining)
+            if kind == "timeout":
+                continue
+            if kind == "eof":
+                return events, "eof"
+            if kind != "event":
+                continue
+            events.append(ev)
+            e = ev.get("event")
+            if e == "terminated":
+                # The summary event: only fires once the solve is resumed
+                # *past* the terminal checkpoint (or stdin closes). Process
+                # is on its way out.
+                self.terminated = ev
+                self.finished = True
+                return events, "terminated"
+            if e == "pause":
+                self.last_pause = ev
+                if ev.get("checkpoint") == "terminated":
+                    # The terminal checkpoint is a real stop: the solve is
+                    # done (status is non-null) but parked here so the
+                    # final/failing iterate stays inspectable. The summary
+                    # `terminated` event only follows a resume past it.
+                    self.finished = True
+                    return events, "finished"
+                return events, "interrupted" if pause_sent else "paused"
+
+    # --- teardown -------------------------------------------------------
+
+    def close(self) -> int | None:
+        with self._lock:
+            if self.alive():
+                try:
+                    self._send({"cmd": "quit"})
+                except OSError:
+                    pass
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            for stream in (self.proc.stdin, self.proc.stdout):
+                try:
+                    stream.close()  # type: ignore[union-attr]
+                except OSError:
+                    pass
+            try:
+                self._stderr_fh.close()
+            except OSError:
+                pass
+            return self.proc.poll()
+
+
+def _spawn_session(argv: list[str], label: str) -> _DebugSession:
+    sid = uuid.uuid4().hex[:12]
+    fd, stderr_path = tempfile.mkstemp(suffix=".stderr", prefix="pounce-dbg-")
+    os.close(fd)
+    stderr_fh = open(stderr_path, "w")
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=stderr_fh, text=True, bufsize=1,
+    )
+    return _DebugSession(sid, proc, stderr_path, stderr_fh, argv, label)
+
+
+def _get_session(session_id: str) -> _DebugSession:
+    with _SESSIONS_LOCK:
+        sess = _SESSIONS.get(session_id)
+    if sess is None:
+        with _SESSIONS_LOCK:
+            active = sorted(_SESSIONS)
+        raise ValueError(
+            f"no such debug session {session_id!r}. Active: {active}. "
+            "Start one with debug_start."
+        )
+    return sess
+
+
+@atexit.register
+def _reap_sessions() -> None:
+    with _SESSIONS_LOCK:
+        sessions = list(_SESSIONS.values())
+        _SESSIONS.clear()
+    for s in sessions:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+@mcp.tool()
+def debug_start(
+    builtin: str | None = None,
+    nl_file: str | None = None,
+    options: dict[str, str] | None = None,
+    options_file: str | None = None,
+    setup: list[str] | None = None,
+    extra_args: list[str] | None = None,
+    label: str | None = None,
+    startup_timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Start a LIVE, steppable solve and hold it open across calls.
+
+    Spawns `pounce <model> --debug-json` and parks it at its first pause
+    (iteration 0). Returns a `session_id` you pass to `debug_command` to
+    step the solve, inspect/mutate the iterate, set breakpoints, re-solve,
+    etc. — the full interactive debugger, driven over MCP. Close it with
+    `debug_close` when done (sessions also reap at server shutdown).
+
+    This is the *live* counterpart to the post-mortem tools (`diagnose`,
+    `find_stalls`, …) which analyze a finished report. Feature-detect off
+    the returned `hello.commands` / `hello.capabilities`, not the version.
+
+    Exactly one of `builtin` or `nl_file` must be specified.
+
+    Args:
+        builtin: Built-in test problem (rosenbrock, quadratic,
+            bounded-quadratic, eq-quadratic, circle).
+        nl_file: Path to an AMPL .nl file. Mutually exclusive with builtin.
+        options: OptionsList key=value pairs forwarded to the solver
+            (e.g. {"mu_strategy": "adaptive"}).
+        options_file: Optional ipopt.opt-format file path.
+        setup: Debugger commands to run immediately after the first pause,
+            e.g. ["break if inf_pr<1e-6", "stop-at kkt"]. Each is a
+            non-resuming command; its result is returned under
+            `setup_results`.
+        extra_args: Escape hatch for raw CLI flags.
+        label: Friendly name for this session (shown in debug_sessions).
+        startup_timeout: Seconds to wait for the hello+pause handshake.
+
+    Returns:
+        Dict with `session_id`, `argv`, the self-describing `hello`
+        handshake, the initial `pause` state, and `setup_results`.
+    """
+    if (builtin is None) == (nl_file is None):
+        raise ValueError("specify exactly one of `builtin` or `nl_file`")
+
+    with _SESSIONS_LOCK:
+        live = sum(1 for s in _SESSIONS.values() if s.alive())
+    if live >= _MAX_SESSIONS:
+        raise RuntimeError(
+            f"too many live debug sessions ({live}/{_MAX_SESSIONS}); "
+            "close one with debug_close first."
+        )
+
+    binary = _find_pounce_bin()
+    argv: list[str] = [binary]
+    if nl_file:
+        nl = Path(nl_file).expanduser()
+        if not nl.exists():
+            raise FileNotFoundError(f"no such .nl file: {nl}")
+        argv.append(str(nl))
+    else:
+        argv.extend(["--problem", builtin])  # type: ignore[list-item]
+    argv.append("--debug-json")
+    if options_file:
+        argv.extend(["--options-file", str(Path(options_file).expanduser())])
+    if extra_args:
+        argv.extend(extra_args)
+    if options:
+        for k, v in options.items():
+            argv.append(f"{k}={v}")
+
+    sess = _spawn_session(argv, label or (nl_file or builtin or "session"))
+    try:
+        sess.read_startup(startup_timeout)
+    except (TimeoutError, RuntimeError):
+        sess.close()
+        raise
+
+    with _SESSIONS_LOCK:
+        _SESSIONS[sess.id] = sess
+
+    setup_results: list[dict[str, Any]] = []
+    if setup:
+        for c in setup:
+            res, _events, _outcome = sess.command(c, None, 30.0)
+            setup_results.append({
+                "command": c,
+                "ok": res.get("ok"),
+                "output": res.get("output"),
+            })
+
+    return {
+        "session_id": sess.id,
+        "argv": argv,
+        "hello": sess.hello,
+        "pause": sess.last_pause,
+        "setup_results": setup_results or None,
+        "note": (
+            "Drive with debug_command(session_id, cmd=…). Feature-detect "
+            "off hello.commands / hello.capabilities. Close with debug_close."
+        ),
+    }
+
+
+@mcp.tool()
+def debug_command(
+    session_id: str,
+    cmd: str,
+    args: list[str] | None = None,
+    timeout_seconds: float = 60.0,
+    max_progress: int = 5,
+) -> dict[str, Any]:
+    """Send ONE command to a live debug session and read its response.
+
+    `cmd` is any debugger verb from the session's `hello.commands` — a bare
+    string (`"continue"`, `"break if inf_pr<1e-6"`, `"diagnose"`) or a verb
+    plus `args` (`cmd="print", args=["x"]`). The full vocabulary is in the
+    `hello` handshake from `debug_start`; see `debug_session_guide` for the
+    protocol.
+
+    Resuming verbs (continue/step/run/resolve/sweep/multistart/…) run the
+    solver until the next stop and stream `progress` events along the way;
+    this call blocks until that stop. If the solve outruns
+    `timeout_seconds`, an in-band `pause` is sent so it halts cleanly at the
+    next checkpoint (`outcome="interrupted"`) rather than corrupting the
+    stream — raise the timeout or set a breakpoint to go further.
+
+    Args:
+        session_id: From debug_start.
+        cmd: Debugger command verb or full command string.
+        args: Optional argument tokens for the verb.
+        timeout_seconds: Max wait for a resuming command to reach a stop.
+        max_progress: How many trailing `progress` events to echo back
+            (they are summarized to a count + this many tail samples).
+
+    Outcomes:
+        parked       a non-resuming command ran; back at the prompt.
+        paused       a resuming command stopped at a breakpoint/checkpoint.
+        interrupted  the timeout fired; the solve was paused mid-run.
+        finished     reached the terminal checkpoint — the solve is done
+                     (`state.status` holds the verdict) but parked so the
+                     final iterate stays inspectable. Send `continue`/`quit`
+                     or `debug_close` to release it.
+        terminated   the summary `terminated` event fired; process exiting.
+        stuck / eof  the solve wouldn't pause, or the process exited.
+
+    Returns:
+        Dict with `ok`, the raw `result` event, the `outcome`, a `finished`
+        flag, the current `state` (latest pause snapshot, carrying the
+        scalar metrics and — at the terminal checkpoint — `status`),
+        `terminated` (the summary event once released), a `progress`
+        summary, and any other streamed `events`.
+    """
+    sess = _get_session(session_id)
+    result, events, outcome = sess.command(cmd, args, timeout_seconds)
+
+    progress = [e for e in events if e.get("event") == "progress"]
+    streamed = [e for e in events if e.get("event") != "progress"]
+
+    pretty = cmd if not args else f"{cmd} {' '.join(str(a) for a in args)}"
+    resp: dict[str, Any] = {
+        "session_id": session_id,
+        "command": pretty,
+        "ok": result.get("ok"),
+        "result": result,
+        "outcome": outcome,
+        "finished": sess.finished,
+        "state": sess.last_pause,
+        "terminated": sess.terminated,
+    }
+    if progress:
+        resp["progress"] = {
+            "count": len(progress),
+            "last": progress[-max_progress:] if max_progress > 0 else [],
+        }
+    if streamed:
+        resp["events"] = streamed
+    return resp
+
+
+@mcp.tool()
+def debug_state(session_id: str) -> dict[str, Any]:
+    """Cached state of a live debug session (no child I/O).
+
+    Returns the last pause snapshot, whether the solve has terminated, and
+    session metadata — cheap to call between `debug_command` steps.
+
+    Args:
+        session_id: From debug_start.
+    """
+    sess = _get_session(session_id)
+    return {
+        "session_id": session_id,
+        "label": sess.label,
+        "alive": sess.alive(),
+        "finished": sess.finished,
+        "n_commands": sess.n_commands,
+        "state": sess.last_pause,
+        "terminated": sess.terminated,
+        "argv": sess.argv,
+    }
+
+
+@mcp.tool()
+def debug_sessions() -> dict[str, Any]:
+    """List all live debug sessions held by this server.
+
+    Returns one row per session with its id, label, liveness, command
+    count, and current iteration — plus the per-server session cap.
+    """
+    with _SESSIONS_LOCK:
+        items = [
+            {
+                "session_id": s.id,
+                "label": s.label,
+                "alive": s.alive(),
+                "terminated": bool(s.terminated),
+                "n_commands": s.n_commands,
+                "iter": (s.last_pause or {}).get("iter"),
+            }
+            for s in _SESSIONS.values()
+        ]
+    return {"sessions": items, "count": len(items), "max_sessions": _MAX_SESSIONS}
+
+
+@mcp.tool()
+def debug_close(session_id: str) -> dict[str, Any]:
+    """Stop a live debug session and reap its process.
+
+    Sends `quit` if the solve is still running, waits for the child to
+    exit (killing it if it ignores quit), and drops the session from the
+    registry.
+
+    Args:
+        session_id: From debug_start.
+    """
+    with _SESSIONS_LOCK:
+        sess = _SESSIONS.pop(session_id, None)
+    if sess is None:
+        raise ValueError(f"no such session {session_id!r} (already closed?)")
+    exit_code = sess.close()
+    return {
+        "session_id": session_id,
+        "exit_code": exit_code,
+        "terminated": sess.terminated,
+        "final_status": (sess.terminated or sess.last_pause or {}).get("status"),
+        "stderr_tail": sess.stderr_tail(),
     }
 
 

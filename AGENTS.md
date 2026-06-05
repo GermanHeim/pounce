@@ -31,14 +31,21 @@ Full contract and a worked transcript: **`docs/src/debugger.md`**
 `--debug`, `--debug-on-error`, `--debug-on-interrupt`,
 `--debug-script <file>`.
 
-### pounce-studio MCP server (post-mortem)
+### pounce-studio MCP server
 
-`studio/mcp/` is a FastMCP server exposing solve reports as callable tools
-(`diagnose`, `find_stalls`, `restoration_windows`, `convergence_trace`,
-`compare_runs`, `run_problem`, …). These analyze a **finished**
-`pounce.solve-report/v1` JSON. For a **live** step-through, drive
-`--debug-json` (above); the MCP `debug_session_guide` tool returns that
-contract with a launch snippet.
+`studio/mcp/` is a FastMCP server with two tool families:
+
+- **Post-mortem** (`diagnose`, `find_stalls`, `restoration_windows`,
+  `convergence_trace`, `compare_runs`, `run_problem`, …) — analyze a
+  **finished** `pounce.solve-report/v1` JSON.
+- **Live debug sessions** (`debug_start`, `debug_command`, `debug_state`,
+  `debug_sessions`, `debug_close`) — a stateful proxy over `--debug-json`.
+  `debug_start` spawns and parks a solver child; `debug_command` steps it
+  one command at a time. This drives the live debugger over MCP without
+  the agent managing the child process or the wire framing.
+
+`debug_session_guide` documents the underlying protocol (for callers
+driving `--debug-json` directly instead of through the proxy).
 
 ## Repo conventions
 
