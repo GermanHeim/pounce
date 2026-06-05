@@ -13,7 +13,7 @@ from ._pounce import (
     Problem, Solver, NlProblem, read_nl, classify_working_set, __version__,
 )
 from ._minimize import minimize, OptimizeResult
-from ._curve_fit import curve_fit, CurveFitResult
+from ._curve_fit import curve_fit, curve_fit_minima, CurveFitResult
 from ._minima import find_minima, MinimaResult
 from ._critical import (
     find_critical_points, find_saddles, reaction_network,
@@ -28,6 +28,7 @@ __all__ = [
     "minimize",
     "OptimizeResult",
     "curve_fit",
+    "curve_fit_minima",
     "CurveFitResult",
     "find_minima",
     "MinimaResult",

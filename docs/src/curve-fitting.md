@@ -174,6 +174,45 @@ where you know the measurement noise.
 > will land. If "~95% of my points should be inside," you want the prediction
 > band.
 
+## Multiple parameter sets: `curve_fit_minima`
+
+Nonlinear least squares is generally non-convex, so the objective `curve_fit`
+minimizes can have **several local minima** — distinct parameter sets that each
+explain the data (peak-assignment ambiguity, frequency aliasing in sinusoids,
+amplitude/decay trade-offs in sums of exponentials, sign/label symmetry, …).
+`pounce.curve_fit_minima` drives [`find_minima`](find-minima.md) over *exactly*
+the same objective — same `sigma` weighting, robust `loss`, `f_scale`,
+`constraints`, and resolved Jacobian — to enumerate those minima, then refines
+each into a full `CurveFitResult`:
+
+```python
+fits = pounce.curve_fit_minima(
+    model, x, y,
+    bounds=[(0, 3), (-10, 10), (0.1, 2.5)],  # finite bounds = the search box
+    method="multistart",   # or "deflation" | "flooding" | "mlsl" | ...
+    n_minima=5,
+    seed=0,
+)
+
+for r in fits:               # ranked best (lowest SSE) first
+    print(r.popt, r.sse, r.r_squared)
+fits[0].summary()            # each is a full CurveFitResult
+```
+
+It reuses everything `curve_fit` does: the data-driven seed becomes the
+search's starting point, the model Jacobian is reused as the search **gradient**
+and the Gauss-Newton matrix as the search **Hessian** — which sharpens the basin
+escapes and lets `find_minima` certify each point as a true minimum (rejecting
+saddles) before recording it. The returned list is ranked by SSE and may contain
+fewer than `n_minima` entries when the landscape has fewer minima.
+
+> Finite `bounds` are strongly recommended — they define the box the search
+> samples / repels within. With the default unbounded box the search degrades to
+> jittered restarts around the seed. The `method`, `n_minima`, `max_solves`,
+> `patience`, `dedup`, and `seed` arguments pass straight through to
+> `find_minima`; see [Finding Multiple Minima](find-minima.md) and
+> [Choosing a Method](find-minima-choosing.md).
+
 See `python/examples/curve_fit_demo.py` and the
 [`18_curve_fit.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/18_curve_fit.ipynb)
 notebook for complete, runnable walkthroughs.

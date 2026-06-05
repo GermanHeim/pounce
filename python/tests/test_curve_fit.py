@@ -261,6 +261,107 @@ def test_p0_inferred_from_signature():
     rng = np.random.default_rng(19)
     x = np.linspace(0.2, 4, 30)
     y = expdecay_np(x, 3.0, 0.8, 0.5) + rng.normal(0, 0.05, x.size)
-    r = pounce.curve_fit(expdecay, x, y)  # no p0 -> inferred (a, b, c) = ones
+    r = pounce.curve_fit(expdecay, x, y)  # no p0 -> inferred (a, b, c)
     assert r.n_params == 3
     assert r.success
+    np.testing.assert_allclose(r.popt, [3.0, 0.8, 0.5], atol=0.1)
+
+
+def test_omitted_p0_data_driven_seed_handles_bad_scaling():
+    # True parameters are ~1e6: a flat ``ones`` seed is poorly scaled, but the
+    # data-driven default anchors candidates on the data magnitude.
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.0, 10.0, 60)
+    y = 2.0e6 * x - 5.0e5 + rng.normal(0, 1e3, x.size)
+    r = pounce.curve_fit(line_j, x, y)  # no p0
+    # The data-driven seed lets the solve recover the (badly scaled) truth.
+    np.testing.assert_allclose(r.popt, [2.0e6, -5.0e5], rtol=1e-3)
+
+
+def test_omitted_p0_seed_respects_bounds():
+    # With finite bounds and no p0, the seed must be inside the box and the fit
+    # must still succeed.
+    rng = np.random.default_rng(7)
+    x = np.linspace(0.0, 5.0, 40)
+    y = 2.0 * x + 1.0 + rng.normal(0, 0.02, x.size)
+    r = pounce.curve_fit(line_j, x, y, bounds=[(0.0, 5.0), (-1.0, 3.0)])
+    assert r.success
+    assert 0.0 <= r.popt[0] <= 5.0 and -1.0 <= r.popt[1] <= 3.0
+    np.testing.assert_allclose(r.popt, [2.0, 1.0], atol=0.1)
+
+
+def test_initial_guess_never_worse_than_ones():
+    # ``ones`` is always one of the scored candidates, so the chosen seed's
+    # objective can never exceed it.
+    from pounce._curve_fit import _initial_guess, _loss_sse
+
+    rng = np.random.default_rng(11)
+    x = np.linspace(0.0, 10.0, 50)
+    y = 1.0e6 * x + 2.0e6 + rng.normal(0, 1e2, x.size)
+
+    def model(xx, p):
+        return p[0] * xx + p[1]
+
+    n = 2
+    lo = np.full(n, -np.inf)
+    hi = np.full(n, np.inf)
+    w = np.ones(x.size)
+    seed = _initial_guess(model, x, y, w, lo, hi, n, _loss_sse, 1.0)
+
+    def sse(p):
+        r = model(x, p) - y
+        return float(r @ r)
+
+    assert sse(seed) <= sse(np.ones(n))
+
+
+# --------------------------------------------------------------------------
+# curve_fit_minima: multiple parameter sets via find_minima
+# --------------------------------------------------------------------------
+
+def _gauss_np(x, a, mu, sig):
+    return a * np.exp(-(x - mu) ** 2 / (2.0 * sig ** 2))
+
+
+def test_curve_fit_minima_finds_multiple_parameter_sets():
+    # A single Gaussian fit to a two-peak signal: with sigma constrained so no
+    # one Gaussian can straddle both peaks, the LS surface has two minima --
+    # "sit on the left peak" vs "sit on the right peak".
+    rng = np.random.default_rng(0)
+    x = np.linspace(-10, 10, 200)
+    y = _gauss_np(x, 1.0, -4.0, 1.0) + _gauss_np(x, 0.7, 4.0, 1.5)
+    y = y + rng.normal(0, 0.01, x.size)
+    bounds = [(0.0, 3.0), (-10.0, 10.0), (0.1, 2.5)]
+
+    fits = pounce.curve_fit_minima(
+        _gauss_np, x, y, bounds=bounds, jac="fd",
+        method="multistart", n_minima=4, seed=3,
+    )
+    # at least the two genuine basins
+    assert len(fits) >= 2
+    # every entry is a fully-formed result, ranked best-SSE-first
+    assert all(isinstance(r, pounce.CurveFitResult) for r in fits)
+    assert all(fits[i].sse <= fits[i + 1].sse for i in range(len(fits) - 1))
+    # the recovered centers include both peaks
+    centers = sorted(round(float(r.popt[1])) for r in fits)
+    assert -4 in centers and 4 in centers
+    # results carry the usual machinery
+    assert fits[0].pcov.shape == (3, 3)
+    assert fits[0].ci.shape == (3, 2)
+
+
+def test_curve_fit_minima_single_basin_matches_curve_fit():
+    # A line has one minimum; curve_fit_minima should return a single result
+    # equal to plain curve_fit.
+    rng = np.random.default_rng(5)
+    x = np.linspace(0.0, 5.0, 40)
+    y = 2.0 * x + 1.0 + rng.normal(0, 0.02, x.size)
+    bounds = [(-5.0, 5.0), (-5.0, 5.0)]
+
+    single = pounce.curve_fit(line_j, x, y, p0=[0.0, 0.0], bounds=bounds, jac="fd")
+    multi = pounce.curve_fit_minima(
+        line_j, x, y, bounds=bounds, jac="fd", method="multistart",
+        n_minima=3, seed=1,
+    )
+    assert len(multi) == 1
+    np.testing.assert_allclose(multi[0].popt, single.popt, atol=1e-4)

@@ -35,6 +35,21 @@ solve converge cleanly with scaling off, which is what makes the
 factor-based covariance and sensitivity exact. Docs:
 `docs/src/curve-fitting.md`; notebook `python/notebooks/18_curve_fit.ipynb`.
 
+`p0` is now optional even without bounds: when omitted, the parameter count is
+read from the model signature and the starting point is chosen data-drivenly
+(a bound-aware, data-scale candidate sweep scored by the objective) instead of
+defaulting to a flat vector of ones — so badly-scaled problems get a far better
+seed, while `ones` (clipped into the bounds) is always among the scored
+candidates so the choice is never worse than the old default.
+
+`curve_fit_minima` finds **multiple** parameter sets by driving
+`pounce.find_minima` over the very same fitting objective (same weighting,
+robust loss, constraints, and resolved Jacobian), reusing the model Jacobian as
+the search gradient and the Gauss-Newton matrix as the search Hessian. It
+returns a list of full `CurveFitResult`s, one per distinct local minimum,
+ranked by SSE — for surfacing alternative fits on non-convex problems
+(peak-assignment ambiguity, frequency aliasing, label symmetry, …).
+
 ### Added — `pounce verify` subcommand + signed receipts
 
 A `verify` subcommand that re-derives feasibility from the canonical `.nl`
