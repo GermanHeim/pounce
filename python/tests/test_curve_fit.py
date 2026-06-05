@@ -365,3 +365,90 @@ def test_curve_fit_minima_single_basin_matches_curve_fit():
     )
     assert len(multi) == 1
     np.testing.assert_allclose(multi[0].popt, single.popt, atol=1e-4)
+
+
+# --------------------------------------------------------------------------
+# Regression: scipy-free Student-t quantile fallback is accurate.
+# --------------------------------------------------------------------------
+
+def test_t_quantile_fallback_matches_scipy_for_small_dof():
+    """The scipy-free ``_t_ppf_fallback`` must match scipy across the whole
+    ``dof >= 1`` range. The previous normal-plus-Cornish-Fisher fallback was
+    ~66% too small at ``dof=1``, silently narrowing confidence intervals on a
+    numpy-only install (scipy is an optional dependency)."""
+    from scipy.stats import t as scit
+
+    from pounce._curve_fit import _t_ppf_fallback
+
+    for dof in (1, 2, 3, 4, 5, 8, 10, 30, 100, 1000):
+        for q in (0.6, 0.9, 0.95, 0.975, 0.99, 0.995):
+            approx = _t_ppf_fallback(q, dof)
+            exact = float(scit.ppf(q, dof))
+            assert abs(approx - exact) <= 1e-6 * abs(exact), (dof, q, approx, exact)
+    # symmetry about the median
+    assert _t_ppf_fallback(0.025, 7) == pytest.approx(-_t_ppf_fallback(0.975, 7))
+
+
+def test_curve_fit_ci_is_scipy_free_accurate(monkeypatch):
+    """End-to-end: hiding scipy must not change the reported confidence
+    intervals (regression for the over-narrow scipy-free CIs)."""
+    import builtins
+
+    rng = np.random.default_rng(11)
+    x = np.linspace(0, 2, 7)  # small sample -> dof=4, where the old bug bit
+    y = 2.5 * np.exp(-1.3 * x) + 0.5 + 0.05 * rng.standard_normal(x.size)
+
+    with_scipy = pounce.curve_fit(expdecay_np, x, y, p0=[2.0, 1.0, 0.0], jac="fd")
+
+    real_import = builtins.__import__
+
+    def no_scipy(name, *a, **k):
+        if name == "scipy" or name.startswith("scipy."):
+            raise ImportError("scipy hidden for test")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_scipy)
+    without_scipy = pounce.curve_fit(expdecay_np, x, y, p0=[2.0, 1.0, 0.0], jac="fd")
+
+    np.testing.assert_allclose(without_scipy.ci, with_scipy.ci, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------
+# Regression: degenerate degrees of freedom are reported honestly.
+# --------------------------------------------------------------------------
+
+def test_non_positive_dof_warns_and_reports_undefined_uncertainty():
+    """An exactly- or under-determined fit (n_data <= n_params) must report the
+    true (<= 0) dof, warn, and hand back non-finite covariance/CIs rather than
+    clamp dof to 1 and fabricate finite uncertainties."""
+    def f(x, a, b):
+        return a * np.exp(-b * x)
+
+    # n_data == n_params -> dof == 0
+    x = np.array([0.0, 1.0])
+    y = f(x, 2.5, 1.3)
+    with pytest.warns(UserWarning, match="degrees of freedom"):
+        r = pounce.curve_fit(f, x, y, p0=[2.0, 1.0], jac="fd")
+    assert r.dof == 0
+    assert not np.all(np.isfinite(r.perr))
+    assert not np.all(np.isfinite(r.ci))
+
+
+def test_huber_and_soft_l1_are_documented_aliases():
+    """``huber`` and ``soft_l1`` are intentionally the same smooth (C2)
+    pseudo-Huber loss — a true piecewise Huber is only C1, which the IPM can't
+    use. Pin the alias so the duplication stays deliberate and documented."""
+    from pounce._curve_fit import _LOSSES
+
+    assert _LOSSES["huber"] is _LOSSES["soft_l1"]
+
+    rng = np.random.default_rng(7)
+    x = np.linspace(0, 2, 30)
+    y = 2.5 * np.exp(-1.3 * x) + 0.03 * rng.standard_normal(x.size)
+
+    def f(x, a, b):
+        return a * np.exp(-b * x)
+
+    rh = pounce.curve_fit(f, x, y, p0=[2.0, 1.0], loss="huber", jac="fd")
+    rs = pounce.curve_fit(f, x, y, p0=[2.0, 1.0], loss="soft_l1", jac="fd")
+    np.testing.assert_array_equal(rh.popt, rs.popt)

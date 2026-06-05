@@ -16,10 +16,15 @@ interior-point solver, returning much more than `(popt, pcov)`:
 
 - parameter covariance, standard errors, and Student-t confidence intervals
   read pounce-natively from the converged factor's reduced Hessian
-  (`pcov = 2·s²·inv(H_S) = s²·(JᵀJ)⁻¹`; matches scipy / `pycse.nlinfit`);
+  (`pcov = 2·s²·inv(H_S) = s²·(JᵀJ)⁻¹`; matches scipy / `pycse.nlinfit`). The
+  t-quantiles use scipy when present and an accurate scipy-free inverse-t
+  (via the inverse regularized incomplete beta) otherwise, so the CIs are
+  correct on a numpy-only install even for small samples;
 - a smooth (C²) loss family — ordinary/weighted least squares plus robust
-  Huber / Cauchy / soft-L1 with a sandwich covariance estimator (non-smooth
-  L1/MAE is intentionally out of scope for the IPM);
+  Cauchy and a smooth pseudo-Huber, exposed under both `soft_l1` and `huber`
+  (the same C² loss: a true piecewise Huber is only C¹, which the IPM can't
+  use), with a sandwich covariance estimator (non-smooth L1/MAE is
+  intentionally out of scope for the IPM);
 - parameter constraints scipy can't express — positivity/negativity/ranges
   via `bounds`, and relations between parameters via `constraints=`; an active
   bound/constraint yields a covariance projected onto the free subspace;

@@ -55,8 +55,12 @@ def _loss_sse(z):
     return rho, rho1, rho2
 
 
-def _loss_huber(z):
-    # rho(z) = z if z<=1 else 2*sqrt(z)-1   (pseudo-Huber-ish, C1; smooth form below)
+def _loss_soft_l1(z):
+    # Pseudo-Huber / Charbonnier loss: rho(z) = 2*(sqrt(1+z) - 1). This is the
+    # canonical *smooth* (C2) Huber — quadratic for small residuals, linear in
+    # |r| for large ones. scipy.least_squares calls it `soft_l1`; statistics
+    # texts call it pseudo-Huber. `_LOSSES["huber"]` is a deliberate alias of
+    # this function (see below), NOT a separate loss.
     t = np.sqrt(1.0 + z)
     rho = 2.0 * (t - 1.0)
     rho1 = 1.0 / t
@@ -71,20 +75,17 @@ def _loss_cauchy(z):
     return rho, rho1, rho2
 
 
-def _loss_soft_l1(z):
-    t = np.sqrt(1.0 + z)
-    rho = 2.0 * (t - 1.0)
-    rho1 = 1.0 / t
-    rho2 = -0.5 / (t ** 3)
-    return rho, rho1, rho2
-
-
-# "huber" here uses the smooth pseudo-Huber so it stays C2 for the IPM.
+# `huber` and `soft_l1` map to the SAME function on purpose. scipy's true
+# `huber` loss (rho = z for z<=1, 2*sqrt(z)-1 otherwise) is only C1 — its second
+# derivative jumps at the knee — and this interior-point solver needs a
+# continuous Hessian, so we serve the smooth pseudo-Huber under both names
+# rather than ship a loss whose curvature is discontinuous. They are aliases;
+# fitting with `loss="huber"` and `loss="soft_l1"` is identical by design.
 _LOSSES: dict[str, Callable] = {
     "sse": _loss_sse,
     "linear": _loss_sse,
     "chi2": _loss_sse,
-    "huber": _loss_huber,
+    "huber": _loss_soft_l1,
     "cauchy": _loss_cauchy,
     "soft_l1": _loss_soft_l1,
 }
@@ -96,24 +97,137 @@ def _to_array(a, dtype=np.float64) -> np.ndarray:
     return np.asarray(a, dtype=dtype)
 
 
-def _t_ppf(q: float, dof: int) -> float:
-    """Student-t inverse CDF; uses scipy when available, else a normal
-    approximation with a Cornish-Fisher-style small-sample correction."""
+def _t_ppf(q: float, dof: float) -> float:
+    """Student-t inverse CDF (quantile). Uses scipy when available; otherwise an
+    accurate scipy-free fallback built on the inverse regularized incomplete
+    beta function (see :func:`_t_ppf_fallback`).
+
+    The old fallback was a normal quantile plus a one-term Cornish-Fisher
+    correction, which is badly inaccurate for small ``dof`` (the t-value at
+    ``dof=1`` was ~3x too small), silently producing over-narrow confidence
+    intervals on a numpy-only install (scipy is optional). The beta-inverse
+    fallback matches scipy to ~1e-6 over the whole ``dof >= 1`` range.
+    """
     try:
         from scipy.stats import t as _t
 
         return float(_t.ppf(q, dof))
     except Exception:
-        # Normal quantile via inverse erf, plus a light dof correction.
-        z = math.sqrt(2.0) * _erfinv(2.0 * q - 1.0)
-        if dof > 0:
-            g1 = (z ** 3 + z) / (4.0 * dof)
-            return z + g1
-        return z
+        return _t_ppf_fallback(q, dof)
+
+
+def _t_ppf_fallback(q: float, dof: float) -> float:
+    """Accurate scipy-free Student-t quantile via the inverse incomplete beta.
+
+    For ``T ~ t_nu`` and ``t >= 0``, ``P(|T| > t) = I_x(nu/2, 1/2)`` with
+    ``x = nu/(nu + t**2)``. Inverting that incomplete-beta relation gives the
+    quantile exactly (up to the bisection tolerance), with no small-``dof``
+    approximation error.
+    """
+    dof = float(dof)
+    if q <= 0.0:
+        return -math.inf
+    if q >= 1.0:
+        return math.inf
+    if q == 0.5:
+        return 0.0
+    if not math.isfinite(dof) or dof <= 0.0:
+        # No t-distribution to speak of; fall back to the normal quantile.
+        return _norm_ppf(q)
+    upper = q > 0.5
+    p = q if upper else 1.0 - q
+    tail = 2.0 * (1.0 - p)  # two-tailed P(|T| > t)
+    x = _betaincinv(0.5 * dof, 0.5, tail)
+    if x <= 0.0:
+        t = math.inf
+    else:
+        t = math.sqrt(dof * (1.0 - x) / x)
+    return t if upper else -t
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued-fraction core of the regularized incomplete beta (Lentz's
+    method; Numerical Recipes ``betacf``)."""
+    MAXIT = 300
+    EPS = 1e-15
+    FPMIN = 1e-300
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta ``I_x(a, b)`` (Numerical Recipes ``betai``)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    bt = math.exp(lbeta + a * math.log(x) + b * math.log(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _betaincinv(a: float, b: float, y: float) -> float:
+    """Inverse of :func:`_betainc` in ``x``: find ``x`` with ``I_x(a, b) = y``.
+
+    ``I_x`` is monotone increasing in ``x``, so plain bisection is robust and
+    converges to machine precision; this is called only O(n_params) times per
+    fit, so its cost is irrelevant next to the solve.
+    """
+    if y <= 0.0:
+        return 0.0
+    if y >= 1.0:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(120):
+        mid = 0.5 * (lo + hi)
+        if _betainc(a, b, mid) < y:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _norm_ppf(q: float) -> float:
+    """Standard-normal quantile (used only for the degenerate ``dof <= 0``
+    fallback, where no t-distribution is defined)."""
+    return math.sqrt(2.0) * _erfinv(2.0 * q - 1.0)
 
 
 def _erfinv(y: float) -> float:
-    # Winitzki approximation; adequate for CI quantiles.
+    # Winitzki approximation; adequate for the degenerate normal fallback.
     a = 0.147
     ln = math.log(1.0 - y * y)
     term = 2.0 / (math.pi * a) + ln / 2.0
@@ -548,15 +662,39 @@ def _solve_fit(
     rw = pr.residual(popt)  # weighted
     sse = float(resid @ resid)
     chi2 = float(rw @ rw)
-    dof = max(pr.m_data - pr.n, 1)
-    reduced_chi2 = chi2 / dof
+    # Honest degrees of freedom. When the fit is exactly- or under-determined
+    # (n_data <= n_params) there is no residual variance to estimate, so the
+    # reduced chi-square, covariance scale, and confidence intervals are not
+    # defined. Report the true (possibly <= 0) dof and let s^2 -> inf carry that
+    # through to inf standard errors / CIs, rather than silently clamping dof to
+    # 1 and handing back finite-but-meaningless uncertainties.
+    dof = pr.m_data - pr.n
+    if dof <= 0:
+        import warnings
+
+        warnings.warn(
+            f"pounce.curve_fit: non-positive degrees of freedom "
+            f"(n_data={pr.m_data} <= n_params={pr.n}); reduced chi-square, "
+            f"covariance, standard errors, and confidence intervals are not "
+            f"well-defined and should not be trusted (the relative-sigma "
+            f"covariance is reported as inf).",
+            stacklevel=2,
+        )
+        reduced_chi2 = float("inf")
+    else:
+        reduced_chi2 = chi2 / dof
     rmse = math.sqrt(sse / pr.m_data)
     mae = float(np.mean(np.abs(resid)))
     ss_tot = float(np.sum((pr.ydata - pr.ydata.mean()) ** 2))
     r2 = 1.0 - sse / ss_tot if ss_tot > 0 else float("nan")
-    adj_r2 = 1.0 - (1.0 - r2) * (pr.m_data - 1) / dof if ss_tot > 0 else float("nan")
+    adj_r2 = (
+        1.0 - (1.0 - r2) * (pr.m_data - 1) / dof
+        if (ss_tot > 0 and dof > 0)
+        else float("nan")
+    )
 
-    # scale factor s^2 (scipy's absolute_sigma rule)
+    # scale factor s^2 (scipy's absolute_sigma rule). With dof <= 0 and relative
+    # sigma this is inf, propagating "undefined" into pcov / perr / ci.
     s2 = 1.0 if absolute_sigma else reduced_chi2
 
     # --- covariance ----------------------------------------------------
@@ -566,7 +704,10 @@ def _solve_fit(
         pr.residual, pr.loss_fn, pr.fs2, active_mask, pr.n, pr.m_con, factor_ok,
     )
     perr = np.sqrt(np.clip(np.diag(pcov), 0.0, None))
-    tval = _t_ppf(1.0 - alpha / 2.0, dof)
+    # Use max(dof, 1) for the quantile so the t-value stays finite; when dof <= 0
+    # the undefined-ness is carried by perr (inf), keeping the CI inf rather than
+    # NaN (scipy's t.ppf returns NaN for dof <= 0).
+    tval = _t_ppf(1.0 - alpha / 2.0, max(dof, 1))
     ci = np.column_stack([popt - tval * perr, popt + tval * perr])
 
     # --- sensitivity dpopt/ddata --------------------------------------

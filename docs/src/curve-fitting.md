@@ -72,9 +72,12 @@ robust loss instead.
 | `loss` | use |
 |---|---|
 | `"sse"` (default), `"chi2"` | ordinary / weighted least squares |
-| `"huber"` | smooth pseudo-Huber, downweights outliers |
+| `"soft_l1"` = `"huber"` | smooth pseudo-Huber, downweights outliers |
 | `"cauchy"` | strong outlier rejection |
-| `"soft_l1"` | gentle L1-like robustness |
+
+`"huber"` and `"soft_l1"` are the **same** smooth (C²) pseudo-Huber loss: a
+true piecewise Huber is only C¹ (its curvature jumps at the knee), which the
+interior-point solver can't use, so both names map to the C² form.
 
 ```python
 res = pounce.curve_fit(model, x, y, p0=[1, 1, 0], loss="huber", f_scale=0.1)
