@@ -821,31 +821,50 @@ you want the minima themselves.
 
 ---
 
-## Ask Claude about the state
+## Ask an LLM about the state
 
 `ask [question]` packages the current paused state — checkpoint,
 residuals, step lengths, dimensions, and the KKT inertia/regularization —
-into a prompt and runs it through **Claude Code** (`claude -p`, headless
-print mode), printing the reply inline. It's AI-assisted debugging
-without leaving the loop:
+into a prompt and runs it through an LLM CLI (by default **Claude Code**,
+`claude -p` headless print mode), printing the reply inline. It's
+AI-assisted debugging without leaving the loop:
 
 ```text
 pounce-dbg> stop-at kkt
 pounce-dbg> continue
 pounce-dbg> ask why is the dual infeasibility stalling?
-# → Claude's analysis of the state + suggested options to try
+# → the model's analysis of the state + suggested options to try
 ```
 
 With no question it defaults to "explain the current state and suggest
-what to try next." The command is configurable via `$POUNCE_DBG_LLM`
-(default `claude -p`); the prompt is fed on the tool's stdin, or
-substituted into a `{}` placeholder if the template has one:
+what to try next."
+
+### Choosing the LLM
+
+Set `$POUNCE_DBG_LLM` to pick the backend. It accepts either a **bare
+provider keyword** — which expands to that CLI's correct non-interactive
+invocation — or a **full command template**:
 
 ```sh
-export POUNCE_DBG_LLM='claude -p'          # default
-export POUNCE_DBG_LLM='llm -m claude-opus' # any prompt-on-stdin CLI
-export POUNCE_DBG_LLM='mytool --ask {}'    # prompt as an argument
+export POUNCE_DBG_LLM=claude     # Claude Code      → claude -p   (default)
+export POUNCE_DBG_LLM=codex      # OpenAI Codex CLI → codex exec <prompt>
+export POUNCE_DBG_LLM=gemini     # Google Gemini    → gemini -p <prompt>
+export POUNCE_DBG_LLM=llm        # simonw's llm     → llm <prompt>
+# …or a full template:
+export POUNCE_DBG_LLM='llm -m claude-opus'  # any prompt-on-stdin CLI
+export POUNCE_DBG_LLM='mytool --ask {}'     # prompt substituted into {}
 ```
+
+For a template, the prompt is fed on the tool's stdin unless it contains a
+`{}` placeholder, in which case it is substituted as an argument. A bare
+word that isn't a known provider is treated as a program name with the
+prompt on stdin.
+
+**Graceful when the CLI is absent.** If the selected tool isn't installed
+or on `PATH`, `ask` returns an error naming the tool and listing the
+provider keywords — the rest of the debugger (and the solve) is
+unaffected. `ask` is the only command that shells out; nothing else
+depends on an LLM being present.
 
 In JSON mode the reply comes back in the `result` event's `data.reply`.
 
@@ -1013,7 +1032,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `source <file>` | run debugger commands from a file |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |
-| `ask [question]` | ask Claude Code (`claude -p` / `$POUNCE_DBG_LLM`) about the state |
+| `ask [question]` | ask an LLM about the state (default Claude Code; `$POUNCE_DBG_LLM`=`claude`/`codex`/`gemini`/`llm` or a template) |
 | `progress [on/off]` | toggle JSON progress events |
 | `detach` | stop pausing; run to completion |
 | `quit` (`q`, `exit`) | stop the solve |

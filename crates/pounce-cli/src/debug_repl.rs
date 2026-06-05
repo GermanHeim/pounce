@@ -367,8 +367,15 @@ impl CmdOut {
 // index those keys directly off the event objects. Command input additionally
 // accepts the short aliases `obj`/`err`/`compl` (see `Metric::parse`); these are
 // the canonical advertised names.
-const METRICS: &[&str] =
-    &["iter", "mu", "objective", "inf_pr", "inf_du", "nlp_error", "complementarity"];
+const METRICS: &[&str] = &[
+    "iter",
+    "mu",
+    "objective",
+    "inf_pr",
+    "inf_du",
+    "nlp_error",
+    "complementarity",
+];
 
 /// A scalar the solver exposes for conditional breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1395,7 +1402,8 @@ impl SolverDebugger {
             "  multistart <N> [rel]     N restarts (uniform in each finite box; jitter else)".into(),
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
-            "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
+            "  ask [question]           ask an LLM about the state (default Claude Code; set".into(),
+            "                           POUNCE_DBG_LLM=claude|codex|gemini|llm or a command template)".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
             "  diff                     what changed in the iterate since the last iteration".into(),
             "  diagnose | diag          live health report: named culprit residuals, KKT inertia, stalls".into(),
@@ -2767,8 +2775,10 @@ impl SolverDebugger {
             .flow(Flow::Stop)
     }
 
-    /// `ask [question]` — hand the current solver state to Claude Code
-    /// (headless `claude -p`, or `$POUNCE_DBG_LLM`) and print its reply.
+    /// `ask [question]` — hand the current solver state to an LLM CLI and
+    /// print its reply. Defaults to headless Claude Code; `$POUNCE_DBG_LLM`
+    /// selects another provider (`codex`, `gemini`, `llm`) or a full command
+    /// template. Degrades gracefully when the CLI isn't installed.
     /// "Ask why this step looks wrong without leaving the debugger."
     fn cmd_ask(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
         let question = if rest.is_empty() {
@@ -4067,16 +4077,55 @@ fn build_ask_prompt(ctx: &DebugCtx, question: &str) -> String {
     p
 }
 
-/// Resolve the LLM command from `$POUNCE_DBG_LLM` (whitespace-split; `{}`
-/// substitutes the prompt as an argument), defaulting to `claude -p`. The
-/// bool is whether the prompt goes on stdin (true) or was substituted
-/// into an argument (false).
-fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
-    let tmpl = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
-    let tmpl = tmpl.trim();
-    if tmpl.is_empty() {
-        return ("claude".to_string(), vec!["-p".to_string()], true);
+/// Provider keywords with a built-in non-interactive invocation, so a user
+/// can select one with just `POUNCE_DBG_LLM=codex` instead of memorizing
+/// each CLI's flags. Returns the program, its argv (with the prompt already
+/// placed for arg-style tools), and whether the prompt is *also* written to
+/// stdin. Keep `LLM_PROVIDERS` in sync for help/error text.
+const LLM_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "llm"];
+
+fn llm_preset(name: &str, prompt: &str) -> Option<(String, Vec<String>, bool)> {
+    match name {
+        // Claude Code — headless print mode, prompt on stdin.
+        "claude" => Some(("claude".to_string(), vec!["-p".to_string()], true)),
+        // OpenAI Codex CLI — non-interactive `codex exec <prompt>`.
+        "codex" => Some((
+            "codex".to_string(),
+            vec!["exec".to_string(), prompt.to_string()],
+            false,
+        )),
+        // Google Gemini CLI — non-interactive `gemini -p <prompt>`.
+        "gemini" => Some((
+            "gemini".to_string(),
+            vec!["-p".to_string(), prompt.to_string()],
+            false,
+        )),
+        // simonw's `llm` — prompt as a positional argument.
+        "llm" => Some(("llm".to_string(), vec![prompt.to_string()], false)),
+        _ => None,
     }
+}
+
+/// Resolve the LLM command from `$POUNCE_DBG_LLM`, defaulting to `claude`.
+/// The value may be either a **bare provider keyword** (`claude`, `codex`,
+/// `gemini`, `llm` — see `llm_preset`) or a **full command template**
+/// (whitespace-split; `{}` substitutes the prompt as an argument, else the
+/// prompt is fed on stdin). The bool is whether the prompt goes on stdin.
+fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
+    let raw = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
+    let tmpl = raw.trim();
+    if tmpl.is_empty() {
+        // Default provider.
+        return llm_preset("claude", prompt).expect("claude is a known provider");
+    }
+    // A bare keyword (no whitespace) matching a known provider wins; this is
+    // the ergonomic `POUNCE_DBG_LLM=codex` path.
+    if !tmpl.contains(char::is_whitespace) {
+        if let Some(preset) = llm_preset(tmpl, prompt) {
+            return preset;
+        }
+    }
+    // Otherwise: a full command template.
     let mut parts = tmpl
         .split_whitespace()
         .map(str::to_string)
@@ -4108,10 +4157,19 @@ fn run_llm(prompt: &str) -> Result<String, String> {
         Stdio::null()
     });
     let mut child = cmd.spawn().map_err(|e| {
-        format!(
-            "could not launch `{prog}`: {e} \
-             (set POUNCE_DBG_LLM to an LLM command, e.g. `claude -p` or `llm`)"
-        )
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // The configured LLM CLI isn't installed / not on PATH. Fail with
+            // an actionable message instead of a raw OS error — the rest of
+            // the debugger keeps working regardless.
+            format!(
+                "LLM CLI `{prog}` is not installed or not on PATH. Install it, \
+                 or set POUNCE_DBG_LLM to another provider \
+                 ({}) or a full command template (e.g. `my-llm --ask {{}}`).",
+                LLM_PROVIDERS.join(" | ")
+            )
+        } else {
+            format!("could not launch `{prog}`: {e}")
+        }
     })?;
     if on_stdin {
         // Write the prompt and close stdin so the child sees EOF.
@@ -4569,6 +4627,52 @@ mod tests {
         std::env::set_var("POUNCE_DBG_LLM", "llm -m gpt");
         let (_, _, on_stdin) = llm_command("q");
         assert!(on_stdin);
+
+        // Bare provider keywords resolve to the right non-interactive call.
+        // (All env-var assertions live in this one test so they can't race
+        // a sibling that mutates the same process-global var.)
+        std::env::set_var("POUNCE_DBG_LLM", "codex");
+        let (prog, args, on_stdin) = llm_command("why is mu stuck");
+        assert_eq!(prog, "codex");
+        assert_eq!(
+            args,
+            vec!["exec".to_string(), "why is mu stuck".to_string()]
+        );
+        assert!(!on_stdin); // prompt is in the argv, not stdin
+
+        std::env::set_var("POUNCE_DBG_LLM", "gemini");
+        let (prog, args, _) = llm_command("q");
+        assert_eq!(prog, "gemini");
+        assert_eq!(args, vec!["-p".to_string(), "q".to_string()]);
+
+        std::env::set_var("POUNCE_DBG_LLM", "llm");
+        let (prog, args, _) = llm_command("q");
+        assert_eq!(prog, "llm");
+        assert_eq!(args, vec!["q".to_string()]);
+
+        // Bare `claude` keyword goes through the preset (gains `-p`), not the
+        // bare-program fallback that would hang in interactive mode.
+        std::env::set_var("POUNCE_DBG_LLM", "claude");
+        let (prog, args, on_stdin) = llm_command("q");
+        assert_eq!(prog, "claude");
+        assert_eq!(args, vec!["-p".to_string()]);
+        assert!(on_stdin);
+
+        // An unknown bare word is NOT a preset: bare program, prompt on stdin
+        // (backward-compatible).
+        std::env::set_var("POUNCE_DBG_LLM", "mytool");
+        let (prog, args, on_stdin) = llm_command("q");
+        assert_eq!(prog, "mytool");
+        assert!(args.is_empty());
+        assert!(on_stdin);
+
+        // A missing CLI fails gracefully: an error (never a panic) with an
+        // actionable, provider-listing message.
+        std::env::set_var("POUNCE_DBG_LLM", "pounce-no-such-llm-xyz");
+        let err = run_llm("hello").unwrap_err();
+        assert!(err.contains("not installed or not on PATH"), "{err}");
+        assert!(err.contains("codex"), "{err}");
+
         std::env::remove_var("POUNCE_DBG_LLM");
     }
 
