@@ -186,13 +186,21 @@ impl IpoptCalculatedQuantities {
         // (upstream's AW fix for negative slacks producing 0).
         slack.element_wise_max(&*zero_vec);
 
-        // t2 = max(mu/multiplier, s_min) - slack  (mu/0 → +inf, capped below)
+        // t2 = max(mu/multiplier, s_min) - slack.
         let mut t2 = t.make_new();
-        t2.set(mu);
-        t2.element_wise_divide(multiplier);
         let mut s_min_vec = t2.make_new();
         s_min_vec.set(s_min);
-        t2.element_wise_max(&*s_min_vec);
+        if mu != 0.0 {
+            // mu/0 → +inf here, intentionally capped by t_max below.
+            t2.set(mu);
+            t2.element_wise_divide(multiplier);
+            t2.element_wise_max(&*s_min_vec);
+        } else {
+            // mu == 0: max(0/multiplier, s_min) is s_min everywhere, but a 0/0
+            // (zero multiplier at μ=0) would seed the slack target with NaN and
+            // poison the bound move — pin straight to s_min instead.
+            t2.copy(&*s_min_vec);
+        }
         t2.axpy(-1.0, &*slack);
 
         // t = max(mu/multiplier, s_min) where flagged, else slack.

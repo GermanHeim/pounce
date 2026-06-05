@@ -1125,11 +1125,19 @@ class JaxProblem:
         nonzeros (issue #83). Drops the per-IPM-iteration derivative cost
         from ``O(n)`` to ``O(k)`` AD passes (``k`` = number of colors) on
         genuinely sparse problems, applied uniformly to the single-solve
-        and batched (block-diagonal) paths. The reported structure and
-        the solve are identical to the dense path. This affects only the
-        forward derivatives fed to the IPM — the differentiable backward
-        (``factor_reuse`` / implicit diff) is unchanged. Defaults to
-        ``False`` (dense, with forward/reverse mode chosen by shape).
+        and batched (block-diagonal) paths. **Provided the sparsity
+        pattern is value-independent** (any composition of smooth
+        pointwise ops), the reported structure, values, and solve are
+        identical to the dense path. For value-dependent structure
+        (``where`` / ``abs`` / branches) a probe can miss a nonzero, and
+        under compression a missed entry *aliases into a same-colored
+        reported entry* — silently wrong derivatives, unlike the dense
+        path which merely drops the missed entry. Use a hand-specified
+        pattern (the :class:`pounce.Problem` API) for such models, or
+        leave ``sparse=False``. This affects only the forward derivatives
+        fed to the IPM — the differentiable backward (``factor_reuse`` /
+        implicit diff) is unchanged. Defaults to ``False`` (dense, with
+        forward/reverse mode chosen by shape).
     n_probes : int or None
         Number of random probes whose nonzero patterns are unioned to
         detect sparsity. ``None`` (default) uses 1 probe for the dense

@@ -1234,7 +1234,11 @@ impl SolverDebugger {
     // ---- command engine -----------------------------------------------
 
     fn dispatch(&mut self, line: &str, ctx: &mut DebugCtx) -> CmdOut {
-        let toks: Vec<&str> = line.split_whitespace().collect();
+        // Quote-aware so a file path with spaces (e.g. `load "my run.json"`)
+        // survives as a single token; identical to `split_whitespace` for any
+        // line without quotes. `owned` backs the `&str` slices `toks` holds.
+        let owned = tokenize_quoted(line);
+        let toks: Vec<&str> = owned.iter().map(String::as_str).collect();
         let Some(&verb) = toks.first() else {
             return CmdOut::ok(vec![]); // empty line: reprompt
         };
@@ -1659,7 +1663,13 @@ impl SolverDebugger {
             ));
         };
         let label = book.label(i);
-        let eq = &book.equations[i];
+        // `i` may come from a name lookup that indexes `names`; guard against a
+        // names/equations length skew rather than risk an out-of-bounds panic.
+        let Some(eq) = book.equations.get(i) else {
+            return CmdOut::err(format!(
+                "constraint `{key}` has no source algebra (index {i} out of range)"
+            ));
+        };
         CmdOut::ok(vec![format!("{label}:  {eq}")]).with_data(serde_json::json!({
             "index": i,
             "name": book.names.get(i).filter(|n| !n.is_empty()),
@@ -3251,7 +3261,7 @@ impl SolverDebugger {
                 "mutate_mu": true,
                 "conditional_breakpoints": "compound",
                 "request_ids": true,
-                "viz": ["block", "delta"],
+                "viz": ["block", "delta", "kkt", "L"],
                 "save": true,
                 "load": true,
                 "sweep": self.restart.is_some(),
@@ -3941,6 +3951,40 @@ struct ParsedCmd {
     id: Option<serde_json::Value>,
 }
 
+/// Split a command line on whitespace, honoring double-quoted spans so a
+/// file-path argument containing spaces survives as one token. Quotes are
+/// delimiters and stripped; for any line without quotes this is byte-for-byte
+/// equivalent to `str::split_whitespace` (collapsing runs of whitespace,
+/// trimming the ends).
+fn tokenize_quoted(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut has_tok = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                has_tok = true; // an empty "" is still a token
+            }
+            c if c.is_whitespace() && !in_quote => {
+                if has_tok {
+                    out.push(std::mem::take(&mut cur));
+                    has_tok = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_tok = true;
+            }
+        }
+    }
+    if has_tok {
+        out.push(cur);
+    }
+    out
+}
+
 /// In JSON mode a command line may be a bare string or a JSON object
 /// `{"cmd": "...", "args": [...], "id": <any>}`. Returns the resolved
 /// command string and the request id (if the object carried one).
@@ -3953,12 +3997,19 @@ fn parse_command(line: &str, mode: DebugMode) -> ParsedCmd {
                 let mut s = cmd.to_string();
                 if let Some(args) = v.get("args").and_then(|a| a.as_array()) {
                     for a in args {
-                        if let Some(a) = a.as_str() {
-                            s.push(' ');
-                            s.push_str(a);
+                        s.push(' ');
+                        let tok = a
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| a.to_string());
+                        // Quote whitespace-bearing args (e.g. paths) so the
+                        // quote-aware tokenizer keeps them as one token.
+                        if tok.contains(char::is_whitespace) {
+                            s.push('"');
+                            s.push_str(&tok);
+                            s.push('"');
                         } else {
-                            s.push(' ');
-                            s.push_str(&a.to_string());
+                            s.push_str(&tok);
                         }
                     }
                 }

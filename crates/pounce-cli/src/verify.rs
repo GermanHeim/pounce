@@ -196,7 +196,16 @@ fn is_finite_bound(b: Number) -> bool {
 }
 
 /// `g_l ≤ v ≤ g_u` violation: how far `v` is outside the box, 0 if inside.
+///
+/// A non-finite `v` (NaN or ±∞) is treated as an infinite violation, never
+/// as feasible: `NaN`-laden arithmetic would otherwise collapse to `0.0`
+/// through `f64::max` (which drops NaN operands) and let a fabricated `.sol`
+/// slip past the feasibility gate — the exact threat this checker defends
+/// against. An unbounded variable pinned at ±∞ is likewise not a real point.
 fn box_violation(v: Number, lo: Number, hi: Number) -> Number {
+    if !v.is_finite() {
+        return Number::INFINITY;
+    }
     let below = if is_finite_bound(lo) {
         lo - v
     } else {
@@ -656,6 +665,13 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
         "VERIFIED — solution is feasible for the canonical problem".to_string()
     } else if !o.feasible {
         "REJECTED — solution VIOLATES the canonical constraints".to_string()
+    } else if !o.duals_present {
+        // Feasible, --require-optimal was asked for, but optimality could not
+        // be checked at all because the .sol carried no duals — say so rather
+        // than implying we found it non-optimal.
+        "REJECTED — feasible, but --require-optimal needs duals and the .sol \
+         carried none"
+            .to_string()
     } else {
         "REJECTED — feasible but not first-order optimal (--require-optimal)".to_string()
     };
@@ -1016,5 +1032,23 @@ mod tests {
         assert!((box_violation(13.0, 0.0, 10.0) - 3.0).abs() < 1e-15);
         // one-sided (no upper)
         assert_eq!(box_violation(1e30, 0.0, NLP_UPPER_BOUND_INF), 0.0);
+    }
+
+    #[test]
+    fn box_violation_rejects_non_finite() {
+        // Regression: a fabricated `.sol` carrying NaN must register an
+        // infinite violation, not slip through as feasible. Before the
+        // `is_finite` guard, `NaN.max(_).max(0.0)` collapsed to `0.0`
+        // (f64::max drops NaN operands) and the checker reported VERIFIED.
+        assert_eq!(box_violation(Number::NAN, 0.0, 10.0), Number::INFINITY);
+        // ±∞ pinned at an unbounded variable is not a real point either.
+        assert_eq!(
+            box_violation(Number::INFINITY, 0.0, NLP_UPPER_BOUND_INF),
+            Number::INFINITY
+        );
+        assert_eq!(
+            box_violation(Number::NEG_INFINITY, NLP_LOWER_BOUND_INF, 10.0),
+            Number::INFINITY
+        );
     }
 }

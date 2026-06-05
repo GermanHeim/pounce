@@ -7,7 +7,7 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
-## Unreleased
+## [0.4.0] — 2026-06-05
 
 ### Added — `pounce.curve_fit` (Python)
 
@@ -140,9 +140,14 @@ nonzeros — instead of materializing the dense matrix and slicing it
 (pounce#83). Per-iteration derivative cost drops from `O(n)` to `O(k)`
 AD passes on genuinely sparse problems; benchmarked on a banded family at
 ~560× (Jacobian) / ~200× (Hessian) per eval and 7.6× faster full solve
-by `n=2000`. Reported structure, values, and solutions are identical to
-the dense path; the differentiable backward is unaffected. Dense problems
-see a small bounded overhead, so the flag is opt-in.
+by `n=2000`. When the sparsity pattern is **value-independent** (any
+composition of smooth pointwise ops) the reported structure, values, and
+solutions are identical to the dense path; the differentiable backward is
+unaffected. For **value-dependent** structure (`where` / `abs` / branches) a
+random probe can miss a nonzero, and under compression a missed entry aliases
+into a same-colored reported entry — silently wrong derivatives — so such
+models should hand-specify the pattern via the `Problem` API or stay on the
+dense path. Dense problems see a small bounded overhead, so the flag is opt-in.
 
 - Forward/reverse mode selection (`jacfwd` when `n < m`, else `jacrev`)
   for the dense path / sparsity probe.
@@ -191,6 +196,72 @@ attached.
 - **JSON protocol:** `hello` → `pause` → `result` (with `request_id`) →
   `progress` → `terminated`. Engine in `pounce-algorithm::debug`; front
   end in `pounce-cli::debug_repl`.
+
+### Added — `read_nl` / `NlProblem` (Python)
+
+`pounce.read_nl(path)` loads an AMPL `.nl` file through pounce's own reader
+and returns an `NlProblem` exposing the model's `objective`, `gradient`,
+`hessian`, and constraint `jacobian` at any point — the same evaluation
+pipeline the solver uses, available standalone for inspection, finite-
+difference checks, or feeding another tool. Exported from `pounce`
+(`read_nl`, `NlProblem` are in `__all__`).
+
+### Added — Expanded `.nl` opcode coverage
+
+The `.nl` reader now handles conditional/logical opcodes (`if-then-else`,
+comparisons), the n-ary list reducers `o11` (MINLIST) / `o12` (MAXLIST), and
+the remaining smooth transcendentals (inverse and hyperbolic trig). Models
+that previously failed to load with an "unsupported opcode" error now parse,
+with FD-verified first/second derivatives on the smooth interior.
+
+> `min`/`max`/`if-then-else` are **non-smooth**: at a kink the gradient is a
+> subgradient and the Hessian misses the kink curvature, so an iterate landing
+> on or oscillating across the switch can stall the interior-point solve. The
+> inverse-trig opcodes (`asin`/`acos`/`atanh`/`acosh`) have **bounded domains**
+> whose derivatives blow up at the edge — bound such variables away from the
+> boundary. The reader accepts these models; convergence is on you.
+
+### Added — `pounce --cite` and `--minima`
+
+- `pounce --cite [REPORT.json]` lists the citations to use for pounce (and,
+  when a solve report is given, any method-specific references it triggered,
+  e.g. the Byrd restoration paper). `--bibtex` emits ready-to-paste entries.
+- `pounce <problem> --minima` runs the multistart global search from the CLI
+  with full `find_minima` parity (method, `n_minima`, dedup, seed).
+
+### Changed
+
+- **Default solver trajectory** moved on several fronts as the interior-point
+  method was brought closer to IPOPT. These change which iterates are visited
+  (and, on a few problems, the iteration count) but not the math being solved:
+  - the barrier parameter `μ` is now updated *inside* the monotone reduction
+    loop, so the relaxed-complementarity error reflects the current `μ`. Net
+    +2 problems reach Optimal on the internal `.nl` sweep, at a ~2.7% total
+    iteration-count cost and a regression on `deconvb` / `gausselm`;
+  - under the watchdog, the line search bypasses the acceptor's `alpha_min`
+    floor (mirrors IPOPT) so the full-step watchdog trial actually runs;
+  - the IPOPT safe-slack bound-adjustment mechanism (`slack_move`) is ported
+    and active by default;
+  - NLP gradient-based scaling now lifts fixed variables to their value before
+    sampling, so the computed scale factors match the operating point.
+- **Dependency:** `feral` pinned to crates.io `0.10.0` (was a git rev),
+  bringing AMF ordering by default and MC64 inertia-guided scaling fallback.
+- **Internal:** the `.nl` pipeline was extracted into a new leaf crate
+  `pounce-nl` (re-exported from `pounce-cli`; no public API change).
+
+### Fixed
+
+- **Restoration:** the limited-memory (L-BFGS) Hessian is now built in the
+  iterates' native space, fixing a space mismatch on compound problems (#102);
+  the cycle detector rolls back to the last acceptable point instead of
+  erroring out when a usable iterate exists.
+- **KKT:** the negative-eigenvalue cache is refreshed on `WrongInertia` /
+  `Singular` outcomes (not only `Success`), matching IPOPT's inertia
+  pass-through so δ_c regularization routing stays live near a singular KKT (#99).
+- **`find_minima`:** the in-bounds test uses a bound-magnitude-relative
+  tolerance so large-scale boxes aren't spuriously rejected (#101); MLSL is
+  bounded by a sample budget so it always terminates instead of looping when
+  its clustering filter rejects every sample (#103).
 
 ## [0.3.0] — 2026-06-02
 

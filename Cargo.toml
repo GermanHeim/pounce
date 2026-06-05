@@ -51,7 +51,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.1-dev"
+version = "0.4.0"
 edition = "2021"
 license = "EPL-2.0"
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
@@ -62,22 +62,22 @@ repository = "https://github.com/jkitchin/pounce"
 # deps lack a registry version). Crates pick these up via
 # `pounce-foo.workspace = true`.
 [workspace.dependencies]
-pounce-common = { path = "crates/pounce-common", version = "0.3.1-dev" }
-pounce-linalg = { path = "crates/pounce-linalg", version = "0.3.1-dev" }
-pounce-linsol = { path = "crates/pounce-linsol", version = "0.3.1-dev" }
-pounce-nlp = { path = "crates/pounce-nlp", version = "0.3.1-dev" }
-pounce-nl = { path = "crates/pounce-nl", version = "0.3.1-dev" }
-pounce-hsl = { path = "crates/pounce-hsl", version = "0.3.1-dev" }
-pounce-feral = { path = "crates/pounce-feral", version = "0.3.1-dev" }
-pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.3.1-dev" }
-pounce-restoration = { path = "crates/pounce-restoration", version = "0.3.1-dev" }
-pounce-presolve = { path = "crates/pounce-presolve", version = "0.3.1-dev" }
-pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.1-dev" }
-pounce-qp = { path = "crates/pounce-qp", version = "0.3.1-dev" }
-pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.1-dev" }
-pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.1-dev" }
-pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.3.1-dev" }
-pounce-observability = { path = "crates/pounce-observability", version = "0.3.1-dev" }
+pounce-common = { path = "crates/pounce-common", version = "0.4.0" }
+pounce-linalg = { path = "crates/pounce-linalg", version = "0.4.0" }
+pounce-linsol = { path = "crates/pounce-linsol", version = "0.4.0" }
+pounce-nlp = { path = "crates/pounce-nlp", version = "0.4.0" }
+pounce-nl = { path = "crates/pounce-nl", version = "0.4.0" }
+pounce-hsl = { path = "crates/pounce-hsl", version = "0.4.0" }
+pounce-feral = { path = "crates/pounce-feral", version = "0.4.0" }
+pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.4.0" }
+pounce-restoration = { path = "crates/pounce-restoration", version = "0.4.0" }
+pounce-presolve = { path = "crates/pounce-presolve", version = "0.4.0" }
+pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.4.0" }
+pounce-qp = { path = "crates/pounce-qp", version = "0.4.0" }
+pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.4.0" }
+pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.4.0" }
+pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.4.0" }
+pounce-observability = { path = "crates/pounce-observability", version = "0.4.0" }
 feral = "0.10.0"
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
