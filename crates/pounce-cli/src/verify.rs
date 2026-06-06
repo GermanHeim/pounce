@@ -988,9 +988,12 @@ mod tests {
 
     #[test]
     fn parse_sol_round_trips_writer() {
-        // Writer is the inverse we must match exactly.
+        // Writer is the inverse we must match exactly. Derive the banner
+        // from the crate version so this fixture never goes stale on a
+        // version bump (the round-trip is agnostic to the exact string).
+        let message = format!("POUNCE {}: Optimal Solution Found", env!("CARGO_PKG_VERSION"));
         let payload = SolutionFile {
-            message: "POUNCE 0.3.1: Optimal Solution Found",
+            message: &message,
             x: &[1.0, 2.5, -0.5, 100.0],
             lambda: &[0.1, -0.2],
             solve_result_num: 0,
