@@ -295,6 +295,15 @@ with FD-verified first/second derivatives on the smooth interior.
   tolerance so large-scale boxes aren't spuriously rejected (#101); MLSL is
   bounded by a sample budget so it always terminates instead of looping when
   its clustering filter rejects every sample (#103).
+- **Bounds length is validated up front** across `minimize`, `find_minima`,
+  `find_saddles`, `find_critical_points`, `reaction_network`, and `curve_fit`.
+  A `bounds` list whose length didn't match the variable/parameter count used
+  to fail silently — a too-short list left trailing variables unbounded, and in
+  the sampling-based searches a length-1 box could *broadcast* across every
+  dimension (sampling all of them from variable 0's interval). It now raises a
+  clear `ValueError` immediately, like scipy; `curve_fit`'s scipy-style
+  `(lo, hi)` tuple form is likewise checked so array sides must be scalar or
+  length-`n_params`.
 
 ## [0.3.0] — 2026-06-02
 

@@ -1,6 +1,7 @@
 """Smoke tests for the scipy.optimize-style facade."""
 
 import numpy as np
+import pytest
 
 import pounce
 
@@ -59,3 +60,32 @@ def test_minimize_eq_constraint():
     assert res.success
     np.testing.assert_allclose(res.x, [0.5, 0.5], atol=1e-6)
     np.testing.assert_allclose(res.fun, 0.5, atol=1e-8)
+
+
+def test_minimize_rejects_wrong_length_bounds():
+    """A too-short ``bounds`` list used to silently leave trailing variables
+    unbounded (and, in the sampling searches, broadcast one box across several);
+    it now raises a clear ValueError up front, like scipy."""
+    def f(x):
+        return float(x @ x)
+
+    def grad(x):
+        return 2.0 * x
+
+    # two variables, one bound pair -> rejected
+    with pytest.raises(ValueError, match="bounds has 1 entry but the problem has 2"):
+        pounce.minimize(f, x0=np.zeros(2), jac=grad, bounds=[(-1, 1)],
+                        options={"print_level": 0})
+
+    # too-long list is rejected too (plural wording)
+    with pytest.raises(ValueError, match="bounds has 3 entries but the problem has 2"):
+        pounce.minimize(f, x0=np.zeros(2), jac=grad,
+                        bounds=[(-1, 1), (-1, 1), (-1, 1)],
+                        options={"print_level": 0})
+
+    # correct length still works
+    res = pounce.minimize(f, x0=np.array([0.5, 0.5]), jac=grad,
+                          bounds=[(-1, 1), (-1, 1)],
+                          options={"tol": 1e-10, "print_level": 0})
+    assert res.success
+    np.testing.assert_allclose(res.x, [0.0, 0.0], atol=1e-6)

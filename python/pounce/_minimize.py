@@ -71,9 +71,34 @@ def _finite_diff_jac(g_fun: Callable, x: np.ndarray, m: int) -> np.ndarray:
     return J
 
 
+def _validate_bounds_length(bounds, n: int) -> None:
+    """Reject a per-variable ``bounds`` sequence that doesn't have exactly ``n``
+    entries (one ``(lo, hi)`` pair per variable).
+
+    Without this, a too-short list silently leaves trailing variables unbounded
+    — and in the sampling-based searches it can *broadcast* one variable's box
+    across several — while a too-long list trips a cryptic ``IndexError`` deep in
+    the solve setup. scipy validates bounds length; so do we, up front.
+    """
+    if bounds is None:
+        return
+    try:
+        length = len(bounds)
+    except TypeError:
+        raise ValueError(
+            "bounds must be a sequence of (lo, hi) pairs, one per variable"
+        ) from None
+    if length != n:
+        raise ValueError(
+            f"bounds has {length} entr{'y' if length == 1 else 'ies'} but the "
+            f"problem has {n} variable(s); pass one (lo, hi) pair per variable"
+        )
+
+
 def _normalize_bounds(bounds, n: int):
     if bounds is None:
         return None, None
+    _validate_bounds_length(bounds, n)
     lb = np.full(n, -np.inf)
     ub = np.full(n, np.inf)
     for i, bd in enumerate(bounds):

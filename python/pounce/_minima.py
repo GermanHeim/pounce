@@ -42,7 +42,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from ._minimize import minimize, OptimizeResult
+from ._minimize import minimize, OptimizeResult, _validate_bounds_length
 
 __all__ = ["find_minima", "MinimaResult"]
 
@@ -685,6 +685,7 @@ def find_minima(
             f"unknown method {method!r}; choose from {sorted(_STRATEGIES)}"
         )
     x0 = np.asarray(x0, dtype=float)
+    _validate_bounds_length(bounds, x0.size)
     rng = np.random.default_rng(seed)
     if max_solves is None:
         # Generous default: repulsion methods spend a polish solve per

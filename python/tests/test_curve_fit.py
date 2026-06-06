@@ -452,3 +452,29 @@ def test_huber_and_soft_l1_are_documented_aliases():
     rh = pounce.curve_fit(f, x, y, p0=[2.0, 1.0], loss="huber", jac="fd")
     rs = pounce.curve_fit(f, x, y, p0=[2.0, 1.0], loss="soft_l1", jac="fd")
     np.testing.assert_array_equal(rh.popt, rs.popt)
+
+
+def test_curve_fit_rejects_wrong_length_bounds():
+    """Both bounds forms are length-checked up front. The scipy 2-tuple form
+    ``(lo, hi)`` with array sides must match the parameter count, and a
+    per-parameter list of pairs must have one pair per parameter — otherwise a
+    too-short list used to silently leave parameters unbounded."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.2, 5, 40)
+    y = 3.0 * np.exp(-0.9 * x) + 0.5 + 0.02 * rng.standard_normal(x.size)
+
+    # scipy 2-tuple form with wrong-length array sides (3 params, length-2 arrays)
+    with pytest.raises(ValueError, match="bounds (lower|upper) has length 2 but the problem has 3"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0],
+                         bounds=([0, 0], [5, 5]))
+
+    # per-parameter list of pairs with the wrong count (2 pairs, 3 params)
+    with pytest.raises(ValueError, match="bounds has 2 entries but the problem has 3"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0],
+                         bounds=[(0, 5), (0, 5)])
+
+    # correct forms still work: scalar scipy tuple broadcasts, full list matches
+    r1 = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0], bounds=(-10, 10))
+    r2 = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0],
+                          bounds=[(-10, 10), (-10, 10), (-10, 10)])
+    np.testing.assert_allclose(r1.popt, r2.popt, rtol=1e-6)

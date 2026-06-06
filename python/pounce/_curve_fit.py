@@ -961,10 +961,17 @@ def _normalize_bound_arg(bounds, n):
         and not _is_pair_list(bounds, n)
     ):
         lo, hi = bounds
-        lo = np.broadcast_to(_to_array(lo), (n,))
-        hi = np.broadcast_to(_to_array(hi), (n,))
+        lo_a, hi_a = _to_array(lo), _to_array(hi)
+        for side, arr in (("lower", lo_a), ("upper", hi_a)):
+            if arr.ndim > 1 or (arr.ndim == 1 and arr.size not in (1, n)):
+                raise ValueError(
+                    f"bounds {side} has length {arr.size} but the problem has "
+                    f"{n} parameter(s); pass a scalar or a length-{n} array"
+                )
+        lo = np.broadcast_to(lo_a, (n,))
+        hi = np.broadcast_to(hi_a, (n,))
         return list(zip(lo.tolist(), hi.tolist()))
-    return bounds  # already a per-parameter list of pairs
+    return bounds  # already a per-parameter list of pairs (validated downstream)
 
 
 def _is_pair_list(bounds, n):

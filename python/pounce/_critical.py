@@ -36,6 +36,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._minima import find_minima, _scale_from_bounds
+from ._minimize import _validate_bounds_length
 
 __all__ = [
     "find_critical_points", "find_saddles", "reaction_network",
@@ -236,6 +237,7 @@ def find_saddles(
     de-duplicated and collected.
     """
     x0 = np.asarray(x0, float)
+    _validate_bounds_length(bounds, x0.size)
     rng = np.random.default_rng(seed)
     n = x0.size
     if max_solves is None:
