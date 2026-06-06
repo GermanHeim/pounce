@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish POUNCE crates to crates.io in dependency order.
 #
-# The first publish of all 16 crates will hit the crates.io rate limit
+# The first publish of all 18 crates will hit the crates.io rate limit
 # for *new* crate names (5 burst then 1 per ~10 min). Before the initial
 # release email help@crates.io and ask for a temporary exemption for
 # this batch — they typically grant within a day. See
@@ -19,10 +19,12 @@
 # workspace-deps refactor (Cargo.toml: [workspace.dependencies] with
 # version= entries) means cargo accepts the path deps for registry
 # publication. Crates marked `publish = false` (pounce-py, iter-diff,
-# pounce-studio-pyo3, pounce-studio-core) are not in this list — the two
-# studio crates are crates.io-excluded because nothing published depends
-# on them. (The benchmark crates pounce-cutest and pounce-large-scale
-# were retired when those suites moved to .nl.)
+# pounce-studio-pyo3) are not in this list. NOTE: pounce-studio-core IS
+# published as of 0.4.0 — the published pounce-cli took a hard dependency
+# on it, so the old "nothing published depends on studio" exclusion no
+# longer holds. pounce-nl is likewise required by pounce-cli and published.
+# (The benchmark crates pounce-cutest and pounce-large-scale were retired
+# when those suites moved to .nl.)
 
 set -euo pipefail
 
@@ -34,6 +36,7 @@ CRATES=(
   pounce-linalg
   pounce-linsol
   pounce-nlp
+  pounce-nl
   pounce-feral
   pounce-hsl
   pounce-l1penalty
@@ -41,6 +44,7 @@ CRATES=(
   pounce-qp
   pounce-observability
   pounce-solve-report
+  pounce-studio-core
   pounce-algorithm
   pounce-restoration
   pounce-sensitivity
