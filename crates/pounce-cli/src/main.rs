@@ -472,6 +472,20 @@ pub fn main() -> ExitCode {
             }
         };
 
+        // Banner-level routing line: report the detected problem class and
+        // which of pounce's solvers was selected for it. Gated like the
+        // banner (suppressed by `sb yes` and in JSON-debug protocol mode) so
+        // stdout stays clean for machine consumers.
+        if !suppress_banner && !json_dbg {
+            println!(
+                "Problem class: {}. Selected solver: {} [solver_selection={}].",
+                class.name(),
+                choice.describe(),
+                sel_str
+            );
+            println!();
+        }
+
         // Dispatch to the specialized convex LP/QP IPM when resolved.
         // `LpIpm` and `QpIpm` both use the convex solver (LP is P = 0).
         if matches!(choice, SolverChoice::LpIpm | SolverChoice::QpIpm) {

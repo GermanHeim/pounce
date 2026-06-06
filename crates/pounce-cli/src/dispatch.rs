@@ -103,6 +103,22 @@ pub enum SolverChoice {
     Global,
 }
 
+impl SolverChoice {
+    /// Human-readable description of the dispatched solver, for the
+    /// banner-level "Solving as …" log line. Names the algorithm and the
+    /// crate that implements it so a reader can tell which of pounce's
+    /// solvers actually ran.
+    pub fn describe(self) -> &'static str {
+        match self {
+            SolverChoice::Nlp => "NLP filter line-search interior-point (pounce-nlp)",
+            SolverChoice::LpIpm => "LP interior-point (pounce-convex)",
+            SolverChoice::QpIpm => "convex QP interior-point (pounce-convex)",
+            SolverChoice::QpActiveSet => "active-set QP (pounce-qp)",
+            SolverChoice::Global => "spatial branch-and-bound global (pounce-global)",
+        }
+    }
+}
+
 /// Parsed `solver_selection` option value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverSelection {
