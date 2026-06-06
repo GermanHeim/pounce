@@ -42,7 +42,7 @@ fn is_finite_bound(v: f64) -> bool {
 /// degree-≤2 polynomial (should not happen for a problem the classifier
 /// routed here, but the conversion is total and falls back gracefully).
 pub fn extract_qp(prob: &NlProblem) -> Option<QpProblem> {
-    Some(extract_qp_with_map(prob)?.0)
+    Some(extract_qp_with_map(prob)?.0) // drops con_map + reporting constant
 }
 
 /// Where each `.nl` constraint's rows landed in the standard-form QP, so
@@ -61,13 +61,23 @@ pub enum ConRowMap {
     },
 }
 
-/// Extract the QP and the constraint→row provenance map together.
-pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap>)> {
+/// Extract the QP, the constraint→row provenance map, and the objective
+/// constant folded into the nonlinear tree (see below), together.
+///
+/// The third return value is the **degree-0 term of the nonlinear
+/// objective** (e.g. the `+9` of `(x₀−3)²` that AMPL/Pyomo emit inside the
+/// nonlinear tree rather than in `NlProblem::obj_constant`). The QP itself
+/// ignores it — it does not move the minimizer — but the caller must add
+/// it to the *reported* objective so the convex solve agrees with the NLP
+/// path. It is returned in the problem's natural (user) sense, *not*
+/// multiplied by the maximize/minimize `sign`.
+pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap>, f64)> {
     let n = prob.n;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
-    // --- objective Hessian P (lower triangle) + nonlinear-tree linear part ---
-    let (hess, obj_nl_linear) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
+    // --- objective Hessian P (lower triangle) + nonlinear-tree linear part
+    //     + nonlinear-tree constant (degree-0 term, for reporting only) ---
+    let (hess, obj_nl_linear, obj_nl_constant) = analyze_quadratic_full(&prob.obj_nonlinear, n)?;
     let mut p_lower: Vec<Triplet> = Vec::with_capacity(hess.len());
     for ((i, j), v) in &hess {
         // analyze_quadratic returns (i ≤ j) upper-ish keys; store as
@@ -165,6 +175,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
             ub: Vec::new(),
         },
         con_map,
+        obj_nl_constant,
     ))
 }
 
@@ -250,7 +261,9 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, con_map) = extract_qp_with_map(&prob).expect("extract");
+        let (qp, con_map, obj_const) = extract_qp_with_map(&prob).expect("extract");
+        // No constant anywhere in this objective.
+        assert_eq!(obj_const, 0.0);
         // P = 2I → two diagonal entries.
         assert_eq!(qp.p_lower.len(), 2);
         assert_eq!(qp.m_eq(), 1);
@@ -356,7 +369,10 @@ mod tests {
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
-        let (qp, con_map) = extract_qp_with_map(&prob).expect("extract");
+        let (qp, con_map, obj_const) = extract_qp_with_map(&prob).expect("extract");
+        // This model puts its constant in the `obj_constant` field, not the
+        // nonlinear tree, so the tree constant is 0 here.
+        assert_eq!(obj_const, 0.0);
         // One inequality row (the lower bound row −x0 ≤ −1); no upper.
         assert_eq!(qp.m_ineq(), 1);
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
@@ -366,8 +382,63 @@ mod tests {
         assert!((lambda[0] - (-2.0)).abs() < 1e-5, "ineq dual={}", lambda[0]);
     }
 
+    /// Regression: a constant folded into the *nonlinear objective tree*
+    /// (not the `obj_constant` field) must still reach the reported
+    /// objective. This is the real `.nl` shape AMPL/Pyomo emit for
+    /// `min (x0-3)^2` — the whole `x0^2 - 6 x0 + 9` lives in the nonlinear
+    /// tree and `obj_constant == 0`. The convex path used to drop the `+9`
+    /// and report an objective 9 too small (cf. HS35 in the benchmark
+    /// comparison). The minimizer is x0 = 1 (upper bound binds), where the
+    /// true objective is (1-3)^2 = 4.
+    #[test]
+    fn tree_embedded_objective_constant_is_recovered() {
+        // (x0 - 3)^2 as a single nonlinear tree: Pow(Sub(x0, 3), 2).
+        let obj = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Binary(
+                BinOp::Sub,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(3.0)),
+            )),
+            Box::new(Expr::Const(2.0)),
+        );
+        let prob = NlProblem {
+            n: 1,
+            m: 0,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: obj,
+            obj_linear: vec![],
+            obj_constant: 0.0, // the +9 is in the TREE, not here
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            x_l: vec![0.0],
+            x_u: vec![1.0],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![0.0],
+            lambda0: vec![],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        };
+        let (qp, _con_map, obj_const) = extract_qp_with_map(&prob).expect("extract");
+        // The degree-0 term of (x0-3)^2 is +9, recovered from the tree.
+        assert!((obj_const - 9.0).abs() < 1e-12, "tree constant={obj_const}");
+        let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.x[0] - 1.0).abs() < 1e-6, "x0={}", sol.x[0]);
+        // Reported objective = (½xᵀPx + cᵀx) + obj_const must equal the true
+        // (1-3)^2 = 4, not the constant-dropped −5.
+        let reported = sol.obj + obj_const;
+        assert!((reported - 4.0).abs() < 1e-5, "reported obj={reported}");
+    }
+
     /// Bound-constrained: min (x0-3)^2 = x0^2 - 6 x0 + 9, 0 ≤ x0 ≤ 1.
-    /// Optimum x0 = 1 (upper bound binds). (Constant 9 dropped from c.)
+    /// Optimum x0 = 1 (upper bound binds). Here the constant 9 is carried
+    /// in the `obj_constant` field (not the tree), so the extracted tree
+    /// constant is 0 (asserted inside).
     #[test]
     fn extract_and_solve_bounded_qp() {
         let prob = NlProblem {

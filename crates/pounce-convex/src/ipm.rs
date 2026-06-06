@@ -66,7 +66,16 @@ pub struct QpOptions {
     /// parameter σ is computed adaptively by the Mehrotra predictor;
     /// it is not an option.)
     pub tau: f64,
-    /// Static KKT regularization δ.
+    /// Static KKT regularization δ. Added on the (block) diagonal to make
+    /// the reduced KKT system quasi-definite, so the LDLᵀ has a stable,
+    /// well-defined inertia. Because convergence is tested on the
+    /// *unregularized* residuals, δ only perturbs the search direction — but
+    /// with a full Newton step it also floors the achievable primal residual
+    /// at `δ·‖dy‖`. On badly-scaled NETLIB LPs the equality multipliers grow
+    /// large (`adlittle`: `‖dy‖ ≈ 4e8`), so a too-large δ freezes `inf_pr`
+    /// above the tolerance and the IPM stalls to its iteration cap. The
+    /// default is sized small enough to clear that floor on such instances
+    /// while still keeping the factorization quasi-definite (see [`Default`]).
     pub reg: f64,
     /// Relative tolerance for accepting an infeasibility/unboundedness
     /// certificate. A certificate is declared only when its defining
@@ -96,7 +105,14 @@ impl Default for QpOptions {
             tol: 1e-8,
             max_iter: 200,
             tau: 0.95,
-            reg: 1e-8,
+            // δ = 1e-10: small enough that the primal-residual floor δ·‖dy‖
+            // clears `tol` even when the equality duals are large (badly
+            // scaled NETLIB LPs such as `adlittle`, which stalls at the cap
+            // with δ = 1e-8 but converges in ~57 iters here), yet still
+            // strictly positive so the reduced KKT stays quasi-definite for a
+            // stable LDLᵀ inertia. The whole 1e-9‥1e-11 band converges the
+            // LP/QP benchmark suites; 1e-10 is centered in it.
+            reg: 1e-10,
             infeas_tol: 1e-7,
             use_hsde: false,
             collect_iterates: false,
@@ -1251,6 +1267,26 @@ fn run_ipm(
 
         if res < opts.tol {
             status = QpStatus::Optimal;
+            // Record the converged iterate so the trace *ends* at the
+            // optimum, matching the NLP path's N+1 convention (a problem
+            // solved in N steps logs N+1 records: the cold start through the
+            // converged point). Every other record is pushed at the bottom of
+            // the loop with the step that was taken *from* it; the converged
+            // iterate takes no step, so its `alpha`s are zero. Without this a
+            // solve that converges immediately (e.g. a tiny well-conditioned
+            // QP in one step) would leave only the pre-step cold start in the
+            // trace, and the trace's final objective would not be the optimum.
+            if opts.collect_iterates {
+                iterates.push(QpIterate {
+                    iter: it,
+                    objective: obj_it,
+                    primal_infeasibility: pinf,
+                    dual_infeasibility: dinf,
+                    mu,
+                    alpha_primal: 0.0,
+                    alpha_dual: 0.0,
+                });
+            }
             break;
         }
 

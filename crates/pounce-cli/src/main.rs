@@ -1134,7 +1134,7 @@ fn run_convex_qp(
     use pounce_convex::presolve::{presolve, PresolveOutcome};
     use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
 
-    let (qp, con_map) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
+    let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
         Some(q) => q,
         None => {
             eprintln!(
@@ -1145,7 +1145,13 @@ fn run_convex_qp(
         }
     };
 
-    let obj_const = prob.obj_constant;
+    // The reported objective must include *both* constant sources: the
+    // `.nl` linear-section constant (`obj_constant`) and any degree-0 term
+    // AMPL/Pyomo folded into the nonlinear objective tree (`obj_nl_const`,
+    // recovered by `extract_qp_with_map`). Dropping the latter makes the
+    // convex solve report an objective off by that constant versus the NLP
+    // path (e.g. HS21 by −100, HS35 by +9). Both are in user sense.
+    let obj_const = prob.obj_constant + obj_nl_const;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
     let backend = || -> Box<dyn SparseSymLinearSolverInterface> {

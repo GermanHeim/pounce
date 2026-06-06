@@ -301,6 +301,11 @@ fn mismatch_msg(class: ProblemClass, forced: &str, expected: &str) -> String {
 /// expression is (at most) linear.
 pub(crate) type QuadHessian = BTreeMap<(usize, usize), f64>;
 
+/// Full quadratic read-out: `(Hessian, [(var, linear coef), …], constant)`.
+/// The linear and constant parts are the pieces AMPL/Pyomo fold into the
+/// nonlinear objective tree (see [`analyze_quadratic_full`]).
+pub(crate) type QuadForm = (QuadHessian, Vec<(usize, f64)>, f64);
+
 /// Attempt to read an expression as a polynomial of total degree ≤ 2 and
 /// return its Hessian (constant, since the form is quadratic). Returns
 /// `None` if the expression contains any term the classifier cannot
@@ -308,11 +313,12 @@ pub(crate) type QuadHessian = BTreeMap<(usize, usize), f64>;
 /// non-constant, `Pow` with exponent ∉ {0,1,2}, products of degree > 2,
 /// external calls, …). `None` ⇒ treat as general nonlinear.
 pub(crate) fn analyze_quadratic(e: &Expr, n: usize) -> Option<QuadHessian> {
-    analyze_quadratic_full(e, n).map(|(h, _)| h)
+    analyze_quadratic_full(e, n).map(|(h, _, _)| h)
 }
 
 /// Like [`analyze_quadratic`] but also returns the degree-1 (linear)
-/// coefficients of the form: `(Hessian, [(var, coef), …])`.
+/// coefficients *and* the degree-0 (constant) term of the form:
+/// `(Hessian, [(var, coef), …], constant)`.
 ///
 /// AMPL folds the linear part of a nonlinear term into the objective's
 /// nonlinear expression tree (the `−6·x₀` of `(x₀−3)²`, say) rather than
@@ -320,20 +326,26 @@ pub(crate) fn analyze_quadratic(e: &Expr, n: usize) -> Option<QuadHessian> {
 /// add these in, exactly as the NLP path's `eval_f` sums the linear
 /// section *and* the nonlinear tree — otherwise the linear shift is
 /// silently dropped and the convex solve minimizes the wrong objective.
-pub(crate) fn analyze_quadratic_full(
-    e: &Expr,
-    _n: usize,
-) -> Option<(QuadHessian, Vec<(usize, f64)>)> {
+///
+/// The **constant** is returned for the same reason: AMPL/Pyomo also fold
+/// the objective's degree-0 term into the nonlinear tree (the `+9` of
+/// `(x₀−3)²`), where it does *not* land in `NlProblem::obj_constant`. It
+/// is irrelevant to the minimizer but is part of the *reported objective
+/// value*; dropping it makes the convex solve report an objective off by
+/// that constant versus the NLP path (see `qp_extract`).
+pub(crate) fn analyze_quadratic_full(e: &Expr, _n: usize) -> Option<QuadForm> {
     let poly = to_poly(e)?;
     if poly.max_degree() > 2 {
         return None;
     }
     let mut h: QuadHessian = BTreeMap::new();
     let mut lin: Vec<(usize, f64)> = Vec::new();
+    let mut constant = 0.0;
     for (vars, coef) in &poly.terms {
         match vars.as_slice() {
-            // Constant term contributes nothing to gradient or Hessian.
-            [] => {}
+            // Constant term: no gradient/Hessian contribution, but it is
+            // part of the objective *value* — accumulate, don't drop.
+            [] => constant += *coef,
             // Linear term c·xᵢ.
             [i] => lin.push((*i, *coef)),
             // Quadratic term c·xᵢ·xⱼ.
@@ -348,7 +360,7 @@ pub(crate) fn analyze_quadratic_full(
     }
     // Drop explicit zeros so `is_empty()` means "linear".
     h.retain(|_, v| v.abs() > 0.0);
-    Some((h, lin))
+    Some((h, lin, constant))
 }
 
 /// A multivariate polynomial as a map from a sorted variable-index

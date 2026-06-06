@@ -355,8 +355,9 @@ mod residual_tests {
     }
 
     /// The opt-in iterate trace is populated only when requested, records one
-    /// entry per interior-point iteration, and reflects convergence (μ and the
-    /// residuals shrink toward the optimum).
+    /// entry per interior-point iteration *plus* a terminal record at the
+    /// converged iterate (the NLP path's N+1 convention), and reflects
+    /// convergence (μ and the residuals shrink toward the optimum).
     #[test]
     fn iterate_trace_is_opt_in_and_records_convergence() {
         // A bounded QP (inequalities ⇒ a non-trivial central path, μ > 0).
@@ -404,10 +405,15 @@ mod residual_tests {
             "final traced dual infeasibility {} should be small",
             last.dual_infeasibility
         );
-        for r in &sol.iterates {
+        // Every stepping iterate has positive fraction-to-boundary lengths;
+        // the terminal converged record takes no step, so its α's are zero.
+        let (term, stepping) = sol.iterates.split_last().unwrap();
+        for r in stepping {
             assert!(r.alpha_primal > 0.0 && r.alpha_primal <= 1.0);
             assert!(r.alpha_dual > 0.0 && r.alpha_dual <= 1.0);
         }
+        assert_eq!(term.alpha_primal, 0.0, "converged record takes no step");
+        assert_eq!(term.alpha_dual, 0.0, "converged record takes no step");
     }
 
     /// Inequality complementarity: a binding general inequality must show

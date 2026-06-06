@@ -56,7 +56,10 @@ def test_iterate_trace_is_opt_in():
     kw = dict(P=np.diag([2.0, 2.0]), c=[-3.0, -4.0], lb=[0, 0], ub=[1, 1])
     assert solve_qp(**kw).iterates == []  # default: no trace
     traced = solve_qp(**kw, collect_iterates=True)
-    assert len(traced.iterates) == traced.iters
+    # N interior-point iterations log N+1 records: one per iteration plus a
+    # terminal record at the converged iterate (matching the NLP trace's
+    # N+1 convention, so the trace always ends at the optimum).
+    assert len(traced.iterates) == traced.iters + 1
     first = traced.iterates[0]
     assert set(first) == {
         "iter",
