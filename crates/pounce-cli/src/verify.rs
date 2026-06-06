@@ -991,7 +991,10 @@ mod tests {
         // Writer is the inverse we must match exactly. Derive the banner
         // from the crate version so this fixture never goes stale on a
         // version bump (the round-trip is agnostic to the exact string).
-        let message = format!("POUNCE {}: Optimal Solution Found", env!("CARGO_PKG_VERSION"));
+        let message = format!(
+            "POUNCE {}: Optimal Solution Found",
+            env!("CARGO_PKG_VERSION")
+        );
         let payload = SolutionFile {
             message: &message,
             x: &[1.0, 2.5, -0.5, 100.0],
