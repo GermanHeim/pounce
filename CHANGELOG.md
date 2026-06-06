@@ -289,6 +289,11 @@ with FD-verified first/second derivatives on the smooth interior.
 
 ### Fixed
 
+- **Windows build:** the debugger's `SIGINT`-to-break handler referenced
+  `nix::sys` / `nix::libc`, which the (Unix-only) `nix` crate does not expose
+  on Windows, breaking the `pounce-cli` build there. The POSIX handler is now
+  `#[cfg(unix)]`-gated with a no-op `install()` stub elsewhere; the rustyline
+  prompt's Ctrl-C double-tap remains the cross-platform escape hatch.
 - **`.sol` banner no longer goes stale:** the `parse_sol` round-trip test
   fixture derived its `POUNCE <version>:` message from a hardcoded literal,
   which silently drifted on each release (it was still `0.3.1`). It now

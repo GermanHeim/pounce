@@ -276,12 +276,13 @@ fn jitter(base: &[f64], rel: f64, k: usize) -> Vec<f64> {
 /// double-tap: the first Ctrl-C cancels the line, a second quits the solve
 /// (see [`SolverDebugger::on_prompt_interrupt`]).
 pub mod interrupt {
-    use nix::sys::signal::{self, SigHandler, Signal};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static PENDING: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
     static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+    #[cfg(unix)]
     extern "C" fn handler(_sig: nix::libc::c_int) {
         // `swap` returns the previous value: if a break was already
         // pending and unconsumed, the user pressed Ctrl-C twice — abort.
@@ -293,7 +294,9 @@ pub mod interrupt {
 
     /// Install the handler once (idempotent). Call only when a debugger
     /// is active, so a normal run keeps default Ctrl-C behavior.
+    #[cfg(unix)]
     pub fn install() {
+        use nix::sys::signal::{self, SigHandler, Signal};
         if INSTALLED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -302,6 +305,13 @@ pub mod interrupt {
             let _ = signal::signal(Signal::SIGINT, SigHandler::Handler(handler));
         }
     }
+
+    /// Non-Unix targets have no POSIX `SIGINT` handler to install, so the
+    /// solve-time Ctrl-C-to-break path is unavailable there. `take()` simply
+    /// never sees a pending break; the rustyline prompt's own double-tap
+    /// (see [`SolverDebugger::on_prompt_interrupt`]) remains the escape hatch.
+    #[cfg(not(unix))]
+    pub fn install() {}
 
     /// Consume a pending break request (clears it).
     pub fn take() -> bool {
