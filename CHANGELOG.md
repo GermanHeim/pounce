@@ -281,9 +281,19 @@ with FD-verified first/second derivatives on the smooth interior.
   bringing AMF ordering by default and MC64 inertia-guided scaling fallback.
 - **Internal:** the `.nl` pipeline was extracted into a new leaf crate
   `pounce-nl` (re-exported from `pounce-cli`; no public API change).
+- **`pounce-studio-mcp` → 0.1.0** (versioned independently of the `0.4.0`
+  core): the MCP server graduated from its `0.0.1` spike to its first
+  functional release — analyze / run / explain / citations tools, GAMS
+  problem tools, a live debug-session proxy, and PyO3 backing via
+  `pounce-studio-core`.
 
 ### Fixed
 
+- **`.sol` banner no longer goes stale:** the `parse_sol` round-trip test
+  fixture derived its `POUNCE <version>:` message from a hardcoded literal,
+  which silently drifted on each release (it was still `0.3.1`). It now
+  reads `CARGO_PKG_VERSION`, like the production writer always has, so the
+  fixture self-updates and never needs a manual bump.
 - **Restoration:** the limited-memory (L-BFGS) Hessian is now built in the
   iterates' native space, fixing a space mismatch on compound problems (#102);
   the cycle detector rolls back to the last acceptable point instead of
