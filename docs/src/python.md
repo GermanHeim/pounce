@@ -110,28 +110,74 @@ minimize(fun, x0, jac=None, hess=None, bounds=None,
 - The most common porting snag is `options`: `options={"maxiter": 100}` is a
   no-op — it is `options={"max_iter": 100}`.
 
-### Why `minimize` is NLP-only (and the other solvers have their own entry points)
+### Solver routing in `minimize`
 
-`minimize` deliberately covers exactly what SciPy's does: a **general,
-black-box nonlinear** problem solved to a **local** optimum. It cannot route
-to the specialized solvers, and that is a soundness decision, not an omission:
+By default `minimize` **auto-routes** the same way the CLI's
+`solver_selection=auto` does: a problem that is provably a **linear program**
+or a **convex quadratic program** is dispatched to the specialized convex
+interior-point solver (`pounce.solve_qp`, the HSDE driver), which reaches a
+**global** optimum in materially fewer iterations; everything else is solved
+by the general NLP filter line-search interior-point method, exactly as before.
 
-- **It only sees an opaque callable.** `minimize` receives `fun` as a Python
-  function. It cannot extract the matrices of a QP, recognize a cone, or
-  *prove* convexity from a black box — so it cannot safely decide "this is an
-  LP/QP, send it to the convex IPM." (The **CLI** *can* auto-route with
-  `solver_selection=auto`, because it classifies a parsed `.nl` model and has
-  the full algebraic structure; a Python callable has none of that.)
-- **The specialized solvers need structure, not a callable.** A convex/conic
-  guarantee requires the problem *as data* (matrices, cone definitions); a
-  certified global optimum requires a *symbolic* objective the solver can
-  relax and bound. Those don't fit the `minimize(fun, x0, …)` shape, so each
-  has a typed entry point that asks you to supply the structure:
+The catch is that `minimize` only sees **opaque callables** — it cannot read a
+`.nl` expression tree the way the CLI can. So instead of *reading* the
+structure it **probes** it: it evaluates `fun`/`jac`/`hess` at several points,
+fits a linear/quadratic model, and then **validates that model against the
+true callables at held-out points** before trusting it. The two
+misclassification directions are not symmetric, and the validation gates the
+dangerous one:
+
+- A convex LP/QP mistakenly sent to the NLP solver is merely *slower* — the
+  filter-IPM still solves it correctly.
+- A genuinely nonlinear problem sent to the QP solver would return a
+  **silently wrong** answer.
+
+So any probe that raises, any model mismatch beyond `route_tol`, a
+non-constant Hessian/Jacobian, or an indefinite Hessian (a nonconvex QP) all
+fall back to the NLP solver. **You never get a wrong "optimum" from a
+misclassification.**
+
+#### Forcing the solver
+
+The `solver_selection` option (passed in `options=`) overrides the automatic
+choice — mirroring the CLI option of the same name:
+
+| `options={"solver_selection": …}` | Behavior |
+|---|---|
+| `"auto"` | **Default.** Probe-and-validate; route provable LP/convex-QP to `solve_qp`, else NLP. |
+| `"nlp"` | Skip routing entirely; always use the NLP solver (the pre-routing behavior). |
+| `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
+| `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
+
+```python
+# Default: route a convex QP to the fast convex IPM automatically.
+res = minimize(fun, x0, bounds=bounds)
+print(res.info["solver"])          # 'qp-ipm' when routed; absent on the NLP path
+
+# Keep the pre-routing behavior — always the NLP solver:
+res = minimize(fun, x0, options={"solver_selection": "nlp"})
+
+# Insist the problem is a convex QP; fail loudly if the probe disagrees:
+res = minimize(fun, x0, options={"solver_selection": "qp-ipm"})
+```
+
+`route_tol` (default `1e-5`) sets the relative tolerance for the held-out
+validation; raise it if a genuinely-linear problem with noisy finite-difference
+Jacobians is being conservatively rejected, lower it to be stricter. The
+routing keys are consumed by `minimize` and never forwarded to the backend, so
+the rest of `options` still reaches the NLP solver unchanged.
+
+#### When you still need a typed entry point
+
+Auto-routing handles LP/convex-QP from the `minimize(fun, x0, …)` shape. The
+remaining specialized solvers need structure that a callable cannot carry — a
+cone list, a symbolic objective to relax and bound — so each keeps its own
+pounce-native entry point:
 
 | Want | Entry point | You provide | Optimum |
 |---|---|---|---|
 | General nonlinear, fast local solve | `minimize(fun, x0, …)` | callables (`fun`/`jac`/`hess`) | local |
-| LP / convex QP | `solve_qp(P, c, A, b, G, h, lb, ub, …)` | matrices | **global** |
+| LP / convex QP | `minimize` (auto) or `solve_qp(P, c, A, b, G, h, lb, ub, …)` | callables / matrices | **global** |
 | SOCP / exp / power / PSD cones | `solve_socp(P, c, A, b, G, h, *, cones, …)` | matrices + cone list | **global** |
 | Polynomial, certified global | `sos_minimize(objective, *, inequalities, equalities, …)` | a polynomial | **global** |
 | Factorable nonconvex, certified global | `minimize_global(objective, *, constraints, lo, hi, …)` | a symbolic `Expr` + box | **global** |

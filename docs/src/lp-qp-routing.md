@@ -82,15 +82,34 @@ solver.solve(model)
 
 ## What you get back
 
-The convex IPM reports the same way as the NLP path: an optimal-status
-banner, the objective value (in your original sense — a `maximize`
-objective and any constant term are reported correctly), and a `.sol`
-file with the primal solution when one is requested.
+Before solving, POUNCE prints a one-line **routing banner** naming the
+detected class, the solver it selected, and the effective
+`solver_selection` — so it is always clear which of POUNCE's solvers ran
+and why:
 
 ```text
-POUNCE (convex QP IPM, pounce-convex): Optimal Solution Found.
+Problem class: LP. Selected solver: convex QP interior-point (pounce-convex) [solver_selection=auto].
+```
+
+(The banner is suppressed alongside the startup banner — `sb yes` or
+JSON-debug protocol mode — to keep stdout clean for machine consumers.)
+
+The convex IPM then reports the same way as the NLP path: an
+optimal-status line, the objective value (in your original sense — a
+`maximize` objective and any constant term are reported correctly), and a
+`.sol` file with the primal solution when one is requested.
+
+```text
+POUNCE (LP IPM, pounce-convex): Optimal Solution Found.
         obj=2.00000000  iters=2
 ```
+
+> **Driver.** The convex path uses the **homogeneous self-dual embedding
+> (HSDE)** interior-point driver — the same self-dual formulation
+> Clarabel/ECOS use. It is self-starting, returns verified
+> infeasibility/unboundedness certificates, and conditions the KKT system
+> internally through its per-cone scaling, so it solves even badly-scaled
+> LPs (e.g. NETLIB `nl`, `‖c‖ ~ 1e6`) without external pre-scaling.
 
 ## Presolve
 
