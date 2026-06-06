@@ -18,6 +18,7 @@
 - [Solution Output](solution-output.md)
 - [JSON Solve Report](json-output.md)
   - [Schema v1 Reference](schema/solve-report-v1.md)
+- [Verifying Solutions](verify.md)
 - [Sensitivity Analysis](sensitivity.md)
 - [Sessions: Factor-Once / Solve-Many](sessions.md)
 - [Interactive Debugger](debugger.md)
@@ -26,6 +27,7 @@
 
 - [Pyomo](pyomo.md)
 - [Python API](python.md)
+- [Curve Fitting](curve-fitting.md)
 
 # Global Search
 
@@ -36,12 +38,17 @@
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
-- [Color Theme](color-theme.md)
+- [Active-Set SQP & Warm Starts](active-set-sqp.md)
+  - [Design Note](active-set-sqp-warm-start.md)
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
 - [Troubleshooting Recipes](troubleshooting.md)
 - [Benchmarks](benchmarks.md)
+
+# Appendix
+
+- [Color Theme](color-theme.md)
 
 ---
 

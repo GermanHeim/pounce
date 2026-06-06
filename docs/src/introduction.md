@@ -46,8 +46,8 @@ and the CLI all solve a wide range of NLPs from the standard test
 suites (Hock-Schittkowski, CUTEst, Mittelmann ampl-nlp, CHO parameter
 estimation, gas/water network design). Sensitivity analysis (sIPOPT
 port), reduced-Hessian computation, the auxiliary-equality + FBBT
-presolve, and the active-set SQP path are all wired in and available
-behind option keys. Existing PyIpopt / cyipopt / JuMP / AMPL clients
+presolve, and the [active-set SQP path](active-set-sqp.md) are all wired
+in and available behind option keys. Existing PyIpopt / cyipopt / JuMP / AMPL clients
 link against `libpounce_cinterface` in place of `libipopt`
 unchanged.
 

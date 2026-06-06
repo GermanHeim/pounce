@@ -1924,7 +1924,24 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
 }
 
 impl NlTnlp {
+    /// Build the TNLP, panicking if AMPL external-function resolution fails.
+    ///
+    /// Kept for the many infallible call sites (CLI, tests) that operate on
+    /// `.nl` models known to need no external libraries. Surfaces that can be
+    /// handed an arbitrary user model — notably the Python `read_nl` binding —
+    /// must call [`Self::try_new`] instead so a missing `$AMPLFUNC` library
+    /// becomes a catchable error rather than an uncatchable panic across the
+    /// pyo3 boundary.
     pub fn new(prob: NlProblem) -> Self {
+        Self::try_new(prob)
+            .unwrap_or_else(|e| panic!("failed to resolve AMPL external functions: {e}"))
+    }
+
+    /// Build the TNLP, returning an error (instead of panicking) when AMPL
+    /// imported functions named by the model can't be resolved — e.g.
+    /// `$AMPLFUNC` is unset, a named library is missing/unloadable, or a
+    /// referenced function id isn't registered by any loaded library.
+    pub fn try_new(prob: NlProblem) -> Result<Self, String> {
         // Resolve any AMPL imported (external) functions. Walk every
         // nonlinear expression to collect the funcall ids actually
         // referenced; load the libraries named in $AMPLFUNC and bind
@@ -1941,8 +1958,7 @@ impl NlTnlp {
             super::nl_external::ExternalResolver::build_for_problem(
                 &prob.imported_funcs,
                 &referenced,
-            )
-            .unwrap_or_else(|e| panic!("failed to resolve AMPL external functions: {e}"))
+            )?
         };
 
         // Flatten objective and each constraint into independent
@@ -2096,7 +2112,7 @@ impl NlTnlp {
 
         let compressed: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
 
-        Self {
+        Ok(Self {
             prob,
             obj_tapes,
             con_tapes,
@@ -2116,7 +2132,7 @@ impl NlTnlp {
             adj_scratch: vec![0.0; max_tape_n],
             adj_dot_scratch: vec![0.0; max_tape_n],
             compressed,
-        }
+        })
     }
 
     pub fn final_x(&self) -> Option<&[Number]> {

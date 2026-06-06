@@ -7,7 +7,9 @@ intentionally cyipopt-compatible: Problem class construction,
 same shape of result, with a scipy-style ``minimize`` facade alongside.
 Convex and conic programs (LP, QP, SOCP, exponential / power cones, small
 SDP) are exposed through ``solve_qp`` / ``solve_socp``; polynomial global
-optimization through ``sos_minimize``. JAX integration (autodiff-built
+optimization through ``sos_minimize``; certified global optimization of
+factorable nonconvex problems through ``minimize_global`` (spatial
+branch-and-bound). JAX integration (autodiff-built
 derivatives, implicit differentiation through ``x*(p)``) lives in the
 ``pounce.jax`` submodule and is only imported on demand to avoid pulling
 in JAX when it is not installed.
@@ -17,6 +19,7 @@ from ._pounce import (
     Problem, Solver, NlProblem, read_nl, classify_working_set, __version__,
 )
 from ._minimize import minimize, OptimizeResult
+from ._curve_fit import curve_fit, curve_fit_minima, CurveFitResult
 from ._minima import find_minima, MinimaResult
 from ._critical import (
     find_critical_points, find_saddles, reaction_network,
@@ -43,6 +46,9 @@ __all__ = [
     "read_nl",
     "minimize",
     "OptimizeResult",
+    "curve_fit",
+    "curve_fit_minima",
+    "CurveFitResult",
     "find_minima",
     "MinimaResult",
     "find_critical_points",

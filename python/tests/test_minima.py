@@ -179,3 +179,47 @@ def test_rastrigin_global_via_hopping():
         n_minima=8, max_solves=200, patience=60, dedup=1e-2, seed=1, options=OPTS,
     )
     assert r.fun == pytest.approx(0.0, abs=1e-4)
+
+
+def test_find_minima_and_saddles_reject_wrong_length_bounds():
+    """The sampling-based searches broadcast ``lo + (hi-lo)*u`` over the box, so
+    a wrong-length ``bounds`` could silently sample every dimension from one
+    variable's interval. Length is now validated up front (matching minimize)."""
+    def fun(z):
+        return float(z @ z)
+
+    def jac(z):
+        return 2.0 * np.asarray(z, float)
+
+    # two variables, one bound pair
+    with pytest.raises(ValueError, match="bounds has 1 entry but the problem has 2"):
+        pounce.find_minima(fun, x0=np.zeros(2), jac=jac, bounds=[(-2, 2)],
+                           options={"print_level": 0})
+
+    def hess(z):
+        return 2.0 * np.eye(2)
+
+    with pytest.raises(ValueError, match="bounds has 1 entry but the problem has 2"):
+        pounce.find_saddles(fun, x0=np.zeros(2), grad=jac, hess=hess,
+                            bounds=[(-2, 2)])
+
+    # correct length is accepted (smoke: returns a result, no exception)
+    r = pounce.find_minima(fun, x0=np.zeros(2), jac=jac,
+                           bounds=[(-2, 2), (-2, 2)], max_solves=5,
+                           options={"print_level": 0})
+    assert r is not None
+
+
+def test_find_minima_rejects_nonsensical_budget():
+    """``n_minima``/``patience``/``max_solves`` below 1 are nonsensical and used
+    to silently no-op or return a wrong count; they now raise clear errors."""
+    f = lambda v: float(v @ v)
+    g = lambda v: 2.0 * np.asarray(v, float)
+    box = [(-2, 2), (-2, 2)]
+    opts = {"print_level": 0}
+    with pytest.raises(ValueError, match="n_minima must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, n_minima=0, options=opts)
+    with pytest.raises(ValueError, match="patience must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, patience=-1, options=opts)
+    with pytest.raises(ValueError, match="max_solves must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, max_solves=0, options=opts)

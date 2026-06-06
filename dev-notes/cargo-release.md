@@ -1,6 +1,6 @@
 # crates.io release
 
-POUNCE ships 13 Rust crates to crates.io. This file is the procedure.
+POUNCE ships 18 Rust crates to crates.io. This file is the procedure.
 For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
 `pypi-release.md`.
 
@@ -12,6 +12,7 @@ For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
 | `pounce-linalg`        | yes        |                                              |
 | `pounce-linsol`        | yes        |                                              |
 | `pounce-nlp`           | yes        |                                              |
+| `pounce-nl`            | yes        | `.nl` reader; pounce-cli depends on it       |
 | `pounce-feral`         | yes        | pure-Rust linear-solver backend              |
 | `pounce-hsl`           | yes        | optional HSL/MA57 backend (user supplies HSL)|
 | `pounce-l1penalty`     | yes        |                                              |
@@ -20,8 +21,10 @@ For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
 | `pounce-restoration`   | yes        |                                              |
 | `pounce-sensitivity`   | yes        | sIPOPT port                                  |
 | `pounce-cinterface`    | yes        | C ABI (CreateIpoptProblem / IpoptSolve)      |
+| `pounce-studio-core`   | yes        | solve-report parsers; pounce-cli dep (0.4.0+)|
 | `pounce-cli`           | yes        | `pounce` and `pounce_sens` binaries          |
 | `pounce-py`            | **no**     | ships on PyPI as `pounce-solver` via maturin |
+| `pounce-studio-pyo3`   | **no**     | PyO3 wrapper; ships on PyPI                   |
 | `pounce-cutest`        | **no**     | benchmark harness (gitignored crate too)     |
 | `pounce-large-scale`   | **no**     | synthetic benchmark suite                    |
 | `iter-diff`            | **no**     | internal Track-A validation tool             |
@@ -31,13 +34,24 @@ publish script enforces the same list and will skip them by construction.
 
 ## Dependency order
 
-Layer 0: `pounce-common`
+Layer 0: `pounce-common`, `pounce-studio-core` (leaf: serde only)
 Layer 1: `pounce-linalg`
 Layer 2: `pounce-linsol`, `pounce-nlp`
-Layer 3: `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`, `pounce-presolve`
+Layer 3: `pounce-nl`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`, `pounce-presolve`, `pounce-convex`
 Layer 4: `pounce-algorithm`
-Layer 5: `pounce-restoration`, `pounce-sensitivity`
+Layer 5: `pounce-restoration`, `pounce-sensitivity`, `pounce-global`
 Layer 6: `pounce-cinterface`, `pounce-cli`
+
+`pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on
+`pounce-common` + `pounce-linsol` + `pounce-linalg`, so it sits in layer 3.
+`pounce-global` (spatial branch-and-bound) depends on `pounce-convex` **and**
+`pounce-algorithm`, so it cannot publish before layer 4 — it sits in layer 5.
+Both are **new crate names** as of 0.4.0 and so are subject to the new-crate
+rate limit on their first publish (see below).
+
+`pounce-studio-core` is a leaf (serde/serde_json only); it can publish any
+time before `pounce-cli`. `pounce-nl` depends on `pounce-common` +
+`pounce-nlp`, so it sits in layer 3.
 
 The script publishes one crate at a time in this layered order, not in
 parallel — each crate must be live on crates.io before any dependent

@@ -251,6 +251,14 @@ SOL is an optional second positional naming the .sol output file
 (equivalent to --sol-output <path>); the AMPL `solver in.nl out.sol`
 convention.
 
+Subcommand:
+  pounce verify <problem.nl> <claim.sol> [--feas-tol T] [--json-output P]
+                            independently check that a .sol solution
+                            satisfies the canonical .nl's constraints and
+                            bounds, without trusting the solver/agent that
+                            produced it. Exit 0 = feasible, 20 = violated.
+                            Run `pounce verify --help` for details.
+
 When the .nl declares the sIPOPT suffixes (sens_state_1,
 sens_state_value_1, sens_init_constr), pounce additionally runs the
 post-optimal parametric sensitivity step and writes the perturbed
@@ -292,8 +300,12 @@ Options:
                             breakpoints, step/continue. Type `help` at
                             the pounce-dbg> prompt for commands.
   --debug-json              same loop, but speak newline-delimited JSON on
-                            stdin/stdout so an LLM agent or program can
-                            drive it (one JSON state object per pause).
+                            stdin/stdout so an LLM agent or program can drive
+                            it. The first line is a self-describing `hello`
+                            handshake (protocol version + every command,
+                            event, checkpoint, metric, and capability), so a
+                            client needs no out-of-band docs; each pause is one
+                            JSON state object. Full spec: docs/src/debugger.md.
   --debug-on-error          don't pause every iteration; run freely and
                             drop into the debugger only if the solve fails,
                             for a post-mortem at the final iterate. Implies

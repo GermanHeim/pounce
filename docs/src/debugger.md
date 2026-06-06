@@ -603,6 +603,14 @@ Staged options are **not** applied to the strategies already built for
 the running solve (they don't re-read options mid-iteration). They take
 effect on a [`resolve`](#re-solve-from-a-saved-point) or the next solve.
 
+The read-side counterpart is `get opt <name>`, which reports an option's
+current (or staged) value and its registry metadata — so you can confirm
+what a `set opt` actually staged before you `resolve`:
+
+```text
+get opt mu_strategy        # → mu_strategy = adaptive  (staged)
+```
+
 ---
 
 ## Discovering options
@@ -827,31 +835,50 @@ you want the minima themselves.
 
 ---
 
-## Ask Claude about the state
+## Ask an LLM about the state
 
 `ask [question]` packages the current paused state — checkpoint,
 residuals, step lengths, dimensions, and the KKT inertia/regularization —
-into a prompt and runs it through **Claude Code** (`claude -p`, headless
-print mode), printing the reply inline. It's AI-assisted debugging
-without leaving the loop:
+into a prompt and runs it through an LLM CLI (by default **Claude Code**,
+`claude -p` headless print mode), printing the reply inline. It's
+AI-assisted debugging without leaving the loop:
 
 ```text
 pounce-dbg> stop-at kkt
 pounce-dbg> continue
 pounce-dbg> ask why is the dual infeasibility stalling?
-# → Claude's analysis of the state + suggested options to try
+# → the model's analysis of the state + suggested options to try
 ```
 
 With no question it defaults to "explain the current state and suggest
-what to try next." The command is configurable via `$POUNCE_DBG_LLM`
-(default `claude -p`); the prompt is fed on the tool's stdin, or
-substituted into a `{}` placeholder if the template has one:
+what to try next."
+
+### Choosing the LLM
+
+Set `$POUNCE_DBG_LLM` to pick the backend. It accepts either a **bare
+provider keyword** — which expands to that CLI's correct non-interactive
+invocation — or a **full command template**:
 
 ```sh
-export POUNCE_DBG_LLM='claude -p'          # default
-export POUNCE_DBG_LLM='llm -m claude-opus' # any prompt-on-stdin CLI
-export POUNCE_DBG_LLM='mytool --ask {}'    # prompt as an argument
+export POUNCE_DBG_LLM=claude     # Claude Code      → claude -p   (default)
+export POUNCE_DBG_LLM=codex      # OpenAI Codex CLI → codex exec <prompt>
+export POUNCE_DBG_LLM=gemini     # Google Gemini    → gemini -p <prompt>
+export POUNCE_DBG_LLM=llm        # simonw's llm     → llm <prompt>
+# …or a full template:
+export POUNCE_DBG_LLM='llm -m claude-opus'  # any prompt-on-stdin CLI
+export POUNCE_DBG_LLM='mytool --ask {}'     # prompt substituted into {}
 ```
+
+For a template, the prompt is fed on the tool's stdin unless it contains a
+`{}` placeholder, in which case it is substituted as an argument. A bare
+word that isn't a known provider is treated as a program name with the
+prompt on stdin.
+
+**Graceful when the CLI is absent.** If the selected tool isn't installed
+or on `PATH`, `ask` returns an error naming the tool and listing the
+provider keywords — the rest of the debugger (and the solve) is
+unaffected. `ask` is the only command that shells out; nothing else
+depends on an LLM being present.
 
 In JSON mode the reply comes back in the `result` event's `data.reply`.
 
@@ -1004,6 +1031,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `break …` (`b`) | iteration / `if` / `on` breakpoints; list; `clear`; `del N` |
 | `stop-at <cp>` | always pause at a checkpoint |
 | `set mu/x/<block>/opt …` | mutate μ, the iterate, or stage an option |
+| `get opt <name>` (`get <name>`) | report an option's current/staged value, source, and default |
 | `opt [filter]` | list/search registered options |
 | `complete <prefix>` | completion candidates |
 | `viz <target>` | open an artifact in a viewer |
@@ -1013,13 +1041,14 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `multistart <N> [rel]` | `N` restarts (uniform in each finite box; jitter elsewhere); tabulate |
 | `watch <target>` (`display`) | auto-print a target at every pause |
 | `tbreak N` (`tb`) | one-shot iteration breakpoint |
+| `commands N <c>;<c>…` | auto-run commands when iteration N's breakpoint hits (`commands N clear` removes) |
 | `watchpoint <blk>[<i>] [τ]` (`wp`) | pause when a value changes by > τ |
 | `diff` | what changed in the iterate since the last iteration |
 | `diagnose` (`diag`) | live health report: named culprit residuals, KKT inertia, stalls |
 | `source <file>` | run debugger commands from a file |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |
-| `ask [question]` | ask Claude Code (`claude -p` / `$POUNCE_DBG_LLM`) about the state |
+| `ask [question]` | ask an LLM about the state (default Claude Code; `$POUNCE_DBG_LLM`=`claude`/`codex`/`gemini`/`llm` or a template) |
 | `progress [on/off]` | toggle JSON progress events |
 | `detach` | stop pausing; run to completion |
 | `quit` (`q`, `exit`) | stop the solve |
@@ -1032,6 +1061,54 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 objects** (the banner, problem stats, and final summary are routed to
 stderr, and `print_level` is forced to 0). A program reads one JSON
 object per line.
+
+### For an LLM agent: the whole contract
+
+You do **not** need this page to drive the debugger — the protocol is
+self-describing. The contract is five lines:
+
+1. **Launch** `pounce <model> --debug-json` (or `--problem <name>`), with
+   the child's stdin and stdout piped.
+2. **Read the first line — `hello`.** It enumerates everything you can do:
+   `commands` (the verbs), `events` (breakpoint triggers), `checkpoints`
+   (where you can pause), `metrics` (the scalar field names), `blocks`
+   (the inspectable vectors), and a `capabilities` map. **Feature-detect
+   off these lists**, never off the version string.
+3. **Send commands**, one JSON object (or bare string) per line, e.g.
+   `{"cmd":"break if inf_pr<1e-6","id":1}` then `{"cmd":"continue","id":2}`.
+   Set `id` to correlate the matching `result`.
+4. **Read events** until you see the one you want. Every `pause` /
+   `progress` / `terminated` event carries the same scalar metric fields,
+   under the exact names listed in `hello.metrics`
+   (`objective`, `mu`, `inf_pr`, `inf_du`, `nlp_error`,
+   `complementarity`, `iter`) — so you can index them directly.
+5. **Finish** with `{"cmd":"continue"}` to run to completion (then read
+   `terminated`), or `{"cmd":"quit"}` to stop early.
+
+A complete minimal transcript (→ sent, ← received), eliding long lines:
+
+```text
+←  {"event":"hello","protocol":"pounce-dbg/1","commands":[…],"metrics":[…],…}
+←  {"event":"pause","checkpoint":"iter_start","iter":0,"objective":24.2,…}
+→  {"cmd":"break if inf_du<1e-6","id":1}
+←  {"event":"result","request_id":1,"command":"break","ok":true,…}
+→  {"cmd":"continue","id":2}
+←  {"event":"progress","iter":1,"objective":4.7,"inf_du":2.1e1,…}
+   … more progress events …
+←  {"event":"pause","checkpoint":"iter_start","iter":21,"inf_du":8.7e-7,"reason":"inf_du<1e-6"}
+→  {"cmd":"continue","id":3}
+←  {"event":"terminated","status":"SolveSucceeded","iterations":21,…}
+```
+
+If you are wired in through the **pounce-studio MCP server**, you don't
+even spawn the CLI yourself: call `debug_start` to open a live session and
+`debug_command` to step it (`debug_state` / `debug_sessions` /
+`debug_close` round it out) — the server owns the child process and the
+framing, and `debug_start` hands you the same `hello` handshake. Call
+`debug_session_guide` for the contract and a launch snippet if you'd
+rather drive `--debug-json` directly. The MCP analysis tools (`diagnose`,
+`find_stalls`, …) are *post-mortem* over a finished report; the
+`debug_*` tools and `--debug-json` are the *live* loop.
 
 ### Session lifecycle
 
@@ -1059,31 +1136,37 @@ Write one per line to stdin, either a bare string or an object:
 ### `hello`
 
 ```json
-{"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.2.0",
+{"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.4.0",
  "capabilities":{"inspect":true,"mutate_iterate":true,"mutate_mu":true,
    "conditional_breakpoints":"compound","request_ids":true,
-   "viz":["block","delta"],"save":true,"load":true,"sweep":true,
-   "kkt_inspect":true,
+   "viz":["block","delta","kkt","L"],"save":true,"load":true,"sweep":true,
+   "kkt_inspect":true,"diagnose":true,"llm_assist":true,
+   "pause_command":true,"equations":false,"structural_diagnose":false,
    "rewind":"primal_dual","resolve":true,"terminal_checkpoint":true,
    "interruptible":true,"progress_events":true,"async_pause":"checkpoint"},
  "checkpoints":["iter_start","after_mu","after_search_dir","after_step",
-                "pre_restoration_entry","post_restoration_exit","terminated"],
+                "step_rejected","pre_restoration_entry",
+                "post_restoration_exit","terminated"],
  "events":["resto_entered","resto_exited","regularized","tiny_step",
-           "ls_rejected","nan"],
+           "ls_rejected","mu_stalled","nan"],
  "commands":[…],"blocks":[…],"metrics":[…]}
 ```
 
 A client should **feature-detect off `capabilities` / `checkpoints` /
 `events`** rather than the protocol string — those lists are additive as
-the debugger grows.
+the debugger grows. A few capabilities are model-conditional: `equations`
+and `structural_diagnose` are `true` only when the solve came from an
+`.nl` file (which carries the source algebra and structural metadata) and
+`false` for a built-in problem, as shown above.
 
 ### `pause`
 
 ```json
 {"event":"pause","checkpoint":"iter_start","status":null,
  "iter":3,"mu":2.0e-2,"objective":5.05,"inf_pr":0.0,"inf_du":2.7e-14,
- "nlp_error":0.0237,"dims":{"x":2,"s":0,"y_c":0,"y_d":0,"z_l":2,"z_u":2,
- "v_l":0,"v_u":0},"breakpoints":[],"conditions":[],"reason":"mu<0.05"}
+ "nlp_error":0.0237,"complementarity":1.9e-2,"dims":{"x":2,"s":0,"y_c":0,
+ "y_d":0,"z_l":2,"z_u":2,"v_l":0,"v_u":0},"breakpoints":[],"conditions":[],
+ "reason":"mu<0.05"}
 ```
 
 `status` is non-null only at the `terminated` checkpoint. `reason`
@@ -1102,12 +1185,14 @@ carries the firing breakpoint / condition / event / interrupt.
 ### `progress`
 
 ```json
-{"event":"progress","iter":42,"mu":1.0e-5,"inf_pr":3.2e-7,"inf_du":1.1e-6,"obj":12.34}
+{"event":"progress","iter":42,"mu":1.0e-5,"inf_pr":3.2e-7,"inf_du":1.1e-6,
+ "objective":12.34,"nlp_error":1.1e-6,"complementarity":9.0e-6}
 ```
 
 Emitted once per outer iteration during a `continue`, so a UI can show
-live progress instead of a hang. Default on; toggle with the `progress`
-command.
+live progress instead of a hang. Carries the same scalar fields, under
+the same names, as `pause` — so `hello.metrics` names index directly off
+either event. Default on; toggle with the `progress` command.
 
 ### `terminated`
 

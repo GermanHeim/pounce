@@ -24,3 +24,4 @@ pub mod seeded_tnlp;
 pub mod sens;
 pub mod solve_report;
 pub mod tree_debug;
+pub mod verify;

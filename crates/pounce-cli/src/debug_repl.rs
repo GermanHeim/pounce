@@ -276,12 +276,13 @@ fn jitter(base: &[f64], rel: f64, k: usize) -> Vec<f64> {
 /// double-tap: the first Ctrl-C cancels the line, a second quits the solve
 /// (see [`SolverDebugger::on_prompt_interrupt`]).
 pub mod interrupt {
-    use nix::sys::signal::{self, SigHandler, Signal};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static PENDING: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
     static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+    #[cfg(unix)]
     extern "C" fn handler(_sig: nix::libc::c_int) {
         // `swap` returns the previous value: if a break was already
         // pending and unconsumed, the user pressed Ctrl-C twice — abort.
@@ -293,7 +294,9 @@ pub mod interrupt {
 
     /// Install the handler once (idempotent). Call only when a debugger
     /// is active, so a normal run keeps default Ctrl-C behavior.
+    #[cfg(unix)]
     pub fn install() {
+        use nix::sys::signal::{self, SigHandler, Signal};
         if INSTALLED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -302,6 +305,13 @@ pub mod interrupt {
             let _ = signal::signal(Signal::SIGINT, SigHandler::Handler(handler));
         }
     }
+
+    /// Non-Unix targets have no POSIX `SIGINT` handler to install, so the
+    /// solve-time Ctrl-C-to-break path is unavailable there. `take()` simply
+    /// never sees a pending break; the rustyline prompt's own double-tap
+    /// (see [`SolverDebugger::on_prompt_interrupt`]) remains the escape hatch.
+    #[cfg(not(unix))]
+    pub fn install() {}
 
     /// Consume a pending break request (clears it).
     pub fn take() -> bool {
@@ -362,7 +372,20 @@ impl CmdOut {
 }
 
 /// Metric names accepted in `break if …` (and shown by `help`).
-const METRICS: &[&str] = &["mu", "inf_pr", "inf_du", "obj", "err", "compl", "iter"];
+// The streamed scalar field names, in the exact form they appear on `pause` /
+// `progress` / `terminated` events — so a client can read `hello.metrics` and
+// index those keys directly off the event objects. Command input additionally
+// accepts the short aliases `obj`/`err`/`compl` (see `Metric::parse`); these are
+// the canonical advertised names.
+const METRICS: &[&str] = &[
+    "iter",
+    "mu",
+    "objective",
+    "inf_pr",
+    "inf_du",
+    "nlp_error",
+    "complementarity",
+];
 
 /// A scalar the solver exposes for conditional breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1255,7 +1278,11 @@ impl SolverDebugger {
     // ---- command engine -----------------------------------------------
 
     fn dispatch(&mut self, line: &str, ctx: &mut dyn DebugState) -> CmdOut {
-        let toks: Vec<&str> = line.split_whitespace().collect();
+        // Quote-aware so a file path with spaces (e.g. `load "my run.json"`)
+        // survives as a single token; identical to `split_whitespace` for any
+        // line without quotes. `owned` backs the `&str` slices `toks` holds.
+        let owned = tokenize_quoted(line);
+        let toks: Vec<&str> = owned.iter().map(String::as_str).collect();
         let Some(&verb) = toks.first() else {
             return CmdOut::ok(vec![]); // empty line: reprompt
         };
@@ -1438,7 +1465,8 @@ impl SolverDebugger {
             "  multistart <N> [rel]     N restarts (uniform in each finite box; jitter else)".into(),
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
-            "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
+            "  ask [question]           ask an LLM about the state (default Claude Code; set".into(),
+            "                           POUNCE_DBG_LLM=claude|codex|gemini|llm or a command template)".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
             "  diff                     what changed in the iterate since the last iteration".into(),
             "  diagnose | diag          live health report: named culprit residuals, KKT inertia, stalls".into(),
@@ -1702,7 +1730,13 @@ impl SolverDebugger {
             ));
         };
         let label = book.label(i);
-        let eq = &book.equations[i];
+        // `i` may come from a name lookup that indexes `names`; guard against a
+        // names/equations length skew rather than risk an out-of-bounds panic.
+        let Some(eq) = book.equations.get(i) else {
+            return CmdOut::err(format!(
+                "constraint `{key}` has no source algebra (index {i} out of range)"
+            ));
+        };
         CmdOut::ok(vec![format!("{label}:  {eq}")]).with_data(serde_json::json!({
             "index": i,
             "name": book.names.get(i).filter(|n| !n.is_empty()),
@@ -2825,8 +2859,10 @@ impl SolverDebugger {
             .flow(Flow::Stop)
     }
 
-    /// `ask [question]` — hand the current solver state to Claude Code
-    /// (headless `claude -p`, or `$POUNCE_DBG_LLM`) and print its reply.
+    /// `ask [question]` — hand the current solver state to an LLM CLI and
+    /// print its reply. Defaults to headless Claude Code; `$POUNCE_DBG_LLM`
+    /// selects another provider (`codex`, `gemini`, `llm`) or a full command
+    /// template. Degrades gracefully when the CLI isn't installed.
     /// "Ask why this step looks wrong without leaving the debugger."
     fn cmd_ask(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let question = if rest.is_empty() {
@@ -3226,6 +3262,7 @@ impl SolverDebugger {
                     "inf_pr": ctx.inf_pr(),
                     "inf_du": ctx.inf_du(),
                     "nlp_error": ctx.nlp_error(),
+                    "complementarity": ctx.complementarity(),
                     "dims": dims,
                     "breakpoints": self.breaks,
                     "conditions": conds,
@@ -3237,8 +3274,10 @@ impl SolverDebugger {
         }
     }
 
-    /// Emit a per-iteration `progress` event (JSON mode only). Same
-    /// scalars as `pause`; fired while running between pauses.
+    /// Emit a per-iteration `progress` event (JSON mode only). Carries the
+    /// same scalar fields, under the same names, as `pause` (minus the
+    /// per-pause `dims` / `breakpoints` / `watches`); fired while running
+    /// between pauses.
     fn emit_progress_event(&self, ctx: &dyn DebugState) {
         let ev = serde_json::json!({
             "event": "progress",
@@ -3246,7 +3285,9 @@ impl SolverDebugger {
             "mu": ctx.mu(),
             "inf_pr": ctx.inf_pr(),
             "inf_du": ctx.inf_du(),
-            "obj": ctx.objective(),
+            "objective": ctx.objective(),
+            "nlp_error": ctx.nlp_error(),
+            "complementarity": ctx.complementarity(),
         });
         emit_json(&ev);
     }
@@ -3294,7 +3335,7 @@ impl SolverDebugger {
                 "mutate_mu": true,
                 "conditional_breakpoints": "compound",
                 "request_ids": true,
-                "viz": ["block", "delta"],
+                "viz": ["block", "delta", "kkt", "L"],
                 "save": true,
                 "load": true,
                 "sweep": self.restart.is_some(),
@@ -4008,6 +4049,40 @@ struct ParsedCmd {
     id: Option<serde_json::Value>,
 }
 
+/// Split a command line on whitespace, honoring double-quoted spans so a
+/// file-path argument containing spaces survives as one token. Quotes are
+/// delimiters and stripped; for any line without quotes this is byte-for-byte
+/// equivalent to `str::split_whitespace` (collapsing runs of whitespace,
+/// trimming the ends).
+fn tokenize_quoted(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut has_tok = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                has_tok = true; // an empty "" is still a token
+            }
+            c if c.is_whitespace() && !in_quote => {
+                if has_tok {
+                    out.push(std::mem::take(&mut cur));
+                    has_tok = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_tok = true;
+            }
+        }
+    }
+    if has_tok {
+        out.push(cur);
+    }
+    out
+}
+
 /// In JSON mode a command line may be a bare string or a JSON object
 /// `{"cmd": "...", "args": [...], "id": <any>}`. Returns the resolved
 /// command string and the request id (if the object carried one).
@@ -4020,12 +4095,19 @@ fn parse_command(line: &str, mode: DebugMode) -> ParsedCmd {
                 let mut s = cmd.to_string();
                 if let Some(args) = v.get("args").and_then(|a| a.as_array()) {
                     for a in args {
-                        if let Some(a) = a.as_str() {
-                            s.push(' ');
-                            s.push_str(a);
+                        s.push(' ');
+                        let tok = a
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| a.to_string());
+                        // Quote whitespace-bearing args (e.g. paths) so the
+                        // quote-aware tokenizer keeps them as one token.
+                        if tok.contains(char::is_whitespace) {
+                            s.push('"');
+                            s.push_str(&tok);
+                            s.push('"');
                         } else {
-                            s.push(' ');
-                            s.push_str(&a.to_string());
+                            s.push_str(&tok);
                         }
                     }
                 }
@@ -4178,16 +4260,55 @@ fn build_ask_prompt(ctx: &dyn DebugState, question: &str) -> String {
     p
 }
 
-/// Resolve the LLM command from `$POUNCE_DBG_LLM` (whitespace-split; `{}`
-/// substitutes the prompt as an argument), defaulting to `claude -p`. The
-/// bool is whether the prompt goes on stdin (true) or was substituted
-/// into an argument (false).
-fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
-    let tmpl = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
-    let tmpl = tmpl.trim();
-    if tmpl.is_empty() {
-        return ("claude".to_string(), vec!["-p".to_string()], true);
+/// Provider keywords with a built-in non-interactive invocation, so a user
+/// can select one with just `POUNCE_DBG_LLM=codex` instead of memorizing
+/// each CLI's flags. Returns the program, its argv (with the prompt already
+/// placed for arg-style tools), and whether the prompt is *also* written to
+/// stdin. Keep `LLM_PROVIDERS` in sync for help/error text.
+const LLM_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "llm"];
+
+fn llm_preset(name: &str, prompt: &str) -> Option<(String, Vec<String>, bool)> {
+    match name {
+        // Claude Code — headless print mode, prompt on stdin.
+        "claude" => Some(("claude".to_string(), vec!["-p".to_string()], true)),
+        // OpenAI Codex CLI — non-interactive `codex exec <prompt>`.
+        "codex" => Some((
+            "codex".to_string(),
+            vec!["exec".to_string(), prompt.to_string()],
+            false,
+        )),
+        // Google Gemini CLI — non-interactive `gemini -p <prompt>`.
+        "gemini" => Some((
+            "gemini".to_string(),
+            vec!["-p".to_string(), prompt.to_string()],
+            false,
+        )),
+        // simonw's `llm` — prompt as a positional argument.
+        "llm" => Some(("llm".to_string(), vec![prompt.to_string()], false)),
+        _ => None,
     }
+}
+
+/// Resolve the LLM command from `$POUNCE_DBG_LLM`, defaulting to `claude`.
+/// The value may be either a **bare provider keyword** (`claude`, `codex`,
+/// `gemini`, `llm` — see `llm_preset`) or a **full command template**
+/// (whitespace-split; `{}` substitutes the prompt as an argument, else the
+/// prompt is fed on stdin). The bool is whether the prompt goes on stdin.
+fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
+    let raw = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
+    let tmpl = raw.trim();
+    if tmpl.is_empty() {
+        // Default provider.
+        return llm_preset("claude", prompt).expect("claude is a known provider");
+    }
+    // A bare keyword (no whitespace) matching a known provider wins; this is
+    // the ergonomic `POUNCE_DBG_LLM=codex` path.
+    if !tmpl.contains(char::is_whitespace) {
+        if let Some(preset) = llm_preset(tmpl, prompt) {
+            return preset;
+        }
+    }
+    // Otherwise: a full command template.
     let mut parts = tmpl
         .split_whitespace()
         .map(str::to_string)
@@ -4219,10 +4340,19 @@ fn run_llm(prompt: &str) -> Result<String, String> {
         Stdio::null()
     });
     let mut child = cmd.spawn().map_err(|e| {
-        format!(
-            "could not launch `{prog}`: {e} \
-             (set POUNCE_DBG_LLM to an LLM command, e.g. `claude -p` or `llm`)"
-        )
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // The configured LLM CLI isn't installed / not on PATH. Fail with
+            // an actionable message instead of a raw OS error — the rest of
+            // the debugger keeps working regardless.
+            format!(
+                "LLM CLI `{prog}` is not installed or not on PATH. Install it, \
+                 or set POUNCE_DBG_LLM to another provider \
+                 ({}) or a full command template (e.g. `my-llm --ask {{}}`).",
+                LLM_PROVIDERS.join(" | ")
+            )
+        } else {
+            format!("could not launch `{prog}`: {e}")
+        }
     })?;
     if on_stdin {
         // Write the prompt and close stdin so the child sees EOF.
@@ -4680,6 +4810,52 @@ mod tests {
         std::env::set_var("POUNCE_DBG_LLM", "llm -m gpt");
         let (_, _, on_stdin) = llm_command("q");
         assert!(on_stdin);
+
+        // Bare provider keywords resolve to the right non-interactive call.
+        // (All env-var assertions live in this one test so they can't race
+        // a sibling that mutates the same process-global var.)
+        std::env::set_var("POUNCE_DBG_LLM", "codex");
+        let (prog, args, on_stdin) = llm_command("why is mu stuck");
+        assert_eq!(prog, "codex");
+        assert_eq!(
+            args,
+            vec!["exec".to_string(), "why is mu stuck".to_string()]
+        );
+        assert!(!on_stdin); // prompt is in the argv, not stdin
+
+        std::env::set_var("POUNCE_DBG_LLM", "gemini");
+        let (prog, args, _) = llm_command("q");
+        assert_eq!(prog, "gemini");
+        assert_eq!(args, vec!["-p".to_string(), "q".to_string()]);
+
+        std::env::set_var("POUNCE_DBG_LLM", "llm");
+        let (prog, args, _) = llm_command("q");
+        assert_eq!(prog, "llm");
+        assert_eq!(args, vec!["q".to_string()]);
+
+        // Bare `claude` keyword goes through the preset (gains `-p`), not the
+        // bare-program fallback that would hang in interactive mode.
+        std::env::set_var("POUNCE_DBG_LLM", "claude");
+        let (prog, args, on_stdin) = llm_command("q");
+        assert_eq!(prog, "claude");
+        assert_eq!(args, vec!["-p".to_string()]);
+        assert!(on_stdin);
+
+        // An unknown bare word is NOT a preset: bare program, prompt on stdin
+        // (backward-compatible).
+        std::env::set_var("POUNCE_DBG_LLM", "mytool");
+        let (prog, args, on_stdin) = llm_command("q");
+        assert_eq!(prog, "mytool");
+        assert!(args.is_empty());
+        assert!(on_stdin);
+
+        // A missing CLI fails gracefully: an error (never a panic) with an
+        // actionable, provider-listing message.
+        std::env::set_var("POUNCE_DBG_LLM", "pounce-no-such-llm-xyz");
+        let err = run_llm("hello").unwrap_err();
+        assert!(err.contains("not installed or not on PATH"), "{err}");
+        assert!(err.contains("codex"), "{err}");
+
         std::env::remove_var("POUNCE_DBG_LLM");
     }
 

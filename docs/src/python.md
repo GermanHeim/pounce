@@ -142,6 +142,21 @@ takes a symbolic `Expr` objective with keyword-only `lo`/`hi` box arrays and
 `(Expr, lo, hi)` constraint triples, *not* callables and SciPy dicts. See
 [Choosing a Solver](choosing-a-solver.md) for the full map.
 
+## Curve fitting
+
+`pounce.curve_fit` is the data-fitting companion to `minimize` — a
+`scipy.optimize.curve_fit`-style front end that adds parameter constraints,
+robust losses, confidence intervals, and `∂params/∂data` sensitivity, with the
+covariance read from the solver's reduced Hessian. See
+[Curve Fitting](curve-fitting.md).
+
+```python
+from pounce import curve_fit
+
+res = curve_fit(model, xdata, ydata, p0=[1, 1, 0])   # model written with jax.numpy
+print(res.summary())
+```
+
 ## Finding multiple minima
 
 `pounce.find_minima` is the global-search companion to `minimize`: it drives

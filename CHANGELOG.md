@@ -7,7 +7,139 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
-## Unreleased
+## [0.4.0] — 2026-06-05
+
+### Added — Convex / conic solver (`pounce-convex`; `solve_qp` / `solve_socp`)
+
+POUNCE is no longer NLP-only: a new pure-Rust convex interior-point solver
+(`pounce-convex`) handles **LP, convex QP, SOCP, and PSD / exp / power cones**,
+solving each to a **global** optimum (a convex problem has no other kind). It
+uses a homogeneous self-dual embedding (HSDE) — symmetric for the self-dual
+cones and a non-symmetric driver for the exponential/power cones — over a
+`Cone` abstraction (`nonneg`, `soc`, `psd`, `exp`, `power`, plus composite and
+chordal decompositions for sparse SDPs). Convex solvers extract the constant
+`P`, `A`, `c`, `b` data once at setup rather than re-evaluating per iteration,
+and share the `pounce-linsol` / `pounce-linalg` factorization substrate with the
+NLP path. Python entry points are typed (not SciPy-shaped, by necessity — a cone
+program is *data*, not a callable): `solve_qp(P, c, A, b, G, h, lb, ub, …)`,
+`solve_socp(…, cones=…)`, plus `solve_qp_batch` / `solve_qp_multi_rhs` for
+batched factor reuse, and a reduced-Hessian sensitivity API. The CLI reads conic
+instances from CBLIB / `.cbf` (including PSDCON / HCOORD / DCOORD SDP blocks).
+
+### Added — SOS polynomial global optimization (`sos_minimize`)
+
+`sos_minimize(objective, *, inequalities, equalities, …)` computes **certified
+global** lower bounds for polynomial optimization via a sum-of-squares /
+Lasserre relaxation (Putinar localizing multipliers for constraints), built on
+the new PSD cone. When the relaxation is exact it extracts the global
+minimizer(s) with an exactness certificate (multi-atom extraction without a
+non-symmetric eig, plus facial reduction for degenerate solves).
+
+### Added — Spatial branch-and-bound global optimizer (`pounce-global`;
+`minimize_global` / `--solver global`)
+
+A new `pounce-global` crate solves **factorable nonconvex NLPs to a certified
+global optimum** by spatial branch-and-bound: αBB convex underestimators,
+polyhedral envelopes for univariate atoms, level-1 RLT cuts, multi-grouping
+trilinear relaxations, optimization-based bound tightening (OBBT), and
+cutting-plane bound refinement, with local NLP upper bounds. Branching is
+reliability-based (pseudocost + strong branching); the node pool and OBBT run in
+parallel (deterministic, ~2.3–2.6× wall-clock). Exposed as
+`minimize_global(objective, *, constraints, lo, hi, …)` in Python (a symbolic
+`Expr` + box) and `pounce --solver global` on `.nl` models, with frontier
+memory estimation and a pre-solve warning.
+
+### Added — Multi-backend interactive debugger (convex IPM + B&B tree)
+
+The interactive debugger was generalized over a `DebugState` trait so one REPL
+drives all three solvers. New backends: a **convex/conic** debugger
+(`pounce_cblib --debug`, wired through the symmetric and non-symmetric HSDE
+drivers) and an **interactive branch-and-bound tree debugger** that can `step`
+through nodes and `into` a node's relaxation — handing off to the interior-point
+REPL via a shared command queue (tree ↔ interior-point). This composes with the
+0.4.0 debugger features below (quote-aware tokenization, `ask` provider presets,
+`--debug-json` protocol, Ctrl-C escape hatch).
+
+### Added — `pounce.curve_fit` (Python)
+
+A `scipy.optimize.curve_fit`-style nonlinear fitter on top of the
+interior-point solver, returning much more than `(popt, pcov)`:
+
+- parameter covariance, standard errors, and Student-t confidence intervals
+  read pounce-natively from the converged factor's reduced Hessian
+  (`pcov = 2·s²·inv(H_S) = s²·(JᵀJ)⁻¹`; matches scipy / `pycse.nlinfit`). The
+  t-quantiles use scipy when present and an accurate scipy-free inverse-t
+  (via the inverse regularized incomplete beta) otherwise, so the CIs are
+  correct on a numpy-only install even for small samples;
+- a smooth (C²) loss family — ordinary/weighted least squares plus robust
+  Cauchy and a smooth pseudo-Huber, exposed under both `soft_l1` and `huber`
+  (the same C² loss: a true piecewise Huber is only C¹, which the IPM can't
+  use), with a sandwich covariance estimator (non-smooth L1/MAE is
+  intentionally out of scope for the IPM);
+- parameter constraints scipy can't express — positivity/negativity/ranges
+  via `bounds`, and relations between parameters via `constraints=`; an active
+  bound/constraint yields a covariance projected onto the free subspace;
+- data sensitivity `dpopt/ddata` (∂params/∂data) from a single batched
+  back-solve against the same factor (`Solver.kkt_solve_many`);
+- a `CurveFitResult` with `predict()`, `confidence_band()` (both `confidence`
+  and `prediction` kinds, heteroscedastic-aware), `correlation`, R²/χ²/dof,
+  and `summary()`.
+
+Derivatives resolve analytic `jac` → JAX autodiff (the default for
+`jax.numpy` models) → a finite-difference fallback; exact derivatives let the
+solve converge cleanly with scaling off, which is what makes the
+factor-based covariance and sensitivity exact. Docs:
+`docs/src/curve-fitting.md`; notebook `python/notebooks/18_curve_fit.ipynb`.
+
+`p0` is now optional even without bounds: when omitted, the parameter count is
+read from the model signature and the starting point is chosen data-drivenly
+(a bound-aware, data-scale candidate sweep scored by the objective) instead of
+defaulting to a flat vector of ones — so badly-scaled problems get a far better
+seed, while `ones` (clipped into the bounds) is always among the scored
+candidates so the choice is never worse than the old default.
+
+### Added — `pounce.curve_fit_minima` (Python)
+
+`curve_fit_minima` finds **multiple** parameter sets that each explain the
+data, for the non-convex problems where one fit isn't the whole story
+(peak-assignment ambiguity, frequency aliasing in sinusoids, amplitude/decay
+trade-offs in sums of exponentials, sign/label symmetry, …).
+
+- drives `pounce.find_minima` over the *very same* fitting objective as
+  `curve_fit` — identical `sigma` weighting, robust `loss`, `f_scale`,
+  `constraints`, and resolved Jacobian — so the enumerated minima are true
+  optima of the actual fit, not a separate surrogate;
+- reuses the model Jacobian as the search **gradient** and the Gauss-Newton
+  matrix as the search **Hessian**, which sharpens the basin escapes and lets
+  `find_minima` certify each point as a minimum (rejecting saddles);
+- refines every distinct minimum into a full `CurveFitResult` (covariance,
+  CIs, optional `dpopt/ddata`) and returns them ranked by SSE, best first;
+- the `method`, `n_minima`, `max_solves`, `patience`, `dedup`, `seed`, and
+  `find_minima_kw` arguments pass straight through to `find_minima`; finite
+  `bounds` define the box it samples / repels within. Docs:
+  `docs/src/curve-fitting.md`.
+
+### Added — `pounce verify` subcommand + signed receipts
+
+A `verify` subcommand that re-derives feasibility from the canonical `.nl`
+rather than trusting a `.sol`'s status line or the solver/agent that produced
+it — the trust anchor when pounce is a tool an agent calls: the agent
+proposes a solution, a small deterministic checker disposes.
+
+- `pounce verify <problem.nl> <claim.sol>` evaluates `g(x*)` and bounds
+  against the canonical model, reporting the worst constraint/bound violation
+  and (when the `.sol` carries duals) a bound-projected KKT stationarity
+  residual. Exit 0 = VERIFIED, 20 = REJECTED, 2 = usage/IO. Feasibility
+  gates; optimality is informational unless `--require-optimal`.
+- The JSON receipt content-addresses both inputs by SHA-256 (zero new deps);
+  with `POUNCE_VERIFY_KEY` set it signs the receipt with HMAC-SHA256 over a
+  float-free preimage so any language can re-derive it.
+- MCP `verify_solution` tool plus dependency-free `verify_sig` helpers and a
+  stdlib reference signer service.
+
+The check itself (recompute feasibility against the model + a content-addressed
+receipt) is ready to use and needs no secrets; the signing / remote-authority
+layer is an explicit proof of concept. Docs: `docs/src/verify.md`.
 
 ### Added — Debugger `load` / `sweep` / `multistart`
 
@@ -64,9 +196,14 @@ nonzeros — instead of materializing the dense matrix and slicing it
 (pounce#83). Per-iteration derivative cost drops from `O(n)` to `O(k)`
 AD passes on genuinely sparse problems; benchmarked on a banded family at
 ~560× (Jacobian) / ~200× (Hessian) per eval and 7.6× faster full solve
-by `n=2000`. Reported structure, values, and solutions are identical to
-the dense path; the differentiable backward is unaffected. Dense problems
-see a small bounded overhead, so the flag is opt-in.
+by `n=2000`. When the sparsity pattern is **value-independent** (any
+composition of smooth pointwise ops) the reported structure, values, and
+solutions are identical to the dense path; the differentiable backward is
+unaffected. For **value-dependent** structure (`where` / `abs` / branches) a
+random probe can miss a nonzero, and under compression a missed entry aliases
+into a same-colored reported entry — silently wrong derivatives — so such
+models should hand-specify the pattern via the `Problem` API or stay on the
+dense path. Dense problems see a small bounded overhead, so the flag is opt-in.
 
 - Forward/reverse mode selection (`jacfwd` when `n < m`, else `jacrev`)
   for the dense path / sparsity probe.
@@ -101,6 +238,16 @@ attached.
 - **Inspect:** `info`; `print` of blocks, search-direction blocks (`dx`),
   scalars (`mu obj inf_pr inf_du err compl iter`), `kkt` (inertia +
   regularization), and `active`; `watch`/`display`; `diff`.
+- **Named-equation diagnostics:** `print residuals` labels primal/dual
+  residuals with their original `.nl` constraint/variable names; `print
+  equation <name|row>` renders the source algebra of a named constraint
+  (by model name or `.nl` row index); `print rank` reports the SVD
+  numerical rank of the equality Jacobian J_c and names the implicated
+  rows. `diagnose` (alias `diag`) runs a panel of heuristics over the
+  current iterate and emits a **named** health report — *"the worst
+  constraint residual is c[mass_balance]"* rather than *"row 13 is
+  infeasible"* — the live counterpart to the `pounce-studio` `diagnose`
+  tool.
 - **Mutate / what-if:** `set mu`, `set x[i]`, `set opt`; `goto`/`restart`
   (soft rewind) and `resolve` (re-solve from the current point).
 - **Visualize:** `viz kkt`/`viz L`/`viz <block>` open via `pounce-dbg-viz`
@@ -110,11 +257,144 @@ attached.
 - **Attach & drive:** `--debug-on-error` (post-mortem), `--debug-on-
   interrupt` / Ctrl-C / in-band `{"cmd":"pause"}` (async pause),
   `--debug-script` / `source`, option discovery + Tab completion, `ask`
-  (consult Claude Code), and a branded REPL banner reusing the project
-  wordmark with a command cheat-sheet.
+  (consult an LLM about the paused state; provider-selectable via
+  `$POUNCE_DBG_LLM` = `claude` / `codex` / `gemini` / `llm` or a custom
+  command template, default Claude Code), and a branded REPL banner
+  reusing the project wordmark with a command cheat-sheet.
 - **JSON protocol:** `hello` → `pause` → `result` (with `request_id`) →
   `progress` → `terminated`. Engine in `pounce-algorithm::debug`; front
   end in `pounce-cli::debug_repl`.
+- **MCP live-debug proxy:** `pounce-studio` exposes the debugger over the
+  Model Context Protocol (`debug_start` / `debug_command` / `debug_state`
+  / `debug_sessions` / `debug_close`), proxying the `--debug-json`
+  protocol so an MCP client can start, drive, and inspect a live solve.
+
+### Added — `read_nl` / `NlProblem` (Python)
+
+`pounce.read_nl(path)` loads an AMPL `.nl` file through pounce's own reader
+and returns an `NlProblem` exposing the model's `objective`, `gradient`,
+`hessian`, and constraint `jacobian` at any point — the same evaluation
+pipeline the solver uses, available standalone for inspection, finite-
+difference checks, or feeding another tool. Exported from `pounce`
+(`read_nl`, `NlProblem` are in `__all__`).
+
+### Added — Expanded `.nl` opcode coverage
+
+The `.nl` reader now handles conditional/logical opcodes (`if-then-else`,
+comparisons), the n-ary list reducers `o11` (MINLIST) / `o12` (MAXLIST), and
+the remaining smooth transcendentals (inverse and hyperbolic trig). Models
+that previously failed to load with an "unsupported opcode" error now parse,
+with FD-verified first/second derivatives on the smooth interior.
+
+> `min`/`max`/`if-then-else` are **non-smooth**: at a kink the gradient is a
+> subgradient and the Hessian misses the kink curvature, so an iterate landing
+> on or oscillating across the switch can stall the interior-point solve. The
+> inverse-trig opcodes (`asin`/`acos`/`atanh`/`acosh`) have **bounded domains**
+> whose derivatives blow up at the edge — bound such variables away from the
+> boundary. The reader accepts these models; convergence is on you.
+
+### Added — `pounce --cite` and `--minima`
+
+- `pounce --cite [REPORT.json]` lists the citations to use for pounce (and,
+  when a solve report is given, any method-specific references it triggered,
+  e.g. the Byrd restoration paper). `--bibtex` emits ready-to-paste entries.
+- `pounce <problem> --minima` runs the multistart global search from the CLI
+  with full `find_minima` parity (method, `n_minima`, dedup, seed).
+
+### Changed
+
+- **Default solver trajectory** moved on several fronts as the interior-point
+  method was brought closer to IPOPT. These change which iterates are visited
+  (and, on a few problems, the iteration count) but not the math being solved:
+  - the barrier parameter `μ` is now updated *inside* the monotone reduction
+    loop, so the relaxed-complementarity error reflects the current `μ`. Net
+    +2 problems reach Optimal on the internal `.nl` sweep, at a ~2.7% total
+    iteration-count cost and a regression on `deconvb` / `gausselm`;
+  - under the watchdog, the line search bypasses the acceptor's `alpha_min`
+    floor (mirrors IPOPT) so the full-step watchdog trial actually runs;
+  - the IPOPT safe-slack bound-adjustment mechanism (`slack_move`) is ported
+    and active by default;
+  - NLP gradient-based scaling now lifts fixed variables to their value before
+    sampling, so the computed scale factors match the operating point.
+- **Auto-retry on local infeasibility (default on).** New option
+  `feral_infeasibility_scaling_retry` (default `yes`): when a solve ends in
+  `Infeasible_Problem_Detected` under a non-MC64 effective scaling, pounce
+  re-solves once with `feral_scaling=mc64` (main IPM and restoration sub-IPM).
+  This rescues problems where a backward-stable scaling choice lands in a
+  spurious infeasible basin under sensitive dependence (`discs.nl` is the
+  canonical case); every individual solve along both trajectories is itself
+  backward-stable, so an a-priori scaling router can't distinguish them. Set
+  to `no` to restore the single-solve behavior.
+- **New option `feral_scaling`** (default `auto`, mirrors `feral_ordering`):
+  pins FERAL's diagonal KKT scaling strategy; also settable via the
+  `POUNCE_FERAL_SCALING` env var.
+- **Dependency:** `feral` pinned to crates.io `0.10.0` (was a git rev),
+  bringing AMF ordering by default and MC64 inertia-guided scaling fallback.
+- **Internal:** the `.nl` pipeline was extracted into a new leaf crate
+  `pounce-nl` (re-exported from `pounce-cli`; no public API change).
+- **`pounce-studio-mcp` → 0.1.0** (versioned independently of the `0.4.0`
+  core): the MCP server graduated from its `0.0.1` spike to its first
+  functional release — analyze / run / explain / citations tools, GAMS
+  problem tools, a live debug-session proxy, and PyO3 backing via
+  `pounce-studio-core`.
+
+### Fixed
+
+- **Windows build:** the debugger's `SIGINT`-to-break handler referenced
+  `nix::sys` / `nix::libc`, which the (Unix-only) `nix` crate does not expose
+  on Windows, breaking the `pounce-cli` build there. The POSIX handler is now
+  `#[cfg(unix)]`-gated with a no-op `install()` stub elsewhere; the rustyline
+  prompt's Ctrl-C double-tap remains the cross-platform escape hatch.
+- **`.sol` banner no longer goes stale:** the `parse_sol` round-trip test
+  fixture derived its `POUNCE <version>:` message from a hardcoded literal,
+  which silently drifted on each release (it was still `0.3.1`). It now
+  reads `CARGO_PKG_VERSION`, like the production writer always has, so the
+  fixture self-updates and never needs a manual bump.
+- **Restoration:** the limited-memory (L-BFGS) Hessian is now built in the
+  iterates' native space, fixing a space mismatch on compound problems (#102);
+  the cycle detector rolls back to the last acceptable point instead of
+  erroring out when a usable iterate exists.
+- **KKT:** the negative-eigenvalue cache is refreshed on `WrongInertia` /
+  `Singular` outcomes (not only `Success`), matching IPOPT's inertia
+  pass-through so δ_c regularization routing stays live near a singular KKT (#99).
+- **`find_minima`:** the in-bounds test uses a bound-magnitude-relative
+  tolerance so large-scale boxes aren't spuriously rejected (#101); MLSL is
+  bounded by a sample budget so it always terminates instead of looping when
+  its clustering filter rejects every sample (#103).
+- **Bounds length is validated up front** across `minimize`, `find_minima`,
+  `find_saddles`, `find_critical_points`, `reaction_network`, and `curve_fit`.
+  A `bounds` list whose length didn't match the variable/parameter count used
+  to fail silently — a too-short list left trailing variables unbounded, and in
+  the sampling-based searches a length-1 box could *broadcast* across every
+  dimension (sampling all of them from variable 0's interval). It now raises a
+  clear `ValueError` immediately, like scipy; `curve_fit`'s scipy-style
+  `(lo, hi)` tuple form is likewise checked so array sides must be scalar or
+  length-`n_params`.
+- **Input validation hardened** so imperfect-but-plausible arguments raise a
+  clear `ValueError` up front instead of failing cryptically deep in the solve:
+  - `minimize` / `find_minima` / `find_saddles` now **promote a scalar / 0-d
+    `x0` to 1-D** (matching scipy), so `minimize(f, 1.5)` works instead of
+    raising `iteration over a 0-d array`;
+  - a **reversed bound** (`low > high`) is rejected instead of silently
+    producing an infeasible box (a fixed `low == high` is still allowed);
+  - **malformed constraint dicts** (not a dict, or missing `type` / `fun`, or a
+    non-callable `fun`) raise a descriptive error instead of a bare `KeyError`;
+  - `curve_fit` validates its data and weights: `xdata`/`ydata` length must
+    match and be non-empty and finite, `sigma` must be positive and finite,
+    `f_scale` must be positive and finite, and an explicit `p0` must have one
+    start per model parameter — each previously surfaced as a `LinAlgError`,
+    `ZeroDivisionError`, back-solve `RuntimeError`, broadcast error, or a
+    silently wrong fit;
+  - a model with **keyword-only parameters** (`f(x, *, a, b)`) — which
+    `curve_fit` cannot call positionally as `f(x, *params)` — is rejected with
+    a clear message instead of a downstream `TypeError`;
+  - `CurveFitResult.confidence_band` checks that `x` has the same
+    dimensionality as the fitted `xdata` and that a prediction-band `sigma` is
+    scalar or matches `x`, replacing a cryptic einsum/broadcast error;
+  - `find_minima` / `find_saddles` reject a sub-1 `n_minima` / `n_saddles` /
+    `patience` / `max_solves`, and `find_saddles` rejects a Morse `index`
+    outside `[1, n]` (which previously sliced the step vector wrong and found
+    the wrong critical points).
 
 ## [0.3.0] — 2026-06-02
 
@@ -456,11 +736,11 @@ Designed for **warm-started NLP sequences** (MPC, parametric
 continuation, homotopy sweeps), where the previous solve's active
 set is a strong starting point.
 
-**Tutorial:** `docs/tutorials/active-set-sqp.md`.
+**Tutorial:** `docs/src/active-set-sqp.md`.
 **Python notebook:** `python/notebooks/06_sqp_parametric_continuation.ipynb`.
 **C example:** `crates/pounce-cinterface/examples/sqp_warm_start.c`.
 **GAMS example:** `gams/examples/parametric_sqp_warm_start.gms`.
-**Design note:** `dev-notes/research/active-set-sqp-warm-start.md`.
+**Design note:** `docs/src/active-set-sqp-warm-start.md`.
 
 #### Algorithm selection (cross-cutting)
 

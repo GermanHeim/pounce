@@ -26,7 +26,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::nl_external::{ExternalArg, ExternalLibrary, ExternalResolver};
+use super::nl_external::{EvalResult, ExternalArg, ExternalLibrary, ExternalResolver};
 use super::nl_reader::{BinOp, CmpOp, Expr, FuncallArg, UnaryOp};
 
 /// One operation in the flattened tape. Operand fields are tape-slot
@@ -139,6 +139,34 @@ fn funcall_to_ext_args<'a>(args: &'a [TapeFuncallArg], vals: &[f64]) -> Vec<Exte
         .collect()
 }
 
+/// Evaluate an external (AMPL imported) function, poisoning the result with
+/// `NaN` instead of panicking when the library reports an error.
+///
+/// An external eval fails on user-controllable conditions — most commonly an
+/// out-of-domain property evaluation (e.g. an IDAES Helmholtz thermo call
+/// outside its valid pressure/temperature range). We mirror the tape's own
+/// arithmetic domain-error semantics (`log(-1) → NaN`): hand back NaN so the
+/// IPM sees a failed evaluation and the line search backs off, rather than
+/// raising an uncatchable panic across the pyo3 boundary on the `read_nl`
+/// surface. The NaN derivative/Hessian vectors are sized by the full argument
+/// count — an upper bound on the real-arg count a successful eval returns — so
+/// every downstream index into them stays in range.
+fn ext_eval_or_nan(
+    lib: &ExternalLibrary,
+    name: &str,
+    call_args: &[ExternalArg<'_>],
+    n_args: usize,
+    want_derivs: bool,
+    want_hes: bool,
+) -> EvalResult {
+    lib.eval(name, call_args, want_derivs, want_hes)
+        .unwrap_or_else(|_| EvalResult {
+            value: f64::NAN,
+            derivs: want_derivs.then(|| vec![f64::NAN; n_args]),
+            hessian: want_hes.then(|| vec![f64::NAN; n_args * (n_args + 1) / 2]),
+        })
+}
+
 /// A flattened expression tape. The result of evaluation is the value
 /// at slot `ops.len() - 1` (i.e. the last op).
 #[derive(Debug, Clone)]
@@ -213,11 +241,7 @@ impl Tape {
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, &vals);
-                    let res = lib
-                        .eval(name, &call_args, false, false)
-                        .unwrap_or_else(|e| {
-                            panic!("external function '{name}' forward eval failed: {e}")
-                        });
+                    let res = ext_eval_or_nan(lib, name, &call_args, args.len(), false, false);
                     res.value
                 }
             };
@@ -393,9 +417,7 @@ impl Tape {
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
-                    let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
-                        panic!("external function '{name}' reverse eval failed: {e}")
-                    });
+                    let res = ext_eval_or_nan(lib, name, &call_args, args.len(), true, false);
                     let derivs = res.derivs.expect("want_derivs=true returns derivs");
                     let mut k = 0usize;
                     for arg in args {
@@ -545,9 +567,7 @@ impl Tape {
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
-                    let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
-                        panic!("external function '{name}' tangent eval failed: {e}")
-                    });
+                    let res = ext_eval_or_nan(lib, name, &call_args, args.len(), true, false);
                     let derivs = res.derivs.expect("want_derivs=true returns derivs");
                     let mut acc = 0.0;
                     let mut k = 0usize;
@@ -613,11 +633,7 @@ impl Tape {
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, &*vals);
-                    let res = lib
-                        .eval(name, &call_args, false, false)
-                        .unwrap_or_else(|e| {
-                            panic!("external function '{name}' forward_into failed: {e}")
-                        });
+                    let res = ext_eval_or_nan(lib, name, &call_args, args.len(), false, false);
                     res.value
                 }
             };
@@ -774,9 +790,7 @@ impl Tape {
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
-                    let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
-                        panic!("external function '{name}' tangent eval failed: {e}")
-                    });
+                    let res = ext_eval_or_nan(lib, name, &call_args, args.len(), true, false);
                     let derivs = res.derivs.expect("want_derivs=true returns derivs");
                     let mut acc = 0.0;
                     let mut k = 0usize;
@@ -1045,9 +1059,7 @@ impl Tape {
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
                     let call_args = funcall_to_ext_args(args, vals);
-                    let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
-                        panic!("external function '{name}' 2nd-order eval failed: {e}")
-                    });
+                    let res = ext_eval_or_nan(lib, name, &call_args, args.len(), true, true);
                     let derivs = res.derivs.expect("want_derivs=true returns derivs");
                     let hes = res.hessian.expect("want_hes=true returns hessian");
                     let real_tape: Vec<usize> = args
@@ -1361,9 +1373,7 @@ impl Tape {
                     TapeOp::Funcall(fc) => {
                         let FuncallData { lib, name, args } = fc.as_ref();
                         let call_args = funcall_to_ext_args(args, &v);
-                        let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
-                            panic!("external function '{name}' 2nd-order eval failed: {e}")
-                        });
+                        let res = ext_eval_or_nan(lib, name, &call_args, args.len(), true, true);
                         let derivs = res.derivs.expect("want_derivs=true returns derivs");
                         let hes = res.hessian.expect("want_hes=true returns hessian");
                         let real_tape: Vec<usize> = args

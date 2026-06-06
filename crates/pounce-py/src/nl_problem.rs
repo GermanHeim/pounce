@@ -326,7 +326,7 @@ pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
     let prob = read_nl_file(std::path::Path::new(path))
         .map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
 
-    // Capture metadata before `prob` is consumed by `NlTnlp::new`.
+    // Capture metadata before `prob` is consumed by `NlTnlp::try_new`.
     let minimize = prob.minimize;
     let obj_constant = prob.obj_constant;
     let x0 = prob.x0.clone();
@@ -339,7 +339,11 @@ pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
     let n = prob.n;
     let m = prob.m;
 
-    let mut tnlp = NlTnlp::new(prob);
+    // `try_new` (not `new`): a model that names an AMPL imported function with
+    // no resolvable `$AMPLFUNC` library must raise a catchable Python error,
+    // not panic across the pyo3 boundary as an uncatchable PanicException.
+    let mut tnlp =
+        NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
     let info = tnlp
         .get_nlp_info()
         .ok_or_else(|| PyValueError::new_err("read_nl: get_nlp_info returned None"))?;

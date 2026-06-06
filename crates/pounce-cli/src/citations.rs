@@ -111,7 +111,14 @@ pub fn render_bibtex(selected: &[Selected]) -> String {
             s.push_str(&format!("  year = {{{}}},\n", c.year));
         }
         if !c.venue.is_empty() {
-            s.push_str(&format!("  howpublished = {{{}}},\n", c.venue));
+            // `@article` expects `journal`; `howpublished` is an `@misc` field
+            // many styles ignore, which would silently drop a journal venue.
+            let venue_field = if c.entry_type == "article" {
+                "journal"
+            } else {
+                "howpublished"
+            };
+            s.push_str(&format!("  {venue_field} = {{{}}},\n", c.venue));
         }
         if !c.doi.is_empty() {
             s.push_str(&format!("  doi = {{{}}},\n", c.doi));

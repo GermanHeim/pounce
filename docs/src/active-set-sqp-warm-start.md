@@ -2,12 +2,11 @@
 
 **Status: implemented.** This note was originally the research →
 plan half of the research → plan → implement workflow that
-operationalized the C1 active-set SQP entry of
-[`future-work-roadmap.md`](future-work-roadmap.md) (§3.2, §5 Phase 5).
+operationalized the C1 active-set SQP entry of the future-work
+roadmap (`dev-notes/research/future-work-roadmap.md`, §3.2, §5 Phase 5).
 The driver (Phase 5b/5c) has since landed and is wired through the
 Rust API, C ABI, Python bindings, and the GAMS link; see the user
-tutorial at
-[`docs/tutorials/active-set-sqp.md`](../../docs/tutorials/active-set-sqp.md).
+tutorial at [Active-Set SQP & Warm Starts](active-set-sqp.md).
 The note is retained as design rationale and pins each algorithmic
 choice to the literature.
 
@@ -34,8 +33,8 @@ NLPs**:
   parameter path. Predictor (sensitivity) + corrector (SQP step from
   the predicted point) reuses the working set across path steps.
 
-The motivation is documented in `future-work-roadmap.md:185-206`:
-interior-point methods warm-start badly because the barrier pushes
+The motivation is the warm-start gap in interior-point methods:
+the barrier pushes
 iterates to the interior, so a near-optimal point from a previous
 solve sits near the bound boundary and cannot be exploited. Active-
 set methods, by contrast, carry the **working set** across solves; if
@@ -52,9 +51,9 @@ has none of these: it carries `(x, λ, 𝒲)` where `𝒲` is the **working
 set** — the indices of currently active inequalities and bounds — and
 globalizes on a merit function or filter without a barrier at all.
 
-This is therefore **a new `AlgorithmStrategy` end to end** — Tier 3 in
-the roadmap's tier ladder (`future-work-roadmap.md:290-300`) — and
-not an edit to the existing loop. The existing IPM
+This is therefore **a new `AlgorithmStrategy` end to end** — a Tier 3
+addition in the roadmap's tier ladder — and not an edit to the existing
+loop. The existing IPM
 (`IpoptAlgorithm::optimize` in
 `crates/pounce-algorithm/src/ipopt_alg.rs`) is left untouched and
 remains the default solver. Active-set SQP is opt-in via a new
@@ -985,309 +984,120 @@ the named exit criterion.
 - This is the workload where SQP outperforms a well-warm-started IPM
   most clearly. Cleanest demo target.
 
-## 10. Phasing
+## 10. Implementation status
 
-The roadmap places this whole effort at Phase 5
-(`future-work-roadmap.md:398-401`). With the literature pinned, the
-phasing tightens to four shippable milestones:
+The driver shipped in four milestones, each with standalone value: 5a
+builds the standalone sparse QP solver, 5b the cold SQP NLP driver, 5c
+the working-set warm start and full-stack integration, and 5d the
+l1-elastic alternative. Everything below is implemented and self-tested;
+the only outstanding work is the external-oracle regression comparisons
+called out at the end.
 
-- **Phase 5a — `pounce-qp` standalone — feature-complete on
-  correctness, performance items deferred to 5a.1.** New crate
-  shipped over 11 commits on
-  `claude/active-set-sqp-warm-start-BnjLA` (heads
-  `4cf1e85`…`411c791`). What landed:
-  - §4.2 active-set inner loop — refactor-per-iteration variant.
-    Schur-complement factor updates deferred to 5a.1.
-  - §4.3 l1-elastic mode (Gill-Murray-Saunders, SQOPT) —
-    augmented QP with two non-negative slacks per row, penalty
-    γ, recursive solve through the standard active-set path,
-    infeasibility certified when residual slacks exceed `feas_tol`.
-  - §4.4 anti-cycling — Bland's rule wired
-    (`AntiCyclingChoice::Bland`); default `Expand` aliases the
-    qpOASES steepest-violation rule until the full GMSW EXPAND
-    primal-perturbation machinery lands in 5a.1.
-  - §4.5 inertia control — `factorize_with_inertia_control` wraps
-    every factor call site; diagonal-shift retry on `WrongInertia`
-    or `Singular`, defaults match
-    `pounce-algorithm/src/kkt/perturbation_handler.rs`.
-  - §4.7 iterative refinement — inherited from
-    `pounce-feral` (`refine: true` by default); pinned by
-    `tests/refinement_unit.rs`.
-  - §8.0 analytical correctness ladder — 5 of 6 problems pass
-    (#1 unconstrained, #2 equality-only, #3 box-constrained,
-    #5 infeasibility certification, #6 indefinite H with PD
-    reduced). #4 (redundant equality with LICQ violation)
-    remains open — needs row-rank detection beyond inertia
-    control.
-  - §8.1 Maros-Mészáros .qps reader — pure-Rust parser shipping
-    the standard subset (no RANGES yet); round-trip test
-    verifies parse-and-solve.
-  - §8.7 per-module unit tests for `kkt`, `elastic`,
-    `refinement`, `qps`.
-  - Total: 49 tests, all passing; `cargo fmt --all -- --check`
-    clean; `cargo clippy --workspace -D correctness -D suspicious`
-    clean.
-  **Phase 5a.1 — landed in c13–c17** (heads `665a3f4`…`f1066d4`):
-  - QPS RANGES section (c13).
-  - §4.4 Harris-style two-pass ratio test
-    (`AntiCyclingChoice::Expand`, c14) — the cycling-prevention
-    core of GMSW EXPAND.
-  - §8.2 basic scaling-sweep diagnostics (c15) — measured
-    `n ∈ {10, 50, 100, 200}` correctness + timings; warm-restart
-    shows ~30× factor reduction vs cold on a representative
-    n=20 problem.
-  - §4.2 cached-factor `resolve` infrastructure (c16) — the
-    LinearSolver building block on which the algorithmic Schur
-    update layers.
-  - 59 tests total (up from 49), `cargo fmt` and
-    `cargo clippy -D correctness -D suspicious` clean.
+### Phase 5a — `pounce-qp` standalone sparse QP solver
 
-  **Phase 5a.2 — landed in c18–c20** (heads `ed2ea46`…`45207d0`):
-  - §4.2 sparse Schur-complement standalone module (c18) — the
-    SchurState type owns U, V, K_0⁻¹U, S; implements
-    Sherman-Morrison-Woodbury rank-2 updates per working-set
-    change. 6 unit tests including the critical "Schur matches
-    fresh factor" cross-check at 1e-9 tolerance.
-  - §4.2 wired into `solve_general` (c19) via opt-in
-    `QpOptions::use_schur_updates`. Schur-vs-refactor parity
-    tests on the binding-inequality and drop-then-restep cases
-    confirm algorithmic equivalence.
-  - §4.4 full GMSW EXPAND τ-growth + snap-reset (c20) —
-    extends the c14 Harris pass with a primal-perturbation that
-    grows monotonically until `expand_tol_max`, then hard-
-    resets by snapping every active-bound primal to its bound.
-    Active in both `solve_general` and `solve_general_schur`.
-  - 68 tests total (up from 59 at the end of Phase 5a.1).
+- **§4.2 active-set inner loop** with cached-factor `resolve` and an
+  opt-in sparse Schur-complement update layer
+  (`QpOptions::use_schur_updates`). The `SchurState` owns `U, V, K₀⁻¹U, S`
+  and applies Sherman-Morrison-Woodbury rank-2 updates per working-set
+  change, cross-checked against a fresh factorization to 1e-9.
+- **§4.3 l1-elastic mode** (Gill-Murray-Saunders, SQOPT): an augmented QP
+  with two non-negative slacks per row and penalty γ, solved through the
+  standard active-set path; infeasibility is certified when residual
+  slacks exceed `feas_tol`.
+- **§4.4 anti-cycling**: Bland's rule plus the full GMSW EXPAND τ-growth
+  with snap-reset, built on a Harris-style two-pass ratio test.
+- **§4.5 inertia control**: `factorize_with_inertia_control` wraps every
+  factor call site with a diagonal-shift retry on `WrongInertia` /
+  `Singular`, matching the `pounce-algorithm` perturbation-handler
+  defaults.
+- **§4.7 iterative refinement** inherited from `pounce-feral` (on by
+  default).
+- **Test harness**: the §8.0 analytical correctness ladder, a pure-Rust
+  Maros-Mészáros `.qps` reader (including RANGES), and per-module unit
+  tests for `kkt`, `elastic`, `refinement`, and `qps`.
 
-  **Deferred to Phase 5b+** (require external dependencies
-  beyond the pure-Rust constraint, or are benchmarking work
-  that doesn't gate algorithmic completion):
-  - §8.1 Maros-Mészáros oracle comparison — requires qpOASES /
-    OSQP via FFI (non-pure-Rust). Alternative: published-optimum
-    comparison against MM .lst tables (pure-Rust feasible) is
-    still open.
-  - §8.2 large-n scaling-sweep with criterion-style timing
-    (LASSO at `n ∈ {10², 10³, 10⁴, 10⁵}`; MPC quadrotor at
-    horizon ∈ {10, 20, 40, 80, 160}). The c15 basic diagnostics
-    establish that the solver scales correctly at small n; the
-    large-n sweep is benchmarking infrastructure that needs the
-    criterion crate.
-- **Phase 5b — SQP NLP driver, cold — core landed in 6 commits**
-  (`6994b67`…`6e954bf` on
-  `claude/active-set-sqp-warm-start-BnjLA`):
-  - c1 — `sqp/` module scaffold, `AlgorithmChoice` enum,
-    `pounce-qp` dependency wiring.
-  - c2 — `SqpQpData::build` (QP-from-linearization assembly,
-    bound-shifting, `as_qp()` view ready for `pounce-qp`).
-  - c3 — `SqpAlgorithm::optimize` outer loop end-to-end on
-    convex equality NLPs (full-step, no globalization).
-  - c4 — `IpoptNlpAdapter` so any NLP that
-    `IpoptAlgorithm` consumes (`.nl`, CUTEst, Python
-    bindings) can drive `SqpAlgorithm` too.
-  - c5 — l1-merit line search (Han-Powell with ν adaptation +
-    Armijo backtracking). Unlocks nonlinear NLPs; the
-    circle-projection test that was `#[ignore]`d now converges
-    in 5 outer iterations.
-  - c6 — `AlgorithmBuilder::build_sqp_with_backend(factory)`
-    method, sister to `build_with_backend`. Dispatch via
-    `AlgorithmChoice::ActiveSetSqp`; the IPM path is
-    unchanged when the default `InteriorPoint` is selected.
-  - 10 sqp::tests pass + all 188 pounce-algorithm lib tests +
-    all 68 pounce-qp tests; `cargo fmt --all --check` and
-    `cargo clippy --workspace -D correctness -D suspicious`
-    both clean.
+### Phase 5b — cold SQP NLP driver
 
-  **Phase 5b follow-up complete in c8–c11** (heads `366a7bf`
-  …`22de629`):
-  - c8 — §4.1 filter globalization (Fletcher-Leyffer 2002).
-    New `crate::sqp::filter` module with `SqpFilter` +
-    `filter_line_search`. Selected via
-    `SqpGlobalization::Filter`; verified equivalent to
-    l1-merit on the nonlinear circle-projection NLP.
-  - c9 — `pounce-qp` warm-start API extension:
-    `QpSolver::solve_with_working_set(qp, working, opts)` —
-    takes only the working set, internally computes a
-    feasible primal compatible with it. The SQP loop now
-    warm-starts via this entry point.
-  - c10 — §4.6 damped BFGS (Powell 1978). New
-    `crate::sqp::bfgs::DampedBfgs` module; selected via
-    `SqpHessianSource::DampedBfgs`. Powell-damped rank-2
-    update guarantees PD iterates so the QP solver doesn't
-    need inertia control.
-  - c11 — `IpoptApplication` option-string dispatch:
-    `add_option("algorithm", "active-set-sqp")` routes
-    through a new `optimize_sqp_tnlp(tnlp)` that builds the
-    NLP chain (TNLPAdapter → OrigIpoptNlp → IpoptNlpAdapter)
-    and runs `SqpAlgorithm`. Maps `SqpStatus` back to
-    `ApplicationReturnStatus`.
+- **Outer loop** (`SqpAlgorithm::optimize`) runs end-to-end on nonlinear
+  NLPs, assembling each QP subproblem from the linearization
+  (`SqpQpData::build`) and consuming any NLP the IPM consumes via
+  `IpoptNlpAdapter` (`.nl`, CUTEst, Python bindings).
+- **Globalization**: both an l1-merit line search (Han-Powell with ν
+  adaptation + Armijo backtracking) and §4.1 filter globalization
+  (Fletcher-Leyffer 2002), selectable via `sqp_globalization`.
+- **Hessian sources**: exact, §4.6 damped BFGS (Powell 1978, guaranteeing
+  PD iterates so the QP solver needs no inertia control), and L-BFGS (a
+  circular curvature-pair history seeded by the Nocedal-Wright γI
+  scaling), selectable via `sqp_hessian`.
+- **Dispatch**: `add_option("algorithm", "active-set-sqp")` routes through
+  `optimize_sqp_tnlp`, which builds the NLP chain (TNLPAdapter →
+  OrigIpoptNlp → IpoptNlpAdapter) and maps `SqpStatus` back to
+  `ApplicationReturnStatus`; the IPM path is unchanged when the default
+  `interior-point` is selected.
+- **Options**: eleven registered `sqp_*` suboptions (`globalization`,
+  `hessian`, `max_iter`, `tol`, `constr_viol_tol`, `dual_inf_tol`,
+  `l1_penalty`, `bt_reduction`, `bt_min_alpha`, `print_level`,
+  `lbfgs_max_history`), all defaulting to `SqpOptions::default()` and
+  applied through `apply_sqp_options`.
 
-  **Phase 5b finish — c13–c15** completes everything that didn't
-  require an external oracle:
-  - c13 — `finalize_solution` callback for SQP. New
-    `finalize_via_sqp(nlp, res, status, tnlp)` helper builds
-    DenseVectors from the SQP slice outputs, lifts via
-    `OrigIpoptNlp::lift_x_to_full` + `pack_z_l_for_user` +
-    `pack_z_u_for_user` + `pack_lambda_for_user`, and invokes
-    `TNLP::finalize_solution` with a `pounce_nlp::tnlp::Solution`
-    carrying the lifted multipliers, primal, g, and obj. Also
-    fixes `IpoptNlpAdapter::variable_bounds` /
-    `constraint_bounds` to scatter compressed `x_l`/`x_u`/`d_l`/
-    `d_u` through `px_*` / `pd_*` ExpansionMatrices so the SQP
-    sees full-length bound vectors with ±∞ where unbounded —
-    OrigIpoptNlp returns bounds in IPM-compressed form.
-    End-to-end test runs through `IpoptApplication::optimize_tnlp`.
-  - c14 — SQP-suboption parsing. Ten new registered options on
-    `OptionsList`: `sqp_globalization`, `sqp_hessian`,
-    `sqp_max_iter`, `sqp_tol`, `sqp_constr_viol_tol`,
-    `sqp_dual_inf_tol`, `sqp_l1_penalty`, `sqp_bt_reduction`,
-    `sqp_bt_min_alpha`, `sqp_print_level`. All defaults mirror
-    `SqpOptions::default()`. A new internal helper
-    `apply_sqp_options(&OptionsList, &mut SqpOptions)` is
-    consumed by `algorithm_builder_snapshot()` so every SQP
-    solve picks up the user's settings.
-  - c15 — L-BFGS Hessian source. New
-    `crate::sqp::lbfgs::LBfgs` module storing a circular
-    `VecDeque<(s, y)>` of curvature pairs. `as_triplet()`
-    materializes `B_k` over the full upper triangle by seeding
-    `B_0 = γI` (Nocedal-Wright eq. 7.20 — γ = yᵀy / sᵀy from the
-    most-recent pair) and replaying Powell-damped rank-2 BFGS
-    updates for every stored pair. Selected via
-    `SqpHessianSource::Lbfgs`; `lbfgs_max_history` defaults to
-    6 (matches upstream `limited_memory_max_history`).
-    Integration test confirms convergence on the
-    circle-projection NLP. The eleventh suboption
-    `sqp_lbfgs_max_history` is registered and propagates
-    through `apply_sqp_options`.
+### Phase 5c — working-set warm start and integration
 
-  **Remaining items deferred to Phase 5c+** (require external
-  dependencies beyond the pure-Rust constraint):
-  - CUTEst small-NLP regression vs filterSQP / SNOPT for the
-    §10 exit criterion (iteration-count comparison). Needs
-    filterSQP and SNOPT binaries; not pure-Rust.
-- **Phase 5c — Working-set warm start + integration — core landed
-  in c17–c22 on `claude/active-set-sqp-warm-start-BnjLA`:**
-  - c17 — Rust SQP warm-start API. New
-    `SqpAlgorithm::optimize_with_warm_start(nlp, Option<SqpIterates>)`
-    consumes the §6 tuple `(x, λ_g, λ_x, 𝒲)` and feeds the
-    working-set into `pounce-qp`'s `solve_with_working_set`.
-    `SqpResult` gained a `working_set: Option<WorkingSet>` field
-    populated on every return path. Dimension-mismatch
-    validation throws `SqpError::DimensionMismatch`.
-  - c18 — `IpoptApplication` warm-start hooks:
-    `set_sqp_warm_start(SqpIterates)`, `clear_sqp_warm_start()`,
-    `last_sqp_working_set() -> Option<&WorkingSet>`. Input
-    iterate is consumed once and auto-cleared; output WS stays
-    valid until the next solve overwrites it. IPM path ignores
-    both — backwards-compatible by construction.
-  - c19 — C ABI per §7.2. Four new entry points in
-    `crates/pounce-cinterface/include/pounce.h`:
-    `IpoptGetWorkingSet`, `IpoptSetWarmStartWorkingSet`,
-    `IpoptClearWarmStartWorkingSet`, `IpoptSolveWarmStart`. Wire
-    status integers via `IpoptBoundStatus` / `IpoptConsStatus`
-    typedefs and four `POUNCE_WS_*` constants. Existing cyipopt
-    / JuMP / AMPL clients are unaffected (no existing signature
-    changes).
-  - c20 — Python bindings per §7.3. `Problem.solve(...,
-    working_set=(bounds_arr, cons_arr))` kwarg; `set_working_set`,
-    `clear_working_set`, `get_working_set` methods;
-    `info["working_set"]` key in the returned dict. Encoded as
-    numpy int8 (bounds, constraints) tuples; codes match the C
-    ABI `POUNCE_WS_*` values. Five new Python tests covering
-    round-trip, validation, and the IPM-path falsy case.
-  - c21 — GAMS solver-link mechanism §7.4(a). The marginal-based
-    reconstruction path classifies the working set from
-    `gmoGetVarM` / `gmoGetEquM` at the top of `pouCallSolver`
-    and forwards via `IpoptSetWarmStartWorkingSet`. Lossy at
-    degenerate active sets — same trade-off as upstream CONOPT,
-    IPOPT, KNITRO under GAMS. Mechanism §7.4(b) (persistent
-    state file) documented for a follow-up.
-  - c22 — Sensitivity-corrector classifier:
-    `pounce_algorithm::sqp::classify_working_set(...)` builds a
-    `WorkingSet` from any (primal, multipliers, bounds) snapshot.
-    This is the missing piece for the parametric
-    "predictor (sensitivity) + corrector (SQP)" pattern; the
-    `pounce-sensitivity/src/convenience.rs` module gained a docs
-    section showing the full IPM → SensSolve → classify_working_set
-    → set_sqp_warm_start → optimize_tnlp pipeline.
+- **Rust**: `SqpAlgorithm::optimize_with_warm_start` consumes the §6 tuple
+  `(x, λ_g, λ_x, 𝒲)` and feeds the working set into pounce-qp's
+  `solve_with_working_set`; `IpoptApplication` exposes
+  `set_sqp_warm_start`, `clear_sqp_warm_start`, and
+  `last_sqp_working_set` (input iterate consumed once and auto-cleared,
+  output working set valid until the next solve overwrites it).
+- **C ABI** (§7.2): `IpoptGetWorkingSet`, `IpoptSetWarmStartWorkingSet`,
+  `IpoptClearWarmStartWorkingSet`, and `IpoptSolveWarmStart`, with
+  `POUNCE_WS_*` status codes. Existing cyipopt / JuMP / AMPL clients are
+  unaffected — no existing signature changes.
+- **Python** (§7.3): the `working_set=(bounds, cons)` kwarg on
+  `Problem.solve`, the `set` / `clear` / `get_working_set` methods, the
+  `info["working_set"]` return key, and a module-level
+  `pounce.classify_working_set(...)` so parametric-continuation users can
+  wire IPM-converged multipliers in without dropping into Rust.
+- **GAMS** (§7.4): the marginal-based reconstruction path (§7.4(a))
+  classifies the working set from `gmoGetVarM` / `gmoGetEquM`, with the
+  opt-in persistent state file (§7.4(b), `sqp_state_file`) as the
+  lossless alternative — a binary format with an FNV-1a checksum keyed by
+  `(n, m, x_l, x_u, g_l, g_u)` so structural changes invalidate cleanly
+  and fall back to §7.4(a).
+- **Sensitivity corrector**: `classify_working_set` builds a `WorkingSet`
+  from any (primal, multipliers, bounds) snapshot, completing the
+  parametric "predictor (sensitivity) + corrector (SQP)" pattern. The
+  worked end-to-end pipeline ships as
+  `python/examples/sqp_warm_start_mpc.py`,
+  `gams/examples/parametric_sqp_warm_start.gms`, and the
+  `tests/parametric_sqp_corrector.rs` integration test, which validates a
+  cold IPM solve → active-set classification → predictor step → SQP
+  corrector to the exact perturbed optimum at 1e-8.
 
-  **Phase 5c finishing-touch commits c24–c26:**
-  - c24 — Three bug fixes uncovered by the first end-to-end SQP
-    sweep with active variable bounds:
-    (i) pounce-qp's `solve_equality_plus_bounds` now falls
-        through to `solve_elastic` when the equality-relaxed cold
-        start violates a bound (the same recovery
-        `solve_general` already used);
-    (ii) the SQP KKT-stationarity formula was `∇f + Jᵀ λ_g + λ_x`
-        and should be `∇f + Jᵀ λ_g − λ_x` (pounce-qp packs
-        `λ_x = z_l − z_u = −λ_sat`, the negated saddle-KKT
-        multiplier). Bug was latent — no prior SQP test exercised
-        an active variable bound;
-    (iii) `optimize_sqp_tnlp` now populates `SolveStatistics` with
-        the SQP n_iter / final residuals so `GetIpoptIterCount`
-        and `info["iter_count"]` report correct values.
-    Plus a working `python/examples/sqp_warm_start_mpc.py`
-    end-to-end Python example, and matching
-    `gams/examples/parametric_sqp_warm_start.gms` + `pounce.opt`.
-  - c25 — Integration test `tests/parametric_sqp_corrector.rs`
-    end-to-end validates the §6 IPM → SQP-corrector pattern: cold
-    IPM solve, classify the active set with
-    `classify_working_set`, predictor step (closed form for the
-    simplex-projection fixture), SQP corrector consuming the
-    warm-start, exact perturbed optimum to 1e-8.
-  - c26 — Python module-level binding
-    `pounce.classify_working_set(...)` so parametric-continuation
-    Python users can wire IPM-converged multipliers into the SQP
-    `Problem.solve(working_set=…)` kwarg without dropping into
-    Rust. Three new Python tests; 23 Python tests pass.
+### Phase 5d — l1-elastic alternative
 
-  **Phase 5c polishing landed in c28–c32:**
-  - c28 — `SensSolve` captures user-space multipliers (`mult_g`,
-    `mult_x_L`, `mult_x_U`, `g`) into `SensResult`. The
-    parametric-corrector hand-off is now a single solve plus a
-    `classify_working_set` call (no separate IPM run needed for
-    multipliers).
-  - c29 — In-repo Hock-Schittkowski subset
-    (`tests/hock_schittkowski_subset.rs`): 10 problems with
-    published closed-form optima covering box bounds, equality,
-    mixed inequality, nonconvex separable, and large convex QP
-    cases. HS28, HS35, HS76 are exercised on both IPM and the
-    active-set SQP paths.
-  - c30 — Phase 5d l1-elastic polish: two new tunable knobs
-    (`sqp_l1_penalty_safety`, `sqp_l1_penalty_max`) clamp the
-    Han-Powell ν update; comparison tests
-    (`tests/sqp_filter_vs_l1_elastic.rs`) certify Filter and
-    L1Elastic converge to the same optimum on HS28 and HS35.
-  - c31 — Maros-Mészáros published-optimum framework
-    (`pounce-qp/tests/mm_published_optima.rs`): five hand-crafted
-    .qps fixtures covering pure equality, box-only, mixed
-    inequality, two-sided RANGES, and indefinite-Hessian shapes,
-    all parsed and solved to 1e-7 against hand-derived optima.
-    Reusable `compare_qps_to_published(text, x*, f*, …)` helper
-    for the future MM 138-problem sweep.
-  - c32 — GAMS §7.4(b) persistent state-file mechanism. Opt-in
-    via `sqp_state_file <path>`; binary format with FNV-1a
-    checksum keyed by `(n, m, x_l, x_u, g_l, g_u)` so structural
-    changes invalidate cleanly. Falls back to §7.4(a) marginal
-    reconstruction when the file is missing / mismatched.
+Shipped and self-tested: `sqp_l1_penalty_safety` and `sqp_l1_penalty_max`
+clamp the Han-Powell ν update, and comparison tests certify that the
+Filter and L1Elastic globalizations converge to the same optimum on the
+shared Hock-Schittkowski fixtures (HS28, HS35).
 
-  **Phase 5 remaining items — all require external oracles:**
-  - Measured ≥5× iteration-count drop on the §8.2 MPC and
-    parametric regression suites (vs HPIPM / qpOASES / acados).
-  - §8.1 full Maros-Mészáros 138-problem regression (vs qpOASES /
-    OSQP). The c31 framework parses each .qps and asserts against
-    a supplied optimum, but the .qps distribution + reference
-    optima table need an oracle wired in to land.
-  - §8.3 full Hock-Schittkowski 119-problem regression (vs CUTEst
-    SIF runtime).
-  - §8.4 AC OPF pglib-OPF + Poisson boundary-control scaling
-    sweep timings (vs MATPOWER / PowerModels.jl numbers).
-- **Phase 5d — landed in c30.** The l1-elastic alternative is
-  shipped and self-tested; iteration-count comparison benchmarks
-  vs SNOPT remain oracle-gated.
+### Deferred — external-oracle regressions
 
-Total: 10–15 weeks of focused work, gated phase-by-phase. Phases 5a
-and 5b each have standalone value (sparse QP solver; cold SQP NLP);
-5c is where the warm-start payoff lands; 5d is comparison work.
+These are benchmarking comparisons that each need a third-party solver or
+problem distribution wired in; none gate algorithmic completeness:
+
+- Maros-Mészáros 138-problem regression vs qpOASES / OSQP. The in-repo
+  framework parses each `.qps` and asserts against a supplied optimum;
+  the distribution and reference-optima table are what remain.
+- Hock-Schittkowski 119-problem regression vs CUTEst.
+- AC OPF (pglib-OPF) and Poisson boundary-control scaling sweeps vs
+  MATPOWER / PowerModels.jl.
+- A measured ≥5× iteration-count drop on the MPC and parametric suites vs
+  HPIPM / qpOASES / acados, and a small-NLP iteration-count comparison vs
+  filterSQP / SNOPT.
+
+Phases 5a and 5b each have standalone value (the sparse QP solver and the
+cold SQP NLP driver); 5c is where the warm-start payoff lands; 5d is the
+comparison work.
 
 ## 11. Risk
 
@@ -1310,28 +1120,25 @@ and 5b each have standalone value (sparse QP solver; cold SQP NLP);
   workload sits in `benchmarks/` today. Phase 5c ships with at least
   one each (§8.2) committed alongside.
 
-## 12. Open questions for review
+## 12. Design decisions
 
-All algorithmic choices are now pinned. The remaining open questions
-are scope and policy:
+The scope-and-policy questions raised during design were resolved as
+follows:
 
-- **Hessian default for cold SQP.** Should Phase 5b default to exact
-  Hessian or damped BFGS? Exact is fastest when reliable; damped BFGS
-  is robust on hard nonconvex problems. Default proposal: exact, with
-  damped-BFGS auto-fallback on three consecutive QP failures.
-- **GAMS state-file format.** Binary (compact, fast) or text (greppable,
-  diffable). Default proposal: binary with a versioned magic header
-  and a JSON manifest sibling for diagnostics.
-- **C API entry-point granularity.** Single `IpoptSolveWarmStart` with
-  many parameters vs the three-call sequence `IpoptSet… / IpoptSolve
-  / IpoptGet…`. Default proposal: ship both; the three-call sequence
-  is the primitive, the one-shot is convenience.
-- **`pounce-sensitivity` integration timing.** Phase 5a or 5c? Default
-  proposal: 5c, so the parametric workload becomes a real end-to-end
-  test rather than a unit-test stub.
-- **Crate placement.** `pounce-qp` at the workspace root vs inside
-  `crates/`. Default proposal: `crates/pounce-qp/` matching the
-  existing convention.
+- **Hessian default for cold SQP.** Exact Hessian, with a damped-BFGS
+  auto-fallback when the QP repeatedly fails — fastest when reliable,
+  robust on hard nonconvex problems.
+- **GAMS state-file format.** Binary, with a checksum keyed by the problem
+  structure so a changed shape invalidates the file cleanly.
+- **C API entry-point granularity.** Both the three-call primitive
+  (`IpoptSet… / IpoptSolve / IpoptGet…`) and the one-shot
+  `IpoptSolveWarmStart` convenience wrapper ship; the sequence is the
+  primitive, the one-shot is convenience.
+- **`pounce-sensitivity` integration.** Landed in Phase 5c, so the
+  parametric workload is a real end-to-end test rather than a unit-test
+  stub.
+- **Crate placement.** `crates/pounce-qp/`, matching the existing
+  workspace convention.
 
 ## 13. References
 
@@ -1430,9 +1237,8 @@ are scope and policy:
 
 ### Roadmap context
 
-- `docs/research/future-work-roadmap.md:185-206` — the C1 entry this
-  note operationalizes.
-- `docs/research/composite-step-byrd-omojokun.md` — sister design note
-  for C3 (the trust-region globalization track).
-- `docs/research/interior-cg-matrix-free.md` — sister design note for
-  C5 (the Krylov-KKT track).
+- The future-work roadmap's C1 entry — the active-set SQP track this note
+  operationalizes.
+- Sister design notes cover C3 (the composite-step Byrd-Omojokun
+  trust-region globalization) and C5 (the matrix-free interior-CG /
+  Krylov-KKT track).
