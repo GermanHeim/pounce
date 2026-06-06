@@ -686,6 +686,12 @@ def find_minima(
         )
     x0 = np.atleast_1d(np.asarray(x0, dtype=float))
     _validate_bounds_length(bounds, x0.size)
+    if n_minima < 1:
+        raise ValueError(f"n_minima must be >= 1, got {n_minima}")
+    if patience < 1:
+        raise ValueError(f"patience must be >= 1, got {patience}")
+    if max_solves is not None and max_solves < 1:
+        raise ValueError(f"max_solves must be >= 1, got {max_solves}")
     rng = np.random.default_rng(seed)
     if max_solves is None:
         # Generous default: repulsion methods spend a polish solve per

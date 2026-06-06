@@ -318,7 +318,17 @@ with FD-verified first/second derivatives on the smooth interior.
     `f_scale` must be positive and finite, and an explicit `p0` must have one
     start per model parameter — each previously surfaced as a `LinAlgError`,
     `ZeroDivisionError`, back-solve `RuntimeError`, broadcast error, or a
-    silently wrong fit.
+    silently wrong fit;
+  - a model with **keyword-only parameters** (`f(x, *, a, b)`) — which
+    `curve_fit` cannot call positionally as `f(x, *params)` — is rejected with
+    a clear message instead of a downstream `TypeError`;
+  - `CurveFitResult.confidence_band` checks that `x` has the same
+    dimensionality as the fitted `xdata` and that a prediction-band `sigma` is
+    scalar or matches `x`, replacing a cryptic einsum/broadcast error;
+  - `find_minima` / `find_saddles` reject a sub-1 `n_minima` / `n_saddles` /
+    `patience` / `max_solves`, and `find_saddles` rejects a Morse `index`
+    outside `[1, n]` (which previously sliced the step vector wrong and found
+    the wrong critical points).
 
 ## [0.3.0] — 2026-06-02
 

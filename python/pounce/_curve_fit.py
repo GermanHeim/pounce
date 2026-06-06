@@ -321,6 +321,11 @@ class CurveFitResult:
         if kind not in ("confidence", "prediction"):
             raise ValueError("kind must be 'confidence' or 'prediction'")
         x = _to_array(x)
+        if self._xdata is not None and x.ndim != self._xdata.ndim:
+            raise ValueError(
+                f"confidence_band expects x with the same dimensionality as the "
+                f"fitted xdata (ndim {self._xdata.ndim}); got ndim {x.ndim}"
+            )
         a = self.alpha if alpha is None else alpha
         yhat = self.predict(x)
         G = self._model_jac(x, self.popt)  # (m, n)
@@ -340,7 +345,13 @@ class CurveFitResult:
         """
         s2 = self._s2
         if sigma is not None:
-            return s2 * _to_array(sigma) ** 2 * np.ones(x.shape)
+            sig = _to_array(sigma)
+            if sig.ndim > 0 and sig.shape != x.shape:
+                raise ValueError(
+                    f"sigma must be a scalar or match x (shape {x.shape}); got "
+                    f"shape {sig.shape}"
+                )
+            return s2 * sig ** 2 * np.ones(x.shape)
         if self._sigma is not None:
             if x.shape == self._sigma.shape and np.allclose(x, self._xdata):
                 return s2 * self._sigma ** 2
@@ -380,7 +391,18 @@ def _infer_param_names(f: Callable) -> list[str] | None:
     names = []
     for p in params[1:]:  # skip the x argument
         if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+            # ``f(x, *params)`` / ``f(x, **kw)``: count is unknown but the model
+            # is still callable as ``f(x, *p)``; defer to the supplied ``p0``.
             return None
+        if p.kind == p.KEYWORD_ONLY:
+            # ``f(x, *, a, b)`` cannot be called positionally as ``f(x, *p)``,
+            # which is how curve_fit invokes the model — fail clearly rather
+            # than with a downstream "takes 1 positional argument" TypeError.
+            raise ValueError(
+                f"model parameter {p.name!r} is keyword-only; curve_fit calls "
+                f"the model positionally as f(x, *params), so write the "
+                f"parameters as positional arguments"
+            )
         names.append(p.name)
     return names or None
 

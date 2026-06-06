@@ -240,6 +240,17 @@ def find_saddles(
     _validate_bounds_length(bounds, x0.size)
     rng = np.random.default_rng(seed)
     n = x0.size
+    if not (1 <= index <= n):
+        raise ValueError(
+            f"index must be between 1 and the dimension {n} for a saddle, "
+            f"got {index}"
+        )
+    if n_saddles < 1:
+        raise ValueError(f"n_saddles must be >= 1, got {n_saddles}")
+    if patience < 1:
+        raise ValueError(f"patience must be >= 1, got {patience}")
+    if max_solves is not None and max_solves < 1:
+        raise ValueError(f"max_solves must be >= 1, got {max_solves}")
     if max_solves is None:
         max_solves = 6 * n_saddles
     # Dedup in the same per-dimension scaled metric find_minima uses, so a

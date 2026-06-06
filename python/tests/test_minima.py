@@ -208,3 +208,18 @@ def test_find_minima_and_saddles_reject_wrong_length_bounds():
                            bounds=[(-2, 2), (-2, 2)], max_solves=5,
                            options={"print_level": 0})
     assert r is not None
+
+
+def test_find_minima_rejects_nonsensical_budget():
+    """``n_minima``/``patience``/``max_solves`` below 1 are nonsensical and used
+    to silently no-op or return a wrong count; they now raise clear errors."""
+    f = lambda v: float(v @ v)
+    g = lambda v: 2.0 * np.asarray(v, float)
+    box = [(-2, 2), (-2, 2)]
+    opts = {"print_level": 0}
+    with pytest.raises(ValueError, match="n_minima must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, n_minima=0, options=opts)
+    with pytest.raises(ValueError, match="patience must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, patience=-1, options=opts)
+    with pytest.raises(ValueError, match="max_solves must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, max_solves=0, options=opts)

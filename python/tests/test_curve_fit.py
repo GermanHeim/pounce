@@ -523,3 +523,42 @@ def test_curve_fit_validates_data_sigma_fscale_p0():
     # the well-formed call still fits
     r = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0])
     np.testing.assert_allclose(r.popt, [3.0, 0.9, 0.5], atol=0.1)
+
+
+def test_curve_fit_rejects_keyword_only_model():
+    """A model with keyword-only parameters can't be called positionally as
+    ``f(x, *params)`` (how curve_fit invokes it); fail with a clear message
+    instead of a downstream ``TypeError: takes 1 positional argument``."""
+    def kwonly(x, *, a, b):
+        return a * np.exp(-b * x)
+
+    x = np.linspace(0.2, 5, 20)
+    y = 2.0 * np.exp(-0.5 * x)
+    with pytest.raises(ValueError, match="keyword-only"):
+        pounce.curve_fit(kwonly, x, y, p0=[1, 1])
+
+
+def test_confidence_band_validates_shapes():
+    """The delta-method band is a per-point 1-D quantity: a wrong-dimensional
+    ``x`` used to raise a cryptic einsum error, and a wrong-length prediction
+    ``sigma`` a cryptic broadcast error. Both now raise clear ValueErrors."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.2, 5, 20)
+    y = 3.0 * np.exp(-0.9 * x) + 0.5 + 0.02 * rng.standard_normal(x.size)
+    r = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0])
+
+    # x with the wrong number of dimensions
+    with pytest.raises(ValueError, match="same dimensionality"):
+        r.confidence_band(np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    # prediction-band sigma that is neither scalar nor x-shaped
+    with pytest.raises(ValueError, match="sigma must be a scalar or match x"):
+        r.confidence_band(x[:5], kind="prediction", sigma=np.ones(3))
+
+    # well-formed bands still work (scalar sigma, matching sigma, confidence)
+    for band in (
+        r.confidence_band(x[:5]),
+        r.confidence_band(x[:5], kind="prediction", sigma=0.5),
+        r.confidence_band(x[:5], kind="prediction", sigma=np.ones(5)),
+    ):
+        assert all(z.shape == (5,) for z in band)
