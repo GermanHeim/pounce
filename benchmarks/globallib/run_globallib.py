@@ -107,12 +107,22 @@ def main():
     ap.add_argument("--opt", action="append", default=[], metavar="KEY=VALUE",
                     help="extra `key=value` option passed to pounce (repeatable), "
                          "e.g. --opt global_obbt_lp=simplex")
+    ap.add_argument("--stems-file", default=None,
+                    help="newline-separated stem list (e.g. a dev tier under "
+                         "tiers/); '#' comments and blanks ignored. Combined "
+                         "with any positional stems.")
     ap.add_argument("stems", nargs="*", help="restrict to these stems")
     args = ap.parse_args()
 
     nl_dir = Path(args.nl_dir)
     optima = load_optima(args.optima)
-    stems = args.stems or sorted(optima)
+    stems = list(args.stems)
+    if args.stems_file:
+        for line in Path(args.stems_file).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                stems.append(line)
+    stems = stems or sorted(optima)
 
     rows = []
     print(f"{'problem':<14}{'n':>4}  {'status':<24}{'certified':>16}"
