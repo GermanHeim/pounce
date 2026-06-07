@@ -10,14 +10,18 @@
 
 use crate::debug::{fire_tree, BnbDebugState};
 use crate::expr::eval;
+use crate::obbt::ObbtLp;
 use crate::problem::{ConstraintProvider, GlobalProblem};
 use crate::relax::build_relaxation;
 use pounce_common::debug::{DebugAction, DebugHook, PruneReason, TreeCheckpoint, TreeDebugHook};
-use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
+use pounce_convex::{
+    solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm, QpOptions, QpStatus, QpWarmStart,
+};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_presolve::fbbt::{run_fbbt, FbbtConfig};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::time::Instant;
 
 /// Which variable to branch on at a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +87,14 @@ impl GlobalSolution {
 }
 
 /// Estimated heap bytes one frontier node occupies for an `n_vars`-variable
-/// problem: the node struct plus its two owned length-`n` box vectors. Used to
-/// project frontier memory before and after a solve.
+/// problem: the node struct, its two owned length-`n` box vectors, and the
+/// carried parent warm start (Phase 3.1). The warm start holds the primal `x`
+/// plus the two bound-multiplier vectors `z_lb`/`z_ub` — `3·n` floats keyed off
+/// `n_vars`; its `m`-dependent `y`/`z` rows are extra and not counted here (no
+/// `m` at this call site), so the figure is a floor on warm-carrying nodes.
+/// Used to project frontier memory before and after a solve.
 pub fn estimate_node_bytes(n_vars: usize) -> usize {
-    std::mem::size_of::<Node>() + 2 * n_vars * std::mem::size_of::<f64>()
+    std::mem::size_of::<Node>() + 5 * n_vars * std::mem::size_of::<f64>()
 }
 
 /// Tuning for the global solve.
@@ -120,6 +128,38 @@ pub struct GlobalOptions {
     /// solves that minimize/maximize every variable over the relaxation, with an
     /// incumbent cutoff). The strongest box reducer, but costly — `0` disables.
     pub obbt_passes: usize,
+    /// Maximum tree depth (root = 0) at which OBBT runs. Nodes deeper than this
+    /// skip the `2n`-LP sweep and rely on the (cheap) FBBT tightening their
+    /// parents already seeded plus the relaxation lower bound. OBBT is the
+    /// dominant per-node cost on larger problems, and its marginal box reduction
+    /// falls off with depth (parents have already tightened the box), so gating
+    /// it to shallow nodes trades a little tightness deep in the tree for much
+    /// higher node throughput. Skipping OBBT only forgoes *tightening* — it is
+    /// never unsound (FBBT still prunes, the relaxation bound is unchanged), so
+    /// the certified optimum cannot move. `usize::MAX` (default) runs OBBT at
+    /// every node, exactly as before.
+    pub obbt_max_depth: usize,
+    /// Run OBBT only on every `obbt_interval`-th node processed (by dequeue
+    /// order), skipping the `2n`-LP sweep on the others. `1` (default) runs OBBT
+    /// at every eligible node, exactly as before; `0` is treated as `1`. Like
+    /// [`obbt_max_depth`](Self::obbt_max_depth) this only throttles *how often*
+    /// the box is tightened — it is never unsound (FBBT still prunes, the
+    /// relaxation bound is unchanged), so the certified optimum cannot move.
+    /// Under the parallel node pool the interval is approximate, since node
+    /// dequeue order is nondeterministic; that only changes how much OBBT runs.
+    pub obbt_interval: usize,
+    /// Maximum number of variables OBBT tightens per pass. When less than `n`,
+    /// each pass sweeps only the `obbt_max_vars` variables with the **widest
+    /// current box side** (`hi[i] − lo[i]`) — the ones that most slow branching —
+    /// for `2·obbt_max_vars` LP solves instead of `2n`. `usize::MAX` (default)
+    /// tightens every variable, exactly as before. Tightening a subset is a
+    /// strict subset of today's tightening, so the bounds stay valid and the
+    /// certified optimum cannot move.
+    pub obbt_max_vars: usize,
+    /// Which LP engine OBBT's `2n` min/max solves use: the cold interior-point
+    /// method (default) or the warm-started revised simplex, which reuses one
+    /// basis across all `2n` objective flips per pass.
+    pub obbt_lp: ObbtLp,
     /// Number of αBB tangent-plane underestimator cuts added to the objective
     /// per node (sample points across the box). αBB convexifies the objective as
     /// a whole via an interval-Hessian spectral shift, complementing the
@@ -163,6 +203,10 @@ impl Default for GlobalOptions {
             local_solve_iters: 50,
             sandwich_rounds: 4,
             obbt_passes: 2,
+            obbt_max_depth: usize::MAX,
+            obbt_interval: 1,
+            obbt_max_vars: usize::MAX,
+            obbt_lp: ObbtLp::default(),
             alphabb_cuts: 1,
             rlt: true,
             multilinear: true,
@@ -193,6 +237,11 @@ struct Node {
     branch: Option<BranchInfo>,
     /// Depth in the tree (root = 0); tracked for the tree debugger.
     depth: usize,
+    /// The parent's relaxation primal/dual, carried to seed this node's
+    /// lower-bound IPM solve as a warm start (Phase 3.2). `None` at the root
+    /// (no parent) or when the parent relaxation was not solved to optimality.
+    /// Boxed to keep the frontier `Node` small (the warm point is 5 vectors).
+    warm: Option<Box<QpWarmStart>>,
 }
 
 // BinaryHeap is a max-heap; invert so the smallest `key` is popped first.
@@ -243,6 +292,51 @@ struct Bounded {
     branch_terms: Vec<crate::relax::BranchTerm>,
     sol_x: Vec<f64>,
     incumbent: Option<(Vec<f64>, f64)>,
+    /// This node's relaxation primal/dual, to be carried onto its children as a
+    /// warm start (Phase 3.1). `None` when the relaxation was not solved to
+    /// optimality (no usable warm point). Boxed to keep `Bounded` compact.
+    warm: Option<Box<QpWarmStart>>,
+}
+
+/// What [`process_node`] decided about a node. Deliberately three-state rather
+/// than `Option<Bounded>`: a timed-out node is **not** pruned — it is still a
+/// *live* region whose inherited lower bound must be preserved. Folding it into
+/// `None` (= pruned) would silently drop a live node and corrupt the global
+/// lower bound, certifying an optimum that was never proven.
+enum NodeOutcome {
+    /// Proven infeasible or dominated — safe to discard.
+    Pruned,
+    /// Bounded successfully; carries the node's relaxation result.
+    Bounded(Bounded),
+    /// The deadline fired before a valid `Bounded` existed (during FBBT/OBBT).
+    /// The node is still live; the driver stops the search and keeps the
+    /// frontier's lower bound. Once the relaxation has produced a valid bound,
+    /// `process_node` returns that `Bounded` instead (the bound is sound; only
+    /// sandwich sharpening and the upper-bound probe are skipped).
+    TimedOut,
+}
+
+/// Depth at which the local-solve budget starts to decay (root + the first few
+/// levels keep the full `local_solve_iters`, where a strong incumbent pays off
+/// most and where small problems live).
+const LOCAL_SOLVE_DECAY_STRIDE: usize = 4;
+/// Floor on the depth-scaled local-solve budget (never below this unless the
+/// caller's root budget is itself smaller).
+const LOCAL_SOLVE_MIN_ITERS: usize = 10;
+
+/// Depth-scaled local-NLP polish budget. The full root budget is spent at the
+/// root and shallow nodes; the cap halves every [`LOCAL_SOLVE_DECAY_STRIDE`]
+/// levels deeper, floored at [`LOCAL_SOLVE_MIN_ITERS`] and never exceeding the
+/// root budget. Deep nodes — which dominate per-node cost on large, deep trees —
+/// get a cheaper polish. This only ever *weakens the upper bound* (fewer polish
+/// steps may yield a worse feasible point); the relaxation lower bound, pruning,
+/// and thus the certified optimum are untouched, so it cannot certify a wrong
+/// value.
+fn local_solve_iters_at_depth(root_iters: usize, depth: usize) -> usize {
+    let shift = (depth / LOCAL_SOLVE_DECAY_STRIDE).min(usize::BITS as usize - 1);
+    (root_iters >> shift)
+        .max(LOCAL_SOLVE_MIN_ITERS)
+        .min(root_iters)
 }
 
 /// All the per-node work that is independent of the shared frontier: FBBT +
@@ -265,10 +359,15 @@ fn process_node<F>(
     obbt_parallel: bool,
     make_backend: &F,
     mut subsolve_hook: Option<&mut dyn DebugHook>,
-) -> Option<Bounded>
+    deadline: Option<Instant>,
+    depth: usize,
+    node_seq: usize,
+    warm: Option<&QpWarmStart>,
+) -> NodeOutcome
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
 {
+    use crate::obbt::{past_deadline, ObbtOutcome};
     let n = prob.n_vars;
     let mut mk = || make_backend();
 
@@ -286,34 +385,62 @@ where
             &opts.fbbt,
         );
         if report.infeasibility_witness.is_some() {
-            return None;
+            return NodeOutcome::Pruned;
         }
     }
     if (0..n).any(|i| lo[i] > hi[i] + 1e-12) {
-        return None; // empty box
+        return NodeOutcome::Pruned; // empty box
     }
 
     // 1b. Optimization-based bound tightening (with the incumbent cutoff).
-    if opts.obbt_passes > 0 {
+    // Gated two ways, both of which only throttle *how often* the box is
+    // tightened (never soundness — FBBT still prunes, the relaxation bound is
+    // unchanged, so the certified optimum cannot move):
+    //   * `obbt_max_depth` — deeper nodes skip the `2n`-LP sweep and rely on the
+    //     FBBT their parents seeded plus the relaxation bound;
+    //   * `obbt_interval` — run OBBT only on every k-th node by dequeue order.
+    // When OBBT's final pass tightens nothing, it hands back the relaxation it
+    // built over the (now final) box so this node's lower-bound stage can reuse
+    // it instead of rebuilding (Phase 4.3) — but only when `opts.multilinear`
+    // matches OBBT's hardcoded `true`, since otherwise a fresh build differs.
+    let mut reuse_relax: Option<crate::relax::Relaxation> = None;
+    let obbt_interval = opts.obbt_interval.max(1);
+    if opts.obbt_passes > 0
+        && depth <= opts.obbt_max_depth
+        && node_seq.is_multiple_of(obbt_interval)
+    {
         let cutoff = incumbent_ub.is_finite().then_some(incumbent_ub);
-        if !crate::obbt::tighten(
+        match crate::obbt::tighten(
             prob,
             &mut lo,
             &mut hi,
             cutoff,
             opts.obbt_passes,
             obbt_parallel,
+            opts.obbt_lp,
+            opts.obbt_max_vars,
             qp_opts,
             make_backend,
+            deadline,
+            &mut reuse_relax,
         ) {
-            return None;
+            ObbtOutcome::Infeasible => return NodeOutcome::Pruned,
+            // No valid relaxation bound exists yet, so the node must stay live.
+            ObbtOutcome::TimedOut => return NodeOutcome::TimedOut,
+            ObbtOutcome::Done => {}
         }
     }
 
-    // 2. Relaxation lower bound + αBB / RLT cuts + sandwich refinement.
-    let relax = build_relaxation(prob, &lo, &hi, opts.multilinear);
+    // 2. Relaxation lower bound + αBB / RLT cuts + sandwich refinement. Reuse the
+    // OBBT final-pass relaxation when it was handed back and the multilinear flag
+    // matches (the reused LP is bit-identical to a fresh build over the same
+    // box); otherwise build it now.
+    let relax = match reuse_relax {
+        Some(r) if opts.multilinear => r,
+        _ => build_relaxation(prob, &lo, &hi, opts.multilinear),
+    };
     if relax.trivially_infeasible {
-        return None;
+        return NodeOutcome::Pruned;
     }
     let mut qp = relax.qp;
     let atoms = relax.atoms;
@@ -333,32 +460,83 @@ where
     // this node, `subsolve_hook` is armed and we run it under the
     // interior-point debugger; `take` keeps the later sandwich re-solves
     // un-debugged.
+    // Warm-start the relaxation solve from the parent's relaxation point when one
+    // was carried (Phase 3.2). Adjacent boxes share most of their active set, so
+    // the IPM reaches the same LP optimum in fewer iterations. Guarded three ways
+    // so it can only ever *speed up* the same solve, never change correctness:
+    //   * the debug path stays cold (the tree debugger observes a clean solve);
+    //   * the warm point must be dimensionally compatible with this node's
+    //     relaxation (child cuts can change the row count) — else cold;
+    //   * a non-`Optimal` warm solve (the direct driver is less robust than the
+    //     cold HSDE) falls back to a cold solve, preserving today's bound.
+    let warm_compatible = |w: &QpWarmStart| {
+        w.x.len() == qp.n
+            && w.y.len() == qp.m_eq()
+            && w.z.len() == qp.m_ineq()
+            && w.z_lb.len() == qp.n
+            && w.z_ub.len() == qp.n
+    };
     let sol = match subsolve_hook.take() {
         Some(h) => solve_qp_ipm_debug(&qp, qp_opts, h, &mut mk),
-        None => solve_qp_ipm(&qp, qp_opts, &mut mk),
+        None => match warm.filter(|w| warm_compatible(w)) {
+            Some(w) => {
+                let s = solve_qp_ipm_warm(&qp, qp_opts, w, &mut mk);
+                if s.status == QpStatus::Optimal {
+                    s
+                } else {
+                    solve_qp_ipm(&qp, qp_opts, &mut mk) // cold fallback
+                }
+            }
+            None => solve_qp_ipm(&qp, qp_opts, &mut mk),
+        },
     };
     let mut node_lb = match sol.status {
         QpStatus::Optimal => sol.obj,
-        QpStatus::PrimalInfeasible => return None,
+        QpStatus::PrimalInfeasible => return NodeOutcome::Pruned,
         _ => parent_key, // numerical trouble: keep the inherited bound
     };
     // Branch from / probe at the original relaxation point (loosest there);
-    // cuts only sharpen the bound.
+    // cuts only sharpen the bound. Past this point we hold a *valid* node bound
+    // (`node_lb`), so a fired deadline returns that `Bounded` rather than
+    // `TimedOut` — sandwich only sharpens it and the probe only seeks an
+    // incumbent; both are safe to skip.
     let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
     if sol.status == QpStatus::Optimal {
         let mut cut_x = sol.x.clone();
+        // Warm-start each sandwich re-solve from the previous round's full
+        // primal/dual (Phase 3.3). Each round only *appends* inequality cuts —
+        // `n`, `m_eq`, and the bound multipliers are unchanged — so the warm
+        // point is the previous solution with `z` padded by zeros for the fresh,
+        // initially-inactive cut rows. A non-`Optimal` warm result (the direct
+        // driver is less robust than cold HSDE) falls back to a cold solve so
+        // the tightening is never weaker than today's.
+        let mut sandwich_warm = QpWarmStart::from_solution(&sol);
         for _ in 0..opts.sandwich_rounds {
+            if past_deadline(deadline) {
+                break;
+            }
             let cuts = crate::relax::sandwich_cuts(&atoms, &col_lo, &col_hi, &cut_x, 1e-7);
             if cuts.is_empty() {
                 break;
             }
             crate::relax::append_cuts(&mut qp, &cuts);
-            let s = solve_qp_ipm(&qp, qp_opts, &mut mk);
-            if s.status != QpStatus::Optimal || s.obj <= node_lb + 1e-9 {
+            sandwich_warm.z.resize(qp.m_ineq(), 0.0);
+            let mut s = solve_qp_ipm_warm(&qp, qp_opts, &sandwich_warm, &mut mk);
+            if s.status != QpStatus::Optimal {
+                s = solve_qp_ipm(&qp, qp_opts, &mut mk); // cold fallback
+            }
+            // Adaptive short-circuit (Phase 4.2): stop when the marginal bound
+            // gain is a negligible fraction of the bound magnitude, not just the
+            // fixed `1e-9` floor. Once a round buys < `1e-7·|node_lb|` (and never
+            // below the original `1e-9` absolute floor), further rounds are not
+            // worth their LP re-solve — the bound is unchanged to tolerance.
+            let gain_eps = (1e-7 * node_lb.abs()).max(1e-9);
+            if s.status != QpStatus::Optimal || s.obj <= node_lb + gain_eps {
                 break;
             }
             node_lb = s.obj;
-            cut_x = s.x;
+            cut_x = s.x.clone();
+            sandwich_warm = QpWarmStart::from_solution(&s);
         }
     }
 
@@ -367,10 +545,9 @@ where
     let mut incumbent: Option<(Vec<f64>, f64)> = None;
     let center: Vec<f64> = (0..n).map(|i| 0.5 * (lo[i] + hi[i])).collect();
     let mut candidates = vec![relax_pt.clone(), center];
-    if opts.local_solve_iters > 0 {
-        if let Some(polished) =
-            crate::nlp::local_solve(prob, &lo, &hi, &relax_pt, opts.local_solve_iters)
-        {
+    let local_iters = local_solve_iters_at_depth(opts.local_solve_iters, depth);
+    if local_iters > 0 && !past_deadline(deadline) {
+        if let Some(polished) = crate::nlp::local_solve(prob, &lo, &hi, &relax_pt, local_iters) {
             candidates.push(polished);
         }
     }
@@ -382,7 +559,13 @@ where
         }
     }
 
-    Some(Bounded {
+    // Carry the relaxation primal/dual for warm-starting children (Phase 3.1).
+    // Built before `sol.x` is moved into `sol_x`; `None` if the solve was not
+    // optimal (no usable interior point).
+    let warm =
+        (sol.status == QpStatus::Optimal).then(|| Box::new(QpWarmStart::from_solution(&sol)));
+
+    NodeOutcome::Bounded(Bounded {
         node_lb,
         lo,
         hi,
@@ -390,6 +573,7 @@ where
         branch_terms,
         sol_x: sol.x,
         incumbent,
+        warm,
     })
 }
 
@@ -426,6 +610,7 @@ fn children(b: &Bounded, k: usize, lb_for_children: f64, parent_depth: usize) ->
                 parent_lb: b.node_lb,
             }),
             depth,
+            warm: b.warm.clone(),
         },
         Node {
             key: lb_for_children,
@@ -438,6 +623,7 @@ fn children(b: &Bounded, k: usize, lb_for_children: f64, parent_depth: usize) ->
                 parent_lb: b.node_lb,
             }),
             depth,
+            warm: b.warm.clone(),
         },
     ]
 }
@@ -522,6 +708,7 @@ where
         hi: prob.x_hi.clone(),
         branch: None,
         depth: 0,
+        warm: None,
     });
     let mut pseudo = crate::branching::PseudoCosts::new(n);
     let mut incumbent_x: Vec<f64> = Vec::new();
@@ -532,6 +719,13 @@ where
     let mut peak_frontier = heap.len();
     let mut node_id = 0u64;
     let t_start = std::time::Instant::now();
+    // Fine-grained wall-clock deadline polled *inside* the per-node pipeline
+    // (FBBT/OBBT/sandwich/probe), so a single slow node cannot overrun
+    // `max_cpu_time` by minutes. `None` ⇒ no limit.
+    let deadline = opts
+        .max_cpu_time
+        .is_finite()
+        .then(|| t_start + std::time::Duration::from_secs_f64(opts.max_cpu_time));
 
     // Single exit: a `break 'search` records the outcome here, the natural
     // (frontier-exhausted) end fills it after the loop, then `Terminated`
@@ -665,7 +859,7 @@ where
             None
         };
 
-        let Some(b) = process_node(
+        let b = match process_node(
             prob,
             opts,
             node.lo.clone(),
@@ -678,22 +872,44 @@ where
             opts.parallel,
             &make_backend,
             node_subsolve,
-        ) else {
-            if fire_cp!(
-                TreeCheckpoint::NodePruned,
-                &node.lo,
-                &node.hi,
-                f64::NAN,
-                node.depth,
-                None,
-                Some(PruneReason::Infeasible)
-            ) {
-                status = stop_status(incumbent_ub);
+            deadline,
+            node.depth,
+            // 0-based dequeue sequence (root = 0 ⇒ always OBBT'd) for `obbt_interval`.
+            nodes - 1,
+            node.warm.as_deref(),
+        ) {
+            NodeOutcome::Bounded(b) => b,
+            NodeOutcome::Pruned => {
+                if fire_cp!(
+                    TreeCheckpoint::NodePruned,
+                    &node.lo,
+                    &node.hi,
+                    f64::NAN,
+                    node.depth,
+                    None,
+                    Some(PruneReason::Infeasible)
+                ) {
+                    status = stop_status(incumbent_ub);
+                    final_lb = global_lb.min(incumbent_ub);
+                    exited = true;
+                    break 'search;
+                }
+                continue;
+            }
+            // The deadline fired mid-node. The node is dropped, but its
+            // inherited bound is `node.key`, which (best-first) is the frontier
+            // minimum — already reflected in `global_lb` (set at loop top), so
+            // keeping `final_lb = global_lb.min(ub)` is a sound lower bound.
+            NodeOutcome::TimedOut => {
+                status = if incumbent_ub.is_finite() && (incumbent_ub - global_lb) <= opts.abs_gap {
+                    GlobalStatus::Optimal
+                } else {
+                    GlobalStatus::TimeLimit
+                };
                 final_lb = global_lb.min(incumbent_ub);
                 exited = true;
                 break 'search;
             }
-            continue;
         };
 
         // Learn the branched variable's pseudocost from the realized gain.
@@ -908,6 +1124,7 @@ where
         hi: prob.x_hi.clone(),
         branch: None,
         depth: 0,
+        warm: None,
     });
     let shared = Mutex::new(Shared {
         heap: root_heap,
@@ -923,12 +1140,19 @@ where
     });
     let cv = Condvar::new();
     let t_start = std::time::Instant::now();
+    // Fine-grained wall-clock deadline, polled inside each worker's per-node
+    // pipeline (mirrors the serial driver) so one slow node cannot overrun
+    // `max_cpu_time`. `Option<Instant>` is `Copy`, captured by each worker.
+    let deadline = opts
+        .max_cpu_time
+        .is_finite()
+        .then(|| t_start + std::time::Duration::from_secs_f64(opts.max_cpu_time));
 
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| loop {
                 // --- acquire a node (or terminate) ---
-                let (node, inc) = {
+                let (node, inc, node_seq) = {
                     let mut s = shared.lock().unwrap();
                     loop {
                         if s.stop {
@@ -960,7 +1184,11 @@ where
                             s.nodes += 1;
                             s.active += 1;
                             let inc = s.incumbent_ub;
-                            break (node, inc);
+                            // 0-based dequeue sequence for `obbt_interval`. Approximate
+                            // under the pool (dequeue order is nondeterministic), which
+                            // only changes how often OBBT runs, never correctness.
+                            let seq = s.nodes - 1;
+                            break (node, inc, seq);
                         } else if s.active == 0 {
                             // Frontier empty and nobody is producing children.
                             if s.incumbent_ub.is_finite() {
@@ -989,32 +1217,55 @@ where
                     false, // OBBT serial inside a worker — nesting oversubscribes
                     make_backend,
                     None, // the parallel pool is not debuggable
+                    deadline,
+                    node.depth,
+                    node_seq,
+                    node.warm.as_deref(),
                 );
 
                 // --- commit under the lock ---
                 {
                     let mut s = shared.lock().unwrap();
-                    if let Some(b) = outcome {
-                        if let Some((x, obj)) = &b.incumbent {
-                            if *obj < s.incumbent_ub {
-                                s.incumbent_ub = *obj;
-                                s.incumbent_x = x.clone();
+                    match outcome {
+                        NodeOutcome::Bounded(b) => {
+                            if let Some((x, obj)) = &b.incumbent {
+                                if *obj < s.incumbent_ub {
+                                    s.incumbent_ub = *obj;
+                                    s.incumbent_x = x.clone();
+                                }
+                            }
+                            let ub = s.incumbent_ub;
+                            let leaf = ub.is_finite() && gap_ok(b.node_lb, ub, opts);
+                            if !leaf {
+                                let (widest_k, width) = widest(&b.lo, &b.hi);
+                                let lb_for_children = b.node_lb.max(node.key);
+                                let dominated = ub.is_finite() && gap_ok(lb_for_children, ub, opts);
+                                if width > opts.box_tol && !dominated {
+                                    let k = select_most_violation(&b, opts.box_tol, n)
+                                        .unwrap_or(widest_k);
+                                    for child in children(&b, k, lb_for_children, node.depth) {
+                                        s.heap.push(child);
+                                    }
+                                    s.peak_frontier = s.peak_frontier.max(s.heap.len());
+                                }
                             }
                         }
-                        let ub = s.incumbent_ub;
-                        let leaf = ub.is_finite() && gap_ok(b.node_lb, ub, opts);
-                        if !leaf {
-                            let (widest_k, width) = widest(&b.lo, &b.hi);
-                            let lb_for_children = b.node_lb.max(node.key);
-                            let dominated = ub.is_finite() && gap_ok(lb_for_children, ub, opts);
-                            if width > opts.box_tol && !dominated {
-                                let k =
-                                    select_most_violation(&b, opts.box_tol, n).unwrap_or(widest_k);
-                                for child in children(&b, k, lb_for_children, node.depth) {
-                                    s.heap.push(child);
-                                }
-                                s.peak_frontier = s.peak_frontier.max(s.heap.len());
-                            }
+                        NodeOutcome::Pruned => {}
+                        // Deadline fired mid-node. This in-flight node is dropped;
+                        // its inherited bound `node.key` and the frontier minimum
+                        // both lower-bound the optimum, so the conservative
+                        // `global_lb = min(node.key, frontier_peek, ub)` stays
+                        // sound. Stop the pool.
+                        NodeOutcome::TimedOut => {
+                            s.time_limit = true;
+                            s.stop = true;
+                            let peek = s.heap.peek().map(|x| x.key).unwrap_or(f64::INFINITY);
+                            let lb = node.key.min(peek);
+                            s.global_lb = if s.incumbent_ub.is_finite() {
+                                lb.min(s.incumbent_ub)
+                            } else {
+                                lb
+                            };
                         }
                     }
                     s.active -= 1;

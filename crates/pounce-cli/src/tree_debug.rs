@@ -84,6 +84,9 @@ pub struct TreeDebugger {
     step: bool,
     breaks: Vec<TreeBreak>,
     quit: bool,
+    /// JSON mode only: whether the one-time `hello` handshake has been
+    /// emitted yet (sent lazily before the first `tree_pause`).
+    hello_sent: bool,
 }
 
 impl TreeDebugger {
@@ -96,7 +99,50 @@ impl TreeDebugger {
             step: true,
             breaks: Vec::new(),
             quit: false,
+            hello_sent: false,
         }
+    }
+
+    /// Emit the one-time JSON handshake, mirroring the iteration-loop
+    /// debugger's `hello` (see `debug_repl::SolverDebugger::emit_hello`) but
+    /// for the spatial branch-and-bound *tree*. A B&B node has no iterate, so
+    /// this is a deliberately **distinct** protocol variant — `kind: "tree"`,
+    /// pauses arrive as `tree_pause` (not `pause`), and there is no
+    /// request/result command loop (`request_ids: false`). Advertising this up
+    /// front lets a generic `pounce-dbg/1` client recognise the tree backend
+    /// instead of blocking forever waiting for an iteration-loop `hello`+`pause`.
+    fn emit_hello(&self) {
+        println!(
+            "{}",
+            serde_json::to_string(&Self::hello_event()).expect("hello serializes")
+        );
+    }
+
+    /// The `hello` payload (split out so a test can pin the wire contract).
+    fn hello_event() -> serde_json::Value {
+        serde_json::json!({
+            "event": "hello",
+            "protocol": "pounce-dbg/1",
+            "kind": "tree",
+            "pounce_version": env!("CARGO_PKG_VERSION"),
+            "pause_event": "tree_pause",
+            "capabilities": {
+                "request_ids": false,
+                "step_into_relaxation": true,
+            },
+            "checkpoints": [
+                "node_selected", "relaxation_solved", "incumbent_found",
+                "node_pruned", "branched", "terminated",
+            ],
+            "commands": [
+                "help", "info", "step", "continue", "into", "node", "bounds",
+                "gap", "incumbent", "frontier", "break", "quit",
+            ],
+            "metrics": [
+                "node", "depth", "node_lb", "global_lb", "incumbent", "gap",
+                "frontier", "nodes",
+            ],
+        })
     }
 
     /// Feed commands from a script file (one per line; `#` comments and blank
@@ -152,7 +198,15 @@ impl TreeDebugger {
     }
 
     fn dispatch(&mut self, line: &str, st: &mut dyn TreeDebugState) -> Flow {
-        let mut toks = line.split_whitespace();
+        // Accept both the plain text form (`quit`) and the JSON command
+        // framing the iteration-loop protocol uses (`{"cmd":"quit","id":N}`).
+        // The tree debugger doesn't run a request/result loop, but honouring
+        // the JSON form means a generic `pounce-dbg/1` client's `quit` /
+        // `continue` still drives it — notably the MCP proxy's `close()`,
+        // which sends `{"cmd":"quit"}` and would otherwise wait out its
+        // process-kill timeout.
+        let normalized = normalize_command(line);
+        let mut toks = normalized.split_whitespace();
         let Some(cmd) = toks.next() else {
             return Flow::Stay;
         };
@@ -339,6 +393,10 @@ impl TreeDebugHook for TreeDebugger {
             return DebugAction::Resume;
         }
         self.step = false; // consume the one-shot step
+        if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
+            self.emit_hello();
+            self.hello_sent = true;
+        }
         self.print_status(st);
 
         loop {
@@ -386,11 +444,79 @@ fn fmt_vec(v: &[f64]) -> String {
     }
 }
 
+/// Map a raw input line to a debugger command. A line that is a JSON object
+/// with a string `cmd` field (the iteration-loop protocol's command framing,
+/// `{"cmd":"continue","id":3}`) yields that `cmd`; anything else passes
+/// through unchanged so the plain text REPL form still works.
+fn normalize_command(line: &str) -> String {
+    let t = line.trim();
+    if t.starts_with('{') {
+        if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(t) {
+            if let Some(c) = m.get("cmd").and_then(|v| v.as_str()) {
+                return c.to_string();
+            }
+        }
+    }
+    line.to_string()
+}
+
 /// Format a finite f64 for JSON, mapping non-finite to `null`.
 fn fnum(x: f64) -> String {
     if x.is_finite() {
         x.to_string()
     } else {
         "null".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tree debugger's JSON `hello` is a *distinct* protocol variant from
+    /// the iteration-loop debugger's: it must announce `kind: "tree"`, name its
+    /// `tree_pause` pause event, and disclaim the request/result loop
+    /// (`request_ids: false`). The MCP `debug_start` proxy keys on exactly
+    /// these to reject the global backend fast instead of hanging — keep this
+    /// contract in lockstep with `studio/mcp/.../server.py::read_startup`.
+    #[test]
+    fn tree_hello_announces_a_distinct_protocol_variant() {
+        let h = TreeDebugger::hello_event();
+        assert_eq!(h["event"], "hello");
+        assert_eq!(h["protocol"], "pounce-dbg/1");
+        assert_eq!(h["kind"], "tree");
+        assert_eq!(h["pause_event"], "tree_pause");
+        assert_eq!(h["capabilities"]["request_ids"], false);
+        // Metrics must match the fields every `tree_pause` actually carries.
+        let metrics: Vec<&str> = h["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for m in [
+            "node",
+            "depth",
+            "node_lb",
+            "global_lb",
+            "incumbent",
+            "gap",
+            "frontier",
+            "nodes",
+        ] {
+            assert!(metrics.contains(&m), "hello.metrics missing {m}");
+        }
+    }
+
+    #[test]
+    fn normalize_command_accepts_json_and_plain_forms() {
+        // JSON command framing (what the MCP proxy's close() sends).
+        assert_eq!(normalize_command(r#"{"cmd":"quit","id":7}"#), "quit");
+        assert_eq!(normalize_command(r#"  {"cmd":"continue"}  "#), "continue");
+        // Plain text passes through unchanged.
+        assert_eq!(normalize_command("step"), "step");
+        assert_eq!(normalize_command("break depth 3"), "break depth 3");
+        // Malformed / non-object JSON falls back to the raw line.
+        assert_eq!(normalize_command("{not json"), "{not json");
     }
 }

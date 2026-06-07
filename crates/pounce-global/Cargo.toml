@@ -10,6 +10,16 @@ keywords = ["global-optimization", "branch-and-bound", "mccormick", "nonconvex",
 categories = ["mathematics", "science"]
 readme = "README.md"
 
+[features]
+# PARKED capability: the warm-started revised-simplex OBBT engine
+# (`obbt_lp = simplex`). Off by default — the dense-basis engine is numerically
+# unsound on badly-scaled relaxation LPs (returns a wrong LP optimum, which makes
+# OBBT cut the global optimum: observed WRONG certified values and a false
+# infeasibility). With the feature off, `ObbtLp::Simplex` transparently runs the
+# sound IPM sweep instead, and `pounce-simplex` is not linked at all. Enable only
+# to develop/harden the engine.
+simplex-obbt = ["dep:pounce-simplex"]
+
 [dependencies]
 pounce-common.workspace = true
 # Expression tape (FbbtTape / FbbtOp) and the ExpressionProvider trait FBBT consumes.
@@ -18,6 +28,12 @@ pounce-nlp.workspace = true
 pounce-presolve.workspace = true
 # Convex LP solver for the relaxation lower bounds.
 pounce-convex.workspace = true
+# Warm-startable revised simplex for the OBBT inner loop (the 2n same-polytope
+# objective-flip LPs); selected via `obbt_lp = simplex`. PARKED: gated behind the
+# off-by-default `simplex-obbt` feature (the dense engine is numerically unsound
+# on badly-scaled relaxation LPs — see `obbt::ObbtLp::Simplex`), so it is not
+# linked in a normal build.
+pounce-simplex = { workspace = true, optional = true }
 # The sparse symmetric linear-solver trait the LP backend is supplied as.
 pounce-linsol.workspace = true
 # Local NLP solves (filter line-search IPM) for upper bounds at a node.

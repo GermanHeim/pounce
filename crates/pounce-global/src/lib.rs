@@ -46,10 +46,16 @@ mod obbt;
 pub mod problem;
 mod relax;
 mod rlt;
+// PARKED behind the off-by-default `simplex-obbt` feature: the revised-simplex
+// OBBT bridge depends on `pounce-simplex`, which is only linked with that
+// feature. See `obbt::ObbtLp::Simplex`.
+#[cfg(feature = "simplex-obbt")]
+mod simplex_bridge;
 
 pub use bnb::{
     estimate_node_bytes, solve_global, solve_global_debug, solve_global_debug_into, BranchRule,
     GlobalOptions, GlobalSolution, GlobalStatus,
 };
 pub use expr::Expr;
+pub use obbt::{ObbtLp, SIMPLEX_DENSE_MAX_ROWS};
 pub use problem::{Constraint, GlobalProblem};

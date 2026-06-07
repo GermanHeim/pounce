@@ -1464,6 +1464,66 @@ fn register_global_options(
          the relaxation. The strongest box reducer, but the most costly.",
     )?;
     reg.add_lower_bounded_integer_option(
+        "global_obbt_max_depth",
+        "Maximum tree depth (root = 0) at which OBBT runs; -1 = every node.",
+        -1,
+        -1,
+        "Nodes deeper than this skip the 2n-LP OBBT sweep and rely on FBBT (which \
+         their parents already seeded) plus the relaxation bound. OBBT is the \
+         dominant per-node cost on larger problems and its marginal box reduction \
+         falls off with depth, so gating it to shallow nodes trades a little \
+         tightness deep in the tree for higher node throughput. Skipping OBBT only \
+         forgoes tightening — never soundness — so the certified optimum cannot \
+         move. `-1` (default) runs OBBT at every node, exactly as before.",
+    )?;
+    reg.add_lower_bounded_integer_option(
+        "global_obbt_interval",
+        "Run OBBT only on every k-th node processed (by dequeue order); 1 = every node.",
+        1,
+        1,
+        "Skips the 2n-LP OBBT sweep on the other nodes, which still get FBBT plus \
+         the relaxation bound. Like global_obbt_max_depth this only throttles how \
+         OFTEN the box is tightened — never soundness — so the certified optimum \
+         cannot move. Under the parallel node pool (global_threads > 1) the \
+         interval is approximate, since node dequeue order is nondeterministic. \
+         `1` (default) runs OBBT at every eligible node, exactly as before.",
+    )?;
+    reg.add_lower_bounded_integer_option(
+        "global_obbt_max_vars",
+        "Max variables OBBT tightens per pass (widest box first); -1 = all n.",
+        -1,
+        -1,
+        "When less than n, each pass sweeps only the global_obbt_max_vars \
+         variables with the widest current box side (hi - lo) — the ones that \
+         most slow branching — for 2k LP solves instead of 2n. Tightening a \
+         subset is a strict subset of the full sweep, so the bounds stay valid \
+         and the certified optimum cannot move. `-1` (default) tightens every \
+         variable, exactly as before.",
+    )?;
+    reg.add_string_option(
+        "global_obbt_lp",
+        "LP engine for OBBT's 2n per-pass min/max solves.",
+        "ipm",
+        &[
+            (
+                "ipm",
+                "Interior-point (pounce-convex): each solve a cold HSDE central-path walk.",
+            ),
+            (
+                "simplex",
+                "DISABLED (parked) — warm-started revised simplex (pounce-simplex): one basis \
+                 per pass, reused across all 2n objective flips. Serial within a pass. \
+                 Known to produce UNSOUND bounds on some relaxations (see below); do not \
+                 rely on it for certified results yet.",
+            ),
+        ],
+        "Default `ipm` is the certified-correct engine. `simplex` is PARKED and disabled \
+         in standard builds: on a GLOBALLib timeout sweep it rescued several models but \
+         returned wrong certified optima on others (it can tighten past the true LP \
+         min/max), so it is not yet sound. Selecting it warns and falls back to `ipm` \
+         unless the binary was built with `--features simplex-obbt` (development only).",
+    )?;
+    reg.add_lower_bounded_integer_option(
         "global_alphabb_cuts",
         "Number of alpha-BB tangent-plane underestimator cuts per node (0 disables).",
         0,
@@ -1560,6 +1620,17 @@ fn global_options_from_list(
     g.local_solve_iters = opts.get_integer_value("global_local_solve_iters", "")?.0 as usize;
     g.sandwich_rounds = opts.get_integer_value("global_sandwich_rounds", "")?.0 as usize;
     g.obbt_passes = opts.get_integer_value("global_obbt_passes", "")?.0 as usize;
+    // -1 (or any negative) sentinel = no depth limit (run OBBT at every node).
+    g.obbt_max_depth = match opts.get_integer_value("global_obbt_max_depth", "")?.0 {
+        d if d < 0 => usize::MAX,
+        d => d as usize,
+    };
+    g.obbt_interval = opts.get_integer_value("global_obbt_interval", "")?.0 as usize;
+    // -1 (or any negative) sentinel = tighten all n variables (no budget).
+    g.obbt_max_vars = match opts.get_integer_value("global_obbt_max_vars", "")?.0 {
+        v if v < 0 => usize::MAX,
+        v => v as usize,
+    };
     g.alphabb_cuts = opts.get_integer_value("global_alphabb_cuts", "")?.0 as usize;
     g.threads = opts.get_integer_value("global_threads", "")?.0 as usize;
     g.rlt = opts.get_bool_value("global_rlt", "")?.0;
@@ -1570,6 +1641,25 @@ fn global_options_from_list(
         "reliability" => BranchRule::Reliability,
         // "most-violation" and any unexpected value keep the default.
         _ => g.branching,
+    };
+    g.obbt_lp = match opts.get_string_value("global_obbt_lp", "")?.0.as_str() {
+        // The simplex OBBT engine is PARKED behind the off-by-default
+        // `simplex-obbt` feature (unsound on ill-scaled relaxations). With the
+        // feature on it is selectable; with it off, requesting it warns and falls
+        // back to the sound IPM default rather than silently or fatally.
+        #[cfg(feature = "simplex-obbt")]
+        "simplex" => pounce_global::ObbtLp::Simplex,
+        #[cfg(not(feature = "simplex-obbt"))]
+        "simplex" => {
+            eprintln!(
+                "pounce: warning: obbt_lp=simplex is disabled (parked: known soundness bug \
+                 on badly-scaled relaxations); using ipm instead. Rebuild with \
+                 `--features simplex-obbt` to enable the experimental engine."
+            );
+            g.obbt_lp
+        }
+        // "ipm" and any unexpected value keep the default (Ipm).
+        _ => g.obbt_lp,
     };
     Ok(g)
 }
@@ -1589,6 +1679,17 @@ fn run_global(
     use pounce_cli::nl_fbbt_translate::translate_constraint;
     use pounce_global::{solve_global, Constraint, GlobalProblem, GlobalStatus};
     use pounce_nlp::{FbbtOp, FbbtTape};
+
+    // Variable count above which `obbt_lp=simplex` is worth a heads-up: the
+    // dense-basis simplex is tuned for small relaxations and auto-falls-back to
+    // the IPM engine on large ones (see `SIMPLEX_DENSE_MAX_ROWS`). A McCormick
+    // relaxation has at least one row per variable/constraint plus envelope
+    // rows per nonlinear term, so this many variables already risks crossing
+    // the row cap. Heuristic, for the warning only — the real gate is per-pass
+    // on the actual relaxation row count inside `pounce-global`. Only relevant
+    // when the parked `simplex-obbt` engine is compiled in.
+    #[cfg(feature = "simplex-obbt")]
+    const SIMPLEX_LARGE_NVARS: usize = 100;
 
     const BOUND_CAP: f64 = 1e6;
     const INF_SENTINEL: f64 = 1e19;
@@ -1660,6 +1761,25 @@ fn run_global(
             return ExitCode::from(2);
         }
     };
+
+    // Size gate for the simplex OBBT engine. Its basis inverse is an explicit
+    // dense `m×m` matrix, fine for the small post-FBBT OBBT LPs but `O(m²)`
+    // memory / `O(m³)` refactor at scale. pounce-global already auto-falls-back
+    // to the interior-point engine per pass once a relaxation exceeds
+    // `SIMPLEX_DENSE_MAX_ROWS` rows (bounds are unaffected); warn so a large run
+    // isn't surprised by that. Heuristic on variable count — the true gate is
+    // on the per-node relaxation row count.
+    #[cfg(feature = "simplex-obbt")]
+    if opts.obbt_lp == pounce_global::ObbtLp::Simplex && gp.n_vars >= SIMPLEX_LARGE_NVARS {
+        eprintln!(
+            "pounce: warning: obbt_lp=simplex uses a dense-basis LP engine tuned for small \
+             relaxations; this problem has {} variables, so on dense relaxations OBBT will \
+             automatically fall back to the interior-point engine per pass (rows > {}). The \
+             certified bounds are unaffected; only the OBBT engine differs.",
+            gp.n_vars,
+            pounce_global::SIMPLEX_DENSE_MAX_ROWS
+        );
+    }
 
     // Warn up front when the worst-case frontier memory (every node of the
     // budget held open at once) could be large, so a big `max_nodes` × wide

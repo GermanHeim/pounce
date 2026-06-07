@@ -53,11 +53,11 @@ def load_optima(path):
     return opt
 
 
-def run_one(bin_path, nl, timeout):
+def run_one(bin_path, nl, timeout, extra_opts=()):
     start = time.time()
     try:
         p = subprocess.run(
-            [bin_path, str(nl), "solver_selection=global"],
+            [bin_path, str(nl), "solver_selection=global", *extra_opts],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=timeout, text=True,
         )
@@ -104,6 +104,9 @@ def main():
                     help="absolute tolerance floor (so a proven optimum of 0 is "
                          "not failed for a correct certified value of ~1e-7)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--opt", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra `key=value` option passed to pounce (repeatable), "
+                         "e.g. --opt global_obbt_lp=simplex")
     ap.add_argument("stems", nargs="*", help="restrict to these stems")
     args = ap.parse_args()
 
@@ -123,7 +126,7 @@ def main():
         nv = var_count(nl)
         if args.max_vars is not None and nv is not None and nv > args.max_vars:
             continue
-        rec = run_one(args.bin, nl, args.timeout)
+        rec = run_one(args.bin, nl, args.timeout, args.opt)
         cert = rec["obj"]
         # verdict
         if rec["status"] == "TIMEOUT":

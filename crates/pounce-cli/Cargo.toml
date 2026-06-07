@@ -79,6 +79,11 @@ default = []
 # turns on the matching feature in pounce-algorithm so the option
 # `linear_solver = ma57` resolves to MA57 instead of falling back to FERAL.
 ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
+# Compile in the PARKED revised-simplex OBBT engine (development only). Off by
+# default — the engine is numerically unsound on badly-scaled relaxation LPs
+# (see pounce-global's `simplex-obbt` feature / `obbt::ObbtLp::Simplex`). With
+# this off, `obbt_lp=simplex` warns and falls back to the sound IPM engine.
+simplex-obbt = ["pounce-global/simplex-obbt"]
 
 [lints]
 workspace = true

@@ -268,6 +268,126 @@ fn obbt_reduces_nodes() {
 }
 
 #[test]
+fn obbt_max_depth_certifies_same_optimum() {
+    // Gating OBBT to shallow nodes only forgoes *tightening*, never soundness:
+    // deeper nodes still get FBBT + the relaxation bound. So a small
+    // `obbt_max_depth` must certify the SAME optimum as the unlimited default,
+    // even if it visits more nodes. Same nonconvex problem as `obbt_reduces_nodes`
+    // (min x + y s.t. x·y ≥ 4 on [1, 5]², optimum 4 at (2, 2)).
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+
+    let unlimited = solve_global(&prob, &GlobalOptions::default(), backend);
+    // Root + first branch level only; everything deeper relies on FBBT.
+    let shallow = solve_global(
+        &prob,
+        &GlobalOptions {
+            obbt_max_depth: 1,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    // Depth 0 = OBBT at the root only — the most aggressive gate.
+    let root_only = solve_global(
+        &prob,
+        &GlobalOptions {
+            obbt_max_depth: 0,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&unlimited, &shallow, &root_only] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective - 4.0).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+    }
+    // Gating OBBT can only ever cost nodes (less tightening), never save them.
+    assert!(
+        shallow.nodes >= unlimited.nodes && root_only.nodes >= shallow.nodes,
+        "node counts: unlimited {}, depth≤1 {}, root-only {}",
+        unlimited.nodes,
+        shallow.nodes,
+        root_only.nodes
+    );
+}
+
+#[test]
+fn obbt_interval_certifies_same_optimum() {
+    // Throttling OBBT to every k-th node only forgoes *tightening* on the
+    // skipped nodes (they still get FBBT + the relaxation bound), so a large
+    // `obbt_interval` (≈ root-only OBBT) must certify the SAME optimum as the
+    // default. Same nonconvex problem as `obbt_reduces_nodes`.
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+
+    let every = solve_global(&prob, &GlobalOptions::default(), backend);
+    // node_seq 0 (root) still runs OBBT; everything else relies on FBBT.
+    let sparse = solve_global(
+        &prob,
+        &GlobalOptions {
+            obbt_interval: 1000,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&every, &sparse] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective - 4.0).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+    }
+    // Throttling OBBT can only cost nodes (less tightening), never save them.
+    assert!(
+        sparse.nodes >= every.nodes,
+        "interval=1000 nodes {} should be ≥ every-node {}",
+        sparse.nodes,
+        every.nodes
+    );
+}
+
+#[test]
+fn obbt_max_vars_certifies_same_optimum() {
+    // Tightening only the widest-box variable each pass (`obbt_max_vars = 1`) is
+    // a strict subset of the full sweep, so the optimum must be unchanged and the
+    // run must still complete. Same nonconvex problem as `obbt_reduces_nodes`.
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+
+    let full = solve_global(&prob, &GlobalOptions::default(), backend);
+    let budgeted = solve_global(
+        &prob,
+        &GlobalOptions {
+            obbt_max_vars: 1,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&full, &budgeted] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective - 4.0).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+    }
+    // A partial sweep tightens less, so it can only cost nodes, never save them.
+    assert!(
+        budgeted.nodes >= full.nodes,
+        "max_vars=1 nodes {} should be ≥ full-sweep {}",
+        budgeted.nodes,
+        full.nodes
+    );
+}
+
+#[test]
 fn alphabb_cuts_toggle() {
     // f(x, y) = x·y on [−1, 1]² (global min −1). The objective is nonconvex
     // (indefinite Hessian), so αBB applies a positive spectral shift. Solve with
@@ -788,6 +908,98 @@ fn certified_lower_bound_never_exceeds_true_global() {
     }
 }
 
+/// Time-limit soundness (the Phase-0 live-node-drop guard): stopping on the
+/// wall clock — including *mid-node*, while OBBT is still sweeping — must never
+/// push the certified `lower_bound` above the true global optimum. A timed-out
+/// node is *live*, not pruned; if it were silently dropped (folded into the
+/// "pruned" path) the frontier minimum could rise above `f*` and certify a
+/// bound that was never proven. Sweep a range of tiny budgets so the deadline
+/// lands at different points in different nodes.
+#[test]
+fn time_limit_never_corrupts_global_lower_bound() {
+    for case in known_optima_cases() {
+        for &limit in &[0.0_f64, 0.001, 0.005, 0.02, 0.1] {
+            let opts = GlobalOptions {
+                max_cpu_time: limit,
+                max_nodes: 200_000, // the *time* limit must be what stops it
+                ..GlobalOptions::default()
+            };
+            let sol = solve_global(&case.prob, &opts, backend);
+            assert!(
+                sol.lower_bound <= case.fstar + 1e-6,
+                "{}: time-limited lower bound {} EXCEEDS true global optimum {} \
+                 at {}s budget (status {:?}) — a dropped timed-out node corrupted \
+                 the global bound",
+                case.name,
+                sol.lower_bound,
+                case.fstar,
+                limit,
+                sol.status,
+            );
+            assert!(
+                sol.lower_bound <= sol.objective + 1e-6,
+                "{}: invalid bracket lb={} > obj={} at {}s budget",
+                case.name,
+                sol.lower_bound,
+                sol.objective,
+                limit,
+            );
+            assert!(
+                matches!(sol.status, GlobalStatus::TimeLimit | GlobalStatus::Optimal),
+                "{}: unexpected status {:?} under a {}s budget",
+                case.name,
+                sol.status,
+                limit,
+            );
+        }
+    }
+}
+
+/// Fine-grained (mid-node) enforcement: a problem whose *single* node is
+/// expensive — many-variable OBBT runs dozens of LP solves per pass — must not
+/// overrun a small wall-clock budget by the cost of a whole node. With the
+/// deadline polled only at node boundaries (the old behaviour) this root node
+/// would run to completion, blowing past the limit; with mid-node polling it
+/// bails promptly. Asserts wall time stays a small multiple of the budget, not
+/// minutes, and the reported bracket is still valid.
+#[test]
+fn time_limit_enforced_within_a_single_expensive_node() {
+    // ~28 coupled nonconvex variables ⇒ a large bilinear relaxation and many
+    // OBBT LP solves per pass, so one node is far more than 0.1 s of work.
+    let n = 28usize;
+    let mut f = var(0).powi(4) - 3.0 * var(0).powi(2);
+    for i in 1..n {
+        f = f + (var(i).powi(4) - 3.0 * var(i).powi(2)) + var(i - 1) * var(i);
+    }
+    let prob = GlobalProblem::new(vec![-2.0; n], vec![2.0; n], &f);
+    let opts = GlobalOptions {
+        max_cpu_time: 0.1,
+        max_nodes: 200_000,
+        ..GlobalOptions::default()
+    };
+    let t = std::time::Instant::now();
+    let sol = solve_global(&prob, &opts, backend);
+    let elapsed = t.elapsed().as_secs_f64();
+    assert!(
+        elapsed < 5.0,
+        "mid-node time enforcement failed: a 0.1s budget ran {elapsed:.2}s \
+         (status {:?}) — the deadline is only being checked at node boundaries",
+        sol.status,
+    );
+    assert_eq!(
+        sol.status,
+        GlobalStatus::TimeLimit,
+        "a 0.1s budget on a 28-var nonconvex problem must report TimeLimit, got {:?}",
+        sol.status,
+    );
+    assert!(
+        sol.lower_bound <= sol.objective + 1e-9,
+        "invalid bracket: lb={} > obj={}",
+        sol.lower_bound,
+        sol.objective,
+    );
+}
+
 /// Per-relaxation validity: with each cut/relaxation family toggled on in
 /// isolation (others off), a partially-explored search must still produce a
 /// valid global lower bound (`lb ≤ f*`). This isolates the validity of each
@@ -903,5 +1115,83 @@ fn parallel_matches_serial_constrained() {
             sol.x
         );
         assert!(sol.lower_bound <= sol.objective + 1e-6);
+    }
+}
+
+/// Phase 6.5 — the warm-started simplex OBBT engine (`obbt_lp = Simplex`) must
+/// certify the **same** global optimum as the interior-point default on a
+/// spread of nonconvex problems, with a sound bracketing lower bound. The two
+/// LP engines agree only to tolerance (different algorithms), so node counts may
+/// differ, but the certified value must not — this is the 0-WRONG gate that
+/// justifies wiring simplex into OBBT at all.
+///
+/// PARKED: the simplex engine is gated behind the off-by-default `simplex-obbt`
+/// feature (it is unsound on badly-scaled relaxation LPs). This test only runs
+/// when that feature is enabled, since otherwise `ObbtLp::Simplex` transparently
+/// falls back to the IPM sweep and the comparison would be vacuous.
+#[cfg(feature = "simplex-obbt")]
+#[test]
+fn simplex_obbt_matches_ipm_certified_optimum() {
+    use pounce_global::ObbtLp;
+    let simplex_opts = || GlobalOptions {
+        obbt_lp: ObbtLp::Simplex,
+        ..GlobalOptions::default()
+    };
+
+    // (builder, expected optimum) over distinct relaxation shapes: a univariate
+    // quartic, a bilinear box, an equality-constrained ratio, and the six-hump
+    // camel (two coupled quartics).
+    let quartic = || {
+        let f = var(0).powi(4) - 3.0 * var(0).powi(2);
+        (GlobalProblem::new(vec![-2.0], vec![2.0], &f), -2.25_f64)
+    };
+    let bilinear = || {
+        let f = var(0) * var(1);
+        (
+            GlobalProblem::new(vec![-1.0, -1.0], vec![1.0, 1.0], &f),
+            -1.0_f64,
+        )
+    };
+    let ratio = || {
+        let obj = var(0).powi(2) + var(1).powi(2);
+        let g = var(0) * var(1);
+        (
+            GlobalProblem::new(vec![0.1, 0.1], vec![10.0, 10.0], &obj).equality(&g, 1.0),
+            2.0_f64,
+        )
+    };
+
+    for mk in [
+        &quartic as &dyn Fn() -> (GlobalProblem, f64),
+        &bilinear,
+        &ratio,
+    ] {
+        let (prob, expected) = mk();
+        let ipm = solve_global(&prob, &GlobalOptions::default(), backend);
+        let (prob2, _) = mk();
+        let spx = solve_global(&prob2, &simplex_opts(), backend);
+
+        assert_eq!(ipm.status, GlobalStatus::Optimal, "ipm {ipm:?}");
+        assert_eq!(spx.status, GlobalStatus::Optimal, "simplex {spx:?}");
+        // Both certify the known optimum...
+        assert!(
+            (spx.objective - expected).abs() < 1e-2,
+            "simplex obj {} vs expected {expected}",
+            spx.objective
+        );
+        // ...and agree with the IPM run to tolerance.
+        assert!(
+            (spx.objective - ipm.objective).abs() < 1e-3,
+            "simplex {} vs ipm {}",
+            spx.objective,
+            ipm.objective
+        );
+        // The certified lower bound is sound (never above the true optimum).
+        assert!(
+            spx.lower_bound <= spx.objective + 1e-6,
+            "lb {} > obj {}",
+            spx.lower_bound,
+            spx.objective
+        );
     }
 }
