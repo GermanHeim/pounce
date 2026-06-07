@@ -860,6 +860,49 @@ mod tests {
         assert!(hessian_is_psd(&h, 2));
     }
 
+    // --- A1: ±PSD_TOL boundary of the convexity test (silent-misroute guard) ---
+
+    /// The safety-critical case: a *real* negative direction — even a small
+    /// one, well beyond `PSD_TOL` — must read non-PSD so an indefinite QP
+    /// routes to NLP, never to the convex IPM (which would return a spurious
+    /// "optimal" at a saddle/maximum).
+    #[test]
+    fn psd_rejects_small_but_real_negative_curvature() {
+        // diag(2, −1e-3): min eigenvalue −1e-3 ≪ −PSD_TOL.
+        let mut h = QuadHessian::new();
+        h.insert((0, 0), 2.0);
+        h.insert((1, 1), -1e-3);
+        assert!(
+            !hessian_is_psd(&h, 2),
+            "a −1e-3 eigenvalue must read indefinite, not be rounded to PSD"
+        );
+    }
+
+    /// Pin the threshold at exactly `±PSD_TOL` (1e-9). Within the band the
+    /// test rounds a tiny negative eigenvalue to PSD **by design**: a
+    /// genuinely semidefinite Hessian whose smallest eigenvalue computes as a
+    /// tiny negative (Jacobi roundoff) must not be misread as nonconvex. The
+    /// band is far below the error of solving a convex QP with that much
+    /// curvature, so it is the sound tradeoff — see the A1 Finding in
+    /// `dev-notes/pr70-hardening.md`. (1×1 Hessians are returned exactly, so
+    /// this is deterministic.)
+    #[test]
+    fn psd_threshold_is_psd_tol() {
+        let mut just_inside = QuadHessian::new();
+        just_inside.insert((0, 0), -1e-10); // |λ| < PSD_TOL ⇒ treated as zero
+        assert!(
+            hessian_is_psd(&just_inside, 1),
+            "−1e-10 is within tolerance and must round to PSD"
+        );
+
+        let mut just_outside = QuadHessian::new();
+        just_outside.insert((0, 0), -1e-7); // |λ| > PSD_TOL ⇒ genuine negative
+        assert!(
+            !hessian_is_psd(&just_outside, 1),
+            "−1e-7 is beyond tolerance and must read indefinite"
+        );
+    }
+
     // --- End-to-end classify_problem on parsed .nl text ---
 
     /// Minimal `g`-format `.nl` text builder is overkill; instead use the
@@ -998,6 +1041,59 @@ mod tests {
         );
         let prob = qp_stub(obj, vec![con]);
         assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
+    }
+
+    /// Classification mirror of the boundary guard: a QP whose only
+    /// curvature is a genuine (beyond-tolerance) negative direction is
+    /// `NonconvexQp`, so `auto` routes it to NLP rather than the convex IPM.
+    /// `minimize −x0²` is concave for a minimizer ⇒ indefinite.
+    #[test]
+    fn classify_concave_minimize_is_nonconvex() {
+        let obj = Expr::Unary(
+            UnaryOp::Neg,
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
+        assert_eq!(classify_problem(&prob), ProblemClass::NonconvexQp);
+    }
+
+    /// Conservative QCQP guard: a convex quadratic objective with an
+    /// *indefinite* quadratic constraint must fall back to NLP — never be
+    /// called `ConvexQcqp` and handed to the conic path, which would treat a
+    /// nonconvex feasible region as convex.
+    #[test]
+    fn classify_qcqp_with_indefinite_constraint_falls_back_to_nlp() {
+        // obj x0² (convex); constraint x0·x1 (indefinite Hessian).
+        let obj = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let con = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        let prob = qp_stub(obj, vec![con]);
+        assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// A nonlinear objective expression whose quadratic part algebraically
+    /// cancels has an empty Hessian ⇒ classify as `Lp`, not a spurious QP
+    /// (which would otherwise route a linear problem to the QP IPM).
+    #[test]
+    fn classify_cancelling_quadratic_objective_is_lp() {
+        // x0² − x0²  ≡ 0: the degree-2 terms cancel in the polynomial walk.
+        let sq = || {
+            Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )
+        };
+        let obj = Expr::Binary(BinOp::Sub, Box::new(sq()), Box::new(sq()));
+        let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
+        assert_eq!(classify_problem(&prob), ProblemClass::Lp);
     }
 
     #[test]

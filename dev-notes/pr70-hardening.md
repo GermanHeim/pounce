@@ -53,17 +53,45 @@ This file is the **state** for the PR #70 hardening loop. Plan:
 
 ---
 
-## [ ] A1 — Routing classification (HIGHEST RISK)
+## [x] A1 — Routing classification (HIGHEST RISK)
 - Scope: `classify_problem` must never under-classify nonconvex as convex.
   Cover: indefinite Hessian → `NonconvexQp`; near-PSD boundary at `±PSD_TOL`
   (1e-9) resolves conservatively (inconclusive → NLP); maximize-of-convex
   (concave) → nonconvex; zero Hessian → `Lp`; pure linear; genuinely convex
   QP/QCQP still convex (no false fallback).
-- Files: `crates/pounce-cli/src/dispatch.rs` (PSD test ~L564+),
-  `crates/pounce-cli/tests/dispatch_routing.rs`, fixtures `crates/pounce-cli/tests/fixtures/*.nl`.
+- Files: `crates/pounce-cli/src/dispatch.rs` (PSD test ~L576+, `#[cfg(test)]` mod).
 - Run: `cargo test -p pounce-cli dispatch`
 - Done: new cases green; any misclassification recorded as a Finding.
 - Findings:
+  - **Tests added** (5, all green; 29/29 in `dispatch::tests`):
+    - `psd_rejects_small_but_real_negative_curvature` — diag(2, −1e-3) reads
+      indefinite (the safety-critical direction: a real negative eigenvalue,
+      even small, is NOT rounded to PSD).
+    - `psd_threshold_is_psd_tol` — pins the cutoff: −1e-10 (|λ|<tol) → PSD,
+      −1e-7 (|λ|>tol) → indefinite.
+    - `classify_concave_minimize_is_nonconvex` — `minimize −x0²` → `NonconvexQp`
+      (auto → NLP), complementing the existing maximize-of-PSD case.
+    - `classify_qcqp_with_indefinite_constraint_falls_back_to_nlp` — convex obj +
+      indefinite quadratic constraint → `Nlp` (conservative QCQP guard; was
+      untested — only the all-convex QCQP case existed).
+    - `classify_cancelling_quadratic_objective_is_lp` — `x0²−x0²` → `Lp`
+      (collapsing quadratic, empty Hessian, not a spurious QP).
+  - **Pre-existing coverage confirmed adequate**: indefinite→NonconvexQp,
+    maximize-of-convex→nonconvex, maximize-of-concave→convex, pure LP, convex
+    QP, convex QCQP, transcendental obj/con→NLP, cubic/transcendental rejection.
+  - **Finding (informational, NOT a defect): the ±PSD_TOL band rounds toward
+    convex.** The PSD test is `min_eig >= -PSD_TOL` (PSD_TOL=1e-9), so a Hessian
+    with smallest eigenvalue in `[-1e-9, 0)` classifies **convex**, not NLP. The
+    module doc (L36–38, L45–48) says it routes inconclusive cases "to the safe
+    side, never to the convex path" — the wording overstates the actual `>= -tol`
+    behavior. This is the *correct* engineering choice, not a bug: PSD includes
+    semidefinite Hessians (zero eigenvalues — e.g. an LP-as-QP or a rank-deficient
+    QP), whose smallest eigenvalue routinely computes as a tiny negative under
+    Jacobi roundoff; requiring strict positivity would misroute legitimate convex
+    QPs to NLP and regress `psd_accepts_psd_with_zero_eigenvalue`. The 1e-9 band is
+    orders of magnitude below the solve error a convex IPM would incur on that much
+    curvature. **Severity: none** (recommend only tightening the doc wording to
+    match `>= -PSD_TOL`). No misclassification found.
 
 ## [ ] A2 — Forced `solver_selection` mismatch must error, not mis-solve
 - Scope: `qp-ipm`/`lp-ipm`/`qp-active-set` forced on a non-matching/nonconvex
