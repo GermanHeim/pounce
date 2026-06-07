@@ -677,3 +677,231 @@ fn time_limit_reports_status_and_valid_bracket() {
         sol.objective
     );
 }
+
+// --- Global-bound soundness (PR70 item E) ---------------------------------
+//
+// The defining correctness property of spatial branch-and-bound is that the
+// certified `lower_bound` is a valid *global* lower bound: at every stage of the
+// search it must never exceed the true global optimum `f*`. If any relaxation
+// (αBB / RLT / OBBT / McCormick / multilinear / trig / envelope) ever produced a
+// bound *above* the truth in a box containing the optimum, that box could be
+// fathomed and the optimum lost — the worst kind of silent wrong answer.
+//
+// The earlier per-test `lb ≤ objective` checks only bracket the *incumbent*; an
+// invalid relaxation can satisfy `lb ≤ objective` while still reporting a lower
+// bound above `f*`. These tests check the strong invariant `lb ≤ f*` directly by
+// stopping the search early at a range of node caps on problems whose global
+// optimum is known in closed form.
+
+/// A nonconvex problem with a known closed-form global optimum.
+struct GlobalCase {
+    prob: GlobalProblem,
+    fstar: f64,
+    name: &'static str,
+}
+
+fn known_optima_cases() -> Vec<GlobalCase> {
+    let x = || var(0);
+    let y = || var(1);
+    let camel = 4.0 * x().powi(2) - 2.1 * x().powi(4) + (1.0 / 3.0) * x().powi(6) + x() * y()
+        - 4.0 * y().powi(2)
+        + 4.0 * y().powi(4);
+    vec![
+        GlobalCase {
+            prob: GlobalProblem::new(vec![-2.0], vec![2.0], &(x().powi(4) - 3.0 * x().powi(2))),
+            fstar: -2.25,
+            name: "quartic x^4-3x^2",
+        },
+        GlobalCase {
+            // bilinear → McCormick envelope
+            prob: GlobalProblem::new(vec![-1.0, -1.0], vec![1.0, 1.0], &(x() * y())),
+            fstar: -1.0,
+            name: "bilinear xy",
+        },
+        GlobalCase {
+            // indefinite Hessian → αBB spectral shift
+            prob: GlobalProblem::new(vec![-2.0, -1.5], vec![2.0, 1.5], &camel),
+            fstar: -1.031_628_5,
+            name: "six-hump camel",
+        },
+        GlobalCase {
+            // nonconvex inequality x·y ≥ 4
+            prob: GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &(x() + y()))
+                .ge(&(x() * y()), 4.0),
+            fstar: 4.0,
+            name: "x+y s.t. xy>=4",
+        },
+        GlobalCase {
+            // trilinear product → multilinear relaxation
+            prob: GlobalProblem::new(
+                vec![-1.0, -1.0, -1.0],
+                vec![1.0, 1.0, 1.0],
+                &(var(0) * var(1) * var(2)),
+            ),
+            fstar: -1.0,
+            name: "trilinear xyz",
+        },
+    ]
+}
+
+/// Core soundness: the certified lower bound is a valid GLOBAL bound — it never
+/// exceeds the true global optimum, at any stage of a partially-explored search.
+#[test]
+fn certified_lower_bound_never_exceeds_true_global() {
+    for case in known_optima_cases() {
+        for &cap in &[1usize, 3, 10, 50, 500] {
+            let opts = GlobalOptions {
+                max_nodes: cap,
+                ..GlobalOptions::default()
+            };
+            let sol = solve_global(&case.prob, &opts, backend);
+            // The invariant: lb is a valid lower bound on the true global optimum.
+            assert!(
+                sol.lower_bound <= case.fstar + 1e-6,
+                "{}: lower bound {} EXCEEDS true global optimum {} at {}-node cap \
+                 (status {:?}) — invalid relaxation would prune the optimum",
+                case.name,
+                sol.lower_bound,
+                case.fstar,
+                cap,
+                sol.status,
+            );
+            // The bracket is always valid too: lb ≤ incumbent.
+            assert!(
+                sol.lower_bound <= sol.objective + 1e-6,
+                "{}: invalid bracket lb={} > obj={}",
+                case.name,
+                sol.lower_bound,
+                sol.objective,
+            );
+            // If it *claims* Optimal, the incumbent must really be the global opt.
+            if sol.status == GlobalStatus::Optimal {
+                assert!(
+                    (sol.objective - case.fstar).abs() < 1e-2,
+                    "{}: claimed Optimal but obj {} != f* {}",
+                    case.name,
+                    sol.objective,
+                    case.fstar,
+                );
+            }
+        }
+    }
+}
+
+/// Per-relaxation validity: with each cut/relaxation family toggled on in
+/// isolation (others off), a partially-explored search must still produce a
+/// valid global lower bound (`lb ≤ f*`). This isolates the validity of each
+/// outer-approximation generator — a bug in any one of them would surface as a
+/// bound above the truth on the matching nonconvex structure.
+#[test]
+fn each_relaxation_yields_valid_global_lower_bound() {
+    let base_off = GlobalOptions {
+        // Strip every optional relaxation/cut so each can be re-enabled alone.
+        alphabb_cuts: 0,
+        rlt: false,
+        multilinear: false,
+        obbt_passes: 0,
+        sandwich_rounds: 0,
+        max_nodes: 200, // partial search: bounds must be valid mid-flight
+        ..GlobalOptions::default()
+    };
+    // (label, options with exactly one family enabled)
+    let configs = vec![
+        ("all-off (box/interval only)", base_off.clone()),
+        (
+            "alphabb",
+            GlobalOptions {
+                alphabb_cuts: GlobalOptions::default().alphabb_cuts,
+                ..base_off.clone()
+            },
+        ),
+        (
+            "rlt",
+            GlobalOptions {
+                rlt: true,
+                ..base_off.clone()
+            },
+        ),
+        (
+            "multilinear",
+            GlobalOptions {
+                multilinear: true,
+                ..base_off.clone()
+            },
+        ),
+        (
+            "obbt",
+            GlobalOptions {
+                obbt_passes: GlobalOptions::default().obbt_passes,
+                ..base_off.clone()
+            },
+        ),
+        (
+            "sandwich",
+            GlobalOptions {
+                sandwich_rounds: GlobalOptions::default().sandwich_rounds,
+                ..base_off.clone()
+            },
+        ),
+    ];
+    for case in known_optima_cases() {
+        for (label, opts) in &configs {
+            let sol = solve_global(&case.prob, opts, backend);
+            assert!(
+                sol.lower_bound <= case.fstar + 1e-6,
+                "[{label}] {}: lower bound {} EXCEEDS true global optimum {} \
+                 (status {:?}) — relaxation family produced an invalid bound",
+                case.name,
+                sol.lower_bound,
+                case.fstar,
+                sol.status,
+            );
+        }
+    }
+}
+
+/// Serial == parallel on a *constrained* nonconvex problem: the parallel node
+/// pool explores in a non-deterministic order but must certify the same global
+/// optimum (and honor the constraint) as the serial sweep. Complements
+/// `parallel_obbt_matches_serial` (unconstrained, exact node-count match) and
+/// `parallel_node_pool_certifies_optimum` (unconstrained camel).
+#[test]
+fn parallel_matches_serial_constrained() {
+    let obj = var(0).powi(2) + var(1).powi(2);
+    let g = var(0) * var(1);
+    // min x²+y² s.t. xy=1 on [0.1,10]² → 2 at (1,1).
+    let prob = GlobalProblem::new(vec![0.1, 0.1], vec![10.0, 10.0], &obj).equality(&g, 1.0);
+
+    let serial = solve_global(&prob, &GlobalOptions::default(), backend);
+    let parallel = solve_global(
+        &prob,
+        &GlobalOptions {
+            parallel: true,
+            threads: 4,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    assert_eq!(serial.status, GlobalStatus::Optimal, "{serial:?}");
+    assert_eq!(parallel.status, GlobalStatus::Optimal, "{parallel:?}");
+    assert!(
+        (serial.objective - parallel.objective).abs() < 1e-2,
+        "serial obj {} vs parallel obj {}",
+        serial.objective,
+        parallel.objective,
+    );
+    // Both land on the true optimum and honor the equality.
+    for sol in [&serial, &parallel] {
+        assert!(
+            (sol.objective - 2.0).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+        assert!(
+            prob.max_violation(&sol.x) < 1e-4,
+            "violation at {:?}",
+            sol.x
+        );
+        assert!(sol.lower_bound <= sol.objective + 1e-6);
+    }
+}

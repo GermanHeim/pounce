@@ -301,7 +301,7 @@ This file is the **state** for the PR #70 hardening loop. Plan:
   Regression check: `cargo test -p pounce-convex --lib` (95 cone/SOS/HSDE unit
   tests) and the full `pounce-convex` + `exp_cone_vs_nlp` test files all green.
 
-## [ ] E — Global solver soundness
+## [x] E — Global solver soundness
 - Scope: (1) certified **lower bound always a valid global bound**; relaxations
   (αBB/RLT/OBBT/McCormick) are valid outer approximations; (2) **parallel ==
   serial** optimum; (3) node/time limits return best-incumbent with correct
@@ -311,6 +311,40 @@ This file is the **state** for the PR #70 hardening loop. Plan:
 - Run: `cargo test -p pounce-global`
 - Done: bound-validity + serial==parallel + limit-status tests green.
 - Findings:
+
+  **Tests added** (`crates/pounce-global/tests/global.rs`, 24 → 27 integration
+  tests; full `-p pounce-global` suite — 27 integration + lib + 4 tree_debug + 2
+  doc — all green):
+
+  - `certified_lower_bound_never_exceeds_true_global` — the defining B&B
+    soundness invariant. Five nonconvex problems with closed-form global optima
+    (quartic x⁴−3x², bilinear xy → McCormick, six-hump camel → αBB, x+y s.t.
+    xy≥4 → nonconvex inequality, trilinear xyz → multilinear) are each solved at
+    a sweep of node caps {1,3,10,50,500}, asserting `lower_bound ≤ f* + 1e-6` at
+    every partial stage. This is *stronger* than the pre-existing `lb ≤ objective`
+    bracket checks — an invalid (too-high) relaxation bound could satisfy
+    `lb ≤ incumbent` yet exceed the truth and silently fathom the optimal box.
+    Also asserts that any `Optimal` claim really sits on `f*`.
+  - `each_relaxation_yields_valid_global_lower_bound` — isolates the validity of
+    each outer-approximation family: starting from all optional relaxations OFF
+    (box/interval only), re-enables exactly one of {αBB, RLT, multilinear, OBBT,
+    sandwich} at a time and re-checks `lb ≤ f*` under a 200-node partial search,
+    across the same five problems. Catches a validity bug localized to a single
+    cut generator.
+  - `parallel_matches_serial_constrained` — serial vs. 4-thread parallel node
+    pool on a *constrained* nonconvex program (min x²+y² s.t. xy=1 → 2 at (1,1)):
+    same `Optimal` status, objectives agree, both honor the equality
+    (`max_violation < 1e-4`) and keep a valid bracket. Complements the existing
+    `parallel_obbt_matches_serial` (unconstrained, exact node-count match) and
+    `parallel_node_pool_certifies_optimum`.
+
+  Limit-status honesty (`NodeLimit`/`TimeLimit` never false-`Optimal`, valid
+  bracket) was already added under item C (`node_limit_reports_status_and_valid_bracket`,
+  `time_limit_reports_status_and_valid_bracket`).
+
+  **No defects.** Every certified lower bound stayed a valid global bound across
+  all problems, node caps, and per-relaxation configurations; serial and parallel
+  agree. The global solver's soundness invariants hold.
 
 ## [ ] F — Presolve round-trip (primal AND dual)
 - Scope: presolve + postsolve recovers true primal and **dual** solution,
