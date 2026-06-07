@@ -198,16 +198,54 @@ This file is the **state** for the PR #70 hardening loop. Plan:
   numbers are from a 60s/problem limit, so the 19 `Maximum_CpuTime_Exceeded`
   entries are time-limit artifacts of this run, not solver verdicts.
 
-## [ ] C — Status / edge-case honesty
+## [x] C — Status / edge-case honesty
 - Scope: Infeasible, Unbounded, and limit cases (iteration/time/node) report the
   correct status — **never "optimal."** Edge inputs: empty constraints, fixed
   variable, free variable, single variable, zero-Hessian QP-as-LP.
 - Files: `crates/pounce-convex/tests/infeasibility.rs` (+bounded_form.rs),
   `crates/pounce-convex/src/{ipm,hsde,hsde_nonsym}.rs`;
   `crates/pounce-global/tests/global.rs` + `bnb.rs` `GlobalStatus::{Infeasible,NodeLimit,TimeLimit}`.
-- Run: `cargo test -p pounce-convex infeasib && cargo test -p pounce-global`
+- Run: `cargo test -p pounce-convex --test infeasibility --test bounded_form &&
+  cargo test -p pounce-global --test global`
+  (the bare `infeasib` name-filter from the original plan misses the new
+  iteration-limit/edge tests, whose names do not contain "infeasib" — use the
+  file-scoped form above.)
 - Done: status assertions green for every edge case.
 - Findings:
+
+  **Pre-existing coverage was already strong.** `infeasibility.rs` covered primal
+  infeasible (equalities + inequalities), unbounded LP/QP, and a feasible→Optimal
+  contrast; `bounded_form.rs` covered the degenerate inputs called out in scope
+  (single variable, free variable via `NEG_INF`/`POS_INF`, zero-Hessian QP-as-LP
+  in `box_constrained_lp`, bound-binds). `global.rs` covered `Infeasible`. The
+  honesty gaps were the **limit statuses** and a couple of degenerate convex
+  inputs, which I added.
+
+  **Convex IPM — 3 new tests in `infeasibility.rs` (8 passed, was 5):**
+  - `iteration_limit_reported_not_optimal` — a well-posed box QP run with
+    `max_iter = 1` reports `QpStatus::IterationLimit`, never a premature
+    `Optimal` and never a false infeasible/unbounded. **This is the convex
+    analogue of the honesty the capri bug (item B) violates** — here the solver
+    correctly refuses to claim optimality when it has not converged.
+  - `fixed_variable_equal_bounds_optimal` — a variable pinned by `lb == ub == 1`
+    solves to `Optimal` at the fixed value (1, 3), obj −14; no spurious
+    infeasible / numerical failure on the degenerate bound.
+  - `unconstrained_qp_optimal` — a fully unconstrained QP (no eq, no ineq, no
+    bounds) still solves to its stationary point (3, −2), obj −13, `Optimal`.
+
+  **Global B&B — 2 new tests in `global.rs` (24 passed, was 22):**
+  - `node_limit_reports_status_and_valid_bracket` — six-hump camel under
+    `max_nodes = 1` reports `GlobalStatus::NodeLimit` (never `Optimal`), returns a
+    **valid bracket** (`lower_bound ≤ objective`), and the gap genuinely exceeds
+    `abs_gap` (it really did not finish).
+  - `time_limit_reports_status_and_valid_bracket` — same problem with
+    `max_cpu_time = 0.0` reports `GlobalStatus::TimeLimit` (never `Optimal`) with a
+    valid bracket. (Time is checked once per node; six-hump camel does not close
+    in a single node, so the first check fires deterministically.)
+
+  **No defects.** Every limit/edge case reports honestly. The one outstanding
+  status-honesty *defect* in the codebase remains the item-B capri case (convex
+  LP IPM reporting `SolveSucceeded` on a wrong answer); that is tracked there.
 
 ## [ ] D — Nonsymmetric cones & SDP (riskiest numerics)
 - Scope: exp/power cones (`hsde_nonsym` path) and `psd`/`chordal` least

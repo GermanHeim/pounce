@@ -587,3 +587,93 @@ fn sos_and_bnb_agree_on_polynomial() {
         bb.objective
     );
 }
+
+// --- Limit-status honesty (PR70 item C) -----------------------------------
+//
+// When a budget is exhausted the search must report `NodeLimit` / `TimeLimit`,
+// NOT a false `Optimal`, and the returned `[lower_bound, objective]` must still
+// be a *valid bracket* on the true global optimum (lower ≤ upper).
+
+/// Node-budget honesty: a multi-node nonconvex problem solved under a tiny node
+/// cap must report `NodeLimit` (never `Optimal`) and return a valid bracket.
+#[test]
+fn node_limit_reports_status_and_valid_bracket() {
+    // Six-hump camel needs many nodes to certify; cap at 1 so the gap cannot
+    // close. (The full solve is covered by `six_hump_camel_global_minimum`.)
+    let x = var(0);
+    let y = var(1);
+    let f = 4.0 * x.clone().powi(2) - 2.1 * x.clone().powi(4)
+        + (1.0 / 3.0) * x.clone().powi(6)
+        + x.clone() * y.clone()
+        - 4.0 * y.clone().powi(2)
+        + 4.0 * y.powi(4);
+    let prob = GlobalProblem::new(vec![-2.0, -1.5], vec![2.0, 1.5], &f);
+    let opts = GlobalOptions {
+        max_nodes: 1,
+        ..GlobalOptions::default()
+    };
+    let sol = solve_global(&prob, &opts, backend);
+    assert_eq!(
+        sol.status,
+        GlobalStatus::NodeLimit,
+        "1-node cap must report NodeLimit, got {sol:?}"
+    );
+    assert_ne!(
+        sol.status,
+        GlobalStatus::Optimal,
+        "must not claim Optimal when the node budget was exhausted"
+    );
+    // The bracket is still valid: certified lower bound ≤ incumbent objective.
+    assert!(
+        sol.lower_bound <= sol.objective + 1e-9,
+        "invalid bracket: lb={} > obj={}",
+        sol.lower_bound,
+        sol.objective
+    );
+    // The gap genuinely did not close (this is the whole point of the status).
+    assert!(
+        sol.gap() > opts.abs_gap,
+        "gap {} should still exceed abs_gap {}",
+        sol.gap(),
+        opts.abs_gap
+    );
+}
+
+/// Time-budget honesty: with a zero wall-clock budget the search must stop at
+/// the first node boundary reporting `TimeLimit` (never `Optimal`), with a
+/// valid bracket. (Time is checked once per node, so a one-node problem could
+/// finish first; six-hump camel does not close in a single node.)
+#[test]
+fn time_limit_reports_status_and_valid_bracket() {
+    let x = var(0);
+    let y = var(1);
+    let f = 4.0 * x.clone().powi(2) - 2.1 * x.clone().powi(4)
+        + (1.0 / 3.0) * x.clone().powi(6)
+        + x.clone() * y.clone()
+        - 4.0 * y.clone().powi(2)
+        + 4.0 * y.powi(4);
+    let prob = GlobalProblem::new(vec![-2.0, -1.5], vec![2.0, 1.5], &f);
+    let opts = GlobalOptions {
+        max_cpu_time: 0.0,
+        // Keep the node cap high so the *time* limit is what stops the search.
+        max_nodes: 200_000,
+        ..GlobalOptions::default()
+    };
+    let sol = solve_global(&prob, &opts, backend);
+    assert_eq!(
+        sol.status,
+        GlobalStatus::TimeLimit,
+        "zero time budget must report TimeLimit, got {sol:?}"
+    );
+    assert_ne!(
+        sol.status,
+        GlobalStatus::Optimal,
+        "must not claim Optimal when the time budget was exhausted"
+    );
+    assert!(
+        sol.lower_bound <= sol.objective + 1e-9,
+        "invalid bracket: lb={} > obj={}",
+        sol.lower_bound,
+        sol.objective
+    );
+}
