@@ -175,7 +175,33 @@ where
         scaling.unscale_solution(prob, &mut sol);
         return sol;
     }
-    solve_qp_ipm_unscaled(prob, opts, make_backend)
+    let mut make_backend = make_backend;
+    let sol = solve_qp_ipm_unscaled(prob, opts, &mut make_backend);
+    // HSDE robustness fallback. The self-dual driver normally conditions itself
+    // through its per-cone NT scaling and so deliberately skips Ruiz pre-scaling
+    // (see the comment above). But on a *severely* ill-scaled system — e.g. the
+    // spatial-B&B relaxation LPs whose McCormick/division columns and ln/√
+    // envelope tangents span `|G| ∈ [1e-7, 1e6]` — the embedded KKT
+    // factorization can still break down (`NumericalFailure`), discarding an
+    // otherwise-correct iterate and leaving the B&B node with no lower bound.
+    // When that happens, retry once *with* Ruiz equilibration. This is sound and
+    // does not contradict the "Ruiz composes badly with HSDE" note: we only get
+    // here because the un-equilibrated solve already failed, so there is nothing
+    // left to regress — equilibration can only recover a usable solve or fail
+    // the same way (in which case we keep the original result).
+    if opts.use_hsde && opts.equilibrate && sol.status == QpStatus::NumericalFailure {
+        let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+        let inner = QpOptions {
+            equilibrate: false,
+            ..*opts
+        };
+        let mut retry = solve_qp_ipm_unscaled(&scaled, &inner, &mut make_backend);
+        scaling.unscale_solution(prob, &mut retry);
+        if retry.status != QpStatus::NumericalFailure {
+            return retry;
+        }
+    }
+    sol
 }
 
 /// The bounds-aware orthant solve without equilibration (the historical
