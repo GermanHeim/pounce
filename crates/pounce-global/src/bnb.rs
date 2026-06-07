@@ -46,6 +46,10 @@ pub enum GlobalStatus {
     /// The node budget was exhausted before the gap closed; `x` is the best
     /// point found and `[lower_bound, objective]` brackets the global optimum.
     NodeLimit,
+    /// The wall-clock time limit (`max_cpu_time`) was reached before the gap
+    /// closed; like `NodeLimit`, `x` is the best point found and
+    /// `[lower_bound, objective]` brackets the global optimum.
+    TimeLimit,
 }
 
 /// Result of [`solve_global`].
@@ -98,6 +102,12 @@ pub struct GlobalOptions {
     pub box_tol: f64,
     /// Maximum branch-and-bound nodes.
     pub max_nodes: usize,
+    /// Wall-clock time limit in seconds. The search stops at the next node
+    /// boundary once the elapsed time reaches this, returning the best
+    /// incumbent so far with `TimeLimit` status (or `Optimal` if the gap
+    /// happened to close). `f64::INFINITY` disables it. Checked once per node,
+    /// so a single very slow node can overrun it.
+    pub max_cpu_time: f64,
     /// Interior-point iteration cap for the per-node local NLP upper-bound
     /// solve. `0` disables local solves (upper bounds then come only from
     /// probing the relaxation point and box center).
@@ -149,6 +159,7 @@ impl Default for GlobalOptions {
             feas_tol: 1e-6,
             box_tol: 1e-7,
             max_nodes: 5000,
+            max_cpu_time: f64::INFINITY,
             local_solve_iters: 50,
             sandwich_rounds: 4,
             obbt_passes: 2,
@@ -520,6 +531,7 @@ where
     let node_bytes = estimate_node_bytes(n);
     let mut peak_frontier = heap.len();
     let mut node_id = 0u64;
+    let t_start = std::time::Instant::now();
 
     // Single exit: a `break 'search` records the outcome here, the natural
     // (frontier-exhausted) end fills it after the loop, then `Terminated`
@@ -621,6 +633,16 @@ where
                 GlobalStatus::Optimal
             } else {
                 GlobalStatus::NodeLimit
+            };
+            final_lb = global_lb.min(incumbent_ub);
+            exited = true;
+            break 'search;
+        }
+        if t_start.elapsed().as_secs_f64() >= opts.max_cpu_time {
+            status = if incumbent_ub.is_finite() && (incumbent_ub - global_lb) <= opts.abs_gap {
+                GlobalStatus::Optimal
+            } else {
+                GlobalStatus::TimeLimit
             };
             final_lb = global_lb.min(incumbent_ub);
             exited = true;
@@ -850,6 +872,7 @@ struct Shared {
     active: usize,
     stop: bool,
     node_limit: bool,
+    time_limit: bool,
     peak_frontier: usize,
 }
 
@@ -895,9 +918,11 @@ where
         active: 0,
         stop: false,
         node_limit: false,
+        time_limit: false,
         peak_frontier: 1,
     });
     let cv = Condvar::new();
+    let t_start = std::time::Instant::now();
 
     std::thread::scope(|scope| {
         for _ in 0..threads {
@@ -911,6 +936,14 @@ where
                         }
                         if s.nodes >= opts.max_nodes {
                             s.node_limit = true;
+                            s.stop = true;
+                            let peek = s.heap.peek().map(|x| x.key).unwrap_or(s.incumbent_ub);
+                            s.global_lb = peek.min(s.incumbent_ub);
+                            cv.notify_all();
+                            return;
+                        }
+                        if t_start.elapsed().as_secs_f64() >= opts.max_cpu_time {
+                            s.time_limit = true;
                             s.stop = true;
                             let peek = s.heap.peek().map(|x| x.key).unwrap_or(s.incumbent_ub);
                             s.global_lb = peek.min(s.incumbent_ub);
@@ -997,6 +1030,12 @@ where
             GlobalStatus::Optimal
         } else {
             GlobalStatus::NodeLimit
+        }
+    } else if s.time_limit {
+        if s.incumbent_ub.is_finite() && (s.incumbent_ub - s.global_lb) <= opts.abs_gap {
+            GlobalStatus::Optimal
+        } else {
+            GlobalStatus::TimeLimit
         }
     } else if s.incumbent_ub.is_finite() {
         GlobalStatus::Optimal

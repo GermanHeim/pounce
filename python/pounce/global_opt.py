@@ -170,8 +170,10 @@ class GlobalResult:
     ----------
     status:
         ``"optimal"`` (gap within tolerance), ``"infeasible"`` (feasible set
-        proven empty), or ``"node_limit"`` (budget exhausted — ``x`` is the best
-        found and ``[lower_bound, objective]`` brackets the global optimum).
+        proven empty), ``"node_limit"`` (node budget exhausted), or
+        ``"time_limit"`` (wall-clock limit reached). For the two limit cases
+        ``x`` is the best found and ``[lower_bound, objective]`` brackets the
+        global optimum.
     x:
         Best feasible point found (the global minimizer when ``optimal``).
     objective:
@@ -207,6 +209,7 @@ def minimize_global(
     feas_tol: float = 1e-6,
     box_tol: float = 1e-7,
     max_nodes: int = 5000,
+    max_cpu_time: float = float("inf"),
     local_solve_iters: int = 50,
     sandwich_rounds: int = 4,
     obbt_passes: int = 2,
@@ -222,9 +225,11 @@ def minimize_global(
     The keyword options mirror the Rust ``GlobalOptions``: gap tolerances, the
     per-node relaxation knobs (``obbt_passes``, ``sandwich_rounds``,
     ``alphabb_cuts``, ``rlt``, ``multilinear``), the local-NLP upper-bound
-    iteration cap, the node budget, and ``threads`` (``> 1`` runs the parallel
-    node pool — faster but non-deterministic in node order; the certified
-    optimum is unchanged). Returns a :class:`GlobalResult`.
+    iteration cap, the node budget (``max_nodes``), the wall-clock limit in
+    seconds (``max_cpu_time``, default unlimited; a node-boundary stop that
+    still returns the best incumbent), and ``threads`` (``> 1`` runs the
+    parallel node pool — faster but non-deterministic in node order; the
+    certified optimum is unchanged). Returns a :class:`GlobalResult`.
     """
     lo = [float(v) for v in lo]
     hi = [float(v) for v in hi]
@@ -244,6 +249,7 @@ def minimize_global(
         feas_tol=feas_tol,
         box_tol=box_tol,
         max_nodes=max_nodes,
+        max_cpu_time=max_cpu_time,
         local_solve_iters=local_solve_iters,
         sandwich_rounds=sandwich_rounds,
         obbt_passes=obbt_passes,

@@ -31,6 +31,7 @@ fn status_str(s: GlobalStatus) -> &'static str {
         GlobalStatus::Optimal => "optimal",
         GlobalStatus::Infeasible => "infeasible",
         GlobalStatus::NodeLimit => "node_limit",
+        GlobalStatus::TimeLimit => "time_limit",
     }
 }
 
@@ -97,6 +98,7 @@ fn tape_from_ops(ops: &[(u8, i64, i64, f64)], n_vars: usize) -> PyResult<FbbtTap
 #[pyo3(signature = (
     n_vars, x_lo, x_hi, objective, constraints=vec![], *,
     abs_gap=1e-6, rel_gap=1e-6, feas_tol=1e-6, box_tol=1e-7, max_nodes=5000,
+    max_cpu_time=f64::INFINITY,
     local_solve_iters=50, sandwich_rounds=4, obbt_passes=2, alphabb_cuts=1,
     rlt=true, multilinear=true, threads=1
 ))]
@@ -113,6 +115,7 @@ pub fn solve_global<'py>(
     feas_tol: f64,
     box_tol: f64,
     max_nodes: usize,
+    max_cpu_time: f64,
     local_solve_iters: usize,
     sandwich_rounds: usize,
     obbt_passes: usize,
@@ -148,6 +151,7 @@ pub fn solve_global<'py>(
         feas_tol,
         box_tol,
         max_nodes,
+        max_cpu_time,
         local_solve_iters,
         sandwich_rounds,
         obbt_passes,

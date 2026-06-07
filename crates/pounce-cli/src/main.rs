@@ -146,6 +146,15 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // Register the spatial branch-and-bound global solver's tunables
+    // (gaps, node budget, cut/tightening counts, branching rule, threads)
+    // so `solver_selection=global` runs can override them via `key=value`
+    // and they appear in the options listing. Read back in `run_global`.
+    if let Err(e) = register_global_options(app.registered_options()) {
+        eprintln!("pounce: failed to register global solver options: {e}");
+        return ExitCode::from(2);
+    }
+
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they
     // didn't.
@@ -539,6 +548,7 @@ pub fn main() -> ExitCode {
                 });
                 return run_global(
                     &prob,
+                    app.options(),
                     sol_path.as_deref(),
                     json_cfg,
                     args.debug,
@@ -1357,7 +1367,211 @@ fn global_status_to_ars(s: pounce_global::GlobalStatus) -> ApplicationReturnStat
         GlobalStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
         GlobalStatus::Infeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         GlobalStatus::NodeLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+        GlobalStatus::TimeLimit => ApplicationReturnStatus::MaximumCpuTimeExceeded,
     }
+}
+
+/// Register the spatial branch-and-bound global solver's tunables. Defaults
+/// mirror `pounce_global::GlobalOptions::default()`; the values are read back
+/// in `global_options_from_list`. `solver_selection=global` ignores these when
+/// not set (defaults apply), and they are harmless no-ops for the other
+/// solvers.
+fn register_global_options(
+    reg: &pounce_common::reg_options::RegisteredOptions,
+) -> Result<(), pounce_common::exception::SolverException> {
+    reg.set_registering_category("Global Solver (spatial branch-and-bound)");
+
+    // Stopping criteria.
+    reg.add_lower_bounded_number_option(
+        "global_abs_gap",
+        "Absolute optimality-gap tolerance (stop when ub - lb <= this).",
+        0.0,
+        false,
+        1e-6,
+        "Spatial branch-and-bound terminates with a certified global optimum \
+         once the upper minus lower bound drops to this absolute gap.",
+    )?;
+    reg.add_lower_bounded_number_option(
+        "global_rel_gap",
+        "Relative optimality-gap tolerance (stop when ub - lb <= this*|ub|).",
+        0.0,
+        false,
+        1e-6,
+        "Relative form of the global optimality gap, scaled by the incumbent.",
+    )?;
+    reg.add_lower_bounded_number_option(
+        "global_feas_tol",
+        "Constraint feasibility tolerance for accepting an incumbent point.",
+        0.0,
+        false,
+        1e-6,
+        "A candidate point is accepted as a feasible incumbent when every \
+         constraint is satisfied to within this tolerance.",
+    )?;
+    reg.add_lower_bounded_number_option(
+        "global_box_tol",
+        "Stop branching a box once its widest side is <= this.",
+        0.0,
+        false,
+        1e-7,
+        "Lower limit on box width; sub-boxes narrower than this are not \
+         branched further.",
+    )?;
+
+    // Search budget.
+    reg.add_lower_bounded_integer_option(
+        "global_max_nodes",
+        "Maximum branch-and-bound nodes before giving up (gap not closed).",
+        1,
+        5000,
+        "Caps the number of explored nodes. Larger values close harder gaps \
+         at the cost of time and frontier memory.",
+    )?;
+    reg.add_lower_bounded_number_option(
+        "global_max_cpu_time",
+        "Wall-clock time limit in seconds (default: unlimited).",
+        0.0,
+        true,
+        f64::INFINITY,
+        "The search stops at the next node boundary once this many seconds have \
+         elapsed, returning the best incumbent found with TimeLimit status. \
+         Checked once per node, so a single slow node can overrun it.",
+    )?;
+
+    // Per-node bounding strength (each `0` disables that component).
+    reg.add_lower_bounded_integer_option(
+        "global_local_solve_iters",
+        "Interior-point iteration cap for the per-node local upper-bound solve (0 disables).",
+        0,
+        50,
+        "Per-node local NLP solve that produces incumbents; 0 falls back to \
+         probing the relaxation point and box center for upper bounds.",
+    )?;
+    reg.add_lower_bounded_integer_option(
+        "global_sandwich_rounds",
+        "Max cutting-plane (sandwich) rounds per node (0 disables).",
+        0,
+        4,
+        "Tangent cuts added at the relaxation solution for loose convex/concave \
+         atoms, tightening the lower bound without branching.",
+    )?;
+    reg.add_lower_bounded_integer_option(
+        "global_obbt_passes",
+        "Optimization-based bound-tightening passes per node (0 disables).",
+        0,
+        2,
+        "Each pass runs 2n LP solves that minimize/maximize every variable over \
+         the relaxation. The strongest box reducer, but the most costly.",
+    )?;
+    reg.add_lower_bounded_integer_option(
+        "global_alphabb_cuts",
+        "Number of alpha-BB tangent-plane underestimator cuts per node (0 disables).",
+        0,
+        1,
+        "alpha-BB convexifies the objective via an interval-Hessian spectral \
+         shift, complementing the factorable relaxation.",
+    )?;
+
+    // Cut families (on/off).
+    reg.add_string_option(
+        "global_rlt",
+        "Add level-1 RLT cuts (affine constraints x variable-bound factors).",
+        "yes",
+        &[
+            ("yes", "Add RLT cuts; tightens bilinearly coupled problems."),
+            ("no", "Disable RLT cuts."),
+        ],
+        "A no-op when there are no affine constraints.",
+    )?;
+    reg.add_string_option(
+        "global_multilinear",
+        "Use the tighter multi-grouping relaxation of 3-way products.",
+        "yes",
+        &[
+            (
+                "yes",
+                "Intersect all three bilinear groupings of a 3-way product.",
+            ),
+            ("no", "Use a single nested grouping."),
+        ],
+        "Tighter relaxation of trilinear terms at a modest per-node cost.",
+    )?;
+
+    // Branching and parallelism.
+    reg.add_string_option(
+        "global_branching",
+        "Branching variable-selection rule.",
+        "most-violation",
+        &[
+            ("widest", "Branch the widest box side (geometry only)."),
+            (
+                "most-violation",
+                "Branch the variable with the largest relaxation violation.",
+            ),
+            (
+                "reliability",
+                "Reliability branching with pseudocosts and strong branching.",
+            ),
+        ],
+        "Most-violation is the default; reliability helps most on larger \
+         problems where variable choice dominates the node count.",
+    )?;
+    reg.add_string_option(
+        "global_parallel",
+        "Run OBBT's per-node bound-tightening solves on a thread pool.",
+        "no",
+        &[
+            (
+                "yes",
+                "Parallelize the 2n OBBT solves within a node (result identical, just faster).",
+            ),
+            ("no", "Serial OBBT."),
+        ],
+        "Ignored when global_threads > 1 (whole nodes run in parallel then and \
+         OBBT stays serial within a worker).",
+    )?;
+    reg.add_lower_bounded_integer_option(
+        "global_threads",
+        "Worker threads for the parallel node pool (1 = deterministic serial).",
+        1,
+        1,
+        "Greater than 1 processes whole frontier nodes concurrently (the bigger \
+         speedup) at the cost of determinism: node counts vary run to run, but \
+         the certified optimum and gap do not.",
+    )?;
+
+    Ok(())
+}
+
+/// Build `GlobalOptions` from the registered `global_*` options, falling back
+/// to `GlobalOptions::default()` for anything left unset. Mirrors the
+/// registration in `register_global_options`.
+fn global_options_from_list(
+    opts: &pounce_common::options_list::OptionsList,
+) -> Result<pounce_global::GlobalOptions, pounce_common::exception::SolverException> {
+    use pounce_global::{BranchRule, GlobalOptions};
+    let mut g = GlobalOptions::default();
+    g.abs_gap = opts.get_numeric_value("global_abs_gap", "")?.0;
+    g.rel_gap = opts.get_numeric_value("global_rel_gap", "")?.0;
+    g.feas_tol = opts.get_numeric_value("global_feas_tol", "")?.0;
+    g.box_tol = opts.get_numeric_value("global_box_tol", "")?.0;
+    g.max_nodes = opts.get_integer_value("global_max_nodes", "")?.0 as usize;
+    g.max_cpu_time = opts.get_numeric_value("global_max_cpu_time", "")?.0;
+    g.local_solve_iters = opts.get_integer_value("global_local_solve_iters", "")?.0 as usize;
+    g.sandwich_rounds = opts.get_integer_value("global_sandwich_rounds", "")?.0 as usize;
+    g.obbt_passes = opts.get_integer_value("global_obbt_passes", "")?.0 as usize;
+    g.alphabb_cuts = opts.get_integer_value("global_alphabb_cuts", "")?.0 as usize;
+    g.threads = opts.get_integer_value("global_threads", "")?.0 as usize;
+    g.rlt = opts.get_bool_value("global_rlt", "")?.0;
+    g.multilinear = opts.get_bool_value("global_multilinear", "")?.0;
+    g.parallel = opts.get_bool_value("global_parallel", "")?.0;
+    g.branching = match opts.get_string_value("global_branching", "")?.0.as_str() {
+        "widest" => BranchRule::Widest,
+        "reliability" => BranchRule::Reliability,
+        // "most-violation" and any unexpected value keep the default.
+        _ => g.branching,
+    };
+    Ok(g)
 }
 
 /// Solve a parsed `.nl` to a certified global optimum via spatial
@@ -1366,13 +1580,14 @@ fn global_status_to_ars(s: pounce_global::GlobalStatus) -> ApplicationReturnStat
 /// a bounded domain. A maximize objective is handled by negating it.
 fn run_global(
     prob: &nl_reader::NlProblem,
+    opts: &pounce_common::options_list::OptionsList,
     sol_path: Option<&std::path::Path>,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug: Option<pounce_cli::cli::DebugMode>,
     debug_script: Option<&std::path::Path>,
 ) -> ExitCode {
     use pounce_cli::nl_fbbt_translate::translate_constraint;
-    use pounce_global::{solve_global, Constraint, GlobalOptions, GlobalProblem, GlobalStatus};
+    use pounce_global::{solve_global, Constraint, GlobalProblem, GlobalStatus};
     use pounce_nlp::{FbbtOp, FbbtTape};
 
     const BOUND_CAP: f64 = 1e6;
@@ -1413,13 +1628,18 @@ fn run_global(
             ops: vec![FbbtOp::Const(0.0)],
         },
     };
+    // `.nl` encodes a missing constraint bound as the ±1e19 sentinel, not a
+    // true infinity; map it back to ±∞ so a one-sided constraint stays
+    // one-sided in pounce-global's relaxation/FBBT. See
+    // `dispatch::nl_constraint_bound` for why the sentinel would otherwise
+    // cause a feasible problem to be certified infeasible.
     let constraints: Vec<Constraint> = (0..prob.m)
         .filter_map(|i| {
             translate_constraint(&prob.con_nonlinear[i], &prob.con_linear[i]).map(|tape| {
                 Constraint {
                     tape,
-                    lo: prob.g_l[i],
-                    hi: prob.g_u[i],
+                    lo: pounce_cli::dispatch::nl_constraint_bound(prob.g_l[i]),
+                    hi: pounce_cli::dispatch::nl_constraint_bound(prob.g_u[i]),
                 }
             })
         })
@@ -1433,7 +1653,13 @@ fn run_global(
         constraints,
     };
 
-    let opts = GlobalOptions::default();
+    let opts = match global_options_from_list(opts) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("pounce: invalid global solver option: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     // Warn up front when the worst-case frontier memory (every node of the
     // budget held open at once) could be large, so a big `max_nodes` × wide
@@ -1486,6 +1712,7 @@ fn run_global(
         GlobalStatus::Optimal => ("Global optimum found.", true, 0),
         GlobalStatus::Infeasible => ("Problem is infeasible.", false, 200),
         GlobalStatus::NodeLimit => ("Node limit exceeded (gap not closed).", false, 400),
+        GlobalStatus::TimeLimit => ("Time limit exceeded (gap not closed).", false, 400),
     };
     println!(
         "POUNCE (global B&B, pounce-global): {msg}  obj={reported_obj:.8}  gap={gap:.3e}  \
