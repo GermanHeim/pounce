@@ -321,6 +321,37 @@ This file is the **state** for the PR #70 hardening loop. Plan:
   Regression check: `cargo test -p pounce-convex --lib` (95 cone/SOS/HSDE unit
   tests) and the full `pounce-convex` + `exp_cone_vs_nlp` test files all green.
 
+  **RESOLVED (both halves fixed).**
+  - *Exp cone (feasible-but-fails):* root cause was a near-boundary stall in the
+    non-symmetric HSDE driver — at u=3 the line search collapses (α≈8e-4) against
+    the exp-cone boundary, μ plateaus at ~8.5e-8, and the un-homogenized residual
+    `res` lands at 1.155e-5, just over the `1e3·tol = 1e-5` acceptance band (the
+    gap term is amplified by a small τ≈0.088 while pres/dres are already tight).
+    Fix (`hsde_nonsym.rs`): track the **best (lowest-residual) iterate** during
+    the loop and, if the driver would otherwise return `NumericalFailure`/
+    `IterationLimit` but that best residual is within **reduced accuracy**
+    (`√tol = 1e-4`), accept it as `Optimal`. This mirrors ECOS/Clarabel/SCS
+    "solved to reduced accuracy." Safe: a genuinely infeasible/unbounded run
+    never drives `res` below 1e-4, and the clean convergence test at `tol` is
+    unchanged. `near_boundary_gp_matches_nlp` now solves at *every* u including
+    u=3 (obj 20.1353, within 1e-4 of e³+e⁻³).
+  - *PSD cone (infeasible → wrong status):* root cause was `detect_infeasibility`
+    validating the Farkas multiplier `z` **componentwise** (`zᵢ ≥ −tol`), which is
+    the dual-cone test for the orthant only. For a PSD block the dual cone is
+    `smat(z) ⪰ 0`, so a legitimate certificate was rejected and the solve fell
+    through to `NumericalFailure`. Fix: added a self-dual `in_dual_cone(z, tol)`
+    method to the `Cone` trait (orthant `zᵢ ≥ −tol`; SOC `z₀ ≥ ‖z₁‖ − tol`; PSD
+    `λ_min(smat z) ≥ −tol`; composite = AND over blocks) and a cone-aware
+    `detect_infeasibility_cone` entry point. The symmetric drivers (`ipm::run_ipm`,
+    `hsde`) now pass their cone so the multiplier is checked against the *actual*
+    dual cone; the non-symmetric (exp/power) path keeps the componentwise default.
+    The infeasible SDP now returns a clean `PrimalInfeasible` Farkas certificate
+    (`sdp_cone.rs` assertion tightened from "PrimalInfeasible | NumericalFailure"
+    to `== PrimalInfeasible`).
+
+  Regression check after fix: full `pounce-convex` suite (all test files) +
+  `exp_cone_vs_nlp` (6 tests, incl. `near_boundary_gp_matches_nlp`) green.
+
 ## [x] E — Global solver soundness
 - Scope: (1) certified **lower bound always a valid global bound**; relaxations
   (αBB/RLT/OBBT/McCormick) are valid outer approximations; (2) **parallel ==

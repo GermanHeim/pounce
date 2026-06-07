@@ -129,14 +129,13 @@ fn sdp_infeasible_psd_cone_never_reports_optimal() {
         QpStatus::Optimal,
         "infeasible SDP must not report Optimal"
     );
-    // Currently PrimalInfeasible (ideal) or NumericalFailure (the documented
-    // gap) — both are honest non-solutions.
-    assert!(
-        matches!(
-            sol.status,
-            QpStatus::PrimalInfeasible | QpStatus::NumericalFailure
-        ),
-        "expected an honest non-solution, got {:?}",
+    // With the cone-aware Farkas check (the multiplier `z` is validated against
+    // the actual PSD/orthant dual cone, not merely componentwise), the
+    // infeasible SDP now yields the clean `PrimalInfeasible` certificate.
+    assert_eq!(
+        sol.status,
+        QpStatus::PrimalInfeasible,
+        "expected a PrimalInfeasible Farkas certificate, got {:?}",
         sol.status
     );
 }

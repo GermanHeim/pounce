@@ -369,6 +369,11 @@ impl Cone for PsdCone {
         dot / self.n as f64
     }
 
+    fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        // Self-dual: z ∈ K iff λ_min(smat z) ≥ −tol.
+        self.min_eig(z) >= -tol
+    }
+
     fn scaling_diag(&self, _s: &[f64], _z: &[f64], _out: &mut [f64]) {
         unimplemented!("PSD uses kkt_block (dense), not scaling_diag")
     }

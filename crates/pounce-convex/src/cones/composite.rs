@@ -118,6 +118,9 @@ impl Cone for ConeKind {
     fn recenter_warm(&self, s: &mut [f64], z: &mut [f64], floor: f64) {
         dispatch!(self, c => c.recenter_warm(s, z, floor))
     }
+    fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        dispatch!(self, c => c.in_dual_cone(z, tol))
+    }
 }
 
 /// A Cartesian product of cones, the cone of the IPM's stacked `(s, z)`.
@@ -303,6 +306,15 @@ impl Cone for CompositeCone {
             let d = k.dim();
             k.recenter_warm(&mut s[*off..off + d], &mut z[*off..off + d], floor);
         }
+    }
+
+    fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        // The dual of a product cone is the product of the duals: every block
+        // must lie in its own dual cone.
+        self.blocks.iter().all(|(off, k)| {
+            let d = k.dim();
+            k.in_dual_cone(&z[*off..off + d], tol)
+        })
     }
 }
 

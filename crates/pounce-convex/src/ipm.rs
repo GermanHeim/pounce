@@ -1394,7 +1394,7 @@ fn run_ipm(
         // (not assumed), so a positive result is a proof and a false
         // positive is impossible; this is the HSDE benefit without the
         // homogeneous-embedding rewrite. Cheap (a few matvecs).
-        if let Some(infeas) = detect_infeasibility(prob, &x, &y, &z, opts) {
+        if let Some(infeas) = detect_infeasibility_cone(prob, &x, &y, &z, opts, cone) {
             status = infeas;
             break;
         }
@@ -2125,6 +2125,37 @@ pub(crate) fn detect_infeasibility(
     z: &[f64],
     opts: &QpOptions,
 ) -> Option<QpStatus> {
+    // Default dual-cone test: componentwise `zᵢ ≥ −tol`, exact for the
+    // nonnegative orthant (LP/QP) and the non-symmetric Farkas paths. The
+    // cone-aware entry point is [`detect_infeasibility_cone`].
+    detect_infeasibility_with(prob, x, y, z, opts, |z, tol| z.iter().all(|&zi| zi >= -tol))
+}
+
+/// Cone-aware variant of [`detect_infeasibility`]: validates the Farkas
+/// dual multiplier `z` against the **actual** dual cone `K*` (orthant: `z ≥
+/// 0`; SOC: `z₀ ≥ ‖z₁‖`; PSD: `smat(z) ⪰ 0`). The componentwise default is
+/// correct only for the orthant — for SOC/PSD blocks a primal-infeasibility
+/// certificate must have its multiplier *in the cone*, not merely
+/// componentwise nonnegative, or the "proof" is not a proof.
+pub(crate) fn detect_infeasibility_cone(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    opts: &QpOptions,
+    cone: &CompositeCone,
+) -> Option<QpStatus> {
+    detect_infeasibility_with(prob, x, y, z, opts, |z, tol| cone.in_dual_cone(z, tol))
+}
+
+fn detect_infeasibility_with(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    opts: &QpOptions,
+    dual_cone_ok: impl Fn(&[f64], f64) -> bool,
+) -> Option<QpStatus> {
     let n = prob.n;
     let ctol = opts.infeas_tol;
 
@@ -2135,7 +2166,7 @@ pub(crate) fn detect_infeasibility(
         prob.at_mul(y, &mut resid);
         prob.gt_mul(z, &mut resid);
         let cert = dot(&prob.b, y) + dot(&prob.h, z); // bᵀy + hᵀz
-        let z_ok = z.iter().all(|&zi| zi >= -ctol * dual_norm);
+        let z_ok = dual_cone_ok(z, ctol * dual_norm);
         if cert < -ctol * dual_norm && inf_norm(&resid) <= ctol * dual_norm && z_ok {
             return Some(QpStatus::PrimalInfeasible);
         }

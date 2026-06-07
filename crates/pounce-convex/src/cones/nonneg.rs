@@ -84,6 +84,11 @@ impl Cone for NonnegCone {
         alpha
     }
 
+    fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        // Self-dual: zᵢ ≥ −tol componentwise.
+        z[..self.n].iter().all(|&zi| zi >= -tol)
+    }
+
     fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock {
         ConeBlock::Diagonal((0..self.n).map(|i| s[i] / z[i]).collect())
     }

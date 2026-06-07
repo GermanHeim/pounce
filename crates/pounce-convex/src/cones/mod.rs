@@ -177,4 +177,14 @@ pub trait Cone {
     /// scaled by the fraction-to-boundary parameter `tau`. For the
     /// orthant: `min over dv_i<0 of -tau * v_i / dv_i`, capped at 1.
     fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64;
+
+    /// Membership test for the cone's **dual** cone, to absolute tolerance
+    /// `tol`: `true` iff `z` lies in (or within `tol` of) the dual cone. Used
+    /// to validate a Farkas/recession direction before certifying primal
+    /// infeasibility — a certificate is only honest if its dual multipliers
+    /// actually lie in the dual cone. The cones shipped here (nonnegative
+    /// orthant, second-order, PSD) are self-dual, so this tests `z` against
+    /// the cone itself: orthant `zᵢ ≥ −tol`; SOC `z₀ ≥ ‖z₁‖ − tol`; PSD
+    /// `λ_min(smat z) ≥ −tol`.
+    fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool;
 }

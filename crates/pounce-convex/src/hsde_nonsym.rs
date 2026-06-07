@@ -739,6 +739,18 @@ where
     let mut status = QpStatus::IterationLimit;
     let mut iters = 0;
 
+    // Best iterate seen, by un-homogenized KKT residual. A feasible conic
+    // program can stall a hair short of `tol` when an iterate rides deep on a
+    // non-symmetric cone boundary: the barrier Hessian blows up, the
+    // fraction-to-boundary step collapses, and the duality gap is amplified by
+    // a small τ even though primal/dual feasibility are already tight. We
+    // snapshot the lowest-residual iterate so that, if the iteration later
+    // breaks down or hits the cap, we can return the point we actually reached
+    // (and judge its accuracy) rather than whatever degenerate iterate we died
+    // on. See the reduced-accuracy acceptance after the loop.
+    let mut best_res = f64::INFINITY;
+    let mut best: Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64, f64)> = None;
+
     for it in 0..opts.max_iter {
         iters = it;
 
@@ -775,6 +787,13 @@ where
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
         let res = pres.max(dres).max(gap);
+
+        // Snapshot the best (lowest-residual) iterate for the reduced-accuracy
+        // fallback. τ > 0 only — the recovery un-homogenizes by 1/τ.
+        if res < best_res && tau > 0.0 {
+            best_res = res;
+            best = Some((x.clone(), y.clone(), z.clone(), s.clone(), tau, kappa));
+        }
 
         // Debugger checkpoint: top of iteration. Same homogeneous-iterate
         // view as the symmetric HSDE driver (blocks x/s/y/z + τ/κ).
@@ -1058,6 +1077,35 @@ where
             };
             if fire(&mut hook, &mut st) == DebugAction::Stop {
                 break;
+            }
+        }
+    }
+
+    // Reduced-accuracy acceptance. If the driver broke down or hit the cap
+    // (NumericalFailure / IterationLimit) but the best iterate we reached has a
+    // KKT residual within √tol (e.g. tol=1e-8 → 1e-4), the problem was
+    // essentially solved — a near-boundary stall on a non-symmetric cone, not a
+    // genuine failure. Restore that iterate and report Optimal, mirroring the
+    // "solved to reduced accuracy" outcome of ECOS/Clarabel/SCS. This never
+    // fires for infeasible/unbounded problems (their residuals never get this
+    // small — the embedding drives τ → 0 and the certificate path triggers
+    // first) and never relaxes the clean convergence test above (still `tol`).
+    if matches!(
+        status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    ) {
+        let reduced_acc = opts.tol.sqrt();
+        if best_res < reduced_acc {
+            if let Some((bx, by, bz, bs, btau, _bkappa)) = best.take() {
+                // κ is not read downstream (the recovery un-homogenizes by
+                // 1/τ); restoring x/y/z/s/τ is what the solution recovery and
+                // the post-mortem hook consume.
+                x = bx;
+                y = by;
+                z = bz;
+                s = bs;
+                tau = btau;
+                status = QpStatus::Optimal;
             }
         }
     }

@@ -173,6 +173,12 @@ impl Cone for SecondOrderCone {
         (tau * alpha).min(1.0)
     }
 
+    fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        // Self-dual: z ∈ K iff z₀ ≥ ‖z₁..‖ − tol.
+        let tail: f64 = z[1..self.m].iter().map(|v| v * v).sum::<f64>().sqrt();
+        z[0] >= tail - tol
+    }
+
     fn scaling_diag(&self, _s: &[f64], _z: &[f64], _out: &mut [f64]) {
         // SOC's (z,z) block is dense — the driver consumes `kkt_block`, not
         // the orthant's diagonal-only `scaling_diag`.

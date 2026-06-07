@@ -37,7 +37,7 @@
 use crate::cones::{CompositeCone, Cone};
 use crate::debug::{fire, ConvexDebugState};
 use crate::ipm::{
-    build_factorization, build_rhs, detect_infeasibility, dot, inf_norm, split_step, QpOptions,
+    build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step, QpOptions,
 };
 use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
@@ -232,7 +232,7 @@ where
         // Farkas/recession ray as τ → 0; the same verified relative checks
         // as the direct driver apply to the homogeneous (x, y, z)). ---
         if tau < 1e-2 * kappa.max(1.0) {
-            if let Some(st) = detect_infeasibility(prob, &x, &y, &z, opts) {
+            if let Some(st) = detect_infeasibility_cone(prob, &x, &y, &z, opts, cone) {
                 status = st;
                 break;
             }
