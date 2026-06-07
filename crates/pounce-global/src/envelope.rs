@@ -275,7 +275,7 @@ pub(crate) fn trig(is_sin: bool, l: f64, u: f64) -> Option<Envelope> {
 
     // Interior inflection = an interior zero of f (at most one for width ≤ π).
     let infl = if f(l) * f(u) < 0.0 {
-        bisect(&f, l, u)
+        bisect(f, l, u)
     } else {
         None
     };

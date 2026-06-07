@@ -268,8 +268,8 @@ impl QpSolution {
         // Dual infeasibility (stationarity).
         let mut r = vec![0.0; n];
         prob.p_mul(&self.x, &mut r);
-        for i in 0..n {
-            r[i] += prob.c[i] - self.z_lb[i] + self.z_ub[i];
+        for (((ri, &ci), &lb), &ub) in r.iter_mut().zip(&prob.c).zip(&self.z_lb).zip(&self.z_ub) {
+            *ri += ci - lb + ub;
         }
         prob.at_mul(&self.y, &mut r);
         prob.gt_mul(&self.z, &mut r);
@@ -279,13 +279,13 @@ impl QpSolution {
         let mut primal_infeasibility = 0.0_f64;
         let mut ax = vec![0.0; prob.m_eq()];
         prob.a_mul(&self.x, &mut ax);
-        for i in 0..prob.m_eq() {
-            primal_infeasibility = primal_infeasibility.max((ax[i] - prob.b[i]).abs());
+        for (&axi, &bi) in ax.iter().zip(&prob.b) {
+            primal_infeasibility = primal_infeasibility.max((axi - bi).abs());
         }
         let mut gx = vec![0.0; prob.m_ineq()];
         prob.g_mul(&self.x, &mut gx);
-        for i in 0..prob.m_ineq() {
-            primal_infeasibility = primal_infeasibility.max((gx[i] - prob.h[i]).max(0.0));
+        for (&gxi, &hi) in gx.iter().zip(&prob.h) {
+            primal_infeasibility = primal_infeasibility.max((gxi - hi).max(0.0));
         }
         for i in 0..n {
             primal_infeasibility = primal_infeasibility.max((prob.lb_of(i) - self.x[i]).max(0.0));
@@ -294,8 +294,8 @@ impl QpSolution {
 
         // Complementarity.
         let mut complementarity = 0.0_f64;
-        for i in 0..prob.m_ineq() {
-            complementarity = complementarity.max((self.z[i] * (prob.h[i] - gx[i])).abs());
+        for ((&zi, &hi), &gxi) in self.z.iter().zip(&prob.h).zip(&gx) {
+            complementarity = complementarity.max((zi * (hi - gxi)).abs());
         }
         for i in 0..n {
             let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));

@@ -139,6 +139,8 @@ pub(crate) fn conjugate_grad<C: BarrierCone>(cone: &C, d: &[f64], out: &mut [f64
     let mut phat = [0.0_f64; 3];
     cone.interior_reference(&mut phat);
     let dp = d[0] * phat[0] + d[1] * phat[1] + d[2] * phat[2];
+    // NaN-safe: `!(dp > 0.0)` rejects dp <= 0 *and* a NaN dp.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(dp > 0.0) {
         return false; // d ∉ int K* (⟨d,p̂⟩ ≤ 0): no conjugate point.
     }
@@ -270,6 +272,9 @@ pub(crate) fn scaling<C: BarrierCone>(cone: &C, s: &[f64], z: &[f64]) -> Option<
         }
     }
     let t = mu * fro2.sqrt();
+    // NaN-safe: `!(t > 0.0)` rejects t <= 0 *and* a NaN t (which `t <= 0.0`
+    // would let through). Bail out rather than build a degenerate factor.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(t > 0.0) {
         return None;
     }

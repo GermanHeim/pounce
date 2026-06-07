@@ -271,8 +271,8 @@ impl Scaling {
         let mut px = vec![0.0; orig.n];
         orig.p_mul(&sol.x, &mut px);
         let mut obj = 0.0;
-        for i in 0..orig.n {
-            obj += 0.5 * sol.x[i] * px[i] + orig.c[i] * sol.x[i];
+        for ((&xi, &pxi), &ci) in sol.x.iter().zip(&px).zip(&orig.c) {
+            obj += 0.5 * xi * pxi + ci * xi;
         }
         sol.obj = obj;
     }

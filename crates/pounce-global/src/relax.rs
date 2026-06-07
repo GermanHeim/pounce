@@ -719,6 +719,10 @@ pub(crate) fn build_relaxation(
 
     // Constraints: bracket each root handle by [lo, hi].
     for con in &prob.constraints {
+        // The `if` inside the `Const` arm is kept explicit on purpose: folding it
+        // into a match guard would leave an in-bounds `Const` unmatched and make
+        // the match non-exhaustive (there is no catch-all arm).
+        #[allow(clippy::collapsible_match)]
         match process_tape(&mut b, &con.tape, x_lo, x_hi, multilinear) {
             Some(Handle::Col(c)) => {
                 let h = Handle::Col(c);

@@ -1423,7 +1423,7 @@ fn run_ipm(
 
         // Affine step lengths and the predicted duality measure μ_aff.
         let (alpha_p_aff, alpha_d_aff) =
-            step_lengths(&cone, &s, &ds_aff, &z, &dz_aff, opts.tau, m_ineq);
+            step_lengths(cone, &s, &ds_aff, &z, &dz_aff, opts.tau, m_ineq);
         let sigma = if m_ineq == 0 {
             0.0
         } else {
@@ -1455,7 +1455,7 @@ fn run_ipm(
             split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
             cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
 
-            let (alpha_p, alpha_d) = step_lengths(&cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
+            let (alpha_p, alpha_d) = step_lengths(cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
             step_p = alpha_p;
             step_d = alpha_d;
         }

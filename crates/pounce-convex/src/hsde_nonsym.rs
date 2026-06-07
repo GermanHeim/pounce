@@ -271,8 +271,8 @@ impl NsKkt {
                     for i in 0..3 {
                         add(zb + i, zb + i, -reg);
                     }
-                    add(zb + 1, zb + 0, 0.0);
-                    add(zb + 2, zb + 0, 0.0);
+                    add(zb + 1, zb, 0.0);
+                    add(zb + 2, zb, 0.0);
                     add(zb + 2, zb + 1, 0.0);
                 }
             }

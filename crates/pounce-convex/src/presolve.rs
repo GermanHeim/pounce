@@ -150,6 +150,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// Outcome of presolve.
+// `Reduced` carries the full reduced problem and is by far the common case;
+// boxing it to shrink the two rare unit variants would just add an
+// allocation + deref on the hot path and ripple through every caller's match.
+#[allow(clippy::large_enum_variant)]
 pub enum PresolveOutcome {
     /// Problem reduced; solve `reduced`, then call [`Presolve::postsolve`].
     Reduced(Presolve),
@@ -1020,8 +1024,8 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         new_c[newc] = prob.c[oldc] + c_adjust[oldc];
     }
     let mut offset = subst_offset;
-    for c in 0..n {
-        if let Some(v) = fixed[c] {
+    for (c, &fixed_c) in fixed.iter().enumerate() {
+        if let Some(v) = fixed_c {
             offset += prob.c[c] * v;
         }
     }
