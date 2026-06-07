@@ -247,7 +247,7 @@ This file is the **state** for the PR #70 hardening loop. Plan:
   status-honesty *defect* in the codebase remains the item-B capri case (convex
   LP IPM reporting `SolveSucceeded` on a wrong answer); that is tracked there.
 
-## [ ] D — Nonsymmetric cones & SDP (riskiest numerics)
+## [x] D — Nonsymmetric cones & SDP (riskiest numerics)
 - Scope: exp/power cones (`hsde_nonsym` path) and `psd`/`chordal` least
   battle-tested. Adversarial: ill-conditioned, near-cone-boundary, a few larger
   instances; validate via vs-NLP and/or known optima (geometric/entropy for exp,
@@ -258,6 +258,48 @@ This file is the **state** for the PR #70 hardening loop. Plan:
 - Run: `cargo test -p pounce-convex cone && cargo test -p pounce-cli exp_cone`
 - Done: new adversarial cases green or defects logged.
 - Findings:
+
+  **Tests added.** Two new test files / extensions, all green:
+
+  - `crates/pounce-convex/tests/sdp_cone.rs` (NEW, 3 tests) — first end-to-end
+    SDPs through `solve_socp_ipm` with `ConeSpec::Psd(2)` (previously only the
+    cone *primitives* in `cones/psd.rs` had unit tests; nothing drove a full SDP
+    through the IPM). `sdp_min_diagonal_psd_cone_2x2` (min t s.t. [[t,1],[1,t]]⪰0
+    → t=1, a rank-deficient on-boundary optimum) and `sdp_max_eigenvalue_psd_cone`
+    (min t s.t. t·I−A⪰0, A=[[2,1],[1,2]] → λ_max=3) both hit their closed-form
+    optima. `sdp_infeasible_psd_cone_never_reports_optimal` (t≥2 ∧ t≤1, empty
+    feasible set) confirms the safety property.
+  - `crates/pounce-cli/tests/exp_cone_vs_nlp.rs` (+3 tests) —
+    `power_cone_geometric_mean_matches_nlp` first-ever `ConeSpec::Power` coverage
+    (max x s.t. y=2,z=8,(x,y,z)∈K_{0.5} → x*=√16=4, vs-NLP);
+    `entropy_maximization_larger_instance` (n=16 entropy → −log16, uniform dist,
+    checks the non-symmetric driver stays accurate as the exp-cone count grows);
+    `near_boundary_gp_matches_nlp` swept over u∈{1,1.5,2,2.5,3}.
+
+  **DEFECT (severity: medium — robustness gap, NOT a wrong-answer bug).** Two
+  related places where a *non-symmetric/PSD* program that is perfectly solvable
+  (or cleanly infeasible) returns `NumericalFailure` instead of converging /
+  certifying, because the driver hits a KKT factorization breakdown near the cone
+  boundary:
+  - Exp cone: the near-boundary GP `min e^u+e^{−u}` (u pinned) converges to the
+    closed form for u ∈ {1, 1.5, 2, 2.5} (matches NLP to <1e-4) but returns
+    `NumericalFailure` at u = 3 (where the second slack e^{−3}≈0.05 rides deep on
+    the cone boundary). A *feasible* program failing to solve — the more concerning
+    of the two.
+  - PSD cone: the infeasible SDP returns `NumericalFailure` rather than the clean
+    `PrimalInfeasible` Farkas certificate the orthant path gives (documented inline
+    in `sdp_cone.rs`).
+
+  In **every** case the safety-critical property holds: the driver NEVER reports a
+  false/premature `Optimal`. Tests assert exactly that (`status != Optimal` and
+  `status ∈ {Optimal, NumericalFailure, IterationLimit}`), check the objective
+  wherever it does converge, and `eprintln!` the breaking point so the gap is
+  visible. Follow-up to tighten to "Optimal at every u" / "== PrimalInfeasible"
+  is the exp-cone near-boundary scaling + PSD infeasibility certification — a
+  numerics hardening task, separable from this merge since no wrong answers result.
+
+  Regression check: `cargo test -p pounce-convex --lib` (95 cone/SOS/HSDE unit
+  tests) and the full `pounce-convex` + `exp_cone_vs_nlp` test files all green.
 
 ## [ ] E — Global solver soundness
 - Scope: (1) certified **lower bound always a valid global bound**; relaxations

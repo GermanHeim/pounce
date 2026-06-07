@@ -433,3 +433,234 @@ fn log_sum_exp_conic_matches_nlp() {
     );
     eprintln!("lse: conic obj={:.8}, nlp obj={:.8}", conic.obj, nlp_obj);
 }
+
+// --------------------------------------------------------------------------
+// 4. Power cone (PR70 item D). K_α = {(x,y,z): |x| ≤ y^α z^{1−α}, y,z ≥ 0}.
+//    Maximizing x with y, z pinned gives the weighted geometric mean
+//    x* = y^α z^{1−α}. The exp-cone tests never exercise `ConeSpec::Power`,
+//    which routes through the *same* non-symmetric HSDE driver.
+// --------------------------------------------------------------------------
+
+#[test]
+fn power_cone_geometric_mean_matches_nlp() {
+    // max x  s.t.  y = 2, z = 8, (x, y, z) ∈ K_{1/2}.
+    // x* = 2^{1/2} · 8^{1/2} = √16 = 4.
+    let prob = QpProblem {
+        n: 3, // (x, y, z)
+        p_lower: vec![],
+        c: vec![-1.0, 0.0, 0.0], // min −x
+        a: vec![
+            Triplet::new(0, 1, 1.0), // y = 2
+            Triplet::new(1, 2, 1.0), // z = 8
+        ],
+        b: vec![2.0, 8.0],
+        g: vec![
+            Triplet::new(0, 0, -1.0), // s0 = x
+            Triplet::new(1, 1, -1.0), // s1 = y
+            Triplet::new(2, 2, -1.0), // s2 = z
+        ],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let conic = timed_conic("power-gm", &prob, &[ConeSpec::Power(0.5)]);
+    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+
+    // NLP: max x s.t. x ≤ √(y·z), y=2, z=8  ⇔  min −x with x² ≤ y·z.
+    // Pose directly as max of √(2·8): the closed form is 4. Cross-check with a
+    // 1-var NLP min −x s.t. x ≤ √16 (the binding monomial), i.e. x* = 4.
+    let nlp = ClosureNlp {
+        n: 1,
+        lb: vec![0.0],
+        ub: vec![10.0],
+        x0: vec![1.0],
+        // x ≤ √(2·8) = 4 written as the equality-free bound via a linear row
+        // x ≤ 4 (the monomial value); the geometric-mean optimum is at equality.
+        a_rows: vec![],
+        b: vec![],
+        f: Box::new(|x| -x[0]),
+        grad: Box::new(|_x, g| g[0] = -1.0),
+        hess_pattern: vec![(0, 0)],
+        hess: Box::new(|_x, _of, v| v[0] = 0.0),
+        captured_obj: RefCell::new(None),
+        captured_x: RefCell::new(None),
+    };
+    // Replace the ub with the monomial value so the NLP optimum is the same 4.
+    let mut nlp = nlp;
+    nlp.ub = vec![(2.0_f64 * 8.0).sqrt()];
+    let (nlp_obj, _) = solve_nlp("power-gm", nlp);
+
+    // Objective is `min −x`, so the optimal value is −4 (x* = 4 = √(2·8)).
+    assert!(
+        (-conic.obj - 4.0).abs() < 1e-5,
+        "conic x* = {} vs geometric mean 4",
+        -conic.obj
+    );
+    assert!(
+        (conic.obj - nlp_obj).abs() < 1e-5,
+        "power objectives disagree: conic={}, nlp={nlp_obj}",
+        conic.obj
+    );
+    // The conic primal recovers (x, y, z) = (4, 2, 8) on the cone boundary.
+    assert!((conic.x[0] - 4.0).abs() < 1e-4, "x = {}", conic.x[0]);
+    assert!((conic.x[1] - 2.0).abs() < 1e-4, "y = {}", conic.x[1]);
+    assert!((conic.x[2] - 8.0).abs() < 1e-4, "z = {}", conic.x[2]);
+    eprintln!("power-gm: conic x*={:.8}", -conic.obj);
+}
+
+// --------------------------------------------------------------------------
+// 5. Larger / near-boundary exp-cone instances (PR70 item D adversarial set).
+// --------------------------------------------------------------------------
+
+/// Larger entropy instance (n = 16): the non-symmetric driver must stay
+/// accurate as the exp-cone count grows. Optimum is the uniform distribution
+/// with objective −log 16.
+#[test]
+fn entropy_maximization_larger_instance() {
+    let n = 16usize;
+    let want_obj = -(n as f64).ln();
+
+    let mut g = Vec::new();
+    let mut h = Vec::new();
+    for i in 0..n {
+        let base = 3 * i;
+        g.push(Triplet::new(base, i, -1.0)); // slack0 = aᵢ
+        h.push(0.0);
+        g.push(Triplet::new(base + 1, n + i, -1.0)); // slack1 = xᵢ
+        h.push(0.0);
+        h.push(1.0); // slack2 = 1
+    }
+    let a: Vec<Triplet> = (0..n).map(|i| Triplet::new(0, n + i, 1.0)).collect();
+    let mut c = vec![0.0; 2 * n];
+    for ci in c.iter_mut().take(n) {
+        *ci = -1.0;
+    }
+    let prob = QpProblem {
+        n: 2 * n,
+        p_lower: vec![],
+        c,
+        a,
+        b: vec![1.0],
+        g,
+        h,
+        lb: vec![],
+        ub: vec![],
+    };
+    let specs = vec![ConeSpec::Exponential; n];
+    let conic = timed_conic("entropy16", &prob, &specs);
+    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+    assert!(
+        (conic.obj - want_obj).abs() < 1e-4,
+        "entropy(n=16) obj {} vs −log 16 = {want_obj}",
+        conic.obj
+    );
+    for i in 0..n {
+        assert!(
+            (conic.x[n + i] - 1.0 / n as f64).abs() < 1e-3,
+            "x[{i}] = {} vs 1/16",
+            conic.x[n + i]
+        );
+    }
+}
+
+/// Near-boundary geometric program, swept over increasing |u|: for each pinned
+/// `u`, `min t1 + t2 s.t. (u,1,t1)∈Kexp, (−u,1,t2)∈Kexp`, whose closed form is
+/// `t1 = e^u`, `t2 = e^{−u}` (the second slack rides ever closer to the cone
+/// boundary as `u` grows). This is the regime most likely to break the
+/// non-symmetric exp-cone scaling, so it both (a) gives positive vs-NLP coverage
+/// where the driver converges and (b) maps the point at which it stops.
+///
+/// LIMITATION (PR70 item D finding): at large `u` (≈3 on this machine) the
+/// non-symmetric HSDE driver returns `NumericalFailure` on this *feasible*
+/// program rather than the optimum — a real robustness gap in the deep
+/// near-boundary regime, not just an infeasibility-certification weakness.
+/// The safety-critical property still holds (it never reports a wrong `Optimal`),
+/// which is what we assert unconditionally; where it does converge we check the
+/// objective against the closed form and the NLP. Tighten to "Optimal at every
+/// `u`" once the exp-cone scaling is hardened near the boundary.
+#[test]
+fn near_boundary_gp_matches_nlp() {
+    let mut solved_any = false;
+    for &u in &[1.0_f64, 1.5, 2.0, 2.5, 3.0] {
+        // Conic: min t1 + t2 s.t. (u,1,t1)∈Kexp, (−u,1,t2)∈Kexp, u pinned.
+        let prob = QpProblem {
+            n: 3, // (u, t1, t2)
+            p_lower: vec![],
+            c: vec![0.0, 1.0, 1.0],
+            a: vec![Triplet::new(0, 0, 1.0)], // u = <pinned>
+            b: vec![u],
+            g: vec![
+                Triplet::new(0, 0, -1.0), // s0 = u
+                Triplet::new(2, 1, -1.0), // s2 = t1
+                Triplet::new(3, 0, 1.0),  // s3 = −u
+                Triplet::new(5, 2, -1.0), // s5 = t2
+            ],
+            h: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let conic = timed_conic(
+            "gp-boundary",
+            &prob,
+            &[ConeSpec::Exponential, ConeSpec::Exponential],
+        );
+
+        // Safety property: must NEVER report a wrong/premature Optimal. Either it
+        // converges (Optimal, checked below) or it fails honestly.
+        assert!(
+            matches!(
+                conic.status,
+                QpStatus::Optimal | QpStatus::NumericalFailure | QpStatus::IterationLimit
+            ),
+            "u={u}: unexpected status {:?}",
+            conic.status
+        );
+        if conic.status != QpStatus::Optimal {
+            eprintln!(
+                "gp-boundary: u={u} -> {:?} (documented near-boundary gap)",
+                conic.status
+            );
+            continue;
+        }
+        solved_any = true;
+
+        let want = u.exp() + (-u).exp();
+        // NLP: min e^u + e^{−u} with u pinned (so it just evaluates the value).
+        let nlp = ClosureNlp {
+            n: 1,
+            lb: vec![u],
+            ub: vec![u],
+            x0: vec![u],
+            a_rows: vec![],
+            b: vec![],
+            f: Box::new(|x| x[0].exp() + (-x[0]).exp()),
+            grad: Box::new(|x, g| g[0] = x[0].exp() - (-x[0]).exp()),
+            hess_pattern: vec![(0, 0)],
+            hess: Box::new(|x, of, v| v[0] = of * (x[0].exp() + (-x[0]).exp())),
+            captured_obj: RefCell::new(None),
+            captured_x: RefCell::new(None),
+        };
+        let (nlp_obj, _) = solve_nlp("gp-boundary", nlp);
+
+        assert!(
+            (conic.obj - want).abs() < 1e-4,
+            "u={u}: near-boundary GP obj {} vs e^u+e^-u = {want}",
+            conic.obj
+        );
+        assert!(
+            (conic.obj - nlp_obj).abs() < 1e-4,
+            "u={u}: GP objectives disagree: conic={}, nlp={nlp_obj}",
+            conic.obj
+        );
+        eprintln!(
+            "gp-boundary: u={u} conic obj={:.8}, nlp obj={:.8}",
+            conic.obj, nlp_obj
+        );
+    }
+    // The driver must converge for at least the moderate cases, else the test is
+    // not actually exercising the exp cone.
+    assert!(
+        solved_any,
+        "exp-cone driver solved no near-boundary GP instance"
+    );
+}
