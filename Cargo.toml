@@ -86,7 +86,7 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.4.0"
 # cost, ldlt_compress profiling). Not yet on crates.io; pinned by rev for
 # reproducibility. NOTE: this git pin blocks the crates.io publish of the
 # pounce crates until feral cuts a release carrying these commits.
-feral = { git = "https://github.com/jkitchin/feral.git", rev = "bb7482124ffda79bd546a3a39ab3d8418b20c460" }
+feral = { git = "https://github.com/jkitchin/feral.git", rev = "11fb4b98d7caac0383c53b6a969e27632efcef77" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
