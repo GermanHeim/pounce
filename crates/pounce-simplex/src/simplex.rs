@@ -44,6 +44,22 @@ const DUAL_TOL: f64 = 1e-7;
 const FEAS_TOL: f64 = 1e-7;
 /// Two ratios within this are a tie in the ratio test (pick by stability/Bland).
 const RATIO_TIE: f64 = 1e-9;
+/// EXPAND anti-degeneracy (Gill, Murray, Saunders & Wright, "A practical
+/// anti-cycling procedure for linearly constrained optimization," Math. Prog.
+/// 45 (1989) 437–474). The primal ratio test runs against a feasibility
+/// tolerance that *grows* from `EXPAND_TOL_0` by `EXPAND_TAU` each iteration up
+/// to `FEAS_TOL`, then resets when the basis is refactorized and the basics are
+/// recomputed exactly. Two consequences: (1) the expanded tolerance guarantees
+/// the largest-pivot row admits a *strictly positive* step even at a degenerate
+/// vertex, so the simplex never crawls through a run of zero-length pivots
+/// (the ex9_1_2 stall); (2) the monotonically growing tolerance perturbs the
+/// effective feasible region enough to break cycles. Bland's rule is retained
+/// only as a finite-termination backstop if EXPAND ever stalls at the cap.
+const EXPAND_TOL_0: f64 = 0.5 * FEAS_TOL;
+/// Per-iteration growth of the EXPAND tolerance. Sized so the tolerance climbs
+/// from `EXPAND_TOL_0` to `FEAS_TOL` over one `REFACTOR_INTERVAL` of pivots,
+/// i.e. it reaches the cap exactly as the periodic refactor resets it.
+const EXPAND_TAU: f64 = (FEAS_TOL - EXPAND_TOL_0) / REFACTOR_INTERVAL as f64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -434,76 +450,123 @@ impl Spx {
         best
     }
 
-    /// Bounded-variable ratio test for entering variable `t` moving in `dir`.
-    /// `self.alpha` already holds `B⁻¹ A_t`.
-    fn ratio_test(&self, t: usize, dir: f64) -> Step {
-        let mut theta_row = INF;
-        let mut leave_row = usize::MAX;
-        let mut leave_state = State::Lower;
-        let mut best_mag = 0.0;
-        for r in 0..self.m {
-            // x_B[r] changes by −g·θ as the entering variable steps by θ in its
-            // improving direction.
-            let g = self.alpha[r] * dir;
-            let v = self.basis_var[r];
-            let (ratio, st) = if g > PIV_TOL {
-                // Basic value decreasing → limited by its lower bound.
-                if self.lb[v] <= -INF {
-                    continue;
-                }
-                (((self.x[v] - self.lb[v]).max(0.0)) / g, State::Lower)
-            } else if g < -PIV_TOL {
-                // Basic value increasing → limited by its upper bound.
-                if self.ub[v] >= INF {
-                    continue;
-                }
-                (((self.ub[v] - self.x[v]).max(0.0)) / (-g), State::Upper)
-            } else {
-                continue;
-            };
-            let mag = g.abs();
-            let take = if ratio < theta_row - RATIO_TIE {
-                true
-            } else if ratio <= theta_row + RATIO_TIE && leave_row != usize::MAX {
-                // Tie: Bland picks the smallest basic-variable index (anti-
-                // cycling); otherwise prefer the larger pivot (stability).
-                if self.bland {
-                    v < self.basis_var[leave_row]
-                } else {
-                    mag > best_mag
-                }
-            } else {
-                false
-            };
-            if take {
-                theta_row = ratio;
-                leave_row = r;
-                leave_state = st;
-                best_mag = mag;
-            }
-        }
-
-        // The entering variable can also just flip to its opposite bound.
+    /// Bounded-variable Harris/EXPAND ratio test for entering variable `t`
+    /// moving in `dir`. `self.alpha` already holds `B⁻¹ A_t`; `expand_tol` is the
+    /// current (slowly growing) primal feasibility tolerance.
+    ///
+    /// Two passes (Harris 1973, "Pivot selection methods of the Devex LP code"):
+    ///   * Pass 1 finds `theta_max`, the largest step that keeps every basic
+    ///     variable within `expand_tol` of its bound (each numerator gets the
+    ///     `expand_tol` slack). Because every blocking row contributes a
+    ///     numerator of at least `expand_tol`, `theta_max` is *strictly
+    ///     positive* even at a degenerate vertex.
+    ///   * Pass 2 selects, among rows whose *true* breakpoint is within
+    ///     `theta_max`, the one with the largest pivot magnitude — the most
+    ///     numerically stable leaving variable, not merely the first to bind.
+    ///
+    /// The step taken lands the chosen leaving variable exactly on its bound
+    /// when that is a healthy (`> expand_tol`) move; on a degenerate move it
+    /// advances to `theta_max` instead, overshooting the bound by at most
+    /// `expand_tol` (cleaned up at the next refactor/recompute reset). This is
+    /// what guarantees forward progress and breaks the degenerate stall without
+    /// resorting to slow Bland pivots.
+    fn ratio_test(&self, t: usize, dir: f64, expand_tol: f64) -> Step {
+        // The entering variable's own opposite-bound flip caps every step.
         let range = if self.lb[t] > -INF && self.ub[t] < INF {
             self.ub[t] - self.lb[t]
         } else {
             INF
         };
 
+        // Pass 1: largest step keeping every basic variable within `expand_tol`
+        // of a bound. `g = αᵣ·dir`; x_B[r] changes by −g·θ.
+        let mut theta_max = range;
+        for r in 0..self.m {
+            let g = self.alpha[r] * dir;
+            let v = self.basis_var[r];
+            if g > PIV_TOL {
+                if self.lb[v] <= -INF {
+                    continue;
+                }
+                let t_r = ((self.x[v] - self.lb[v]).max(0.0) + expand_tol) / g;
+                if t_r < theta_max {
+                    theta_max = t_r;
+                }
+            } else if g < -PIV_TOL {
+                if self.ub[v] >= INF {
+                    continue;
+                }
+                let t_r = ((self.ub[v] - self.x[v]).max(0.0) + expand_tol) / (-g);
+                if t_r < theta_max {
+                    theta_max = t_r;
+                }
+            }
+        }
+
+        // Pass 2: among rows whose true breakpoint is within `theta_max`, pick
+        // the largest pivot (Bland: smallest index, as the anti-cycling backstop).
+        let mut leave_row = usize::MAX;
+        let mut leave_state = State::Lower;
+        let mut best_mag = 0.0;
+        let mut chosen_ratio = INF;
+        for r in 0..self.m {
+            let g = self.alpha[r] * dir;
+            let v = self.basis_var[r];
+            let (ratio, st, mag) = if g > PIV_TOL {
+                if self.lb[v] <= -INF {
+                    continue;
+                }
+                (((self.x[v] - self.lb[v]).max(0.0)) / g, State::Lower, g)
+            } else if g < -PIV_TOL {
+                if self.ub[v] >= INF {
+                    continue;
+                }
+                (((self.ub[v] - self.x[v]).max(0.0)) / (-g), State::Upper, -g)
+            } else {
+                continue;
+            };
+            if ratio <= theta_max {
+                let better = if self.bland {
+                    leave_row == usize::MAX || v < self.basis_var[leave_row]
+                } else {
+                    mag > best_mag
+                };
+                if better {
+                    leave_row = r;
+                    leave_state = st;
+                    best_mag = mag;
+                    chosen_ratio = ratio;
+                }
+            }
+        }
+
+        // No basic variable blocks within `theta_max`: the entering variable
+        // flips to its opposite bound, or the objective is unbounded.
         if leave_row == usize::MAX {
             if range >= INF {
                 return Step::Unbounded;
             }
             return Step::Flip { theta: range };
         }
-        if range < theta_row - RATIO_TIE {
-            Step::Flip { theta: range }
+
+        // Healthy move → land the leaving variable exactly on its bound.
+        // Degenerate move → advance to `theta_max` (overshoot ≤ expand_tol) so
+        // the entering variable always makes strictly positive progress.
+        let theta = if chosen_ratio > expand_tol {
+            chosen_ratio
         } else {
-            Step::Pivot {
-                theta: theta_row,
-                row: leave_row,
-                leave_state,
-            }
+            theta_max
+        };
+
+        // Prefer the basis-preserving flip when it is no longer than the pivot
+        // (this also covers the case where `range` itself bound `theta_max`).
+        if range <= theta + RATIO_TIE {
+            return Step::Flip { theta: range };
+        }
+        Step::Pivot {
+            theta,
+            row: leave_row,
+            leave_state,
         }
     }
 
@@ -513,11 +576,15 @@ impl Spx {
         let limit = 50 * self.nn + 2000;
         let mut degenerate_run = 0usize;
         let mut iters = 0usize;
+        // EXPAND feasibility tolerance: grows each iteration, reset to the floor
+        // whenever the basis is refactorized and the basics recomputed exactly.
+        let mut expand_tol = EXPAND_TOL_0;
         loop {
             if iters >= limit {
                 return LpStatus::IterationLimit;
             }
             iters += 1;
+            expand_tol = (expand_tol + EXPAND_TAU).min(FEAS_TOL);
 
             let (t, dir) = match self.price() {
                 Some(p) => p,
@@ -528,7 +595,7 @@ impl Spx {
             // Disjoint field borrows: basis (&), buf (&), alpha (&mut).
             self.basis.ftran(&self.buf, &mut self.alpha);
 
-            match self.ratio_test(t, dir) {
+            match self.ratio_test(t, dir, expand_tol) {
                 Step::Unbounded => return LpStatus::Unbounded,
                 Step::Flip { theta } => {
                     let delta = dir * theta;
@@ -583,11 +650,15 @@ impl Spx {
                             return LpStatus::NumericalFailure;
                         }
                         self.recompute_basics();
+                        // EXPAND reset: basics are now exact, so retract the
+                        // tolerance to the floor (Gill et al. 1989).
+                        expand_tol = EXPAND_TOL_0;
                     }
                 }
             }
 
-            // Persistent degeneracy → switch to Bland's rule until a real step.
+            // Backstop only: if EXPAND ever stalls at the tolerance cap, fall
+            // back to Bland's rule to guarantee finite termination.
             if degenerate_run > self.nn + 10 {
                 self.bland = true;
             }
