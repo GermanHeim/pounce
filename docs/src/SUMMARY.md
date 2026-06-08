@@ -6,11 +6,15 @@
 
 - [Installation](installation.md)
 - [Quick Start](quick-start.md)
+- [Choosing a Solver](choosing-a-solver.md)
 
 # Command-Line Interface
 
 - [Running Solves](cli.md)
 - [Solver Options](options.md)
+- [LP / QP Solver Routing](lp-qp-routing.md)
+- [Convex Solver: LP, QP, SOCP](convex-solver.md)
+- [Global Optimization](global-optimization.md)
 - [Solution Output](solution-output.md)
 - [JSON Solve Report](json-output.md)
   - [Schema v1 Reference](schema/solve-report-v1.md)

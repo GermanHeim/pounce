@@ -29,6 +29,7 @@ use pounce_common::diagnostics::{
 };
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
@@ -80,6 +81,66 @@ pub fn main() -> ExitCode {
     }
 
     let mut app = IpoptApplication::new();
+
+    // Register the LP/QP routing option so `solver_selection=...` is
+    // accepted by the (validating) options parser. See the dispatch plan
+    // (dev-notes/lp-qp-routing.md): `auto` routes classified LP / convex
+    // QP problems to the specialized `pounce-convex` IPM and everything
+    // else to the NLP filter-IPM; forcing values are validated against
+    // the detected class.
+    if let Err(e) = app.registered_options().add_string_option(
+        "solver_selection",
+        "Which solver to route the problem to.",
+        "auto",
+        &[
+            (
+                "auto",
+                "Most specialized solver matching the detected problem class.",
+            ),
+            (
+                "nlp",
+                "Always the filter-IPM NLP solver (current default behavior).",
+            ),
+            (
+                "lp-ipm",
+                "Force IPM-LP; errors if the problem is not an LP.",
+            ),
+            (
+                "qp-ipm",
+                "Force IPM-QP; errors if the problem is not LP/convex-QP.",
+            ),
+            (
+                "qp-active-set",
+                "Force active-set QP; errors if not LP/convex-QP.",
+            ),
+        ],
+        "Selects the solver by problem class. `auto` routes LP and convex \
+         QP to the specialized convex interior-point solver (pounce-convex) \
+         and all other classes to the NLP filter-IPM. `qp-active-set` is \
+         reserved for the active-set QP track and currently falls through \
+         to NLP.",
+    ) {
+        eprintln!("pounce: failed to register solver_selection option: {e}");
+        return ExitCode::from(2);
+    }
+
+    // Toggle presolve on the convex LP/QP path. Default on.
+    if let Err(e) = app.registered_options().add_string_option(
+        "qp_presolve",
+        "Run presolve before the convex LP/QP interior-point solve.",
+        "yes",
+        &[
+            ("yes", "Reduce the problem (and detect trivial infeasibility / unboundedness) before solving."),
+            ("no", "Solve the extracted problem directly, without presolve."),
+        ],
+        "Only affects the convex LP/QP path (`solver_selection` routing to \
+         pounce-convex). When on, presolve removes empty / duplicate / \
+         redundant rows, fixes and substitutes structural columns, and may \
+         report infeasible / unbounded without invoking the solver.",
+    ) {
+        eprintln!("pounce: failed to register qp_presolve option: {e}");
+        return ExitCode::from(2);
+    }
 
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they
@@ -357,6 +418,108 @@ pub fn main() -> ExitCode {
     // problem and the clean objective is evaluated directly) and return.
     if let Some(mcfg) = &args.minima {
         return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
+    }
+
+    // LP/QP routing (Phase 1). Resolve the `solver_selection` option
+    // against the detected problem class. For `.nl` inputs we classify
+    // the parsed problem; for builtins we conservatively treat the class
+    // as NLP (they are general nonlinear test problems). `auto`/`nlp`
+    // both route to the existing solver — the only observable effect in
+    // Phase 1 is that an explicit forcing value (e.g. `--solver=lp`)
+    // that does not match the detected class is rejected with a clear
+    // message, instead of being silently ignored.
+    {
+        use pounce_cli::dispatch::{
+            classify_problem, resolve_solver, ProblemClass, SolverChoice, SolverSelection,
+        };
+        let sel_str = app
+            .options()
+            .get_string_value("solver_selection", "")
+            .map(|(v, _)| v)
+            .unwrap_or_else(|_| "auto".to_string());
+        let selection = match SolverSelection::parse(&sel_str) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "pounce: invalid solver_selection '{sel_str}'; valid values: {}",
+                    SolverSelection::VALUES.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+        };
+
+        // Classify the problem. Only the `.nl` path carries enough
+        // structure; builtins are treated as general NLP. (Re-reading the
+        // `.nl` here is cheap relative to a solve and keeps the dispatch
+        // self-contained.)
+        let (class, reparsed) = match &args.problem {
+            ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
+                Ok(prob) => (classify_problem(&prob), Some(prob)),
+                Err(_) => (ProblemClass::Nlp, None),
+            },
+            ProblemSource::Builtin(_) => (ProblemClass::Nlp, None),
+        };
+
+        let choice = match resolve_solver(class, selection) {
+            Ok(c) => c,
+            Err(msg) => {
+                eprintln!("pounce: {msg}");
+                return ExitCode::from(2);
+            }
+        };
+
+        // Banner-level routing line: report the detected problem class and
+        // which of pounce's solvers was selected for it. Gated like the
+        // banner (suppressed by `sb yes` and in JSON-debug protocol mode) so
+        // stdout stays clean for machine consumers.
+        if !suppress_banner && !json_dbg {
+            println!(
+                "Problem class: {}. Selected solver: {} [solver_selection={}].",
+                class.name(),
+                choice.describe(),
+                sel_str
+            );
+            println!();
+        }
+
+        // Dispatch to the specialized convex LP/QP IPM when resolved.
+        // `LpIpm` and `QpIpm` both use the convex solver (LP is P = 0).
+        if matches!(choice, SolverChoice::LpIpm | SolverChoice::QpIpm) {
+            if let Some(prob) = reparsed {
+                let presolve_on = app
+                    .options()
+                    .get_string_value("qp_presolve", "")
+                    .map(|(v, _)| v != "no")
+                    .unwrap_or(true);
+                // JSON solve report, when requested — same schema as the NLP
+                // path, so the benchmark harness can compare QP and NLP solves.
+                let json_cfg = args.json_output.as_deref().map(|p| {
+                    let input = match &args.problem {
+                        ProblemSource::Builtin(name) => {
+                            InputDescriptor::Builtin { name: name.clone() }
+                        }
+                        ProblemSource::NlFile(f) => InputDescriptor::NlFile {
+                            path: f.clone(),
+                            size_bytes: std::fs::metadata(f).ok().map(|m| m.len()),
+                        },
+                    };
+                    (p, args.json_detail, input)
+                });
+                return run_convex_qp(
+                    &prob,
+                    class,
+                    sol_path.as_deref(),
+                    presolve_on,
+                    json_cfg,
+                    debug_hook.as_ref(),
+                );
+            }
+            // Should not happen (only `.nl` classifies non-NLP), but be
+            // safe: fall through to NLP rather than mis-dispatch.
+        }
+        // `nlp`, `qp-active-set` (not yet wired), and unmatched cases
+        // fall through to the existing NLP solve below.
+        let _ = choice;
     }
 
     // Does the `.nl` ask for a parametric sensitivity step? When it
@@ -917,6 +1080,227 @@ fn build_debugger(
     match script {
         Some(p) => dbg.with_script(p.to_string_lossy().into_owned()),
         None => dbg,
+    }
+}
+
+/// Solve a classified LP / convex-QP `.nl` problem through the
+/// specialized `pounce-convex` interior-point method, write a `.sol`,
+/// and return the process exit code. This is the LP/QP dispatch target
+/// (see `dev-notes/lp-qp-routing.md`).
+///
+/// Writes the primal solution `x` and the constraint duals recovered
+/// from the QP multipliers (`pounce_cli::qp_extract::recover_duals`).
+/// The objective is reported in the user's original sense, including the
+/// `.nl`'s constant term, which the standard-form QP drops.
+/// Map the convex solver's status onto the NLP-side `ApplicationReturnStatus`
+/// used by the JSON solve report, so QP and NLP reports share one status
+/// vocabulary.
+fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
+    use pounce_convex::QpStatus;
+    match s {
+        QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+        QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
+        QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
+        QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
+        QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
+    }
+}
+
+fn run_convex_qp(
+    prob: &nl_reader::NlProblem,
+    class: pounce_cli::dispatch::ProblemClass,
+    sol_path: Option<&std::path::Path>,
+    presolve_on: bool,
+    json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
+    debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
+) -> ExitCode {
+    use pounce_convex::presolve::{presolve, PresolveOutcome};
+    use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
+
+    let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
+        Some(q) => q,
+        None => {
+            eprintln!(
+                "pounce: internal error: {} not extractable as QP",
+                class.name()
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    // The reported objective must include *both* constant sources: the
+    // `.nl` linear-section constant (`obj_constant`) and any degree-0 term
+    // AMPL/Pyomo folded into the nonlinear objective tree (`obj_nl_const`,
+    // recovered by `extract_qp_with_map`). Dropping the latter makes the
+    // convex solve report an objective off by that constant versus the NLP
+    // path (e.g. HS21 by −100, HS35 by +9). Both are in user sense.
+    let obj_const = prob.obj_constant + obj_nl_const;
+    let sign = if prob.minimize { 1.0 } else { -1.0 };
+
+    let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    };
+    let t0 = std::time::Instant::now();
+    // With presolve on, reduce the problem (logging what was removed),
+    // solve the reduced problem, then postsolve back to the extracted-QP
+    // space — so the `con_map`-based dual recovery below still applies.
+    // Trivial infeasibility / unboundedness is reported without solving.
+    let trivial = |status| pounce_convex::QpSolution {
+        status,
+        x: vec![0.0; qp.n],
+        y: vec![0.0; qp.m_eq()],
+        z: vec![0.0; qp.m_ineq()],
+        z_lb: vec![0.0; qp.n],
+        z_ub: vec![0.0; qp.n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    // Collect the per-iteration convergence trace only when a Full-detail
+    // JSON report was requested (it carries the `iterations` array); the
+    // default solve stays trace-free.
+    let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
+    let qp_opts = QpOptions {
+        collect_iterates: want_trace,
+        ..QpOptions::default()
+    };
+    let sol = if let Some(hook) = debug_hook {
+        // Interactive debug: step the IPM on the extracted QP directly.
+        // Presolve is skipped so the debugger's `x`/`s`/`y`/`z` blocks
+        // correspond to the user's problem rather than a reduced one.
+        let mut h = hook.borrow_mut();
+        solve_qp_ipm_debug(&qp, &qp_opts, &mut *h, backend)
+    } else if presolve_on {
+        match presolve(&qp) {
+            PresolveOutcome::Reduced(ps) => {
+                let st = ps.stats();
+                if st.reduced_anything() {
+                    println!(
+                        "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
+                         free-fixed {}, substituted {}, forcing {}, dominated {}, tightened {})",
+                        st.orig_vars,
+                        st.reduced_vars,
+                        st.orig_rows,
+                        st.reduced_rows,
+                        st.fixed_vars,
+                        st.free_cols_fixed,
+                        st.free_col_singletons,
+                        st.forcing_rows,
+                        st.dominated_cols,
+                        st.tightened_bounds,
+                    );
+                }
+                let red = solve_qp_ipm(&ps.reduced, &qp_opts, backend);
+                ps.postsolve(&red)
+            }
+            PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),
+            PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
+        }
+    } else {
+        solve_qp_ipm(&qp, &qp_opts, backend)
+    };
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    // Report the objective in the user's original sense, including the
+    // dropped constant term: f_user = sign * (½xᵀPx + cᵀx) + const.
+    let reported_obj = sign * sol.obj + obj_const;
+
+    // AMPL `.sol` convention: 0 solved, 200–299 infeasible, 300–399
+    // unbounded, 400–499 limit, 500–599 failure.
+    let (msg, ok, srn) = match sol.status {
+        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
+        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
+        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
+        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
+    };
+    println!(
+        "POUNCE ({} IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
+        class.name(),
+        sol.iters,
+    );
+
+    // Recover per-constraint duals once (mapped from the QP multipliers back
+    // to per-`.nl`-constraint order); used by both the `.sol` and the JSON
+    // report.
+    let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
+
+    // Write a `.sol` if requested: primal x and recovered constraint duals in
+    // the AMPL `.sol` convention.
+    if let Some(path) = sol_path {
+        let payload = nl_writer::SolutionFile {
+            message: &format!("POUNCE {} IPM (pounce-convex): {msg}", class.name()),
+            x: &sol.x,
+            lambda: &lambda,
+            solve_result_num: srn,
+            suffixes: &[],
+        };
+        if let Err(e) = nl_writer::write_sol_file(path, &payload) {
+            eprintln!("pounce: failed to write {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+    }
+
+    // Emit the JSON solve report, when requested — same `pounce.solve-report/v1`
+    // schema as the NLP path, so the benchmark harness can compare QP and NLP
+    // solves uniformly. (Per-iteration history is NLP-only for now; the convex
+    // driver does not yet feed the iterate trace, so `iterations` stays empty
+    // even at Full detail.)
+    if let Some((json_path, detail, input)) = json_cfg {
+        let mut builder = ReportBuilder::new(detail, input);
+        builder.problem.n_variables = qp.n as _;
+        builder.problem.n_constraints = lambda.len() as _;
+        builder.problem.n_objectives = 1;
+        builder.problem.minimize = prob.minimize;
+        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.solve_result_num = srn;
+        builder.solution.objective = reported_obj;
+        builder.solution.x = sol.x.clone();
+        builder.solution.lambda = lambda.clone();
+        builder.stats.iteration_count = sol.iters as _;
+        builder.stats.final_objective = reported_obj;
+        builder.stats.total_wallclock_time_secs = elapsed;
+        // Real final KKT residuals (from pounce-convex), so the harness sees
+        // genuine convergence numbers rather than zeros.
+        let res = sol.kkt_residuals(&qp);
+        builder.stats.final_constr_viol = res.primal_infeasibility;
+        builder.stats.final_dual_inf = res.dual_infeasibility;
+        builder.stats.final_compl = res.complementarity;
+        builder.stats.final_kkt_error = res.kkt_error();
+        // Per-iteration convergence trace at Full detail (the convex IPM's
+        // iterate records map onto the report's IterRecord schema, shared with
+        // the NLP path so the harness reads one format).
+        if matches!(detail, ReportDetail::Full) {
+            builder.iterations = sol
+                .iterates
+                .iter()
+                .map(|it| IterRecord {
+                    iter: it.iter as _,
+                    objective: it.objective,
+                    inf_pr: it.primal_infeasibility,
+                    inf_du: it.dual_infeasibility,
+                    mu: it.mu,
+                    alpha_primal: it.alpha_primal,
+                    alpha_dual: it.alpha_dual,
+                    ..IterRecord::default()
+                })
+                .collect();
+        }
+        let report = builder.finish();
+        if let Err(e) = write_report_file(json_path, &report) {
+            eprintln!(
+                "pounce: failed to write JSON report to {}: {e}",
+                json_path.display()
+            );
+        } else {
+            eprintln!("pounce: wrote {}", json_path.display());
+        }
+    }
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

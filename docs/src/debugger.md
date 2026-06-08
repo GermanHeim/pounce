@@ -19,6 +19,12 @@ It has two front ends sharing one command engine:
 No production NLP solver ships anything like this; if you have used
 `ipopt` you have had `print_level` and a log. This is a live debugger.
 
+The same debugger spans **every** POUNCE solver: the NLP filter-IPM, the
+convex / conic interior-point solver, and the spatial branch-and-bound
+global optimizer — and you can **step from a branch-and-bound node into the
+interior-point debugger for that node's relaxation**. See [Beyond the
+interior-point loop](#beyond-the-interior-point-loop).
+
 > The debugger has **zero effect on the solve when it is not attached**.
 > The checkpoint fire-sites short-circuit when no debugger is installed,
 > so the standard regression suite is bit-for-bit identical with and
@@ -1295,12 +1301,118 @@ points (`numpy.savetxt("starts.txt", X0, delimiter=",")`). See
 
 ---
 
+## Beyond the interior-point loop
+
+Everything above is the NLP filter-IPM. The same debugger — same command
+engine, same REPL — drives the other solvers too.
+
+### Convex and conic solves
+
+The convex LP/QP interior-point solver and the HSDE conic drivers (SOCP,
+the exponential / power cones, and small PSD cones) expose the **same**
+checkpoints and commands as the NLP loop. The iterate blocks follow the QP
+standard form — `x` (variables), `s` (cone slacks), `y` (equality
+multipliers), `z` (inequality / cone multipliers) — and the HSDE drivers
+additionally expose the homogenizing scalars `tau` / `kappa` as 1-element
+blocks (`print tau`). `set <block>` and `goto` work as on the NLP path;
+`set mu` is rejected, because the convex μ is *derived* from `⟨s, z⟩`
+(edit `s`/`z` to move it).
+
+```sh
+pounce model.nl --debug                 # LP / convex-QP (auto-routed) — IPM REPL
+pounce_cblib model.cbf --debug          # SOCP / exp / power / PSD (conic) — IPM REPL
+pounce_cblib model.cbf --debug-script s.pdbg
+```
+
+### The branch-and-bound tree
+
+Branch-and-bound is a *tree search*, not an iteration loop, so it has its
+own REPL — you step over **nodes**, not iterations. Launch it by routing to
+the global solver:
+
+```sh
+pounce model.nl solver_selection=global --debug
+```
+
+It pauses at the tree checkpoints — `node_selected`, `relaxation_solved`,
+`incumbent_found`, `node_pruned`, `branched`, `terminated` — and the
+commands are tree-native:
+
+| Command | Shows / does |
+|---|---|
+| `s` / `step` | run to the next checkpoint |
+| `c` / `continue` | run until a breakpoint or the end |
+| `node` | the current node's variable box and its bound |
+| `bounds` | global lower bound, incumbent (upper), and gap |
+| `gap` | the optimality gap |
+| `incumbent` / `inc` | the best feasible point so far |
+| `frontier` | number of open nodes |
+| `break incumbent` | stop when the incumbent improves |
+| `break gap <x>` | stop once the gap ≤ x |
+| `break depth <n>` | stop at a node of depth ≥ n |
+| `break node <id>` | stop when node #id is selected |
+| `into` | **step into this node's relaxation solve** (see below) |
+| `q` / `quit` | stop the search now |
+
+```text
+$ pounce model.nl solver_selection=global --debug
+── btree ── node_selected node #1 depth 0  lb=NaN  inc=none  gap=inf  frontier=0 (nodes 0)
+(btree) break depth 1
+breakpoint: depth ≥ 1
+(btree) continue
+── btree ── node_selected node #2 depth 1  lb=NaN  inc=2.000000e0  gap=inf  frontier=1 (nodes 1)
+(btree) incumbent
+incumbent obj = 2.00000000e0  at x = [1.000000e0, 1.000000e0]
+(btree) quit
+```
+
+### Step into a node's relaxation (`into`)
+
+Each branch-and-bound node computes its lower bound by solving a **convex
+relaxation** — which is itself an interior-point solve the debugger
+understands. So at a `node_selected` pause, `into` drops you into the
+interior-point REPL for that node's relaxation, with the full iterate-level
+command set; when you `continue` past it, control returns to the tree.
+
+```text
+── btree ── node_selected node #1 depth 0  lb=NaN  inc=none  gap=inf
+(btree) into
+stepping into node #1's relaxation solve…
+
+── pounce-dbg ── iter 0 @iter_start  mu=1.000e0  obj=0.000000e0  inf_pr=2.00e0  inf_du=1.00e0
+pounce-dbg> print mu
+mu = 1.0000000000e0
+pounce-dbg> continue          # finish the relaxation, back to the tree
+(btree) …
+```
+
+Under `--debug-script`, a single script interleaves the two: the tree
+commands and the interior-point commands for a stepped-into relaxation are
+read from the same queue (they run sequentially), e.g.
+
+```text
+into            # tree: step into node #1's relaxation
+print mu        # interior-point: now inside the relaxation solve
+continue        # interior-point: finish it, back to the tree
+continue        # tree: continue the search
+```
+
+---
+
 ## Limitations
 
 - **Soft rewind only.** `goto`/`restart` restore the primal-dual state,
   not strategy history (see the caveat above).
 - **`set opt` is staged, not hot-applied** to a running solve; it takes
   effect on `resolve` / the next solve.
+- **The parallel branch-and-bound pool is not debuggable** — with
+  concurrent nodes there is no single "current node", so `--debug` runs the
+  deterministic serial driver. The result is identical; only wall-clock
+  differs.
+- **No tree rewind.** The tree debugger inspects and breaks; it does not
+  rewind the search or edit a node's box (the interior-point debugger it
+  steps into is still fully read/write).
+- **Stepping into applies to the relaxation** (the lower-bound solve), not
+  yet the local upper-bound NLP solve.
 
 <!-- Stuck on a hard solve at 2am? There may be a `coffee` waiting at the prompt. -->
-

@@ -66,6 +66,128 @@ res = minimize(lambda x: (x - 1) @ (x - 1) + 1, x0=np.zeros(5))
 print(res.fun, res.x)
 ```
 
+`minimize` is a thin facade over `pounce.Problem` shaped after
+`scipy.optimize.minimize`, so SciPy code ports with few changes. It returns a
+SciPy-`OptimizeResult`-shaped object (`res.x`, `res.fun`, `res.success`,
+`res.status`, `res.message`, `res.nit`, plus `res.info` and dict-style
+`res["x"]`).
+
+### Compatibility with `scipy.optimize.minimize`
+
+```python
+minimize(fun, x0, jac=None, hess=None, bounds=None,
+         constraints=None, options=None)
+```
+
+| Argument | Status | Notes |
+|---|---|---|
+| `fun`, `x0` | ✅ | objective callable and start point |
+| `jac` | ✅ | callable; **omitted → forward finite differences** (`√eps` step). Provide one for production. |
+| `hess` | ⚠️ | used **only when there are no constraints**; with constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
+| `bounds` | ✅ | a sequence of `(lo, hi)` pairs; a `None` element or a `None` endpoint means ±∞ |
+| `constraints` | ✅ | SciPy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`; multiple are concatenated; `"jac"` optional (finite-diff fallback) |
+| `options` | ⚠️ | forwarded to `Problem.add_option` — keys are **pounce/Ipopt option names** (`tol`, `max_iter`, `hessian_approximation`), **not** SciPy's (`maxiter`, `ftol`) |
+| `args` | ❌ | not supported — close over extra arguments in `fun`/`jac` |
+| `method` | ❌ | always the filter-IPM (see below for why there is no `method=`) |
+| `hessp` | ❌ | no Hessian-vector-product mode |
+| `tol` | ❌ | pass it via `options={"tol": …}` |
+| `callback` | ❌ | not supported |
+
+**Conventions that match SciPy** (so constraint dicts port directly):
+
+- Inequalities use the SciPy sign convention **`g(x) ≥ 0`**; equalities are
+  **`g(x) = 0`**.
+- The result object is SciPy-`OptimizeResult`-shaped (subset of fields + an
+  `info` map).
+
+**Gaps worth knowing:**
+
+- **Only the dict form of `constraints`** is accepted — a SciPy `Bounds`,
+  `LinearConstraint`, or `NonlinearConstraint` *object* will not work, and
+  `bounds` must be `(lo, hi)` pairs (not a `Bounds` object).
+- The constraint **Jacobian is dense**; for large sparse Jacobians use the
+  `Problem` class directly (it takes a sparse Jacobian and structure).
+- The most common porting snag is `options`: `options={"maxiter": 100}` is a
+  no-op — it is `options={"max_iter": 100}`.
+
+### Solver routing in `minimize`
+
+By default `minimize` **auto-routes** the same way the CLI's
+`solver_selection=auto` does: a problem that is provably a **linear program**
+or a **convex quadratic program** is dispatched to the specialized convex
+interior-point solver (`pounce.solve_qp`, the HSDE driver), which reaches a
+**global** optimum in materially fewer iterations; everything else is solved
+by the general NLP filter line-search interior-point method, exactly as before.
+
+The catch is that `minimize` only sees **opaque callables** — it cannot read a
+`.nl` expression tree the way the CLI can. So instead of *reading* the
+structure it **probes** it: it evaluates `fun`/`jac`/`hess` at several points,
+fits a linear/quadratic model, and then **validates that model against the
+true callables at held-out points** before trusting it. The two
+misclassification directions are not symmetric, and the validation gates the
+dangerous one:
+
+- A convex LP/QP mistakenly sent to the NLP solver is merely *slower* — the
+  filter-IPM still solves it correctly.
+- A genuinely nonlinear problem sent to the QP solver would return a
+  **silently wrong** answer.
+
+So any probe that raises, any model mismatch beyond `route_tol`, a
+non-constant Hessian/Jacobian, or an indefinite Hessian (a nonconvex QP) all
+fall back to the NLP solver. **You never get a wrong "optimum" from a
+misclassification.**
+
+#### Forcing the solver
+
+The `solver_selection` option (passed in `options=`) overrides the automatic
+choice — mirroring the CLI option of the same name:
+
+| `options={"solver_selection": …}` | Behavior |
+|---|---|
+| `"auto"` | **Default.** Probe-and-validate; route provable LP/convex-QP to `solve_qp`, else NLP. |
+| `"nlp"` | Skip routing entirely; always use the NLP solver (the pre-routing behavior). |
+| `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
+| `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
+
+```python
+# Default: route a convex QP to the fast convex IPM automatically.
+res = minimize(fun, x0, bounds=bounds)
+print(res.info["solver"])          # 'qp-ipm' when routed; absent on the NLP path
+
+# Keep the pre-routing behavior — always the NLP solver:
+res = minimize(fun, x0, options={"solver_selection": "nlp"})
+
+# Insist the problem is a convex QP; fail loudly if the probe disagrees:
+res = minimize(fun, x0, options={"solver_selection": "qp-ipm"})
+```
+
+`route_tol` (default `1e-5`) sets the relative tolerance for the held-out
+validation; raise it if a genuinely-linear problem with noisy finite-difference
+Jacobians is being conservatively rejected, lower it to be stricter. The
+routing keys are consumed by `minimize` and never forwarded to the backend, so
+the rest of `options` still reaches the NLP solver unchanged.
+
+#### When you still need a typed entry point
+
+Auto-routing handles LP/convex-QP from the `minimize(fun, x0, …)` shape. The
+remaining specialized solvers need structure that a callable cannot carry — a
+cone list, a symbolic objective to relax and bound — so each keeps its own
+pounce-native entry point:
+
+| Want | Entry point | You provide | Optimum |
+|---|---|---|---|
+| General nonlinear, fast local solve | `minimize(fun, x0, …)` | callables (`fun`/`jac`/`hess`) | local |
+| LP / convex QP | `minimize` (auto) or `solve_qp(P, c, A, b, G, h, lb, ub, …)` | callables / matrices | **global** |
+| SOCP / exp / power / PSD cones | `solve_socp(P, c, A, b, G, h, *, cones, …)` | matrices + cone list | **global** |
+| Polynomial, certified global | `sos_minimize(objective, *, inequalities, equalities, …)` | a polynomial | **global** |
+| Factorable nonconvex, certified global | `minimize_global(objective, *, constraints, lo, hi, …)` | a symbolic `Expr` + box | **global** |
+
+The `solve_qp` / `solve_socp` / `sos_minimize` / `minimize_global` functions
+are pounce-native (not SciPy-shaped) by necessity — e.g. `minimize_global`
+takes a symbolic `Expr` objective with keyword-only `lo`/`hi` box arrays and
+`(Expr, lo, hi)` constraint triples, *not* callables and SciPy dicts. See
+[Choosing a Solver](choosing-a-solver.md) for the full map.
+
 ## Curve fitting
 
 `pounce.curve_fit` is the data-fitting companion to `minimize` — a

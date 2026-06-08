@@ -9,6 +9,91 @@ changes.
 
 ## [0.4.0] — 2026-06-05
 
+### Added — Convex / conic solver (`pounce-convex`; `solve_qp` / `solve_socp`)
+
+POUNCE is no longer NLP-only: a new pure-Rust convex interior-point solver
+(`pounce-convex`) handles **LP, convex QP, SOCP, and PSD / exp / power cones**,
+solving each to a **global** optimum (a convex problem has no other kind). It
+uses a homogeneous self-dual embedding (HSDE) — symmetric for the self-dual
+cones and a non-symmetric driver for the exponential/power cones — over a
+`Cone` abstraction (`nonneg`, `soc`, `psd`, `exp`, `power`, plus composite and
+chordal decompositions for sparse SDPs). Convex solvers extract the constant
+`P`, `A`, `c`, `b` data once at setup rather than re-evaluating per iteration,
+and share the `pounce-linsol` / `pounce-linalg` factorization substrate with the
+NLP path. Python entry points are typed (not SciPy-shaped, by necessity — a cone
+program is *data*, not a callable): `solve_qp(P, c, A, b, G, h, lb, ub, …)`,
+`solve_socp(…, cones=…)`, plus `solve_qp_batch` / `solve_qp_multi_rhs` for
+batched factor reuse, and a reduced-Hessian sensitivity API. The CLI reads conic
+instances from CBLIB / `.cbf` (including PSDCON / HCOORD / DCOORD SDP blocks).
+
+### Fixed — Convex LP/QP reported objective dropped tree-folded constant
+
+The convex LP/QP path (`solver_selection=lp-ipm` / `qp-ipm`) reported an
+objective off by the objective's constant term whenever AMPL/Pyomo folded that
+constant into the **nonlinear objective tree** (the `+9` of `(x-3)²`) rather
+than the `.nl` linear-section constant. The quadratic-form extractor
+(`analyze_quadratic_full`) discarded the degree-0 term — correct for the
+*minimizer*, wrong for the *reported value* — so e.g. `HS21` reported `0.04`
+instead of `−99.96` and `HS35` `−8.889` instead of `0.111`. The extractor now
+returns that constant and the convex driver adds it to the reported objective
+alongside `obj_constant`; the optimal point was always correct. Caught by a
+head-to-head NLP-vs-convex run over the Maros-Mészáros QP and NETLIB LP suites
+(`benchmarks/nl_compare_nlp_vs_convex.md`).
+
+### Fixed — Convex LP/QP IPM stalled on badly-scaled NETLIB LPs
+
+The static KKT regularization `δ` (added on the reduced KKT diagonal so the
+LDLᵀ has a stable inertia) was `1e-8`, large enough to **floor the achievable
+primal residual** at `δ·‖dy‖`: with a full Newton step `A·dx = −r_p + δ·dy`, so
+on instances with large equality multipliers the primal infeasibility cannot
+fall below `δ·‖dy‖`. On NETLIB `adlittle` (`‖dy‖ ≈ 4e8`) this froze `inf_pr`
+near 4 and the LP IPM ran to its iteration cap, returning a wrong objective
+(`439665` vs the published `225494.96`). Lowering the default `δ` to `1e-10` —
+still strictly positive, so the system stays quasi-definite — clears the floor:
+`adlittle` now converges in ~57 iterations to the optimum, `stocfor1` speeds up
+(139 → 71 iters), and the rest of the LP/QP suites are unchanged (the QP suite
+is bit-identical). The whole `1e-9‥1e-11` band converges the benchmark suites;
+`1e-10` is centered in it.
+
+Also: the convex IPM's opt-in iteration trace now records a **terminal record at
+the converged iterate** (the NLP path's N+1 convention), so the trace always
+ends at the optimum instead of at the last pre-step state — previously a solve
+that converged in a single step left only the cold-start record in the trace.
+
+### Added — SOS polynomial global optimization (`sos_minimize`)
+
+`sos_minimize(objective, *, inequalities, equalities, …)` computes **certified
+global** lower bounds for polynomial optimization via a sum-of-squares /
+Lasserre relaxation (Putinar localizing multipliers for constraints), built on
+the new PSD cone. When the relaxation is exact it extracts the global
+minimizer(s) with an exactness certificate (multi-atom extraction without a
+non-symmetric eig, plus facial reduction for degenerate solves).
+
+### Added — Spatial branch-and-bound global optimizer (`pounce-global`;
+`minimize_global` / `--solver global`)
+
+A new `pounce-global` crate solves **factorable nonconvex NLPs to a certified
+global optimum** by spatial branch-and-bound: αBB convex underestimators,
+polyhedral envelopes for univariate atoms, level-1 RLT cuts, multi-grouping
+trilinear relaxations, optimization-based bound tightening (OBBT), and
+cutting-plane bound refinement, with local NLP upper bounds. Branching is
+reliability-based (pseudocost + strong branching); the node pool and OBBT run in
+parallel (deterministic, ~2.3–2.6× wall-clock). Exposed as
+`minimize_global(objective, *, constraints, lo, hi, …)` in Python (a symbolic
+`Expr` + box) and `pounce --solver global` on `.nl` models, with frontier
+memory estimation and a pre-solve warning.
+
+### Added — Multi-backend interactive debugger (convex IPM + B&B tree)
+
+The interactive debugger was generalized over a `DebugState` trait so one REPL
+drives all three solvers. New backends: a **convex/conic** debugger
+(`pounce_cblib --debug`, wired through the symmetric and non-symmetric HSDE
+drivers) and an **interactive branch-and-bound tree debugger** that can `step`
+through nodes and `into` a node's relaxation — handing off to the interior-point
+REPL via a shared command queue (tree ↔ interior-point). This composes with the
+0.4.0 debugger features below (quote-aware tokenization, `ask` provider presets,
+`--debug-json` protocol, Ctrl-C escape hatch).
+
 ### Added — `pounce.curve_fit` (Python)
 
 A `scipy.optimize.curve_fit`-style nonlinear fitter on top of the

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish POUNCE crates to crates.io in dependency order.
 #
-# The first publish of all 18 crates will hit the crates.io rate limit
+# The first publish of all 21 crates will hit the crates.io rate limit
 # for *new* crate names (5 burst then 1 per ~10 min). Before the initial
 # release email help@crates.io and ask for a temporary exemption for
 # this batch — they typically grant within a day. See
@@ -42,10 +42,13 @@ CRATES=(
   pounce-l1penalty
   pounce-presolve
   pounce-qp
+  pounce-convex
   pounce-observability
   pounce-solve-report
   pounce-studio-core
   pounce-algorithm
+  pounce-simplex
+  pounce-global
   pounce-restoration
   pounce-sensitivity
   pounce-cinterface

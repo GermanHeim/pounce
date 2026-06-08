@@ -1,6 +1,6 @@
 # crates.io release
 
-POUNCE ships 18 Rust crates to crates.io. This file is the procedure.
+POUNCE ships 21 Rust crates to crates.io. This file is the procedure.
 For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
 `pypi-release.md`.
 
@@ -18,6 +18,7 @@ For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
 | `pounce-l1penalty`     | yes        |                                              |
 | `pounce-presolve`      | yes        |                                              |
 | `pounce-algorithm`     | yes        | IPM core                                     |
+| `pounce-simplex`       | yes        | warm-start simplex LP; pounce-global OBBT dep|
 | `pounce-restoration`   | yes        |                                              |
 | `pounce-sensitivity`   | yes        | sIPOPT port                                  |
 | `pounce-cinterface`    | yes        | C ABI (CreateIpoptProblem / IpoptSolve)      |
@@ -34,17 +35,31 @@ publish script enforces the same list and will skip them by construction.
 
 ## Dependency order
 
-Layer 0: `pounce-common`, `pounce-studio-core` (leaf: serde only)
+Layer 0: `pounce-common`, `pounce-studio-core` (leaf: serde only),
+         `pounce-simplex` (leaf: std only)
 Layer 1: `pounce-linalg`
 Layer 2: `pounce-linsol`, `pounce-nlp`
-Layer 3: `pounce-nl`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`, `pounce-presolve`
+Layer 3: `pounce-nl`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`, `pounce-presolve`, `pounce-convex`
 Layer 4: `pounce-algorithm`
-Layer 5: `pounce-restoration`, `pounce-sensitivity`
+Layer 5: `pounce-restoration`, `pounce-sensitivity`, `pounce-global`
 Layer 6: `pounce-cinterface`, `pounce-cli`
+
+`pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on
+`pounce-common` + `pounce-linsol` + `pounce-linalg`, so it sits in layer 3.
+`pounce-global` (spatial branch-and-bound) depends on `pounce-convex` **and**
+`pounce-algorithm`, so it cannot publish before layer 4 — it sits in layer 5.
+Both are **new crate names** as of 0.4.0 and so are subject to the new-crate
+rate limit on their first publish (see below).
 
 `pounce-studio-core` is a leaf (serde/serde_json only); it can publish any
 time before `pounce-cli`. `pounce-nl` depends on `pounce-common` +
 `pounce-nlp`, so it sits in layer 3.
+
+`pounce-simplex` (warm-start bounded-variable revised simplex, used by
+`pounce-global`'s OBBT inner loop) is a leaf with **no dependencies** (std
+only), so it can publish any time before `pounce-global` (layer 5); the script
+places it just before it. It is a **new crate name** as of this release and so
+is subject to the new-crate rate limit on first publish.
 
 The script publishes one crate at a time in this layered order, not in
 parallel — each crate must be live on crates.io before any dependent

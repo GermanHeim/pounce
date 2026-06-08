@@ -3,7 +3,7 @@
 //! Implements [`pounce_algorithm::debug::DebugHook`]. The core fires us
 //! at every checkpoint (today: the top of each outer iteration); we
 //! pause, hand the user (or an agent) a command prompt, and apply
-//! inspect / mutate / flow commands against the live [`DebugCtx`] before
+//! inspect / mutate / flow commands against the live [`DebugState`] before
 //! returning [`DebugAction::Resume`] or [`DebugAction::Stop`].
 //!
 //! Two front ends share one command engine ([`SolverDebugger::dispatch`]):
@@ -42,10 +42,10 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, ResidKind,
-    Residual, BLOCK_NAMES,
+    is_live_tolerance, DebugCtx, IterateSnapshot, ResidKind, Residual, BLOCK_NAMES,
 };
 use pounce_algorithm::debug_rank::{RankReport, RankRow};
+use pounce_common::debug::{Checkpoint, DebugAction, DebugHook, DebugState};
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use pounce_nlp::ipopt_nlp::SplitNames;
 use pounce_presolve::dulmage_mendelsohn::DulmageMendelsohnPartition;
@@ -412,7 +412,7 @@ impl Metric {
             _ => return None,
         })
     }
-    fn eval(self, ctx: &DebugCtx) -> f64 {
+    fn eval(self, ctx: &dyn DebugState) -> f64 {
         match self {
             Metric::Mu => ctx.mu(),
             Metric::InfPr => ctx.inf_pr(),
@@ -505,7 +505,7 @@ impl Atom {
         })
     }
 
-    fn holds(&self, ctx: &DebugCtx) -> bool {
+    fn holds(&self, ctx: &dyn DebugState) -> bool {
         self.op.eval(self.metric.eval(ctx), self.rhs)
     }
 }
@@ -575,7 +575,7 @@ impl Condition {
         })
     }
 
-    fn holds(&self, ctx: &DebugCtx) -> bool {
+    fn holds(&self, ctx: &dyn DebugState) -> bool {
         let mut acc = self.first.holds(ctx);
         for (join, atom) in &self.rest {
             let v = atom.holds(ctx);
@@ -981,7 +981,7 @@ pub struct SolverDebugger {
     break_events: HashSet<&'static str>,
     /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
     /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
-    snapshots: BTreeMap<i32, IterateSnapshot>,
+    snapshots: BTreeMap<i32, Box<dyn pounce_common::debug::IterSnapshot>>,
     /// Shared slot for `resolve` to request a fresh solve from the
     /// current point with staged options. `None` disables `resolve`.
     restart: Option<RestartCell>,
@@ -1022,7 +1022,18 @@ pub struct SolverDebugger {
     /// `None` when no `.nl` model was wired in. See Lee et al. (2024,
     /// <https://doi.org/10.69997/sct.147875>).
     structure_book: Option<StructureBook>,
+    /// A command queue shared with another REPL (the branch-and-bound tree
+    /// debugger), used when this debugger drives a *sub-solve* under
+    /// `--debug-script`. When set, [`next_command_line`](Self::next_command_line)
+    /// pops from it instead of stdin, so a single script interleaves tree and
+    /// interior-point commands.
+    script_queue: Option<SharedScript>,
 }
+
+/// A command queue shared between the tree debugger and an interior-point
+/// sub-solve debugger so one `--debug-script` drives both (they run
+/// sequentially, never concurrently).
+pub type SharedScript = Rc<std::cell::RefCell<VecDeque<String>>>;
 
 impl SolverDebugger {
     /// Fully interactive: pause at the first iteration and at the
@@ -1065,7 +1076,22 @@ impl SolverDebugger {
             prompt_interrupts: 0,
             equation_book: None,
             structure_book: None,
+            script_queue: None,
         }
+    }
+
+    /// A debugger that stays **quiet** (never pauses) until [`arm`]ed. Used as
+    /// the on-demand sub-solve hook for the branch-and-bound tree debugger:
+    /// it sees a node's relaxation solve only when the user steps into it.
+    ///
+    /// [`arm`]: DebugHook::arm
+    pub fn quiet(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
+        let mut d = Self::new(mode, reg);
+        d.step = false;
+        d.pause_iters = false;
+        d.pause_terminal = false;
+        d.detached = true;
+        d
     }
 
     /// Queue a debugger script to run once at the first pause.
@@ -1088,6 +1114,14 @@ impl SolverDebugger {
     /// <https://doi.org/10.69997/sct.147875>).
     pub fn set_structure_book(&mut self, book: StructureBook) {
         self.structure_book = Some(book);
+    }
+
+    /// Read commands from a queue shared with the tree debugger, so one
+    /// `--debug-script` drives both this sub-solve and the tree (see
+    /// [`SharedScript`]). Takes precedence over stdin / the editor.
+    pub fn with_shared_script(mut self, queue: SharedScript) -> Self {
+        self.script_queue = Some(queue);
+        self
     }
 
     /// Enable the `resolve` command, wiring the shared restart slot the
@@ -1152,7 +1186,7 @@ impl SolverDebugger {
 
     /// First conditional breakpoint that holds at the current state, if
     /// any. Returns its source text (for the pause banner / event).
-    fn matched_condition(&self, ctx: &DebugCtx) -> Option<String> {
+    fn matched_condition(&self, ctx: &dyn DebugState) -> Option<String> {
         if self.detached {
             return None;
         }
@@ -1165,7 +1199,7 @@ impl SolverDebugger {
     /// First armed event that fires at the current checkpoint/state, if
     /// any. Events are derived from observable state, so they're evaluated
     /// at the checkpoint where the relevant quantity is meaningful.
-    fn matched_event(&self, ctx: &DebugCtx) -> Option<&'static str> {
+    fn matched_event(&self, ctx: &dyn DebugState) -> Option<&'static str> {
         if self.detached || self.break_events.is_empty() {
             return None;
         }
@@ -1209,7 +1243,7 @@ impl SolverDebugger {
 
     /// First watchpoint whose value changed (beyond its threshold) since
     /// the previous iteration. Updates the stored baselines.
-    fn matched_watchpoint(&mut self, ctx: &DebugCtx) -> Option<String> {
+    fn matched_watchpoint(&mut self, ctx: &dyn DebugState) -> Option<String> {
         if self.detached {
             return None;
         }
@@ -1243,7 +1277,7 @@ impl SolverDebugger {
 
     // ---- command engine -----------------------------------------------
 
-    fn dispatch(&mut self, line: &str, ctx: &mut DebugCtx) -> CmdOut {
+    fn dispatch(&mut self, line: &str, ctx: &mut dyn DebugState) -> CmdOut {
         // Quote-aware so a file path with spaces (e.g. `load "my run.json"`)
         // survives as a single token; identical to `split_whitespace` for any
         // line without quotes. `owned` backs the `&str` slices `toks` holds.
@@ -1294,7 +1328,7 @@ impl SolverDebugger {
                 }
                 None => CmdOut::err("usage: tbreak <iteration>"),
             },
-            "watchpoint" | "wp" => self.cmd_watchpoint(rest),
+            "watchpoint" | "wp" => self.cmd_watchpoint(rest, ctx),
             "commands" => self.cmd_commands(rest),
             "stop-at" | "stopat" => self.cmd_stop_at(rest),
             "progress" => match rest.first().copied() {
@@ -1314,19 +1348,34 @@ impl SolverDebugger {
             "complete" => self.cmd_complete(rest),
             "viz" | "plot" => self.cmd_viz(rest, ctx),
             "save" => self.cmd_save(rest, ctx),
-            "load" => self.cmd_load(rest, ctx),
-            "sweep" => self.cmd_sweep(rest, ctx),
-            "multistart" => self.cmd_multistart(rest, ctx),
+            "load" => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_load(rest, c),
+                None => nlp_only("load"),
+            },
+            "sweep" => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_sweep(rest, c),
+                None => nlp_only("sweep"),
+            },
+            "multistart" => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_multistart(rest, c),
+                None => nlp_only("multistart"),
+            },
             "goto" | "jump" => self.cmd_goto(rest, ctx),
             "restart" => match self.snapshots.keys().next().copied() {
                 Some(k) => self.restore_to(k, ctx),
                 None => CmdOut::err("no snapshots captured yet"),
             },
-            "resolve" | "re-solve" => self.cmd_resolve(ctx),
+            "resolve" | "re-solve" => match as_nlp(ctx) {
+                Some(c) => self.cmd_resolve(c),
+                None => nlp_only("resolve"),
+            },
             "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
             "watch" | "display" => self.cmd_watch(rest),
             "diff" => self.cmd_diff(ctx),
-            "diagnose" | "diag" => self.cmd_diagnose(ctx),
+            "diagnose" | "diag" => match as_nlp(ctx) {
+                Some(c) => self.cmd_diagnose(c),
+                None => nlp_only("diagnose"),
+            },
             "source" => self.cmd_source(rest, ctx),
             "detach" => {
                 self.detached = true;
@@ -1428,7 +1477,7 @@ impl SolverDebugger {
         CmdOut::ok(lines)
     }
 
-    fn cmd_info(&self, ctx: &DebugCtx) -> CmdOut {
+    fn cmd_info(&self, ctx: &dyn DebugState) -> CmdOut {
         let dims: Vec<_> = ctx.block_dims();
         let dims_json: serde_json::Map<String, serde_json::Value> = dims
             .iter()
@@ -1460,7 +1509,7 @@ impl SolverDebugger {
         }))
     }
 
-    fn cmd_print(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_print(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let Some(&what) = rest.first() else {
             return self.cmd_info(ctx);
         };
@@ -1480,11 +1529,14 @@ impl SolverDebugger {
             return self.cmd_print_equation(&rest[1..]);
         }
         if what == "rank" {
-            return self.cmd_print_rank(ctx);
+            return match as_nlp(ctx) {
+                Some(c) => self.cmd_print_rank(c),
+                None => nlp_only("print rank"),
+            };
         }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
-        let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
-        if BLOCK_NAMES.contains(&what) {
+        let delta = what.strip_prefix("d").filter(|b| is_block(ctx, b));
+        if is_block(ctx, what) {
             match ctx.block(what) {
                 Some(v) => CmdOut::ok(vec![fmt_vec(what, &v)])
                     .with_data(serde_json::json!({"name": what, "values": v})),
@@ -1521,7 +1573,7 @@ impl SolverDebugger {
     /// below `tol`) and reports the min slack; `inactive` is the mirror —
     /// it counts the bounds with room to spare (slack ≥ `tol`) and reports
     /// the max slack, the variables furthest from their bound.
-    fn cmd_print_bounds(&self, ctx: &DebugCtx, active: bool) -> CmdOut {
+    fn cmd_print_bounds(&self, ctx: &dyn DebugState, active: bool) -> CmdOut {
         let tol = 1e-6;
         let mut lines = Vec::new();
         let mut cats = serde_json::Map::new();
@@ -1567,7 +1619,7 @@ impl SolverDebugger {
     /// together; `primal`/`dual` restrict to one space. Default `k=10`.
     /// The top primal entry equals `inf_pr`; the top dual equals
     /// `inf_du`. Args may appear in either order.
-    fn cmd_print_residuals(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_print_residuals(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let mut k: Option<usize> = None;
         let mut filter: Option<bool> = None; // Some(true)=primal, Some(false)=dual
         for &arg in rest {
@@ -1613,7 +1665,12 @@ impl SolverDebugger {
         // print as `mass_balance` rather than `c[3]` — the model-vs-index
         // gap Lee et al. (2024, <https://doi.org/10.69997/sct.147875>) flag
         // for equation-oriented debugging. `None` ⇒ index labels throughout.
-        let names = ctx.split_names();
+        // Model names are NLP-specific (.col/.row); only the NLP debugger
+        // exposes them — other solvers fall back to index labels.
+        let names = ctx
+            .as_any()
+            .and_then(|a| a.downcast_ref::<DebugCtx>())
+            .and_then(|c| c.split_names());
         let name_of = |r: &Residual| resid_name(r, &names);
 
         let lines = top
@@ -1947,7 +2004,7 @@ impl SolverDebugger {
 
     /// `print kkt` — inertia + regularization of the factored augmented
     /// system. Only meaningful at/after `after_search_dir`.
-    fn cmd_print_kkt(&self, ctx: &DebugCtx) -> CmdOut {
+    fn cmd_print_kkt(&self, ctx: &dyn DebugState) -> CmdOut {
         let Some(k) = ctx.kkt() else {
             return CmdOut::err(
                 "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
@@ -2151,7 +2208,7 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_set(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_set(&mut self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         match rest {
             ["mu", v] => match v.parse::<f64>() {
                 Ok(mu) => match ctx.set_mu(mu) {
@@ -2160,7 +2217,10 @@ impl SolverDebugger {
                 },
                 Err(_) => CmdOut::err("usage: set mu <value>"),
             },
-            ["opt", name, value] => self.cmd_set_opt(name, value, ctx),
+            ["opt", name, value] => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_set_opt(name, value, c),
+                None => nlp_only("set opt"),
+            },
             [target, value] => self.cmd_set_block(target, value, ctx),
             _ => CmdOut::err(
                 "usage: set mu <v> | set <blk>[<i>] <v> | set <blk> <v0,v1,..> | set opt <name> <v>",
@@ -2169,7 +2229,7 @@ impl SolverDebugger {
     }
 
     /// `set x[2] 1.5` (component) or `set x 1,2,3` (whole block).
-    fn cmd_set_block(&mut self, target: &str, value: &str, ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_set_block(&mut self, target: &str, value: &str, ctx: &mut dyn DebugState) -> CmdOut {
         // Component form: name[idx]
         if let Some(open) = target.find('[') {
             if !target.ends_with(']') {
@@ -2350,7 +2410,7 @@ impl SolverDebugger {
     /// `save [path]` — dump the full current iterate (all blocks +
     /// search-direction blocks) and residual scalars to a JSON file for
     /// external analysis. Defaults to a temp path keyed by iteration.
-    fn cmd_save(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_save(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let iter = ctx.iter();
         let path = rest
             .first()
@@ -2358,7 +2418,7 @@ impl SolverDebugger {
             .unwrap_or_else(|| std::env::temp_dir().join(format!("pounce-dbg-iter{iter}.json")));
         let collect = |delta: bool| -> serde_json::Map<String, serde_json::Value> {
             let mut m = serde_json::Map::new();
-            for &b in BLOCK_NAMES.iter() {
+            for b in block_names(ctx) {
                 let v = if delta {
                     ctx.delta_block(b)
                 } else {
@@ -2726,7 +2786,7 @@ impl SolverDebugger {
     }
 
     /// `goto <k>` — rewind to a captured iteration.
-    fn cmd_goto(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_goto(&mut self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         match rest.first().and_then(|s| s.parse::<i32>().ok()) {
             Some(k) => self.restore_to(k, ctx),
             None => CmdOut::err("usage: goto <iteration>"),
@@ -2736,10 +2796,14 @@ impl SolverDebugger {
     /// Restore the snapshot for iteration `k` (primal-dual state only;
     /// strategy history is not rewound). Stays paused so the user can
     /// inspect / re-tune before `continue`/`step`.
-    fn restore_to(&mut self, k: i32, ctx: &mut DebugCtx) -> CmdOut {
+    fn restore_to(&mut self, k: i32, ctx: &mut dyn DebugState) -> CmdOut {
         match self.snapshots.get(&k) {
             Some(snap) => {
-                ctx.restore(snap);
+                if !ctx.restore(snap.as_ref()) {
+                    return CmdOut::err(format!(
+                        "this solver does not support rewinding to iter {k}"
+                    ));
+                }
                 CmdOut::ok(vec![format!(
                     "rewound to iter {k} (primal-dual only; strategy history not restored). \
                      `continue`/`step` to resume."
@@ -2800,7 +2864,7 @@ impl SolverDebugger {
     /// selects another provider (`codex`, `gemini`, `llm`) or a full command
     /// template. Degrades gracefully when the CLI isn't installed.
     /// "Ask why this step looks wrong without leaving the debugger."
-    fn cmd_ask(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_ask(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let question = if rest.is_empty() {
             "Explain the current state of this interior-point solve and suggest what to try next."
                 .to_string()
@@ -2848,7 +2912,7 @@ impl SolverDebugger {
     /// `watchpoint <blk>[<i>] [threshold] | clear | del <spec>` — pause
     /// when a watched value changes by more than `threshold` (default 0,
     /// any change) between iterations.
-    fn cmd_watchpoint(&mut self, rest: &[&str]) -> CmdOut {
+    fn cmd_watchpoint(&mut self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         match rest {
             [] => {
                 let v: Vec<&str> = self.watchpoints.iter().map(|w| w.raw.as_str()).collect();
@@ -2879,7 +2943,7 @@ impl SolverDebugger {
                     }
                     _ => (spec.to_string(), None),
                 };
-                if !BLOCK_NAMES.contains(&block.as_str()) {
+                if !is_block(ctx, block.as_str()) {
                     return CmdOut::err(format!("unknown block `{block}`"));
                 }
                 let raw = spec.to_string();
@@ -2945,7 +3009,7 @@ impl SolverDebugger {
 
     /// `diff` — what changed in the iterate since the previous captured
     /// iteration: per-block max |Δ| (and where), plus Δμ.
-    fn cmd_diff(&self, ctx: &DebugCtx) -> CmdOut {
+    fn cmd_diff(&self, ctx: &dyn DebugState) -> CmdOut {
         let iter = ctx.iter();
         let Some((&piter, prev)) = self.snapshots.range(..iter).next_back() else {
             return CmdOut::err("no previous iterate to diff against");
@@ -2954,7 +3018,7 @@ impl SolverDebugger {
         let dmu = ctx.mu() - prev.mu();
         lines.push(format!("  mu  = {:.6e}  (Δ {:+.3e})", ctx.mu(), dmu));
         let mut blocks = serde_json::Map::new();
-        for b in BLOCK_NAMES {
+        for b in block_names(ctx) {
             let (Some(cur), Some(old)) = (ctx.block(b), prev.block(b)) else {
                 continue;
             };
@@ -2992,7 +3056,7 @@ impl SolverDebugger {
     /// `source <file>` — run debugger commands from a file (one per line;
     /// `#` comments and blank lines skipped). Stops early if a command
     /// resumes or stops the solve, propagating that control flow.
-    fn cmd_source(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_source(&mut self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         let Some(&path) = rest.first() else {
             return CmdOut::err("usage: source <file>");
         };
@@ -3023,7 +3087,7 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_viz(&self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_viz(&self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
         };
@@ -3097,12 +3161,12 @@ impl SolverDebugger {
             }
         }
         // Resolve the vector to visualize.
-        let (label, vals) = if BLOCK_NAMES.contains(&target) {
+        let (label, vals) = if is_block(ctx, target) {
             match ctx.block(target) {
                 Some(v) => (target.to_string(), v),
                 None => return CmdOut::err(format!("no data for block `{target}`")),
             }
-        } else if let Some(blk) = target.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b)) {
+        } else if let Some(blk) = target.strip_prefix("d").filter(|b| is_block(ctx, b)) {
             match ctx.delta_block(blk) {
                 Some(v) => (format!("d{blk}"), v),
                 None => return CmdOut::err(format!("no search direction for `d{blk}`")),
@@ -3125,7 +3189,7 @@ impl SolverDebugger {
     // ---- front ends ----------------------------------------------------
 
     /// Emit the pause banner / state for the current front end.
-    fn emit_pause(&self, ctx: &DebugCtx, reason: Option<&str>) {
+    fn emit_pause(&self, ctx: &dyn DebugState, reason: Option<&str>) {
         let terminal = matches!(ctx.checkpoint(), Checkpoint::Terminated);
         match self.mode {
             DebugMode::Repl => {
@@ -3214,7 +3278,7 @@ impl SolverDebugger {
     /// same scalar fields, under the same names, as `pause` (minus the
     /// per-pause `dims` / `breakpoints` / `watches`); fired while running
     /// between pauses.
-    fn emit_progress_event(&self, ctx: &DebugCtx) {
+    fn emit_progress_event(&self, ctx: &dyn DebugState) {
         let ev = serde_json::json!({
             "event": "progress",
             "iter": ctx.iter(),
@@ -3352,6 +3416,16 @@ impl SolverDebugger {
     /// an editor is active (history / Tab / Ctrl-R); otherwise a plain
     /// reader with a stderr prompt (REPL) or no prompt (JSON).
     fn next_command_line(&mut self) -> Option<String> {
+        // A shared script (sub-solve under the tree debugger's --debug-script)
+        // takes precedence: pop the next command, echoing it. An empty queue
+        // returns None, which resumes this sub-solve back to the tree.
+        if let Some(q) = &self.script_queue {
+            let cmd = q.borrow_mut().pop_front();
+            if let Some(c) = &cmd {
+                let _ = writeln!(std::io::stderr(), "pounce-dbg> {c}");
+            }
+            return cmd;
+        }
         if let DebugMode::Repl = self.mode {
             if let Some(ed) = self.editor.as_mut() {
                 return match ed.readline("pounce-dbg> ") {
@@ -3770,7 +3844,17 @@ impl DebugHook for SolverDebugger {
         !self.detached
     }
 
-    fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+    /// Re-arm a [`quiet`](SolverDebugger::quiet) debugger to drop in at the
+    /// next checkpoint of the next sub-solve (the tree debugger's
+    /// step-into-relaxation).
+    fn arm(&mut self) {
+        self.step = true;
+        self.detached = false;
+        self.pause_iters = true;
+        self.pause_terminal = true;
+    }
+
+    fn at_checkpoint(&mut self, ctx: &mut dyn DebugState) -> DebugAction {
         // One-time handshake so a JSON client learns the protocol /
         // capabilities before the first pause.
         if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
@@ -3785,8 +3869,12 @@ impl DebugHook for SolverDebugger {
             // launches the next; `Some` means "re-solving from the next
             // seed", `None` means the sweep finished (fall through).
             if self.sweep.is_some() {
-                if let Some(action) = self.drive_sweep(ctx) {
-                    return action;
+                // A sweep can only be started on the NLP solver, so the
+                // downcast succeeds whenever one is in flight.
+                if let Some(c) = as_nlp(ctx) {
+                    if let Some(action) = self.drive_sweep(c) {
+                        return action;
+                    }
                 }
             }
             let failed = ctx.status().map(|s| !is_success_status(s)).unwrap_or(false);
@@ -3814,7 +3902,7 @@ impl DebugHook for SolverDebugger {
         // by evicting the oldest beyond the cap.
         if is_iter_start {
             if let Some(snap) = ctx.snapshot() {
-                self.snapshots.insert(snap.iter(), snap);
+                self.snapshots.insert(ctx.iter(), snap);
                 while self.snapshots.len() > SNAPSHOT_CAP {
                     let Some(&oldest) = self.snapshots.keys().next() else {
                         break;
@@ -3908,7 +3996,7 @@ impl DebugHook for SolverDebugger {
 
 impl SolverDebugger {
     /// Read and dispatch commands until one resumes or stops the solve.
-    fn prompt_loop(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+    fn prompt_loop(&mut self, ctx: &mut dyn DebugState) -> DebugAction {
         // Run a `--debug-script` once, at the first pause, before reading
         // any interactive command. It may itself resume / stop the solve.
         if let Some(path) = self.pending_script.take() {
@@ -4043,6 +4131,39 @@ fn emit_json(v: &serde_json::Value) {
     let _ = h.flush();
 }
 
+/// Downcast a generic [`DebugState`] to the NLP solver's concrete
+/// [`DebugCtx`], for the NLP-only REPL commands (rank diagnosis, model-name
+/// resolution, warm `resolve`, sweep/multistart). `None` for the
+/// convex/conic and global solvers, whose REPL reports "not supported".
+fn as_nlp<'a>(ctx: &'a dyn DebugState) -> Option<&'a DebugCtx> {
+    ctx.as_any().and_then(|a| a.downcast_ref::<DebugCtx>())
+}
+
+/// Mutable form of [`as_nlp`], for commands that mutate NLP-specific state.
+fn as_nlp_mut<'a>(ctx: &'a mut dyn DebugState) -> Option<&'a mut DebugCtx> {
+    ctx.as_any_mut().and_then(|a| a.downcast_mut::<DebugCtx>())
+}
+
+/// Standard "command needs the NLP solver" error for the convex/global REPL.
+fn nlp_only(cmd: &str) -> CmdOut {
+    CmdOut::err(format!(
+        "`{cmd}` is only available for the NLP solver (not the convex/conic or global solvers)"
+    ))
+}
+
+/// The iterate-block names the *current* solver exposes (NLP: the eight
+/// primal-dual blocks; convex IPM: `x`/`s`/`y`/`z`). Block commands use
+/// this rather than the static NLP [`BLOCK_NAMES`] so they work for any
+/// solver behind the [`DebugState`] trait.
+fn block_names(ctx: &dyn DebugState) -> Vec<&'static str> {
+    ctx.block_dims().into_iter().map(|(n, _)| n).collect()
+}
+
+/// Whether `name` is one of the current solver's iterate blocks.
+fn is_block(ctx: &dyn DebugState, name: &str) -> bool {
+    block_names(ctx).iter().any(|n| *n == name)
+}
+
 fn fmt_vec(name: &str, v: &[f64]) -> String {
     const MAX: usize = 12;
     if v.len() <= MAX {
@@ -4092,12 +4213,13 @@ fn write_and_open(label: &str, iter: i32, vals: &[f64]) -> Result<(String, Strin
 
 /// Build the prompt handed to the LLM by `ask`: a compact, self-contained
 /// description of the paused interior-point state plus the user question.
-fn build_ask_prompt(ctx: &DebugCtx, question: &str) -> String {
+fn build_ask_prompt(ctx: &dyn DebugState, question: &str) -> String {
     use std::fmt::Write as _;
     let mut p = String::new();
     p.push_str(
-        "You are helping debug a paused run of POUNCE, a pure-Rust port of the Ipopt \
-         interior-point NLP solver. The solve is stopped at a debugger checkpoint. \
+        "You are helping debug a paused run of POUNCE, a pure-Rust interior-point \
+         optimization solver whose NLP core is ported from Ipopt. The solve is \
+         stopped at a debugger checkpoint. \
          Use the state below to answer concisely and suggest concrete next steps \
          (options to try, what to inspect). State:\n\n",
     );

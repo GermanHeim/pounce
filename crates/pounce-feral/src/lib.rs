@@ -156,6 +156,16 @@ pub struct FeralConfig {
     /// regression testing). See `feral/src/scaling/mod.rs::
     /// ScalingStrategy` for the per-variant rationale.
     pub scaling: ScalingStrategy,
+    /// Per-backend internal-parallelism toggle (tri-state). `None` (the
+    /// default) leaves feral's `Solver` at its own default and lets the
+    /// legacy `FERAL_PARALLEL` env var still force serial; `Some(false)`
+    /// builds an explicitly **serial** factor; `Some(true)` forces feral's
+    /// internal rayon parallelism on. This is the first-class lever for
+    /// outer-parallel / inner-serial batched solving — each rayon worker
+    /// builds its own `Some(false)` backend, with no global state (pounce
+    /// issue #79). feral reads `Solver::use_parallel` fresh on every
+    /// `factor()`, so two backends with different settings never interfere.
+    pub parallel: Option<bool>,
 }
 
 impl Default for FeralConfig {
@@ -171,6 +181,7 @@ impl Default for FeralConfig {
             pivtol: 1e-8,
             ordering: OrderingMethod::Auto,
             scaling: ScalingStrategy::Auto,
+            parallel: None,
         }
     }
 }
@@ -215,6 +226,11 @@ impl FeralConfig {
                 .as_deref()
                 .and_then(parse_scaling_strategy)
                 .unwrap_or(ScalingStrategy::Auto),
+            // Left `None` so the legacy `FERAL_PARALLEL` env var still acts
+            // as the fallback serial switch in `with_config`; callers that
+            // want an explicit per-backend setting use `FeralConfig.parallel`
+            // directly (e.g. `FeralSolverInterface::serial`).
+            parallel: None,
         }
     }
 }
@@ -259,6 +275,18 @@ impl FeralSolverInterface {
     /// the `.opt`-file knobs take effect.
     pub fn new() -> Self {
         Self::with_config(FeralConfig::from_env())
+    }
+
+    /// Construct a backend with feral's internal parallelism **disabled**
+    /// (inheriting all other env-driven config). Each rayon worker in an
+    /// outer-parallel / inner-serial batch builds one of these directly, so
+    /// the only parallelism is across instances — no global `FERAL_PARALLEL`
+    /// mutation (pounce issue #79).
+    pub fn serial() -> Self {
+        Self::with_config(FeralConfig {
+            parallel: Some(false),
+            ..FeralConfig::from_env()
+        })
     }
 
     /// Construct with explicit configuration. Cascade-break
@@ -320,11 +348,20 @@ impl FeralSolverInterface {
             }
         }
         let mut solver = Solver::with_params(np, SupernodeParams::default());
-        if matches!(
-            std::env::var("FERAL_PARALLEL").as_deref(),
-            Ok("0") | Ok("false") | Ok("off")
-        ) {
-            solver = solver.with_parallel(false);
+        // Internal-parallelism toggle. An explicit `cfg.parallel` is the
+        // primary, per-backend lever (no global state); when unset, fall
+        // back to the legacy process-wide `FERAL_PARALLEL` env var for
+        // backward compatibility.
+        match cfg.parallel {
+            Some(p) => solver = solver.with_parallel(p),
+            None => {
+                if matches!(
+                    std::env::var("FERAL_PARALLEL").as_deref(),
+                    Ok("0") | Ok("false") | Ok("off")
+                ) {
+                    solver = solver.with_parallel(false);
+                }
+            }
         }
         if cfg.fma {
             solver = solver.with_fma(true);
@@ -832,6 +869,39 @@ mod tests {
             assert!((rhs[0] - 1.0).abs() < 1e-12);
             assert!((rhs[1] - 1.0).abs() < 1e-12);
         }
+    }
+
+    /// Issue #79: the first-class per-backend `parallel` toggle builds a
+    /// serial factor without touching any global state, and its result is
+    /// bit-identical to the parallel driver (feral guarantees parity).
+    #[test]
+    fn per_backend_parallel_toggle_serial_matches_parallel() {
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        let solve = |mut s: FeralSolverInterface| -> [f64; 2] {
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success
+            );
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success
+            );
+            rhs
+        };
+        let par = solve(FeralSolverInterface::with_config(FeralConfig {
+            parallel: Some(true),
+            ..FeralConfig::default()
+        }));
+        let ser = solve(FeralSolverInterface::serial());
+        // [[2,1],[1,3]] x = [3,4] ⇒ x = [1, 1], same both ways.
+        assert!((par[0] - 1.0).abs() < 1e-12 && (par[1] - 1.0).abs() < 1e-12);
+        assert_eq!(
+            par, ser,
+            "serial and parallel factors must agree bit-for-bit"
+        );
     }
 
     /// Pounce emits some symmetric entries as upper-triangle
