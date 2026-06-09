@@ -20,7 +20,7 @@ pluggable backend (FERAL by default, HSL MA57 optionally).
 | **NLP filter-IPM** | general smooth NLP (nonconvex OK) | local (KKT) | `pounce-algorithm` + `pounce-nlp` | CLI default; Python `Problem`/`minimize`; `--solver nlp` |
 | **NLP active-set SQP** | general smooth NLP | local | `pounce-algorithm` (subproblems via `pounce-qp`) | `algorithm=active-set-sqp` |
 | **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `--solver lp-ipm`/`qp-ipm` |
-| **Convex IPM (conic)** | SOCP, exponential, power, PSD (small) cones | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `pounce <file>.cbf` |
+| **Convex IPM (conic)** | SOCP, exp/power/PSD cones, convex QCQP | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `minimize` (convex QCQP); `--solver socp`; `pounce <file>.cbf` |
 | **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `--solver qp-active-set` |
 | **SOS / Lasserre** | polynomial (nonconvex) | **global** | `pounce-convex` | `sos_minimize`; `pounce.sos_minimize` |
 
@@ -78,9 +78,19 @@ cone is self-scaled and runs on the symmetric driver; the exp/power cones
 run on the non-symmetric HSDE driver, so the two families can't yet be
 mixed in one problem.)
 
-- Python: `pounce.qp.solve_socp(..., cones=[("exp", 3), ("pow", 0.5), ...])`.
+A common special case routes here **automatically**: a convex
+**quadratically-constrained QP** (QCQP). When `auto` routing finds a
+convex-quadratic inequality `½xᵀHx + aᵀx + b ≤ 0` (`H ⪰ 0`), it reformulates
+each such constraint to one second-order cone (`H = FᵀF`) and sends the whole
+problem to the conic solver — no `.cbf` and no manual cone bookkeeping needed.
+This works from a `.nl`/Pyomo model on the CLI and from `minimize()` in Python
+(which probes each constraint's Hessian and only routes when it can prove the
+feasible set is convex). See [LP / QP Solver Routing](lp-qp-routing.md).
+
+- Python: `pounce.qp.solve_socp(..., cones=[("exp", 3), ("pow", 0.5), ...])`
+  for an explicit cone program, or just `minimize(...)` for a convex QCQP.
 - CLI: a Conic Benchmark Format file, `pounce model.cbf` (see the CBLIB
-  benchmark tier).
+  benchmark tier), or any convex-QCQP `.nl` under `auto` routing.
 
 ### Nonconvex problem, global optimum required → **SOS** or **spatial branch-and-bound**
 
@@ -120,6 +130,7 @@ pounce model.nl --solver auto          # default: classify, then route
 pounce model.nl --solver nlp           # filter-IPM (or active-set-sqp via algorithm=)
 pounce model.nl --solver lp-ipm        # convex LP interior-point
 pounce model.nl --solver qp-ipm        # convex QP interior-point
+pounce model.nl --solver socp          # conic interior-point (convex QCQP)
 pounce model.nl --solver qp-active-set # active-set QP
 ```
 

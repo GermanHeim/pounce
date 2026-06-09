@@ -7,6 +7,32 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
+## [Unreleased]
+
+### Added — Convex QCQP auto-routes to the conic (SOCP) solver
+
+The `auto` router now recognizes a convex **quadratically-constrained QP** and
+sends it to the `pounce-convex` conic interior-point solver instead of the
+general NLP path. Each convex-quadratic inequality `½xᵀHx + aᵀx + b ≤ 0`
+(`H ⪰ 0`) is reformulated to one second-order cone (`H = FᵀF`, via a pivoted
+rank-revealing Cholesky so a rank-deficient `H` yields the minimal cone), solved
+alongside the QP objective and linear constraints, and its dual is mapped back
+to a per-constraint multiplier. Works on both surfaces:
+
+- **CLI** — a convex-QCQP `.nl`/Pyomo model routes automatically; force it with
+  `solver_selection=socp` (errors if the problem is not a convex QCQP).
+- **Python** — `minimize()` probes each constraint's Hessian at an anchor plus
+  held-out points, validates the fitted quadratic before trusting it, and routes
+  only when the feasible set is provably convex (a scipy `ineq` `g(x) ≥ 0` must
+  be concave); otherwise it falls back to NLP. `options={"solver_selection":
+  "socp"}` forces the conic path.
+
+This closes the long-standing "conic solver: future" gap in the routing docs —
+the conic solver shipped in 0.4.0 but was not reachable from either router for
+quadratic *constraints*. See [LP / QP Solver Routing](docs/src/lp-qp-routing.md)
+and [Choosing a Solver](docs/src/choosing-a-solver.md).
+
+
 ## [0.4.0] — 2026-06-05
 
 ### Added — Convex / conic solver (`pounce-convex`; `solve_qp` / `solve_socp`)

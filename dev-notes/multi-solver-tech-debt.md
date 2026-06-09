@@ -179,6 +179,21 @@ section**" definition-of-done, and name an owner for the cross-solver
 landscape/choosing-a-solver docs so they're updated as a unit when a solver
 lands or changes class coverage.
 
+**Status (issue #108).** Both recommendations are now done. A new
+`CONTRIBUTING.md` codifies the "one feature → CHANGELOG entry + book section"
+definition-of-done and names **@jkitchin** as the owner of the three
+cross-solver landscape pages (`choosing-a-solver.md`, `lp-qp-routing.md`,
+`python.md`), which must be updated as a unit when a solver lands or changes
+class coverage. The mechanizable half of the DoD is enforced:
+`scripts/check-docs-consistency.sh` (wired into the CI `test` job) fails the
+build if any `docs/src` page is unreachable from `SUMMARY.md` or any TOC link
+is dead — so a feature page can't ship invisible. The live drift was also
+fixed: the QCQP→SOCP auto-routing shipped in the #107 sibling work had no
+landing in the landscape page or CHANGELOG, so `choosing-a-solver.md` now
+documents the auto-route plus the `socp` selection, and a `## [Unreleased]`
+CHANGELOG section records the feature. (The 0.4.0 convex/conic/SOS backfill
+that originally motivated this area was already complete.)
+
 ## Suggested follow-ups
 
 Each area should become a tracked issue linking back to this note. None blocks
