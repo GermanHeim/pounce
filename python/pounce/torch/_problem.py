@@ -61,7 +61,7 @@ from .._ad_common import (
 from ._build import _DT, _seed_matrix, _t, _to_np
 from ._diff import _kkt_backward, _require_f64
 
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
 def _coerce_param(p, name="p"):

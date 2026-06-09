@@ -31,6 +31,7 @@ import torch
 from torch.func import grad, jacrev
 
 from ._build import _DT, _t, _to_np
+from .._ad_common import ACTIVE_TOL
 
 _OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")
 
@@ -205,7 +206,7 @@ class PathFollower:
         )
         return float(r["margin"][0])
 
-    def _active_signature(self, lam, zL, zU, active_tol=1e-6):
+    def _active_signature(self, lam, zL, zU, active_tol=ACTIVE_TOL):
         tp = self._tp
         sig = (
             tuple(bool(v) for v in _to_np(zL > active_tol))

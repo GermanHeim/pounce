@@ -713,6 +713,36 @@ pub(crate) fn build_info_dict<'py>(
     // the corrector in predictor–corrector path following (pounce#86).
     // `0.0` on the barrier-free SQP path.
     info.set_item("mu", final_mu)?;
+
+    // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
+    // compute the active set ONCE here, in the producer, so the JAX /
+    // torch backward passes read it instead of each re-deriving
+    // `|mult| > tol` under its own tolerance. `pinned_vars[i]` = an
+    // active variable bound (dx/dp = 0); `active_constraints[i]` = an
+    // equality row or a binding inequality. We want only the two masks,
+    // not a full `DiffHandoff`, so go through the shared `masks` helper on
+    // the borrowed duals rather than cloning x / λ / z_L / z_U just to
+    // discard them.
+    let equality_mask: Vec<bool> = bridge
+        .state
+        .g_l
+        .iter()
+        .zip(bridge.state.g_u.iter())
+        .map(|(l, u)| l == u)
+        .collect();
+    let (pinned_vars, active_constraints) = pounce_sensitivity::DiffHandoff::masks(
+        &bridge.state.final_z_l,
+        &bridge.state.final_z_u,
+        &bridge.state.final_lambda,
+        &equality_mask,
+        pounce_sensitivity::DEFAULT_ACTIVE_TOL,
+    );
+    info.set_item("pinned_vars", pinned_vars.into_pyarray_bound(py))?;
+    info.set_item(
+        "active_constraints",
+        active_constraints.into_pyarray_bound(py),
+    )?;
+    info.set_item("active_tol", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(info)
 }
 
