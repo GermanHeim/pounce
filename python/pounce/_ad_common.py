@@ -25,6 +25,17 @@ from collections import defaultdict
 
 import numpy as np
 
+from ._pounce import DEFAULT_ACTIVE_TOL
+
+# Single source of truth for the differentiable-solve active-set
+# tolerance, re-exported from the Rust producer (the `DiffHandoff`
+# contract: see ``dev-notes/diff-handoff-contract.md``). A bound or
+# constraint multiplier above this is treated as active. Every JAX /
+# torch backward imports ``ACTIVE_TOL`` from here rather than hardcoding
+# ``1e-6``, so the producer's ``info["active_tol"]`` and every consumer's
+# threshold are guaranteed to agree.
+ACTIVE_TOL: float = DEFAULT_ACTIVE_TOL
+
 # Threshold below which a Jacobian/Hessian entry is treated as
 # structurally zero during the pattern probe. Tight enough to reject
 # genuine zeros from constant terms, loose enough that random probe

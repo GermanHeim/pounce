@@ -52,7 +52,7 @@ from torch.func import grad, hessian, jacrev
 from ._build import _TorchProblem, _DT
 from .._pounce import Problem
 
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
 def _require_f64(name, t):

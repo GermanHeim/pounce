@@ -719,7 +719,10 @@ pub(crate) fn build_info_dict<'py>(
     // torch backward passes read it instead of each re-deriving
     // `|mult| > tol` under its own tolerance. `pinned_vars[i]` = an
     // active variable bound (dx/dp = 0); `active_constraints[i]` = an
-    // equality row or a binding inequality.
+    // equality row or a binding inequality. We want only the two masks,
+    // not a full `DiffHandoff`, so go through the shared `masks` helper on
+    // the borrowed duals rather than cloning x / λ / z_L / z_U just to
+    // discard them.
     let equality_mask: Vec<bool> = bridge
         .state
         .g_l
@@ -727,24 +730,19 @@ pub(crate) fn build_info_dict<'py>(
         .zip(bridge.state.g_u.iter())
         .map(|(l, u)| l == u)
         .collect();
-    let handoff = pounce_sensitivity::DiffHandoff::from_solution(
-        bridge.state.final_x.clone(),
-        bridge.state.final_obj,
-        bridge.state.final_lambda.clone(),
-        bridge.state.final_z_l.clone(),
-        bridge.state.final_z_u.clone(),
+    let (pinned_vars, active_constraints) = pounce_sensitivity::DiffHandoff::masks(
+        &bridge.state.final_z_l,
+        &bridge.state.final_z_u,
+        &bridge.state.final_lambda,
         &equality_mask,
         pounce_sensitivity::DEFAULT_ACTIVE_TOL,
     );
-    info.set_item(
-        "pinned_vars",
-        handoff.pinned_vars.clone().into_pyarray_bound(py),
-    )?;
+    info.set_item("pinned_vars", pinned_vars.into_pyarray_bound(py))?;
     info.set_item(
         "active_constraints",
-        handoff.active_constraints.clone().into_pyarray_bound(py),
+        active_constraints.into_pyarray_bound(py),
     )?;
-    info.set_item("active_tol", handoff.active_tol)?;
+    info.set_item("active_tol", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(info)
 }
 

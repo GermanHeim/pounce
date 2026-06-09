@@ -57,5 +57,10 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // SOS polynomial global optimizer (pounce-convex::sos).
     m.add_function(wrap_pyfunction!(sos::sos_minimize, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // Single source of truth for the differentiable-solve active-set
+    // tolerance (the `DiffHandoff` contract). The JAX / torch frontends
+    // import this instead of each hardcoding `1e-6`, so the producer's
+    // `info["active_tol"]` and every consumer's threshold can never drift.
+    m.add("DEFAULT_ACTIVE_TOL", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(())
 }

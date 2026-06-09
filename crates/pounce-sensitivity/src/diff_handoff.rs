@@ -90,30 +90,15 @@ impl DiffHandoff {
         equality_mask: &[bool],
         active_tol: Number,
     ) -> Self {
-        let n_x = x.len();
-        let n_g = lambda.len();
-        debug_assert_eq!(mult_x_lower.len(), n_x, "z_L length must match x");
-        debug_assert_eq!(mult_x_upper.len(), n_x, "z_U length must match x");
-        debug_assert!(
-            equality_mask.is_empty() || equality_mask.len() == n_g,
-            "equality_mask must be empty or length n_g"
+        debug_assert_eq!(mult_x_lower.len(), x.len(), "z_L length must match x");
+        debug_assert_eq!(mult_x_upper.len(), x.len(), "z_U length must match x");
+        let (pinned_vars, active_constraints) = Self::masks(
+            &mult_x_lower,
+            &mult_x_upper,
+            &lambda,
+            equality_mask,
+            active_tol,
         );
-
-        // A bound is active when either side's multiplier exceeds the
-        // tolerance → the variable is pinned (dx/dp = 0).
-        let pinned_vars: Vec<bool> = (0..n_x)
-            .map(|i| mult_x_lower[i] > active_tol || mult_x_upper[i] > active_tol)
-            .collect();
-
-        // A constraint row is active when it is an equality (always) or
-        // its multiplier magnitude exceeds the tolerance.
-        let active_constraints: Vec<bool> = (0..n_g)
-            .map(|i| {
-                let is_eq = equality_mask.get(i).copied().unwrap_or(false);
-                is_eq || lambda[i].abs() > active_tol
-            })
-            .collect();
-
         Self {
             x,
             obj_val,
@@ -124,6 +109,53 @@ impl DiffHandoff {
             pinned_vars,
             active_tol,
         }
+    }
+
+    /// Derive the active-set masks `(pinned_vars, active_constraints)` from
+    /// borrowed duals — the single active-set derivation, shared by
+    /// [`Self::from_solution`] and producers that want only the masks (e.g.
+    /// the Python `info` dict) without surrendering the solution vectors.
+    /// Keeping the rule here means "`|mult| > active_tol`, equalities always
+    /// active" lives in exactly one place.
+    ///
+    /// `pinned_vars[i]` is `true` when variable `i`'s lower- or upper-bound
+    /// multiplier exceeds `active_tol`. `active_constraints[i]` is `true` for
+    /// an equality row (`equality_mask[i]`) or one whose `|lambda[i]| >
+    /// active_tol`. `equality_mask` may be empty (no equalities known) or
+    /// length `lambda.len()`.
+    pub fn masks(
+        mult_x_lower: &[Number],
+        mult_x_upper: &[Number],
+        lambda: &[Number],
+        equality_mask: &[bool],
+        active_tol: Number,
+    ) -> (Vec<bool>, Vec<bool>) {
+        debug_assert_eq!(
+            mult_x_lower.len(),
+            mult_x_upper.len(),
+            "z_L and z_U lengths must match"
+        );
+        debug_assert!(
+            equality_mask.is_empty() || equality_mask.len() == lambda.len(),
+            "equality_mask must be empty or length n_g"
+        );
+        // A bound is active when either side's multiplier exceeds the
+        // tolerance → the variable is pinned (dx/dp = 0).
+        let pinned_vars = mult_x_lower
+            .iter()
+            .zip(mult_x_upper.iter())
+            .map(|(&l, &u)| l > active_tol || u > active_tol)
+            .collect();
+        // A constraint row is active when it is an equality (always) or its
+        // multiplier magnitude exceeds the tolerance.
+        let active_constraints = lambda
+            .iter()
+            .enumerate()
+            .map(|(i, &lam)| {
+                equality_mask.get(i).copied().unwrap_or(false) || lam.abs() > active_tol
+            })
+            .collect();
+        (pinned_vars, active_constraints)
     }
 
     /// Re-shape a [`SensResult`] from a converged solve into a
@@ -203,9 +235,7 @@ mod tests {
         let lambda = vec![0.0, 1e-9, 4.0];
         let eq = vec![true, false, false];
 
-        let h = DiffHandoff::from_solution(
-            x, 42.0, lambda, z_l, z_u, &eq, DEFAULT_ACTIVE_TOL,
-        );
+        let h = DiffHandoff::from_solution(x, 42.0, lambda, z_l, z_u, &eq, DEFAULT_ACTIVE_TOL);
 
         assert_eq!(h.pinned_vars, vec![true, false, true]);
         assert_eq!(h.active_constraints, vec![true, false, true]);

@@ -64,7 +64,7 @@ __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
 # Active-set tolerance for the backward pass: an inequality counts as
 # active when its multiplier is above this (complementarity slackness).
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
 def _expand_bounds(G, h, lb, ub, n):

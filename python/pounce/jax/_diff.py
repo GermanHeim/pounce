@@ -63,7 +63,7 @@ import numpy as np
 from ._build import _JaxProblem
 from .._pounce import Problem
 
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
 def _kkt_implicit_backward(f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v):

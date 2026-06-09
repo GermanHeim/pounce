@@ -73,7 +73,7 @@ from ._build import (
 )
 from .._pounce import Problem, Solver
 
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
 class _StackedJaxNlp:
