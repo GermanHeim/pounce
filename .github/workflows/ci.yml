@@ -34,6 +34,16 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
+      # Release guard: the three registry versions (Rust workspace,
+      # pounce-solver wheel, pyomo-pounce) must agree, and the crates.io
+      # publish list in scripts/publish-crates.sh must match the workspace's
+      # publishable crates in topological order. Catches release drift (e.g.
+      # the publish list naming crates that no longer exist) on every PR
+      # rather than at tag time. Needs cargo metadata (feral sibling cloned
+      # above) and python3 (preinstalled on ubuntu-latest).
+      - name: Release consistency check
+        run: scripts/check-release-consistency.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 

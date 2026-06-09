@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish POUNCE crates to crates.io in dependency order.
 #
-# The first publish of all 21 crates will hit the crates.io rate limit
+# The first publish of all 19 crates will hit the crates.io rate limit
 # for *new* crate names (5 burst then 1 per ~10 min). Before the initial
 # release email help@crates.io and ask for a temporary exemption for
 # this batch — they typically grant within a day. See
@@ -30,28 +30,29 @@ set -euo pipefail
 
 # Topologically sorted: each crate appears only after every crate it
 # depends on. Verified against `cargo metadata` — see
-# dev-notes/cargo-release.md for the dependency graph.
+# dev-notes/cargo-release.md for the dependency graph. This list is guarded
+# by scripts/check-release-consistency.sh (run in CI): it fails the build if
+# the set drifts from the workspace's publishable crates or the order stops
+# being topological, so keep edits here in sync with the actual members.
 CRATES=(
   pounce-common
   pounce-linalg
   pounce-linsol
-  pounce-nlp
-  pounce-nl
   pounce-feral
   pounce-hsl
+  pounce-nlp
   pounce-l1penalty
+  pounce-observability
   pounce-presolve
   pounce-qp
-  pounce-convex
-  pounce-observability
-  pounce-solve-report
-  pounce-studio-core
   pounce-algorithm
-  pounce-simplex
-  pounce-global
   pounce-restoration
   pounce-sensitivity
+  pounce-solve-report
   pounce-cinterface
+  pounce-convex
+  pounce-nl
+  pounce-studio-core
   pounce-cli
 )
 

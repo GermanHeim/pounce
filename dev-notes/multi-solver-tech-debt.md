@@ -106,6 +106,22 @@ prominently (a "Choosing a Solver" page already exists — make it the front doo
 Track the routing facade as the designed-but-unbuilt piece it is, so it isn't
 mistaken for shipped.
 
+**Status (issue #106).** Option (a) shipped in this same PR (commit `caf6bcb`,
+"feat(python): auto-route minimize() to the convex LP/QP solver"). `minimize`'s
+inability to *read* structure is resolved by **probing**: `python/pounce/_route.py`
+(`classify_and_extract`) evaluates the opaque callables at an anchor plus held-out
+points, fits a linear/convex-quadratic model, and validates it before dispatching
+to `solve_qp`; anything it cannot *prove* convex (nonlinear, indefinite Hessian,
+nonlinear constraint, or any probe that raises) falls back to the NLP solver, the
+same conservative direction `dispatch.rs` takes. It is wired into `_minimize.py`
+behind a `solver_selection` option (`auto` default, plus `nlp` / `lp-ipm` /
+`qp-ipm`) that mirrors the CLI, documented in `docs/src/python.md`, and covered by
+`python/tests/test_minimize_autoroute.py` (routing, objective-constant fold-back,
+auto==forced-NLP transparency, nonlinear/nonconvex staying on NLP, forced-selection
+errors, and finite-difference routing). The CLI/Python dispatch stories now share
+the same classify-then-conservatively-fall-back contract, so the drift risk is the
+documentation upkeep noted in area 4, not two divergent designs.
+
 ### 3. Release / publish surface
 
 **State.** The workspace grew **16 → 18 published crates** across **three**
@@ -130,6 +146,22 @@ step.)
 layered dependency order in `cargo-release.md` as the single source the script
 derives from; consider a CI check that the three registries' target versions
 agree before tagging.
+
+**Status (issue #107).** All three recommendations are now done.
+`release-crates.yml` (tag-triggered, idempotent, `crates-io` environment) is the
+crates.io publish path — the manual step is gone — and `CLAUDE.md` and
+`cargo-release.md` were corrected to say so. The new guard
+`scripts/check-release-consistency.sh`, wired into the CI `test` job, fails the
+build unless (1) the three registries' versions agree, (2) the
+`publish-crates.sh` list equals the workspace's publishable crates (ground truth
+is `cargo metadata`, which cannot drift), and (3) that list is topologically
+ordered. The guard immediately caught real drift: `publish-crates.sh` and
+`cargo-release.md` still listed `pounce-simplex` and `pounce-global` — crates
+that no longer exist (the global solver was stripped per issue #105) — which
+would have aborted a real `cargo publish` run. The publish list is now the
+correct **19** crates, and `pounce-convex` (new crate name, not yet on
+crates.io) is documented as the only one subject to the new-crate rate limit on
+the next release.
 
 ### 4. Docs / CHANGELOG drift
 
