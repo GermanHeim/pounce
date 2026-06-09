@@ -178,6 +178,44 @@ def _lower_triangle_coo(P, n: int):
     return out_r, out_c, out_v
 
 
+# Largest n for which the default (auto) PSD check runs a dense O(n³)
+# eigenvalue solve. Above this the check is skipped unless ``check_psd=True``
+# is passed explicitly, so a large sparse QP is not silently slowed down by an
+# O(n³) densify-and-eig (see the dense-input scaling concern, issue #116).
+_PSD_CHECK_AUTO_MAX_N = 1500
+
+
+def _min_eig_lower_coo(pr, pc, pv, n: int) -> float:
+    """Smallest eigenvalue of the symmetric Hessian reconstructed from its
+    lower-triangle COO — i.e. exactly the matrix the solver sees."""
+    M = np.zeros((n, n), dtype=np.float64)
+    for ri, ci, vi in zip(pr, pc, pv):
+        M[ri, ci] = vi
+        M[ci, ri] = vi
+    return float(np.linalg.eigvalsh(M)[0]) if n else 0.0
+
+
+def _check_psd(pr, pc, pv, n: int) -> None:
+    """Raise ``ValueError`` if the Hessian ``P`` is not positive semidefinite.
+
+    The convex IPM and its unboundedness detection assume a PSD ``P``; an
+    indefinite ``P`` otherwise returns a silently-wrong ``status="optimal"``
+    (issue #112). The tolerance is relative to the spectral scale so genuine
+    PSD matrices with round-off-level negative eigenvalues pass."""
+    if not pr:  # no Hessian entries → LP, trivially PSD
+        return
+    lam_min = _min_eig_lower_coo(pr, pc, pv, n)
+    scale = max(abs(v) for v in pv)
+    if lam_min < -1e-8 * max(scale, 1.0):
+        raise ValueError(
+            f"P is not positive semidefinite (min eigenvalue {lam_min:.3e}); "
+            "the convex QP solver requires a PSD Hessian. A nonconvex QP is "
+            "unbounded below in the indefinite directions and has no convex "
+            "optimum. Pass check_psd=False to skip this check (e.g. if you "
+            "know P is PSD and want to avoid the O(n^3) eigenvalue cost)."
+        )
+
+
 def _build(
     P,
     c: Sequence[float],
@@ -264,6 +302,7 @@ def solve_qp(
     max_iter: Optional[int] = None,
     warm_start=None,
     collect_iterates: bool = False,
+    check_psd: Optional[bool] = None,
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
@@ -276,12 +315,23 @@ def solve_qp(
     seeds the interior-point iteration to reduce the iteration count; it
     does not change the solution, and a dimension mismatch is ignored.
 
+    ``check_psd`` guards against an indefinite (nonconvex) ``P``, which the
+    convex solver would otherwise accept and report a silently-wrong
+    ``"optimal"`` for (issue #112). ``None`` (the default) runs the check
+    only when ``n <= 1500`` so a large sparse QP is not slowed by the
+    O(n^3) eigenvalue solve; pass ``True`` to always check or ``False`` to
+    never check.
+
     The returned :class:`QpResult` carries the final KKT ``residuals``;
     pass ``collect_iterates=True`` to also capture the per-iteration
     convergence trace in ``result.iterates``.
     """
     if c is None:
         raise ValueError("solve_qp: `c` is required")
+    if check_psd is not False:
+        n = np.asarray(c, dtype=np.float64).ravel().shape[0]
+        if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
+            _check_psd(*_lower_triangle_coo(P, n), n)
     prob = _build(P, c, A, b, G, h, lb, ub)
     return _to_result(
         _pounce.solve_qp(

@@ -226,13 +226,16 @@ def test_jax_torch_parity_solve_qp():
 # ---------------------------------------------------------------------------
 # xfail: filed bugs (assert the desired post-fix behavior; pinned to issues)
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(reason="#112: no PSD guard; indefinite P returns 'optimal'",
-                   strict=False)
 def test_solve_qp_rejects_indefinite_P():
+    # Fixed in #112: an indefinite (nonconvex) P is unbounded below and has no
+    # convex optimum; solve_qp now raises instead of reporting a bogus
+    # 'optimal' at the origin.
     P = np.array([[1.0, 0.0], [0.0, -1.0]])   # indefinite -> unbounded below
-    r = solve_qp(P, np.zeros(2))
-    # Desired: a non-optimal status (or a raised error). Today: 'optimal'.
-    assert r.status != "optimal"
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        solve_qp(P, np.zeros(2))
+    # The check is opt-out for callers who know P is PSD (or accept the risk).
+    r = solve_qp(P, np.zeros(2), check_psd=False)
+    assert r is not None
 
 
 @pytest.mark.xfail(reason="#113: no shape validation; mismatch -> infeasible",
