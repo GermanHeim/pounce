@@ -562,3 +562,150 @@ def test_confidence_band_validates_shapes():
         r.confidence_band(x[:5], kind="prediction", sigma=np.ones(5)),
     ):
         assert all(z.shape == (5,) for z in band)
+
+
+# --------------------------------------------------------------------------
+# Streaming / out-of-core fits (curve_fit_streaming)
+#
+# The solver only needs additive sums over data points, so streaming the data
+# in mini-batches and accumulating those sums must reproduce the in-memory fit
+# exactly -- only one batch is ever held in memory.
+# --------------------------------------------------------------------------
+
+def _batched_source(x, y, sigma=None, step=137):
+    """Return a zero-arg factory yielding fresh (x, y[, sigma]) batches.
+
+    ``step`` deliberately does not divide the data length, exercising a smaller
+    final batch (and the JAX shape retrace it triggers).
+    """
+    def source():
+        for i in range(0, len(y), step):
+            if sigma is None:
+                yield x[i : i + step], y[i : i + step]
+            else:
+                yield x[i : i + step], y[i : i + step], sigma[i : i + step]
+    return source
+
+
+@pytest.mark.parametrize("jac", ["jax", "fd"])
+@pytest.mark.parametrize("absolute_sigma", [False, True])
+@pytest.mark.parametrize("use_sigma", [False, True])
+def test_streaming_matches_full_memory(jac, absolute_sigma, use_sigma):
+    """Exact parity: streamed fit == in-memory fit on the same data."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 10.0, 1000)
+    sigma = (0.04 + 0.02 * x) if use_sigma else None
+    noise = rng.normal(0.0, 0.05, x.size) if sigma is None else rng.normal(0.0, sigma)
+    y = expdecay_np(x, 2.0, 0.3, 0.5) + noise
+
+    model = expdecay if jac == "jax" else expdecay_np
+    kw = dict(p0=[1.0, 1.0, 0.0], jac=jac, absolute_sigma=absolute_sigma)
+
+    full = pounce.curve_fit(model, x, y, sigma=sigma, **kw)
+    streamed = pounce.curve_fit_streaming(
+        model, _batched_source(x, y, sigma), **kw
+    )
+
+    np.testing.assert_allclose(streamed.popt, full.popt, rtol=1e-8)
+    np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-6, atol=1e-12)
+    assert streamed.dof == full.dof
+    assert streamed.n_data == full.n_data == 1000
+    assert streamed.cov_source == full.cov_source
+    np.testing.assert_allclose(streamed.sse, full.sse, rtol=1e-9)
+    np.testing.assert_allclose(streamed.chi_square, full.chi_square, rtol=1e-9)
+    np.testing.assert_allclose(streamed.r_squared, full.r_squared, rtol=1e-9)
+    np.testing.assert_allclose(streamed.mae, full.mae, rtol=1e-9)
+
+
+def test_streaming_robust_sandwich_matches_full_memory():
+    """Robust loss -> the sandwich covariance is accumulated over batches."""
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.0, 10.0, 800)
+    y = expdecay_np(x, 2.0, 0.3, 0.5) + rng.normal(0.0, 0.05, x.size)
+    y[::50] += 2.0  # outliers
+
+    full = pounce.curve_fit(expdecay, x, y, p0=[1.0, 1.0, 0.0], loss="huber")
+    streamed = pounce.curve_fit_streaming(
+        expdecay, _batched_source(x, y), p0=[1.0, 1.0, 0.0], loss="huber"
+    )
+    assert full.cov_source == streamed.cov_source == "sandwich"
+    np.testing.assert_allclose(streamed.popt, full.popt, rtol=1e-7)
+    np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-5, atol=1e-12)
+
+
+def test_streaming_active_bound_projects_covariance():
+    """An active bound projects the covariance onto the free set, same as the
+    in-memory fit."""
+    rng = np.random.default_rng(2)
+    x = np.linspace(0.0, 5.0, 400)
+    y = expdecay_np(x, 3.0, 0.9, 0.5) + rng.normal(0.0, 0.05, x.size)
+    bounds = [(-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, 0.3)]  # true c=0.5
+
+    full = pounce.curve_fit(expdecay, x, y, p0=[1.0, 1.0, 0.0], bounds=bounds)
+    streamed = pounce.curve_fit_streaming(
+        expdecay, _batched_source(x, y), p0=[1.0, 1.0, 0.0], bounds=bounds
+    )
+    np.testing.assert_array_equal(streamed.active_mask, full.active_mask)
+    assert streamed.active_mask[2]
+    assert streamed.cov_source == full.cov_source == "reduced_hessian(projected)"
+    np.testing.assert_allclose(streamed.popt, full.popt, rtol=1e-6)
+    np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-5, atol=1e-12)
+
+
+def test_streaming_disables_residuals_and_sensitivity():
+    """The O(n_data) outputs are not materialised; summary still renders."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 5.0, 300)
+    y = expdecay_np(x, 3.0, 0.9, 0.5) + rng.normal(0.0, 0.05, x.size)
+    res = pounce.curve_fit_streaming(expdecay, _batched_source(x, y), p0=[1.0, 1.0, 0.0])
+    assert res.residuals is None
+    assert res.dpopt_ddata is None
+    assert isinstance(res.summary(), str)
+    # confidence band on new x still works (homoscedastic fallback)
+    band = res.confidence_band(x[:5])
+    assert all(z.shape == (5,) for z in band)
+
+
+def test_streaming_factory_is_reusable_and_never_materializes():
+    """The source must be a *factory* (fresh iterator per pass), and the solve
+    must never pull a slice wider than one batch."""
+    rng = np.random.default_rng(0)
+    n = 50_000
+    x = np.linspace(0.0, 10.0, n)
+    y = expdecay_np(x, 2.0, 0.3, 0.5) + rng.normal(0.0, 0.05, n)
+    batch = 1000
+
+    state = {"passes": 0, "max_batch": 0}
+
+    def source():
+        state["passes"] += 1
+        for i in range(0, n, batch):
+            xb = x[i : i + batch]
+            state["max_batch"] = max(state["max_batch"], xb.size)
+            yield xb, y[i : i + batch]
+
+    # two independent iterators from one factory
+    it1, it2 = source(), source()
+    assert next(it1) is not None and next(it2) is not None
+
+    res = pounce.curve_fit_streaming(expdecay, source, p0=[1.0, 1.0, 0.0])
+    assert res.success
+    assert state["passes"] > 1                 # re-read once per iteration
+    assert state["max_batch"] == batch         # never a full-array read
+
+
+def test_streaming_requires_factory_and_params():
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 5.0, 100)
+    y = expdecay_np(x, 3.0, 0.9, 0.5)
+
+    # a one-shot iterator (not a factory) is rejected
+    with pytest.raises(ValueError, match="zero-argument callable"):
+        pounce.curve_fit_streaming(expdecay, iter([(x, y)]), p0=[1.0, 1.0, 0.0])
+
+    # a model with *args params and no p0/n_params can't fix the count
+    def variadic(x, *p):
+        return p[0] * x + p[1]
+
+    with pytest.raises(ValueError, match="number of parameters"):
+        pounce.curve_fit_streaming(variadic, _batched_source(x, y))

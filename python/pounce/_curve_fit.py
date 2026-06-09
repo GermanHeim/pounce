@@ -528,6 +528,15 @@ class _FitProblem:
     bounds: Any
     constraints: Any
 
+    # --- out-of-core / mini-batch streaming (see ``curve_fit_streaming``) ---
+    # When ``streaming`` is True the full ``xdata``/``ydata`` are *not* held in
+    # memory: the objective/gradient/Gauss-Newton-Hessian closures above are the
+    # methods of ``closures`` (a :class:`_StreamingClosures`) which accumulate
+    # those sums by re-reading the data from ``data_source`` one batch at a time.
+    streaming: bool = False
+    data_source: Callable | None = None
+    closures: Any = None
+
 
 def _build_fit_problem(
     f, xdata, ydata, p0, sigma, bounds, constraints, loss, f_scale, jac
@@ -706,24 +715,40 @@ def _solve_fit(
     factor_ok = bool(scaling_off and solver.converged)
 
     # --- residual diagnostics (unweighted, for reporting) --------------
-    yhat = pr.model(pr.xdata, popt)
-    resid = pr.ydata - yhat
-    rw = pr.residual(popt)  # weighted
-    sse = float(resid @ resid)
-    chi2 = float(rw @ rw)
+    # Both paths produce the same scalar sums; streaming accumulates them over a
+    # data pass (re-using the cached pass at ``popt``) rather than materialising
+    # the residual vector, so ``resid`` is None and is not returned.
+    if pr.streaming:
+        sp = pr.closures._ensure(popt)
+        n_data = sp.n_data
+        sse = sp.sse
+        chi2 = sp.chi2
+        mae = sp.abs_sum / n_data
+        # total sum of squares via the streaming variance identity
+        ss_tot = sp.sum_y2 - (sp.sum_y * sp.sum_y) / n_data
+        resid = None
+    else:
+        yhat = pr.model(pr.xdata, popt)
+        resid = pr.ydata - yhat
+        rw = pr.residual(popt)  # weighted
+        sse = float(resid @ resid)
+        chi2 = float(rw @ rw)
+        mae = float(np.mean(np.abs(resid)))
+        ss_tot = float(np.sum((pr.ydata - pr.ydata.mean()) ** 2))
+        n_data = pr.m_data
     # Honest degrees of freedom. When the fit is exactly- or under-determined
     # (n_data <= n_params) there is no residual variance to estimate, so the
     # reduced chi-square, covariance scale, and confidence intervals are not
     # defined. Report the true (possibly <= 0) dof and let s^2 -> inf carry that
     # through to inf standard errors / CIs, rather than silently clamping dof to
     # 1 and handing back finite-but-meaningless uncertainties.
-    dof = pr.m_data - pr.n
+    dof = n_data - pr.n
     if dof <= 0:
         import warnings
 
         warnings.warn(
             f"pounce.curve_fit: non-positive degrees of freedom "
-            f"(n_data={pr.m_data} <= n_params={pr.n}); reduced chi-square, "
+            f"(n_data={n_data} <= n_params={pr.n}); reduced chi-square, "
             f"covariance, standard errors, and confidence intervals are not "
             f"well-defined and should not be trusted (the relative-sigma "
             f"covariance is reported as inf).",
@@ -732,12 +757,10 @@ def _solve_fit(
         reduced_chi2 = float("inf")
     else:
         reduced_chi2 = chi2 / dof
-    rmse = math.sqrt(sse / pr.m_data)
-    mae = float(np.mean(np.abs(resid)))
-    ss_tot = float(np.sum((pr.ydata - pr.ydata.mean()) ** 2))
+    rmse = math.sqrt(sse / n_data)
     r2 = 1.0 - sse / ss_tot if ss_tot > 0 else float("nan")
     adj_r2 = (
-        1.0 - (1.0 - r2) * (pr.m_data - 1) / dof
+        1.0 - (1.0 - r2) * (n_data - 1) / dof
         if (ss_tot > 0 and dof > 0)
         else float("nan")
     )
@@ -748,10 +771,16 @@ def _solve_fit(
 
     # --- covariance ----------------------------------------------------
     active_mask = _active_bounds(popt, pr.lb, pr.ub, info)
-    pcov, cov_source = _covariance(
-        solver, popt, pr.model_jac, pr.xdata, pr.w, s2, pr.is_robust,
-        pr.residual, pr.loss_fn, pr.fs2, active_mask, pr.n, pr.m_con, factor_ok,
-    )
+    if pr.streaming:
+        pcov, cov_source = _stream_covariance(
+            solver, popt, pr.data_source, pr.model, pr.model_jac, pr.loss_fn,
+            pr.fs2, s2, pr.is_robust, active_mask, pr.n, pr.m_con, factor_ok,
+        )
+    else:
+        pcov, cov_source = _covariance(
+            solver, popt, pr.model_jac, pr.xdata, pr.w, s2, pr.is_robust,
+            pr.residual, pr.loss_fn, pr.fs2, active_mask, pr.n, pr.m_con, factor_ok,
+        )
     perr = np.sqrt(np.clip(np.diag(pcov), 0.0, None))
     # Use max(dof, 1) for the quantile so the t-value stays finite; when dof <= 0
     # the undefined-ness is carried by perr (inf), keeping the CI inf rather than
@@ -760,8 +789,10 @@ def _solve_fit(
     ci = np.column_stack([popt - tval * perr, popt + tval * perr])
 
     # --- sensitivity dpopt/ddata --------------------------------------
+    # dpopt/ddata is (n_params x n_data) -- the size of the data -- so it is not
+    # offered in streaming mode (see ``curve_fit_streaming``).
     dpopt = None
-    if sensitivity:
+    if sensitivity and not pr.streaming:
         dpopt = _data_sensitivity(
             solver, pr.model_jac, pr.xdata, pr.w, pr.m_con, popt, factor_ok
         )
@@ -780,7 +811,7 @@ def _solve_fit(
         chi_square=chi2,
         reduced_chi_square=reduced_chi2,
         dof=dof,
-        n_data=pr.m_data,
+        n_data=n_data,
         n_params=pr.n,
         alpha=alpha,
         loss=pr.loss_name,
@@ -860,6 +891,372 @@ def curve_fit(
         prob, prob.x0,
         absolute_sigma=absolute_sigma, alpha=alpha,
         sensitivity=sensitivity, options=options,
+    )
+
+
+# --------------------------------------------------------------------------
+# Out-of-core / mini-batch streaming
+#
+# The solver only ever asks the Python side for three things per iteration --
+# objective, gradient, and the Gauss-Newton Hessian -- and all three are
+# *additive sums over data points* (see the closures in ``_build_fit_problem``).
+# So they can be computed by streaming mini-batches through and accumulating the
+# sums, never materialising the full dataset. The result is exact (identical to
+# the in-memory fit), at the cost of one pass over the data per solver iteration.
+# --------------------------------------------------------------------------
+
+def _unpack_batch(batch):
+    """Normalise one streamed batch into ``(x_batch, y_batch, weight_batch)``.
+
+    A batch is ``(x, y)`` or ``(x, y, sigma)``; ``weight = 1/sigma`` (ones when
+    no sigma is given), matching the global-array weighting in
+    :func:`_build_fit_problem`.
+    """
+    if len(batch) == 3:
+        xb, yb, sb = batch
+        xb = _to_array(xb)
+        yb = _to_array(yb).ravel()
+        sb = _to_array(sb).ravel()
+        if sb.shape != yb.shape:
+            raise ValueError("sigma_batch must be 1-D and match y_batch length")
+        if not np.all(np.isfinite(sb)) or np.any(sb <= 0.0):
+            raise ValueError(
+                "sigma must be positive and finite (per-point standard deviation)"
+            )
+        wb = 1.0 / sb
+    elif len(batch) == 2:
+        xb, yb = batch
+        xb = _to_array(xb)
+        yb = _to_array(yb).ravel()
+        wb = np.ones(yb.size)
+    else:
+        raise ValueError(
+            "each batch must be a (x, y) or (x, y, sigma) tuple; "
+            f"got a sequence of length {len(batch)}"
+        )
+    return xb, yb, wb
+
+
+@dataclass
+class _StreamPass:
+    """Everything accumulated in a single streaming pass over the data at a
+    fixed parameter vector: the solver quantities (objective/gradient/GN-Hessian)
+    plus the running sums needed for the goodness-of-fit diagnostics."""
+
+    obj: float
+    grad: np.ndarray
+    H: np.ndarray
+    n_data: int
+    sse: float        # sum of unweighted squared residuals
+    chi2: float       # sum of weighted squared residuals
+    abs_sum: float    # sum of |unweighted residual| (for MAE)
+    sum_y: float      # sum y  (for R^2 total sum of squares)
+    sum_y2: float     # sum y^2
+
+
+def _stream_pass(p, data_source, model, model_jac, loss_fn, fs2, n) -> _StreamPass:
+    """One full pass over ``data_source`` accumulating the objective, gradient,
+    Gauss-Newton Hessian, and diagnostics sums at ``p``.
+
+    Mirrors the in-memory closures of :func:`_build_fit_problem` term by term;
+    summation over batches is just the associativity of the per-point sums, so
+    the result equals the full-memory computation to floating-point round-off.
+    The Jacobian is computed on every pass (even for a pure objective request)
+    because re-deriving it would mean a second data read -- the data pass itself,
+    not the Jacobian, is the cost out of core.
+    """
+    p = _to_array(p)
+    obj = 0.0
+    grad = np.zeros(n)
+    H = np.zeros((n, n))
+    n_data = 0
+    sse = chi2 = abs_sum = sum_y = sum_y2 = 0.0
+    any_batch = False
+    # Transient overflow at line-search trial points is normal and benign.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        for batch in data_source():
+            xb, yb, wb = _unpack_batch(batch)
+            if yb.size == 0:
+                continue
+            any_batch = True
+            mb = model(xb, p)
+            r = (mb - yb) * wb
+            z = (r * r) / fs2
+            rho, rho1, rho2 = loss_fn(z)
+            obj += float(fs2 * np.sum(rho))
+            J = model_jac(xb, p)                       # (batch, n)
+            grad += 2.0 * (J.T @ (rho1 * r * wb))
+            weight = 2.0 * (rho1 + 2.0 * z * rho2)
+            Jw = J * wb[:, None]
+            H += (Jw.T * weight) @ Jw
+            # diagnostics (unweighted residual + weighted chi2 + y moments)
+            ru = yb - mb
+            n_data += yb.size
+            sse += float(ru @ ru)
+            chi2 += float(r @ r)
+            abs_sum += float(np.sum(np.abs(ru)))
+            sum_y += float(yb.sum())
+            sum_y2 += float(yb @ yb)
+    if not any_batch:
+        raise ValueError(
+            "data_source yielded no data; need at least one non-empty batch"
+        )
+    return _StreamPass(obj, grad, H, n_data, sse, chi2, abs_sum, sum_y, sum_y2)
+
+
+class _StreamingClosures:
+    """objective/gradient/gn_hessian over a streamed dataset.
+
+    The interior-point solver evaluates objective, then gradient, then Hessian at
+    the *same* parameter vector each iteration (the Rust bridge does not forward
+    its ``new_x`` flag to Python). A one-slot cache keyed on the parameter bytes
+    therefore collapses those three calls into a single data pass: the first call
+    streams the data and accumulates all three quantities; the other two are
+    cache hits.
+    """
+
+    def __init__(self, data_source, model, model_jac, loss_fn, fs2, n):
+        self._src = data_source
+        self._model = model
+        self._model_jac = model_jac
+        self._loss_fn = loss_fn
+        self._fs2 = fs2
+        self._n = n
+        self._key = None
+        self._pass: _StreamPass | None = None
+
+    def _ensure(self, p) -> _StreamPass:
+        p = _to_array(p)
+        key = p.tobytes()
+        if key != self._key or self._pass is None:
+            self._pass = _stream_pass(
+                p, self._src, self._model, self._model_jac,
+                self._loss_fn, self._fs2, self._n,
+            )
+            self._key = key
+        return self._pass
+
+    def objective(self, p):
+        return self._ensure(p).obj
+
+    def gradient(self, p):
+        return self._ensure(p).grad
+
+    def gn_hessian(self, p):
+        return self._ensure(p).H
+
+
+def _stream_covariance(
+    solver, popt, data_source, model, model_jac, loss_fn, fs2,
+    s2, is_robust, active_mask, n, m_con, factor_ok,
+):
+    """Streaming counterpart of :func:`_covariance`.
+
+    The interior least-squares optimum with exact derivatives reads the
+    covariance straight from the converged KKT factor -- *data-free*. Otherwise
+    the Gauss-Newton ``M = sum (w g)(w g)^T`` (and, for robust losses, the
+    sandwich pieces ``A``/``B``) are accumulated over one data pass and fed
+    through the identical algebra as :func:`_covariance`.
+    """
+    has_active = m_con > 0 or (active_mask is not None and active_mask.any())
+
+    # Interior, exact-derivative least-squares optimum: no data needed.
+    if not is_robust and not has_active and factor_ok:
+        inv_hs = _inv_hessian_from_factor(solver, n, m_con)
+        if inv_hs is not None:
+            return 2.0 * s2 * inv_hs, "reduced_hessian"
+
+    M = np.zeros((n, n))
+    A = np.zeros((n, n)) if is_robust else None
+    B = np.zeros((n, n)) if is_robust else None
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        for batch in data_source():
+            xb, yb, wb = _unpack_batch(batch)
+            if yb.size == 0:
+                continue
+            J = model_jac(xb, popt)
+            Jw = J * wb[:, None]
+            M += Jw.T @ Jw
+            if is_robust:
+                r = (model(xb, popt) - yb) * wb
+                z = (r * r) / fs2
+                _, rho1, rho2 = loss_fn(z)
+                A += (Jw.T * (rho1 + 2.0 * z * rho2)) @ Jw
+                score = (rho1 * r)[:, None] * Jw
+                B += score.T @ score
+
+    if is_robust:
+        Ainv = np.linalg.pinv(A)
+        return s2 * (Ainv @ B @ Ainv), "sandwich"
+    if has_active:
+        free = ~active_mask if active_mask is not None else np.ones(n, bool)
+        cov = np.zeros((n, n))
+        cov[np.ix_(free, free)] = s2 * np.linalg.pinv(M[np.ix_(free, free)])
+        return cov, "reduced_hessian(projected)"
+    return s2 * np.linalg.pinv(M), "jacobian"
+
+
+def _build_streaming_fit_problem(
+    f, data_source, p0, n_params, bounds, constraints,
+    loss, f_scale, jac, param_names,
+) -> _FitProblem:
+    """Assemble a :class:`_FitProblem` whose objective/gradient/Hessian stream
+    over ``data_source`` instead of capturing in-memory arrays. ``sigma`` is
+    supplied per-batch inside the data tuples, not here."""
+    if not callable(data_source):
+        raise ValueError(
+            "data_source must be a zero-argument callable returning a fresh "
+            "iterator of (x_batch, y_batch[, sigma_batch]) tuples (it is "
+            "re-read once per solver iteration)"
+        )
+
+    inferred = param_names if param_names is not None else _infer_param_names(f)
+
+    # --- parameter count + starting point ------------------------------
+    if p0 is None:
+        if n_params is None and inferred is None:
+            raise ValueError(
+                "cannot infer the number of parameters; pass p0 (a full "
+                "starting vector) or n_params"
+            )
+        n = int(n_params) if n_params is not None else len(inferred)
+        auto_p0 = True
+    else:
+        p0 = _to_array(p0).ravel()
+        n = p0.size
+        auto_p0 = False
+        if n_params is not None and n_params != n:
+            raise ValueError(f"p0 has {n} value(s) but n_params={n_params}")
+        if inferred is not None and n != len(inferred):
+            raise ValueError(
+                f"p0 has {n} value(s) but the model takes {len(inferred)} "
+                f"parameter(s) ({', '.join(inferred)})"
+            )
+
+    # --- loss ----------------------------------------------------------
+    if callable(loss):
+        loss_fn = loss
+        loss_name = getattr(loss, "__name__", "custom")
+    else:
+        if loss not in _LOSSES:
+            raise ValueError(f"unknown loss {loss!r}; choose from {sorted(_LOSSES)}")
+        loss_fn = _LOSSES[loss]
+        loss_name = loss
+    is_robust = (not callable(loss)) and loss in _ROBUST
+    f_scale = float(f_scale)
+    if not np.isfinite(f_scale) or f_scale <= 0.0:
+        raise ValueError("f_scale must be a positive, finite scale")
+    fs2 = f_scale ** 2
+
+    def model(x, p):
+        return _to_array(f(x, *np.asarray(p))).ravel()
+
+    lb, ub = _normalize_bounds(_normalize_bound_arg(bounds, n), n)
+    if auto_p0:
+        # No full-data pass is available for the data-driven _initial_guess, so
+        # fall back to ones clipped strictly inside the box. Passing p0 is
+        # strongly recommended for a streaming fit.
+        p0 = np.ones(n)
+        if lb is not None:
+            p0 = np.where(np.isfinite(lb), np.maximum(p0, lb), p0)
+        if ub is not None:
+            p0 = np.where(np.isfinite(ub), np.minimum(p0, ub), p0)
+
+    # Probe one batch (a throwaway fresh iterator) to trace the Jacobian. The
+    # JAX path retraces once if a later batch has a different shape, which is
+    # correct -- uniform batch sizes simply avoid the extra trace.
+    try:
+        first = next(iter(data_source()))
+    except StopIteration:
+        raise ValueError("data_source yielded no batches") from None
+    probe_x, _probe_y, _ = _unpack_batch(first)
+    model_jac, jac_exact, _ = _resolve_model_jac(f, model, jac, probe_x, p0)
+
+    closures = _StreamingClosures(data_source, model, model_jac, loss_fn, fs2, n)
+    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+
+    return _FitProblem(
+        f=f, model=model, model_jac=model_jac, residual=None,
+        objective=closures.objective, gradient=closures.gradient,
+        gn_hessian=closures.gn_hessian,
+        loss_fn=loss_fn, loss_name=loss_name, is_robust=is_robust, fs2=fs2,
+        w=None, sigma=None, lb=lb, ub=ub, n=n, param_names=inferred,
+        m_con=m_con, g_combined=g_combined, jac_combined=jac_combined,
+        cl=cl, cu=cu, jac_exact=jac_exact, xdata=None, ydata=None,
+        m_data=0, x0=np.asarray(p0, dtype=float),
+        bounds=bounds, constraints=constraints,
+        streaming=True, data_source=data_source, closures=closures,
+    )
+
+
+def curve_fit_streaming(
+    f: Callable,
+    data_source: Callable[[], Any],
+    p0=None,
+    *,
+    n_params: int | None = None,
+    absolute_sigma: bool = False,
+    bounds: Sequence | tuple = (-np.inf, np.inf),
+    constraints: Sequence | Mapping | None = None,
+    loss: str | Callable = "sse",
+    f_scale: float = 1.0,
+    jac: Callable | str | None = None,
+    alpha: float = 0.05,
+    options: Mapping[str, Any] | None = None,
+    param_names: list[str] | None = None,
+) -> CurveFitResult:
+    """Out-of-core :func:`curve_fit` for datasets too large to hold in memory.
+
+    Identical model and objective to :func:`curve_fit`, but the data is read in
+    mini-batches from ``data_source`` instead of as in-memory arrays. Because the
+    solver's objective, gradient, and Gauss-Newton Hessian are additive sums over
+    data points, streaming and accumulating them yields the *exact* same fit as
+    the in-memory call -- only one batch (plus an ``n_params x n_params`` matrix)
+    is ever resident. The cost is one pass over the data per solver iteration
+    (~10-50), so ``data_source`` must be re-readable.
+
+    Parameters
+    ----------
+    f
+        Model ``f(x, *params)`` (write it with ``jax.numpy`` for exact
+        derivatives; otherwise pass an analytic ``jac`` or ``jac="fd"``).
+    data_source
+        A **zero-argument callable** returning a *fresh* iterator of
+        ``(x_batch, y_batch)`` or ``(x_batch, y_batch, sigma_batch)`` tuples.
+        It is called once per solver pass, so it must yield the full dataset
+        each time (e.g. re-open an ``mmap``/HDF5 file and slice it). Uniform
+        batch sizes avoid an extra JAX retrace on a smaller final batch.
+    p0
+        Starting parameter vector. **Strongly recommended** -- with only
+        ``n_params`` the seed falls back to ones clipped into ``bounds`` (the
+        data-driven seed used by :func:`curve_fit` needs a full in-memory pass).
+    n_params
+        Number of parameters, required if ``p0`` is omitted and the model
+        signature does not name them.
+
+    Notes
+    -----
+    ``residuals`` (length ``n_data``) and the parametric sensitivity
+    ``dpopt_ddata`` (shape ``n_params x n_data``) are **not** returned -- they
+    are the size of the data and would defeat the purpose; both fields are
+    ``None``. All scalar diagnostics (SSE, chi-square, R^2, dof) and the
+    covariance / standard errors / confidence intervals are computed and are
+    identical to the in-memory fit. ``confidence_band`` works for new ``x`` but
+    falls back to a homoscedastic noise level (the per-point ``sigma`` is not
+    retained).
+
+    Returns
+    -------
+    CurveFitResult
+    """
+    prob = _build_streaming_fit_problem(
+        f, data_source, p0, n_params, bounds, constraints,
+        loss, f_scale, jac, param_names,
+    )
+    return _solve_fit(
+        prob, prob.x0,
+        absolute_sigma=absolute_sigma, alpha=alpha,
+        sensitivity=False, options=options,
     )
 
 
