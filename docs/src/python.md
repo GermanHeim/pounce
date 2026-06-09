@@ -166,10 +166,18 @@ res = minimize(fun, x0, options={"solver_selection": "nlp"})
 # Insist the problem is a convex QP; fail loudly if the probe disagrees:
 res = minimize(fun, x0, options={"solver_selection": "qp-ipm"})
 
-# A convex QCQP (e.g. a quadratic ball constraint) routes to the conic solver:
-ball = {"type": "ineq", "fun": lambda x: 1.0 - x @ x}   # x·x ≤ 1
-res = minimize(lambda x: -x[0] - x[1], [0.1, 0.1], constraints=[ball])
-print(res.info["solver"])          # 'socp'
+# A convex QCQP (e.g. a quadratic ball constraint) routes to the conic solver.
+# Give the objective and constraint analytic `jac`s: derivative-free detection
+# recovers the constraint Hessian from a finite-difference-of-finite-difference
+# Jacobian, which is too noisy to confirm the quadratic, so without `jac` the
+# probe conservatively defers to NLP (still the correct answer, just slower).
+ball = {"type": "ineq",
+        "fun": lambda x: 1.0 - x @ x,        # x·x ≤ 1
+        "jac": lambda x: -2.0 * np.asarray(x)}
+res = minimize(lambda x: -x[0] - x[1], [0.1, 0.1],
+               jac=lambda x: np.array([-1.0, -1.0]),
+               constraints=[ball])
+print(res.info.get("solver"))      # 'socp' (None on the NLP fall-back path)
 ```
 
 `route_tol` (default `1e-5`) sets the relative tolerance for the held-out

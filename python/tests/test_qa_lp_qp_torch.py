@@ -83,6 +83,22 @@ def test_routing_transparency_qp():
     assert np.max(np.abs(auto.x - nlp.x)) < 1e-6
 
 
+def test_docs_qcqp_snippet_routes_to_socp():
+    """Pins the docs/src/python.md QCQP routing snippet (#114): with analytic
+    jacs the quadratic-ball QCQP routes to 'socp' and reaches x≈[√½, √½].
+    Without jac, derivative-free detection defers to NLP -- so the doc snippet
+    (and this test) supplies them, making res.info['solver'] == 'socp' true."""
+    from pounce import minimize
+    ball = {"type": "ineq",
+            "fun": lambda x: 1.0 - x @ x,
+            "jac": lambda x: -2.0 * np.asarray(x)}
+    res = minimize(lambda x: -x[0] - x[1], [0.1, 0.1],
+                   jac=lambda x: np.array([-1.0, -1.0]),
+                   constraints=[ball])
+    assert res.info.get("solver") == "socp"
+    assert np.max(np.abs(res.x - np.sqrt(0.5))) < 1e-4
+
+
 def test_warm_start_fewer_iters_same_optimum():
     rng = np.random.default_rng(1)
     n = 50
