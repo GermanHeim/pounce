@@ -21,6 +21,7 @@
 - [Verifying Solutions](verify.md)
 - [Sensitivity Analysis](sensitivity.md)
 - [Sessions: Factor-Once / Solve-Many](sessions.md)
+- [Differentiable Solves & the DiffHandoff Contract](differentiable-solves.md)
 - [Interactive Debugger](debugger.md)
 
 # Integrations

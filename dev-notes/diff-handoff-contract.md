@@ -210,10 +210,25 @@ Status tags reflect the build-and-test sweep recorded above.
    mask. That rewiring is behavior-neutral by construction (same tol,
    same rule), so it has no test signal and was intentionally skipped —
    do it only when a *non-AD* consumer needs the mask it can't recompute.
-3. **Unify the multiplier naming at the boundary.** NLP and QP frontends
-   consume `lambda`/`mult_x_*`; the `lam`/`nu`/`mult_g` names become
-   internal mapping detail. (QP keeps its *OptNet backward* — only the
-   handoff field names unify, not the algorithm.) Small, low-risk.
+3. **[REVISED — document, don't rename] Reconcile the multiplier naming.**
+   Investigation showed the surface names are *deliberate public
+   contracts*, not accidental drift, so renaming would break consumers:
+   - `mult_g` / `mult_x_L` / `mult_x_U` (NLP) is the **cyipopt
+     compatibility** contract — the `Problem` API is cyipopt-shaped and
+     the C ABI exports exactly these symbols for cyipopt / JuMP / AMPL
+     clients. Untouchable.
+   - `x` / `y` / `z` / `z_lb` / `z_ub` (QP) is the **OptNet / convex-solver
+     convention** for a structurally different problem
+     (`min ½xᵀPx s.t. Gx≤h, Ax=b`; `y` = equality, `z` = inequality).
+   - `lam` / `nu` are **internal** to `_qp.py` and already consistent.
+     Note `lam` means *different things* across files (`_diff.py`: *all*
+     constraint duals; `_qp.py`: *inequality-only*), so "one name" would
+     be actively wrong.
+
+   The legitimate intent — a single canonical convention consumers can
+   rely on — is therefore satisfied by **documentation**, not renaming:
+   `DiffHandoff.lambda` is the canonical field, and the seam doc (step 6)
+   tabulates how each surface's duals map onto it. Folded into step 6.
 4. **[ALREADY DONE — pounce#76/#77] Factor-reuse / batched backward.**
    `JaxProblem` already routes both the single (`_bwd_single_factor_reuse`)
    and batched (`_bwd_batched_factor_reuse`) backward through
@@ -228,10 +243,13 @@ Status tags reflect the build-and-test sweep recorded above.
    array-API shim; gated on the two-port maintenance burden actually
    biting. Parity is already tested, so this is pure de-duplication with
    no correctness upside — do it last, or not at all.
-6. **[mostly DONE via step 2] Expose across the seam.** The masks are in
-   the info dict `nlp_pounce.py` reads, so the contract data already
-   crosses the language boundary. Remaining: *document* the info-dict
-   mask keys as the stable contract discopt differentiates against.
+6. **[DONE] Expose + document across the seam.** The masks are in the
+   info dict `nlp_pounce.py` reads, so the contract data already crosses
+   the language boundary. The user-facing contract — info-dict mask keys,
+   the canonical `lambda` field, and the per-surface multiplier mapping
+   table (this absorbs step 3's documentation intent) — is written up in
+   [`docs/src/differentiable-solves.md`](../docs/src/differentiable-solves.md)
+   and linked from `SUMMARY.md`.
 
 ## Verification
 
