@@ -928,13 +928,6 @@ impl IpoptApplication {
         Some(last_status)
     }
 
-    /// **Stub.** Re-solve with a warm start. Phase 7+.
-    pub fn reoptimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
-        // Same dispatch as `optimize_tnlp` for now; warm-start handling
-        // lands once the IPM path's warm-start hooks are exposed.
-        self.optimize_tnlp(tnlp)
-    }
-
     /// Constrained-NLP path: build adapter → OrigIpoptNlp → algorithm
     /// bundle, run `optimize`, populate statistics, and call
     /// `finalize_solution` on the user's TNLP.
