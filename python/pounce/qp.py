@@ -216,6 +216,68 @@ def _check_psd(pr, pc, pv, n: int) -> None:
         )
 
 
+def _mat_shape(mat):
+    """``(n_rows, n_cols)`` of a sparse-or-dense matrix, or ``None`` for a
+    ``None`` matrix or a dense array that is not 2-D (``_coo`` raises a clear
+    error for the latter)."""
+    if mat is None:
+        return None
+    if hasattr(mat, "tocoo") and hasattr(mat, "shape"):  # scipy sparse
+        return tuple(mat.shape)
+    sh = np.asarray(mat).shape
+    return sh if len(sh) == 2 else None
+
+
+def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
+    """Reject malformed inputs up front with a precise ``ValueError`` instead
+    of a misleading solver status (issue #113): a shape mismatch otherwise
+    surfaces as ``primal_infeasible`` and a NaN/Inf as ``iteration_limit``."""
+
+    def _finite(name, arr, allow_inf=False):
+        if arr is None:
+            return
+        data = np.asarray(
+            arr.tocoo().data if hasattr(arr, "tocoo") else arr, dtype=np.float64)
+        if not data.size:
+            return
+        # ±inf bounds are the idiomatic "no bound"; only NaN is malformed there.
+        bad = np.isnan(data) if allow_inf else ~np.isfinite(data)
+        if bad.any():
+            what = "NaN" if allow_inf else "NaN or Inf"
+            raise ValueError(f"solve_qp: `{name}` contains {what}")
+
+    for name, arr in (("P", P), ("c", c), ("A", A), ("b", b),
+                      ("G", G), ("h", h)):
+        _finite(name, arr)
+    _finite("lb", lb, allow_inf=True)
+    _finite("ub", ub, allow_inf=True)
+
+    psh = _mat_shape(P)
+    if psh is not None and psh != (n, n):
+        raise ValueError(f"solve_qp: `P` has shape {psh} but must be ({n}, {n})")
+
+    for mname, mat, vname, vec in (("A", A, "b", b), ("G", G, "h", h)):
+        sh = _mat_shape(mat)
+        if sh is None:
+            continue
+        rows, cols = sh
+        if cols != n:
+            raise ValueError(
+                f"solve_qp: `{mname}` has {cols} columns but n={n} (from `c`)")
+        vlen = 0 if vec is None else np.asarray(vec).ravel().shape[0]
+        if vlen != rows:
+            raise ValueError(
+                f"solve_qp: `{mname}` has {rows} rows but `{vname}` has "
+                f"length {vlen}")
+
+    for name, vec in (("lb", lb), ("ub", ub)):
+        if vec is not None:
+            vlen = np.asarray(vec).ravel().shape[0]
+            if vlen != n:
+                raise ValueError(
+                    f"solve_qp: `{name}` has length {vlen} but n={n} (from `c`)")
+
+
 def _build(
     P,
     c: Sequence[float],
@@ -228,6 +290,7 @@ def _build(
 ) -> "_pounce.QpProblem":
     c = np.asarray(c, dtype=np.float64).ravel()
     n = c.shape[0]
+    _validate(P, c, A, b, G, h, lb, ub, n)
     pr, pc, pv = _lower_triangle_coo(P, n)
     ar, ac, av = _coo(A, n, "A")
     gr, gc, gv = _coo(G, n, "G")

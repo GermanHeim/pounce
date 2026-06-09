@@ -238,19 +238,26 @@ def test_solve_qp_rejects_indefinite_P():
     assert r is not None
 
 
-@pytest.mark.xfail(reason="#113: no shape validation; mismatch -> infeasible",
-                   strict=False)
 def test_solve_qp_validates_A_b_shape():
-    with pytest.raises((ValueError, TypeError)):
+    # Fixed in #113: a shape mismatch used to surface as primal_infeasible;
+    # now it is a clear up-front ValueError.
+    with pytest.raises(ValueError, match="rows"):
         solve_qp(np.diag([2.0, 2.0]), np.zeros(2),
                  A=np.array([[1.0, 1.0]]), b=np.array([1.0, 2.0]))
+    # column-count mismatch is also caught.
+    with pytest.raises(ValueError, match="columns"):
+        solve_qp(np.eye(2), np.zeros(2),
+                 G=np.ones((1, 3)), h=np.array([1.0]))
 
 
-@pytest.mark.xfail(reason="#113: no NaN/Inf validation; nan -> iteration_limit",
-                   strict=False)
 def test_solve_qp_validates_nan_inputs():
-    with pytest.raises((ValueError, TypeError)):
+    # Fixed in #113: a NaN used to surface as iteration_limit with x=[nan,...];
+    # now it is a clear up-front ValueError.
+    with pytest.raises(ValueError, match="NaN or Inf"):
         solve_qp(np.eye(2), np.array([np.nan, 1.0]))
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        solve_qp(np.eye(2), np.zeros(2), G=np.array([[np.inf, 0.0]]),
+                 h=np.array([1.0]))
 
 
 @pytest.mark.xfail(reason="#115: minimize is verbose by default (unlike scipy)",
