@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._pounce import Problem
-from ._route import classify_and_extract
+from ._route import classify_and_extract, classify_and_extract_socp
 
 _EPS = float(np.finfo(np.float64).eps) ** 0.5
 
@@ -289,6 +289,44 @@ def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
     )
 
 
+def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
+    """Adapt a routed convex-QCQP solve (reformulated to a SOCP) back into an
+    :class:`OptimizeResult`.
+
+    Mirrors :func:`_solve_via_convex`: the conic solver minimizes
+    ``½xᵀPx + cᵀx`` over the cone constraints and never sees the objective's
+    degree-0 term, so ``ex.obj_const`` is added back to the reported value (the
+    same constant the CLI threads through ``run_convex_socp``). The result shape
+    matches the NLP path so the router stays transparent to callers.
+    """
+    from .qp import solve_socp
+
+    res = solve_socp(
+        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, cones=ex.cones,
+        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+    )
+    fun_val = float(res.obj) + ex.obj_const
+    success = res.status == "optimal"
+    return OptimizeResult(
+        x=np.asarray(res.x),
+        fun=fun_val,
+        success=success,
+        status=_QP_STATUS_CODE.get(res.status, 1),
+        message=res.status,
+        nit=int(res.iters),
+        info={
+            "solver": "socp",
+            "problem_class": ex.kind,
+            "obj_val": fun_val,
+            "obj_constant": ex.obj_const,
+            "status": res.status,
+            "status_msg": res.status,
+            "iter_count": int(res.iters),
+            "residuals": res.residuals,
+        },
+    )
+
+
 def minimize(
     fun: Callable[[np.ndarray], float],
     x0: np.ndarray,
@@ -304,15 +342,21 @@ def minimize(
     (``options={"solver_selection": "auto"}``) the problem is probed for
     structure: a linear or convex-quadratic objective with only linear
     constraints is dispatched to the specialized convex LP/QP interior-point
-    solver (``pounce.solve_qp``), and everything else falls through to the
-    general NLP filter-IPM. Detection is conservative and validated against
-    the true callables at held-out points, so a nonlinear problem is never
-    silently sent to the QP solver. Override with ``"solver_selection"``:
+    solver (``pounce.solve_qp``), a convex-quadratic objective/constraints
+    problem (a convex QCQP) is reformulated to a second-order cone program and
+    dispatched to the conic interior-point solver (``pounce.solve_socp``), and
+    everything else falls through to the general NLP filter-IPM. Detection is
+    conservative and validated against the true callables at held-out points,
+    so a nonlinear problem is never silently sent to the convex solver.
+    Override with ``"solver_selection"``:
 
-    * ``"auto"`` (default) — route LP/convex-QP to the convex solver, else NLP;
+    * ``"auto"`` (default) — route LP/convex-QP to the convex QP solver, a
+      convex QCQP to the conic solver, else NLP;
     * ``"nlp"`` — always use the NLP solver (the pre-routing behavior);
-    * ``"lp-ipm"`` / ``"qp-ipm"`` — force the convex solver, raising
-      ``ValueError`` if the problem is not detected as an LP / convex QP.
+    * ``"lp-ipm"`` / ``"qp-ipm"`` — force the convex QP solver, raising
+      ``ValueError`` if the problem is not detected as an LP / convex QP;
+    * ``"socp"`` — force the conic solver, raising ``ValueError`` if the
+      problem is not detected as a convex QCQP.
     """
     # Promote a scalar / 0-d x0 to 1-D, matching scipy.optimize.minimize, so a
     # single-variable problem can be written ``minimize(f, 1.5)``.
@@ -326,12 +370,13 @@ def minimize(
     opts = dict(options) if options else {}
     selection = str(opts.pop("solver_selection", "auto")).lower()
     route_tol = float(opts.pop("route_tol", 1e-5))
+    route_kw = dict(
+        fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
+        g_combined=g_combined, jac_combined=jac_combined,
+        cl=cl, cu=cu, x0=x0, rtol=route_tol,
+    )
     if selection in ("auto", "lp-ipm", "qp-ipm"):
-        extract = classify_and_extract(
-            fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
-            g_combined=g_combined, jac_combined=jac_combined,
-            cl=cl, cu=cu, x0=x0, rtol=route_tol,
-        )
+        extract = classify_and_extract(**route_kw)
         if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
             raise ValueError(
                 "solver_selection='lp-ipm' but the problem was not detected as "
@@ -344,6 +389,21 @@ def minimize(
             )
         if extract is not None:
             return _solve_via_convex(extract, opts)
+        # Auto: an LP/QP wasn't found — try a convex QCQP before giving up to
+        # the NLP solver (a quadratic *constraint* lands here, not above).
+        if selection == "auto":
+            socp = classify_and_extract_socp(**route_kw)
+            if socp is not None:
+                return _solve_via_socp(socp, opts)
+    elif selection == "socp":
+        socp = classify_and_extract_socp(**route_kw)
+        if socp is None:
+            raise ValueError(
+                "solver_selection='socp' but the problem was not detected as a "
+                "convex QCQP (convex-quadratic objective and/or constraints, all "
+                "convex, with only linear equalities)"
+            )
+        return _solve_via_socp(socp, opts)
 
     problem_obj = _build_problem_obj(
         fun=fun,
