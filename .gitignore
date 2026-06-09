@@ -6,6 +6,11 @@
 # mdbook render output — `make book` regenerates it from docs/src/.
 /docs/book
 
+# Versioned-docs render output — `scripts/build-versioned-docs.sh` default
+# output dir (stable + dev + archived tag builds for GitHub Pages).
+/site
+/_serve
+
 # Local Python venv used to build/test the native extension
 # (`maturin develop`). Machine-specific build artifact.
 /.venv
