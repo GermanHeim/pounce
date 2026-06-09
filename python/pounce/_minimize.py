@@ -357,6 +357,11 @@ def minimize(
       ``ValueError`` if the problem is not detected as an LP / convex QP;
     * ``"socp"`` — force the conic solver, raising ``ValueError`` if the
       problem is not detected as a convex QCQP.
+
+    Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
+    Pass ``options={"disp": True}`` for a concise log or an explicit
+    ``options={"print_level": N}`` (0–12) to control the NLP backend's IPM
+    iteration table directly.
     """
     # Promote a scalar / 0-d x0 to 1-D, matching scipy.optimize.minimize, so a
     # single-variable problem can be written ``minimize(f, 1.5)``.
@@ -370,6 +375,13 @@ def minimize(
     opts = dict(options) if options else {}
     selection = str(opts.pop("solver_selection", "auto")).lower()
     route_tol = float(opts.pop("route_tol", 1e-5))
+    # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
+    # NLP backend otherwise prints a full IPM iteration table by default (and the
+    # log is written from Rust to fd 1, so Python stdout redirection can't catch
+    # it). Default print_level to 0 (silent) unless the caller passes an explicit
+    # print_level or scipy-style disp=True. (#115)
+    disp = bool(opts.pop("disp", False))
+    opts.setdefault("print_level", 5 if disp else 0)
     route_kw = dict(
         fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
         g_combined=g_combined, jac_combined=jac_combined,

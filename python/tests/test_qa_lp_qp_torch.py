@@ -276,25 +276,30 @@ def test_solve_qp_validates_nan_inputs():
                  h=np.array([1.0]))
 
 
-@pytest.mark.xfail(reason="#115: minimize is verbose by default (unlike scipy)",
-                   strict=False)
 def test_minimize_silent_by_default(tmp_path):
-    # The IPM log is written from Rust to OS fd 1, so it must be captured at the
-    # file-descriptor level (Python's redirect_stdout cannot see it — that is
-    # itself part of #115). Desired: a default minimize() emits nothing.
+    # Fixed in #115: minimize() is now silent by default (like scipy), while
+    # disp=True / print_level>0 still emit the IPM table. The log is written
+    # from Rust to OS fd 1, so it must be captured at the file-descriptor level
+    # (Python's redirect_stdout cannot see it).
     import os
     from pounce import minimize
-    cap = tmp_path / "fd1.txt"
-    saved = os.dup(1)
-    fd = os.open(str(cap), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    try:
-        os.dup2(fd, 1)
-        minimize(lambda x: (x - 1) @ (x - 1) + 1, x0=np.zeros(3))
-    finally:
-        os.dup2(saved, 1)
-        os.close(fd)
-        os.close(saved)
-    assert cap.read_text() == ""
+
+    def _fd1_bytes(**kw):
+        cap = tmp_path / "fd1.txt"
+        saved = os.dup(1)
+        fd = os.open(str(cap), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        try:
+            os.dup2(fd, 1)
+            minimize(lambda x: (x - 1) @ (x - 1) + 1, x0=np.zeros(3), **kw)
+        finally:
+            os.dup2(saved, 1)
+            os.close(fd)
+            os.close(saved)
+        return len(cap.read_text())
+
+    assert _fd1_bytes() == 0                                 # silent default
+    assert _fd1_bytes(options={"disp": True}) > 0            # opt-in verbose
+    assert _fd1_bytes(options={"print_level": 5}) > 0        # explicit level
 
 
 @pytest.mark.xfail(reason="#117: cryptic TypeError on SymPy input", strict=False)
