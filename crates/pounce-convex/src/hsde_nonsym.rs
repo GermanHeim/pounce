@@ -31,7 +31,7 @@
 use crate::cones::{BarrierCone, Cone, ConeBlock, ExponentialCone, PowerCone, SecondOrderCone};
 use crate::debug::{fire, ConvexDebugState};
 use crate::ipm::{build_rhs, detect_infeasibility_with, dot, inf_norm, split_step, QpOptions};
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::qp::{breakdown_status, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -908,8 +908,11 @@ where
         // "Acceptable level": near the cone boundary the barrier Hessian blows
         // up (ψ → 0) and the scaling/factorization can break down a hair short
         // of `tol`. If that happens while the KKT residuals are already tiny
-        // (within `~1e3·tol`), the current iterate *is* essentially optimal —
-        // accept it rather than reporting a spurious NumericalFailure.
+        // (within `~1e3·tol`), the iterate is usable — report it as
+        // `OptimalInaccurate` (reduced accuracy) rather than discarding it as a
+        // spurious NumericalFailure. It is deliberately *not* a bare `Optimal`:
+        // the residual sits above `tol`, so callers can distinguish it from a
+        // genuinely converged solve (code review 2026-06 item M20).
         let near_opt = res < 1e3 * opts.tol;
         // Infeasibility certificate as τ → 0. Validate the Farkas multiplier
         // and the recession direction against the *actual* (non-symmetric)
@@ -927,31 +930,19 @@ where
         let scalings = match kkt.update_blocks(&cone, &s, &z, opts.reg, &mut kkt_vals) {
             Some(sc) => sc,
             None => {
-                status = if near_opt {
-                    QpStatus::Optimal
-                } else {
-                    QpStatus::NumericalFailure
-                };
+                status = breakdown_status(near_opt);
                 break;
             }
         };
         if fact.refactor(&kkt_vals).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
 
         // Constant direction p: M p = (−c, b, h).
         build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut p_x, &mut p_y, &mut p_z);
@@ -966,11 +957,7 @@ where
         comp_term(&cone, &scalings, &s, &z, 0.0, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -1069,19 +1056,11 @@ where
             break;
         }
         if solve_failed {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         if alpha <= 0.0 {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
 
@@ -1164,8 +1143,11 @@ where
     // (NumericalFailure / IterationLimit) but the best iterate we reached has a
     // KKT residual within √tol (e.g. tol=1e-8 → 1e-4), the problem was
     // essentially solved — a near-boundary stall on a non-symmetric cone, not a
-    // genuine failure. Restore that iterate and report Optimal, mirroring the
-    // "solved to reduced accuracy" outcome of ECOS/Clarabel/SCS. This never
+    // genuine failure. Restore that iterate and report `OptimalInaccurate`,
+    // mirroring the "solved to reduced accuracy" outcome of ECOS/Clarabel/SCS.
+    // It is reported as `OptimalInaccurate`, *not* a bare `Optimal`: the
+    // residual is only within `√tol`, so callers can tell it apart from a
+    // genuinely converged solve (code review 2026-06 item M20). This never
     // fires for infeasible/unbounded problems (their residuals never get this
     // small — the embedding drives τ → 0 and the certificate path triggers
     // first) and never relaxes the clean convergence test above (still `tol`).
@@ -1184,7 +1166,7 @@ where
                 z = bz;
                 s = bs;
                 tau = btau;
-                status = QpStatus::Optimal;
+                status = QpStatus::OptimalInaccurate;
             }
         }
     }
@@ -1411,9 +1393,12 @@ mod tests {
         };
         let specs = [NsBlock::exp(), NsBlock::exp(), NsBlock::Orthant(1)];
         let sol = solve_conic_hsde_nonsym(&prob, &specs, &opts(), backend);
-        assert_eq!(
-            sol.status,
-            QpStatus::Optimal,
+        // This exp-cone GP reaches its optimum through the driver's
+        // reduced-accuracy fallback (best iterate within √tol), so the status
+        // is `OptimalInaccurate` — a usable solve at reduced accuracy, not a
+        // failure. The objective check below pins the actual solution quality.
+        assert!(
+            matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
             "not optimal: {:?}",
             sol.status
         );
@@ -1606,7 +1591,14 @@ mod tests {
         // length-mismatched (ignored) vector all reach the same optimum.
         for warm in [cold.x.as_slice(), &[50.0, -30.0, 9.0], &[1.0]] {
             let sol = solve_conic_hsde_nonsym_warm(&prob, &specs, warm, &opts(), backend);
-            assert_eq!(sol.status, QpStatus::Optimal, "warm {warm:?}");
+            // A bad warm start can land on the reduced-accuracy fallback
+            // (`OptimalInaccurate`); both count as a usable solve. The
+            // start-independent invariant is the objective, checked next.
+            assert!(
+                matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+                "warm {warm:?}: {:?}",
+                sol.status
+            );
             assert!(
                 (sol.obj - cold.obj).abs() < 1e-5,
                 "warm {warm:?} obj {} vs {}",

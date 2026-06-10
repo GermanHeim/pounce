@@ -1212,10 +1212,32 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
     use pounce_convex::QpStatus;
     match s {
         QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+        // Reduced-accuracy solve (residual above `tol` but usable) — Ipopt's
+        // "Solved To Acceptable Level" is the matching NLP-side status.
+        QpStatus::OptimalInaccurate => ApplicationReturnStatus::SolvedToAcceptableLevel,
         QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
         QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
+    }
+}
+
+/// Map a convex-solver status onto the AMPL `.sol` terminal line: the message,
+/// whether the solve is treated as a success (drives the exit code), and the
+/// `solve_result_num`. AMPL convention: 0 solved, 100–199 solved to reduced
+/// accuracy, 200–299 infeasible, 300–399 unbounded, 400–499 limit, 500–599
+/// failure. Shared by the QP/LP and SOCP report paths so the two cannot drift.
+fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32) {
+    use pounce_convex::QpStatus;
+    match s {
+        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
+        QpStatus::OptimalInaccurate => {
+            ("Solved to acceptable level (reduced accuracy).", true, 100)
+        }
+        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
+        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
+        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
     }
 }
 
@@ -1319,15 +1341,7 @@ fn run_convex_qp(
     // dropped constant term: f_user = sign * (½xᵀPx + cᵀx) + const.
     let reported_obj = sign * sol.obj + obj_const;
 
-    // AMPL `.sol` convention: 0 solved, 200–299 infeasible, 300–399
-    // unbounded, 400–499 limit, 500–599 failure.
-    let (msg, ok, srn) = match sol.status {
-        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
-        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
-        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
-        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
-        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
-    };
+    let (msg, ok, srn) = convex_status_report(sol.status);
     println!(
         "POUNCE ({} IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
         class.name(),
@@ -1431,7 +1445,7 @@ fn run_convex_socp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
 ) -> ExitCode {
-    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions, QpStatus};
+    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions};
 
     let (qp, con_map, obj_nl_const, cones) =
         match pounce_cli::qp_extract::extract_socp_with_map(prob) {
@@ -1470,13 +1484,7 @@ fn run_convex_socp(
 
     let reported_obj = sign * sol.obj + obj_const;
 
-    let (msg, ok, srn) = match sol.status {
-        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
-        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
-        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
-        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
-        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
-    };
+    let (msg, ok, srn) = convex_status_report(sol.status);
     println!(
         "POUNCE ({} conic IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
         class.name(),
@@ -1799,4 +1807,48 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
             }
         },
     )
+}
+
+#[cfg(test)]
+mod convex_status_tests {
+    use super::{convex_status_report, qp_status_to_ars};
+    use pounce_convex::QpStatus;
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
+
+    /// Code review 2026-06 item M20: the reduced-accuracy convex status
+    /// (`OptimalInaccurate`) must surface to the user as a *distinct* outcome —
+    /// not silently folded into a clean `Optimal`. It maps to AMPL
+    /// `solve_result_num` 100 (the "solved to acceptable/reduced accuracy"
+    /// band) with a distinct message, and onto the NLP-side
+    /// `SolvedToAcceptableLevel` status, so callers reading either the `.sol`
+    /// terminal line or the JSON report can tell it apart from a full-accuracy
+    /// solve.
+    #[test]
+    fn optimal_inaccurate_is_distinct_from_optimal() {
+        let (msg, ok, srn) = convex_status_report(QpStatus::OptimalInaccurate);
+        assert_eq!(srn, 100, "reduced-accuracy solve must use the 100 band");
+        assert!(ok, "a reduced-accuracy solve is still a usable success");
+        assert!(
+            msg.contains("acceptable"),
+            "message should signal reduced accuracy, got {msg:?}"
+        );
+
+        let (opt_msg, _, opt_srn) = convex_status_report(QpStatus::Optimal);
+        assert_eq!(opt_srn, 0);
+        assert_ne!(
+            srn, opt_srn,
+            "OptimalInaccurate must not share Optimal's solve_result_num"
+        );
+        assert_ne!(msg, opt_msg, "the two must read differently to the user");
+
+        // And on the NLP-side status vocabulary used by the JSON report.
+        assert_eq!(
+            qp_status_to_ars(QpStatus::OptimalInaccurate),
+            ApplicationReturnStatus::SolvedToAcceptableLevel
+        );
+        assert_eq!(
+            qp_status_to_ars(QpStatus::Optimal),
+            ApplicationReturnStatus::SolveSucceeded
+        );
+    }
 }

@@ -170,6 +170,19 @@ impl QpProblem {
 pub enum QpStatus {
     /// Converged: KKT residuals and duality gap below tolerance.
     Optimal,
+    /// Solved to *reduced* accuracy: the KKT factorization or a back-solve
+    /// broke down (or the iteration cap / a stalled step was hit) while the
+    /// best KKT residual reached was already small — within `~1e3·tol` for the
+    /// symmetric HSDE driver, `√tol` for the non-symmetric one — but never as
+    /// tight as the clean `tol` convergence test. The returned iterate is
+    /// usable but its residual sits above `tol`. This is the analogue of
+    /// ECOS/Clarabel's `*_INACC` ("solved to inaccurate") and Ipopt's
+    /// "Solved To Acceptable Level": callers that need full accuracy (e.g.
+    /// sensitivity, SOS exactness certification) should treat it as *not*
+    /// [`Optimal`](Self::Optimal). Previously these cases were reported as a
+    /// bare `Optimal`, indistinguishable from a genuinely-converged solve.
+    /// (Code review 2026-06 item M20.)
+    OptimalInaccurate,
     /// Primal infeasible: no `x` satisfies `Ax = b, Gx ≤ h`. A Farkas
     /// certificate `(y, z ≥ 0)` with `Aᵀy + Gᵀz ≈ 0` and `bᵀy + hᵀz < 0`
     /// was detected and verified.
@@ -181,6 +194,22 @@ pub enum QpStatus {
     IterationLimit,
     /// The KKT factorization failed (e.g. structurally singular system).
     NumericalFailure,
+}
+
+/// Terminal status for a mid-iteration breakdown (factorization / back-solve
+/// failure, or a non-positive step). When the best KKT residual reached so far
+/// is already within the reduced-accuracy band (`near_opt`), the iterate is
+/// usable and we report [`QpStatus::OptimalInaccurate`] rather than discarding
+/// it as a [`QpStatus::NumericalFailure`]. Centralized so the symmetric and
+/// non-symmetric HSDE drivers cannot drift apart, and so the "a near-`tol`
+/// breakdown is *not* a bare `Optimal`" rule is unit-testable. (Code review
+/// 2026-06 item M20.)
+pub(crate) fn breakdown_status(near_opt: bool) -> QpStatus {
+    if near_opt {
+        QpStatus::OptimalInaccurate
+    } else {
+        QpStatus::NumericalFailure
+    }
 }
 
 /// Result of an IPM solve: the primal/dual solution and status.
@@ -439,5 +468,25 @@ mod residual_tests {
             res.kkt_error() < 1e-6,
             "binding-inequality residuals not small: {res:?}"
         );
+    }
+
+    /// Code review 2026-06 item M20: a mid-iteration breakdown whose best KKT
+    /// residual is already within the reduced-accuracy band must be reported as
+    /// the distinct `OptimalInaccurate`, *not* a bare `Optimal`. Before the fix
+    /// both the symmetric and non-symmetric HSDE drivers re-labeled these
+    /// breakdowns plain `Optimal`, so callers could not tell a residual sitting
+    /// at ~1e3·tol apart from a genuinely converged solve. `breakdown_status`
+    /// centralizes that decision; this pins it.
+    #[test]
+    fn breakdown_status_marks_near_opt_as_inaccurate_not_optimal() {
+        // Near-optimal breakdown: usable iterate, reduced accuracy.
+        assert_eq!(breakdown_status(true), QpStatus::OptimalInaccurate);
+        assert_ne!(
+            breakdown_status(true),
+            QpStatus::Optimal,
+            "a near-tol breakdown must be distinguishable from a clean Optimal"
+        );
+        // Genuine breakdown with a large residual: still a hard failure.
+        assert_eq!(breakdown_status(false), QpStatus::NumericalFailure);
     }
 }

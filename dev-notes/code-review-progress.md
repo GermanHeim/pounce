@@ -43,6 +43,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M17 | `eval_c_internal` re-fetches all bounds and makes four full-size scratch allocations per cache miss, in the line-search hot path | **FIXED** | **Mechanism confirmed + reproduced.** In `OrigIpoptNlp` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs`), `eval_c_internal` formed the equality residual `c_i = g[g_idx] - g_l[g_idx]` by calling the user `get_bounds_info` on **every** cache-missing iterate — allocating four fresh full-size scratch vectors (`tmp_x_l`, `tmp_x_u`, `full_g_l`, `full_g_u`) each time — purely to read the *constant* equality RHS `g_l[g_idx]` (`g_l == g_u` for equalities). Since the filter line search evaluates `c` at every trial point, this per-trial bounds fetch + four allocations sat squarely in the hot path. Upstream Ipopt captures the RHS once as `c_rhs`. **Reproduced** with a counting `Hs071` TNLP (now also tallying `get_bounds_info_calls`): pre-fix, each fresh iterate added another `get_bounds_info` call (6 extra calls for 6 iterates above the 2-call construction baseline). **Fix**: capture the constant RHS once at construction — new field `c_rhs: Vec<Number>` (length `n_c`), computed in `OrigIpoptNlp::new` from the already-fetched `full_g_l` as `c_map.iter().map(|&g_idx| full_g_l[g_idx]).collect()`. `eval_c_internal` now forms `raw = full_g[g_idx] - self.c_rhs[i]`, dropping the per-iterate `get_bounds_info` call and all four scratch allocations. Scaling and the `full_g` source (M16's shared cache) are unchanged, so numerics are identical. **Verified post-fix**: counting TNLP shows `get_bounds_info_calls` stays at the construction baseline across 6 fresh-iterate `eval_c` calls; residual value unchanged (c = g1−40 = 12 at the HS071 start); end-to-end `lp_afiro solver_selection=nlp` still converges to −464.75314761311961 ("Optimal Solution Found"). **Test** (`orig_ipopt_nlp::tests::eval_c_does_not_refetch_bounds_per_iterate`): snapshots `get_bounds_info_calls` after construction, runs `eval_c` at six distinct iterates, asserts the count is unchanged (and that c=12). **Pre-fix FAILS** (`left: 8, right: 2`), confirmed by neutering the fix — temporarily restoring the per-iterate `get_bounds_info` fetch — then restored. `pounce-nlp` (37, 0 failed), `pounce-algorithm` (245), and full `pounce-cli` (159 lib + all integration, 0 failed) green. See `## M17 detail`. |
 | M18 | Per-call allocations in the tape-AD gradient hot path (`forward` + `reverse` allocate per summand tape, ~10⁶ tapes per `eval_jac_g`) | **FIXED** | **Mechanism confirmed + reproduced.** In `crates/pounce-nl/src/nl_tape.rs`, `Tape::gradient_seed` calls `forward` (allocates a `Vec<f64>` of forward values, `:198`) and `reverse` (allocates `adj = vec![0.0; n]`, `:272`) on every invocation. The `.nl` front end (`nl_reader.rs`) deliberately emits one tiny `Tape` per additive summand, so `eval_jac_g` (`gradient_seed` per constraint summand) and `eval_grad_f` (per objective summand) drive these two small allocations millions of times on large models. The Hessian path already had the `forward_into` + reusable-scratch pattern; the gradient path did not. **Reproduced** with a counting global allocator: `gradient_seed` allocates on essentially every call (≥1000 allocations across 1000 calls on a sample tape). **Fix** (mirrors the Hessian scratch pattern): added `Tape::gradient_seed_into(x, seed, grad, vals, adj)` — a `pub` allocation-free variant that runs `forward_into` (existing) into a caller `vals` arena and a new private `reverse_into(vals, seed, grad, adj)` that zeroes the touched `[0,n)` slots of a caller `adj` arena instead of allocating one. `reverse` now delegates to `reverse_into` (behavior unchanged; `gradient_seed` and the FD-comparison tests still exercise it). The two hot-path callers in `nl_reader.rs` (`eval_grad_f`, `eval_jac_g`) now call `gradient_seed_into`, reusing the existing `vals_scratch`/`adj_scratch` arenas (already sized to `max_tape_n`, the max over all obj+con tapes, so always ≥ any single summand tape). **Verified post-fix**: the counting allocator shows `gradient_seed_into` performs **0** allocations across 1000 calls (vs ≥1000 for `gradient_seed`) and computes the identical gradient; end-to-end NLP solves unchanged — `convex_qp`→2.0, `tame`→0.0, `nonconvex_qp`→1.0, all "Optimal Solution Found". **Test** (`tests/tape_gradient_no_alloc.rs`): a counting `#[global_allocator]` (single test in its own integration binary so no sibling thread perturbs the counter) asserts `gradient_seed_into` == `gradient_seed` numerically, the baseline allocates ≥1000×, and the new path allocates 0×. **Pre-fix the 0-assertion FAILS** (`left: 1000, right: 0`), confirmed by neutering `gradient_seed_into` with a throwaway `vec!` per call, then restored. `pounce-nl` (78 lib + 1 new integration, 0 failed) and full `pounce-cli` (0 failed) green. See `## M18 detail`. |
 | M19 | Initial duals from the `.nl` `d` segment parsed into `lambda0` but never used; `warm_start_init_point yes` silently warm-starts from zero multipliers | **FIXED** | **Mechanism confirmed + reachability traced.** The `.nl` reader (`crates/pounce-nl/src/nl_reader.rs`) parses the `d` segment into `NlProblem::lambda0` (`:458`), but `NlTnlp::get_starting_point` only copied `x0` into `sp.x` and ignored `sp.lambda` entirely — so the parsed constraint multipliers were discarded. The module header even claimed the `d` segment is "read and discarded". **Reachability**: the warm-start path is live — `OrigIpoptNlp::get_starting_point` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs:1289`) requests `init_lambda: init_y_c \|\| init_y_d` and, on return, compresses `full_lambda` into the algorithm-side `y_c`/`y_d` via `c_map`/`d_map` with `obj`/constraint scaling (`:1320-1333`). The engine sets `init_lambda` when `warm_start_init_point yes`; with the TNLP leaving `sp.lambda` untouched, the warm start began from zero multipliers — defeating the point of supplying `lambda0`. **Fix**: when `sp.init_lambda` is set, `get_starting_point` now copies `self.prob.lambda0` into `sp.lambda` (the `.nl` `d` segment carries no bound multipliers, so `z_l`/`z_u` are left to engine defaults); the stale module-header doc comment is corrected to state both `x` and `d` are parsed and returned, the duals feeding a `warm_start_init_point` solve. **Verified post-fix**: the new test parses an equality-constrained `.nl` with `d1\n0 2.5`, asserts `lambda0 == [2.5]`, then drives `get_starting_point` with `init_lambda: true` (yields `lambda == [2.5]`) and `init_lambda: false` on a pre-filled buffer (left untouched at `[7.0]`). Cold-start paths are unaffected because they pass `init_lambda: false`; `lp_afiro solver_selection=nlp` still converges to −464.75314761311961 ("Optimal"). **Test** (`nl_reader::tests::get_starting_point_returns_nl_initial_duals`). **Pre-fix the warm-start branch FAILS** (`left: [0.0], right: [2.5]`), confirmed by neutering the copy with `if sp.init_lambda && false`, then restored. `pounce-nl` (79 lib + integration, 0 failed) and full `pounce-cli` (0 failed) green. See `## M19 detail`. |
+| M20 | Silent tolerance relaxation: convex IPM breakdowns re-labeled `Optimal` at residuals far above `tol`, with no way for callers to detect the reduced accuracy | **FIXED** | **Mechanism confirmed + reproduced.** Both convex HSDE drivers accept a usable-but-inaccurate iterate when a factorization/back-solve breaks down (or the cap/a stalled step is hit) while the best KKT residual is already small: the symmetric `hsde.rs` accepts within `~1e3·tol` (`near_opt`, 4 break sites), and the non-symmetric `hsde_nonsym.rs` accepts within `~1e3·tol` (6 break sites) and, at exit, restores the best iterate if `best_res < √tol` (`:1176`). Each of these reported a bare `QpStatus::Optimal` — and since `QpStatus` had no reduced-accuracy variant and `QpSolution` carries no final-residual field, a residual sitting at `1e-5`/`1e-4` (default `tol=1e-8`) was indistinguishable from a genuinely converged solve. ECOS/Clarabel expose exactly this as a distinct `*_INACC` status. **Reproduced**: the exp/power-cone GP suites (`exp_cone_vs_nlp`, `cblib_cbf`, `cblib_vs_nlp` — `demb761`/`beck751`/`fang88`/`pow3`, log-sum-exp, entropy, near-boundary GP) reach their optima through the non-symmetric reduced-accuracy fallback, so they were *already* being reported as `Optimal` despite residuals only within `√tol` — the masquerade in the field. **Fix** (mirrors ECOS/Clarabel `*_INACC`): added `QpStatus::OptimalInaccurate` and a centralized `breakdown_status(near_opt)` (in `qp.rs`) that returns `OptimalInaccurate` when `near_opt` (else `NumericalFailure`); both drivers now call it instead of an inline `if near_opt { Optimal } else { NumericalFailure }`, and the non-symmetric best-iterate restoration sets `OptimalInaccurate`. The clean convergence test (`pres<tol && dres<tol && gap<tol → Optimal`) is untouched, so genuinely-converged solves still report `Optimal`. CLI surfacing: `convex_status_report` (extracted, shared by the QP/LP and SOCP report paths) maps `OptimalInaccurate → ("Solved to acceptable level (reduced accuracy).", ok=true, solve_result_num=100)` — the AMPL 100–199 reduced-accuracy band; `qp_status_to_ars` (CLI + `pounce_cblib`) maps it to `ApplicationReturnStatus::SolvedToAcceptableLevel` (the JSON report's `solve_result_num` 100); `pounce_cblib` treats it as a success exit code; the two `pounce-py` `status_str` maps emit `"optimal_inaccurate"`. Conservatively, sensitivity (`sensitivity.rs:91`) and SOS exactness (`sos.rs:474/498`) keep their strict `== Optimal` gate, so reduced-accuracy solutions are *not* used as exact certificates. **Verified post-fix**: well-conditioned `lp_afiro solver_selection=lp-ipm` and `convex_qp solver_selection=qp-ipm` still print "Optimal Solution Found." (`srn` 0) — the new path does not fire for them; the exp/power-cone suites now report `OptimalInaccurate` while their objective cross-checks against an independent NLP still hold. **Tests**: `qp::residual_tests::breakdown_status_marks_near_opt_as_inaccurate_not_optimal` (pins `breakdown_status(true)==OptimalInaccurate≠Optimal`, `(false)==NumericalFailure`); CLI `convex_status_tests::optimal_inaccurate_is_distinct_from_optimal` (pins `srn=100`, `ok=true`, message ≠ "Optimal…", and `→ SolvedToAcceptableLevel`, all distinct from `Optimal`). Existing conic tests updated to accept either usable status (clean `Optimal` or `OptimalInaccurate`) while keeping their objective checks. **Pre-fix FAILS** (`left: Optimal, right: OptimalInaccurate`), confirmed by neutering `breakdown_status` to return `Optimal`, then restored. `pounce-convex` (104 lib + integration, 0 failed), full `pounce-cli` (20 binaries, 0 failed), `pounce-py` build green. **Residual-field follow-up** (a `QpSolution.final_residual`) deferred — the distinct status already resolves "callers cannot detect it". See `## M20 detail`. |
 
 ## C1 detail
 
@@ -1769,3 +1770,84 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   confirmation.
 - **Result**: `pounce-nl` green (79 lib + integration, 0 failed); downstream
   full `pounce-cli` green (0 failed).
+
+## M20 detail
+
+- **Issue (review M20)**: the convex IPM's two HSDE drivers accept a usable
+  iterate when the KKT factorization / a back-solve breaks down (or the cap or
+  a non-positive step is hit) while the best residual reached is already small.
+  The symmetric `hsde.rs` accepts within `~1e3·tol` (`near_opt`, four break
+  sites: refactor, the constant-direction solve, the predictor solve, the
+  corrector solve); the non-symmetric `hsde_nonsym.rs` accepts within
+  `~1e3·tol` (six break sites) and, on exit, restores the best iterate when
+  `best_res < √tol` (`:1176`). Every one of these reported a bare
+  `QpStatus::Optimal`. With no reduced-accuracy variant on `QpStatus` and no
+  final-residual field on `QpSolution`, a residual of `1e-5`/`1e-4`
+  (default `tol = 1e-8`) was indistinguishable from a genuine convergence —
+  exactly the "silent tolerance relaxation" the review names. ECOS/Clarabel
+  expose this as a distinct `*_INACC` status.
+- **Reproduced (real instances, not synthetic)**: the exp/power-cone geometric
+  programs in `exp_cone_vs_nlp`, `cblib_cbf`, and `cblib_vs_nlp` —
+  `demb761`/`beck751`/`fang88`, the synthetic power cone `pow3`, log-sum-exp,
+  entropy maximization, and the near-boundary GP — all reach their optimum
+  through the non-symmetric driver's reduced-accuracy fallback, so they were
+  *already* being reported as a bare `Optimal` despite residuals only within
+  `√tol`. Flipping their status assertions to require the new
+  `OptimalInaccurate` shows them landing there (and *not* on a clean
+  `Optimal`).
+- **Fix** (mirrors ECOS/Clarabel `*_INACC` and Ipopt's "Solved To Acceptable
+  Level"):
+  - New `QpStatus::OptimalInaccurate` variant (documented as a usable solve
+    whose residual sits above `tol`; callers needing full accuracy must treat
+    it as *not* `Optimal`).
+  - New centralized `pub(crate) fn breakdown_status(near_opt) -> QpStatus` in
+    `qp.rs` returning `OptimalInaccurate` when `near_opt`, else
+    `NumericalFailure`. Both drivers call it in place of the inline
+    `if near_opt { Optimal } else { NumericalFailure }` (10 sites total), so
+    the symmetric and non-symmetric drivers cannot drift apart and the rule is
+    unit-testable. The non-symmetric best-iterate restoration sets
+    `OptimalInaccurate` directly.
+  - The clean convergence test (`pres<tol && dres<tol && gap<tol → Optimal`)
+    is untouched — genuinely converged solves still report `Optimal`.
+  - CLI surfacing: extracted `convex_status_report(status) -> (msg, ok, srn)`
+    (shared by the QP/LP and SOCP report paths, replacing two identical inline
+    matches) maps `OptimalInaccurate → ("Solved to acceptable level (reduced
+    accuracy).", ok=true, srn=100)` — the AMPL 100–199 reduced-accuracy band.
+    `qp_status_to_ars` (CLI `main.rs` and `pounce_cblib`) maps it to
+    `ApplicationReturnStatus::SolvedToAcceptableLevel` (JSON-report
+    `solve_result_num` 100 via `status_to_solve_result_num`); `pounce_cblib`'s
+    exit-code check treats it as success. The two `pounce-py` `status_str`
+    maps emit `"optimal_inaccurate"`.
+  - Conservatively *excluded* from accuracy-critical consumers: sensitivity
+    (`sensitivity.rs:91`) and SOS exactness certification (`sos.rs:474/498`)
+    keep their strict `== Optimal` gate, so a reduced-accuracy solution is not
+    used as an exact certificate.
+- **Why well-conditioned solves are safe**: `lp_afiro solver_selection=lp-ipm`
+  (obj −464.75314285, 15 iters) and `convex_qp solver_selection=qp-ipm`
+  (obj 2.0, 1 iter) still print "Optimal Solution Found." (`srn` 0) — the
+  reduced-accuracy path does not fire for them.
+- **Tests**:
+  - `pounce-convex` `qp::residual_tests::breakdown_status_marks_near_opt_as_inaccurate_not_optimal`:
+    pins `breakdown_status(true) == OptimalInaccurate` (and `!= Optimal`),
+    `breakdown_status(false) == NumericalFailure`.
+  - `pounce-cli` `convex_status_tests::optimal_inaccurate_is_distinct_from_optimal`:
+    pins `convex_status_report(OptimalInaccurate) == (.., ok=true, srn=100)`
+    with a message containing "acceptable", distinct `srn`/message from
+    `Optimal`, and `qp_status_to_ars(OptimalInaccurate) ==
+    SolvedToAcceptableLevel`.
+  - Existing exp/power-cone conic tests (`cblib_cbf`, `cblib_vs_nlp`,
+    `exp_cone_vs_nlp`, and the two `hsde_nonsym` unit tests) updated to accept
+    either usable status (`Optimal | OptimalInaccurate`) while keeping their
+    objective cross-checks; the `exp_cone_vs_nlp` near-boundary safety sweep's
+    allowed-status set gains `OptimalInaccurate`.
+- **Fail-first**: neutering `breakdown_status` to return `Optimal` for
+  `near_opt` made `breakdown_status_marks_near_opt_as_inaccurate_not_optimal`
+  fail (`left: Optimal, right: OptimalInaccurate`); restored after
+  confirmation.
+- **Scope note / deferred**: the review also notes `QpSolution` carries no
+  final-residual field. The distinct status already resolves the named defect
+  ("callers cannot detect it"); a `QpSolution.final_residual` (so callers can
+  read *how* inaccurate) is a separate additive enhancement, deferred.
+- **Result**: `pounce-convex` green (104 lib + all integration, 0 failed);
+  full `pounce-cli` green (20 binaries, 0 failed); `pounce-py` builds clean;
+  workspace build clean.
