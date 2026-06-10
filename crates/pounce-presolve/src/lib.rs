@@ -1136,8 +1136,23 @@ impl TNLP for PresolveTnlp {
                 true
             };
             if ok_grad && ok_struct && ok_vals {
-                // Densify the Jacobian (only needed for the recovery LU).
-                let mut jac_dense = vec![0.0; m_inner * n_inner];
+                // `recover_dropped_multipliers` reads the Jacobian only at the
+                // frames' fixed-var columns, so materialize just those columns
+                // (the union across all frames) instead of the full
+                // `m_inner × n_inner` dense block — O(m·k) rather than O(m·n),
+                // where k = total distinct fixed vars is tiny next to n. The
+                // old full densification cost ~80 GB at 100k×100k (issue M26).
+                let mut orig_to_compact = vec![usize::MAX; n_inner];
+                let mut n_cols = 0usize;
+                for frame in &frames {
+                    for &c in &frame.fixed_vars {
+                        if c < n_inner && orig_to_compact[c] == usize::MAX {
+                            orig_to_compact[c] = n_cols;
+                            n_cols += 1;
+                        }
+                    }
+                }
+                let mut jac_cols = vec![0.0; m_inner * n_cols];
                 for k in 0..nnz_inner {
                     let i = if one_based {
                         (jac_irow_inner[k] as isize - 1) as usize
@@ -1150,13 +1165,20 @@ impl TNLP for PresolveTnlp {
                         jac_jcol_inner[k] as usize
                     };
                     if i < m_inner && j < n_inner {
-                        jac_dense[i * n_inner + j] = jac_values[k];
+                        let cc = orig_to_compact[j];
+                        if cc != usize::MAX {
+                            jac_cols[i * n_cols + cc] = jac_values[k];
+                        }
                     }
                 }
                 for frame in &frames {
-                    if let Ok(lam_dropped) =
-                        frame.recover_dropped_multipliers(&grad_f, &jac_dense, &lambda_full)
-                    {
+                    if let Ok(lam_dropped) = frame.recover_dropped_multipliers_cols(
+                        &grad_f,
+                        &jac_cols,
+                        n_cols,
+                        &orig_to_compact,
+                        &lambda_full,
+                    ) {
                         for (idx, &r) in frame.dropped_rows.iter().enumerate() {
                             lambda_full[r] = lam_dropped[idx];
                         }
