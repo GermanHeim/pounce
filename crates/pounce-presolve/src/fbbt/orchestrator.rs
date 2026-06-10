@@ -122,6 +122,22 @@ pub fn run_fbbt(
         cfg.max_constraints.min(n_constraints)
     };
 
+    // Per-variable scratch, allocated ONCE and reused across every
+    // constraint and sweep. A constraint's tape typically touches only
+    // a handful of variables, so we never want to allocate or scan an
+    // `O(n_vars)` buffer per constraint. `tighten[j]` holds the running
+    // intersection of the reverse-propagated intervals for variable `j`
+    // *within the current constraint*; `last_seen[j]` stamps which
+    // constraint last wrote `tighten[j]` (so the first `Var(j)` slot of
+    // a constraint overwrites rather than intersecting stale data, with
+    // no per-constraint reset); `touched` lists the distinct variables
+    // this constraint actually mentions, so the apply step iterates only
+    // those. `stamp` is a monotonic per-constraint-visit counter.
+    let mut tighten: Vec<Interval> = vec![Interval::ENTIRE; n_vars];
+    let mut last_seen: Vec<usize> = vec![usize::MAX; n_vars];
+    let mut touched: Vec<usize> = Vec::new();
+    let mut stamp: usize = 0;
+
     for _iter in 0..cfg.max_iter {
         report.iterations += 1;
         let mut improved = false;
@@ -155,16 +171,29 @@ pub fn run_fbbt(
             // the constraint references it without CSE sharing).
             // Each slot may carry a different reverse-propagated
             // interval; the variable's tightened interval is the
-            // INTERSECTION of all those slot intervals.
-            let mut tighten: Vec<Interval> = vec![Interval::ENTIRE; n_vars];
+            // INTERSECTION of all those slot intervals. We touch only
+            // the variables this constraint mentions — the `stamp`
+            // guards a first-write-overwrites-then-intersect discipline
+            // on the reused `tighten` scratch, so no `O(n_vars)` reset.
+            stamp += 1;
+            touched.clear();
             for (slot_idx, op) in tape.ops.iter().enumerate() {
                 if let FbbtOp::Var(j) = *op {
-                    tighten[j] = tighten[j].intersect(reverse.slots[slot_idx]);
+                    if last_seen[j] == stamp {
+                        tighten[j] = tighten[j].intersect(reverse.slots[slot_idx]);
+                    } else {
+                        last_seen[j] = stamp;
+                        tighten[j] = reverse.slots[slot_idx];
+                        touched.push(j);
+                    }
                 }
             }
 
-            // Apply.
-            for j in 0..n_vars {
+            // Apply — only the variables this constraint touched. Any
+            // variable absent from the tape keeps an ENTIRE interval and
+            // could never tighten or be empty, so iterating `touched`
+            // alone is exactly equivalent to the old `0..n_vars` scan.
+            for &j in &touched {
                 let t = tighten[j];
                 if t.is_empty() {
                     report.infeasibility_witness = Some(i);
@@ -465,6 +494,71 @@ mod tests {
         assert!(x_hi[0] <= 1.0 + 1e-12);
         assert_eq!(x_lo[1], -10.0);
         assert_eq!(x_hi[1], 10.0);
+    }
+
+    /// A variable that appears in two structurally distinct `Var(j)`
+    /// slots of one constraint must end with the INTERSECTION of both
+    /// slots' reverse-propagated intervals — this exercises the reused
+    /// scratch's `stamp`-guarded "first slot overwrites, later slots
+    /// intersect" discipline, the subtle part of the sparse-apply
+    /// rewrite (M28).
+    ///
+    /// A variable appearing in two structurally distinct `Var(j)` slots
+    /// of one constraint must end with the INTERSECTION of both slots'
+    /// reverse intervals. The squared slot comes FIRST (yielding the
+    /// tight `x ≤ √6 ≈ 2.449`) and the linear slot SECOND (yielding only
+    /// the loose `x ≤ 6`); in a *single sweep* the correct intersection
+    /// gives `x_hi ≈ 2.449`, whereas an aggregation bug that kept just
+    /// the last slot would leave `x_hi ≈ 6`. Using `max_iter = 1` is
+    /// essential — iterating to a fixed point would wash the difference
+    /// out, since all slot intervals coincide at the root.
+    ///
+    /// `x² + x = 6` over `x ∈ [0, 10]` (true root x = 2).
+    #[test]
+    fn duplicate_var_slots_intersect() {
+        let tape = FbbtTape {
+            ops: vec![
+                FbbtOp::Var(0),       // slot 0: base of x²  (tight slot)
+                FbbtOp::PowInt(0, 2), // slot 1: x²
+                FbbtOp::Var(0),       // slot 2: linear x    (loose slot)
+                FbbtOp::Add(1, 2),    // slot 3: x² + x
+            ],
+        };
+        let provider = StubProvider {
+            tapes: vec![Some(tape)],
+        };
+        let mut x_lo = vec![0.0];
+        let mut x_hi = vec![10.0];
+        let cfg = FbbtConfig {
+            tol: 1e-6,
+            max_iter: 1, // single sweep — see doc comment
+            max_constraints: 0,
+        };
+        let r = run_fbbt(
+            &provider,
+            1,
+            1,
+            &mut x_lo,
+            &mut x_hi,
+            &[6.0],
+            &[6.0],
+            None,
+            &cfg,
+        );
+        assert!(r.infeasibility_witness.is_none());
+        assert_eq!(x_lo[0], 0.0, "lower bound unchanged in one sweep");
+        // √6 ≈ 2.449: requires the FIRST (squared) slot's interval to be
+        // intersected in. Keeping only the last (linear) slot leaves 6.
+        assert!(
+            x_hi[0] <= 2.45,
+            "x_hi = {} — duplicate Var slots were not intersected (got the loose linear slot)",
+            x_hi[0]
+        );
+        assert!(
+            x_hi[0] >= 2.449 - 1e-3,
+            "x_hi = {} unexpectedly tight",
+            x_hi[0]
+        );
     }
 
     /// Soundness fuzz on a quadratic: any feasible point of the
