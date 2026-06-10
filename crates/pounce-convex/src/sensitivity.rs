@@ -27,7 +27,7 @@
 //! is then a single back-substitution, so a parametric sweep costs one
 //! solve per query (the build-once / solve-many idiom of the NLP
 //! `Solver`). A tiny static regularization `δ` (the QP solver's own `reg`,
-//! default `1e-8`) is placed on the diagonal so the indefinite factor is
+//! default `1e-10`) is placed on the diagonal so the indefinite factor is
 //! stable; the induced error in the step is `O(δ)`.
 
 use crate::ipm::QpOptions;
@@ -731,5 +731,22 @@ mod tests {
         );
         // The explicit-tolerance entry point carries the same contract.
         assert!(sens.reduced_hessian(1e-9).is_ok());
+    }
+
+    /// Pin the regularization value the module doc cites. The default-built
+    /// sensitivity (`build_default` → `QpOptions::default()`) places
+    /// `opts.reg` on the KKT diagonal (see `build`, `let reg = opts.reg`), so
+    /// the "default `δ`" the module-level doc names *is* `QpOptions::default()
+    /// .reg`. That default was retuned `1e-8 → 1e-10` (ipm.rs: `1e-8` stalls
+    /// `adlittle`), but the doc kept saying `1e-8` (L42). This guards the doc
+    /// against silent drift: if the default reg changes again, this fails and
+    /// forces the module doc to be updated in lockstep.
+    #[test]
+    fn module_doc_regularization_matches_qp_options_default() {
+        assert_eq!(
+            QpOptions::default().reg,
+            1e-10,
+            "module doc names this as the default sensitivity regularization δ",
+        );
     }
 }

@@ -109,6 +109,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L39 | `QpSensitivity::build` / `reduced_hessian` re-scan all of `G` per active row (`sensitivity.rs:134-138, 273-277`; review also cites a postsolve twin at `presolve.rs:1584-1590`) | **FIXED (perf; behavior-preserving)** | **Confirmed by reading both sites + checking the presolve cite.** Both `build` (KKT assembly, `:136`) and `reduced_hessian` (active-Jacobian `B`, `:274`) looped over the active rows and, *inside* each, did `prob.g.iter().filter(\|t\| t.row == i)` — re-walking the **entire** `G` triplet list once per active row, i.e. `O(n_active · nnz(G))`. The cited postsolve twin (`presolve.rs:1584-1590`) **no longer exists**: that region was rewritten by `d12a27f` (postsolve recovery-order fix) and a grep for `filter(\|t\| t.row ==` across `pounce-convex` now matches **only** the two `sensitivity.rs` sites — so the perf issue is real but confined to sensitivity. **Fix**: a single `group_rows_by_index(&prob.g, m_ineq)` pass builds a `Vec<Vec<(col,val)>>` (one `O(nnz(G))` bucket-sort), then each active row indexes its own bucket directly — `O(nnz(G))` total, each lookup proportional to that row's own nonzeros. Behavior is identical (same triplets added in the same order; `add` accumulates commutatively). **Test** (`sensitivity::tests`): `reduced_hessian_two_active_multi_triplet_rows` — `min ½‖x‖²−2·𝟙ᵀx` on n=3 with `x₀+x₁≤1` and `x₁+x₂≤1`, both active at `(1,0,1)` with λ=1>0. Two active rows, **each with two nonzeros and a shared column** (col 1 in both) — the case the existing single-triplet active-row fixtures never exercised. Asserts `x≈(1,0,1)`, both `z>0`, `reduced_hessian` `n_dof=1` / eigenvalue 1 (null space `(−1,1,−1)/√3`), and `kkt_dim = n+0+2` (both rows entered the factor). This is a perf refactor (no behavior change), so there is no fail-first *bug*; the test instead guards grouping correctness — a misgrouping such as `rows[t.col]` (or letting the shared column 1 leak between rows) would corrupt `B`/KKT and break the eigenvalue/`n_dof` assertions. Full pounce-convex suite green (109 lib, +1); `cargo fmt -p pounce-convex` / gated `cargo clippy` clean (no `sensitivity.rs` warnings). See `## L39 detail`. |
 | L40 | `symmetric_eigen` return value ignored in `reduced_hessian` (`sensitivity.rs:300, 348`) — on non-convergence the rank/null-space would be silently wrong; everywhere else in the crate the return is checked | **FIXED** | **Confirmed by reading both call sites + the crate convention.** `symmetric_eigen` returns a `bool` (made meaningful by the M4 fix: `false` on non-convergence). `reduced_hessian` calls it twice — once on `BᵀB` to split rank vs. null space (`:322`), once on the assembled `H_R` to eigendecompose (`:370`) — and **discarded both returns**, so a non-converged sweep would publish a wrong `n_dof`/`Z` (hence a wrong reduced Hessian and eigenvalues) as if trustworthy. Every other consumer in the crate checks it: `psd.rs::sym_apply` does `if !symmetric_eigen(...) { return None; }`. **Fix**: `reduced_hessian` (and `reduced_hessian_default`) now return `Result<ReducedHessian, SensError>`; a new `SensError::EigenFailed` variant is returned at either guard (`if !symmetric_eigen(...) { return Err(SensError::EigenFailed); }`), and the success value is `Ok`-wrapped. The Python binding (`pounce-py/src/qp.rs::reduced_hessian`) maps the new error to a `PyValueError` (and the build-error `match` gains the now-required `EigenFailed` arm). The 4 in-crate test callers became `.expect("eigensolve converges")`. **Test** (`sensitivity::tests`): `reduced_hessian_returns_ok_on_convergent_eigensolve` — a well-formed QP (`min ½‖x‖²−2·𝟙ᵀx` on n=2 with `x₀+x₁≤1` active) whose two internal eigensolves both converge, asserting the call yields `Ok` with `n_dof=1` / eigenvalue 1, and that the explicit-tolerance entry point is `Ok` too. **Fail-first (N/A — the `Err` path is a defensive guard).** The `EigenFailed` branch only trips when `symmetric_eigen` exhausts its 50 sweeps, which a modest well-conditioned reduced Hessian never does — so the failure path is not reachable through the public solver at this layer (the same limitation M4 documented for the convergence flag itself) and is not exercised by a fixture; the test pins the `Ok` contract that previously was a bare return. Full pounce-convex suite green (110 lib, +1); `pounce-py` builds; `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L40 detail`. |
 | L41 | Nonsym driver assembles SOC `(z,z)` blocks dense (`hsde_nonsym.rs:262-269`), unlike the symmetric driver's sparse diag+rank-1 form — O(m²) fill for large SOCs mixed with exp cones | **FIXED (perf; threshold-gated to preserve small-SOC numerics)** | **Confirmed by reading both drivers + a fail-first structural test.** `NsKkt::build` reserved the full dense `m×m` lower triangle for every SOC `(z,z)` block (`m(m+1)/2` entries), while the symmetric driver (`ipm.rs::KktStructure`, `ZBlockPos::DiagRank1`) uses the ECOS/Clarabel sparse trick: an auxiliary variable `ξ` with diagonal + coupling column `u` + `(ξ,ξ)=1`, whose Schur complement reproduces `diag(d)+uuᵀ` at `O(m)` fill. **Fix**: ported the aux-variable form to the nonsym KKT, but **threshold-gated** by `SOC_DENSE_MAX_DIM = 3` — for the dense triangle `m(m+1)/2` is actually *fewer* nonzeros than the aux form's `2m+1` (plus an extra row/col) when `m ≤ 3`, and is slightly better-conditioned near the cone boundary, so small SOCs keep the dense path and large ones (the review's concern) take the sparse path. The shared helpers already support the appended aux rows: `build_rhs` zeros the aux tail and `split_step` reads only the base rows; `recover_ds` uses `BlockScaling::SecondOrder{diag,u}` directly, independent of the KKT layout — so the change is contained to `NsKkt` (the `ZPos` variants, `build`, `update_blocks`). **Why the threshold (verified):** an unconditional sparse port tipped the existing `soc_mixed_with_exp` (SOC(3)+exp) test from `Optimal` to `OptimalInaccurate` — the solution was still correct to 1e-8 (`x=(5,e)`, `obj=5+e`), only the convergence band crossed, because the augmented system is marginally worse-conditioned near the boundary. Gating SOC(3) to dense restores exact `Optimal`. **Tests** (`hsde_nonsym::tests`): `large_soc_kkt_block_is_sparse_not_dense` (SOC(24): `+1` aux var, `ZPos::SecondOrderSparse`, nnz below the dense `m(m+1)/2` bound — **fail-first confirmed**: pre-fix `dim` was the base with no aux), `small_soc_kkt_block_stays_dense` (SOC(3): no aux, `ZPos::SecondOrderDense`), and `large_soc_sparse_path_solves` (SOC(6) norm-min through the driver reaches `t=5`, exercising the sparse path end-to-end, not just structurally). Full pounce-convex suite green (113 lib, +3); `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean (the one `type_complexity` note at `:908` is pre-existing and outside the gated set). See `## L41 detail`. |
+| L42 | Documented sensitivity regularization default `1e-8` vs actual `reg: 1e-10` (`sensitivity.rs:30-31` vs `ipm.rs:135`) | **FIXED (doc)** | **Confirmed by reading both sites.** The `sensitivity` module doc says the static regularization δ is "the QP solver's own `reg`, default `1e-8`" (`:29-30`), but `QpOptions::default()` sets `reg: 1e-10` (`ipm.rs:135`) — and the default-built sensitivity (`build_default` → `QpOptions::default()`) puts exactly that `opts.reg` on the KKT diagonal (`build`, `:116` `let reg = opts.reg`). The default was deliberately retuned `1e-8 → 1e-10` (the `ipm.rs:128-134` comment: `1e-8` floors the primal residual `δ·‖dy‖` above `tol` on badly-scaled NETLIB LPs like `adlittle`, stalling to the iteration cap; `1e-10` converges in ~57 iters), but the sensitivity doc kept the old number — a pure doc-staleness bug, no wrong behavior. **Fix**: corrected the doc to `1e-10`, and added a regression-guard test so doc and code can't silently drift again. **Test** (`sensitivity::tests`): `module_doc_regularization_matches_qp_options_default` asserts `QpOptions::default().reg == 1e-10` (the value the module doc now names). **Fail-first confirmed**: with the assertion temporarily set to the stale `1e-8`, the test failed (`left: 1e-10, right: 1e-8`), proving the doc's claim was wrong against the actual default; restoring `1e-10` (doc + test together) passes. Full pounce-convex suite green (114 lib, +1); `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L42 detail`. |
 
 ## C1 detail
 
@@ -5562,3 +5563,52 @@ Full pounce-convex suite green (113 lib tests, +3; all integration green);
 (`-D clippy::correctness -D clippy::suspicious`) clean — the lone
 `type_complexity` note at `hsde_nonsym.rs:908` (the `best` iterate tuple) is
 pre-existing and outside the gated set.
+
+## L42 detail
+
+**Issue.** The `sensitivity` module doc claims the static regularization δ is
+"the QP solver's own `reg`, default `1e-8`" (`sensitivity.rs:29-30`), but the
+actual default is `reg: 1e-10` (`ipm.rs:135`).
+
+**Verification.** Read both sites directly:
+- `sensitivity.rs:29-31` — "A tiny static regularization `δ` (the QP solver's
+  own `reg`, default `1e-8`) is placed on the diagonal …".
+- `ipm.rs:135` — `QpOptions::default()` sets `reg: 1e-10`.
+- `sensitivity.rs:116` — `QpSensitivity::build` does `let reg = opts.reg;` and
+  places it on the `(x,x)`/`(y,y)`/active-block diagonals (`:142, :149, :165`).
+  The default-constructed entry points (`build_default` at `:203`,
+  `reduced_hessian_default`) pass `QpOptions::default()`, so the δ a
+  default-built sensitivity actually uses **is** `QpOptions::default().reg =
+  1e-10`, not the documented `1e-8`.
+
+The mismatch is a stale doc, not a behavior bug: the default was deliberately
+retuned `1e-8 → 1e-10`. The `ipm.rs:128-134` comment explains why — with a full
+Newton step δ floors the achievable primal residual at `δ·‖dy‖`, and on
+badly-scaled NETLIB LPs the equality duals grow large (`adlittle`: `‖dy‖ ≈
+4e8`), so `δ = 1e-8` freezes `inf_pr` above `tol` and the IPM stalls to its
+iteration cap, while `1e-10` converges in ~57 iters (the whole `1e-9‥1e-11`
+band converges the LP/QP suites; `1e-10` is centered in it). The sensitivity
+module doc simply wasn't updated when the default moved.
+
+**Fix.** Corrected the doc line to `default 1e-10`, and added a regression
+guard so the doc and the code can't silently drift again.
+
+**Test** (`sensitivity::tests`): `module_doc_regularization_matches_qp_options_default`
+asserts `QpOptions::default().reg == 1e-10` — the value the module doc now
+names. Because a doc comment can't be checked by the compiler, the test pins the
+underlying constant the prose cites; if the default reg is retuned again, this
+fails and forces the module doc to be updated in lockstep.
+
+**Fail-first (confirmed).** With the assertion temporarily set to the stale
+documented value (`1e-8`), the test failed:
+```
+assertion `left == right` failed: module doc names this as the default sensitivity regularization δ
+  left: 1e-10
+ right: 1e-8
+```
+That is the concrete demonstration that the doc's claim disagreed with the
+actual default. Restoring `1e-10` (doc comment and test together) passes.
+
+Full pounce-convex suite green (114 lib tests, +1; all integration green);
+`cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D
+clippy::suspicious`) clean.
