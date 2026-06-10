@@ -14,6 +14,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H3 | cli: `.sol`/JSON constraint duals written in internal c/d-split order, unscaled | **FIXED** | `on_converged` hook now reassembles `lambda` via `pack_lambda_for_user` (inverts the c/d split via `c_map`/`d_map` AND unwinds `c_scale`/`d_scale`) instead of concatenating raw `y_c`+`y_d`; manual concatenation kept only as a fallback for non-`OrigIpoptNlp`. Test `lambda_is_in_original_g_order_not_cd_split_order` in `json_report.rs`. |
 | H4 | cli: convex LP/QP/SOCP dispatch ignores the `-AMPL` exit-code contract | **FIXED** | Threaded `args.ampl` into `run_convex_qp`/`run_convex_socp`; new `convex_exit_code(ok, ampl)` returns 0 for any non-fatal outcome under `-AMPL` (mirrors NLP path), 1 otherwise. Also dropped the `.sol`-write-failure `exit 2` (log-and-continue like the NLP path). Test `ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp`. |
 | H5 | nl: external-function errors detected on the wrong channel — failed evals silently return garbage | **FIXED** | `ExternalLibrary::eval` now decodes both `funcadd` error channels via `decode_external_errmsg`: the **reassigned** `al->Errmsg` pointer (conforming path) and the caller buffer. Previously only `errmsg_buf[0]` was checked, so a library doing `al->Errmsg = "...";` was invisible and the IPM consumed NaN f/∇f/∇²f. Tests `reassigned_errmsg_pointer_is_detected_end_to_end` + `decode_external_errmsg_buffer_and_none_channels`. |
+| H6 | qp: `select_blocker` EXPAND branch can panic (`best.expect`) on valid near-degenerate input | **FIXED** | The Harris two-pass admitted nothing in Pass 2 when every candidate's τ-relaxed ratio `r + τ/\|a·p\|` exceeded the artificial `α_min_relaxed = 1.0` init cap by more than `tol` (reachable when `\|a·p\| ≈ feas_tol` inflates `τ/\|a·p\|`). `best` stayed `None` → `expect` panicked. Now falls back to the strict minimum-ratio blocker (always exists since `α_min < 1.0`) and steps exactly `α_min`. Tests `expand_tau_inflation_falls_back_to_strict_min_no_panic` + 2 more in `solver::select_blocker_tests`. |
 
 ## C1 detail
 
@@ -222,3 +223,41 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   the old check was blind to it, while `decode_external_errmsg` returns
   `Some("T out of range")`. Full `pounce-nl` suite green (75 + …); no external
   dylib required (the IDAES-dependent tests still skip when absent).
+
+## H6 detail
+
+- **Bug**: `select_blocker`'s `AntiCyclingChoice::Expand` arm
+  (`pounce-qp/src/solver.rs`) runs the GMSW EXPAND Harris two-pass. Pass 1
+  initializes `alpha_min_relaxed = 1.0` (a *cap*, not `+∞`) and records
+  `min(1.0, minᵢ r_relaxedᵢ)` where `r_relaxed = r + τ/|a·p|`. Pass 2 admits
+  candidates with `r_relaxed ≤ alpha_min_relaxed + tol`, then
+  `best.expect("non-empty candidates above")` reads the winner. When *every*
+  candidate's `r_relaxed > 1.0` the recorded minimum is the artificial `1.0`
+  cap that **no real candidate attains**, so Pass 2's admission test
+  (`r_relaxed > 1.0 + tol`) rejects all of them → `best = None` → panic.
+- **Reachable on valid input**: a candidate with a true blocking ratio `r < 1`
+  (so the `alpha_min ≥ 1.0` early-return at the top is *not* taken) but a tiny
+  `|a·p| ≈ feas_tol` has `τ/|a·p|` blow `r_relaxed` far above `1`. If all
+  candidates are near-degenerate like this, the panic fires. The review doc
+  itself notes "Narrow but reachable on near-degenerate data" — confirmed
+  **not** a false positive (an earlier note claimed otherwise; that was wrong).
+- **Fix**: replace the `best.expect(...)` with a `match`; in the `None` arm,
+  fall back to the strict minimum-ratio blocker — scan `candidates` for the
+  first with `r ≤ alpha_min` (guaranteed to exist, since `alpha_min < 1.0` past
+  the early-return) and step exactly `alpha_min`. This never freezes (α > 0),
+  never panics, and never oversteps the first blocking constraint (it does
+  **not** floor at the bogus `alpha_min_relaxed = 1.0`, which would jump past
+  the blocker).
+- **Test**: `solver::select_blocker_tests` (a `#[cfg(test)] mod` *inside*
+  `solver` so it can reach the private `select_blocker`/`BlockerTarget`).
+  `expand_tau_inflation_falls_back_to_strict_min_no_panic` passes a single
+  `(Bound(0,AtLower), r=0.5, |a·p|=1e-9)` with `τ=1e-3` → pre-fix panics at the
+  `expect` (verified by reverting the fix: *"panicked at solver.rs:1518:
+  non-empty candidates above"*), post-fix returns `(0.5, Some(Bound(0,…)))`.
+  Two companions: `expand_fallback_selects_strict_minimum_among_inflated`
+  (picks the min-ratio one among several inflated) and
+  `expand_normal_case_admits_in_pass_two` (healthy `|a·p|` ⇒ ordinary Pass-2
+  admission, no fallback).
+- **Verified by running code**: full `pounce-qp` suite green (74 lib + 1 + 5
+  integration); the targeted test fails (panics) when the fix is reverted and
+  passes with it in place.

@@ -1515,11 +1515,34 @@ fn select_blocker(
                     best = Some((target, r, ap_mag));
                 }
             }
-            let (target, r, _) = best.expect("non-empty candidates above");
-            // Floor the step length at the τ-relaxed minimum so
-            // we never freeze at α = 0; cap at 1.0.
-            let alpha = r.max(alpha_min_relaxed).min(1.0).max(0.0);
-            (alpha, Some(target))
+            match best {
+                Some((target, r, _)) => {
+                    // Floor the step length at the τ-relaxed minimum so
+                    // we never freeze at α = 0; cap at 1.0.
+                    let alpha = r.max(alpha_min_relaxed).min(1.0).max(0.0);
+                    (alpha, Some(target))
+                }
+                None => {
+                    // Pass 2 admitted nothing. This happens when every
+                    // candidate's τ-relaxed ratio exceeds the artificial
+                    // `α_min_relaxed = 1.0` initialization cap by more than
+                    // `tol` — reachable when |a·p| ≈ feas_tol makes
+                    // `τ/|a·p|` inflate `r_relaxed` above `1 + tol` for ALL
+                    // candidates (so the recorded minimum is the cap, which
+                    // no real candidate attains). Fall back to the strict
+                    // minimum-ratio blocker (guaranteed to exist since
+                    // `α_min < 1.0`) and step exactly `α_min`: never freeze,
+                    // panic, or overstep the first blocking constraint.
+                    let mut fb: Option<BlockerTarget> = None;
+                    for &(target, r, _) in candidates {
+                        if r <= alpha_min {
+                            fb = Some(target);
+                            break;
+                        }
+                    }
+                    (alpha_min, fb)
+                }
+            }
         }
     }
 }
@@ -1664,4 +1687,88 @@ fn quad_objective(qp: &QpProblem, x: &[Number]) -> Number {
     }
     let lin: Number = qp.g.iter().zip(x.iter()).map(|(&gi, &xi)| gi * xi).sum();
     quad + lin
+}
+
+#[cfg(test)]
+mod select_blocker_tests {
+    //! Unit tests for the GMSW EXPAND ratio test in `select_blocker`.
+    //! These live inside `solver` (not `crate::tests`) so they can reach
+    //! the private `select_blocker`/`BlockerTarget` items.
+    use super::{select_blocker, BlockerTarget};
+    use crate::options::{AntiCyclingChoice, QpOptions};
+    use crate::working_set::BoundStatus;
+
+    fn expand_opts(feas_tol: f64) -> QpOptions {
+        QpOptions {
+            feas_tol,
+            anti_cycling: AntiCyclingChoice::Expand,
+            ..QpOptions::default()
+        }
+    }
+
+    /// Regression for H6: the EXPAND branch panicked (`best.expect`)
+    /// when every candidate's τ-relaxed ratio `r + τ/|a·p|` exceeded
+    /// the artificial `α_min_relaxed = 1.0` initialization cap by more
+    /// than `tol`. Reachable with a *single* candidate that has a true
+    /// blocking ratio `r < 1` but a tiny `|a·p| ≈ feas_tol`, so
+    /// `τ/|a·p|` inflates `r_relaxed` far above `1`. Pre-fix this hits
+    /// `best = None → panic`; post-fix it falls back to the strict
+    /// minimum-ratio blocker and steps exactly `α_min = r`.
+    #[test]
+    fn expand_tau_inflation_falls_back_to_strict_min_no_panic() {
+        let opts = expand_opts(1e-6);
+        // expand_tol (τ) = 1e-3, ap_mag = 1e-9 ⇒ r_relaxed ≈ 0.5 + 1e6.
+        let candidates = [(BlockerTarget::Bound(0, BoundStatus::AtLower), 0.5, 1e-9)];
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3);
+        assert!(
+            matches!(blocker, Some(BlockerTarget::Bound(0, BoundStatus::AtLower))),
+            "expected the sole candidate as blocker, got {:?}",
+            blocker.map(|b| match b {
+                BlockerTarget::Bound(i, _) => ("bound", i),
+                BlockerTarget::Cons(i, _) => ("cons", i),
+            })
+        );
+        // Step the strict ratio, never the bogus 1.0 floor (which would
+        // overstep the constraint).
+        assert!(
+            (alpha - 0.5).abs() < 1e-12,
+            "expected α = 0.5 (strict min), got {alpha}"
+        );
+    }
+
+    /// Multiple inflated candidates: the fallback must still pick the
+    /// strict minimum-ratio one (here index 1, r = 0.25) and step its
+    /// ratio, not the larger-index r.
+    #[test]
+    fn expand_fallback_selects_strict_minimum_among_inflated() {
+        let opts = expand_opts(1e-6);
+        let candidates = [
+            (BlockerTarget::Bound(0, BoundStatus::AtLower), 0.75, 1e-9),
+            (BlockerTarget::Bound(1, BoundStatus::AtUpper), 0.25, 1e-9),
+        ];
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3);
+        assert!(
+            matches!(blocker, Some(BlockerTarget::Bound(1, BoundStatus::AtUpper))),
+            "expected the strict-min candidate (index 1)"
+        );
+        assert!(
+            (alpha - 0.25).abs() < 1e-12,
+            "expected α = 0.25, got {alpha}"
+        );
+    }
+
+    /// Non-degenerate EXPAND still works: a candidate with a healthy
+    /// `|a·p|` keeps its τ-relaxed ratio below the cap, so Pass 2
+    /// admits it normally (no fallback).
+    #[test]
+    fn expand_normal_case_admits_in_pass_two() {
+        let opts = expand_opts(1e-6);
+        let candidates = [(BlockerTarget::Bound(0, BoundStatus::AtLower), 0.5, 1.0)];
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-9);
+        assert!(matches!(
+            blocker,
+            Some(BlockerTarget::Bound(0, BoundStatus::AtLower))
+        ));
+        assert!(alpha >= 0.5 && alpha <= 1.0, "α in range, got {alpha}");
+    }
 }
