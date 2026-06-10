@@ -167,8 +167,15 @@ def _normalize_bounds(bounds, n: int):
     return lb, ub
 
 
-def _wrap_constraints(constraints, n: int):
-    """Coalesce scipy-style constraint dict(s) into one g(x) + (cl, cu)."""
+def _wrap_constraints(constraints, n: int, x0=None):
+    """Coalesce scipy-style constraint dict(s) into one g(x) + (cl, cu).
+
+    Each constraint function is probed once to learn its output dimension.
+    The probe point is the user's ``x0`` when supplied (falling back to the
+    origin only when no ``x0`` is available), so a constraint that is
+    undefined at the origin — but defined at a feasible start — does not
+    spuriously fail before the solve even begins (L47).
+    """
     if not constraints:
         return 0, None, None, None, None
     if isinstance(constraints, dict):
@@ -195,7 +202,7 @@ def _wrap_constraints(constraints, n: int):
         funs.append(c["fun"])
         jacs.append(c.get("jac"))
 
-    probe = np.zeros(n)
+    probe = np.zeros(n) if x0 is None else np.asarray(x0, dtype=float).ravel()
     sizes = [int(_to_array(fn(probe)).size) for fn in funs]
     m_total = int(sum(sizes))
 
@@ -204,11 +211,13 @@ def _wrap_constraints(constraints, n: int):
 
     def jac_combined(x):
         rows = []
-        for fn, jc in zip(funs, jacs):
+        # Reuse the per-constraint row counts learned during probing
+        # instead of re-evaluating ``fn(x)`` for a size we already know;
+        # the FD path still calls ``fn`` internally to build the columns.
+        for fn, jc, m_i in zip(funs, jacs, sizes):
             if jc is not None:
                 rows.append(np.atleast_2d(_to_array(jc(x))))
             else:
-                m_i = _to_array(fn(x)).size
                 rows.append(_finite_diff_jac(fn, x, m_i))
         return np.vstack(rows)
 
@@ -437,7 +446,7 @@ def minimize(
     x0 = np.atleast_1d(_to_array(x0))
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
-    m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+    m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n, x0)
 
     # Solver routing (mirrors the CLI's `solver_selection`). Pop the routing
     # keys so the remainder of `options` still flows to the NLP solver.

@@ -114,6 +114,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L44 | `Interval::mul` produces NaN endpoints on `0 × ∞` corners (`fbbt/interval.rs:148-159`) → `is_empty()` reads EMPTY → spurious infeasibility; `inverse_powint`'s `powf(1/n)` not outward-rounded (`reverse.rs:223-224`) | **FIXED (both parts)** | **Confirmed by reading both + three fail-first tests.** (1) `mul`'s four-corner formula computes `0.0 * ∞ = NaN`; for `[0,0] × ENTIRE` *all four* corners are NaN → `[NaN, NaN]`, which `is_empty()` (`:68`, NaN ⇒ empty) reads as spurious infeasibility. (A single NaN corner was already absorbed by `f64::min`/`max` returning the non-NaN operand, so only the all-NaN case leaked.) **Fix**: a `corner(a,b)` helper treating any `0 * x` as `0` (exact-zero annihilation, the IA convention) — the only NaN source in `a*b` is `0×∞`, so this makes every corner well-defined. (2) `inverse_powint` computed `abs_lo/abs_hi = powf(1/n)` round-to-nearest, violating the module's outward-rounding soundness invariant (could over-tighten and drop a feasible point); the odd branch (`signed_nth_root`) had the same flaw. **Fix**: `round_down`/`round_up` the root endpoints (helpers exposed `pub(crate)`), both branches. **Tests**: `mul_zero_by_entire_is_zero_not_empty` (fail-first: pre-fix `Interval{lo:NaN,hi:NaN}`); `inverse_powint_even_branch_is_outward_rounded` and `..._odd_branch_...` on perfect-square/cube intervals (fail-first: pre-fix lower root `== raw powf`, not strictly below). Full pounce-presolve suite green (223 lib, +3); `cargo fmt` / gated `cargo clippy` clean. See `## L44 detail`. |
 | L45 | `finalize_solution` ignores the `eval_g` return value (`lib.rs:931-933` orig) → on re-eval failure the stale/garbage `scratch_g` is forwarded as the reported constraint vector | **FIXED** | **Confirmed by a fail-first test.** `finalize_solution` re-evaluates `g` at the final `sol.x` into the inner-sized `scratch_g`, but discarded the boolean result; a failed `eval_g` leaves `scratch_g` holding partial garbage or a stale earlier-iterate value, which was then cloned into `g_full` and reported. **Fix**: capture `ok_g`; on `!ok_g`, zero `scratch_g` and rebuild it from the solver's own (trustworthy) reduced `sol.g`, mapped to the kept inner rows via `rows_kept` exactly as the multiplier mapping does (presolve-dropped rows left at 0, no reliable value existing for them). **Test**: `finalize_does_not_forward_stale_g_when_eval_g_fails` — a `GFailRecordingVar` mock whose `eval_g` writes sentinel `999.0` and returns `false`; finalize records the reported `sol.g`. Fail-first: pre-fix the recorded vector is `[999, 999]`; post-fix `[0, 0]`. Full pounce-presolve suite green (224 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L45 detail`. |
 | L46 | Metadata projection infers per-row-ness from vector length alone (`project_con_metadata`/`expand_con_metadata`) — coincidental-length global vectors are silently subset/expanded | **VERIFIED REAL — documented limitation, not cleanly fixable** | **Confirmed by reading + a characterization test.** `project_con_metadata` treats any constraint-metadata vector with `len() == m_in` as per-row and subsets it to `rows_kept`; `expand_con_metadata` mirrors with `len() == m_out`. `MetaData` is an untyped `BTreeMap<String, Vec<_>>` (a faithful port of upstream Ipopt's untyped `*MetaDataMapType`) with **no per-key arity tag**, so length is the only available signal — a semantically-global vector that coincidentally has length `m_in` is wrongly subset. **Not cleanly fixable without an arity-aware metadata API.** Mitigations applied: (1) the heuristic is *exact* for every contract-conforming TNLP — by the TNLP contract all constraint-bucket vectors are per-constraint, and pounce's only real producer (`nl_reader`) emits genuinely per-row `con_names`, so today's shipped behavior is correct; (2) the fast path `m_in == m_out` (no rows dropped) is identity, so the hazard only exists once presolve drops a row; (3) explicit contract + caveat doc comments on both functions; (4) two regression tests — `con_metadata_per_row_vector_round_trips_under_row_drop` (canonical correct case) and `con_metadata_length_heuristic_misfires_on_coincidental_global` (pins the known misfire as a future-fix anchor). Full pounce-presolve suite green (226 lib, +2); `cargo fmt` / gated `cargo clippy` clean. See `## L46 detail`. |
+| L47 | `_wrap_constraints` probes user constraint funcs at `np.zeros(n)` instead of `x0` (`_minimize.py:198-199`) → constraints undefined at the origin fail before the solve even with feasible `x0`; `jac_combined` (211) re-evaluates `fn(x)` per FD call just for a row count it already has | **FIXED (both parts)** | **Confirmed by reading + a probe-point test.** (1) The sizing probe was hard-coded to `np.zeros(n)`; a constraint like `log(x)` is `-inf`/undefined at the origin yet finite at a feasible `x0=[1,1]`, so the size probe produced `-inf`/NaN (or raised) before the solve began. **Fix**: thread `x0` into `_wrap_constraints(constraints, n, x0)` and probe at `x0` (origin only as the `x0 is None` fallback). (2) `jac_combined`'s FD branch recomputed `m_i = fn(x).size` every call purely to size the FD block, although `sizes` was already captured at probe time. **Fix**: zip the precomputed `sizes` into the loop and pass `m_i` straight to `_finite_diff_jac` (the FD routine still calls `fn` for the columns — only the redundant sizing call is gone). **Tests** (`test_minimize.py`): `test_wrap_constraints_probes_at_x0_not_origin` (probe records `x0`, `g(x0)` finite; the `x0=None` origin path yields `-inf` — the pre-fix behavior) and `test_wrap_constraints_fd_jac_uses_probed_sizes` (3-output/2-input constraint → FD Jacobian shape `(3,2)`). Verified against the codereview source via a stubbed-native harness. See `## L47 detail`. |
 
 ## C1 detail
 
@@ -5788,3 +5789,43 @@ that a global vector of *non*-`m_in` length is correctly passed through.
 
 Full pounce-presolve suite green (226 lib, +2); `cargo fmt` / gated `cargo
 clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
+
+## L47 detail
+
+**Issue.** `_wrap_constraints` evaluates each user constraint function once to
+learn its output dimension (so the combined constraint count and the bound
+vectors `cl`/`cu` can be sized). The probe point was hard-coded to
+`np.zeros(n)`. Separately, `jac_combined`'s finite-difference branch recomputed
+the per-constraint row count `m_i = fn(x).size` on every Jacobian call.
+
+**Verification.** A constraint such as `g(x) = log(x)` (a common
+positivity-coupled form) is undefined / `-inf` at the origin but perfectly
+finite at a feasible start like `x0 = [1, 1]`. Probing at `np.zeros(n)` thus
+produces `-inf`/NaN (or raises) before the IPM ever runs, even though the user
+supplied a valid `x0`. A stubbed-native harness confirms `g(np.zeros(2))`
+yields `[-inf, -inf]` while `g(x0)` is finite `[0, 0]`.
+
+**Fix — part 1.** Thread the caller's `x0` into
+`_wrap_constraints(constraints, n, x0)` and probe at `x0`, falling back to the
+origin only when `x0 is None`. `minimize` already has `x0` in hand at the call
+site (`_minimize.py:440`), so this is a pure plumbing change. Matches
+`scipy.optimize.minimize`, which also evaluates constraints at the user's
+start.
+
+**Fix — part 2.** The probe already captured each constraint's size in `sizes`;
+`jac_combined` now zips `sizes` into its loop and hands `m_i` directly to
+`_finite_diff_jac` instead of re-deriving it via an extra `fn(x)` call. The FD
+routine still calls `fn` to build the columns — only the redundant sizing call
+is removed.
+
+**Tests** (`test_minimize.py`):
+- `test_wrap_constraints_probes_at_x0_not_origin`: records the probe argument
+  and asserts it equals `x0`, that `g(x0)` is finite, and that the legacy
+  `x0=None` origin probe yields `-inf` (the pre-fix failure mode).
+- `test_wrap_constraints_fd_jac_uses_probed_sizes`: a 3-output / 2-input
+  constraint yields an FD Jacobian of shape `(3, 2)`, exercising the
+  size-reuse path.
+
+Both pass against the codereview source (verified via a stubbed-native import
+harness, since the worktree has no compiled `_pounce.so`; CI builds the wheel
+and runs them normally).

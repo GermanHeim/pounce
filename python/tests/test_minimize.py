@@ -256,3 +256,48 @@ def test_minimize_rejects_malformed_constraint_dicts():
     with pytest.raises(ValueError, match="must be callable"):
         pounce.minimize(f, np.ones(2), jac=g,
                         constraints={"type": "eq", "fun": 3.0}, options=opts)
+
+
+def test_wrap_constraints_probes_at_x0_not_origin():
+    """L47: constraint sizing must probe at the user's x0, not at the
+    origin. A constraint undefined at 0 (e.g. ``log``) but defined at a
+    feasible start used to fail before the solve began."""
+    from pounce._minimize import _wrap_constraints
+
+    calls = []
+
+    def con(x):
+        calls.append(np.array(x, dtype=float))
+        # Undefined at the origin; finite at x0 = [1, 1].
+        return np.log(x)
+
+    x0 = np.array([1.0, 1.0])
+    m, g, jac, cl, cu = _wrap_constraints([{"type": "ineq", "fun": con}], 2, x0)
+
+    # Probe happened at x0, so it saw a finite value (log(1) == 0).
+    assert m == 2
+    assert calls, "constraint should have been probed once for sizing"
+    np.testing.assert_allclose(calls[0], x0)
+    assert np.all(np.isfinite(g(x0)))
+
+    # Probing at the origin (the old behavior) would have yielded -inf.
+    with np.errstate(divide="ignore"):
+        m0, g0, _, _, _ = _wrap_constraints([{"type": "ineq", "fun": con}], 2, None)
+        assert np.any(np.isneginf(g0(np.zeros(2))))
+
+
+def test_wrap_constraints_fd_jac_uses_probed_sizes():
+    """L47 (part 2): the FD Jacobian must not re-evaluate the constraint
+    function purely to recount rows — the per-constraint size learned at
+    probe time is reused, and the returned Jacobian has the right shape."""
+    from pounce._minimize import _wrap_constraints
+
+    def con(x):
+        # 3 outputs from 2 inputs -> Jacobian must be (3, 2).
+        return np.array([x[0], x[1], x[0] + x[1]])
+
+    x0 = np.array([0.5, 0.5])
+    m, g, jac, cl, cu = _wrap_constraints([{"type": "eq", "fun": con}], 2, x0)
+    assert m == 3
+    J = jac(x0)
+    assert J.shape == (3, 2)
