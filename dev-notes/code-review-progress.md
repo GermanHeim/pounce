@@ -103,6 +103,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L33 | `relax_bounds` silently no-ops when a bound `Rc` is shared (`orig_ipopt_nlp.rs`) while `adjust_variable_bounds` treats the same condition as a hard invariant (`expect`) — they should agree, and the loud version is safer | **FIXED** | **Confirmed by reading code.** Both `OrigIpoptNlp::relax_bounds` and `adjust_variable_bounds` rely on the bound `Rc`s (`x_l/x_u/d_l/d_u`) being **uniquely owned**. `adjust_variable_bounds` enforces it with `Rc::get_mut(...).expect("... uniquely owned")`; `relax_bounds` instead used `if let Some(_) = Rc::get_mut(...)` and silently skipped any shared bound — so a stray clone would leave bounds *tighter* than `bound_relax_factor` requires, with no signal. **Fix**: rewrote `relax_bounds` to `Rc::get_mut(...).expect("relax_bounds: <field> is uniquely owned")` for all four bounds, matching `adjust_variable_bounds`. The sole production caller (`application.rs:1085`, in structure init before the main loop) holds the invariant, so the loud form never trips in real solves. **Tests** (`orig_ipopt_nlp::tests`): `relax_bounds_widens_uniquely_owned_bounds` (baseline: `x_l` relaxes down, `x_u` up on the normal uniquely-owned state) and `relax_bounds_panics_on_shared_bound_rc` (`#[should_panic(expected = "x_l is uniquely owned")]` after `Rc::clone(&nlp.x_l)` bumps the strong count). **Fail-first confirmed**: reverting to the `if let Some` no-op makes the shared-Rc case *not* panic — `test did not panic as expected`. Restored; 39 pounce-nlp + 20 pounce-algorithm (the relax_bounds integration caller) test groups green. `cargo fmt -p pounce-nlp` / gated `cargo clippy` clean. See `## L33 detail`. |
 | L34 | `HybridTape` is dead code with a misleading panic in the promoted-CSE path (`nl_tape.rs`) | **FIXED** | **Confirmed by reading code + repo-wide grep.** `HybridTape`/`build_multi` (the designed-but-unwired partial-separability tape) has **zero callers** outside `nl_tape.rs` and no test coverage — fully dead. Its `build_into_summand` rejects unsupported opcodes with a clear message ("AMPL external function calls are not supported on the hybrid path … Build with `Tape::build_with_externals`"), **except** the *promoted*-CSE branch: it emits a shared CSE body via `build_recursive(expr, …, &ExternalResolver::default())` with an **empty** resolver, so a funcall buried in a promoted CSE reached `build_recursive`'s `Expr::Funcall` arm and panicked with the **misleading** `unresolved AMPL funcall id <n>` — implying a resolution failure rather than the real reason (funcalls are unsupported on the hybrid path regardless of resolvability). **Fix**: added a `cse_contains_funcall(body)` pre-scan in the promoted branch that raises the *same* clear hybrid-unsupported message before calling `build_recursive`, so both CSE paths report the same reason. (Chose to make the panic consistent rather than delete the intentionally-designed module.) **Test** (`nl_tape::tests`): `hybrid_promoted_cse_with_funcall_reports_clear_message` (`#[should_panic(expected = "external function calls are not supported on the")]`) builds a funcall CSE body shared across two roots so it is promoted, then `HybridTape::build_multi`. **Fail-first confirmed**: removing the guard makes the panic message `"unresolved AMPL funcall id 0"`, which `should_panic` rejects ("panic did not contain expected string"). Restored; 85 pounce-nl lib (+1) green. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L34 detail`. |
 | L35 | `k`-segment line count assumed, not read (`nl_reader.rs`); a nonstandard count desynchronizes the line stream into a confusing downstream error | **FIXED** | **Confirmed by reading code + reproducing the desync.** The `.nl` `k` segment (Jacobian column counts) header is `k<count>`, where `<count>` is the number of count lines that follow; the standard value is `n-1`. The parser **discarded** the header (`p.eat_segment_header()?`) and looped a hard-coded `n-1` times. A file declaring any other count then read the wrong number of data lines: it swallowed the following segment's header (or stopped short), so parsing failed far downstream with a baffling error pointing nowhere near the cause. **Fix**: read the declared count via `parse_segment_index(&hdr, 'k')`, validate it equals the expected `n-1` (0 when `n==0`), and `Err` with a clear `"k-segment declares {declared} … standard count for n={n} … is {expected}"` message at the segment itself; the consume loop then runs over the validated count. **Test** (`nl_reader::tests`): `k_segment_nonstandard_count_is_parse_error_at_source` rewrites EQ_LIN's `k1`+1 count line to `k0` (n=2 ⇒ expected 1) and asserts the `"k-segment declares"` error. **Fail-first confirmed**: with the old assume-`n-1` code the same input mis-reads `J0 2` as the k data line and dies downstream with `"unknown .nl segment tag '0'"` — the exact confusing far-removed error the issue describes — so the test's `k-segment declares` assert fails. Restored; 86 pounce-nl lib (+1) green, and the full pounce-cli suite (parses real `.nl` fixtures, all standard `k<n-1>`) green — the validation rejects no valid file. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L35 detail`. |
+| L36 | Stale module docs claim SOC reduced-system methods are `unimplemented!` (`cones/soc.rs:16-21`) and that only the orthant is implemented (`lib.rs:6-9`); both are fully implemented and production-wired | **FIXED (docs)** | **Confirmed false by reading code + grep + an existing test.** `soc.rs`'s module doc claimed `recover_ds`, `rhs_comp_term`, and the corrector were "deferred to Phase 2b and `unimplemented!`", and that "the driver builds an orthant-only cone … SOC is … not yet a solvable cone." In fact all three carry **real bodies** (`soc.rs:188-262`: `comp_residual_corrector`, `rhs_comp_term` = `Arw(z)⁻¹ r_comp`, `recover_ds` = `−Arw(z)⁻¹ r_comp − W⁻² dz`); the *only* `unimplemented!` is `scaling_diag` (deliberately N/A — "SOC uses kkt_block, not scaling_diag"). SOC is **production-wired**: `hsde_nonsym.rs` constructs `SecondOrderCone::new(m)` and calls `kkt_block`/`in_dual_cone` in the solve loop (lines 159/180/409/516/591/653), `composite.rs` builds `ConeSpec::SecondOrder`, and the CLI routes convex QCQP / `solver_selection=socp` → `SolverChoice::SocpIpm` (`dispatch.rs`). `lib.rs` similarly claimed "only the nonnegative orthant implemented" with SOCP/exp/power/SDP as future "phases"; all have landed (`cones::{soc,exp,power,psd}`, `hsde`, `hsde_nonsym`, `equilibrate`, `presolve`). **Fix**: rewrote both module docs to state the real, shipped status (docs-only; no code change). **Verification**: this is a verifiable (not unverifiable) issue — the claims are falsified by the code and by the existing test `cones::soc::tests::one_dimensional_cone_matches_orthant`, which calls `rhs_comp_term`/`recover_ds`/`kkt_block` and checks they reduce to the orthant in 1-D (impossible if `unimplemented!`). No new behavioral test is meaningful for a doc correction. 107 pounce-convex lib tests green; normal `cargo doc -p pounce-convex` builds clean; `cargo fmt` / gated `cargo clippy` clean. (Pre-existing strict-`-D warnings` rustdoc private-link errors in `hsde`/`presolve`/etc. are unrelated and untouched.) See `## L36 detail`. |
 
 ## C1 detail
 
@@ -5246,3 +5247,47 @@ confirming. 86 pounce-nl lib tests (+1) green; the full pounce-cli suite (which
 parses real `.nl` fixtures, all carrying standard `k<n-1>` headers) stays green,
 confirming the new validation rejects no valid file. `cargo fmt -p pounce-nl` /
 gated `cargo clippy` clean.
+
+## L36 detail
+
+**Issue.** Stale module docs claim SOC reduced-system methods are
+`unimplemented!` (`cones/soc.rs:16-21`) and that only the orthant is
+implemented (`lib.rs:6-9`); both are fully implemented and production-wired.
+
+**Verification (the docs are false).**
+- `soc.rs:188-262`: `comp_residual_corrector` computes the Mehrotra
+  second-order Jordan term `s∘z + ds_aff∘dz_aff − σμ e`; `rhs_comp_term`
+  computes `Arw(z)⁻¹ r_comp`; `recover_ds` computes
+  `−Arw(z)⁻¹ r_comp − W⁻² dz` via `nt_scaling`/`apply_w2`. All real bodies.
+  The lone `unimplemented!` is `scaling_diag` (line ~185), explicitly
+  not-applicable: "SOC uses kkt_block, not scaling_diag".
+- Production wiring: `hsde_nonsym.rs` builds `SecondOrderCone::new(m)` and
+  calls its `in_dual_cone` (159, 180) and `kkt_block` (409), and steps SOC
+  blocks (516, 591, 653); `cones/composite.rs:169` constructs
+  `ConeSpec::SecondOrder(m) → SecondOrderCone::new(m)`; the CLI dispatch
+  routes `ProblemClass::ConvexQcqp` and `solver_selection=socp` to
+  `SolverChoice::SocpIpm` (`pounce-cli/src/dispatch.rs:302, 320-322`).
+- `lib.rs` claimed "only the nonnegative orthant implemented" with
+  "Mehrotra + HSDE, SOCP, exponential/power cones, SDP" listed as future
+  phases. Every one has landed: `cones::{nonneg,soc,exp,power,psd}`,
+  `hsde.rs`, `hsde_nonsym.rs` (Mehrotra + HSDE), `equilibrate.rs`,
+  `presolve.rs`.
+
+**Fix.** Docs-only. Rewrote `soc.rs`'s module header to list the
+reduced-system methods among the implemented machinery and state SOC is
+production-wired (HSDE solver + CLI `SocpIpm` route), noting `scaling_diag`
+is the sole deliberately-N/A `unimplemented!`. Rewrote `lib.rs`'s header to
+say the later cone families / Mehrotra / HSDE / equilibration have landed,
+pointing at the concrete modules. No code changed.
+
+**Test.** A doc correction has no runtime behavior to assert, so no new test
+was added. The staleness is already contradicted by the existing
+`cones::soc::tests::one_dimensional_cone_matches_orthant`, which invokes
+`kkt_block`, `rhs_comp_term`, and `recover_ds` and checks they reduce to the
+orthant formulas in 1-D — a test that could not pass if those methods were
+`unimplemented!`. 107 pounce-convex lib tests green; normal
+`cargo doc -p pounce-convex --no-deps` builds clean; `cargo fmt` / gated
+`cargo clippy` clean. (The strict `RUSTDOCFLAGS="-D warnings"` private
+intra-doc-link errors in `hsde`/`equilibrate`/`presolve`/`ipm` are
+pre-existing and unrelated to this change; CI does not run rustdoc with
+`-D warnings`.)
