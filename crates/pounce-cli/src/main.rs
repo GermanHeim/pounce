@@ -6,10 +6,12 @@
 //! used to reading `ipopt` output can drop in `pounce` without
 //! relearning where the numbers live.
 //!
-//! Exit status: 0 on `Solve_Succeeded`, non-zero otherwise. In AMPL
-//! solver mode (`-AMPL`) the exit code instead follows the AMPL
-//! contract — 0 for any solve that ran and produced a `.sol`, since
-//! the termination is carried by the file's `solve_result_num`.
+//! Exit status: 0 on a successful solve — `Solve_Succeeded` or
+//! `Solved_To_Acceptable_Level` (the reduced-accuracy convergence Ipopt
+//! likewise treats as success) — and non-zero otherwise. In AMPL solver
+//! mode (`-AMPL`) the exit code instead follows the AMPL contract — 0 for
+//! any solve that ran and produced a `.sol`, since the termination is
+//! carried by the file's `solve_result_num`.
 
 use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
@@ -1180,22 +1182,40 @@ pub fn main() -> ExitCode {
         write_diagnostics_timing(diag, &app);
     }
 
-    match status {
-        ApplicationReturnStatus::SolveSucceeded
-        | ApplicationReturnStatus::SolvedToAcceptableLevel => ExitCode::SUCCESS,
-        // AMPL solver-protocol mode: the process exit code is not the
-        // status channel. AMPL and Pyomo's ASL interface read the
-        // termination from the `.sol` file's `solve_result_num`, and
-        // conventionally an AMPL solver exits 0 whenever it ran and
-        // produced a `.sol` — limit reached, infeasible, even a failed
-        // solve. A non-zero exit makes Pyomo raise `ApplicationError`
-        // and never parse the `.sol`. Genuine startup failures (bad
-        // `.nl`, bad option) already returned non-zero above, before
-        // the solve, so reaching here in `-AMPL` mode means a `.sol`
-        // was written and carries the verdict.
-        _ if args.ampl => ExitCode::SUCCESS,
-        _ => ExitCode::from(1),
+    nlp_exit_code(status, args.ampl)
+}
+
+/// Process exit code for the general NLP solve path.
+///
+/// A *successful* solve — `SolveSucceeded` **or** `SolvedToAcceptableLevel`
+/// (the reduced-accuracy convergence Ipopt also treats as a success; see
+/// `minimize()` parity, #119) — exits 0. Everything else exits 1, **except**
+/// in AMPL solver mode.
+///
+/// In `-AMPL` mode the process exit code is not the status channel: AMPL and
+/// Pyomo's ASL interface read the termination from the `.sol` file's
+/// `solve_result_num`, and conventionally an AMPL solver exits 0 whenever it
+/// ran and produced a `.sol` — limit reached, infeasible, even a failed solve.
+/// A non-zero exit makes Pyomo raise `ApplicationError` and never parse the
+/// `.sol`. Genuine startup failures (bad `.nl`, bad option) already returned
+/// non-zero earlier, before the solve, so reaching here in `-AMPL` mode means a
+/// `.sol` was written and carries the verdict. Mirrors [`convex_exit_code`].
+fn nlp_exit_code(status: ApplicationReturnStatus, ampl: bool) -> ExitCode {
+    if nlp_solve_succeeded(status) || ampl {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
+}
+
+/// Whether an NLP solve outcome counts as a "success" for the (non-AMPL) exit
+/// code: `SolveSucceeded` or the reduced-accuracy `SolvedToAcceptableLevel`,
+/// matching Ipopt and the `minimize()` success set (#119).
+fn nlp_solve_succeeded(status: ApplicationReturnStatus) -> bool {
+    matches!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
 }
 
 /// Build a `SolverDebugger` for the requested mode/flags, wired to the
@@ -1979,6 +1999,40 @@ mod scaling_retry_tests {
                 "promoted: stats must be the retry solve's"
             );
             assert_eq!(stats.final_objective, 42.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nlp_exit_code_tests {
+    //! Code review L27: the module doc claimed exit 0 only on `Solve_Succeeded`,
+    //! but the NLP path also (correctly) exits 0 on `SolvedToAcceptableLevel`.
+    //! The doc was corrected; these tests lock the actual behavior so the doc
+    //! and code can't drift again.
+    use super::nlp_solve_succeeded;
+    use pounce_nlp::return_codes::ApplicationReturnStatus as A;
+
+    #[test]
+    fn acceptable_level_counts_as_success() {
+        // The crux of L27: reduced-accuracy convergence is a success.
+        assert!(nlp_solve_succeeded(A::SolvedToAcceptableLevel));
+        assert!(nlp_solve_succeeded(A::SolveSucceeded));
+    }
+
+    #[test]
+    fn non_convergent_statuses_are_not_success() {
+        for s in [
+            A::InfeasibleProblemDetected,
+            A::MaximumIterationsExceeded,
+            A::RestorationFailed,
+            A::DivergingIterates,
+            A::MaximumCpuTimeExceeded,
+            A::InternalError,
+        ] {
+            assert!(
+                !nlp_solve_succeeded(s),
+                "{s:?} must not count as a successful solve"
+            );
         }
     }
 }

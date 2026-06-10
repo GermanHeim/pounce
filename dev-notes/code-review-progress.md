@@ -89,6 +89,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L24 | CLI: the `.nl` was fully re-parsed a second time purely to classify it for LP/QP dispatch (`main.rs:456-461` / the `nl_reader::read_nl_file` at the dispatch block), doubling parse time and peak memory on large models; the classification re-parse's error arm (`Err(_) => (ProblemClass::Nlp, None)`) silently fell back to NLP | **FIXED** | **Bug confirmed by reading + running code.** The `.nl` is parsed once to build `NlTnlp` (consuming `NlProblem`), then `read_nl_file(path)` ran a *second* full parse in the dispatch block just to call `classify_problem`. Every `.nl` solve paid two parses; large models paid double parse time + peak memory. The second parse's `Err(_)` arm discarded the error and defaulted to `ProblemClass::Nlp` (silent mis-route latent on a re-read failure). **Fix**: classify during the **first** parse — capture `nl_class = Some(classify_problem(&prob))` right before `prob` is moved into `NlTnlp::new`, and have the dispatch block read `class` from `nl_class` (no re-parse). The specialized convex solvers still need an owned `NlProblem` (the first one was consumed), so re-parse **once, lazily, only on the convex dispatch path** (LP/convex-QP/SOCP) — never for a general NLP solve — and on that re-parse a failure now surfaces (`eprintln!` + exit 2) instead of silently routing to NLP. Builtins (always NLP) never re-parse. **Tests/verification**: the existing end-to-end suites exercise the refactored path — `qp_dispatch_end_to_end::auto_routes_convex_qp_to_pounce_convex` (auto classifies `convex_qp.nl` → routes to pounce-convex, proving the captured `nl_class` drives routing), `nlp_path_still_solves_same_file`, plus `dispatch_routing` (21 tests total) all green. **Fail-first confirmed**: breaking the capture (`nl_class = None` → defaults to Nlp) makes `auto_routes_convex_qp_to_pounce_convex` fail (the convex QP misroutes to NLP, stdout lacks `pounce-convex`). The pure parse-count reduction and the re-parse error-surfacing path are verified by code reading (no deterministic fail-first seam for "parsed once not twice" or a first-succeeds/second-fails race). Restored; suites green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L24 detail`. |
 | L25 | CLI: a failed `.sol` write exited 0 on the NLP path (`main.rs:1076-1080`) but 2 on the convex LP/QP/SOCP path (`main.rs:1287`); under `-AMPL` a convex-path write failure made the process exit non-zero, so Pyomo/ASL raised `ApplicationError` and never read the (stale/missing) `.sol` | **ALREADY FIXED (by H4)** | **Verified by reading + git history; no separate fix needed.** The exact asymmetry L25 describes was eliminated by the earlier High-priority fix **H4** (`fix(cli): honor -AMPL exit-code contract on convex LP/QP/SOCP paths`, commit `ce49710`). Its message states it "drop[s] the convex paths' `.sol`-write-failure `exit 2` in favor of log-and-continue, matching the NLP path so the exit code uniformly follows the solve outcome." Confirmed by code reading: all three `.sol`-write sites — NLP (`main.rs:1169-1172`), convex-QP (`main.rs:1433-1435`), convex-SOCP (`main.rs:1574-1576`) — now `eprintln!` a warning and continue; none early-returns `ExitCode::from(2)` on a write failure. The convex paths' final exit routes through `convex_exit_code(ok, ampl)` (exits 0 when `ok \|\| ampl`), mirroring the NLP path's `_ if args.ampl => ExitCode::SUCCESS`. **Behavioral coverage**: H4's regression test `qp_dispatch_end_to_end::ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp` runs the infeasible-QP fixture both ways (`-AMPL` exits 0 with srn 200 in the `.sol`; plain CLI exits non-zero), locking the `-AMPL` exit contract that L25 was concerned with. A dedicated `.sol`-write-failure test was not added — forcing a write failure hermetically/portably (unwritable path) is brittle, and the failure mode L25 flagged (distinct exit 2) no longer exists in any path. See `## L25 detail`. |
 | L26 | CLI summary (`print.rs`): (a) the final-summary block prints the **same** number under both the `(scaled)` and `(unscaled)` columns for Dual infeasibility / Constraint violation / Complementarity / Overall NLP error (`print.rs:381-401`); (b) "Variable bound violation" is hardcoded `0.0` (`print.rs:391`); (c) the inequality bound-type breakdown didn't sum to `n_ineq` — a "free" inequality row (no finite bound) fell through to a no-op arm (`print.rs:87-89`) | **PARTIALLY FIXED** (c fixed + tested; a/b documented as solver-statistics limitations) | **All three verified by reading code.** **(c) FIXED:** a constraint row with `g_l=-inf, g_u=+inf` is classified inequality (`n_ineq += 1`) but its `(has_l,has_u)=(false,false)` match arm was `=> {}`, so `ineq_lower_only + ineq_both + ineq_upper_only < n_ineq` whenever a free row was present — exactly the "breakdown not sum to total" defect. The comment already said to "count it anyway under 'both' to keep the totals consistent," so the code was simply not doing what its comment claimed. **Fix**: `(false, false) => ineq_both += 1`, comment rewritten to match. **Test** (`print.rs` `inequality_tally_tests::free_inequality_row_keeps_breakdown_summing_to_total`): a mock TNLP with 3 inequality rows (lower-only, both, free) asserts `ineq_lower_only + ineq_both + ineq_upper_only == n_ineq == 3` (and the free row lands in "both": both=2). **Fail-first confirmed**: reverting to `=> {}` makes the sum 2 ≠ 3 (test fails). 160 pounce-cli lib tests green; `cargo fmt` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. **(a)/(b) DOCUMENTED, not fixed — root cause is missing solver statistics, not a print bug:** `SolveStatistics` (`pounce-nlp/src/solve_statistics.rs:51-66`) carries a single value each for `final_dual_inf`/`final_constr_viol`/`final_compl`/`final_kkt_error` (populated once off the scaled-space `cq` cache at `application.rs:1347-1361`) and **no** variable-bound-violation field; only the objective is tracked in both spaces (`final_objective` + `final_scaled_objective`). So the print layer has only the scaled residual to show — printing it under both columns is the *display* symptom of the solver not computing unscaled residuals, and the `0.0` bound violation is a value the solver never measures (an interior-point iterate is bound-feasible by construction, so it is ~0 on a converged solve, but it is genuinely uncomputed for early-terminated solves). A faithful fix requires plumbing unscaled residuals + a bound-violation metric through `pounce-algorithm`'s finalize path into `SolveStatistics` — a solver-statistics change well beyond a CLI print remediation, deferred to a dedicated issue. Nothing parses this block (grep over `crates/`/`pyomo-pounce/`/`python/` finds no scraper), so the misleading columns are cosmetic, not a data-integrity break. See `## L26 detail`. |
+| L27 | CLI module doc (`main.rs:9-12`) claimed "Exit status: 0 on `Solve_Succeeded`, non-zero otherwise" but the code (`main.rs:1183-1185`) also returns 0 for `SolvedToAcceptableLevel` — the doc understated the success set | **FIXED** | **Confirmed by reading code.** The NLP exit-code `match status { SolveSucceeded \| SolvedToAcceptableLevel => SUCCESS, … }` exits 0 for reduced-accuracy convergence too (consistent with `minimize()` parity #119 and Ipopt), but the module-level doc only named `Solve_Succeeded`. **Fix**: (1) corrected the module doc to name both `Solve_Succeeded` and `Solved_To_Acceptable_Level` as the success set; (2) extracted the inline exit-code match into a pure helper `nlp_exit_code(status, ampl)` (mirroring the existing `convex_exit_code(ok, ampl)`), itself composed from a testable predicate `nlp_solve_succeeded(status)` (mirrors L23's `scaling_retry_promoted`). This both removes the duplicated AMPL-contract comment and gives the doc-claimed behavior a regression lock. **Tests** (`main.rs` `nlp_exit_code_tests`): `acceptable_level_counts_as_success` (both `SolveSucceeded` and `SolvedToAcceptableLevel` → true — the crux of L27) and `non_convergent_statuses_are_not_success` (Infeasible/MaxIters/RestorationFailed/Diverging/MaxCpuTime/InternalError → false). `ExitCode` has no `PartialEq`, so the bool predicate is the testable seam. **Fail-first confirmed**: dropping `SolvedToAcceptableLevel` from `nlp_solve_succeeded` makes `acceptable_level_counts_as_success` fail (`assertion failed: nlp_solve_succeeded(A::SolvedToAcceptableLevel)`). Restored; 5 pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L27 detail`. |
 
 ## C1 detail
 
@@ -4792,3 +4793,53 @@ A grep for the summary block's text across `crates/`, `pyomo-pounce/`, and
 so the (a)/(b) display imprecision is cosmetic, not a data-integrity problem.
 The (c) fix is the only behavioral correctness defect in L26 and is now closed
 with a regression test.
+
+## L27 detail
+
+**Issue (verbatim).** "Module doc says exit 0 only on `Solve_Succeeded`; code
+also (reasonably) returns 0 for `SolvedToAcceptableLevel` (`main.rs:9-12` vs
+1090-1092)."
+
+**Root cause.** The NLP path's exit-code logic exits 0 for both
+`SolveSucceeded` and `SolvedToAcceptableLevel`:
+
+```
+match status {
+    ApplicationReturnStatus::SolveSucceeded
+    | ApplicationReturnStatus::SolvedToAcceptableLevel => ExitCode::SUCCESS,
+    _ if args.ampl => ExitCode::SUCCESS,   // AMPL contract
+    _ => ExitCode::from(1),
+}
+```
+
+But the module-level doc comment (`main.rs:9`) said only:
+"Exit status: 0 on `Solve_Succeeded`, non-zero otherwise." Treating
+reduced-accuracy convergence as success is correct and matches `minimize()`
+(#119) and Ipopt; the doc just understated it.
+
+**Fix.**
+1. Module doc corrected to name both `Solve_Succeeded` and
+   `Solved_To_Acceptable_Level` as the exit-0 success set (AMPL clause
+   unchanged).
+2. The inline `match` was extracted into a pure helper
+   `nlp_exit_code(status, ampl) -> ExitCode` (mirrors `convex_exit_code(ok,
+   ampl)`), composed from a small testable predicate
+   `nlp_solve_succeeded(status) -> bool`. `ExitCode` implements no `PartialEq`,
+   so the bool predicate is the unit-testable seam (same pattern as L23's
+   `scaling_retry_promoted`). The duplicated AMPL-contract comment now lives
+   once, on the helper.
+
+**Tests** (`main.rs` `nlp_exit_code_tests`):
+- `acceptable_level_counts_as_success` — both `SolveSucceeded` and
+  `SolvedToAcceptableLevel` return true (the L27 crux).
+- `non_convergent_statuses_are_not_success` — `InfeasibleProblemDetected`,
+  `MaximumIterationsExceeded`, `RestorationFailed`, `DivergingIterates`,
+  `MaximumCpuTimeExceeded`, `InternalError` all return false.
+
+**Fail-first.** Removing `SolvedToAcceptableLevel` from `nlp_solve_succeeded`
+makes `acceptable_level_counts_as_success` fail
+(`assertion failed: nlp_solve_succeeded(A::SolvedToAcceptableLevel)`). Restored.
+
+5 pounce-cli bin tests green; `cargo fmt -p pounce-cli` and
+`cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious`
+clean (3 remaining warnings are pre-existing `clippy::style`).
