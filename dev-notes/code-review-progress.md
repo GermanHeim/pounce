@@ -82,6 +82,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L17 | sensitivity: `IndexPCalculator::schur_matrix` drops the B-row sign and caches P columns by column index only, so a `−1` B row mis-signs its Schur entry and two A rows selecting the same column with opposite signs share one wrong-signed cached column (`p_calculator.rs:150-166,191-199`) | **FIXED** | **Both bugs confirmed by reading + running code, and verified against upstream sIPOPT (`SensIndexPCalculator.cpp`) — both behaviors *mirror* upstream but are only *reachable* in pounce because `from_parts`/`set_from_*` accept `−1` signs and duplicate columns, where production `IndexSchurData` is `+1`-only with unique columns.** **(1) B-row sign dropped.** Upstream `GetSchurMatrix` writes `S[i,j] = −P[B_colᵢ, A_colⱼ]` indexing `P` by `B`'s column index alone, never reading `B`'s ±1 factor. `schur_matrix` faithfully copied this (`let (b_idx_vec, _facs) = b.multiplying_row(i)?; … = -p_col[b_col]`), discarding `_facs`. So a `B` row carrying `−1` produced a Schur entry with the wrong sign. **Fix**: bind the factor (`b_facs`) and write `S[i,j] = −b_facs[0]·P[…]`. **(2) Duplicate-column cache conflation.** `compute_p` keyed the `p_cols` cache by column index only (`contains_key(&col)` / `insert(col, …)`) while the stored column *bakes in* A's sign (`K⁻¹(sign·e_col)`). Two A rows selecting the same column with opposite signs → the second hit `contains_key` on the first and silently reused the `+`-signed column for the `−` row. **Fix**: key the cache by `(col, sign)`; `schur_matrix` looks columns up by the same `(a_col, a_sign)` key. Public `p_columns()` return type changes `HashMap<Index,…>` → `HashMap<(Index,Index),…>` (only the test suite consumes it). **Tests** (`p_calculator::tests`): `schur_matrix_honors_negative_b_sign` (A col 0 +1, B col 1 −1 ⇒ `S[0,0] = −(−1)·P[1,0] = +½`, the buggy path yields −½) and `compute_p_distinguishes_same_column_opposite_signs` (A = col 1 twice with +1/−1 ⇒ both `(1,+1)` and `(1,−1)` cached as exact negatives; the buggy path caches only one). The contract test `adapter_compute_p_respects_negative_signs` (signed-column storage: `p_pos[i] == −p_neg[i]`) still passes — the fix preserves signed storage, it just stops two opposite-sign rows from aliasing. **Fail-first confirmed** by reverting each bug independently (drop `b_facs[0]`; collapse the cache key to column-only): the matching new test fails (`schur_matrix_honors_negative_b_sign` gets −½ not +½; `compute_p_distinguishes_same_column_opposite_signs`'s `(1,−1)` lookup is `None`) while the rest stay green. Restored, full pounce-sensitivity suite green (47 lib + 6 adapter + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L17 detail`. |
 | L18 | restoration: inner solver pins tolerances at `(1e-8, 1e-6, 15, 3000, 3000)` regardless of the user's outer `tol` (`resto_inner_solver.rs:251`), and `is_square_problem = n == m_eq` ignores inequalities (line 226), unlike IPOPT's `IsSquareProblem` | **FIXED (1 of 2; 2nd is not a bug)** | **Split verdict after running code + upstream cross-check.** **(1) Hardcoded resto tol — REAL, fixed.** `run_inner_resto` built the resto sub-solve's convergence check with `RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)` — the inner-IPM stationarity `tol`, `acceptable_tol`, and `acceptable_iter` were literals, so a user `tol=1e-3` (or `1e-10`) still drove the restoration sub-NLP to `1e-8`. Upstream clones the outer `OptionsList` into the resto sub-options (`IpRestoMinC_1Nrm.cpp`), so the resto IPM *inherits* the user's `tol`/`acceptable_tol`/`acceptable_iter`. Verified the inner builder carries these: `IpoptApplication::algorithm_builder_from_options` sets `builder.conv_check.{tol,acceptable_tol,acceptable_iter}` from the `tol`/`acceptable_tol`/`acceptable_iter` options (`application.rs:1627,1648,1663`), and CLI/py/cinterface all hand that builder to `make_default_restoration_factory_provider`. **Fix**: extracted `build_resto_conv_check_adapter(&ConvCheckOptions)` that reads `conv.{tol,acceptable_tol,acceptable_iter}` and keeps the resto-phase iteration budgets as named consts `RESTO_INNER_MAX_ITERS`/`RESTO_MAX_SUCCESSIVE_ITERS` (= 3000, which mirror `IpRestoConvCheck.cpp:137,144` `maximum_iters`/`maximum_resto_iters` — resto-specific, *not* the outer `max_iter`); the callsite now passes `&inner_alg_builder.conv_check`. Added `RestoConvCheckAdapter::{inner_tol,inner_acceptable_tol,inner_acceptable_iter}` accessors. **(2) `is_square_problem` — NOT a bug.** The claim "ignores inequalities, unlike IPOPT's `IsSquareProblem`" is false: upstream `IpoptCalculatedQuantities::IsSquareProblem()` is literally `return (ip_data_->curr()->x()->Dim() == ip_data_->curr()->y_c()->Dim());` (`IpIpoptCalculatedQuantities.cpp:3732-3735`, fetched via the GitHub raw API) — i.e. `n == m_eq`, with no inequality term. pounce's `is_square_problem = n_orig == m_eq` matches upstream exactly; left unchanged. **Test** (`resto_inner_solver::tests`): `resto_conv_check_adapter_inherits_user_tolerances` builds a `ConvCheckOptions` with `tol=1e-3, acceptable_tol=1e-2, acceptable_iter=7` and asserts the adapter reports them. **Fail-first confirmed** by reverting the helper to the old `(1e-8, 1e-6, 15)` literals — the test fails (`1e-8 != 1e-3`, "outer tol must propagate"). Restored, full pounce-restoration suite green (106 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L18 detail`. |
 | L19 | restoration: `min_c_1nrm` LSM branch mutates `data.curr` without restoring it only on the non-default `constr_mult_reset_threshold > 0` path (`min_c_1nrm.rs:397-407`) — a divergence trap between option settings | **FIXED** | **Bug confirmed by reading + running code (pounce port of `IpRestoMinC_1Nrm`).** In `recover`'s least-square-multiplier (LSM) block, the non-default `constr_mult_reset_threshold > 0` path sets `data.curr = recovered` (the just-staged trial container) so `EqMultCalculator::calculate_y_eq` evaluates ∇f/J_c/J_d at the recovered iterate — but it **never restored `curr`**, so this path returned with `curr` = the recovered iterate while the default (`threshold == 0`) path leaves `curr` untouched. Upstream `DefaultIterateInitializer::least_square_mults` ends with `CopyTrialToCurrent` + `AcceptTrialPoint`, so upstream's `curr` becomes the recovered iterate on *every* path; pounce instead defers that promotion to the caller (`IpoptAlgorithm`'s `Recovered` arm calls `accept_trial_point`, `curr ← trial`), so `recover` must leave `curr` exactly as found or the two option settings diverge mid-cycle — a latent trap for any read of `curr` between `recover`'s return and the caller's promotion (e.g. `adjust_variable_bounds_for_small_slacks`). **Not observable at solver-output level** because the caller unconditionally overwrites `curr` immediately after `Recovered`; the fix is verified directly at the `recover` boundary. **Fix**: snapshot `saved_curr = data.curr.clone()` before the temporary `curr = recovered`, then restore `data.curr = saved_curr` after the LSM step, so both option paths leave `curr` identical on return. **Test** (`min_c_1nrm::tests`): a direct `perform_restoration` fixture (2-var/1-eq/1-ineq `MockNlp` → non-square so the LSM branch is reachable; stub `EqMultCalculator` writing sub-threshold multipliers without touching `cq`/`aug_solver`; synthetic inner-solver hook returning a recovered `trial_x = [10,20]` ≠ `curr.x = [2,3]`) asserts `curr.x` is unchanged after the call on both the `threshold = 10` and `threshold = 0` paths. **Fail-first confirmed** by dropping the restore: `recover_restores_curr_on_constr_mult_reset_path` fails (`curr` leaks `[10,20]` vs expected `[2,3]`) while `recover_leaves_curr_unchanged_on_default_path` stays green. Restored, full pounce-restoration suite green (108 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L19 detail`. |
+| L20 | sensitivity: `IndexSchurData::set_from_flags` returns the wrong error variant (`AlreadyInitialized`) for an out-of-range flag value and leaves partially-populated `idx`/`val` state with `initialized == false` (`schur_data.rs:217`), so a caller retry double-appends rows | **FIXED** | **Bug confirmed by reading + running code (pounce port of `SensIndexSchurData`).** Two coupled defects: (1) an out-of-range flag (anything other than 0/1) returned `Err(SchurDataError::AlreadyInitialized)` — a misleading variant that names an unrelated failure mode; (2) the validation happened *mid-loop*, after earlier `f == 1` entries had already been pushed to `idx`/`val`, and the early return left `initialized == false`, so a caller that caught the error and retried with a corrected flag array would re-run the push loop and **append duplicate rows** on top of the partial state. **Fix**: added a dedicated `SchurDataError::InvalidFlag` variant (doc cites upstream `SensIndexSchurData.cpp:51-78`) and rewrote `set_from_flags` to validate the entire flag array up front (`flags.iter().any(|&f| f != 0 && f != 1)` → `Err(InvalidFlag)`) *before* any mutation — atomic, so a rejected call leaves the instance pristine for retry. **Tests** (`schur_data::tests`): `set_from_flags_rejects_invalid_flag_with_distinct_variant` (flags `[1,0,2,1]` → `Err(InvalidFlag)`, not `AlreadyInitialized`); `set_from_flags_invalid_flag_leaves_instance_pristine_for_retry` (flags `[1,0,5]` → `InvalidFlag`, asserts `!is_initialized()`, `nrows() == 0`, empty `col_indices`; then retry `[1,0,1]` yields `col_indices() == [0,2]` with no duplicate append). **Fail-first confirmed**: against the pre-fix code both new tests fail — the old loop returns `Err(AlreadyInitialized)` for the invalid-flag input and, with the early return removed, leaves `col_indices() == [0,3]` (partial) so the retry double-appends to `[0,3,0,2]`. Restored; full pounce-sensitivity suite green. `cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L20 detail`. |
 
 ## C1 detail
 
@@ -4328,3 +4329,70 @@ suite green (106 lib + integration). `cargo fmt -p pounce-restoration` /
   (108 lib + integration). `cargo fmt -p pounce-restoration` /
   `cargo clippy -p pounce-restoration --all-targets -- -D clippy::correctness
   -D clippy::suspicious` clean.
+
+## L20 detail
+
+**Issue (L20).** `IndexSchurData::set_from_flags` returns the wrong error
+variant and leaves partially-populated state on invalid flags
+(`schur_data.rs:217`); a retry appends duplicates.
+
+**Verification.** Pounce port of Ipopt's `SensIndexSchurData::SetSchurDataFromVector`
+(`SensIndexSchurData.cpp:51-78`). `set_from_flags(flags, v)` builds the Schur
+selection set: for each `flags[i] == 1` it pushes column index `i` (with sign
+`+1`/`-1` from `v`) into `idx`/`val`. The contract is that flag entries are
+`0` (skip) or `1` (select). The pre-fix loop handled the out-of-range case
+inside the match as `_ => return Err(SchurDataError::AlreadyInitialized)`:
+
+  - **Wrong variant.** `AlreadyInitialized` names "set_* called twice on the
+    same instance" — nothing to do with a bad flag value. A caller inspecting
+    the error to decide whether to retry would be misdirected.
+  - **Partial mutation + non-atomic retry.** The check fired *mid-loop*, after
+    any earlier `f == 1` entries had been pushed, and the early return left
+    `self.initialized == false`. A caller that caught the error, fixed its
+    flag vector, and called again would re-enter the push loop on top of the
+    leftover `idx`/`val`, appending duplicate rows. Confirmed by running a
+    fixture: flags `[1,0,5]` then retry `[1,0,1]` produced
+    `col_indices() == [0,3,0,2]` instead of `[0,2]`.
+
+**Fix** (`crates/pounce-sensitivity/src/schur_data.rs`). Added a dedicated
+`SchurDataError::InvalidFlag` variant (doc cites the upstream line range and
+notes it is distinct from `AlreadyInitialized` and leaves the instance
+untouched). Rewrote `set_from_flags` to validate the whole array before any
+mutation:
+
+```rust
+if flags.iter().any(|&f| f != 0 && f != 1) {
+    return Err(SchurDataError::InvalidFlag);
+}
+let w: Index = if v > 0.0 { 1 } else { -1 };
+for (i, &f) in flags.iter().enumerate() {
+    if f == 1 {
+        self.idx.push(i as Index);
+        self.val.push(w);
+    }
+}
+self.initialized = true;
+Ok(())
+```
+
+This makes the operation atomic — a rejected call leaves `idx`/`val`/`initialized`
+exactly as found, so a retry starts clean. Also corrected the
+`AlreadyInitialized` doc (dropped the stale "or flags contained values other
+than 0/1" clause) and updated the trait-level `set_from_flags` doc to mention
+both error variants and the unchanged-on-error guarantee.
+
+**Tests** (`schur_data::tests`):
+- `set_from_flags_rejects_invalid_flag_with_distinct_variant` — flags
+  `[1,0,2,1]` → `Err(SchurDataError::InvalidFlag)` (asserts the specific
+  variant, not just `is_err()`).
+- `set_from_flags_invalid_flag_leaves_instance_pristine_for_retry` — flags
+  `[1,0,5]` → `InvalidFlag`; asserts `!is_initialized()`, `nrows() == 0`,
+  empty `col_indices()`; then retry `[1,0,1]` yields `col_indices() == [0,2]`
+  with no duplicate append.
+
+**Fail-first confirmed.** Against the pre-fix code both new tests fail: the old
+loop returns `Err(AlreadyInitialized)` for the invalid input, and (with the
+early return removed to model the partial-state path) the retry double-appends
+to `[0,3,0,2]`. Restored; full pounce-sensitivity suite green.
+`cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity
+--all-targets -- -D clippy::correctness -D clippy::suspicious` clean.
