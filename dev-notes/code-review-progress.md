@@ -79,6 +79,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L14 | qp: the inertia-control retry loops recover from a linear-solver failure by substring-testing the error message for `"inertia"`/`"singular"` (`solver.rs:123,142`; `schur.rs:275,297`), a fragile case-sensitive match that silently misses the capitalized `Debug`-formatted `ESymSolverStatus` (`Singular`/`WrongInertia`) emitted by `LinearSolver::resolve`'s catch-all (`factor.rs:172`) — those failures propagate as unrecoverable instead of triggering a shift retry | **FIXED** | **Bug confirmed by reading + running code.** The §4.5 inertia-control loops in both the dense (`solver.rs`) and Schur (`schur.rs`) QP paths decide whether a `QpError::LinearSolverFailure(msg)` is recoverable (retry with a larger Hessian-diagonal shift) by `msg.contains("inertia") || msg.contains("singular")` — a **case-sensitive** substring test, duplicated at four sites. The factorize path produces lowercase messages (`"...inertia..."`), so those match. But `LinearSolver::resolve`'s catch-all (`factor.rs:172`) formats the backend status with `Debug`: `format!("resolve backend status: {other:?}")`, and `ESymSolverStatus`'s variants are **capitalized** (`Singular`, `WrongInertia`) — so a resolve-path singular/wrong-inertia failure yields `"resolve backend status: Singular"`, which `contains("singular")` **misses**. The recoverable failure then propagates as a hard error instead of triggering the shift retry that would rescue the solve. **Fix**: centralized the recoverability decision in one predicate `QpError::is_recoverable_factorization_failure()` (`error.rs`) that lowercases the message before testing (`m.contains("inertia") || m.contains("singular")`), and routed all four matchers through it (`solver.rs:123,142`; `schur.rs:275,297`), removing the duplicated inline substring tests. **Test** (`pounce-qp` `tests::refinement_unit::recoverable_factorization_failure_is_case_insensitive`): asserts the predicate accepts both the lowercase factorize-path messages **and** the capitalized resolve-path Debug strings (`"resolve backend status: Singular"`, `"...WrongInertia"`), and rejects non-recoverable failures (`"backend reported fatal error"`, `"resolve called before factorize"`) and non-`LinearSolverFailure` variants (`DimensionMismatch`). **Fail-first confirmed** by reverting the predicate to the case-sensitive `msg.contains(...)`: it fails on `"resolve backend status: Singular"` (`assertion failed: ...is_recoverable_factorization_failure()`); restored, full pounce-qp suite green (78 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L14 detail`. |
 | L15 | qp: `ElasticReformulation::original_inertia()` hardcodes `Psd` (`elastic.rs:169-175`), making the `Indefinite` arm of `as_qp`'s inertia match dead — an indefinite original problem is solved through the augmented elastic problem as if PSD; `solve_elastic` hard-calls `solve_general` (`solver.rs:1087`), ignoring `opts.use_schur_updates` | **FIXED** | **Both bugs confirmed by reading + running code (pounce-internal §4.3/§4.5 design, not an upstream-divergence).** **(1) Dead inertia arm.** `ElasticReformulation::build` discarded `qp.hessian_inertia`, and `original_inertia()` unconditionally returned `HessianInertia::Psd`. `as_qp` (`elastic.rs:162-165`) maps the original inertia onto the augmented problem with `Psd|Unknown => Psd`, `Indefinite => Indefinite` — but since `original_inertia()` could never return `Indefinite`, the augmented problem was *always* marked `Psd`, so an indefinite original `H` was solved as if PSD (skipping the §4.5 inertia-control assumption). **Fix**: `build` now captures `qp.hessian_inertia` into a new `orig_inertia` field and `original_inertia()` returns it; the augmented Hessian is block-diag(`H_orig`, 0) so it shares `H_orig`'s definiteness category (zero slack diagonals never introduce negative curvature), and the existing `as_qp` match now correctly propagates `Indefinite` while collapsing `Psd`/`Unknown` to `Psd`. **(2) `use_schur_updates` ignored.** The top-level `solve` dispatches between `solve_general_schur` (when `opts.use_schur_updates`) and `solve_general` (`solver.rs:1587-1591`), but `solve_elastic`'s recursive solve hard-called `solve_general`, so an infeasible problem solved with `use_schur_updates = true` silently fell back to the refactor path. **Fix**: `solve_elastic` now mirrors the same dispatch; both inner solvers bypass the `solve` feasibility audit, so the no-re-audit / no-recovery-loop property is preserved (comment updated). **Tests**: `elastic_unit::as_qp_propagates_original_hessian_inertia` (Indefinite original ⇒ augmented `Indefinite`; Psd/Unknown ⇒ `Psd`) and `analytical::l15_elastic_honors_use_schur_updates` (the `problem_5` infeasible QP solved with `use_schur_updates = true` returns the same minimal-l1 certificate **and** records `n_schur_updates > 0`, proving the Schur path ran inside the elastic recovery — the refactor path leaves it 0). **Fail-first confirmed** by reverting both edits (`original_inertia` → hardcoded `Psd`; dispatch → `solve_general` only): both tests fail (inertia `Indefinite != Psd`; `n_schur_updates == 0`). Restored, full pounce-qp suite green (80 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L15 detail`. |
 | L16 | sensitivity: `clamp_step_to_bounds` panics (index OOB) on non-dense bound vectors instead of the documented no-op (`boundcheck.rs:64-78,106-112`); and `dv.values()` (here + the `dense_to_vec` siblings in `solver.rs:408`, `convenience.rs:438`) trips `DenseVector::values`'s `!homogeneous` debug_assert where `expanded_values()` is the safe accessor | **FIXED** | **Both bugs confirmed by reading + running code (pounce sIPOPT port; the `values`/`expanded_values` homogeneous-value distinction is pounce-internal).** **(1) OOB panic on non-dense bounds.** `compressed_values` returns an empty `Vec` when the bound `dyn Vector` is not a `DenseVector` (documented contract: "silently no-ops"). But the clamp loops then indexed `bounds[compressed_i]` for every entry of the bound *expansion matrix* — so a non-dense `x_l`/`x_u` paired with a non-empty `px_l`/`px_u` panics `index out of bounds: the len is 0 but the index is 0` instead of no-opping. **Fix**: replaced both `bounds[compressed_i]` accesses with `bounds.get(compressed_i)` + `continue` on `None`, honoring the no-op contract (also covers a bounds slice shorter than the expansion). **(2) Homogeneous debug_assert.** `DenseVector::values()` carries `debug_assert!(self.initialized && !self.homogeneous)` (mirrors upstream's `DBG_ASSERT` in `DenseVector::Values() const`); a homogeneous bound vector — e.g. every lower bound 0, stored as a scalar with no materialized slice — makes `values()` panic in debug/test builds. Three sites used `dv.values().to_vec()`: `boundcheck.rs::compressed_values`, and the `dense_to_vec` helpers in `solver.rs` and `convenience.rs`. **Fix**: switched all three to `expanded_values()`, which materializes the scalar for a homogeneous vector and clones otherwise. **Tests** (`boundcheck::tests`): `clamp_handles_homogeneous_bounds_without_panicking` (homogeneous lower bound built via `Vector::set`; asserts no panic + correct single clamp) and `clamp_is_noop_on_non_dense_bounds` (a 1-block `CompoundVector` — the only other `dyn Vector` impl — as `x_l`; asserts 0 clamps, `dx` untouched). **Fail-first confirmed** by reverting both fixes: the homogeneous test panics at `dense_vector.rs:131` (`assertion failed: self.initialized && !self.homogeneous`) and the non-dense test panics at `boundcheck.rs` (`index out of bounds: the len is 0 but the index is 0`). Restored, full pounce-sensitivity suite green (45 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L16 detail`. |
+| L17 | sensitivity: `IndexPCalculator::schur_matrix` drops the B-row sign and caches P columns by column index only, so a `−1` B row mis-signs its Schur entry and two A rows selecting the same column with opposite signs share one wrong-signed cached column (`p_calculator.rs:150-166,191-199`) | **FIXED** | **Both bugs confirmed by reading + running code, and verified against upstream sIPOPT (`SensIndexPCalculator.cpp`) — both behaviors *mirror* upstream but are only *reachable* in pounce because `from_parts`/`set_from_*` accept `−1` signs and duplicate columns, where production `IndexSchurData` is `+1`-only with unique columns.** **(1) B-row sign dropped.** Upstream `GetSchurMatrix` writes `S[i,j] = −P[B_colᵢ, A_colⱼ]` indexing `P` by `B`'s column index alone, never reading `B`'s ±1 factor. `schur_matrix` faithfully copied this (`let (b_idx_vec, _facs) = b.multiplying_row(i)?; … = -p_col[b_col]`), discarding `_facs`. So a `B` row carrying `−1` produced a Schur entry with the wrong sign. **Fix**: bind the factor (`b_facs`) and write `S[i,j] = −b_facs[0]·P[…]`. **(2) Duplicate-column cache conflation.** `compute_p` keyed the `p_cols` cache by column index only (`contains_key(&col)` / `insert(col, …)`) while the stored column *bakes in* A's sign (`K⁻¹(sign·e_col)`). Two A rows selecting the same column with opposite signs → the second hit `contains_key` on the first and silently reused the `+`-signed column for the `−` row. **Fix**: key the cache by `(col, sign)`; `schur_matrix` looks columns up by the same `(a_col, a_sign)` key. Public `p_columns()` return type changes `HashMap<Index,…>` → `HashMap<(Index,Index),…>` (only the test suite consumes it). **Tests** (`p_calculator::tests`): `schur_matrix_honors_negative_b_sign` (A col 0 +1, B col 1 −1 ⇒ `S[0,0] = −(−1)·P[1,0] = +½`, the buggy path yields −½) and `compute_p_distinguishes_same_column_opposite_signs` (A = col 1 twice with +1/−1 ⇒ both `(1,+1)` and `(1,−1)` cached as exact negatives; the buggy path caches only one). The contract test `adapter_compute_p_respects_negative_signs` (signed-column storage: `p_pos[i] == −p_neg[i]`) still passes — the fix preserves signed storage, it just stops two opposite-sign rows from aliasing. **Fail-first confirmed** by reverting each bug independently (drop `b_facs[0]`; collapse the cache key to column-only): the matching new test fails (`schur_matrix_honors_negative_b_sign` gets −½ not +½; `compute_p_distinguishes_same_column_opposite_signs`'s `(1,−1)` lookup is `None`) while the rest stay green. Restored, full pounce-sensitivity suite green (47 lib + 6 adapter + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L17 detail`. |
 
 ## C1 detail
 
@@ -4107,3 +4108,73 @@ tests fail:
 Restored, the full pounce-sensitivity suite is green (45 lib + integration, 0
 failures); `cargo fmt -p pounce-sensitivity -- --check` clean; clippy
 (correctness/suspicious) clean.
+
+## L17 detail
+
+**Issue (code-review-2026-06.md L17).** `IndexPCalculator::schur_matrix`
+drops the B-row sign (mirrors upstream, but `from_parts` accepts −1 signs
+making the wrong result reachable) and caches P columns by column index
+only, so two A rows selecting the same column with opposite signs share one
+cached column (`p_calculator.rs:150-166, 191-199`).
+
+**Upstream cross-check.** Fetched
+`contrib/sIPOPT/src/SensIndexPCalculator.cpp` from `coin-or/Ipopt`
+(`stable/3.14`). Both pounce behaviors faithfully mirror upstream:
+
+- `GetSchurMatrix` builds `S` by reading `P` at `B`'s *column indices*
+  (`extractor.GetIntVector(...)`) and writing `S(i+1, col) = -(*(it->second))[i]`
+  — it never multiplies by `B`'s ±1 value.
+- `ComputeP` stashes each solved column in `data_A_`-keyed map `P_` using the
+  *column index* as the key, with no consideration of the row's sign.
+
+Upstream is safe because production `IndexSchurData` is built only from 0/1
+flag arrays (`SetData_Flag`) or list+single-sign (`SetData_List`), so every
+stored value is `+1` and column indices are unique. Pounce's `from_parts`
+and `set_from_*` validate signs ∈ {+1, −1} (rejecting 0) but **allow −1 and
+allow duplicate columns**, so the two latent bugs become reachable.
+
+**Bug 1 — B-row sign dropped.** `schur_matrix` did
+`let (b_idx_vec, _facs) = b.multiplying_row(i)?;` then
+`dense_schur[j*n_b + i] = -p_col[b_col];`, discarding `_facs[0]` (the B row's
+±1). For a B row carrying −1 the Schur entry came out with the wrong sign.
+**Fix:** bind the factor and apply it —
+`dense_schur[j*n_b + i] = -b_facs[0] * p_col[b_col];`.
+
+**Bug 2 — duplicate-column cache conflation.** The stored P column bakes in
+A's sign (`rhs[c_us] = signs[i]; solve → K⁻¹(sign·e_col)`), but the cache was
+keyed by `col` alone: `if self.p_cols.contains_key(&col) { continue }` /
+`self.p_cols.insert(col, p_col)`. So when A had the same column twice with
+*opposite* signs, the second row saw the key already present and silently
+reused the first row's (wrong-signed) column. **Fix:** key the cache by
+`(col, sign)`; `schur_matrix` looks each A column up by the same
+`(a_col, a_signs[j])` key. The public `p_columns()` accessor return type
+changes `HashMap<Index, Vec<Number>>` → `HashMap<(Index, Index), Vec<Number>>`
+(only the in-crate + integration test suites consume it; updated the three
+`.get(&col)` callsites in `p_calculator.rs` tests and the three in
+`tests/adapter_trait_pipeline.rs` to `(col, sign)` keys).
+
+**Contract preserved.** `tests/adapter_trait_pipeline.rs::adapter_compute_p_respects_negative_signs`
+asserts the signed-storage contract (`p_pos[i] == -p_neg[i]` for the same
+column built once with +1 and once with −1). The fix keeps signed storage —
+it only stops two opposite-sign rows *in the same A* from aliasing — so that
+test still passes unchanged (apart from the tuple-key lookup).
+
+**Tests** (`p_calculator::tests`):
+
+- `schur_matrix_honors_negative_b_sign` — K = 3×3 tridiag(−1,2,−1), A picks
+  col 0 (+1) so `P[:,0] = K⁻¹e_0 = (¾, ½, ¼)`, B picks col 1 with sign −1.
+  Correct entry `S[0,0] = −b_sign·P[1,0] = −(−1)·½ = +½`; the buggy
+  sign-dropping path yields −½.
+- `compute_p_distinguishes_same_column_opposite_signs` — same K, A = col 1
+  selected twice with +1 then −1. Asserts both `(1, +1)` and `(1, −1)` are
+  cached and are exact negations (`K⁻¹e_1 = (½, 1, ½)`); the buggy col-only
+  cache stores just one entry, so the `(1, −1)` lookup is `None`.
+
+**Fail-first** confirmed by reverting each bug *independently* (so each new
+test's failure is attributable to its own fix): dropping `b_facs[0]` fails
+only `schur_matrix_honors_negative_b_sign` (−½ ≠ +½); collapsing the cache
+key to column-only fails only `compute_p_distinguishes_same_column_opposite_signs`
+(`(1, −1)` absent). Restored both; full pounce-sensitivity suite green
+(47 lib + 6 adapter_trait_pipeline + the rest of the integration suites).
+`cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity
+--all-targets -- -D clippy::correctness -D clippy::suspicious` clean.
