@@ -32,6 +32,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M6 | sensitivity: `SensSolve` swallows sensitivity-stage failures | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: the `on_converged` callback in `SensSolve::run` (`crates/pounce-sensitivity/src/convenience.rs`) writes a diagnostic into `CallbackOut.error` on *every* sensitivity-stage failure (no current iterate, inequality/invalid pin, `PdSensBacksolver::new` / `IndexSchurData::from_parts` error, `parametric_step` / `compute_reduced_hessian[_eigen]` returning false) and bails. But `CallbackOut.error` carried `#[allow(dead_code)]` and was **never copied into `SensResult`** (the result builder at the old lines 382-396 read every other `out.*` field but not `error`). Because the *underlying solve* still converged, `status` is `SolveSucceeded` and the requested `dx`/`reduced_hessian` are simply `None` — **indistinguishable from "sensitivity not requested."** A failed `parametric_step` therefore looked like success with no step computed. **Fix**: add a public `error: Option<String>` field to `SensResult` (documented as the sole signal separating a sensitivity failure from a not-requested computation), copy `out.error.clone()` into it in the builder, and drop the `#[allow(dead_code)]`. Updated the two unit-test `SensResult` literals in `diff_handoff.rs` (`error: None`). Also surfaced it end-to-end: the Python `info` dict now carries `info["sens_error"]` (`pounce-py/src/problem.rs`), since the Python binding is the primary user-facing consumer and previously had no way to see the failure either. **Test** (`tests/convenience_api.rs`): `sens_solve_surfaces_sensitivity_stage_failure` — solves the known-good `ParametricTNLP` (converges) but pins an out-of-range index, so the callback hits the "not in the equality c-block" branch and writes `error`. Post-fix asserts `status == SolveSucceeded`, `error.is_some()`, `dx.is_none()`; a paired happy-path solve asserts `error.is_none()` + `dx.is_some()`. **Pre-fix the assertion FAILS** ("failure must be surfaced … not swallowed; dx = None, status = SolveSucceeded") — verified by temporarily forcing `error: None` in the builder. Full `pounce-sensitivity` suite green (64 across 7 binaries, 0 failed); `pounce-py` builds clean. See `## M6 detail`. |
 | M7 | QP: QPS parser doubles Hessian off-diagonals for `QMATRIX` files | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: `parse_qps` (`crates/pounce-qp/src/qps.rs`) mapped all three quadratic-section headers to the same state — `Some("QUADOBJ") \| Some("QSECTION") \| Some("QMATRIX") => section = Section::Quadobj` (old line 132). But the conventions differ: `QUADOBJ`/`QSECTION` list each off-diagonal pair **once** (single triangle), whereas `QMATRIX` lists the **full** matrix — both `(i,j)` and the mirror `(j,i)`. The content parser pushed every raw `(i_col, j_col, val)` triplet to `h_entries`; the lower-triangle normalization (`let (lo, hi) = if i>=j {(j,i)} else {(i,j)}`) then collapses both QMATRIX mirror entries onto the **same** lower triplet, and the evaluator sums all triplets → every off-diagonal is **doubled** (diagonal `i==j` is listed once, so unaffected). A QMATRIX file thus solves a different objective (`½xᵀHx` with off-diagonals 2×) and returns a wrong optimum. **Fix**: split the header match so `QMATRIX` sets a new `quad_is_full = true` flag (`QUADOBJ`/`QSECTION` set it `false`); in the content parser, when `quad_is_full && i_col < j_col`, skip the strict-upper mirror so each off-diagonal survives exactly once in the lower triangle. Single-triangle sections keep every entry (unchanged). **Latent-but-real**: no in-repo data uses QMATRIX (the `mm_published_optima` fixtures are all QUADOBJ, which is why they always passed), so this path had **zero** prior coverage; any user supplying a standard CPLEX/Maros-Mészáros QMATRIX file hit the bug. **Tests** (`src/tests/qps_unit.rs`): `parse_qps_qmatrix_full_matrix_does_not_double_off_diagonals` parses a QMATRIX `H = [[2,1],[1,2]]` (both `X1·X2` and `X2·X1` listed) and asserts the summed off-diagonal `H_21 == 1.0` (not 2.0) with diagonals intact; pre-fix it **FAILS** (`H_21 = 2`), post-fix passes. A paired `parse_qps_quadobj_single_triangle_keeps_off_diagonal` guards the QUADOBJ path against the fix regressing it. Full `pounce-qp` suite green (77 lib + 1 + 5 `mm_published_optima` integration, 0 failed). See `## M7 detail`. |
 | M8 | l1penalty: augmented `x` passed to inner `eval_jac_g` | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: in `L1PenaltyBarrierTnlp` (`crates/pounce-l1penalty/src/wrapper.rs`) every forwarding method truncates the augmented variable vector to the inner's original `n` before calling the inner TNLP — `eval_f` (`&x[..n]`), `eval_grad_f` (`&x[..n]`), `eval_g` (`&x[..n]`), `eval_h` (`x.map(|xa| &xa[..n])`) — **except** `eval_jac_g`, which forwarded the full augmented slice `x` (length `n + 2·m_eq`) unchanged to both the `Structure` and `Values` inner calls (old lines 416, 445). The augmented variables append `m_eq` `p` and `m_eq` `n` slacks, so the inner saw `m_eq*2` extra trailing entries. **Why it matters / latent**: most inner `eval_jac_g` impls index `x[j]` for fixed `j < n` and are unharmed, so no in-repo test caught it — but any inner that validates `x.len()` (a reasonable defensive check) or iterates the slice (`x.iter()`) reads garbage/out-of-contract data. The inconsistency with the other four methods is itself a latent correctness hazard. **Fix**: compute `let inner_x = x.map(|xa| &xa[..n]);` once and pass `inner_x` to both inner `eval_jac_g` calls, mirroring `eval_h` exactly. The wrapper's own slack Jacobian entries (the `-1`/`+1` columns) are unchanged. **Test** (`wrapper.rs` tests): `jacobian_passes_inner_only_original_x` wraps a `LenSpy` inner TNLP (`n=2, m=1`) that records, via `Rc<Cell<usize>>`, the length of the `x` slice it receives in `eval_jac_g`; the test calls the wrapper's `eval_jac_g` with an augmented `x` of length 4 (`2 + 2·1`) and asserts the inner saw length **2**. Pre-fix the inner sees **4** (the assertion **FAILS**, verified by temporarily reverting `inner_x`→`x`); post-fix it sees 2. Full `pounce-l1penalty` suite green (11 tests) and the `pounce-algorithm` consumer green (245 + integration binaries, 0 failed). See `## M8 detail`. |
+| M9 | restoration: silent zero-substitution on failed `DenseVector` downcasts | **FIXED** (scope corrected — sensitivity sites in the review do not exhibit the pattern) | **Mechanism confirmed by code inspection + reproduced by a failing test**: the restoration init/clone paths read outer-iterate blocks with `v.as_any().downcast_ref::<DenseVector>().map(|d| d.expanded_values()).unwrap_or_else(|| vec![0.0; dim])`. A failed downcast (a non-`DenseVector`, e.g. a compound block) silently substitutes **zeros** — seeding the restoration start point from a zero residual / zero multiplier with **no diagnostic**, masking the invariant violation. This is asymmetric with the *write* side, which already `.expect()`-panics on the same mismatch (`downcast_dense_mut`, `init.rs:475`). `expanded_values()` already handles the *homogeneous* DenseVector case correctly, so only a genuinely non-dense block triggers it. **Sites fixed (all in `pounce-restoration`)**: 7 inline reads in `init.rs` (c, d−s, s, z_l, z_u, v_l, v_u) plus the shared `expanded_dense_values` helpers in `resto_inner_solver.rs:775` and `resto_resto.rs:234`. **Scope correction**: the review also cited `pounce-sensitivity/src/solver.rs` and `convenience.rs` and `aug_resto_system_solver.rs:553`, but (a) a `grep` for the zero-fill pattern finds **none** in pounce-sensitivity (those line numbers now point to `IndexSchurData::from_parts` / the `SensResult` builder — unrelated; likely shifted by the M6 edit), and (b) `aug_resto_system_solver.rs:553` is `lr.get_diag()…unwrap_or_else(|| vec![0.0; n])` where the `Option` is a *legitimate* absence (a low-rank update with no diagonal → zero diagonal is correct), **not** a failed downcast — both excluded with rationale. **Fix**: introduce `expanded_dense_or_panic(v, what)` in `init.rs` (panics with a labelled message) and route all 7 inline sites through it; convert both `expanded_dense_values` helpers to panic (retaining `fallback_dim` only to size the diagnostic). Read and write sides are now symmetric — a non-dense block fails loudly. **Test** (`init.rs` tests): `expanded_dense_or_panic_panics_on_non_dense` builds a 1-block `CompoundVector` (not a `DenseVector`) and asserts the helper panics (`#[should_panic(expected = "must be a DenseVector")]`); `expanded_dense_or_panic_returns_values_for_dense` guards the happy path. **Pre-fix the panic test FAILS** ("test did not panic as expected" — the helper returns zeros), verified by temporarily restoring the silent `vec![0.0; v.dim()]` fallback. Full `pounce-restoration` suite green (105 lib + integration, 0 failed) and the `pounce-algorithm` consumer green (245 + integration, 0 failed). See `## M9 detail`. |
 
 ## C1 detail
 
@@ -1125,3 +1126,67 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   back to `x`; post-fix it sees 2 and passes. Full `pounce-l1penalty` suite green
   (11 tests, 0 failed) and the sole consumer `pounce-algorithm` green (245 unit +
   all integration binaries, 0 failed).
+
+## M9 detail
+
+- **Bug** (`pounce-restoration`): the restoration entry/clone paths read outer
+  iterate blocks with the pattern
+  `v.as_any().downcast_ref::<DenseVector>().map(|d| d.expanded_values())
+  .unwrap_or_else(|| vec![0.0; dim])`. The `Option` being unwrapped is the
+  *downcast result*, so a failed downcast — a block that is **not** a
+  `DenseVector` (e.g. a `CompoundVector`/homogeneous compound) — is silently
+  replaced with a zero vector. The restoration NLP is then seeded from a zero
+  residual / zero multiplier with **no diagnostic**, quietly corrupting the
+  start point. `DenseVector::expanded_values()` already materializes the
+  *homogeneous* dense case correctly (`vec![scalar; dim]`), so only a genuinely
+  non-dense block triggers the fallback.
+- **Why it matters**: the *write* side of the same initializer asserts the
+  invariant loudly — `downcast_dense_mut` (`init.rs:475`,
+  `resto_inner_solver.rs:802`, …) does `.expect("expected a DenseVector
+  component")`. The read side silently swallowing the identical mismatch is
+  inconsistent and strictly worse: a zeroed residual produces a plausible-looking
+  but wrong restoration solve instead of a crash that pinpoints the bug.
+- **Sites fixed (all in `pounce-restoration`)**:
+  - `init.rs` — 7 inline reads: `c_vec`, `d_minus_s_vec`, `s`, `z_l`, `z_u`,
+    `v_l`, `v_u` (the outer residuals and bound multipliers).
+  - `resto_inner_solver.rs:775` and `resto_resto.rs:234` — the shared
+    `expanded_dense_values(v, fallback_dim)` helper (one copy in each file),
+    used by the dense-clone routines.
+- **Scope correction vs. the review's citation**:
+  - `pounce-sensitivity/src/solver.rs:380-388` and `convenience.rs:397-405`: a
+    `grep` for the zero-fill pattern finds **no** occurrence anywhere in
+    pounce-sensitivity. Those line numbers now point at
+    `IndexSchurData::from_parts` (solver.rs) and the `SensResult { … }` builder
+    (convenience.rs) — unrelated code, and the convenience.rs lines shifted when
+    the M6 fix added the `error` field. No silent-downcast bug exists there.
+  - `aug_resto_system_solver.rs:553`: `lr.get_diag().map(|d| orig_rows(…))
+    .unwrap_or_else(|| vec![0.0; n])`. Here the `Option` is `get_diag()`'s own
+    return — a low-rank update legitimately *may have no diagonal*, in which case
+    a zero diagonal contribution is the correct value, not a masked failure.
+    Excluded by design.
+- **Fix**:
+  1. `init.rs`: add `expanded_dense_or_panic(v: &dyn Vector, what: &str) ->
+     Vec<Number>` that panics with a labelled message
+     (`"…outer {what} must be a DenseVector…"`) on a failed downcast, and route
+     all 7 inline sites through it (passing a human-readable block label). This
+     also de-duplicates the 7 copies of the pattern.
+  2. `resto_inner_solver.rs` / `resto_resto.rs`: change the two
+     `expanded_dense_values` helper bodies from the zero-fill fallback to a
+     `panic!` (keeping the `fallback_dim` parameter only to size the diagnostic
+     message). All callers are unchanged.
+  Read and write sides are now symmetric: a non-`DenseVector` block fails loudly
+  in both directions.
+- **Test** (`init.rs` `#[cfg(test)] mod tests`):
+  - `expanded_dense_or_panic_panics_on_non_dense` — builds a minimal 1-block
+    `CompoundVector` (via a `make_compound` helper; the compound does not
+    downcast to `DenseVector`) and asserts the helper panics
+    (`#[should_panic(expected = "must be a DenseVector")]`).
+  - `expanded_dense_or_panic_returns_values_for_dense` — a real `DenseVector`
+    round-trips `[1.0, -2.0, 3.5]`, guarding the happy path against the fix.
+- **Verification summary**: pre-fix the `should_panic` test FAILS with "test did
+  not panic as expected" (the helper returns `vec![0.0; dim]`), confirmed by
+  temporarily restoring the silent `vec![0.0; v.dim()]` fallback in
+  `expanded_dense_or_panic`; post-fix it panics and passes. Full
+  `pounce-restoration` suite green (105 lib + all integration binaries, 0 failed)
+  and the downstream `pounce-algorithm` consumer green (245 unit + all
+  integration, 0 failed).

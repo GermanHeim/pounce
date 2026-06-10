@@ -772,11 +772,22 @@ fn is_resto_success(status: SolverReturn) -> bool {
     )
 }
 
+/// Expand a vector block to a dense slice, panicking with a clear
+/// diagnostic if it is not a `DenseVector`. Previously a failed downcast
+/// silently produced `vec![0.0; fallback_dim]`, masking a non-dense block
+/// by corrupting the clone with zeros. The restoration data is all
+/// `DenseVector`, so a non-dense block is an invariant violation that
+/// must surface, not be papered over. `fallback_dim` is retained only to
+/// size the diagnostic.
 fn expanded_dense_values(v: &dyn Vector, fallback_dim: Index) -> Vec<f64> {
     v.as_any()
         .downcast_ref::<DenseVector>()
         .map(|d| d.expanded_values())
-        .unwrap_or_else(|| vec![0.0; fallback_dim as usize])
+        .unwrap_or_else(|| {
+            panic!(
+                "expanded_dense_values: expected a DenseVector for a length-{fallback_dim} block (got a non-dense block)"
+            )
+        })
 }
 
 fn clone_to_dense(template: &dyn Vector) -> Rc<dyn Vector> {

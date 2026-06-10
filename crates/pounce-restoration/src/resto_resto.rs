@@ -231,11 +231,21 @@ fn set_block(cv: &mut CompoundVector, idx: i32, vals: &[f64]) {
     }
 }
 
+/// Expand a vector block to a dense slice, panicking with a clear
+/// diagnostic if it is not a `DenseVector`. A failed downcast previously
+/// substituted `vec![0.0; fallback_dim]` silently, masking a non-dense
+/// block. The restoration data is all `DenseVector`, so this is an
+/// invariant violation that must surface; `fallback_dim` is retained only
+/// to size the diagnostic.
 fn expanded_dense_values(v: &dyn Vector, fallback_dim: i32) -> Vec<f64> {
     v.as_any()
         .downcast_ref::<DenseVector>()
         .map(|d| d.expanded_values())
-        .unwrap_or_else(|| vec![0.0; fallback_dim as usize])
+        .unwrap_or_else(|| {
+            panic!(
+                "expanded_dense_values: expected a DenseVector for a length-{fallback_dim} block (got a non-dense block)"
+            )
+        })
 }
 
 #[cfg(test)]
