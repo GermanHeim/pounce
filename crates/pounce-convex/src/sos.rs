@@ -30,7 +30,7 @@ use crate::qp::{QpProblem, QpStatus, Triplet};
 use crate::ConeSpec;
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::SparseSymLinearSolverInterface;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A sparse multivariate polynomial over `n_vars` variables: a list of
 /// `(exponent vector, coefficient)` terms. The exponent vector has length
@@ -335,7 +335,11 @@ fn build_sos_sdp(
     let mut cones: Vec<ConeSpec> = Vec::new();
     let mut g_rows: Vec<Triplet> = Vec::new();
     let mut g_h: Vec<f64> = Vec::new();
-    let mut by_mono: HashMap<Vec<usize>, Vec<(usize, f64)>> = HashMap::new();
+    // BTreeMap (not HashMap) so the coefficient-matching rows below are emitted
+    // in a deterministic, sorted-by-monomial order. With a HashMap the SDP's row
+    // ordering — and hence the solver's floating-point path and results — varied
+    // run-to-run (M22).
+    let mut by_mono: BTreeMap<Vec<usize>, Vec<(usize, f64)>> = BTreeMap::new();
     let unit = [(vec![0usize; n], 1.0)]; // weight ≡ 1 for σ₀
 
     // PSD (SOS) blocks: σ₀ (weight 1, basis degree d), then one localizing
@@ -1183,6 +1187,37 @@ mod tests {
             quad.iter().all(|&q| q),
             "missing a quadrant: {:?}",
             s.minimizers
+        );
+    }
+
+    #[test]
+    fn sdp_row_order_is_deterministic() {
+        // M22: the coefficient-matching rows were emitted in `HashMap`
+        // iteration order, so the SDP's row ordering — and hence the solver's
+        // floating-point path and results — varied run-to-run. Rust seeds each
+        // `HashMap` differently, so building the *same* problem twice in one
+        // process exposes it: with a `HashMap` the two builds disagree on row
+        // order; with the `BTreeMap` they are identical. Assert determinism via
+        // both the RHS vector order and the monomial→row map.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 1.0),
+                (vec![0, 4], 1.0),
+                (vec![2, 2], -1.0),
+                (vec![1, 0], -2.0),
+                (vec![0, 1], 3.0),
+                (vec![0, 0], 5.0),
+            ],
+        );
+        let prob = PolyProblem::new(p);
+        let (qp1, _, mi1) = build_sos_sdp(&prob, None, None);
+        let (qp2, _, mi2) = build_sos_sdp(&prob, None, None);
+        assert!(qp1.b.len() > 1, "need several rows to detect a permutation");
+        assert_eq!(qp1.b, qp2.b, "RHS row order differs between builds");
+        assert_eq!(
+            mi1.row_of, mi2.row_of,
+            "monomial→row assignment differs between builds"
         );
     }
 
