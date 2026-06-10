@@ -71,6 +71,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L6 | algorithm: dead/divergent duplicates of filter acceptance predicates — `src/line_search/filter_acceptor.rs:171-179` (no round-off slack, unlike the live path at 292-300) and 199-229 (parameterized `obj_max_inc` while the live path hard-codes 5.0) | **FIXED** | **Both divergences confirmed by reading + running code; unified.** Two near-duplicate copies of the filter sufficient-progress / iterate-acceptance logic had drifted from the live `check_acceptability` path. **(a) `is_sufficient_progress` (171-179)** used bare `<` where the live path (then 292-300) uses `compare_le` (a `<=` carrying `10·eps·|basval|` round-off slack); the helper was also **dead** (`grep` shows no caller — only `is_acceptable_to_current_iterate` is live, from `pounce-restoration/src/conv_check.rs:163`). On the round-off boundary (`phi_trial − phi == −gamma_phi·theta`, common near a solution where φ is flat and the descent is summation-noise-sized) the bare `<` rejects a step `compare_le` accepts — the same flat-objective failure mode documented on `armijo_holds`. **(b)** the live `check_acceptability` rapid-barrier-increase guard hard-coded `5.0`, while the parameterized `is_acceptable_to_current_iterate` (the restoration-live copy) reads an `obj_max_inc` argument — so the two paths would diverge for any non-default `obj_max_inc`. **Fix**: (1) rewrote `is_sufficient_progress` to use `compare_le` (now identical to the live OR-test) and made it the **single source of truth** — both `check_acceptability` and `is_acceptable_to_current_iterate` now delegate their sufficient-progress test to it; (2) added an `obj_max_inc` field to `FilterLsAcceptor` (default 5.0) and switched the live guard from the literal `5.0` to `self.obj_max_inc`, so the regular-phase and restoration paths share one cap. The live regular-phase behavior is **byte-identical** (it already used `compare_le` and 5.0 = the field default), so no integration regression. **Tests** (`filter_acceptor::tests`): `is_sufficient_progress_accepts_round_off_boundary_like_live_path` builds the φ-branch equality boundary and asserts the helper accepts it; `check_acceptability_honors_obj_max_inc_field` drives a ~1e7 barrier jump (log10≈7) and asserts Reject at the default cap 5.0 (threshold 6) but Accept once `obj_max_inc=10.0` (threshold 11). **Fail-first confirmed** by temporarily reverting both edits (bare `<` and literal `5.0`): both new tests fail; restored, both pass. Full pounce-algorithm green (lib **248** + all integration) and pounce-restoration green (105), confirming the dedup is regression-free. See `## L6 detail`. |
 | L7 | algorithm: watchdog revert applies the current-direction fraction-to-boundary cap to the snapshot direction — `src/line_search/backtracking.rs:725-737`; the correct stored cap is `#[allow(dead_code)]`. Rescued by backtracking, but wastes evaluations post-watchdog | **NOT A BUG** (premise refuted by upstream source) + dead field removed | **Premise checked against the actual upstream source and found false.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpBacktrackingLineSearch.cpp`. In `FindAcceptableTrialPoint`, when the watchdog trial cap is exceeded the code does `StopWatchDog(actual_delta); skip_first_trial_point = true;`, and the next `DoBacktrackingLineSearch` executes `if( skip_first_trial_point ) { alpha_primal *= alpha_red_factor_; }` — it multiplies the **existing** `alpha_primal` (the *current* direction's `alpha_primal_max`, set fresh at the top of this outer iteration's call) by the reduction factor and does **NOT** recompute a fraction-to-the-boundary cap from the reverted snapshot delta. `StopWatchDog` only restores `actual_delta` to the snapshot (`actual_delta = watchdog_delta_->MakeNewContainer()`); it does not touch `alpha_primal`. pounce's `handle_watchdog_failure` re-runs `run_alpha_loop(&snap_delta, alpha_init, …, skip_first=true)`, which starts at `alpha_init * alpha_red_factor` (`backtracking.rs:842-843`) where `alpha_init` is the current direction's FTB cap — an **exact** match to upstream. The "correct stored cap" the review points to (`watchdog_alpha_primal_test`) is a misread: upstream's `watchdog_alpha_primal_test_` is the **acceptor's** frozen Armijo *test* step length (used inside `IpFilterLSAcceptor` when in watchdog), not a line-search restart cap, so there is no upstream behavior that would consume a snapshot FTB cap here. The "wastes evaluations when the snapshot direction has a tighter boundary" cost, to the extent it exists, is present in upstream too (both backtrack from the over-large start). **No behavioral change** is warranted; switching the restart to a snapshot-recomputed cap would *introduce* a divergence from upstream. **Cleanup done**: pounce's `watchdog_alpha_primal_test` field was genuinely dead (written in `start_watchdog`, never read; carried `#[allow(dead_code)]`). Removed the field, its initializer, and the `aff_step_alpha_primal_max` computation in `start_watchdog`, and added a comment at the revert site documenting the upstream-faithful `alpha_init` choice so the site is not re-flagged. **Verified by running code**: `cargo build -p pounce-algorithm` clean (no dead-code warning), full suite green (lib **248** + all integration, 0 failures) — the watchdog revert path is exercised by the HS/integration solves (e.g. PFIT3/PFIT4/scon1dls noted in the code comments), confirming the removal is regression-free. Recorded per the "document issues that cannot be verified" rule — here the issue is verifiable and refuted. See `## L7 detail`. |
 | L8 | linsol: Ruiz scaler's 0/1-based auto-detection misclassifies a 0-based triplet whose index 0 carries no entries (`crates/pounce-linsol/src/ruiz.rs:117-129`); factors land on the wrong rows. Applied consistently, so result quality degrades rather than correctness; the only in-tree caller is safe (1-based) | **FIXED** | **Bug confirmed by reading + running code (latent: no live caller hits it).** `compute_sym_t_scaling_factors` auto-detected the index base with a **min-only** rule: `let offset = if min_idx >= 1 { 1 } else { 0 }`. A 0-based triplet whose row 0 is structurally empty has every index `>= 1`, so `min_idx >= 1` → it was treated as **1-based** and `airn[k] - 1`/`ajcn[k] - 1` shifted every entry down one row; the equilibration factors then landed on the wrong rows (row 0 received the factor meant for row 1, the true last row was never scaled). **Reproduced** with a focused unit test: `K = diag([0, 4, 9])` stored 0-based (entries on rows/cols 1,2; row 0 empty, `min_idx==1`, `max_idx==2==n-1`). Pre-fix the detector picked offset 1 and `s = [0.5, 0.333, 1.0]` — the factor for `K_11=4` leaked onto the empty row 0 and `K_22=9` was left unscaled. **Fix**: detect the base from **both** index extremes, which are individually decisive for an n×n matrix — a 1-based triplet never references index 0, and a 0-based triplet never references index n (valid range `[0, n-1]`). New rule: `min_idx == 0 ⇒ 0-based`; else `max_idx >= n ⇒ 1-based`; else `max_idx == n-1 ⇒ 0-based` (full 0-based coverage, the case the old rule botched); else fall back to the historical 1-based assumption. The in-tree 1-based caller (indices `1..=n`, `max_idx == n`) and the existing `fortran_index_style` / 0-based tests are unchanged. **Test** (`ruiz::tests::zero_based_with_empty_first_row_is_not_misread_as_fortran`): asserts row 0 keeps `d=1` and `K_11`,`K_22` equilibrate to ≈1. **Fail-first confirmed** by temporarily reverting to the min-only rule: the test fails with `empty row 0 must keep d=1, got 0.5`. Restored, full `pounce-linsol` suite green (18 + 1, 0 failures). See `## L8 detail`. |
+| L9 | linsol: the KKT-dump diagnostic disables its one-shot via `unsafe std::env::remove_var("POUNCE_DBG_KKT_DUMP")` (`crates/pounce-linsol/src/t_sym_solver.rs:197-243`), which is unsound — `setenv`/`unsetenv` is not thread-safe and feral runs solves under rayon, so a concurrent env read can race the unset | **FIXED** | **Bug confirmed by reading the code + the threading model.** The dump block read `POUNCE_DBG_KKT_DUMP`, and after dumping called `unsafe { std::env::remove_var(...) }` to ensure a single dump. `std::env::{set_var,remove_var}` mutate the process environment via `setenv`/`unsetenv`, which glibc/musl do **not** make thread-safe against concurrent `getenv`; Rust 2024 marks them `unsafe` for exactly this reason. pounce-feral drives multiple solves in parallel through rayon, so one solver's `remove_var` can race another thread's env read (in this crate or any dependency that reads env, e.g. logging) — UB, not merely a lost dump. **Fix**: stop mutating the environment entirely. The env var is now **read-only** (gates whether dumping is requested); the one-shot guarantee moves to a lock-free atomic claim. Extracted a free fn `claim_kkt_dump(n_call, skip, &DUMPED) -> bool` that returns `false` while `n_call < skip` (the existing skip-N-calls knob) and otherwise `!dumped.swap(true, SeqCst)` — exactly one caller across all threads ever sees `true`. Statics are now `CALL_COUNT: AtomicUsize` + `DUMPED: AtomicBool` (the old `WARNED` flag folded in); no `unsafe`, no env writes. **Tests** (`t_sym_solver::tests`): `claim_kkt_dump_is_one_shot_after_skip` (sequential/deterministic — calls below `skip` return false, the first at/after `skip` returns true, all later return false) and `claim_kkt_dump_claims_exactly_once_under_concurrency` (32 threads + `Barrier`, asserts **exactly one** winner). **Fail-first confirmed** by making the helper non-one-shot (always-claim): both tests fail; restored, full `pounce-linsol` suite green (20 + 1, 0 failures). See `## L9 detail`. |
 
 ## C1 detail
 
@@ -3621,3 +3622,54 @@ the historical 1-based default.
   and 0-based tests (`equilibrates_diagonal_extremes`, `zero_row_keeps_unit_scale`,
   `fuzz_reduces_imbalance`) are unchanged. Full `pounce-linsol` suite green
   (18 lib + 1 integration, 0 failures).
+
+## L9 detail
+
+**Issue (review L9).** The KKT-dump diagnostic in
+`crates/pounce-linsol/src/t_sym_solver.rs` enforced its "dump once" behavior by
+calling `unsafe { std::env::remove_var("POUNCE_DBG_KKT_DUMP") }` after writing
+the dump. Mutating the process environment (`setenv`/`unsetenv`) is not
+thread-safe against concurrent `getenv`; Rust 2024 makes these `unsafe` for that
+reason. pounce-feral schedules solves on a rayon pool, so this unset can run
+concurrently with an environment read on another thread (here or in any
+dependency that reads env), which is undefined behavior — the real hazard is the
+data race, not a missed dump.
+
+**Verification.** Read the dump block and traced the call path: the static
+`CALL_COUNT`/`WARNED`/dumped state plus the `remove_var` disable were all
+process-global, and the only synchronization for "dump exactly once" was the env
+unset itself. Confirmed feral's parallel-solve model (rayon) makes concurrent
+entry real.
+
+**Fix.** Remove all environment mutation. `POUNCE_DBG_KKT_DUMP` (and the
+skip-N-calls knob) are now read-only inputs; the one-shot guarantee is a
+lock-free atomic claim:
+
+```rust
+fn claim_kkt_dump(n_call: usize, skip: usize, dumped: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering;
+    if n_call < skip {
+        return false;
+    }
+    !dumped.swap(true, Ordering::SeqCst)
+}
+```
+
+Statics became `CALL_COUNT: AtomicUsize` and `DUMPED: AtomicBool` (the previous
+`WARNED` flag folded into the same one-shot). No `unsafe`, no `set_var`/
+`remove_var`. `swap(true)` is atomic, so across any number of threads exactly
+one call observes the prior `false` and returns `true`.
+
+**Tests** (`t_sym_solver::tests`):
+- `claim_kkt_dump_is_one_shot_after_skip` — sequential and deterministic:
+  with `skip=2`, calls 0 and 1 return `false`, call 2 returns `true`, calls 3
+  and 4 return `false`.
+- `claim_kkt_dump_claims_exactly_once_under_concurrency` — 32 threads released
+  together by a `Barrier` all call `claim_kkt_dump(0, 0, &shared)`; the test
+  asserts the winner count is exactly 1.
+
+**Fail-first.** Temporarily made the helper always claim (drop the `swap`
+one-shot): both tests fail (the sequential one on call 3 returning `true`, the
+concurrency one on a winner count > 1). Restored; full `pounce-linsol` suite
+green (20 lib + 1 integration, 0 failures). `cargo fmt -p pounce-linsol
+--check` clean.
