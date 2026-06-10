@@ -36,9 +36,23 @@ import numpy as np
 import torch
 
 from .. import _pounce
+from ..qp import _PSD_CHECK_AUTO_MAX_N, _check_psd
 from ._build import _DT
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
+
+
+def _guard_psd(P, n):
+    """Reject an indefinite Hessian on the host forward (issue #112).
+
+    The ``autograd.Function`` forward runs eagerly on concrete tensors, so an
+    indefinite ``P`` would otherwise return a silently-wrong ``"optimal"`` and
+    feed that garbage into the OptNet backward pass. Mirrors
+    :func:`pounce.qp.solve_qp`'s guard and auto-size threshold (skip the
+    O(n^3) eigenvalue solve for a large QP)."""
+    if n <= _PSD_CHECK_AUTO_MAX_N:
+        _check_psd(*_to_coo_lower(np.asarray(P)), n)
+
 
 # Note: unlike the NLP backward, the QP/SOCP backward reads the converged
 # multipliers directly via the arrow/diag scalings, so no active-set
@@ -47,8 +61,11 @@ __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
 
 def _t(a) -> torch.Tensor:
-    out = torch.as_tensor(np.asarray(a, dtype=np.float64), dtype=_DT) \
-        if not isinstance(a, torch.Tensor) else a.to(_DT)
+    out = (
+        torch.as_tensor(np.asarray(a, dtype=np.float64), dtype=_DT)
+        if not isinstance(a, torch.Tensor)
+        else a.to(_DT)
+    )
     return out
 
 
@@ -111,10 +128,16 @@ def _build_problem(P, c, G, h, A, b):
     return _pounce.QpProblem(
         n=n,
         c=np.asarray(c).tolist(),
-        p_rows=pr, p_cols=pc, p_vals=pv,
-        a_rows=ar, a_cols=ac, a_vals=av,
+        p_rows=pr,
+        p_cols=pc,
+        p_vals=pv,
+        a_rows=ar,
+        a_cols=ac,
+        a_vals=av,
         b=np.asarray(b).tolist(),
-        g_rows=gr, g_cols=gc, g_vals=gv,
+        g_rows=gr,
+        g_cols=gc,
+        g_vals=gv,
         h=np.asarray(h).tolist(),
     )
 
@@ -138,11 +161,13 @@ def _check_status(status, where):
 
 def _split_duals(d, m_g, m_a):
     lam = (
-        np.asarray(d["z"], dtype=np.float64) if m_g
+        np.asarray(d["z"], dtype=np.float64)
+        if m_g
         else np.zeros((0,), dtype=np.float64)
     )
     nu = (
-        np.asarray(d["y"], dtype=np.float64) if m_a
+        np.asarray(d["y"], dtype=np.float64)
+        if m_a
         else np.zeros((0,), dtype=np.float64)
     )
     return lam, nu
@@ -152,6 +177,7 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     """Host-side forward solve via pounce-convex. Returns (x, lam, nu)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
+    _guard_psd(P, c.shape[0])
     prob = _build_problem(P, c, G, h, A, b)
     warm = None
     if warm_x is not None and np.asarray(warm_x).size == c.shape[0]:
@@ -170,13 +196,17 @@ def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
     m_a = A.shape[0]
     b_sz = cs.shape[0]
     n = cs.shape[1]
+    _guard_psd(P, n)  # P is shared across the batch — one check covers all rows
     probs = [_build_problem(P, cs[i], G, hs[i], A, bs[i]) for i in range(b_sz)]
     warms = None
     if warm_xs is not None and np.asarray(warm_xs).shape == (b_sz, n):
         wx = np.asarray(warm_xs, dtype=np.float64)
         warms = [{"x": wx[i].tolist()} for i in range(b_sz)]
     dicts = _pounce.solve_qp_batch(
-        probs, tol=tol, max_iter=max_iter, warm_starts=warms,
+        probs,
+        tol=tol,
+        max_iter=max_iter,
+        warm_starts=warms,
     )
     for i, d in enumerate(dicts):
         _check_status(d["status"], f"QpLayer batch forward solve (row {i})")
@@ -247,8 +277,15 @@ def _make_qp_fn(n, m_g, m_a, tol, max_iter):
         @staticmethod
         def forward(ctx, P, c, G, h, A, b, warm_x):
             x, lam, nu = _forward_solve(
-                _np(P), _np(c), _np(G), _np(h), _np(A), _np(b),
-                tol, max_iter, warm_x=_np(warm_x),
+                _np(P),
+                _np(c),
+                _np(G),
+                _np(h),
+                _np(A),
+                _np(b),
+                tol,
+                max_iter,
+                warm_x=_np(warm_x),
             )
             x_t = torch.as_tensor(x, dtype=_DT)
             lam_t = torch.as_tensor(lam, dtype=_DT)
@@ -270,8 +307,15 @@ def _make_qp_batch_fn(n, m_g, m_a, tol, max_iter):
         @staticmethod
         def forward(ctx, P, cs, G, hs, A, bs, warm_xs):
             xs, lams, nus = _forward_solve_batch(
-                _np(P), _np(cs), _np(G), _np(hs), _np(A), _np(bs),
-                tol, max_iter, warm_xs=_np(warm_xs),
+                _np(P),
+                _np(cs),
+                _np(G),
+                _np(hs),
+                _np(A),
+                _np(bs),
+                tol,
+                max_iter,
+                warm_xs=_np(warm_xs),
             )
             xs_t = torch.as_tensor(xs, dtype=_DT)
             lams_t = torch.as_tensor(lams, dtype=_DT)
@@ -286,10 +330,21 @@ def _make_qp_batch_fn(n, m_g, m_a, tol, max_iter):
             gPs, gcs, gGs, ghs, gAs, gbs = [], [], [], [], [], []
             for i in range(B):
                 gP, gc, gG, gh, gA, gb = _kkt_backward(
-                    P, G, A, hs[i], xs[i], lams[i], nus[i], gxs[i],
+                    P,
+                    G,
+                    A,
+                    hs[i],
+                    xs[i],
+                    lams[i],
+                    nus[i],
+                    gxs[i],
                 )
-                gPs.append(gP); gcs.append(gc); gGs.append(gG)
-                ghs.append(gh); gAs.append(gA); gbs.append(gb)
+                gPs.append(gP)
+                gcs.append(gc)
+                gGs.append(gG)
+                ghs.append(gh)
+                gAs.append(gA)
+                gbs.append(gb)
             # Shared matrices: sum cotangents over the batch. RHS stays
             # per-row. Warm start is not differentiated.
             return (
@@ -321,7 +376,14 @@ def _warm_primal(warm_start, n):
 
 def solve_qp(
     *,
-    P, c, G=None, h=None, A=None, b=None, lb=None, ub=None,
+    P,
+    c,
+    G=None,
+    h=None,
+    A=None,
+    b=None,
+    lb=None,
+    ub=None,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
@@ -372,7 +434,14 @@ def _warm_primal_batch(warm_start, b_sz, n):
 
 def solve_qp_batch(
     *,
-    P, c, G=None, h=None, A=None, b=None, lb=None, ub=None,
+    P,
+    c,
+    G=None,
+    h=None,
+    A=None,
+    b=None,
+    lb=None,
+    ub=None,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
@@ -388,13 +457,17 @@ def solve_qp_batch(
     P = _t(P)
     cs = _t(c)
     if cs.ndim != 2:
-        raise ValueError(f"solve_qp_batch: `c` must be 2-D (B, n), got {tuple(cs.shape)}")
+        raise ValueError(
+            f"solve_qp_batch: `c` must be 2-D (B, n), got {tuple(cs.shape)}"
+        )
     b_sz, n = cs.shape
 
     G0 = torch.zeros((0, n), dtype=_DT) if G is None else _t(G)
     A0 = torch.zeros((0, n), dtype=_DT) if A is None else _t(A)
 
-    G_full, h_bounds = _expand_bounds(G0, torch.zeros((G0.shape[0],), dtype=_DT), lb, ub, n)
+    G_full, h_bounds = _expand_bounds(
+        G0, torch.zeros((G0.shape[0],), dtype=_DT), lb, ub, n
+    )
     m_g = G_full.shape[0]
     n_user_rows = G0.shape[0]
     bound_rows = m_g - n_user_rows
@@ -439,16 +512,32 @@ class QpLayer:
 
     def __call__(self, c, *, b=None, h=None, warm_start=None):
         return solve_qp(
-            P=self._P, c=c, G=self._G, h=h, A=self._A, b=b,
-            lb=self._lb, ub=self._ub, tol=self._tol, max_iter=self._max_iter,
+            P=self._P,
+            c=c,
+            G=self._G,
+            h=h,
+            A=self._A,
+            b=b,
+            lb=self._lb,
+            ub=self._ub,
+            tol=self._tol,
+            max_iter=self._max_iter,
             warm_start=warm_start,
         )
 
     def batch(self, cs, *, b=None, h=None, warm_start=None):
         """Solve a parallel batch sharing this layer's structure."""
         return solve_qp_batch(
-            P=self._P, c=cs, G=self._G, h=h, A=self._A, b=b,
-            lb=self._lb, ub=self._ub, tol=self._tol, max_iter=self._max_iter,
+            P=self._P,
+            c=cs,
+            G=self._G,
+            h=h,
+            A=self._A,
+            b=b,
+            lb=self._lb,
+            ub=self._ub,
+            tol=self._tol,
+            max_iter=self._max_iter,
             warm_start=warm_start,
         )
 
@@ -544,6 +633,7 @@ def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
     """Host-side SOCP forward via pounce-convex. Returns (x, lam, nu)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
+    _guard_psd(P, c.shape[0])
     prob = _build_problem(P, c, G, h, A, b)
     d = _pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter)
     _check_status(d["status"], "SOCP differentiable forward solve")
@@ -557,8 +647,15 @@ def _make_socp_fn(n, m_g, m_a, cones, specs, tol, max_iter):
         @staticmethod
         def forward(ctx, P, c, G, h, A, b):
             x, lam, nu = _forward_solve_socp(
-                _np(P), _np(c), _np(G), _np(h), _np(A), _np(b),
-                specs, tol, max_iter,
+                _np(P),
+                _np(c),
+                _np(G),
+                _np(h),
+                _np(A),
+                _np(b),
+                specs,
+                tol,
+                max_iter,
             )
             x_t = torch.as_tensor(x, dtype=_DT)
             lam_t = torch.as_tensor(lam, dtype=_DT)

@@ -54,6 +54,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M28 | FBBT allocates and scans O(n_vars) per constraint per sweep: `vec![Interval::ENTIRE; n_vars]` + a `0..n_vars` apply loop for every constraint — O(m·n) per sweep when each tape touches a handful of variables | **FIXED** | **Cost confirmed by timing.** `run_fbbt` (`crates/pounce-presolve/src/fbbt/orchestrator.rs:159-197`) allocated a fresh `vec![Interval::ENTIRE; n_vars]` *per constraint* and then ran a `for j in 0..n_vars` apply loop over it — even though a constraint's tape typically mentions only a handful of variables. Per sweep that is `O(m·n_vars)` regardless of sparsity. **Reproduced by running code**: a timing probe (m = n constraints, each a single-`Var(i)` tape over a wide non-tightening bound) showed clearly quadratic scaling — `0.62 / 2.25 / 8.86 ms` at `n = 1000/2000/4000` (each `n`-doubling ≈ 4×, the O(n²) signature). **Fix**: hoist the per-variable scratch out of the loops and touch only the variables a constraint actually mentions. A reused `tighten: Vec<Interval>` (length n_vars, allocated once), a `last_seen: Vec<usize>` stamp array, a `touched: Vec<usize>` list, and a monotonic per-constraint `stamp` implement a "first `Var(j)` slot overwrites, later slots intersect" discipline with **no per-constraint reset** — the apply step iterates only `touched`. Variables absent from the tape keep an `ENTIRE` interval and can never tighten or be empty, so iterating `touched` is exactly equivalent to the old `0..n_vars` scan. Per-constraint work drops to O(tape length); per sweep to O(nnz). No public API or numerical contract changed. **Verified post-fix**: the same probe is near-linear — `0.073 / 0.119 / 0.191 ms` at `n = 1000/2000/4000`, a speedup that *grows* with `n` (8.5× → 46×), exactly the O(n)→O(1)-per-constraint improvement predicts. **Test**: `duplicate_var_slots_intersect` pins the subtle part — a variable in two structurally distinct `Var(0)` slots of one tape (`x²+x=6`, squared slot first/tight, linear slot second/loose) must end with the INTERSECTION; in a single sweep (`max_iter=1`, essential — a fixed point washes the difference out) the correct intersection gives `x_hi ≈ √6 ≈ 2.449`. The existing 64 FBBT tests (coupled-constraint iteration, soundness fuzz, row-mask, infeasibility, caps) all still pass unchanged. **Pre-fix vs neuter**: making later slots *overwrite* instead of *intersect* makes `duplicate_var_slots_intersect` FAIL (`x_hi = 6.0`, the loose linear slot), confirmed then restored. `pounce-presolve` (217 lib + integration + 9 doctests, 0 failed) and `pounce-py` build green. See `## M28 detail`. |
 | M29 | LICQ structural check duplicates and degrades an existing primitive: per-row `vec![false; n]` allocation (O(m·n)) and recursive augmenting paths (stack-overflow risk on long chains, e.g. discretized dynamics), while the crate already has an iterative Hopcroft–Karp in `matching.rs` | **FIXED** | **Both degradations confirmed by running code.** `bipartite_matching_rank` (`crates/pounce-presolve/src/licq.rs:72-110`) ran its own Hungarian-style matcher: a `vec![false; n]` `seen` array allocated **per row** (O(m·n) total just to zero scratch) and a **recursive** `try_augment` whose depth equals the augmenting-path length. The crate already ships an iterative, BFS-layered Hopcroft–Karp (`matching.rs::hopcroft_karp`, O(E·√V), König-cross-checked) operating on `EqualityIncidence` — the LICQ matcher was a second, weaker copy. **Reproduced by running code**: (a) a temporary recursion-depth counter on `try_augment` over a staircase chain (`row 0:{0}`, `row i:{i−1,i}`, final row → last column only) measured max depth `= m−1` exactly (999 / 3999 / 15999 at m = 1000/4000/16000) — linear in chain length, so a chain of tens of thousands of rows overflows a normal 2–8 MB stack; (b) a timing probe on the m = n diagonal showed the per-row allocation scaling super-linearly (`0.023 / 0.069 / 0.245 ms` at n = 1000/2000/4000, the O(m·n) signature). **Fix**: delete `try_augment` and rewrite `bipartite_matching_rank` to pack the `EqRow` list into a CSR `EqualityIncidence` (out-of-range columns dropped, columns sorted+deduped exactly as `from_probe`) and call `hopcroft_karp(&inc).size`. Hopcroft–Karp prunes failed searches in BFS (no DFS at all when no augmenting path exists) and bounds its DFS recursion depth to the BFS layer distance (O(√V)), removing both the per-row allocation and the deep recursion. `licq_check`'s public verdict semantics are unchanged. **Verified post-fix**: all 7 existing LICQ tests (over-determined, empty-row, duplicate-singleton, distinct-singleton, augmenting-path) pass unchanged. **New tests**: `long_chain_does_not_overflow_stack` (m = 50 000 rows over m−1 touched columns + a phantom column so `m ≤ n`; the exact chain that drove the old matcher to depth ≈ 50 000) completes on the default 2 MB test stack and returns `StructuralRank(m−1)`; `long_chain_full_rank` (m = 20 000, m columns, perfect matching) returns `Full`, guarding against the fix capping long augmenting paths short. `pounce-presolve` (219 lib + integration + 9 doctests, 0 failed), no new clippy warnings, and `pounce-py` build green. See `## M29 detail`. |
 | M30 | python: `curve_fit` covariance never projects onto the active *general-constraint* nullspace — `active_mask` covers variable bounds only, so an active equality between parameters is returned as the unconstrained covariance while labeled `reduced_hessian(projected)`, overstating variances and dropping induced anti-correlations | **FIXED** | **Bug confirmed by running code.** `_covariance` (`python/pounce/_curve_fit.py:1542-1547`) and its streaming twin `_stream_covariance` (1108-1112) handled the active set with `free = ~active_mask` — projecting out only **bound**-active columns. With `m_con > 0` but no active bound the branch fired (`if m_con > 0 or active_mask.any()`), computed `free = all-True`, and returned the **unconstrained** `s2·pinv(M)` while labeling it `reduced_hessian(projected)`. **Reproduced by running code**: a weighted line fit (`f = a·x + b`, `M = JwᵀJw`) under an active equality `a + b = c` — calling `_covariance` directly and checking the variance along the constraint gradient. Pre-fix `A·pcov·Aᵀ = 0.318` (should be 0: the binding relation is known exactly) and `pcov` was bit-identical to the unconstrained inverse, with the induced anti-correlation absent; the correct projected covariance carries `A·pcov·Aᵀ = 0` and a `-0.065` off-diagonal. **Fix**: thread the constraint plumbing already on `_FitProblem` (`jac_combined`, `g_combined`, `cl`, `cu`) into both covariance functions and project onto the **joint** active-set nullspace. `_active_constraint_jac` selects the binding general-constraint rows (equalities `cl==cu` always bind; inequalities within `tol` of a finite bound); `_projected_covariance` stacks those with unit rows `eⱼ` for active bounds, takes an orthonormal nullspace basis `Z` (SVD), and returns `s2·Z·pinv(ZᵀMZ)·Zᵀ`. For a bounds-only active set `Z` is the free coordinate subspace and this reduces **exactly** to the old `cov[ix_(free,free)] = s2·pinv(M[free,free])` (the prior behavior preserved, verified by the existing bound tests). When `m_con > 0` but every inequality is slack and no bound binds, nothing is projected and the source is honestly reported as `jacobian`. **Also**: the `_covariance` docstring now states it is the first-order (delta-method) asymptotic covariance — `M` is the Gauss-Newton Hessian and the constraints are linearized at `popt`, omitting the curvature term `ΣλᵢHᵢ` (zero for linear constraints, higher-order otherwise) — resolving the "Gauss-Newton comment assumes linear constraints" note; the module docstring's "projection onto the active-constraint nullspace" claim is now actually true. **Tests** (`python/tests/test_curve_fit.py`): `test_active_equality_constraint_projects_covariance` (in-memory) and `test_streaming_active_equality_projects_covariance` (streaming twin) fit a line under an active `a+b=1` equality and assert `cov_source == "reduced_hessian(projected)"`, zero variance along the constraint gradient (`g·pcov·g < 1e-9`), a negative `pcov[0,1]`, and a match to the closed-form `Z·pinv(ZᵀMZ)·Zᵀ`. **Pre-fix both FAIL** (`g·pcov·g ≈ 1.6e-3`, the unconstrained variance) — confirmed before the fix; post-fix both PASS. Full `test_curve_fit.py` (44) green, and `test_sensitivity.py`/`test_minimize.py`/`test_minima.py` (37) unaffected. See `## M30 detail`. |
+| M31 | python: the issue-#112 indefinite-`P` guard fires only on `solve_qp` — every other host QP entry point (`solve_qp_batch`, `solve_qp_multi_rhs`, `QpFactorization`, `QpSensitivity`, `solve_socp`) and the jax/torch differentiable layers skip the PSD check, so a nonconvex `P` is solved by the convex IPM and returns a silently-wrong `status="optimal"` (or a constructed handle / a corrupt backward pass) | **FIXED** | **Bug confirmed by running code** (`/tmp/m31_verify.py`): an indefinite `P = diag(1,-1)` with box bounds fed to all six host entry points — only `solve_qp` raised; the other five returned `status="optimal"` or constructed a usable handle. **Fix**: a shared `_maybe_check_psd(P, c, check_psd)` helper (honoring `check_psd ∈ {None=auto, True, False}` with the `_PSD_CHECK_AUTO_MAX_N=1500` auto threshold) is threaded into all six host entry points, each of which gained a `check_psd` parameter; the jax/torch host forwards (`_forward_solve`, `_forward_solve_batch`, `_forward_solve_socp`) gained a `_guard_psd` that runs the same eigenvalue screen before building the `_pounce.QpProblem`. **Tests**: `test_qp_host.py` gained 7 tests — five `*_rejects_indefinite_p` (one per previously-unguarded entry point, `pytest.raises(ValueError, match="positive semidefinite")`), `test_check_psd_false_bypasses_guard_everywhere`, and `test_psd_p_still_solves_on_all_entry_points`; `test_qp_jax.py`/`test_qp_torch.py` each gained `test_indefinite_p_rejected_in_{forward,batch_forward}` (jax wraps the host `ValueError` but the "semidefinite" message survives). **Pre-fix the five rejection tests FAIL** (the unguarded points return `optimal`) — confirmed by neutering the guard; post-fix all PASS. Full QP suite green: `test_qp.py`/`test_qp_host.py`/`test_qp_jax.py`/`test_qp_torch.py`/`test_qp_sensitivity.py`/`test_socp.py` (82 passed). See `## M31 detail`. |
 
 ## C1 detail
 
@@ -2484,3 +2485,67 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
     `test_minimize.py` / `test_minima.py` (37 passed) green.
 - **Result**: `pounce-presolve` green (219 lib + integration + 9 doctests,
   0 failed), no new clippy warnings; `pounce-py` builds clean.
+
+## M31 detail
+
+- **Issue** (`dev-notes/code-review-2026-06.md:468-473`,
+  `python/pounce/qp.py:434-437`): the indefinite-`P` guard added under issue
+  #112 (`_check_psd`, which raises `ValueError("... positive semidefinite ...")`
+  when `λ_min(P) < -1e-8·max(scale,1)`) was wired into `solve_qp` only. The
+  other five host QP entry points — `solve_qp_batch` (`qp.py:547`),
+  `solve_qp_multi_rhs` (588), `QpFactorization` (626), `QpSensitivity` (679),
+  and `solve_socp` (474) — never called it, and neither did the jax/torch
+  differentiable layers' host forwards. A nonconvex (indefinite) `P` is outside
+  the convex IPM's contract, so it converges to a meaningless KKT point and
+  reports `status="optimal"` — a *silently wrong* answer. For the
+  differentiable layers it is worse: the bogus primal feeds the OptNet implicit
+  backward, corrupting gradients.
+- **Verification (running code)**: `/tmp/m31_verify.py` builds
+  `P = diag(1, -1)` (eigenvalues +1, −1) with `c = 0` and box bounds
+  `[-1, 1]²` (the bounds keep the convex IPM from diverging so it returns a
+  *concrete* status, exposing the silent-wrong behavior rather than a generic
+  failure) and calls all six host entry points. Pre-fix: only `solve_qp`
+  raised; `solve_qp_batch`/`solve_qp_multi_rhs`/`solve_socp` returned
+  `status="optimal"` and `QpFactorization`/`QpSensitivity` constructed usable
+  handles.
+- **Fix** (`python/pounce/qp.py`): a single shared helper
+  ```python
+  def _maybe_check_psd(P, c, check_psd) -> None:
+      if check_psd is False:
+          return
+      n = np.asarray(c, dtype=np.float64).ravel().shape[0]
+      if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
+          _check_psd(*_lower_triangle_coo(P, n), n)
+  ```
+  centralizes the policy: `check_psd=False` is the opt-out escape hatch (caller
+  asserts PSD, or wants the nonconvex behavior, or is avoiding the O(n³) eig);
+  `check_psd=True` forces the check at any size; `check_psd=None` (default) runs
+  it automatically only when `n <= _PSD_CHECK_AUTO_MAX_N` (1500) to bound the
+  eigenvalue cost on large QPs. `solve_qp` was refactored onto the helper, and
+  each of the other five entry points gained a `check_psd` parameter and a call
+  to it before building the `_pounce` problem (for `solve_qp_batch`, once per
+  problem dict). The jax/torch layers (`pounce/jax/_qp.py`,
+  `pounce/torch/_qp.py`) import `_PSD_CHECK_AUTO_MAX_N`/`_check_psd` and gained a
+  local `_guard_psd(P, n)` that runs the same screen (size-gated) inside the
+  host forwards `_forward_solve`, `_forward_solve_batch`, `_forward_solve_socp`
+  — the points where a concrete numpy `P` is turned into a `_pounce.QpProblem`
+  (jax via `pure_callback`, torch in the eager `autograd.Function.forward`).
+- **Tests**:
+  - `python/tests/test_qp_host.py` — five `test_*_rejects_indefinite_p` (one per
+    previously-unguarded host entry point), each
+    `pytest.raises(ValueError, match="positive semidefinite")`;
+    `test_check_psd_false_bypasses_guard_everywhere` (the opt-out skips the
+    guard on all five); `test_psd_p_still_solves_on_all_entry_points` (a
+    genuine PSD `P` passes unscathed everywhere).
+  - `python/tests/test_qp_jax.py` / `test_qp_torch.py` —
+    `test_indefinite_p_rejected_in_forward` and
+    `test_indefinite_p_rejected_in_batch_forward` (batched `c` is `(B, n)` and
+    `h` is `(B, m)`); jax wraps the host `ValueError` in a runtime error but the
+    `"semidefinite"` substring survives, so both layers match on it.
+  - **Fail-first confirmed**: neutering the guard makes the five host rejection
+    tests FAIL (the unguarded points return `status="optimal"`); restored, all
+    pass.
+  - Full QP suite green under `POUNCE_SKIP_EXT_STALE_CHECK=1 PYTHONPATH=$PWD/python`
+    (Python-only change; extension unchanged): `test_qp.py`, `test_qp_host.py`,
+    `test_qp_jax.py`, `test_qp_torch.py`, `test_qp_sensitivity.py`,
+    `test_socp.py` — **82 passed**.

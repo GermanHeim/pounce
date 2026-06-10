@@ -297,3 +297,27 @@ def test_infeasible_grad_raises():
 
     with pytest.raises(RuntimeError, match="status"):
         jax.grad(loss)(jnp.array([0.0]))
+
+
+def test_indefinite_p_rejected_in_forward():
+    # issue #112 (code review M31): the differentiable layer must not solve an
+    # indefinite QP and feed a silently-wrong "optimal" into the backward pass.
+    # The host-callback guard raises; jax wraps it, but the PSD message
+    # survives in the error string.
+    P = jnp.array([[1.0, 0.0], [0.0, -1.0]])  # eigenvalues +1, -1
+    c = jnp.zeros(2)
+    G = -jnp.eye(2)
+    h = jnp.ones(2)
+    with pytest.raises(Exception, match="semidefinite"):
+        solve_qp(P=P, c=c, G=G, h=h)
+
+
+def test_indefinite_p_rejected_in_batch_forward():
+    # batched layer: ``c`` is (B, n) and ``h`` is (B, m); the shared P is
+    # screened once before any instance solves.
+    P = jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    c = jnp.zeros((2, 2))  # B=2, n=2
+    G = -jnp.eye(2)
+    h = jnp.ones((2, 2))  # B=2, m=2
+    with pytest.raises(Exception, match="semidefinite"):
+        solve_qp_batch(P=P, c=c, G=G, h=h)

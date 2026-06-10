@@ -59,12 +59,29 @@ import numpy as np
 from jax.scipy.linalg import block_diag
 
 from .. import _pounce
+from ..qp import _PSD_CHECK_AUTO_MAX_N, _check_psd
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
+
+def _guard_psd(P, n):
+    """Reject an indefinite Hessian on the host forward (issue #112).
+
+    The differentiable layer reads the primal/dual iterate and solves a KKT
+    system for the gradient; an indefinite ``P`` gives a silently-wrong
+    ``"optimal"`` forward and feeds that garbage into the backward pass too.
+    This runs on the concrete numpy ``P`` inside the host callback, with the
+    same auto-size threshold as :func:`pounce.qp.solve_qp` so a large QP is
+    not slowed by the O(n^3) eigenvalue solve."""
+    if n <= _PSD_CHECK_AUTO_MAX_N:
+        _check_psd(*_to_coo_lower(np.asarray(P)), n)
+
+
 # Active-set tolerance for the backward pass: an inequality counts as
 # active when its multiplier is above this (complementarity slackness).
-from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
+from .._ad_common import (
+    ACTIVE_TOL as _ACTIVE_TOL,
+)  # single source of truth (DiffHandoff contract)
 
 
 def _expand_bounds(G, h, lb, ub, n):
@@ -175,6 +192,7 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     iteration with that primal; it only affects the iteration count."""
     m_g = G.shape[0]
     m_a = A.shape[0]
+    _guard_psd(P, c.shape[0])
     prob = _build_problem(P, c, G, h, A, b)
     warm = None
     if warm_x is not None and np.asarray(warm_x).size == c.shape[0]:
@@ -194,6 +212,7 @@ def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
     m_a = A.shape[0]
     b_sz = cs.shape[0]
     n = cs.shape[1]
+    _guard_psd(P, n)  # P is shared across the batch — one check covers all rows
     probs = [_build_problem(P, cs[i], G, hs[i], A, bs[i]) for i in range(b_sz)]
     warms = None
     if warm_xs is not None and np.asarray(warm_xs).shape == (b_sz, n):
@@ -280,9 +299,7 @@ def _make_qp_vjp(n, m_g, m_a, tol, max_iter):
         return x
 
     def fwd(P, c, G, h, A, b, warm_x):
-        x, lam, nu = _pure_forward(
-            P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter
-        )
+        x, lam, nu = _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter)
         return x, (P, G, A, h, x, lam, nu, warm_x)
 
     def bwd(res, gx):
@@ -532,9 +549,7 @@ def solve_qp_batch(
     else:
         h_arr = jnp.asarray(h, dtype=jnp.float64)
         hs_user = (
-            jnp.broadcast_to(h_arr, (b_sz, n_user_rows))
-            if h_arr.ndim == 1
-            else h_arr
+            jnp.broadcast_to(h_arr, (b_sz, n_user_rows)) if h_arr.ndim == 1 else h_arr
         )
     hs_bounds = jnp.broadcast_to(h_bounds[n_user_rows:], (b_sz, bound_rows))
     hs = jnp.concatenate([hs_user, hs_bounds], axis=1)
@@ -696,6 +711,7 @@ def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
     """Host-side SOCP forward via pounce-convex. Returns (x, z, y)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
+    _guard_psd(P, c.shape[0])
     prob = _build_problem(P, c, G, h, A, b)
     d = _pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter)
     _check_status(d["status"], "SOCP differentiable forward solve")
@@ -714,9 +730,15 @@ def _make_socp_vjp(n, m_g, m_a, cones, specs, tol, max_iter):
     def forward(P, c, G, h, A, b):
         def host(P_h, c_h, G_h, h_h, A_h, b_h):
             return _forward_solve_socp(
-                np.asarray(P_h), np.asarray(c_h), np.asarray(G_h),
-                np.asarray(h_h), np.asarray(A_h), np.asarray(b_h),
-                specs, tol, max_iter,
+                np.asarray(P_h),
+                np.asarray(c_h),
+                np.asarray(G_h),
+                np.asarray(h_h),
+                np.asarray(A_h),
+                np.asarray(b_h),
+                specs,
+                tol,
+                max_iter,
             )
 
         return jax.pure_callback(host, shapes, P, c, G, h, A, b)
