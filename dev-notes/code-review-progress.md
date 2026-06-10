@@ -86,6 +86,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L21 | l1penalty: `L1PenaltyBarrierTnlp::new` discards the `bool` return of `get_starting_point` and `eval_g` with `let _ =` (`wrapper.rs:179-191`), so a failing seed callback silently seeds the `(p, n)` slacks from a zeroed `x_0`/violation instead of returning `None` as documented | **FIXED** | **Bug confirmed by reading + running code (pounce port of ripopt `L1PenaltyBarrierNlp`).** `new`'s doc-contract: "Calls … `get_starting_point`, and `eval_g` … If any of these fail, returns `None`." The code violated it — both calls were `let _ = …`, so a TNLP whose `get_starting_point`/`eval_g` returns `false` would proceed with `x0` left at its `vec![0.0; n]` initialization (and `g0` at zero), seeding every equality slack `(p_k, n_k)` from a bogus zero violation rather than rejecting the wrap. Both methods return `bool` (`pounce-nlp/src/tnlp.rs:175,184`). **Fix**: capture the `get_starting_point` result and `return None` if false; fold the `eval_g` call into `if m > 0 && !…eval_g(…) { return None; }`. Now `new` honors its documented "returns `None` if any of these fail" contract. **Tests** (`wrapper::tests`): a `SeedFails` mock (mirrors `EqOnly` but with `fail_starting_point`/`fail_eval_g` flags) drives `new_returns_none_when_starting_point_fails`, `new_returns_none_when_eval_g_fails`, and a control `new_succeeds_when_seed_callbacks_succeed` (both flags off → `Some`). **Fail-first confirmed**: reverting to `let _ =` makes both `*_returns_none_*` tests fail (`new` returns `Some`) while the control stays green. Restored; full pounce-l1penalty suite green (14 lib). `cargo fmt -p pounce-l1penalty` / `cargo clippy -p pounce-l1penalty --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L21 detail`. |
 | L22 | CLI: the `--cite <model>.nl` "wrong file" hint suggests producing a report with `pounce … --solve-report report.json`, but no `--solve-report` flag exists — `cli.rs` parses only `--json-output` (`main.rs:1700-1711`), so a user following the hint hits "unknown argument" | **FIXED** | **Bug confirmed by reading + running code.** When `--cite` is handed a `.nl` model instead of a solve-report JSON, `run_cite` prints a help hint telling the user to generate a report first. The hint named `--solve-report`, which the CLI arg parser does not accept (grep of `cli.rs` shows the report-output flag is `--json-output` at `cli.rs:520`; `--solve-report` appears nowhere). Following the hint literally produces an unknown-argument error. **Fix**: corrected the hint string (and its preceding comment) to `pounce {} --json-output report.json`. **Test** (`tests/cite_hint_flag.rs`, new integration test using `CARGO_BIN_EXE_pounce`): writes a temp `.nl`-extension file with non-JSON contents, runs `pounce --cite <file>.nl`, and asserts stderr **contains** `--json-output` and **does not contain** `--solve-report`. **Fail-first confirmed**: reverting the hint to `--solve-report` makes the test fail (stderr lacks `--json-output`). `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L22 detail`. |
 | L23 | CLI: after a failed MC64 hypersensitivity scaling retry, `status` reverts to the original local-infeasibility verdict but the reported statistics still reflect the *retry* solve (`main.rs:883-899, 902`) — `app.statistics()` was read **after** the second `optimize_tnlp`, so a non-promoting retry pairs the original verdict with the failed retry's iteration count / objective | **FIXED** | **Bug confirmed by reading + running code.** The `feral_infeasibility_scaling_retry` guard re-solves once with MC64 on a local-infeasibility verdict; on failure it sets `status = InfeasibleProblemDetected` (original verdict) but the subsequent `let solve_stats = app.statistics()` returns the *retry* solve's stats (the retry's `optimize_tnlp` overwrote `app.statistics()`), so the summary/JSON report show the original verdict next to the failed retry's iterations/objective. On the promote path stats were correct only incidentally. **Fix**: snapshot `solve_stats = app.statistics()` immediately after the solve loop (the verdict-bearing solve), and after the retry set `(status, solve_stats)` together via a new pure helper `resolve_scaling_retry_outcome(retry_status, original_stats, retry_stats)` — promote ⇒ `(retry_status, retry_stats)`; otherwise ⇒ `(InfeasibleProblemDetected, original_stats)`. Status and stats now move in lockstep. Extracted `scaling_retry_promoted` for the promote predicate. **Tests** (`main.rs` `scaling_retry_tests`): `failed_retry_keeps_original_status_and_stats` (over `InfeasibleProblemDetected`/`MaximumIterationsExceeded`/`RestorationFailed` retry verdicts → status stays infeasible AND `iteration_count`/`final_objective` stay the original solve's `7`, not the retry's `42`); `promoted_retry_adopts_retry_status_and_stats` (`SolveSucceeded`/`SolvedToAcceptableLevel` → status + stats both the retry's `42`). **Fail-first confirmed**: modeling the pre-fix leak (else-branch returns `retry_stats`) fails the failed-retry test (`iteration_count` 42 ≠ 7). Restored; full pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L23 detail`. |
+| L24 | CLI: the `.nl` was fully re-parsed a second time purely to classify it for LP/QP dispatch (`main.rs:456-461` / the `nl_reader::read_nl_file` at the dispatch block), doubling parse time and peak memory on large models; the classification re-parse's error arm (`Err(_) => (ProblemClass::Nlp, None)`) silently fell back to NLP | **FIXED** | **Bug confirmed by reading + running code.** The `.nl` is parsed once to build `NlTnlp` (consuming `NlProblem`), then `read_nl_file(path)` ran a *second* full parse in the dispatch block just to call `classify_problem`. Every `.nl` solve paid two parses; large models paid double parse time + peak memory. The second parse's `Err(_)` arm discarded the error and defaulted to `ProblemClass::Nlp` (silent mis-route latent on a re-read failure). **Fix**: classify during the **first** parse — capture `nl_class = Some(classify_problem(&prob))` right before `prob` is moved into `NlTnlp::new`, and have the dispatch block read `class` from `nl_class` (no re-parse). The specialized convex solvers still need an owned `NlProblem` (the first one was consumed), so re-parse **once, lazily, only on the convex dispatch path** (LP/convex-QP/SOCP) — never for a general NLP solve — and on that re-parse a failure now surfaces (`eprintln!` + exit 2) instead of silently routing to NLP. Builtins (always NLP) never re-parse. **Tests/verification**: the existing end-to-end suites exercise the refactored path — `qp_dispatch_end_to_end::auto_routes_convex_qp_to_pounce_convex` (auto classifies `convex_qp.nl` → routes to pounce-convex, proving the captured `nl_class` drives routing), `nlp_path_still_solves_same_file`, plus `dispatch_routing` (21 tests total) all green. **Fail-first confirmed**: breaking the capture (`nl_class = None` → defaults to Nlp) makes `auto_routes_convex_qp_to_pounce_convex` fail (the convex QP misroutes to NLP, stdout lacks `pounce-convex`). The pure parse-count reduction and the re-parse error-surfacing path are verified by code reading (no deterministic fail-first seam for "parsed once not twice" or a first-succeeds/second-fails race). Restored; suites green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L24 detail`. |
 
 ## C1 detail
 
@@ -4587,3 +4588,69 @@ solve's, not the failed retry's", `iteration_count` 42 ≠ 7) while the promote
 test stays green. Restored; full pounce-cli bin tests green.
 `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce
 -- -D clippy::correctness -D clippy::suspicious` clean.
+
+## L24 detail
+
+**Issue (L24).** The `.nl` is fully re-parsed for classification
+(`main.rs:456-461`) — doubles parse time/peak memory on large models; the error
+case silently falls back to NLP.
+
+**Verification.** In `run` (`crates/pounce-cli/src/main.rs`) the `.nl` is parsed
+once at the "Load the problem" block (`nl_reader::read_nl_file`, then
+`NlTnlp::new(prob)` *moves* the `NlProblem`). The LP/QP dispatch block then ran
+a **second** full parse purely to classify:
+
+```rust
+let (class, reparsed) = match &args.problem {
+    ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
+        Ok(prob) => (classify_problem(&prob), Some(prob)),
+        Err(_) => (ProblemClass::Nlp, None),   // <- silent NLP fallback
+    },
+    ProblemSource::Builtin(_) => (ProblemClass::Nlp, None),
+};
+```
+
+Two costs: (1) every `.nl` solve parses the file twice — on a large model that
+doubles parse wall-time and the transient peak memory of holding a second
+`NlProblem`; (2) the `Err(_)` arm threw the parse error away and defaulted to
+`ProblemClass::Nlp`, so a re-read failure would silently mis-route rather than
+report.
+
+**Fix** (`crates/pounce-cli/src/main.rs`).
+- Capture the class from the *first* parse: a new outer
+  `let mut nl_class: Option<ProblemClass> = None;`, set to
+  `Some(pounce_cli::dispatch::classify_problem(&prob))` immediately before
+  `NlTnlp::new(prob)` consumes `prob`. `classify_problem` is a pure read-only
+  pass over the parsed problem (`dispatch.rs:174`), far cheaper than a parse.
+- The dispatch block now reads `class` from `nl_class` (builtins → `Nlp`); the
+  redundant `read_nl_file` is gone.
+- The convex solvers (`run_convex_qp` / `run_convex_socp`) need an owned
+  `NlProblem`, and the first one was moved into `NlTnlp`. So re-parse **once,
+  lazily, only inside the convex dispatch branch** (`LpIpm`/`QpIpm`/`SocpIpm`),
+  which only `.nl` inputs ever reach. A failure there now surfaces
+  (`eprintln!` + `ExitCode::from(2)`) instead of falling through to NLP.
+
+Net effect: the common general-NLP `.nl` solve now parses the file exactly once
+(was twice); only the convex LP/QP/SOCP route — typically small problems —
+re-parses, and it no longer swallows a parse error.
+
+**Tests/verification.** The performance claim ("parsed once, not twice") has no
+clean deterministic fail-first seam without instrumenting `read_nl_file`, and
+the re-parse error path needs a first-succeeds/second-fails race — both are
+verified by code reading. The behavioral correctness of the refactor (the
+captured `nl_class` must still drive dispatch) is covered end-to-end by the
+existing suites, all green after the change:
+- `qp_dispatch_end_to_end::auto_routes_convex_qp_to_pounce_convex` — `auto` on
+  `convex_qp.nl` classifies it as a convex QP and routes to pounce-convex.
+- `qp_dispatch_end_to_end::nlp_path_still_solves_same_file`,
+  `forced_qp_ipm_solves`, `forced_qp_active_set_solves_convex_qp`, etc.
+- `dispatch_routing` (5 tests) — forced-mismatch rejection, `auto`/`nlp`
+  no-regression. 21 dispatch/QP tests total pass.
+
+**Fail-first confirmed.** Forcing the capture off (`nl_class = None`, so `class`
+defaults to `Nlp`) makes `auto_routes_convex_qp_to_pounce_convex` fail — the
+convex QP misroutes through the NLP path and stdout no longer contains
+`pounce-convex`. This proves the dispatch now sources its class from the
+first-parse capture. Restored; suites green. `cargo fmt -p pounce-cli` /
+`cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness
+-D clippy::suspicious` clean.

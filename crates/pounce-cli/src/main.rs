@@ -338,6 +338,11 @@ pub fn main() -> ExitCode {
     // read off `NlProblem` before `NlTnlp` consumes it.
     let mut nl_suffixes: Option<nl_reader::NlSuffixes> = None;
     let mut nl_dims: Option<(usize, usize)> = None;
+    // Problem class captured from the *first* `.nl` parse below, so the
+    // LP/QP dispatch never has to re-read the file just to classify it
+    // (re-parsing doubled parse time / peak memory on large models — code
+    // review L24). `None` for builtins (treated as general NLP).
+    let mut nl_class: Option<pounce_cli::dispatch::ProblemClass> = None;
     // `nl_expr_provider` shadows `inner_tnlp` for the `.nl`-file path:
     // both point at the same `NlTnlp`, but the second handle is typed
     // as `dyn ExpressionProvider` so the presolve wrapper can use it
@@ -405,6 +410,10 @@ pub fn main() -> ExitCode {
                         h.set_equation_book(book);
                         h.set_structure_book(structure);
                     }
+                    // Classify now, while we still own `prob` (it's about to
+                    // be moved into `NlTnlp`). Saves a second full parse in the
+                    // LP/QP dispatch block below.
+                    nl_class = Some(pounce_cli::dispatch::classify_problem(&prob));
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
@@ -444,9 +453,7 @@ pub fn main() -> ExitCode {
     // that does not match the detected class is rejected with a clear
     // message, instead of being silently ignored.
     {
-        use pounce_cli::dispatch::{
-            classify_problem, resolve_solver, ProblemClass, SolverChoice, SolverSelection,
-        };
+        use pounce_cli::dispatch::{resolve_solver, ProblemClass, SolverChoice, SolverSelection};
         let sel_str = app
             .options()
             .get_string_value("solver_selection", "")
@@ -463,16 +470,14 @@ pub fn main() -> ExitCode {
             }
         };
 
-        // Classify the problem. Only the `.nl` path carries enough
-        // structure; builtins are treated as general NLP. (Re-reading the
-        // `.nl` here is cheap relative to a solve and keeps the dispatch
-        // self-contained.)
-        let (class, reparsed) = match &args.problem {
-            ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
-                Ok(prob) => (classify_problem(&prob), Some(prob)),
-                Err(_) => (ProblemClass::Nlp, None),
-            },
-            ProblemSource::Builtin(_) => (ProblemClass::Nlp, None),
+        // Problem class. The `.nl` path was already classified during the
+        // initial parse above (`nl_class`) — we do NOT re-read the file here
+        // (re-parsing doubled parse time / peak memory on large models, and
+        // its error arm silently fell back to NLP; code review L24). Builtins
+        // are treated as general NLP.
+        let class = match &args.problem {
+            ProblemSource::NlFile(_) => nl_class.unwrap_or(ProblemClass::Nlp),
+            ProblemSource::Builtin(_) => ProblemClass::Nlp,
         };
 
         let choice = match resolve_solver(class, selection) {
@@ -505,25 +510,36 @@ pub fn main() -> ExitCode {
             choice,
             SolverChoice::LpIpm | SolverChoice::QpIpm | SolverChoice::SocpIpm
         ) {
-            if let Some(prob) = reparsed.as_ref() {
+            // The convex solvers need the parsed `NlProblem`, but the initial
+            // parse moved it into `NlTnlp`. Re-parse the file here — only on
+            // the convex dispatch path (LP / convex-QP / SOCP), never for a
+            // general NLP solve. Only `.nl` inputs ever classify as convex, so
+            // the builtin arm falls through to NLP. A parse failure surfaces
+            // and exits rather than silently mis-routing to NLP (L24).
+            if let ProblemSource::NlFile(path) = &args.problem {
+                let prob = match nl_reader::read_nl_file(path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "pounce: failed to re-read {} for the convex solver: {e}",
+                            path.display()
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
                 // JSON solve report, when requested — same schema as the NLP
                 // path, so the benchmark harness can compare convex and NLP
                 // solves.
                 let json_cfg = args.json_output.as_deref().map(|p| {
-                    let input = match &args.problem {
-                        ProblemSource::Builtin(name) => {
-                            InputDescriptor::Builtin { name: name.clone() }
-                        }
-                        ProblemSource::NlFile(f) => InputDescriptor::NlFile {
-                            path: f.clone(),
-                            size_bytes: std::fs::metadata(f).ok().map(|m| m.len()),
-                        },
+                    let input = InputDescriptor::NlFile {
+                        path: path.clone(),
+                        size_bytes: std::fs::metadata(path).ok().map(|m| m.len()),
                     };
                     (p, args.json_detail, input)
                 });
                 if matches!(choice, SolverChoice::SocpIpm) {
                     return run_convex_socp(
-                        prob,
+                        &prob,
                         class,
                         sol_path.as_deref(),
                         json_cfg,
@@ -537,7 +553,7 @@ pub fn main() -> ExitCode {
                     .map(|(v, _)| v != "no")
                     .unwrap_or(true);
                 return run_convex_qp(
-                    prob,
+                    &prob,
                     class,
                     sol_path.as_deref(),
                     presolve_on,
@@ -546,8 +562,7 @@ pub fn main() -> ExitCode {
                     args.ampl,
                 );
             }
-            // Should not happen (only `.nl` classifies non-NLP), but be
-            // safe: fall through to NLP rather than mis-dispatch.
+            // Builtins never classify as convex; fall through to NLP.
         }
         // `qp-active-set`: route the (convex-QP) problem through the
         // active-set SQP engine instead of the IPM. `resolve_solver`
