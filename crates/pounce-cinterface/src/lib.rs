@@ -786,22 +786,32 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
         // (always non-negative at feasible iterates), so reverse the
         // sign and clamp.
         if !x_l_violation.is_null() && n_us > 0 {
-            let mut v = vec![0.0; n_us];
             let slack = cq.curr_slack_x_l();
             let z_l_full = nlp.pack_z_l_for_user(&*slack);
+            // Guard the scatter length exactly like the sibling branches
+            // below: an unexpected packed length would otherwise index
+            // `v[i]` out of bounds and panic across this `extern "C"`
+            // boundary (an abort, not a recoverable error).
+            if z_l_full.len() != n_us {
+                return false;
+            }
             // pack_z_l_for_user scatters by the same x_L mapping; the
             // returned vector at full-x positions holds `slack_x_l[i]`
             // which is `x_i - x_L_i`. Clamp the *negative* part to get
             // the violation `max(0, x_L_i - x_i)`.
+            let mut v = vec![0.0; n_us];
             for (i, s) in z_l_full.iter().enumerate() {
                 v[i] = (-s).max(0.0);
             }
             std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
         }
         if !x_u_violation.is_null() && n_us > 0 {
-            let mut v = vec![0.0; n_us];
             let slack = cq.curr_slack_x_u();
             let s_full = nlp.pack_z_u_for_user(&*slack);
+            if s_full.len() != n_us {
+                return false;
+            }
+            let mut v = vec![0.0; n_us];
             for (i, s) in s_full.iter().enumerate() {
                 v[i] = (-s).max(0.0);
             }
@@ -2385,6 +2395,157 @@ mod tests {
             "GetIpoptCurrentIterate did not return a usable x"
         );
         unsafe { FreeIpoptProblem(p) };
+    }
+
+    static CB_VIOL_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    // Bounded variant of `create_callback_test_problem`: x in [0, 10] with a
+    // finite lower bound, so the `x_l_violation` / `x_u_violation` branches of
+    // GetIpoptCurrentViolations actually scatter a real `x_L`/`x_U` mapping
+    // (not the degenerate "no bound" pack).
+    fn create_bounded_callback_test_problem() -> IpoptProblem {
+        // min (x - 2)^2  s.t.  -10 <= x <= 10,  x in [0, 10].
+        let xl = [0.0];
+        let xu = [10.0];
+        let gl = [-10.0];
+        let gu = [10.0];
+        unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                1,
+                gl.as_ptr(),
+                gu.as_ptr(),
+                1,
+                1,
+                0,
+                Some(quad_eval_f),
+                Some(cb_quad_eval_g),
+                Some(quad_eval_grad_f),
+                Some(cb_quad_eval_jac_g),
+                Some(cb_quad_eval_h),
+            )
+        }
+    }
+
+    unsafe extern "C" fn violations_inspecting_cb(
+        _alg_mod: Index,
+        _iter_count: Index,
+        _obj_value: Number,
+        _inf_pr: Number,
+        _inf_du: Number,
+        _mu: Number,
+        _d_norm: Number,
+        _regularization_size: Number,
+        _alpha_du: Number,
+        _alpha_pr: Number,
+        _ls_trials: Index,
+        user_data: *mut c_void,
+    ) -> Bool {
+        let problem = user_data as IpoptProblem;
+        // Exercise the bound-violation branches (n=1, m=1) from inside an
+        // installed intermediate context. Pre-L51 these branches indexed
+        // `v[i]` without a length guard; the fix makes them return FALSE on
+        // a packed-length mismatch instead of panicking across `extern "C"`.
+        let mut x_l_viol = [f64::NAN];
+        let mut x_u_viol = [f64::NAN];
+        let rc = GetIpoptCurrentViolations(
+            problem,
+            FALSE,
+            1,
+            x_l_viol.as_mut_ptr(),
+            x_u_viol.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if rc == TRUE
+            && x_l_viol[0].is_finite()
+            && x_l_viol[0] >= 0.0
+            && x_u_viol[0].is_finite()
+            && x_u_viol[0] >= 0.0
+        {
+            CB_VIOL_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        TRUE
+    }
+
+    #[test]
+    fn get_current_violations_inside_callback_reports_finite_bounds() {
+        CB_VIOL_OK.store(false, std::sync::atomic::Ordering::SeqCst);
+        let p = create_bounded_callback_test_problem();
+        assert!(!p.is_null());
+        let ok = unsafe { SetIntermediateCallback(p, Some(violations_inspecting_cb)) };
+        assert_eq!(ok, TRUE);
+        let mut x = [5.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                p as *mut c_void,
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert!(
+            CB_VIOL_OK.load(std::sync::atomic::Ordering::SeqCst),
+            "GetIpoptCurrentViolations did not return finite, non-negative \
+             bound violations from inside the callback"
+        );
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn bound_violation_scatter_rejects_oversized_pack_instead_of_panicking() {
+        // L51 fail-first (logic level): reproduce the scatter of the
+        // `x_l_violation` / `x_u_violation` branches. The packed vector comes
+        // from `pack_z_*_for_user`, whose length must equal the output `n`.
+        // Pre-fix the branches scattered it with `for (i, s) in
+        // packed.enumerate() { v[i] = ... }` over a `vec![0.0; n]` *without*
+        // checking the length; an oversized pack indexes `v[i]` out of bounds
+        // and panics — and across the real `extern "C"` boundary that panic
+        // aborts the embedding process. The fix adds the same length guard
+        // the sibling (`compl_*`, `grad_lag_x`) branches already had.
+        let n_us = 1usize;
+        let packed = vec![0.5_f64, -0.3]; // len 2 != n_us == 1
+
+        // Pre-fix: the unguarded scatter panics on the oversized pack.
+        let unguarded = std::panic::catch_unwind(|| {
+            let mut v = vec![0.0; n_us];
+            for (i, s) in packed.iter().enumerate() {
+                v[i] = (-s).max(0.0);
+            }
+            v
+        });
+        assert!(
+            unguarded.is_err(),
+            "unguarded scatter should panic (→ abort across extern \"C\") on an oversized pack"
+        );
+
+        // Post-fix: the length guard returns an error instead of panicking.
+        let guarded: Result<Vec<f64>, ()> = (|| {
+            if packed.len() != n_us {
+                return Err(());
+            }
+            let mut v = vec![0.0; n_us];
+            for (i, s) in packed.iter().enumerate() {
+                v[i] = (-s).max(0.0);
+            }
+            Ok(v)
+        })();
+        assert!(
+            guarded.is_err(),
+            "guarded scatter should reject the length mismatch (return FALSE), not panic"
+        );
     }
 
     unsafe extern "C" fn user_stop_cb(

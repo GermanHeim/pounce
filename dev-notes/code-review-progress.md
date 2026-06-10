@@ -118,6 +118,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L48 | `minimize` silently drops information on specific routes: user `hess` ignored whenever constraints are present (`_build_problem_obj` gates Hessian on `m == 0`, no warning); convex routes forward only `tol`/`max_iter`, so `disp`/`print_level`/`acceptable_tol` are silently discarded | **FIXED (both parts, via warnings)** | **Confirmed by reading + two monkeypatch tests.** (1) `_build_problem_obj` only attaches `hessian`/`hessianstructure` when `m == 0`, because the wrapper can supply only the *objective* Hessian and has no way to assemble the constraint-curvature term `Σλᵢ∇²gᵢ` of the Lagrangian Hessian the IPM needs; with constraints it falls back to L-BFGS. Correct behavior, but silent. **Fix**: warn when `hess is not None and m > 0`, explaining the L-BFGS fallback. (2) `_solve_via_convex`/`_solve_via_socp` read only `opts.get("tol")`/`opts.get("max_iter")`. **Fix**: capture the user's requested option keys *before* defaulting/popping (`requested_opt_keys`), and at each convex/SOCP routing return warn (`_warn_convex_dropped_opts`) listing any requested key outside the honored set `{tol, max_iter, disp}` plus a provided `hess`, pointing to `solver_selection='nlp'`. **Tests** (`test_minimize.py`, monkeypatching the native `Problem` / `classify_and_extract` / `_solve_via_convex`): `test_hess_ignored_with_constraints_warns` (warns with a constraint; no warning unconstrained) and `test_convex_route_warns_on_dropped_options` (warns on `acceptable_tol`/`print_level`; silent when only `tol`/`max_iter`). Verified against the codereview source via a stubbed-native harness. See `## L48 detail`. |
 | L49 | Strict-contiguity fast path turns valid non-contiguous float64 arrays into errors instead of copying (`problem.rs::extract_f64_vec`, `tnlp_bridge.rs::copy_pyarray_into`) | **FIXED** | **Confirmed end-to-end (fail-first against installed main, pass against a freshly-built codereview wheel).** A non-contiguous float64 array (a strided view like `x[::2]`, or a column of a 2-D array) still downcasts to `PyArray1<f64>`, so it takes the fast path and hits `arr.as_slice()?`, which requires C-contiguity and returns `Err` → the call raised `TypeError: The given array is not contiguous` instead of copying. (The generic per-element fallback below was unreachable for such arrays — they downcast successfully.) **Fix**: in both decoders (and the i64/i32 index decoder `extract_index_vec_inferred` for consistency), match on `as_slice()`; on `Err` fall back to a strided ndarray view `arr.readonly().as_array().iter().copied()`. `warm_start.rs::extract_f64_vec` was inspected and is **not** affected — it uses `bound.extract()` (Python iteration protocol), which already handles non-contiguous arrays. **Test** (`test_problem.py::test_noncontiguous_float64_arrays_are_copied_not_rejected`): an HS071 solve where bounds, `x0`, and the gradient/constraints/Jacobian callback returns are all non-contiguous strided views; asserts `Solve_Succeeded` and the known optimum. **Fail-first**: the same script raises `TypeError: The given array is not contiguous` on the installed (main) build; passes (obj 17.014) on the codereview wheel. `cargo fmt` / gated `cargo clippy` clean. See `## L49 detail`. |
 | L50 | The KKT-fallback success heuristic can mark `User_Requested_Stop` as success (`_minimize.py`) — combined with M32, a crashing callback can yield `success=True` | **FIXED** | **Confirmed by reading + a monkeypatch test + a fail-first truth-table.** After the solve, `success = status_code in {0,1} or (isfinite(kkt) and kkt <= acceptable_tol)`. The KKT-error fallback (the second disjunct) is meant for *numerical stalls* (e.g. `Search_Direction_Becomes_Too_Small`, status 3) that happen to sit at an acceptable point — but it fired for **any** non-success status, including `User_Requested_Stop` (status 5). Status 5 is what the bridge reports when the user's `intermediate` callback aborts, and (per M32) also when such a callback *raises*. So a crashing/aborting callback whose last computed KKT error was coincidentally small was upgraded to `success=True`. **Fix**: add `_NO_KKT_FALLBACK_STATUS = {5}` and gate the fallback on `status_code not in _NO_KKT_FALLBACK_STATUS`. **Fail-first** (truth table): for `status=5, kkt=1e-12, acc=1e-6` the pre-fix expression is `True`; post-fix `False`; the `status=3` stall control stays `True`. **Test** (`test_minimize.py::test_user_requested_stop_is_not_success_despite_small_kkt`, monkeypatching the native `Problem`): a fake returning status 5 + `final_kkt_error=1e-12` yields `success is False`, while a sibling returning status 3 with the same KKT error stays `success is True`. Verified against the codereview source via the stubbed-native harness. See `## L50 detail`. |
+| L51 | `GetIpoptCurrentViolations` bound-violation branches skip the length check their sibling branches perform (`pounce-cinterface/src/lib.rs:788-808`); a packed-length mismatch indexes `v[i]` out of bounds → panic inside `extern "C"` → abort | **FIXED (hardened) + placeholder behavior documented** | **Confirmed by reading; panic not reachable through the public API (defense-in-depth fix).** The `x_l_violation`/`x_u_violation` branches built `v = vec![0.0; n_us]` and ran `for (i, s) in pack_z_*_for_user(...).enumerate() { v[i] = ... }` with **no** length guard, unlike the five sibling branches (`compl_x_l/u`, `grad_lag_x`, and every branch of `GetIpoptCurrentIterate`) which all `if v.len() != n_us { return false; }` first. An oversized pack would index `v[i]` out of bounds → panic; `with_current` has **no** `catch_unwind`, so the panic unwinds across `extern "C"` → process abort. In practice the top-of-function `n != info.n` guard pins `n` to `info.n`, and `pack_z_*_for_user` returns `cls.n_full_x == info.n`, so the mismatch is unreachable via the public API today — this is a latent gap hardened for consistency/defense-in-depth. **Fix**: add the same `if pack.len() != n_us { return false; }` guard to both bound branches. **Tests** (`pounce-cinterface` lib): `bound_violation_scatter_rejects_oversized_pack_instead_of_panicking` is **fail-first at the logic level** — `catch_unwind` over the pre-fix scatter (oversized pack) `.is_err()` (it panics), while the guarded version returns `Err`; and `get_current_violations_inside_callback_reports_finite_bounds` drives a real `IpoptSolve` with a finite-bound problem and asserts the (now-guarded) branches return `TRUE` with finite, non-negative violations from inside the callback. Note: `nlp_constraint_violation`/`compl_g` remain documented zero-fill placeholders returned with `TRUE` (per-row reconstruction is a follow-up) — already noted in the code comments, behavior unchanged. 45 lib tests pass; `cargo fmt` / gated clippy clean. See `## L51 detail`. |
 
 ## C1 detail
 
@@ -5969,3 +5970,71 @@ with `final_kkt_error=1e-12` yields `res.success is False`, while a sibling
 `_StallProblem` returning status 3 with the same KKT error keeps
 `res.success is True`. Passes against the codereview source via the
 stubbed-native harness.
+
+## L51 detail
+
+**Issue.** `GetIpoptCurrentViolations`
+(`crates/pounce-cinterface/src/lib.rs`) scatters compressed algorithm-side
+quantities out to full-`n`/full-`m` buffers. Five of its branches
+(`compl_x_l`, `compl_x_u`, `grad_lag_x`, and — in the sibling
+`GetIpoptCurrentIterate` — every `pack_*` branch) guard the scatter with
+`if v.len() != n_us { return false; }` before copying. The two
+bound-violation branches did **not**:
+
+```rust
+if !x_l_violation.is_null() && n_us > 0 {
+    let mut v = vec![0.0; n_us];
+    let z_l_full = nlp.pack_z_l_for_user(&*slack);
+    for (i, s) in z_l_full.iter().enumerate() {
+        v[i] = (-s).max(0.0);   // <-- v[i] panics if z_l_full.len() > n_us
+    }
+    ...
+}
+```
+
+If `pack_z_l_for_user` ever returned a vector longer than `n_us`, `v[i]`
+indexes out of bounds and panics. `with_current`
+(`pounce-algorithm/src/intermediate.rs:58`) wraps the closure with **no**
+`catch_unwind`, so the panic unwinds across the `extern "C"` boundary —
+which is undefined behavior / a process abort, not a recoverable `FALSE`.
+(This is the specific instance of the broader "no FFI panic boundary" item
+tracked as L56.)
+
+**Reachability (honest).** Through the public API this is currently
+*unreachable*: the function early-returns `FALSE` when `n != info.n`, so
+`n_us == info.n`, and `pack_z_*_for_user` returns a vector of length
+`cls.n_full_x`, which equals `info.n` for any well-formed problem (the
+full, fixed-inclusive variable count). So the panic is a **latent**
+gap, not a live crash — the fix is defense-in-depth and consistency with
+the sibling branches, exactly the kind of internal-invariant guard the rest
+of the function already carries.
+
+**Fix.** Add `if z_l_full.len() != n_us { return false; }` (and the `x_U`
+analogue) before the scatter loop, matching the siblings. On a mismatch the
+function now returns `FALSE` instead of aborting the embedding process.
+
+**Tests** (`pounce-cinterface` lib, `cargo test -p pounce-cinterface`):
+
+- `bound_violation_scatter_rejects_oversized_pack_instead_of_panicking` —
+  **fail-first at the logic level**: it reproduces the exact scatter against
+  an oversized pack (`len 2`, `n_us 1`). `std::panic::catch_unwind` over the
+  *pre-fix* form returns `Err` (it panics → would abort across `extern
+  "C"`); the *post-fix* guarded form returns `Err(())` cleanly. Asserts the
+  unguarded path panics and the guarded path does not.
+- `get_current_violations_inside_callback_reports_finite_bounds` — drives a
+  real `IpoptSolve` on a finite-bound problem (`x in [0, 10]`) with an
+  intermediate callback that calls `GetIpoptCurrentViolations` from inside
+  the installed context and asserts it returns `TRUE` with finite,
+  non-negative `x_l`/`x_u` violations. Locks the guarded happy path
+  end-to-end.
+
+The full `pounce-cinterface` lib suite (45 tests) passes; `cargo fmt` and
+gated clippy (`-D clippy::correctness -D clippy::suspicious`) are clean.
+
+**Also noted (no change).** The issue flags that `nlp_constraint_violation`
+and `compl_g` are zero-filled placeholders returned with `TRUE`. That is
+already documented in the function's inline comments — per-row equality/range
+violation and constraint-complementarity reconstruction in full-`g`
+coordinates is an explicit follow-up. Left as-is (a correctness *gap in
+completeness*, not a bug): callers get the scalar `inf_pr` summary via
+`IterStats`; the per-row detail is simply not yet populated.
