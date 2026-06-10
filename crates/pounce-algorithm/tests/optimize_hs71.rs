@@ -699,6 +699,71 @@ fn hs071_output_file_captures_timing_report() {
 /// re-optimize workflow that drives this initializer doesn't yet
 /// surface. The unit tests in `init::warm_start` cover the clamp /
 /// target-mu semantics in isolation.
+/// Regression test for the `max_iter`-boundary convergence gap (L1).
+///
+/// The main loop in `IpoptAlgorithm::optimize` incremented the iteration
+/// counter and broke out with `Maximum_Iterations_Exceeded` *before*
+/// calling `iterate()` again, so the convergence check never ran on the
+/// iterate produced by the final permitted step. A solve that converges on
+/// exactly the `max_iter`-th iterate therefore reported
+/// `Maximum_Iterations_Exceeded`, where upstream Ipopt — which runs its
+/// `CheckConvergence` (including the `iter >= max_iter` test) at the *top*
+/// of the loop, convergence first — reports success. That premature break
+/// also kept `data.iter_count` from ever reaching `max_iter`, leaving the
+/// `MaxIterExceeded` branch in `conv_check/opt_error.rs` effectively dead.
+///
+/// Strategy: find the iteration `k` at which HS071 naturally converges with
+/// a generous budget, then re-solve with `max_iter = k`. The converging
+/// iterate is the one produced by the final permitted step; the solver must
+/// still test it and report success, not `Maximum_Iterations_Exceeded`.
+#[test]
+fn hs071_converges_exactly_at_max_iter_boundary() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let status = app.optimize_tnlp(Rc::clone(&tnlp));
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "baseline HS071 did not converge to full success: {status:?}",
+    );
+    let k = app.statistics().iteration_count;
+    assert!(
+        k > 1,
+        "need a multi-iteration solve to exercise the boundary; k = {k}",
+    );
+
+    // Cap max_iter at exactly the iteration HS071 converges on. The final
+    // permitted step produces the converged iterate; before the L1 fix the
+    // loop broke with Maximum_Iterations_Exceeded before that iterate was
+    // ever convergence-tested.
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("max_iter", k, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let status = app.optimize_tnlp(Rc::clone(&tnlp));
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 boundary: max_iter={k} status={status:?} iter={}",
+        stats.iteration_count,
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "converging on the max_iter-th iterate must report success, \
+         got {status:?} (max_iter = {k})",
+    );
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-4,
+        "final_objective = {} (expected ~17.014017)",
+        stats.final_objective,
+    );
+}
+
 #[test]
 fn warm_start_options_flow_through_builder() {
     let mut app = IpoptApplication::new();

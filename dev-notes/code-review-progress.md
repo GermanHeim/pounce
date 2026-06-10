@@ -63,6 +63,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M37 | rust(cinterface): library UB — the sensitivity C API feeds NULL straight into `slice::from_raw_parts`. `IpoptSolverParametricStep` (`crates/pounce-cinterface/src/solver.rs:339,347`) and `IpoptSolverReducedHessian` (`:383`) accept a legal `n_pins == 0` call (which is allowed to pass NULL `pin_indices`/`deltas` — there is nothing to point at), but build the slices with `from_raw_parts(pin_indices, 0)` unconditionally. `from_raw_parts` requires its pointer be non-null and aligned *even for empty slices*, so `from_raw_parts(NULL, 0)` is UB; recent rustc's `-C debug-assertions` precondition checks turn it into a process abort. The rest of the crate gates this correctly (`IpoptSolverSolve` uses `if n_us > 0 { from_raw_parts } else { &[] }`) | **FIXED** | **Bug confirmed by running code**: a converged-session solve followed by `IpoptSolverParametricStep(solver, 0, NULL, NULL, dx_out)` aborts with SIGABRT — `unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null` (the session check sits *before* the bad `from_raw_parts`, so a solve is required to reach it). **Fix**: a local `slice_or_empty(ptr, len)` helper that returns `&[]` when `len == 0` and only calls `from_raw_parts` otherwise — mirroring the `n_us > 0` gate already used in `IpoptSolverSolve` — applied to all three sites (the two `ParametricStep` slices + the `ReducedHessian` pins). An empty pin set is a well-defined no-op (zero perturbation → Δx ≈ 0, 0×0 reduced Hessian), so both calls now return `TRUE`. **Test** (`crates/pounce-cinterface/src/solver.rs::zero_pins_with_null_pointers_is_not_ub`): solves the 1-D quad to a session, then calls both entry points with `n_pins=0` + NULL pointers and asserts `TRUE`. **Fail-first confirmed** by reverting the `ParametricStep` slices to bare `from_raw_parts`: the test aborts (signal 6, SIGABRT, the non-null precondition message); post-fix all 43 pounce-cinterface lib tests pass, clippy clean of new warnings. See `## M37 detail`. |
 | M38 | release: no tag-vs-manifest version check in any release workflow. `.github/workflows/release-crates.yml`, `release-pounce.yml`, `release-pyomo-pounce.yml` key off the tag prefixes `v*` / `python-v*` / `pyomo-pounce-v*` but never confirm the tag's version matches the manifest it publishes. Tagging `v0.5.0` with manifests at 0.4.0 makes the crates publish a silent green no-op (`publish-crates.sh` skips every crate as "already published" at 0.4.0) and the PyPI publish ship the stale 0.4.0 wheel under the 0.5.0 release | **FIXED** | **Bug confirmed by running code**: there was no guard at all — `check-release-consistency.sh` checks the three *manifests* agree with each other but never against the *tag*. Added `scripts/check_tag_version.py <tag-or-ref>`, which strips the longest matching release prefix (`pyomo-pounce-v`/`python-v`/`v`, longest-first so the PyPI tags aren't misread as the bare crates `v`), reads the first top-of-line `version = "..."` from the routed manifest (Cargo `[workspace.package]` / the two `pyproject.toml`s — same extraction as the consistency script), and exits 2 on mismatch / 3 on an unrecognized tag / 4 on an unreadable manifest. **Verified live**: against the repo at 0.4.0, `check_tag_version.py refs/tags/v0.5.0` fails with exit 2 and a TAG/MANIFEST MISMATCH message (the exact M38 scenario nothing previously caught), while `v0.4.0`/`python-v0.4.0` pass and `pyomo-pounce-v1.0.0` correctly routes to the pyomo manifest. **Wiring**: `release-crates.yml` gains a guard step before `Publish crates`; `release-pounce.yml`/`release-pyomo-pounce.yml` gain a `verify-version` job that the build jobs `needs:`, so a mismatch fails before the multi-platform wheel matrix runs. All three gate on `github.event_name == 'push'`, so manual `workflow_dispatch` dry-runs (no tag) skip the check (no-op pass). **Test** (`scripts/tests/test_check_tag_version.py`, mirroring the sibling `test_check_dep_publishability.py` standalone-unittest convention): 18 cases over synthetic manifests (stable across version bumps) covering prefix routing, longest-prefix precedence, prerelease suffixes, and the M38 mismatch → exit 2; the three workflows parse and the `verify-version → build → publish` dependency graph is well-formed. 25 `scripts/tests` total green. See `## M38 detail`. |
 | M39 | ci: `pounce-hsl` is on the crates.io publish list but compiled by zero CI jobs. `.github/workflows/ci.yml:63,66,69` (clippy/build/test) all pass `--exclude pounce-hsl` because the crate FFI-links the licensed `libcoinhsl` (absent from CI), so its first compile is the `cargo publish` verify build mid-release — and it is 5th of 19 in the publish order, so the four crates ahead of it (pounce-common/-linalg/-linsol/-feral) are already irreversibly published when it fails | **FIXED** | **Bug confirmed by running code**: with a deliberate type error appended to `crates/pounce-hsl/src/lib.rs`, the current CI build command `cargo build --workspace --exclude pounce-hsl` finished green (exit 0) — the error was completely invisible to CI. Root-caused the exclusion: `pounce-hsl/Cargo.toml` has `links = "coinhsl"` + a `build.rs`, but `build.rs` degrades gracefully when `COINHSL_DIR` is unset (emits a warning and returns, compiling a plain rlib with no link directives), so the crate *type-checks* fine without HSL — only *linking* (build/test of a final artifact) needs the library. **Fix**: add a `cargo check -p pounce-hsl --all-targets --verbose` step to the `test` job (after Test). `cargo check` type-checks without linking; `--all-targets` also covers the test modules (which the excluded test job never compiles either). Verified: against the injected error this step fails with `E0308` (exit 101) — catching exactly what the build step missed; with the error reverted it passes (exit 0), COINHSL_DIR unset, emitting only the benign warning. The publish list position (5/19) and the four-crates-ahead claim were confirmed from `scripts/publish-crates.sh`. **Test/verification**: the fail-first demonstration is the injected-error A/B above (current CI build green vs new check exit 101); the live repo `cargo check -p pounce-hsl --all-targets` is clean; `ci.yml` parses and the new step is present in the `test` job. CI-only change; no crate source touched (the temporary error was restored via `cp`+`touch`). See `## M39 detail`. |
+| L1 | algorithm: the final iterate is never convergence-tested at the `max_iter` boundary. `IpoptAlgorithm::optimize`'s main loop (`crates/pounce-algorithm/src/ipopt_alg.rs:1651-1656`) increments `iter_count` and breaks with `Maximum_Iterations_Exceeded` *before* calling `iterate()` again, so the convergence check never runs on the iterate produced by the final permitted step. A solve converging on exactly the `max_iter`-th iterate reports `Maximum_Iterations_Exceeded` where upstream Ipopt — whose `CheckConvergence` runs at the top of the loop, convergence-first — reports success; the `MaxIterExceeded` branch in `conv_check/opt_error.rs:233` is consequently dead (`data.iter_count` can never reach `max_iter`) | **FIXED** | **Bug confirmed by running code**: HS071 converges to `Solve_Succeeded` at `iter=8` with a generous budget; re-solving with `max_iter=8` reported `MaximumIterationsExceeded` at `iter=7` — the loop broke before the converged 8th iterate was ever tested. **Root cause**: the outer loop carried its own `if iter_count >= self.max_iter { break MaxiterExceeded }` that short-circuited *before* the next `iterate()` call, while the real convergence test (component tolerances **then** the `iter >= max_iter` gate) lives inside `iterate()` → `check_convergence_with_state`. Because the break fired first, `data.iter_count` topped out at `max_iter - 1`, so the in-`iterate()` `MaxIterExceeded` branch (`opt_error.rs:233`) never executed. **Fix**: drop the premature break — bump the counter and loop, letting the next `iterate()` run its convergence check. Termination is still guaranteed: once `iter_count` reaches `max_iter`, `check_convergence_with_state` returns `Converged`/`ConvergedToAcceptable` or `MaxIterExceeded`, never `Continue`. This matches upstream's top-of-loop, convergence-first ordering and takes the same number of steps (`max_iter`), adding only the missing final-iterate check. **Test** (`crates/pounce-algorithm/tests/optimize_hs71.rs::hs071_converges_exactly_at_max_iter_boundary`): finds HS071's natural convergence iteration `k`, re-solves with `max_iter=k`, asserts success + objective ≈ 17.014017. **Fail-first confirmed**: pre-fix the test fails with `MaximumIterationsExceeded (max_iter = 8)`; post-fix all 16 `optimize_hs71` tests pass and the full pounce-algorithm suite is green (lib 245 + all integration tests, 0 failures). See `## L1 detail`. |
 
 ## C1 detail
 
@@ -3040,3 +3041,58 @@ so both the library and its tests are now type-checked on every PR without
 needing an HSL install. Confirmed `cargo check -p pounce-hsl --all-targets`
 passes on the clean tree (exit 0) and the workflow YAML parses with the new
 step present. CI-only change; no crate source modified.
+
+## L1 detail
+
+- **Bug**: pounce splits the per-iteration convergence test (which lives at the
+  *top* of `IpoptAlgorithm::iterate`, in `check_convergence_with_state`) from a
+  *second*, redundant `max_iter` guard in the outer driver loop
+  (`ipopt_alg.rs`, the `IterateOutcome::Continue` arm). The driver did:
+
+  ```rust
+  let mut iter_count = self.data.borrow().iter_count;
+  iter_count += 1;
+  if iter_count >= self.max_iter {
+      break SolverReturn::MaxiterExceeded;   // <-- breaks BEFORE iterate()
+  }
+  self.data.borrow_mut().iter_count = iter_count;
+  ```
+
+  Because the break fired before the next `iterate()` call, the iterate
+  produced by the final permitted step was never convergence-tested. Two
+  consequences:
+  1. A solve converging on *exactly* the `max_iter`-th iterate reported
+     `Maximum_Iterations_Exceeded` instead of `Solve_Succeeded` — upstream
+     Ipopt runs `CheckConvergence` (component tolerances first, then its own
+     `iter_count >= max_iterations` test) at the top of the loop, so it catches
+     that boundary convergence.
+  2. `data.iter_count` could never be set to `max_iter` (the break intercepted
+     the assignment), so the in-`iterate()` `MaxIterExceeded` branch at
+     `conv_check/opt_error.rs:233` was effectively dead code.
+
+- **Verification (run before any change)**: a fresh HS071 solve with the
+  default budget converges to `Solve_Succeeded` at `iter=8`. Re-solving with
+  `max_iter=8` reported `status=MaximumIterationsExceeded iter=7` — the loop
+  broke at the boundary, one step short of testing the converged 8th iterate.
+
+- **Fix**: remove the premature break. Bump `data.iter_count` and loop; the
+  next `iterate()` runs its convergence check, which tests the component
+  tolerances *before* the `iter_count >= max_iter` gate, so boundary
+  convergence is reported as success and a genuine overrun still terminates via
+  `opt_error.rs:233` (now live). Termination is guaranteed because
+  `check_convergence_with_state` never returns `Continue` once
+  `iter_count >= max_iter`. Behaviorally this matches upstream's
+  top-of-loop / convergence-first ordering and takes the same `max_iter` steps;
+  it only *adds* the previously-missing convergence test on the final iterate.
+
+- **Test**: `optimize_hs71.rs::hs071_converges_exactly_at_max_iter_boundary`
+  derives HS071's natural convergence iteration `k` from a generous-budget
+  solve, then re-solves with `max_iter = k` and asserts
+  `Solve_Succeeded`/`SolvedToAcceptableLevel` + objective ≈ 17.014017. Deriving
+  `k` at runtime keeps the test robust to options/linear-backend drift.
+  Fail-first: pre-fix it panics with
+  `converging on the max_iter-th iterate must report success, got
+  MaximumIterationsExceeded (max_iter = 8)`. Post-fix all 16 `optimize_hs71`
+  tests pass and the full `pounce-algorithm` suite is green (lib 245 tests +
+  every integration test, 0 failures), confirming the core loop change is
+  regression-free.
