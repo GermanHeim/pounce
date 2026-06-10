@@ -59,6 +59,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M33 | python(pyomo-pounce): the Pyomo plugin's `_default_executable` (`pyomo-pounce/pyomo_pounce/pounce_solver.py:35-36`) resolves the solver only via `shutil.which("pounce")` despite depending on `pounce-solver`, which bundles the binary at a deterministic path (`pounce/bin/pounce`, exposed by `pounce._cli._bundled_binary`). A non-activated-venv run (cron, IDE runner, Jupyter kernel) with `<venv>/bin` off PATH reports the solver unavailable, or PATH shadowing picks up a stale system binary | **FIXED** | **Bug confirmed by running code**: with a bundled binary present at the deterministic path but PATH stripped of `pounce` (simulating cron/Jupyter), `_default_executable()` returned `None` — the solver reported unavailable. **Fix**: prefer `pounce._cli._bundled_binary()` when it `is_file()` (a lazy import guarded by `try/except` so a missing `pounce-solver` degrades gracefully), and fall back to `shutil.which("pounce")` for system installs / local cargo dev builds. **Tests** (`pyomo-pounce/tests/test_pounce.py`): `test_default_executable_prefers_bundled` (bundled present + PATH stripped → returns bundled path), `test_default_executable_falls_back_to_path` (no bundled → returns the PATH binary), `test_default_executable_none_when_nowhere` (neither → `None`), all via `monkeypatch` of `pounce._cli._bundled_binary` and `PATH`. **Fail-first confirmed** by reverting the method to `return shutil.which("pounce")`: `prefers_bundled` FAILS (`None != bundled`) while the fallback/none tests pass; post-fix all 7 plugin tests pass (the 3 solve-smoke tests run against the on-PATH binary, no skips). See `## M33 detail`. |
 | M34 | python: default auto-routing in `pounce.minimize` costs O(n²) user-function evaluations before the solve. On the `auto` path the LP/QP router (`classify_and_extract`) and the SOCP/QCQP router (`classify_and_extract_socp`) both FD-fit the *same* objective at an *identical* probe set (same `seed=0`), so the objective is finite-differenced twice; for a problem that ends up on the NLP path this is pure overhead, and it was undocumented (`python/pounce/_route.py`, `_minimize.py:425,447-468`) | **FIXED** | **Bug confirmed by running code**: counting `fun` calls through `minimize` on a quartic (NLP route, n=5), the routing overhead (auto-path calls minus nlp-forced-path calls) was 520 = exactly 2× a single router's 260 probe calls — the SOCP router re-probed every point the QP router had already evaluated. **Fix**: wrap the router callables (`fun`/`jac`/`hess`/`g_combined`/`jac_combined`) in one shared point-keyed cache (`_route._point_cache`, keyed on the point's float64 bytes) inside the `route_kw` both routers receive, so the second router's probes are cache hits; the NLP fallback still calls the *original* callables, so the actual solve is unaffected. Also documented the routing cost and the `solver_selection="nlp"` opt-out in the `minimize` docstring. **Test** (`python/tests/test_minimize_autoroute.py::test_auto_route_probes_objective_once_not_twice`): asserts the auto-path routing overhead equals one router's probe count, not two. **Fail-first confirmed** by reverting the `_point_cache` wrapping: overhead = 520 ≠ 260 → test FAILS; post-fix 74 routing/minimize tests pass. See `## M34 detail`. |
 | M35 | rust(pounce-py): session-style solves hold the GIL for the whole IPM run. `PySolver::solve` (`crates/pounce-py/src/solver.rs:80`), `QpFactorization::solve` and `QpSensitivity::new` (`crates/pounce-py/src/qp.rs`) call the Rust solver without `py.allow_threads`, unlike `PyProblem::solve` and the one-shot QP/SOCP entry points. `Solver` is the workhorse under `curve_fit` and the jax/torch hosts, so concurrent solves on multiple Python threads serialize | **FIXED** | **Bug confirmed by running code**: the QP path is pure Rust (no Python callbacks), so a `QpSensitivity` solve held the GIL *continuously* — a background watcher thread stalled 23.6 ms ≈ the full 31 ms solve, and 8 `QpSensitivity` solves across 8 threads took as long as serial (ratio 0.97) on a 14-core box. **Fix**: wrap each solve in `py.allow_threads`. The QP sites are pure Rust but hold non-`Send` linear-solver trait objects, so a transparent `SendGuard` (the same trick `PyProblem::solve` uses for its `Rc`s) crosses the GIL-release boundary; the closure runs on the calling thread so it never actually moves between OS threads. The NLP `PySolver::solve` uses the identical `SendGuard` pattern as `PyProblem::solve` (every `tnlp_bridge.rs` callback re-acquires the GIL via `Python::with_gil`, so re-entrancy is safe). **Test** (`python/tests/test_qp_sensitivity.py::test_qp_solve_releases_the_gil`): asserts 8 threaded solves finish in < 0.75× serial (skips on < 4 cores). Post-fix the watcher stall dropped to 4.5 ms and the threaded ratio to 0.39 (~2.5× speedup). **Fail-first confirmed** by swapping the pre-M35 `.so`: ratio 1.01 → test FAILS; post-fix all 41 QP + 112 NLP-session/sensitivity/curve_fit tests pass (one pre-existing, unrelated `test_socp.py` exp-cone failure reproduces identically on the pre-M35 `.so`). See `## M35 detail`. |
+| M36 | rust(studio-core): the report-reader's `InputDescriptor` mirror (`crates/pounce-studio-core/src/report.rs:142-154`) is missing the `CbfFile` variant that the writer (`crates/pounce-solve-report/src/lib.rs:185-204`) emits as `"kind": "cbf-file"` for `.cbf` conic instances. serde's internally-tagged enum hard-fails on the unknown tag, so the *entire* solve report is rejected — CBF solve reports can't be loaded at all | **FIXED** | **Bug confirmed by running code**: rewriting a good fixture's `fair_metadata.input` to `{"kind":"cbf-file","path":…,"size_bytes":…}` and loading it via `SolveReport::from_json_str` failed with serde `unknown variant 'cbf-file', expected one of 'nl-file', 'builtin', 'tnlp-direct'`. **Fix**: add the `CbfFile { path, size_bytes }` variant to studio-core's `InputDescriptor`, mirroring the writer (kebab-case `"cbf-file"`; `path: String` matching the reader's other variants). No production code matches the enum exhaustively, so the addition is self-contained. **Test** (`crates/pounce-studio-core/tests/fixtures.rs::loads_cbf_file_input_descriptor`): loads a cbf-file report and asserts it decodes to `InputDescriptor::CbfFile` with the right path/size. **Fail-first confirmed**: pre-fix a load-only form of the test failed with the serde unknown-variant error; post-fix all 13 studio-core tests pass. See `## M36 detail`. |
 
 ## C1 detail
 
@@ -2773,3 +2774,53 @@ rebuilt via `maturin build --release` and the `.so` extracted into the
 worktree. (One pre-existing, unrelated `test_socp.py::test_exp_cone_log_sum_exp_mixed`
 failure reproduces identically on the pre-M35 `.so`, so it is not caused by
 this change and is out of scope for M35.)
+
+## M36 detail
+
+**Issue** (`crates/pounce-studio-core/src/report.rs:142-154` vs writer
+`crates/pounce-solve-report/src/lib.rs:185-204`): the solve-report *writer* and
+the studio-core *reader* each define their own `InputDescriptor`, an
+internally-tagged enum (`#[serde(tag = "kind", rename_all = "kebab-case")]`).
+The writer has four variants — `NlFile`, **`CbfFile`** (`"kind": "cbf-file"`,
+for a Conic Benchmark Format `.cbf` instance solved through the convex conic
+driver), `Builtin`, `TnlpDirect` — but the reader mirror had only three,
+missing `CbfFile`. Because serde's internally-tagged enums reject an unknown
+tag for the *whole* value, any report produced from a `.cbf` input failed to
+deserialize entirely: every studio-core consumer (the MCP `load_solve_report`,
+`diagnose`, `inspect`, …) returned a hard error rather than the report.
+
+**Verification (running code)**: starting from the known-good `rosenbrock.json`
+fixture, rewrite `fair_metadata.input` to
+`{"kind":"cbf-file","path":"/tmp/cblib/instance.cbf","size_bytes":4096}` and
+load it through `SolveReport::from_json_str`. Pre-fix this returned
+`Err(Json("unknown variant 'cbf-file', expected one of 'nl-file', 'builtin',
+'tnlp-direct'"))` — the exact whole-report rejection.
+
+**Fix** (`crates/pounce-studio-core/src/report.rs`): add the missing variant to
+the reader, mirroring the writer:
+
+```rust
+/// A Conic Benchmark Format (`.cbf`) instance … Mirrors the writer's
+/// `pounce_solve_report::InputDescriptor::CbfFile` (`"kind": "cbf-file"`).
+CbfFile {
+    path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+},
+```
+
+(`path: String` keeps the reader's existing convention — it uses `String` where
+the writer uses `PathBuf`; the JSON is identical.) No production code in
+studio-core pattern-matches `InputDescriptor` exhaustively (only test-fixture
+*constructions* of `Builtin`/`TnlpDirect` exist), so the new variant needs no
+other call-site changes.
+
+**Test** (`crates/pounce-studio-core/tests/fixtures.rs`):
+`loads_cbf_file_input_descriptor` performs the same fixture rewrite and asserts
+the report loads and `fair_metadata.input` decodes to `InputDescriptor::CbfFile`
+with the expected `path`/`size_bytes`. **Fail-first confirmed**: a load-only
+form (`from_json_str(&src).is_ok()`, which compiles against the unfixed enum)
+failed pre-fix with the serde unknown-variant error; post-fix the full test and
+all 13 studio-core tests pass. clippy reports no new lib warnings (the test's
+`unwrap`/`expect` follow the file's established convention). Pure-Rust crate; no
+Python extension involved.
