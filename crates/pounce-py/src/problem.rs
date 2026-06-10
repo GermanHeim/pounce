@@ -408,9 +408,25 @@ impl PyProblem {
     /// Solve, then run a parametric sensitivity step at the converged
     /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
     /// extra keys `dx`, `dx_full`, `reduced_hessian`,
+    /// `reduced_hessian_scaled`, `obj_scaling_factor`, `pin_g_scaling`,
+    /// `kkt_perturbations` (the inertia-correction `(δ_x, δ_s, δ_c,
+    /// δ_d)` baked into the converged factor — all zero means the
+    /// factor is unregularized and the covariance reading is exact),
     /// `reduced_hessian_eigenvalues`, and `reduced_hessian_eigenvectors`
     /// (each may be `None` when the corresponding output was not
     /// requested or the solve did not converge).
+    ///
+    /// `reduced_hessian` is in **natural (unscaled) units**: any NLP
+    /// scaling the IPM applied (`nlp_scaling_method`, default
+    /// `"gradient-based"`) is undone, so `-inv(reduced_hessian)` is
+    /// directly the parameter covariance of an estimation problem,
+    /// independent of problem scaling and discretization (pounce#128).
+    /// `reduced_hessian_scaled` is the value as the solver's internal
+    /// scaled space sees it (what pounce returned before #128), and
+    /// `obj_scaling_factor` / `pin_g_scaling` are the factors relating
+    /// the two: `H_scaled[i,j] = obj_scaling_factor /
+    /// (pin_g_scaling[i]*pin_g_scaling[j]) * H[i,j]`. `obj_scal`
+    /// survives as a plain extra multiplier on both (default 1.0).
     ///
     /// `pin_constraint_indices` are 0-based indices into `g(x)`
     /// identifying the parameter-pin equalities `g_i(x) = p_i`. The
@@ -514,31 +530,31 @@ impl PyProblem {
             stats.final_constr_viol,
             stats.final_compl,
         )?;
-        let dx_obj: PyObject = match result.dx {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        info.set_item("dx", opt_vec_to_py(py, result.dx))?;
+        info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
+        info.set_item("reduced_hessian", opt_vec_to_py(py, result.reduced_hessian))?;
+        info.set_item(
+            "reduced_hessian_scaled",
+            opt_vec_to_py(py, result.reduced_hessian_scaled),
+        )?;
+        let obj_scaling_obj: PyObject = match result.obj_scaling_factor {
+            Some(v) => v.into_py(py),
             None => py.None(),
         };
-        info.set_item("dx", dx_obj)?;
-        let dx_full_obj: PyObject = match result.dx_full {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("dx_full", dx_full_obj)?;
-        let rh_obj: PyObject = match result.reduced_hessian {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian", rh_obj)?;
-        let eigvals_obj: PyObject = match result.reduced_hessian_eigenvalues {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_eigenvalues", eigvals_obj)?;
-        let eigvecs_obj: PyObject = match result.reduced_hessian_eigenvectors {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_eigenvectors", eigvecs_obj)?;
+        info.set_item("obj_scaling_factor", obj_scaling_obj)?;
+        info.set_item("pin_g_scaling", opt_vec_to_py(py, result.pin_g_scaling))?;
+        info.set_item(
+            "kkt_perturbations",
+            opt_vec_to_py(py, result.kkt_perturbations.map(|p| p.to_vec())),
+        )?;
+        info.set_item(
+            "reduced_hessian_eigenvalues",
+            opt_vec_to_py(py, result.reduced_hessian_eigenvalues),
+        )?;
+        info.set_item(
+            "reduced_hessian_eigenvectors",
+            opt_vec_to_py(py, result.reduced_hessian_eigenvectors),
+        )?;
         // Surface a post-solve sensitivity-stage failure (M6). The
         // underlying solve can converge (so `status` is success) while
         // the sensitivity step still fails, leaving every `dx`/Hessian
@@ -562,6 +578,16 @@ impl PyProblem {
     #[getter]
     fn has_hessian(&self) -> bool {
         self.has_hessian
+    }
+}
+
+/// `Some(vec)` → 1-D float ndarray, `None` → Python `None`. Shared by
+/// the optional-output info-dict keys here and in the sibling
+/// `Solver` pyclass.
+pub(crate) fn opt_vec_to_py(py: Python<'_>, v: Option<Vec<Number>>) -> PyObject {
+    match v {
+        Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        None => py.None(),
     }
 }
 
@@ -593,38 +619,7 @@ impl PyProblem {
             .transpose()?;
         let z_l0 = zl.map(|v| extract_f64_vec(&v, n, "zl")).transpose()?;
         let z_u0 = zu.map(|v| extract_f64_vec(&v, n, "zu")).transpose()?;
-
-        let (jac_rows, jac_cols, nele_jac) = if m > 0 {
-            let s = call0(&self.problem_obj, "jacobianstructure")?;
-            let (rows, cols) = decode_structure_inferred(&s)?;
-            (rows.clone(), cols.clone(), rows.len() as Index)
-        } else {
-            (Vec::new(), Vec::new(), 0)
-        };
-
-        // Hessian sparsity. When the user provides one, use it
-        // verbatim. Without one we still need a non-empty pattern: the
-        // L-BFGS updater pins its work-space sparsity from
-        // `curr_exact_hessian()`, so an empty space means nowhere for
-        // the quasi-Newton approximation to land. Declare the dense
-        // lower triangle — `eval_h(Values)` returns zeros and the
-        // updater overwrites them with its rank-update approximation.
-        let (hess_rows, hess_cols, nele_hess) = if self.has_hessian {
-            let s = call0(&self.problem_obj, "hessianstructure")?;
-            let (rows, cols) = decode_structure_inferred(&s)?;
-            (rows.clone(), cols.clone(), rows.len() as Index)
-        } else {
-            let mut rows = Vec::with_capacity(n * (n + 1) / 2);
-            let mut cols = Vec::with_capacity(n * (n + 1) / 2);
-            for i in 0..n {
-                for j in 0..=i {
-                    rows.push(i as Index);
-                    cols.push(j as Index);
-                }
-            }
-            let nele = rows.len() as Index;
-            (rows, cols, nele)
-        };
+        let init = self.build_tnlp_init(py, x0_vec, lam0, z_l0, z_u0)?;
 
         let mut app = IpoptApplication::new();
         if !self.has_hessian {
@@ -665,7 +660,62 @@ impl PyProblem {
         );
         app.set_restoration_factory_provider(resto_provider);
 
-        let init = PyTnlpInit {
+        let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
+        Ok((app, bridge))
+    }
+
+    /// Assemble the [`PyTnlpInit`] payload for one solve: resolve the
+    /// Jacobian / Hessian sparsity through the Python object (once, so
+    /// the solver's `Structure` calls are GIL-free copies) and capture
+    /// bounds, starting point, optional warm duals, and the callback
+    /// handle. Factored out of [`Self::prepare`] so the batch path
+    /// (pounce#126 phase 2) can mint per-instance bridges without
+    /// building the application on this thread — the resulting
+    /// `PyTnlpInit` is plain data + `Py<PyAny>` handles, hence `Send`,
+    /// and moves to the rayon worker that owns the solve.
+    pub(crate) fn build_tnlp_init(
+        &self,
+        py: Python<'_>,
+        x0_vec: Vec<Number>,
+        lam0: Option<Vec<Number>>,
+        z_l0: Option<Vec<Number>>,
+        z_u0: Option<Vec<Number>>,
+    ) -> PyResult<PyTnlpInit> {
+        let n = self.n as usize;
+        let m = self.m as usize;
+        let (jac_rows, jac_cols, nele_jac) = if m > 0 {
+            let s = call0(&self.problem_obj, "jacobianstructure")?;
+            let (rows, cols) = decode_structure_inferred(&s)?;
+            (rows.clone(), cols.clone(), rows.len() as Index)
+        } else {
+            (Vec::new(), Vec::new(), 0)
+        };
+
+        // Hessian sparsity. When the user provides one, use it
+        // verbatim. Without one we still need a non-empty pattern: the
+        // L-BFGS updater pins its work-space sparsity from
+        // `curr_exact_hessian()`, so an empty space means nowhere for
+        // the quasi-Newton approximation to land. Declare the dense
+        // lower triangle — `eval_h(Values)` returns zeros and the
+        // updater overwrites them with its rank-update approximation.
+        let (hess_rows, hess_cols, nele_hess) = if self.has_hessian {
+            let s = call0(&self.problem_obj, "hessianstructure")?;
+            let (rows, cols) = decode_structure_inferred(&s)?;
+            (rows.clone(), cols.clone(), rows.len() as Index)
+        } else {
+            let mut rows = Vec::with_capacity(n * (n + 1) / 2);
+            let mut cols = Vec::with_capacity(n * (n + 1) / 2);
+            for i in 0..n {
+                for j in 0..=i {
+                    rows.push(i as Index);
+                    cols.push(j as Index);
+                }
+            }
+            let nele = rows.len() as Index;
+            (rows, cols, nele)
+        };
+
+        Ok(PyTnlpInit {
             n: self.n,
             m: self.m,
             nele_jac,
@@ -692,9 +742,35 @@ impl PyProblem {
             final_lambda: vec![0.0; m],
             final_obj: 0.0,
             final_status_code: 0,
-        };
-        let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
-        Ok((app, bridge))
+        })
+    }
+
+    /// The pending option sets, in `OptionsList`'s three value classes
+    /// — for the batch path, which applies them to a fresh per-worker
+    /// application instead of going through [`Self::prepare`].
+    pub(crate) fn option_sets(
+        &self,
+    ) -> (&[(String, String)], &[(String, Number)], &[(String, Index)]) {
+        (&self.str_opts, &self.num_opts, &self.int_opts)
+    }
+
+    pub(crate) fn uses_exact_hessian(&self) -> bool {
+        self.has_hessian
+    }
+
+    pub(crate) fn dims(&self) -> (usize, usize) {
+        (self.n as usize, self.m as usize)
+    }
+
+    /// Per-constraint equality mask (`g_l[i] == g_u[i]`), used by the batch
+    /// info-dict builder to reproduce the single-solve `active_constraints`
+    /// classification (equalities are always active).
+    pub(crate) fn equality_mask(&self) -> Vec<bool> {
+        self.g_l
+            .iter()
+            .zip(&self.g_u)
+            .map(|(l, u)| l == u)
+            .collect()
     }
 }
 
@@ -859,7 +935,11 @@ fn extract_index_vec_inferred(val: &Py<PyAny>, what: &str) -> PyResult<Vec<Index
     })
 }
 
-fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<Number>> {
+pub(crate) fn extract_f64_vec(
+    val: &Py<PyAny>,
+    expected: usize,
+    what: &str,
+) -> PyResult<Vec<Number>> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
         if let Ok(arr) = bound.downcast::<PyArray1<Number>>() {
@@ -1044,7 +1124,7 @@ fn extract_i8_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<
     })
 }
 
-fn status_message(status: ApplicationReturnStatus) -> &'static str {
+pub(crate) fn status_message(status: ApplicationReturnStatus) -> &'static str {
     use ApplicationReturnStatus::*;
     match status {
         SolveSucceeded => "Solve_Succeeded",

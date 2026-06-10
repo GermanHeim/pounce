@@ -255,6 +255,10 @@ mod tests {
             dx: None,
             dx_full: None,
             reduced_hessian: None,
+            reduced_hessian_scaled: None,
+            obj_scaling_factor: None,
+            pin_g_scaling: None,
+            kkt_perturbations: None,
             reduced_hessian_eigenvalues: None,
             reduced_hessian_eigenvectors: None,
             mult_g: Some(vec![0.0]), // degenerate: |λ| ≈ 0
@@ -282,6 +286,10 @@ mod tests {
             dx: None,
             dx_full: None,
             reduced_hessian: None,
+            reduced_hessian_scaled: None,
+            obj_scaling_factor: None,
+            pin_g_scaling: None,
+            kkt_perturbations: None,
             reduced_hessian_eigenvalues: None,
             reduced_hessian_eigenvectors: None,
             mult_g: None, // duals not populated → no handoff

@@ -700,16 +700,16 @@ def _solve_fit(
     problem.add_option("print_level", 0)
     problem.add_option("sb", "yes")
     # With exact derivatives (analytic/JAX) the IPM converges cleanly with no
-    # NLP scaling, which keeps the converged factor's Hessian *unscaled* so the
-    # pounce-native covariance/sensitivity back-solves are exact. With a
-    # finite-difference fallback we leave scaling on for convergence robustness
-    # (and read covariance from the scaling-independent Jacobian instead).
+    # NLP scaling; keep it off so the converged factor matches the natural
+    # problem exactly. Since pounce#128 this is a preference, not a
+    # correctness requirement: held-factor back-solves (``Solver.kkt_solve``)
+    # undo any active NLP scaling, so a user who explicitly turns scaling on
+    # still gets natural-units covariance from the factor path.
     user_opts = dict(options or {})
     if pr.jac_exact and "nlp_scaling_method" not in user_opts:
         problem.add_option("nlp_scaling_method", "none")
     for k, v in user_opts.items():
         problem.add_option(k, v)
-    scaling_off = pr.jac_exact and user_opts.get("nlp_scaling_method", "none") == "none"
 
     solver = Solver(problem)
     popt, info = solver.solve(x0=np.asarray(p0, dtype=float))
@@ -727,9 +727,10 @@ def _solve_fit(
     success = status_code in _NLP_SUCCESS_STATUS or (
         np.isfinite(kkt_error) and kkt_error <= acceptable_tol
     )
-    # The converged factor is only trustworthy as an *unscaled* Hessian when
-    # scaling was off and the solve actually held a factor.
-    factor_ok = bool(scaling_off and solver.converged)
+    # The converged factor is trustworthy when the derivatives that built it
+    # were exact and the solve actually held a factor. (Scaling state no
+    # longer enters: factor back-solves are scaling-corrected, pounce#128.)
+    factor_ok = bool(pr.jac_exact and solver.converged)
 
     # --- residual diagnostics (unweighted, for reporting) --------------
     # Both paths produce the same scalar sums; streaming accumulates them over a
@@ -1587,10 +1588,11 @@ def _covariance(
 
     For least squares ``pcov = s^2 (J_w^T J_w)^-1`` (the inverse reduced
     Hessian of the sum-of-squares objective). When the converged factor is
-    trustworthy (exact derivatives, scaling off) this is read pounce-natively
-    from the inverse-Hessian block of ``K`` (``pcov = 2 s^2 inv(H_S)``, no
-    explicit matrix inverse); otherwise it is formed from the model Jacobian,
-    which is scaling-independent and gives the identical value. Robust losses
+    trustworthy (exact derivatives) this is read pounce-natively from the
+    inverse-Hessian block of ``K`` (``pcov = 2 s^2 inv(H_S)``, no explicit
+    matrix inverse; the back-solve is scaling-corrected, pounce#128);
+    otherwise it is formed from the model Jacobian, which is
+    scaling-independent and gives the identical value. Robust losses
     use the sandwich estimator.
 
     Active variable bounds *and* active general constraints project the
