@@ -634,13 +634,19 @@ pub fn main() -> ExitCode {
             // the x block against the originating `.nl`'s var count.
             let x = nlp.borrow().lift_x_to_full(&*curr.x);
             // Reassemble the user-facing `lambda` (length `n_full_g`, in
-            // original `.nl` g-row order) via `pack_lambda_for_user`, which
-            // inverts the c/d split through `c_map`/`d_map` AND unwinds the
-            // `c_scale`/`d_scale` scaling. Concatenating the raw `y_c` then
-            // `y_d` blocks here instead would permute the duals on any `.nl`
-            // with interleaved eq/ineq rows and leave them scaled — AMPL /
-            // Pyomo read the dual block positionally.
-            let mut lambda = nlp.borrow().pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+            // original `.nl` g-row order) via `finalize_solution_lambda`, which
+            // inverts the c/d split through `c_map`/`d_map`, unwinds the
+            // `c_scale`/`d_scale` scaling, AND divides out `obj_scale_factor`
+            // so the dual is in the user's unscaled-Lagrangian convention.
+            // (`pack_lambda_for_user` omits the obj_scale division — it feeds
+            // the scaled `eval_h` — so using it here left the duals scaled
+            // whenever gradient-based scaling triggered: pounce#11 F1.)
+            // Concatenating the raw `y_c` then `y_d` blocks here instead would
+            // permute the duals on any `.nl` with interleaved eq/ineq rows and
+            // leave them scaled — AMPL / Pyomo read the dual block positionally.
+            let mut lambda = nlp
+                .borrow()
+                .finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
             if lambda.is_empty() {
                 // Fallback for a non-`OrigIpoptNlp` whose `pack_lambda_for_user`
                 // is the empty-vec default: emit the raw `y_c`-then-`y_d`
