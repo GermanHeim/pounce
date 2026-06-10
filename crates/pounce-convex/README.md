@@ -26,14 +26,21 @@ LP is the `P = 0` case and is solved by the same driver.
   through `pounce_linsol::Factorization` — the same factor-once /
   solve-many handle the NLP path uses (feral by default, MA57 optional).
   No new linear-algebra dependency.
-- **Bare method now, Mehrotra next.** The current iteration uses a fixed
-  centering parameter and fraction-to-boundary step control. Mehrotra
-  predictor-corrector and the homogeneous self-dual embedding are Phase 3
-  and slot into this same scaffolding.
+- **Mehrotra predictor-corrector with HSDE.** The iteration uses a
+  Mehrotra predictor-corrector step over a homogeneous self-dual embedding
+  (`use_hsde` defaults to `true` — see [`hsde`]/[`hsde_nonsym`]), with Ruiz
+  equilibration ([`equilibrate`]) on the non-HSDE path for badly-scaled
+  data. The SOC / exponential / power / PSD cones (`cones::{soc,exp,power,
+  psd}`) are present as tested building blocks for the conic family.
 
 ## Status
 
-Phase 2, first increment: correct convex-QP solves validated against
-problems with analytically known optima (unconstrained, equality-,
-inequality-, and bound-constrained). Not yet wired into the CLI dispatch
-(`auto` still routes to NLP-IPM); not yet performance-tuned.
+Solves convex LP and QP correctly (validated against problems with
+analytically known optima, and exercised by the head-to-head benchmark
+suites `benchmarks/lp_convex` and `benchmarks/qp_convex` against the
+general NLP path). **Wired into the CLI dispatch**
+(`crates/pounce-cli/src/dispatch.rs`): `solver_selection=auto` routes LP
+and convex QP here (and convex QCQP to the same crate's SOCP IPM), and
+`solver_selection=lp-ipm | qp-ipm | socp` force it explicitly. The conic
+(SOCP / exponential / power / PSD) family beyond the QP/LP path is still
+under construction.

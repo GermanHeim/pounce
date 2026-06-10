@@ -8,6 +8,15 @@ path (Phase 5b) and the corrector inside `pounce-sensitivity`
 Pure Rust, no FFI. Layered on `pounce-common` + `pounce-linalg` +
 `pounce-linsol`; tests use `pounce-feral` as the LDLᵀ backend.
 
+From the CLI this engine is reached on an LP / convex-QP `.nl` via
+`solver_selection=qp-active-set`
+(`crates/pounce-cli/src/dispatch.rs`), which routes through the
+active-set SQP driver (it solves its step QPs here). It is the
+right choice for warm-started SQP / MPC subproblem sequences; for a
+cold one-shot convex-QP solve the dedicated convex interior-point
+solver (`pounce-convex`, `solver_selection=qp-ipm`) is generally the
+better fit.
+
 ## Status
 
 **Phase 5a — feature-complete on correctness.** Every problem

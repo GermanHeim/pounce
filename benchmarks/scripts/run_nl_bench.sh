@@ -32,6 +32,16 @@ IPOPT_BIN="$5"
 TIMELIMIT="${6:-300}"
 MODE="${7:-both}"
 
+# Optional extra args appended to the pounce (non-AMPL) invocation, and an
+# optional override for the pounce row's JSON `solver` label. Used by the
+# head-to-head suites (lp_convex / qp_convex), which run the same .nl twice
+# through pounce with two `solver_selection=` values into two result files.
+# Empty by default → existing callers behave byte-for-byte as before.
+POUNCE_EXTRA_ARGS="${8:-}"
+POUNCE_SOLVER_LABEL="${9:-}"
+# Split the extra args on whitespace (each is a bare key=value token).
+read -r -a POUNCE_EXTRA_ARR <<< "$POUNCE_EXTRA_ARGS"
+
 # Ipopt's compiled default linear solver is ma27, even in an HSL/MA57
 # build — so we ask for ma57 explicitly, otherwise the "ipopt-ma57"
 # reference would silently run ma27. Override via the env var.
@@ -96,6 +106,14 @@ pounce_status_from_log() {
   local s
   s=$(grep -oE '^[Ss]tatus:[[:space:]]+\w+' "$log" | tail -1 | awk '{print $2}')
   if [ -n "$s" ]; then echo "$s"; return; fi
+  # The convex IPM path (pounce-convex, solver_selection=lp-ipm/qp-ipm) prints
+  # a single summary line "POUNCE (LP IPM, pounce-convex): <msg>  obj=... iters=...".
+  # "Optimal Solution Found." is picked up by ipopt_status_from_log below; the
+  # non-optimal convex messages have their own wording, mapped here.
+  if grep -q "Problem is primal infeasible" "$log"; then echo "Infeasible_Problem_Detected"; return; fi
+  if grep -q "dual infeasible" "$log"; then echo "Diverging_Iterates"; return; fi
+  if grep -q "Maximum iterations exceeded" "$log"; then echo "Maximum_Iterations_Exceeded"; return; fi
+  if grep -q "Numerical failure" "$log"; then echo "Restoration_Failed"; return; fi
   # Pounce mirrors Ipopt's stdout for the common cases
   ipopt_status_from_log "$log"
 }
@@ -106,6 +124,9 @@ extract_iters() {
   # Prefer the end-of-run summary line.
   local n
   n=$(grep -oE 'Number of Iterations[. :]+[0-9]+' "$1" | tail -1 | grep -oE '[0-9]+$')
+  if [ -n "$n" ]; then echo "$n"; return; fi
+  # The convex IPM summary line carries "iters=N".
+  n=$(grep -oE 'iters=[0-9]+' "$1" | tail -1 | grep -oE '[0-9]+$')
   if [ -n "$n" ]; then echo "$n"; return; fi
   # Fallback for timed-out / killed runs that never printed the summary:
   # the leading integer of the last iteration-table row (handles the
@@ -133,6 +154,10 @@ extract_obj() {
   line=$(grep -E 'Objective[. :]+' "$1" | tail -1)
   [ -z "$line" ] && line=$(grep -E 'Final objective[. :]+' "$1" | tail -1)
   v=$(printf '%s\n' "$line" | sed -E 's/^.*://' | awk '{print $NF}')
+  # The convex IPM summary line carries "obj=<value>" (no "Objective" label).
+  if [ -z "$line" ]; then
+    v=$(grep -oE 'obj=[-+0-9.eEnaif]+' "$1" | tail -1 | sed -E 's/^obj=//')
+  fi
   if printf '%s' "$v" | grep -qE '^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$'; then
     printf '%s' "$v"
   else
@@ -144,15 +169,21 @@ extract_obj() {
 # Emits one JSON object on stdout (no trailing comma).
 run_one() {
   local label="$1" bin="$2" nl="$3" ampl_protocol="$4"
-  local problem nm n m start end elapsed log rc
+  local problem nm n m start end elapsed log logtag rc
   problem=$(basename "$nl" .nl)
   nm=$(parse_nm "$nl"); n=${nm%% *}; m=${nm##* }
-  log="${LOGDIR}/${problem}.${label}.log"
+  # Tag the log with the solver-label override (if any) so two pounce arms
+  # of the same suite (e.g. convex/nlp) don't clobber each other's logs.
+  logtag="${POUNCE_SOLVER_LABEL:-$label}"
+  log="${LOGDIR}/${problem}.${logtag}.log"
 
   start=$(python3 -c 'import time; print(time.time())')
   if [ "$ampl_protocol" = "yes" ]; then
     timeout "$TIMELIMIT" "$bin" "$nl" -AMPL \
       linear_solver="$IPOPT_LINEAR_SOLVER" max_cpu_time="$TIMELIMIT" > "$log" 2>&1
+    rc=$?
+  elif [ ${#POUNCE_EXTRA_ARR[@]} -gt 0 ]; then
+    timeout "$TIMELIMIT" "$bin" "$nl" "${POUNCE_EXTRA_ARR[@]}" > "$log" 2>&1
     rc=$?
   else
     timeout "$TIMELIMIT" "$bin" "$nl" > "$log" 2>&1
@@ -188,13 +219,19 @@ run_one() {
   iter=$(extract_iters "$log"); iter=${iter:-0}
 
   # JSON solver label: "ipopt" for the AMPL-protocol invocation (so the
-  # report's load_domain_results() finds it under the canonical key).
+  # report's load_domain_results() finds it under the canonical key). A
+  # non-empty POUNCE_SOLVER_LABEL overrides the pounce row's label (used by
+  # the head-to-head suites to tag the two arms "convex" / "nlp").
   local solver_label
+  if [ -n "$POUNCE_SOLVER_LABEL" ] && [ "$label" = "pounce" ]; then
+    solver_label="$POUNCE_SOLVER_LABEL"
+  else
   case "$label" in
     pounce) solver_label="pounce" ;;
     ipopt*) solver_label="ipopt" ;;
     *) solver_label="$label" ;;
   esac
+  fi
 
   printf '  {"solver":"%s","name":"%s","n":%s,"m":%s,"status":"%s","objective":%s,"iterations":%s,"solve_time":%s}' \
     "$solver_label" "$problem" "$n" "$m" "$status" "$obj" "$iter" "$elapsed"

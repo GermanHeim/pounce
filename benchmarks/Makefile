@@ -52,6 +52,7 @@ export IPOPT_LINEAR_SOLVER
 	gas-run gas-rerun water-run water-rerun \
 	qp-run qp-rerun qp-generate \
 	lp-run lp-rerun lp-generate \
+	lp-convex-run lp-convex-rerun qp-convex-run qp-convex-rerun \
 	lpopt-run lpopt-rerun lpopt-generate \
 	globallib-run globallib-rerun globallib-translate \
 	globallib-micro globallib-fast .PHONY-build-simplex-obbt \
@@ -88,6 +89,8 @@ help:
 	@echo "  qp-generate                (Re)generate the qp .nl files only (needs pyomo/scipy; downloads .mat)"
 	@echo "  lp-run          / -rerun   Netlib + small Meszaros LP validation set (.nl from generate_nl.py)"
 	@echo "  lp-generate                (Re)generate the lp .nl files only (needs highspy/pyomo; downloads MPS)"
+	@echo "  lp-convex-run   / -rerun   LP head-to-head: pounce-convex (lp-ipm) vs pounce-nlp (reuses lp .nl)"
+	@echo "  qp-convex-run   / -rerun   QP head-to-head: pounce-convex (qp-ipm) vs pounce-nlp (reuses qp .nl)"
 	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
 	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
 	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
@@ -130,6 +133,8 @@ MITT_DIR        := $(REPO_ROOT)/benchmarks/mittelmann
 QP_DIR          := $(REPO_ROOT)/benchmarks/qp
 LP_DIR          := $(REPO_ROOT)/benchmarks/lp
 LPOPT_DIR       := $(REPO_ROOT)/benchmarks/lpopt
+LP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/lp_convex
+QP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/qp_convex
 
 # Ensure POUNCE_BIN exists; helps when a target is run before any cargo
 # build. Cheap when already built.
@@ -275,6 +280,44 @@ lp-run: $(LP_DIR)/pounce.json
 lp-rerun:
 	rm -f $(LP_DIR)/pounce.json
 	$(MAKE) lp-run
+
+# Head-to-head suites: the dedicated convex interior-point solver
+# (pounce-convex, via solver_selection=lp-ipm / qp-ipm) vs the general NLP
+# filter-IPM (solver_selection=nlp) on the SAME .nl problems as the lp/qp
+# suites above. Two pounce arms (same binary), two result files: convex.json
+# and nlp.json. No ipopt reference — this is pounce-vs-pounce. They reuse the
+# lp/qp .nl data (nldir_lp / nldir_qp); a missing .nl regenerates via the
+# existing lp-generate / qp-generate stamps (afiro.nl / QPTEST.nl).
+
+# --- LP: pounce-convex (lp-ipm) vs pounce-nlp ---
+$(LP_CONVEX_DIR)/convex.json: $(POUNCE_BIN) $(nldir_lp)/afiro.nl
+	$(NL_DRIVER) lp_convex $(nldir_lp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) \
+		pounce solver_selection=lp-ipm convex
+
+$(LP_CONVEX_DIR)/nlp.json: $(POUNCE_BIN) $(nldir_lp)/afiro.nl
+	$(NL_DRIVER) lp_convex $(nldir_lp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) \
+		pounce solver_selection=nlp nlp
+
+lp-convex-run: $(LP_CONVEX_DIR)/convex.json $(LP_CONVEX_DIR)/nlp.json
+
+lp-convex-rerun:
+	rm -f $(LP_CONVEX_DIR)/convex.json $(LP_CONVEX_DIR)/nlp.json
+	$(MAKE) lp-convex-run
+
+# --- QP: pounce-convex (qp-ipm) vs pounce-nlp ---
+$(QP_CONVEX_DIR)/convex.json: $(POUNCE_BIN) $(nldir_qp)/QPTEST.nl
+	$(NL_DRIVER) qp_convex $(nldir_qp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) \
+		pounce solver_selection=qp-ipm convex
+
+$(QP_CONVEX_DIR)/nlp.json: $(POUNCE_BIN) $(nldir_qp)/QPTEST.nl
+	$(NL_DRIVER) qp_convex $(nldir_qp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) \
+		pounce solver_selection=nlp nlp
+
+qp-convex-run: $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
+
+qp-convex-rerun:
+	rm -f $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
+	$(MAKE) qp-convex-run
 
 # Mittelmann lpopt LP suite — the curated HARD subset of Hans Mittelmann's
 # lpopt benchmark (https://plato.asu.edu/ftp/lpopt.html). These are large,
@@ -442,6 +485,8 @@ benchmark:
 	-$(MAKE) water-run
 	-$(MAKE) qp-run
 	-$(MAKE) lp-run
+	-$(MAKE) lp-convex-run
+	-$(MAKE) qp-convex-run
 	-$(MAKE) lpopt-run
 	-$(MAKE) gams-bench
 	-$(MAKE) benchmark-report
@@ -498,6 +543,8 @@ clean-bench-nl:
 	      $(REPO_ROOT)/benchmarks/lp/pounce.json
 	rm -f $(nldir_lpopt)/*.sol \
 	      $(REPO_ROOT)/benchmarks/lpopt/pounce.json
+	rm -f $(LP_CONVEX_DIR)/convex.json $(LP_CONVEX_DIR)/nlp.json
+	rm -f $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
 	rm -rf $(REPO_ROOT)/benchmarks/logs
 
 clean-bench-report:

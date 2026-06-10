@@ -110,16 +110,20 @@ def _read_records(path):
         return json.load(f)
 
 
-def _build_comparisons(records, suite_name):
+def _build_comparisons(records, suite_name, left_key='pounce', right_key='ipopt'):
     """Build the canonical comparison list from a flat list of
-    {solver,name,n,m,status,objective,iterations,solve_time} records
-    (any mix of pounce and ipopt rows)."""
+    {solver,name,n,m,status,objective,iterations,solve_time} records.
+
+    `left_key`/`right_key` select which `solver` values fill the two slots
+    of each comparison (the `pounce_*` and `ipopt_*` dict fields are just
+    internal slot names). The default ('pounce','ipopt') is the standard
+    pounce-vs-ipopt suite; the head-to-head suites pass ('convex','nlp')."""
     pounce_by_name = {}
     ipopt_by_name = {}
     for r in records:
-        if r['solver'] == 'pounce':
+        if r['solver'] == left_key:
             pounce_by_name[r['name']] = r
-        elif r['solver'] == 'ipopt':
+        elif r['solver'] == right_key:
             ipopt_by_name[r['name']] = r
 
     comparisons = []
@@ -155,22 +159,25 @@ def _build_comparisons(records, suite_name):
     return comparisons
 
 
-def load_suite(suite_name, dirname):
-    """Load one .nl suite by merging its per-release pounce run with the
-    saved ipopt-ma57 reference.
+def load_suite(suite_name, dirname,
+               left_file='pounce.json', right_file='ipopt_ma57.json',
+               left_key='pounce', right_key='ipopt'):
+    """Load one .nl suite by merging its two solver-arm result files.
 
-    Reads benchmarks/<dirname>/pounce.json (regenerated every release) and
-    benchmarks/<dirname>/ipopt_ma57.json (committed reference, run rarely).
-    Returns (comparisons, has_pounce, has_ipopt); comparisons is None when
+    By default this merges benchmarks/<dirname>/pounce.json (regenerated
+    every release) with benchmarks/<dirname>/ipopt_ma57.json (committed
+    reference). The head-to-head suites override the filenames/keys to
+    merge convex.json (left) with nlp.json (right).
+    Returns (comparisons, has_left, has_right); comparisons is None when
     neither file is present.
     """
     base = os.path.join(SCRIPT_DIR, dirname)
-    pounce = _read_records(os.path.join(base, 'pounce.json'))
-    ipopt = _read_records(os.path.join(base, 'ipopt_ma57.json'))
-    if not pounce and not ipopt:
+    left = _read_records(os.path.join(base, left_file))
+    right = _read_records(os.path.join(base, right_file))
+    if not left and not right:
         return None, False, False
-    comps = _build_comparisons(pounce + ipopt, suite_name)
-    return (comps if comps else None), bool(pounce), bool(ipopt)
+    comps = _build_comparisons(left + right, suite_name, left_key, right_key)
+    return (comps if comps else None), bool(left), bool(right)
 
 
 def _make_comparison(name, suite, n, m, p_status, i_status, p_obj, i_obj,
@@ -548,7 +555,76 @@ def generate_profiles(profile_dirs):
     return lines
 
 
-def generate_report(suites, output_path, baseline=None, profile_dirs=None):
+def head_to_head_lines(head_to_head):
+    """Render the dedicated-convex-vs-general-NLP head-to-head section.
+
+    `head_to_head` is a list of (suite_name, comps) where each comps was
+    built with the 'convex' arm in the left slot (pounce_*) and the 'nlp'
+    arm in the right slot (ipopt_*). This is a pounce-vs-pounce comparison
+    on identical .nl problems, so it is rendered with its own labels and
+    deliberately kept out of the Ipopt-reference machinery (profiles,
+    regressions/wins, baseline).
+    """
+    if not head_to_head:
+        return []
+
+    lines = []
+    lines.append("## Dedicated Convex Solver vs. General NLP (head-to-head)")
+    lines.append("")
+    lines.append("The same LP / convex-QP `.nl` problems solved twice by the **same**")
+    lines.append("pounce binary: once routed to the dedicated convex interior-point")
+    lines.append("solver (`pounce-convex`, via `solver_selection=lp-ipm` / `qp-ipm`) and")
+    lines.append("once through the general NLP filter-IPM (`solver_selection=nlp`). This")
+    lines.append("quantifies the speedup the dedicated solver buys on its home turf. It")
+    lines.append("is a pounce-vs-pounce comparison and is independent of the Ipopt")
+    lines.append("reference used by the suites above.")
+    lines.append("")
+
+    for name, comps in head_to_head:
+        s = suite_summary(name, comps)
+        lines.append(f"### {name}")
+        lines.append("")
+        lines.append("| Metric | pounce-convex | pounce-nlp |")
+        lines.append("|--------|---------------|------------|")
+        lines.append(
+            f"| Optimal | {s['r_optimal']}/{s['total']} "
+            f"({100*s['r_optimal']/max(s['total'],1):.1f}%) "
+            f"| {s['i_optimal']}/{s['total']} "
+            f"({100*s['i_optimal']/max(s['total'],1):.1f}%) |"
+        )
+        lines.append(f"| Solved exclusively | {s['r_only']} | {s['i_only']} |")
+        lines.append(f"| Both Optimal | {s['both']} | |")
+        lines.append(f"| Matching objectives (< 0.01%) | {s['passed']}/{max(s['both'],1)} | |")
+        lines.append("")
+
+        sp = speed_stats(comps)
+        if sp is None:
+            lines.append("_No problem was solved by both arms — no speed comparison._")
+            lines.append("")
+            continue
+
+        lines.append(f"On {sp['n_problems']} problems solved by both arms:")
+        lines.append("")
+        lines.append("| Metric | pounce-convex | pounce-nlp |")
+        lines.append("|--------|---------------|------------|")
+        lines.append(f"| Median time | {fmt_time(sp['r_median_time'])} | {fmt_time(sp['i_median_time'])} |")
+        lines.append(f"| Total time | {fmt_time(sp['r_total_time'])} | {fmt_time(sp['i_total_time'])} |")
+        lines.append(f"| Mean iterations | {sp['r_mean_iters']:.1f} | {sp['i_mean_iters']:.1f} |")
+        lines.append(f"| Median iterations | {sp['r_median_iters']} | {sp['i_median_iters']} |")
+        lines.append("")
+        lines.append(f"- **Geometric-mean speedup (convex over nlp)**: {sp['geo_mean_speedup']:.1f}x")
+        lines.append(f"- **Median speedup**: {sp['median_speedup']:.1f}x")
+        lines.append(f"- pounce-convex faster: {sp['r_faster_count']}/{sp['n_problems']} "
+                     f"({100*sp['r_faster_count']/sp['n_problems']:.0f}%)")
+        lines.append(f"- pounce-convex 10x+ faster: {sp['r_10x_faster']}/{sp['n_problems']}")
+        lines.append(f"- pounce-nlp faster: {sp['i_faster_count']}/{sp['n_problems']}")
+        lines.append("")
+
+    return lines
+
+
+def generate_report(suites, output_path, baseline=None, profile_dirs=None,
+                    head_to_head=None):
     """Generate the unified benchmark report."""
     prov = collect_provenance()
     lines = []
@@ -874,6 +950,11 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None):
             lines.append(f"POUNCE: **{solved}/{len(comps)} Optimal**")
             lines.append("")
 
+    # Head-to-head: dedicated convex solver vs general NLP. Rendered as a
+    # standalone section; intentionally not folded into all_comps / the
+    # baseline / the Ipopt profiles (a different comparison axis).
+    lines.extend(head_to_head_lines(head_to_head or []))
+
     lines.append("---")
     lines.append("*Generated by benchmark_report.py*")
 
@@ -968,12 +1049,32 @@ def main():
     # via `make -C benchmarks gams-bench` (gams/nlpbench `bench-smoke`),
     # which does not feed this report.
 
+    # Head-to-head suites: the dedicated convex solver (convex.json) vs the
+    # general NLP path (nlp.json) on the same .nl problems. Loaded separately
+    # so they stay out of the Ipopt-reference machinery (profiles, baseline,
+    # regressions/wins, executive summary).
+    head_to_head = []
+    for suite_name, dirname in (('LP — convex vs NLP', 'lp_convex'),
+                                ('QP — convex vs NLP', 'qp_convex')):
+        comps, has_convex, has_nlp = load_suite(
+            suite_name, dirname,
+            left_file='convex.json', right_file='nlp.json',
+            left_key='convex', right_key='nlp')
+        if comps:
+            head_to_head.append((suite_name, comps))
+            print(f"{suite_name} suite: {len(comps)} records loaded — "
+                  f"convex-vs-nlp head-to-head")
+        else:
+            print(f"{suite_name} suite: no results "
+                  f"(run `make -C benchmarks {dirname.replace('_', '-')}-run` first)")
+
     if not suites:
         print("No benchmark results found. Run `make benchmark` first.")
         sys.exit(1)
 
     combined, _summary = generate_report(suites, output_path, baseline,
-                                          profile_dirs=profile_dirs)
+                                          profile_dirs=profile_dirs,
+                                          head_to_head=head_to_head)
 
     print(f"\nReport written to {output_path}")
     print(f"Baseline saved to {output_path.replace('.md', '.json')}")
