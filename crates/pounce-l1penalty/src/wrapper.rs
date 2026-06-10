@@ -404,6 +404,12 @@ impl TNLP for L1PenaltyBarrierTnlp {
         let n = self.n_orig;
         let m_eq = self.m_eq;
         let inner_nnz = self.inner_jac_nnz;
+        // The inner TNLP only knows about its original `n` variables, so
+        // hand it the original-space slice of x — exactly as eval_f /
+        // eval_grad_f / eval_g / eval_h do. Forwarding the full augmented
+        // slice (length n + 2*m_eq) breaks any inner that checks x.len()
+        // or iterates the slice.
+        let inner_x = x.map(|xa| &xa[..n]);
         let n_idx_offset: Index = match self.index_style {
             IndexStyle::C => 0,
             IndexStyle::Fortran => 1,
@@ -414,7 +420,7 @@ impl TNLP for L1PenaltyBarrierTnlp {
                 debug_assert_eq!(irow.len(), inner_nnz + 2 * m_eq);
                 debug_assert_eq!(jcol.len(), inner_nnz + 2 * m_eq);
                 let inner_ok = self.inner.borrow_mut().eval_jac_g(
-                    x,
+                    inner_x,
                     new_x,
                     SparsityRequest::Structure {
                         irow: &mut irow[..inner_nnz],
@@ -443,7 +449,7 @@ impl TNLP for L1PenaltyBarrierTnlp {
             SparsityRequest::Values { values } => {
                 debug_assert_eq!(values.len(), inner_nnz + 2 * m_eq);
                 let inner_ok = self.inner.borrow_mut().eval_jac_g(
-                    x,
+                    inner_x,
                     new_x,
                     SparsityRequest::Values {
                         values: &mut values[..inner_nnz],
@@ -778,6 +784,138 @@ mod tests {
         assert_eq!(vals[1], 1.0);
         assert_eq!(vals[2], -1.0);
         assert_eq!(vals[3], 1.0);
+    }
+
+    #[test]
+    fn jacobian_passes_inner_only_original_x() {
+        // Regression for M8: the wrapper must hand the inner TNLP only the
+        // original-variable slice of x in eval_jac_g, exactly as eval_f /
+        // eval_grad_f / eval_g / eval_h do. Previously the full augmented
+        // slice (length n_orig + 2*m_eq) leaked through, so an inner that
+        // checks x.len() or iterates the slice would misbehave.
+        use std::cell::Cell;
+
+        struct LenSpy {
+            seen_len: Rc<Cell<usize>>,
+        }
+        impl TNLP for LenSpy {
+            fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+                Some(NlpInfo {
+                    n: 2,
+                    m: 1,
+                    nnz_jac_g: 2,
+                    nnz_h_lag: 2,
+                    index_style: IndexStyle::C,
+                })
+            }
+            fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+                for v in b.x_l.iter_mut() {
+                    *v = -1e19;
+                }
+                for v in b.x_u.iter_mut() {
+                    *v = 1e19;
+                }
+                b.g_l[0] = 1.0;
+                b.g_u[0] = 1.0;
+                true
+            }
+            fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+                true
+            }
+            fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+                Some(x[0] * x[0] + x[1] * x[1])
+            }
+            fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+                g[0] = 2.0 * x[0];
+                g[1] = 2.0 * x[1];
+                true
+            }
+            fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+                g[0] = x[0] + x[1];
+                true
+            }
+            fn eval_jac_g(
+                &mut self,
+                x: Option<&[Number]>,
+                _new_x: bool,
+                mode: SparsityRequest<'_>,
+            ) -> bool {
+                // Record the length of x the wrapper handed us.
+                if let Some(xs) = x {
+                    self.seen_len.set(xs.len());
+                }
+                match mode {
+                    SparsityRequest::Structure { irow, jcol } => {
+                        irow[0] = 0;
+                        jcol[0] = 0;
+                        irow[1] = 0;
+                        jcol[1] = 1;
+                        true
+                    }
+                    SparsityRequest::Values { values } => {
+                        values[0] = 1.0;
+                        values[1] = 1.0;
+                        true
+                    }
+                }
+            }
+            fn eval_h(
+                &mut self,
+                _x: Option<&[Number]>,
+                _new_x: bool,
+                obj_factor: Number,
+                _lambda: Option<&[Number]>,
+                _new_lambda: bool,
+                mode: SparsityRequest<'_>,
+            ) -> bool {
+                match mode {
+                    SparsityRequest::Structure { irow, jcol } => {
+                        irow[0] = 0;
+                        jcol[0] = 0;
+                        irow[1] = 1;
+                        jcol[1] = 1;
+                        true
+                    }
+                    SparsityRequest::Values { values } => {
+                        values[0] = 2.0 * obj_factor;
+                        values[1] = 2.0 * obj_factor;
+                        true
+                    }
+                }
+            }
+            fn finalize_solution(
+                &mut self,
+                _sol: Solution<'_>,
+                _ip_data: &IpoptData,
+                _ip_cq: &IpoptCq,
+            ) {
+            }
+        }
+
+        let seen = Rc::new(Cell::new(0usize));
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(LenSpy {
+            seen_len: Rc::clone(&seen),
+        }));
+        let mut w = L1PenaltyBarrierTnlp::new(inner, 1.0).expect("wrapper construction");
+
+        // Augmented x has length n_orig + 2*m_eq = 2 + 2 = 4.
+        let x = [0.4, 0.5, 0.2, 0.3];
+        let mut vals = vec![0.0; 4];
+        assert!(w.eval_jac_g(
+            Some(&x),
+            true,
+            SparsityRequest::Values { values: &mut vals },
+        ));
+        // The inner must have seen only its 2 original variables, not 4.
+        assert_eq!(
+            seen.get(),
+            2,
+            "inner eval_jac_g received x of length {} but expected the {} original vars only",
+            seen.get(),
+            2
+        );
     }
 
     #[test]
