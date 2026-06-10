@@ -15,6 +15,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H4 | cli: convex LP/QP/SOCP dispatch ignores the `-AMPL` exit-code contract | **FIXED** | Threaded `args.ampl` into `run_convex_qp`/`run_convex_socp`; new `convex_exit_code(ok, ampl)` returns 0 for any non-fatal outcome under `-AMPL` (mirrors NLP path), 1 otherwise. Also dropped the `.sol`-write-failure `exit 2` (log-and-continue like the NLP path). Test `ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp`. |
 | H5 | nl: external-function errors detected on the wrong channel — failed evals silently return garbage | **FIXED** | `ExternalLibrary::eval` now decodes both `funcadd` error channels via `decode_external_errmsg`: the **reassigned** `al->Errmsg` pointer (conforming path) and the caller buffer. Previously only `errmsg_buf[0]` was checked, so a library doing `al->Errmsg = "...";` was invisible and the IPM consumed NaN f/∇f/∇²f. Tests `reassigned_errmsg_pointer_is_detected_end_to_end` + `decode_external_errmsg_buffer_and_none_channels`. |
 | H6 | qp: `select_blocker` EXPAND branch can panic (`best.expect`) on valid near-degenerate input | **FIXED** | The Harris two-pass admitted nothing in Pass 2 when every candidate's τ-relaxed ratio `r + τ/\|a·p\|` exceeded the artificial `α_min_relaxed = 1.0` init cap by more than `tol` (reachable when `\|a·p\| ≈ feas_tol` inflates `τ/\|a·p\|`). `best` stayed `None` → `expect` panicked. Now falls back to the strict minimum-ratio blocker (always exists since `α_min < 1.0`) and steps exactly `α_min`. Tests `expand_tau_inflation_falls_back_to_strict_min_no_panic` + 2 more in `solver::select_blocker_tests`. |
+| H7 | convex: dual-infeasibility certificate validates recession `Gd` componentwise — false `DualInfeasible` on SOC/PSD | **FIXED** | `detect_infeasibility_with` gained a `primal_recession_ok` closure: the dual-inf branch now checks `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`; SOC/PSD ⇒ `cone.in_dual_cone(−Gd)`, valid since the composite cone is self-dual) instead of `gd_max ≤ tol`. A direction with `Gd ≤ 0` but `−Gd ∉ K` (e.g. `−Gd=(0.1,0.5) ∉ SOC`) no longer yields a bogus unboundedness proof. Tests `soc_recession_not_in_cone_is_not_dual_infeasible` + 2 in `ipm::detect_infeasibility_tests`. |
 
 ## C1 detail
 
@@ -261,3 +262,41 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **Verified by running code**: full `pounce-qp` suite green (74 lib + 1 + 5
   integration); the targeted test fails (panics) when the fix is reverted and
   passes with it in place.
+
+## H7 detail
+
+- **Bug**: `detect_infeasibility_with` (`pounce-convex/src/ipm.rs`) validates the
+  dual-infeasibility / unboundedness certificate's recession direction `d` with
+  `Pd≈0, Ad≈0, cᵀd<0` and `Gd ≤ 0` **componentwise** (`gd_max ≤ ctol·‖x‖∞`).
+  For a cone inequality `Gx ⪯_K h`, the correct recession condition is
+  `−Gd ∈ K`, which is *stronger* than componentwise for any non-orthant cone.
+  The cone-aware entry point `detect_infeasibility_cone` (reached from the
+  direct driver `ipm.rs:1397` and the symmetric HSDE driver `hsde.rs:235`) only
+  fixed the *primal* (Farkas) certificate's `z ∈ K*` test; the dual branch
+  still used the componentwise check. So a direction with `−Gd = (0.1, 0.5)`
+  (componentwise OK, but `0.1 < ‖0.5‖` ⇒ **not** in the SOC) was accepted as a
+  genuine unboundedness ray, violating the function's documented "a false
+  positive is impossible" contract.
+- **Fix**: thread a second closure `primal_recession_ok(gd, tol)` through
+  `detect_infeasibility_with` (mirroring the existing `dual_cone_ok`). The
+  orthant default keeps componentwise (`(Gd)ᵢ ≤ tol`); the cone-aware path
+  tests `−Gd ∈ K` via `cone.in_dual_cone(−Gd, tol)` — valid because every cone
+  reaching `CompositeCone` is symmetric/self-dual (orthant/SOC/PSD; exp/power
+  route to `hsde_nonsym`, which is the separate H8 issue). Updated the
+  certificate doc comment from `Gd ≤ 0` to `−Gd ∈ K`.
+- **Test**: `ipm::detect_infeasibility_tests` (calls the `pub(crate)` detectors
+  directly). `soc_recession_not_in_cone_is_not_dual_infeasible` builds
+  `G=[[−0.1],[−0.5]]`, `d=(1)` so `Gd=(−0.1,−0.5)` (componentwise ≤0) but
+  `−Gd=(0.1,0.5) ∉ SOC`: asserts the componentwise `detect_infeasibility`
+  (wrongly) returns `DualInfeasible` while the fixed `detect_infeasibility_cone`
+  returns `None`. Companions `soc_genuine_recession_still_dual_infeasible`
+  (`−Gd=(1,0) ∈ SOC` ⇒ still `DualInfeasible`, no false negative) and
+  `orthant_unbounded_lp_detected_both_paths` (orthant parity).
+- **Verified by running code**: reverting just the cone-aware recession closure
+  to componentwise makes `detect_infeasibility_cone` return
+  `Some(DualInfeasible)` and the test fails (`left: Some(DualInfeasible), right:
+  None`); with the fix it returns `None`. Full `pounce-convex` suite green (100
+  lib + integration).
+- **Note**: H8 (`hsde_nonsym.rs:840` using the componentwise default for
+  exp/power Farkas multipliers) is the *primal*-certificate analogue in the
+  non-symmetric driver and is tracked separately.
