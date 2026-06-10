@@ -68,6 +68,19 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude pounce-hsl --verbose
 
+      # pounce-hsl is excluded from the build/test/clippy steps above because
+      # it FFI-links libcoinhsl (HSL is licensed and absent from CI), so those
+      # steps can't link it. But it IS on the crates.io publish list
+      # (scripts/publish-crates.sh, 5th of 19), and without this step nothing
+      # in CI ever compiles it: a type/syntax error would first surface during
+      # the `cargo publish` verify build mid-release — after the four crates
+      # ahead of it have already been irreversibly published (M39).
+      # `cargo check` type-checks the crate (lib + tests via --all-targets)
+      # without linking; build.rs degrades to a plain rlib with no link
+      # directives when COINHSL_DIR is unset, so this needs no HSL install.
+      - name: Compile-check pounce-hsl (publishable, link-excluded above)
+        run: cargo check -p pounce-hsl --all-targets --verbose
+
   # Exercise the Python surface (the `pounce.jax` differentiable /
   # sensitivity / path-following APIs) on every PR. The Rust `test` job
   # above covers the solver core, and `wheel-smoke` only imports the

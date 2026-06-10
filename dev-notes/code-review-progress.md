@@ -62,6 +62,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M36 | rust(studio-core): the report-reader's `InputDescriptor` mirror (`crates/pounce-studio-core/src/report.rs:142-154`) is missing the `CbfFile` variant that the writer (`crates/pounce-solve-report/src/lib.rs:185-204`) emits as `"kind": "cbf-file"` for `.cbf` conic instances. serde's internally-tagged enum hard-fails on the unknown tag, so the *entire* solve report is rejected — CBF solve reports can't be loaded at all | **FIXED** | **Bug confirmed by running code**: rewriting a good fixture's `fair_metadata.input` to `{"kind":"cbf-file","path":…,"size_bytes":…}` and loading it via `SolveReport::from_json_str` failed with serde `unknown variant 'cbf-file', expected one of 'nl-file', 'builtin', 'tnlp-direct'`. **Fix**: add the `CbfFile { path, size_bytes }` variant to studio-core's `InputDescriptor`, mirroring the writer (kebab-case `"cbf-file"`; `path: String` matching the reader's other variants). No production code matches the enum exhaustively, so the addition is self-contained. **Test** (`crates/pounce-studio-core/tests/fixtures.rs::loads_cbf_file_input_descriptor`): loads a cbf-file report and asserts it decodes to `InputDescriptor::CbfFile` with the right path/size. **Fail-first confirmed**: pre-fix a load-only form of the test failed with the serde unknown-variant error; post-fix all 13 studio-core tests pass. See `## M36 detail`. |
 | M37 | rust(cinterface): library UB — the sensitivity C API feeds NULL straight into `slice::from_raw_parts`. `IpoptSolverParametricStep` (`crates/pounce-cinterface/src/solver.rs:339,347`) and `IpoptSolverReducedHessian` (`:383`) accept a legal `n_pins == 0` call (which is allowed to pass NULL `pin_indices`/`deltas` — there is nothing to point at), but build the slices with `from_raw_parts(pin_indices, 0)` unconditionally. `from_raw_parts` requires its pointer be non-null and aligned *even for empty slices*, so `from_raw_parts(NULL, 0)` is UB; recent rustc's `-C debug-assertions` precondition checks turn it into a process abort. The rest of the crate gates this correctly (`IpoptSolverSolve` uses `if n_us > 0 { from_raw_parts } else { &[] }`) | **FIXED** | **Bug confirmed by running code**: a converged-session solve followed by `IpoptSolverParametricStep(solver, 0, NULL, NULL, dx_out)` aborts with SIGABRT — `unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null` (the session check sits *before* the bad `from_raw_parts`, so a solve is required to reach it). **Fix**: a local `slice_or_empty(ptr, len)` helper that returns `&[]` when `len == 0` and only calls `from_raw_parts` otherwise — mirroring the `n_us > 0` gate already used in `IpoptSolverSolve` — applied to all three sites (the two `ParametricStep` slices + the `ReducedHessian` pins). An empty pin set is a well-defined no-op (zero perturbation → Δx ≈ 0, 0×0 reduced Hessian), so both calls now return `TRUE`. **Test** (`crates/pounce-cinterface/src/solver.rs::zero_pins_with_null_pointers_is_not_ub`): solves the 1-D quad to a session, then calls both entry points with `n_pins=0` + NULL pointers and asserts `TRUE`. **Fail-first confirmed** by reverting the `ParametricStep` slices to bare `from_raw_parts`: the test aborts (signal 6, SIGABRT, the non-null precondition message); post-fix all 43 pounce-cinterface lib tests pass, clippy clean of new warnings. See `## M37 detail`. |
 | M38 | release: no tag-vs-manifest version check in any release workflow. `.github/workflows/release-crates.yml`, `release-pounce.yml`, `release-pyomo-pounce.yml` key off the tag prefixes `v*` / `python-v*` / `pyomo-pounce-v*` but never confirm the tag's version matches the manifest it publishes. Tagging `v0.5.0` with manifests at 0.4.0 makes the crates publish a silent green no-op (`publish-crates.sh` skips every crate as "already published" at 0.4.0) and the PyPI publish ship the stale 0.4.0 wheel under the 0.5.0 release | **FIXED** | **Bug confirmed by running code**: there was no guard at all — `check-release-consistency.sh` checks the three *manifests* agree with each other but never against the *tag*. Added `scripts/check_tag_version.py <tag-or-ref>`, which strips the longest matching release prefix (`pyomo-pounce-v`/`python-v`/`v`, longest-first so the PyPI tags aren't misread as the bare crates `v`), reads the first top-of-line `version = "..."` from the routed manifest (Cargo `[workspace.package]` / the two `pyproject.toml`s — same extraction as the consistency script), and exits 2 on mismatch / 3 on an unrecognized tag / 4 on an unreadable manifest. **Verified live**: against the repo at 0.4.0, `check_tag_version.py refs/tags/v0.5.0` fails with exit 2 and a TAG/MANIFEST MISMATCH message (the exact M38 scenario nothing previously caught), while `v0.4.0`/`python-v0.4.0` pass and `pyomo-pounce-v1.0.0` correctly routes to the pyomo manifest. **Wiring**: `release-crates.yml` gains a guard step before `Publish crates`; `release-pounce.yml`/`release-pyomo-pounce.yml` gain a `verify-version` job that the build jobs `needs:`, so a mismatch fails before the multi-platform wheel matrix runs. All three gate on `github.event_name == 'push'`, so manual `workflow_dispatch` dry-runs (no tag) skip the check (no-op pass). **Test** (`scripts/tests/test_check_tag_version.py`, mirroring the sibling `test_check_dep_publishability.py` standalone-unittest convention): 18 cases over synthetic manifests (stable across version bumps) covering prefix routing, longest-prefix precedence, prerelease suffixes, and the M38 mismatch → exit 2; the three workflows parse and the `verify-version → build → publish` dependency graph is well-formed. 25 `scripts/tests` total green. See `## M38 detail`. |
+| M39 | ci: `pounce-hsl` is on the crates.io publish list but compiled by zero CI jobs. `.github/workflows/ci.yml:63,66,69` (clippy/build/test) all pass `--exclude pounce-hsl` because the crate FFI-links the licensed `libcoinhsl` (absent from CI), so its first compile is the `cargo publish` verify build mid-release — and it is 5th of 19 in the publish order, so the four crates ahead of it (pounce-common/-linalg/-linsol/-feral) are already irreversibly published when it fails | **FIXED** | **Bug confirmed by running code**: with a deliberate type error appended to `crates/pounce-hsl/src/lib.rs`, the current CI build command `cargo build --workspace --exclude pounce-hsl` finished green (exit 0) — the error was completely invisible to CI. Root-caused the exclusion: `pounce-hsl/Cargo.toml` has `links = "coinhsl"` + a `build.rs`, but `build.rs` degrades gracefully when `COINHSL_DIR` is unset (emits a warning and returns, compiling a plain rlib with no link directives), so the crate *type-checks* fine without HSL — only *linking* (build/test of a final artifact) needs the library. **Fix**: add a `cargo check -p pounce-hsl --all-targets --verbose` step to the `test` job (after Test). `cargo check` type-checks without linking; `--all-targets` also covers the test modules (which the excluded test job never compiles either). Verified: against the injected error this step fails with `E0308` (exit 101) — catching exactly what the build step missed; with the error reverted it passes (exit 0), COINHSL_DIR unset, emitting only the benign warning. The publish list position (5/19) and the four-crates-ahead claim were confirmed from `scripts/publish-crates.sh`. **Test/verification**: the fail-first demonstration is the injected-error A/B above (current CI build green vs new check exit 101); the live repo `cargo check -p pounce-hsl --all-targets` is clean; `ci.yml` parses and the new step is present in the `test` job. CI-only change; no crate source touched (the temporary error was restored via `cp`+`touch`). See `## M39 detail`. |
 
 ## C1 detail
 
@@ -2978,3 +2979,64 @@ script-test files run clean together: `python3 -m unittest discover -s
 scripts/tests` → 25 passed. All three workflow YAMLs parse and the
 `verify-version → build → publish` dependency graph validates. CI/release-only
 change; no Rust or Python package code touched.
+
+## M39 detail
+
+**Issue** (`.github/workflows/ci.yml:63,66,69`): the `test` job's Clippy, Build,
+and Test steps all carry `--exclude pounce-hsl`:
+
+```yaml
+run: cargo clippy --workspace --exclude pounce-hsl --all-targets -- ...
+run: cargo build  --workspace --exclude pounce-hsl --verbose
+run: cargo test   --workspace --exclude pounce-hsl --verbose
+```
+
+so no CI job compiles `pounce-hsl` at all — yet it is on the crates.io publish
+list (`scripts/publish-crates.sh`, **5th of 19**, after pounce-common,
+pounce-linalg, pounce-linsol, pounce-feral). The exclusion is legitimate:
+`crates/pounce-hsl/Cargo.toml` declares `links = "coinhsl"` and a `build.rs`,
+and the crate FFI-wraps `libcoinhsl` (MA57), which is licensed and not present
+on the CI runners — so a *link* of any final artifact (a `cargo build`/`cargo
+test` binary) that pulls pounce-hsl in would fail. The cost of the blanket
+exclusion: a plain type/syntax error in pounce-hsl source is caught by **no**
+CI job. Its first compile is the verify build `cargo publish` runs by default,
+mid-release; by the time the topological publish reaches it, the four crates
+ahead are already live on crates.io and cannot be unpublished — a partial,
+irreversible release triggered by a trivial compile error.
+
+**Why a compile-check is safe without HSL**: `build.rs` is defensive — when
+`COINHSL_DIR` is unset it prints a `cargo:warning` and returns *without*
+emitting any `rustc-link-lib`/`rustc-link-search` directives, compiling
+pounce-hsl as an ordinary rlib. Only a downstream crate selecting the `ma57`
+path (which sets COINHSL_DIR) actually links the library. So `cargo check`
+(which type-checks but never links) compiles pounce-hsl cleanly on a
+library-less machine.
+
+**Verification (running code)**:
+
+```
+# Inject a deliberate type error into crates/pounce-hsl/src/lib.rs, then:
+$ cargo build --workspace --exclude pounce-hsl     # the CURRENT CI build
+  ... Finished ... exit 0          # <-- error completely invisible to CI
+$ cargo check -p pounce-hsl --all-targets          # the PROPOSED step
+  error[E0308]: mismatched types ... exit 101       # <-- caught
+```
+
+with `COINHSL_DIR` unset in both (the CI condition). Reverting the error (via
+`cp`+`touch`, not `mv`, to keep cargo's mtimes honest) returns the check to
+exit 0 with only the benign "COINHSL_DIR not set" warning.
+
+**Fix** (`.github/workflows/ci.yml`): add one step to the `test` job, after
+Test, on the same runner that already has the toolchain + feral sibling:
+
+```yaml
+- name: Compile-check pounce-hsl (publishable, link-excluded above)
+  run: cargo check -p pounce-hsl --all-targets --verbose
+```
+
+`--all-targets` extends the check to pounce-hsl's test modules (`ma57.rs`
+`#[cfg(test)]`, etc.), which the excluded `cargo test` never compiles either —
+so both the library and its tests are now type-checked on every PR without
+needing an HSL install. Confirmed `cargo check -p pounce-hsl --all-targets`
+passes on the clean tree (exit 0) and the workflow YAML parses with the new
+step present. CI-only change; no crate source modified.
