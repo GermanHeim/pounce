@@ -9,6 +9,22 @@
 //!   variable box are dropped from the problem the solver sees, then
 //!   reinstated with `λ=0` when forwarding `eval_h` / `finalize_solution`
 //!   to the inner TNLP.
+//!
+//!   **Dual-attribution caveat (issue M24).** A row that was *itself* the
+//!   reason a bound got tightened in Phase 1 — e.g. `x ≥ 2` tightening
+//!   `x_l = 2` — then has an activity interval flush against its own
+//!   bound, so Phase 2 sees it as redundant and drops it. If that bound is
+//!   active at the solution the interior-point method reports the dual on
+//!   the *variable bound* multiplier (`z_l`/`z_u`) against a bound that did
+//!   not exist in the original problem, while the reinstated row keeps
+//!   `λ = 0`. The primal point, objective, and KKT stationarity
+//!   (`∇f − Jᵀλ − z_l + z_u = 0`) are all unaffected — only the *attribution*
+//!   of the dual differs from a no-presolve solve (row multiplier vs. bound
+//!   multiplier). A faithful fix would transfer the bound multiplier back to
+//!   the row's `λ`, but that needs Phase-1 provenance (which row implied
+//!   which bound) that is not currently tracked, and is ambiguous for
+//!   multi-variable rows; it is left as future work. The behavior is pinned
+//!   by `tests::dropped_row_dual_lands_on_bound_not_row` (M24).
 //! * **Phase 3** — structural LICQ check on the surviving equality
 //!   rows. Verdict is published via [`PresolveTnlp::licq_verdict`].
 //! * **Phase 4** — bound-multiplier warm-start hints for variables
@@ -1829,6 +1845,142 @@ mod tests {
             vec![0.0, 0.0],
             "z_u must be zeroed at aux-fixed vars (H10)"
         );
+    }
+
+    /// Single-variable `min x` with one linear row `x ≥ 2` (M24). Phase 1
+    /// tightens `x_l = 2` from the row; Phase 2 then sees the row's activity
+    /// `[2, 10] ⊆ [2, +∞)` and drops it as redundant.
+    struct MinXWithLowerRow;
+    impl TNLP for MinXWithLowerRow {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 10.0;
+            b.g_l[0] = 2.0; // x ≥ 2
+            b.g_u[0] = 1e19;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 5.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0])
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 1.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => {
+                    values[0] = 1.0;
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Characterizes the M24 dual-attribution behavior (see the module-level
+    /// "Dual-attribution caveat"). A redundant row that *implied* a now-active
+    /// bound is dropped; the dual lands on the variable-bound multiplier
+    /// (`z_l`) rather than the row's `λ`, which stays 0. The primal point and
+    /// KKT stationarity are intact — only the attribution differs from a
+    /// no-presolve solve. Pins the current behavior so a future provenance-
+    /// based dual-transfer fix has an explicit target (the `λ == 0` assertion
+    /// is what such a fix would flip to `λ == z_l`).
+    #[test]
+    fn dropped_row_dual_lands_on_bound_not_row() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(MinXWithLowerRow));
+        let opts = PresolveOptions {
+            enabled: true,
+            bound_tightening: true,
+            redundant_constraint_removal: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+
+        // Phase 1 tightened the bound from the row; Phase 2 dropped the row.
+        assert_eq!(
+            wrapped.n_dropped_rows(),
+            1,
+            "the `x ≥ 2` row must be dropped"
+        );
+        assert_eq!(info.m, 0, "reduced problem has no rows");
+        let b = wrapped.cached_bounds().expect("inited");
+        assert!(
+            (b.x_l[0] - 2.0).abs() < 1e-12,
+            "x_l tightened to 2 by the row, got {}",
+            b.x_l[0]
+        );
+
+        // Reduced solve at the optimum x=2: the bound `x ≥ 2` (which presolve
+        // created — the original lower bound was 0) is active, so the IPM puts
+        // the dual on z_l. ∇f = 1, so stationarity ∇f − z_l = 0 ⇒ z_l = 1.
+        let x = [2.0];
+        let z_l = [1.0];
+        let z_u = [0.0];
+        let g: [Number; 0] = [];
+        let lambda: [Number; 0] = [];
+        let sol = Solution {
+            status: pounce_nlp::alg_types::SolverReturn::Success,
+            x: &x,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g,
+            lambda: &lambda,
+            obj_value: 2.0,
+        };
+        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
+        let (xf, lamf) = wrapped.finalized_full_solution().expect("finalized");
+
+        // Primal is correct.
+        assert!((xf[0] - 2.0).abs() < 1e-12, "primal x = 2");
+        // M24: the reinstated row keeps λ = 0 — the dual is *not* transferred
+        // back from the bound multiplier. (A dual-transfer fix would make this
+        // `≈ z_l = 1`.)
+        assert_eq!(lamf.len(), 1, "full-space lambda regains the original row");
+        assert!(
+            lamf[0].abs() < 1e-12,
+            "M24: dropped-row λ stays 0 (dual sits on z_l instead), got {}",
+            lamf[0]
+        );
+        // KKT stationarity ∇f − Jᵀλ − z_l + z_u = 0 still holds with the dual
+        // on z_l (1 − 1·0 − 1 + 0 = 0): the certificate is valid, only the
+        // attribution differs.
+        let grad_f = 1.0;
+        let jac = 1.0; // ∂g0/∂x
+        let stat = grad_f - jac * lamf[0] - z_l[0] + z_u[0];
+        assert!(stat.abs() < 1e-12, "KKT stationarity residual {stat}");
     }
 
     /// 1-variable, 2-constraint TNLP that drives FBBT into a partial
