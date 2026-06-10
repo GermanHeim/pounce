@@ -387,11 +387,28 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 }
             }
             'k' => {
-                // Column counts in the Jacobian; we don't need them
-                // for evaluation since J segments give explicit lists.
-                p.eat_segment_header()?;
-                let count = if n == 0 { 0 } else { n - 1 };
-                for _ in 0..count {
+                // Column counts in the Jacobian; we don't need their
+                // values for evaluation (the J segments give explicit
+                // lists), but we must consume exactly as many data lines
+                // as follow or the segment stream desyncs. The `.nl`
+                // format writes that line count in the header itself
+                // (`k<count>`), and the standard value is `n-1`. Read the
+                // declared count rather than assuming it: a file with a
+                // nonstandard count would otherwise leave us reading the
+                // wrong number of lines, swallowing a later segment header
+                // (or stopping short) and failing with a confusing,
+                // far-removed error. Validate against the expected `n-1`
+                // so a mismatch surfaces here, clearly, at its source.
+                let (hdr, _) = p.eat_segment_header()?;
+                let declared = parse_segment_index(&hdr, 'k')?;
+                let expected = if n == 0 { 0 } else { n - 1 };
+                if declared != expected {
+                    return Err(format!(
+                        "k-segment declares {declared} column-count lines but \
+                         the standard count for n={n} variables is {expected}"
+                    ));
+                }
+                for _ in 0..declared {
                     p.next_data_line()?;
                 }
             }
@@ -2684,6 +2701,26 @@ J0 2
         let bad = format!("{EQ_LIN}x1\n5 0.5\n");
         let err = parse_nl_text(&bad).expect_err("out-of-range x index must error");
         assert!(err.contains("out of range"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn k_segment_nonstandard_count_is_parse_error_at_source() {
+        // Code review L35: the `k` (Jacobian column-count) segment header
+        // declares how many count lines follow — `k<count>` — and the
+        // standard value is n-1. The parser used to *assume* n-1 and ignore
+        // the header, so a file declaring a different count read the wrong
+        // number of data lines, desynced the segment stream, and failed far
+        // downstream with a confusing error (or silently mis-parsed). With
+        // the declared count now read and validated, a nonstandard count is
+        // a clear parse error at its source. Here EQ_LIN has n=2 (expected
+        // count 1); rewrite its `k1` + one count line to `k0`.
+        let bad = EQ_LIN.replace("k1\n2\n", "k0\n");
+        assert_ne!(bad, EQ_LIN, "fixture substitution must apply");
+        let err = parse_nl_text(&bad).expect_err("nonstandard k count must error");
+        assert!(
+            err.contains("k-segment declares"),
+            "expected a clear k-segment count error, got: {err}"
+        );
     }
 
     #[test]

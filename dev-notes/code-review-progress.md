@@ -102,6 +102,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 
 | L33 | `relax_bounds` silently no-ops when a bound `Rc` is shared (`orig_ipopt_nlp.rs`) while `adjust_variable_bounds` treats the same condition as a hard invariant (`expect`) — they should agree, and the loud version is safer | **FIXED** | **Confirmed by reading code.** Both `OrigIpoptNlp::relax_bounds` and `adjust_variable_bounds` rely on the bound `Rc`s (`x_l/x_u/d_l/d_u`) being **uniquely owned**. `adjust_variable_bounds` enforces it with `Rc::get_mut(...).expect("... uniquely owned")`; `relax_bounds` instead used `if let Some(_) = Rc::get_mut(...)` and silently skipped any shared bound — so a stray clone would leave bounds *tighter* than `bound_relax_factor` requires, with no signal. **Fix**: rewrote `relax_bounds` to `Rc::get_mut(...).expect("relax_bounds: <field> is uniquely owned")` for all four bounds, matching `adjust_variable_bounds`. The sole production caller (`application.rs:1085`, in structure init before the main loop) holds the invariant, so the loud form never trips in real solves. **Tests** (`orig_ipopt_nlp::tests`): `relax_bounds_widens_uniquely_owned_bounds` (baseline: `x_l` relaxes down, `x_u` up on the normal uniquely-owned state) and `relax_bounds_panics_on_shared_bound_rc` (`#[should_panic(expected = "x_l is uniquely owned")]` after `Rc::clone(&nlp.x_l)` bumps the strong count). **Fail-first confirmed**: reverting to the `if let Some` no-op makes the shared-Rc case *not* panic — `test did not panic as expected`. Restored; 39 pounce-nlp + 20 pounce-algorithm (the relax_bounds integration caller) test groups green. `cargo fmt -p pounce-nlp` / gated `cargo clippy` clean. See `## L33 detail`. |
 | L34 | `HybridTape` is dead code with a misleading panic in the promoted-CSE path (`nl_tape.rs`) | **FIXED** | **Confirmed by reading code + repo-wide grep.** `HybridTape`/`build_multi` (the designed-but-unwired partial-separability tape) has **zero callers** outside `nl_tape.rs` and no test coverage — fully dead. Its `build_into_summand` rejects unsupported opcodes with a clear message ("AMPL external function calls are not supported on the hybrid path … Build with `Tape::build_with_externals`"), **except** the *promoted*-CSE branch: it emits a shared CSE body via `build_recursive(expr, …, &ExternalResolver::default())` with an **empty** resolver, so a funcall buried in a promoted CSE reached `build_recursive`'s `Expr::Funcall` arm and panicked with the **misleading** `unresolved AMPL funcall id <n>` — implying a resolution failure rather than the real reason (funcalls are unsupported on the hybrid path regardless of resolvability). **Fix**: added a `cse_contains_funcall(body)` pre-scan in the promoted branch that raises the *same* clear hybrid-unsupported message before calling `build_recursive`, so both CSE paths report the same reason. (Chose to make the panic consistent rather than delete the intentionally-designed module.) **Test** (`nl_tape::tests`): `hybrid_promoted_cse_with_funcall_reports_clear_message` (`#[should_panic(expected = "external function calls are not supported on the")]`) builds a funcall CSE body shared across two roots so it is promoted, then `HybridTape::build_multi`. **Fail-first confirmed**: removing the guard makes the panic message `"unresolved AMPL funcall id 0"`, which `should_panic` rejects ("panic did not contain expected string"). Restored; 85 pounce-nl lib (+1) green. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L34 detail`. |
+| L35 | `k`-segment line count assumed, not read (`nl_reader.rs`); a nonstandard count desynchronizes the line stream into a confusing downstream error | **FIXED** | **Confirmed by reading code + reproducing the desync.** The `.nl` `k` segment (Jacobian column counts) header is `k<count>`, where `<count>` is the number of count lines that follow; the standard value is `n-1`. The parser **discarded** the header (`p.eat_segment_header()?`) and looped a hard-coded `n-1` times. A file declaring any other count then read the wrong number of data lines: it swallowed the following segment's header (or stopped short), so parsing failed far downstream with a baffling error pointing nowhere near the cause. **Fix**: read the declared count via `parse_segment_index(&hdr, 'k')`, validate it equals the expected `n-1` (0 when `n==0`), and `Err` with a clear `"k-segment declares {declared} … standard count for n={n} … is {expected}"` message at the segment itself; the consume loop then runs over the validated count. **Test** (`nl_reader::tests`): `k_segment_nonstandard_count_is_parse_error_at_source` rewrites EQ_LIN's `k1`+1 count line to `k0` (n=2 ⇒ expected 1) and asserts the `"k-segment declares"` error. **Fail-first confirmed**: with the old assume-`n-1` code the same input mis-reads `J0 2` as the k data line and dies downstream with `"unknown .nl segment tag '0'"` — the exact confusing far-removed error the issue describes — so the test's `k-segment declares` assert fails. Restored; 86 pounce-nl lib (+1) green, and the full pounce-cli suite (parses real `.nl` fixtures, all standard `k<n-1>`) green — the validation rejects no valid file. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L35 detail`. |
 
 ## C1 detail
 
@@ -5204,3 +5205,44 @@ to `"unresolved AMPL funcall id 0"`; the test then fails with "panic did not
 contain expected string / expected substring: external function calls are not
 supported on the". Restored after confirming. 85 pounce-nl lib tests (+1) green;
 `cargo fmt -p pounce-nl` / gated `cargo clippy` clean.
+
+## L35 detail
+
+**Issue.** `k`-segment line count assumed, not read (`nl_reader.rs:359-367`);
+a nonstandard count desynchronizes the line stream into a confusing downstream
+error.
+
+**Verification.** In the AMPL `.nl` format the `k` segment encodes the
+cumulative Jacobian column counts. Its header is `k<count>` — the integer is
+the number of count lines that follow, and the standard value is `n-1` (the
+counts for the first `n-1` columns; the last is implied). The segment loop in
+`parse_nl_text` ate the header with `p.eat_segment_header()?` (discarding it)
+and then read a hard-coded `n-1` data lines. So the *declared* count was never
+consulted: any file with a nonstandard count read the wrong number of lines and
+desynced the segment stream — every later segment header is then off by the
+difference, and the parse dies far downstream with an error that gives no hint
+of the real cause.
+
+**Fix.** Read the declared count from the header
+(`parse_segment_index(&hdr, 'k')`), compute the expected `n-1` (`0` when
+`n==0`), and return a clear error at the segment itself when they disagree:
+`"k-segment declares {declared} column-count lines but the standard count for
+n={n} variables is {expected}"`. The consume loop then runs over the validated
+count. (Equivalently: the loop now consumes exactly what the file declares, and
+a declaration inconsistent with the variable count is reported precisely where
+it occurs rather than as a downstream desync.)
+
+**Test.** `nl_reader::tests::k_segment_nonstandard_count_is_parse_error_at_source`
+takes the `EQ_LIN` fixture (n=2, so the standard `k` header is `k1` followed by
+one count line) and rewrites `k1\n2\n` → `k0\n` (declaring 0 lines, but n-1=1).
+`parse_nl_text` must return an `Err` containing `"k-segment declares"`.
+
+**Fail-first.** Reverting to the assume-`n-1` loop makes the same input read the
+following `J0 2` line as the (nonexistent) k data line; the J segment is then
+never recognized and the parser reports `"unknown .nl segment tag '0'"` (from
+the orphaned `0 1` line) — the exact confusing, far-removed error the issue
+calls out. The test's `"k-segment declares"` assertion fails. Restored after
+confirming. 86 pounce-nl lib tests (+1) green; the full pounce-cli suite (which
+parses real `.nl` fixtures, all carrying standard `k<n-1>` headers) stays green,
+confirming the new validation rejects no valid file. `cargo fmt -p pounce-nl` /
+gated `cargo clippy` clean.
