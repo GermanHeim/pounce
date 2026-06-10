@@ -57,6 +57,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M31 | python: the issue-#112 indefinite-`P` guard fires only on `solve_qp` — every other host QP entry point (`solve_qp_batch`, `solve_qp_multi_rhs`, `QpFactorization`, `QpSensitivity`, `solve_socp`) and the jax/torch differentiable layers skip the PSD check, so a nonconvex `P` is solved by the convex IPM and returns a silently-wrong `status="optimal"` (or a constructed handle / a corrupt backward pass) | **FIXED** | **Bug confirmed by running code** (`/tmp/m31_verify.py`): an indefinite `P = diag(1,-1)` with box bounds fed to all six host entry points — only `solve_qp` raised; the other five returned `status="optimal"` or constructed a usable handle. **Fix**: a shared `_maybe_check_psd(P, c, check_psd)` helper (honoring `check_psd ∈ {None=auto, True, False}` with the `_PSD_CHECK_AUTO_MAX_N=1500` auto threshold) is threaded into all six host entry points, each of which gained a `check_psd` parameter; the jax/torch host forwards (`_forward_solve`, `_forward_solve_batch`, `_forward_solve_socp`) gained a `_guard_psd` that runs the same eigenvalue screen before building the `_pounce.QpProblem`. **Tests**: `test_qp_host.py` gained 7 tests — five `*_rejects_indefinite_p` (one per previously-unguarded entry point, `pytest.raises(ValueError, match="positive semidefinite")`), `test_check_psd_false_bypasses_guard_everywhere`, and `test_psd_p_still_solves_on_all_entry_points`; `test_qp_jax.py`/`test_qp_torch.py` each gained `test_indefinite_p_rejected_in_{forward,batch_forward}` (jax wraps the host `ValueError` but the "semidefinite" message survives). **Pre-fix the five rejection tests FAIL** (the unguarded points return `optimal`) — confirmed by neutering the guard; post-fix all PASS. Full QP suite green: `test_qp.py`/`test_qp_host.py`/`test_qp_jax.py`/`test_qp_torch.py`/`test_qp_sensitivity.py`/`test_socp.py` (82 passed). See `## M31 detail`. |
 | M32 | rust(pounce-py): the `intermediate` TNLP callback (`crates/pounce-py/src/tnlp_bridge.rs:364-374`) (a) coerces a non-`bool` return via `res.extract::<bool>().unwrap_or(true)`, so a cyipopt-valid falsy int `0` (meaning *stop*) fails strict bool extraction and is read as *continue* — silently ignoring the user's stop; and (b) maps any callback exception to `Err(_) => false` with **no logging** (unlike the eval callbacks), so a crashing callback masquerades as a silent `User_Requested_Stop` | **FIXED** | **Both bugs confirmed by running code** (`/tmp/m32_verify.py`, after a `maturin build` of the worktree): an `intermediate` returning `0` at `iter_count>=1` was **ignored** pre-fix — the solve ran all 8 IPM iterations to `Solve_Succeeded` (`x→3`) instead of stopping. **Fix**: replace `res.extract::<bool>().unwrap_or(true)` with `res.is_truthy()?` (Python truthiness, matching cyipopt: `False`/`0`/`0.0`/`[]` stop, truthy continues; `None`/no-return still continues via the existing `is_none()` branch), and replace `Err(_) => false` with `Err(e) => { tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}"); false }` so a raising callback leaves a trace like `objective`/`gradient`/… (verified: post-fix log line `ERROR pounce::py: pounce-py: intermediate(): RuntimeError: boom...`). **Tests** (`python/tests/test_problem.py`): `test_intermediate_falsy_return_stops[0,False,0.0,[]]` (all must yield `User_Requested_Stop` and not reach `x*=3`), `test_intermediate_truthy_return_continues[1,True,0.5,[0]]` (→`Solve_Succeeded`), `test_intermediate_no_return_continues`, and `test_intermediate_exception_aborts_with_user_stop`. **Fail-first confirmed** by swapping the pre-fix `.so`: `[0]`, `[0.0]`, `[[]]` FAIL (`Solve_Succeeded`) while `[False]` already passed — exactly the `extract::<bool>` gap; post-fix all 14 pass. Broader solve-exercising suite green (53 passed); `cargo clippy -p pounce-py` clean of new warnings. See `## M32 detail`. |
 | M33 | python(pyomo-pounce): the Pyomo plugin's `_default_executable` (`pyomo-pounce/pyomo_pounce/pounce_solver.py:35-36`) resolves the solver only via `shutil.which("pounce")` despite depending on `pounce-solver`, which bundles the binary at a deterministic path (`pounce/bin/pounce`, exposed by `pounce._cli._bundled_binary`). A non-activated-venv run (cron, IDE runner, Jupyter kernel) with `<venv>/bin` off PATH reports the solver unavailable, or PATH shadowing picks up a stale system binary | **FIXED** | **Bug confirmed by running code**: with a bundled binary present at the deterministic path but PATH stripped of `pounce` (simulating cron/Jupyter), `_default_executable()` returned `None` — the solver reported unavailable. **Fix**: prefer `pounce._cli._bundled_binary()` when it `is_file()` (a lazy import guarded by `try/except` so a missing `pounce-solver` degrades gracefully), and fall back to `shutil.which("pounce")` for system installs / local cargo dev builds. **Tests** (`pyomo-pounce/tests/test_pounce.py`): `test_default_executable_prefers_bundled` (bundled present + PATH stripped → returns bundled path), `test_default_executable_falls_back_to_path` (no bundled → returns the PATH binary), `test_default_executable_none_when_nowhere` (neither → `None`), all via `monkeypatch` of `pounce._cli._bundled_binary` and `PATH`. **Fail-first confirmed** by reverting the method to `return shutil.which("pounce")`: `prefers_bundled` FAILS (`None != bundled`) while the fallback/none tests pass; post-fix all 7 plugin tests pass (the 3 solve-smoke tests run against the on-PATH binary, no skips). See `## M33 detail`. |
+| M34 | python: default auto-routing in `pounce.minimize` costs O(n²) user-function evaluations before the solve. On the `auto` path the LP/QP router (`classify_and_extract`) and the SOCP/QCQP router (`classify_and_extract_socp`) both FD-fit the *same* objective at an *identical* probe set (same `seed=0`), so the objective is finite-differenced twice; for a problem that ends up on the NLP path this is pure overhead, and it was undocumented (`python/pounce/_route.py`, `_minimize.py:425,447-468`) | **FIXED** | **Bug confirmed by running code**: counting `fun` calls through `minimize` on a quartic (NLP route, n=5), the routing overhead (auto-path calls minus nlp-forced-path calls) was 520 = exactly 2× a single router's 260 probe calls — the SOCP router re-probed every point the QP router had already evaluated. **Fix**: wrap the router callables (`fun`/`jac`/`hess`/`g_combined`/`jac_combined`) in one shared point-keyed cache (`_route._point_cache`, keyed on the point's float64 bytes) inside the `route_kw` both routers receive, so the second router's probes are cache hits; the NLP fallback still calls the *original* callables, so the actual solve is unaffected. Also documented the routing cost and the `solver_selection="nlp"` opt-out in the `minimize` docstring. **Test** (`python/tests/test_minimize_autoroute.py::test_auto_route_probes_objective_once_not_twice`): asserts the auto-path routing overhead equals one router's probe count, not two. **Fail-first confirmed** by reverting the `_point_cache` wrapping: overhead = 520 ≠ 260 → test FAILS; post-fix 74 routing/minimize tests pass. See `## M34 detail`. |
 
 ## C1 detail
 
@@ -2663,3 +2664,56 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **Result**: `pyomo-pounce/tests/test_pounce.py` — **7 passed** (the 3
   solve-smoke tests ran against the on-PATH binary, no skips). Pure-Python
   plugin change; no extension rebuild involved.
+## M34 detail
+
+**Issue** (`python/pounce/_route.py`, `python/pounce/_minimize.py:425,447-468`):
+`pounce.minimize` takes opaque callables, so to route an LP/convex-QP to the
+dedicated convex solver it must *probe* the callables and finite-difference a
+quadratic model. On the default `auto` path it runs **two** routers in
+sequence — `classify_and_extract` (LP/QP) and, if that finds nothing,
+`classify_and_extract_socp` (SOCP/QCQP). Both build their probe set from
+`np.random.default_rng(seed=0)` and FD-fit the *same* objective, so they
+evaluate the objective Hessian at an identical set of points. For a problem
+that ultimately lands on the NLP solver (the common case for a genuine
+nonlinear objective), every one of those evaluations is overhead, and it was
+nowhere documented.
+
+**Verification (running code)**: counting `fun` calls through `minimize` on a
+quartic `Σ xᵢ⁴` (n=5, no analytic derivatives → FD, routes to NLP):
+
+| path | `fun` calls |
+|------|-------------|
+| `auto` (both routers + NLP solve) | 491 |
+| `solver_selection="nlp"` (no routing) | 231 |
+| one router (`classify_and_extract`) in isolation | 260 |
+
+Routing overhead = 491 − 231 = **260** post-fix, i.e. exactly one router's
+probe count. Pre-fix the same measurement gave **520** (auto = 751), exactly
+2× — the SOCP router re-probed from scratch every point the QP router had
+already evaluated. (`/tmp/m34_verify.py` separately confirmed the two routers'
+probe sets are identical: 608/608 points at n=8 with 608 shared.)
+
+**Fix** (`python/pounce/_route.py` + `python/pounce/_minimize.py`): added a
+small `_point_cache(f)` helper that wraps a callable so repeated evaluations at
+the *same point* return a cached result, keyed on the point's exact float64
+bytes (`np.asarray(x, float64).tobytes()`); `None` passes through unchanged and
+cached values are returned as-is (never mutated). In `_minimize`, the
+`route_kw` dict the routers receive now wraps `fun`/`jac`/`hess`/`g_combined`/
+`jac_combined` in `_point_cache`, so the second router's probes are cache hits.
+Crucially **only the router copies are cached** — the NLP fallback
+(`_build_problem_obj`) still binds the *original* callables, so the actual
+solve is byte-for-byte unaffected.
+
+Also added a docstring paragraph to `minimize` documenting that auto-routing
+costs `O(n²)` extra `fun` evaluations and that `solver_selection="nlp"` skips
+routing entirely (for known-NLP problems or expensive `fun`).
+
+**Test** (`python/tests/test_minimize_autoroute.py`):
+`test_auto_route_probes_objective_once_not_twice` counts `fun` calls on the
+auto path, the nlp-forced path, and one router in isolation, then asserts the
+auto-path routing overhead (`auto − nlp`) equals a single router's probe count
+— not double. **Fail-first confirmed** by reverting the `_point_cache`
+wrapping in `route_kw`: overhead becomes 520 ≠ 260 and the test fails; with the
+fix restored all **74** tests in `test_minimize_autoroute.py`,
+`test_minimize_socp_autoroute.py`, `test_minimize.py`, and `test_curve_fit.py`
+pass. Pure-Python change; no extension rebuild involved.

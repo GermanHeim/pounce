@@ -29,7 +29,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._pounce import Problem
-from ._route import classify_and_extract, classify_and_extract_socp
+from ._route import _point_cache, classify_and_extract, classify_and_extract_socp
 
 # Central-difference step. The optimal step for a central difference is
 # ``~eps**(1/3)`` (≈6.06e-6), balancing the ``O(h^2)`` truncation error against
@@ -300,8 +300,16 @@ def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
     from .qp import solve_qp
 
     res = solve_qp(
-        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, lb=ex.lb, ub=ex.ub,
-        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+        P=ex.P,
+        c=ex.c,
+        A=ex.A,
+        b=ex.b,
+        G=ex.G,
+        h=ex.h,
+        lb=ex.lb,
+        ub=ex.ub,
+        tol=opts.get("tol"),
+        max_iter=opts.get("max_iter"),
     )
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
@@ -339,8 +347,15 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
     from .qp import solve_socp
 
     res = solve_socp(
-        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, cones=ex.cones,
-        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+        P=ex.P,
+        c=ex.c,
+        A=ex.A,
+        b=ex.b,
+        G=ex.G,
+        h=ex.h,
+        cones=ex.cones,
+        tol=opts.get("tol"),
+        max_iter=opts.get("max_iter"),
     )
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
@@ -371,9 +386,7 @@ def _any_constraint_without_jac(constraints) -> bool:
         return False
     if isinstance(constraints, dict):
         constraints = [constraints]
-    return any(
-        isinstance(c, dict) and c.get("jac") is None for c in constraints
-    )
+    return any(isinstance(c, dict) and c.get("jac") is None for c in constraints)
 
 
 def minimize(
@@ -407,6 +420,13 @@ def minimize(
     * ``"socp"`` — force the conic solver, raising ``ValueError`` if the
       problem is not detected as a convex QCQP.
 
+    Auto-routing has a cost: detection probes the opaque callables and
+    finite-differences a quadratic model of the objective (and any
+    constraints), which is ``O(n²)`` extra ``fun`` evaluations. For a problem
+    that ultimately lands on the NLP path this probing is pure overhead, so if
+    you already know your problem is a general NLP — or ``fun`` is expensive —
+    pass ``options={"solver_selection": "nlp"}`` to skip routing entirely.
+
     Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
     Pass ``options={"disp": True}`` for a concise log or an explicit
     ``options={"print_level": N}`` (0–12) to control the NLP backend's IPM
@@ -431,10 +451,26 @@ def minimize(
     # print_level or scipy-style disp=True. (#115)
     disp = bool(opts.pop("disp", False))
     opts.setdefault("print_level", 5 if disp else 0)
+    # The LP/QP and SOCP routers probe an identical point set (same seed) and
+    # FD-fit the same objective; on the `auto` path both run in sequence, so
+    # without sharing they evaluate the objective Hessian twice (~8n² extra
+    # `fun` calls at FD, tens of thousands at n≈50). Wrap the router callables
+    # in one shared point-cache so the second router's probes are cache hits.
+    # Only these router copies are cached; the NLP fallback below still calls
+    # the original `fun`/`jac`/… so the actual solve is unaffected.
     route_kw = dict(
-        fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
-        g_combined=g_combined, jac_combined=jac_combined,
-        cl=cl, cu=cu, x0=x0, rtol=route_tol,
+        fun=_point_cache(fun),
+        jac=_point_cache(jac),
+        hess=_point_cache(hess),
+        lb=lb,
+        ub=ub,
+        m=m,
+        g_combined=_point_cache(g_combined),
+        jac_combined=_point_cache(jac_combined),
+        cl=cl,
+        cu=cu,
+        x0=x0,
+        rtol=route_tol,
     )
     if selection in ("auto", "lp-ipm", "qp-ipm"):
         extract = classify_and_extract(**route_kw)
@@ -477,11 +513,11 @@ def minimize(
     if jac is None:
         fd_targets.append("the objective gradient (pass jac=...)")
     if m > 0 and _any_constraint_without_jac(constraints):
-        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each "
-                          "constraint dict)")
+        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each constraint dict)")
     if fd_targets:
         warnings.warn(
-            "pounce.minimize is approximating " + " and ".join(fd_targets)
+            "pounce.minimize is approximating "
+            + " and ".join(fd_targets)
             + " by finite differences. This is slower and less accurate than "
             "analytic derivatives. For a faster, more robust solve supply them "
             "directly, or use the autodiff frontends pounce.jax / pounce.torch.",

@@ -67,10 +67,12 @@ def test_routed_qp_matches_nlp_solve():
 def test_nonlinear_objective_stays_on_nlp():
     # Rosenbrock: quartic, not a quadratic — must NOT be routed to the QP solver.
     fun = lambda x: (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
-    jac = lambda x: np.array([
-        -2 * (1 - x[0]) - 400 * x[0] * (x[1] - x[0] ** 2),
-        200 * (x[1] - x[0] ** 2),
-    ])
+    jac = lambda x: np.array(
+        [
+            -2 * (1 - x[0]) - 400 * x[0] * (x[1] - x[0] ** 2),
+            200 * (x[1] - x[0] ** 2),
+        ]
+    )
     res = minimize(fun, [-1.2, 1.0], jac=jac)
 
     assert _routed_to(res) is None
@@ -109,3 +111,52 @@ def test_finite_difference_qp_routes_without_user_derivatives():
 
     assert _routed_to(res) == "qp-ipm"
     np.testing.assert_allclose(res.x, a, atol=1e-5)
+
+
+def test_auto_route_probes_objective_once_not_twice():
+    # M34: on the `auto` path both the LP/QP router and the SOCP/QCQP router run
+    # in sequence, each finite-differencing the *same* objective at the *same*
+    # probe points (identical seed). A shared point-cache (wired in `_minimize`
+    # via `_route._point_cache`) makes the second router's probes cache hits, so
+    # the routing overhead is one router's worth of `fun` calls, not two.
+    from pounce._route import classify_and_extract
+
+    n = 5
+    x0 = np.full(n, 0.3)
+
+    def _counting_quartic():
+        calls = {"n": 0}
+
+        def fun(x):
+            calls["n"] += 1
+            return float(np.sum(np.asarray(x) ** 4))  # quartic → NLP route
+
+        return fun, calls
+
+    # Auto path: both routers probe, then the problem falls through to NLP.
+    f_auto, c_auto = _counting_quartic()
+    minimize(f_auto, x0)
+    # NLP-forced path: no routing, so the difference isolates the routing cost.
+    f_nlp, c_nlp = _counting_quartic()
+    minimize(f_nlp, x0, options={"solver_selection": "nlp"})
+    # One router in isolation: the unit the shared cache should collapse to.
+    f_one, c_one = _counting_quartic()
+    classify_and_extract(
+        fun=f_one,
+        jac=None,
+        hess=None,
+        lb=None,
+        ub=None,
+        m=0,
+        g_combined=None,
+        jac_combined=None,
+        cl=None,
+        cu=None,
+        x0=x0,
+        rtol=1e-5,
+    )
+
+    routing_overhead = c_auto["n"] - c_nlp["n"]
+    # Post-fix the overhead equals a single router's probe count; pre-fix (no
+    # shared cache) it was 2× because each router re-probed from scratch.
+    assert routing_overhead == c_one["n"]
