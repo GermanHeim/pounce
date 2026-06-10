@@ -58,6 +58,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M32 | rust(pounce-py): the `intermediate` TNLP callback (`crates/pounce-py/src/tnlp_bridge.rs:364-374`) (a) coerces a non-`bool` return via `res.extract::<bool>().unwrap_or(true)`, so a cyipopt-valid falsy int `0` (meaning *stop*) fails strict bool extraction and is read as *continue* — silently ignoring the user's stop; and (b) maps any callback exception to `Err(_) => false` with **no logging** (unlike the eval callbacks), so a crashing callback masquerades as a silent `User_Requested_Stop` | **FIXED** | **Both bugs confirmed by running code** (`/tmp/m32_verify.py`, after a `maturin build` of the worktree): an `intermediate` returning `0` at `iter_count>=1` was **ignored** pre-fix — the solve ran all 8 IPM iterations to `Solve_Succeeded` (`x→3`) instead of stopping. **Fix**: replace `res.extract::<bool>().unwrap_or(true)` with `res.is_truthy()?` (Python truthiness, matching cyipopt: `False`/`0`/`0.0`/`[]` stop, truthy continues; `None`/no-return still continues via the existing `is_none()` branch), and replace `Err(_) => false` with `Err(e) => { tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}"); false }` so a raising callback leaves a trace like `objective`/`gradient`/… (verified: post-fix log line `ERROR pounce::py: pounce-py: intermediate(): RuntimeError: boom...`). **Tests** (`python/tests/test_problem.py`): `test_intermediate_falsy_return_stops[0,False,0.0,[]]` (all must yield `User_Requested_Stop` and not reach `x*=3`), `test_intermediate_truthy_return_continues[1,True,0.5,[0]]` (→`Solve_Succeeded`), `test_intermediate_no_return_continues`, and `test_intermediate_exception_aborts_with_user_stop`. **Fail-first confirmed** by swapping the pre-fix `.so`: `[0]`, `[0.0]`, `[[]]` FAIL (`Solve_Succeeded`) while `[False]` already passed — exactly the `extract::<bool>` gap; post-fix all 14 pass. Broader solve-exercising suite green (53 passed); `cargo clippy -p pounce-py` clean of new warnings. See `## M32 detail`. |
 | M33 | python(pyomo-pounce): the Pyomo plugin's `_default_executable` (`pyomo-pounce/pyomo_pounce/pounce_solver.py:35-36`) resolves the solver only via `shutil.which("pounce")` despite depending on `pounce-solver`, which bundles the binary at a deterministic path (`pounce/bin/pounce`, exposed by `pounce._cli._bundled_binary`). A non-activated-venv run (cron, IDE runner, Jupyter kernel) with `<venv>/bin` off PATH reports the solver unavailable, or PATH shadowing picks up a stale system binary | **FIXED** | **Bug confirmed by running code**: with a bundled binary present at the deterministic path but PATH stripped of `pounce` (simulating cron/Jupyter), `_default_executable()` returned `None` — the solver reported unavailable. **Fix**: prefer `pounce._cli._bundled_binary()` when it `is_file()` (a lazy import guarded by `try/except` so a missing `pounce-solver` degrades gracefully), and fall back to `shutil.which("pounce")` for system installs / local cargo dev builds. **Tests** (`pyomo-pounce/tests/test_pounce.py`): `test_default_executable_prefers_bundled` (bundled present + PATH stripped → returns bundled path), `test_default_executable_falls_back_to_path` (no bundled → returns the PATH binary), `test_default_executable_none_when_nowhere` (neither → `None`), all via `monkeypatch` of `pounce._cli._bundled_binary` and `PATH`. **Fail-first confirmed** by reverting the method to `return shutil.which("pounce")`: `prefers_bundled` FAILS (`None != bundled`) while the fallback/none tests pass; post-fix all 7 plugin tests pass (the 3 solve-smoke tests run against the on-PATH binary, no skips). See `## M33 detail`. |
 | M34 | python: default auto-routing in `pounce.minimize` costs O(n²) user-function evaluations before the solve. On the `auto` path the LP/QP router (`classify_and_extract`) and the SOCP/QCQP router (`classify_and_extract_socp`) both FD-fit the *same* objective at an *identical* probe set (same `seed=0`), so the objective is finite-differenced twice; for a problem that ends up on the NLP path this is pure overhead, and it was undocumented (`python/pounce/_route.py`, `_minimize.py:425,447-468`) | **FIXED** | **Bug confirmed by running code**: counting `fun` calls through `minimize` on a quartic (NLP route, n=5), the routing overhead (auto-path calls minus nlp-forced-path calls) was 520 = exactly 2× a single router's 260 probe calls — the SOCP router re-probed every point the QP router had already evaluated. **Fix**: wrap the router callables (`fun`/`jac`/`hess`/`g_combined`/`jac_combined`) in one shared point-keyed cache (`_route._point_cache`, keyed on the point's float64 bytes) inside the `route_kw` both routers receive, so the second router's probes are cache hits; the NLP fallback still calls the *original* callables, so the actual solve is unaffected. Also documented the routing cost and the `solver_selection="nlp"` opt-out in the `minimize` docstring. **Test** (`python/tests/test_minimize_autoroute.py::test_auto_route_probes_objective_once_not_twice`): asserts the auto-path routing overhead equals one router's probe count, not two. **Fail-first confirmed** by reverting the `_point_cache` wrapping: overhead = 520 ≠ 260 → test FAILS; post-fix 74 routing/minimize tests pass. See `## M34 detail`. |
+| M35 | rust(pounce-py): session-style solves hold the GIL for the whole IPM run. `PySolver::solve` (`crates/pounce-py/src/solver.rs:80`), `QpFactorization::solve` and `QpSensitivity::new` (`crates/pounce-py/src/qp.rs`) call the Rust solver without `py.allow_threads`, unlike `PyProblem::solve` and the one-shot QP/SOCP entry points. `Solver` is the workhorse under `curve_fit` and the jax/torch hosts, so concurrent solves on multiple Python threads serialize | **FIXED** | **Bug confirmed by running code**: the QP path is pure Rust (no Python callbacks), so a `QpSensitivity` solve held the GIL *continuously* — a background watcher thread stalled 23.6 ms ≈ the full 31 ms solve, and 8 `QpSensitivity` solves across 8 threads took as long as serial (ratio 0.97) on a 14-core box. **Fix**: wrap each solve in `py.allow_threads`. The QP sites are pure Rust but hold non-`Send` linear-solver trait objects, so a transparent `SendGuard` (the same trick `PyProblem::solve` uses for its `Rc`s) crosses the GIL-release boundary; the closure runs on the calling thread so it never actually moves between OS threads. The NLP `PySolver::solve` uses the identical `SendGuard` pattern as `PyProblem::solve` (every `tnlp_bridge.rs` callback re-acquires the GIL via `Python::with_gil`, so re-entrancy is safe). **Test** (`python/tests/test_qp_sensitivity.py::test_qp_solve_releases_the_gil`): asserts 8 threaded solves finish in < 0.75× serial (skips on < 4 cores). Post-fix the watcher stall dropped to 4.5 ms and the threaded ratio to 0.39 (~2.5× speedup). **Fail-first confirmed** by swapping the pre-M35 `.so`: ratio 1.01 → test FAILS; post-fix all 41 QP + 112 NLP-session/sensitivity/curve_fit tests pass (one pre-existing, unrelated `test_socp.py` exp-cone failure reproduces identically on the pre-M35 `.so`). See `## M35 detail`. |
 
 ## C1 detail
 
@@ -2717,3 +2718,58 @@ wrapping in `route_kw`: overhead becomes 520 ≠ 260 and the test fails; with th
 fix restored all **74** tests in `test_minimize_autoroute.py`,
 `test_minimize_socp_autoroute.py`, `test_minimize.py`, and `test_curve_fit.py`
 pass. Pure-Python change; no extension rebuild involved.
+
+## M35 detail
+
+**Issue** (`crates/pounce-py/src/solver.rs:80`, `crates/pounce-py/src/qp.rs`):
+the session-style entry points ran the Rust IPM while still holding the Python
+GIL. `PyProblem::solve` and the one-shot `solve_qp`/`solve_socp` already
+release it with `py.allow_threads`, but `PySolver::solve` (the NLP `Solver`
+session), `QpFactorization::solve`, and `QpSensitivity::new` did not. `Solver`
+is the workhorse under `curve_fit` and the jax/torch hosts, so any code running
+several of these on Python threads got no overlap — every solve serialized
+behind the GIL.
+
+**Verification (running code)**, `n=220` strictly-convex QP, 14-core box:
+
+| metric | pre-fix | post-fix |
+|--------|---------|----------|
+| watcher-thread max stall during solves | 23.6 ms (≈ full 31 ms solve) | 4.5 ms |
+| 8 `QpSensitivity` solves, threaded ÷ serial | 0.97 | 0.39 |
+
+The QP path is pure Rust (no Python callbacks), so pre-fix a solve held the GIL
+*continuously* and a background Python thread was completely starved for the
+solve's duration; post-fix the watcher runs throughout and the eight solves
+overlap across cores (~2.5× speedup).
+
+**Fix**: wrap each solve body in `py.allow_threads`.
+- `QpFactorization::solve` / `QpSensitivity::new` are pure Rust, but their
+  factorization/sensitivity objects hold non-`Send` `dyn
+  SparseSymLinearSolverInterface` / `dyn TSymScalingMethod` trait objects, so a
+  plain `allow_threads` (which needs `Send`) doesn't typecheck. A transparent
+  `SendGuard<T>` (`unsafe impl Send`, with method accessors that defeat the
+  2021-edition disjoint-capture rule) carries the borrow / result across the
+  boundary — the closure runs on the *calling* thread after
+  `PyEval_SaveThread`, so the value never actually crosses OS threads. This is
+  the same shim `PyProblem::solve` already uses for its `Rc<RefCell<…>>`.
+  `QpSensitivity::new` gained a `py: Python<'_>` parameter and was restructured
+  to return `(status, Option<payload>)` from the closure (no panic-on-`None`
+  unwrap, so no new `clippy::expect_used`).
+- `PySolver::solve` (NLP) uses the *identical* `SendGuard` pattern as
+  `PyProblem::solve`: every TNLP callback in `tnlp_bridge.rs` re-acquires the
+  GIL via `Python::with_gil` before touching Python, so re-entering the
+  interpreter from the GIL-released solve is safe and serialized as usual.
+
+**Test** (`python/tests/test_qp_sensitivity.py::test_qp_solve_releases_the_gil`):
+runs 8 independent convex-QP solves serially and across 8 threads (best-of-2
+each) and asserts threaded < 0.75 × serial; skips on < 4 cores. **Fail-first
+confirmed** by swapping the pre-M35 `.so`: ratio 1.01 ⇒ test FAILS; with the
+fix, ratio 0.39 ⇒ PASS.
+
+**Result**: 41 QP tests (`test_qp.py`, `test_qp_sensitivity.py`,
+`test_qp_host.py`) + 112 NLP-session / sensitivity / curve_fit / problem tests
+pass; clippy reports no new warnings on the changed lines. The extension was
+rebuilt via `maturin build --release` and the `.so` extracted into the
+worktree. (One pre-existing, unrelated `test_socp.py::test_exp_cone_log_sum_exp_mixed`
+failure reproduces identically on the pre-M35 `.so`, so it is not caused by
+this change and is out of scope for M35.)
