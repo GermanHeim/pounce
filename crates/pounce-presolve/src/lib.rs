@@ -615,6 +615,17 @@ impl PresolveTnlp {
                     max_iter: self.opts.fbbt_max_iter.max(1) as usize,
                     max_constraints: self.opts.fbbt_max_constraints.max(0) as usize,
                 };
+                // H12: snapshot the bounds before FBBT. The `FbbtReport`
+                // contract states that on detected infeasibility the
+                // variable bounds are "undefined and must not be trusted"
+                // — FBBT may have partially tightened several variables
+                // before a later constraint proved the box empty. Pass the
+                // Phase-0 `row_kept_inner` mask so propagation skips any row
+                // an auxiliary elimination dropped (over the aux-clamped box
+                // a dropped row can fabricate a spurious infeasibility — the
+                // same #53 hazard Phase 1 guards against with filtered rows).
+                let fbbt_x_l_pre = x_l.clone();
+                let fbbt_x_u_pre = x_u.clone();
                 let provider_borrow = provider.borrow();
                 let report = crate::fbbt::run_fbbt(
                     &*provider_borrow,
@@ -624,8 +635,28 @@ impl PresolveTnlp {
                     &mut x_u,
                     &g_l_inner,
                     &g_u_inner,
+                    Some(&row_kept_inner),
                     &cfg,
                 );
+                drop(provider_borrow);
+                if report.infeasibility_witness.is_some() {
+                    // Genuine FBBT infeasibility on a kept row. Presolve has
+                    // no channel to certify infeasibility to the solver, so
+                    // — mirroring the Phase 1 rollback — discard FBBT's
+                    // corrupted bounds and let the IPM run on the pre-FBBT
+                    // box and certify infeasibility itself. The report is
+                    // still surfaced via `fbbt_report()` for diagnostics.
+                    tracing::warn!(
+                        target: "pounce::presolve",
+                        witness = report.infeasibility_witness,
+                        "FBBT reported a constraint infeasibility; its tightened \
+                         bounds are undefined and are being discarded — the solve \
+                         proceeds on the pre-FBBT box so the IPM can certify \
+                         infeasibility itself."
+                    );
+                    x_l.copy_from_slice(&fbbt_x_l_pre);
+                    x_u.copy_from_slice(&fbbt_x_u_pre);
+                }
                 fbbt_report = Some(report);
             }
         }
@@ -1772,6 +1803,137 @@ mod tests {
             got_zu,
             vec![0.0, 0.0],
             "z_u must be zeroed at aux-fixed vars (H10)"
+        );
+    }
+
+    /// 1-variable, 2-constraint TNLP that drives FBBT into a partial
+    /// tightening followed by a genuine infeasibility. Both constraints are
+    /// `g = x` (default `NonLinear` linearity, so they are FBBT-handled, not
+    /// turned into linear rows Phase 1 would catch first). Row 0 demands
+    /// `x ∈ [0.3, 0.7]` (tightens the box `x ∈ [0, 1]`); row 1 demands
+    /// `x = 5` (infeasible). FBBT applies row 0, then row 1 flags the box
+    /// empty — leaving the bounds in the partially-tightened `[0.3, 0.7]`
+    /// state the `FbbtReport` contract says must not be trusted.
+    struct FbbtPartialThenInfeasible;
+    impl TNLP for FbbtPartialThenInfeasible {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 2,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 1.0;
+            b.g_l[0] = 0.3;
+            b.g_u[0] = 0.7;
+            b.g_l[1] = 5.0;
+            b.g_u[1] = 5.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.5;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            g[1] = x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 0]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Returns the tape `x` (i.e. `Var(0)`) for both constraints.
+    struct VarTapeProvider;
+    impl ExpressionProvider for VarTapeProvider {
+        fn constraint_expression(
+            &self,
+            i: usize,
+        ) -> Option<pounce_nlp::expression_provider::FbbtTape> {
+            use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+            if i < 2 {
+                Some(FbbtTape {
+                    ops: vec![FbbtOp::Var(0)],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// H12: when FBBT detects a genuine infeasibility, the partially
+    /// tightened (and per its own contract "undefined") bounds must NOT
+    /// reach the reduced problem. Presolve has no infeasibility channel, so
+    /// it discards FBBT's bounds and lets the IPM run on the pre-FBBT box —
+    /// here the original `[0, 1]`, never the corrupted `[0.3, 0.7]`.
+    #[test]
+    fn fbbt_infeasibility_discards_corrupted_bounds() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FbbtPartialThenInfeasible));
+        let provider: Rc<RefCell<dyn ExpressionProvider>> = Rc::new(RefCell::new(VarTapeProvider));
+        let opts = PresolveOptions {
+            enabled: true,
+            fbbt: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped =
+            PresolveTnlp::with_expression_provider(Rc::clone(&inner), Rc::clone(&provider), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 1);
+        assert_eq!(info.m, 2, "nonlinear rows are not dropped by presolve");
+
+        // FBBT must have reached the infeasible row.
+        let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        assert_eq!(
+            rpt.infeasibility_witness,
+            Some(1),
+            "row 1 (`x = 5`) is the infeasibility witness"
+        );
+
+        // ...but its corrupted tightening is discarded: the reduced box is
+        // the original [0, 1], not the partial [0.3, 0.7] FBBT left behind.
+        let mut x_l = vec![0.0; info.n as usize];
+        let mut x_u = vec![0.0; info.n as usize];
+        let mut g_l = vec![0.0; info.m as usize];
+        let mut g_u = vec![0.0; info.m as usize];
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        assert_eq!(
+            (x_l[0], x_u[0]),
+            (0.0, 1.0),
+            "FBBT's undefined-on-infeasibility bounds must not reach the IPM (H12)"
         );
     }
 }

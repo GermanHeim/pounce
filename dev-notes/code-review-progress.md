@@ -20,6 +20,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H9 | convex: `presolve_conic` protects only `SecondOrder` rows — unsound reductions / wrong `Infeasible` for PSD/exp/power rows | **FIXED** | Two layers fixed. (1) `presolve_conic` now protects **every** non-`Nonneg` cone block (`!matches!(spec, ConeSpec::Nonneg(_))`), not just `SecondOrder`. (2) The deeper bug: `build_rows` independently collapsed empty rows — a post-substitution empty cone row with `h<0` returned `Err`→`Infeasible`, and a feasible empty cone row (`h≥0`) was silently dropped, desyncing `reduced_cones`. `build_rows` now takes a `protected` mask and keeps coupled cone rows verbatim (the `0·x ≤ h` slack `s=h` is legal — e.g. `(−1,1,5) ∈ K_exp`); `pivot_divisor` guards empty rows. Tests `exp_cone_empty_row_negative_h_is_not_infeasible`, `exp_cone_activity_redundant_row_not_dropped` in `tests/presolve_conic.rs`. |
 | H10 | presolve: postsolve does not zero `z_l`/`z_u` at aux-fixed variables — reported duals violate stationarity | **FIXED** | `finalize_solution` (`lib.rs:1049`) forwarded `sol.z_l`/`sol.z_u` verbatim, but `recover_dropped_multipliers` folds the entire fixed-var stationarity residual into the recovered λ assuming `z_l = z_u = 0` there — double-counting against the IPM's large clamp multipliers. Now copies `z_l`/`z_u` into mutable buffers and zeros each `frame.fixed_vars` entry immediately after that frame's λ is recovered (only on `Ok` recovery; a failed recovery leaves λ=0 so the clamp multiplier is still legitimate). Test `phase0_finalize_zeroes_bound_multipliers_at_fixed_vars` (recording mock inner). |
 | H11 | presolve: objective coupling classified from the gradient at a single probe point — a nonlinear objective variable reading zero gradient at the probe is mis-classified `PureEquality` and wrongly eliminated | **FIXED** | `run_auxiliary_phase0` built `obj_support` solely from `objective_gradient_support(grad_f)` — one sample. A variable whose objective gradient happens to vanish at the probe (classic `f=(x−x₀)²` started at `x₀`) reads as objective-free, so its square block is classed `PureEquality` and eliminated even under `Safe`. `PresolveTnlp` now fetches `get_variables_linearity` (`lib.rs:354`) and passes it via a new `Phase0Probe::var_linearity` field; `run_auxiliary_phase0` (`auxiliary.rs:221`) unions every `NonLinear`-tagged variable into `obj_support`, so nonlinear vars are always treated objective-coupled. When the TNLP declines (default), `var_linearity=None` → falls back to the probe gradient (no behavior change; no production TNLP implements the hook). Test `phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe`. |
+| H12 | presolve: FBBT lacks both the Phase-0 row mask and any infeasibility handling | **FIXED** | Two layers. (1) **Row mask**: `run_fbbt` (`fbbt/orchestrator.rs`) gained a `row_kept: Option<&[bool]>` param; the call site (`lib.rs`) passes `Some(&row_kept_inner)`, so propagation skips any row Phase 0 dropped — over the aux-clamped box a dropped row could fabricate a spurious infeasibility (the #53 hazard Phase 1 already filters). (2) **Infeasibility handling**: `fbbt_report.infeasibility_witness` was never inspected, so FBBT's "undefined and must not be trusted" partially-tightened bounds reached the IPM. The call site now snapshots `x_l`/`x_u` before FBBT and, on a witness, restores them (mirrors the Phase 1 rollback — presolve has no channel to certify infeasibility, so the IPM runs on the pre-FBBT box and certifies it). Tests `dropped_row_is_skipped_and_does_not_flag_infeasible` (orchestrator) + `fbbt_infeasibility_discards_corrupted_bounds` (lib integration). |
 
 ## C1 detail
 
@@ -455,3 +456,52 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   FAILED (`left:1 right:0` — the nonlinear-tagged block was still
   eliminated); post-fix PASSES. Full `pounce-presolve` suite green (205 lib +
   integration + doctests); `cargo fmt --check` clean; no build warnings.
+
+## H12 detail
+
+- **Bug** (two independent defects in the Phase 1b FBBT call,
+  `lib.rs:610-631`):
+  1. **No Phase-0 row mask.** `run_fbbt` was handed `m_in` (the full inner
+     row count) and `g_l_inner`/`g_u_inner` over the **aux-clamped** variable
+     bounds — but Phase 0 may have dropped rows (recorded in
+     `row_kept_inner`). Propagating a dropped row's interval against the
+     clamped box can derive a contradiction that does not exist in the
+     original problem — exactly the configuration the #53 review fixed for
+     Phase 1 (filtered rows). FBBT got neither the filter nor the rollback.
+  2. **No infeasibility handling.** `FbbtReport::infeasibility_witness`
+     (`fbbt/orchestrator.rs:70-74`) documents that on infeasibility "the
+     variable bounds … are undefined and must not be trusted" — FBBT can
+     partially tighten several variables in a sweep before a later
+     constraint proves the box empty, then return immediately. The call site
+     stored `fbbt_report = Some(report)` and proceeded, feeding those
+     corrupted bounds straight to the IPM. Genuine infeasibility was silently
+     swallowed *and* the bounds were wrong.
+- **Fix**:
+  - `run_fbbt` (`fbbt/orchestrator.rs`) gained a `row_kept: Option<&[bool]>`
+    parameter (length-asserted); the sweep `continue`s on any `!mask[i]`.
+    `None` preserves the standalone/test behavior (consider every row).
+  - The call site (`lib.rs`) passes `Some(&row_kept_inner)` — the same mask
+    Phase 0/Phase 2 maintain — so dropped rows are never propagated.
+  - Before FBBT the call site snapshots `x_l`/`x_u`; if
+    `report.infeasibility_witness.is_some()` it restores the snapshot and
+    logs a warning. Presolve has **no channel to certify infeasibility** to
+    the solver (Phase 1's own infeasibility path likewise rolls back, not
+    surfaces), so the correct conservative action is to discard FBBT's
+    undefined bounds and let the IPM run on the valid pre-FBBT box and
+    certify infeasibility itself. The report is still exposed via
+    `fbbt_report()` for diagnostics.
+- **Tests**:
+  - `dropped_row_is_skipped_and_does_not_flag_infeasible`
+    (`fbbt/orchestrator.rs`): a `Var(0)` row demanding `x = 5` over the box
+    `[0,1]`. Control (`row_kept = None`) → `infeasibility_witness == Some(0)`;
+    fixed (`Some(&[false, true])`, the row dropped) → `None`, box untouched.
+  - `fbbt_infeasibility_discards_corrupted_bounds` (`lib.rs` integration):
+    `FbbtPartialThenInfeasible` (1 var `x∈[0,1]`, two `g=x` nonlinear rows;
+    row 0 tightens to `[0.3,0.7]`, row 1 demands `x=5`) + a `VarTapeProvider`.
+    After presolve, `fbbt_report().infeasibility_witness == Some(1)` **and**
+    the reduced box is the original `[0,1]`, not the corrupted `[0.3,0.7]`.
+- **Verified by running code**: the integration test, run with the bound
+  restore temporarily disabled, FAILED with `left: (0.3, 0.7)` (the corrupted
+  partial tightening leaking to the IPM); with the fix it reads `(0.0, 1.0)`
+  and PASSES. Full `pounce-presolve` suite green (207 lib + integration +
+  9 doctests); `cargo fmt --check` clean; no build warnings.

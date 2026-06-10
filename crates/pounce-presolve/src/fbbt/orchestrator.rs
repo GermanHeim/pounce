@@ -87,6 +87,14 @@ pub struct FbbtReport {
 /// `g_lo` / `g_hi` are the constraint bounds, length `m`. Providers
 /// that return `None` for a constraint index are skipped silently
 /// (FBBT can't tighten without a structural expression).
+///
+/// `row_kept`, when `Some`, is a length-`n_constraints` mask: rows whose
+/// entry is `false` are skipped entirely. A presolve caller passes the
+/// Phase-0 `row_kept_inner` mask here so propagation never runs over a
+/// row an earlier auxiliary elimination dropped — over the aux-clamped
+/// variable bounds such an eliminated row can manufacture a spurious
+/// infeasibility (the issue #53 row-filtering Phase 1 already performs).
+/// `None` means "consider every row" (the standalone / test default).
 pub fn run_fbbt(
     provider: &dyn ExpressionProvider,
     n_vars: usize,
@@ -95,6 +103,7 @@ pub fn run_fbbt(
     x_hi: &mut [Number],
     g_lo: &[Number],
     g_hi: &[Number],
+    row_kept: Option<&[bool]>,
     cfg: &FbbtConfig,
 ) -> FbbtReport {
     let mut report = FbbtReport::default();
@@ -103,6 +112,9 @@ pub fn run_fbbt(
     assert_eq!(x_hi.len(), n_vars, "x_hi length");
     assert_eq!(g_lo.len(), n_constraints, "g_lo length");
     assert_eq!(g_hi.len(), n_constraints, "g_hi length");
+    if let Some(mask) = row_kept {
+        assert_eq!(mask.len(), n_constraints, "row_kept length");
+    }
 
     let cap = if cfg.max_constraints == 0 {
         n_constraints
@@ -115,6 +127,11 @@ pub fn run_fbbt(
         let mut improved = false;
 
         for i in 0..cap {
+            if let Some(mask) = row_kept {
+                if !mask[i] {
+                    continue;
+                }
+            }
             let Some(tape) = provider.constraint_expression(i) else {
                 continue;
             };
@@ -231,6 +248,7 @@ mod tests {
             &mut x_hi,
             &[1.0],
             &[1.0],
+            None,
             &FbbtConfig::default(),
         );
         assert!(r.infeasibility_witness.is_none());
@@ -261,6 +279,7 @@ mod tests {
             &mut x_hi,
             &[Number::NEG_INFINITY],
             &[10.0],
+            None,
             &FbbtConfig::default(),
         );
         assert!(r.infeasibility_witness.is_none());
@@ -304,6 +323,7 @@ mod tests {
             &mut x_hi,
             &[Number::NEG_INFINITY, 0.5],
             &[1.0, 0.5],
+            None,
             &FbbtConfig::default(),
         );
         assert!(r.infeasibility_witness.is_none());
@@ -336,6 +356,7 @@ mod tests {
             &mut x_hi,
             &[1.0],
             &[5.0],
+            None,
             &FbbtConfig::default(),
         );
         assert_eq!(r.infeasibility_witness, Some(0));
@@ -356,6 +377,7 @@ mod tests {
             &mut x_hi,
             &[-100.0],
             &[100.0],
+            None,
             &FbbtConfig::default(),
         );
         assert!(r.infeasibility_witness.is_none());
@@ -393,6 +415,7 @@ mod tests {
             &mut x_hi,
             &[1.0, 0.0],
             &[1.0, 0.0],
+            None,
             &cfg,
         );
         assert!(r.infeasibility_witness.is_none());
@@ -434,6 +457,7 @@ mod tests {
             &mut x_hi,
             &[-1.0, -1.0],
             &[1.0, 1.0],
+            None,
             &cfg,
         );
         // x_0 must have tightened, x_1 untouched.
@@ -470,6 +494,7 @@ mod tests {
             &mut x_hi,
             &[5.0],
             &[5.0],
+            None,
             &FbbtConfig::default(),
         );
         // For y values on a grid, x = 5 - y²; test that (x, y) lies
@@ -494,5 +519,62 @@ mod tests {
                 "feasible y={y} dropped"
             );
         }
+    }
+
+    /// H12: the `row_kept` mask must keep FBBT from ever touching a row a
+    /// prior presolve phase dropped. Constraint 0 demands `x = 5` over the
+    /// box `x ∈ [0, 1]` — infeasible. With no mask FBBT (correctly, for a
+    /// live row) flags it; but when Phase 0 has dropped that row, running
+    /// propagation against the aux-clamped box manufactures a spurious
+    /// infeasibility. Masking the row out must suppress that and leave the
+    /// box untouched.
+    #[test]
+    fn dropped_row_is_skipped_and_does_not_flag_infeasible() {
+        let tape = FbbtTape {
+            ops: vec![FbbtOp::Var(0)],
+        };
+        // Row 0: `x = 5` (bound [5,5]); row 1: a no-op (`None` tape).
+        let provider = StubProvider {
+            tapes: vec![Some(tape), None],
+        };
+        let g_lo = [5.0, 0.0];
+        let g_hi = [5.0, 0.0];
+        let cfg = FbbtConfig::default();
+
+        // Control — row 0 live: FBBT flags it infeasible against [0,1].
+        let mut x_lo = [0.0];
+        let mut x_hi = [1.0];
+        let r = run_fbbt(
+            &provider, 1, 2, &mut x_lo, &mut x_hi, &g_lo, &g_hi, None, &cfg,
+        );
+        assert_eq!(
+            r.infeasibility_witness,
+            Some(0),
+            "a live `x = 5` row over [0,1] must read infeasible (control)"
+        );
+
+        // Fixed — row 0 dropped by Phase 0: masked out, no false infeasibility.
+        let mut x_lo = [0.0];
+        let mut x_hi = [1.0];
+        let r = run_fbbt(
+            &provider,
+            1,
+            2,
+            &mut x_lo,
+            &mut x_hi,
+            &g_lo,
+            &g_hi,
+            Some(&[false, true]),
+            &cfg,
+        );
+        assert_eq!(
+            r.infeasibility_witness, None,
+            "a dropped row must never manufacture infeasibility"
+        );
+        assert_eq!(
+            (x_lo[0], x_hi[0]),
+            (0.0, 1.0),
+            "the box must be untouched when the only constraint is masked out"
+        );
     }
 }
