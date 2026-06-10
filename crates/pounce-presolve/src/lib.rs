@@ -984,6 +984,15 @@ impl TNLP for PresolveTnlp {
             let s = self.state.as_ref().expect("inited");
             s.reduction_stack.iter_top_down().cloned().collect()
         };
+        // Bound multipliers forwarded to the inner finalize. At each frame's
+        // Phase-0 aux-fixed variables these are zeroed once the variable's
+        // dropped-row multipliers are recovered below:
+        // `recover_dropped_multipliers` folds the entire stationarity residual
+        // into λ under the documented assumption `z_l = z_u = 0` there, so
+        // forwarding the IPM's clamp multipliers unchanged would double-count
+        // that contribution and break `∇f − Jᵀλ − z_l + z_u = 0`.
+        let mut z_l_full = sol.z_l.to_vec();
+        let mut z_u_full = sol.z_u.to_vec();
         if !frames.is_empty() && m_inner > 0 {
             let mut grad_f = vec![0.0; n_inner];
             let ok_grad = self
@@ -1042,6 +1051,16 @@ impl TNLP for PresolveTnlp {
                         for (idx, &r) in frame.dropped_rows.iter().enumerate() {
                             lambda_full[r] = lam_dropped[idx];
                         }
+                        // The recovered λ now carries this frame's fixed-var
+                        // stationarity; drop the IPM's clamp multipliers there.
+                        for &i in &frame.fixed_vars {
+                            if i < z_l_full.len() {
+                                z_l_full[i] = 0.0;
+                            }
+                            if i < z_u_full.len() {
+                                z_u_full[i] = 0.0;
+                            }
+                        }
                     }
                 }
             }
@@ -1050,8 +1069,8 @@ impl TNLP for PresolveTnlp {
             Solution {
                 status: sol.status,
                 x: sol.x,
-                z_l: sol.z_l,
-                z_u: sol.z_u,
+                z_l: &z_l_full,
+                z_u: &z_u_full,
                 g: &g_full,
                 lambda: &lambda_full,
                 obj_value: sol.obj_value,
@@ -1601,5 +1620,142 @@ mod tests {
         // tighten_report must NOT have flagged infeasibility.
         let rpt = wrapped.tighten_report();
         assert!(!rpt.infeasible, "Phase 1 falsely flagged infeasibility");
+    }
+
+    /// Same model as [`TwoVarSquareEq`] but records the bound multipliers
+    /// `z_l`/`z_u` that `finalize_solution` forwards to the inner TNLP, so a
+    /// test can assert what the reported KKT point carries.
+    struct RecordingTwoVar {
+        rec: Rc<RefCell<Option<(Vec<Number>, Vec<Number>)>>>,
+    }
+    impl TNLP for RecordingTwoVar {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            *self.rec.borrow_mut() = Some((sol.z_l.to_vec(), sol.z_u.to_vec()));
+        }
+    }
+
+    /// Regression for H10. Phase 0 clamps `x_l = x_u = v` at the two
+    /// eliminated variables, so the IPM reports large bound multipliers
+    /// there. `recover_dropped_multipliers` attributes the *whole*
+    /// stationarity residual to the recovered row multipliers λ under the
+    /// documented assumption `z_l = z_u = 0` at those variables; if
+    /// `finalize_solution` forwards the clamp multipliers unchanged the
+    /// contribution is double-counted and the reported point violates
+    /// `∇f − Jᵀλ − z_l + z_u = 0`. The fix zeros `z_l`/`z_u` at every
+    /// frame's `fixed_vars` once their λ has been recovered.
+    #[test]
+    fn phase0_finalize_zeroes_bound_multipliers_at_fixed_vars() {
+        let rec = Rc::new(RefCell::new(None));
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(RecordingTwoVar {
+            rec: Rc::clone(&rec),
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 2, "variable count unchanged (clamp, not reduce)");
+        assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
+
+        // The reduced solve returns the clamped point (2, 1); the IPM places
+        // large bound multipliers on the now-fixed variables, and the reduced
+        // problem has no rows (so empty g / lambda).
+        let x = [2.0, 1.0];
+        let z_l = [7.0, 0.0];
+        let z_u = [0.0, 3.0];
+        let g: [Number; 0] = [];
+        let lambda: [Number; 0] = [];
+        let sol = Solution {
+            status: pounce_nlp::alg_types::SolverReturn::Success,
+            x: &x,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g,
+            lambda: &lambda,
+            obj_value: 0.0,
+        };
+        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
+
+        let (got_zl, got_zu) = rec.borrow().clone().expect("inner finalize ran");
+        // fixed_vars = {0, 1}: both must be zeroed. Pre-fix the inner sees the
+        // forwarded clamp multipliers [7,0] / [0,3] verbatim.
+        assert_eq!(
+            got_zl,
+            vec![0.0, 0.0],
+            "z_l must be zeroed at aux-fixed vars (H10)"
+        );
+        assert_eq!(
+            got_zu,
+            vec![0.0, 0.0],
+            "z_u must be zeroed at aux-fixed vars (H10)"
+        );
     }
 }

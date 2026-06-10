@@ -18,6 +18,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H7 | convex: dual-infeasibility certificate validates recession `Gd` componentwise — false `DualInfeasible` on SOC/PSD | **FIXED** | `detect_infeasibility_with` gained a `primal_recession_ok` closure: the dual-inf branch now checks `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`; SOC/PSD ⇒ `cone.in_dual_cone(−Gd)`, valid since the composite cone is self-dual) instead of `gd_max ≤ tol`. A direction with `Gd ≤ 0` but `−Gd ∉ K` (e.g. `−Gd=(0.1,0.5) ∉ SOC`) no longer yields a bogus unboundedness proof. Tests `soc_recession_not_in_cone_is_not_dual_infeasible` + 2 in `ipm::detect_infeasibility_tests`. |
 | H8 | convex: non-symmetric HSDE driver validates Farkas/recession certs with the orthant test — wrong in both directions for exp/power | **FIXED** | `hsde_nonsym.rs:840` now calls `detect_infeasibility_nscone` (new helper) instead of the componentwise `detect_infeasibility`. Added `NsCone::in_dual_cone`/`in_primal_cone` (per-block dispatch; exp/power use their `BarrierCone` tests). The dual exp cone requires `u < 0`, so componentwise `z ≥ 0` both **rejected** genuine exp Farkas certs (→ `IterationLimit`) and **accepted** all-nonnegative `z ∉ K_exp*` (false `PrimalInfeasible`); both fixed. `detect_infeasibility_with` made `pub(crate)`; the plain componentwise `detect_infeasibility` is now test/docs-only. Tests `exp_farkas_certificate_rejected_componentwise_accepted_cone_aware`, `nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise`, `nscone_exp_membership_disagrees_with_componentwise`. |
 | H9 | convex: `presolve_conic` protects only `SecondOrder` rows — unsound reductions / wrong `Infeasible` for PSD/exp/power rows | **FIXED** | Two layers fixed. (1) `presolve_conic` now protects **every** non-`Nonneg` cone block (`!matches!(spec, ConeSpec::Nonneg(_))`), not just `SecondOrder`. (2) The deeper bug: `build_rows` independently collapsed empty rows — a post-substitution empty cone row with `h<0` returned `Err`→`Infeasible`, and a feasible empty cone row (`h≥0`) was silently dropped, desyncing `reduced_cones`. `build_rows` now takes a `protected` mask and keeps coupled cone rows verbatim (the `0·x ≤ h` slack `s=h` is legal — e.g. `(−1,1,5) ∈ K_exp`); `pivot_divisor` guards empty rows. Tests `exp_cone_empty_row_negative_h_is_not_infeasible`, `exp_cone_activity_redundant_row_not_dropped` in `tests/presolve_conic.rs`. |
+| H10 | presolve: postsolve does not zero `z_l`/`z_u` at aux-fixed variables — reported duals violate stationarity | **FIXED** | `finalize_solution` (`lib.rs:1049`) forwarded `sol.z_l`/`sol.z_u` verbatim, but `recover_dropped_multipliers` folds the entire fixed-var stationarity residual into the recovered λ assuming `z_l = z_u = 0` there — double-counting against the IPM's large clamp multipliers. Now copies `z_l`/`z_u` into mutable buffers and zeros each `frame.fixed_vars` entry immediately after that frame's λ is recovered (only on `Ok` recovery; a failed recovery leaves λ=0 so the clamp multiplier is still legitimate). Test `phase0_finalize_zeroes_bound_multipliers_at_fixed_vars` (recording mock inner). |
 
 ## C1 detail
 
@@ -378,3 +379,34 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   post-fix. The step-1 mask fix alone left both still failing (`left:1`), which
   is what surfaced the deeper `build_rows` layer. Full `pounce-convex` suite
   green (103 lib + integration); `cargo fmt --check` clean.
+
+## H10 detail
+
+- **Bug**: `PresolveTnlp::finalize_solution` (`lib.rs:1049`) constructed the
+  inner `Solution` with `z_l: sol.z_l, z_u: sol.z_u` forwarded **unchanged**.
+  Phase 0 fixes block variables by clamping `x_l = x_u = v`, so the IPM emits
+  large bound multipliers at those variables. The dropped-row recovery
+  `recover_dropped_multipliers` (`reduction_frame.rs:205`) solves
+  `∇f − Jᵀλ = 0` at the fixed vars under the documented assumption
+  `z_l = z_u = 0` there — so the recovered λ already accounts for the full
+  residual. Forwarding the clamp multipliers too double-counts the
+  contribution, and the reported KKT point violates the stationarity
+  `∇f − Jᵀλ − z_l + z_u = 0`.
+- **Fix** (`lib.rs`): copy `sol.z_l`/`sol.z_u` into mutable `z_l_full`/
+  `z_u_full`; in the per-frame recovery loop, on a **successful** (`Ok`) λ
+  recovery, zero `z_l_full[i] = z_u_full[i] = 0` for every `i` in
+  `frame.fixed_vars` (length-guarded). Forward the buffers to the inner
+  `finalize_solution`. Zeroing only on `Ok` is deliberate: a failed recovery
+  leaves the dropped rows' λ at 0, so the IPM's clamp multiplier is still the
+  legitimate carrier of that variable's stationarity and must survive.
+- **Test** (`lib.rs` test module): `RecordingTwoVar` — same model as
+  `TwoVarSquareEq` (`x+y=3, x−y=1` → fixes `(2,1)`, both rows dropped, frame
+  `fixed_vars={0,1}`) but records the `z_l`/`z_u` its `finalize_solution`
+  receives. `phase0_finalize_zeroes_bound_multipliers_at_fixed_vars` drives a
+  reduced `Solution` with clamp multipliers `z_l=[7,0]`, `z_u=[0,3]` and
+  asserts the inner sees `[0,0]`/`[0,0]`.
+- **Verified by running code**: pre-fix FAILED (`left:[7.0,0.0]`, the
+  multipliers forwarded verbatim); post-fix PASSES. `m_inner = info_inner.m`
+  is the **full** row count, so the recovery+zeroing block runs even though
+  the reduced problem has 0 rows. Full `pounce-presolve` suite green (204 lib
+  + integration); `cargo fmt --check` clean.
