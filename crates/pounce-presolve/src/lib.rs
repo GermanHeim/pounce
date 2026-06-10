@@ -637,6 +637,31 @@ impl PresolveTnlp {
             linear_rows = full_linear_rows;
         }
 
+        // M25: a *genuine* Phase-1 infeasibility (empty feasible box) must not
+        // reach the IPM as crossed bounds `x_l > x_u`. `tighten_pass` returns
+        // the moment it detects `x_l[j] > x_u[j]`, leaving those crossed
+        // bounds in place; the rollback above only fires when Phase 0 made
+        // changes (`!reduction_stack.is_empty()`), so an infeasibility found
+        // with an empty reduction stack — or one that survives the rollback
+        // re-tighten — would otherwise hand a degenerate box to the solver,
+        // which reports an invalid-problem error instead of a clean
+        // infeasibility verdict. Presolve has no channel to certify
+        // infeasibility, so — mirroring the aux rollback above and the FBBT
+        // handling below — restore the original inner box (always a valid box)
+        // and let the IPM run on it and certify infeasibility itself. The
+        // `tighten_report.infeasible` flag is preserved and surfaced via
+        // `tighten_report()` for diagnostics.
+        if tighten_report.infeasible {
+            x_l.copy_from_slice(&inner_x_l);
+            x_u.copy_from_slice(&inner_x_u);
+            tracing::warn!(
+                target: "pounce::presolve",
+                "Phase 1 bound tightening proved the feasible region empty; its \
+                 crossed bounds are being discarded — the solve proceeds on the \
+                 original box so the IPM can certify infeasibility itself."
+            );
+        }
+
         // Phase 1b — FBBT (issue #62). Runs interval arithmetic over
         // each nonlinear constraint's expression DAG to tighten
         // variable bounds further. No-op when (a) `presolve_fbbt` is
@@ -1981,6 +2006,115 @@ mod tests {
         let jac = 1.0; // ∂g0/∂x
         let stat = grad_f - jac * lamf[0] - z_l[0] + z_u[0];
         assert!(stat.abs() < 1e-12, "KKT stationarity residual {stat}");
+    }
+
+    /// M25 scratch: one variable, box `x ∈ [0, 10]`, two contradictory linear
+    /// rows `x ≥ 5` and `x ≤ 3`. Phase 1 tightens `x_l = 5`, `x_u = 3` and
+    /// flags infeasible. Auxiliary is off, so the reduction stack is empty and
+    /// the rollback guard does NOT fire.
+    struct TwoContradictoryRows;
+    impl TNLP for TwoContradictoryRows {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 2,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 10.0;
+            b.g_l[0] = 5.0; // x ≥ 5
+            b.g_u[0] = 1e19;
+            b.g_l[1] = -1e19; // x ≤ 3
+            b.g_u[1] = 3.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 4.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            g[1] = x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 0]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Regression for M25. A genuine Phase-1 infeasibility found with an empty
+    /// reduction stack (auxiliary off, so the aux rollback guard never fires)
+    /// must NOT hand crossed bounds `x_l > x_u` to the IPM — that triggers an
+    /// invalid-problem failure instead of a clean infeasibility verdict.
+    /// Presolve restores the original box and lets the IPM certify
+    /// infeasibility itself; the `infeasible` flag is still surfaced for
+    /// diagnostics.
+    #[test]
+    fn phase1_infeasible_restores_valid_box_for_ipm() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoContradictoryRows));
+        let opts = PresolveOptions {
+            enabled: true,
+            bound_tightening: true,
+            auxiliary: false,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let _info = wrapped.get_nlp_info().expect("init ok");
+
+        // The infeasibility is still detected and surfaced for diagnostics.
+        assert!(
+            wrapped.tighten_report().infeasible,
+            "Phase 1 must still flag the empty feasible region"
+        );
+
+        // But the box handed to the IPM is the original, valid box — not the
+        // crossed `[5, 3]` Phase 1 derived.
+        let b = wrapped.cached_bounds().expect("inited");
+        assert!(
+            b.x_l[0] <= b.x_u[0] + 1e-12,
+            "M25: bounds handed to IPM must be valid, got x_l={} > x_u={}",
+            b.x_l[0],
+            b.x_u[0]
+        );
+        assert!(
+            (b.x_l[0] - 0.0).abs() < 1e-12 && (b.x_u[0] - 10.0).abs() < 1e-12,
+            "box restored to the original [0, 10], got [{}, {}]",
+            b.x_l[0],
+            b.x_u[0]
+        );
     }
 
     /// 1-variable, 2-constraint TNLP that drives FBBT into a partial

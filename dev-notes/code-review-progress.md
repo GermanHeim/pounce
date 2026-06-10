@@ -48,6 +48,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M22 | SOS SDP assembly iterates a `HashMap`, so the coefficient-matching row order — and hence the solver's floating-point results — is nondeterministic run-to-run | **FIXED** | **Mechanism confirmed + reproduced by running code.** `build_sos_sdp` (`crates/pounce-convex/src/sos.rs`) accumulates the coefficient-matching equalities in `by_mono: HashMap<Vec<usize>, Vec<(usize,f64)>>` and then emits one SDP row per entry by iterating `for (alpha, terms) in &by_mono`. Rust's `HashMap` is seeded per-instance (DoS-resistant `RandomState`), so the iteration order — and therefore the assignment of monomials to SDP rows — changes every run; the solver then walks a different (mathematically equivalent) row permutation each time, yielding run-to-run floating-point drift in the bound/minimizers (the SOS tests carry loose `1e-5` tolerances to absorb it). **Reproduced**: building the *same* problem twice in one process (each `HashMap` gets a distinct seed) gives different RHS row order and a different monomial→row map every run — `qp1.b == qp2.b` and `mi1.row_of == mi2.row_of` were both **false** across three separate processes. **Fix**: switch `by_mono` to a `BTreeMap<Vec<usize>, …>` (keys are exponent vectors, which are `Ord`), so the row-emitting iteration is in deterministic sorted-by-monomial order. One-line type change plus the import; `row_of`/`coeff_map` stay `HashMap` (lookup-only, order irrelevant — their row *values* are now deterministic because they derive from the ordered `by_mono` walk). No numerical or API change beyond fixing the ordering. **Verified post-fix**: the same twice-build probe now yields `qp1.b == qp2.b` **and** `mi1.row_of == mi2.row_of` (true); all SOS bound/extraction tests still pass. **Test** (`sos::tests::sdp_row_order_is_deterministic`): builds the SDP twice and asserts identical RHS order and monomial→row map. **Pre-fix FAILS** (`RHS row order differs between builds`), confirmed by reverting `by_mono` to `HashMap`, then restored. `pounce-convex` (106 lib + all integration, 0 failed) and `pounce-py` build green. See `## M22 detail`. |
 | M23 | `PsdCone::kkt_block` is O(n⁵) per cone per IPM iteration (it applies the scaling operator to every svec unit vector); `lyapunov_solve` likewise uses O(n⁴) quadruple loops instead of two matmuls — dominant per-iteration cost for PSD/SOS moment SDPs | **FIXED** | **Cost confirmed by timing.** `kkt_block` (`crates/pounce-convex/src/cones/psd.rs`) built the `m×m` (`m = n(n+1)/2`) symmetric-Kronecker block `H = W ⊗ₛ W` by, for each of the `m = O(n²)` svec unit vectors `e_b`, calling `apply_scaling` (two O(n³) matmuls `W·smat(e_b)·W`) and extracting the column — O(n²·n³) = **O(n⁵)** per cone per iteration. `lyapunov_solve` formed `R̃ = QᵀRQ` and `D = QD̃Qᵀ` with explicit quadruple loops — **O(n⁴)** each instead of O(n³). For SOS moment SDPs (one large PSD cone, `n` = moment-matrix size) this is the dominant per-iteration work. **Reproduced by running code**: a timing probe over `n = 8,16,24,32` showed the old construction scaling steeply super-quartically (`n=16→0.00052s`, `n=24→0.0036s`, `n=32→0.014s`, ~factor-7 per `n`-doubling between the O(n⁴) and O(n⁵) regimes). **Fix**: replace the per-unit-vector loop with a **closed form** for the symmetric-Kronecker entries — column `b ↔ svec pair (p,q)`, `D = W·smat(e_b)·W` has `D_ij = W_ip W_jp` (`p=q`) or `(W_ip W_jq + W_iq W_jp)/√2` (`p>q`), and `H[a][b] = (i=j ? 1 : √2)·D_ij` for output pair `(i,j)` — building the lower triangle directly in **O(n⁴)** (one `O(1)` expression per of the `O(n⁴)` entries). `lyapunov_solve` rewritten to transpose `Q` once (column-major→row-major) and use the existing `matmul` for both congruences — **O(n³)**. No public API, cone layout (`ConeBlock::DenseLower`, svec √2 convention), or numerical contract changed. **Verified post-fix**: the same timing probe gives `n=32` **20.1× faster** (`0.014s → 0.0007s`), and the measured speedup grows ~linearly in `n` (1.2×→6.4×→13.1×→20.1× over `n=8,16,24,32`) — exactly the O(n) factor O(n⁵)→O(n⁴) predicts. **Tests**: `cones::psd::tests::kkt_block_matches_apply_scaling_reference` asserts the closed-form block reproduces — entry for entry, within `1e-9`, over `n = 1,2,3,5,8` — the reference built by applying `W⊗ₛW` to each unit vector (the previous construction); the existing `kkt_block_maps_z_to_s` (defining property `H·svec(z)=svec(s)`), `recover_ds_matches_block_and_rhs`, and `lyapunov_inverts_jordan` (`z∘(Arw(z)⁻¹r)=r`, guards the matmul rewrite) all still pass. **Pre-fix FAILS** (`[0][0]: … vs …`), confirmed by perturbing the closed-form entry by `1e-3`, then restored. `pounce-convex` (107 lib + all integration, 0 failed) and `pounce-py` build green. See `## M23 detail`. |
 | M24 | Rows dropped as redundant *because of the bound-tightening they themselves implied* (e.g. `x ≥ 2` tightens `x_l = 2`, then is dropped) get `λ = 0`; if that bound is active the IPM reports the dual on a variable-bound multiplier (`z_l`/`z_u`) against a bound absent from the original problem | **DOCUMENTED** (verified; design-inherent, fix deferred) | **Mechanism confirmed + reproduced by running code.** Phase 2 (`crates/pounce-presolve/src/redundant.rs`) drops a linear row when its activity interval over the current box is `⊆ [lo, hi]`; a row like `x ≥ 2` first tightens `x_l = 2` in Phase 1, so its activity `[2, 10] ⊆ [2, +∞)` and Phase 2 drops it. The reduced solve then puts the dual on the (presolve-created) *variable bound* `x ≥ 2`, while the reinstated row keeps `λ = 0` — the dual is attributed to a bound that did not exist in the original `.nl`. **Reproduced**: a single-variable `min x s.t. x ≥ 2` (orig. box `[0,10]`) driven through `PresolveTnlp` reports `n_dropped_rows = 1`, `m: 1→0`, `x_l` tightened to `2`; finalizing the reduced optimum `x=2` with `z_l=1` gives recovered full-space `λ[0] = 0` (the dual stays on `z_l`, is *not* transferred to the row). **Scope**: the review notes "primal/objective unaffected; inherent to the design and worth documenting or fixing via dual transfer." Verified that the KKT certificate is intact — stationarity `∇f − Jᵀλ − z_l + z_u = 1 − 0 − 1 + 0 = 0` holds with the dual on `z_l`; only the *attribution* (bound multiplier vs. row `λ`) differs from a no-presolve solve. **Why documented, not fixed**: a faithful dual transfer needs Phase-1 *provenance* (which row implied which bound) — `bound_tighten::tighten_bounds` returns only counts (`TightenReport`), records no row→bound link, and the multi-variable case is genuinely ambiguous (a row binding at a box vertex maps to several bound multipliers). The existing `recover_dropped_multipliers` machinery covers only Phase-0 aux-eliminated rows (reduction-stack frames), not Phase-2 redundant rows. Adding provenance plumbing is a substantial, risky change the review itself ranks behind documenting; deferred as future work with an explicit target. **Action**: expanded the Phase 2 module-doc with a "Dual-attribution caveat (issue M24)" paragraph stating the limitation precisely (primal/objective/KKT unaffected, attribution differs, transfer needs untracked provenance), and added a **characterization test** `tests::dropped_row_dual_lands_on_bound_not_row` pinning the behavior: row dropped, `x_l→2`, full-space `λ[0]==0`, primal `x=2`, and KKT stationarity residual `≈0`. The `λ[0]==0` assertion is the explicit hook a future dual-transfer fix would flip to `λ[0]≈z_l`. Doc-only + test; no behavior change. `pounce-presolve` (208 lib + integration, 0 failed) and `pounce-py` build green. See `## M24 detail`. |
+| M25 | A genuine Phase-1 infeasibility leaves crossed bounds `x_l > x_u` in the box handed to the IPM — the rollback guard only fires when the reduction stack is non-empty, so an infeasibility found with an empty stack reaches the solver as a degenerate problem | **FIXED** | **Mechanism confirmed + reproduced by running code.** `tighten_pass` (`crates/pounce-presolve/src/bound_tighten.rs:128-131`) returns the instant it derives `x_l[j] > x_u[j]`, leaving those crossed bounds written into `x_l`/`x_u`. In `lib.rs` the only restoration was the aux-rollback guard (`if tighten_report.infeasible && !reduction_stack.is_empty()`, `:609`), which re-runs Phase 1 on un-filtered rows — but it is gated on a *non-empty* reduction stack. When `auxiliary` is off (the default) the stack is empty, so a genuine Phase-1 infeasibility skips the guard entirely and the crossed box flows straight into `CachedBounds` (`:821`) → the IPM, which reports an invalid-problem error rather than a clean infeasibility verdict. (The FBBT path at `:679-695` already handles its own infeasibility correctly by restoring the pre-FBBT box; the Phase-1 path did not.) **Reproduced**: a single-variable TNLP with box `x ∈ [0,10]` and two contradictory linear rows `x ≥ 5`, `x ≤ 3` (auxiliary off) — after `get_nlp_info`, `tighten_report().infeasible == true` and `cached_bounds()` returns `x_l = [5.0]`, `x_u = [3.0]` (crossed). **Fix** (mirrors the aux rollback and FBBT handling): after the Phase-1 block, `if tighten_report.infeasible { x_l.copy_from_slice(&inner_x_l); x_u.copy_from_slice(&inner_x_u); }` — restore the pristine original inner box (snapshotted at `:472-473`, always a valid box; it is also the correct target after a rollback re-tighten that stays infeasible, since the rollback already restored to it before re-tightening). The IPM then runs on a well-posed box and certifies infeasibility itself; the `infeasible` flag is preserved and still surfaced via `tighten_report()` for diagnostics (a `tracing::warn!` records the discard). **Verified post-fix**: the same reproduction now returns `x_l = [0.0]`, `x_u = [10.0]` (valid, original box) while `tighten_report().infeasible` stays `true`. **Test** (`tests::phase1_infeasible_restores_valid_box_for_ipm`): asserts the box handed to the IPM is valid (`x_l ≤ x_u`, restored to `[0,10]`) and the infeasibility is still flagged. **Pre-fix FAILS** (`bounds handed to IPM must be valid, got x_l=5 > x_u=3`), confirmed by neutering the guard (`&& false`), then restored. The existing aux-rollback test (`phase0_via_tnlp_no_infeasible_with_default_bound_tightening`) — where the rollback *clears* the infeasibility — is unaffected (the new guard only fires when `infeasible` survives). `pounce-presolve` (209 lib + integration, 0 failed) and `pounce-py` build green. See `## M25 detail`. |
 
 ## C1 detail
 
@@ -2112,3 +2113,69 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **Result**: `pounce-presolve` green (208 lib + all integration, 0 failed);
   `pounce-py` builds clean. No public API or numerical behavior changed — the
   item is verified and documented, with the dual-transfer fix deferred.
+
+## M25 detail
+
+- **Issue (review M25)**: Phase 1 bound tightening can prove the feasible
+  region empty and, in doing so, leave the variable box *crossed*
+  (`x_l[j] > x_u[j]`). `tighten_pass`
+  (`crates/pounce-presolve/src/bound_tighten.rs:128-131`) writes the tightened
+  `x_l[j] = nl` / `x_u[j] = nh` and only *then* checks `x_l[j] > x_u[j] + tol`,
+  returning immediately with `infeasible = true` and the crossed bounds in
+  place. In `lib.rs` the sole restoration was the aux-rollback guard
+  (`if tighten_report.infeasible && !reduction_stack.is_empty()`, `:609`):
+  it restores the pre-Phase-0 box, undoes the row drops, clears the reduction
+  stack, and re-runs Phase 1 on the un-filtered rows — but it is gated on a
+  **non-empty** reduction stack.
+- **Why it matters**: `auxiliary` is off by default, so the reduction stack is
+  empty for the common case. A genuine Phase-1 infeasibility then skips the
+  guard entirely, and the crossed box flows into `CachedBounds { x_l, x_u, … }`
+  (`:821`) and on to the IPM via `get_bounds_info`. An interior-point method
+  handed `x_l > x_u` cannot initialize a strictly-interior point and reports an
+  invalid-problem / bad-bounds error — a confusing failure in place of the
+  clean "infeasible" verdict the IPM would return if it were allowed to run on
+  a valid box. (The FBBT path at `:679-695` already does the right thing for
+  its own infeasibility: it snapshots the pre-FBBT box and restores it so the
+  IPM can certify infeasibility itself. Phase 1 lacked the analogous step.)
+- **Reproduced by running code**: a single-variable TNLP, box `x ∈ [0, 10]`,
+  two contradictory linear rows `x ≥ 5` (row 0) and `x ≤ 3` (row 1), both
+  marked `Linear`, `auxiliary = false`. After `get_nlp_info`:
+  `tighten_report().infeasible == true`, and `cached_bounds()` returns
+  `x_l = [5.0]`, `x_u = [3.0]` — crossed, exactly what would reach the IPM.
+- **Fix** (mirrors the aux rollback and the FBBT handling): immediately after
+  the Phase-1 block, restore the original inner box whenever the tighten still
+  reports infeasibility:
+
+  ```rust
+  if tighten_report.infeasible {
+      x_l.copy_from_slice(&inner_x_l);
+      x_u.copy_from_slice(&inner_x_u);
+      tracing::warn!(target: "pounce::presolve", "Phase 1 … crossed bounds … discarded …");
+  }
+  ```
+
+  `inner_x_l`/`inner_x_u` are the pristine original bounds snapshotted at
+  `:472-473` (only ever read afterward), so they are always a valid box. This
+  is also the correct target for the *non-empty-stack* path: the aux rollback
+  restores to those same inner bounds before re-tightening, so if the re-run
+  stays infeasible, restoring to them again is exactly right (and the aux
+  elimination has already been rolled back). The `infeasible` flag is left set
+  and surfaced via `tighten_report()` for diagnostics. Phase 4 warm-z (which
+  compares `x_l` to `inner_x_l`) and Phase 2 redundancy then run on the valid,
+  un-tightened box — both conservative and correct.
+- **Verified post-fix**: the same reproduction now returns `x_l = [0.0]`,
+  `x_u = [10.0]` (the original box) while `tighten_report().infeasible`
+  remains `true` — a valid box reaches the IPM, the infeasibility is still
+  reported.
+- **Test** (`tests::phase1_infeasible_restores_valid_box_for_ipm`): asserts
+  `tighten_report().infeasible`, `x_l ≤ x_u`, and the box restored to
+  `[0, 10]`.
+- **Fail-first**: neutering the guard (`if tighten_report.infeasible && false`)
+  makes the test fail with `bounds handed to IPM must be valid, got
+  x_l=5 > x_u=3`; restored after confirmation.
+- **Regression safety**: the existing aux-rollback test
+  (`phase0_via_tnlp_no_infeasible_with_default_bound_tightening`), where the
+  rollback re-tighten *clears* the infeasibility, is unaffected — the new guard
+  fires only when `infeasible` survives the Phase-1 block.
+- **Result**: `pounce-presolve` green (209 lib + all integration, 0 failed);
+  `pounce-py` builds clean.
