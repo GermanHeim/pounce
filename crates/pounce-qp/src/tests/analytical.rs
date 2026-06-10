@@ -1685,3 +1685,86 @@ fn problem_5_infeasibility_certified_by_elastic_mode() {
         sol.x[0]
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// M5 regression (dev-notes/code-review-2026-06.md): a warm start can
+// drive `solve` to report `Optimal` at a point that violates an
+// equality row the caller left `Inactive`.
+//
+//     min ½‖x‖²   s.t.   x₁ + x₂ = 2   (no bounds)
+//
+// True optimum: x* = (1, 1), obj = 1. We warm-start at x = (0, 0)
+// with the single equality row marked `Inactive` (not `Equality`).
+//
+// Pre-fix: the inner loop sees no active rows, computes p = −Hx − g
+// = 0, declares KKT-stationarity, finds no active row to drop, and
+// returns `Optimal` at (0, 0) — which violates x₁ + x₂ = 2 by 2.0
+// (the ratio test would have `continue`d past the equality row even
+// if it had been reached). Post-fix: the feasibility audit catches
+// the violation and recovers through elastic mode, returning the
+// true feasible optimum (1, 1).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn m5_warm_start_inactive_equality_is_not_a_false_optimal() {
+    let n = 2;
+    let m = 1;
+    let h = identity_hessian(n);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0, 0.0];
+    let bl = [2.0];
+    let bu = [2.0];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    // Infeasible warm start with the equality row left Inactive.
+    let ws = crate::QpWarmStart {
+        x: vec![0.0, 0.0],
+        lambda_g: vec![0.0],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::Inactive; 2],
+            constraints: vec![crate::ConsStatus::Inactive],
+        },
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, Some(&ws), &QpOptions::default()).unwrap();
+
+    // The returned point MUST satisfy the equality (this is the
+    // assertion that fails pre-fix: x = (0, 0) ⇒ residual 2.0).
+    let residual = (sol.x[0] + sol.x[1] - 2.0).abs();
+    assert!(
+        residual < 1e-6,
+        "returned x = ({}, {}) violates x₁+x₂=2 by {residual}; status = {:?}",
+        sol.x[0],
+        sol.x[1],
+        sol.status
+    );
+
+    // And it must be the true optimum, reported feasible.
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Optimal,
+        "status = {:?}",
+        sol.status
+    );
+    assert!((sol.x[0] - 1.0).abs() < 1e-6, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 1.0).abs() < 1e-6, "x[1] = {}", sol.x[1]);
+}

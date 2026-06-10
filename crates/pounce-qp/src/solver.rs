@@ -1571,10 +1571,31 @@ impl QpSolver for ParametricActiveSetSolver {
         // Any of: caller provided a warm start, or the problem has at
         // least one one-sided / two-sided general inequality row.
         if ws.is_some() || has_general_inequality {
-            if opts.use_schur_updates {
-                return self.solve_general_schur(qp, ws, opts);
+            let sol = if opts.use_schur_updates {
+                self.solve_general_schur(qp, ws, opts)?
+            } else {
+                self.solve_general(qp, ws, opts)?
+            };
+
+            // Feasibility audit (M5): the warm-start inner loop steps
+            // with a zero-RHS active-set system, so the residuals of
+            // caller-marked-active rows are frozen and an equality row
+            // left `Inactive` can never enter the working set — either
+            // way the loop can converge to a constraint-violating point
+            // and label it `Optimal`. Audit every row + bound; on
+            // violation, recover through elastic mode (the same
+            // recovery the cold path uses when `cold_general_initial`
+            // returns an infeasible point). `solve_elastic` recurses
+            // through `solve_general` *directly*, bypassing this entry,
+            // and seeds a slack-feasible augmented problem — so the
+            // recursive solve is never re-audited and the recovery
+            // cannot loop. Feasible warm/cold results pass untouched.
+            if matches!(sol.status, QpStatus::Optimal)
+                && !point_is_feasible(qp, &sol.x, opts.feas_tol)
+            {
+                return self.solve_elastic(qp, opts);
             }
-            return self.solve_general(qp, ws, opts);
+            return Ok(sol);
         }
 
         // Cold-start fast paths for problems with no general
@@ -1670,6 +1691,41 @@ impl QpSolver for ParametricActiveSetSolver {
 
 /// Evaluate `½ xᵀ H x + gᵀ x`, walking the symmetric Hessian once
 /// and fanning each off-diagonal entry into both halves.
+/// Feasibility audit for a candidate solution `x` (M5). Checks every
+/// general-constraint row — **including equality rows** (`bl == bu`) —
+/// and every variable bound against `feas_tol`. Returns `true` iff `x`
+/// violates none of them.
+///
+/// The warm-start path of [`ParametricActiveSetSolver::solve_general`]
+/// trusts the caller's `(x, working)` and steps with a zero-RHS active-
+/// set system, so the residuals of rows the caller marked active are
+/// frozen and never re-checked; an equality row the caller left
+/// `Inactive` is skipped by the ratio test (`bl == bu` ⇒ `continue`)
+/// and can never enter the working set. Either way the inner loop can
+/// reach a KKT-stationary point that violates a constraint and report
+/// it as `Optimal`. `solve` runs this audit before trusting an
+/// `Optimal` and recovers through elastic mode on failure.
+fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
+    let ax = a_times_x(qp.a, x, qp.m);
+    for i in 0..qp.m {
+        if qp.bl[i] > NLP_LOWER_BOUND_INF && ax[i] < qp.bl[i] - feas_tol {
+            return false;
+        }
+        if qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] > qp.bu[i] + feas_tol {
+            return false;
+        }
+    }
+    for (i, &xi) in x.iter().enumerate() {
+        if qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - feas_tol {
+            return false;
+        }
+        if qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + feas_tol {
+            return false;
+        }
+    }
+    true
+}
+
 fn quad_objective(qp: &QpProblem, x: &[Number]) -> Number {
     let mut quad = 0.0;
     let irows = qp.h.irows();

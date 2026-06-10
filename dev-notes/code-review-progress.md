@@ -28,6 +28,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M2 | algorithm: `accept_trial_point` silently nulls `curr` when no trial is staged | **FIXED** | **Mechanism confirmed by code inspection**: `accept_trial_point` (`ipopt_data.rs:203-205`) did `self.curr = self.trial.take()` unconditionally; `ipopt_alg.rs:1121` calls it every iteration. In the documented bookkeeping-only `iterate()` path (no NLP + no `search_dir`, module docs `ipopt_alg.rs:17-22`), step 5 (`ipopt_alg.rs:724-727`) is skipped, so `delta` stays `None`, `have_delta == false` (`ipopt_alg.rs:994`), and no trial is staged — yet accept still ran, nulling `curr`. The next iteration's `IpoptCq::curr_iv` (`ipopt_cq.rs:107-112`) then hits `unreachable!("curr iterate not set")`. **Fix**: guard the promotion — `if let Some(trial) = self.trial.take() { self.curr = Some(trial); }`, preserving `curr` when nothing is staged (normal path unchanged: trial is always `Some` after a line search, so it still promotes and clears `trial`). **Test** (`ipopt_data.rs` tests): `accept_trial_point_preserves_curr_when_no_trial_staged` sets `curr`, leaves `trial` unset, asserts `curr.is_some()` after accept. Pre-fix FAILS (`curr` nulled); post-fix PASSES alongside the existing `accept_trial_point_promotes_trial_to_curr`. Full `pounce-algorithm` suite green (323 passed, 0 failed). |
 | M3 | algorithm: `LeastSquareMults` lacks the δ_c/δ_d inertia workaround its sibling has | **FIXED** (trigger not synthetically reproducible — see note) | **Mechanism confirmed by code inspection**: `calculate_y_eq` (`eq_mult/least_square.rs:106-119`) solved the W=0 augmented system with `delta_c = delta_d = 0.0`, while the dual initializer (`init/default.rs:154-194`) solves the *identical* W=0 / structurally-zero (3,3)/(4,4)-block system but perturbs `delta_c = delta_d = 1e-8` specifically because pounce-feral's LDLᵀ mis-reports the inertia of that block (counted 0 negative eigenvalues on `nuffield2_trap` where the true count is `n_c+n_d`, raising `WrongInertia`). With `check_neg = aug_solver.provides_inertia()` (feral → true) and `num_eq = n_c+n_d` passed to `solve` (`least_square.rs:133-135`), the LS solve can spuriously fail; the caller then **silently leaves `y_c=y_d=0`** (`init/default.rs:388-390`) — the iter-0 `inf_du` blow-up this step exists to prevent. "Duplicate logic that diverged." **Fix**: mirror the sibling's `1e-8` perturbation (`least_square.rs:115,118`), with a cross-reference comment to keep the two in sync. **Verification**: the fail-first trigger is feral's *data-dependent* inertia mis-report on a CUTEst matrix (`nuffield2_trap`) **not in the repo**; the aug-solver unit harness uses `DenseMock` (an exact LU oracle) which cannot reproduce it, so a synthetic fail-first test is not constructible — the *sibling* fix itself shipped on the same basis (no synthetic fail-first test, integration-validated). Regression-safety is verified by running: `constr_mult_init_max` defaults to `1e3 > 0`, so every constrained solve traverses `calculate_y_eq`; the constrained-problem integration tests (`optimize_hs71`, `optimize_hs14`, `hock_schittkowski_subset`) and the full `pounce-algorithm` suite stay green (323 passed, 0 failed), confirming the `1e-8` perturbation is numerically inert (the constraint Jacobian dominates). See `## M3 detail`. |
 | M4 | linalg: `symmetric_eigen` reports `true` on non-convergence | **FIXED** | **Confirmed by code inspection**: the doc (`eigen.rs:32-35`) promises `false` when the Jacobi sweeps run out, but the cyclic-Jacobi loop only `break`s on early convergence; after `max_sweeps` (50) it fell through to `return true` unconditionally (old `eigen.rs:153`). Callers branch on the verdict (`pounce-convex/src/cones/psd.rs:108,145,163,231`, `sos.rs:615,672,717`), so a stalled matrix would feed unconverged eigenpairs into PSD projections / SOS decompositions instead of the error path. **Fix**: track a `converged` flag (set on the early-`break`), recompute the off-diagonal mass once after the loop (to credit convergence achieved on the final sweep, whose state the top-of-loop check never sees), and `return converged`. Eigenpair extraction stays unconditional so callers still get best-effort values. To make the otherwise-unreachable `false` path testable, the body moved to a private `symmetric_eigen_impl(.., max_sweeps)`; the public `symmetric_eigen` delegates with `50` (signature/callers unchanged). **Tests** (`eigen.rs`): `eigen_reports_false_when_sweeps_exhausted` — a coupled 4×4 with `max_sweeps=1` must return `false` (pre-fix FAILS, returning `true`); `eigen_reports_true_when_converged` — same matrix at `max_sweeps=50` returns `true`, and an already-diagonal matrix converges even at `max_sweeps=1`. Pre-fix the first test FAILS; post-fix all 8 `eigen` tests pass, and `pounce-linalg` + `pounce-convex` (the consumers) stay green (328 passed, 0 failed). See `## M4 detail`. |
+| M5 | QP: warm start can return `Optimal` at an infeasible point; unmarked equality rows never enforced | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: `ParametricActiveSetSolver::solve_general` (`crates/pounce-qp/src/solver.rs`) trusts the caller's warm-start `(x, working)` and steps with a zero-RHS active-set system (`rhs[n..] = 0`, lines 729-732), so the residuals of caller-marked-active rows are frozen and never re-audited; the `Optimal` return (lines 827-841) had **no** feasibility check, contradicting `QpStatus::Optimal`'s own contract ("KKT residual **and feasibility** within tolerance", `error.rs:8-9`). Separately, an equality row (`bl==bu`) the caller left `Inactive` is skipped by the ratio test (`if qp.bl[i]==qp.bu[i] { continue; }`, lines 883-884) and can **never** enter the working set, so it is never enforced. Net effect: a warm start at an infeasible point converges to a KKT-stationary point of the wrong working set and is returned as a silent `Optimal` (the doc claimed it "may diverge or hit max_iter" — the real failure is worse). **Fix**: add a post-solve feasibility audit in the public `solve` (the one entry point for both `solve_general` and `solve_general_schur`): a free fn `point_is_feasible` checks every general row **including equalities** and every variable bound against `feas_tol`; when a result claims `Optimal` but fails the audit, recover through `solve_elastic` — the exact recovery the cold path already uses when `cold_general_initial` returns an infeasible point. **Recursion-safe by construction**: `solve_elastic` recurses through `solve_general` *directly* (not the public `solve`), seeding a slack-feasible augmented problem, so the recovery is never re-audited and cannot loop. Feasible warm/cold results pass the audit untouched (happy path unchanged). The audit is the "`OptimalityCheck` audit pass" the doc comment (lines 668-671) explicitly deferred. **Test** (`tests/analytical.rs`): `m5_warm_start_inactive_equality_is_not_a_false_optimal` — `min ½‖x‖² s.t. x₁+x₂=2`, warm-started at `(0,0)` with the equality row `Inactive`; pre-fix returns `Optimal` at `(0,0)` (residual 2.0 — **FAILS** the feasibility assertion), post-fix recovers to the true optimum `(1,1)` reported `Optimal`. Full `pounce-qp` suite green (75 + 6 integration) and the `pounce-algorithm` QP consumer green (245 + SQP integration, 0 failed). See `## M5 detail`. |
 
 ## C1 detail
 
@@ -893,3 +894,74 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   and the full `pounce-linalg` plus `pounce-convex` consumer suites stay green
   (328 passed, 0 failed) — the existing convex PSD/SOS tests confirm the new
   verdict does not perturb the converged (normal) path.
+
+## M5 detail
+
+- **Bug** (`crates/pounce-qp/src/solver.rs`): the active-set QP solver's
+  warm-start path can return `QpStatus::Optimal` at a point that violates a
+  constraint — most sharply, an equality row the caller's working set left
+  `Inactive`.
+  - The inner loop of `solve_general` (and its Schur twin `solve_general_schur`)
+    solves the EQP step system with the constraint block of the RHS zeroed
+    (`rhs[n..] = 0`, lines 729-732): the step keeps `aᵢᵀp = 0` for every
+    *active* row, i.e. it holds those rows at whatever residual the warm-start
+    `x` already had. Nothing re-audits that residual — the cold path guarantees
+    feasibility via `cold_general_initial`, but the warm-start path trusts the
+    caller.
+  - The `Optimal` return (lines 827-841 / 1259-1273) had no feasibility check,
+    even though `QpStatus::Optimal`'s doc (`error.rs:8-9`) promises "KKT
+    residual **and feasibility** within tolerance."
+  - The ratio test skips equality rows entirely (`if qp.bl[i]==qp.bu[i] {
+    continue; }`, lines 883-884 / 1299-1300), so an equality the caller left
+    `Inactive` can never be picked up as a blocker and entered into the working
+    set — it is silently never enforced.
+- **Why it matters**: the solver is warm-started by the active-set SQP driver
+  and by `solve_elastic`'s recursive call. A warm start whose `x` is infeasible
+  (or whose working set omits an equality) converges to the unconstrained /
+  wrong-working-set minimum and is reported `Optimal` — a *wrong answer*, not the
+  "diverge or hit max_iter" the doc comment (lines 668-671) advertised. The doc
+  itself names the missing piece: "Validation is deferred to a follow-up commit
+  that adds an `OptimalityCheck` audit pass."
+- **Fix**: add that audit pass.
+  1. New free fn `point_is_feasible(qp, x, feas_tol)` — checks every general row
+     **including equalities** (`bl`/`bu` against `aᵀx`) and every variable bound
+     against `feas_tol`. Mirrors the inequality check already in
+     `cold_general_initial` (lines 1000-1021), extended to cover equality rows.
+  2. In the public `solve` — the single entry point that dispatches to both
+     `solve_general` and `solve_general_schur` — capture the result and, when it
+     claims `Optimal` but fails `point_is_feasible`, `return self.solve_elastic(qp,
+     opts)`. This is the **same** recovery the cold path already uses when
+     `cold_general_initial` returns an infeasible point (`None => return
+     self.solve_elastic(...)`), so an infeasible warm start now reaches the true
+     optimum (or a certified `Infeasible`) instead of a false `Optimal`.
+- **Recursion safety**: `solve_elastic` recurses through `solve_general`
+  *directly* (line ~1090), not through the public `solve`, so the augmented
+  elastic problem is **not** re-audited. Its warm start is slack-feasible by
+  construction (`reform.initial_seed` sets the slacks to absorb the residual
+  exactly), and the active-set inner loop preserves feasibility, so even if the
+  audit *were* reachable there it would pass. No infinite-recovery loop is
+  possible.
+- **Happy path unchanged**: feasible warm starts and cold solves (which
+  `cold_general_initial` already guarantees feasible or routes to elastic) pass
+  the audit and are returned verbatim. Confirmed by the existing warm-start and
+  scaling tests staying green.
+- **Scope note (equality ratio-test skip)**: the `continue`-on-`bl==bu` lines
+  are left as-is. Making `Inactive` equalities enter through the ratio test is a
+  deeper change to the active-set add logic with its own degeneracy/cycling
+  considerations; the feasibility audit is the minimal, recursion-safe fix that
+  closes the *observable* defect (the false `Optimal`) by routing any such case
+  to the elastic solver, which enforces every row. The audit catches both
+  failure modes (frozen active-row residual **and** never-entered equality).
+- **Test** (`tests/analytical.rs`):
+  `m5_warm_start_inactive_equality_is_not_a_false_optimal` — `min ½‖x‖² s.t.
+  x₁+x₂=2`, no bounds; true optimum `(1,1)`. Warm-started at `(0,0)` with the
+  single equality row marked `Inactive`. **Pre-fix FAILS**: the inner loop sees
+  no active rows, computes `p = −Hx − g = 0`, declares KKT-stationarity, finds
+  no active row to drop, and returns `Optimal` at `(0,0)` — residual
+  `|x₁+x₂−2| = 2.0`. **Post-fix PASSES**: the audit flags the violation, elastic
+  mode recovers `(1,1)`, status `Optimal`.
+- **Verification summary**: pre-fix the new test FAILS (false `Optimal` at
+  `(0,0)`); post-fix it PASSES. Full `pounce-qp` suite green (75 unit + 1 + 5
+  integration, 0 failed); the `pounce-algorithm` QP consumer (active-set SQP +
+  l1-elastic) green (245 unit + SQP/elastic integration, 0 failed) — the audit
+  does not perturb any feasible-result path.
