@@ -30,7 +30,7 @@
 
 use crate::cones::{BarrierCone, Cone, ConeBlock, ExponentialCone, PowerCone, SecondOrderCone};
 use crate::debug::{fire, ConvexDebugState};
-use crate::ipm::{build_rhs, detect_infeasibility, dot, inf_norm, split_step, QpOptions};
+use crate::ipm::{build_rhs, detect_infeasibility_with, dot, inf_norm, split_step, QpOptions};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
@@ -143,6 +143,49 @@ impl NsCone {
             dim,
             degree,
         }
+    }
+
+    /// Whether `z` lies in the **dual** cone `K*` (to tolerance `tol`),
+    /// block by block. The orthant and SOC are self-dual; exp/power use
+    /// their barrier-cone dual test (`K_exp*` requires `u < 0`, so a
+    /// componentwise `z ≥ 0` test is wrong in *both* directions). Used to
+    /// validate Farkas (primal-infeasibility) multipliers.
+    pub(crate) fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        for &(off, b) in &self.blocks {
+            let ok = match b {
+                NsBlock::Orthant(d) => z[off..off + d].iter().all(|&v| v >= -tol),
+                // SOC is self-dual ⇒ its `in_dual_cone` is the membership test.
+                NsBlock::SecondOrder(m) => {
+                    SecondOrderCone::new(m).in_dual_cone(&z[off..off + m], tol)
+                }
+                NsBlock::Nonsym(c) => c.in_dual_cone(&z[off..off + 3], tol),
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `s` lies in the **primal** cone `K` (to tolerance `tol`),
+    /// block by block. For exp/power this is distinct from `in_dual_cone`
+    /// (the cones are not self-dual). Used to validate the recession
+    /// direction `−Gd ∈ K` for the dual-infeasibility certificate.
+    pub(crate) fn in_primal_cone(&self, s: &[f64], tol: f64) -> bool {
+        for &(off, b) in &self.blocks {
+            let ok = match b {
+                NsBlock::Orthant(d) => s[off..off + d].iter().all(|&v| v >= -tol),
+                // SOC is self-dual ⇒ `in_dual_cone` doubles as the primal test.
+                NsBlock::SecondOrder(m) => {
+                    SecondOrderCone::new(m).in_dual_cone(&s[off..off + m], tol)
+                }
+                NsBlock::Nonsym(c) => c.in_primal_cone(&s[off..off + 3], tol),
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
     }
 
     /// Self-dual starting iterate `e` (orthant: ones; non-symmetric cone: the
@@ -654,6 +697,39 @@ fn max_step(
     }
 }
 
+/// Cone-aware infeasibility detection for the non-symmetric driver.
+///
+/// Validates the Farkas multiplier `z ∈ K*` and the recession direction
+/// `−Gd ∈ K` against the genuine non-symmetric cone instead of the
+/// orthant componentwise default. For an exp block the dual cone requires
+/// `u < 0`, so the componentwise test both *rejects* genuine exp Farkas
+/// certificates (infeasible problems degraded to `IterationLimit`) and
+/// *accepts* all-nonnegative `z ∉ K_exp*` (false `PrimalInfeasible`); the
+/// recession branch had the analogous flaw via `Gd ≤ 0`.
+fn detect_infeasibility_nscone(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    opts: &QpOptions,
+    cone: &NsCone,
+) -> Option<QpStatus> {
+    detect_infeasibility_with(
+        prob,
+        x,
+        y,
+        z,
+        opts,
+        |z, tol| cone.in_dual_cone(z, tol),
+        |gd, tol| {
+            // `−Gd ∈ K`; the non-symmetric cone is NOT self-dual, so this
+            // is the *primal* membership test (distinct from `in_dual_cone`).
+            let neg: Vec<f64> = gd.iter().map(|&v| -v).collect();
+            cone.in_primal_cone(&neg, tol)
+        },
+    )
+}
+
 /// Solve `min cᵀx s.t. Ax = b, Gx + s = h, s ∈ K` with `K` a product of
 /// orthant and exponential cones, via the non-symmetric HSDE.
 fn run_nonsym<F>(
@@ -835,9 +911,12 @@ where
         // (within `~1e3·tol`), the current iterate *is* essentially optimal —
         // accept it rather than reporting a spurious NumericalFailure.
         let near_opt = res < 1e3 * opts.tol;
-        // Infeasibility certificate as τ → 0.
+        // Infeasibility certificate as τ → 0. Validate the Farkas multiplier
+        // and the recession direction against the *actual* (non-symmetric)
+        // cone — the orthant-only componentwise test is wrong in both
+        // directions for exp/power blocks (`K_exp*` requires `u < 0`).
         if tau < 1e-2 * kappa.max(1.0) {
-            if let Some(st) = detect_infeasibility(prob, &x, &y, &z, opts) {
+            if let Some(st) = detect_infeasibility_nscone(prob, &x, &y, &z, opts, &cone) {
                 status = st;
                 break;
             }
@@ -1582,5 +1661,111 @@ mod tests {
         let sol = solve_socp_ipm(&prob, &[ConeSpec::Power(0.5)], &opts(), backend);
         assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
         assert!((sol.x[0] - 1.0).abs() < 1e-5, "x = {} vs 1", sol.x[0]);
+    }
+
+    // ---- H8: non-symmetric Farkas/recession certificates must use the
+    // actual cone, not the orthant componentwise test. ----
+
+    /// `NsCone`'s membership tests must agree with the exp cone's own
+    /// `K_exp*` test (`u < 0`), where the componentwise `z ≥ 0` disagrees
+    /// in both directions.
+    #[test]
+    fn nscone_exp_membership_disagrees_with_componentwise() {
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        // Self-dual interior reference: in both K and K* (and has u < 0).
+        let mut e = [0.0; 3];
+        cone.identity(&mut e);
+        assert!(cone.in_dual_cone(&e, 1e-9), "interior ref must be in K*");
+        assert!(cone.in_primal_cone(&e, 1e-9), "interior ref must be in K");
+        assert!(e[0] < 0.0, "dual exp interior has u < 0, got {}", e[0]);
+
+        // All-nonnegative point: passes componentwise z ≥ 0 but u = 1 > 0
+        // ⇒ NOT in K_exp*.
+        let allpos = [1.0, 1.0, 1.0];
+        assert!(
+            allpos.iter().all(|&v| v >= 0.0),
+            "componentwise nonneg holds"
+        );
+        assert!(
+            !cone.in_dual_cone(&allpos, 1e-9),
+            "(1,1,1) has u>0 ⇒ not in K_exp*"
+        );
+    }
+
+    /// **False negative** (the headline H8 bug): a genuine exp Farkas
+    /// multiplier has `u < 0`, so the orthant componentwise test rejects
+    /// it and an infeasible problem degrades to `IterationLimit`. The
+    /// cone-aware detector accepts it as `PrimalInfeasible`.
+    ///
+    /// Setup isolates the primal branch: `A` empty, `y` empty, `G = 0`
+    /// (so `Gᵀz = 0` trivially), and `h` chosen so `hᵀz < 0`.
+    #[test]
+    fn exp_farkas_certificate_rejected_componentwise_accepted_cone_aware() {
+        use crate::ipm::detect_infeasibility;
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        let mut zc = [0.0; 3];
+        cone.identity(&mut zc); // in K*, u < 0
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],              // G = 0 ⇒ Gᵀz = 0
+            h: vec![1.0, 0.0, 0.0], // hᵀz = z₀ < 0
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [0.0]; // skip the dual-inf branch
+        let y: [f64; 0] = [];
+        assert!(zc[0] < 0.0 && prob.h[0] > 0.0, "hᵀz = z₀ < 0");
+
+        // Componentwise (orthant) test: z₀ < 0 ⇒ rejects the genuine cert.
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &zc, &opts),
+            None,
+            "orthant test wrongly rejects a real exp Farkas certificate"
+        );
+        // Cone-aware: z ∈ K_exp* ⇒ verified PrimalInfeasible.
+        assert_eq!(
+            detect_infeasibility_nscone(&prob, &x, &y, &zc, &opts, &cone),
+            Some(QpStatus::PrimalInfeasible),
+            "cone-aware test must accept the genuine exp Farkas certificate"
+        );
+    }
+
+    /// **False positive**: an all-nonnegative `z ∉ K_exp*` is accepted by
+    /// the componentwise test (bogus `PrimalInfeasible`) but rejected by
+    /// the cone-aware one.
+    #[test]
+    fn nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise() {
+        use crate::ipm::detect_infeasibility;
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        let z = [1.0, 1.0, 1.0]; // u = 1 > 0 ⇒ ∉ K_exp*, but ≥ 0 componentwise
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![-1.0, 0.0, 0.0], // hᵀz = −z₀ = −1 < 0
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [0.0];
+        let y: [f64; 0] = [];
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &opts),
+            Some(QpStatus::PrimalInfeasible),
+            "componentwise test FALSE-positives on z=(1,1,1) ∉ K_exp*"
+        );
+        assert_eq!(
+            detect_infeasibility_nscone(&prob, &x, &y, &z, &opts, &cone),
+            None,
+            "cone-aware test must reject z=(1,1,1): not in K_exp*"
+        );
     }
 }

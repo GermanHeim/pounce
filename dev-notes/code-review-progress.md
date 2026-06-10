@@ -16,6 +16,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H5 | nl: external-function errors detected on the wrong channel — failed evals silently return garbage | **FIXED** | `ExternalLibrary::eval` now decodes both `funcadd` error channels via `decode_external_errmsg`: the **reassigned** `al->Errmsg` pointer (conforming path) and the caller buffer. Previously only `errmsg_buf[0]` was checked, so a library doing `al->Errmsg = "...";` was invisible and the IPM consumed NaN f/∇f/∇²f. Tests `reassigned_errmsg_pointer_is_detected_end_to_end` + `decode_external_errmsg_buffer_and_none_channels`. |
 | H6 | qp: `select_blocker` EXPAND branch can panic (`best.expect`) on valid near-degenerate input | **FIXED** | The Harris two-pass admitted nothing in Pass 2 when every candidate's τ-relaxed ratio `r + τ/\|a·p\|` exceeded the artificial `α_min_relaxed = 1.0` init cap by more than `tol` (reachable when `\|a·p\| ≈ feas_tol` inflates `τ/\|a·p\|`). `best` stayed `None` → `expect` panicked. Now falls back to the strict minimum-ratio blocker (always exists since `α_min < 1.0`) and steps exactly `α_min`. Tests `expand_tau_inflation_falls_back_to_strict_min_no_panic` + 2 more in `solver::select_blocker_tests`. |
 | H7 | convex: dual-infeasibility certificate validates recession `Gd` componentwise — false `DualInfeasible` on SOC/PSD | **FIXED** | `detect_infeasibility_with` gained a `primal_recession_ok` closure: the dual-inf branch now checks `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`; SOC/PSD ⇒ `cone.in_dual_cone(−Gd)`, valid since the composite cone is self-dual) instead of `gd_max ≤ tol`. A direction with `Gd ≤ 0` but `−Gd ∉ K` (e.g. `−Gd=(0.1,0.5) ∉ SOC`) no longer yields a bogus unboundedness proof. Tests `soc_recession_not_in_cone_is_not_dual_infeasible` + 2 in `ipm::detect_infeasibility_tests`. |
+| H8 | convex: non-symmetric HSDE driver validates Farkas/recession certs with the orthant test — wrong in both directions for exp/power | **FIXED** | `hsde_nonsym.rs:840` now calls `detect_infeasibility_nscone` (new helper) instead of the componentwise `detect_infeasibility`. Added `NsCone::in_dual_cone`/`in_primal_cone` (per-block dispatch; exp/power use their `BarrierCone` tests). The dual exp cone requires `u < 0`, so componentwise `z ≥ 0` both **rejected** genuine exp Farkas certs (→ `IterationLimit`) and **accepted** all-nonnegative `z ∉ K_exp*` (false `PrimalInfeasible`); both fixed. `detect_infeasibility_with` made `pub(crate)`; the plain componentwise `detect_infeasibility` is now test/docs-only. Tests `exp_farkas_certificate_rejected_componentwise_accepted_cone_aware`, `nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise`, `nscone_exp_membership_disagrees_with_componentwise`. |
 
 ## C1 detail
 
@@ -300,3 +301,40 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **Note**: H8 (`hsde_nonsym.rs:840` using the componentwise default for
   exp/power Farkas multipliers) is the *primal*-certificate analogue in the
   non-symmetric driver and is tracked separately.
+
+## H8 detail
+
+- **Bug**: the non-symmetric HSDE driver (`hsde_nonsym.rs:840`, exp/power
+  blocks, also carries SOC) called the orthant componentwise
+  `detect_infeasibility` to validate its as-`τ→0` infeasibility certificate.
+  The dual exponential cone is `K_exp* = cl{ (u,v,w) : −u·e^{v/u} ≤ e·w, u<0 }`
+  (`exp.rs:110`) — it **requires `u < 0`**. The componentwise `z ≥ 0` test is
+  therefore wrong in *both* directions: it (a) **rejects** every genuine exp
+  Farkas multiplier (which has `u<0`), so a primal-infeasible exp problem
+  silently degrades to `IterationLimit`; and (b) **accepts** an all-nonnegative
+  `z ∉ K_exp*`, emitting a false `PrimalInfeasible`. The recession branch had
+  the analogous `Gd ≤ 0` flaw (H7's defect, here on a non-self-dual cone).
+- **Fix**: added `NsCone::in_dual_cone` / `in_primal_cone` (per-block dispatch:
+  orthant componentwise, SOC self-dual via `SecondOrderCone::in_dual_cone`,
+  exp/power via their `BarrierCone` primal/dual tests). Made
+  `detect_infeasibility_with` `pub(crate)` and added a `detect_infeasibility_nscone`
+  helper that routes the Farkas test through `cone.in_dual_cone(z)` and the
+  recession test through `−Gd ∈ K` via `cone.in_primal_cone(−Gd)` (the
+  non-symmetric cone is **not** self-dual, so primal ≠ dual here — unlike H7).
+  Line 840 now calls it. The plain componentwise `detect_infeasibility` has no
+  production caller anymore (both drivers are cone-aware); kept `#[allow(dead_code)]`
+  as the documented orthant baseline + test contrast oracle.
+- **Test** (`hsde_nonsym::tests`, contrast componentwise vs cone-aware):
+  `exp_farkas_certificate_rejected_componentwise_accepted_cone_aware` — a real
+  exp Farkas cert `z = interior_reference` (`u<0`, `∈ K_exp*`) with `G=0`,
+  `h=(1,0,0)` so `hᵀz=z₀<0`: componentwise `detect_infeasibility` returns
+  `None` (misses it), cone-aware returns `PrimalInfeasible`.
+  `nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise` — `z=(1,1,1)`
+  (`u>0 ∉ K_exp*`) with `h=(−1,0,0)`: componentwise FALSE-positives
+  `PrimalInfeasible`, cone-aware returns `None`.
+  `nscone_exp_membership_disagrees_with_componentwise` — unit-checks the new
+  `NsCone` membership against the exp cone's `u<0` requirement.
+- **Verified by running code**: both contrast tests show the old componentwise
+  path (the literal pre-fix line-840 call) returning the wrong status while the
+  new cone-aware path returns the correct one. Full `pounce-convex` suite green
+  (103 lib + integration); no warnings.

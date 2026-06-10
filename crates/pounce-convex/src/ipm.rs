@@ -2118,6 +2118,14 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 ///   `bᵀy + hᵀz < 0` (Farkas). `z ≥ 0` is maintained by the IPM.
 /// - **Dual infeasible / unbounded:** direction `d` (= `x`) with
 ///   `Pd ≈ 0, Ad ≈ 0, −Gd ∈ K, cᵀd < 0` (orthant: `−Gd ∈ K ⟺ Gd ≤ 0`).
+///
+/// This orthant-exact entry point is the documented baseline that the
+/// cone-aware variants ([`detect_infeasibility_cone`] for the symmetric
+/// composite cone, `detect_infeasibility_nscone` for the non-symmetric
+/// driver) generalize. Both production drivers now route through a
+/// cone-aware path, so this plain version is retained for documentation
+/// and as a contrast oracle in tests.
+#[allow(dead_code)]
 pub(crate) fn detect_infeasibility(
     prob: &QpProblem,
     x: &[f64],
@@ -2180,7 +2188,7 @@ pub(crate) fn detect_infeasibility_cone(
     )
 }
 
-fn detect_infeasibility_with(
+pub(crate) fn detect_infeasibility_with(
     prob: &QpProblem,
     x: &[f64],
     y: &[f64],
