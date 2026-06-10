@@ -158,6 +158,15 @@ pub struct PresolveTnlp {
 
     /// `None` until init has run; afterwards `Some(state)`.
     state: Option<PresolveState>,
+
+    /// Full-space `(x, lambda)` forwarded to the inner TNLP at the last
+    /// `finalize_solution` — i.e. after row-drop multiplier recovery, in
+    /// the original `.nl` row order (length `info_inner.m`). `None` until
+    /// a solve finalizes. The CLI prefers this over its reduced-space
+    /// `on_converged` / counting capture so the `.sol` / JSON dual block
+    /// regains the original constraint count: the kept-row-space lambda
+    /// the solver produces otherwise mis-aligns against the `.nl`'s `m`.
+    finalized_full_solution: Option<(Vec<Number>, Vec<Number>)>,
 }
 
 struct PresolveState {
@@ -216,6 +225,7 @@ impl PresolveTnlp {
             expr_provider: None,
             opts,
             state: None,
+            finalized_full_solution: None,
         }
     }
 
@@ -235,6 +245,7 @@ impl PresolveTnlp {
             expr_provider: Some(expr_provider),
             opts,
             state: None,
+            finalized_full_solution: None,
         }
     }
 
@@ -256,6 +267,16 @@ impl PresolveTnlp {
     /// has not yet run or no rows are redundant).
     pub fn n_dropped_rows(&self) -> Index {
         self.state.as_ref().map(|s| s.n_dropped_rows).unwrap_or(0)
+    }
+
+    /// The full-space `(x, lambda)` captured at the last
+    /// `finalize_solution`, lifted back to the original `.nl` row space
+    /// (length `info_inner.m`) with dropped-row multipliers recovered.
+    /// `None` until a solve finalizes. The CLI consumes this so its
+    /// `.sol` / JSON dual block carries the original constraint count
+    /// rather than the reduced kept-row count. See the field docs.
+    pub fn finalized_full_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        self.finalized_full_solution.clone()
     }
 
     /// Cached reduced bounds, if presolve has run.
@@ -1112,6 +1133,10 @@ impl TNLP for PresolveTnlp {
                 }
             }
         }
+        // Stash the full-space (x, lambda) the inner TNLP is about to
+        // receive so the CLI can prefer it over its reduced-space
+        // capture when sizing the `.sol` / JSON dual block.
+        self.finalized_full_solution = Some((sol.x.to_vec(), lambda_full.clone()));
         self.inner.borrow_mut().finalize_solution(
             Solution {
                 status: sol.status,

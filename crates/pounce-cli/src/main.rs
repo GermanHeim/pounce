@@ -952,6 +952,27 @@ pub fn main() -> ExitCode {
         }
     }
 
+    // Presolve row-dropping: both lambda sources above (`on_converged`
+    // and the `CountingTnlp` fallback) sit *outside* presolve, so their
+    // `lambda` is in the reduced kept-row space — length `m_out`, not the
+    // original `.nl`'s `m`. AMPL / Pyomo read the `.sol` dual block
+    // positionally against the originating `.nl`, so a short block
+    // mis-aligns or is rejected. `PresolveTnlp::finalize_solution` already
+    // lifted the duals back to the original row order *and* recovered
+    // multipliers for the dropped rows; swap that full-length vector in.
+    if let Some(p) = &presolve_handle {
+        let lifted = if p.borrow().n_dropped_rows() > 0 {
+            p.borrow().finalized_full_solution().map(|(_x, lam)| lam)
+        } else {
+            None
+        };
+        if let Some(lam_full) = lifted {
+            if let Some((_x, lambda)) = nominal_capture.borrow_mut().as_mut() {
+                *lambda = lam_full;
+            }
+        }
+    }
+
     // Reduced Hessian: print to stderr (informational), mirroring
     // upstream sIPOPT's RedHessian / Eigenvalues prints in
     // `SensReducedHessianCalculator.cpp`.
@@ -991,7 +1012,16 @@ pub fn main() -> ExitCode {
         let mut builder = ReportBuilder::new(args.json_detail, input);
         if let Some(info) = nlp_info_snapshot {
             builder.problem.n_variables = info.n;
-            builder.problem.n_constraints = info.m;
+            // `info.m` is the reduced kept-row count under presolve, but
+            // the lifted `lambda` (and the `.sol`) carry the original
+            // `.nl` constraint count — and `SolutionInfo::lambda` is
+            // documented to have length `problem.n_constraints`. Report
+            // the original `m` so that invariant holds.
+            let n_dropped = presolve_handle
+                .as_ref()
+                .map(|p| p.borrow().n_dropped_rows())
+                .unwrap_or(0);
+            builder.problem.n_constraints = info.m + n_dropped;
             builder.problem.n_objectives = 1; // pounce IPM uses obj 0; multi-obj is read but ignored
             builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
             builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
@@ -1072,10 +1102,18 @@ pub fn main() -> ExitCode {
     // the capture is empty; fall back to zero blocks sized from the
     // pre-solve NLP dimensions so the file still round-trips.
     if let Some(sol_path) = &sol_path {
-        let (n, m) = nlp_info_snapshot
+        let (n, m_out) = nlp_info_snapshot
             .as_ref()
             .map(|i| (i.n as usize, i.m as usize))
             .unwrap_or((0, 0));
+        // `nlp_info_snapshot.m` is the reduced kept-row count when
+        // presolve dropped rows; the zero-fallback block must be sized to
+        // the original `.nl`'s `m` so a failed-solve `.sol` still aligns.
+        let m = m_out
+            + presolve_handle
+                .as_ref()
+                .map(|p| p.borrow().n_dropped_rows() as usize)
+                .unwrap_or(0);
         let (x, lambda) = nominal_capture
             .borrow()
             .clone()

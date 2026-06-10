@@ -36,6 +36,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M10 | Schur-update QP path: no inertia re-check after working-set drops; `O(m·nnz(A))` assembly per reset | **VERIFIED (by inspection) — doc corrected; behavioral fix DEFERRED** | **Asymmetry confirmed by code inspection.** The refactor path (`solve_general`/`solve_box_constrained`) calls `factorize_with_inertia_control` **every iteration** (`solver.rs:734`, `:238`), re-checking KKT inertia and applying a δ-shift on `WrongInertia`/`Singular`. The Schur path (`solve_general_schur`) runs inertia control **only inside `SchurState::reset`** (at init + every `max_schur_updates_before_refactor = 50` changes); the rank-2 SMW `apply_change` after a DROP (`solver.rs:1234`) does **not** re-check inertia. A drop enlarges the active-set null space and can expose negative curvature the cached factor never regularizes until the next reset, contradicting the doc claim "algorithmically identical to the refactor-per-iteration path" (`solver.rs:1137`). **Latent**: indefinite-reduced-Hessian only; `use_schur_updates` defaults `false` and *no production caller flips it* (the SQP driver feeds `HessianInertia::Psd`, for which the reduced Hessian is always PD and both paths are provably identical). **Not deterministically regression-testable**: two indefinite-QP probes — (a) `H = diag(-1,2)`, box `[-1,1]²`, drop into negative curvature; (b) same with `x₁` unbounded so the dropped direction is unbounded below — were run through *both* paths. **Both produced byte-identical results** (case a: both `Optimal` at `x=(-1,0)`; case b: both `MaxIter` at identical `x`). The active-set ratio-test re-add and the global-KKT-inertia gating (a single 1-D negative-curvature exposure often still matches `expected_neg`, so even the refactor path takes no shift) make constructed cases self-correct or diverge identically; I could not force a deterministic divergence to anchor a fail-first test. **Disposition mirrors M1**: documented, not silently fixed. **Verifiable correction applied**: the false "algorithmically identical" doc comment in `solver.rs` is rewritten to state the PD-only equivalence and spell out the indefinite-H inertia caveat (DROP vs ADD curvature argument). **Behavioral fix DEFERRED** (forcing `schur.reset()` unconditionally after every drop would restore parity, but absent a failing test and given the numerical delicacy / blast radius on the opt-in path, it is not applied here). **Perf sub-claim** (`O(m·nnz(A))` assembly in `build_k_max_triplet` per reset, `schur.rs`) is real but a performance characteristic, not a correctness bug, and not naturally regression-testable. `cargo test -p pounce-qp` green (77 + 1 + 5, 0 failed). See `## M10 detail`. |
 | M11 | CLI QP extraction drops constraint terms folded into the nonlinear tree | **FIXED** | **Mechanism confirmed + reproduced by a failing test.** `extract_qp_with_map` (`crates/pounce-cli/src/qp_extract.rs`) built `A`/`G` from `prob.con_linear` **only**, ignoring `prob.con_nonlinear[row]`. But the classifier deliberately admits constraint rows whose nonlinear expression reduces to degree ≤ 1 (`dispatch.rs`), and AMPL/Pyomo fold a row's linear+constant terms into that nonlinear tree (cancelled quadratics, defined variables) — exactly as the *objective* path already handles via `analyze_quadratic_full` (`qp_extract.rs:80,98`) and as the **SOCP** extractor handles for constraints (`qp_extract.rs:355-396`, `nl_lin` + `const_shift`). So an LP/convex-QP with linear/constant terms inside a constraint's nonlinear tree got silently wrong constraints on the convex path: the folded coefficients vanished and the folded constant never shifted the bound. **Fix**: in the QP constraint loop, run `analyze_quadratic_full(&prob.con_nonlinear[row], n)` (empty Hessian for these linear rows), add the recovered `nl_lin` to the row coefficients, and shift the bound by the folded constant (`g_l−k ≤ row ≤ g_u−k`) — mirroring the SOCP path verbatim, including the `nonzeros()` filter so all-zero rows are not emitted. `con_nonlinear` is always parallel to `con_linear` (both length `m`, initialized to `Expr::Const(0.0)` per row at parse, `nl_reader.rs:295`), so the index is safe. **Test** (`qp_extract::tests::constraint_linear_terms_folded_in_tree_are_recovered`): `min x0 s.t. x0−3 ≥ 0` with the whole `x0−3` body in `con_nonlinear[0]` and `con_linear[0]` empty; asserts the solve is `Optimal` at `x0 = 3` and the recovered dual is finite. **Pre-fix the test FAILS** (`assert_eq!(sol.status, Optimal)` — the dropped constraint leaves a vacuous `0 ≤ 0` row and `min x0` is unbounded), confirmed by temporarily forcing the `nl_lin`/`const_shift` to `Default::default()` via an `if false` guard; post-fix it solves to `x0 = 3`. Full `pounce-cli` suite green (155 lib + all integration, 0 failed). See `## M11 detail`. |
 | M12 | `DivergingIterates` mapped to AMPL code 401 ("limit") instead of the 300 ("unbounded") range | **FIXED** | **Mechanism confirmed + reproduced by a failing test.** `status_to_solve_result_num` (`crates/pounce-solve-report/src/lib.rs:453`) mapped `ApplicationReturnStatus::DivergingIterates → 401`. `DivergingIterates` is Ipopt's **unboundedness** signal (the iterates run off to infinity), so per the AMPL `solve_result_num` convention (300–399 = unbounded; 400–499 = limit) it belongs in the 300 range. This was internally inconsistent: the CLI's convex path maps the *same* unbounded condition (`QpStatus::DualInfeasible`) to **300** in its own numeric mapping (`main.rs:1276,1425`, with the range documented at `main.rs:1271-1272`), yet routes the NLP-side `DualInfeasible → DivergingIterates` (`main.rs:1165`) which then went through the 401 mapping — so the same physical outcome reported 300 on the convex path and 401 on the NLP path. Also matches upstream Ipopt's ASL driver (Diverging_Iterates → 300). **Fix**: one-line mapping change `DivergingIterates => 300`; the doc comment is extended to document the 300 "unbounded" bucket and why `DivergingIterates` lives there (not a 400 limit). **Test** (`tests::diverging_iterates_maps_to_unbounded_range`): asserts `DivergingIterates → 300`, and pins the surrounding buckets (`SolveSucceeded → 0`, `InfeasibleProblemDetected → 200`, `MaximumIterationsExceeded`/`SearchDirectionBecomesTooSmall → 400`, `RestorationFailed → 500`) so the range convention can't silently drift. **Pre-fix the test FAILS** (`left: 401, right: 300`), confirmed by reverting the mapping to `401`. No test anywhere hard-coded the old `401` (grep confirmed). `pounce-solve-report` (7) and `pounce-cli` suites green. See `## M12 detail`. |
+| M13 | NLP-path presolve: `.sol` / JSON dual block carries the reduced kept-row count, not the original `.nl` `m` | **FIXED** | **Mechanism confirmed + reproduced end-to-end.** With `presolve=yes` on the general-NLP route, `PresolveTnlp` drops redundant rows and the solver works in a reduced (`m_out`) row space. The CLI captures the converged duals from **outside** that wrapper — the IPM `on_converged` hook (`main.rs:612`, via `pack_lambda_for_user`) and the active-set `CountingTnlp` fallback (`main.rs:950`) both see the reduced solution — so the `.sol` / JSON dual block had length `m_out`, shorter than the originating `.nl`'s `m`. AMPL/Pyomo read the dual block **positionally** against the `.nl`, so a short block mis-aligns or is rejected. **Reproduced** by running `lp_afiro.nl solver_selection=nlp presolve=yes` (drops 4 of 27 rows): pre-fix `.sol`/JSON `lambda` length was **23**, vs **27** for the `presolve=no` baseline; `dual_order.nl` (drops both rows) emitted a **zero-length** dual block. **Fix** (reuses existing machinery, no new dual math): `PresolveTnlp::finalize_solution` *already* lifts the duals back to the original row order with dropped-row multiplier recovery (the Phase-0 `recover_dropped_multipliers` path) before forwarding to the inner TNLP — it just wasn't surfaced. Added a `finalized_full_solution: Option<(Vec<Number>,Vec<Number>)>` capture on `PresolveTnlp` (stored at finalize, exposed via a getter); the CLI, when presolve dropped rows, swaps that full-length `lambda` into `nominal_capture` before the `.sol`/JSON writers run. Also: the `.sol` zero-fallback block and the JSON `problem.n_constraints` are now sized to the original `m` (`m_out + n_dropped_rows`), restoring the documented `lambda.len() == n_constraints` invariant. **Dropped-row duals**: redundant rows recover to a *valid alternative* certificate — exactly baseline for genuinely-slack rows (active-row duals match `lp_afiro` baseline tightly), and 0 where bound-tightening migrated the dual to a bound multiplier (e.g. `dual_order`); both satisfy KKT. The fix targets the **length/alignment** defect M13 names. **Test** (`tests/presolve_dual_length.rs::presolve_dual_block_keeps_original_nl_length`): runs `lp_afiro` through the NLP path with `presolve=no` then `=yes`, guards that presolve genuinely drops rows (parses the stdout summary), and asserts the presolved `lambda` length equals the baseline `m` **and** the reported `n_constraints`. **Pre-fix the test FAILS** (`presolve dual block length 23 != original .nl m 27`), confirmed by neutering the lambda swap with an `if false` guard. Mitigated in practice by presolve defaulting off. `pounce-presolve` (207 lib + 9 doc) and full `pounce-cli` (155 lib + all integration, 0 failed) suites green. See `## M13 detail`. |
 
 ## C1 detail
 
@@ -1344,3 +1345,78 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   `main.rs:1000,1088`).
 - **Result**: `pounce-solve-report` suite green (7 tests, 0 failed); full
   `pounce-cli` suite green (no failures).
+
+## M13 detail
+
+- **Bug**: under `presolve=yes` on the general-NLP route, `PresolveTnlp`
+  drops redundant constraint rows, so the solver operates on a reduced
+  (`m_out`) row space. The CLI's solution capture sits **outside** the
+  presolve wrapper:
+  - the IPM `on_converged` hook builds `lambda` via
+    `OrigIpoptNlp::pack_lambda_for_user(y_c, y_d)` (`main.rs:612`) — the
+    `y_c`/`y_d` are reduced, so the result has length `m_out`;
+  - the active-set SQP fallback reads `CountingTnlp::captured_solution`
+    (`main.rs:950`), and `CountingTnlp` wraps *outside* presolve too.
+  Both `.sol` (`main.rs` writer) and JSON (`SolutionInfo::lambda`) then
+  carried `m_out` duals. AMPL/Pyomo read the `.sol` dual block
+  positionally against the originating `.nl`'s `m` constraints, so a
+  short block mis-aligns (wrong row → wrong dual) or is rejected.
+- **Reachability / reproduction** (run, not just inspected):
+  - `target/debug/pounce crates/pounce-cli/tests/fixtures/lp_afiro.nl
+    solver_selection=nlp presolve=yes` → "dropped 4 redundant rows";
+    pre-fix `.sol`/JSON `lambda` length **23**, vs **27** for
+    `presolve=no`.
+  - `dual_order.nl` (drops both of 2 rows) → pre-fix a **zero-length**
+    dual block (`m_out = 0`) against a 2-constraint `.nl`.
+- **Why the data was already available**: `PresolveTnlp::finalize_solution`
+  (`crates/pounce-presolve/src/lib.rs`) reconstructs the inner-sized
+  `lambda_full` by scattering kept-row duals through `rows_kept` **and**
+  splicing recovered multipliers for dropped rows (the Phase-0
+  `reduction_frame::recover_dropped_multipliers` walk), then forwards the
+  full-length solution to `inner.finalize_solution`. The correct
+  full-space dual vector was being computed and handed to the inner TNLP
+  — the CLI just never read it, preferring its own reduced-space capture.
+- **Fix**:
+  - `pounce-presolve`: add a `finalized_full_solution:
+    Option<(Vec<Number>, Vec<Number>)>` field to `PresolveTnlp`,
+    populated at `finalize_solution` with `(sol.x.to_vec(),
+    lambda_full.clone())` just before forwarding to the inner TNLP, and a
+    public `finalized_full_solution()` getter.
+  - `pounce-cli/src/main.rs`: after the active-set backfill, when
+    `presolve_handle` is `Some` and `n_dropped_rows() > 0`, swap the
+    captured `lambda` for `finalized_full_solution()`'s full-length
+    vector (keeping the existing `x`). Also size the `.sol` zero-fallback
+    block and the JSON `problem.n_constraints` to the original `m`
+    (`m_out + n_dropped_rows`) so the documented `lambda.len() ==
+    n_constraints` invariant holds.
+- **Convention check**: the lambda forwarded into the TNLP stack at
+  finalize is already `pack_lambda_for_user`'s output
+  (`application.rs:2189`, `finalize_via_orig_nlp`) — c/d split inverted,
+  scaling unwound, `.nl` row order — so `PresolveTnlp` lifts a vector in
+  exactly the same user-facing convention the `on_converged` path uses;
+  the only delta is the lift to `m_in` + dropped-row recovery. Verified
+  empirically: post-fix `lp_afiro` active-row duals match the
+  `presolve=no` baseline tightly.
+- **Dropped-row dual values**: a recovered dual is a *valid alternative*
+  KKT certificate. For genuinely-slack redundant rows it reproduces the
+  baseline value; where bound-tightening presolve migrated the dual onto
+  a bound multiplier (`dual_order`'s rows), the constraint dual is
+  legitimately 0 (the "force" now lives in `z_l`/`z_u`). Both satisfy
+  stationarity. M13 is specifically the **length/alignment** defect, and
+  that is fully fixed.
+- **Test**: `crates/pounce-cli/tests/presolve_dual_length.rs::
+  presolve_dual_block_keeps_original_nl_length` runs `lp_afiro` through
+  the NLP path (`solver_selection=nlp`) with `presolve=no` then `=yes`,
+  guards that presolve genuinely dropped rows (parses the stdout
+  "dropped N redundant rows" summary), and asserts the presolved
+  `lambda` length equals the baseline `m` **and** the report's
+  `n_constraints`. **Pre-fix it FAILS** ("presolve dual block length 23
+  != original .nl m 27"), confirmed by neutering the lambda swap with an
+  `if false` guard.
+- **Scope note**: `solver_selection=nlp` is required — under the default
+  `auto` route `lp_afiro` dispatches to the convex IPM, which has its own
+  `.sol` path and never wraps `PresolveTnlp`. Presolve defaults off, so
+  this never affected a default run.
+- **Result**: `pounce-presolve` green (207 lib + 9 doc, 0 failed); full
+  `pounce-cli` green (155 lib + all integration incl. the new test, 0
+  failed).
