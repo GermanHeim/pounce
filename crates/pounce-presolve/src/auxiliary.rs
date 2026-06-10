@@ -229,6 +229,20 @@ pub fn run_auxiliary_phase0(
         };
     }
     let mut x_running: Vec<Number> = probe.x_probe.to_vec();
+    // C2(c): a trivially-fixed variable (`x_l == x_u`) is excluded from
+    // incidence, so it can only appear in a block's rows as a *non-block*
+    // column folded into the RHS. Fold it at its fixed value, not its
+    // (possibly different) probe value — otherwise the dropped equality
+    // is satisfied at a point the IPM will never occupy.
+    //
+    // `fixed_mask[j]` tracks which columns are pinned: trivially fixed
+    // up front, plus any fixed by an earlier accepted block. The C2
+    // soundness gate below consults it.
+    let mut fixed_mask = vec![false; probe.n_vars];
+    for &i in &trivial.fixed_vars {
+        x_running[i] = probe.x_l[i];
+        fixed_mask[i] = true;
+    }
 
     for comp in &comps.components {
         let t_btf = std::time::Instant::now();
@@ -351,6 +365,55 @@ pub fn run_auxiliary_phase0(
                 .map(|&kk| eq_inc.eq_row_inner_idx[kk])
                 .collect();
             let block_cols = &block.cols;
+
+            // -- 3c'. C2 soundness gate --
+            // A block's rows are dropped from the IPM's problem, so
+            // every variable they depend on must be pinned: either a
+            // block column (solved + clamped here) or an already-fixed
+            // non-block column. Any *free* non-block column means the
+            // IPM can move it after the row is gone, silently breaking
+            // the dropped equality (`solve_linear_block` folds it into
+            // the RHS at a fixed probe value). Scan the **raw Jacobian
+            // sparsity** — not incidence, which drops entries that are
+            // numerically zero at the probe (a nonlinear row's
+            // derivative can be zero there yet structurally nonzero,
+            // C2(d)). Catches C2(a) (free column from a rejected earlier
+            // block), C2(b) (Square row adjacent to an Over column), and
+            // C2(d) in one gate.
+            let mut depends_on_free = false;
+            let nnz = probe.jac_irow.len();
+            'gate: for &r_inner in &inner_rows {
+                for kk in 0..nnz {
+                    let i = if probe.one_based {
+                        (probe.jac_irow[kk] as isize - 1) as usize
+                    } else {
+                        probe.jac_irow[kk] as usize
+                    };
+                    if i != r_inner {
+                        continue;
+                    }
+                    let j = if probe.one_based {
+                        (probe.jac_jcol[kk] as isize - 1) as usize
+                    } else {
+                        probe.jac_jcol[kk] as usize
+                    };
+                    if block_cols.contains(&j) {
+                        continue;
+                    }
+                    let pinned =
+                        (probe.x_u[j] - probe.x_l[j]).abs() <= probe.eq_tol || fixed_mask[j];
+                    if !pinned {
+                        depends_on_free = true;
+                        break 'gate;
+                    }
+                }
+            }
+            if depends_on_free {
+                diag.rejection_reasons
+                    .push(AuxiliaryRejectionReason::NonBlockColumnFree);
+                continue;
+            }
+
             // PR #60 review nit: pass the block's variable bounds
             // into Newton so a converged-but-out-of-box solution
             // gets caught early as `OutOfBounds` rather than
@@ -459,6 +522,9 @@ pub fn run_auxiliary_phase0(
                 accepted_fixed_vars.push(c);
                 accepted_fixed_values.push(out.x[ii]);
                 x_running[c] = out.x[ii];
+                // This column is now pinned for the C2 gate on later
+                // blocks in BTF order.
+                fixed_mask[c] = true;
             }
             for &r_inner in &inner_rows {
                 accepted_dropped_rows.push(r_inner);
@@ -1065,6 +1131,69 @@ mod tests {
             (v0 + v1 - 3.0).abs() < 1e-8,
             "x+y should be 3, got {}",
             v0 + v1
+        );
+    }
+
+    /// Callback for the C2(d) gate test: row 0 is `g = x0 + x1^2`,
+    /// whose derivative w.r.t. x1 is `2*x1` — zero at the probe
+    /// x1 = 0. The probe's Jacobian *values* therefore carry a 0 for
+    /// the (0, x1) entry, so `EqualityIncidence::from_probe` drops it
+    /// and DM forms a clean square block {row0, x0}; but x1 is a real
+    /// dependency the IPM is free to move.
+    struct HiddenDepCallback;
+    impl Phase0TnlpCallback for HiddenDepCallback {
+        fn eval_g_full(&mut self, x: &[Number], g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1] * x[1];
+            true
+        }
+        fn eval_jac_g_values(&mut self, x: &[Number], values: &mut [Number]) -> bool {
+            // Sparsity (0,0)=∂/∂x0=1, (0,1)=∂/∂x1=2*x1.
+            values[0] = 1.0;
+            values[1] = 2.0 * x[1];
+            true
+        }
+    }
+
+    #[test]
+    fn c2_gate_rejects_block_with_probe_hidden_free_dependency() {
+        // Regression for C2(d) (and the C2 gate generally). Row 0 is
+        // `x0 + x1^2 = 5`, nonlinear in x1. At the probe x1 = 0 the
+        // derivative ∂/∂x1 is 0, so incidence omits the entry and DM
+        // forms the square block {row0, x0}. Pre-fix, Phase 0 solved
+        // x0 = 5 (folding x1 at its probe 0), passed the residual check
+        // at (5, 0), and dropped row 0 — leaving the IPM free to move
+        // x1 and silently break x0 + x1^2 = 5. The C2 soundness gate
+        // scans the raw Jacobian sparsity, sees x1 is a free non-block
+        // column, and rejects.
+        let probe = linear_probe(
+            2,
+            1,
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 0.0], // ∂/∂x0=1, ∂/∂x1=2*x1=0 at probe x1=0
+            &[5.0],
+            &[5.0],
+            &[0.0], // g(0,0) = 0
+            &[Linearity::NonLinear],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let mut tnlp = HiddenDepCallback;
+        let plan = run_auxiliary_phase0(&opts, &probe, Some(&mut tnlp), None);
+        assert_eq!(
+            plan.diagnostics.blocks_eliminated, 0,
+            "block depending on free non-block var x1 must not be eliminated"
+        );
+        assert!(plan.frame.is_none());
+        assert!(
+            plan.diagnostics
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, AuxiliaryRejectionReason::NonBlockColumnFree)),
+            "expected NonBlockColumnFree, got {:?}",
+            plan.diagnostics.rejection_reasons
         );
     }
 
