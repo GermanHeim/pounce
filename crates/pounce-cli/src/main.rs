@@ -514,6 +514,7 @@ pub fn main() -> ExitCode {
                         sol_path.as_deref(),
                         json_cfg,
                         debug_hook.as_ref(),
+                        args.ampl,
                     );
                 }
                 let presolve_on = app
@@ -528,6 +529,7 @@ pub fn main() -> ExitCode {
                     presolve_on,
                     json_cfg,
                     debug_hook.as_ref(),
+                    args.ampl,
                 );
             }
             // Should not happen (only `.nl` classifies non-NLP), but be
@@ -1173,6 +1175,7 @@ fn run_convex_qp(
     presolve_on: bool,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
+    ampl: bool,
 ) -> ExitCode {
     use pounce_convex::presolve::{presolve, PresolveOutcome};
     use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
@@ -1295,9 +1298,11 @@ fn run_convex_qp(
             solve_result_num: srn,
             suffixes: &[],
         };
+        // Log a `.sol` write failure but do not early-return a distinct exit
+        // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`
+        // the final exit must still follow the solve-outcome contract.
         if let Err(e) = nl_writer::write_sol_file(path, &payload) {
             eprintln!("pounce: failed to write {}: {e}", path.display());
-            return ExitCode::from(2);
         }
     }
 
@@ -1357,11 +1362,7 @@ fn run_convex_qp(
         }
     }
 
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+    convex_exit_code(ok, ampl)
 }
 
 /// Solve a classified **convex QCQP** by reformulating it to a second-order
@@ -1377,6 +1378,7 @@ fn run_convex_socp(
     sol_path: Option<&std::path::Path>,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
+    ampl: bool,
 ) -> ExitCode {
     use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions, QpStatus};
 
@@ -1443,9 +1445,11 @@ fn run_convex_socp(
             solve_result_num: srn,
             suffixes: &[],
         };
+        // Log a `.sol` write failure but do not early-return a distinct exit
+        // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`
+        // the final exit must still follow the solve-outcome contract.
         if let Err(e) = nl_writer::write_sol_file(path, &payload) {
             eprintln!("pounce: failed to write {}: {e}", path.display());
-            return ExitCode::from(2);
         }
     }
 
@@ -1495,7 +1499,20 @@ fn run_convex_socp(
         }
     }
 
-    if ok {
+    convex_exit_code(ok, ampl)
+}
+
+/// Process exit code for the convex (LP/QP/SOCP) solver paths, honoring the
+/// AMPL solver-protocol contract. In `-AMPL` mode the termination is conveyed
+/// through the `.sol` file's `solve_result_num`, so the process exits 0 for
+/// any non-fatal solve outcome (infeasible, unbounded, iteration limit) just
+/// as the NLP path does (main.rs:1103-1118) — a non-zero exit makes Pyomo /
+/// the ASL interface raise `ApplicationError` and never read the `.sol`.
+/// Genuine startup failures (bad `.nl`/option, unextractable problem) returned
+/// non-zero earlier, before any solve, so reaching here in `-AMPL` mode means a
+/// verdict was produced. Outside AMPL mode, an unsuccessful solve exits 1.
+fn convex_exit_code(ok: bool, ampl: bool) -> ExitCode {
+    if ok || ampl {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

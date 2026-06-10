@@ -12,6 +12,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H1 | qp: inertia-shift regularization silently discarded — unbounded QPs reported `Optimal` with δ-dependent garbage | **FIXED** (`solve_equality_only` path) | Re-verify unshifted stationarity `δ·‖x‖∞` after a shifted one-shot solve; report `Unbounded` when it exceeds `1e-3·‖g‖∞` (gradient scale, not `opt_tol`). Test `h1_zero_hessian_linear_objective_is_unbounded`; repointed `inertia_control_shift_succeeds_on_psd_singular_hessian` to a bounded singular case. |
 | H2 | sensitivity: pin-row mapping omits `full_g_to_c_block` — silently wrong sensitivities with inequality constraints | **FIXED** | Translate user full-g pin indices through the c/d split before indexing `y_c`; reject pinned inequalities. Fixed `Solver::parametric_step`, `Solver::compute_reduced_hessian`, and the `convenience` (`SensSolve`) path; added `PdSensBacksolver::full_g_to_c_block` accessor. Tests in `cd_split_pin_mapping.rs`. |
 | H3 | cli: `.sol`/JSON constraint duals written in internal c/d-split order, unscaled | **FIXED** | `on_converged` hook now reassembles `lambda` via `pack_lambda_for_user` (inverts the c/d split via `c_map`/`d_map` AND unwinds `c_scale`/`d_scale`) instead of concatenating raw `y_c`+`y_d`; manual concatenation kept only as a fallback for non-`OrigIpoptNlp`. Test `lambda_is_in_original_g_order_not_cd_split_order` in `json_report.rs`. |
+| H4 | cli: convex LP/QP/SOCP dispatch ignores the `-AMPL` exit-code contract | **FIXED** | Threaded `args.ampl` into `run_convex_qp`/`run_convex_socp`; new `convex_exit_code(ok, ampl)` returns 0 for any non-fatal outcome under `-AMPL` (mirrors NLP path), 1 otherwise. Also dropped the `.sol`-write-failure `exit 2` (log-and-continue like the NLP path). Test `ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp`. |
 
 ## C1 detail
 
@@ -157,3 +158,33 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   the fallback branch (`if true || lambda.is_empty()`) reproduced the failure in
   the test harness (`lambda[0] = 58 expected ≈2`); restored → green. Full
   `pounce-cli` suite green (154 unit + all integration bins).
+
+## H4 detail
+
+- **Bug**: `run_convex_qp` (`pounce-cli/src/main.rs`) and `run_convex_socp`
+  never received `args.ampl` and ended with `if ok { SUCCESS } else { from(1) }`
+  — exit 1 on every non-fatal *unsuccessful* outcome (infeasible / unbounded /
+  iteration limit). But these paths handle every default-routed (`auto`)
+  LP / convex-QP / QCQP `.nl`, and the AMPL solver protocol conveys termination
+  through the `.sol`'s `solve_result_num`: a non-zero process exit makes Pyomo /
+  the ASL interface raise `ApplicationError` and never read the `.sol`. The NLP
+  path already documents and implements this (`_ if args.ampl => SUCCESS`,
+  main.rs:1116). So `pounce model.nl -AMPL` on an infeasible LP broke the Pyomo
+  integration. Secondary inconsistency: a failed `.sol` write exited 2 on the
+  convex paths but only logged-and-continued on the NLP path.
+- **Fix**: thread `args.ampl` into both functions; extract
+  `convex_exit_code(ok, ampl) -> ExitCode` returning `SUCCESS` when `ok || ampl`
+  (mirrors the NLP contract) and `1` otherwise. Dropped the two
+  `.sol`-write-failure `return ExitCode::from(2)` early-returns in favor of
+  log-and-continue, matching the NLP path so the exit code uniformly follows the
+  solve outcome.
+- **Test** (`qp_dispatch_end_to_end.rs::ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp`):
+  runs the infeasible-QP fixture both ways — `-AMPL --sol-output` must exit 0
+  with the verdict (`solve_result_num` 200) written to the `.sol`; plain
+  `--no-sol` must still exit non-zero. The existing
+  `infeasible_qp_reports_infeasible` (non-AMPL, exit non-zero) is unchanged.
+- **Verified the bug by running code**: pre-fix binary exited 1 on
+  `infeasible_qp.nl -AMPL` (with the `.sol` written); post-fix → exit 0, and
+  non-AMPL stays exit 1 / feasible `-AMPL` exits 0. Neutralizing the `|| ampl`
+  guard reproduced the test failure (`right: Some(0)`); restored → green. Full
+  `pounce-cli` suite green (154 unit + integration; qp_dispatch 16 tests).
