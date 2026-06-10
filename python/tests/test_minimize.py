@@ -301,3 +301,80 @@ def test_wrap_constraints_fd_jac_uses_probed_sizes():
     assert m == 3
     J = jac(x0)
     assert J.shape == (3, 2)
+
+
+class _FakeProblem:
+    """Stand-in for the native ``Problem`` so the NLP path can run to its
+    warnings without the compiled extension."""
+
+    def __init__(self, **kwargs):
+        self._x0 = None
+
+    def add_option(self, key, value):
+        pass
+
+    def solve(self, x0):
+        info = {
+            "status": 0,
+            "status_msg": "Solve_Succeeded",
+            "obj_val": 0.0,
+            "iter_count": 1,
+            "final_kkt_error": 0.0,
+        }
+        return np.asarray(x0, dtype=float), info
+
+
+def test_hess_ignored_with_constraints_warns(monkeypatch):
+    """L48: a user-supplied ``hess`` cannot be honored once constraints are
+    present (the wrapper can't form the constraint-curvature term of the
+    Lagrangian Hessian), so the solver silently fell back to L-BFGS. It must
+    now warn."""
+    import pounce._minimize as M
+
+    monkeypatch.setattr(M, "Problem", _FakeProblem)
+
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+    H = lambda x: 2.0 * np.eye(2)
+    con = {"type": "eq", "fun": lambda x: x[0] - x[1], "jac": lambda x: np.array([[1.0, -1.0]])}
+
+    # solver_selection='nlp' forces the general NLP path (no convex routing).
+    with pytest.warns(UserWarning, match="ignores the supplied 'hess'"):
+        M.minimize(f, np.ones(2), jac=g, hess=H, constraints=con,
+                   options={"solver_selection": "nlp", "print_level": 0})
+
+    # Unconstrained: hess is honored, so no such warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        M.minimize(f, np.ones(2), jac=g, hess=H,
+                   options={"solver_selection": "nlp", "print_level": 0})
+
+
+def test_convex_route_warns_on_dropped_options(monkeypatch):
+    """L48: the dedicated convex (LP/QP) router honors only tol/max_iter, so
+    NLP-only options like ``acceptable_tol``/``print_level`` are dropped. That
+    must warn rather than happen silently."""
+    import pounce._minimize as M
+
+    class _Extract:
+        kind = "qp"
+
+    sentinel = M.OptimizeResult(x=np.zeros(2), fun=0.0, success=True, status=0,
+                                message="optimal", nit=1, info={"solver": "qp-ipm"})
+
+    monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
+    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
+
+    f = lambda x: float(x @ x)
+    with pytest.warns(UserWarning, match="had no effect|were ignored|acceptable_tol"):
+        res = M.minimize(f, np.ones(2),
+                         options={"solver_selection": "qp-ipm",
+                                  "acceptable_tol": 1e-9, "print_level": 3})
+    assert res is sentinel
+
+    # Only honored options (tol/max_iter) -> no warning.
+    monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        M.minimize(f, np.ones(2),
+                   options={"solver_selection": "qp-ipm", "tol": 1e-8, "max_iter": 50})

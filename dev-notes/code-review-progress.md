@@ -115,6 +115,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L45 | `finalize_solution` ignores the `eval_g` return value (`lib.rs:931-933` orig) → on re-eval failure the stale/garbage `scratch_g` is forwarded as the reported constraint vector | **FIXED** | **Confirmed by a fail-first test.** `finalize_solution` re-evaluates `g` at the final `sol.x` into the inner-sized `scratch_g`, but discarded the boolean result; a failed `eval_g` leaves `scratch_g` holding partial garbage or a stale earlier-iterate value, which was then cloned into `g_full` and reported. **Fix**: capture `ok_g`; on `!ok_g`, zero `scratch_g` and rebuild it from the solver's own (trustworthy) reduced `sol.g`, mapped to the kept inner rows via `rows_kept` exactly as the multiplier mapping does (presolve-dropped rows left at 0, no reliable value existing for them). **Test**: `finalize_does_not_forward_stale_g_when_eval_g_fails` — a `GFailRecordingVar` mock whose `eval_g` writes sentinel `999.0` and returns `false`; finalize records the reported `sol.g`. Fail-first: pre-fix the recorded vector is `[999, 999]`; post-fix `[0, 0]`. Full pounce-presolve suite green (224 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L45 detail`. |
 | L46 | Metadata projection infers per-row-ness from vector length alone (`project_con_metadata`/`expand_con_metadata`) — coincidental-length global vectors are silently subset/expanded | **VERIFIED REAL — documented limitation, not cleanly fixable** | **Confirmed by reading + a characterization test.** `project_con_metadata` treats any constraint-metadata vector with `len() == m_in` as per-row and subsets it to `rows_kept`; `expand_con_metadata` mirrors with `len() == m_out`. `MetaData` is an untyped `BTreeMap<String, Vec<_>>` (a faithful port of upstream Ipopt's untyped `*MetaDataMapType`) with **no per-key arity tag**, so length is the only available signal — a semantically-global vector that coincidentally has length `m_in` is wrongly subset. **Not cleanly fixable without an arity-aware metadata API.** Mitigations applied: (1) the heuristic is *exact* for every contract-conforming TNLP — by the TNLP contract all constraint-bucket vectors are per-constraint, and pounce's only real producer (`nl_reader`) emits genuinely per-row `con_names`, so today's shipped behavior is correct; (2) the fast path `m_in == m_out` (no rows dropped) is identity, so the hazard only exists once presolve drops a row; (3) explicit contract + caveat doc comments on both functions; (4) two regression tests — `con_metadata_per_row_vector_round_trips_under_row_drop` (canonical correct case) and `con_metadata_length_heuristic_misfires_on_coincidental_global` (pins the known misfire as a future-fix anchor). Full pounce-presolve suite green (226 lib, +2); `cargo fmt` / gated `cargo clippy` clean. See `## L46 detail`. |
 | L47 | `_wrap_constraints` probes user constraint funcs at `np.zeros(n)` instead of `x0` (`_minimize.py:198-199`) → constraints undefined at the origin fail before the solve even with feasible `x0`; `jac_combined` (211) re-evaluates `fn(x)` per FD call just for a row count it already has | **FIXED (both parts)** | **Confirmed by reading + a probe-point test.** (1) The sizing probe was hard-coded to `np.zeros(n)`; a constraint like `log(x)` is `-inf`/undefined at the origin yet finite at a feasible `x0=[1,1]`, so the size probe produced `-inf`/NaN (or raised) before the solve began. **Fix**: thread `x0` into `_wrap_constraints(constraints, n, x0)` and probe at `x0` (origin only as the `x0 is None` fallback). (2) `jac_combined`'s FD branch recomputed `m_i = fn(x).size` every call purely to size the FD block, although `sizes` was already captured at probe time. **Fix**: zip the precomputed `sizes` into the loop and pass `m_i` straight to `_finite_diff_jac` (the FD routine still calls `fn` for the columns — only the redundant sizing call is gone). **Tests** (`test_minimize.py`): `test_wrap_constraints_probes_at_x0_not_origin` (probe records `x0`, `g(x0)` finite; the `x0=None` origin path yields `-inf` — the pre-fix behavior) and `test_wrap_constraints_fd_jac_uses_probed_sizes` (3-output/2-input constraint → FD Jacobian shape `(3,2)`). Verified against the codereview source via a stubbed-native harness. See `## L47 detail`. |
+| L48 | `minimize` silently drops information on specific routes: user `hess` ignored whenever constraints are present (`_build_problem_obj` gates Hessian on `m == 0`, no warning); convex routes forward only `tol`/`max_iter`, so `disp`/`print_level`/`acceptable_tol` are silently discarded | **FIXED (both parts, via warnings)** | **Confirmed by reading + two monkeypatch tests.** (1) `_build_problem_obj` only attaches `hessian`/`hessianstructure` when `m == 0`, because the wrapper can supply only the *objective* Hessian and has no way to assemble the constraint-curvature term `Σλᵢ∇²gᵢ` of the Lagrangian Hessian the IPM needs; with constraints it falls back to L-BFGS. Correct behavior, but silent. **Fix**: warn when `hess is not None and m > 0`, explaining the L-BFGS fallback. (2) `_solve_via_convex`/`_solve_via_socp` read only `opts.get("tol")`/`opts.get("max_iter")`. **Fix**: capture the user's requested option keys *before* defaulting/popping (`requested_opt_keys`), and at each convex/SOCP routing return warn (`_warn_convex_dropped_opts`) listing any requested key outside the honored set `{tol, max_iter, disp}` plus a provided `hess`, pointing to `solver_selection='nlp'`. **Tests** (`test_minimize.py`, monkeypatching the native `Problem` / `classify_and_extract` / `_solve_via_convex`): `test_hess_ignored_with_constraints_warns` (warns with a constraint; no warning unconstrained) and `test_convex_route_warns_on_dropped_options` (warns on `acceptable_tol`/`print_level`; silent when only `tol`/`max_iter`). Verified against the codereview source via a stubbed-native harness. See `## L48 detail`. |
 
 ## C1 detail
 
@@ -5829,3 +5830,50 @@ is removed.
 Both pass against the codereview source (verified via a stubbed-native import
 harness, since the worktree has no compiled `_pounce.so`; CI builds the wheel
 and runs them normally).
+
+## L48 detail
+
+**Issue.** `minimize` discards user-supplied information on two routes without
+telling the caller: (a) a `hess` argument is ignored whenever constraints are
+present; (b) when the problem is routed to the dedicated convex (LP/QP/SOCP)
+solver, every option except `tol`/`max_iter` is dropped (`disp`,
+`print_level`, `acceptable_tol`, …). The module docstring's "the router is
+transparent to callers" claim therefore did not hold.
+
+**Verification — part (a).** `_build_problem_obj` attaches the `hessian` /
+`hessianstructure` members only under `if hess is not None and m == 0`. With
+`m > 0` the supplied `hess` is silently unused and the IPM falls back to
+L-BFGS. The gate is *correct* — the Python wrapper computes only
+`obj_factor · hess(x)` (the objective Hessian) and cannot form the
+constraint-curvature term `Σ λᵢ ∇²gᵢ` of the Lagrangian Hessian (it has no
+per-constraint Hessians and no `λ` at build time) — but it was undocumented and
+unwarned.
+
+**Verification — part (b).** `_solve_via_convex` / `_solve_via_socp` construct
+their `solve_qp` / `solve_socp` calls reading only `opts.get("tol")` and
+`opts.get("max_iter")`. Anything else in `options` reaches them and is ignored.
+
+**Fix.** (a) Emit a `UserWarning` when `hess is not None and m > 0`, naming the
+L-BFGS fallback and the "objective Hessian is used only when unconstrained"
+rule. (b) Snapshot the user's option keys into `requested_opt_keys` *before*
+the routing pops and the `disp`/`print_level` defaulting, then at every convex
+/ SOCP routing return call `_warn_convex_dropped_opts(route_name)`, which warns
+listing any requested key outside the honored set
+`{solver_selection, route_tol, tol, max_iter, disp}` (plus a provided `hess`),
+and points the user at `solver_selection='nlp'` to force the option-honoring
+NLP path. `solver_selection`/`route_tol` are *consumed*, not ignored, so they
+are excluded; `disp` is excluded because it is already translated into the
+`print_level` default the convex path's silence honors.
+
+**Tests** (`test_minimize.py`, with the native `Problem` /
+`classify_and_extract` / `_solve_via_convex` monkeypatched so the routing logic
+runs without the compiled extension):
+- `test_hess_ignored_with_constraints_warns`: a constrained solve with `hess`
+  warns (`match="ignores the supplied 'hess'"`); the same solve *without*
+  constraints raises no warning (Hessian honored).
+- `test_convex_route_warns_on_dropped_options`: routing to the QP solver with
+  `acceptable_tol`/`print_level` warns and still returns the convex result;
+  passing only `tol`/`max_iter` is silent.
+
+Both pass against the codereview source (stubbed-native harness; CI runs them
+on the built wheel).

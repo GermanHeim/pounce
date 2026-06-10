@@ -451,6 +451,11 @@ def minimize(
     # Solver routing (mirrors the CLI's `solver_selection`). Pop the routing
     # keys so the remainder of `options` still flows to the NLP solver.
     opts = dict(options) if options else {}
+    # Remember which options the *user* actually asked for, before we pop
+    # routing keys or inject defaults (`disp`/`print_level` below). The convex
+    # routers honor only a subset, so this lets us warn about the rest (L48)
+    # instead of silently discarding them.
+    requested_opt_keys = set(opts)
     selection = str(opts.pop("solver_selection", "auto")).lower()
     route_tol = float(opts.pop("route_tol", 1e-5))
     # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
@@ -481,6 +486,25 @@ def minimize(
         x0=x0,
         rtol=route_tol,
     )
+    # Options the dedicated convex (LP/QP/SOCP) routers actually honor; the
+    # routing key and tolerance are consumed here, not "ignored". Everything
+    # else the user passed (e.g. `print_level`, `disp`, `acceptable_tol`) has
+    # no effect on the convex path, so warn rather than drop silently (L48).
+    _CONVEX_HONORED = {"solver_selection", "route_tol", "tol", "max_iter", "disp"}
+
+    def _warn_convex_dropped_opts(route_name: str) -> None:
+        ignored = sorted(requested_opt_keys - _CONVEX_HONORED)
+        if hess is not None:
+            ignored.append("hess (argument)")
+        if ignored:
+            warnings.warn(
+                f"pounce.minimize routed this problem to the dedicated {route_name} "
+                "solver, which honors only 'tol' and 'max_iter'. These were ignored: "
+                f"{ignored}. Pass solver_selection='nlp' to force the general NLP "
+                "solver, which honors them.",
+                stacklevel=2,
+            )
+
     if selection in ("auto", "lp-ipm", "qp-ipm"):
         extract = classify_and_extract(**route_kw)
         if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
@@ -494,12 +518,14 @@ def minimize(
                 "a convex LP/QP (convex-quadratic objective + linear constraints)"
             )
         if extract is not None:
+            _warn_convex_dropped_opts("convex LP/QP")
             return _solve_via_convex(extract, opts)
         # Auto: an LP/QP wasn't found — try a convex QCQP before giving up to
         # the NLP solver (a quadratic *constraint* lands here, not above).
         if selection == "auto":
             socp = classify_and_extract_socp(**route_kw)
             if socp is not None:
+                _warn_convex_dropped_opts("convex SOCP")
                 return _solve_via_socp(socp, opts)
     elif selection == "socp":
         socp = classify_and_extract_socp(**route_kw)
@@ -509,6 +535,7 @@ def minimize(
                 "convex QCQP (convex-quadratic objective and/or constraints, all "
                 "convex, with only linear equalities)"
             )
+        _warn_convex_dropped_opts("convex SOCP")
         return _solve_via_socp(socp, opts)
 
     # (D, gh #123) The NLP path finite-differences any derivative the caller
@@ -530,6 +557,20 @@ def minimize(
             + " by finite differences. This is slower and less accurate than "
             "analytic derivatives. For a faster, more robust solve supply them "
             "directly, or use the autodiff frontends pounce.jax / pounce.torch.",
+            stacklevel=2,
+        )
+
+    # (L48) The NLP wrapper can only supply the *objective* Hessian; it has no
+    # way to assemble the constraint-curvature term ``Σ λᵢ ∇²gᵢ`` the IPM needs
+    # for the full Lagrangian Hessian. So a user-supplied ``hess`` is honored
+    # only for unconstrained problems (`m == 0`); with constraints the solver
+    # falls back to L-BFGS. Warn rather than drop it silently.
+    if hess is not None and m > 0:
+        warnings.warn(
+            "pounce.minimize ignores the supplied 'hess' when constraints are "
+            "present: the wrapper cannot form the constraint-curvature term of "
+            "the Lagrangian Hessian, so the solver uses an L-BFGS approximation. "
+            "The objective Hessian is used only for unconstrained problems.",
             stacklevel=2,
         )
 
