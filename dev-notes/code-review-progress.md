@@ -30,6 +30,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M4 | linalg: `symmetric_eigen` reports `true` on non-convergence | **FIXED** | **Confirmed by code inspection**: the doc (`eigen.rs:32-35`) promises `false` when the Jacobi sweeps run out, but the cyclic-Jacobi loop only `break`s on early convergence; after `max_sweeps` (50) it fell through to `return true` unconditionally (old `eigen.rs:153`). Callers branch on the verdict (`pounce-convex/src/cones/psd.rs:108,145,163,231`, `sos.rs:615,672,717`), so a stalled matrix would feed unconverged eigenpairs into PSD projections / SOS decompositions instead of the error path. **Fix**: track a `converged` flag (set on the early-`break`), recompute the off-diagonal mass once after the loop (to credit convergence achieved on the final sweep, whose state the top-of-loop check never sees), and `return converged`. Eigenpair extraction stays unconditional so callers still get best-effort values. To make the otherwise-unreachable `false` path testable, the body moved to a private `symmetric_eigen_impl(.., max_sweeps)`; the public `symmetric_eigen` delegates with `50` (signature/callers unchanged). **Tests** (`eigen.rs`): `eigen_reports_false_when_sweeps_exhausted` — a coupled 4×4 with `max_sweeps=1` must return `false` (pre-fix FAILS, returning `true`); `eigen_reports_true_when_converged` — same matrix at `max_sweeps=50` returns `true`, and an already-diagonal matrix converges even at `max_sweeps=1`. Pre-fix the first test FAILS; post-fix all 8 `eigen` tests pass, and `pounce-linalg` + `pounce-convex` (the consumers) stay green (328 passed, 0 failed). See `## M4 detail`. |
 | M5 | QP: warm start can return `Optimal` at an infeasible point; unmarked equality rows never enforced | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: `ParametricActiveSetSolver::solve_general` (`crates/pounce-qp/src/solver.rs`) trusts the caller's warm-start `(x, working)` and steps with a zero-RHS active-set system (`rhs[n..] = 0`, lines 729-732), so the residuals of caller-marked-active rows are frozen and never re-audited; the `Optimal` return (lines 827-841) had **no** feasibility check, contradicting `QpStatus::Optimal`'s own contract ("KKT residual **and feasibility** within tolerance", `error.rs:8-9`). Separately, an equality row (`bl==bu`) the caller left `Inactive` is skipped by the ratio test (`if qp.bl[i]==qp.bu[i] { continue; }`, lines 883-884) and can **never** enter the working set, so it is never enforced. Net effect: a warm start at an infeasible point converges to a KKT-stationary point of the wrong working set and is returned as a silent `Optimal` (the doc claimed it "may diverge or hit max_iter" — the real failure is worse). **Fix**: add a post-solve feasibility audit in the public `solve` (the one entry point for both `solve_general` and `solve_general_schur`): a free fn `point_is_feasible` checks every general row **including equalities** and every variable bound against `feas_tol`; when a result claims `Optimal` but fails the audit, recover through `solve_elastic` — the exact recovery the cold path already uses when `cold_general_initial` returns an infeasible point. **Recursion-safe by construction**: `solve_elastic` recurses through `solve_general` *directly* (not the public `solve`), seeding a slack-feasible augmented problem, so the recovery is never re-audited and cannot loop. Feasible warm/cold results pass the audit untouched (happy path unchanged). The audit is the "`OptimalityCheck` audit pass" the doc comment (lines 668-671) explicitly deferred. **Test** (`tests/analytical.rs`): `m5_warm_start_inactive_equality_is_not_a_false_optimal` — `min ½‖x‖² s.t. x₁+x₂=2`, warm-started at `(0,0)` with the equality row `Inactive`; pre-fix returns `Optimal` at `(0,0)` (residual 2.0 — **FAILS** the feasibility assertion), post-fix recovers to the true optimum `(1,1)` reported `Optimal`. Full `pounce-qp` suite green (75 + 6 integration) and the `pounce-algorithm` QP consumer green (245 + SQP integration, 0 failed). See `## M5 detail`. |
 | M6 | sensitivity: `SensSolve` swallows sensitivity-stage failures | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: the `on_converged` callback in `SensSolve::run` (`crates/pounce-sensitivity/src/convenience.rs`) writes a diagnostic into `CallbackOut.error` on *every* sensitivity-stage failure (no current iterate, inequality/invalid pin, `PdSensBacksolver::new` / `IndexSchurData::from_parts` error, `parametric_step` / `compute_reduced_hessian[_eigen]` returning false) and bails. But `CallbackOut.error` carried `#[allow(dead_code)]` and was **never copied into `SensResult`** (the result builder at the old lines 382-396 read every other `out.*` field but not `error`). Because the *underlying solve* still converged, `status` is `SolveSucceeded` and the requested `dx`/`reduced_hessian` are simply `None` — **indistinguishable from "sensitivity not requested."** A failed `parametric_step` therefore looked like success with no step computed. **Fix**: add a public `error: Option<String>` field to `SensResult` (documented as the sole signal separating a sensitivity failure from a not-requested computation), copy `out.error.clone()` into it in the builder, and drop the `#[allow(dead_code)]`. Updated the two unit-test `SensResult` literals in `diff_handoff.rs` (`error: None`). Also surfaced it end-to-end: the Python `info` dict now carries `info["sens_error"]` (`pounce-py/src/problem.rs`), since the Python binding is the primary user-facing consumer and previously had no way to see the failure either. **Test** (`tests/convenience_api.rs`): `sens_solve_surfaces_sensitivity_stage_failure` — solves the known-good `ParametricTNLP` (converges) but pins an out-of-range index, so the callback hits the "not in the equality c-block" branch and writes `error`. Post-fix asserts `status == SolveSucceeded`, `error.is_some()`, `dx.is_none()`; a paired happy-path solve asserts `error.is_none()` + `dx.is_some()`. **Pre-fix the assertion FAILS** ("failure must be surfaced … not swallowed; dx = None, status = SolveSucceeded") — verified by temporarily forcing `error: None` in the builder. Full `pounce-sensitivity` suite green (64 across 7 binaries, 0 failed); `pounce-py` builds clean. See `## M6 detail`. |
+| M7 | QP: QPS parser doubles Hessian off-diagonals for `QMATRIX` files | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: `parse_qps` (`crates/pounce-qp/src/qps.rs`) mapped all three quadratic-section headers to the same state — `Some("QUADOBJ") \| Some("QSECTION") \| Some("QMATRIX") => section = Section::Quadobj` (old line 132). But the conventions differ: `QUADOBJ`/`QSECTION` list each off-diagonal pair **once** (single triangle), whereas `QMATRIX` lists the **full** matrix — both `(i,j)` and the mirror `(j,i)`. The content parser pushed every raw `(i_col, j_col, val)` triplet to `h_entries`; the lower-triangle normalization (`let (lo, hi) = if i>=j {(j,i)} else {(i,j)}`) then collapses both QMATRIX mirror entries onto the **same** lower triplet, and the evaluator sums all triplets → every off-diagonal is **doubled** (diagonal `i==j` is listed once, so unaffected). A QMATRIX file thus solves a different objective (`½xᵀHx` with off-diagonals 2×) and returns a wrong optimum. **Fix**: split the header match so `QMATRIX` sets a new `quad_is_full = true` flag (`QUADOBJ`/`QSECTION` set it `false`); in the content parser, when `quad_is_full && i_col < j_col`, skip the strict-upper mirror so each off-diagonal survives exactly once in the lower triangle. Single-triangle sections keep every entry (unchanged). **Latent-but-real**: no in-repo data uses QMATRIX (the `mm_published_optima` fixtures are all QUADOBJ, which is why they always passed), so this path had **zero** prior coverage; any user supplying a standard CPLEX/Maros-Mészáros QMATRIX file hit the bug. **Tests** (`src/tests/qps_unit.rs`): `parse_qps_qmatrix_full_matrix_does_not_double_off_diagonals` parses a QMATRIX `H = [[2,1],[1,2]]` (both `X1·X2` and `X2·X1` listed) and asserts the summed off-diagonal `H_21 == 1.0` (not 2.0) with diagonals intact; pre-fix it **FAILS** (`H_21 = 2`), post-fix passes. A paired `parse_qps_quadobj_single_triangle_keeps_off_diagonal` guards the QUADOBJ path against the fix regressing it. Full `pounce-qp` suite green (77 lib + 1 + 5 `mm_published_optima` integration, 0 failed). See `## M7 detail`. |
 
 ## C1 detail
 
@@ -1027,3 +1028,53 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   confirmed by temporarily forcing `error: None` in the builder; post-fix it
   PASSES. Full `pounce-sensitivity` suite green (64 tests across 7 binaries, 0
   failed) and `pounce-py` compiles clean with the new `info["sens_error"]` key.
+
+## M7 detail
+
+- **Bug** (`crates/pounce-qp/src/qps.rs`): the QPS section dispatcher mapped all
+  three quadratic-section headers to one state —
+  `Some("QUADOBJ") | Some("QSECTION") | Some("QMATRIX") => section = Section::Quadobj`
+  (old line 132) — but the conventions are **not** interchangeable:
+  - `QUADOBJ` / `QSECTION` (Maros-Mészáros / CPLEX): the objective Hessian is
+    given as a **single triangle** — each off-diagonal pair `H_ij` appears once.
+  - `QMATRIX` (CPLEX full-matrix): the **entire symmetric matrix** is listed —
+    both `(i,j)` and the mirror `(j,i)`, each carrying the same value.
+  The `Section::Quadobj` content parser pushes every raw `(i_col, j_col, val)`
+  triplet to `h_entries`. The later lower-triangle normalization,
+  `let (lo, hi) = if i >= j { (j, i) } else { (i, j) }; h_irow.push(hi+1);
+  h_jcol.push(lo+1); h_val.push(v);`, maps both QMATRIX mirror entries onto the
+  **same** lower triplet `(hi, lo)`. pounce's evaluator **sums** all triplets at
+  a position, so every off-diagonal ends up **2×** its file value. The diagonal
+  (`i == j`) is listed once and is unaffected.
+- **Why it matters**: a QMATRIX-format problem is silently solved with the wrong
+  objective — `½xᵀHx` with all off-diagonals doubled — yielding a wrong optimum
+  with no error. QMATRIX is a standard, widely-emitted convention (CPLEX `.qps`
+  export, parts of the Maros-Mészáros distribution), so this is a correctness
+  bug on real third-party input, not a contrived edge case.
+- **Latent — zero prior coverage**: no `.qps` data in the repo uses QMATRIX
+  (`grep -rln QMATRIX` over tests/benchmarks/data → empty). The
+  `mm_published_optima` integration fixtures are all QUADOBJ, which is why the
+  suite was green despite the defect — the QMATRIX branch was never exercised.
+- **Fix**: split the header match — `QMATRIX` sets a new `quad_is_full = true`
+  flag while `QUADOBJ` / `QSECTION` set it `false`. In the content parser, when
+  `quad_is_full && i_col < j_col`, `continue` (skip the strict-upper mirror) so
+  each off-diagonal survives exactly once and normalizes correctly; diagonal and
+  lower entries are kept. Single-triangle sections keep every entry, so the
+  already-correct QUADOBJ path is byte-for-byte unchanged. The fix is internal
+  to `parse_qps` (signature/return type unchanged) — no downstream API impact.
+- **Tests** (`src/tests/qps_unit.rs`), with a new `h_at(model, irow, jcol)`
+  helper that sums the parsed triplets at a lower-triangle position (the
+  *effective* H entry the solver sees):
+  - `parse_qps_qmatrix_full_matrix_does_not_double_off_diagonals` — parses a
+    QMATRIX file for `H = [[2, 1], [1, 2]]` (lists `X1·X1`, `X1·X2`, `X2·X1`,
+    `X2·X2`) and asserts `H_21 == 1.0` (not 2.0) with `H_11 == H_22 == 2.0`.
+    Pre-fix **FAILS** with `H_21 = 2`; post-fix passes.
+  - `parse_qps_quadobj_single_triangle_keeps_off_diagonal` — the same `H` via a
+    single `X1·X2 = 1` QUADOBJ entry; asserts `H_21 == 1.0`. Guards the
+    single-triangle path against the QMATRIX fix regressing it (passes pre- and
+    post-fix).
+- **Verification summary**: fail-first confirmed by short-circuiting the new
+  guard (`if false && quad_is_full && …`) — the QMATRIX test reports
+  `H_21 = 2`, the QUADOBJ test stays correct. With the fix restored, full
+  `pounce-qp` suite green (77 lib incl. the 2 new + 1 + 5 `mm_published_optima`
+  integration, 0 failed).
