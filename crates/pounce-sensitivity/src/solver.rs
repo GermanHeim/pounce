@@ -114,6 +114,29 @@ impl ConvergedState {
     }
 }
 
+/// Translate user-facing full-g pin indices into flat KKT rows of the
+/// `y_c` block, applying the c/d-split map. `y_c` holds equality rows
+/// only, so a pinned equality's flat row is `y_c_offset +
+/// full_g_to_c_block(g)`; an inequality has no `y_c` row and is rejected
+/// with [`SolverError::SensComputationFailed`] rather than silently
+/// pinning a `y_d`/slack row (H2).
+fn pin_rows_for(
+    backsolver: &PdSensBacksolver,
+    y_c_offset: Index,
+    pin_constraint_indices: &[Index],
+) -> Result<Vec<Index>, SolverError> {
+    pin_constraint_indices
+        .iter()
+        .map(|&full_g| match backsolver.full_g_to_c_block(full_g) {
+            Some(c_idx) => Ok(y_c_offset + c_idx),
+            None => Err(SolverError::SensComputationFailed(format!(
+                "pinning constraint #{full_g} is an inequality (not in the equality \
+                 c-block); only equality constraints can be pinned for sensitivity"
+            ))),
+        })
+        .collect()
+}
+
 /// Session-style solver: holds an [`IpoptApplication`], its TNLP, and
 /// the converged factor between calls.
 pub struct Solver {
@@ -308,15 +331,16 @@ impl Solver {
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
 
         // y_c rows live right after the (x, s) primal block in the
-        // compound-vector layout (matches `convenience.rs`).
+        // compound-vector layout (matches `convenience.rs`). The pin
+        // index is a user-facing full-g index; it must be translated
+        // through the c/d split (`full_g_to_c_block`) before being added
+        // to `y_c_offset` — `y_c` holds equality rows only, so any
+        // inequality preceding a pinned equality shifts its c-row down.
         let dims = state.backsolver.block_dims();
         let n_x = dims[0];
         let n_s = dims[1];
         let y_c_offset = (n_x + n_s) as Index;
-        let param_rows: Vec<Index> = pin_constraint_indices
-            .iter()
-            .map(|&i| y_c_offset + i)
-            .collect();
+        let param_rows = pin_rows_for(&state.backsolver, y_c_offset, pin_constraint_indices)?;
         let signs = vec![1; pin_constraint_indices.len()];
         let a_data = IndexSchurData::from_parts(param_rows, signs)
             .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
@@ -354,10 +378,9 @@ impl Solver {
         let n = pin_constraint_indices.len();
         let dims = state.backsolver.block_dims();
         let y_c_offset = (dims[0] + dims[1]) as Index;
-        let param_rows: Vec<Index> = pin_constraint_indices
-            .iter()
-            .map(|&i| y_c_offset + i)
-            .collect();
+        // Translate user full-g indices through the c/d split — see
+        // `parametric_step`.
+        let param_rows = pin_rows_for(&state.backsolver, y_c_offset, pin_constraint_indices)?;
         let signs = vec![1; n];
         let a_data = IndexSchurData::from_parts(param_rows, signs)
             .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;

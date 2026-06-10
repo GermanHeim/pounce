@@ -10,6 +10,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | C1 | presolve: Phase-2 redundancy mask misaligned after Phase-0 row drop | **FIXED** | `apply_redundant_verdicts` helper guards on `row_kept_inner`; rollback path rebuilds `linear_rows`. Test `c1_redundancy_mask_realigned_after_phase0_drop`. |
 | C2 | presolve: Phase-0 block elimination assumes non-block columns are constants (4 sub-cases) | **FIXED** | Conservative soundness gate rejects any block whose rows reference a free non-block column; `x_running` clamped to fixed value for trivially-fixed vars. Test `c2_gate_rejects_block_with_probe_hidden_free_dependency`. |
 | H1 | qp: inertia-shift regularization silently discarded — unbounded QPs reported `Optimal` with δ-dependent garbage | **FIXED** (`solve_equality_only` path) | Re-verify unshifted stationarity `δ·‖x‖∞` after a shifted one-shot solve; report `Unbounded` when it exceeds `1e-3·‖g‖∞` (gradient scale, not `opt_tol`). Test `h1_zero_hessian_linear_objective_is_unbounded`; repointed `inertia_control_shift_succeeds_on_psd_singular_hessian` to a bounded singular case. |
+| H2 | sensitivity: pin-row mapping omits `full_g_to_c_block` — silently wrong sensitivities with inequality constraints | **FIXED** | Translate user full-g pin indices through the c/d split before indexing `y_c`; reject pinned inequalities. Fixed `Solver::parametric_step`, `Solver::compute_reduced_hessian`, and the `convenience` (`SensSolve`) path; added `PdSensBacksolver::full_g_to_c_block` accessor. Tests in `cd_split_pin_mapping.rs`. |
 
 ## C1 detail
 
@@ -95,3 +96,34 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   (`if false && delta > 0.0`) makes `h1_…` report `Optimal` with
   `x = [-1e8, 2e8]` (the δ-dependent clamp point) — the bug reproduced;
   restored → `Unbounded`. Full `pounce-qp` suite green (71 unit + tests).
+
+## H2 detail
+
+- **Bug**: the pin-constraint → KKT-row mapping computed the flat row of a
+  pinned equality as `n_x + n_s + user_g_index`, but the `y_c` multiplier
+  block holds **equality rows only**. With any inequality preceding the pinned
+  equality in `g(x)`, the inequality lands in the `d` block and shifts every
+  later equality's `y_c` position down — so the raw user index selects the
+  wrong constraint's row (or a `y_d`/slack row) and `parametric_step` /
+  `compute_reduced_hessian` return plausible-but-wrong numbers with no error.
+  Three sites: `Solver::parametric_step` (solver.rs:316), `Solver::compute_reduced_hessian`
+  (solver.rs:357), and the `convenience`/`SensSolve` closure (convenience.rs:285).
+  The CLI driver (`pounce-cli/src/sens.rs`) already did it right via
+  `full_g_to_c_block` — duplicated logic that had diverged. Existing tests
+  passed only because every fixture was equality-only (identity c-map).
+- **Fix**: route all three sites through the c/d-split map. Added
+  `PdSensBacksolver::full_g_to_c_block` (delegates to the held NLP) and a
+  `pin_rows_for` helper in solver.rs; convenience.rs translates inline against
+  its `nlp` handle. A pinned inequality (no `y_c` row) is now rejected with an
+  error instead of silently pinning a `d`/slack row.
+- **Test** (`tests/cd_split_pin_mapping.rs`): a fixture with one inactive
+  leading inequality then three equalities (`min x0²` s.t. `x0+x1+x2≤1000`,
+  `x0=x1+x2`, `x1=p1`, `x2=p2`). Pinning the x1-fixing equality must move x1
+  and x0 but not x2 (`dx=[Δ,Δ,0]`); the pre-fix bug pins the x2-fixing
+  equality instead. Plus two inequality-rejection tests (parametric_step and
+  reduced_hessian).
+- **Verified the bug by running code**: pre-fix, the new test reported
+  `dx=[0.1, 0, …]` (x1 unmoved — wrong row pinned) and pinning the inequality
+  returned `Ok([0.1, 0, 0])` silently; post-fix → `dx=[0.1,0.1,0]` and the
+  inequality is rejected. Full `pounce-sensitivity` suite green (43 + 6 + 3 + …
+  across test bins); `pounce-cli` builds clean.

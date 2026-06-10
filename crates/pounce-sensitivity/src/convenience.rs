@@ -277,12 +277,32 @@ impl SensSolve {
 
             let n_x = curr.x.dim() as usize;
             let n_s = curr.s.dim() as usize;
-            // y_c rows live right after the (x, s) primal block in
-            // the compound-vector layout. Pin constraint indices are
-            // user-facing 0-based indices into g(x); the same
-            // constraint lives at flat KKT row `n_x + n_s + i`.
+            // y_c rows live right after the (x, s) primal block in the
+            // compound-vector layout. Pin constraint indices are
+            // user-facing 0-based indices into g(x), but `y_c` holds
+            // equality rows only — so the flat KKT row is
+            // `n_x + n_s + full_g_to_c_block(i)`, NOT `n_x + n_s + i`.
+            // They differ whenever an inequality precedes the pinned
+            // equality; an inequality has no y_c row and is rejected
+            // (H2).
             let y_c_offset = (n_x + n_s) as Index;
-            let param_rows: Vec<Index> = pin_indices.iter().map(|&i| y_c_offset + i).collect();
+            let mut param_rows: Vec<Index> = Vec::with_capacity(n_params);
+            {
+                let nlp_borrow = nlp.borrow();
+                for &i in pin_indices.iter() {
+                    match nlp_borrow.full_g_to_c_block(i) {
+                        Some(c_idx) => param_rows.push(y_c_offset + c_idx),
+                        None => {
+                            outbox_cb.borrow_mut().error = Some(format!(
+                                "pinning constraint #{i} is an inequality (not in the \
+                                 equality c-block); only equality constraints can be \
+                                 pinned for sensitivity"
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
             let signs = vec![1; n_params];
 
             let backsolver = match PdSensBacksolver::new(data, cq, nlp, Rc::clone(&pd)) {
