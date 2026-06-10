@@ -1687,6 +1687,66 @@ fn problem_5_infeasibility_certified_by_elastic_mode() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// L15 regression (dev-notes/code-review-2026-06.md): `solve_elastic`
+// hard-called `solve_general`, ignoring `opts.use_schur_updates` — so
+// an infeasible problem solved with the Schur path silently fell back
+// to the refactor path. Same infeasible problem as
+// `problem_5_infeasibility_certified_by_elastic_mode`, but with
+// `use_schur_updates = true`: the elastic recovery must now route the
+// augmented solve through `solve_general_schur`, which records ≥1
+// rank-2 Schur update in the stats (the refactor path reports 0).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn l15_elastic_honors_use_schur_updates() {
+    let n = 1;
+    let m = 2;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1], vec![1]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0]);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 2], vec![1, 1]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0];
+    let bl = [5.0, NLP_LOWER_BOUND_INF];
+    let bu = [NLP_UPPER_BOUND_INF, 3.0];
+    let xl = [NLP_LOWER_BOUND_INF];
+    let xu = [NLP_UPPER_BOUND_INF];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut opts = QpOptions::default();
+    opts.use_schur_updates = true;
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &opts).unwrap();
+
+    // Same minimal-l1 infeasibility certificate as the refactor path.
+    assert_eq!(sol.status, crate::QpStatus::Infeasible);
+    assert!(sol.stats.used_phase1, "elastic mode should have run");
+    assert!((sol.x[0] - 3.0).abs() < 1e-6, "x = {}", sol.x[0]);
+    // The Schur path was actually taken inside the elastic recovery:
+    // the refactor path leaves n_schur_updates == 0.
+    assert!(
+        sol.stats.n_schur_updates > 0,
+        "elastic solve should have used the Schur path (≥1 update), got {}",
+        sol.stats.n_schur_updates
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // M5 regression (dev-notes/code-review-2026-06.md): a warm start can
 // drive `solve` to report `Optimal` at a point that violates an
 // equality row the caller left `Inactive`.

@@ -77,6 +77,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L12 | feral: `FERAL_PIVTOL` breaks the documented `POUNCE_FERAL_*` env-var convention (`crates/pounce-feral/src/lib.rs:215-218`); `POUNCE_FERAL_PIVTOL` is silently ignored | **FIXED** | **Bug confirmed by running code.** `FeralConfig::from_env` reads six knobs under the `POUNCE_FERAL_*` prefix (`CASCADE_BREAK`, `FMA`, `REFINE`, `SINGULAR_PIVOT_FLOOR`, `ORDERING`, `SCALING`) but read the pivot threshold from the bare **`FERAL_PIVTOL`** — off-convention — and the `from_env` docstring didn't list pivtol at all, so a user following the documented `POUNCE_FERAL_*` convention sets `POUNCE_FERAL_PIVTOL` and it is silently ignored. **Reproduced** with a throwaway example calling `FeralConfig::from_env()`: `POUNCE_FERAL_PIVTOL=0.3` → `pivtol = 1e-8` (ignored), while `FERAL_PIVTOL=0.4` → `pivtol = 0.4` (legacy works). **Fix**: extracted a pure helper `resolve_pivtol_env(pounce, legacy) -> f64` that prefers `POUNCE_FERAL_PIVTOL` (the convention) and keeps the bare `FERAL_PIVTOL` only as a **deprecated legacy alias** (back-compat), falling through unparseable/unset values to the `1e-8` default. `from_env` now passes both env vars to it. Pure-helper design deliberately avoids mutating the process environment in the test (the rayon-parallel solves make env mutation a data race — the same hazard fixed in L9). Updated the `from_env` docstring (now lists `POUNCE_FERAL_PIVTOL`), the in-code comment at the `pivot_threshold` assignment, and the `feral_pivtol` OptionsList option help (`upstream_options.rs:1029`) to name `POUNCE_FERAL_PIVTOL` (preferred) + `FERAL_PIVTOL` (deprecated alias). **Test** (`pounce-feral` `tests::resolve_pivtol_env_honors_pounce_convention`): convention name read; legacy honored when convention unset; convention wins when both set; default with neither; unparseable falls through. **Fail-first confirmed** by reverting the helper to legacy-only (ignore the pounce arg): the test fails (`left: 1e-8, right: 0.3`); restored, full pounce-feral suite green (15 lib) and pounce-algorithm green (248 lib). `cargo fmt`/`clippy` (correctness/suspicious) clean on both crates. See `## L12 detail`. |
 | L13 | qp/restoration: doc/code sign mismatches in restoration formulas (code right, docs wrong): `resto_nlp.rs:6-7` (`c − n + p` vs implemented `c + n − p`), `resto_resto.rs:16-21` (wrong quadratic for the stated root) | **FIXED** (docs corrected; code already right + matches upstream) | **Both premises confirmed by reading code + verifying the code against upstream, then correcting the docs.** **(1) Constraint signs**: `restoration_constraint_{c,d}` (`resto_nlp.rs:895,907`) and the `eval_c`/`eval_d` doc-comments implement `c_resto = c_orig + n_c − p_c` (and `d_orig + n_d − p_d`), but the module-level doc said `c(x) − n_c + p_c = 0` / `d(x) − n_d + p_d − s = 0` — slack signs swapped. The implemented `c + n − p` is **correct**: it matches upstream `IpRestoIpoptNLP` (`p_c = c(x) + n_c` ⇒ `c + n − p = 0`, verified by WebFetch) and the existing tests `constraint_{c,d}_combines_orig_n_p_with_correct_signs` already lock it. **(2) Quadratic**: the closed-form slack reset (`resto_resto.rs::compute_n_p`) computes `v = a + sqrt(a²+b)` with `a = mu/(2ρ) − 0.5·c`, `b = c·mu/(2ρ)` — **identical to upstream** `IpRestoRestoPhase.cpp::solve_quadratic` (verified by WebFetch quoting the literal body `v=a; v=v*v; v+=b; v=sqrt(v); v+=a` ⇒ `a + sqrt(a²+b)`). But the module doc stated this root solves `v² + 2·a·v − b = 0`, whose root is actually `−a + sqrt(...)`. The root `a + sqrt(a²+b)` solves `v² − **2·a·v** − b = 0` (substitute: `(v−a)² = a²+b`). Confirmed by first-principles derivation (minimize `ρ(2n+c) − μln n − μln(c+n)` ⇒ `n² + (c−2·half)n − b = 0`, linear coeff `= −2a`) and a c=0 sanity check (true minimizer `n = μ/ρ = 2·half`; code gives `half+half = 2half`, the doc's `−a+sqrt` form gives 0 — wrong). **The same sign error was mirrored in the `resto_resto` test name/comments** (`quadratic_root_satisfies_v2_plus_2av_minus_b_zero`) even though its *assertion* already used the correct `v*v − 2av − b`. **Fix (docs/labels only — no code change)**: corrected the constraint signs in `resto_nlp.rs` and the sibling `resto_alg_builder.rs` module doc; corrected the quadratic to `v² − 2·a·v − b = 0` in `resto_resto.rs` with a short derivation note; renamed the test to `quadratic_root_satisfies_v2_minus_2av_minus_b_zero` and added an assertion that the wrong `v² + 2av − b` form is clearly non-zero (`> 1e-4`) so the corrected sign is regression-locked both ways. **Verification**: full pounce-restoration suite green (105 lib + integration), incl. the renamed test and the pre-existing sign tests; `init.rs`'s quadratic was already correct (`n*n − 2.0*a*n − b`). The "fail-first" here is the provable doc-vs-upstream contradiction (the doc's `+2av`/`−n+p` forms do not hold for the code's actual, upstream-matching values). `cargo fmt`/`clippy` clean. See `## L13 detail`. |
 | L14 | qp: the inertia-control retry loops recover from a linear-solver failure by substring-testing the error message for `"inertia"`/`"singular"` (`solver.rs:123,142`; `schur.rs:275,297`), a fragile case-sensitive match that silently misses the capitalized `Debug`-formatted `ESymSolverStatus` (`Singular`/`WrongInertia`) emitted by `LinearSolver::resolve`'s catch-all (`factor.rs:172`) — those failures propagate as unrecoverable instead of triggering a shift retry | **FIXED** | **Bug confirmed by reading + running code.** The §4.5 inertia-control loops in both the dense (`solver.rs`) and Schur (`schur.rs`) QP paths decide whether a `QpError::LinearSolverFailure(msg)` is recoverable (retry with a larger Hessian-diagonal shift) by `msg.contains("inertia") || msg.contains("singular")` — a **case-sensitive** substring test, duplicated at four sites. The factorize path produces lowercase messages (`"...inertia..."`), so those match. But `LinearSolver::resolve`'s catch-all (`factor.rs:172`) formats the backend status with `Debug`: `format!("resolve backend status: {other:?}")`, and `ESymSolverStatus`'s variants are **capitalized** (`Singular`, `WrongInertia`) — so a resolve-path singular/wrong-inertia failure yields `"resolve backend status: Singular"`, which `contains("singular")` **misses**. The recoverable failure then propagates as a hard error instead of triggering the shift retry that would rescue the solve. **Fix**: centralized the recoverability decision in one predicate `QpError::is_recoverable_factorization_failure()` (`error.rs`) that lowercases the message before testing (`m.contains("inertia") || m.contains("singular")`), and routed all four matchers through it (`solver.rs:123,142`; `schur.rs:275,297`), removing the duplicated inline substring tests. **Test** (`pounce-qp` `tests::refinement_unit::recoverable_factorization_failure_is_case_insensitive`): asserts the predicate accepts both the lowercase factorize-path messages **and** the capitalized resolve-path Debug strings (`"resolve backend status: Singular"`, `"...WrongInertia"`), and rejects non-recoverable failures (`"backend reported fatal error"`, `"resolve called before factorize"`) and non-`LinearSolverFailure` variants (`DimensionMismatch`). **Fail-first confirmed** by reverting the predicate to the case-sensitive `msg.contains(...)`: it fails on `"resolve backend status: Singular"` (`assertion failed: ...is_recoverable_factorization_failure()`); restored, full pounce-qp suite green (78 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L14 detail`. |
+| L15 | qp: `ElasticReformulation::original_inertia()` hardcodes `Psd` (`elastic.rs:169-175`), making the `Indefinite` arm of `as_qp`'s inertia match dead — an indefinite original problem is solved through the augmented elastic problem as if PSD; `solve_elastic` hard-calls `solve_general` (`solver.rs:1087`), ignoring `opts.use_schur_updates` | **FIXED** | **Both bugs confirmed by reading + running code (pounce-internal §4.3/§4.5 design, not an upstream-divergence).** **(1) Dead inertia arm.** `ElasticReformulation::build` discarded `qp.hessian_inertia`, and `original_inertia()` unconditionally returned `HessianInertia::Psd`. `as_qp` (`elastic.rs:162-165`) maps the original inertia onto the augmented problem with `Psd|Unknown => Psd`, `Indefinite => Indefinite` — but since `original_inertia()` could never return `Indefinite`, the augmented problem was *always* marked `Psd`, so an indefinite original `H` was solved as if PSD (skipping the §4.5 inertia-control assumption). **Fix**: `build` now captures `qp.hessian_inertia` into a new `orig_inertia` field and `original_inertia()` returns it; the augmented Hessian is block-diag(`H_orig`, 0) so it shares `H_orig`'s definiteness category (zero slack diagonals never introduce negative curvature), and the existing `as_qp` match now correctly propagates `Indefinite` while collapsing `Psd`/`Unknown` to `Psd`. **(2) `use_schur_updates` ignored.** The top-level `solve` dispatches between `solve_general_schur` (when `opts.use_schur_updates`) and `solve_general` (`solver.rs:1587-1591`), but `solve_elastic`'s recursive solve hard-called `solve_general`, so an infeasible problem solved with `use_schur_updates = true` silently fell back to the refactor path. **Fix**: `solve_elastic` now mirrors the same dispatch; both inner solvers bypass the `solve` feasibility audit, so the no-re-audit / no-recovery-loop property is preserved (comment updated). **Tests**: `elastic_unit::as_qp_propagates_original_hessian_inertia` (Indefinite original ⇒ augmented `Indefinite`; Psd/Unknown ⇒ `Psd`) and `analytical::l15_elastic_honors_use_schur_updates` (the `problem_5` infeasible QP solved with `use_schur_updates = true` returns the same minimal-l1 certificate **and** records `n_schur_updates > 0`, proving the Schur path ran inside the elastic recovery — the refactor path leaves it 0). **Fail-first confirmed** by reverting both edits (`original_inertia` → hardcoded `Psd`; dispatch → `solve_general` only): both tests fail (inertia `Indefinite != Psd`; `n_schur_updates == 0`). Restored, full pounce-qp suite green (80 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L15 detail`. |
 
 ## C1 detail
 
@@ -3960,3 +3961,79 @@ fails (the `is_none()` assertion is false — the wrapped i32 is `Some`) and
   full pounce-qp suite is green (78 lib + 1 doc + 5 integration, 0 failures).
   `cargo fmt -p pounce-qp -- --check` clean; clippy
   (correctness/suspicious) clean.
+
+## L15 detail
+
+Two independent defects in the QP l1-elastic mode (§4.3) and its dispatch.
+Both are pounce-internal design bugs (the elastic reformulation + Schur-update
+machinery are pounce's own §4.3/§4.5 design — not present in upstream Ipopt),
+so verification is by reading + running pounce code, not an upstream fetch.
+
+### (1) Dead `Indefinite` inertia arm
+
+- **Site**: `crates/pounce-qp/src/elastic.rs`.
+  - `ElasticReformulation::build(qp, gamma)` constructed the augmented problem
+    but **discarded** `qp.hessian_inertia`.
+  - `original_inertia()` unconditionally returned `HessianInertia::Psd`.
+  - `as_qp()` (lines 162-165) builds the augmented `QpProblem` with
+    `hessian_inertia: match self.original_inertia() {
+    HessianInertia::Psd | HessianInertia::Unknown => HessianInertia::Psd,
+    HessianInertia::Indefinite => HessianInertia::Indefinite }`.
+- **Bug**: because `original_inertia()` could never return `Indefinite`, the
+  `Indefinite` match arm was **dead** and the augmented problem was *always*
+  marked `Psd`. An indefinite original `H` was therefore solved through the
+  augmented elastic problem as if it were PSD, telling the solver to skip the
+  §4.5 inertia-control assumption it actually needs.
+- **Fix**: added an `orig_inertia: HessianInertia` field to
+  `ElasticReformulation`, set in `build` from `qp.hessian_inertia`;
+  `original_inertia()` returns it. The augmented Hessian is
+  block-diag(`H_orig`, 0), which shares `H_orig`'s definiteness category
+  (appending zero slack diagonals cannot introduce negative curvature), so
+  propagating the original inertia is correct: `Indefinite` now reaches the
+  live arm, while `Psd`/`Unknown` still collapse to `Psd` (the augmented
+  Hessian is PSD with explicit zero slack diagonals). No change to the
+  common-case (`Unknown`→`Psd`) behavior.
+
+### (2) `solve_elastic` ignored `opts.use_schur_updates`
+
+- **Site**: `crates/pounce-qp/src/solver.rs`.
+  - The top-level `solve` dispatches the general path between
+    `solve_general_schur` (when `opts.use_schur_updates`) and `solve_general`
+    (lines ~1587-1591).
+  - `solve_elastic`'s recursive solve hard-called
+    `self.solve_general(&qp_aug, Some(&ws), opts)` — ignoring the flag.
+- **Bug**: an infeasible problem solved with `use_schur_updates = true`
+  recovered through elastic mode but **silently fell back to the refactor
+  path** for the augmented solve, so the opt-in Schur machinery was never
+  exercised on the recovery solve.
+- **Fix**: `solve_elastic` now mirrors the top-level dispatch
+  (`if opts.use_schur_updates { solve_general_schur } else { solve_general }`).
+  Both inner solvers recurse *directly*, bypassing the `solve` feasibility
+  audit, so the original no-re-audit / no-recovery-loop property is preserved;
+  updated the audit comment that documented the bypass to name both paths.
+
+### Tests
+
+- `crates/pounce-qp/src/tests/elastic_unit.rs` ::
+  `as_qp_propagates_original_hessian_inertia` — builds reformulations from
+  originals marked `Indefinite` / `Psd` / `Unknown` and asserts
+  `as_qp().hessian_inertia` is `Indefinite` / `Psd` / `Psd` respectively (the
+  `Indefinite` case is the formerly-dead arm).
+- `crates/pounce-qp/src/tests/analytical.rs` ::
+  `l15_elastic_honors_use_schur_updates` — the same infeasible QP as
+  `problem_5_infeasibility_certified_by_elastic_mode`, solved with
+  `use_schur_updates = true`. Asserts the same minimal-l1 certificate
+  (`Infeasible`, `used_phase1`, `x ≈ 3.0`) **and** `stats.n_schur_updates > 0`,
+  proving the Schur path ran inside the elastic recovery (the refactor path
+  leaves the counter at 0).
+
+### Fail-first
+
+Reverting both edits — `original_inertia()` back to a hardcoded
+`HessianInertia::Psd`, and the `solve_elastic` dispatch back to a bare
+`solve_general` — makes both tests fail:
+`as_qp_propagates_original_hessian_inertia` fails on the `Indefinite` case
+(`Psd != Indefinite`) and `l15_elastic_honors_use_schur_updates` fails on
+`n_schur_updates == 0`. Restored, the full pounce-qp suite is green (80 lib +
+1 doc + 5 integration, 0 failures); `cargo fmt -p pounce-qp -- --check` clean;
+clippy (correctness/suspicious) clean.

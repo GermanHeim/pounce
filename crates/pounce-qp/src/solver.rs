@@ -1083,8 +1083,18 @@ impl ParametricActiveSetSolver {
             working: working_aug,
         };
 
-        // Recursive solve through the standard path.
-        let sol_aug = self.solve_general(&qp_aug, Some(&ws), opts)?;
+        // Recursive solve through the standard path, honoring the
+        // same Schur-vs-refactor choice the top-level `solve` makes
+        // (L15: this previously hard-called `solve_general`, so an
+        // infeasible problem solved with `use_schur_updates = true`
+        // silently fell back to the refactor path). Both inner solvers
+        // bypass the `solve` feasibility audit, so the recursive solve
+        // is still never re-audited and the recovery cannot loop.
+        let sol_aug = if opts.use_schur_updates {
+            self.solve_general_schur(&qp_aug, Some(&ws), opts)?
+        } else {
+            self.solve_general(&qp_aug, Some(&ws), opts)?
+        };
 
         // Pack the original-space solution.
         let x = sol_aug.x[..n].to_vec();
@@ -1599,10 +1609,11 @@ impl QpSolver for ParametricActiveSetSolver {
             // violation, recover through elastic mode (the same
             // recovery the cold path uses when `cold_general_initial`
             // returns an infeasible point). `solve_elastic` recurses
-            // through `solve_general` *directly*, bypassing this entry,
-            // and seeds a slack-feasible augmented problem — so the
-            // recursive solve is never re-audited and the recovery
-            // cannot loop. Feasible warm/cold results pass untouched.
+            // through `solve_general` / `solve_general_schur` *directly*
+            // (per `use_schur_updates`), bypassing this entry, and seeds
+            // a slack-feasible augmented problem — so the recursive solve
+            // is never re-audited and the recovery cannot loop. Feasible
+            // warm/cold results pass untouched.
             if matches!(sol.status, QpStatus::Optimal)
                 && !point_is_feasible(qp, &sol.x, opts.feas_tol)
             {
