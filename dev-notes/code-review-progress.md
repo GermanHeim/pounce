@@ -69,6 +69,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L4 | algorithm: `golden_section` can return an unevaluated `-100.0` sentinel endpoint when `qmax <= 0` (`src/mu/oracle/quality_function.rs:540-554` with 730, 741); also `>=` in `qf_ok` makes the default `qf_tol = 0.0` flat-stop dead | **PARTIAL — one facet fixed, one not-a-bug** | **Two facets; verified against upstream.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpQualityFunctionMuOracle.cpp::PerformGoldenSection`. **Facet 2 (`>=` makes flat-stop dead): NOT A BUG.** Upstream's loop condition is `(1. - Min/Max) >= qf_tol` — the *same* `>=` as pounce line 499. With the default `qf_tol = 0.0` the term `(1 - qmin/qmax) >= 0` is always true for any non-degenerate bracket, so the qf-tolerance never stops the loop *in either codebase*; that is upstream's intended behavior (the qf_tol stop is opt-in via a positive `quality_function_eps`), not a pounce regression. **Facet 1 (unevaluated sentinel return): REAL, fixed.** `pick_sigma` always passes one endpoint with the `-100.0` sentinel (search-up → `q_up=-100` at line 730; search-down → `q_lo=-100` at 741). Upstream never lands on a sentinel because its loop lacks a `qmax > 0` guard, so a sentinel state (large positive ratio) keeps the loop alive until the slot is overwritten, and its post-loop else-branch re-evaluates `if( q_up < 0. )` anyway. pounce **adds** `qmax > 0.0 &&` to `qf_ok` (line 499, to dodge a divide-by-zero when every sample ≤ 0); that guard can force `qf_ok = false` on the first pass while an endpoint still holds the sentinel, routing it into the `width_ok && !qf_ok` branch (540-554) — which, unlike pounce's *own* else-branch (561-572) and upstream, did **not** re-evaluate, so it returned the unevaluated `-100.0` endpoint as the spurious minimum. **Reproduced** by a focused unit test on the pure `golden_section`: `q(σ) = -σ` on the interior/lo points (all ≤ 0 ⇒ `qmax ≤ 0`) but `+50` at the upper endpoint; search-up call returns σ=3 (the sentinel endpoint, true q=50, the bracket *maximum*) pre-fix. **Fix**: in the `width_ok && !qf_ok` branch re-evaluate any unmoved sentinel endpoint (`sigma_lo==sigma_lo_in && q_lo<0` / `sigma_up==sigma_up_in && q_up<0`) before selecting the minimum, mirroring the else-branch and upstream; refreshed the stale doc-comment (524-530) that wrongly claimed the sentinel could never reach this branch. **Test** (`quality_function.rs::tests::golden_section_never_returns_unevaluated_sentinel`): asserts the result is `< sigma_up`. **Fail-first confirmed** (pre-fix returns σ=3; post-fix returns an interior σ≈2.24). Full pounce-algorithm suite green (lib 246 + all integration, 0 failures). See `## L4 detail`. |
 | L5 | algorithm: `max_cpu_time` actually measures wall time — `src/conv_check/opt_error.rs:257` via `pounce_common::utils::cpu_time()`'s documented wallclock fallback | **FIXED** | **Bug confirmed by reading + running code; fix verified against upstream.** `pounce_common::utils::cpu_time()` was literally `wallclock_time()` (a documented "phase 4 will wire in a real CPU clock" stub), so the `max_cpu_time` gate at `opt_error.rs:257` (`timing.overall_alg.live_cpu_time() >= self.max_cpu_time`) bounded **wall** time, not CPU time — diverging from upstream, whose `max_cpu_time` bounds process CPU. **Upstream reference**: fetched `coin-or/Ipopt` (stable/3.14) `src/Common/IpUtils.cpp::CpuTime()` — on Unix it returns `getrusage(RUSAGE_SELF).ru_utime` (process **user** CPU time); on Windows it uses `clock()` (which on the MSVC runtime is itself elapsed real time). **Fix**: implement the Unix path with `libc::getrusage(RUSAGE_SELF)` returning `ru_utime` seconds, matching upstream exactly; keep the `wallclock_time()` fallback for non-Unix (faithful to upstream's Windows `clock()` ≈ wall behavior). Added `libc = "0.2"` to `[workspace.dependencies]` and a `[target.'cfg(unix)'.dependencies] libc` entry to pounce-common (Unix-only, so non-Unix targets pull nothing new); no change to the publish list / release-consistency guard. **Test** (`pounce-common::utils::tests::cpu_time_excludes_sleep_but_counts_compute`, `#[cfg(unix)]`): (1) sleeps 300 ms and asserts `wall_delta − cpu_delta > 0.1 s` (CPU must not accrue while blocked), and (2) runs a 50 M-iter busy loop and asserts `cpu_delta > 0` (clock is live, not constant-zero). **Fail-first confirmed** by temporarily reverting `cpu_time()` to the wallclock alias: it then reported "cpu_time advanced 0.310s across a 0.310s sleep … gap was only −0.000s" and the assertion fired; restored, it passes. Full pounce-common suite green (58) and pounce-algorithm green (lib 246 + all integration); `cargo check --workspace --exclude pounce-hsl` clean. See `## L5 detail`. |
 | L6 | algorithm: dead/divergent duplicates of filter acceptance predicates — `src/line_search/filter_acceptor.rs:171-179` (no round-off slack, unlike the live path at 292-300) and 199-229 (parameterized `obj_max_inc` while the live path hard-codes 5.0) | **FIXED** | **Both divergences confirmed by reading + running code; unified.** Two near-duplicate copies of the filter sufficient-progress / iterate-acceptance logic had drifted from the live `check_acceptability` path. **(a) `is_sufficient_progress` (171-179)** used bare `<` where the live path (then 292-300) uses `compare_le` (a `<=` carrying `10·eps·|basval|` round-off slack); the helper was also **dead** (`grep` shows no caller — only `is_acceptable_to_current_iterate` is live, from `pounce-restoration/src/conv_check.rs:163`). On the round-off boundary (`phi_trial − phi == −gamma_phi·theta`, common near a solution where φ is flat and the descent is summation-noise-sized) the bare `<` rejects a step `compare_le` accepts — the same flat-objective failure mode documented on `armijo_holds`. **(b)** the live `check_acceptability` rapid-barrier-increase guard hard-coded `5.0`, while the parameterized `is_acceptable_to_current_iterate` (the restoration-live copy) reads an `obj_max_inc` argument — so the two paths would diverge for any non-default `obj_max_inc`. **Fix**: (1) rewrote `is_sufficient_progress` to use `compare_le` (now identical to the live OR-test) and made it the **single source of truth** — both `check_acceptability` and `is_acceptable_to_current_iterate` now delegate their sufficient-progress test to it; (2) added an `obj_max_inc` field to `FilterLsAcceptor` (default 5.0) and switched the live guard from the literal `5.0` to `self.obj_max_inc`, so the regular-phase and restoration paths share one cap. The live regular-phase behavior is **byte-identical** (it already used `compare_le` and 5.0 = the field default), so no integration regression. **Tests** (`filter_acceptor::tests`): `is_sufficient_progress_accepts_round_off_boundary_like_live_path` builds the φ-branch equality boundary and asserts the helper accepts it; `check_acceptability_honors_obj_max_inc_field` drives a ~1e7 barrier jump (log10≈7) and asserts Reject at the default cap 5.0 (threshold 6) but Accept once `obj_max_inc=10.0` (threshold 11). **Fail-first confirmed** by temporarily reverting both edits (bare `<` and literal `5.0`): both new tests fail; restored, both pass. Full pounce-algorithm green (lib **248** + all integration) and pounce-restoration green (105), confirming the dedup is regression-free. See `## L6 detail`. |
+| L7 | algorithm: watchdog revert applies the current-direction fraction-to-boundary cap to the snapshot direction — `src/line_search/backtracking.rs:725-737`; the correct stored cap is `#[allow(dead_code)]`. Rescued by backtracking, but wastes evaluations post-watchdog | **NOT A BUG** (premise refuted by upstream source) + dead field removed | **Premise checked against the actual upstream source and found false.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpBacktrackingLineSearch.cpp`. In `FindAcceptableTrialPoint`, when the watchdog trial cap is exceeded the code does `StopWatchDog(actual_delta); skip_first_trial_point = true;`, and the next `DoBacktrackingLineSearch` executes `if( skip_first_trial_point ) { alpha_primal *= alpha_red_factor_; }` — it multiplies the **existing** `alpha_primal` (the *current* direction's `alpha_primal_max`, set fresh at the top of this outer iteration's call) by the reduction factor and does **NOT** recompute a fraction-to-the-boundary cap from the reverted snapshot delta. `StopWatchDog` only restores `actual_delta` to the snapshot (`actual_delta = watchdog_delta_->MakeNewContainer()`); it does not touch `alpha_primal`. pounce's `handle_watchdog_failure` re-runs `run_alpha_loop(&snap_delta, alpha_init, …, skip_first=true)`, which starts at `alpha_init * alpha_red_factor` (`backtracking.rs:842-843`) where `alpha_init` is the current direction's FTB cap — an **exact** match to upstream. The "correct stored cap" the review points to (`watchdog_alpha_primal_test`) is a misread: upstream's `watchdog_alpha_primal_test_` is the **acceptor's** frozen Armijo *test* step length (used inside `IpFilterLSAcceptor` when in watchdog), not a line-search restart cap, so there is no upstream behavior that would consume a snapshot FTB cap here. The "wastes evaluations when the snapshot direction has a tighter boundary" cost, to the extent it exists, is present in upstream too (both backtrack from the over-large start). **No behavioral change** is warranted; switching the restart to a snapshot-recomputed cap would *introduce* a divergence from upstream. **Cleanup done**: pounce's `watchdog_alpha_primal_test` field was genuinely dead (written in `start_watchdog`, never read; carried `#[allow(dead_code)]`). Removed the field, its initializer, and the `aff_step_alpha_primal_max` computation in `start_watchdog`, and added a comment at the revert site documenting the upstream-faithful `alpha_init` choice so the site is not re-flagged. **Verified by running code**: `cargo build -p pounce-algorithm` clean (no dead-code warning), full suite green (lib **248** + all integration, 0 failures) — the watchdog revert path is exercised by the HS/integration solves (e.g. PFIT3/PFIT4/scon1dls noted in the code comments), confirming the removal is regression-free. Recorded per the "document issues that cannot be verified" rule — here the issue is verifiable and refuted. See `## L7 detail`. |
 
 ## C1 detail
 
@@ -3437,3 +3438,106 @@ tests fail (`17 passed; 2 failed`); with the fixes in place all 19
 `filter_acceptor` tests pass. Full `pounce-algorithm` green (lib **248** + every
 integration test) and `pounce-restoration` green (105), confirming the live
 caller of `is_acceptable_to_current_iterate` is unaffected.
+
+## L7 detail
+
+**Issue (L7):** "Watchdog revert applies the current-direction fraction-to-boundary
+cap to the snapshot direction — `src/line_search/backtracking.rs:725-737`; the
+correct stored cap is `#[allow(dead_code)]`. Rescued by backtracking, but wastes
+evaluations post-watchdog."
+
+**Verdict: NOT A BUG (premise refuted by upstream source); dead parity field removed.**
+
+### What the code does
+
+On a `StopWatchDog` revert (`handle_watchdog_failure`, the
+`evaluation_error || watchdog_trial_iter > watchdog_trial_iter_max` branch), pounce:
+
+1. restores `curr` to the watchdog snapshot iterate,
+2. re-runs the alpha loop on the **snapshot** direction `snap_delta`,
+3. passes `alpha_init` as the cap with `skip_first = true`, so `run_alpha_loop`
+   starts at `alpha_init * alpha_red_factor` (`backtracking.rs:842-843`).
+
+`alpha_init` here is the **current** outer iteration's fraction-to-the-boundary
+cap (`alpha_primal_max` for the direction that just failed), threaded down from
+`find_acceptable_trial_point` → `run_filter_line_search` → `handle_watchdog_failure`.
+It is **not** recomputed from `snap_delta`.
+
+The review reads this as a bug: it argues the snapshot direction should use its
+own FTB cap, which pounce stored at watchdog activation as
+`watchdog_alpha_primal_test = aff_step_alpha_primal_max(delta, tau)` — a field
+that was marked `#[allow(dead_code)]` and never read.
+
+### Why it is not a bug — upstream does exactly the same
+
+Fetched `coin-or/Ipopt` (stable/3.14)
+`src/Algorithm/IpBacktrackingLineSearch.cpp`:
+
+- `FindAcceptableTrialPoint`, watchdog-cap-exceeded branch:
+  ```cpp
+  if( evaluation_error || watchdog_trial_iter_ > watchdog_trial_iter_max_ )
+  {
+     StopWatchDog(actual_delta);
+     skip_first_trial_point = true;
+  }
+  ```
+- The next `DoBacktrackingLineSearch` with `skip_first_trial_point = true`:
+  ```cpp
+  if( skip_first_trial_point )
+  {
+     alpha_primal *= alpha_red_factor_;
+  }
+  ```
+  i.e. it reduces the **existing** `alpha_primal` and does **not** recompute the
+  FTB cap from `actual_delta`.
+- `StopWatchDog` only swaps the direction back to the snapshot:
+  ```cpp
+  IpData().set_trial(old_trial);
+  IpData().AcceptTrialPoint();
+  actual_delta = watchdog_delta_->MakeNewContainer();
+  IpData().SetHaveAffineDeltas(false);
+  ```
+  It never touches `alpha_primal`.
+
+At the revert point `alpha_primal` holds the **current** outer iteration's
+`alpha_primal_max` (set fresh at the top of this call's `DoBacktrackingLineSearch`;
+in the watchdog window `alpha_min = alpha_primal_max`, so only the single full
+step ran before the cap was exceeded). So upstream's restart =
+`current_direction_alpha_primal_max * alpha_red_factor` applied to the reverted
+snapshot delta — **byte-for-byte the same policy as pounce's
+`alpha_init * alpha_red_factor`**.
+
+### The "stored cap" is a misread
+
+Upstream's `watchdog_alpha_primal_test_` lives in `IpFilterLSAcceptor` and is the
+acceptor's frozen **Armijo test step length** used while in watchdog mode (the
+`alpha_primal_test` fed to the switching/sufficient-decrease test), **not** a
+line-search restart cap. Nothing in upstream consumes a snapshot FTB cap at the
+revert site, so pounce should store no analogue here. The `aff_step_alpha_primal_max`
+pounce stashed in `watchdog_alpha_primal_test` was simply unused scaffolding.
+
+The "wastes evaluations" observation — if the snapshot direction's true FTB
+boundary is tighter than `alpha_init`, the first reverted trial overshoots and is
+rejected before backtracking finds an acceptable step — is real but is **upstream's
+behavior too** (upstream also starts from the current direction's reduced alpha and
+backtracks). It is not a pounce-introduced regression.
+
+### Change made (cleanup only, no behavior change)
+
+Removed the genuinely-dead `watchdog_alpha_primal_test` field, its initializer,
+and the `aff_step_alpha_primal_max(delta, tau)` computation in `start_watchdog`
+(eliminating the `#[allow(dead_code)]`), and added a comment at the revert site
+explaining that passing `alpha_init` is the faithful upstream port — so a future
+reviewer does not re-flag it. This matches the repo's recent dead-code-removal
+pattern (#120, #121).
+
+### Verification
+
+`cargo build -p pounce-algorithm` is clean (no dead-code warning after removal).
+Full `pounce-algorithm` suite green: **lib 248 + every integration test, 0
+failures**. The watchdog revert path is exercised by the HS/integration solves
+(the code comments cite PFIT3/PFIT4/scon1dls as problems that drive the
+accept-anyway / revert branches), so the green suite confirms removing the dead
+field changed no behavior. No new regression test was added because there is no
+bug to pin — adding a snapshot-FTB recompute would *introduce* a divergence from
+upstream, not remove one (same disposition as L2).

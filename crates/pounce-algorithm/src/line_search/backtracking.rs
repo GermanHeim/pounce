@@ -130,12 +130,6 @@ pub struct BacktrackingLineSearch {
     watchdog_iterate: Option<IteratesVector>,
     /// Snapshot of the search direction at watchdog activation.
     watchdog_delta: Option<IteratesVector>,
-    /// Snapshot of `primal_frac_to_the_bound(τ, δ)` at watchdog
-    /// activation. Currently unused inside the alpha loop (pounce's
-    /// driver passes `alpha_init` directly), but stored for parity
-    /// with upstream's iter-by-iter trace.
-    #[allow(dead_code)]
-    watchdog_alpha_primal_test: Number,
     /// Number of outer iterations elapsed since watchdog activation.
     watchdog_trial_iter: i32,
     /// Number of consecutive shortened (n_steps > 0) accepts.
@@ -235,7 +229,6 @@ impl BacktrackingLineSearch {
             in_watchdog: false,
             watchdog_iterate: None,
             watchdog_delta: None,
-            watchdog_alpha_primal_test: 0.0,
             watchdog_trial_iter: 0,
             watchdog_shortened_iter: 0,
             last_mu: -1.0,
@@ -659,8 +652,6 @@ impl BacktrackingLineSearch {
         self.watchdog_iterate = Some(curr);
         self.watchdog_delta = Some(delta.clone());
         self.watchdog_trial_iter = 0;
-        let tau = data.borrow().curr_tau;
-        self.watchdog_alpha_primal_test = cq.borrow().aff_step_alpha_primal_max(delta, tau);
         self.watchdog_theta = cq.borrow().curr_constraint_violation();
         self.watchdog_phi = cq.borrow().curr_barrier_obj();
         self.watchdog_d_phi = self.compute_d_phi(cq, delta);
@@ -722,6 +713,23 @@ impl BacktrackingLineSearch {
             // and we want a plain backtracking pass over the saved
             // delta; mirrors upstream's behavior of not running the
             // soc_method on the recovered search.
+            //
+            // We start the retry from `alpha_init * alpha_red_factor`
+            // (skip_first=true), where `alpha_init` is the CURRENT
+            // direction's fraction-to-the-boundary cap — NOT a cap
+            // recomputed from `snap_delta`. This is a faithful port,
+            // not a bug: upstream's `StopWatchDog` reverts `actual_delta`
+            // to the snapshot, sets `skip_first_trial_point = true`, and
+            // the next `DoBacktrackingLineSearch` does
+            // `alpha_primal *= alpha_red_factor_` on the *existing*
+            // `alpha_primal` (the current direction's `alpha_primal_max`)
+            // — it likewise never recomputes the FTB cap from the
+            // reverted delta (IpBacktrackingLineSearch.cpp). Upstream's
+            // `watchdog_alpha_primal_test_` is the acceptor's frozen
+            // Armijo test step, not a line-search restart cap, so pounce
+            // stores no analogue. Any wasted backtracking trials when the
+            // snapshot direction has a tighter boundary are present in
+            // upstream too.
             let result2 = self.run_alpha_loop(
                 data,
                 cq,
