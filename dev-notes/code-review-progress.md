@@ -100,6 +100,8 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 
 | L32 | Malformed `J`/`G` indices panic later as slice OOB instead of a parse error, while `x`/`d` out-of-range entries are silently dropped — inconsistent strictness (`nl_reader.rs` segment parse loop) | **FIXED** | **Confirmed by reading code + tracing the panic.** The J/G segment parsers pushed each entry's *variable (column) index* into `con_linear`/`obj_linear` without bounds-checking it against `n`. An out-of-range column index then panicked as a slice OOB at `x[*j]` during constraint/objective evaluation (`nl_reader.rs:2299`, `2345`) — a crash on malformed user `.nl`. The `x`/`d` segments, by contrast, guarded `if idx < n`/`if idx < m` and *silently dropped* out-of-range entries (hiding corruption). The J *row* index was already a clean `Err`. **Fix**: unified all four index-bearing segments on **parse error** — J and G now reject `var >= n` with a descriptive error before storing; `x`/`d` now reject `idx >= n`/`idx >= m` instead of dropping. **Tests** (`nl_reader::tests`): `malformed_j_variable_index_is_parse_error_not_panic` (J entry var 5 with n=2 → `Err(... out of range)` rather than a later panic) and `out_of_range_x_segment_index_is_parse_error` (x index 5 with n=2 → `Err`). **Fail-first confirmed**: removing the J check makes `parse_nl_text` return `Ok` (storing the bad index) so `expect_err` panics; removing the x check makes it silently drop and return `Ok`, also failing `expect_err`. Restored; 84 pounce-nl lib (+2) + 1 integration green, and full pounce-cli suite (parses real `.nl` fixtures) green — the tighter x/d parsing rejects no valid file. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L32 detail`. |
 
+| L33 | `relax_bounds` silently no-ops when a bound `Rc` is shared (`orig_ipopt_nlp.rs`) while `adjust_variable_bounds` treats the same condition as a hard invariant (`expect`) — they should agree, and the loud version is safer | **FIXED** | **Confirmed by reading code.** Both `OrigIpoptNlp::relax_bounds` and `adjust_variable_bounds` rely on the bound `Rc`s (`x_l/x_u/d_l/d_u`) being **uniquely owned**. `adjust_variable_bounds` enforces it with `Rc::get_mut(...).expect("... uniquely owned")`; `relax_bounds` instead used `if let Some(_) = Rc::get_mut(...)` and silently skipped any shared bound — so a stray clone would leave bounds *tighter* than `bound_relax_factor` requires, with no signal. **Fix**: rewrote `relax_bounds` to `Rc::get_mut(...).expect("relax_bounds: <field> is uniquely owned")` for all four bounds, matching `adjust_variable_bounds`. The sole production caller (`application.rs:1085`, in structure init before the main loop) holds the invariant, so the loud form never trips in real solves. **Tests** (`orig_ipopt_nlp::tests`): `relax_bounds_widens_uniquely_owned_bounds` (baseline: `x_l` relaxes down, `x_u` up on the normal uniquely-owned state) and `relax_bounds_panics_on_shared_bound_rc` (`#[should_panic(expected = "x_l is uniquely owned")]` after `Rc::clone(&nlp.x_l)` bumps the strong count). **Fail-first confirmed**: reverting to the `if let Some` no-op makes the shared-Rc case *not* panic — `test did not panic as expected`. Restored; 39 pounce-nlp + 20 pounce-algorithm (the relax_bounds integration caller) test groups green. `cargo fmt -p pounce-nlp` / gated `cargo clippy` clean. See `## L33 detail`. |
+
 ## C1 detail
 
 - **Bug**: `redundant_mask` from `find_redundant_rows` is aligned to the
@@ -5107,3 +5109,48 @@ after confirming.
 file that previously parsed. Verified it does not: 84 pounce-nl lib tests and the
 full pounce-cli suite (which parses real `.nl` problem fixtures end to end) stay
 green. `cargo fmt` / gated `cargo clippy` clean.
+
+## L33 detail
+
+**Issue (L33).** `crates/pounce-nlp/src/orig_ipopt_nlp.rs` has two methods that
+mutate the bound vectors in place through their `Rc<DenseVector>` slots, both
+relying on the invariant that those `Rc`s are uniquely owned at the call point:
+
+- `adjust_variable_bounds` (≈1786): `Rc::get_mut(slot).expect("... uniquely owned").copy(new)`
+  — a shared `Rc` is a hard error (panic).
+- `relax_bounds` (≈655): `if let Some(x_l) = Rc::get_mut(&mut self.x_l) { apply(...) }`
+  — a shared `Rc` is *silently skipped*.
+
+So the same invariant violation produced two opposite reactions. The silent
+branch is the dangerous one: `relax_bounds` implements Ipopt's
+`bound_relax_factor` widening (`OrigIpoptNLP::InitializeStructures`); if a bound
+`Rc` were ever shared, the widening would simply not happen and the solver would
+run with bounds tighter than configured, with no diagnostic.
+
+**Fix.** Make `relax_bounds` enforce the invariant loudly, identical in spirit to
+`adjust_variable_bounds`:
+
+    apply(Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned"), -1.0);
+    apply(Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),  1.0);
+    apply(Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"), -1.0);
+    apply(Rc::get_mut(&mut self.d_u).expect("relax_bounds: d_u is uniquely owned"),  1.0);
+
+**Call-site safety.** The only production caller is
+`pounce-algorithm/src/application.rs:1085`, invoked during structure
+initialization before the main loop, when the bound `Rc`s are freshly built and
+unshared. The prior code's `get_mut` already succeeded there (the relaxation was
+in fact being applied), so promoting the skip to an `expect` cannot regress real
+solves — confirmed by the green pounce-algorithm suite.
+
+**Tests** (`orig_ipopt_nlp::tests`, on the existing `build_orig_nlp()` Hs071
+harness):
+- `relax_bounds_widens_uniquely_owned_bounds`: snapshots `x_l`/`x_u`, calls
+  `relax_bounds(1e-2, 1.0)`, asserts every `x_l` moved down and every `x_u` up.
+- `relax_bounds_panics_on_shared_bound_rc`: `#[should_panic(expected = "x_l is
+  uniquely owned")]`; an explicit `Rc::clone(&nlp.x_l)` raises the strong count
+  so `get_mut` returns `None` and the new `expect` fires.
+
+**Fail-first.** Reverting `relax_bounds` to the `if let Some { … }` no-op makes
+the shared-`Rc` test *not* panic (`test did not panic as expected`), failing the
+`should_panic`. Restored after confirming. 39 pounce-nlp + 20 pounce-algorithm
+test groups green; `cargo fmt` / gated `cargo clippy` clean.

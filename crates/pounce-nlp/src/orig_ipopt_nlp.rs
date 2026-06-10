@@ -665,18 +665,28 @@ impl OrigIpoptNlp {
                 *x += sign * delta;
             }
         };
-        if let Some(x_l) = Rc::get_mut(&mut self.x_l) {
-            apply(x_l, -1.0);
-        }
-        if let Some(x_u) = Rc::get_mut(&mut self.x_u) {
-            apply(x_u, 1.0);
-        }
-        if let Some(d_l) = Rc::get_mut(&mut self.d_l) {
-            apply(d_l, -1.0);
-        }
-        if let Some(d_u) = Rc::get_mut(&mut self.d_u) {
-            apply(d_u, 1.0);
-        }
+        // The bound `Rc`s are uniquely owned (nothing clones them — the same
+        // invariant `adjust_variable_bounds` relies on), so `get_mut` must
+        // succeed. A shared `Rc` here would silently skip the relaxation,
+        // leaving bounds tighter than `bound_relax_factor` requires; that is
+        // a programming error, so fail loudly to match `adjust_variable_bounds`
+        // rather than no-op.
+        apply(
+            Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned"),
+            -1.0,
+        );
+        apply(
+            Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
+            1.0,
+        );
+        apply(
+            Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"),
+            -1.0,
+        );
+        apply(
+            Rc::get_mut(&mut self.d_u).expect("relax_bounds: d_u is uniquely owned"),
+            1.0,
+        );
     }
 
     /// Determine objective + per-constraint scaling from the starting
@@ -3179,5 +3189,33 @@ mod tests {
         let yd = nlp.d_space().make_new_dense();
         let h = nlp.eval_h(&x, 1.0, &yc, &yd);
         assert_eq!(h.n_rows(), 1);
+    }
+
+    #[test]
+    fn relax_bounds_widens_uniquely_owned_bounds() {
+        // Baseline: with uniquely-owned bound Rcs (the normal post-construction
+        // state) relax_bounds loosens x_l downward and x_u upward.
+        let (_adapter, mut nlp) = build_orig_nlp();
+        let x_l_before = nlp.x_l.values().to_vec();
+        let x_u_before = nlp.x_u.values().to_vec();
+        nlp.relax_bounds(1e-2, 1.0);
+        for (b, a) in x_l_before.iter().zip(nlp.x_l.values()) {
+            assert!(a < b, "x_l should relax downward: {a} !< {b}");
+        }
+        for (b, a) in x_u_before.iter().zip(nlp.x_u.values()) {
+            assert!(a > b, "x_u should relax upward: {a} !> {b}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "x_l is uniquely owned")]
+    fn relax_bounds_panics_on_shared_bound_rc() {
+        // Code review L33: a shared bound Rc used to make relax_bounds silently
+        // skip the relaxation, leaving bounds tighter than bound_relax_factor
+        // requires. The unique-ownership invariant is now enforced loudly,
+        // matching adjust_variable_bounds' `expect`.
+        let (_adapter, mut nlp) = build_orig_nlp();
+        let _shared = Rc::clone(&nlp.x_l); // bump strong_count so get_mut fails
+        nlp.relax_bounds(1e-2, 1.0);
     }
 }
