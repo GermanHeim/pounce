@@ -56,6 +56,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M30 | python: `curve_fit` covariance never projects onto the active *general-constraint* nullspace — `active_mask` covers variable bounds only, so an active equality between parameters is returned as the unconstrained covariance while labeled `reduced_hessian(projected)`, overstating variances and dropping induced anti-correlations | **FIXED** | **Bug confirmed by running code.** `_covariance` (`python/pounce/_curve_fit.py:1542-1547`) and its streaming twin `_stream_covariance` (1108-1112) handled the active set with `free = ~active_mask` — projecting out only **bound**-active columns. With `m_con > 0` but no active bound the branch fired (`if m_con > 0 or active_mask.any()`), computed `free = all-True`, and returned the **unconstrained** `s2·pinv(M)` while labeling it `reduced_hessian(projected)`. **Reproduced by running code**: a weighted line fit (`f = a·x + b`, `M = JwᵀJw`) under an active equality `a + b = c` — calling `_covariance` directly and checking the variance along the constraint gradient. Pre-fix `A·pcov·Aᵀ = 0.318` (should be 0: the binding relation is known exactly) and `pcov` was bit-identical to the unconstrained inverse, with the induced anti-correlation absent; the correct projected covariance carries `A·pcov·Aᵀ = 0` and a `-0.065` off-diagonal. **Fix**: thread the constraint plumbing already on `_FitProblem` (`jac_combined`, `g_combined`, `cl`, `cu`) into both covariance functions and project onto the **joint** active-set nullspace. `_active_constraint_jac` selects the binding general-constraint rows (equalities `cl==cu` always bind; inequalities within `tol` of a finite bound); `_projected_covariance` stacks those with unit rows `eⱼ` for active bounds, takes an orthonormal nullspace basis `Z` (SVD), and returns `s2·Z·pinv(ZᵀMZ)·Zᵀ`. For a bounds-only active set `Z` is the free coordinate subspace and this reduces **exactly** to the old `cov[ix_(free,free)] = s2·pinv(M[free,free])` (the prior behavior preserved, verified by the existing bound tests). When `m_con > 0` but every inequality is slack and no bound binds, nothing is projected and the source is honestly reported as `jacobian`. **Also**: the `_covariance` docstring now states it is the first-order (delta-method) asymptotic covariance — `M` is the Gauss-Newton Hessian and the constraints are linearized at `popt`, omitting the curvature term `ΣλᵢHᵢ` (zero for linear constraints, higher-order otherwise) — resolving the "Gauss-Newton comment assumes linear constraints" note; the module docstring's "projection onto the active-constraint nullspace" claim is now actually true. **Tests** (`python/tests/test_curve_fit.py`): `test_active_equality_constraint_projects_covariance` (in-memory) and `test_streaming_active_equality_projects_covariance` (streaming twin) fit a line under an active `a+b=1` equality and assert `cov_source == "reduced_hessian(projected)"`, zero variance along the constraint gradient (`g·pcov·g < 1e-9`), a negative `pcov[0,1]`, and a match to the closed-form `Z·pinv(ZᵀMZ)·Zᵀ`. **Pre-fix both FAIL** (`g·pcov·g ≈ 1.6e-3`, the unconstrained variance) — confirmed before the fix; post-fix both PASS. Full `test_curve_fit.py` (44) green, and `test_sensitivity.py`/`test_minimize.py`/`test_minima.py` (37) unaffected. See `## M30 detail`. |
 | M31 | python: the issue-#112 indefinite-`P` guard fires only on `solve_qp` — every other host QP entry point (`solve_qp_batch`, `solve_qp_multi_rhs`, `QpFactorization`, `QpSensitivity`, `solve_socp`) and the jax/torch differentiable layers skip the PSD check, so a nonconvex `P` is solved by the convex IPM and returns a silently-wrong `status="optimal"` (or a constructed handle / a corrupt backward pass) | **FIXED** | **Bug confirmed by running code** (`/tmp/m31_verify.py`): an indefinite `P = diag(1,-1)` with box bounds fed to all six host entry points — only `solve_qp` raised; the other five returned `status="optimal"` or constructed a usable handle. **Fix**: a shared `_maybe_check_psd(P, c, check_psd)` helper (honoring `check_psd ∈ {None=auto, True, False}` with the `_PSD_CHECK_AUTO_MAX_N=1500` auto threshold) is threaded into all six host entry points, each of which gained a `check_psd` parameter; the jax/torch host forwards (`_forward_solve`, `_forward_solve_batch`, `_forward_solve_socp`) gained a `_guard_psd` that runs the same eigenvalue screen before building the `_pounce.QpProblem`. **Tests**: `test_qp_host.py` gained 7 tests — five `*_rejects_indefinite_p` (one per previously-unguarded entry point, `pytest.raises(ValueError, match="positive semidefinite")`), `test_check_psd_false_bypasses_guard_everywhere`, and `test_psd_p_still_solves_on_all_entry_points`; `test_qp_jax.py`/`test_qp_torch.py` each gained `test_indefinite_p_rejected_in_{forward,batch_forward}` (jax wraps the host `ValueError` but the "semidefinite" message survives). **Pre-fix the five rejection tests FAIL** (the unguarded points return `optimal`) — confirmed by neutering the guard; post-fix all PASS. Full QP suite green: `test_qp.py`/`test_qp_host.py`/`test_qp_jax.py`/`test_qp_torch.py`/`test_qp_sensitivity.py`/`test_socp.py` (82 passed). See `## M31 detail`. |
 | M32 | rust(pounce-py): the `intermediate` TNLP callback (`crates/pounce-py/src/tnlp_bridge.rs:364-374`) (a) coerces a non-`bool` return via `res.extract::<bool>().unwrap_or(true)`, so a cyipopt-valid falsy int `0` (meaning *stop*) fails strict bool extraction and is read as *continue* — silently ignoring the user's stop; and (b) maps any callback exception to `Err(_) => false` with **no logging** (unlike the eval callbacks), so a crashing callback masquerades as a silent `User_Requested_Stop` | **FIXED** | **Both bugs confirmed by running code** (`/tmp/m32_verify.py`, after a `maturin build` of the worktree): an `intermediate` returning `0` at `iter_count>=1` was **ignored** pre-fix — the solve ran all 8 IPM iterations to `Solve_Succeeded` (`x→3`) instead of stopping. **Fix**: replace `res.extract::<bool>().unwrap_or(true)` with `res.is_truthy()?` (Python truthiness, matching cyipopt: `False`/`0`/`0.0`/`[]` stop, truthy continues; `None`/no-return still continues via the existing `is_none()` branch), and replace `Err(_) => false` with `Err(e) => { tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}"); false }` so a raising callback leaves a trace like `objective`/`gradient`/… (verified: post-fix log line `ERROR pounce::py: pounce-py: intermediate(): RuntimeError: boom...`). **Tests** (`python/tests/test_problem.py`): `test_intermediate_falsy_return_stops[0,False,0.0,[]]` (all must yield `User_Requested_Stop` and not reach `x*=3`), `test_intermediate_truthy_return_continues[1,True,0.5,[0]]` (→`Solve_Succeeded`), `test_intermediate_no_return_continues`, and `test_intermediate_exception_aborts_with_user_stop`. **Fail-first confirmed** by swapping the pre-fix `.so`: `[0]`, `[0.0]`, `[[]]` FAIL (`Solve_Succeeded`) while `[False]` already passed — exactly the `extract::<bool>` gap; post-fix all 14 pass. Broader solve-exercising suite green (53 passed); `cargo clippy -p pounce-py` clean of new warnings. See `## M32 detail`. |
+| M33 | python(pyomo-pounce): the Pyomo plugin's `_default_executable` (`pyomo-pounce/pyomo_pounce/pounce_solver.py:35-36`) resolves the solver only via `shutil.which("pounce")` despite depending on `pounce-solver`, which bundles the binary at a deterministic path (`pounce/bin/pounce`, exposed by `pounce._cli._bundled_binary`). A non-activated-venv run (cron, IDE runner, Jupyter kernel) with `<venv>/bin` off PATH reports the solver unavailable, or PATH shadowing picks up a stale system binary | **FIXED** | **Bug confirmed by running code**: with a bundled binary present at the deterministic path but PATH stripped of `pounce` (simulating cron/Jupyter), `_default_executable()` returned `None` — the solver reported unavailable. **Fix**: prefer `pounce._cli._bundled_binary()` when it `is_file()` (a lazy import guarded by `try/except` so a missing `pounce-solver` degrades gracefully), and fall back to `shutil.which("pounce")` for system installs / local cargo dev builds. **Tests** (`pyomo-pounce/tests/test_pounce.py`): `test_default_executable_prefers_bundled` (bundled present + PATH stripped → returns bundled path), `test_default_executable_falls_back_to_path` (no bundled → returns the PATH binary), `test_default_executable_none_when_nowhere` (neither → `None`), all via `monkeypatch` of `pounce._cli._bundled_binary` and `PATH`. **Fail-first confirmed** by reverting the method to `return shutil.which("pounce")`: `prefers_bundled` FAILS (`None != bundled`) while the fallback/none tests pass; post-fix all 7 plugin tests pass (the 3 solve-smoke tests run against the on-PATH binary, no skips). See `## M33 detail`. |
 
 ## C1 detail
 
@@ -2610,3 +2611,55 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   clippy -p pounce-py` shows only pre-existing warnings (none from the two
   changed lines). The rebuilt `.so` is a worktree-local build artifact
   (gitignored); only the Rust source, the test, and this doc are committed.
+
+## M33 detail
+
+- **Issue** (`dev-notes/code-review-2026-06.md:481-486`,
+  `pyomo-pounce/pyomo_pounce/pounce_solver.py:35-36`): Pyomo's `ASL` base
+  calls `_default_executable()` to locate the solver binary. The plugin
+  implemented it as `return shutil.which("pounce")`. But the runtime
+  dependency `pounce-solver` ships a per-platform wheel that drops the `pounce`
+  binary at a deterministic path inside the package — `pounce/bin/pounce`,
+  surfaced by `pounce._cli._bundled_binary()` (`python/pounce/_cli.py:22-24`)
+  — and a `<venv>/bin/pounce` *console-script shim*. `shutil.which` finds only
+  the shim, and only when `<venv>/bin` is on PATH. Runs that don't activate the
+  venv (cron jobs, IDE test runners, Jupyter kernels launched from a different
+  environment) have `<venv>/bin` off PATH and report the solver unavailable;
+  worse, a stale system `pounce` earlier on PATH is silently preferred over the
+  wheel's matching binary.
+- **Verification (running code)**: from the worktree
+  (`PYTHONPATH=$PWD/pyomo-pounce:$PWD/python`), monkeypatch
+  `pounce._cli._bundled_binary` to a real temp executable and set
+  `PATH=/usr/bin:/bin` (no `pounce`). Pre-fix `_default_executable()` →
+  `None` even though the bundled binary exists; the solver is reported
+  unavailable.
+- **Fix** (`pyomo-pounce/pyomo_pounce/pounce_solver.py`):
+  ```python
+  def _default_executable(self):
+      try:
+          from pounce._cli import _bundled_binary
+          bundled = _bundled_binary()
+          if bundled.is_file():
+              return str(bundled)
+      except Exception:
+          pass
+      return shutil.which("pounce")
+  ```
+  The bundled binary (deterministic, PATH-independent, guaranteed to match the
+  installed wheel) is preferred; the `try/except` keeps a missing
+  `pounce-solver` (system install / local `cargo install` dev build) working
+  via the PATH fallback.
+- **Tests** (`pyomo-pounce/tests/test_pounce.py`, all hermetic via
+  `monkeypatch`):
+  - `test_default_executable_prefers_bundled` — bundled present, PATH stripped
+    → returns the bundled path (the regression-sensitive case).
+  - `test_default_executable_falls_back_to_path` — no bundled binary → returns
+    the `pounce` found on PATH.
+  - `test_default_executable_none_when_nowhere` — neither → `None` (the honest
+    "unavailable" signal `available()` relies on).
+  - **Fail-first confirmed** by reverting the method to `return
+    shutil.which("pounce")`: `prefers_bundled` FAILS (`None != bundled`) while
+    the other two pass; post-fix all pass.
+- **Result**: `pyomo-pounce/tests/test_pounce.py` — **7 passed** (the 3
+  solve-smoke tests ran against the on-PATH binary, no skips). Pure-Python
+  plugin change; no extension rebuild involved.
