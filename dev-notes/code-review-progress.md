@@ -120,6 +120,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L50 | The KKT-fallback success heuristic can mark `User_Requested_Stop` as success (`_minimize.py`) — combined with M32, a crashing callback can yield `success=True` | **FIXED** | **Confirmed by reading + a monkeypatch test + a fail-first truth-table.** After the solve, `success = status_code in {0,1} or (isfinite(kkt) and kkt <= acceptable_tol)`. The KKT-error fallback (the second disjunct) is meant for *numerical stalls* (e.g. `Search_Direction_Becomes_Too_Small`, status 3) that happen to sit at an acceptable point — but it fired for **any** non-success status, including `User_Requested_Stop` (status 5). Status 5 is what the bridge reports when the user's `intermediate` callback aborts, and (per M32) also when such a callback *raises*. So a crashing/aborting callback whose last computed KKT error was coincidentally small was upgraded to `success=True`. **Fix**: add `_NO_KKT_FALLBACK_STATUS = {5}` and gate the fallback on `status_code not in _NO_KKT_FALLBACK_STATUS`. **Fail-first** (truth table): for `status=5, kkt=1e-12, acc=1e-6` the pre-fix expression is `True`; post-fix `False`; the `status=3` stall control stays `True`. **Test** (`test_minimize.py::test_user_requested_stop_is_not_success_despite_small_kkt`, monkeypatching the native `Problem`): a fake returning status 5 + `final_kkt_error=1e-12` yields `success is False`, while a sibling returning status 3 with the same KKT error stays `success is True`. Verified against the codereview source via the stubbed-native harness. See `## L50 detail`. |
 | L51 | `GetIpoptCurrentViolations` bound-violation branches skip the length check their sibling branches perform (`pounce-cinterface/src/lib.rs:788-808`); a packed-length mismatch indexes `v[i]` out of bounds → panic inside `extern "C"` → abort | **FIXED (hardened) + placeholder behavior documented** | **Confirmed by reading; panic not reachable through the public API (defense-in-depth fix).** The `x_l_violation`/`x_u_violation` branches built `v = vec![0.0; n_us]` and ran `for (i, s) in pack_z_*_for_user(...).enumerate() { v[i] = ... }` with **no** length guard, unlike the five sibling branches (`compl_x_l/u`, `grad_lag_x`, and every branch of `GetIpoptCurrentIterate`) which all `if v.len() != n_us { return false; }` first. An oversized pack would index `v[i]` out of bounds → panic; `with_current` has **no** `catch_unwind`, so the panic unwinds across `extern "C"` → process abort. In practice the top-of-function `n != info.n` guard pins `n` to `info.n`, and `pack_z_*_for_user` returns `cls.n_full_x == info.n`, so the mismatch is unreachable via the public API today — this is a latent gap hardened for consistency/defense-in-depth. **Fix**: add the same `if pack.len() != n_us { return false; }` guard to both bound branches. **Tests** (`pounce-cinterface` lib): `bound_violation_scatter_rejects_oversized_pack_instead_of_panicking` is **fail-first at the logic level** — `catch_unwind` over the pre-fix scatter (oversized pack) `.is_err()` (it panics), while the guarded version returns `Err`; and `get_current_violations_inside_callback_reports_finite_bounds` drives a real `IpoptSolve` with a finite-bound problem and asserts the (now-guarded) branches return `TRUE` with finite, non-negative violations from inside the callback. Note: `nlp_constraint_violation`/`compl_g` remain documented zero-fill placeholders returned with `TRUE` (per-row reconstruction is a follow-up) — already noted in the code comments, behavior unchanged. 45 lib tests pass; `cargo fmt` / gated clippy clean. See `## L51 detail`. |
 | L52 | `target_triple` in solve reports is always `"unknown"` (`pounce-solve-report/src/lib.rs:405-411`): `option_env!("TARGET")` is only set for build scripts, never for crate-source compilation | **FIXED** | **Confirmed empirically + fail-first test.** A standalone `rustc` of `option_env!("TARGET")` resolves to `"unknown"` at source-compile time (Cargo exposes `TARGET` to *build scripts* only), so `TARGET_TRIPLE` — and thus `fair_metadata.solver.target_triple` in every emitted `pounce.solve-report/v1` — was hard-stuck at `"unknown"`. The inline comment claiming "`TARGET` is set by Cargo when building this crate" was wrong. **Fix**: add `crates/pounce-solve-report/build.rs` that reads the build script's `TARGET` and re-exports it via `cargo:rustc-env=POUNCE_TARGET_TRIPLE=…` (with `rerun-if-env-changed=TARGET`); change the constant to `option_env!("POUNCE_TARGET_TRIPLE")` (keeps the `"unknown"` fallback for non-Cargo tooling). **Test** (`pounce-solve-report` lib): `target_triple_resolves_to_real_triple_not_unknown` asserts `TARGET_TRIPLE != "unknown"`, has `>= 2` dashes (`arch-vendor-os` shape), and propagates into a finished `ReportBuilder::finish()` report. **Fail-first**: pre-fix the constant is `"unknown"`, so the `assert_ne!` fails; post-fix it resolves to the host triple (`aarch64-apple-darwin` here). 8 lib tests pass; `cargo fmt` / gated clippy clean. See `## L52 detail`. |
+| L53 | Stale `[patch.crates-io]` story: five "Checkout feral sibling" CI steps + three manylinux `../feral` bind-mounts (`ci.yml`) and `studio/skill/README.md:39` reference a path-based feral patch the committed tree does not carry | **FIXED** | **Confirmed by reading + `cargo metadata`.** The committed `Cargo.toml` pins `feral = "0.10.0"` (a published crates.io release — verified live) with **no** `[patch.crates-io]`. The local-dev override (skip-worktree, `S` bit, not committed) redirects feral to a **git rev**, not a `path = "../feral"`. `cargo metadata` here resolves feral to `git+https://github.com/jkitchin/feral.git?rev=…` under `~/.cargo/git/checkouts/` — **never** `../feral`; in CI (committed tree, no patch) it resolves from crates.io. So every `git clone … ../feral` step and `-v …/feral:…/feral` bind-mount is dead, and the comments claiming `[patch.crates-io] feral = { path = "../feral" }` are false. **Fix**: remove all 5 "Checkout feral sibling" steps and all 3 `docker-options` feral bind-mounts from `ci.yml` (jobs `test`, `python-test`, `python-test-torch`, `wheel-smoke`, `pyomo-pounce-smoke`); correct the release-consistency comment ("feral resolves from crates.io"); rewrite `studio/skill/README.md` to state both installs build straight from crates.io (no sibling / no patch), noting the git-rev override is a local maintainer-only workflow. **Verification**: `python3 yaml.safe_load` confirms `ci.yml` stays valid with all 5 jobs; 0 "Checkout feral" steps remain; `cargo metadata` proof above. Left the dated QA log `dev-notes/qa-lp-qp-torch.md` (records a past build's `../feral` sibling) intact — a historical record, not a live reference. See `## L53 detail`. |
 
 ## C1 detail
 
@@ -6089,3 +6090,54 @@ standalone `rustc` run above), so the `assert_ne!(TARGET_TRIPLE, "unknown")`
 fails; post-fix it resolves to the host triple (`aarch64-apple-darwin` on
 this machine). Full `pounce-solve-report` lib suite (8 tests) passes;
 `cargo fmt` / gated clippy clean.
+
+## L53 detail
+
+**Issue.** `.github/workflows/ci.yml` and `studio/skill/README.md` both
+describe a `[patch.crates-io] feral = { path = "../feral" }` override and
+instruct cloning feral into a `../feral` sibling so cargo can resolve it.
+Five jobs (`test`, `python-test`, `python-test-torch`, `wheel-smoke`,
+`pyomo-pounce-smoke`) each carried a "Checkout feral sibling" step, and
+three manylinux wheel builds bind-mounted `../feral` into the container.
+
+**Why it's stale (verified by running cargo).** The *committed* `Cargo.toml`
+pins `feral = "0.10.0"` — a published crates.io release (confirmed live via
+the crates.io API, with the serde sanity-check) — and carries **no**
+`[patch.crates-io]`. The only feral patch that exists is a *local,
+uncommitted* maintainer override (the file has the git `skip-worktree`
+bit — `git ls-files -v Cargo.toml` → `S`), and even that points feral at a
+**git rev**, not a sibling path:
+
+```
+$ cargo metadata --format-version 1 | jq '.packages[] | select(.name=="feral") | .source'
+"git+https://github.com/jkitchin/feral.git?rev=11fb4b9…"
+# manifest_path: ~/.cargo/git/checkouts/feral-…/Cargo.toml
+```
+
+So cargo resolves feral from `~/.cargo/git/checkouts/` (local patch) or
+crates.io (CI's committed tree) — it **never** reads `../feral`. Every
+sibling clone and bind-mount is dead, and the explanatory comments
+(`[patch.crates-io] feral = { path = "../feral" }`) are simply wrong.
+
+**Fix.**
+- `ci.yml`: deleted all 5 "Checkout feral sibling" steps and all 3
+  `docker-options: -v …/feral:…/feral` bind-mounts (plus their stale
+  comments). Corrected the `Release consistency check` comment to say
+  "feral resolves from crates.io" instead of "feral sibling cloned above".
+- `studio/skill/README.md`: rewrote the install note — both `pounce-studio`
+  and `pounce` build straight from crates.io (no sibling, no patch);
+  clarified the git-rev override is a local maintainer-only workflow.
+
+**Verification.**
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`
+  → valid; all 5 jobs (`test`, `python-test`, `python-test-torch`,
+  `wheel-smoke`, `pyomo-pounce-smoke`) preserved.
+- `grep -c "Checkout feral" ci.yml` → 0.
+- The `cargo metadata` resolution above proves the sibling is unused, so the
+  removed steps cannot affect the build.
+
+**Deliberately left alone.** `dev-notes/qa-lp-qp-torch.md:52-53` mentions a
+`../feral` sibling, but it is a dated QA log recording how one past build
+(`899405e`, the #111 PyTorch landing) was set up — a historical record, not
+a live instruction or a patch reference. Editing it would falsify that
+record; out of L53's scope.
