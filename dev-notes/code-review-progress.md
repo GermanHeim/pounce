@@ -44,6 +44,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M18 | Per-call allocations in the tape-AD gradient hot path (`forward` + `reverse` allocate per summand tape, ~10⁶ tapes per `eval_jac_g`) | **FIXED** | **Mechanism confirmed + reproduced.** In `crates/pounce-nl/src/nl_tape.rs`, `Tape::gradient_seed` calls `forward` (allocates a `Vec<f64>` of forward values, `:198`) and `reverse` (allocates `adj = vec![0.0; n]`, `:272`) on every invocation. The `.nl` front end (`nl_reader.rs`) deliberately emits one tiny `Tape` per additive summand, so `eval_jac_g` (`gradient_seed` per constraint summand) and `eval_grad_f` (per objective summand) drive these two small allocations millions of times on large models. The Hessian path already had the `forward_into` + reusable-scratch pattern; the gradient path did not. **Reproduced** with a counting global allocator: `gradient_seed` allocates on essentially every call (≥1000 allocations across 1000 calls on a sample tape). **Fix** (mirrors the Hessian scratch pattern): added `Tape::gradient_seed_into(x, seed, grad, vals, adj)` — a `pub` allocation-free variant that runs `forward_into` (existing) into a caller `vals` arena and a new private `reverse_into(vals, seed, grad, adj)` that zeroes the touched `[0,n)` slots of a caller `adj` arena instead of allocating one. `reverse` now delegates to `reverse_into` (behavior unchanged; `gradient_seed` and the FD-comparison tests still exercise it). The two hot-path callers in `nl_reader.rs` (`eval_grad_f`, `eval_jac_g`) now call `gradient_seed_into`, reusing the existing `vals_scratch`/`adj_scratch` arenas (already sized to `max_tape_n`, the max over all obj+con tapes, so always ≥ any single summand tape). **Verified post-fix**: the counting allocator shows `gradient_seed_into` performs **0** allocations across 1000 calls (vs ≥1000 for `gradient_seed`) and computes the identical gradient; end-to-end NLP solves unchanged — `convex_qp`→2.0, `tame`→0.0, `nonconvex_qp`→1.0, all "Optimal Solution Found". **Test** (`tests/tape_gradient_no_alloc.rs`): a counting `#[global_allocator]` (single test in its own integration binary so no sibling thread perturbs the counter) asserts `gradient_seed_into` == `gradient_seed` numerically, the baseline allocates ≥1000×, and the new path allocates 0×. **Pre-fix the 0-assertion FAILS** (`left: 1000, right: 0`), confirmed by neutering `gradient_seed_into` with a throwaway `vec!` per call, then restored. `pounce-nl` (78 lib + 1 new integration, 0 failed) and full `pounce-cli` (0 failed) green. See `## M18 detail`. |
 | M19 | Initial duals from the `.nl` `d` segment parsed into `lambda0` but never used; `warm_start_init_point yes` silently warm-starts from zero multipliers | **FIXED** | **Mechanism confirmed + reachability traced.** The `.nl` reader (`crates/pounce-nl/src/nl_reader.rs`) parses the `d` segment into `NlProblem::lambda0` (`:458`), but `NlTnlp::get_starting_point` only copied `x0` into `sp.x` and ignored `sp.lambda` entirely — so the parsed constraint multipliers were discarded. The module header even claimed the `d` segment is "read and discarded". **Reachability**: the warm-start path is live — `OrigIpoptNlp::get_starting_point` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs:1289`) requests `init_lambda: init_y_c \|\| init_y_d` and, on return, compresses `full_lambda` into the algorithm-side `y_c`/`y_d` via `c_map`/`d_map` with `obj`/constraint scaling (`:1320-1333`). The engine sets `init_lambda` when `warm_start_init_point yes`; with the TNLP leaving `sp.lambda` untouched, the warm start began from zero multipliers — defeating the point of supplying `lambda0`. **Fix**: when `sp.init_lambda` is set, `get_starting_point` now copies `self.prob.lambda0` into `sp.lambda` (the `.nl` `d` segment carries no bound multipliers, so `z_l`/`z_u` are left to engine defaults); the stale module-header doc comment is corrected to state both `x` and `d` are parsed and returned, the duals feeding a `warm_start_init_point` solve. **Verified post-fix**: the new test parses an equality-constrained `.nl` with `d1\n0 2.5`, asserts `lambda0 == [2.5]`, then drives `get_starting_point` with `init_lambda: true` (yields `lambda == [2.5]`) and `init_lambda: false` on a pre-filled buffer (left untouched at `[7.0]`). Cold-start paths are unaffected because they pass `init_lambda: false`; `lp_afiro solver_selection=nlp` still converges to −464.75314761311961 ("Optimal"). **Test** (`nl_reader::tests::get_starting_point_returns_nl_initial_duals`). **Pre-fix the warm-start branch FAILS** (`left: [0.0], right: [2.5]`), confirmed by neutering the copy with `if sp.init_lambda && false`, then restored. `pounce-nl` (79 lib + integration, 0 failed) and full `pounce-cli` (0 failed) green. See `## M19 detail`. |
 | M20 | Silent tolerance relaxation: convex IPM breakdowns re-labeled `Optimal` at residuals far above `tol`, with no way for callers to detect the reduced accuracy | **FIXED** | **Mechanism confirmed + reproduced.** Both convex HSDE drivers accept a usable-but-inaccurate iterate when a factorization/back-solve breaks down (or the cap/a stalled step is hit) while the best KKT residual is already small: the symmetric `hsde.rs` accepts within `~1e3·tol` (`near_opt`, 4 break sites), and the non-symmetric `hsde_nonsym.rs` accepts within `~1e3·tol` (6 break sites) and, at exit, restores the best iterate if `best_res < √tol` (`:1176`). Each of these reported a bare `QpStatus::Optimal` — and since `QpStatus` had no reduced-accuracy variant and `QpSolution` carries no final-residual field, a residual sitting at `1e-5`/`1e-4` (default `tol=1e-8`) was indistinguishable from a genuinely converged solve. ECOS/Clarabel expose exactly this as a distinct `*_INACC` status. **Reproduced**: the exp/power-cone GP suites (`exp_cone_vs_nlp`, `cblib_cbf`, `cblib_vs_nlp` — `demb761`/`beck751`/`fang88`/`pow3`, log-sum-exp, entropy, near-boundary GP) reach their optima through the non-symmetric reduced-accuracy fallback, so they were *already* being reported as `Optimal` despite residuals only within `√tol` — the masquerade in the field. **Fix** (mirrors ECOS/Clarabel `*_INACC`): added `QpStatus::OptimalInaccurate` and a centralized `breakdown_status(near_opt)` (in `qp.rs`) that returns `OptimalInaccurate` when `near_opt` (else `NumericalFailure`); both drivers now call it instead of an inline `if near_opt { Optimal } else { NumericalFailure }`, and the non-symmetric best-iterate restoration sets `OptimalInaccurate`. The clean convergence test (`pres<tol && dres<tol && gap<tol → Optimal`) is untouched, so genuinely-converged solves still report `Optimal`. CLI surfacing: `convex_status_report` (extracted, shared by the QP/LP and SOCP report paths) maps `OptimalInaccurate → ("Solved to acceptable level (reduced accuracy).", ok=true, solve_result_num=100)` — the AMPL 100–199 reduced-accuracy band; `qp_status_to_ars` (CLI + `pounce_cblib`) maps it to `ApplicationReturnStatus::SolvedToAcceptableLevel` (the JSON report's `solve_result_num` 100); `pounce_cblib` treats it as a success exit code; the two `pounce-py` `status_str` maps emit `"optimal_inaccurate"`. Conservatively, sensitivity (`sensitivity.rs:91`) and SOS exactness (`sos.rs:474/498`) keep their strict `== Optimal` gate, so reduced-accuracy solutions are *not* used as exact certificates. **Verified post-fix**: well-conditioned `lp_afiro solver_selection=lp-ipm` and `convex_qp solver_selection=qp-ipm` still print "Optimal Solution Found." (`srn` 0) — the new path does not fire for them; the exp/power-cone suites now report `OptimalInaccurate` while their objective cross-checks against an independent NLP still hold. **Tests**: `qp::residual_tests::breakdown_status_marks_near_opt_as_inaccurate_not_optimal` (pins `breakdown_status(true)==OptimalInaccurate≠Optimal`, `(false)==NumericalFailure`); CLI `convex_status_tests::optimal_inaccurate_is_distinct_from_optimal` (pins `srn=100`, `ok=true`, message ≠ "Optimal…", and `→ SolvedToAcceptableLevel`, all distinct from `Optimal`). Existing conic tests updated to accept either usable status (clean `Optimal` or `OptimalInaccurate`) while keeping their objective checks. **Pre-fix FAILS** (`left: Optimal, right: OptimalInaccurate`), confirmed by neutering `breakdown_status` to return `Optimal`, then restored. `pounce-convex` (104 lib + integration, 0 failed), full `pounce-cli` (20 binaries, 0 failed), `pounce-py` build green. **Residual-field follow-up** (a `QpSolution.final_residual`) deferred — the distinct status already resolves "callers cannot detect it". See `## M20 detail`. |
+| M21 | SOS flat-truncation exactness check is weaker than Curto–Fialkow for constrained problems; extracted atoms are never validated against the constraints, so `is_exact = true` can over-claim | **FIXED** | **Mechanism confirmed + concrete failing instance constructed** (the review left this "Uncertain"). `recover_from_moments` (`crates/pounce-convex/src/sos.rs`) certified exactness purely by flat truncation of the moment matrix `M_d` (`rank M_d = rank M_{d−1}`) and then extracted the atoms — it never looked at `prob.inequalities`/`prob.equalities`. For a *constrained* program `rank M_d = rank M_{d−1}` only certifies a representing measure on `ℝⁿ`; when some constraint `gᵢ` has `dg = ⌈deg gᵢ/2⌉ > 1` (degree > 2) the `d−1` window is a strictly *weaker* condition than the `d−dg` window Curto–Fialkow/Henrion–Lasserre require to pin the atoms to `K`, so a flat `M_d` can extract atoms outside the feasible set while `is_exact = true` reports the *unconstrained* bound as the exact constrained optimum. **Reproduced by running code**: `min (x+1)² s.t. x³ ≥ 0` (feasible `x ≥ 0`; true constrained min `1` at `x = 0`, unconstrained min `0` at `x = −1`) at order 2 reported `is_exact = true`, `lower_bound = 0`, single "minimizer" at **x ≈ −0.719 — infeasible** (`x³ ≈ −0.37 < 0`). Same pathology for `min (x+2)² s.t. x³ ≥ 0` (atom ≈ −0.63) and `min (x+1)² s.t. x⁵ ≥ 0` at order 3 (a spurious atom at x ≈ 318). **Fix**: validate every extracted atom against the constraints before keeping the certificate — `recover_from_moments` now takes `prob` and, after extraction, calls a new `PolyProblem::is_feasible(x, tol)` (each `gᵢ(x) ≥ −tol·(1+‖gᵢ‖(x))`, `|hⱼ(x)| ≤ tol·(1+‖hⱼ‖(x))`, a scale-invariant relative margin via new private `Polynomial::eval`/`eval_magnitude`); if any atom is infeasible the exactness certificate is withdrawn (`is_exact = false`, no minimizers). `lower_bound` is unchanged — it stays a valid lower bound (here `0 ≤ 1`). Unconstrained problems have empty constraint lists, so `is_feasible` is a no-op and their recovery is untouched. The facial-reduction re-solve also runs the validated recovery. The `SosSolution`/`is_exact` docs now state the constrained certificate requires feasible atoms. **Verified post-fix**: the failing instance now returns `is_exact = false`, `num_minimizers = 0`, `lower_bound ≤ 1`; all existing `sos_minimize` extraction tests (unconstrained — unique/two/three/four-atom, facial reduction, Goldstein–Price) still certify and extract unchanged. **Test** (`sos::tests::constrained_overclaim_rejected_when_atom_infeasible`). **Pre-fix FAILS** (`is_exact = true` with minimizer `[−0.719]`), confirmed by neutering the guard (`is_feasible(..) || true`), then restored. `pounce-convex` (105 lib + all integration, 0 failed) and `pounce-py` build green. See `## M21 detail`. |
 
 ## C1 detail
 
@@ -1851,3 +1852,85 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **Result**: `pounce-convex` green (104 lib + all integration, 0 failed);
   full `pounce-cli` green (20 binaries, 0 failed); `pounce-py` builds clean;
   workspace build clean.
+
+## M21 detail
+
+- **Issue (review M21)**: `crates/pounce-convex/src/sos.rs` certifies SOS
+  exactness for `sos_minimize` by *flat truncation* of the moment matrix —
+  `recover_from_moments` compares `rank M_d` with the rank on the
+  degree-≤(d−1) sub-basis (`mi.basis0[i].iter().sum() < mi.d`, `:549-550`).
+  The review flags that for a **constrained** program this is weaker than the
+  Curto–Fialkow / Henrion–Lasserre condition: the sufficient stopping window
+  is `rank M_d = rank M_{d−dg}` with `dg = max_i ⌈deg gᵢ/2⌉`, and the extracted
+  atoms are never checked against the constraints, so `is_exact = true`
+  ("provably the global minimum") can over-claim. The review marked it
+  *Uncertain — no concrete failing instance constructed*.
+- **Why the `d−1` window is the weaker test** (direction matters): the moment
+  sub-matrices are nested, `rank M_{d−dg} ≤ rank M_{d−1} ≤ rank M_d`. So
+  `rank M_d = rank M_{d−dg}` (the correct, atoms-in-`K` condition) *implies*
+  `rank M_d = rank M_{d−1}` (the code's condition), but **not** conversely.
+  When `dg > 1` the code accepts a strictly larger set of moment matrices as
+  "flat" than the theorem licenses — exactly the regime that can yield atoms
+  outside `K`. `dg > 1` requires a constraint of degree ≥ 3.
+- **Concrete failing instance** (constructed by running code, closing the
+  review's "Uncertain"): `min (x+1)² s.t. x³ ≥ 0`. The feasible set is
+  `x ≥ 0`; the constrained minimum is `1` at `x = 0`, but the *unconstrained*
+  minimum is `0` at `x = −1`. The single degree-3 constraint gives `dg = 2`,
+  and at order 2 its localizing matrix is the lone scalar `L(x³) ≥ 0` — far too
+  weak to pin the relaxation. Pre-fix, `sos_minimize(&prob, Some(2), …)`
+  returned `status = Optimal`, `is_exact = true`, `lower_bound = 0`, and a
+  single "minimizer" at **x ≈ −0.719**, which is **infeasible** (`x³ ≈ −0.37`).
+  So the certificate simultaneously reported the wrong optimum (0 vs 1) and an
+  infeasible optimizer. Two more confirmations: `min (x+2)² s.t. x³ ≥ 0` (atom
+  ≈ −0.63, `x³ ≈ −0.26`) and `min (x+1)² s.t. x⁵ ≥ 0` at order 3 (a spurious
+  atom at x ≈ 318).
+- **Fix** (`crates/pounce-convex/src/sos.rs`): validate the extracted atoms
+  against the feasible set before keeping the certificate, rather than
+  widening the rank window (which would only convert over-claims into
+  silent *under*-claims at low order and still not guarantee feasibility).
+  - New private `Polynomial::eval(x)` and `Polynomial::eval_magnitude(x)` (the
+    triangle-inequality bound `Σ|cᵢ|·∏|xₖ|^{eₖ}`), plus a shared
+    `Polynomial::monomial(e, x)` helper.
+  - New `PolyProblem::is_feasible(x, tol)`: `gᵢ(x) ≥ −tol·(1+‖gᵢ‖(x))` for
+    every inequality and `|hⱼ(x)| ≤ tol·(1+‖hⱼ‖(x))` for every equality — a
+    **scale-invariant relative** margin (normalized by each constraint's
+    magnitude at `x`) so a binding constraint reading `gᵢ ≈ 0` is accepted
+    within the ~1e-4 inaccuracy of moment-extracted atoms while a clear
+    violation (a sizeable negative fraction of `‖gᵢ‖`) is caught. `FEAS_TOL =
+    1e-4`.
+  - `recover_from_moments` now takes `prob`; after extraction it withdraws the
+    certificate (`is_exact = false`, clears `minimizers`, `num_minimizers = 0`)
+    if any atom fails `is_feasible`. `lower_bound` is **unchanged** — it remains
+    a valid lower bound (in the example `0 ≤ 1`).
+  - Both call sites in `sos_minimize` (the central solve and the
+    facial-reduction re-solve) pass `prob`, so the validation guards the
+    facial-reduction path too. (Because the failing instance now reports
+    `is_exact = false` from the first recovery, the facial-reduction branch
+    fires and re-solves at the same order; at order 2 the relaxation is
+    genuinely not tight, so it correctly stays `is_exact = false`.)
+- **No effect on unconstrained recovery**: with no inequalities/equalities,
+  `is_feasible` is vacuously true, so all existing `sos_minimize` extraction
+  tests — `extract_unique_minimizer_1d/2d`, `extracts_two_global_minimizers`,
+  `facial_reduction_recovers_nonunique_minimizers`,
+  `facial_reduction_three_minimizers_degree_six`,
+  `facial_reduction_four_minimizers_2d_order_three`,
+  `goldstein_price_wide_coefficient_range` — still certify and extract
+  unchanged. The constrained `sos_constrained_lower_bound` tests are also
+  unaffected (they return only a bound and never enter recovery).
+- **Test** (`crates/pounce-convex/src/sos.rs`,
+  `sos::tests::constrained_overclaim_rejected_when_atom_infeasible`): runs the
+  `min (x+1)² s.t. x³ ≥ 0` instance at order 2 and asserts `status = Optimal`,
+  `!is_exact`, `num_minimizers = 0`, `minimizers` empty, and `lower_bound ≤ 1`
+  (still a valid lower bound).
+- **Fail-first**: neutering the guard (`prob.is_feasible(x, FEAS_TOL) || true`)
+  makes the test fail with `is_exact = true` and minimizer `[−0.7189…]` —
+  precisely the over-claim — then restored.
+- **Result**: `pounce-convex` green (105 lib + all integration, 0 failed);
+  `pounce-py` builds clean (its `sos_minimize` wrapper surfaces the corrected
+  `is_exact`/`minimizers` unchanged in shape).
+- **Scope note**: this hardens the *exactness certificate* — it never weakens
+  the `lower_bound`, which is valid regardless of flatness. A user wanting the
+  certified constrained optimum for such an instance should raise the
+  relaxation `order` until the higher-order moment/localizing matrices make the
+  relaxation tight (and the now-validated flat truncation fires on feasible
+  atoms).
