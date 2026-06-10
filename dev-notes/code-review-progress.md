@@ -101,6 +101,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L32 | Malformed `J`/`G` indices panic later as slice OOB instead of a parse error, while `x`/`d` out-of-range entries are silently dropped — inconsistent strictness (`nl_reader.rs` segment parse loop) | **FIXED** | **Confirmed by reading code + tracing the panic.** The J/G segment parsers pushed each entry's *variable (column) index* into `con_linear`/`obj_linear` without bounds-checking it against `n`. An out-of-range column index then panicked as a slice OOB at `x[*j]` during constraint/objective evaluation (`nl_reader.rs:2299`, `2345`) — a crash on malformed user `.nl`. The `x`/`d` segments, by contrast, guarded `if idx < n`/`if idx < m` and *silently dropped* out-of-range entries (hiding corruption). The J *row* index was already a clean `Err`. **Fix**: unified all four index-bearing segments on **parse error** — J and G now reject `var >= n` with a descriptive error before storing; `x`/`d` now reject `idx >= n`/`idx >= m` instead of dropping. **Tests** (`nl_reader::tests`): `malformed_j_variable_index_is_parse_error_not_panic` (J entry var 5 with n=2 → `Err(... out of range)` rather than a later panic) and `out_of_range_x_segment_index_is_parse_error` (x index 5 with n=2 → `Err`). **Fail-first confirmed**: removing the J check makes `parse_nl_text` return `Ok` (storing the bad index) so `expect_err` panics; removing the x check makes it silently drop and return `Ok`, also failing `expect_err`. Restored; 84 pounce-nl lib (+2) + 1 integration green, and full pounce-cli suite (parses real `.nl` fixtures) green — the tighter x/d parsing rejects no valid file. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L32 detail`. |
 
 | L33 | `relax_bounds` silently no-ops when a bound `Rc` is shared (`orig_ipopt_nlp.rs`) while `adjust_variable_bounds` treats the same condition as a hard invariant (`expect`) — they should agree, and the loud version is safer | **FIXED** | **Confirmed by reading code.** Both `OrigIpoptNlp::relax_bounds` and `adjust_variable_bounds` rely on the bound `Rc`s (`x_l/x_u/d_l/d_u`) being **uniquely owned**. `adjust_variable_bounds` enforces it with `Rc::get_mut(...).expect("... uniquely owned")`; `relax_bounds` instead used `if let Some(_) = Rc::get_mut(...)` and silently skipped any shared bound — so a stray clone would leave bounds *tighter* than `bound_relax_factor` requires, with no signal. **Fix**: rewrote `relax_bounds` to `Rc::get_mut(...).expect("relax_bounds: <field> is uniquely owned")` for all four bounds, matching `adjust_variable_bounds`. The sole production caller (`application.rs:1085`, in structure init before the main loop) holds the invariant, so the loud form never trips in real solves. **Tests** (`orig_ipopt_nlp::tests`): `relax_bounds_widens_uniquely_owned_bounds` (baseline: `x_l` relaxes down, `x_u` up on the normal uniquely-owned state) and `relax_bounds_panics_on_shared_bound_rc` (`#[should_panic(expected = "x_l is uniquely owned")]` after `Rc::clone(&nlp.x_l)` bumps the strong count). **Fail-first confirmed**: reverting to the `if let Some` no-op makes the shared-Rc case *not* panic — `test did not panic as expected`. Restored; 39 pounce-nlp + 20 pounce-algorithm (the relax_bounds integration caller) test groups green. `cargo fmt -p pounce-nlp` / gated `cargo clippy` clean. See `## L33 detail`. |
+| L34 | `HybridTape` is dead code with a misleading panic in the promoted-CSE path (`nl_tape.rs`) | **FIXED** | **Confirmed by reading code + repo-wide grep.** `HybridTape`/`build_multi` (the designed-but-unwired partial-separability tape) has **zero callers** outside `nl_tape.rs` and no test coverage — fully dead. Its `build_into_summand` rejects unsupported opcodes with a clear message ("AMPL external function calls are not supported on the hybrid path … Build with `Tape::build_with_externals`"), **except** the *promoted*-CSE branch: it emits a shared CSE body via `build_recursive(expr, …, &ExternalResolver::default())` with an **empty** resolver, so a funcall buried in a promoted CSE reached `build_recursive`'s `Expr::Funcall` arm and panicked with the **misleading** `unresolved AMPL funcall id <n>` — implying a resolution failure rather than the real reason (funcalls are unsupported on the hybrid path regardless of resolvability). **Fix**: added a `cse_contains_funcall(body)` pre-scan in the promoted branch that raises the *same* clear hybrid-unsupported message before calling `build_recursive`, so both CSE paths report the same reason. (Chose to make the panic consistent rather than delete the intentionally-designed module.) **Test** (`nl_tape::tests`): `hybrid_promoted_cse_with_funcall_reports_clear_message` (`#[should_panic(expected = "external function calls are not supported on the")]`) builds a funcall CSE body shared across two roots so it is promoted, then `HybridTape::build_multi`. **Fail-first confirmed**: removing the guard makes the panic message `"unresolved AMPL funcall id 0"`, which `should_panic` rejects ("panic did not contain expected string"). Restored; 85 pounce-nl lib (+1) green. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L34 detail`. |
 
 ## C1 detail
 
@@ -5154,3 +5155,52 @@ harness):
 the shared-`Rc` test *not* panic (`test did not panic as expected`), failing the
 `should_panic`. Restored after confirming. 39 pounce-nlp + 20 pounce-algorithm
 test groups green; `cargo fmt` / gated `cargo clippy` clean.
+
+## L34 detail
+
+**Issue.** `HybridTape` is dead code with a misleading panic in the
+promoted-CSE path (`nl_tape.rs`).
+
+**Verification.** `HybridTape` and its constructor `build_multi` (the
+designed-but-unwired *partial-separability* tape that splits an objective into
+per-summand local tapes plus a shared prelude) have **zero callers** anywhere
+outside `nl_tape.rs` — confirmed by repo-wide
+`grep -rn "build_multi\|HybridTape" crates/` (the only hits are unrelated
+`build_multi_vector` in `lim_mem_quasi_newton.rs`) — and there is no test that
+exercises it. It is fully dead code.
+
+The summand builder `build_into_summand` rejects opcodes the hybrid path cannot
+lower (external funcalls; conditional/logical/min-max) with a **clear** panic:
+`"HybridTape: AMPL external function calls are not supported on the hybrid
+(partial-separability) tape path. Build with Tape::build_with_externals
+instead."` — *except* in the **promoted-CSE branch**. A CSE referenced by ≥2
+summands is "promoted": its body is emitted once into the shared prelude via
+`build_recursive(expr, prelude, prelude_map, &ExternalResolver::default())` —
+note the **empty** default resolver (the hybrid path carries no resolver of its
+own). So a funcall buried inside a promoted CSE flows into `build_recursive`'s
+`Expr::Funcall` arm (`nl_tape.rs:1742`), whose
+`.unwrap_or_else(|| panic!("unresolved AMPL funcall id {id}"))` fires —
+**misleadingly** implying the funcall id failed to resolve, when the real
+reason is that funcalls are categorically unsupported on the hybrid path (they
+would be rejected even with a fully-populated resolver).
+
+**Fix.** Added a small `cse_contains_funcall(expr)` recursive scanner and called
+it at the top of the promoted-CSE branch in `build_into_summand`; when the
+promoted body contains a funcall it panics with the **same** clear
+hybrid-unsupported message the non-promoted summand path and the bottom
+`Expr::Funcall` arm already use. Both CSE paths now report the same reason.
+Chose to make the panic *consistent* rather than delete the module: `HybridTape`
+is intentionally-designed (if unwired) infrastructure, and the issue is the
+misleading message, not the existence of the code.
+
+**Test.** `nl_tape::tests::hybrid_promoted_cse_with_funcall_reports_clear_message`
+(`#[should_panic(expected = "external function calls are not supported on the")]`)
+constructs an `Expr::Funcall` CSE body shared via one `Rc` across two summand
+roots (`add(Cse(body), 1)`, `add(Cse(body), 2)`) so the CSE is promoted, then
+calls `HybridTape::build_multi`.
+
+**Fail-first.** Removing the `cse_contains_funcall` guard makes the panic revert
+to `"unresolved AMPL funcall id 0"`; the test then fails with "panic did not
+contain expected string / expected substring: external function calls are not
+supported on the". Restored after confirming. 85 pounce-nl lib tests (+1) green;
+`cargo fmt -p pounce-nl` / gated `cargo clippy` clean.
