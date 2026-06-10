@@ -25,6 +25,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H14 | release: crates.io automation guaranteed to fail mid-batch (irreversible partial publish), invisible to the consistency guard | **FIXED (guard + pre-flight; root pin out of scope)** | Verified by running `cargo publish -p pounce-feral --dry-run`: hard-fails with "all dependencies must have a version requirement specified … dependency `feral` does not specify a version". The root `feral` dep (`Cargo.toml:89`) is a versionless git pin (`req:"*"`, source `git+…`); it is crate #4 of 19 in publish order, so a `vX.Y.Z` tag uploads 3 crates then hard-fails — an irreversible partial release. The root pin cannot be lifted here (feral must first cut a crates.io release carrying the pinned commits — `feral` is on crates.io only at 0.10.0, which lacks them). Two-layer fix: (1) new `scripts/check_dep_publishability.py` flags any normal/build dep of a publishable crate that is git-sourced or wildcard/versionless; wired as check #4 in `check-release-consistency.sh` (the per-PR/pre-tag guard) so the blocker is no longer invisible. (2) `publish-crates.sh` pre-flight runs the same scan and **aborts before uploading crate 1**, converting the irreversible mid-batch failure into a safe no-op. Tests: `scripts/tests/test_check_dep_publishability.py` (7 synthetic-fixture cases, tree-state-independent). |
 | H15 | python: `curve_fit` reports `success=False` for `Solved_To_Acceptable_Level` | **FIXED** | `_solve_fit` (`_curve_fit.py:712`, shared by `curve_fit`, `curve_fit_streaming`, `curve_fit_minima`) gated `success` on `int(info["status"]) == 0`, so an acceptable-level stall (status 1) was reported failed despite a fully populated `popt`/`pcov` — and it lacked the `final_kkt_error` fallback `minimize` already had (gh #119/#123). **Verified by running code**: built the native ext (`maturin develop`) and ran an exp-decay FD fit at `tol=1e-12` → `status=1`, `success=False`, valid `popt≈[2.5,1.31,0.505]`. Fix reuses `_minimize._NLP_SUCCESS_STATUS` (`{0,1}`) plus the finite-KKT-≤-`acceptable_tol` second gate. Post-fix the same fit reports `success=True`. Tests `test_curve_fit_acceptable_level_reports_success` (e2e, asserts status 1 → success) + `test_curve_fit_success_mapping_matches_nlp_minimize`; pre-fix the e2e FAILS (`assert False is True`), post-fix PASSES. Full `test_curve_fit.py` (42) + `test_minima.py`/`test_minimize.py` (30) green. |
 | M1 | algorithm: convergence gates use internally *scaled* residuals where upstream uses unscaled | **VERIFIED — DEFERRED** (cross-crate scaling-unwind + core convergence-criteria change; unsafe to ship in an autonomous edit) | **Mechanism confirmed by code inspection**: `check_convergence_with_state` / `current_is_acceptable_with_state` (`conv_check/opt_error.rs:215-222, 301-307`) gate `dual_inf_tol`/`constr_viol_tol`/`compl_inf_tol`/`acceptable_*` on the **scaled** CQ accessors `curr_dual_infeasibility_max` / `curr_primal_infeasibility_max` / `curr_complementarity_max` / `curr_f`; `ipopt_cq.rs` exposes **no** unscaled component accessor (only `unscaled_curr_f`), and `nlp_scaling_method` defaults to **gradient-based** (`upstream_options.rs:361`), so scaling is on by default. Direction (`orig_ipopt_nlp.rs:897-916`): `c_scaled = c_scale·c_orig` with `c_scale ≤ 1`, so the user-space violation = `c_scaled/c_scale ≥ c_scaled` can exceed `constr_viol_tol` by `1/c_scale` while pounce declares `Success` — the reported harm. **Why deferred, not fixed here**: (a) a correct unscaled constraint-violation accessor needs `c_scale`/`d_scale`, which are private to `OrigIpoptNlp` — exposing them means new `IpoptNlp` trait methods on every implementor; (b) unscaled dual-inf and complementarity need the scaling-object unwind pounce explicitly defers (`orig_ipopt_nlp.rs:52-54`) and, because x-scaling is identity but obj-scaling `df` is not, are **not** simple divisions (`∇ₓL_scaled = df·∇f + Jᵀλ` vs unscaled `∇f + Jᵀλ`), so a careless port silently corrupts termination; (c) this is core convergence criteria (high blast radius) deserving reference-validated review. See `## M1 detail` for the scoped two-PR plan and the tests it needs. No code changed. |
+| M2 | algorithm: `accept_trial_point` silently nulls `curr` when no trial is staged | **FIXED** | **Mechanism confirmed by code inspection**: `accept_trial_point` (`ipopt_data.rs:203-205`) did `self.curr = self.trial.take()` unconditionally; `ipopt_alg.rs:1121` calls it every iteration. In the documented bookkeeping-only `iterate()` path (no NLP + no `search_dir`, module docs `ipopt_alg.rs:17-22`), step 5 (`ipopt_alg.rs:724-727`) is skipped, so `delta` stays `None`, `have_delta == false` (`ipopt_alg.rs:994`), and no trial is staged — yet accept still ran, nulling `curr`. The next iteration's `IpoptCq::curr_iv` (`ipopt_cq.rs:107-112`) then hits `unreachable!("curr iterate not set")`. **Fix**: guard the promotion — `if let Some(trial) = self.trial.take() { self.curr = Some(trial); }`, preserving `curr` when nothing is staged (normal path unchanged: trial is always `Some` after a line search, so it still promotes and clears `trial`). **Test** (`ipopt_data.rs` tests): `accept_trial_point_preserves_curr_when_no_trial_staged` sets `curr`, leaves `trial` unset, asserts `curr.is_some()` after accept. Pre-fix FAILS (`curr` nulled); post-fix PASSES alongside the existing `accept_trial_point_promotes_trial_to_curr`. Full `pounce-algorithm` suite green (323 passed, 0 failed). |
 
 ## C1 detail
 
@@ -737,3 +738,53 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **No code changed for M1** — documented as VERIFIED — DEFERRED per the review
   workflow ("document issues that cannot be verified [here]"). The mechanism is
   confirmed; the fix is scoped above for a dedicated, reviewed change.
+
+## M2 detail
+
+- **Bug** (`crates/pounce-algorithm/src/ipopt_data.rs`): `accept_trial_point`
+  promoted the staged trial unconditionally:
+  ```rust
+  pub fn accept_trial_point(&mut self) {
+      self.curr = self.trial.take();
+  }
+  ```
+  When no trial is staged, `self.trial.take()` is `None`, so this **nulls out
+  `curr`**. Upstream `IpIpoptData::AcceptTrialPoint` `DBG_ASSERT`s a valid trial
+  before promoting it, because upstream always runs a line search that stages
+  one — so upstream never reaches this state.
+- **Reachable path** — pounce has a documented bookkeeping-only `iterate()`
+  mode (`ipopt_alg.rs:17-22`: "Without [NLP + search_dir], `iterate()` runs the
+  bookkeeping pieces … and is exercised by structural unit tests"):
+  1. Step 5 / search direction is gated on `if let (Some(nlp), Some(sd)) = …`
+     (`ipopt_alg.rs:724-727`); without both, it is skipped and `data.delta`
+     stays `None`.
+  2. The line search is gated on `have_delta = self.data.borrow().delta.is_some()`
+     (`ipopt_alg.rs:994-995`); with `delta == None` the whole block is skipped,
+     so **no trial is staged**.
+  3. `accept_trial_point()` is nevertheless called every iteration
+     (`ipopt_alg.rs:1121`), so `curr` is set to `None`.
+  4. The next iteration's CQ accessor `IpoptCq::curr_iv`
+     (`ipopt_cq.rs:107-112`) does
+     `let Some(iv) = …curr… else { unreachable!("curr iterate not set") }` —
+     a panic.
+- **Fix** — guard the promotion so an unstaged accept preserves `curr`:
+  ```rust
+  pub fn accept_trial_point(&mut self) {
+      if let Some(trial) = self.trial.take() {
+          self.curr = Some(trial);
+      }
+  }
+  ```
+  The normal solve path is byte-for-byte unchanged: after a line search `trial`
+  is always `Some`, so it still promotes to `curr` and clears `trial` (the
+  existing `accept_trial_point_promotes_trial_to_curr` test still passes). Only
+  the previously-buggy `trial == None` case changes — from "destroy `curr`" to
+  "leave `curr` intact".
+- **Test** (`ipopt_data.rs` `#[cfg(test)] mod tests`):
+  `accept_trial_point_preserves_curr_when_no_trial_staged` — sets `curr` via
+  `set_curr(zero_iv())`, leaves `trial` unset, calls `accept_trial_point()`, and
+  asserts `curr.is_some()` (and `trial.is_none()`).
+- **Verification summary**: pre-fix the new test FAILS with
+  `accept_trial_point() nulled curr with no trial staged` while the existing
+  promote test passes; post-fix both pass. Full `pounce-algorithm` suite green
+  (323 passed, 0 failed) — no regression in the normal-step path.
