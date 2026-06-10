@@ -22,6 +22,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H11 | presolve: objective coupling classified from the gradient at a single probe point — a nonlinear objective variable reading zero gradient at the probe is mis-classified `PureEquality` and wrongly eliminated | **FIXED** | `run_auxiliary_phase0` built `obj_support` solely from `objective_gradient_support(grad_f)` — one sample. A variable whose objective gradient happens to vanish at the probe (classic `f=(x−x₀)²` started at `x₀`) reads as objective-free, so its square block is classed `PureEquality` and eliminated even under `Safe`. `PresolveTnlp` now fetches `get_variables_linearity` (`lib.rs:354`) and passes it via a new `Phase0Probe::var_linearity` field; `run_auxiliary_phase0` (`auxiliary.rs:221`) unions every `NonLinear`-tagged variable into `obj_support`, so nonlinear vars are always treated objective-coupled. When the TNLP declines (default), `var_linearity=None` → falls back to the probe gradient (no behavior change; no production TNLP implements the hook). Test `phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe`. |
 | H12 | presolve: FBBT lacks both the Phase-0 row mask and any infeasibility handling | **FIXED** | Two layers. (1) **Row mask**: `run_fbbt` (`fbbt/orchestrator.rs`) gained a `row_kept: Option<&[bool]>` param; the call site (`lib.rs`) passes `Some(&row_kept_inner)`, so propagation skips any row Phase 0 dropped — over the aux-clamped box a dropped row could fabricate a spurious infeasibility (the #53 hazard Phase 1 already filters). (2) **Infeasibility handling**: `fbbt_report.infeasibility_witness` was never inspected, so FBBT's "undefined and must not be trusted" partially-tightened bounds reached the IPM. The call site now snapshots `x_l`/`x_u` before FBBT and, on a witness, restores them (mirrors the Phase 1 rollback — presolve has no channel to certify infeasibility, so the IPM runs on the pre-FBBT box and certifies it). Tests `dropped_row_is_skipped_and_does_not_flag_infeasible` (orchestrator) + `fbbt_infeasibility_discards_corrupted_bounds` (lib integration). |
 | H13 | cinterface: `IpoptSolverSolve` silently discards all user options after the first solve | **FIXED** | The session solve does `mem::replace(&mut info.problem.app, IpoptApplication::new())` to move the configured app into the `RustSolver`, leaving a **blank** app behind that nothing restored (the doc's claimed `app_template` field never existed — grep-confirmed). The second `IpoptSolverSolve` on a handle then read default options — linear solver, tolerances, scaling all lost — and the `feral_config_from_options` snapshot read the blanked app too. Fix: clone the `OptionsList` (it derives `Clone`) before the `mem::replace` and write it back into the fresh blank app via `options_mut()`, so options survive every solve. Stale doc comment on `IpoptSolverInfo::problem` corrected. Test `options_survive_repeated_session_solves` (`solver.rs`): sets `max_iter=7`, creates the session, solves twice, asserts the option persists after each. |
+| H14 | release: crates.io automation guaranteed to fail mid-batch (irreversible partial publish), invisible to the consistency guard | **FIXED (guard + pre-flight; root pin out of scope)** | Verified by running `cargo publish -p pounce-feral --dry-run`: hard-fails with "all dependencies must have a version requirement specified … dependency `feral` does not specify a version". The root `feral` dep (`Cargo.toml:89`) is a versionless git pin (`req:"*"`, source `git+…`); it is crate #4 of 19 in publish order, so a `vX.Y.Z` tag uploads 3 crates then hard-fails — an irreversible partial release. The root pin cannot be lifted here (feral must first cut a crates.io release carrying the pinned commits — `feral` is on crates.io only at 0.10.0, which lacks them). Two-layer fix: (1) new `scripts/check_dep_publishability.py` flags any normal/build dep of a publishable crate that is git-sourced or wildcard/versionless; wired as check #4 in `check-release-consistency.sh` (the per-PR/pre-tag guard) so the blocker is no longer invisible. (2) `publish-crates.sh` pre-flight runs the same scan and **aborts before uploading crate 1**, converting the irreversible mid-batch failure into a safe no-op. Tests: `scripts/tests/test_check_dep_publishability.py` (7 synthetic-fixture cases, tree-state-independent). |
 
 ## C1 detail
 
@@ -551,3 +552,66 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   fix it reads `Some(7)` after both solves and PASSES. Full
   `pounce-cinterface` suite green (42 tests); `cargo fmt --check` clean; no
   build warnings.
+
+## H14 detail
+
+- **Bug** (release tooling): the root `Cargo.toml:89` pins feral by git rev
+  with **no `version =`**:
+  ```toml
+  feral = { git = "https://github.com/jkitchin/feral.git", rev = "11fb4b9…" }
+  ```
+  `pounce-feral` (crate **4 of 19** in `publish-crates.sh`'s topological
+  order) depends on it (`feral.workspace = true`). `cargo publish` rewrites
+  every path/git dep to a crates.io version requirement and refuses any dep
+  that lacks one, so publishing `pounce-feral` hard-fails — *after* crates 1–3
+  (`pounce-common`, `pounce-linalg`, `pounce-linsol`) are already live.
+  crates.io versions are immutable, so a `vX.Y.Z` tag ships an irreversible,
+  un-rollback-able **partial** release. Neither `check-release-consistency.sh`
+  (versions / membership / topo order only) nor any CI job ran
+  `cargo publish --dry-run`, so the guard reported the release safe.
+- **Verified by running code**:
+  ```
+  $ cargo publish -p pounce-feral --dry-run
+  error: failed to verify manifest …
+    all dependencies must have a version requirement specified when publishing.
+    dependency `feral` does not specify a version
+  ```
+  `cargo metadata` shows the dep as `req:"*"`, `source:"git+…"`. `feral` is on
+  crates.io only at **0.10.0**, which predates the pinned MC64/scaling commits,
+  so simply pinning `version="0.10.0"` would publish a crate that depends on
+  *different code* than was built — the comment in `Cargo.toml` documents
+  exactly this. The true root fix (feral cutting a release with the pinned
+  commits) is **out of scope** for a code-review remediation.
+- **Fix** (two layers, both runtime-verified):
+  1. **Visibility** — new `scripts/check_dep_publishability.py` parses
+     `cargo metadata` and flags any normal/build dependency of a publishable
+     crate that is git-sourced or carries a wildcard/`*` (versionless)
+     requirement; dev-deps and `publish = false` crates are exempt. Wired as
+     **check #4** in `check-release-consistency.sh` (the guard CLAUDE.md
+     documents as the pre-tag gate, run in CI on every PR). The blocker is no
+     longer invisible: the guard now exits non-zero and names
+     `pounce-feral -> feral` until feral is released and pinned.
+  2. **Safety** — `publish-crates.sh` gained a **pre-flight** that runs the
+     same scan against its `CRATES=(…)` list and aborts *before uploading
+     crate 1*. This is the load-bearing fix: it converts the irreversible
+     mid-batch failure into a clean no-op even if the guard is bypassed. The
+     tag-triggered `release-crates.yml` inherits it (it invokes this script).
+- **Tests** (`scripts/tests/test_check_dep_publishability.py`, 7 cases): runs
+  the detector against **synthetic** `cargo metadata` documents, so they are
+  independent of the live tree (which is itself blocked today). Cover:
+  clean workspace → no blocker; git dep → flagged; wildcard `*` req → flagged;
+  dev-dependency git dep → ignored; build-dependency git dep → flagged;
+  `publish = false` crate's git dep → ignored; `restrict_to` scoping. All pass
+  (`python3 scripts/tests/test_check_dep_publishability.py` → `Ran 7 tests … OK`).
+- **Verification summary**: live guard now FAILS at check #4 (checks 1–3 still
+  print OK, proving pre-fix the guard exited 0 — "looks safe but isn't");
+  `publish-crates.sh --dry-run` ABORTS at pre-flight before any `cargo publish`;
+  unit suite green.
+- **Trade-off (flagged for the maintainer)**: because the guard runs on every
+  PR (`ci.yml`), check #4 will keep CI red until `feral` cuts a crates.io
+  release carrying the pinned commits and `Cargo.toml` is updated to
+  `feral = { version = "X.Y.Z", git = …, rev = … }`. That red is intentional
+  and honest — a crates.io release genuinely cannot succeed in the current
+  state. If the team prefers the guard not gate unrelated PRs, demote check #4
+  to a warning (drop the `fail=1`) while keeping the `publish-crates.sh`
+  pre-flight as the hard gate; the harm-prevention is unaffected.
