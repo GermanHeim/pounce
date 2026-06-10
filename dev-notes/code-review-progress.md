@@ -90,6 +90,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L25 | CLI: a failed `.sol` write exited 0 on the NLP path (`main.rs:1076-1080`) but 2 on the convex LP/QP/SOCP path (`main.rs:1287`); under `-AMPL` a convex-path write failure made the process exit non-zero, so Pyomo/ASL raised `ApplicationError` and never read the (stale/missing) `.sol` | **ALREADY FIXED (by H4)** | **Verified by reading + git history; no separate fix needed.** The exact asymmetry L25 describes was eliminated by the earlier High-priority fix **H4** (`fix(cli): honor -AMPL exit-code contract on convex LP/QP/SOCP paths`, commit `ce49710`). Its message states it "drop[s] the convex paths' `.sol`-write-failure `exit 2` in favor of log-and-continue, matching the NLP path so the exit code uniformly follows the solve outcome." Confirmed by code reading: all three `.sol`-write sites — NLP (`main.rs:1169-1172`), convex-QP (`main.rs:1433-1435`), convex-SOCP (`main.rs:1574-1576`) — now `eprintln!` a warning and continue; none early-returns `ExitCode::from(2)` on a write failure. The convex paths' final exit routes through `convex_exit_code(ok, ampl)` (exits 0 when `ok \|\| ampl`), mirroring the NLP path's `_ if args.ampl => ExitCode::SUCCESS`. **Behavioral coverage**: H4's regression test `qp_dispatch_end_to_end::ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp` runs the infeasible-QP fixture both ways (`-AMPL` exits 0 with srn 200 in the `.sol`; plain CLI exits non-zero), locking the `-AMPL` exit contract that L25 was concerned with. A dedicated `.sol`-write-failure test was not added — forcing a write failure hermetically/portably (unwritable path) is brittle, and the failure mode L25 flagged (distinct exit 2) no longer exists in any path. See `## L25 detail`. |
 | L26 | CLI summary (`print.rs`): (a) the final-summary block prints the **same** number under both the `(scaled)` and `(unscaled)` columns for Dual infeasibility / Constraint violation / Complementarity / Overall NLP error (`print.rs:381-401`); (b) "Variable bound violation" is hardcoded `0.0` (`print.rs:391`); (c) the inequality bound-type breakdown didn't sum to `n_ineq` — a "free" inequality row (no finite bound) fell through to a no-op arm (`print.rs:87-89`) | **PARTIALLY FIXED** (c fixed + tested; a/b documented as solver-statistics limitations) | **All three verified by reading code.** **(c) FIXED:** a constraint row with `g_l=-inf, g_u=+inf` is classified inequality (`n_ineq += 1`) but its `(has_l,has_u)=(false,false)` match arm was `=> {}`, so `ineq_lower_only + ineq_both + ineq_upper_only < n_ineq` whenever a free row was present — exactly the "breakdown not sum to total" defect. The comment already said to "count it anyway under 'both' to keep the totals consistent," so the code was simply not doing what its comment claimed. **Fix**: `(false, false) => ineq_both += 1`, comment rewritten to match. **Test** (`print.rs` `inequality_tally_tests::free_inequality_row_keeps_breakdown_summing_to_total`): a mock TNLP with 3 inequality rows (lower-only, both, free) asserts `ineq_lower_only + ineq_both + ineq_upper_only == n_ineq == 3` (and the free row lands in "both": both=2). **Fail-first confirmed**: reverting to `=> {}` makes the sum 2 ≠ 3 (test fails). 160 pounce-cli lib tests green; `cargo fmt` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. **(a)/(b) DOCUMENTED, not fixed — root cause is missing solver statistics, not a print bug:** `SolveStatistics` (`pounce-nlp/src/solve_statistics.rs:51-66`) carries a single value each for `final_dual_inf`/`final_constr_viol`/`final_compl`/`final_kkt_error` (populated once off the scaled-space `cq` cache at `application.rs:1347-1361`) and **no** variable-bound-violation field; only the objective is tracked in both spaces (`final_objective` + `final_scaled_objective`). So the print layer has only the scaled residual to show — printing it under both columns is the *display* symptom of the solver not computing unscaled residuals, and the `0.0` bound violation is a value the solver never measures (an interior-point iterate is bound-feasible by construction, so it is ~0 on a converged solve, but it is genuinely uncomputed for early-terminated solves). A faithful fix requires plumbing unscaled residuals + a bound-violation metric through `pounce-algorithm`'s finalize path into `SolveStatistics` — a solver-statistics change well beyond a CLI print remediation, deferred to a dedicated issue. Nothing parses this block (grep over `crates/`/`pyomo-pounce/`/`python/` finds no scraper), so the misleading columns are cosmetic, not a data-integrity break. See `## L26 detail`. |
 | L27 | CLI module doc (`main.rs:9-12`) claimed "Exit status: 0 on `Solve_Succeeded`, non-zero otherwise" but the code (`main.rs:1183-1185`) also returns 0 for `SolvedToAcceptableLevel` — the doc understated the success set | **FIXED** | **Confirmed by reading code.** The NLP exit-code `match status { SolveSucceeded \| SolvedToAcceptableLevel => SUCCESS, … }` exits 0 for reduced-accuracy convergence too (consistent with `minimize()` parity #119 and Ipopt), but the module-level doc only named `Solve_Succeeded`. **Fix**: (1) corrected the module doc to name both `Solve_Succeeded` and `Solved_To_Acceptable_Level` as the success set; (2) extracted the inline exit-code match into a pure helper `nlp_exit_code(status, ampl)` (mirroring the existing `convex_exit_code(ok, ampl)`), itself composed from a testable predicate `nlp_solve_succeeded(status)` (mirrors L23's `scaling_retry_promoted`). This both removes the duplicated AMPL-contract comment and gives the doc-claimed behavior a regression lock. **Tests** (`main.rs` `nlp_exit_code_tests`): `acceptable_level_counts_as_success` (both `SolveSucceeded` and `SolvedToAcceptableLevel` → true — the crux of L27) and `non_convergent_statuses_are_not_success` (Infeasible/MaxIters/RestorationFailed/Diverging/MaxCpuTime/InternalError → false). `ExitCode` has no `PartialEq`, so the bool predicate is the testable seam. **Fail-first confirmed**: dropping `SolvedToAcceptableLevel` from `nlp_solve_succeeded` makes `acceptable_level_counts_as_success` fail (`assertion failed: nlp_solve_succeeded(A::SolvedToAcceptableLevel)`). Restored; 5 pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L27 detail`. |
+| L28 | `nl_hessian_program.rs` (`HessianProgram::compile`) is dead in-tree (only `pub mod` in `lib.rs:19`; zero callers of `compile`/`execute`) but `panic!`s on `Funcall`/min/max/conditional-logical/extra-transcendental ops (lines 456, 477, 594, 615, 766, 787 in `compile`; 1275, 1285, 1329, 1339 in the `reachable_to_output`/`depends_on_var` helpers) — would fire on arbitrary user `.nl` input if ever wired into dispatch | **FIXED** | **Confirmed by reading code + git.** The module declares `pub mod nl_hessian_program;` (compiled) but nothing calls `HessianProgram::compile`/`execute` (grep over `crates/`/`pyomo-pounce/`/`python/` finds only the `pub mod` line). All three compile sweeps (forward / forward-tangent / reverse-over-tangent) and the two dependence/reachability analyses `panic!`ed on opcodes the program path can't lower; the panic messages themselves say "use the Tape (build_with_externals) path instead", revealing the *intended* design is a graceful fall-back, not a crash. **Fix**: (1) `compile` now returns `Option<Self>` with an up-front guard `if !tape.ops.iter().all(program_supports_op) { return None; }` — a new free fn `program_supports_op` is the single source of truth for the supported set (smooth arithmetic + `sin`/`cos`); (2) all 10 `panic!`s became `unreachable!` — the guard filters unsupported ops before any sweep or helper runs, so they are statically unreachable from the public entry, and `unreachable!` now flags only an internal guard/sweep inconsistency (a programmer error), never user input; (3) both early returns wrapped in `Some(...)`; (4) the two in-tree test call sites updated to `.expect(...)`. **Test** (`nl_hessian_program::tests::unsupported_opcode_returns_none_instead_of_panicking`): a `tan(x0)` tape (→ unsupported `TapeOp::Tan`) makes `compile` return `None`; a `mul(x0,x1)` tape still returns `Some`. **Fail-first confirmed**: disabling the guard (`if false`) makes the tan tape reach the forward-sweep `unreachable!` and panic (`internal error: entered unreachable code: HessianProgram path does not yet support tan/...`) — exactly the L28 crash-on-user-input failure mode. Restored; 161 pounce-cli lib tests green (was 160). `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --lib -- -D clippy::correctness -D clippy::suspicious` clean (remaining warnings are pre-existing `unwrap_used`/`expect_used` restriction-style, incl. the test `.expect()`s — not correctness/suspicious). See `## L28 detail`. |
 
 ## C1 detail
 
@@ -4843,3 +4844,64 @@ makes `acceptable_level_counts_as_success` fail
 5 pounce-cli bin tests green; `cargo fmt -p pounce-cli` and
 `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious`
 clean (3 remaining warnings are pre-existing `clippy::style`).
+
+## L28 detail
+
+**Issue (verbatim).** "`nl_hessian_program.rs` is dead in-tree but panics on
+`Funcall`/min/max/transcendental ops (lines 456, 477, 594) — would fire on user
+input if ever wired in."
+
+**Verification.** `crates/pounce-cli/src/nl_hessian_program.rs` is a 1500-line
+precompiled-symbolic-Hessian optimization module. It is declared
+`pub mod nl_hessian_program;` (`lib.rs:19`) so it compiles, but a grep across
+`crates/`, `pyomo-pounce/`, and `python/` finds no caller of
+`HessianProgram::compile` or `::execute` — only the module declaration. It is
+genuinely dead, latent until wired into the Hessian dispatch path.
+
+`HessianProgram::compile` lowers a `Tape` into a flat op program across three
+sweeps (forward, per-`j` forward-tangent, per-`j` reverse-over-tangent), plus
+two pre-analyses (`reachable_to_output`, `depends_on_var`). Each match-dispatches
+`TapeOp` and `panic!`ed on any opcode it can't lower. The supported set
+(intersection across all sweeps — the forward sweep is the most restrictive) is:
+`Const, Var, Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt, Exp, Log, Log10, Sin,
+Cos`. Everything else — `Funcall` (AMPL external functions), `Tan`/`Atan`/`Acos`/
+the hyperbolics/`Asin`…/`Atan2`, and `Cmp`/`And`/`Or`/`Not`/`Select`/`Min`/`Max`
+— hit a `panic!`. The panic messages all end "use the Tape (build_with_externals)
+path instead", showing the *intended* contract was a graceful fall-back to the
+interpreter path, with the panic a placeholder stub.
+
+**Fix.**
+1. `compile(tape, hess_map) -> Option<Self>` (was `-> Self`).
+2. Up-front guard: `if !tape.ops.iter().all(program_supports_op) { return None; }`.
+   New free fn `program_supports_op(&TapeOp) -> bool` is the single source of
+   truth for the supported set, documented as such.
+3. All 10 `panic!`s → `unreachable!`. The guard rejects unsupported tapes before
+   any sweep or helper runs, so these arms are statically unreachable from the
+   only public entry; `unreachable!` now signals an internal guard/sweep
+   inconsistency (e.g. a future opcode added to the guard but not a sweep) — a
+   programmer error surfaced in tests — never user input.
+4. Both early returns wrapped in `Some(...)`; the two in-tree test call sites
+   (`assert_program_matches_tape`, `slots_layout_matches_design`) updated to
+   `.expect(...)`.
+
+**Test:** `nl_hessian_program::tests::unsupported_opcode_returns_none_instead_of_panicking`
+— a `tan(x0)` tape (lowers to the unsupported `TapeOp::Tan`) makes `compile`
+return `None`; a supported `mul(x0,x1)` tape still returns `Some` (so the guard
+rejects only genuinely-unsupported ops, not everything).
+
+**Fail-first:** replacing the guard condition with `if false` lets the tan tape
+flow into the forward sweep, which hits the (now) `unreachable!` arm and panics:
+`internal error: entered unreachable code: HessianProgram path does not yet
+support tan/atan/acos, …` — the exact crash-on-user-input failure mode L28
+describes. Restored.
+
+161 pounce-cli lib tests green (was 160). `cargo fmt -p pounce-cli` and
+`cargo clippy -p pounce-cli --lib -- -D clippy::correctness -D clippy::suspicious`
+clean. (The lib emits pre-existing `clippy::restriction` `unwrap_used`/
+`expect_used` style warnings — including the two test `.expect()`s added here —
+which are not in the gated `correctness`/`suspicious` groups.)
+
+**Note.** This does not wire the module into dispatch (out of scope); it only
+makes the dead path safe to wire in later — `compile` returning `None` is now
+the documented "fall back to the Tape interpreter" signal a future caller
+composes with.
