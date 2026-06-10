@@ -527,7 +527,7 @@ impl PresolveTnlp {
         // bounds through an aux-dropped row lets tighten_bounds
         // derive `x_l[j] > x_u[j]` for an aux-clamped variable and
         // then hand corrupted bounds to the IPM.
-        let linear_rows: Vec<LinearRow> = linear_row_map
+        let mut linear_rows: Vec<LinearRow> = linear_row_map
             .iter()
             .enumerate()
             .filter_map(|(i, r)| if row_kept_inner[i] { r.clone() } else { None })
@@ -566,7 +566,9 @@ impl PresolveTnlp {
             }
             reduction_stack = ReductionStack::default();
             // Re-run tighten on the unfiltered linear rows now that
-            // the aux clamps are gone.
+            // the aux clamps are gone. Rebuild `linear_rows` to the
+            // full set too, so Phase 2's redundancy mask stays aligned
+            // with the now all-kept `row_kept_inner` (C1).
             let full_linear_rows: Vec<LinearRow> =
                 linear_row_map.iter().filter_map(|r| r.clone()).collect();
             tighten_report = TightenReport::default();
@@ -579,6 +581,7 @@ impl PresolveTnlp {
                     1e-12,
                 );
             }
+            linear_rows = full_linear_rows;
         }
 
         // Phase 1b — FBBT (issue #62). Runs interval arithmetic over
@@ -639,18 +642,11 @@ impl PresolveTnlp {
         let mut n_dropped_rows: Index = 0;
         if self.opts.redundant_constraint_removal {
             let redundant_mask = find_redundant_rows(&linear_rows, &x_l, &x_u, 1e-9);
-            // redundant_mask aligns with `linear_rows`; map back to
-            // inner row indices.
-            let mut linear_iter = redundant_mask.iter();
-            for (i, lr) in linear_row_map.iter().enumerate() {
-                if lr.is_some() {
-                    let is_red = *linear_iter.next().unwrap_or(&false);
-                    if is_red {
-                        row_kept_inner[i] = false;
-                        n_dropped_rows += 1;
-                    }
-                }
-            }
+            // `redundant_mask` aligns with the *kept* linear rows
+            // (`linear_rows`); map it back onto inner rows, skipping
+            // rows Phase 0 already dropped (C1).
+            n_dropped_rows =
+                apply_redundant_verdicts(&linear_row_map, &redundant_mask, &mut row_kept_inner);
         }
 
         // Phase 3: structural LICQ check on the kept equality rows.
@@ -757,6 +753,38 @@ impl PresolveTnlp {
         });
         self.state.as_ref()
     }
+}
+
+/// Map `find_redundant_rows`' verdict mask back onto `row_kept_inner`,
+/// returning the number of rows newly dropped.
+///
+/// The mask is aligned to the **kept** linear rows in inner-row order
+/// — i.e. it has exactly one entry per `(i)` where `linear_row_map[i]`
+/// is `Some` **and** `row_kept_inner[i]` is still `true` (that is the
+/// filter `linear_rows` was built with). The mapping iterator must
+/// therefore advance only on rows that are both linear and still kept.
+///
+/// Regression guard for C1: the original loop advanced the mask on
+/// every `Some` row regardless of `row_kept_inner`, so once Phase 0 had
+/// dropped any linear row every later verdict landed on its
+/// predecessor's row — silently deleting a binding constraint (and
+/// keeping a redundant one).
+fn apply_redundant_verdicts(
+    linear_row_map: &[Option<LinearRow>],
+    redundant_mask: &[bool],
+    row_kept_inner: &mut [bool],
+) -> Index {
+    let mut mask = redundant_mask.iter();
+    let mut n_dropped: Index = 0;
+    for (i, lr) in linear_row_map.iter().enumerate() {
+        if lr.is_some() && row_kept_inner[i] {
+            if *mask.next().unwrap_or(&false) {
+                row_kept_inner[i] = false;
+                n_dropped += 1;
+            }
+        }
+    }
+    n_dropped
 }
 
 // Inside this impl every `.expect("inited")` is invariant-protected
@@ -1269,6 +1297,54 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn c1_redundancy_mask_realigned_after_phase0_drop() {
+        // Regression for C1. `find_redundant_rows` returns a verdict
+        // mask aligned to the *kept* linear rows (inner-row order).
+        // When Phase 0 has dropped an earlier linear row, the mapping
+        // back to inner rows must skip already-dropped rows; advancing
+        // the mask iterator on them shifts every later verdict onto its
+        // predecessor's row.
+        let lr = |lo: Number| {
+            Some(LinearRow {
+                entries: vec![(0, 1.0)],
+                lo,
+                hi: lo,
+            })
+        };
+        // Three linear rows; Phase 0 dropped inner row 0.
+        let linear_row_map = vec![lr(0.0), lr(1.0), lr(2.0)];
+        let row_kept = vec![false, true, true];
+        // `find_redundant_rows` ran over the *kept* rows [row1, row2]
+        // and flagged the SECOND kept row (inner row 2) redundant; the
+        // first kept row (inner row 1) is binding.
+        let mask = vec![false, true];
+
+        // Correct mapping: only inner row 2 is dropped.
+        let mut kept_new = row_kept.clone();
+        let n = apply_redundant_verdicts(&linear_row_map, &mask, &mut kept_new);
+        assert_eq!(
+            kept_new,
+            vec![false, true, false],
+            "verdict must land on inner row 2, not its predecessor"
+        );
+        assert_eq!(n, 1);
+
+        // Document the pre-fix misalignment this test guards against:
+        // the old loop advanced the mask on every `Some` row regardless
+        // of `row_kept_inner`, dropping inner row 1 (binding!) and
+        // keeping inner row 2 (redundant) — a silent wrong answer.
+        let mut buggy = row_kept.clone();
+        let mut it = mask.iter();
+        for (i, l) in linear_row_map.iter().enumerate() {
+            if l.is_some() && *it.next().unwrap_or(&false) {
+                buggy[i] = false;
+            }
+        }
+        assert_eq!(buggy, vec![false, false, true]);
+        assert_ne!(buggy, kept_new);
     }
 
     #[test]
