@@ -53,6 +53,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M27 | Phase-0 block assembly rescans the *entire* COO Jacobian once per block row — O(block_rows × nnz) — in the C2 gate, `solve_linear_block`, `residual_norm_linear`, and `NonlinearBlock::jacobian`; quadratic in problem size for many small blocks | **FIXED** | **Cost confirmed by timing.** Phase-0 auxiliary elimination (`crates/pounce-presolve/src/auxiliary.rs`) assembles each square block by walking the full COO Jacobian (`for kk in 0..nnz { decode row; if row != r continue; … }`) once **per block row** — in the C2 acceptance gate, `solve_linear_block`, `residual_norm_linear`, and `NonlinearBlock::jacobian`. For the common case of many small blocks (e.g. n singleton rows, the diagonal-aux pattern) the total work is `O(total_block_rows × nnz) = O(n²)`. **Reproduced by running code**: a timing probe over the all-singleton diagonal pattern at `n = 500/1000/2000` showed clearly super-linear scaling — `1.11 / 2.32 / 7.03 ms` (each doubling of `n` more than doubling time, trending toward 4×). **Fix**: build a CSR row index **once** up front — `build_row_nnz(jac_irow, n_rows, one_based)` returns `(ptr, entries)` mapping each 0-based row to the list of its nnz positions `kk` in O(nnz); a `Copy` `RowNnz { ptr, entries }` view exposes `of_row(r) -> &[kk]`. The four hot loops now iterate `for &kk in row_nnz.of_row(r)` instead of scanning all nnz, threaded through the C2 gate, `solve_linear_block`, `residual_norm_linear`, and `NonlinearBlock::jacobian` — total Phase-0 assembly drops to O(nnz). Index decode (`decode_idx`) honors the one-/zero-based COO convention identically in the count and fill passes. No public API or numerical contract changed. **Verified post-fix**: the same probe is near-linear — `0.54 / 0.92 / 1.97 ms` at `n = 500/1000/2000`, a speedup that *grows* with `n` (2.1× → 3.6×), exactly the O(n)→O(1)-per-row improvement predicts. **Tests**: `build_row_nnz_groups_by_row_zero_based` and `build_row_nnz_honours_one_based_decode` pin the CSR builder (one-based ptr/entries identical to zero-based); `phase0_diagonal_many_singletons_correct` (n = 400) asserts all n vars are fixed to `r+1` and all rows dropped; `phase0_one_based_two_blocks_eliminated` is an end-to-end one-based pipeline asserting `fixed_vars == [0,1]`, values `5.0/7.0`, `dropped_rows == [0,1]` — identical to the pre-M27 result. **Pre-fix vs neuter**: a clean fail-first (restore with `cp`+`touch`, never `mv` — `mv` rolls the source mtime below the compiled binary's, so cargo silently reuses a stale half-neutered binary and fabricates phantom failures) confirmed `build_row_nnz_honours_one_based_decode` and `phase0_one_based_two_blocks_eliminated` FAIL on a decode-inconsistent neuter, then pass on restore. `pounce-presolve` (216 lib + integration + 9 doctests, 0 failed) and `pounce-py` build green. See `## M27 detail`. |
 | M28 | FBBT allocates and scans O(n_vars) per constraint per sweep: `vec![Interval::ENTIRE; n_vars]` + a `0..n_vars` apply loop for every constraint — O(m·n) per sweep when each tape touches a handful of variables | **FIXED** | **Cost confirmed by timing.** `run_fbbt` (`crates/pounce-presolve/src/fbbt/orchestrator.rs:159-197`) allocated a fresh `vec![Interval::ENTIRE; n_vars]` *per constraint* and then ran a `for j in 0..n_vars` apply loop over it — even though a constraint's tape typically mentions only a handful of variables. Per sweep that is `O(m·n_vars)` regardless of sparsity. **Reproduced by running code**: a timing probe (m = n constraints, each a single-`Var(i)` tape over a wide non-tightening bound) showed clearly quadratic scaling — `0.62 / 2.25 / 8.86 ms` at `n = 1000/2000/4000` (each `n`-doubling ≈ 4×, the O(n²) signature). **Fix**: hoist the per-variable scratch out of the loops and touch only the variables a constraint actually mentions. A reused `tighten: Vec<Interval>` (length n_vars, allocated once), a `last_seen: Vec<usize>` stamp array, a `touched: Vec<usize>` list, and a monotonic per-constraint `stamp` implement a "first `Var(j)` slot overwrites, later slots intersect" discipline with **no per-constraint reset** — the apply step iterates only `touched`. Variables absent from the tape keep an `ENTIRE` interval and can never tighten or be empty, so iterating `touched` is exactly equivalent to the old `0..n_vars` scan. Per-constraint work drops to O(tape length); per sweep to O(nnz). No public API or numerical contract changed. **Verified post-fix**: the same probe is near-linear — `0.073 / 0.119 / 0.191 ms` at `n = 1000/2000/4000`, a speedup that *grows* with `n` (8.5× → 46×), exactly the O(n)→O(1)-per-constraint improvement predicts. **Test**: `duplicate_var_slots_intersect` pins the subtle part — a variable in two structurally distinct `Var(0)` slots of one tape (`x²+x=6`, squared slot first/tight, linear slot second/loose) must end with the INTERSECTION; in a single sweep (`max_iter=1`, essential — a fixed point washes the difference out) the correct intersection gives `x_hi ≈ √6 ≈ 2.449`. The existing 64 FBBT tests (coupled-constraint iteration, soundness fuzz, row-mask, infeasibility, caps) all still pass unchanged. **Pre-fix vs neuter**: making later slots *overwrite* instead of *intersect* makes `duplicate_var_slots_intersect` FAIL (`x_hi = 6.0`, the loose linear slot), confirmed then restored. `pounce-presolve` (217 lib + integration + 9 doctests, 0 failed) and `pounce-py` build green. See `## M28 detail`. |
 | M29 | LICQ structural check duplicates and degrades an existing primitive: per-row `vec![false; n]` allocation (O(m·n)) and recursive augmenting paths (stack-overflow risk on long chains, e.g. discretized dynamics), while the crate already has an iterative Hopcroft–Karp in `matching.rs` | **FIXED** | **Both degradations confirmed by running code.** `bipartite_matching_rank` (`crates/pounce-presolve/src/licq.rs:72-110`) ran its own Hungarian-style matcher: a `vec![false; n]` `seen` array allocated **per row** (O(m·n) total just to zero scratch) and a **recursive** `try_augment` whose depth equals the augmenting-path length. The crate already ships an iterative, BFS-layered Hopcroft–Karp (`matching.rs::hopcroft_karp`, O(E·√V), König-cross-checked) operating on `EqualityIncidence` — the LICQ matcher was a second, weaker copy. **Reproduced by running code**: (a) a temporary recursion-depth counter on `try_augment` over a staircase chain (`row 0:{0}`, `row i:{i−1,i}`, final row → last column only) measured max depth `= m−1` exactly (999 / 3999 / 15999 at m = 1000/4000/16000) — linear in chain length, so a chain of tens of thousands of rows overflows a normal 2–8 MB stack; (b) a timing probe on the m = n diagonal showed the per-row allocation scaling super-linearly (`0.023 / 0.069 / 0.245 ms` at n = 1000/2000/4000, the O(m·n) signature). **Fix**: delete `try_augment` and rewrite `bipartite_matching_rank` to pack the `EqRow` list into a CSR `EqualityIncidence` (out-of-range columns dropped, columns sorted+deduped exactly as `from_probe`) and call `hopcroft_karp(&inc).size`. Hopcroft–Karp prunes failed searches in BFS (no DFS at all when no augmenting path exists) and bounds its DFS recursion depth to the BFS layer distance (O(√V)), removing both the per-row allocation and the deep recursion. `licq_check`'s public verdict semantics are unchanged. **Verified post-fix**: all 7 existing LICQ tests (over-determined, empty-row, duplicate-singleton, distinct-singleton, augmenting-path) pass unchanged. **New tests**: `long_chain_does_not_overflow_stack` (m = 50 000 rows over m−1 touched columns + a phantom column so `m ≤ n`; the exact chain that drove the old matcher to depth ≈ 50 000) completes on the default 2 MB test stack and returns `StructuralRank(m−1)`; `long_chain_full_rank` (m = 20 000, m columns, perfect matching) returns `Full`, guarding against the fix capping long augmenting paths short. `pounce-presolve` (219 lib + integration + 9 doctests, 0 failed), no new clippy warnings, and `pounce-py` build green. See `## M29 detail`. |
+| M30 | python: `curve_fit` covariance never projects onto the active *general-constraint* nullspace — `active_mask` covers variable bounds only, so an active equality between parameters is returned as the unconstrained covariance while labeled `reduced_hessian(projected)`, overstating variances and dropping induced anti-correlations | **FIXED** | **Bug confirmed by running code.** `_covariance` (`python/pounce/_curve_fit.py:1542-1547`) and its streaming twin `_stream_covariance` (1108-1112) handled the active set with `free = ~active_mask` — projecting out only **bound**-active columns. With `m_con > 0` but no active bound the branch fired (`if m_con > 0 or active_mask.any()`), computed `free = all-True`, and returned the **unconstrained** `s2·pinv(M)` while labeling it `reduced_hessian(projected)`. **Reproduced by running code**: a weighted line fit (`f = a·x + b`, `M = JwᵀJw`) under an active equality `a + b = c` — calling `_covariance` directly and checking the variance along the constraint gradient. Pre-fix `A·pcov·Aᵀ = 0.318` (should be 0: the binding relation is known exactly) and `pcov` was bit-identical to the unconstrained inverse, with the induced anti-correlation absent; the correct projected covariance carries `A·pcov·Aᵀ = 0` and a `-0.065` off-diagonal. **Fix**: thread the constraint plumbing already on `_FitProblem` (`jac_combined`, `g_combined`, `cl`, `cu`) into both covariance functions and project onto the **joint** active-set nullspace. `_active_constraint_jac` selects the binding general-constraint rows (equalities `cl==cu` always bind; inequalities within `tol` of a finite bound); `_projected_covariance` stacks those with unit rows `eⱼ` for active bounds, takes an orthonormal nullspace basis `Z` (SVD), and returns `s2·Z·pinv(ZᵀMZ)·Zᵀ`. For a bounds-only active set `Z` is the free coordinate subspace and this reduces **exactly** to the old `cov[ix_(free,free)] = s2·pinv(M[free,free])` (the prior behavior preserved, verified by the existing bound tests). When `m_con > 0` but every inequality is slack and no bound binds, nothing is projected and the source is honestly reported as `jacobian`. **Also**: the `_covariance` docstring now states it is the first-order (delta-method) asymptotic covariance — `M` is the Gauss-Newton Hessian and the constraints are linearized at `popt`, omitting the curvature term `ΣλᵢHᵢ` (zero for linear constraints, higher-order otherwise) — resolving the "Gauss-Newton comment assumes linear constraints" note; the module docstring's "projection onto the active-constraint nullspace" claim is now actually true. **Tests** (`python/tests/test_curve_fit.py`): `test_active_equality_constraint_projects_covariance` (in-memory) and `test_streaming_active_equality_projects_covariance` (streaming twin) fit a line under an active `a+b=1` equality and assert `cov_source == "reduced_hessian(projected)"`, zero variance along the constraint gradient (`g·pcov·g < 1e-9`), a negative `pcov[0,1]`, and a match to the closed-form `Z·pinv(ZᵀMZ)·Zᵀ`. **Pre-fix both FAIL** (`g·pcov·g ≈ 1.6e-3`, the unconstrained variance) — confirmed before the fix; post-fix both PASS. Full `test_curve_fit.py` (44) green, and `test_sensitivity.py`/`test_minimize.py`/`test_minima.py` (37) unaffected. See `## M30 detail`. |
 
 ## C1 detail
 
@@ -2408,5 +2409,78 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   - `long_chain_full_rank`: m = 20 000 rows over m columns (perfect matching) ⇒
     `Full`, guarding against the new matcher capping a long augmenting path
     short.
+
+## M30 detail
+
+- **Bug** (`python/pounce/_curve_fit.py`): the constrained-covariance branch in
+  both `_covariance` (the buggy block was lines 1542-1547) and the streaming
+  twin `_stream_covariance` (1108-1112) read:
+  ```python
+  if m_con > 0 or (active_mask is not None and active_mask.any()):
+      free = ~active_mask if active_mask is not None else np.ones(n, bool)
+      cov = np.zeros((n, n))
+      cov[np.ix_(free, free)] = s2 * np.linalg.pinv(M[np.ix_(free, free)])
+      return cov, "reduced_hessian(projected)"
+  ```
+  `active_mask` (from `_active_bounds`) covers **variable bounds only**. So when
+  `m_con > 0` but no bound is active, `free` is all-True and the function returns
+  the **unconstrained** `s2·pinv(M)` — yet labels it `reduced_hessian(projected)`.
+  An active equality between parameters is never projected out: variances are
+  overstated and the induced anti-correlations are missing, directly
+  contradicting the module docstring's headline ("correct under active bounds /
+  constraints … the projection onto the active-constraint nullspace").
+- **Verified by running code** (`/tmp/m30_verify.py`, loading the module in
+  isolation): a weighted line fit `f(x) = a·x + b` with `M = JwᵀJw`, under an
+  active equality `a + b = 3` (`A = [[1, 1]]`). Pre-fix `_covariance` returned a
+  `pcov` bit-identical to the unconstrained `s2·pinv(M)`, with
+  `A·pcov·Aᵀ = 0.318` — i.e. it claims the *exactly-known* combination `a + b`
+  has appreciable variance — and no off-diagonal anti-correlation. The correct
+  projected covariance has `A·pcov·Aᵀ = 0` and a `−0.065` off-diagonal. After
+  threading the constraint Jacobian into the call, the same probe returns the
+  projected covariance (`code == correct`, `A·pcov·Aᵀ = 0`).
+- **Fix**: `_FitProblem` already carries `m_con`, `g_combined`, `jac_combined`,
+  `cl`, `cu` (built by `_minimize._wrap_constraints`) but the covariance call
+  site only passed `m_con`. Thread `jac_combined`/`g_combined`/`cl`/`cu` into
+  both `_covariance` and `_stream_covariance` and replace the bounds-only
+  projection with two helpers:
+  - `_active_constraint_jac(popt, jac_combined, g_combined, cl, cu, tol=1e-6)`
+    returns the rows of `jac_combined(popt)` that **bind**: an equality
+    (`cl[i] == cu[i]`) always binds; an inequality binds when `g_combined(popt)`
+    sits within `tol·max(1,|bound|)` of a finite `cl`/`cu`. This linearizes the
+    (possibly nonlinear) constraints at `popt` — the first-order active set.
+  - `_projected_covariance(M, s2, active_mask, A_gen, n)` stacks the active
+    general rows `A_gen` with unit rows `eⱼ` for the active bounds, takes an
+    orthonormal nullspace basis `Z` of the stack via SVD (rank-robust
+    threshold), and returns `s2·Z·pinv(ZᵀMZ)·Zᵀ`. For an empty active set it
+    returns `s2·pinv(M)`; for a fully-pinned active set it returns zeros.
+  The caller reports `reduced_hessian(projected)` only when something actually
+  binds (`_n_active > 0`), else `jacobian`.
+- **Equivalence to the old bounds path**: for a bounds-only active set, `A` is a
+  stack of unit rows `eⱼ`, so `Z` is precisely the free coordinate subspace and
+  `s2·Z·pinv(ZᵀMZ)·Zᵀ` equals the old `cov[ix_(free,free)] = s2·pinv(M[free,free])`
+  embedded with zero bound rows/cols. The existing `test_positivity_bound_active`
+  and `test_streaming_active_bound_projects_covariance` confirm this is preserved.
+- **Gauss-Newton / nonlinear-constraint note**: the `_covariance` docstring now
+  states the result is the first-order (delta-method) asymptotic covariance — `M`
+  is the Gauss-Newton Hessian and the constraints are linearized at `popt`, so it
+  omits the constraint-curvature term `Σλᵢ∇²gᵢ` (identically zero for linear
+  constraints, higher-order otherwise). This is the standard constrained-LS
+  covariance and matches what the projection computes.
+- **Tests** (`python/tests/test_curve_fit.py`):
+  - `test_active_equality_constraint_projects_covariance` — fits a line under an
+    active `a + b = 1` equality (analytic constraint jac) and asserts
+    `cov_source == "reduced_hessian(projected)"`, `g·pcov·g < 1e-9` along the
+    constraint gradient `g = [1,1]`, `pcov[0,1] < 0` (anti-correlation), and a
+    match to the closed-form `s2·Z·pinv(ZᵀMZ)·Zᵀ`.
+  - `test_streaming_active_equality_projects_covariance` — the streaming twin,
+    asserting the streamed covariance matches the in-memory one and projects the
+    same way.
+  - **Pre-fix both FAIL** — `g·pcov·g ≈ 1.6e-3` (the unconstrained variance);
+    confirmed before applying the fix, both PASS after. Run with
+    `POUNCE_SKIP_EXT_STALE_CHECK=1 PYTHONPATH=$PWD/python` so `import pounce`
+    binds the worktree's pure-Python module (the change is Python-only; the
+    extension is unchanged).
+  - Full `test_curve_fit.py` (44 passed) and `test_sensitivity.py` /
+    `test_minimize.py` / `test_minima.py` (37 passed) green.
 - **Result**: `pounce-presolve` green (219 lib + integration + 9 doctests,
   0 failed), no new clippy warnings; `pounce-py` builds clean.

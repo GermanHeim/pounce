@@ -186,6 +186,38 @@ def test_general_parameter_constraint():
     assert r.popt[0] + r.popt[1] <= 1e-6
 
 
+def test_active_equality_constraint_projects_covariance():
+    """An ACTIVE general equality between parameters must be projected out of
+    ``pcov``: the constrained combination carries ~zero variance and the
+    parameters pick up an induced anti-correlation -- neither holds for the
+    unconstrained covariance. Pre-fix the projection ignored general
+    constraints entirely and returned the unconstrained covariance while
+    mislabeling it ``reduced_hessian(projected)``. (Code review M30.)"""
+    rng = np.random.default_rng(31)
+    x = np.linspace(0.0, 10.0, 40)
+    y = line(x, 2.0, -1.0) + rng.normal(0.0, 0.5, x.size)  # unconstrained a+b != 1
+    # require a + b = 1  (active equality g(p) = a + b - 1 = 0)
+    cons = [{"type": "eq", "fun": lambda p: p[0] + p[1] - 1.0,
+             "jac": lambda p: np.array([[1.0, 1.0]])}]
+    r = pounce.curve_fit(line_j, x, y, p0=[1.0, 0.0], constraints=cons)
+
+    assert abs(r.popt[0] + r.popt[1] - 1.0) <= 1e-6
+    assert r.cov_source == "reduced_hessian(projected)"
+    g = np.array([1.0, 1.0])                      # the active-constraint gradient
+    # variance along the constrained direction is ~zero (the binding relation
+    # is known exactly), and the parameters are perfectly anti-correlated.
+    assert float(g @ r.pcov @ g) < 1e-9
+    assert r.pcov[0, 1] < 0.0
+    # cross-check against the closed-form projected covariance.
+    Jw = np.column_stack([x, np.ones_like(x)])    # d line / d[a, b]
+    M = Jw.T @ Jw
+    A = np.array([[1.0, 1.0]])
+    _, _, Vt = np.linalg.svd(A)
+    Z = Vt[1:].T
+    pcov_ref = r._s2 * Z @ np.linalg.pinv(Z.T @ M @ Z) @ Z.T
+    np.testing.assert_allclose(r.pcov, pcov_ref, rtol=1e-5, atol=1e-10)
+
+
 # --------------------------------------------------------------------------
 # 7. Result object UX.
 # --------------------------------------------------------------------------
@@ -650,6 +682,26 @@ def test_streaming_active_bound_projects_covariance():
     assert streamed.cov_source == full.cov_source == "reduced_hessian(projected)"
     np.testing.assert_allclose(streamed.popt, full.popt, rtol=1e-6)
     np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-5, atol=1e-12)
+
+
+def test_streaming_active_equality_projects_covariance():
+    """The streaming covariance must project out an active general equality
+    exactly like the in-memory fit (the streaming twin of the M30 bug)."""
+    rng = np.random.default_rng(31)
+    x = np.linspace(0.0, 10.0, 400)
+    y = line(x, 2.0, -1.0) + rng.normal(0.0, 0.5, x.size)
+    cons = [{"type": "eq", "fun": lambda p: p[0] + p[1] - 1.0,
+             "jac": lambda p: np.array([[1.0, 1.0]])}]
+
+    full = pounce.curve_fit(line_j, x, y, p0=[1.0, 0.0], constraints=cons)
+    streamed = pounce.curve_fit_streaming(
+        line_j, _batched_source(x, y), p0=[1.0, 0.0], constraints=cons
+    )
+    assert streamed.cov_source == full.cov_source == "reduced_hessian(projected)"
+    g = np.array([1.0, 1.0])
+    assert float(g @ streamed.pcov @ g) < 1e-9
+    np.testing.assert_allclose(streamed.popt, full.popt, rtol=1e-6)
+    np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-5, atol=1e-10)
 
 
 def test_streaming_disables_residuals_and_sensitivity():
