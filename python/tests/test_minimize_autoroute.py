@@ -64,6 +64,45 @@ def test_routed_qp_matches_nlp_solve():
     assert auto.fun == pytest.approx(nlp.fun, abs=1e-6)
 
 
+def test_point_cache_stores_defensive_copies():
+    """M34: the router's probe cache must store copies, not the user's return
+    object. A ``jac``/``hess`` callable that reuses one output buffer across
+    calls would otherwise mutate earlier cache entries in place and poison the
+    routers' probe data."""
+    # The cache itself is pure Python (numpy only), but importing it pulls in
+    # the pounce package __init__ and thus the native extension; skip when
+    # that's unavailable rather than fail on an unrelated import.
+    route = pytest.importorskip("pounce._route")
+
+    buf = np.zeros(2)
+    n_calls = [0]
+
+    def jac(x):
+        n_calls[0] += 1
+        buf[:] = x  # reuse ONE buffer: the previous return value is mutated
+        return buf
+
+    cached = route._point_cache(jac)
+    x1 = np.array([1.0, 2.0])
+    x2 = np.array([3.0, 4.0])
+    v1 = cached(x1)
+    v2 = cached(x2)  # mutates `buf` in place
+    # The second call must not have poisoned the first cached value...
+    np.testing.assert_array_equal(np.asarray(v1), [1.0, 2.0])
+    np.testing.assert_array_equal(np.asarray(v2), [3.0, 4.0])
+    # ...and a cache hit returns the stored copy without re-evaluating.
+    np.testing.assert_array_equal(np.asarray(cached(x1)), [1.0, 2.0])
+    assert n_calls[0] == 2
+
+    # Scalars (a cached `fun` value) are stored as 0-d arrays, which the
+    # routers' `float(...)` / `np.asarray(...)` consumers accept.
+    fun = route._point_cache(lambda x: 7.5)
+    assert float(fun(x1)) == 7.5
+    assert float(fun(x1)) == 7.5  # cache hit
+    # None (absent jac/hess) still passes through untouched.
+    assert route._point_cache(None) is None
+
+
 def test_nonlinear_objective_stays_on_nlp():
     # Rosenbrock: quartic, not a quadratic — must NOT be routed to the QP solver.
     fun = lambda x: (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2

@@ -110,8 +110,12 @@ def _point_cache(f: Optional[Callable]) -> Optional[Callable]:
     redundant ``fun`` evaluations at FD). Sharing one cache across both router
     calls turns the second router's probes into cache hits.
 
-    ``None`` passes through (an absent ``jac``/``hess``). The cached values are
-    never mutated in place by the routers, so the cache is shared by reference.
+    ``None`` passes through (an absent ``jac``/``hess``). Cached values are
+    stored as defensive float64 *copies*, never as the user's return object: a
+    ``jac``/``hess`` that reuses one output buffer across calls would otherwise
+    mutate earlier cache entries in place and poison the routers' probe data
+    (M34). Scalars (a ``fun`` value) become 0-d arrays, which every router
+    consumer already accepts (``float(...)`` / ``np.asarray(...)``).
     """
     if f is None:
         return None
@@ -122,7 +126,7 @@ def _point_cache(f: Optional[Callable]) -> Optional[Callable]:
         hit = cache.get(key, _MISS)
         if hit is not _MISS:
             return hit
-        val = f(x)
+        val = np.array(f(x), dtype=np.float64, copy=True)
         cache[key] = val
         return val
 

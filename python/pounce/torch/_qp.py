@@ -42,15 +42,21 @@ from ._build import _DT
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
 
-def _guard_psd(P, n):
+def _guard_psd(P, n, check_psd=None):
     """Reject an indefinite Hessian on the host forward (issue #112).
 
     The ``autograd.Function`` forward runs eagerly on concrete tensors, so an
     indefinite ``P`` would otherwise return a silently-wrong ``"optimal"`` and
-    feed that garbage into the OptNet backward pass. Mirrors
-    :func:`pounce.qp.solve_qp`'s guard and auto-size threshold (skip the
-    O(n^3) eigenvalue solve for a large QP)."""
-    if n <= _PSD_CHECK_AUTO_MAX_N:
+    feed that garbage into the OptNet backward pass.
+
+    ``check_psd`` has the same semantics as :func:`pounce.qp.solve_qp`'s
+    (M31): ``None`` (default) checks only when ``n <= 1500`` so a large QP is
+    not slowed by the O(n^3) eigenvalue solve, ``True`` always checks, and
+    ``False`` skips the check (e.g. a layer whose ``P`` is PSD by
+    construction, where the per-forward ``eigvalsh`` is pure overhead)."""
+    if check_psd is False:
+        return
+    if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
         _check_psd(*_to_coo_lower(np.asarray(P)), n)
 
 
@@ -173,11 +179,11 @@ def _split_duals(d, m_g, m_a):
     return lam, nu
 
 
-def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
+def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None, check_psd=None):
     """Host-side forward solve via pounce-convex. Returns (x, lam, nu)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
-    _guard_psd(P, c.shape[0])
+    _guard_psd(P, c.shape[0], check_psd)
     prob = _build_problem(P, c, G, h, A, b)
     warm = None
     if warm_x is not None and np.asarray(warm_x).size == c.shape[0]:
@@ -189,14 +195,16 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     return x, lam, nu
 
 
-def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
+def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None,
+                         check_psd=None):
     """Parallel host-side batch solve. Shared ``P``/``G``/``A``; per-row
     ``cs``/``hs``/``bs``. Returns stacked (xs, lams, nus)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
     b_sz = cs.shape[0]
     n = cs.shape[1]
-    _guard_psd(P, n)  # P is shared across the batch — one check covers all rows
+    # P is shared across the batch — one check covers all rows.
+    _guard_psd(P, n, check_psd)
     probs = [_build_problem(P, cs[i], G, hs[i], A, bs[i]) for i in range(b_sz)]
     warms = None
     if warm_xs is not None and np.asarray(warm_xs).shape == (b_sz, n):
@@ -272,7 +280,7 @@ def _kkt_backward(P, G, A, h, x, lam, nu, gx):
     return grad_P, grad_c, grad_G, grad_h, grad_A, grad_b
 
 
-def _make_qp_fn(n, m_g, m_a, tol, max_iter):
+def _make_qp_fn(n, m_g, m_a, tol, max_iter, check_psd=None):
     class _QpFn(torch.autograd.Function):
         @staticmethod
         def forward(ctx, P, c, G, h, A, b, warm_x):
@@ -286,6 +294,7 @@ def _make_qp_fn(n, m_g, m_a, tol, max_iter):
                 tol,
                 max_iter,
                 warm_x=_np(warm_x),
+                check_psd=check_psd,
             )
             x_t = torch.as_tensor(x, dtype=_DT)
             lam_t = torch.as_tensor(lam, dtype=_DT)
@@ -302,7 +311,7 @@ def _make_qp_fn(n, m_g, m_a, tol, max_iter):
     return _QpFn
 
 
-def _make_qp_batch_fn(n, m_g, m_a, tol, max_iter):
+def _make_qp_batch_fn(n, m_g, m_a, tol, max_iter, check_psd=None):
     class _QpBatchFn(torch.autograd.Function):
         @staticmethod
         def forward(ctx, P, cs, G, hs, A, bs, warm_xs):
@@ -316,6 +325,7 @@ def _make_qp_batch_fn(n, m_g, m_a, tol, max_iter):
                 tol,
                 max_iter,
                 warm_xs=_np(warm_xs),
+                check_psd=check_psd,
             )
             xs_t = torch.as_tensor(xs, dtype=_DT)
             lams_t = torch.as_tensor(lams, dtype=_DT)
@@ -387,6 +397,7 @@ def solve_qp(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
+    check_psd: Optional[bool] = None,
 ):
     """Differentiable convex-QP solve ``x*(P, c, G, h, A, b)``.
 
@@ -398,6 +409,12 @@ def solve_qp(
     gradient flows to ``lb``/``ub``). ``warm_start`` supplies a previous
     primal ``x`` to seed the iteration; it is not differentiated and only
     reduces the iteration count.
+
+    ``check_psd`` controls the PSD guard on ``P`` (issue #112), with the
+    same semantics as :func:`pounce.qp.solve_qp`: ``None`` (the default)
+    checks only when ``n <= 1500``, ``True`` always checks, and ``False``
+    skips the per-forward O(n^3) eigenvalue check — useful when ``P`` is
+    PSD by construction (e.g. ``LLᵀ + εI`` in an OptNet layer).
     """
     P = _t(P)
     c = _t(c)
@@ -410,7 +427,7 @@ def solve_qp(
     G_full, h_full = _expand_bounds(G0, h0, lb, ub, n)
     warm_x = _warm_primal(warm_start, n)
 
-    fn = _make_qp_fn(n, G_full.shape[0], A0.shape[0], tol, max_iter)
+    fn = _make_qp_fn(n, G_full.shape[0], A0.shape[0], tol, max_iter, check_psd)
     return fn.apply(P, c, G_full, h_full, A0, b0, warm_x)
 
 
@@ -445,6 +462,7 @@ def solve_qp_batch(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
+    check_psd: Optional[bool] = None,
 ):
     """Differentiable **parallel** batch of convex QPs sharing structure.
 
@@ -453,6 +471,10 @@ def solve_qp_batch(
     and ``b`` may be batched (``(B, ·)``) or shared. Returns ``xs`` of
     shape ``(B, n)``. Gradients to the shared matrices sum over the batch;
     gradients to ``c``/``h``/``b`` stay per-row. ``∇P`` is symmetric.
+
+    ``check_psd``: PSD-guard control for the shared ``P`` (one check covers
+    the whole batch) — ``None`` auto (``n <= 1500``), ``True`` force,
+    ``False`` skip; same semantics as :func:`pounce.qp.solve_qp`.
     """
     P = _t(P)
     cs = _t(c)
@@ -488,7 +510,7 @@ def solve_qp_batch(
         bs = b_arr.expand(b_sz, m_a) if b_arr.ndim == 1 else b_arr
 
     warm_xs = _warm_primal_batch(warm_start, b_sz, n)
-    fn = _make_qp_batch_fn(n, m_g, m_a, tol, max_iter)
+    fn = _make_qp_batch_fn(n, m_g, m_a, tol, max_iter, check_psd)
     return fn.apply(P, cs, G_full, hs, A0, bs, warm_xs)
 
 
@@ -499,9 +521,15 @@ class QpLayer:
     ``c``/``b``/``h`` solves and is differentiable w.r.t. those (and, via
     :func:`solve_qp`, the captured matrices too). Suitable for use inside
     a ``torch.nn`` model.
+
+    ``check_psd`` controls the per-forward PSD guard on ``P`` (same
+    ``None``/``True``/``False`` semantics as :func:`pounce.qp.solve_qp`);
+    pass ``check_psd=False`` when ``P`` is PSD by construction to skip the
+    O(n^3) eigenvalue check on every forward.
     """
 
-    def __init__(self, P, G=None, A=None, lb=None, ub=None, *, tol=None, max_iter=None):
+    def __init__(self, P, G=None, A=None, lb=None, ub=None, *, tol=None,
+                 max_iter=None, check_psd=None):
         self._P = P
         self._G = G
         self._A = A
@@ -509,6 +537,7 @@ class QpLayer:
         self._ub = ub
         self._tol = tol
         self._max_iter = max_iter
+        self._check_psd = check_psd
 
     def __call__(self, c, *, b=None, h=None, warm_start=None):
         return solve_qp(
@@ -523,6 +552,7 @@ class QpLayer:
             tol=self._tol,
             max_iter=self._max_iter,
             warm_start=warm_start,
+            check_psd=self._check_psd,
         )
 
     def batch(self, cs, *, b=None, h=None, warm_start=None):
@@ -539,6 +569,7 @@ class QpLayer:
             tol=self._tol,
             max_iter=self._max_iter,
             warm_start=warm_start,
+            check_psd=self._check_psd,
         )
 
 
@@ -629,11 +660,11 @@ def _socp_backward(P, G, A, h, x, lam, nu, gx, cones):
     return grad_P, grad_c, grad_G, grad_h, grad_A, grad_b
 
 
-def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
+def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter, check_psd=None):
     """Host-side SOCP forward via pounce-convex. Returns (x, lam, nu)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
-    _guard_psd(P, c.shape[0])
+    _guard_psd(P, c.shape[0], check_psd)
     prob = _build_problem(P, c, G, h, A, b)
     d = _pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter)
     _check_status(d["status"], "SOCP differentiable forward solve")
@@ -642,7 +673,7 @@ def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
     return x, lam, nu
 
 
-def _make_socp_fn(n, m_g, m_a, cones, specs, tol, max_iter):
+def _make_socp_fn(n, m_g, m_a, cones, specs, tol, max_iter, check_psd=None):
     class _SocpFn(torch.autograd.Function):
         @staticmethod
         def forward(ctx, P, c, G, h, A, b):
@@ -656,6 +687,7 @@ def _make_socp_fn(n, m_g, m_a, cones, specs, tol, max_iter):
                 specs,
                 tol,
                 max_iter,
+                check_psd=check_psd,
             )
             x_t = torch.as_tensor(x, dtype=_DT)
             lam_t = torch.as_tensor(lam, dtype=_DT)
@@ -671,7 +703,8 @@ def _make_socp_fn(n, m_g, m_a, cones, specs, tol, max_iter):
     return _SocpFn
 
 
-def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
+def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None,
+               check_psd=None):
     """Differentiable convex-SOCP solve over a product of cones.
 
     Solves ``min ½xᵀPx+cᵀx s.t. Gx ⪯_K h, Ax=b`` where the inequality
@@ -679,6 +712,10 @@ def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
     specs (``"nonneg"``/``"soc"``; an int means a second-order cone).
     Differentiable w.r.t. ``P, c, G, h, A, b`` via cone-aware OptNet
     implicit differentiation (``diag`` → the cones' arrow operators).
+
+    ``check_psd`` controls the PSD guard on ``P`` — ``None`` auto
+    (``n <= 1500``), ``True`` force, ``False`` skip; same semantics as
+    :func:`pounce.qp.solve_qp`.
     """
     P = _t(P)
     c = _t(c)
@@ -688,5 +725,7 @@ def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
     A0 = torch.zeros((0, n), dtype=_DT) if A is None else _t(A)
     b0 = torch.zeros((0,), dtype=_DT) if b is None else _t(b)
     static, specs = _normalize_socp_cones(cones)
-    fn = _make_socp_fn(n, G.shape[0], A0.shape[0], static, specs, tol, max_iter)
+    fn = _make_socp_fn(
+        n, G.shape[0], A0.shape[0], static, specs, tol, max_iter, check_psd
+    )
     return fn.apply(P, c, G, h, A0, b0)

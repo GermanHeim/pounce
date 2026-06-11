@@ -802,3 +802,57 @@ def test_curve_fit_success_mapping_matches_nlp_minimize():
     assert 0 in _NLP_SUCCESS_STATUS      # Solve_Succeeded
     assert 1 in _NLP_SUCCESS_STATUS      # Solved_To_Acceptable_Level
     assert 2 not in _NLP_SUCCESS_STATUS  # Infeasible_Problem_Detected
+
+
+def test_curve_fit_no_kkt_fallback_gate_matches_minimize():
+    """L50 lockstep: curve_fit's KKT-error success fallback must exclude the
+    same statuses as minimize's, so an external abort (``User_Requested_Stop``,
+    code 5) can never be laundered into ``success=True`` by a coincidentally
+    small final KKT error. curve_fit exposes no intermediate callback today, so
+    the gate is latent — this pins both sites to the *same* constant so the two
+    "judge success exactly as minimize" sites cannot drift."""
+    from pounce._curve_fit import _NO_KKT_FALLBACK_STATUS as cf_gate
+    from pounce._minimize import _NO_KKT_FALLBACK_STATUS as m_gate
+
+    assert cf_gate is m_gate              # one shared source of truth
+    assert 5 in cf_gate                   # User_Requested_Stop stays failed
+    assert not cf_gate & {0, 1}           # success codes never gated
+
+
+def test_curve_fit_constraint_probed_at_p0_not_origin():
+    """L47 (curve_fit side): constraint sizing must probe at the starting seed
+    ``p0``, not the origin, mirroring ``minimize``'s x0 probe — a constraint
+    undefined at 0 (e.g. ``log``) but defined at p0 must not blow up before
+    the solve begins. Covers both the in-memory and the streaming builder."""
+    from pounce._curve_fit import _build_fit_problem, _build_streaming_fit_problem
+
+    x = np.linspace(0.0, 10.0, 40)
+    y = line(x, 2.0, 1.5)
+    p0 = [1.5, 1.2]
+
+    probes = []
+
+    def con(p):
+        probes.append(np.array(p, dtype=float))
+        # Undefined (-inf) at the origin; finite at p0.
+        return np.log(p)
+
+    prob = _build_fit_problem(
+        line, x, y, p0, None, (-np.inf, np.inf),
+        [{"type": "ineq", "fun": con}], "sse", 1.0, "fd",
+    )
+    assert prob.m_con == 2
+    np.testing.assert_allclose(probes[0], p0)  # probed at p0, not 0
+    assert np.all(np.isfinite(prob.g_combined(np.asarray(p0, dtype=float))))
+
+    s_probes = []
+
+    def s_con(p):
+        s_probes.append(np.array(p, dtype=float))
+        return np.log(p)
+
+    _build_streaming_fit_problem(
+        line, lambda: iter([(x, y)]), p0, None, (-np.inf, np.inf),
+        [{"type": "ineq", "fun": s_con}], "sse", 1.0, "fd", None,
+    )
+    np.testing.assert_allclose(s_probes[0], p0)  # streaming builder too

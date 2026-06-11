@@ -38,6 +38,7 @@ from ._pounce import Solver
 from ._minimize import (
     _DEFAULT_ACCEPTABLE_TOL,
     _NLP_SUCCESS_STATUS,
+    _NO_KKT_FALLBACK_STATUS,
     _normalize_bounds,
     _wrap_constraints,
 )
@@ -666,7 +667,12 @@ def _build_fit_problem(
         Jw = J * (w[:, None])
         return (Jw.T * weight) @ Jw
 
-    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+    # Probe constraints at the starting seed, not the origin, so a constraint
+    # undefined at 0 but defined at p0 does not fail at build time (L47 —
+    # mirrors _minimize.py passing x0).
+    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(
+        constraints, n, np.asarray(p0, dtype=float)
+    )
 
     return _FitProblem(
         f=f, model=model, model_jac=model_jac, residual=residual,
@@ -720,12 +726,19 @@ def _solve_fit(
     # only status 0 reported `success=False` at a verified optimum with a fully
     # populated `popt`/`pcov`, and callers gating on `.success` discarded valid
     # fits. As a second gate, a stall (e.g. tiny-step exit) whose final unscaled
-    # NLP error is already within `acceptable_tol` is also a success.
+    # NLP error is already within `acceptable_tol` is also a success — except
+    # for `_NO_KKT_FALLBACK_STATUS` (User_Requested_Stop), which is an external
+    # abort that must never be laundered into success (L50). curve_fit exposes
+    # no intermediate callback today, so that status cannot currently arise
+    # here; the gate exists to keep this success judgment in lockstep with
+    # `_minimize.py`'s, which is the contract this block documents.
     status_code = int(info["status"])
     acceptable_tol = float(user_opts.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
     kkt_error = float(info.get("final_kkt_error", float("nan")))
     success = status_code in _NLP_SUCCESS_STATUS or (
-        np.isfinite(kkt_error) and kkt_error <= acceptable_tol
+        status_code not in _NO_KKT_FALLBACK_STATUS
+        and np.isfinite(kkt_error)
+        and kkt_error <= acceptable_tol
     )
     # The converged factor is trustworthy when the derivatives that built it
     # were exact and the solve actually held a factor. (Scaling state no
@@ -1197,7 +1210,11 @@ def _build_streaming_fit_problem(
     model_jac, jac_exact, _ = _resolve_model_jac(f, model, jac, probe_x, p0)
 
     closures = _StreamingClosures(data_source, model, model_jac, loss_fn, fs2, n)
-    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+    # Probe constraints at the starting seed, not the origin (L47 — mirrors
+    # _minimize.py passing x0).
+    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(
+        constraints, n, np.asarray(p0, dtype=float)
+    )
 
     return _FitProblem(
         f=f, model=model, model_jac=model_jac, residual=None,

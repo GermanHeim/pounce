@@ -380,6 +380,29 @@ def test_convex_route_warns_on_dropped_options(monkeypatch):
                    options={"solver_selection": "qp-ipm", "tol": 1e-8, "max_iter": 50})
 
 
+def test_convex_route_warns_on_disp(monkeypatch):
+    """L48 residual: ``_solve_via_convex``/``_solve_via_socp`` read only
+    ``tol``/``max_iter``, so ``disp=True`` is dropped on the convex routes just
+    like ``print_level`` — it must trigger the same dropped-options warning
+    rather than be listed as honored."""
+    import pounce._minimize as M
+
+    class _Extract:
+        kind = "qp"
+
+    sentinel = M.OptimizeResult(x=np.zeros(2), fun=0.0, success=True, status=0,
+                                message="optimal", nit=1, info={"solver": "qp-ipm"})
+
+    monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
+    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
+
+    f = lambda x: float(x @ x)
+    with pytest.warns(UserWarning, match="disp"):
+        res = M.minimize(f, np.ones(2),
+                         options={"solver_selection": "qp-ipm", "disp": True})
+    assert res is sentinel
+
+
 class _UserStopProblem:
     """Fake native Problem that returns ``User_Requested_Stop`` (status 5) —
     what the bridge reports when the user's ``intermediate`` callback aborts or

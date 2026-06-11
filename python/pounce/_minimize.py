@@ -499,7 +499,10 @@ def minimize(
     # routing key and tolerance are consumed here, not "ignored". Everything
     # else the user passed (e.g. `print_level`, `disp`, `acceptable_tol`) has
     # no effect on the convex path, so warn rather than drop silently (L48).
-    _CONVEX_HONORED = {"solver_selection", "route_tol", "tol", "max_iter", "disp"}
+    # `disp` is deliberately NOT in this set: `_solve_via_convex` /
+    # `_solve_via_socp` read only `tol` / `max_iter`, so `disp=True` is dropped
+    # on the convex routes and must trigger the warning below.
+    _CONVEX_HONORED = {"solver_selection", "route_tol", "tol", "max_iter"}
 
     def _warn_convex_dropped_opts(route_name: str) -> None:
         ignored = sorted(requested_opt_keys - _CONVEX_HONORED)
