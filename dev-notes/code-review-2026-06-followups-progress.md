@@ -9,7 +9,7 @@ code, a fail-first test where constructible, the fix, and the result.
 | F1 | H3 duals off by `obj_scale_factor` | High | ✅ fixed |
 | F2 | H1 inertia-shift δ + unbounded-QP false positive | Med-High | ✅ fixed |
 | F3 | H11 fix dormant (no `get_variables_linearity`) | High | ✅ fixed |
-| F4 | L7 watchdog `alpha_primal_max` — reopen | Medium | ⬜ todo |
+| F4 | L7 watchdog `alpha_primal_max` — reopen | Medium | ✅ fixed |
 | F5 | L56 incomplete — session FFI unguarded | Medium | ⬜ todo |
 | F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ⬜ todo |
 | F7 | L10 MA57 grow paths unguarded | Low | ⬜ todo |
@@ -192,3 +192,74 @@ body to the stub (`-> false`, slice untouched): the test panics
 `pounce-presolve` 226 lib tests green (the H11 path now active on the real
 no-hand-tags route, no regression). fmt + clippy (correctness/suspicious gate)
 clean.
+
+---
+
+## F4 detail — watchdog StopWatchDog retry reused the failed direction's FTB cap (Medium)
+
+**Finding.** The filter line-search watchdog snapshots an iterate + search
+direction; after `watchdog_trial_iter_max` (default 3) failed outer iterations
+it reverts ("StopWatchDog") to that snapshot and re-runs the alpha-loop on the
+saved `delta` with `skip_first = true`. Upstream
+`IpBacktrackingLineSearch::FindAcceptableTrialPoint` (stable/3.14) recomputes
+`alpha_primal_max` / `alpha_dual_max` from `actual_delta_` — which
+`StopWatchDog` has reverted to the snapshot — so the entire body re-runs on the
+recovered direction, fraction-to-the-boundary (FTB) caps included. pounce's
+`handle_watchdog_failure` (`backtracking.rs`) instead **reused the
+`alpha_init` / `alpha_dual` it had been handed** — the caps computed for the
+*pre-revert* iterate and the *now-abandoned* failed direction — and fed them to
+`run_alpha_loop` over `snap_delta`.
+
+**Root cause.** The retry's first trial length is `cap × alpha_red_factor`. With
+a stale cap the first trial is mis-sized for `snap_delta` at the reverted
+iterate: if the failed cap is looser than the snapshot's true FTB limit, the
+trial overshoots the boundary (negative slack / bound multiplier → non-finite
+barrier objective, wasted backtracking trials); if tighter, it needlessly
+shortens an otherwise-feasible step. Either way the recovered search starts from
+the wrong place.
+
+**Fix.** In the StopWatchDog branch, after `set_curr(snap)` (so the CQ now
+reflects the snapshot), recompute both caps from `snap_delta` at the reverted
+iterate and stop reusing the handed-in values:
+
+```rust
+let tau = data.borrow().curr_tau;
+let (alpha_primal_retry, alpha_dual_retry) = {
+    let cq_ref = cq.borrow();
+    (1.0_f64.min(cq_ref.aff_step_alpha_primal_max(&snap_delta, tau)),
+     1.0_f64.min(cq_ref.aff_step_alpha_dual_max(&snap_delta, tau)))
+};
+```
+
+clamped to the full step `1.0` (the default `alpha_max`, matching the main
+path's `alpha_init.min(alpha_primal_max)` at `ipopt_alg.rs:1045`;
+`BacktrackingLineSearch` carries no `alpha_max` field). The now-unused
+`alpha_init` parameter was removed from `handle_watchdog_failure`'s signature
+and its call site in `run_filter_line_search`. Both the primal **and** dual cap
+are recomputed: the verification doc named only `alpha_primal_max`, but the dual
+cap reuse is the identical staleness bug — applying the failed direction's dual
+cap to `snap_delta`'s bound-multiplier components at the reverted iterate can
+violate FTB on the `z`'s just as readily.
+
+**Verification by running code (fail-first).** New focused unit test
+`crates/pounce-algorithm/src/line_search/backtracking.rs::stop_watchdog_retry_recomputes_ftb_cap_from_snapshot_direction`.
+The watchdog/backtracking path had no existing unit harness, so the test builds
+one: an `F4MockNlp` (n=1, `x[0] ≥ 0`, `f = x[0]²`, no constraints) and a
+`RecordingAcceptor` that records the *first* trial alpha offered and always
+accepts. It arms the watchdog (snapshot `x = 2` ⇒ slack 2, `z_L = 0.5`,
+`τ = 1`; `snap_delta` `Δx = -4` ⇒ true FTB cap `τ·s/|Δx| = 1·2/4 = 0.5`) with
+`watchdog_trial_iter = watchdog_trial_iter_max`, then calls
+`handle_watchdog_failure`. It asserts `Outcome::Accepted` and that the recorded
+first retry alpha is `0.25` (= recomputed cap `0.5` × `alpha_red_factor` `0.5`).
+Fail-first was demonstrated by temporarily hard-coding the call to pass a
+*failed-direction* cap of `0.6` in place of `alpha_primal_retry`: the recorded
+first alpha became `0.3` (≠ asserted `0.25`) — the test fails on the pre-fix
+behavior and passes after. Numbers were chosen so both the pre-fix (`0.3`,
+`x = 0.8`) and post-fix (`0.25`) first trials are *feasible*, avoiding the trap
+where an infeasible pre-fix trial backtracks and coincidentally lands on `0.25`.
+
+**Result.** `pounce-algorithm` 258 lib tests + the new one green (one unrelated
+pre-existing flake, `iter_dump::tests::header_writes_magic_and_version`, races on
+a shared `ENV_DUMP_PATH` env var under parallel execution and passes in
+isolation — not touched by this change). fmt + clippy (correctness/suspicious
+gate) clean.
