@@ -385,14 +385,20 @@ impl PresolveTnlp {
 
         // Per-variable linearity (H11): lets Phase-0 objective-coupling
         // classification distinguish a genuinely objective-free variable from
-        // one that is merely zero-gradient at the single probe point. Most
-        // TNLPs decline (default `false`), in which case Phase 0 falls back to
-        // the probe gradient alone.
+        // one that is merely zero-gradient at the single probe point. The
+        // objective-scoped query is preferred — it is exactly the set the
+        // guard needs. The global tags are only a fallback: they are a
+        // conservative superset (a variable nonlinear only in a *constraint*
+        // is tagged NonLinear too), which keeps the guard sound but blocks
+        // legitimate eliminations of objective-free blocks (the gas-network
+        // case). Most TNLPs decline both (default `false`), in which case
+        // Phase 0 falls back to the probe gradient alone.
         let mut var_linearity = vec![Linearity::NonLinear; n];
-        let have_var_linearity = self
-            .inner
-            .borrow_mut()
-            .get_variables_linearity(&mut var_linearity);
+        let have_var_linearity = {
+            let mut inner = self.inner.borrow_mut();
+            inner.get_objective_variables_linearity(&mut var_linearity)
+                || inner.get_variables_linearity(&mut var_linearity)
+        };
 
         // Probe point for Jacobian values (linear rows have constant
         // Jacobians; this `x` is only needed because some inner
@@ -1384,6 +1390,12 @@ impl TNLP for PresolveTnlp {
         self.inner.borrow_mut().get_variables_linearity(types)
     }
 
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_objective_variables_linearity(types)
+    }
+
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
         let Some(_) = self.ensure_init() else {
             return false;
@@ -1796,6 +1808,115 @@ mod tests {
         assert!((bounds.x_u[0] - 2.0).abs() < 1e-12);
         assert!((bounds.x_l[1] - 1.0).abs() < 1e-12);
         assert!((bounds.x_u[1] - 1.0).abs() < 1e-12);
+    }
+
+    /// [`TwoVarSquareEq`] with linearity tags layered on: the *global*
+    /// tags report both variables `NonLinear` (as a TNLP whose equality
+    /// rows are nonlinear would — the gas-network shape), while the
+    /// objective-scoped tags, when offered, report both `Linear`
+    /// (matching the zero objective gradient).
+    struct SquareEqWithTags {
+        inner: TwoVarSquareEq,
+        offer_obj_tags: bool,
+    }
+    impl TNLP for SquareEqWithTags {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.inner.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.inner.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.inner.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+            self.inner.eval_f(x, new_x)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_grad_f(x, new_x, g)
+        }
+        fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_g(x, new_x, g)
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.inner.eval_jac_g(x, new_x, mode)
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            self.inner.get_constraints_linearity(types)
+        }
+        fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::NonLinear;
+            types[1] = Linearity::NonLinear;
+            true
+        }
+        fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            if !self.offer_obj_tags {
+                return false;
+            }
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+            self.inner.finalize_solution(sol, d, q)
+        }
+    }
+
+    /// Regression for the gas-network CI failure: objective-scoped tags
+    /// must take precedence over the global ones, so a variable that is
+    /// nonlinear only in *constraints* does not poison `obj_support` and
+    /// block a legitimate Phase-0 elimination. Pre-fix (global tags only)
+    /// both variables were unioned into the objective support and the
+    /// Safe policy kept both rows.
+    #[test]
+    fn phase0_objective_scoped_tags_dont_block_constraint_nonlinear_elimination() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SquareEqWithTags {
+            inner: TwoVarSquareEq,
+            offer_obj_tags: true,
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(
+            info.m, 0,
+            "objective-free block must still be eliminated when only the \
+             global tags say NonLinear"
+        );
+        assert_eq!(wrapped.auxiliary_diagnostics().vars_eliminated, 2);
+    }
+
+    /// When the TNLP offers only the global tags, the fallback stays
+    /// conservative: constraint nonlinearity is treated as possible
+    /// objective coupling and the block is kept (sound, just suboptimal).
+    #[test]
+    fn phase0_global_tags_fallback_remains_conservative() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SquareEqWithTags {
+            inner: TwoVarSquareEq,
+            offer_obj_tags: false,
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(
+            info.m, 2,
+            "global-only tags fall back to the conservative union"
+        );
+        assert_eq!(wrapped.auxiliary_diagnostics().vars_eliminated, 0);
     }
 
     #[test]

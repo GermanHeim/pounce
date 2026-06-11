@@ -2631,18 +2631,34 @@ impl TNLP for NlTnlp {
         // `obj_nonlinear` and every `con_nonlinear` row. A variable touched
         // only by a linear part — or not referenced at all — is Linear.
         //
-        // Reporting this (rather than leaving the default `false` stub)
-        // is what engages the presolve auxiliary-elimination safeguard
-        // (pounce-presolve H11): a variable that is nonlinear in the
-        // objective but happens to have a zero gradient at the single
-        // probe point (e.g. `f = (x - x0)^2` warm-started at `x0`) is kept
-        // in the objective support instead of being mis-classified
-        // objective-free and eliminated.
         let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
         collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
         for row in &self.prob.con_nonlinear {
             collect_vars(row, &mut nonlinear);
         }
+        for (i, t) in types.iter_mut().enumerate() {
+            *t = if nonlinear.contains(&i) {
+                Linearity::NonLinear
+            } else {
+                Linearity::Linear
+            };
+        }
+        true
+    }
+
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        // Objective-scoped variant of `get_variables_linearity`: only
+        // `obj_nonlinear` contributes. This is what engages the presolve
+        // auxiliary-elimination safeguard (pounce-presolve H11): a variable
+        // that is nonlinear in the objective but happens to have a zero
+        // gradient at the single probe point (e.g. `f = (x - x0)^2`
+        // warm-started at `x0`) is kept in the objective support instead of
+        // being mis-classified objective-free and eliminated. A variable
+        // that is nonlinear only in *constraints* stays `Linear` here, so
+        // the guard does not block legitimate eliminations of
+        // objective-free equality blocks (the gas-network case).
+        let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
+        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
         for (i, t) in types.iter_mut().enumerate() {
             *t = if nonlinear.contains(&i) {
                 Linearity::NonLinear
@@ -2852,6 +2868,63 @@ b
         assert!(
             matches!(types[1], Linearity::Linear),
             "x1 appears only in the linear part"
+        );
+    }
+
+    /// Objective-scoped linearity must NOT inherit constraint
+    /// nonlinearity. `min 3*x1 s.t. x0^2 = 4`: x0 is nonlinear globally
+    /// (constraint tape) but linear w.r.t. the objective, so the presolve
+    /// H11 guard must not treat it as objective-coupled — that was the CI
+    /// regression where every gas-network variable (nonlinear in the flow
+    /// equations, absent from the linear objective) blocked Phase-0
+    /// elimination.
+    #[test]
+    fn objective_variables_linearity_ignores_constraint_nonlinearity() {
+        // x0^2
+        let con_nl = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let prob = NlProblem {
+            n: 2,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(1, 3.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![con_nl],
+            con_linear: vec![vec![]],
+            x_l: vec![f64::NEG_INFINITY; 2],
+            x_u: vec![f64::INFINITY; 2],
+            g_l: vec![4.0],
+            g_u: vec![4.0],
+            x0: vec![0.0; 2],
+            lambda0: vec![0.0],
+            suffixes: NlSuffixes::default(),
+            imported_funcs: vec![],
+            var_names: vec![],
+            con_names: vec![],
+        };
+        let mut tnlp = NlTnlp::new(prob);
+
+        let mut global = vec![Linearity::Linear; 2];
+        assert!(tnlp.get_variables_linearity(&mut global));
+        assert!(
+            matches!(global[0], Linearity::NonLinear),
+            "global tags see x0's constraint nonlinearity"
+        );
+
+        let mut obj = vec![Linearity::NonLinear; 2];
+        assert!(tnlp.get_objective_variables_linearity(&mut obj));
+        assert!(
+            matches!(obj[0], Linearity::Linear),
+            "x0 is linear w.r.t. the objective despite the nonlinear constraint"
+        );
+        assert!(
+            matches!(obj[1], Linearity::Linear),
+            "x1 is linear everywhere"
         );
     }
 

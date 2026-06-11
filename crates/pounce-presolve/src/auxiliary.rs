@@ -53,7 +53,9 @@ pub struct Phase0Probe<'a> {
     pub eq_tol: Number,
     pub x_probe: &'a [Number],
     pub grad_f: &'a [Number],
-    /// Per-variable linearity tags (`get_variables_linearity`), when the
+    /// Per-variable linearity tags **with respect to the objective**
+    /// (`get_objective_variables_linearity`, falling back to the global
+    /// `get_variables_linearity` — a conservative superset), when the
     /// inner TNLP supplies them. `grad_f` is sampled at a single probe
     /// point, so a variable nonlinear in the objective can read as
     /// objective-free there (e.g. `f=(x−x₀)²` started at `x₀`). A `Linear`
@@ -268,13 +270,16 @@ pub fn run_auxiliary_phase0(
 
     // Variables with a non-negligible objective gradient *at the probe*.
     let mut obj_support = objective_gradient_support(probe.grad_f, 1e-12);
-    // H11: the probe gradient is a single sample. For any variable the inner
-    // TNLP tags `NonLinear`, a zero probe-gradient does NOT prove it is
-    // objective-free (the gradient may be non-zero elsewhere — the classic
-    // `f=(x−x₀)²` started at `x₀` reads as zero). Treat every nonlinear
-    // variable as objective-coupled so its block is not eliminated as
-    // `PureEquality` under the `Safe` policy. When the TNLP declines to
-    // provide variable linearity, fall back to the probe gradient alone.
+    // H11: the probe gradient is a single sample. For any variable tagged
+    // `NonLinear` *in the objective*, a zero probe-gradient does NOT prove it
+    // is objective-free (the gradient may be non-zero elsewhere — the classic
+    // `f=(x−x₀)²` started at `x₀` reads as zero). Treat every such variable
+    // as objective-coupled so its block is not eliminated as `PureEquality`
+    // under the `Safe` policy. The tags are objective-scoped when the TNLP
+    // provides them (constraint-only nonlinearity must NOT block elimination
+    // of an objective-free block — the gas-network case); the global tags are
+    // only a conservative fallback. When the TNLP declines both, fall back to
+    // the probe gradient alone.
     if let Some(var_lin) = probe.var_linearity {
         for (i, l) in var_lin.iter().enumerate() {
             if matches!(l, Linearity::NonLinear) {
