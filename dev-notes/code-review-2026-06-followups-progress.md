@@ -11,7 +11,7 @@ code, a fail-first test where constructible, the fix, and the result.
 | F3 | H11 fix dormant (no `get_variables_linearity`) | High | ✅ fixed |
 | F4 | L7 watchdog `alpha_primal_max` — reopen | Medium | ✅ fixed |
 | F5 | L56 incomplete — session FFI unguarded | Medium | ✅ fixed |
-| F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ⬜ todo |
+| F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ✅ fixed |
 | F7 | L10 MA57 grow paths unguarded | Low | ⬜ todo |
 | F8 | M9 zero-fill in pounce-sensitivity `dense_to_vec` | Low | ⬜ todo |
 
@@ -330,4 +330,59 @@ neutralizing the two up-front clears: both tests then `FAILED` (the stale
 `session`/`last_solve` persisted); restoring the clears makes them pass.
 
 **Result.** `pounce-cinterface` full lib suite green — 49 tests (47 prior + 2
+new). fmt + clippy (correctness/suspicious gate) clean.
+
+## F6 detail — FBBT infeasibility did not roll back a Phase-0 aux clamp (Medium)
+
+**Finding.** Presolve runs Phase 0 (auxiliary-equality elimination — clamps
+variables, drops rows, pushes a `ReductionFrame` onto `reduction_stack`) before
+Phase 1b (FBBT — interval propagation over the kept nonlinear constraint DAGs,
+`crates/pounce-presolve/src/lib.rs`). Phase 1 already guards against a bad aux
+clamp: `if tighten_report.infeasible && !reduction_stack.is_empty()` it **rolls
+back Phase 0** and re-runs tightening on the un-clamped box (#53). The FBBT
+infeasibility branch (lib.rs ~704) had **no symmetric guard** — on a witness it
+restored *only* the pre-FBBT box (`fbbt_x_l_pre`/`fbbt_x_u_pre`), which is the
+*aux-clamped* box. So if an aux clamp made a kept **nonlinear** row infeasible,
+the clamp stayed in force and the IPM was handed a reduced problem that is
+infeasible *because presolve broke it* — the solver then cleanly certifies a
+"wrong infeasible" verdict on a problem whose original may be feasible. Presolve
+has no channel to certify infeasibility itself, so it must never bake in a
+reduction whose infeasibility it cannot attribute to the original.
+
+**Fix.** Mirror the Phase-1 aux rollback in the FBBT branch. When
+`report.infeasibility_witness.is_some() && !reduction_stack.is_empty()`:
+1. Restore the inner box (`inner_x_l`/`inner_x_u`), re-key every dropped row
+   (`row_kept_inner` all `true`), clear `reduction_stack`, and rebuild the full
+   `linear_rows` set so Phase 2's redundancy mask stays aligned (C1).
+2. Re-run Phase 1 bound tightening on the full (un-filtered) linear rows, with
+   the M25 guard (a genuine Phase-1 infeasibility on the un-clamped box restores
+   the inner box rather than handing the IPM crossed bounds).
+3. Re-run FBBT on the un-clamped, all-kept box. Only an infeasibility that
+   **survives** there is genuine — it then falls through to the existing
+   "discard FBBT's undefined bounds, proceed on the pre-FBBT box, let the IPM
+   certify" handling.
+
+The empty-`reduction_stack` case (no aux active) keeps the original behavior
+(restore the pre-FBBT box) — a witness there cannot be a Phase-0 artifact.
+`let report` became `let mut report` so the re-run can overwrite it (and the
+surfaced `fbbt_report()` reflects the authoritative un-clamped re-run).
+
+**Verification by running code (fail-first).** New test
+`lib.rs::fbbt_infeasibility_with_aux_clamp_rolls_back_phase0`. A 3-var/3-row
+TNLP: rows 0/1 are a square linear-equality block (`x0+x1=3`, `x0-x1=1` →
+clamps `x0=2`, `x1=1`); row 2 is tagged `NonLinear` (FBBT-handled, never a
+Phase-1 linear row) and reads `x0+x2=20` with `x2 ∈ [0,1]`, supplied as the
+FBBT tape `Add(Var(0), Var(2))` by a paired `ExpressionProvider`. Over the
+aux-clamped box `x0 ∈ [2,2]` FBBT sees `x0+x2 ∈ [2,3]`, disjoint from `20`, and
+witnesses infeasibility on row 2 — an infeasibility that exists *only* because
+the clamp pinned `x0`. The test asserts the scenario fired
+(`auxiliary_diagnostics().vars_eliminated == 2`), then that the rollback
+restored the dropped rows (`info.m == 3`), that the re-run FBBT found no witness
+(`fbbt_report().infeasibility_witness.is_none()`), and that `x0` is no longer
+pinned to 2 (FBBT re-tightens it to `[19,20]` on the free box; bounds stay
+valid). Fail-first demonstrated by neutralizing the new guard
+(`&& !reduction_stack.is_empty()` → `&& false`): the test then `FAILED` with
+`got m=1` (Phase 0's dropped rows survived); restoring the guard makes it pass.
+
+**Result.** `pounce-presolve` full lib suite green — 227 tests (226 prior + 1
 new). fmt + clippy (correctness/suspicious gate) clean.

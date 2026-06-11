@@ -689,7 +689,7 @@ impl PresolveTnlp {
                 let fbbt_x_l_pre = x_l.clone();
                 let fbbt_x_u_pre = x_u.clone();
                 let provider_borrow = provider.borrow();
-                let report = crate::fbbt::run_fbbt(
+                let mut report = crate::fbbt::run_fbbt(
                     &*provider_borrow,
                     n,
                     m_in,
@@ -701,13 +701,100 @@ impl PresolveTnlp {
                     &cfg,
                 );
                 drop(provider_borrow);
-                if report.infeasibility_witness.is_some() {
-                    // Genuine FBBT infeasibility on a kept row. Presolve has
-                    // no channel to certify infeasibility to the solver, so
-                    // — mirroring the Phase 1 rollback — discard FBBT's
-                    // corrupted bounds and let the IPM run on the pre-FBBT
-                    // box and certify infeasibility itself. The report is
-                    // still surfaced via `fbbt_report()` for diagnostics.
+                if report.infeasibility_witness.is_some() && !reduction_stack.is_empty() {
+                    // F6: an FBBT infeasibility found while a Phase-0
+                    // auxiliary elimination is in force may be an *artifact*
+                    // of that elimination — an aux clamp can make a kept
+                    // *nonlinear* row infeasible over the clamped box even
+                    // though the original problem is feasible. Restoring only
+                    // the pre-FBBT box (the `else` branch below) leaves the
+                    // aux clamps in place, so the IPM would then cleanly
+                    // certify infeasibility of a problem presolve itself broke
+                    // — a wrong "infeasible" verdict on a feasible original.
+                    // Mirror the Phase-1 aux rollback (the `tighten_report`
+                    // branch above): undo Phase 0 entirely — restore the inner
+                    // box, re-keep every dropped row, clear the reduction
+                    // stack, rebuild the full linear-row set — then re-run
+                    // Phase 1 and FBBT on the un-clamped box. Only an
+                    // infeasibility that *survives* on the un-clamped box is
+                    // genuine; presolve still cannot certify it, so it then
+                    // falls through to the same "discard FBBT bounds, let the
+                    // IPM certify" handling.
+                    tracing::warn!(
+                        target: "pounce::presolve",
+                        witness = report.infeasibility_witness,
+                        "FBBT reported a constraint infeasibility while auxiliary \
+                         elimination was active; rolling back the elimination and \
+                         re-running FBBT on the un-clamped box to avoid certifying \
+                         a presolve-induced infeasibility on a feasible original."
+                    );
+                    x_l.copy_from_slice(&inner_x_l);
+                    x_u.copy_from_slice(&inner_x_u);
+                    for kept in row_kept_inner.iter_mut() {
+                        *kept = true;
+                    }
+                    reduction_stack = ReductionStack::default();
+                    // Rebuild `linear_rows` to the full set so Phase 2's
+                    // redundancy mask stays aligned with the now all-kept
+                    // `row_kept_inner` (C1), mirroring the Phase-1 rollback.
+                    let full_linear_rows: Vec<LinearRow> =
+                        linear_row_map.iter().filter_map(|r| r.clone()).collect();
+                    tighten_report = TightenReport::default();
+                    if self.opts.bound_tightening && !full_linear_rows.is_empty() {
+                        tighten_report = tighten_bounds(
+                            &full_linear_rows,
+                            &mut x_l,
+                            &mut x_u,
+                            self.opts.max_passes,
+                            1e-12,
+                        );
+                    }
+                    linear_rows = full_linear_rows;
+                    // M25: a genuine Phase-1 infeasibility on the un-clamped
+                    // box must not reach the IPM as crossed bounds.
+                    if tighten_report.infeasible {
+                        x_l.copy_from_slice(&inner_x_l);
+                        x_u.copy_from_slice(&inner_x_u);
+                    }
+                    // Re-run FBBT on the un-clamped, all-kept box.
+                    let rerun_x_l_pre = x_l.clone();
+                    let rerun_x_u_pre = x_u.clone();
+                    let provider_borrow = provider.borrow();
+                    report = crate::fbbt::run_fbbt(
+                        &*provider_borrow,
+                        n,
+                        m_in,
+                        &mut x_l,
+                        &mut x_u,
+                        &g_l_inner,
+                        &g_u_inner,
+                        Some(&row_kept_inner),
+                        &cfg,
+                    );
+                    drop(provider_borrow);
+                    if report.infeasibility_witness.is_some() {
+                        // Survives without the aux clamp: a genuine
+                        // infeasibility of the original problem. Discard
+                        // FBBT's undefined bounds and let the IPM certify it.
+                        tracing::warn!(
+                            target: "pounce::presolve",
+                            witness = report.infeasibility_witness,
+                            "FBBT still reports infeasibility on the un-clamped box; \
+                             treating it as genuine and proceeding on the pre-FBBT \
+                             box so the IPM can certify infeasibility itself."
+                        );
+                        x_l.copy_from_slice(&rerun_x_l_pre);
+                        x_u.copy_from_slice(&rerun_x_u_pre);
+                    }
+                } else if report.infeasibility_witness.is_some() {
+                    // No aux elimination active (empty reduction stack): the
+                    // witnessed infeasibility cannot be a Phase-0 artifact.
+                    // Presolve has no channel to certify infeasibility to the
+                    // solver, so — mirroring the Phase 1 rollback — discard
+                    // FBBT's corrupted bounds and let the IPM run on the
+                    // pre-FBBT box and certify infeasibility itself. The
+                    // report is still surfaced via `fbbt_report()` for
+                    // diagnostics.
                     tracing::warn!(
                         target: "pounce::presolve",
                         witness = report.infeasibility_witness,
@@ -2440,6 +2527,192 @@ mod tests {
             (x_l[0], x_u[0]),
             (0.0, 1.0),
             "FBBT's undefined-on-infeasibility bounds must not reach the IPM (H12)"
+        );
+    }
+
+    /// 3-variable, 3-row TNLP that pits a Phase-0 auxiliary clamp against a
+    /// kept nonlinear row. Rows 0/1 are a square LINEAR equality block
+    /// (`x0 + x1 = 3`, `x0 - x1 = 1` → `(x0, x1) = (2, 1)`) that Phase 0
+    /// eliminates, clamping `x0 = 2`. Row 2 is tagged `NonLinear` (so it is
+    /// FBBT-handled, never turned into a linear row Phase 1 would catch) and
+    /// reads `x0 + x2 = 20` with `x2 ∈ [0, 1]`. Over the *aux-clamped* box
+    /// `x0 ∈ [2, 2]` FBBT sees `x0 + x2 ∈ [2, 3]`, disjoint from the required
+    /// `20`, and witnesses infeasibility on row 2 — an infeasibility that
+    /// exists ONLY because the aux clamp pinned `x0`. On the un-clamped box
+    /// `x0` is free and FBBT tightens it to `[19, 20]` with no witness.
+    struct AuxClampBreaksKeptNonlinearRow;
+    impl TNLP for AuxClampBreaksKeptNonlinearRow {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 3,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1e19;
+            b.x_u[0] = 1e19;
+            b.x_l[1] = -1e19;
+            b.x_u[1] = 1e19;
+            b.x_l[2] = 0.0;
+            b.x_u[2] = 1.0;
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            b.g_l[2] = 20.0;
+            b.g_u[2] = 20.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+                sp.x[2] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            g[2] = x[0] + x[2];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1, 2, 2]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1, 0, 2]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            // Tagged NonLinear so it is FBBT-handled, not a Phase-1 linear row.
+            types[2] = Linearity::NonLinear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Supplies the FBBT tape `x0 + x2` for row 2 only (rows 0/1 are linear
+    /// and need no tape).
+    struct AuxBreakProvider;
+    impl ExpressionProvider for AuxBreakProvider {
+        fn constraint_expression(
+            &self,
+            i: usize,
+        ) -> Option<pounce_nlp::expression_provider::FbbtTape> {
+            use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+            if i == 2 {
+                Some(FbbtTape {
+                    ops: vec![FbbtOp::Var(0), FbbtOp::Var(2), FbbtOp::Add(0, 1)],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Regression for F6 (follow-up to H12). An FBBT infeasibility witnessed
+    /// while a Phase-0 auxiliary elimination is in force must roll back that
+    /// elimination and re-run FBBT on the un-clamped box — mirroring the
+    /// Phase-1 aux rollback (#53). Restoring only the pre-FBBT box leaves the
+    /// aux clamps in place, handing the IPM a reduced problem whose
+    /// infeasibility is a presolve artifact (here `x0` pinned to 2 makes the
+    /// kept row `x0 + x2 = 20` infeasible). After the rollback the dropped
+    /// rows are restored, FBBT finds no infeasibility on the free box, and the
+    /// solver sees the full original problem.
+    #[test]
+    fn fbbt_infeasibility_with_aux_clamp_rolls_back_phase0() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(AuxClampBreaksKeptNonlinearRow));
+        let provider: Rc<RefCell<dyn ExpressionProvider>> = Rc::new(RefCell::new(AuxBreakProvider));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            bound_tightening: true,
+            fbbt: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped =
+            PresolveTnlp::with_expression_provider(Rc::clone(&inner), Rc::clone(&provider), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+
+        // Confirm the scenario actually fired: Phase 0 eliminated the 2×2
+        // linear block (clamping x0, x1). Without this the test would pass
+        // vacuously.
+        assert_eq!(
+            wrapped.auxiliary_diagnostics().vars_eliminated,
+            2,
+            "Phase 0 must have clamped the linear block — otherwise the \
+             rollback path is never exercised"
+        );
+
+        // The headline fix: the elimination is rolled back, so every dropped
+        // row is restored. Without the rollback Phase 0's two dropped rows
+        // would leave `m == 1`.
+        assert_eq!(
+            info.m, 3,
+            "FBBT infeasibility under an aux clamp must roll Phase 0 back, \
+             restoring the dropped rows (got m={})",
+            info.m
+        );
+
+        // FBBT, re-run on the un-clamped box, finds no infeasibility: the
+        // witness was an artifact of the aux clamp.
+        let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        assert!(
+            rpt.infeasibility_witness.is_none(),
+            "FBBT must not witness infeasibility on the un-clamped box, got {:?}",
+            rpt.infeasibility_witness
+        );
+
+        // x0 is no longer pinned to the aux value 2; FBBT over `x0 + x2 = 20`
+        // with `x2 ∈ [0, 1]` tightens it to `[19, 20]`. Bounds stay valid.
+        let mut x_l = vec![0.0; info.n as usize];
+        let mut x_u = vec![0.0; info.n as usize];
+        let mut g_l = vec![0.0; info.m as usize];
+        let mut g_u = vec![0.0; info.m as usize];
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        for i in 0..(info.n as usize) {
+            assert!(
+                x_l[i] <= x_u[i] + 1e-12,
+                "bounds handed to IPM must be valid: x_l[{i}]={} > x_u[{i}]={}",
+                x_l[i],
+                x_u[i]
+            );
+        }
+        assert!(
+            x_l[0] > 2.0 + 1e-6,
+            "x0 must no longer be clamped to the aux value 2 (got x_l[0]={})",
+            x_l[0]
         );
     }
 
