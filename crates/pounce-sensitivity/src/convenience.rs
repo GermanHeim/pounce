@@ -470,14 +470,32 @@ struct CallbackOut {
 }
 
 fn dense_to_vec(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
-    match v
-        .as_any()
-        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-    {
-        // `expanded_values` materializes a homogeneous vector instead
-        // of tripping `DenseVector::values`'s `!homogeneous`
-        // debug_assert (L16).
-        Some(d) => d.expanded_values(),
-        None => vec![0.0; v.dim() as usize],
+    let any = v.as_any();
+    // `expanded_values` materializes a homogeneous vector instead of tripping
+    // `DenseVector::values`'s `!homogeneous` debug_assert (L16).
+    if let Some(d) = any.downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+        return d.expanded_values();
     }
+    // M9/F8: a `CompoundVector` (e.g. a partitioned primal `x`) is the other
+    // concrete `Vector` impl the iterate can carry. Flatten its components in
+    // order — recursively, so nested compounds work — instead of silently
+    // fabricating a zero vector, which previously poisoned `SensResult.x` /
+    // the KKT residual extraction with zeros.
+    if let Some(c) = any.downcast_ref::<pounce_linalg::compound_vector::CompoundVector>() {
+        let mut out = Vec::with_capacity(v.dim() as usize);
+        for i in 0..c.n_comps() {
+            out.extend(dense_to_vec(c.comp(i)));
+        }
+        return out;
+    }
+    // No generic element accessor exists on the `Vector` trait, so an
+    // unrecognized concrete impl still falls back to zeros — but assert in
+    // debug builds so a newly-added `Vector` type is caught by tests rather
+    // than silently emitting a zero vector in release.
+    debug_assert!(
+        false,
+        "dense_to_vec: unhandled Vector impl, returning zeros (dim {})",
+        v.dim()
+    );
+    vec![0.0; v.dim() as usize]
 }

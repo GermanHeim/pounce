@@ -13,7 +13,7 @@ code, a fail-first test where constructible, the fix, and the result.
 | F5 | L56 incomplete — session FFI unguarded | Medium | ✅ fixed |
 | F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ✅ fixed |
 | F7 | L10 MA57 grow paths unguarded | Low | ✅ fixed |
-| F8 | M9 zero-fill in pounce-sensitivity `dense_to_vec` | Low | ⬜ todo |
+| F8 | M9 zero-fill in pounce-sensitivity `dense_to_vec` | Low | ✅ fixed |
 
 ---
 
@@ -435,3 +435,60 @@ run in CI where CoinHSL is installed). Verification was therefore done two ways:
 program and run — all five assertions pass, and it prints the pre-fix wrap
 (`current + 1 = i32::MIN = -2147483648`) that the guard now rejects. fmt +
 clippy (correctness/suspicious gate) clean.
+
+## F8 detail — `dense_to_vec` silently zero-filled a `CompoundVector` iterate (Low)
+
+**Finding.** The M9 review flagged two copies of a private `dense_to_vec`
+helper — `crates/pounce-sensitivity/src/solver.rs` and `convenience.rs` — that
+flatten the converged primal iterate `x` into a `Vec<Number>` (populating
+`ConvergedState.x` / `SensResult.x` and the KKT-residual extraction). The L16
+follow-up had edited only the `Some(DenseVector)` arm (swapping `values()` for
+`expanded_values()` to dodge a homogeneous-vector `debug_assert`), but left the
+fallback as
+
+```rust
+None => vec![0.0; v.dim() as usize],
+```
+
+The iterate's primal block is not always a `DenseVector`: a partitioned problem
+hands back a `CompoundVector` (the other concrete `pounce_linalg::Vector`
+impl). For such an iterate the `downcast_ref::<DenseVector>()` fails and the
+function **silently fabricated an all-zero vector of the right length**,
+poisoning `SensResult.x` and any KKT residual computed from it with zeros — no
+panic, no error, just wrong numbers.
+
+**Fix.** Both `dense_to_vec` copies now also match the `CompoundVector` case
+and flatten its components in order — recursively, so a nested compound also
+works:
+
+```rust
+if let Some(c) = any.downcast_ref::<pounce_linalg::compound_vector::CompoundVector>() {
+    let mut out = Vec::with_capacity(v.dim() as usize);
+    for i in 0..c.n_comps() {
+        out.extend(dense_to_vec(c.comp(i)));
+    }
+    return out;
+}
+```
+
+The `Vector` trait has no generic element accessor, so a genuinely-unknown
+concrete impl still falls back to zeros — but now behind a
+`debug_assert!(false, …)`, so a newly-added `Vector` type is caught by the test
+suite in debug builds rather than silently emitting zeros in release.
+
+**Verification by running code.** New unit tests in `solver.rs`:
+`dense_to_vec_flattens_compound_vector_components` builds a two-block
+`CompoundVector` (`[1.5, -2.0]` ‖ `[7.0, 0.25, -9.0]`) and asserts
+`dense_to_vec` returns the concatenated real values (and explicitly *not*
+`vec![0.0; 5]`); `dense_to_vec_handles_plain_dense_vector` covers the existing
+`DenseVector` path. Fail-first was demonstrated by neutralizing the new
+`CompoundVector` arm (`if false /* FAILFIRST */`): the compound test then falls
+through to the fallback and fails — the `debug_assert!(false, "… returning
+zeros (dim 5)")` fires in the debug test build (in release it would have
+returned the zero vector the fix exists to prevent) — and passes again once the
+arm is restored. Full `pounce-sensitivity` lib suite (51 tests) green; fmt +
+clippy (correctness/suspicious gate) clean.
+
+> **Merge note.** This finding's files (`solver.rs` / `convenience.rs`) overlap
+> the area touched by the updated `main` (#129/#130). The fix is applied here
+> against the branch as-is; reconcile with main at merge time.
