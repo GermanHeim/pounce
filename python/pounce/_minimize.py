@@ -29,7 +29,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._pounce import Problem
-from ._route import classify_and_extract, classify_and_extract_socp
+from ._route import _point_cache, classify_and_extract, classify_and_extract_socp
 
 # Central-difference step. The optimal step for a central difference is
 # ``~eps**(1/3)`` (≈6.06e-6), balancing the ``O(h^2)`` truncation error against
@@ -63,6 +63,15 @@ _QP_STATUS_CODE = {
 # made HS071 and similar problems report ``success=False`` at a verified
 # optimum. Codes 2..6 (infeasible, tiny step, diverging, …) stay failures.
 _NLP_SUCCESS_STATUS = frozenset({0, 1})
+
+# Statuses for which the KKT-error fallback below must NOT upgrade the solve to
+# ``success=True``. ``User_Requested_Stop`` (5) means the solve was aborted by
+# the user's ``intermediate`` callback — or, via M32, by a callback that raised
+# (which the bridge maps to this same status). That is an external abort, not a
+# numerical stall at an acceptable point, so judging it "successful" because the
+# last computed KKT error happened to be small is wrong and can mask a crashing
+# callback. (L50)
+_NO_KKT_FALLBACK_STATUS = frozenset({5})
 
 
 @dataclass
@@ -167,8 +176,15 @@ def _normalize_bounds(bounds, n: int):
     return lb, ub
 
 
-def _wrap_constraints(constraints, n: int):
-    """Coalesce scipy-style constraint dict(s) into one g(x) + (cl, cu)."""
+def _wrap_constraints(constraints, n: int, x0=None):
+    """Coalesce scipy-style constraint dict(s) into one g(x) + (cl, cu).
+
+    Each constraint function is probed once to learn its output dimension.
+    The probe point is the user's ``x0`` when supplied (falling back to the
+    origin only when no ``x0`` is available), so a constraint that is
+    undefined at the origin — but defined at a feasible start — does not
+    spuriously fail before the solve even begins (L47).
+    """
     if not constraints:
         return 0, None, None, None, None
     if isinstance(constraints, dict):
@@ -195,7 +211,7 @@ def _wrap_constraints(constraints, n: int):
         funs.append(c["fun"])
         jacs.append(c.get("jac"))
 
-    probe = np.zeros(n)
+    probe = np.zeros(n) if x0 is None else np.asarray(x0, dtype=float).ravel()
     sizes = [int(_to_array(fn(probe)).size) for fn in funs]
     m_total = int(sum(sizes))
 
@@ -204,11 +220,13 @@ def _wrap_constraints(constraints, n: int):
 
     def jac_combined(x):
         rows = []
-        for fn, jc in zip(funs, jacs):
+        # Reuse the per-constraint row counts learned during probing
+        # instead of re-evaluating ``fn(x)`` for a size we already know;
+        # the FD path still calls ``fn`` internally to build the columns.
+        for fn, jc, m_i in zip(funs, jacs, sizes):
             if jc is not None:
                 rows.append(np.atleast_2d(_to_array(jc(x))))
             else:
-                m_i = _to_array(fn(x)).size
                 rows.append(_finite_diff_jac(fn, x, m_i))
         return np.vstack(rows)
 
@@ -300,8 +318,16 @@ def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
     from .qp import solve_qp
 
     res = solve_qp(
-        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, lb=ex.lb, ub=ex.ub,
-        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+        P=ex.P,
+        c=ex.c,
+        A=ex.A,
+        b=ex.b,
+        G=ex.G,
+        h=ex.h,
+        lb=ex.lb,
+        ub=ex.ub,
+        tol=opts.get("tol"),
+        max_iter=opts.get("max_iter"),
     )
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
@@ -339,8 +365,15 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
     from .qp import solve_socp
 
     res = solve_socp(
-        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, cones=ex.cones,
-        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+        P=ex.P,
+        c=ex.c,
+        A=ex.A,
+        b=ex.b,
+        G=ex.G,
+        h=ex.h,
+        cones=ex.cones,
+        tol=opts.get("tol"),
+        max_iter=opts.get("max_iter"),
     )
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
@@ -371,9 +404,7 @@ def _any_constraint_without_jac(constraints) -> bool:
         return False
     if isinstance(constraints, dict):
         constraints = [constraints]
-    return any(
-        isinstance(c, dict) and c.get("jac") is None for c in constraints
-    )
+    return any(isinstance(c, dict) and c.get("jac") is None for c in constraints)
 
 
 def minimize(
@@ -407,6 +438,13 @@ def minimize(
     * ``"socp"`` — force the conic solver, raising ``ValueError`` if the
       problem is not detected as a convex QCQP.
 
+    Auto-routing has a cost: detection probes the opaque callables and
+    finite-differences a quadratic model of the objective (and any
+    constraints), which is ``O(n²)`` extra ``fun`` evaluations. For a problem
+    that ultimately lands on the NLP path this probing is pure overhead, so if
+    you already know your problem is a general NLP — or ``fun`` is expensive —
+    pass ``options={"solver_selection": "nlp"}`` to skip routing entirely.
+
     Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
     Pass ``options={"disp": True}`` for a concise log or an explicit
     ``options={"print_level": N}`` (0–12) to control the NLP backend's IPM
@@ -417,11 +455,16 @@ def minimize(
     x0 = np.atleast_1d(_to_array(x0))
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
-    m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+    m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n, x0)
 
     # Solver routing (mirrors the CLI's `solver_selection`). Pop the routing
     # keys so the remainder of `options` still flows to the NLP solver.
     opts = dict(options) if options else {}
+    # Remember which options the *user* actually asked for, before we pop
+    # routing keys or inject defaults (`disp`/`print_level` below). The convex
+    # routers honor only a subset, so this lets us warn about the rest (L48)
+    # instead of silently discarding them.
+    requested_opt_keys = set(opts)
     selection = str(opts.pop("solver_selection", "auto")).lower()
     route_tol = float(opts.pop("route_tol", 1e-5))
     # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
@@ -431,11 +474,49 @@ def minimize(
     # print_level or scipy-style disp=True. (#115)
     disp = bool(opts.pop("disp", False))
     opts.setdefault("print_level", 5 if disp else 0)
+    # The LP/QP and SOCP routers probe an identical point set (same seed) and
+    # FD-fit the same objective; on the `auto` path both run in sequence, so
+    # without sharing they evaluate the objective Hessian twice (~8n² extra
+    # `fun` calls at FD, tens of thousands at n≈50). Wrap the router callables
+    # in one shared point-cache so the second router's probes are cache hits.
+    # Only these router copies are cached; the NLP fallback below still calls
+    # the original `fun`/`jac`/… so the actual solve is unaffected.
     route_kw = dict(
-        fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
-        g_combined=g_combined, jac_combined=jac_combined,
-        cl=cl, cu=cu, x0=x0, rtol=route_tol,
+        fun=_point_cache(fun),
+        jac=_point_cache(jac),
+        hess=_point_cache(hess),
+        lb=lb,
+        ub=ub,
+        m=m,
+        g_combined=_point_cache(g_combined),
+        jac_combined=_point_cache(jac_combined),
+        cl=cl,
+        cu=cu,
+        x0=x0,
+        rtol=route_tol,
     )
+    # Options the dedicated convex (LP/QP/SOCP) routers actually honor; the
+    # routing key and tolerance are consumed here, not "ignored". Everything
+    # else the user passed (e.g. `print_level`, `disp`, `acceptable_tol`) has
+    # no effect on the convex path, so warn rather than drop silently (L48).
+    # `disp` is deliberately NOT in this set: `_solve_via_convex` /
+    # `_solve_via_socp` read only `tol` / `max_iter`, so `disp=True` is dropped
+    # on the convex routes and must trigger the warning below.
+    _CONVEX_HONORED = {"solver_selection", "route_tol", "tol", "max_iter"}
+
+    def _warn_convex_dropped_opts(route_name: str) -> None:
+        ignored = sorted(requested_opt_keys - _CONVEX_HONORED)
+        if hess is not None:
+            ignored.append("hess (argument)")
+        if ignored:
+            warnings.warn(
+                f"pounce.minimize routed this problem to the dedicated {route_name} "
+                "solver, which honors only 'tol' and 'max_iter'. These were ignored: "
+                f"{ignored}. Pass solver_selection='nlp' to force the general NLP "
+                "solver, which honors them.",
+                stacklevel=2,
+            )
+
     if selection in ("auto", "lp-ipm", "qp-ipm"):
         extract = classify_and_extract(**route_kw)
         if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
@@ -449,12 +530,14 @@ def minimize(
                 "a convex LP/QP (convex-quadratic objective + linear constraints)"
             )
         if extract is not None:
+            _warn_convex_dropped_opts("convex LP/QP")
             return _solve_via_convex(extract, opts)
         # Auto: an LP/QP wasn't found — try a convex QCQP before giving up to
         # the NLP solver (a quadratic *constraint* lands here, not above).
         if selection == "auto":
             socp = classify_and_extract_socp(**route_kw)
             if socp is not None:
+                _warn_convex_dropped_opts("convex SOCP")
                 return _solve_via_socp(socp, opts)
     elif selection == "socp":
         socp = classify_and_extract_socp(**route_kw)
@@ -464,6 +547,7 @@ def minimize(
                 "convex QCQP (convex-quadratic objective and/or constraints, all "
                 "convex, with only linear equalities)"
             )
+        _warn_convex_dropped_opts("convex SOCP")
         return _solve_via_socp(socp, opts)
 
     # (D, gh #123) The NLP path finite-differences any derivative the caller
@@ -477,14 +561,28 @@ def minimize(
     if jac is None:
         fd_targets.append("the objective gradient (pass jac=...)")
     if m > 0 and _any_constraint_without_jac(constraints):
-        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each "
-                          "constraint dict)")
+        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each constraint dict)")
     if fd_targets:
         warnings.warn(
-            "pounce.minimize is approximating " + " and ".join(fd_targets)
+            "pounce.minimize is approximating "
+            + " and ".join(fd_targets)
             + " by finite differences. This is slower and less accurate than "
             "analytic derivatives. For a faster, more robust solve supply them "
             "directly, or use the autodiff frontends pounce.jax / pounce.torch.",
+            stacklevel=2,
+        )
+
+    # (L48) The NLP wrapper can only supply the *objective* Hessian; it has no
+    # way to assemble the constraint-curvature term ``Σ λᵢ ∇²gᵢ`` the IPM needs
+    # for the full Lagrangian Hessian. So a user-supplied ``hess`` is honored
+    # only for unconstrained problems (`m == 0`); with constraints the solver
+    # falls back to L-BFGS. Warn rather than drop it silently.
+    if hess is not None and m > 0:
+        warnings.warn(
+            "pounce.minimize ignores the supplied 'hess' when constraints are "
+            "present: the wrapper cannot form the constraint-curvature term of "
+            "the Lagrangian Hessian, so the solver uses an L-BFGS approximation. "
+            "The objective Hessian is used only for unconstrained problems.",
             stacklevel=2,
         )
 
@@ -525,7 +623,9 @@ def minimize(
     acceptable_tol = float(opts.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
     kkt_error = float(info.get("final_kkt_error", float("nan")))
     success = status_code in _NLP_SUCCESS_STATUS or (
-        np.isfinite(kkt_error) and kkt_error <= acceptable_tol
+        status_code not in _NO_KKT_FALLBACK_STATUS
+        and np.isfinite(kkt_error)
+        and kkt_error <= acceptable_tol
     )
     return OptimizeResult(
         x=np.asarray(x),
