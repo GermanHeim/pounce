@@ -2620,6 +2620,38 @@ impl TNLP for NlTnlp {
         }
         true
     }
+
+    fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        // Global linearity, per the upstream TNLP contract: a variable is
+        // NonLinear iff it appears in the nonlinear part of the objective
+        // or of any constraint; otherwise Linear. The parsed `.nl` splits
+        // every row into a linear part (J/G coefficient list) and a
+        // nonlinear expression, so the set of nonlinear variables is
+        // exactly the structural union of `collect_vars` over
+        // `obj_nonlinear` and every `con_nonlinear` row. A variable touched
+        // only by a linear part — or not referenced at all — is Linear.
+        //
+        // Reporting this (rather than leaving the default `false` stub)
+        // is what engages the presolve auxiliary-elimination safeguard
+        // (pounce-presolve H11): a variable that is nonlinear in the
+        // objective but happens to have a zero gradient at the single
+        // probe point (e.g. `f = (x - x0)^2` warm-started at `x0`) is kept
+        // in the objective support instead of being mis-classified
+        // objective-free and eliminated.
+        let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
+        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
+        for row in &self.prob.con_nonlinear {
+            collect_vars(row, &mut nonlinear);
+        }
+        for (i, t) in types.iter_mut().enumerate() {
+            *t = if nonlinear.contains(&i) {
+                Linearity::NonLinear
+            } else {
+                Linearity::Linear
+            };
+        }
+        true
+    }
 }
 
 /// Convenience: read an `.nl` file and build a TNLP-compatible Rc.
@@ -2760,6 +2792,67 @@ b
         // d/dx1 = 2*(x1-2) = -2.0
         assert!((g[0] - (-1.0)).abs() < 1e-12);
         assert!((g[1] - (-2.0)).abs() < 1e-12);
+    }
+
+    /// F3 (H11 dormant): `NlTnlp` must answer `get_variables_linearity`
+    /// with global semantics so the presolve auxiliary-elimination
+    /// safeguard actually engages. Pre-fix the default trait stub returned
+    /// `false` and left the slice untouched, so a variable that is
+    /// nonlinear in the objective but zero-gradient at the probe point
+    /// could be wrongly eliminated.
+    ///
+    /// Problem: `min (x0 - 1)^2 + 3*x1`. x0 appears in the nonlinear part
+    /// of the objective (NonLinear); x1 appears only in the linear part
+    /// (Linear).
+    #[test]
+    fn variables_linearity_tags_obj_nonlinear_vs_linear_vars() {
+        // (x0 - 1)^2
+        let obj_nl = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Binary(
+                BinOp::Sub,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(1.0)),
+            )),
+            Box::new(Expr::Const(2.0)),
+        );
+        let prob = NlProblem {
+            n: 2,
+            m: 0,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: obj_nl,
+            obj_linear: vec![(1, 3.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            x_l: vec![f64::NEG_INFINITY; 2],
+            x_u: vec![f64::INFINITY; 2],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![0.0; 2],
+            lambda0: vec![],
+            suffixes: NlSuffixes::default(),
+            imported_funcs: vec![],
+            var_names: vec![],
+            con_names: vec![],
+        };
+        let mut tnlp = NlTnlp::new(prob);
+        let mut types = vec![Linearity::Linear; 2];
+        let ok = tnlp.get_variables_linearity(&mut types);
+        // Pre-fix: default stub returns false (slice untouched).
+        assert!(
+            ok,
+            "get_variables_linearity must report it filled the slice"
+        );
+        assert!(
+            matches!(types[0], Linearity::NonLinear),
+            "x0 is nonlinear in the objective"
+        );
+        assert!(
+            matches!(types[1], Linearity::Linear),
+            "x1 appears only in the linear part"
+        );
     }
 
     /// `min x0^2 + x1^2  s.t.  x0 + x1 = 1`.

@@ -8,7 +8,7 @@ code, a fail-first test where constructible, the fix, and the result.
 |----|-------|-----|--------|
 | F1 | H3 duals off by `obj_scale_factor` | High | ✅ fixed |
 | F2 | H1 inertia-shift δ + unbounded-QP false positive | Med-High | ✅ fixed |
-| F3 | H11 fix dormant (no `get_variables_linearity`) | High | ⬜ todo |
+| F3 | H11 fix dormant (no `get_variables_linearity`) | High | ✅ fixed |
 | F4 | L7 watchdog `alpha_primal_max` — reopen | Medium | ⬜ todo |
 | F5 | L56 incomplete — session FFI unguarded | Medium | ⬜ todo |
 | F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ⬜ todo |
@@ -143,3 +143,52 @@ The N1 case (`Unbounded` pre-fix) and the active-set case (`MaxIter` pre-fix,
 **Result.** `pounce-qp` full suite green — 83 lib tests + integration
 (`mm_published_optima` real Maros-Meszaros QPs confirm bounded problems are not
 falsely flagged). fmt + clippy (correctness/suspicious gate) clean.
+
+---
+
+## F3 detail — H11 presolve safeguard was dormant (High)
+
+**Finding.** The L-batch fix H11 added a guard in the Phase-0 presolve
+auxiliary-elimination pass (`pounce-presolve/src/auxiliary.rs:270-281`): it
+unions every variable upstream tagged `NonLinear` into the objective support,
+so a variable that is nonlinear in the objective but merely *zero-gradient at
+the single probe point* (the canonical case `f = (x − x0)²` warm-started at
+`x0`, where `∇f(x0) = 0`) is not mis-classified objective-free and eliminated.
+The guard reads the tags from `TNLP::get_variables_linearity`. But the only
+implementation of that trait method was the **default stub**
+(`pounce-nlp/src/tnlp.rs:223`, `-> false`, slice untouched), so on every
+production path `have_var_linearity` was `false`, `probe.var_linearity` was
+`None`, and the H11 union never ran. The safeguard was dead code: its unit
+tests (`auxiliary.rs:1002-1065`) pass *tags by hand* and so never exercised the
+real (untagged) production path.
+
+**Root cause.** `NlTnlp` (the `.nl`-backed TNLP, the production entry point for
+every AMPL/`pounce`-CLI solve) implemented `get_constraints_linearity` but not
+`get_variables_linearity`, falling through to the `false` default. The tape
+already knows exactly which variables are nonlinear, so the information was
+available — just never surfaced.
+
+**Fix.** Implement `get_variables_linearity` on `NlTnlp`
+(`crates/pounce-nl/src/nl_reader.rs`, beside `get_constraints_linearity`) with
+the upstream **global** semantics: a variable is `NonLinear` iff it appears in
+the nonlinear part of the objective or of any constraint, else `Linear`. The
+parsed `.nl` already separates each row into a linear coefficient list and a
+nonlinear `Expr`, so the nonlinear set is exactly the structural union of the
+existing `collect_vars` walk over `obj_nonlinear` and every `con_nonlinear`
+row. This honors the documented contract and engages H11 on every solve. (The
+alternative the verifier floated — making the *untagged* case conservative in
+the presolve — was rejected: it would broadly regress legitimate
+auxiliary-elimination for every TNLP that genuinely returns no tags.)
+
+**Verification by running code (fail-first).** New unit test
+`crates/pounce-nl/src/nl_reader.rs::variables_linearity_tags_obj_nonlinear_vs_linear_vars`
+builds `min (x0 − 1)² + 3·x1` (x0 nonlinear in the objective, x1 only in the
+linear part) and asserts `get_variables_linearity` returns `true` with
+`[NonLinear, Linear]`. Demonstrated fail-first by temporarily reverting the
+body to the stub (`-> false`, slice untouched): the test panics
+`get_variables_linearity must report it filled the slice`. Post-fix it passes.
+
+**Result.** `pounce-nl` full suite green (89 lib tests, incl. the new one);
+`pounce-presolve` 226 lib tests green (the H11 path now active on the real
+no-hand-tags route, no regression). fmt + clippy (correctness/suspicious gate)
+clean.
