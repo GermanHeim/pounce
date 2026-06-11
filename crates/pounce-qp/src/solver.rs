@@ -568,40 +568,59 @@ impl ParametricActiveSetSolver {
         let mut lambda_g = vec![0.0; qp.m];
         lambda_g.copy_from_slice(&rhs[qp.n..]);
 
-        // H1: the inertia-control retry solved the *shifted* system
+        // H1 / N1: the inertia-control retry solved the *shifted* system
         // `(H+δI)` when `δ > 0`, which it must do whenever the reduced
-        // Hessian is not PD on null(A). The shifted solution satisfies
-        // `(H+δI)x + Aᵀλ + g = 0`, so the *true* (unshifted)
-        // stationarity residual on the primal block is exactly `-δx`.
+        // Hessian is not PD on null(A). A `δ > 0` solve is consistent with
+        // BOTH a bounded QP (the regularizer merely picks the min-norm
+        // point along a flat, gradient-free direction) and an unbounded
+        // one — so the shift alone proves nothing.
         //
-        // Two regimes produce `δ > 0`, and they differ by orders of
-        // magnitude in `‖δx‖`:
-        //   * Bounded QP, flat (zero-curvature) direction not driven by
-        //     g — the regularizer just picks the min-norm point along
-        //     the flat direction, so `‖x‖` stays `O(‖x*‖)` and the
-        //     residual is `δ·‖x*‖` ≈ `δ_initial·O(1)` (Tikhonov noise).
-        //   * Unbounded QP — g has a descent component along the
-        //     null/negative-curvature direction, so the regularized
-        //     `x` blows up like `‖g_null‖/δ` and the residual is
-        //     `δ·‖x‖ ≈ ‖g_null‖ = O(‖g‖)`, independent of δ.
+        // The discriminator is a *certified recession ray*. A QP
+        // `min ½xᵀHx + gᵀx  s.t. Ax = b` is unbounded below iff there is a
+        // direction `d` with `Hd = 0` (zero curvature — for PSD H
+        // equivalent to `dᵀHd = 0`), `Ad = 0` (stays feasible), and
+        // `gᵀd < 0` (descent). The shifted solve manufactures exactly
+        // this witness when one exists: any descent component of `-g`
+        // lying in a zero-curvature, feasible direction is amplified by
+        // `1/δ`, so the normalized iterate `d = x/‖x‖` converges to that
+        // recession ray as `δ → 0`. We therefore certify the three
+        // conditions directly on `d`.
         //
-        // We must NOT compare against `opt_tol` (1e-9): `δ_initial`
-        // (1e-8) already exceeds it, so every shifted *bounded* solve
-        // would false-positive. The discriminator is the gradient
-        // scale — a macroscopic fraction of `‖g‖` in the residual means
-        // -g genuinely drives the regularized direction, the
-        // certificate of unboundedness. Report `Unbounded` rather than
-        // a δ-dependent garbage `Optimal` (pre-fix, `min gᵀx`, H=0 gave
-        // `x = -g/δ` with `status: Optimal`).
+        // This replaces the earlier magnitude heuristic `δ·‖x‖∞ >
+        // 1e-3·‖g‖∞`, which fired on any large `‖x‖` and could not
+        // distinguish a large-but-finite minimizer in a *curved*
+        // direction (e.g. `H = diag(1e-6, 0)`, `g = (-1, 0)`: the curved
+        // x₁ runs out to its finite optimum ≈ 1e6) from a genuine blow-up
+        // along a *flat* descent ray (N1 false positive). The curvature
+        // clause `dᵀHd ≈ 0 relative to ‖H‖` rejects the former (there
+        // `dᵀHd ≈ ‖H‖`) and admits the latter.
         if delta > 0.0 {
-            let x_inf = x.iter().map(|v| v.abs()).fold(0.0, f64::max);
-            let g_inf = qp.g.iter().map(|v| v.abs()).fold(0.0, f64::max);
-            let stationarity_resid = delta * x_inf;
-            // 1e-3·max(‖g‖∞,1): comfortably above the `δ_initial·O(1)`
-            // Tikhonov floor of a bounded solve, far below the `O(‖g‖)`
-            // residual of a genuine blow-up (an ~8-order gap in
-            // practice). The `max(.,1)` floors tiny-gradient problems.
-            if stationarity_resid > 1e-3 * g_inf.max(1.0) {
+            // Feasibility of the candidate ray `d = x/‖x‖`: the saddle
+            // solve enforced `Ax = b` exactly, so `Ad = b/‖x‖`, which the
+            // blow-up drives to ~0. Verify it explicitly (cheap guard;
+            // trivially satisfied in the unconstrained `m = 0` case), then
+            // delegate the curvature + descent clauses to the shared test.
+            let x_norm = x.iter().map(|v| v * v).sum::<Number>().sqrt();
+            let feasible_ray = if x_norm > 0.0 {
+                let inv = 1.0 / x_norm;
+                let mut ad = vec![0.0; qp.m];
+                let mut a_scale: Number = 0.0;
+                let irows = qp.a.irows();
+                let jcols = qp.a.jcols();
+                let vals = qp.a.values();
+                for k in 0..irows.len() {
+                    let i = (irows[k] - 1) as usize;
+                    let j = (jcols[k] - 1) as usize;
+                    a_scale = a_scale.max(vals[k].abs());
+                    ad[i] += vals[k] * x[j] * inv;
+                }
+                let ad_inf = ad.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                ad_inf <= 1e-6 * (1.0 + a_scale)
+            } else {
+                false
+            };
+
+            if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x) {
                 return Ok(QpSolution {
                     x,
                     lambda_g,
@@ -728,7 +747,8 @@ impl ParametricActiveSetSolver {
                 *rhs_i = -(hx_i + g_i);
             }
 
-            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
+            let delta =
+                self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
             n_refactor += 1;
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -891,6 +911,34 @@ impl ParametricActiveSetSolver {
             }
 
             let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
+
+            // F2(a): certified unboundedness on the active-set path. An
+            // empty candidate list means NO inactive row or bound blocks
+            // along `+p` (and `p` already lies in the active constraints'
+            // null space), so `+p` is feasible for every step length — a
+            // recession ray if it is also zero-curvature and descent.
+            // We only reach for this when the inertia shift fired
+            // (`delta > 0`, i.e. the reduced Hessian was singular on the
+            // active null space); a PD reduced Hessian gives a finite
+            // Newton step and never trips here. Without this the loop
+            // takes unbounded full steps until `MaxIter` (δ discarded).
+            if candidates.is_empty() && delta > 0.0 && ray_is_unbounded_descent(qp.h, qp.g, &p) {
+                return Ok(QpSolution {
+                    obj: Number::NEG_INFINITY,
+                    x,
+                    lambda_g: vec![0.0; m],
+                    lambda_x: vec![0.0; n],
+                    working,
+                    status: QpStatus::Unbounded,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates: 0,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
 
             if alpha < 0.0 {
                 alpha = 0.0;
@@ -1332,6 +1380,33 @@ impl ParametricActiveSetSolver {
                 }
             }
             let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
+
+            // F2(a), Schur path. Same certificate as `solve_general`: an
+            // empty candidate list means `+p` is feasible for every step
+            // length, so a zero-curvature descent `p` is a recession ray.
+            // The Schur driver hides the per-iterate inertia shift inside
+            // `SchurState`, so unlike `solve_general` we cannot gate on
+            // `delta > 0` here — but `ray_is_unbounded_descent` already
+            // rejects any curved (PD-reduced-Hessian) Newton step via its
+            // `dᵀHd ≈ 0` clause, so the unconditional check is still safe.
+            if candidates.is_empty() && ray_is_unbounded_descent(qp.h, qp.g, &p) {
+                return Ok(QpSolution {
+                    obj: Number::NEG_INFINITY,
+                    x,
+                    lambda_g: vec![0.0; m],
+                    lambda_x: vec![0.0; n],
+                    working,
+                    status: QpStatus::Unbounded,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
+
             if alpha < 0.0 {
                 alpha = 0.0;
             }
@@ -1748,6 +1823,78 @@ fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
         }
     }
     true
+}
+
+/// Two intrinsic clauses of a certified-recession-ray test for QP
+/// unboundedness. A QP `min ½xᵀHx + gᵀx s.t. Ax = b` is unbounded
+/// below iff there is a direction `d` with `Hd = 0` (zero curvature —
+/// for PSD `H` equivalent to `dᵀHd = 0`), `Ad = 0` (stays feasible),
+/// and `gᵀd < 0` (descent). This helper checks the two clauses that
+/// depend only on `(H, g)`:
+///   (i)  zero curvature  `dᵀHd ≈ 0` relative to `‖H‖`  (H ≡ 0 ⇒ flat),
+///   (ii) strict descent  `gᵀd < 0`.
+///
+/// **Feasibility of the ray is the caller's responsibility** — the two
+/// call sites certify it by different (both locally valid) arguments:
+/// the equality-only solve maintains `Ax = b` so `A(x/‖x‖) = b/‖x‖ → 0`
+/// as the iterate blows up; the active-set loop reaches its check only
+/// when the ratio test finds NO inactive row blocking along `dir` (and
+/// `dir` already lies in the active constraints' null space).
+///
+/// `dir` need not be normalized — the test is scale-invariant. The
+/// curvature tolerance `1e-3·‖H‖` separates a genuine zero-curvature
+/// ray (where `dᵀHd/‖H‖` is `O((δ/‖H‖)²)`, driven to ~0 by the shrinking
+/// inertia shift `δ`) from a large-but-finite minimizer in a *curved*
+/// direction (where `dᵀHd ≈ ‖H‖`, ratio `O(1)`) — the N1 false-positive
+/// class. Ambiguous near-floor-curvature cases fall on the conservative
+/// side (reported bounded, not falsely unbounded).
+fn ray_is_unbounded_descent(
+    h: &pounce_linalg::triplet::SymTMatrix,
+    g: &[Number],
+    dir: &[Number],
+) -> bool {
+    let norm = dir.iter().map(|v| v * v).sum::<Number>().sqrt();
+    if norm == 0.0 {
+        return false;
+    }
+    let inv = 1.0 / norm;
+
+    // dᵀHd and ‖H‖ (max |stored entry|), using the symmetric triplet
+    // convention (off-diagonal pairs stored once ⇒ count twice).
+    let mut dhd: Number = 0.0;
+    let mut h_scale: Number = 0.0;
+    let irows = h.irows();
+    let jcols = h.jcols();
+    let vals = h.values();
+    for k in 0..irows.len() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        let v = vals[k];
+        h_scale = h_scale.max(v.abs());
+        let di = dir[i] * inv;
+        let dj = dir[j] * inv;
+        dhd += if i == j {
+            v * di * di
+        } else {
+            2.0 * v * di * dj
+        };
+    }
+    let zero_curvature = if h_scale > 0.0 {
+        dhd.abs() <= 1e-3 * h_scale
+    } else {
+        true // H ≡ 0: every direction is a zero-curvature ray.
+    };
+
+    // gᵀd vs ‖g‖₂ — strict (numerically meaningful) descent.
+    let g_dot_d: Number = g
+        .iter()
+        .zip(dir.iter())
+        .map(|(&gi, &di)| gi * di * inv)
+        .sum();
+    let g_norm = g.iter().map(|v| v * v).sum::<Number>().sqrt();
+    let descent = g_dot_d < -1e-6 * g_norm.max(1.0);
+
+    zero_curvature && descent
 }
 
 fn quad_objective(qp: &QpProblem, x: &[Number]) -> Number {
