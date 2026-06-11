@@ -74,7 +74,7 @@ const FALSE: Bool = 0;
 /// user-supplied `extern "C"` callback aborts at that callback's own ABI
 /// boundary, before unwinding can reach here — that is the caller's
 /// responsibility, exactly as in the C/C++ original.
-fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
+pub(crate) fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(r) => r,
         Err(_) => fallback,
@@ -543,6 +543,14 @@ pub unsafe extern "C" fn IpoptSolve(
     if ipopt_problem.is_null() {
         return ApplicationReturnStatus::InternalError as Index;
     }
+    // Invalidate the retained stats up front, before the solve is attempted.
+    // The `last_solve` snapshot is only repopulated at the *end* of a
+    // completed solve, so if the guarded body below bails early or a panic is
+    // caught (returning `Internal_Error`), the post-solve accessors
+    // (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …) must not silently
+    // report the *previous* solve's stats. Clearing here makes the
+    // failure-consistent state "no data" rather than stale data (F5).
+    (*ipopt_problem).last_solve = None;
     // Guard the whole solve: `optimize_tnlp` runs the entire pounce core and
     // callback bridge, any of which could panic on an unexpected internal
     // state. Without this, such a panic would unwind across `extern "C"` and
@@ -1600,53 +1608,59 @@ pub unsafe extern "C" fn IpoptWriteSolveReport(
         status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
     };
 
-    if ipopt_problem.is_null() || path.is_null() {
-        return FALSE;
-    }
-    let info = unsafe { &*ipopt_problem };
-    let Some(last) = info.last_solve.as_ref() else {
-        return FALSE;
-    };
-
-    let Ok(path_str) = (unsafe { CStr::from_ptr(path) }).to_str() else {
-        return FALSE;
-    };
-
-    let detail_choice = if detail.is_null() {
-        ReportDetail::Summary
-    } else {
-        let Ok(detail_str) = (unsafe { CStr::from_ptr(detail) }).to_str() else {
+    // Guard the report build/write: it clones the retained iterate and runs
+    // the `pounce-solve-report` serializer + file I/O, any of which could
+    // panic on an unexpected state. A panic unwinding across `extern "C"`
+    // aborts the embedding process; report `FALSE` instead. (See `ffi_guard`.)
+    ffi_guard(FALSE, || unsafe {
+        if ipopt_problem.is_null() || path.is_null() {
+            return FALSE;
+        }
+        let info = &*ipopt_problem;
+        let Some(last) = info.last_solve.as_ref() else {
             return FALSE;
         };
-        match ReportDetail::parse(detail_str) {
-            Ok(d) => d,
-            Err(_) => return FALSE,
+
+        let Ok(path_str) = CStr::from_ptr(path).to_str() else {
+            return FALSE;
+        };
+
+        let detail_choice = if detail.is_null() {
+            ReportDetail::Summary
+        } else {
+            let Ok(detail_str) = CStr::from_ptr(detail).to_str() else {
+                return FALSE;
+            };
+            match ReportDetail::parse(detail_str) {
+                Ok(d) => d,
+                Err(_) => return FALSE,
+            }
+        };
+
+        let mut builder = ReportBuilder::new(detail_choice, InputDescriptor::TnlpDirect);
+        builder.problem.n_variables = info.n;
+        builder.problem.n_constraints = info.m;
+        builder.problem.n_objectives = 1;
+        builder.problem.nnz_jac_g = Some(info.nele_jac);
+        builder.problem.nnz_h_lag = Some(info.nele_hess);
+
+        builder.solution.status = last.status;
+        builder.solution.solve_result_num = status_to_solve_result_num(last.status);
+        builder.solution.objective = last.final_obj;
+        builder.solution.x = last.final_x.clone();
+        builder.solution.lambda = last.final_lambda.clone();
+
+        builder.ingest_stats(&last.stats);
+        if let Some(linsol) = last.linear_solver.clone() {
+            builder.set_linear_solver_summary(linsol);
         }
-    };
 
-    let mut builder = ReportBuilder::new(detail_choice, InputDescriptor::TnlpDirect);
-    builder.problem.n_variables = info.n;
-    builder.problem.n_constraints = info.m;
-    builder.problem.n_objectives = 1;
-    builder.problem.nnz_jac_g = Some(info.nele_jac);
-    builder.problem.nnz_h_lag = Some(info.nele_hess);
-
-    builder.solution.status = last.status;
-    builder.solution.solve_result_num = status_to_solve_result_num(last.status);
-    builder.solution.objective = last.final_obj;
-    builder.solution.x = last.final_x.clone();
-    builder.solution.lambda = last.final_lambda.clone();
-
-    builder.ingest_stats(&last.stats);
-    if let Some(linsol) = last.linear_solver.clone() {
-        builder.set_linear_solver_summary(linsol);
-    }
-
-    let report = builder.finish();
-    match write_report_file(std::path::Path::new(path_str), &report) {
-        Ok(_) => TRUE,
-        Err(_) => FALSE,
-    }
+        let report = builder.finish();
+        match write_report_file(std::path::Path::new(path_str), &report) {
+            Ok(_) => TRUE,
+            Err(_) => FALSE,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1966,6 +1980,104 @@ mod tests {
         assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
         assert!((x[0] - 2.0).abs() < 1e-6, "x[0] = {}", x[0]);
         assert!(obj.abs() < 1e-10, "obj = {}", obj);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    /// F5: `IpoptSolve` invalidates the retained `last_solve` stats **up
+    /// front**, so a solve that bails — or whose pounce-internal panic
+    /// `ffi_guard` catches (returning `Internal_Error`) — does not leave the
+    /// post-solve accessors (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …)
+    /// silently reporting the *previous* solve's stats.
+    ///
+    /// A caught panic can't be injected deterministically through the public
+    /// C ABI (a panic in a user `extern "C"` callback aborts at its own
+    /// boundary; see `ffi_guard`). We drive the equivalent control-flow shape:
+    /// after a successful solve we corrupt `n` to a negative value so the next
+    /// `IpoptSolve` returns `InvalidProblemDefinition` from inside the guarded
+    /// body **without** reaching the trailing `last_solve = Some(..)` write —
+    /// exactly where a caught panic also bails. The up-front clear makes the
+    /// accessor report "no data" (0) in both cases rather than stale data.
+    #[test]
+    fn stale_stats_cleared_when_resolve_bails() {
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let p = unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        };
+        assert!(!p.is_null());
+
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        // The successful solve recorded real stats.
+        let iters_after_success = unsafe { GetIpoptIterCount(p) };
+        assert!(
+            iters_after_success >= 1,
+            "a converged solve should record >=1 iteration, got {iters_after_success}"
+        );
+        assert!(unsafe { (*p).last_solve.is_some() });
+
+        // Corrupt the problem so the next solve bails early in the guarded body
+        // (the same place a caught panic would land) without recording stats.
+        unsafe { (*p).n = -1 };
+        let mut x2 = [0.0_f64];
+        let rc2 = unsafe {
+            IpoptSolve(
+                p,
+                x2.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            rc2,
+            ApplicationReturnStatus::InvalidProblemDefinition as Index
+        );
+
+        // Post-fix: the up-front invalidation cleared the retained stats, so
+        // the accessor reports "no data" (0), not the previous iteration count.
+        // Pre-fix this returned `iters_after_success` (stale).
+        assert!(
+            unsafe { (*p).last_solve.is_none() },
+            "a bailed re-solve must clear stale last_solve (F5)"
+        );
+        assert_eq!(
+            unsafe { GetIpoptIterCount(p) },
+            0,
+            "stale iteration count must not survive a bailed re-solve (F5)"
+        );
+
         unsafe { FreeIpoptProblem(p) };
     }
 

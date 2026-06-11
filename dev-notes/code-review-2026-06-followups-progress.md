@@ -10,7 +10,7 @@ code, a fail-first test where constructible, the fix, and the result.
 | F2 | H1 inertia-shift δ + unbounded-QP false positive | Med-High | ✅ fixed |
 | F3 | H11 fix dormant (no `get_variables_linearity`) | High | ✅ fixed |
 | F4 | L7 watchdog `alpha_primal_max` — reopen | Medium | ✅ fixed |
-| F5 | L56 incomplete — session FFI unguarded | Medium | ⬜ todo |
+| F5 | L56 incomplete — session FFI unguarded | Medium | ✅ fixed |
 | F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ⬜ todo |
 | F7 | L10 MA57 grow paths unguarded | Low | ⬜ todo |
 | F8 | M9 zero-fill in pounce-sensitivity `dense_to_vec` | Low | ⬜ todo |
@@ -263,3 +263,71 @@ pre-existing flake, `iter_dump::tests::header_writes_magic_and_version`, races o
 a shared `ENV_DUMP_PATH` env var under parallel execution and passes in
 isolation — not touched by this change). fmt + clippy (correctness/suspicious
 gate) clean.
+
+---
+
+## F5 detail — session-style C ABI was unguarded against panics (Medium)
+
+**Finding.** The L56 fix wrapped `IpoptSolve` / `IpoptSolveWarmStart` (the
+classic one-shot C entry points) in `ffi_guard` — a `catch_unwind` that
+converts a pounce-internal panic into an `Internal_Error` / `FALSE` return
+instead of letting it unwind across the `extern "C"` boundary (UB, in practice
+a process abort that takes the embedding application down). But the **session
+API** in `crates/pounce-cinterface/src/solver.rs` — `IpoptSolverSolve` (which
+drives the identical solver surface) plus `IpoptSolverKktSolve`,
+`IpoptSolverKktSolveScaled`, `IpoptSolverParametricStep`,
+`IpoptSolverReducedHessian` — and the report writer `IpoptWriteSolveReport`
+(`lib.rs`) had **no `catch_unwind` anywhere**, contradicting the L56 commit's
+"only entry points that drive the solver" claim. An internal panic in any of
+them still aborted the embedding process.
+
+A second, related defect the verifier flagged: after a (now-)caught panic in
+`IpoptSolverSolve`, the handle's `last_solve` would still hold the *previous*
+solve's stats and `session` its *previous* converged factor, so the post-solve
+accessors and a later `IpoptSolverKktSolve` would silently report / back-solve
+against stale data alongside the `Internal_Error` return.
+
+**Fix.**
+1. **Guards.** Promoted `ffi_guard` to `pub(crate)` and wrapped every session
+   entry point and `IpoptWriteSolveReport` in it (fallback: `Internal_Error`
+   for the solve, `FALSE` for the Bool-returning ops). `kkt_solve_impl` is
+   wrapped once, covering both the scaled and natural-units KKT entry points.
+2. **State hygiene.** `IpoptSolverSolve` now invalidates `session` **and**
+   `problem.last_solve` to `None` *up front*, before the guarded solve runs.
+   Those fields are only repopulated at the *end* of a completed solve, so if
+   the guarded body bails early or a caught panic returns `Internal_Error`,
+   the failure-consistent state is "no data" (no held factor, no stats) rather
+   than a stale factor / stale stats. The same up-front clear was applied to
+   the classic `IpoptSolve` in `lib.rs`, which shares the `last_solve` accessor
+   surface (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …) and had the
+   identical latent staleness.
+
+A panic inside a user-supplied `extern "C"` callback still aborts at *that*
+callback's own ABI boundary, before unwinding can reach `ffi_guard` — that is
+the caller's responsibility, exactly as in upstream Ipopt's C/C++ original.
+`ffi_guard` guards panics originating in *pounce's own* Rust code (solver core,
+callback bridge, numerical kernels, the report serializer).
+
+**Verification by running code (fail-first).** Two new tests assert the
+state-hygiene half of the fix (the directly observable behavior):
+- `solver.rs::stale_session_state_cleared_when_resolve_bails` (session arm) —
+  reads the private `session` / `problem.last_solve` fields directly.
+- `lib.rs::stale_stats_cleared_when_resolve_bails` (classic arm) — observes
+  via the public `GetIpoptIterCount` accessor.
+
+A caught panic cannot be injected deterministically through the public C ABI
+(a panic in a user `extern "C"` callback aborts at its own boundary before
+reaching `ffi_guard`; the panic-catch mechanism itself is already covered by
+`lib.rs::ffi_guard_converts_panic_to_fallback`). Each test therefore drives the
+**equivalent control-flow shape**: after a successful solve it corrupts a cached
+dimension (`n`/`m` → −1) so the next solve returns `InvalidProblemDefinition`
+from *inside the guarded body* without reaching the trailing
+`session = Some(..)` / `last_solve = Some(..)` writes — exactly where a caught
+panic also bails. Post-fix the handle reports "no data" (`session` None,
+`last_solve` None, `GetIpoptIterCount == 0`, `GetKktDim == -1`); pre-fix the
+previous solve's factor and stats survived. Fail-first demonstrated by
+neutralizing the two up-front clears: both tests then `FAILED` (the stale
+`session`/`last_solve` persisted); restoring the clears makes them pass.
+
+**Result.** `pounce-cinterface` full lib suite green — 49 tests (47 prior + 2
+new). fmt + clippy (correctness/suspicious gate) clean.
