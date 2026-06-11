@@ -376,6 +376,104 @@ fn f2_general_active_set_detects_unbounded_ray() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Bounded ill-conditioned QP: the certificate must NOT fire on a soft
+// (small-but-real curvature) mode.
+//
+//     min ½ x₁² + ½·10⁻⁴ x₂² − x₂,   H = diag(1, 1e-4, 0),
+//     g = (0, −1, 0) — true minimum −5000 at x₂ = 10⁴.
+//
+// x₃ is structurally flat (h₃₃ = 0), so the inertia shift fires
+// (δ > 0) and the certificate runs; the candidate ray is dominated by
+// the *soft* x₂ mode, whose curvature (1e-4) is 4 orders below the
+// stiffest entry but real — the minimizer is finite. An earlier
+// `dᵀHd ≤ 1e-3·‖H‖` curvature clause certified this `Unbounded` with
+// obj = −∞ on all three paths (the pre-certificate code answered
+// Optimal). The structural-zero floor (`‖Hd‖∞ ≤ 1e-10·‖H‖`) must
+// reject the ray and report the finite optimum.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn soft_mode_bounded_qp_is_not_falsely_unbounded() {
+    let n = 3;
+    let h = diag_hessian(&[1.0, 1e-4, 0.0]);
+    let g = [0.0, -1.0, 0.0];
+    let xl = [NLP_LOWER_BOUND_INF; 3];
+    let xu = [NLP_UPPER_BOUND_INF; 3];
+
+    let check = |sol: &crate::QpSolution, path: &str| {
+        assert_eq!(
+            sol.status,
+            crate::QpStatus::Optimal,
+            "{path}: bounded soft-mode QP must be Optimal, got {:?} with x = {:?}",
+            sol.status,
+            sol.x
+        );
+        // True minimum −5000 at x₂ = 1e4; the δ-regularized solve sits
+        // within O(δ/λ) of it.
+        assert!(
+            (sol.obj + 5000.0).abs() < 5.0,
+            "{path}: expected obj ≈ −5000, got {}",
+            sol.obj
+        );
+        assert!(
+            (sol.x[1] - 1e4).abs() < 10.0,
+            "{path}: expected x₂ ≈ 1e4, got {}",
+            sol.x[1]
+        );
+    };
+
+    // Unconstrained (one-shot equality path, m = 0).
+    let a = empty_gen(0, n);
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    check(&sol, "one-shot");
+
+    // With a non-binding inequality row (x₁ ≤ 5) → general active-set
+    // path, and the same on the opt-in Schur-update path.
+    let a_space = GenTMatrixSpace::new(1, n as i32, vec![1], vec![1]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0]);
+    let bl = [NLP_LOWER_BOUND_INF];
+    let bu = [5.0];
+    let qp = QpProblem {
+        n,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    check(&sol, "general");
+
+    let schur_opts = QpOptions {
+        use_schur_updates: true,
+        ..QpOptions::default()
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &schur_opts).unwrap();
+    check(&sol, "schur");
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Problem 2 — Equality-only QP, H = I, A full rank.
 //
 //     min ½ xᵀ x + gᵀ x

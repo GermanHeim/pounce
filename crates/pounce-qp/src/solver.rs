@@ -592,8 +592,9 @@ impl ParametricActiveSetSolver {
         // direction (e.g. `H = diag(1e-6, 0)`, `g = (-1, 0)`: the curved
         // x₁ runs out to its finite optimum ≈ 1e6) from a genuine blow-up
         // along a *flat* descent ray (N1 false positive). The curvature
-        // clause `dᵀHd ≈ 0 relative to ‖H‖` rejects the former (there
-        // `dᵀHd ≈ ‖H‖`) and admits the latter.
+        // clause `‖Hd‖∞ ≈ 0` (structural-zero floor, see
+        // `ray_is_unbounded_descent`) rejects the former (there `‖Hd‖∞ ≈
+        // ‖H‖`) and admits the latter.
         if delta > 0.0 {
             // Feasibility of the candidate ray `d = x/‖x‖`: the saddle
             // solve enforced `Ax = b` exactly, so `Ad = b/‖x‖`, which the
@@ -620,7 +621,7 @@ impl ParametricActiveSetSolver {
                 false
             };
 
-            if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x) {
+            if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x, &x) {
                 return Ok(QpSolution {
                     x,
                     lambda_g,
@@ -922,7 +923,8 @@ impl ParametricActiveSetSolver {
             // active null space); a PD reduced Hessian gives a finite
             // Newton step and never trips here. Without this the loop
             // takes unbounded full steps until `MaxIter` (δ discarded).
-            if candidates.is_empty() && delta > 0.0 && ray_is_unbounded_descent(qp.h, qp.g, &p) {
+            if candidates.is_empty() && delta > 0.0 && ray_is_unbounded_descent(qp.h, qp.g, &x, &p)
+            {
                 return Ok(QpSolution {
                     obj: Number::NEG_INFINITY,
                     x,
@@ -1386,10 +1388,12 @@ impl ParametricActiveSetSolver {
             // length, so a zero-curvature descent `p` is a recession ray.
             // The Schur driver hides the per-iterate inertia shift inside
             // `SchurState`, so unlike `solve_general` we cannot gate on
-            // `delta > 0` here — but `ray_is_unbounded_descent` already
-            // rejects any curved (PD-reduced-Hessian) Newton step via its
-            // `dᵀHd ≈ 0` clause, so the unconditional check is still safe.
-            if candidates.is_empty() && ray_is_unbounded_descent(qp.h, qp.g, &p) {
+            // `delta > 0` here — but `ray_is_unbounded_descent` rejects
+            // any direction with measurable curvature (`‖Hp‖∞` above the
+            // 1e-10·‖H‖ structural-zero floor), so a PD-reduced-Hessian
+            // Newton step never certifies and the unconditional check is
+            // still safe.
+            if candidates.is_empty() && ray_is_unbounded_descent(qp.h, qp.g, &x, &p) {
                 return Ok(QpSolution {
                     obj: Number::NEG_INFINITY,
                     x,
@@ -1830,27 +1834,40 @@ fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
 /// below iff there is a direction `d` with `Hd = 0` (zero curvature —
 /// for PSD `H` equivalent to `dᵀHd = 0`), `Ad = 0` (stays feasible),
 /// and `gᵀd < 0` (descent). This helper checks the two clauses that
-/// depend only on `(H, g)`:
-///   (i)  zero curvature  `dᵀHd ≈ 0` relative to `‖H‖`  (H ≡ 0 ⇒ flat),
-///   (ii) strict descent  `gᵀd < 0`.
+/// depend only on `(H, g)` and the current iterate `x_cand`:
+///   (i)  zero curvature  `‖Hd‖∞ ≈ 0` relative to `‖H‖`  (H ≡ 0 ⇒ flat),
+///   (ii) strict descent of the *local* gradient `(H·x_cand + g)ᵀd < 0`.
 ///
-/// **Feasibility of the ray is the caller's responsibility** — the two
+/// **Feasibility of the ray is the caller's responsibility** — the
 /// call sites certify it by different (both locally valid) arguments:
 /// the equality-only solve maintains `Ax = b` so `A(x/‖x‖) = b/‖x‖ → 0`
 /// as the iterate blows up; the active-set loop reaches its check only
 /// when the ratio test finds NO inactive row blocking along `dir` (and
 /// `dir` already lies in the active constraints' null space).
 ///
-/// `dir` need not be normalized — the test is scale-invariant. The
-/// curvature tolerance `1e-3·‖H‖` separates a genuine zero-curvature
-/// ray (where `dᵀHd/‖H‖` is `O((δ/‖H‖)²)`, driven to ~0 by the shrinking
-/// inertia shift `δ`) from a large-but-finite minimizer in a *curved*
-/// direction (where `dᵀHd ≈ ‖H‖`, ratio `O(1)`) — the N1 false-positive
-/// class. Ambiguous near-floor-curvature cases fall on the conservative
-/// side (reported bounded, not falsely unbounded).
+/// `dir` need not be normalized — the test is scale-invariant.
+///
+/// The curvature clause is deliberately near-exact (`1e-10·‖H‖`): a
+/// false `Unbounded` is the dangerous direction. For PSD `H`, any
+/// measurable curvature along `d` means a *finite* minimizer in that
+/// direction at `‖∇q‖/λ`, however large — an earlier `dᵀHd ≤ 1e-3·‖H‖`
+/// version certified `Unbounded` on bounded QPs whose softest mode sat
+/// 3+ orders below the stiffest entry (e.g. `H = diag(1, 1e-4, 0)`,
+/// `g = (0, -1, 0)`, true minimum −5000 at `x₂ = 10⁴`). Curvature below
+/// `1e-10·‖H‖` is beneath any meaningful precision of the problem data
+/// and is treated as structurally zero. Soft-but-real modes therefore
+/// fall on the conservative side (reported bounded), never falsely
+/// unbounded.
+///
+/// The descent clause uses the local gradient `H·x_cand + g`, not the
+/// origin gradient `g`: with `Hd ≈ 0` enforced only to tolerance, the
+/// two can disagree at a large iterate (the earlier `gᵀd` version read
+/// "descent" while sitting essentially at the minimizer). For a genuine
+/// recession ray they coincide (`xᵀ(Hd) ≈ 0`).
 fn ray_is_unbounded_descent(
     h: &pounce_linalg::triplet::SymTMatrix,
     g: &[Number],
+    x_cand: &[Number],
     dir: &[Number],
 ) -> bool {
     let norm = dir.iter().map(|v| v * v).sum::<Number>().sqrt();
@@ -1859,9 +1876,12 @@ fn ray_is_unbounded_descent(
     }
     let inv = 1.0 / norm;
 
-    // dᵀHd and ‖H‖ (max |stored entry|), using the symmetric triplet
-    // convention (off-diagonal pairs stored once ⇒ count twice).
-    let mut dhd: Number = 0.0;
+    // ‖Hd‖∞, H·x_cand, and ‖H‖ (max |stored entry|), using the symmetric
+    // triplet convention (off-diagonal pairs stored once ⇒ scatter both
+    // (i,j) and (j,i)).
+    let n = dir.len();
+    let mut hd = vec![0.0; n];
+    let mut hx = vec![0.0; n];
     let mut h_scale: Number = 0.0;
     let irows = h.irows();
     let jcols = h.jcols();
@@ -1871,28 +1891,30 @@ fn ray_is_unbounded_descent(
         let j = (jcols[k] - 1) as usize;
         let v = vals[k];
         h_scale = h_scale.max(v.abs());
-        let di = dir[i] * inv;
-        let dj = dir[j] * inv;
-        dhd += if i == j {
-            v * di * di
-        } else {
-            2.0 * v * di * dj
-        };
+        hd[i] += v * dir[j] * inv;
+        hx[i] += v * x_cand[j];
+        if i != j {
+            hd[j] += v * dir[i] * inv;
+            hx[j] += v * x_cand[i];
+        }
     }
+    let hd_inf = hd.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
     let zero_curvature = if h_scale > 0.0 {
-        dhd.abs() <= 1e-3 * h_scale
+        hd_inf <= 1e-10 * h_scale
     } else {
         true // H ≡ 0: every direction is a zero-curvature ray.
     };
 
-    // gᵀd vs ‖g‖₂ — strict (numerically meaningful) descent.
-    let g_dot_d: Number = g
+    // Local directional derivative (H·x_cand + g)ᵀd vs ‖g‖₂ — strict
+    // (numerically meaningful) descent.
+    let slope: Number = g
         .iter()
+        .zip(hx.iter())
         .zip(dir.iter())
-        .map(|(&gi, &di)| gi * di * inv)
+        .map(|((&gi, &hxi), &di)| (gi + hxi) * di * inv)
         .sum();
     let g_norm = g.iter().map(|v| v * v).sum::<Number>().sqrt();
-    let descent = g_dot_d < -1e-6 * g_norm.max(1.0);
+    let descent = slope < -1e-6 * g_norm.max(1.0);
 
     zero_curvature && descent
 }
