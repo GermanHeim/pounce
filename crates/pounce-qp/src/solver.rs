@@ -20,7 +20,8 @@ use crate::options::{AntiCyclingChoice, QpOptions};
 use crate::problem::{QpProblem, QpSolution, QpStats, QpWarmStart};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
-use pounce_common::Number;
+use pounce_common::{Index, Number};
+use pounce_linsol::status::ESymSolverStatus;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
 /// QP subproblem solver.
@@ -150,6 +151,38 @@ impl ParametricActiveSetSolver {
              problem with no PD reduced direction, or relax `inertia_shift_factor`",
             opts.inertia_max_shifts, current
         )))
+    }
+
+    /// Assemble and factor the pinned active-set KKT
+    /// `[H Aᵀ_W Eᵀ_W; A_W 0 0; E_W 0 0]` with right-hand side
+    /// `[-g; cons_targets; bound_targets]`, returning the primal `x`
+    /// (the first `n` entries of the KKT solution). `cons_targets` is
+    /// parallel to `active_cons`, `bound_targets` to `active_bounds`.
+    ///
+    /// Shared by the cold-start equality factor and the warm-start
+    /// `solve_with_working_set` factor; multipliers are recomputed by
+    /// the inner loop, so they are not returned here.
+    fn factor_pinned_primal(
+        &mut self,
+        qp: &QpProblem,
+        active_cons: &[usize],
+        cons_targets: &[Number],
+        active_bounds: &[usize],
+        bound_targets: &[Number],
+        opts: &QpOptions,
+    ) -> Result<Vec<Number>, QpError> {
+        let n = qp.n;
+        let k_c = active_cons.len();
+        let k_b = active_bounds.len();
+        let kkt = assemble_active_set_kkt(qp, active_cons, active_bounds);
+        let mut rhs = vec![0.0; n + k_c + k_b];
+        for (rhs_i, &g_i) in rhs[..n].iter_mut().zip(qp.g.iter()) {
+            *rhs_i = -g_i;
+        }
+        rhs[n..n + k_c].copy_from_slice(cons_targets);
+        rhs[n + k_c..n + k_c + k_b].copy_from_slice(bound_targets);
+        self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?;
+        Ok(rhs[..n].to_vec())
     }
 
     /// Primal active-set path for box-constrained QPs
@@ -731,6 +764,21 @@ impl ParametricActiveSetSolver {
         // other anti-cycling choices.
         let mut expand_tol = opts.expand_tol_initial;
 
+        // Linear-independence anti-cycling tabu. When the rank guard
+        // prunes a linearly-dependent row at a *stationary* (degenerate)
+        // vertex, that row is satisfied at `x` and has true `a·p = 0`
+        // along every feasible direction — yet numerical drift can give
+        // it a tiny `|a·p| > feas_tol`, so the ratio test keeps re-adding
+        // it, the factor goes rank-deficient again, and the engine cycles
+        // (prune → re-add → prune …). Forbidding a pruned row from
+        // re-entering until `x` actually moves breaks that cycle: while
+        // the vertex is stationary the active set can only shrink, so the
+        // degenerate phase terminates finitely; the tabu is cleared on the
+        // first real step (`α > feas_tol`), after which the null space has
+        // changed and a previously-dependent row may legitimately re-enter.
+        let mut tabu_cons = vec![false; m];
+        let mut tabu_bounds = vec![false; n];
+
         for _iter in 0..opts.max_iter {
             let active_cons: Vec<usize> = (0..m)
                 .filter(|&i| working.constraints[i].is_active())
@@ -748,8 +796,60 @@ impl ParametricActiveSetSolver {
                 *rhs_i = -(hx_i + g_i);
             }
 
-            let delta =
-                self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
+            let delta = match self.factorize_with_inertia_control(
+                kkt,
+                &mut rhs,
+                (k_c + k_b) as i32,
+                qp.n,
+                opts,
+            ) {
+                Ok(d) => d,
+                Err(e) if e.is_recoverable_factorization_failure() => {
+                    // The active set went rank-deficient: at a degenerate
+                    // vertex more binding rows than variables can be linearly
+                    // dependent, and numerical drift can let a dependent row
+                    // (whose `a·p` should be 0) slip past the ratio test's
+                    // `feas_tol`. No H-block shift can repair a rank-deficient
+                    // *constraint* block, so the inertia loop just exhausted.
+                    // Linear-independence guard: prune the active set to a
+                    // maximal independent subset, deactivate the redundant
+                    // rows (still satisfied at `x` — they are combinations of
+                    // the kept ones), and retry on the next iteration.
+                    let (kc, kb) = independent_active_subset(
+                        &mut self.linsol,
+                        qp,
+                        &active_cons,
+                        &active_bounds,
+                    );
+                    if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                        return Err(e);
+                    }
+                    let mut keep_c = vec![false; m];
+                    for &i in &kc {
+                        keep_c[i] = true;
+                    }
+                    let mut keep_b = vec![false; n];
+                    for &i in &kb {
+                        keep_b[i] = true;
+                    }
+                    for &i in &active_cons {
+                        if !keep_c[i] {
+                            working.constraints[i] = ConsStatus::Inactive;
+                            tabu_cons[i] = true;
+                            n_changes += 1;
+                        }
+                    }
+                    for &i in &active_bounds {
+                        if !keep_b[i] {
+                            working.bounds[i] = BoundStatus::Inactive;
+                            tabu_bounds[i] = true;
+                            n_changes += 1;
+                        }
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             n_refactor += 1;
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -824,7 +924,7 @@ impl ParametricActiveSetSolver {
                     consider(&mut worst, DropTarget::Bound(i), viol);
                 }
 
-                if let Some((target, _)) = worst {
+                if let Some((target, _viol)) = worst {
                     match target {
                         DropTarget::Cons(i) => working.constraints[i] = ConsStatus::Inactive,
                         DropTarget::Bound(i) => working.bounds[i] = BoundStatus::Inactive,
@@ -885,6 +985,17 @@ impl ParametricActiveSetSolver {
                 if working.bounds[i].is_active() {
                     continue;
                 }
+                // Rank-tabu (rate-aware): a bound pruned as linearly
+                // dependent has true `a·p = 0`, so suppress it from the
+                // ratio test only while its rate stays in the drift band
+                // (`|p[i]| ≤ TABU_DRIFT_REL·‖p‖∞`). If the active set has
+                // since evolved and this bound now carries an O(1) rate,
+                // it is a GENUINE blocker — let it through so the step is
+                // capped (otherwise ‖p‖ overshoots to ~1e14) and Bland's
+                // lowest-index rule sees the true candidate set.
+                if tabu_bounds[i] && p[i].abs() <= TABU_DRIFT_REL * p_inf {
+                    continue;
+                }
                 if p[i] < -opts.feas_tol && qp.xl[i] > NLP_LOWER_BOUND_INF {
                     let r = (x[i] - qp.xl[i]) / -p[i];
                     candidates.push((BlockerTarget::Bound(i, BoundStatus::AtLower), r, p[i].abs()));
@@ -901,6 +1012,14 @@ impl ParametricActiveSetSolver {
                 if qp.bl[i] == qp.bu[i] {
                     continue;
                 }
+                // Rank-tabu (rate-aware): see the bound loop above — a
+                // pruned-dependent row has true `a·p = 0`, so suppress it
+                // only while its rate stays in the drift band; a genuine
+                // O(1) rate re-admits it so the step is capped and Bland
+                // sees the true candidate set.
+                if tabu_cons[i] && ap[i].abs() <= TABU_DRIFT_REL * p_inf {
+                    continue;
+                }
                 if ap[i] < -opts.feas_tol && qp.bl[i] > NLP_LOWER_BOUND_INF {
                     let r = (ax[i] - qp.bl[i]) / -ap[i];
                     candidates.push((BlockerTarget::Cons(i, ConsStatus::AtLower), r, ap[i].abs()));
@@ -910,6 +1029,9 @@ impl ParametricActiveSetSolver {
                     candidates.push((BlockerTarget::Cons(i, ConsStatus::AtUpper), r, ap[i].abs()));
                 }
             }
+            // (The rate-aware tabu skip is applied at the top of each loop
+            // above: a pruned dependent row enters `candidates` only once
+            // its rate along `p` leaves the linear-dependence drift band.)
 
             let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
 
@@ -944,6 +1066,17 @@ impl ParametricActiveSetSolver {
 
             if alpha < 0.0 {
                 alpha = 0.0;
+            }
+
+            // A genuine step changes the iterate, so the null space of the
+            // active set moves and the rank-tabu list (built at the prior
+            // stationary vertex) no longer applies — lift it so legitimately
+            // independent rows can re-enter. Degenerate `α ≈ 0` pivots leave
+            // the vertex fixed, so the tabu persists and keeps breaking the
+            // prune→re-add cycle.
+            if alpha > opts.feas_tol {
+                tabu_cons.iter_mut().for_each(|t| *t = false);
+                tabu_bounds.iter_mut().for_each(|t| *t = false);
             }
 
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
@@ -1028,21 +1161,36 @@ impl ParametricActiveSetSolver {
         let m = qp.m;
 
         let eq_rows: Vec<usize> = (0..m).filter(|&i| qp.bl[i] == qp.bu[i]).collect();
-        let m_eq = eq_rows.len();
+        let eq_targets: Vec<Number> = eq_rows.iter().map(|&r| qp.bl[r]).collect();
 
-        let kkt = assemble_active_set_kkt(qp, &eq_rows, &[]);
-        let mut rhs = vec![0.0; n + m_eq];
-        for (rhs_i, &g_i) in rhs[..n].iter_mut().zip(qp.g.iter()) {
-            *rhs_i = -g_i;
-        }
-        for (j, &row) in eq_rows.iter().enumerate() {
-            rhs[n + j] = qp.bl[row];
-        }
-
-        self.factorize_with_inertia_control(kkt, &mut rhs, m_eq as i32, qp.n, opts)?;
+        // Factor the equality block `[H Aᵀ_eq; A_eq 0]`. If the
+        // equalities are rank-deficient — redundant rows, the
+        // degenerate case a pure interior-point method hands the
+        // LP-crossover bridge — the saddle KKT is singular and no
+        // §4.5 H-block shift can rescue a rank-deficient *constraint*
+        // block (the shift exhausts and reports a recoverable failure).
+        // Linear-independence guard: prune the equalities to a maximal
+        // independent subset and retry once. A dropped row is a linear
+        // combination of the kept ones, so at the constraint-consistent
+        // cold point it is automatically satisfied — the feasible set is
+        // unchanged, only the rank deficiency is removed.
+        let (x, kept_eq): (Vec<Number>, Vec<usize>) =
+            match self.factor_pinned_primal(qp, &eq_rows, &eq_targets, &[], &[], opts) {
+                Ok(x) => (x, eq_rows.clone()),
+                Err(e) if e.is_recoverable_factorization_failure() => {
+                    let (kept, _) = independent_active_subset(&mut self.linsol, qp, &eq_rows, &[]);
+                    if kept.len() == eq_rows.len() {
+                        // Full row rank already — the failure is not a
+                        // rank deficiency this guard can repair.
+                        return Err(e);
+                    }
+                    let kept_targets: Vec<Number> = kept.iter().map(|&r| qp.bl[r]).collect();
+                    let x = self.factor_pinned_primal(qp, &kept, &kept_targets, &[], &[], opts)?;
+                    (x, kept)
+                }
+                Err(e) => return Err(e),
+            };
         *n_refactor += 1;
-
-        let x: Vec<Number> = rhs[..n].to_vec();
 
         // Inequality-row feasibility check — any violation routes
         // the caller to elastic mode.
@@ -1070,9 +1218,19 @@ impl ParametricActiveSetSolver {
         // Build the working set: equalities always active; rows /
         // bounds exactly at their boundary value snapped to active.
         let mut working = WorkingSet::cold(n, m);
+        let mut kept_eq_flag = vec![false; m];
+        for &r in &kept_eq {
+            kept_eq_flag[r] = true;
+        }
         for (i, c) in working.constraints.iter_mut().enumerate() {
             if qp.bl[i] == qp.bu[i] {
-                *c = ConsStatus::Equality;
+                if kept_eq_flag[i] {
+                    *c = ConsStatus::Equality;
+                }
+                // A redundant equality dropped by the rank-repair guard
+                // stays Inactive: the ratio test skips `bl == bu` rows,
+                // so it never re-enters the working set, and it remains
+                // satisfied as a combination of the kept equalities.
             } else if qp.bl[i] > NLP_LOWER_BOUND_INF && (ax[i] - qp.bl[i]).abs() <= opts.feas_tol {
                 *c = ConsStatus::AtLower;
             } else if qp.bu[i] < NLP_UPPER_BOUND_INF && (ax[i] - qp.bu[i]).abs() <= opts.feas_tol {
@@ -1483,6 +1641,241 @@ fn active_slot_count(working: &WorkingSet) -> usize {
         + working.bounds.iter().filter(|s| s.is_active()).count()
 }
 
+/// Relative tolerance for the modified-Gram-Schmidt rank test in
+/// [`independent_active_subset`]. A candidate normal whose component
+/// orthogonal to the already-accepted normals falls below this
+/// fraction of its original norm is judged linearly dependent
+/// (redundant) and dropped.
+const RANK_REL_TOL: Number = 1e-9;
+
+/// Rate threshold (relative to the step inf-norm) below which a
+/// rank-tabu'd row is treated as genuinely linearly dependent and
+/// kept out of the ratio test. A row pruned as a linear combination
+/// of the kept active rows has true `a·p = 0`, so numerically
+/// `|a·p|` sits at the refined-solve residual scale (≈1e-12·‖p‖);
+/// anything above `TABU_DRIFT_REL·‖p‖∞` is an O(1) fraction of the
+/// step — a *genuine* blocker that the active set's evolution has
+/// re-exposed. Suppressing such a row hides it from the ratio test,
+/// lets the step overshoot (observed ‖p‖→1e14 on degenerate NETLIB
+/// gen), and voids Bland's lowest-index guarantee (it can only rank
+/// the surviving candidates). So the tabu suppresses a row only while
+/// its rate stays in this drift band; a genuine rate re-admits it.
+const TABU_DRIFT_REL: Number = 1e-7;
+
+/// Select a maximal linearly-independent subset of the given active
+/// constraint / bound normals by modified Gram-Schmidt with one
+/// reorthogonalization pass.
+///
+/// Returns `(keep_cons, keep_bounds)` — the entries of `active_cons` /
+/// `active_bounds`, in their original order, whose normals are
+/// linearly independent of the earlier-kept ones. Dependent
+/// (redundant) rows are omitted.
+///
+/// This is the linear-independence guard that lets the active-set
+/// engine pin a degenerate / rank-deficient active set. A redundant
+/// row is a linear combination of kept rows, so at any
+/// constraint-consistent point it is automatically satisfied: dropping
+/// it leaves the feasible vertex unchanged while removing the rank
+/// deficiency that makes the active-set KKT singular (no H-block shift
+/// can rescue a rank-deficient *constraint* block). General-constraint
+/// rows are processed before variable bounds, so equality / general
+/// rows are preferred over bounds when a tie must be broken.
+fn independent_active_subset(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> (Vec<usize>, Vec<usize>) {
+    // Prefer the backend's sparse rank-reveal (feral's `SparseLu`
+    // degeneracy probe) when available — it factors a sparse augmented
+    // system in O(nnz) instead of the dense O(k²·n) modified-Gram-Schmidt
+    // grind, which is the operation that grinds large degenerate LPs
+    // (the NETLIB GEN family) to a halt. Fall back to dense MGS for
+    // backends that don't rank-reveal (e.g. MA57).
+    if linsol.provides_degeneracy_detection() {
+        if let Some(kept) = independent_active_subset_sparse(linsol, qp, active_cons, active_bounds)
+        {
+            return kept;
+        }
+    }
+    independent_active_subset_dense(qp, active_cons, active_bounds)
+}
+
+/// Sparse linear-independence guard via the backend's Ipopt-style
+/// degeneracy probe. Builds the active-row Jacobian `J` as a 1-based
+/// triplet (`n_cols = qp.n`; general rows `0..active_cons.len()`
+/// ordered before bound rows, so general rows win ties — matching the
+/// dense path), calls `determine_dependent_rows`, and maps the flagged
+/// rows back to `(keep_cons, keep_bounds)`. Returns `None` on a probe
+/// failure so the caller can fall back to dense MGS.
+fn independent_active_subset_sparse(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let n_cols = qp.n;
+    let n_c = active_cons.len();
+    let n_b = active_bounds.len();
+    let n_rows = n_c + n_b;
+    if n_rows == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+
+    // Each active general row maps to J-row `pos` (its index in
+    // `active_cons`); each active bound maps to J-row `n_c + b`.
+    let mut j_row_of_con: Vec<Option<usize>> = vec![None; qp.m];
+    for (pos, &row) in active_cons.iter().enumerate() {
+        j_row_of_con[row] = Some(pos);
+    }
+
+    let mut irn: Vec<Index> = Vec::new();
+    let mut jcn: Vec<Index> = Vec::new();
+    let mut vals: Vec<Number> = Vec::new();
+
+    // General-constraint rows: scatter the sparse Jacobian `A` in one pass.
+    let a_irows = qp.a.irows();
+    let a_jcols = qp.a.jcols();
+    let a_vals = qp.a.values();
+    for k in 0..a_irows.len() {
+        let row = (a_irows[k] - 1) as usize;
+        if let Some(pos) = j_row_of_con[row] {
+            let col = (a_jcols[k] - 1) as usize;
+            irn.push((pos + 1) as Index);
+            jcn.push((col + 1) as Index);
+            vals.push(a_vals[k]);
+        }
+    }
+
+    // Variable-bound rows: a unit entry `(n_c + b, var, 1)`.
+    for (b, &var) in active_bounds.iter().enumerate() {
+        irn.push((n_c + b + 1) as Index);
+        jcn.push((var + 1) as Index);
+        vals.push(1.0);
+    }
+
+    let mut c_deps: Vec<Index> = Vec::new();
+    let st = linsol.determine_dependent_rows(
+        n_rows as Index,
+        n_cols as Index,
+        &irn,
+        &jcn,
+        &vals,
+        &mut c_deps,
+    );
+    if st != ESymSolverStatus::Success {
+        return None;
+    }
+
+    let mut dropped = vec![false; n_rows];
+    for &d in &c_deps {
+        let d = d as usize;
+        if d < n_rows {
+            dropped[d] = true;
+        }
+    }
+
+    let mut keep_cons = Vec::with_capacity(n_c);
+    for (pos, &row) in active_cons.iter().enumerate() {
+        if !dropped[pos] {
+            keep_cons.push(row);
+        }
+    }
+    let mut keep_bounds = Vec::with_capacity(n_b);
+    for (b, &var) in active_bounds.iter().enumerate() {
+        if !dropped[n_c + b] {
+            keep_bounds.push(var);
+        }
+    }
+
+    Some((keep_cons, keep_bounds))
+}
+
+/// Dense modified-Gram-Schmidt linear-independence guard — the fallback
+/// for backends without a sparse rank-reveal. Allocates a dense normal
+/// per active row and orthogonalizes; O(k²·n). Retained byte-for-byte
+/// for the MA57 backend.
+fn independent_active_subset_dense(
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> (Vec<usize>, Vec<usize>) {
+    let n = qp.n;
+
+    // Gather dense normals for the active general-constraint rows from
+    // the sparse Jacobian in one pass.
+    let mut pos_of_row: Vec<Option<usize>> = vec![None; qp.m];
+    for (pos, &row) in active_cons.iter().enumerate() {
+        pos_of_row[row] = Some(pos);
+    }
+    let mut cons_normals = vec![vec![0.0; n]; active_cons.len()];
+    let a_irows = qp.a.irows();
+    let a_jcols = qp.a.jcols();
+    let a_vals = qp.a.values();
+    for k in 0..a_irows.len() {
+        let row = (a_irows[k] - 1) as usize;
+        if let Some(pos) = pos_of_row[row] {
+            let col = (a_jcols[k] - 1) as usize;
+            cons_normals[pos][col] += a_vals[k];
+        }
+    }
+
+    let mut basis: Vec<Vec<Number>> = Vec::new();
+    let mut keep_cons = Vec::new();
+    let mut keep_bounds = Vec::new();
+
+    for (pos, &row) in active_cons.iter().enumerate() {
+        let mut v = std::mem::take(&mut cons_normals[pos]);
+        if accept_if_independent(&mut v, &mut basis) {
+            keep_cons.push(row);
+        }
+    }
+    for &var in active_bounds {
+        let mut v = vec![0.0; n];
+        v[var] = 1.0;
+        if accept_if_independent(&mut v, &mut basis) {
+            keep_bounds.push(var);
+        }
+    }
+
+    (keep_cons, keep_bounds)
+}
+
+/// One modified-Gram-Schmidt step: orthogonalize `v` against `basis`
+/// (two passes for numerical robustness against loss of orthogonality).
+/// If the residual keeps a non-negligible fraction of `v`'s original
+/// norm, normalize it, append it to `basis`, and return `true` (the row
+/// is linearly independent); otherwise leave `basis` unchanged and
+/// return `false` (linearly dependent / redundant).
+fn accept_if_independent(v: &mut [Number], basis: &mut Vec<Vec<Number>>) -> bool {
+    let orig = dot(v, v).sqrt();
+    if orig == 0.0 {
+        return false;
+    }
+    for _pass in 0..2 {
+        for q in basis.iter() {
+            let d = dot(q, v);
+            if d != 0.0 {
+                for (vi, &qi) in v.iter_mut().zip(q.iter()) {
+                    *vi -= d * qi;
+                }
+            }
+        }
+    }
+    let r = dot(v, v).sqrt();
+    if r > RANK_REL_TOL * orig {
+        let inv = 1.0 / r;
+        basis.push(v.iter().map(|&vi| vi * inv).collect());
+        true
+    } else {
+        false
+    }
+}
+
+fn dot(a: &[Number], b: &[Number]) -> Number {
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+}
+
 #[derive(Clone, Copy)]
 enum DropTarget {
     Cons(usize),
@@ -1668,6 +2061,27 @@ impl QpSolver for ParametricActiveSetSolver {
             }
         }
 
+        // Warm-start feasibility pre-check (companion to the M5
+        // post-hoc audit below). A warm start whose primal is already
+        // infeasible cannot be repaired by the zero-RHS warm inner
+        // loop: its ratio test sees already-violated inactive rows,
+        // yields negative step lengths that clamp to zero, and freezes
+        // the objective until `MaxIter` (observed on degenerate NETLIB
+        // `gen`, where the crossover hint pins a rank-deficient vertex
+        // that violates ~hundreds of inactive rows). Route such a start
+        // straight to l1-elastic phase-1 — the same recovery the cold
+        // path takes when `cold_general_initial` returns infeasible, and
+        // the M5 audit takes post-hoc. `solve_elastic` seeds a slack-
+        // feasible augmented problem and recurses through `solve_general`
+        // /`solve_general_schur` *directly*, bypassing this entry, so the
+        // recovery cannot loop. A feasible warm start (the common case —
+        // a good crossover/SQP hint) passes untouched.
+        if let Some(w) = ws {
+            if !point_is_feasible(qp, &w.x, opts.feas_tol) {
+                return self.solve_elastic(qp, opts);
+            }
+        }
+
         let has_general_inequality = !is_all_equality_constraints(qp);
 
         // Any of: caller provided a warm start, or the problem has at
@@ -1740,53 +2154,89 @@ impl QpSolver for ParametricActiveSetSolver {
         let active_bounds: Vec<usize> = (0..qp.n)
             .filter(|&i| working.bounds[i].is_active())
             .collect();
-        let k_c = active_cons.len();
-        let k_b = active_bounds.len();
 
-        // Assemble [H Aᵀ_W Eᵀ_W; A_W 0 0; E_W 0 0]. RHS is
-        // [-g; β_cons; β_bounds] where β picks the
-        // appropriate target from the active side.
-        let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
-        let mut rhs = vec![0.0; qp.n + k_c + k_b];
-        for (rhs_i, &g_i) in rhs[..qp.n].iter_mut().zip(qp.g.iter()) {
-            *rhs_i = -g_i;
-        }
-        for (j, &i) in active_cons.iter().enumerate() {
-            rhs[qp.n + j] = match working.constraints[i] {
-                ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
-                ConsStatus::AtUpper => qp.bu[i],
-                ConsStatus::Inactive => unreachable!(),
-            };
-        }
-        for (j, &var) in active_bounds.iter().enumerate() {
-            rhs[qp.n + k_c + j] = match working.bounds[var] {
-                BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[var],
-                BoundStatus::AtUpper => qp.xu[var],
-                BoundStatus::Inactive => unreachable!(),
-            };
-        }
-        self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
+        // The boundary value each active row / bound is pinned to.
+        let cons_target = |i: usize| match working.constraints[i] {
+            ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+            ConsStatus::AtUpper => qp.bu[i],
+            ConsStatus::Inactive => unreachable!(),
+        };
+        let bound_target = |i: usize| match working.bounds[i] {
+            BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[i],
+            BoundStatus::AtUpper => qp.xu[i],
+            BoundStatus::Inactive => unreachable!(),
+        };
+        let cons_targets: Vec<Number> = active_cons.iter().map(|&i| cons_target(i)).collect();
+        let bound_targets: Vec<Number> = active_bounds.iter().map(|&i| bound_target(i)).collect();
 
-        // Build a warm-start using the computed primal + the
-        // caller's working set. Multipliers come from the KKT
-        // solve as well (signed per the
-        // §5/§6 convention: lambda_x = z_l − z_u = −λ_sat for
-        // active bounds).
-        let mut x_init = vec![0.0; qp.n];
-        x_init.copy_from_slice(&rhs[..qp.n]);
-        let mut lambda_g = vec![0.0; qp.m];
-        for (j, &i) in active_cons.iter().enumerate() {
-            lambda_g[i] = rhs[qp.n + j];
-        }
-        let mut lambda_x = vec![0.0; qp.n];
-        for (j, &i) in active_bounds.iter().enumerate() {
-            lambda_x[i] = -rhs[qp.n + k_c + j];
-        }
+        // Factor the pinned KKT for a primal that satisfies the hinted
+        // active rows. If the hint is rank-deficient — a degenerate
+        // optimum can pin more binding rows than there are variables,
+        // and the LP-crossover bridge hands over redundant equality
+        // rows — the saddle KKT is singular and the §4.5 H-shift cannot
+        // repair a rank-deficient *constraint* block. Linear-
+        // independence guard: prune the active set to a maximal
+        // independent subset, retry once, and forward the pruned
+        // working set so the inner loop starts from a full-rank state.
+        // Dropped rows are linear combinations of the kept ones, hence
+        // satisfied at the recovered primal.
+        let (x_init, fwd_working) = match self.factor_pinned_primal(
+            qp,
+            &active_cons,
+            &cons_targets,
+            &active_bounds,
+            &bound_targets,
+            opts,
+        ) {
+            Ok(x) => (x, working.clone()),
+            Err(e) if e.is_recoverable_factorization_failure() => {
+                let (kc, kb) =
+                    independent_active_subset(&mut self.linsol, qp, &active_cons, &active_bounds);
+                if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                    // Full rank already — not a deficiency this repairs.
+                    return Err(e);
+                }
+                let kc_targets: Vec<Number> = kc.iter().map(|&i| cons_target(i)).collect();
+                let kb_targets: Vec<Number> = kb.iter().map(|&i| bound_target(i)).collect();
+                let x = self.factor_pinned_primal(qp, &kc, &kc_targets, &kb, &kb_targets, opts)?;
+
+                // Forward a pruned working set: dropped active rows /
+                // bounds revert to Inactive. A dropped row has `a·p = 0`
+                // along every active-set step (it lies in the kept rows'
+                // span), so the inner loop never re-adds it and it stays
+                // at its boundary.
+                let mut fwd = working.clone();
+                let mut keep_c = vec![false; qp.m];
+                for &i in &kc {
+                    keep_c[i] = true;
+                }
+                let mut keep_b = vec![false; qp.n];
+                for &i in &kb {
+                    keep_b[i] = true;
+                }
+                for i in 0..qp.m {
+                    if working.constraints[i].is_active() && !keep_c[i] {
+                        fwd.constraints[i] = ConsStatus::Inactive;
+                    }
+                }
+                for i in 0..qp.n {
+                    if working.bounds[i].is_active() && !keep_b[i] {
+                        fwd.bounds[i] = BoundStatus::Inactive;
+                    }
+                }
+                (x, fwd)
+            }
+            Err(e) => return Err(e),
+        };
+
+        // The inner loop recomputes multipliers each iteration from a
+        // fresh KKT solve, so the warm-start multipliers are unused;
+        // pass zeros and let `solve_general` drive from `(x, working)`.
         let ws = QpWarmStart {
             x: x_init,
-            lambda_g,
-            lambda_x,
-            working: working.clone(),
+            lambda_g: vec![0.0; qp.m],
+            lambda_x: vec![0.0; qp.n],
+            working: fwd_working,
         };
         self.solve(qp, Some(&ws), opts)
     }

@@ -41,7 +41,98 @@ use crate::ipm::{
 };
 use crate::qp::{breakdown_status, QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
-use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_common::types::Index;
+use pounce_linsol::{Factorization, FactorizationError, SparseSymLinearSolverInterface};
+
+/// Strictly-positive floor for the adaptive static regularization δ (see the
+/// `update_blocks` call in [`solve_conic_hsde`]). δ must stay above this so the
+/// reduced KKT remains quasi-definite for a stable LDLᵀ inertia; the adaptive
+/// rule only ever shrinks δ *toward* this floor on large-dual problems, never
+/// below it. Sits ~4 orders under the configured default (`QpOptions::reg`,
+/// 1e-10) — enough room for the LISWET cluster (‖ŷ‖ ~ 1e4 ⇒ δ ~ 1e-12) without
+/// reaching machine-noise territory.
+const REG_MIN: f64 = 1e-14;
+
+/// Maximum iterative-refinement passes per KKT back-solve, and the relative
+/// residual at which refinement stops. Each HSDE step solves the same factored
+/// KKT three times (constant direction, predictor, corrector); near a
+/// degenerate optimum that KKT is ill-conditioned and a single LDLᵀ back-solve
+/// loses several digits, biasing the Newton direction and collapsing the
+/// fraction-to-boundary step (the NETLIB GEN stall). Refining each solve
+/// against the assembled matrix recovers those digits — Clarabel, QDLDL, and
+/// SCS all refine every solve by default. Passes are few (refinement converges
+/// in 1–2 steps when it helps) and a well-conditioned solve exits after a
+/// single residual check, so the overhead on easy problems is one matvec.
+const IR_MAX_PASSES: usize = 5;
+const IR_RELTOL: f64 = 1e-12;
+
+/// Dynamic-regularization schedule (Ipopt-style inertia/regularization
+/// correction; Clarabel's dynamic KKT regularization). When the factorization
+/// is singular, or the constant-direction solve cannot be refined below
+/// [`DYN_REG_RES_TOL`] (the KKT is numerically singular on the degenerate
+/// face), raise the `(z,z)` regularization δ by [`DYN_REG_FACTOR`] — up to
+/// [`DYN_REG_MAX`], at most [`DYN_REG_MAX_TRIES`] times — and refactor. δ is
+/// reset to its small per-iteration base every iteration, so a single hard
+/// iterate never inflates δ for the rest of the solve; well-conditioned
+/// iterations keep the tight static δ and never enter the bump loop.
+const DYN_REG_FACTOR: f64 = 10.0;
+const DYN_REG_MAX: f64 = 1e-7;
+const DYN_REG_MAX_TRIES: usize = 4;
+const DYN_REG_RES_TOL: f64 = 1e-8;
+
+/// Gondzio multiple centrality correctors (Gondzio 1996, "Multiple centrality
+/// corrections in a primal–dual method for linear programming"). After the
+/// Mehrotra corrector, up to [`GONDZIO_MAX_CORR`] additional corrections are
+/// computed through the *same* factorization (each is one extra back-solve):
+/// a trial step enlarged by [`GONDZIO_DELTA`] is formed, and any
+/// complementarity product it would push outside the centered box
+/// `[β_lo·μ, β_hi·μ]` is corrected back toward the box. Each corrector is
+/// accepted only if it lengthens the fraction-to-boundary step by at least
+/// `GONDZIO_GAMMA·GONDZIO_DELTA`; otherwise correction stops. Lengthening the
+/// step is exactly the documented purpose of the scheme — and it is what
+/// breaks the degenerate-face step collapse (σ→1 centering freezing μ) on the
+/// NETLIB GEN family, where the Mehrotra corrector alone stalls. β_lo = 0.1,
+/// β_hi = 10 is Gondzio's recommended symmetric box.
+const GONDZIO_MAX_CORR: usize = 3;
+const GONDZIO_DELTA: f64 = 0.1;
+const GONDZIO_GAMMA: f64 = 0.1;
+const GONDZIO_BETA_LO: f64 = 0.1;
+const GONDZIO_BETA_HI: f64 = 10.0;
+
+/// HSDE infeasibility-ray discriminant: is the homogenizing pair `(τ, κ)` on
+/// the Farkas/recession ray (`κ ≫ τ`), as opposed to converging to a solution
+/// (`τ → τ* > 0`) or merely degenerating on a feasible-but-ill-scaled problem
+/// (`τ, κ → 0` together)?
+///
+/// The defining signature of infeasibility is the *ratio* `κ/τ → ∞`: at a
+/// genuine certificate `τ → 0` while `κ → κ* > 0`. This must NOT be a bare
+/// `τ < ε` floor — a feasible large-‖x*‖ QP (e.g. POWELL20) can drive `τ → 0`
+/// too, but there `κ → 0` *alongside* `τ` (no ray supports `κ > 0`), so `κ/τ`
+/// stays bounded and the gate stays shut. The threshold here is `κ/τ > 100`.
+///
+/// A prior `κ.max(1.0)` floor degraded this to `τ < 1e-2`, firing on the
+/// collapsed-`τ` iterate of a feasible problem and declaring it infeasible.
+fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
+    tau < 1e-2 * kappa
+}
+
+/// May the scale-relative stopping test *relax* the absolute one for a problem
+/// of natural scale `max_scale` (the largest of the dual/primal/gap term norms)
+/// at tolerance `tol`?
+///
+/// Only once `tol`-level *absolute* KKT accuracy is genuinely unreachable: the
+/// finite-precision floor on an absolute residual is `≈ max_scale·ε`, so when
+/// `max_scale·ε > tol` no iterate can drive the absolute residual under `tol`
+/// and the scale-relative residual is the only valid optimality certificate.
+/// Below that crossover (`max_scale ≲ tol/ε ≈ 4.5e7` at `tol = 1e-8`) the tight
+/// absolute test must govern — relaxing it there lets a moderately-scaled
+/// reduced problem stop a step early, and the bound-tightening presolve's dual
+/// re-attribution then amplifies that slack into a large stationarity violation
+/// in the original problem. Tying the crossover to `tol` keeps it self-consistent
+/// under a caller-tightened/loosened tolerance.
+fn relative_stop_permitted(max_scale: f64, tol: f64) -> bool {
+    max_scale * f64::EPSILON > tol
+}
 
 /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
 /// scaled by `tau` and capped at 1 (the scalar analogue of `Cone::max_step`
@@ -52,6 +143,76 @@ fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
     } else {
         1.0
     }
+}
+
+/// Symmetric matvec `y ← M x` for the lower-triangle KKT triplets
+/// (`airn`/`ajcn` are 1-based with `row ≥ col`). Each strictly-lower entry
+/// contributes to both `y[i]` and `y[j]`; the diagonal once. Used to form the
+/// residual `rhs − M u` that drives iterative refinement.
+fn kkt_matvec(airn: &[Index], ajcn: &[Index], vals: &[f64], x: &[f64], y: &mut [f64]) {
+    for v in y.iter_mut() {
+        *v = 0.0;
+    }
+    for k in 0..vals.len() {
+        let i = (airn[k] - 1) as usize;
+        let j = (ajcn[k] - 1) as usize;
+        let v = vals[k];
+        y[i] += v * x[j];
+        if i != j {
+            y[j] += v * x[i];
+        }
+    }
+}
+
+/// Solve `M u = rhs` against the cached factor (overwriting `rhs` with `u`),
+/// applying iterative refinement against the assembled KKT triplets
+/// `(airn, ajcn, vals)`. Recovers digits lost to factorization round-off on
+/// the ill-conditioned KKT near a degenerate optimum (see [`IR_MAX_PASSES`]).
+///
+/// Refinement runs against the *factored* (regularized) matrix `vals`: the
+/// static δ is below `tol` at the default, so the regularized and true systems
+/// coincide to working precision there; when dynamic regularization raises δ
+/// the resulting bias is accepted in exchange for a usable (stable) step.
+/// `b`/`r`/`d` are caller-owned scratch of length `dim`. Returns the final
+/// relative residual `‖rhs − M u‖∞ / (1 + ‖rhs‖∞)`, which the caller uses as
+/// the dynamic-regularization trigger.
+#[allow(clippy::too_many_arguments)]
+fn solve_refined(
+    fact: &mut Factorization,
+    airn: &[Index],
+    ajcn: &[Index],
+    vals: &[f64],
+    rhs: &mut [f64],
+    b: &mut [f64],
+    r: &mut [f64],
+    d: &mut [f64],
+) -> Result<f64, FactorizationError> {
+    b.copy_from_slice(rhs);
+    fact.solve_one(rhs)?;
+    let bnorm = 1.0 + inf_norm(b);
+    let mut res = f64::INFINITY;
+    for _ in 0..IR_MAX_PASSES {
+        kkt_matvec(airn, ajcn, vals, rhs, r);
+        for k in 0..r.len() {
+            r[k] = b[k] - r[k];
+        }
+        let new_res = inf_norm(r) / bnorm;
+        // Stop once converged, or once refinement stops making progress — the
+        // latter means the factor can no longer recover accuracy (a
+        // near-singular KKT on the degenerate face), which is the signal the
+        // dynamic-regularization loop keys on via the returned residual.
+        if new_res <= IR_RELTOL || new_res >= res {
+            res = new_res;
+            break;
+        }
+        res = new_res;
+        d.copy_from_slice(r);
+        fact.solve_one(d)?;
+        for k in 0..rhs.len() {
+            rhs[k] += d[k];
+        }
+    }
+    Ok(res)
 }
 
 /// Solve `min ½xᵀPx + cᵀx s.t. Ax = b, Gx ⪯_K h` via the homogeneous
@@ -86,6 +247,10 @@ where
     let neg_b: Vec<f64> = prob.b.iter().map(|v| -v).collect();
     let neg_h: Vec<f64> = prob.h.iter().map(|v| -v).collect();
     let zeros_m = vec![0.0; m_ineq];
+    // Zero linear-residual blocks for the Gondzio corrector solves, whose only
+    // non-zero right-hand side is the re-centered complementarity term.
+    let zeros_n = vec![0.0; n];
+    let zeros_meq = vec![0.0; m_eq];
 
     // Self-dual start: x = y = 0, s = z = e (cone identity), τ = κ = 1.
     let mut x = vec![0.0; n];
@@ -106,6 +271,23 @@ where
     let mut comp = vec![0.0; m_ineq];
     let mut kkt_vals = kkt.values.clone();
     let mut rhs = vec![0.0; kkt.dim];
+    // Iterative-refinement scratch (residual b, residual-of-residual r, and
+    // the correction d), each one full KKT right-hand side.
+    let mut ir_b = vec![0.0; kkt.dim];
+    let mut ir_r = vec![0.0; kkt.dim];
+    let mut ir_d = vec![0.0; kkt.dim];
+
+    // Scratch + constants for the scale-relative convergence normalizers
+    // (see the stopping test below). Dual side: ‖Aᵀŷ‖, ‖Gᵀẑ‖; primal side:
+    // ‖Ax̂‖, ‖Gx̂‖. The RHS/cost data norms are constant and double as the
+    // `1+` absolute floors that preserve the old behavior on well-scaled data.
+    let mut nrm_aty = vec![0.0; n];
+    let mut nrm_gtz = vec![0.0; n];
+    let mut nrm_ax = vec![0.0; m_eq];
+    let mut nrm_gx = vec![0.0; m_ineq];
+    let norm_b = inf_norm(&prob.b);
+    let norm_h = inf_norm(&prob.h);
+    let norm_c = inf_norm(&prob.c);
 
     // Direction buffers: p = constant direction, (dx,dy,dz) = the running
     // step, with affine slack/dual kept for the Mehrotra corrector.
@@ -118,6 +300,14 @@ where
     let mut ds = vec![0.0; m_ineq];
     let mut dz_aff = vec![0.0; m_ineq];
     let mut ds_aff = vec![0.0; m_ineq];
+    // Gondzio centrality-corrector buffers: one extra direction (cdx, cdy,
+    // cdz, cds) plus two combined-step scratch vectors. Allocated once.
+    let mut cdx = vec![0.0; n];
+    let mut cdy = vec![0.0; m_eq];
+    let mut cdz = vec![0.0; m_ineq];
+    let mut cds = vec![0.0; m_ineq];
+    let mut step_s = vec![0.0; m_ineq];
+    let mut step_z = vec![0.0; m_ineq];
 
     let mut status = QpStatus::IterationLimit;
     let mut iters = 0;
@@ -164,25 +354,91 @@ where
 
         // --- convergence (un-homogenized residuals; divide out τ) ---
         // Gap = x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ = (xᵀPx/τ + cᵀx + bᵀy + hᵀz)/τ.
+        // These are the *absolute* residuals (what the trace/debugger report).
         let pres = inf_norm(&rho_y).max(inf_norm(&rho_z)) / tau;
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
-        let res = pres.max(dres).max(gap);
+        // Un-homogenized objective `½x̂ᵀPx̂ + cᵀx̂` (x̂ = x/τ).
+        let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
+
+        // --- scale-relative residuals (Clarabel-style) ---
+        // A pure absolute test `res < tol` is unreachable for large-data
+        // problems: a feasible QP whose data norms are large (POWELL20:
+        // ‖Px̂‖ ~ 7.5e3, objective ~5e10) floors its absolute KKT residuals far
+        // above `tol` (primal ~3e-5, gap ~4e2) while the *relative* residuals
+        // are ~1e-9 — genuinely optimal. Normalize each residual by the natural
+        // scale of its own terms. Data-only (`‖c‖`/`‖b‖`/`‖h‖`) normalizers are
+        // *insufficient* for a QP — the dual residual's dominant scale is the
+        // Hessian-gradient term ‖Px̂‖, which only the matvec norms capture.
+        // `px_vec` already holds `Px` (computed above) ⇒ ‖Px̂‖ = ‖px_vec‖/τ.
+        //
+        // These relative residuals do NOT simply replace the absolute test:
+        // the relative test is *gated* on the problem scale below (it only
+        // relaxes the absolute test once `tol`-level absolute accuracy is
+        // unreachable). The `1.0 +` floor alone is not enough — a moderately
+        // scaled problem (scale ~30) has a relative residual ~30× looser than
+        // its absolute one, and the bound-tightening presolve's dual
+        // re-attribution amplifies that slack into a large stationarity
+        // violation in the *original* problem (the reduced solve stops a step
+        // early, before the final quadratic plunge to ~machine-ε accuracy).
+        for v in nrm_aty.iter_mut() {
+            *v = 0.0;
+        }
+        prob.at_mul(&y, &mut nrm_aty);
+        for v in nrm_gtz.iter_mut() {
+            *v = 0.0;
+        }
+        prob.gt_mul(&z, &mut nrm_gtz);
+        for v in nrm_ax.iter_mut() {
+            *v = 0.0;
+        }
+        prob.a_mul(&x, &mut nrm_ax);
+        for v in nrm_gx.iter_mut() {
+            *v = 0.0;
+        }
+        prob.g_mul(&x, &mut nrm_gx);
+        let scale_d = (inf_norm(&px_vec)
+            .max(inf_norm(&nrm_aty))
+            .max(inf_norm(&nrm_gtz))
+            / tau)
+            .max(norm_c);
+        let scale_p = (inf_norm(&nrm_ax).max(inf_norm(&nrm_gx)).max(inf_norm(&s)) / tau)
+            .max(norm_b)
+            .max(norm_h);
+        let d_obj = -0.5 * xpx / (tau * tau) - bty / tau - htz / tau;
+        let scale_g = obj_hat.abs().max(d_obj.abs());
+        let pres_rel = pres / (1.0 + scale_p);
+        let dres_rel = dres / (1.0 + scale_d);
+        let gap_rel = gap / (1.0 + scale_g);
+        // Gate (see [`relative_stop_permitted`]): the scale-relative test only
+        // *relaxes* the absolute one once the problem's natural scale is large
+        // enough that `tol`-level absolute accuracy is below the
+        // finite-precision floor. Empirically this cleanly separates the two
+        // regimes seen across the QP set — well-/moderately-scaled problems
+        // (scale ≲ 1e3, incl. every bound-tightening presolve instance at
+        // scale ≲ 30) reach the tight absolute test, while the large-data
+        // cluster (POWELL20/BOYD/QFORPLAN/QSHELL at scale 7e9–4e12) can only be
+        // certified relatively.
+        let large_scale = relative_stop_permitted(scale_d.max(scale_p).max(scale_g), opts.tol);
+        // `res` (used only for the `near_opt` salvage check below) tracks
+        // whichever test governs this iterate.
+        let res = if large_scale {
+            pres_rel.max(dres_rel).max(gap_rel)
+        } else {
+            pres.max(dres).max(gap)
+        };
         // "Acceptable level": near the cone boundary the scaling/factorization
-        // can break down a hair short of `tol`. If the unregularized KKT
-        // residuals are already tiny (within `~1e3·tol`) when that happens, the
-        // iterate is usable — report it as `OptimalInaccurate` (reduced
-        // accuracy) rather than discarding it as a spurious `NumericalFailure`.
-        // It is deliberately *not* reported as a bare `Optimal`: the residual
-        // sits above `tol`, so callers can tell it apart from a genuinely
-        // converged solve (code review 2026-06 item M20). This mirrors the
-        // non-symmetric HSDE driver (`hsde_nonsym.rs`), which already does this;
-        // the two drivers were inconsistent (the symmetric one discarded usable
+        // can break down a hair short of `tol`. If the (relative) KKT residuals
+        // are already tiny (within `~1e3·tol`) when that happens, the iterate
+        // is usable — report it as `OptimalInaccurate` (reduced accuracy)
+        // rather than discarding it as a spurious `NumericalFailure`. It is
+        // deliberately *not* reported as a bare `Optimal`: the residual sits
+        // above `tol`, so callers can tell it apart from a genuinely converged
+        // solve (code review 2026-06 item M20). This mirrors the non-symmetric
+        // HSDE driver (`hsde_nonsym.rs`), which already does this; the two
+        // drivers were inconsistent (the symmetric one discarded usable
         // SOC/orthant iterates that the non-symmetric one would have accepted).
         let near_opt = res < 1e3 * opts.tol;
-        // Un-homogenized objective `½x̂ᵀPx̂ + cᵀx̂` (x̂ = x/τ) — what the
-        // trace and debugger report.
-        let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
 
         // Debugger checkpoint: top of iteration. Blocks expose the
         // homogeneous iterate `(x, s, y, z, τ, κ)`; the objective is the
@@ -214,7 +470,11 @@ where
             }
         }
 
-        if pres < opts.tol && dres < opts.tol && gap < opts.tol {
+        // Absolute test always governs; the scale-relative test only relaxes
+        // it for genuinely large-data problems (`large_scale`, gated above).
+        let converged = (pres < opts.tol && dres < opts.tol && gap < opts.tol)
+            || (large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol);
+        if converged {
             status = QpStatus::Optimal;
             // Terminal record at the converged iterate (no step taken).
             if opts.collect_iterates {
@@ -234,23 +494,71 @@ where
         // --- infeasibility (the embedding drives the iterate onto the
         // Farkas/recession ray as τ → 0; the same verified relative checks
         // as the direct driver apply to the homogeneous (x, y, z)). ---
-        if tau < 1e-2 * kappa.max(1.0) {
+        //
+        // The trigger is the ratio discriminant κ ≫ τ — see
+        // [`on_infeasibility_ray`]. Concretely POWELL20 (‖x*‖ ~ 1e7): once τ
+        // collapses far enough that the homogeneous Farkas residual
+        // ‖Aᵀy+Gᵀz‖ = τ·‖Px̂+c‖ slips under `FARKAS_RESID_TOL` (~iter 33), κ has
+        // collapsed with it (κ/τ ~ 1e-9), so the gate stays shut.
+        if on_infeasibility_ray(tau, kappa) {
             if let Some(st) = detect_infeasibility_cone(prob, &x, &y, &z, opts, cone) {
                 status = st;
                 break;
             }
         }
 
-        // --- refactor M with the current cone scaling ---
-        kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
-        if fact.refactor(&kkt_vals).is_err() {
-            status = breakdown_status(near_opt);
+        // --- adaptive static regularization δ ---
+        // The static δ added to the KKT diagonal biases the *step*, flooring
+        // the un-homogenized residual at ~δ·‖(x̂,ŷ,ẑ)‖ (x̂ = x/τ, …) — see the
+        // `δ·‖dy‖` floor noted on `QpOptions::reg`. On large-dual problems
+        // (the LISWET cluster: ‖ŷ‖ ~ 1e4) a fixed δ = 1e-10 floors that
+        // residual at ~1e-6 ≫ `tol`, so the solve plateaus and runs to
+        // `max_iter`. Scale δ down by the current iterate norm so the floor
+        // tracks ~`tol` regardless of dual scale, but never below `REG_MIN`
+        // (keeps the reduced KKT quasi-definite). Well-scaled problems
+        // (‖iterate‖ ~ 1) are untouched: `tol/scale ≥ opts.reg`, so the `min`
+        // keeps the configured δ.
+        let iterate_scale = (inf_norm(&x).max(inf_norm(&y)).max(inf_norm(&z)) / tau).max(1.0);
+        let base_reg = (opts.tol / iterate_scale).min(opts.reg).max(REG_MIN);
+
+        // --- refactor M with the current cone scaling + dynamic regularization ---
+        // Factor at the small static δ; if the factorization is singular, or
+        // the constant-direction solve cannot be refined below DYN_REG_RES_TOL
+        // (the KKT is numerically singular on the degenerate face), raise δ on
+        // the (z,z) block and refactor — bounded, and reset to `base_reg` next
+        // iteration. The constant direction `p: M p = (−c, b, h)` doubles as
+        // the conditioning probe: it is solved here inside the loop so its
+        // refinement residual gates the bump.
+        let mut reg_eff = base_reg;
+        let mut dyn_tries = 0usize;
+        let mut factored = false;
+        loop {
+            kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
+            if fact.refactor(&kkt_vals).is_err() {
+                if dyn_tries < DYN_REG_MAX_TRIES && reg_eff < DYN_REG_MAX {
+                    reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                    dyn_tries += 1;
+                    continue;
+                }
+                break; // factored stays false → breakdown below
+            }
+            build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
+            let res_p = match solve_refined(
+                &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
+                &mut ir_d,
+            ) {
+                Ok(res) => res,
+                Err(_) => break, // factored stays false → breakdown below
+            };
+            if res_p > DYN_REG_RES_TOL && dyn_tries < DYN_REG_MAX_TRIES && reg_eff < DYN_REG_MAX {
+                reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                dyn_tries += 1;
+                continue;
+            }
+            factored = true;
             break;
         }
-
-        // --- constant direction p: M p = (−c, b, h) ---
-        build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if !factored {
             status = breakdown_status(near_opt);
             break;
         }
@@ -269,7 +577,11 @@ where
         cone.comp_residual(&s, &z, 0.0, &mut r_c);
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if solve_refined(
+            &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
+        )
+        .is_err()
+        {
             status = breakdown_status(near_opt);
             break;
         }
@@ -309,7 +621,11 @@ where
         cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if solve_refined(
+            &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
+        )
+        .is_err()
+        {
             status = breakdown_status(near_opt);
             break;
         }
@@ -320,7 +636,7 @@ where
             + dot(&prob.h, &dz);
         // τκ corrector residual: τκ + Δτ_aff·Δκ_aff (target σμ).
         let r_tk = tau * kappa + dtau_aff * dkappa_aff;
-        let dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
+        let mut dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
         // Combine: dw = q + Δτ·p.
         for i in 0..n {
             dx[i] += dtau * p_x[i];
@@ -331,15 +647,115 @@ where
         for i in 0..m_ineq {
             dz[i] += dtau * p_z[i];
         }
-        let dkappa = (sigma_mu - r_tk - kappa * dtau) / tau;
+        let mut dkappa = (sigma_mu - r_tk - kappa * dtau) / tau;
         cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
 
         // Single fraction-to-boundary step (HSDE is primal/dual-symmetric).
+        // A *separate* primal/dual step is unsound here: τ couples both
+        // residuals (ρ_x carries `cτ` + `Px`, ρ_y carries `bτ`), so stepping
+        // the primal block (x, s, τ) and dual block (y, z, κ) by different
+        // amounts leaves a dual-infeasibility residual ∝ (α_p − α_d) — on the
+        // degenerate NETLIB GEN family (α_p ≫ α_d) that blows ρ_x up from
+        // ~1e-8 to ~5e-2. The symmetric step keeps the embedding's clean
+        // (1−α) residual decrease.
         let mut alpha = ray_step(tau, dtau, opts.tau).min(ray_step(kappa, dkappa, opts.tau));
         if m_ineq > 0 {
             alpha = alpha
                 .min(cone.max_step(&s, &ds, opts.tau))
                 .min(cone.max_step(&z, &dz, opts.tau));
+        }
+
+        // === Gondzio multiple centrality correctors ===
+        // Restricted to the pure nonnegative orthant: the complementarity
+        // product s∘z is then elementwise, so we can box-project it directly.
+        // Each pass forms a trial step enlarged by GONDZIO_DELTA, projects the
+        // resulting complementarity products into the centrality band
+        // [β_lo·μ, β_hi·μ], solves a *corrector* system through the existing
+        // factor (zero linear residual, only the re-centered complementarity
+        // RHS), and accepts the extra direction only if it lengthens the step
+        // by at least GONDZIO_GAMMA·GONDZIO_DELTA — otherwise the loop stops.
+        if cone.is_orthant() && m_ineq > 0 && mu > 0.0 {
+            let lo = GONDZIO_BETA_LO * mu;
+            let hi = GONDZIO_BETA_HI * mu;
+            for _ in 0..GONDZIO_MAX_CORR {
+                let a_trial = (alpha + GONDZIO_DELTA).min(1.0);
+                // Cone complementarity targets: project the trial products into
+                // the band; r_c holds the deviation ṽ − t so that recover_ds
+                // yields a correction with z∘cds + s∘cdz = t − ṽ.
+                let mut active = false;
+                for i in 0..m_ineq {
+                    let v = (s[i] + a_trial * ds[i]) * (z[i] + a_trial * dz[i]);
+                    let t = v.clamp(lo, hi);
+                    r_c[i] = v - t;
+                    if r_c[i] != 0.0 {
+                        active = true;
+                    }
+                }
+                // τ/κ complementarity target (same band).
+                let v_tk = (tau + a_trial * dtau) * (kappa + a_trial * dkappa);
+                let t_tk = v_tk.clamp(lo, hi);
+                if !active && (v_tk - t_tk) == 0.0 {
+                    break;
+                }
+                // Corrector system: zero linear residual, complementarity RHS
+                // only. Solve through the existing factor with refinement.
+                cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
+                build_rhs(
+                    &zeros_n, &zeros_meq, &zeros_m, &comp, n, m_eq, m_ineq, &mut rhs,
+                );
+                if solve_refined(
+                    &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
+                    &mut ir_d,
+                )
+                .is_err()
+                {
+                    break;
+                }
+                split_step(&rhs, n, m_eq, m_ineq, &mut cdx, &mut cdy, &mut cdz);
+                // τ-row Schur solve for the corrector (rho_tau = 0).
+                let gtq_c = dot(&prob.c, &cdx)
+                    + two_over_tau * dot(&px_vec, &cdx)
+                    + dot(&prob.b, &cdy)
+                    + dot(&prob.h, &cdz);
+                let dtau_c = (-gtq_c - (t_tk - v_tk) / tau) / denom;
+                for i in 0..n {
+                    cdx[i] += dtau_c * p_x[i];
+                }
+                for i in 0..m_eq {
+                    cdy[i] += dtau_c * p_y[i];
+                }
+                for i in 0..m_ineq {
+                    cdz[i] += dtau_c * p_z[i];
+                }
+                let dkappa_c = (t_tk - v_tk - kappa * dtau_c) / tau;
+                cone.recover_ds(&s, &z, &r_c, &cdz, &mut cds);
+                // Trial enlarged step and its fraction-to-boundary length.
+                for i in 0..m_ineq {
+                    step_s[i] = ds[i] + cds[i];
+                    step_z[i] = dz[i] + cdz[i];
+                }
+                let a_new = ray_step(tau, dtau + dtau_c, opts.tau)
+                    .min(ray_step(kappa, dkappa + dkappa_c, opts.tau))
+                    .min(cone.max_step(&s, &step_s, opts.tau))
+                    .min(cone.max_step(&z, &step_z, opts.tau));
+                if a_new >= alpha + GONDZIO_GAMMA * GONDZIO_DELTA {
+                    for i in 0..n {
+                        dx[i] += cdx[i];
+                    }
+                    for i in 0..m_eq {
+                        dy[i] += cdy[i];
+                    }
+                    for i in 0..m_ineq {
+                        dz[i] += cdz[i];
+                        ds[i] += cds[i];
+                    }
+                    dtau += dtau_c;
+                    dkappa += dkappa_c;
+                    alpha = a_new;
+                } else {
+                    break;
+                }
+            }
         }
 
         // Debugger checkpoint: the combined Newton direction and the single
@@ -716,6 +1132,77 @@ mod tests {
             (sol.x[0].hypot(sol.x[1]) - 1.0).abs() < 1e-5,
             "x {:?}",
             sol.x
+        );
+    }
+
+    /// The infeasibility-ray discriminant must key off the *ratio* κ/τ, not a
+    /// bare `τ < ε` floor. Pins the exact `(τ, κ)` iterates POWELL20 produces:
+    /// the early iterates where κ genuinely dominates (κ/τ ≫ 100) are on the
+    /// ray; the collapsed-τ late iterate (κ/τ ~ 1e-9) — where the prior
+    /// `κ.max(1.0)` floor wrongly fired and declared the feasible QP
+    /// infeasible — must NOT be. (See `on_infeasibility_ray`.)
+    #[test]
+    fn infeasibility_ray_discriminant_is_ratio_not_floor() {
+        // POWELL20 late iterate (it=33): τ=9.95e-15, κ=1.15e-23 ⇒ κ/τ ~ 1e-9.
+        // Feasible-degenerate: both collapsing, κ does NOT dominate. The old
+        // `τ < 1e-2·κ.max(1.0)` = `τ < 1e-2` floor fired here — the bug.
+        assert!(
+            !on_infeasibility_ray(9.95e-15, 1.15e-23),
+            "feasible collapsed-τ iterate (κ ≪ τ) must not be flagged as a ray"
+        );
+        // POWELL20 early iterate (it=9): τ=1.1e-11, κ=0.637 ⇒ κ/τ ~ 6e10.
+        // κ genuinely dominates — on the ray (the FARKAS_RESID_TOL residual
+        // gate then rejects the still-too-large certificate, as it should).
+        assert!(
+            on_infeasibility_ray(1.1e-11, 0.637),
+            "κ ≫ τ is the infeasibility-ray signature and must be flagged"
+        );
+        // A genuine small-certificate infeasible iterate: κ/τ = 1e6 > 100.
+        assert!(on_infeasibility_ray(1e-9, 1e-3));
+        // Boundary: κ/τ exactly 100 is not yet dominant (strict `>` after the
+        // 1e-2 factor); κ/τ = 1000 is.
+        assert!(!on_infeasibility_ray(1.0, 100.0));
+        assert!(on_infeasibility_ray(1.0, 1000.0));
+        // A converged feasible solve (τ → τ* > 0, κ → 0) is never a ray.
+        assert!(!on_infeasibility_ray(0.8, 1e-12));
+    }
+
+    /// The scale-relative stopping test may only relax the absolute one once
+    /// `tol`-level absolute accuracy is unreachable (`max_scale·ε > tol`). Pins
+    /// the two regimes measured across the QP set: every bound-tightening
+    /// presolve instance (scale ≲ 30, where postsolve dual re-attribution would
+    /// otherwise amplify a relaxed reduced-problem residual) stays on the tight
+    /// absolute test; the large-data cluster (POWELL20/QFORPLAN/QSHELL/BOYD at
+    /// scale 7e9–4e12, whose absolute residuals floor far above `tol`) gets the
+    /// relative certificate. (See `relative_stop_permitted`.)
+    #[test]
+    fn relative_stop_gated_on_unreachable_absolute_accuracy() {
+        let tol = 1e-8;
+        // Presolve-regime scales (measured at the stopping iterate): the gate
+        // must stay shut so the absolute test governs.
+        assert!(
+            !relative_stop_permitted(32.0, tol),
+            "scale 32 must use absolute"
+        );
+        assert!(
+            !relative_stop_permitted(2.489e3, tol),
+            "LISWET1 scale (reaches absolute tol) must use absolute"
+        );
+        // Large-data cluster scales (measured): the gate must open.
+        assert!(
+            relative_stop_permitted(7.457e9, tol),
+            "QFORPLAN scale (smallest of the cluster) must permit relative"
+        );
+        assert!(relative_stop_permitted(5.209e10, tol), "POWELL20 scale");
+        assert!(relative_stop_permitted(3.750e12, tol), "BOYD1 scale");
+        // Crossover is `tol/ε`: just below stays absolute, just above goes
+        // relative — and it tracks `tol` (a tighter tol opens the gate sooner).
+        let crossover = tol / f64::EPSILON;
+        assert!(!relative_stop_permitted(0.5 * crossover, tol));
+        assert!(relative_stop_permitted(2.0 * crossover, tol));
+        assert!(
+            relative_stop_permitted(0.5 * crossover, 1e-10),
+            "tighter tol lowers the crossover"
         );
     }
 

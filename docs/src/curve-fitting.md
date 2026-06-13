@@ -177,6 +177,60 @@ where you know the measurement noise.
 > will land. If "~95% of my points should be inside," you want the prediction
 > band.
 
+## Out-of-core data: `curve_fit_streaming`
+
+When the dataset is too large to hold in memory, `pounce.curve_fit_streaming`
+fits **exactly the same model and objective** as `curve_fit`, but reads the data
+in **mini-batches** instead of as in-memory arrays. The solver's objective,
+gradient, and Gauss-Newton Hessian are all *additive sums over data points*, so
+streaming and accumulating them produces the **identical** fit — only one batch
+(plus an `n_params × n_params` matrix) is ever resident.
+
+Instead of `xdata, ydata` you pass a `data_source`: a **zero-argument callable**
+(a factory) that returns a *fresh* iterator of `(x_batch, y_batch)` — or
+`(x_batch, y_batch, sigma_batch)` — tuples. It is called once per solver pass,
+so it must yield the full dataset every time (re-open the file, re-slice the
+mmap, …); a one-shot iterator is rejected.
+
+```python
+import numpy as np
+import pounce
+
+# 50M points living on disk — re-read in 100k-row batches each pass
+x_mm = np.load("x.npy", mmap_mode="r")
+y_mm = np.load("y.npy", mmap_mode="r")
+BATCH = 100_000
+
+def data_source():                       # fresh iterator every call
+    for i in range(0, x_mm.shape[0], BATCH):
+        yield x_mm[i : i + BATCH], y_mm[i : i + BATCH]
+
+res = pounce.curve_fit_streaming(model, data_source, p0=[1, 1, 0])
+print(res.summary())
+res.popt, res.pcov, res.perr             # identical to the in-memory fit
+```
+
+Notes and trade-offs:
+
+- **Re-readable, not one-shot.** Each solver iteration (~10–50) makes one pass
+  over `data_source`, so it must replay the whole dataset on every call. Uniform
+  batch sizes avoid an extra JAX retrace on a smaller final batch.
+- **Provide `p0`.** The data-driven seed `curve_fit` uses needs a full in-memory
+  pass, so give a starting vector. With only `n_params` the seed falls back to
+  ones clipped into `bounds`. If the model signature doesn't name the parameters
+  and you omit `p0`, pass `n_params=`.
+- **What you get back is the same** — all scalar diagnostics (SSE, χ², R², dof)
+  and the full covariance / standard errors / confidence intervals are computed
+  and are bit-for-bit the in-memory result. Everything else carries over too:
+  weighted fits (`sigma` batches), robust `loss` (the sandwich covariance is
+  accumulated over batches), `bounds`, and `constraints` (active sets project the
+  covariance exactly as in the in-memory fit).
+- **What is omitted** — the two `O(n_data)` outputs are *not* returned:
+  `res.residuals` and the data sensitivity `res.dpopt_ddata` are both `None`
+  (they are the size of the data and would defeat the purpose). `confidence_band`
+  still works for new `x`, but uses a homoscedastic noise level since the
+  per-point `sigma` is not retained.
+
 ## Multiple parameter sets: `curve_fit_minima`
 
 Nonlinear least squares is generally non-convex, so the objective `curve_fit`

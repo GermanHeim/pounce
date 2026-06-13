@@ -25,6 +25,7 @@
 
 pub mod batch;
 pub mod cones;
+pub mod crossover;
 pub(crate) mod debug;
 pub(crate) mod equilibrate;
 pub mod hsde;

@@ -182,6 +182,17 @@ impl CompositeCone {
     pub fn blocks(&self) -> &[(usize, ConeKind)] {
         &self.blocks
     }
+
+    /// True iff every block is a nonnegative orthant (the LP/QP case). The
+    /// complementarity product `s ∘ z` is then elementwise, so a corrector can
+    /// box-project the products directly on `(s, z)` without the Jordan-algebra
+    /// machinery an SOC/PSD block would require — see the Gondzio multiple
+    /// centrality correctors in [`crate::hsde`], which are enabled only here.
+    pub fn is_orthant(&self) -> bool {
+        self.blocks
+            .iter()
+            .all(|(_, k)| matches!(k, ConeKind::Nonneg(_)))
+    }
 }
 
 impl Cone for CompositeCone {
