@@ -356,11 +356,15 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
     }
     fn determine_dependent_rows(
         &mut self,
-        ia: &[Index],
-        ja: &[Index],
+        n_rows: Index,
+        n_cols: Index,
+        irn: &[Index],
+        jcn: &[Index],
+        vals: &[Number],
         c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
-        self.get().determine_dependent_rows(ia, ja, c_deps)
+        self.get()
+            .determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
     }
     fn factor_pattern(&self, want_values: bool) -> Option<pounce_linsol::FactorPattern> {
         self.inner

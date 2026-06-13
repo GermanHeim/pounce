@@ -952,6 +952,7 @@ dependencies = [
  "pounce-feral",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-qp",
  "rayon",
 ]
 

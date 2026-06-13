@@ -124,13 +124,24 @@ pub trait SparseSymLinearSolverInterface {
         false
     }
 
-    /// Find linearly dependent rows — used by Ipopt's degeneracy
-    /// probe. Default is `FatalError` matching upstream's default
-    /// implementation.
+    /// Find the linearly dependent rows of a constraint Jacobian `J`
+    /// (the Ipopt-style degeneracy probe). `J` is `n_rows × n_cols`,
+    /// supplied as a **1-based triplet** `(irn, jcn, vals)`; on
+    /// success `c_deps` is filled with the **0-based** indices of a
+    /// set of rows whose removal leaves `J` full row rank (each
+    /// dropped row is a linear combination of the retained ones).
+    ///
+    /// Callers must check [`Self::provides_degeneracy_detection`]
+    /// first. The default returns `FatalError`, matching upstream's
+    /// "not supported" default; backends that implement this set
+    /// `provides_degeneracy_detection() -> true`.
     fn determine_dependent_rows(
         &mut self,
-        _ia: &[Index],
-        _ja: &[Index],
+        _n_rows: Index,
+        _n_cols: Index,
+        _irn: &[Index],
+        _jcn: &[Index],
+        _vals: &[Number],
         _c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
         ESymSolverStatus::FatalError

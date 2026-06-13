@@ -221,6 +221,12 @@ pub struct AlgorithmBuilder {
     /// SQP-specific options (consulted only when
     /// `algorithm = ActiveSetSqp`).
     pub sqp: crate::sqp::SqpOptions,
+    /// QP-subproblem-solver options for the active-set SQP path
+    /// (`pounce_qp::QpOptions`), threaded into the `SqpAlgorithm` via
+    /// `with_qp_options`. Consulted only when `algorithm = ActiveSetSqp`.
+    /// Populated from the `sqp_qp_*` CLI options by
+    /// `application::apply_qp_subproblem_options`.
+    pub sqp_qp: pounce_qp::QpOptions,
     pub init: InitOptions,
 }
 
@@ -512,6 +518,7 @@ impl Default for AlgorithmBuilder {
             output: OutputOptions::default(),
             warm: WarmStartOptions::default(),
             sqp: crate::sqp::SqpOptions::default(),
+            sqp_qp: pounce_qp::QpOptions::default(),
             init: InitOptions::default(),
         }
     }
@@ -587,7 +594,10 @@ impl AlgorithmBuilder {
         }
         let backend = factory(self.linear_solver);
         let qp_solver = pounce_qp::ParametricActiveSetSolver::new(backend);
-        Some(crate::sqp::SqpAlgorithm::new(qp_solver, self.sqp.clone()))
+        Some(
+            crate::sqp::SqpAlgorithm::new(qp_solver, self.sqp.clone())
+                .with_qp_options(self.sqp_qp.clone()),
+        )
     }
 
     fn build_inner(&self, search_dir: Option<PdSearchDirCalc>) -> AlgorithmBundle {
@@ -816,6 +826,7 @@ mod tests {
                             output: OutputOptions::default(),
                             warm: WarmStartOptions::default(),
                             sqp: crate::sqp::SqpOptions::default(),
+                            sqp_qp: pounce_qp::QpOptions::default(),
                             init: InitOptions::default(),
                         }
                         .build();

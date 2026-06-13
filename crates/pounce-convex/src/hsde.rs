@@ -41,7 +41,8 @@ use crate::ipm::{
 };
 use crate::qp::{breakdown_status, QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
-use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_common::types::Index;
+use pounce_linsol::{Factorization, FactorizationError, SparseSymLinearSolverInterface};
 
 /// Strictly-positive floor for the adaptive static regularization δ (see the
 /// `update_blocks` call in [`solve_conic_hsde`]). δ must stay above this so the
@@ -51,6 +52,52 @@ use pounce_linsol::SparseSymLinearSolverInterface;
 /// 1e-10) — enough room for the LISWET cluster (‖ŷ‖ ~ 1e4 ⇒ δ ~ 1e-12) without
 /// reaching machine-noise territory.
 const REG_MIN: f64 = 1e-14;
+
+/// Maximum iterative-refinement passes per KKT back-solve, and the relative
+/// residual at which refinement stops. Each HSDE step solves the same factored
+/// KKT three times (constant direction, predictor, corrector); near a
+/// degenerate optimum that KKT is ill-conditioned and a single LDLᵀ back-solve
+/// loses several digits, biasing the Newton direction and collapsing the
+/// fraction-to-boundary step (the NETLIB GEN stall). Refining each solve
+/// against the assembled matrix recovers those digits — Clarabel, QDLDL, and
+/// SCS all refine every solve by default. Passes are few (refinement converges
+/// in 1–2 steps when it helps) and a well-conditioned solve exits after a
+/// single residual check, so the overhead on easy problems is one matvec.
+const IR_MAX_PASSES: usize = 5;
+const IR_RELTOL: f64 = 1e-12;
+
+/// Dynamic-regularization schedule (Ipopt-style inertia/regularization
+/// correction; Clarabel's dynamic KKT regularization). When the factorization
+/// is singular, or the constant-direction solve cannot be refined below
+/// [`DYN_REG_RES_TOL`] (the KKT is numerically singular on the degenerate
+/// face), raise the `(z,z)` regularization δ by [`DYN_REG_FACTOR`] — up to
+/// [`DYN_REG_MAX`], at most [`DYN_REG_MAX_TRIES`] times — and refactor. δ is
+/// reset to its small per-iteration base every iteration, so a single hard
+/// iterate never inflates δ for the rest of the solve; well-conditioned
+/// iterations keep the tight static δ and never enter the bump loop.
+const DYN_REG_FACTOR: f64 = 10.0;
+const DYN_REG_MAX: f64 = 1e-7;
+const DYN_REG_MAX_TRIES: usize = 4;
+const DYN_REG_RES_TOL: f64 = 1e-8;
+
+/// Gondzio multiple centrality correctors (Gondzio 1996, "Multiple centrality
+/// corrections in a primal–dual method for linear programming"). After the
+/// Mehrotra corrector, up to [`GONDZIO_MAX_CORR`] additional corrections are
+/// computed through the *same* factorization (each is one extra back-solve):
+/// a trial step enlarged by [`GONDZIO_DELTA`] is formed, and any
+/// complementarity product it would push outside the centered box
+/// `[β_lo·μ, β_hi·μ]` is corrected back toward the box. Each corrector is
+/// accepted only if it lengthens the fraction-to-boundary step by at least
+/// `GONDZIO_GAMMA·GONDZIO_DELTA`; otherwise correction stops. Lengthening the
+/// step is exactly the documented purpose of the scheme — and it is what
+/// breaks the degenerate-face step collapse (σ→1 centering freezing μ) on the
+/// NETLIB GEN family, where the Mehrotra corrector alone stalls. β_lo = 0.1,
+/// β_hi = 10 is Gondzio's recommended symmetric box.
+const GONDZIO_MAX_CORR: usize = 3;
+const GONDZIO_DELTA: f64 = 0.1;
+const GONDZIO_GAMMA: f64 = 0.1;
+const GONDZIO_BETA_LO: f64 = 0.1;
+const GONDZIO_BETA_HI: f64 = 10.0;
 
 /// HSDE infeasibility-ray discriminant: is the homogenizing pair `(τ, κ)` on
 /// the Farkas/recession ray (`κ ≫ τ`), as opposed to converging to a solution
@@ -98,6 +145,76 @@ fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
     }
 }
 
+/// Symmetric matvec `y ← M x` for the lower-triangle KKT triplets
+/// (`airn`/`ajcn` are 1-based with `row ≥ col`). Each strictly-lower entry
+/// contributes to both `y[i]` and `y[j]`; the diagonal once. Used to form the
+/// residual `rhs − M u` that drives iterative refinement.
+fn kkt_matvec(airn: &[Index], ajcn: &[Index], vals: &[f64], x: &[f64], y: &mut [f64]) {
+    for v in y.iter_mut() {
+        *v = 0.0;
+    }
+    for k in 0..vals.len() {
+        let i = (airn[k] - 1) as usize;
+        let j = (ajcn[k] - 1) as usize;
+        let v = vals[k];
+        y[i] += v * x[j];
+        if i != j {
+            y[j] += v * x[i];
+        }
+    }
+}
+
+/// Solve `M u = rhs` against the cached factor (overwriting `rhs` with `u`),
+/// applying iterative refinement against the assembled KKT triplets
+/// `(airn, ajcn, vals)`. Recovers digits lost to factorization round-off on
+/// the ill-conditioned KKT near a degenerate optimum (see [`IR_MAX_PASSES`]).
+///
+/// Refinement runs against the *factored* (regularized) matrix `vals`: the
+/// static δ is below `tol` at the default, so the regularized and true systems
+/// coincide to working precision there; when dynamic regularization raises δ
+/// the resulting bias is accepted in exchange for a usable (stable) step.
+/// `b`/`r`/`d` are caller-owned scratch of length `dim`. Returns the final
+/// relative residual `‖rhs − M u‖∞ / (1 + ‖rhs‖∞)`, which the caller uses as
+/// the dynamic-regularization trigger.
+#[allow(clippy::too_many_arguments)]
+fn solve_refined(
+    fact: &mut Factorization,
+    airn: &[Index],
+    ajcn: &[Index],
+    vals: &[f64],
+    rhs: &mut [f64],
+    b: &mut [f64],
+    r: &mut [f64],
+    d: &mut [f64],
+) -> Result<f64, FactorizationError> {
+    b.copy_from_slice(rhs);
+    fact.solve_one(rhs)?;
+    let bnorm = 1.0 + inf_norm(b);
+    let mut res = f64::INFINITY;
+    for _ in 0..IR_MAX_PASSES {
+        kkt_matvec(airn, ajcn, vals, rhs, r);
+        for k in 0..r.len() {
+            r[k] = b[k] - r[k];
+        }
+        let new_res = inf_norm(r) / bnorm;
+        // Stop once converged, or once refinement stops making progress — the
+        // latter means the factor can no longer recover accuracy (a
+        // near-singular KKT on the degenerate face), which is the signal the
+        // dynamic-regularization loop keys on via the returned residual.
+        if new_res <= IR_RELTOL || new_res >= res {
+            res = new_res;
+            break;
+        }
+        res = new_res;
+        d.copy_from_slice(r);
+        fact.solve_one(d)?;
+        for k in 0..rhs.len() {
+            rhs[k] += d[k];
+        }
+    }
+    Ok(res)
+}
+
 /// Solve `min ½xᵀPx + cᵀx s.t. Ax = b, Gx ⪯_K h` via the homogeneous
 /// self-dual embedding, returning the un-homogenized solution. `P = 0` is an
 /// LP/SOCP; `P ⪰ 0` a QP (the τ-row picks up the `xᵀPx/τ` coupling).
@@ -130,6 +247,10 @@ where
     let neg_b: Vec<f64> = prob.b.iter().map(|v| -v).collect();
     let neg_h: Vec<f64> = prob.h.iter().map(|v| -v).collect();
     let zeros_m = vec![0.0; m_ineq];
+    // Zero linear-residual blocks for the Gondzio corrector solves, whose only
+    // non-zero right-hand side is the re-centered complementarity term.
+    let zeros_n = vec![0.0; n];
+    let zeros_meq = vec![0.0; m_eq];
 
     // Self-dual start: x = y = 0, s = z = e (cone identity), τ = κ = 1.
     let mut x = vec![0.0; n];
@@ -150,6 +271,11 @@ where
     let mut comp = vec![0.0; m_ineq];
     let mut kkt_vals = kkt.values.clone();
     let mut rhs = vec![0.0; kkt.dim];
+    // Iterative-refinement scratch (residual b, residual-of-residual r, and
+    // the correction d), each one full KKT right-hand side.
+    let mut ir_b = vec![0.0; kkt.dim];
+    let mut ir_r = vec![0.0; kkt.dim];
+    let mut ir_d = vec![0.0; kkt.dim];
 
     // Scratch + constants for the scale-relative convergence normalizers
     // (see the stopping test below). Dual side: ‖Aᵀŷ‖, ‖Gᵀẑ‖; primal side:
@@ -174,6 +300,14 @@ where
     let mut ds = vec![0.0; m_ineq];
     let mut dz_aff = vec![0.0; m_ineq];
     let mut ds_aff = vec![0.0; m_ineq];
+    // Gondzio centrality-corrector buffers: one extra direction (cdx, cdy,
+    // cdz, cds) plus two combined-step scratch vectors. Allocated once.
+    let mut cdx = vec![0.0; n];
+    let mut cdy = vec![0.0; m_eq];
+    let mut cdz = vec![0.0; m_ineq];
+    let mut cds = vec![0.0; m_ineq];
+    let mut step_s = vec![0.0; m_ineq];
+    let mut step_z = vec![0.0; m_ineq];
 
     let mut status = QpStatus::IterationLimit;
     let mut iters = 0;
@@ -385,17 +519,46 @@ where
         // (‖iterate‖ ~ 1) are untouched: `tol/scale ≥ opts.reg`, so the `min`
         // keeps the configured δ.
         let iterate_scale = (inf_norm(&x).max(inf_norm(&y)).max(inf_norm(&z)) / tau).max(1.0);
-        let reg_eff = (opts.tol / iterate_scale).min(opts.reg).max(REG_MIN);
-        // --- refactor M with the current cone scaling ---
-        kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
-        if fact.refactor(&kkt_vals).is_err() {
-            status = breakdown_status(near_opt);
+        let base_reg = (opts.tol / iterate_scale).min(opts.reg).max(REG_MIN);
+
+        // --- refactor M with the current cone scaling + dynamic regularization ---
+        // Factor at the small static δ; if the factorization is singular, or
+        // the constant-direction solve cannot be refined below DYN_REG_RES_TOL
+        // (the KKT is numerically singular on the degenerate face), raise δ on
+        // the (z,z) block and refactor — bounded, and reset to `base_reg` next
+        // iteration. The constant direction `p: M p = (−c, b, h)` doubles as
+        // the conditioning probe: it is solved here inside the loop so its
+        // refinement residual gates the bump.
+        let mut reg_eff = base_reg;
+        let mut dyn_tries = 0usize;
+        let mut factored = false;
+        loop {
+            kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
+            if fact.refactor(&kkt_vals).is_err() {
+                if dyn_tries < DYN_REG_MAX_TRIES && reg_eff < DYN_REG_MAX {
+                    reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                    dyn_tries += 1;
+                    continue;
+                }
+                break; // factored stays false → breakdown below
+            }
+            build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
+            let res_p = match solve_refined(
+                &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
+                &mut ir_d,
+            ) {
+                Ok(res) => res,
+                Err(_) => break, // factored stays false → breakdown below
+            };
+            if res_p > DYN_REG_RES_TOL && dyn_tries < DYN_REG_MAX_TRIES && reg_eff < DYN_REG_MAX {
+                reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                dyn_tries += 1;
+                continue;
+            }
+            factored = true;
             break;
         }
-
-        // --- constant direction p: M p = (−c, b, h) ---
-        build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if !factored {
             status = breakdown_status(near_opt);
             break;
         }
@@ -414,7 +577,11 @@ where
         cone.comp_residual(&s, &z, 0.0, &mut r_c);
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if solve_refined(
+            &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
+        )
+        .is_err()
+        {
             status = breakdown_status(near_opt);
             break;
         }
@@ -454,7 +621,11 @@ where
         cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if solve_refined(
+            &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
+        )
+        .is_err()
+        {
             status = breakdown_status(near_opt);
             break;
         }
@@ -465,7 +636,7 @@ where
             + dot(&prob.h, &dz);
         // τκ corrector residual: τκ + Δτ_aff·Δκ_aff (target σμ).
         let r_tk = tau * kappa + dtau_aff * dkappa_aff;
-        let dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
+        let mut dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
         // Combine: dw = q + Δτ·p.
         for i in 0..n {
             dx[i] += dtau * p_x[i];
@@ -476,15 +647,115 @@ where
         for i in 0..m_ineq {
             dz[i] += dtau * p_z[i];
         }
-        let dkappa = (sigma_mu - r_tk - kappa * dtau) / tau;
+        let mut dkappa = (sigma_mu - r_tk - kappa * dtau) / tau;
         cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
 
         // Single fraction-to-boundary step (HSDE is primal/dual-symmetric).
+        // A *separate* primal/dual step is unsound here: τ couples both
+        // residuals (ρ_x carries `cτ` + `Px`, ρ_y carries `bτ`), so stepping
+        // the primal block (x, s, τ) and dual block (y, z, κ) by different
+        // amounts leaves a dual-infeasibility residual ∝ (α_p − α_d) — on the
+        // degenerate NETLIB GEN family (α_p ≫ α_d) that blows ρ_x up from
+        // ~1e-8 to ~5e-2. The symmetric step keeps the embedding's clean
+        // (1−α) residual decrease.
         let mut alpha = ray_step(tau, dtau, opts.tau).min(ray_step(kappa, dkappa, opts.tau));
         if m_ineq > 0 {
             alpha = alpha
                 .min(cone.max_step(&s, &ds, opts.tau))
                 .min(cone.max_step(&z, &dz, opts.tau));
+        }
+
+        // === Gondzio multiple centrality correctors ===
+        // Restricted to the pure nonnegative orthant: the complementarity
+        // product s∘z is then elementwise, so we can box-project it directly.
+        // Each pass forms a trial step enlarged by GONDZIO_DELTA, projects the
+        // resulting complementarity products into the centrality band
+        // [β_lo·μ, β_hi·μ], solves a *corrector* system through the existing
+        // factor (zero linear residual, only the re-centered complementarity
+        // RHS), and accepts the extra direction only if it lengthens the step
+        // by at least GONDZIO_GAMMA·GONDZIO_DELTA — otherwise the loop stops.
+        if cone.is_orthant() && m_ineq > 0 && mu > 0.0 {
+            let lo = GONDZIO_BETA_LO * mu;
+            let hi = GONDZIO_BETA_HI * mu;
+            for _ in 0..GONDZIO_MAX_CORR {
+                let a_trial = (alpha + GONDZIO_DELTA).min(1.0);
+                // Cone complementarity targets: project the trial products into
+                // the band; r_c holds the deviation ṽ − t so that recover_ds
+                // yields a correction with z∘cds + s∘cdz = t − ṽ.
+                let mut active = false;
+                for i in 0..m_ineq {
+                    let v = (s[i] + a_trial * ds[i]) * (z[i] + a_trial * dz[i]);
+                    let t = v.clamp(lo, hi);
+                    r_c[i] = v - t;
+                    if r_c[i] != 0.0 {
+                        active = true;
+                    }
+                }
+                // τ/κ complementarity target (same band).
+                let v_tk = (tau + a_trial * dtau) * (kappa + a_trial * dkappa);
+                let t_tk = v_tk.clamp(lo, hi);
+                if !active && (v_tk - t_tk) == 0.0 {
+                    break;
+                }
+                // Corrector system: zero linear residual, complementarity RHS
+                // only. Solve through the existing factor with refinement.
+                cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
+                build_rhs(
+                    &zeros_n, &zeros_meq, &zeros_m, &comp, n, m_eq, m_ineq, &mut rhs,
+                );
+                if solve_refined(
+                    &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
+                    &mut ir_d,
+                )
+                .is_err()
+                {
+                    break;
+                }
+                split_step(&rhs, n, m_eq, m_ineq, &mut cdx, &mut cdy, &mut cdz);
+                // τ-row Schur solve for the corrector (rho_tau = 0).
+                let gtq_c = dot(&prob.c, &cdx)
+                    + two_over_tau * dot(&px_vec, &cdx)
+                    + dot(&prob.b, &cdy)
+                    + dot(&prob.h, &cdz);
+                let dtau_c = (-gtq_c - (t_tk - v_tk) / tau) / denom;
+                for i in 0..n {
+                    cdx[i] += dtau_c * p_x[i];
+                }
+                for i in 0..m_eq {
+                    cdy[i] += dtau_c * p_y[i];
+                }
+                for i in 0..m_ineq {
+                    cdz[i] += dtau_c * p_z[i];
+                }
+                let dkappa_c = (t_tk - v_tk - kappa * dtau_c) / tau;
+                cone.recover_ds(&s, &z, &r_c, &cdz, &mut cds);
+                // Trial enlarged step and its fraction-to-boundary length.
+                for i in 0..m_ineq {
+                    step_s[i] = ds[i] + cds[i];
+                    step_z[i] = dz[i] + cdz[i];
+                }
+                let a_new = ray_step(tau, dtau + dtau_c, opts.tau)
+                    .min(ray_step(kappa, dkappa + dkappa_c, opts.tau))
+                    .min(cone.max_step(&s, &step_s, opts.tau))
+                    .min(cone.max_step(&z, &step_z, opts.tau));
+                if a_new >= alpha + GONDZIO_GAMMA * GONDZIO_DELTA {
+                    for i in 0..n {
+                        dx[i] += cdx[i];
+                    }
+                    for i in 0..m_eq {
+                        dy[i] += cdy[i];
+                    }
+                    for i in 0..m_ineq {
+                        dz[i] += cdz[i];
+                        ds[i] += cds[i];
+                    }
+                    dtau += dtau_c;
+                    dkappa += dkappa_c;
+                    alpha = a_new;
+                } else {
+                    break;
+                }
+            }
         }
 
         // Debugger checkpoint: the combined Newton direction and the single

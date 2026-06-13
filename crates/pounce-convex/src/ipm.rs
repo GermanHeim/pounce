@@ -132,6 +132,30 @@ pub struct QpOptions {
     /// preserves the cone; the SOCP/conic driver never equilibrates, since
     /// per-row scaling is unsound for non-orthant cones. Default `true`.
     pub equilibrate: bool,
+    /// Run the LP-crossover phase ([`crate::crossover`]) after the interior-
+    /// point solve. For a **pure LP** (`P = 0`), crossover hands the near-
+    /// optimal interior iterate to the active-set engine ([`pounce_qp`]),
+    /// which pivots it to an *exact* optimal vertex basis. This closes the
+    /// gap on degenerate LPs (NETLIB GEN family), where strict
+    /// complementarity fails, the fraction-to-boundary step collapses, and a
+    /// pure IPM cannot certify the vertex to `tol` — exactly the
+    /// IPM-then-crossover pairing every commercial LP solver uses
+    /// (Andersen & Ye 1996). It is a strict, **never-regress** refinement: the
+    /// purified vertex is returned only when it is feasible and its KKT error
+    /// does not exceed the interior iterate's. A no-op for genuine QPs
+    /// (`P ≠ 0`) and for the warm-start / debug entry points.
+    ///
+    /// **Default `false` — opt-in.** Crossover is correct (never-regress) but
+    /// the active-set purification is currently *slow* on the degenerate /
+    /// large NETLIB LPs it most targets: on the LP suite it regressed solve
+    /// times 3×–800× versus the pure IPM (dozens of sub-second LPs pushed past
+    /// the 300 s cap) while still **not** reaching an exact `Optimal` vertex on
+    /// the GEN family it was built for (see issue #133). Until the purification
+    /// is made fast and robust (the deferred LU-basis engine), it ships off by
+    /// default and is enabled explicitly — CLI `qp_crossover=yes`, or this
+    /// field — for callers who want exact-vertex refinement on small,
+    /// well-behaved LPs and can absorb the cost.
+    pub crossover: bool,
 }
 
 impl Default for QpOptions {
@@ -152,6 +176,9 @@ impl Default for QpOptions {
             use_hsde: true,
             collect_iterates: false,
             equilibrate: true,
+            // Opt-in: off by default. See the field doc — correct but slow on
+            // the LPs it targets, and does not yet reach Optimal on GEN (#133).
+            crossover: false,
         }
     }
 }
@@ -165,6 +192,26 @@ impl Default for QpOptions {
 /// back into the original `z` and the bound multipliers `z_lb`/`z_ub`.
 /// The iteration math is unchanged by the presence of bounds.
 pub fn solve_qp_ipm<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let mut make_backend = make_backend;
+    // Interior-point solve in the original problem's coordinates (the core
+    // already unscales any internal Ruiz equilibration before returning).
+    let sol = solve_qp_ipm_core(prob, opts, &mut make_backend);
+    // LP-crossover refinement: for a pure LP, purify the interior iterate to an
+    // exact optimal vertex via the active-set engine. Gated to pure LPs and
+    // never-regressing — a no-op for QPs and whenever the vertex is not a
+    // strict improvement. Runs against the same un-equilibrated `prob` so the
+    // `z`/`s` conventions line up. See [`crate::crossover`].
+    crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend)
+}
+
+/// The interior-point solve (the historical [`solve_qp_ipm`] body): bounds-aware
+/// orthant solve with optional Ruiz equilibration, returning a solution in the
+/// original problem's coordinates. Factored out so [`solve_qp_ipm`] can layer
+/// the LP-crossover refinement on top.
+fn solve_qp_ipm_core<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {

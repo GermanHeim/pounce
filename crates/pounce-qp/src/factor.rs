@@ -190,4 +190,29 @@ impl LinearSolver {
     pub fn has_cached_factor(&self) -> bool {
         self.factored
     }
+
+    /// Whether the backend can rank-reveal a constraint Jacobian (the
+    /// sparse linear-independence guard). Falls back to dense MGS when
+    /// `false` (e.g. the MA57 backend).
+    pub fn provides_degeneracy_detection(&self) -> bool {
+        self.backend.provides_degeneracy_detection()
+    }
+
+    /// Rank-reveal the dependent rows of the constraint Jacobian `J`
+    /// (1-based triplet, `n_rows × n_cols`); fills `c_deps` with the
+    /// 0-based indices of a maximal set of redundant rows. The backend
+    /// factors a throwaway system internal to itself, leaving this
+    /// wrapper's cached KKT factor untouched.
+    pub fn determine_dependent_rows(
+        &mut self,
+        n_rows: Index,
+        n_cols: Index,
+        irn: &[Index],
+        jcn: &[Index],
+        vals: &[Number],
+        c_deps: &mut Vec<Index>,
+    ) -> ESymSolverStatus {
+        self.backend
+            .determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
+    }
 }

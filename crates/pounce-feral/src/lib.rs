@@ -710,6 +710,125 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         EMatrixFormat::TripletFormat
     }
 
+    fn provides_degeneracy_detection(&self) -> bool {
+        true
+    }
+
+    /// Find the dependent rows of a constraint Jacobian `J` (an
+    /// `n_rows × n_cols` matrix given as a 1-based triplet) by
+    /// rank-revealing the scaled augmented system
+    ///
+    /// ```text
+    ///     M = [ s·I_n   Jᵀ ]    s = max(1, max|J|),  d = n_cols + n_rows
+    ///         [   J     0  ]
+    /// ```
+    ///
+    /// `M` is symmetric with `rank(M) = n_cols + rank(J)`, so it has
+    /// exactly `n_rows − rank(J)` singular pivots — one per dependent
+    /// row. Scaling the identity block by `s ≥ max|J|` makes every
+    /// `x`-column's diagonal the column maximum, so feral's threshold
+    /// partial pivoting pins each of the first `n_cols` rows on its own
+    /// column; the singular pivots therefore fall exclusively in the
+    /// `J`-row block `[n_cols, d)`, and `perm[k] − n_cols` is the
+    /// dependent row for each singular pivot position `k`. Working off
+    /// the well-conditioned augmented system (rather than `JJᵀ`, whose
+    /// squared conditioning blurs near-dependent rows) is the standard
+    /// Ipopt `DetermineDependentRows` recipe.
+    fn determine_dependent_rows(
+        &mut self,
+        n_rows: Index,
+        n_cols: Index,
+        irn: &[Index],
+        jcn: &[Index],
+        vals: &[Number],
+        c_deps: &mut Vec<Index>,
+    ) -> ESymSolverStatus {
+        use feral::{
+            LuParams, LuScaling, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic,
+        };
+
+        c_deps.clear();
+        let n_rows = n_rows as usize;
+        let n_cols = n_cols as usize;
+        if n_rows == 0 {
+            return ESymSolverStatus::Success;
+        }
+        let nnz = vals.len();
+        if irn.len() != nnz || jcn.len() != nnz {
+            return ESymSolverStatus::FatalError;
+        }
+
+        // Identity-block scale: dominate every J entry so the x-columns
+        // pivot on their own diagonal (see method doc).
+        let a_max = vals.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+        let s = a_max.max(1.0);
+
+        // Build M column-by-column: cols[col] = list of (row, value).
+        let d = n_cols + n_rows;
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
+        for c in 0..n_cols {
+            cols[c].push((c, s)); // s·I_n on the leading x-columns
+        }
+        for t in 0..nnz {
+            let i = (irn[t] - 1) as usize; // 0-based J row
+            let c = (jcn[t] - 1) as usize; // 0-based J col
+            if i >= n_rows || c >= n_cols {
+                return ESymSolverStatus::FatalError; // malformed triplet
+            }
+            let v = vals[t];
+            cols[c].push((n_cols + i, v)); // J in the bottom-left block
+            cols[n_cols + i].push((c, v)); // Jᵀ in the top-right block
+        }
+
+        let m = match SparseColMatrix::from_sparse_columns(d, &cols) {
+            Ok(m) => m,
+            Err(_) => return ESymSolverStatus::FatalError,
+        };
+        // Fill-reducing (AMD) order — `natural` blows up on large augmented
+        // systems (gen: d≈6000). The dependent-row mapping below is unaffected:
+        // it reads the *row pivot* permutation `perm()`, and the s-scaling pins
+        // each x-column to its own x-row diagonal regardless of column order.
+        let symbolic = match SparseLuSymbolic::analyze(&m) {
+            Ok(sym) => sym,
+            Err(_) => return ESymSolverStatus::FatalError,
+        };
+
+        // feral computes its singularity floor as ztol = zero_pivot_tol·max|M|
+        // (= zero_pivot_tol·s, since the identity scale dominates J) and
+        // perturbs singular pivots up to `abs_floor`; setting abs_floor = ztol
+        // keeps a perturbed pivot at the floor so it is detectable below.
+        let zero_pivot_tol = 1e-13;
+        let ztol = zero_pivot_tol * s;
+        let params = LuParams {
+            on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
+            scaling: LuScaling::None,
+            zero_pivot_tol,
+            ..LuParams::default()
+        };
+        let lu = match SparseLu::factor(&m, &symbolic, params) {
+            Ok(lu) => lu,
+            Err(_) => return ESymSolverStatus::FatalError,
+        };
+
+        // A pivot position is singular when its U diagonal sits at/below the
+        // detection floor; independent pivots are O(s) ≫ this floor. The
+        // s-scaling guarantees singular pivots map to J-rows (perm[k] ≥
+        // n_cols); defensively skip any that do not.
+        let dep_tol = 1e-9 * s;
+        let perm = lu.perm();
+        for k in 0..d {
+            if lu.u_dense(k, k).abs() <= dep_tol {
+                let r = perm[k];
+                debug_assert!(r >= n_cols, "singular pivot landed on an x-row");
+                if r >= n_cols {
+                    c_deps.push((r - n_cols) as Index);
+                }
+            }
+        }
+        c_deps.sort_unstable();
+        ESymSolverStatus::Success
+    }
+
     /// Walk feral's per-supernode `NodeFactors` to assemble the LDLᵀ
     /// factor's strict-lower nonzero pattern in *permuted*
     /// coordinates. `perm` is feral's global fill-reducing
@@ -1167,5 +1286,61 @@ mod tests {
             assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for {method:?}");
             assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for {method:?}");
         }
+    }
+
+    /// Rank-deficient J: rows 1,2 over 3 cols with row 2 = 2·row 1.
+    /// `determine_dependent_rows` must flag exactly the *one* redundant
+    /// row, and (per the s-scaling argument) it must be a real J-row
+    /// index in `[0, n_rows)`. Pins R2: the singular-pivot → row map.
+    #[test]
+    fn determine_dependent_rows_flags_the_redundant_row() {
+        let mut s = FeralSolverInterface::new();
+        assert!(s.provides_degeneracy_detection());
+        // J = [[1,1,1],[2,2,2]] as a 1-based triplet.
+        let irn: [Index; 6] = [1, 1, 1, 2, 2, 2];
+        let jcn: [Index; 6] = [1, 2, 3, 1, 2, 3];
+        let vals = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let mut c_deps = Vec::new();
+        let st = s.determine_dependent_rows(2, 3, &irn, &jcn, &vals, &mut c_deps);
+        assert_eq!(st, ESymSolverStatus::Success);
+        assert_eq!(c_deps.len(), 1, "exactly one dependent row, got {c_deps:?}");
+        assert!(
+            c_deps[0] == 0 || c_deps[0] == 1,
+            "dep row in range: {c_deps:?}"
+        );
+    }
+
+    /// Full-rank J (identity rows): no dependent rows.
+    #[test]
+    fn determine_dependent_rows_full_rank_reports_none() {
+        let mut s = FeralSolverInterface::new();
+        // J = I_3.
+        let irn: [Index; 3] = [1, 2, 3];
+        let jcn: [Index; 3] = [1, 2, 3];
+        let vals = [1.0, 1.0, 1.0];
+        let mut c_deps = Vec::new();
+        let st = s.determine_dependent_rows(3, 3, &irn, &jcn, &vals, &mut c_deps);
+        assert_eq!(st, ESymSolverStatus::Success);
+        assert!(c_deps.is_empty(), "full-rank J has no deps, got {c_deps:?}");
+    }
+
+    /// Three rows, rank 2: row 3 = row 1 + row 2. Exactly one dependency,
+    /// and dropping it must leave the other two independent.
+    #[test]
+    fn determine_dependent_rows_rank_two_of_three() {
+        let mut s = FeralSolverInterface::new();
+        // r1=[1,0,1], r2=[0,1,1], r3=r1+r2=[1,1,2].
+        let irn: [Index; 7] = [1, 1, 2, 2, 3, 3, 3];
+        let jcn: [Index; 7] = [1, 3, 2, 3, 1, 2, 3];
+        let vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0];
+        let mut c_deps = Vec::new();
+        let st = s.determine_dependent_rows(3, 3, &irn, &jcn, &vals, &mut c_deps);
+        assert_eq!(st, ESymSolverStatus::Success);
+        assert_eq!(
+            c_deps.len(),
+            1,
+            "one dependency among 3 rows, got {c_deps:?}"
+        );
+        assert!(c_deps[0] <= 2, "row index in range: {c_deps:?}");
     }
 }

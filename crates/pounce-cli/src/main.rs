@@ -159,6 +159,169 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // ---- Convex LP/QP interior-point knobs (pounce-convex `QpOptions`) ----
+    // These only affect the `solver_selection` paths that route to
+    // pounce-convex (`lp-ipm` / `qp-ipm` / `auto` on an LP / convex QP, and
+    // the SOCP IPM). Each forwards only when the user *explicitly* sets it
+    // (see the convex dispatch below); otherwise the driver keeps its own
+    // tuned default. The standard `tol` and `max_iter` options feed the
+    // convex solve too — these `qp_*` knobs cover the rest of `QpOptions`.
+    let convex_knobs: Result<(), pounce_common::SolverException> = (|| {
+        let r = app.registered_options();
+        // τ ∈ (0,1): fraction-to-boundary step damping (Mehrotra σ is adaptive).
+        r.add_bounded_number_option(
+            "qp_tau",
+            "Convex IPM fraction-to-boundary parameter τ ∈ (0,1).",
+            0.0,
+            true,
+            1.0,
+            true,
+            0.95,
+            "Convex LP/QP interior-point only. Caps each Newton step at a \
+             fraction τ of the distance to the cone boundary; nearer 1 is more \
+             aggressive. Default 0.95.",
+        )?;
+        // Static KKT regularization δ ≥ 0.
+        r.add_lower_bounded_number_option(
+            "qp_reg",
+            "Convex IPM static KKT regularization δ ≥ 0.",
+            0.0,
+            false,
+            1e-10,
+            "Convex LP/QP interior-point only. Added on the (block) diagonal to \
+             keep the reduced KKT quasi-definite for a stable LDLᵀ inertia. Too \
+             large freezes the primal residual on badly-scaled LPs; the default \
+             1e-10 is centered in the band that converges the LP/QP suites.",
+        )?;
+        // Certificate value / cone-membership tolerance > 0.
+        r.add_lower_bounded_number_option(
+            "qp_infeas_tol",
+            "Convex IPM infeasibility-certificate value tolerance > 0.",
+            0.0,
+            true,
+            1e-7,
+            "Convex LP/QP interior-point only. Relative tolerance on the value \
+             and cone-membership parts of an infeasibility / unboundedness \
+             certificate. The certificate's defining-equation residual is held \
+             to a far tighter internal tolerance; this only governs when a \
+             status is backed by a verified proof. Default 1e-7.",
+        )?;
+        r.add_string_option(
+            "qp_hsde",
+            "Use the homogeneous self-dual embedding for the convex IPM.",
+            "yes",
+            &[
+                ("yes", "Self-dual embedding: self-starting, native certificates, robust on ill-conditioned data."),
+                ("no", "Infeasible-start primal–dual method (the warm-start / build-once substrate)."),
+            ],
+            "Convex LP/QP interior-point only. HSDE (default) self-starts and \
+             produces infeasibility / unboundedness certificates natively; it \
+             is also the substrate for non-symmetric cones. Default yes.",
+        )?;
+        r.add_string_option(
+            "qp_equilibrate",
+            "Ruiz-equilibrate the data before the direct convex IPM solve.",
+            "yes",
+            &[
+                (
+                    "yes",
+                    "Apply Ruiz row/column scaling before solving (direct, non-HSDE path).",
+                ),
+                ("no", "Solve the raw data without equilibration."),
+            ],
+            "Convex LP/QP interior-point only, and only when `qp_hsde=no` (the \
+             direct infeasible-start path): a conditioning aid for the raw KKT \
+             factorization. HSDE conditions internally and ignores this. \
+             Default yes.",
+        )?;
+        r.add_string_option(
+            "qp_crossover",
+            "Run LP crossover to purify the IPM iterate to an exact vertex.",
+            "no",
+            &[
+                ("yes", "After the IPM, pivot the interior iterate to an exact optimal vertex (active-set purification)."),
+                ("no", "Return the interior-point iterate directly (default)."),
+            ],
+            "Convex LP path only (pure LP, P=0); a no-op for genuine QPs. \
+             Correct (never-regress) but currently slow on the degenerate / \
+             large NETLIB LPs it targets and does not yet reach an exact \
+             `Optimal` vertex on the GEN family (issue #133), so it is off by \
+             default and offered as an opt-in for small, well-behaved LPs that \
+             want exact-vertex refinement. Default no.",
+        )?;
+        Ok(())
+    })();
+    if let Err(e) = convex_knobs {
+        eprintln!("pounce: failed to register convex LP/QP options: {e}");
+        return ExitCode::from(2);
+    }
+
+    // ---- Active-set SQP QP-subproblem knobs (pounce-qp `QpOptions`) ----
+    // Consulted only on `solver_selection=qp-active-set` (the active-set SQP
+    // engine, whose step QPs are solved by pounce-qp). Read into the algorithm
+    // builder by `application::apply_qp_subproblem_options`; each forwards only
+    // when explicitly set, otherwise the pounce-qp default stands. The outer
+    // SQP loop has its own `sqp_*` family (registered with the SQP options);
+    // these `sqp_qp_*` knobs tune the inner QP solver specifically.
+    let sqp_qp_knobs: Result<(), pounce_common::SolverException> = (|| {
+        let r = app.registered_options();
+        r.add_lower_bounded_number_option(
+            "sqp_qp_feas_tol",
+            "Active-set QP-subproblem feasibility tolerance > 0.",
+            0.0,
+            true,
+            1e-9,
+            "Active-set SQP only (solver_selection=qp-active-set). Constraint \
+             feasibility tolerance for the pounce-qp subproblem solve. \
+             Default 1e-9.",
+        )?;
+        r.add_lower_bounded_number_option(
+            "sqp_qp_opt_tol",
+            "Active-set QP-subproblem optimality (KKT) tolerance > 0.",
+            0.0,
+            true,
+            1e-9,
+            "Active-set SQP only. Optimality / KKT tolerance for the pounce-qp \
+             subproblem solve. Default 1e-9.",
+        )?;
+        r.add_lower_bounded_integer_option(
+            "sqp_qp_max_iter",
+            "Active-set QP-subproblem iteration cap.",
+            1,
+            200,
+            "Active-set SQP only. Maximum active-set pivots per QP subproblem \
+             solve. Default 200.",
+        )?;
+        r.add_lower_bounded_number_option(
+            "sqp_qp_elastic_gamma",
+            "Active-set QP-subproblem elastic-mode penalty γ > 0.",
+            0.0,
+            true,
+            1e6,
+            "Active-set SQP only. Penalty on the elastic (phase-1) slacks used \
+             to recover from an infeasible QP subproblem. Large enough that the \
+             slacks vanish at the solution of a feasible QP, small enough not to \
+             dominate the Hessian conditioning. Default 1e6.",
+        )?;
+        r.add_string_option(
+            "sqp_qp_anti_cycling",
+            "Active-set QP-subproblem anti-cycling rule.",
+            "expand",
+            &[
+                ("expand", "EXPAND tolerance-growth + Harris two-pass (Gill-Murray-Saunders-Wright 1989). Default."),
+                ("bland", "Bland's rule: slower but guaranteed finite; mainly for tests."),
+                ("none", "No anti-cycling — benchmarking only; may cycle on degenerate QPs."),
+            ],
+            "Active-set SQP only. Anti-cycling strategy for the pounce-qp \
+             subproblem ratio test. Default expand.",
+        )?;
+        Ok(())
+    })();
+    if let Err(e) = sqp_qp_knobs {
+        eprintln!("pounce: failed to register active-set QP options: {e}");
+        return ExitCode::from(2);
+    }
+
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they
     // didn't.
@@ -539,6 +702,13 @@ pub fn main() -> ExitCode {
                     };
                     (p, args.json_detail, input)
                 });
+                // Build the convex IPM options from the registered CLI knobs.
+                // Each tunable forwards only when the user *explicitly* set it
+                // (the `true` flag from `get_*_value`); otherwise the convex
+                // driver keeps its own tuned `QpOptions` default. `max_iter` in
+                // particular must not be silently raised to the (far larger)
+                // Ipopt default, so it too is forwarded only when set.
+                let convex_opts = convex_cli_opts(&app);
                 if matches!(choice, SolverChoice::SocpIpm) {
                     return run_convex_socp(
                         &prob,
@@ -547,6 +717,7 @@ pub fn main() -> ExitCode {
                         json_cfg,
                         debug_hook.as_ref(),
                         args.ampl,
+                        convex_opts,
                     );
                 }
                 let presolve_on = app
@@ -562,6 +733,7 @@ pub fn main() -> ExitCode {
                     json_cfg,
                     debug_hook.as_ref(),
                     args.ampl,
+                    convex_opts,
                 );
             }
             // Builtins never classify as convex; fall through to NLP.
@@ -1331,6 +1503,47 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
     }
 }
 
+/// Build the convex IPM [`pounce_convex::QpOptions`] from the registered CLI
+/// knobs.
+///
+/// Every field is overridden only when the user *explicitly* set the option
+/// (the `true` flag returned by the `OptionsList` accessors); otherwise the
+/// `QpOptions` default is kept. The standard `tol` / `max_iter` options feed
+/// the convex solve alongside the `qp_*` knobs registered in `main`.
+/// `max_iter` is forwarded only when set so the convex driver's own (smaller)
+/// cap is never silently raised to the much larger Ipopt default.
+fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
+    let mut o = pounce_convex::QpOptions::default();
+    let opt = app.options();
+    if let Ok((v, true)) = opt.get_integer_value("max_iter", "") {
+        if v > 0 {
+            o.max_iter = v as usize;
+        }
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("tol", "") {
+        o.tol = v;
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("qp_tau", "") {
+        o.tau = v;
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("qp_reg", "") {
+        o.reg = v;
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("qp_infeas_tol", "") {
+        o.infeas_tol = v;
+    }
+    if let Ok((v, true)) = opt.get_string_value("qp_hsde", "") {
+        o.use_hsde = v != "no";
+    }
+    if let Ok((v, true)) = opt.get_string_value("qp_equilibrate", "") {
+        o.equilibrate = v != "no";
+    }
+    if let Ok((v, true)) = opt.get_string_value("qp_crossover", "") {
+        o.crossover = v != "no";
+    }
+    o
+}
+
 fn run_convex_qp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
@@ -1339,6 +1552,7 @@ fn run_convex_qp(
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
+    convex_opts: pounce_convex::QpOptions,
 ) -> ExitCode {
     use pounce_convex::presolve::{presolve, PresolveOutcome};
     use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
@@ -1388,7 +1602,7 @@ fn run_convex_qp(
     let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
     let qp_opts = QpOptions {
         collect_iterates: want_trace,
-        ..QpOptions::default()
+        ..convex_opts
     };
     let sol = if let Some(hook) = debug_hook {
         // Interactive debug: step the IPM on the extracted QP directly.
@@ -1547,6 +1761,7 @@ fn run_convex_socp(
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
+    convex_opts: pounce_convex::QpOptions,
 ) -> ExitCode {
     use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions};
 
@@ -1574,7 +1789,7 @@ fn run_convex_socp(
     let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
     let qp_opts = QpOptions {
         collect_iterates: want_trace,
-        ..QpOptions::default()
+        ..convex_opts
     };
     let t0 = std::time::Instant::now();
     let sol = if let Some(hook) = debug_hook {

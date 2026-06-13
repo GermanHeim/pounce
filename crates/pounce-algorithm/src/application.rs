@@ -732,6 +732,7 @@ impl IpoptApplication {
     fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {
         let mut builder = AlgorithmBuilder::default();
         apply_sqp_options(&self.options, &mut builder.sqp);
+        apply_qp_subproblem_options(&self.options, &mut builder.sqp_qp);
         builder
     }
 
@@ -2335,6 +2336,42 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
         if v >= 1 {
             opts.lbfgs_max_history = v as u32;
         }
+    }
+}
+
+/// Populate the active-set SQP **QP-subproblem** options
+/// ([`pounce_qp::QpOptions`]) from the `sqp_qp_*` option family.
+///
+/// Sister to [`apply_sqp_options`], which handles the SQP *outer-loop*
+/// options ([`crate::sqp::SqpOptions`]); this one feeds the inner QP
+/// solver that `SqpAlgorithm` delegates each subproblem to. Consulted
+/// only on the `ActiveSetSqp` path. Each knob is forwarded only when
+/// the user explicitly set it (the `true` flag), so the `pounce_qp`
+/// defaults stand otherwise.
+fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOptions) {
+    use pounce_qp::AntiCyclingChoice;
+
+    if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_iter", "") {
+        if v >= 0 {
+            opts.max_iter = v as u32;
+        }
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_feas_tol", "") {
+        opts.feas_tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_opt_tol", "") {
+        opts.opt_tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_elastic_gamma", "") {
+        opts.elastic_gamma = v;
+    }
+    if let Ok((s, true)) = options.get_string_value("sqp_qp_anti_cycling", "") {
+        opts.anti_cycling = match s.as_str() {
+            "expand" => AntiCyclingChoice::Expand,
+            "bland" => AntiCyclingChoice::Bland,
+            "none" => AntiCyclingChoice::None,
+            _ => opts.anti_cycling,
+        };
     }
 }
 

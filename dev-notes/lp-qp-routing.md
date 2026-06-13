@@ -268,6 +268,59 @@ Follows the precedent of `linear_solver`, which selects `Ma57`/`Feral`
 via the `LinearBackendFactory` at
 `crates/pounce-algorithm/src/alg_builder.rs:45-57`.
 
+### Tunable solver knobs
+
+Beyond routing, each engine exposes its previously-hard-coded `QpOptions`
+fields as registered CLI options. All are registered at runtime in
+`crates/pounce-cli/src/main.rs` (alongside `solver_selection` /
+`qp_presolve`) and follow the Ipopt **forward-only-when-explicitly-set**
+convention: a knob overrides the engine default only when the user actually
+passes it, so defaults are byte-identical to the pre-wiring behaviour.
+
+**Convex LP/QP interior-point** (`pounce-convex::QpOptions`; the `lp-ipm` /
+`qp-ipm` / SOCP paths, and `auto` on an LP / convex QP). Read into the solve
+by `convex_cli_opts()` in `main.rs`:
+
+| Option | Field | Default | Meaning |
+|---|---|---|---|
+| `tol` (standard) | `tol` | 1e-8 | KKT / duality convergence tolerance |
+| `max_iter` (standard) | `max_iter` | 200 | IPM iteration cap (forwarded only when set, so the convex cap is never raised to the larger Ipopt default) |
+| `qp_tau` | `tau` | 0.95 | fraction-to-boundary step damping τ ∈ (0,1) |
+| `qp_reg` | `reg` | 1e-10 | static KKT regularization δ ≥ 0 |
+| `qp_infeas_tol` | `infeas_tol` | 1e-7 | infeasibility-certificate value tolerance |
+| `qp_hsde` | `use_hsde` | yes | use the homogeneous self-dual embedding |
+| `qp_equilibrate` | `equilibrate` | yes | Ruiz-equilibrate (direct path only, `qp_hsde=no`) |
+| `qp_crossover` | `crossover` | **no** | LP crossover to an exact vertex (pure LP only) |
+
+`qp_crossover` is **off by default**: the active-set purification is correct
+(never-regress) but currently slow on the degenerate / large NETLIB LPs it
+targets — it regressed the LP suite 3×–800× when on by default — and it does
+not yet reach an exact `Optimal` vertex on the GEN family (issue #133). It
+ships as an opt-in for small, well-behaved LPs that want exact-vertex
+refinement. See the field doc on `QpOptions::crossover`.
+
+**Active-set SQP QP-subproblem** (`pounce-qp::QpOptions`; consulted only on
+`solver_selection=qp-active-set`). Read into the algorithm builder by
+`application::apply_qp_subproblem_options()` and threaded into `SqpAlgorithm`
+via `with_qp_options`. These tune the *inner* QP solver and are distinct from
+the `sqp_*` family that tunes the SQP *outer* loop:
+
+| Option | Field | Default | Meaning |
+|---|---|---|---|
+| `sqp_qp_feas_tol` | `feas_tol` | 1e-9 | subproblem feasibility tolerance |
+| `sqp_qp_opt_tol` | `opt_tol` | 1e-9 | subproblem optimality / KKT tolerance |
+| `sqp_qp_max_iter` | `max_iter` | 200 | active-set pivots per subproblem |
+| `sqp_qp_elastic_gamma` | `elastic_gamma` | 1e6 | elastic (phase-1) penalty γ |
+| `sqp_qp_anti_cycling` | `anti_cycling` | expand | anti-cycling rule (`expand` / `bland` / `none`) |
+
+Note: the EXPAND anti-cycling path can exit prematurely ("Search Direction
+Too Small") on some trivial LPs (e.g. `afiro`) where `sqp_qp_anti_cycling=bland`
+solves cleanly — the GMSW bound-perturbation half of EXPAND is still
+unimplemented (issue #133, direction 2). The remaining deep `QpOptions`
+internals (`inertia_shift_*`, `expand_tol_*`, `max_schur_updates_before_refactor`,
+`use_schur_updates`) stay hard-coded; they are factorization-stability
+magic numbers, not user-facing tuning knobs.
+
 ### What does not change
 
 - `TNLP` trait stays exactly as it is — algorithm-agnostic,
