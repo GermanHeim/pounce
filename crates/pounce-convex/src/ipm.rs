@@ -55,6 +55,18 @@ use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
 
+/// Tolerance on the **residual** of an infeasibility/unboundedness
+/// certificate's defining equation (`‖Aᵀy+Gᵀz‖` for a Farkas pair,
+/// `‖Px‖,‖Ax‖,‖Gx‖` for a recession ray), relative to the certificate's own
+/// magnitude. Deliberately far tighter than [`QpOptions::infeas_tol`] (the
+/// certificate-*value*/cone-membership tolerance): a genuine certificate
+/// drives this residual to ~machine precision, whereas a *feasible* problem's
+/// best approximate certificate floors at `∝ 1/‖x*‖` and must be rejected.
+/// See [`detect_infeasibility_with`] for the full derivation (regression: a
+/// feasible large-`‖x*‖` QP — POWELL20 — was declared primal-infeasible when
+/// this shared `infeas_tol`).
+const FARKAS_RESID_TOL: f64 = 1e-10;
+
 /// Options for the QP interior-point solve.
 #[derive(Debug, Clone, Copy)]
 pub struct QpOptions {
@@ -77,12 +89,15 @@ pub struct QpOptions {
     /// default is sized small enough to clear that floor on such instances
     /// while still keeping the factorization quasi-definite (see [`Default`]).
     pub reg: f64,
-    /// Relative tolerance for accepting an infeasibility/unboundedness
-    /// certificate. A certificate is declared only when its defining
-    /// inequalities hold to this tolerance *relative to the certificate's
-    /// own magnitude*, so the status is always backed by a verified
-    /// proof — there are no false positives, only (rarely) an
-    /// `IterationLimit` fallback when no certificate is verifiable.
+    /// Relative tolerance for the *value* and cone-membership parts of an
+    /// infeasibility/unboundedness certificate (`bᵀy+hᵀz < 0`, `z ∈ K*`),
+    /// taken relative to the certificate's own magnitude. The certificate's
+    /// *residual* (its defining equation `Aᵀy+Gᵀz = 0`, or `Px=Ax=Gx=0` for a
+    /// recession ray) is held to the far tighter [`FARKAS_RESID_TOL`] instead:
+    /// a genuine certificate drives the residual to ~machine precision, while
+    /// a feasible problem's best approximate certificate only reaches a floor
+    /// `∝ 1/‖x*‖`. Splitting the two is what keeps a status backed by a real
+    /// proof — `IterationLimit` is the fallback when no certificate verifies.
     pub infeas_tol: f64,
     /// Use the homogeneous self-dual embedding driver ([`crate::hsde`]) rather
     /// than the infeasible-start primal–dual method. HSDE self-starts, produces
@@ -2207,7 +2222,24 @@ pub(crate) fn detect_infeasibility_with(
     primal_recession_ok: impl Fn(&[f64], f64) -> bool,
 ) -> Option<QpStatus> {
     let n = prob.n;
+    // Certificate *value* threshold and cone-membership slack: a modest
+    // tolerance (`infeas_tol`, 1e-7) is right for "is `bᵀy+hᵀz` meaningfully
+    // negative" and "is `z` in the dual cone".
     let ctol = opts.infeas_tol;
+    // Certificate *residual* tolerance: far tighter (`FARKAS_RESID_TOL`,
+    // ~1e-10). A finite-precision Farkas pair `(y,z)` only proves
+    // infeasibility in the limit `‖Aᵀy+Gᵀz‖ → 0`. A FEASIBLE problem still
+    // admits an approximate certificate, but its residual cannot fall below a
+    // floor `∝ 1/‖x*‖` (the bound `bᵀy+hᵀz ≥ -‖x*‖₁·‖Aᵀy+Gᵀz‖∞` means a
+    // large-norm feasible point leaves only a small residual to "explain").
+    // POWELL20 (`‖x*‖ ~ 1e7`) floors at `~7.5e-8` — which the loose `ctol`
+    // (1e-7) wrongly accepted, declaring a feasible QP primal-infeasible at
+    // iteration 2. A *genuine* certificate drives the residual to ~machine
+    // precision (`~1e-15`). `FARKAS_RESID_TOL` sits ~5 orders above the latter
+    // and ~3 below the former, so it rejects the spurious floor while still
+    // accepting real certificates. (Symmetric reasoning applies to the
+    // recession residuals `Px,Ax,Gx` in the dual-infeasibility test below.)
+    let rtol = FARKAS_RESID_TOL;
 
     // --- Primal infeasibility (Farkas certificate) ---
     let dual_norm = inf_norm(y).max(inf_norm(z));
@@ -2217,7 +2249,7 @@ pub(crate) fn detect_infeasibility_with(
         prob.gt_mul(z, &mut resid);
         let cert = dot(&prob.b, y) + dot(&prob.h, z); // bᵀy + hᵀz
         let z_ok = dual_cone_ok(z, ctol * dual_norm);
-        if cert < -ctol * dual_norm && inf_norm(&resid) <= ctol * dual_norm && z_ok {
+        if cert < -ctol * dual_norm && inf_norm(&resid) <= rtol * dual_norm && z_ok {
             return Some(QpStatus::PrimalInfeasible);
         }
     }
@@ -2237,8 +2269,8 @@ pub(crate) fn detect_infeasibility_with(
         // direction that merely has `Gd ≤ 0` but `−Gd ∉ K` is rejected.
         let gd_ok = primal_recession_ok(&gd, ctol * x_norm);
         if cd < -ctol * x_norm
-            && inf_norm(&pd) <= ctol * x_norm
-            && inf_norm(&ad) <= ctol * x_norm
+            && inf_norm(&pd) <= rtol * x_norm
+            && inf_norm(&ad) <= rtol * x_norm
             && gd_ok
         {
             return Some(QpStatus::DualInfeasible);
@@ -2366,6 +2398,54 @@ mod detect_infeasibility_tests {
         assert_eq!(
             detect_infeasibility_cone(&prob, &x, &y, &z, &opts, &cone),
             Some(QpStatus::DualInfeasible)
+        );
+    }
+
+    /// POWELL20 regression: a Farkas pair `(y,z)` whose certificate *value*
+    /// is strongly negative (`hᵀz = −1`) and whose `z` is in the dual cone,
+    /// but whose residual `‖Gᵀz‖ = 7.5e-8` sits in the danger zone *between*
+    /// `FARKAS_RESID_TOL` (1e-10) and `infeas_tol` (1e-7) — exactly the
+    /// spurious near-certificate a feasible large-`‖x*‖` QP (POWELL20)
+    /// produces. The OLD code (residual bound = `infeas_tol·dual_norm`)
+    /// accepted it and declared the feasible problem primal-infeasible; the
+    /// tightened residual bound must reject it (`None`).
+    #[test]
+    fn spurious_farkas_with_residual_floor_is_not_infeasible() {
+        // n=1 inequality-only LP. z=[1] ⇒ dual_norm=1, cert=hᵀz=−1,
+        // resid=Gᵀz=[7.5e-8] (the POWELL20 floor).
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 7.5e-8)],
+            h: vec![-1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [0.0]; // no recession direction ⇒ dual-infeasibility branch inert
+        let y: [f64; 0] = [];
+        let z = [1.0];
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &opts),
+            None,
+            "residual 7.5e-8 (between FARKAS_RESID_TOL and infeas_tol) is a \
+             feasibility floor, not a certificate — must not report infeasible"
+        );
+
+        // A genuine, machine-tight certificate (residual 1e-12 ≪ 1e-10) on the
+        // same structure must still be detected — the tightening only rejects
+        // the floor, not real certificates.
+        let tight = QpProblem {
+            g: vec![Triplet::new(0, 0, 1e-12)],
+            ..prob
+        };
+        assert_eq!(
+            detect_infeasibility(&tight, &x, &y, &z, &opts),
+            Some(QpStatus::PrimalInfeasible),
+            "residual 1e-12 ≪ FARKAS_RESID_TOL is a genuine Farkas certificate"
         );
     }
 }

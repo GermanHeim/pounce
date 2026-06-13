@@ -43,6 +43,50 @@ use crate::qp::{breakdown_status, QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_linsol::SparseSymLinearSolverInterface;
 
+/// Strictly-positive floor for the adaptive static regularization δ (see the
+/// `update_blocks` call in [`solve_conic_hsde`]). δ must stay above this so the
+/// reduced KKT remains quasi-definite for a stable LDLᵀ inertia; the adaptive
+/// rule only ever shrinks δ *toward* this floor on large-dual problems, never
+/// below it. Sits ~4 orders under the configured default (`QpOptions::reg`,
+/// 1e-10) — enough room for the LISWET cluster (‖ŷ‖ ~ 1e4 ⇒ δ ~ 1e-12) without
+/// reaching machine-noise territory.
+const REG_MIN: f64 = 1e-14;
+
+/// HSDE infeasibility-ray discriminant: is the homogenizing pair `(τ, κ)` on
+/// the Farkas/recession ray (`κ ≫ τ`), as opposed to converging to a solution
+/// (`τ → τ* > 0`) or merely degenerating on a feasible-but-ill-scaled problem
+/// (`τ, κ → 0` together)?
+///
+/// The defining signature of infeasibility is the *ratio* `κ/τ → ∞`: at a
+/// genuine certificate `τ → 0` while `κ → κ* > 0`. This must NOT be a bare
+/// `τ < ε` floor — a feasible large-‖x*‖ QP (e.g. POWELL20) can drive `τ → 0`
+/// too, but there `κ → 0` *alongside* `τ` (no ray supports `κ > 0`), so `κ/τ`
+/// stays bounded and the gate stays shut. The threshold here is `κ/τ > 100`.
+///
+/// A prior `κ.max(1.0)` floor degraded this to `τ < 1e-2`, firing on the
+/// collapsed-`τ` iterate of a feasible problem and declaring it infeasible.
+fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
+    tau < 1e-2 * kappa
+}
+
+/// May the scale-relative stopping test *relax* the absolute one for a problem
+/// of natural scale `max_scale` (the largest of the dual/primal/gap term norms)
+/// at tolerance `tol`?
+///
+/// Only once `tol`-level *absolute* KKT accuracy is genuinely unreachable: the
+/// finite-precision floor on an absolute residual is `≈ max_scale·ε`, so when
+/// `max_scale·ε > tol` no iterate can drive the absolute residual under `tol`
+/// and the scale-relative residual is the only valid optimality certificate.
+/// Below that crossover (`max_scale ≲ tol/ε ≈ 4.5e7` at `tol = 1e-8`) the tight
+/// absolute test must govern — relaxing it there lets a moderately-scaled
+/// reduced problem stop a step early, and the bound-tightening presolve's dual
+/// re-attribution then amplifies that slack into a large stationarity violation
+/// in the original problem. Tying the crossover to `tol` keeps it self-consistent
+/// under a caller-tightened/loosened tolerance.
+fn relative_stop_permitted(max_scale: f64, tol: f64) -> bool {
+    max_scale * f64::EPSILON > tol
+}
+
 /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
 /// scaled by `tau` and capped at 1 (the scalar analogue of `Cone::max_step`
 /// for the homogenizing variables `τ`, `κ`).
@@ -107,6 +151,18 @@ where
     let mut kkt_vals = kkt.values.clone();
     let mut rhs = vec![0.0; kkt.dim];
 
+    // Scratch + constants for the scale-relative convergence normalizers
+    // (see the stopping test below). Dual side: ‖Aᵀŷ‖, ‖Gᵀẑ‖; primal side:
+    // ‖Ax̂‖, ‖Gx̂‖. The RHS/cost data norms are constant and double as the
+    // `1+` absolute floors that preserve the old behavior on well-scaled data.
+    let mut nrm_aty = vec![0.0; n];
+    let mut nrm_gtz = vec![0.0; n];
+    let mut nrm_ax = vec![0.0; m_eq];
+    let mut nrm_gx = vec![0.0; m_ineq];
+    let norm_b = inf_norm(&prob.b);
+    let norm_h = inf_norm(&prob.h);
+    let norm_c = inf_norm(&prob.c);
+
     // Direction buffers: p = constant direction, (dx,dy,dz) = the running
     // step, with affine slack/dual kept for the Mehrotra corrector.
     let mut p_x = vec![0.0; n];
@@ -164,25 +220,91 @@ where
 
         // --- convergence (un-homogenized residuals; divide out τ) ---
         // Gap = x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ = (xᵀPx/τ + cᵀx + bᵀy + hᵀz)/τ.
+        // These are the *absolute* residuals (what the trace/debugger report).
         let pres = inf_norm(&rho_y).max(inf_norm(&rho_z)) / tau;
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
-        let res = pres.max(dres).max(gap);
+        // Un-homogenized objective `½x̂ᵀPx̂ + cᵀx̂` (x̂ = x/τ).
+        let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
+
+        // --- scale-relative residuals (Clarabel-style) ---
+        // A pure absolute test `res < tol` is unreachable for large-data
+        // problems: a feasible QP whose data norms are large (POWELL20:
+        // ‖Px̂‖ ~ 7.5e3, objective ~5e10) floors its absolute KKT residuals far
+        // above `tol` (primal ~3e-5, gap ~4e2) while the *relative* residuals
+        // are ~1e-9 — genuinely optimal. Normalize each residual by the natural
+        // scale of its own terms. Data-only (`‖c‖`/`‖b‖`/`‖h‖`) normalizers are
+        // *insufficient* for a QP — the dual residual's dominant scale is the
+        // Hessian-gradient term ‖Px̂‖, which only the matvec norms capture.
+        // `px_vec` already holds `Px` (computed above) ⇒ ‖Px̂‖ = ‖px_vec‖/τ.
+        //
+        // These relative residuals do NOT simply replace the absolute test:
+        // the relative test is *gated* on the problem scale below (it only
+        // relaxes the absolute test once `tol`-level absolute accuracy is
+        // unreachable). The `1.0 +` floor alone is not enough — a moderately
+        // scaled problem (scale ~30) has a relative residual ~30× looser than
+        // its absolute one, and the bound-tightening presolve's dual
+        // re-attribution amplifies that slack into a large stationarity
+        // violation in the *original* problem (the reduced solve stops a step
+        // early, before the final quadratic plunge to ~machine-ε accuracy).
+        for v in nrm_aty.iter_mut() {
+            *v = 0.0;
+        }
+        prob.at_mul(&y, &mut nrm_aty);
+        for v in nrm_gtz.iter_mut() {
+            *v = 0.0;
+        }
+        prob.gt_mul(&z, &mut nrm_gtz);
+        for v in nrm_ax.iter_mut() {
+            *v = 0.0;
+        }
+        prob.a_mul(&x, &mut nrm_ax);
+        for v in nrm_gx.iter_mut() {
+            *v = 0.0;
+        }
+        prob.g_mul(&x, &mut nrm_gx);
+        let scale_d = (inf_norm(&px_vec)
+            .max(inf_norm(&nrm_aty))
+            .max(inf_norm(&nrm_gtz))
+            / tau)
+            .max(norm_c);
+        let scale_p = (inf_norm(&nrm_ax).max(inf_norm(&nrm_gx)).max(inf_norm(&s)) / tau)
+            .max(norm_b)
+            .max(norm_h);
+        let d_obj = -0.5 * xpx / (tau * tau) - bty / tau - htz / tau;
+        let scale_g = obj_hat.abs().max(d_obj.abs());
+        let pres_rel = pres / (1.0 + scale_p);
+        let dres_rel = dres / (1.0 + scale_d);
+        let gap_rel = gap / (1.0 + scale_g);
+        // Gate (see [`relative_stop_permitted`]): the scale-relative test only
+        // *relaxes* the absolute one once the problem's natural scale is large
+        // enough that `tol`-level absolute accuracy is below the
+        // finite-precision floor. Empirically this cleanly separates the two
+        // regimes seen across the QP set — well-/moderately-scaled problems
+        // (scale ≲ 1e3, incl. every bound-tightening presolve instance at
+        // scale ≲ 30) reach the tight absolute test, while the large-data
+        // cluster (POWELL20/BOYD/QFORPLAN/QSHELL at scale 7e9–4e12) can only be
+        // certified relatively.
+        let large_scale = relative_stop_permitted(scale_d.max(scale_p).max(scale_g), opts.tol);
+        // `res` (used only for the `near_opt` salvage check below) tracks
+        // whichever test governs this iterate.
+        let res = if large_scale {
+            pres_rel.max(dres_rel).max(gap_rel)
+        } else {
+            pres.max(dres).max(gap)
+        };
         // "Acceptable level": near the cone boundary the scaling/factorization
-        // can break down a hair short of `tol`. If the unregularized KKT
-        // residuals are already tiny (within `~1e3·tol`) when that happens, the
-        // iterate is usable — report it as `OptimalInaccurate` (reduced
-        // accuracy) rather than discarding it as a spurious `NumericalFailure`.
-        // It is deliberately *not* reported as a bare `Optimal`: the residual
-        // sits above `tol`, so callers can tell it apart from a genuinely
-        // converged solve (code review 2026-06 item M20). This mirrors the
-        // non-symmetric HSDE driver (`hsde_nonsym.rs`), which already does this;
-        // the two drivers were inconsistent (the symmetric one discarded usable
+        // can break down a hair short of `tol`. If the (relative) KKT residuals
+        // are already tiny (within `~1e3·tol`) when that happens, the iterate
+        // is usable — report it as `OptimalInaccurate` (reduced accuracy)
+        // rather than discarding it as a spurious `NumericalFailure`. It is
+        // deliberately *not* reported as a bare `Optimal`: the residual sits
+        // above `tol`, so callers can tell it apart from a genuinely converged
+        // solve (code review 2026-06 item M20). This mirrors the non-symmetric
+        // HSDE driver (`hsde_nonsym.rs`), which already does this; the two
+        // drivers were inconsistent (the symmetric one discarded usable
         // SOC/orthant iterates that the non-symmetric one would have accepted).
         let near_opt = res < 1e3 * opts.tol;
-        // Un-homogenized objective `½x̂ᵀPx̂ + cᵀx̂` (x̂ = x/τ) — what the
-        // trace and debugger report.
-        let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
 
         // Debugger checkpoint: top of iteration. Blocks expose the
         // homogeneous iterate `(x, s, y, z, τ, κ)`; the objective is the
@@ -214,7 +336,11 @@ where
             }
         }
 
-        if pres < opts.tol && dres < opts.tol && gap < opts.tol {
+        // Absolute test always governs; the scale-relative test only relaxes
+        // it for genuinely large-data problems (`large_scale`, gated above).
+        let converged = (pres < opts.tol && dres < opts.tol && gap < opts.tol)
+            || (large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol);
+        if converged {
             status = QpStatus::Optimal;
             // Terminal record at the converged iterate (no step taken).
             if opts.collect_iterates {
@@ -234,15 +360,34 @@ where
         // --- infeasibility (the embedding drives the iterate onto the
         // Farkas/recession ray as τ → 0; the same verified relative checks
         // as the direct driver apply to the homogeneous (x, y, z)). ---
-        if tau < 1e-2 * kappa.max(1.0) {
+        //
+        // The trigger is the ratio discriminant κ ≫ τ — see
+        // [`on_infeasibility_ray`]. Concretely POWELL20 (‖x*‖ ~ 1e7): once τ
+        // collapses far enough that the homogeneous Farkas residual
+        // ‖Aᵀy+Gᵀz‖ = τ·‖Px̂+c‖ slips under `FARKAS_RESID_TOL` (~iter 33), κ has
+        // collapsed with it (κ/τ ~ 1e-9), so the gate stays shut.
+        if on_infeasibility_ray(tau, kappa) {
             if let Some(st) = detect_infeasibility_cone(prob, &x, &y, &z, opts, cone) {
                 status = st;
                 break;
             }
         }
 
+        // --- adaptive static regularization δ ---
+        // The static δ added to the KKT diagonal biases the *step*, flooring
+        // the un-homogenized residual at ~δ·‖(x̂,ŷ,ẑ)‖ (x̂ = x/τ, …) — see the
+        // `δ·‖dy‖` floor noted on `QpOptions::reg`. On large-dual problems
+        // (the LISWET cluster: ‖ŷ‖ ~ 1e4) a fixed δ = 1e-10 floors that
+        // residual at ~1e-6 ≫ `tol`, so the solve plateaus and runs to
+        // `max_iter`. Scale δ down by the current iterate norm so the floor
+        // tracks ~`tol` regardless of dual scale, but never below `REG_MIN`
+        // (keeps the reduced KKT quasi-definite). Well-scaled problems
+        // (‖iterate‖ ~ 1) are untouched: `tol/scale ≥ opts.reg`, so the `min`
+        // keeps the configured δ.
+        let iterate_scale = (inf_norm(&x).max(inf_norm(&y)).max(inf_norm(&z)) / tau).max(1.0);
+        let reg_eff = (opts.tol / iterate_scale).min(opts.reg).max(REG_MIN);
         // --- refactor M with the current cone scaling ---
-        kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
+        kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
         if fact.refactor(&kkt_vals).is_err() {
             status = breakdown_status(near_opt);
             break;
@@ -716,6 +861,77 @@ mod tests {
             (sol.x[0].hypot(sol.x[1]) - 1.0).abs() < 1e-5,
             "x {:?}",
             sol.x
+        );
+    }
+
+    /// The infeasibility-ray discriminant must key off the *ratio* κ/τ, not a
+    /// bare `τ < ε` floor. Pins the exact `(τ, κ)` iterates POWELL20 produces:
+    /// the early iterates where κ genuinely dominates (κ/τ ≫ 100) are on the
+    /// ray; the collapsed-τ late iterate (κ/τ ~ 1e-9) — where the prior
+    /// `κ.max(1.0)` floor wrongly fired and declared the feasible QP
+    /// infeasible — must NOT be. (See `on_infeasibility_ray`.)
+    #[test]
+    fn infeasibility_ray_discriminant_is_ratio_not_floor() {
+        // POWELL20 late iterate (it=33): τ=9.95e-15, κ=1.15e-23 ⇒ κ/τ ~ 1e-9.
+        // Feasible-degenerate: both collapsing, κ does NOT dominate. The old
+        // `τ < 1e-2·κ.max(1.0)` = `τ < 1e-2` floor fired here — the bug.
+        assert!(
+            !on_infeasibility_ray(9.95e-15, 1.15e-23),
+            "feasible collapsed-τ iterate (κ ≪ τ) must not be flagged as a ray"
+        );
+        // POWELL20 early iterate (it=9): τ=1.1e-11, κ=0.637 ⇒ κ/τ ~ 6e10.
+        // κ genuinely dominates — on the ray (the FARKAS_RESID_TOL residual
+        // gate then rejects the still-too-large certificate, as it should).
+        assert!(
+            on_infeasibility_ray(1.1e-11, 0.637),
+            "κ ≫ τ is the infeasibility-ray signature and must be flagged"
+        );
+        // A genuine small-certificate infeasible iterate: κ/τ = 1e6 > 100.
+        assert!(on_infeasibility_ray(1e-9, 1e-3));
+        // Boundary: κ/τ exactly 100 is not yet dominant (strict `>` after the
+        // 1e-2 factor); κ/τ = 1000 is.
+        assert!(!on_infeasibility_ray(1.0, 100.0));
+        assert!(on_infeasibility_ray(1.0, 1000.0));
+        // A converged feasible solve (τ → τ* > 0, κ → 0) is never a ray.
+        assert!(!on_infeasibility_ray(0.8, 1e-12));
+    }
+
+    /// The scale-relative stopping test may only relax the absolute one once
+    /// `tol`-level absolute accuracy is unreachable (`max_scale·ε > tol`). Pins
+    /// the two regimes measured across the QP set: every bound-tightening
+    /// presolve instance (scale ≲ 30, where postsolve dual re-attribution would
+    /// otherwise amplify a relaxed reduced-problem residual) stays on the tight
+    /// absolute test; the large-data cluster (POWELL20/QFORPLAN/QSHELL/BOYD at
+    /// scale 7e9–4e12, whose absolute residuals floor far above `tol`) gets the
+    /// relative certificate. (See `relative_stop_permitted`.)
+    #[test]
+    fn relative_stop_gated_on_unreachable_absolute_accuracy() {
+        let tol = 1e-8;
+        // Presolve-regime scales (measured at the stopping iterate): the gate
+        // must stay shut so the absolute test governs.
+        assert!(
+            !relative_stop_permitted(32.0, tol),
+            "scale 32 must use absolute"
+        );
+        assert!(
+            !relative_stop_permitted(2.489e3, tol),
+            "LISWET1 scale (reaches absolute tol) must use absolute"
+        );
+        // Large-data cluster scales (measured): the gate must open.
+        assert!(
+            relative_stop_permitted(7.457e9, tol),
+            "QFORPLAN scale (smallest of the cluster) must permit relative"
+        );
+        assert!(relative_stop_permitted(5.209e10, tol), "POWELL20 scale");
+        assert!(relative_stop_permitted(3.750e12, tol), "BOYD1 scale");
+        // Crossover is `tol/ε`: just below stays absolute, just above goes
+        // relative — and it tracks `tol` (a tighter tol opens the gate sooner).
+        let crossover = tol / f64::EPSILON;
+        assert!(!relative_stop_permitted(0.5 * crossover, tol));
+        assert!(relative_stop_permitted(2.0 * crossover, tol));
+        assert!(
+            relative_stop_permitted(0.5 * crossover, 1e-10),
+            "tighter tol lowers the crossover"
         );
     }
 
