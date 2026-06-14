@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.5.0] - 2026-06-14
+
 ### Added — broader `scipy.optimize.minimize` compatibility
 
 `pounce.minimize` now covers much more of the SciPy surface, so it works as a
