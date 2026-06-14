@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-06-13 00:04:29
+Generated: 2026-06-14 07:31:55
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.4.0 (main @ 3820734-dirty) |
+| POUNCE | v0.4.0 (fix/convex-debugger-reachability @ 1ea75a2-dirty) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -38,11 +38,11 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Optimal (strict) | **1239/1326** (93.4%) | **1237/1326** (93.3%) |
-| Acceptable (informational, *not* counted as solved) | 33 | 24 |
-| Solved exclusively (strict Optimal) | 42 | 40 |
-| Both Optimal | 1197 | |
-| Matching objectives (< 0.01%) | 1141/1197 | |
+| Optimal (strict) | **1262/1326** (95.2%) | **1237/1326** (93.3%) |
+| Acceptable (informational, *not* counted as solved) | 10 | 24 |
+| Solved exclusively (strict Optimal) | 45 | 20 |
+| Both Optimal | 1217 | |
+| Matching objectives (< 0.01%) | 1162/1217 | |
 
 > **Note:** All headline counts use strict Optimal status only. `Acceptable`
 > means the iterate met relaxed tolerances but not the requested tolerance —
@@ -76,16 +76,16 @@ _1326 problems; solvers: pounce, ipopt._
 
 | Suite | Problems | POUNCE Optimal | Ipopt Optimal | POUNCE only | Ipopt only | Both Optimal | Match |
 |-------|----------|---------------|--------------|-------------|------------|--------------|-------|
-| Vanderbei | 733 | 686 (93.6%) | 683 (93.2%) | 18 | 15 | 668 | 651/668 |
+| Vanderbei | 733 | 687 (93.7%) | 683 (93.2%) | 18 | 14 | 669 | 652/669 |
 | Electrolyte | 13 | 13 (100.0%) | 13 (100.0%) | 0 | 0 | 13 | 13/13 |
 | Grid | 4 | 4 (100.0%) | 4 (100.0%) | 0 | 0 | 4 | 4/4 |
 | CHO | 1 | 1 (100.0%) | 1 (100.0%) | 0 | 0 | 1 | 1/1 |
 | Water | 6 | 6 (100.0%) | 6 (100.0%) | 0 | 0 | 6 | 2/6 |
 | Gas | 4 | 3 (75.0%) | 3 (75.0%) | 0 | 0 | 3 | 3/3 |
 | LargeScale | 5 | 5 (100.0%) | 5 (100.0%) | 0 | 0 | 5 | 5/5 |
-| Mittelmann | 47 | 43 (91.5%) | 37 (78.7%) | 6 | 0 | 37 | 35/37 |
-| QP | 138 | 137 (99.3%) | 133 (96.4%) | 5 | 1 | 132 | 124/132 |
-| LP | 371 | 341 (91.9%) | 352 (94.9%) | 13 | 24 | 328 | 303/328 |
+| Mittelmann | 47 | 42 (89.4%) | 37 (78.7%) | 6 | 1 | 36 | 35/36 |
+| QP | 138 | 138 (100.0%) | 133 (96.4%) | 5 | 0 | 133 | 125/133 |
+| LP | 371 | 363 (97.8%) | 352 (94.9%) | 16 | 5 | 347 | 322/347 |
 | LPopt | 4 | 0 (0.0%) | 0 (0.0%) | 0 | 0 | 0 | 0/1 |
 
 ## Vanderbei Reference Cross-Check
@@ -94,17 +94,17 @@ Per-problem status from R. Vanderbei's `cute_table.pdf` (`vanderbei/cute_table_s
 
 | cute_table status | problems | POUNCE solved | meaning |
 |---|---|---|---|
-| optimum | 684 | 651 | finite reference optimum exists (expected-solvable) |
+| optimum | 684 | 652 | finite reference optimum exists (expected-solvable) |
 | hard | 14 | 8 | in table, but SNOPT+NITRO+LOQO all hit time/iter limits |
 | infeasible | 3 | 0 | a reference solver declared infeasibility |
 | unbounded | 1 | 0 | unbounded below |
 | untabulated | 31 | 27 | not in cute_table — no reference datum |
 
-**POUNCE solved 651 / 684 expected-solvable (95.2%).** The hard / infeasible / unbounded / untabulated rows above are excluded from this denominator — a POUNCE failure there is shared with the commercial reference solvers and is not counted as a miss.
+**POUNCE solved 652 / 684 expected-solvable (95.3%).** The hard / infeasible / unbounded / untabulated rows above are excluded from this denominator — a POUNCE failure there is shared with the commercial reference solvers and is not counted as a miss.
 
-**Genuine misses — expected-solvable but POUNCE did not reach Optimal (33):**
+**Genuine misses — expected-solvable but POUNCE did not reach Optimal (32):**
 
-> airport brainpc0 brainpc2 britgas coshfun cresc100 cresc132 cresc50 dallass deconvb eigena2 flosp2hh grouping himmelbj hs012 hs043 hs065 kissing makela2 minmaxbd nonmsqrt orthrds2 orthrege palmer1c palmer5e palmer7c polak3 polak4 rosenmmx sawpath sineali steenbrc steenbrf
+> airport brainpc0 brainpc2 britgas coshfun cresc100 cresc132 cresc50 dallass deconvb eigena2 flosp2hh grouping himmelbj hs012 hs043 kissing makela2 minmaxbd nonmsqrt orthrds2 orthrege palmer1c palmer5e palmer7c polak3 polak4 rosenmmx sawpath sineali steenbrc steenbrf
 
 **Objective disagreements vs. cute_table reference (26)** — POUNCE converged but to a different value than the agreed reference optimum (possible wrong basin or misread problem):
 
@@ -139,20 +139,20 @@ Per-problem status from R. Vanderbei's `cute_table.pdf` (`vanderbei/cute_table_s
 
 ## Vanderbei Suite — Performance
 
-On 668 commonly-solved problems:
+On 669 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 41.9ms | 44.5ms |
-| Total time | 298.05s | 233.75s |
-| Mean iterations | 47.2 | 47.2 |
+| Median time | 42.8ms | 44.5ms |
+| Total time | 308.99s | 233.80s |
+| Mean iterations | 47.1 | 47.2 |
 | Median iterations | 15 | 16 |
 
-- **Geometric mean speedup**: 0.9x
+- **Geometric mean speedup**: 0.8x
 - **Median speedup**: 1.0x
-- POUNCE faster: 343/668 (51%)
-- POUNCE 10x+ faster: 1/668
-- Ipopt faster: 325/668
+- POUNCE faster: 290/669 (43%)
+- POUNCE 10x+ faster: 1/669
+- Ipopt faster: 379/669
 
 ## Electrolyte Suite — Performance
 
@@ -160,16 +160,16 @@ On 13 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 29.8ms | 37.6ms |
-| Total time | 399.8ms | 503.3ms |
+| Median time | 33.7ms | 37.6ms |
+| Total time | 445.4ms | 503.3ms |
 | Mean iterations | 14.8 | 12.2 |
 | Median iterations | 10 | 10 |
 
-- **Geometric mean speedup**: 1.3x
-- **Median speedup**: 1.2x
-- POUNCE faster: 12/13 (92%)
+- **Geometric mean speedup**: 1.1x
+- **Median speedup**: 1.1x
+- POUNCE faster: 11/13 (85%)
 - POUNCE 10x+ faster: 0/13
-- Ipopt faster: 1/13
+- Ipopt faster: 2/13
 
 ## Grid Suite — Performance
 
@@ -177,16 +177,16 @@ On 4 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 33.5ms | 41.9ms |
-| Total time | 134.2ms | 157.2ms |
+| Median time | 36.2ms | 41.9ms |
+| Total time | 147.7ms | 157.2ms |
 | Mean iterations | 15.5 | 15.5 |
 | Median iterations | 17 | 17 |
 
-- **Geometric mean speedup**: 1.2x
-- **Median speedup**: 1.2x
-- POUNCE faster: 4/4 (100%)
+- **Geometric mean speedup**: 1.1x
+- **Median speedup**: 1.1x
+- POUNCE faster: 3/4 (75%)
 - POUNCE 10x+ faster: 0/4
-- Ipopt faster: 0/4
+- Ipopt faster: 1/4
 
 ## CHO Suite — Performance
 
@@ -194,8 +194,8 @@ On 1 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 4.14s | 1.76s |
-| Total time | 4.14s | 1.76s |
+| Median time | 4.24s | 1.76s |
+| Total time | 4.24s | 1.76s |
 | Mean iterations | 36.0 | 33.0 |
 | Median iterations | 36 | 33 |
 
@@ -211,16 +211,16 @@ On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 138.1ms | 122.5ms |
-| Total time | 802.2ms | 696.0ms |
+| Median time | 140.2ms | 122.5ms |
+| Total time | 811.4ms | 696.0ms |
 | Mean iterations | 192.7 | 205.2 |
 | Median iterations | 191 | 209 |
 
-- **Geometric mean speedup**: 0.9x
+- **Geometric mean speedup**: 0.8x
 - **Median speedup**: 0.9x
-- POUNCE faster: 2/6 (33%)
+- POUNCE faster: 1/6 (17%)
 - POUNCE 10x+ faster: 0/6
-- Ipopt faster: 4/6
+- Ipopt faster: 5/6
 
 ## Gas Suite — Performance
 
@@ -228,13 +228,13 @@ On 3 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 87.6ms | 113.3ms |
-| Total time | 306.4ms | 374.0ms |
+| Median time | 93.7ms | 113.3ms |
+| Total time | 320.3ms | 374.0ms |
 | Mean iterations | 40.0 | 39.7 |
 | Median iterations | 20 | 20 |
 
-- **Geometric mean speedup**: 1.3x
-- **Median speedup**: 1.3x
+- **Geometric mean speedup**: 1.2x
+- **Median speedup**: 1.2x
 - POUNCE faster: 3/3 (100%)
 - POUNCE 10x+ faster: 0/3
 - Ipopt faster: 0/3
@@ -245,9 +245,9 @@ On 5 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 2.75s | 573.2ms |
-| Total time | 12.59s | 9.43s |
-| Mean iterations | 309.2 | 305.6 |
+| Median time | 2.77s | 573.2ms |
+| Total time | 12.99s | 9.43s |
+| Mean iterations | 309.0 | 305.6 |
 | Median iterations | 5 | 2 |
 
 - **Geometric mean speedup**: 0.5x
@@ -258,54 +258,54 @@ On 5 commonly-solved problems:
 
 ## Mittelmann Suite — Performance
 
-On 37 commonly-solved problems:
+On 36 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 9.62s | 5.65s |
-| Total time | 1263.43s | 1301.60s |
-| Mean iterations | 107.9 | 105.4 |
+| Median time | 9.48s | 5.65s |
+| Total time | 994.37s | 1227.95s |
+| Mean iterations | 92.4 | 96.3 |
 | Median iterations | 35 | 41 |
 
 - **Geometric mean speedup**: 0.7x
 - **Median speedup**: 0.6x
-- POUNCE faster: 12/37 (32%)
-- POUNCE 10x+ faster: 0/37
-- Ipopt faster: 25/37
+- POUNCE faster: 12/36 (33%)
+- POUNCE 10x+ faster: 0/36
+- Ipopt faster: 24/36
 
 ## QP Suite — Performance
 
-On 132 commonly-solved problems:
+On 133 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 89.5ms | 93.0ms |
-| Total time | 132.87s | 172.93s |
-| Mean iterations | 20.2 | 76.1 |
-| Median iterations | 19 | 24 |
+| Median time | 85.0ms | 92.9ms |
+| Total time | 157.44s | 172.97s |
+| Mean iterations | 18.3 | 75.6 |
+| Median iterations | 17 | 24 |
 
 - **Geometric mean speedup**: 1.1x
-- **Median speedup**: 1.1x
-- POUNCE faster: 81/132 (61%)
-- POUNCE 10x+ faster: 2/132
-- Ipopt faster: 51/132
+- **Median speedup**: 1.0x
+- POUNCE faster: 72/133 (54%)
+- POUNCE 10x+ faster: 2/133
+- Ipopt faster: 61/133
 
 ## LP Suite — Performance
 
-On 328 commonly-solved problems:
+On 347 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 127.7ms | 141.2ms |
-| Total time | 189.05s | 391.43s |
-| Mean iterations | 29.5 | 105.6 |
-| Median iterations | 29 | 56 |
+| Median time | 151.1ms | 156.2ms |
+| Total time | 239.47s | 409.87s |
+| Mean iterations | 24.4 | 107.2 |
+| Median iterations | 23 | 56 |
 
-- **Geometric mean speedup**: 1.2x
+- **Geometric mean speedup**: 1.1x
 - **Median speedup**: 1.0x
-- POUNCE faster: 172/328 (52%)
-- POUNCE 10x+ faster: 9/328
-- Ipopt faster: 156/328
+- POUNCE faster: 163/347 (47%)
+- POUNCE 10x+ faster: 9/347
+- Ipopt faster: 184/347
 
 ## Failure Analysis
 
@@ -313,12 +313,12 @@ On 328 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 9 | 6 |
+| Acceptable | 10 | 6 |
 | Infeasible_Problem_Detected | 5 | 4 |
 | Invalid_Number_Detected | 1 | 3 |
 | Maximum_CpuTime_Exceeded | 3 | 8 |
 | Maximum_Iterations_Exceeded | 17 | 16 |
-| Restoration_Failed | 6 | 3 |
+| Restoration_Failed | 4 | 3 |
 | Search_Direction_Becomes_Too_Small | 1 | 1 |
 | Solver_Error | 5 | 2 |
 | Unknown_Error | 0 | 7 |
@@ -333,7 +333,7 @@ On 328 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Maximum_CpuTime_Exceeded | 4 | 6 |
+| Maximum_CpuTime_Exceeded | 5 | 6 |
 | Maximum_Iterations_Exceeded | 0 | 3 |
 | Solver_Error | 0 | 1 |
 
@@ -341,17 +341,17 @@ On 328 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 1 | 4 |
+| Acceptable | 0 | 4 |
 | Maximum_CpuTime_Exceeded | 0 | 1 |
 
 ### LP Suite
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 23 | 14 |
+| Acceptable | 0 | 14 |
 | Infeasible_Problem_Detected | 2 | 1 |
 | Maximum_CpuTime_Exceeded | 0 | 1 |
-| Maximum_Iterations_Exceeded | 5 | 1 |
+| Maximum_Iterations_Exceeded | 6 | 1 |
 | Restoration_Failed | 0 | 1 |
 | Unknown_Error | 0 | 1 |
 
@@ -366,48 +366,28 @@ On 328 commonly-solved problems:
 
 | Problem | Suite | n | m | POUNCE status | Ipopt obj |
 |---------|-------|---|---|--------------|-----------|
-| 80bau3b | LP | 9799 | 2237 | Acceptable | 9.872242e+05 |
-| PRIMALC8 | QP | 520 | 8 | Acceptable | -1.830943e+04 |
+| NARX_CFy | Mittelmann | 43973 | 48256 | Maximum_CpuTime_Exceeded | 8.726796e-03 |
 | airport | Vanderbei | 84 | 42 | Restoration_Failed | 4.795270e+04 |
-| ch | LP | 5062 | 3682 | Maximum_Iterations_Exceeded | 9.257564e+05 |
-| delf001 | LP | 5462 | 3098 | Acceptable | 2.358603e+03 |
-| delf022 | LP | 5472 | 3214 | Acceptable | 3.649904e+02 |
-| delf030 | LP | 5469 | 3199 | Acceptable | 2.538378e+02 |
 | eigena2 | Vanderbei | 110 | 55 | Acceptable | 8.250000e+01 |
 | gen | LP | 2560 | 769 | Maximum_Iterations_Exceeded | -1.097485e-05 |
 | gen1 | LP | 2560 | 769 | Maximum_Iterations_Exceeded | -1.097485e-05 |
 | gen4 | LP | 4297 | 1537 | Maximum_Iterations_Exceeded | -2.221401e-05 |
-| hs012 | Vanderbei | 2 | 1 | Restoration_Failed | -3.000000e+01 |
+| hs012 | Vanderbei | 2 | 1 | Acceptable | -3.000000e+01 |
 | hs043 | Vanderbei | 4 | 3 | Acceptable | -4.400000e+01 |
-| hs065 | Vanderbei | 3 | 4 | Restoration_Failed | 9.535288e-01 |
 | kissing | Vanderbei | 127 | 903 | Acceptable | 8.454426e-01 |
-| large000 | LP | 6833 | 4239 | Acceptable | 7.260546e+01 |
-| large011 | LP | 6837 | 4236 | Acceptable | 4.935814e+02 |
-| large017 | LP | 6837 | 4277 | Acceptable | 6.256793e+02 |
-| large022 | LP | 6834 | 4312 | Acceptable | 3.774823e+02 |
-| large024 | LP | 6831 | 4292 | Acceptable | 3.560283e+02 |
-| large025 | LP | 6832 | 4297 | Acceptable | 3.554429e+02 |
-| large027 | LP | 6821 | 4275 | Acceptable | 3.337026e+02 |
+| kleemin8 | LP | 8 | 8 | Maximum_Iterations_Exceeded | -1.000000e+14 |
 | makela2 | Vanderbei | 3 | 3 | Acceptable | 7.200000e+00 |
 | minmaxbd | Vanderbei | 5 | 20 | Restoration_Failed | 1.157064e+02 |
-| nemspmm1 | LP | 8622 | 2342 | Acceptable | -3.274158e+05 |
-| nesm | LP | 2923 | 662 | Acceptable | 1.407604e+07 |
-| nsir2 | LP | 5717 | 4451 | Acceptable | -2.717559e+07 |
 | orthrds2 | Vanderbei | 203 | 100 | Acceptable | 1.544297e+03 |
 | orthrege | Vanderbei | 36 | 20 | Acceptable | 3.868188e+00 |
-| p0201 | LP | 201 | 133 | Acceptable | 6.875000e+03 |
 | palmer1c | Vanderbei | 8 | 0 | Maximum_Iterations_Exceeded | 9.759799e-02 |
 | palmer7c | Vanderbei | 8 | 0 | Maximum_Iterations_Exceeded | 6.019857e-01 |
-| pcb1000 | LP | 2428 | 1565 | Acceptable | 5.680946e+04 |
-| pcb3000 | LP | 6810 | 3960 | Acceptable | 1.374164e+05 |
-| pilot87 | LP | 4883 | 2030 | Acceptable | 3.017104e+02 |
+| pilot87 | LP | 4883 | 2030 | Maximum_Iterations_Exceeded | 3.017104e+02 |
 | polak4 | Vanderbei | 3 | 3 | Restoration_Failed | -3.513953e-09 |
 | rosenmmx | Vanderbei | 5 | 4 | Acceptable | -4.400000e+01 |
 | sawpath | Vanderbei | 593 | 786 | Infeasible_Problem_Detected | 1.815730e+02 |
-| seymourl | LP | 1372 | 4944 | Acceptable | 4.038465e+02 |
-| ship08l | LP | 4283 | 712 | Acceptable | 1.909055e+06 |
 
-## Wins (POUNCE Optimal, Ipopt not Optimal) — 42 problems
+## Wins (POUNCE Optimal, Ipopt not Optimal) — 45 problems
 
 | Problem | Suite | n | m | Ipopt status | POUNCE obj |
 |---------|-------|---|---|-------------|------------|
@@ -417,11 +397,13 @@ On 328 commonly-solved problems:
 | QRECIPE | QP | 180 | 91 | Acceptable | -2.666160e+02 |
 | QSCORPIO | QP | 358 | 388 | Acceptable | 1.880510e+03 |
 | aa4 | LP | 7195 | 426 | Acceptable | 2.587761e+04 |
+| air05 | LP | 7195 | 426 | Acceptable | 2.587761e+04 |
 | bore3d | LP | 315 | 233 | Acceptable | 1.373080e+03 |
 | brainpc1 | Vanderbei | 6905 | 6900 | Restoration_Failed | 4.362953e-04 |
 | brainpc5 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.752286e-04 |
 | brainpc7 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.926834e-04 |
 | bt8 | Vanderbei | 5 | 2 | Acceptable | 1.000000e+00 |
+| co5 | LP | 7993 | 5715 | Acceptable | 7.144696e+05 |
 | complex | LP | 1408 | 1023 | Acceptable | -9.966667e+01 |
 | coolhans | Vanderbei | 9 | 0 | Unknown_Error | 0.000000e+00 |
 | cq5 | LP | 7530 | 5025 | Acceptable | 4.001338e+05 |
@@ -432,8 +414,9 @@ On 328 commonly-solved problems:
 | drcav2lq | Vanderbei | 10816 | 816 | Maximum_CpuTime_Exceeded | 1.555870e-03 |
 | drcavty2 | Vanderbei | 10816 | 816 | Maximum_CpuTime_Exceeded | 1.555870e-03 |
 | eigenc2 | Vanderbei | 462 | 231 | Unknown_Error | 7.718095e+02 |
+| finnis | LP | 614 | 497 | Acceptable | 1.727911e+05 |
 | flosp2th | Vanderbei | 691 | 0 | Maximum_Iterations_Exceeded | 1.000000e+01 |
-| greenbea | LP | 5405 | 2389 | Maximum_Iterations_Exceeded | -7.255177e+07 |
+| greenbea | LP | 5405 | 2389 | Maximum_Iterations_Exceeded | -7.246479e+07 |
 | greenbeb | LP | 5405 | 2389 | Acceptable | -4.302260e+06 |
 | henon120 | Mittelmann | 32401 | 241 | Maximum_CpuTime_Exceeded | 1.332947e+02 |
 | lane_emden120 | Mittelmann | 57721 | 241 | Maximum_CpuTime_Exceeded | 9.340251e+00 |
@@ -454,44 +437,21 @@ On 328 commonly-solved problems:
 | steenbre | Vanderbei | 540 | 126 | Acceptable | 2.851495e+04 |
 | steenbrg | Vanderbei | 540 | 126 | Acceptable | 2.747128e+04 |
 
-## Acceptable (not Optimal) — 33 problems
+## Acceptable (not Optimal) — 10 problems
 
 These problems converged within relaxed tolerances but not strict tolerances.
 
 | Problem | Suite | n | m | Ipopt status | POUNCE obj | Ipopt obj |
 |---------|-------|---|---|-------------|------------|-----------|
-| 80bau3b | LP | 9799 | 2237 | Optimal | 9.872242e+05 | 9.872242e+05 |
-| PRIMALC8 | QP | 520 | 8 | Optimal | -1.830943e+04 | -1.830943e+04 |
-| air05 | LP | 7195 | 426 | Acceptable | 2.587761e+04 | 2.587759e+04 |
-| co5 | LP | 7993 | 5715 | Acceptable | 7.144696e+05 | 7.144695e+05 |
 | dallass | Vanderbei | 46 | 31 | Invalid_Number_Detected | -3.202464e+04 | N/A |
-| delf001 | LP | 5462 | 3098 | Optimal | 2.358609e+03 | 2.358603e+03 |
-| delf022 | LP | 5472 | 3214 | Optimal | 3.649929e+02 | 3.649904e+02 |
-| delf030 | LP | 5469 | 3199 | Optimal | 2.538402e+02 | 2.538378e+02 |
 | eigena2 | Vanderbei | 110 | 55 | Optimal | 8.250000e+01 | 8.250000e+01 |
-| finnis | LP | 614 | 497 | Acceptable | 1.727911e+05 | 1.727916e+05 |
+| hs012 | Vanderbei | 2 | 1 | Optimal | -3.000000e+01 | -3.000000e+01 |
 | hs043 | Vanderbei | 4 | 3 | Optimal | -4.400000e+01 | -4.400000e+01 |
 | kissing | Vanderbei | 127 | 903 | Optimal | 1.000001e+00 | 8.454426e-01 |
-| large000 | LP | 6833 | 4239 | Optimal | 7.260853e+01 | 7.260546e+01 |
-| large011 | LP | 6837 | 4236 | Optimal | 4.935848e+02 | 4.935814e+02 |
-| large017 | LP | 6837 | 4277 | Optimal | 6.256827e+02 | 6.256793e+02 |
-| large022 | LP | 6834 | 4312 | Optimal | 3.774854e+02 | 3.774823e+02 |
-| large024 | LP | 6831 | 4292 | Optimal | 3.560314e+02 | 3.560283e+02 |
-| large025 | LP | 6832 | 4297 | Optimal | 3.554460e+02 | 3.554429e+02 |
-| large027 | LP | 6821 | 4275 | Optimal | 3.337057e+02 | 3.337026e+02 |
 | makela2 | Vanderbei | 3 | 3 | Optimal | 7.200000e+00 | 7.200000e+00 |
-| nemspmm1 | LP | 8622 | 2342 | Optimal | -3.274158e+05 | -3.274158e+05 |
-| nesm | LP | 2923 | 662 | Optimal | 1.407604e+07 | 1.407604e+07 |
-| nsir2 | LP | 5717 | 4451 | Optimal | -2.717559e+07 | -2.717559e+07 |
 | orthrds2 | Vanderbei | 203 | 100 | Optimal | 1.544296e+03 | 1.544297e+03 |
 | orthrege | Vanderbei | 36 | 20 | Optimal | 3.934338e+00 | 3.868188e+00 |
-| p0201 | LP | 201 | 133 | Optimal | 6.875000e+03 | 6.875000e+03 |
-| pcb1000 | LP | 2428 | 1565 | Optimal | 5.680946e+04 | 5.680946e+04 |
-| pcb3000 | LP | 6810 | 3960 | Optimal | 1.374164e+05 | 1.374164e+05 |
-| pilot87 | LP | 4883 | 2030 | Optimal | 3.017105e+02 | 3.017104e+02 |
 | rosenmmx | Vanderbei | 5 | 4 | Optimal | -4.400000e+01 | -4.400000e+01 |
-| seymourl | LP | 1372 | 4944 | Optimal | 4.038465e+02 | 4.038465e+02 |
-| ship08l | LP | 4283 | 712 | Optimal | 1.909055e+06 | 1.909055e+06 |
 | steenbrc | Vanderbei | 540 | 126 | Unknown_Error | 1.946894e+04 | 2.597624e+04 |
 
 ## POUNCE-Only Suite Details
@@ -502,12 +462,12 @@ These suites currently run POUNCE only — no Ipopt-side comparison is captured 
 
 | Problem | n | m | Status | Objective | Iters | Time |
 |---------|---|---|--------|-----------|-------|------|
-| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.08s |
-| irish-electricity | 61,728 | 104,259 | Maximum_Iterations_Exceeded | 2.4544e+06 | 199 | 79.70s |
-| qap15 | 22,275 | 6,330 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.09s |
+| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.06s |
+| irish-electricity | 61,728 | 104,259 | Maximum_Iterations_Exceeded | 2.4544e+06 | 199 | 110.17s |
+| qap15 | 22,275 | 6,330 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.05s |
 | supportcase10 | 14,630 | 165,684 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.09s |
 
-POUNCE: **0/4 Optimal** in 979.97s total
+POUNCE: **0/4 Optimal** in 1010.38s total
 
 ## Dedicated Convex Solver vs. General NLP (head-to-head)
 
@@ -523,49 +483,49 @@ reference used by the suites above.
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Optimal | 341/371 (91.9%) | 359/371 (96.8%) |
-| Solved exclusively | 8 | 26 |
-| Both Optimal | 333 | |
-| Matching objectives (< 0.01%) | 308/333 | |
+| Optimal | 363/371 (97.8%) | 359/371 (96.8%) |
+| Solved exclusively | 9 | 5 |
+| Both Optimal | 354 | |
+| Matching objectives (< 0.01%) | 329/354 | |
 
-On 333 problems solved by both arms:
+On 354 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 126.3ms | 193.9ms |
-| Total time | 189.24s | 587.70s |
-| Mean iterations | 29.4 | 113.8 |
-| Median iterations | 29 | 55 |
+| Median time | 160.3ms | 208.1ms |
+| Total time | 241.92s | 656.26s |
+| Mean iterations | 24.5 | 115.5 |
+| Median iterations | 23 | 56 |
 
-- **Geometric-mean speedup (convex over nlp)**: 1.5x
+- **Geometric-mean speedup (convex over nlp)**: 1.4x
 - **Median speedup**: 1.2x
-- pounce-convex faster: 251/333 (75%)
-- pounce-convex 10x+ faster: 9/333
-- pounce-nlp faster: 82/333
+- pounce-convex faster: 240/354 (68%)
+- pounce-convex 10x+ faster: 8/354
+- pounce-nlp faster: 114/354
 
 ### QP — convex vs NLP
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Optimal | 136/138 (98.6%) | 135/138 (97.8%) |
-| Solved exclusively | 3 | 2 |
-| Both Optimal | 133 | |
-| Matching objectives (< 0.01%) | 125/133 | |
+| Optimal | 137/138 (99.3%) | 135/138 (97.8%) |
+| Solved exclusively | 3 | 1 |
+| Both Optimal | 134 | |
+| Matching objectives (< 0.01%) | 126/134 | |
 
-On 133 problems solved by both arms:
+On 134 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 85.5ms | 117.8ms |
-| Total time | 139.18s | 155.48s |
-| Mean iterations | 20.3 | 76.2 |
-| Median iterations | 19 | 25 |
+| Median time | 89.1ms | 124.8ms |
+| Total time | 175.12s | 156.66s |
+| Mean iterations | 18.4 | 75.8 |
+| Median iterations | 17 | 25 |
 
-- **Geometric-mean speedup (convex over nlp)**: 1.3x
+- **Geometric-mean speedup (convex over nlp)**: 1.1x
 - **Median speedup**: 1.1x
-- pounce-convex faster: 91/133 (68%)
-- pounce-convex 10x+ faster: 2/133
-- pounce-nlp faster: 42/133
+- pounce-convex faster: 80/134 (60%)
+- pounce-convex 10x+ faster: 1/134
+- pounce-nlp faster: 54/134
 
 ---
 *Generated by benchmark_report.py*
