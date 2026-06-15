@@ -1088,6 +1088,42 @@ impl<'a> Parser<'a> {
                     Ok(Expr::MaxList(args))
                 }
             }
+            // AMPL power specializations (ASL `opcode.hd` 81/82/83). AMPL
+            // emits these in place of the general `o5` (OPPOW) as a hint that
+            // one operand is constant. The distinction exists because an
+            // integer / half-integer constant power is evaluated by a
+            // mul/sqrt chain that stays real for a negative base, whereas the
+            // general `pow` (via `exp(c·ln x)`) returns NaN there. Structurally
+            // they read exactly like `o5`, so they lower to the same `Pow` AST
+            // and reuse the existing constant-power tape lowering (see
+            // `nl_tape::try_emit_const_pow`). Arity/operand order confirmed
+            // against the ASL reader and the `ampl/mp` opcode table:
+            // POW_CONST_EXP / POW_CONST_BASE are binary `base, exp`; POW2 is
+            // unary with an implicit exponent of 2.
+            //
+            // o81 OP1POW: `base ^ (const exponent)` — binary, operands
+            // `base` then `exp` (the exponent is a numeric node here).
+            81 => {
+                let base = self.parse_expr()?;
+                let exp = self.parse_expr()?;
+                Ok(Expr::Binary(BinOp::Pow, Box::new(base), Box::new(exp)))
+            }
+            // o82 OP2POW: square — unary, single operand; exponent 2 implicit.
+            82 => {
+                let base = self.parse_expr()?;
+                Ok(Expr::Binary(
+                    BinOp::Pow,
+                    Box::new(base),
+                    Box::new(Expr::Const(2.0)),
+                ))
+            }
+            // o83 OPCPOW: `(const base) ^ exponent` — binary, operands `base`
+            // (the numeric node) then `exp`.
+            83 => {
+                let base = self.parse_expr()?;
+                let exp = self.parse_expr()?;
+                Ok(Expr::Binary(BinOp::Pow, Box::new(base), Box::new(exp)))
+            }
             other => Err(format!("unsupported opcode o{other}")),
         }
     }
@@ -3625,5 +3661,165 @@ S1 2 sens_init_constr
             FuncallArg::Str(s) => assert_eq!(s, "abc"),
             other => panic!("expected Str, got {other:?}"),
         }
+    }
+
+    // --- AMPL power specializations (opcodes o81/o82/o83) --------------------
+    //
+    // AMPL emits these in place of the general `o5` (OPPOW) when one operand
+    // is constant. They must parse to the same `Pow` AST as `o5` so the tape's
+    // negative-base-safe constant-power lowering applies. The eval points below
+    // are chosen to pin down BOTH the arity and the operand order: a swapped
+    // `base`/`exp` (or treating `o82` as a different unary op) gives a
+    // different number at these points, so each assertion is discriminating.
+
+    /// Parse a single expression `expr_src` with `n` variables in scope,
+    /// driving the real `parse_opcode` path through `parse_expr`.
+    fn parse_one_expr(n: usize, expr_src: &str) -> Expr {
+        let mut p = Parser::new(expr_src);
+        p.n = n;
+        p.parse_expr().expect("parse expression")
+    }
+
+    #[test]
+    fn opcode_o82_square_is_unary_pow_of_two() {
+        // o82 OP2POW: `x^2`, unary — one operand, implicit exponent 2.
+        let e = parse_one_expr(1, "o82\nv0\n");
+        match &e {
+            Expr::Binary(BinOp::Pow, base, exp) => {
+                assert!(matches!(**base, Expr::Var(0)));
+                match **exp {
+                    Expr::Const(c) => assert!((c - 2.0).abs() < 1e-12, "exp const = {c}"),
+                    ref other => panic!("o82 exponent must be Const(2.0), got {other:?}"),
+                }
+            }
+            other => panic!("o82 must parse to Pow(base, 2), got {other:?}"),
+        }
+        // value: 3^2 = 9, and — the whole point of o82 — a NEGATIVE base stays
+        // real: (-3)^2 = 9 (general `exp(2·ln x)` would be NaN here).
+        assert!((eval_expr(&e, &[3.0]) - 9.0).abs() < 1e-12);
+        assert!((eval_expr(&e, &[-3.0]) - 9.0).abs() < 1e-12);
+        // gradient d/dx x^2 = 2x: 6 at x=3, -6 at x=-3 (real on both sides).
+        let mut g = [0.0_f64; 1];
+        grad_expr(&e, &[3.0], 1.0, &mut g);
+        assert!((g[0] - 6.0).abs() < 1e-9, "grad at 3 = {}", g[0]);
+        g[0] = 0.0;
+        grad_expr(&e, &[-3.0], 1.0, &mut g);
+        assert!((g[0] + 6.0).abs() < 1e-9, "grad at -3 = {}", g[0]);
+    }
+
+    #[test]
+    fn opcode_o81_const_exponent_is_base_pow_const() {
+        // o81 OP1POW: `base ^ const`, binary, operands `base` then `exp`.
+        let e = parse_one_expr(1, "o81\nv0\nn3\n");
+        match &e {
+            Expr::Binary(BinOp::Pow, base, exp) => {
+                assert!(matches!(**base, Expr::Var(0)), "base must be the variable");
+                match **exp {
+                    Expr::Const(c) => assert!((c - 3.0).abs() < 1e-12, "exp const = {c}"),
+                    ref other => panic!("o81 exponent must be Const(3.0), got {other:?}"),
+                }
+            }
+            other => panic!("o81 must parse to Pow(var, const), got {other:?}"),
+        }
+        // x^3 at x=2 is 8, NOT 3^2=9 — pins operand order (base^exp, not exp^base).
+        assert!((eval_expr(&e, &[2.0]) - 8.0).abs() < 1e-12);
+        // NEGATIVE base, odd integer exponent: (-2)^3 = -8. This is exactly the
+        // case the general `pow` (exp(3·ln x)) cannot do — it returns NaN.
+        assert!((eval_expr(&e, &[-2.0]) + 8.0).abs() < 1e-12);
+        // gradient d/dx x^3 = 3x^2 = 12 at x=2.
+        let mut g = [0.0_f64; 1];
+        grad_expr(&e, &[2.0], 1.0, &mut g);
+        assert!((g[0] - 12.0).abs() < 1e-9, "grad at 2 = {}", g[0]);
+    }
+
+    #[test]
+    fn opcode_o83_const_base_is_const_pow_exp() {
+        // o83 OPCPOW: `const ^ exp`, binary, operands `base` (the const) then `exp`.
+        let e = parse_one_expr(1, "o83\nn2\nv0\n");
+        match &e {
+            Expr::Binary(BinOp::Pow, base, exp) => {
+                match **base {
+                    Expr::Const(c) => assert!((c - 2.0).abs() < 1e-12, "base const = {c}"),
+                    ref other => panic!("o83 base must be Const(2.0), got {other:?}"),
+                }
+                assert!(
+                    matches!(**exp, Expr::Var(0)),
+                    "exponent must be the variable"
+                );
+            }
+            other => panic!("o83 must parse to Pow(const, var), got {other:?}"),
+        }
+        // 2^x at x=3 is 8, NOT x^2=9 at x=3 — pins operand order (const^exp).
+        assert!((eval_expr(&e, &[3.0]) - 8.0).abs() < 1e-12);
+        assert!((eval_expr(&e, &[0.0]) - 1.0).abs() < 1e-12);
+        // gradient d/dx 2^x = 2^x · ln 2; at x=3 that is 8·ln2.
+        let mut g = [0.0_f64; 1];
+        grad_expr(&e, &[3.0], 1.0, &mut g);
+        assert!(
+            (g[0] - 8.0 * 2.0_f64.ln()).abs() < 1e-9,
+            "grad at 3 = {} (want {})",
+            g[0],
+            8.0 * 2.0_f64.ln()
+        );
+    }
+
+    #[test]
+    fn power_specializations_agree_with_general_o5() {
+        // Where both are defined, o81/o82/o83 must be numerically identical to
+        // the general `o5` pow on the same operands — they are only routing
+        // hints, not different math.
+        let o5_sq = parse_one_expr(1, "o5\nv0\nn2\n"); // x^2
+        let o82 = parse_one_expr(1, "o82\nv0\n");
+        let o5_cube = parse_one_expr(1, "o5\nv0\nn3\n"); // x^3
+        let o81 = parse_one_expr(1, "o81\nv0\nn3\n");
+        let o5_exp = parse_one_expr(1, "o5\nn2\nv0\n"); // 2^x
+        let o83 = parse_one_expr(1, "o83\nn2\nv0\n");
+        for &x in &[-2.0_f64, -0.5, 0.0, 1.0, 2.5, 4.0] {
+            assert!((eval_expr(&o82, &[x]) - eval_expr(&o5_sq, &[x])).abs() < 1e-12);
+            assert!((eval_expr(&o81, &[x]) - eval_expr(&o5_cube, &[x])).abs() < 1e-12);
+            // 2^x is real for all x; compare across the same points.
+            assert!((eval_expr(&o83, &[x]) - eval_expr(&o5_exp, &[x])).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn power_opcodes_round_trip_through_parse_nl_text() {
+        // End-to-end through the public entry point: `min x0^2 + x1^2` written
+        // with o82 (square) parses and evaluates like its o5 twin. Reuses the
+        // SIMPLE header (n=2, m=0, both vars nonlinear in the objective).
+        let nl = SIMPLE.replace(
+            "o0\no5\no1\nv0\nn1\nn2\no5\no1\nv1\nn2\nn2\n",
+            "o0\no82\nv0\no82\nv1\n",
+        );
+        assert_ne!(nl, SIMPLE, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse o82 objective");
+        // f(3,4) = 9 + 16 = 25; both bases negative still real: f(-3,-4)=25.
+        assert!((eval_expr(&p.obj_nonlinear, &[3.0, 4.0]) - 25.0).abs() < 1e-12);
+        assert!((eval_expr(&p.obj_nonlinear, &[-3.0, -4.0]) - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn power_opcode_o81_evaluates_through_the_tape_at_negative_base() {
+        // Full production path: parse o81 -> build the tape -> eval_f/eval_grad_f.
+        // `min x0^3 + x1^3` lowers each cube to an integer-power mul chain
+        // (the negative-base-safe path) rather than a generic `powf`. The check
+        // at a NEGATIVE base is the one that would break if o81 wrongly routed
+        // through `exp(c·ln x)`: (-2)^3 must be -8, not NaN.
+        let nl = SIMPLE.replace(
+            "o0\no5\no1\nv0\nn1\nn2\no5\no1\nv1\nn2\nn2\n",
+            "o0\no81\nv0\nn3\no81\nv1\nn3\n",
+        );
+        assert_ne!(nl, SIMPLE, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse o81 objective");
+        let mut tnlp = NlTnlp::new(p);
+        tnlp.get_nlp_info().unwrap();
+        // f(-2, 1) = (-2)^3 + 1^3 = -8 + 1 = -7 (real, not NaN).
+        let f = tnlp.eval_f(&[-2.0, 1.0], true).unwrap();
+        assert!((f + 7.0).abs() < 1e-12, "f(-2,1) = {f}");
+        // grad = (3 x0^2, 3 x1^2) = (12, 3) at (-2, 1).
+        let mut g = [0.0_f64; 2];
+        assert!(tnlp.eval_grad_f(&[-2.0, 1.0], true, &mut g));
+        assert!((g[0] - 12.0).abs() < 1e-9, "df/dx0 = {}", g[0]);
+        assert!((g[1] - 3.0).abs() < 1e-9, "df/dx1 = {}", g[1]);
     }
 }
