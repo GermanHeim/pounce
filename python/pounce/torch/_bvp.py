@@ -46,11 +46,97 @@ class TorchBVPSolution:
     sol: Callable
 
 
-def solve_bvp(fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None):
+def _newton_autograd_fn(fun, bc, x, n, m, k, uses_p, z0, tol):
+    """First-order-differentiable feral-Newton solve as a torch Function.
+
+    Forward: damped Newton on ``R(z, theta) = 0`` via FERAL's sparse LU.
+    Backward: the implicit-function-theorem VJP — ``R_z^T u = grad_out`` via
+    ``SparseLU.solve_transpose``, then ``-(dR/dtheta)^T u`` through torch
+    autograd of the residual at ``z*``. Both directions stay on the ``N``
+    system (no ``2N`` saddle); first-order only. Mirrors the JAX path.
+    """
+    import numpy as _np
+    from ..bvp._jac import CollocationJacobian
+    from ..bvp._newton import newton_solve
+    from .._pounce import SparseLU
+
+    x_np = _np.asarray(x.detach().cpu().numpy(), dtype=_np.float64)
+    z0_np = _np.asarray(z0.detach().cpu().numpy(), dtype=_np.float64)
+    N = n * m + k
+
+    def _np_normalized(theta_t):
+        nfun_t, nbc_t = _core._make_normalized(fun, bc, theta=theta_t, uses_p=uses_p)
+        nfun = lambda xx, YY, pp: _np.asarray(
+            nfun_t(torch.as_tensor(xx, dtype=torch.float64),
+                   torch.as_tensor(YY, dtype=torch.float64),
+                   torch.as_tensor(pp, dtype=torch.float64)).detach().cpu().numpy(),
+            dtype=_np.float64,
+        )
+        nbc = lambda ya, yb, pp: _np.asarray(
+            nbc_t(torch.as_tensor(ya, dtype=torch.float64),
+                  torch.as_tensor(yb, dtype=torch.float64),
+                  torch.as_tensor(pp, dtype=torch.float64)).detach().cpu().numpy(),
+            dtype=_np.float64,
+        )
+        return nfun, nbc
+
+    class _Newton(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, theta):
+            nfun, nbc = _np_normalized(theta.detach())
+
+            def residual_fn(z):
+                return _core.residual_of_z(z, nfun, nbc, x_np, n, m, k, _np.concatenate)
+
+            jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
+            z_star, _it, _ok, _rn = newton_solve(
+                residual_fn, jac, z0_np, n, m, k, tol=float(tol),
+            )
+            z_star = _np.asarray(z_star, dtype=_np.float64)
+            ctx.save_for_backward(theta)
+            ctx._z_star = z_star
+            return torch.as_tensor(z_star, dtype=torch.float64)
+
+        @staticmethod
+        def backward(ctx, grad_out):
+            (theta,) = ctx.saved_tensors
+            z_star = ctx._z_star
+            nfun, nbc = _np_normalized(theta.detach())
+            jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
+            rows, cols = jac.structure()
+            lu = SparseLU(N, _np.asarray(rows, _np.int64), _np.asarray(cols, _np.int64))
+            Y = z_star[: n * m].reshape(n, m)
+            pp = z_star[n * m :]
+            lu.factor(jac.values(Y, pp))
+            u = _np.asarray(
+                lu.solve_transpose(_np.asarray(grad_out.detach().cpu().numpy(), _np.float64)),
+                _np.float64,
+            )
+            u_t = torch.as_tensor(u, dtype=torch.float64)
+            # dL/dtheta = -(dR/dtheta)^T u via torch autograd of the residual.
+            # backward() runs with grad disabled by default — re-enable it so
+            # the residual graph w.r.t. theta is tracked.
+            with torch.enable_grad():
+                th = theta.detach().clone().requires_grad_(True)
+                z_t = torch.as_tensor(z_star, dtype=torch.float64)
+                nfun_t, nbc_t = _core._make_normalized(fun, bc, theta=th, uses_p=uses_p)
+                Yt, ppt = _core.unpack_z(z_t, n, m)
+                R = _core.collocation_residual(nfun_t, nbc_t, x, Yt, ppt, _cat)
+                (dtheta,) = torch.autograd.grad(R, th, grad_outputs=-u_t)
+            return dtheta
+
+    return _Newton.apply
+
+
+def solve_bvp(
+    fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None, method="newton",
+):
     """Solve a BVP differentiably w.r.t. ``theta`` with PyTorch + pounce.
 
     See :func:`pounce.jax.solve_bvp` for the argument contract; this is the
-    torch-tensor equivalent.
+    torch-tensor equivalent. ``method="newton"`` (default) uses the fast
+    FERAL sparse-LU Newton forward with an implicit-function-theorem
+    backward; ``method="ipm"`` routes through :func:`pounce.torch.solve`.
     """
     if theta is None:
         raise ValueError(
@@ -86,9 +172,15 @@ def solve_bvp(fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None):
     if options:
         opts.update(options)
 
-    z_star = _pounce_solve(
-        theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
-    )
+    if method == "newton":
+        solve_root = _newton_autograd_fn(fun, bc, x, n, m, k, uses_p, z0, tol)
+        z_star = solve_root(theta)
+    elif method == "ipm":
+        z_star = _pounce_solve(
+            theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
+        )
+    else:
+        raise ValueError(f"unknown method {method!r}; use 'newton' or 'ipm'.")
 
     Y_star, p_star = _core.unpack_z(z_star, n, m)
     nfun, _ = _core._make_normalized(fun, bc, theta=theta, uses_p=uses_p)

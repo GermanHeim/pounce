@@ -55,9 +55,95 @@ class JaxBVPSolution:
     sol: Callable
 
 
+def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol):
+    """First-order-differentiable feral-Newton solve (``method="newton"``).
+
+    Forward: damped Newton on ``R(z, theta) = 0`` factoring the ``N x N``
+    collocation Jacobian with FERAL's sparse LU (host ``pure_callback``).
+    Backward: the implicit-function-theorem VJP. For a cotangent ``v`` on
+    ``z*``, ``dL/dtheta = -(dR/dtheta)^T u`` where ``R_z^T u = v`` is solved
+    with the *same* sparse LU (``solve_transpose``), and the
+    ``(dR/dtheta)^T`` product is taken by JAX VJP over the traceable
+    residual at the converged ``z*``. Both directions stay on the ``N``
+    system — no ``2N`` saddle — so it is the fast path. First-order only
+    (the forward is an opaque callback); use ``method="ipm",
+    second_order=True`` for higher-order derivatives.
+    """
+    import numpy as np
+    from ..bvp._jac import CollocationJacobian
+    from ..bvp._newton import newton_solve
+    from ..bvp._solve import _BvpNlp  # noqa: F401  (kept for parity / reuse)
+    from .._pounce import SparseLU
+
+    x_np = np.asarray(x, dtype=np.float64)
+    z0_np = np.asarray(z0, dtype=np.float64)
+
+    def residual_jax(z, theta):
+        nfun, nbc = _core._make_normalized(fun, bc, theta=theta, uses_p=uses_p)
+        Y, pp = _core.unpack_z(z, n, m)
+        return _core.collocation_residual(nfun, nbc, x, Y, pp, jnp.concatenate)
+
+    def _np_normalized(theta_np):
+        nfun_j, nbc_j = _core._make_normalized(fun, bc, theta=theta_np, uses_p=uses_p)
+        nfun = lambda xx, YY, pp: np.asarray(nfun_j(xx, YY, pp), dtype=np.float64)
+        nbc = lambda ya, yb, pp: np.asarray(nbc_j(ya, yb, pp), dtype=np.float64)
+        return nfun, nbc
+
+    def _host_newton(theta_np):
+        nfun, nbc = _np_normalized(theta_np)
+
+        def residual_fn(z):
+            return _core.residual_of_z(z, nfun, nbc, x_np, n, m, k, np.concatenate)
+
+        jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
+        z_star, _it, _ok, _rn = newton_solve(
+            residual_fn, jac, z0_np, n, m, k, tol=float(tol),
+        )
+        return np.asarray(z_star, dtype=np.float64)
+
+    def _host_btran(z_star_np, theta_np, v_np):
+        nfun, nbc = _np_normalized(theta_np)
+        jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
+        rows, cols = jac.structure()
+        lu = SparseLU(n * m + k, np.asarray(rows, np.int64), np.asarray(cols, np.int64))
+        Y = np.asarray(z_star_np)[: n * m].reshape(n, m)
+        pp = np.asarray(z_star_np)[n * m :]
+        lu.factor(jac.values(Y, pp))
+        # Solve R_z^T u = v.
+        return np.asarray(lu.solve_transpose(np.asarray(v_np, np.float64)), np.float64)
+
+    N = n * m + k
+
+    @jax.custom_vjp
+    def solve_fn(theta):
+        return jax.pure_callback(
+            _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta,
+        )
+
+    def fwd(theta):
+        z_star = jax.pure_callback(
+            _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta,
+        )
+        return z_star, (z_star, theta)
+
+    def bwd(res, v):
+        z_star, theta = res
+        u = jax.pure_callback(
+            _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
+            z_star, theta, v,
+        )
+        # dL/dtheta = -(dR/dtheta)^T u, via VJP of the residual at z*.
+        _, vjp_theta = jax.vjp(lambda th: residual_jax(z_star, th), theta)
+        (dtheta,) = vjp_theta(-u)
+        return (dtheta,)
+
+    solve_fn.defvjp(fwd, bwd)
+    return solve_fn
+
+
 def solve_bvp(
     fun, bc, x, y, p=None, theta=None, *,
-    tol=1e-8, options=None, second_order=False,
+    tol=1e-8, options=None, method="newton", second_order=False,
 ):
     """Solve a BVP differentiably w.r.t. ``theta`` with JAX + pounce.
 
@@ -133,13 +219,25 @@ def solve_bvp(
     if options:
         opts.update(options)
 
-    if second_order:
-        solve_root = _make_root_solver_jvp(f, g, z0, N, cl, cu, opts)
+    if method == "newton":
+        if second_order:
+            raise ValueError(
+                "second_order=True is only supported with method='ipm' "
+                "(the Newton path's forward is an opaque callback, so it is "
+                "first-order differentiable)."
+            )
+        solve_root = _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol)
         z_star = solve_root(theta)
+    elif method == "ipm":
+        if second_order:
+            solve_root = _make_root_solver_jvp(f, g, z0, N, cl, cu, opts)
+            z_star = solve_root(theta)
+        else:
+            z_star = _pounce_solve(
+                theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
+            )
     else:
-        z_star = _pounce_solve(
-            theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
-        )
+        raise ValueError(f"unknown method {method!r}; use 'newton' or 'ipm'.")
 
     Y_star, p_star = _core.unpack_z(z_star, n, m)
     nfun, _ = _core._make_normalized(fun, bc, theta=theta, uses_p=uses_p)

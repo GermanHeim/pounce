@@ -201,7 +201,9 @@ def test_jax_solve_bvp_second_order():
     y0 = jnp.zeros((2, x.size))
 
     def y_mid(lam):
-        sol = pj.solve_bvp(fun, bc, x, y0, theta=lam, second_order=True)
+        sol = pj.solve_bvp(
+            fun, bc, x, y0, theta=lam, method="ipm", second_order=True
+        )
         return sol.y[0, sol.y.shape[1] // 2]
 
     lam = 1.0
@@ -213,6 +215,31 @@ def test_jax_solve_bvp_second_order():
     fd2 = float((jax.grad(y_mid)(lam + h) - jax.grad(y_mid)(lam - h)) / (2 * h))
     assert abs(g1 - fd1) / abs(fd1) < 1e-6
     assert abs(g2 - fd2) / abs(fd2) < 1e-5
+
+
+def test_jax_solve_bvp_newton_ipm_grad_agree():
+    """The feral-Newton VJP and the IPM implicit-diff VJP agree."""
+    pytest.importorskip("jax")
+    import jax
+    import jax.numpy as jnp
+    import pounce.jax as pj
+
+    def fun(x, y, theta):
+        return jnp.vstack((y[1], -theta * jnp.exp(y[0])))
+
+    def bc(ya, yb, theta):
+        return jnp.array([ya[0], yb[0]])
+
+    x = jnp.linspace(0, 1, 41)
+    y0 = jnp.zeros((2, x.size))
+
+    def loss(theta, method):
+        sol = pj.solve_bvp(fun, bc, x, y0, theta=theta, method=method)
+        return jnp.sum(sol.y[0] ** 2)
+
+    g_newton = float(jax.grad(lambda t: loss(t, "newton"))(1.0))
+    g_ipm = float(jax.grad(lambda t: loss(t, "ipm"))(1.0))
+    assert abs(g_newton - g_ipm) / abs(g_ipm) < 1e-5
 
 
 def test_jax_solve_bvp_unknown_parameter():

@@ -30,13 +30,13 @@ differentiable JAX/PyTorch frontends:
   `A x = b` on general sparse matrices.
 - **`pounce.jax.solve_bvp` / `pounce.torch.solve_bvp`** — the same solve made
   differentiable w.r.t. a `theta` parameter threaded into `fun` / `bc`, via
-  the implicit-function theorem on the collocation KKT system. Supports
+  the implicit-function theorem on the collocation system. Supports
   gradients/Jacobians w.r.t. ODE/BC coefficients, boundary values, and the
-  sensitivity of solved-for unknown parameters `p*`. First-order by
-  default; `pounce.jax.solve_bvp(..., second_order=True)` wraps the solve
-  in a `custom_jvp` that re-applies the implicit-function theorem to the
-  square collocation root-find, enabling `jax.grad(jax.grad(...))` /
-  `jax.hessian` to arbitrary order.
+  sensitivity of solved-for unknown parameters `p*`. The default
+  `method="newton"` is the fast path (FERAL sparse-LU forward + sparse
+  `R_zᵀ` backward, first-order). `method="ipm", second_order=True` wraps the
+  solve in a `custom_jvp` that re-applies the implicit-function theorem,
+  enabling `jax.grad(jax.grad(...))` / `jax.hessian` to arbitrary order.
 - Docs: `docs/src/bvp.md`; worked accuracy/speed/differentiability comparison
   in `python/examples/bvp_scipy_compare.py`.
 

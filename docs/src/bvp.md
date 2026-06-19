@@ -132,13 +132,26 @@ All of these are validated against finite differences to ~1e-11 in
 `python/examples/bvp_scipy_compare.py`, which also benchmarks accuracy and
 speed against SciPy.
 
+### Differentiable solver backends (`method`)
+
+The differentiable `solve_bvp` (both `pounce.jax` and `pounce.torch`) takes
+the same `method` switch:
+
+- **`method="newton"` (default)** — the fast path. Forward is the FERAL
+  sparse-LU Newton solve; the backward is the implicit-function-theorem VJP
+  `dz/dθ = −R_z⁻¹ R_θ`, solving `R_zᵀu = v` with the same sparse LU
+  (`SparseLU.solve_transpose`). Both directions stay on the `N` system — no
+  `2N` saddle — so it is fast *and* differentiable. **First-order only**
+  (the forward is an opaque callback).
+- **`method="ipm"`** — routes the forward through `pounce.jax.solve` /
+  `pounce.torch.solve` (the interior-point feasibility NLP). Needed for
+  second-order derivatives (below).
+
 ### Second-order derivatives
 
-By default `solve_bvp` routes through `pounce.jax.solve`'s first-order
-`custom_vjp`, whose forward crosses a `pure_callback` (no JVP rule) — so
-`jax.grad(jax.grad(...))` / `jax.hessian` raise. Pass **`second_order=True`**
-to wrap the solve in a `custom_jvp` whose tangent rule re-applies the
-implicit-function theorem to the square collocation root-find,
+With `method="ipm"`, pass **`second_order=True`** to wrap the solve in a
+`custom_jvp` whose tangent rule re-applies the implicit-function theorem to
+the square collocation root-find,
 
 ```text
 dz/dθ = -(∂R/∂z)⁻¹ (∂R/∂θ),
@@ -149,7 +162,8 @@ recurses to arbitrary order:
 
 ```python
 def y_mid(lam):
-    sol = pj.solve_bvp(fun, bc, x, y0, theta=lam, second_order=True)
+    sol = pj.solve_bvp(fun, bc, x, y0, theta=lam,
+                       method="ipm", second_order=True)
     return sol.y[0, sol.y.shape[1] // 2]
 
 jax.grad(jax.grad(y_mid))(1.0)     # d²y(0.5)/dλ²  — works
