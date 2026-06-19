@@ -175,6 +175,17 @@ def test_step_cap_reports_failure_not_success():
     assert res["t"][-1] < 100.0          # partial trajectory returned
 
 
+def test_failure_with_t_eval_returns_nans_not_garbage():
+    """No recorded steps + t_eval requested must yield NaNs, not garbage."""
+    from pounce.ode import _radau
+    te = np.linspace(0, 1, 5)
+    res = _radau.integrate(lambda t, y: [-y[0]], 0.0, 1.0, np.array([1.0]),
+                           t_eval=te, max_steps=0)
+    assert res["success"] is False
+    assert res["y"].shape == (1, te.size)
+    assert np.all(np.isnan(res["y"]))
+
+
 def test_info_excluded_from_dict_surface():
     """The internal `info` field must not leak through the Bunch interface."""
     r = po.solve_ivp(lambda t, y: [-y[0]], (0, 1), [1.0])

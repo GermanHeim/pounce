@@ -84,7 +84,6 @@ class _RadauProblem:
         self.fun = fun
         self.n = n
         self.M = np.eye(n) if mass is None else np.asarray(mass, dtype=float)
-        self.is_dae = mass is not None and np.linalg.matrix_rank(self.M) < n
         self._user_jac = jac
         self.nfev = 0
         self.njev = 0
@@ -324,8 +323,12 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
             out["t"] = te
             out["y"] = sol(te)
     elif t_eval is not None:
-        out["t"] = np.asarray(t_eval, dtype=float)
-        out["y"] = np.empty((n, np.asarray(t_eval).size))
+        # No steps were recorded (e.g. the first step underflowed) yet output
+        # points were requested: return NaNs, not uninitialized memory, so a
+        # caller that ignores success=False sees an obvious failure.
+        te = np.asarray(t_eval, dtype=float)
+        out["t"] = te
+        out["y"] = np.full((n, te.size), np.nan)
     return out
 
 
