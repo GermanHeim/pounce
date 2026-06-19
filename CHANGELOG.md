@@ -9,6 +9,80 @@ changes.
 
 ## [Unreleased]
 
+### Added — boundary value problems (`pounce.bvp`)
+
+A `scipy.integrate.solve_bvp`-compatible boundary value problem solver, plus
+differentiable JAX/PyTorch frontends:
+
+- **`pounce.solve_bvp(fun, bc, x, y, p=None, ...)`** — drop-in for
+  `scipy.integrate.solve_bvp`. Discretises the BVP with 4th-order
+  Hermite–Simpson collocation on a fixed mesh and solves the square
+  collocation root-find as a pounce feasibility NLP. Returns a SciPy-shaped
+  bunch (`sol`, `x`, `y`, `yp`, `p`, `rms_residuals`, `niter`, `status`,
+  `message`, `success`). Accuracy matches SciPy (same collocation scheme).
+  The default `method="newton"` factors the exact **sparse** `N×N`
+  collocation Jacobian (analytic per-node blocks from `fun_jac`/`bc_jac`,
+  else a vectorised finite difference) with FERAL's unsymmetric sparse LU,
+  using a **modified (frozen-Jacobian) Newton** that reuses the factor
+  across steps and refactors only on stall — so it is **typically faster
+  than `scipy.integrate.solve_bvp`** at equal mesh (≈0.6–1.0×), including
+  large nonlinear problems. `method="ipm"` solves it as a pounce
+  feasibility NLP.
+  Adaptive mesh refinement is **on by default** (`adaptive=True`, like
+  SciPy — a faithful port of SciPy's Lobatto residual estimator + refinement
+  rule that reproduces its mesh sequence node-for-node); `adaptive=False`
+  solves the given mesh as-is. The collocation system is solved to round-off
+  independent of the mesh `tol` (the latter only gates refinement).
+  `verbose` mirrors SciPy (1 = termination report, 2 = per-iteration
+  progress). Result `status` codes: 0 converged, 1 max nodes, 2 singular
+  Jacobian, 3 bc_tol unmet, 4 Newton non-convergence, 5 IPM acceptable-only.
+- **`pounce._pounce.SparseLU`** — new PyO3 binding exposing FERAL's
+  unsymmetric sparse LU (`factor` / `solve` / `solve_transpose`) for direct
+  `A x = b` on general sparse matrices.
+- **`pounce.solve_bvp_constrained`** — constrained / optimal-control BVPs
+  (state & parameter bounds, inequality path constraints, optional
+  objective over an under-determined system), solved with the interior-point
+  method on the collocation NLP. This is unique to pounce —
+  `scipy.integrate.solve_bvp` cannot express bounds, path constraints, or an
+  objective.
+- **`pounce.jax.solve_bvp` / `pounce.torch.solve_bvp`** — the same solve made
+  differentiable w.r.t. a `theta` parameter threaded into `fun` / `bc`, via
+  the implicit-function theorem on the collocation system. Supports
+  gradients/Jacobians w.r.t. ODE/BC coefficients, boundary values, and the
+  sensitivity of solved-for unknown parameters `p*`. The default
+  `method="newton"` is the fast path (FERAL sparse-LU forward + sparse
+  `R_zᵀ` backward, first-order). `method="ipm", second_order=True` wraps the
+  solve in a `custom_jvp` that re-applies the implicit-function theorem,
+  enabling `jax.grad(jax.grad(...))` / `jax.hessian` to arbitrary order.
+- Docs: `docs/src/bvp.md`; worked accuracy/speed/differentiability comparison
+  in `python/examples/bvp_scipy_compare.py`.
+
+#### Scope and positioning
+
+Honest framing of where this sits relative to other BVP solvers:
+
+- **Algorithm class.** Fixed 4th-order Hermite–Simpson collocation — the same
+  family as MATLAB `bvp4c` and `scipy.integrate.solve_bvp` (itself a
+  bvp4c-style port). At equal mesh we match SciPy's accuracy and are
+  typically a bit faster; this is "competitive with a widely-used production
+  solver," **not** the numerical state of the art. Higher-order /
+  variable-order collocation (COLNEW/COLSYS), 5th-order `bvp5c`, and
+  deferred-correction / continuation codes (TWPBVP, ACDC) need fewer nodes
+  per digit of accuracy and are more robust on stiff / singularly-perturbed
+  boundary-layer problems.
+- **Where it genuinely leads.** End-to-end **differentiability** of the
+  solution (`∂y/∂θ`, Jacobians, second order) via implicit differentiation in
+  JAX/PyTorch, and **integrated bound / path constraints and objectives**
+  (optimal control) through the IPM — capabilities classical BVP solvers do
+  not offer. (For heavy constrained optimal control, mature direct-collocation
+  stacks such as CasADi and Pyomo.DAE + IPOPT remain more complete.)
+- **Not yet covered:** variable/high-order collocation; continuation /
+  deferred correction for stiff boundary layers; multipoint boundary
+  conditions; DAEs; the singular term `S`; complex-valued problems. A
+  credible "SOTA" claim would also require benchmarking against COLNEW /
+  `bvp5c` / SciPy on a standard suite (e.g. the Cash–Mazzia test set) for
+  accuracy-vs-nodes and robustness, not just speed-vs-SciPy.
+
 
 ## [0.5.0] - 2026-06-14
 

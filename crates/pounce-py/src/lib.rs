@@ -25,6 +25,7 @@ mod problem;
 mod qp;
 mod solver;
 mod sos;
+mod sparse_lu;
 mod tnlp_bridge;
 mod warm_start;
 
@@ -32,6 +33,7 @@ pub use nl_problem::{read_nl, PyNlProblem};
 pub use problem::PyProblem;
 pub use qp::{PyQpFactorization, PyQpProblem, PyQpSensitivity};
 pub use solver::PySolver;
+pub use sparse_lu::PySparseLu;
 
 /// Python module entry point. The crate name (`_pounce`) and the
 /// `#[pymodule]` function name must agree; maturin uses the lib name
@@ -45,6 +47,7 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProblem>()?;
     m.add_class::<PySolver>()?;
     m.add_class::<PyNlProblem>()?;
+    m.add_class::<sparse_lu::PySparseLu>()?;
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
     // Batched NLP solving (pounce#126): native `.nl` path (phase 1)
     // and callback-Problem path (phase 2).
