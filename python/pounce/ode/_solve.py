@@ -20,10 +20,11 @@ from typing import Any, Callable
 import numpy as np
 
 from . import _radau
+from .._result import ResultMixin
 
 
 @dataclass
-class OdeResult:
+class OdeResult(ResultMixin):
     """Result of :func:`solve_ivp`, mirroring SciPy's ``Bunch``.
 
     ``t`` ``(n_points,)``, ``y`` ``(n, n_points)``, ``sol`` (a dense-output

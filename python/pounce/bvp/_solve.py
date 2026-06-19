@@ -28,6 +28,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .._pounce import Problem, SparseLU
+from .._result import ResultMixin
 from . import _core
 from ._jac import CollocationJacobian
 
@@ -80,7 +81,7 @@ def _print_termination(status, niter, n_nodes, max_rms, max_bc):
 
 
 @dataclass
-class BVPResult:
+class BVPResult(ResultMixin):
     """Result of :func:`solve_bvp`, mirroring SciPy's ``Bunch``.
 
     Attributes match :func:`scipy.integrate.solve_bvp` so existing code can

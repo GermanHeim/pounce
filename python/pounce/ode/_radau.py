@@ -91,18 +91,25 @@ class _RadauProblem:
         return J
 
 
-def _solve_stages(prob, t, y, h, J, lu3):
+def _solve_stages(prob, t, y, h, J, lu3, scale, newton_tol):
     """Simplified-Newton solve of the 3-stage system for stage derivatives K.
 
     ``M K_i = f(t + c_i h, y + h Σ_j A_ij K_j)``. Returns ``(K, converged,
     rate)``; ``lu3`` factors ``I_3 ⊗ M − h (A ⊗ J)`` (reused across the
     Newton iterations of this step).
+
+    Convergence uses the Hairer-Wanner criterion: the increments must shrink
+    (rate ``Θ = ‖ΔK‖/‖ΔK_prev‖ < 1``) and the predicted remaining error
+    ``Θ/(1−Θ)·‖ΔK‖`` must drop below ``newton_tol`` in the scaled RMS norm.
+    Norms are taken in the same ``scale = atol + rtol·|y|`` used for the step
+    error, so the stage solve is only as accurate as the tolerance needs.
     """
     n = prob.n
     K = np.zeros((3, n))
     dnorm_prev = None
     rate = None
     converged = False
+    sc = scale * np.sqrt(3 * n)              # RMS denominator for (3n,) stack
     for it in range(_NEWTON_MAXITER):
         G = np.empty((3, n))
         for i in range(3):
@@ -110,13 +117,17 @@ def _solve_stages(prob, t, y, h, J, lu3):
             G[i] = prob.M @ K[i] - prob.f(t + RADAU_C[i] * h, stage_y)
         dK = lu3.solve(-G.reshape(-1)).reshape(3, n)
         K = K + dK
-        dnorm = np.linalg.norm(dK)
+        dnorm = np.linalg.norm(dK / sc)
         if dnorm_prev is not None and dnorm_prev > 0:
             rate = dnorm / dnorm_prev
             if rate >= 1:
                 break          # diverging — bail, caller shrinks h / refreshes J
-        if dnorm < 1e-10 * max(1.0, np.linalg.norm(K)):
-            converged = True
+            # Predicted error of the converged iterate; stop once it's tiny.
+            if rate / (1 - rate) * dnorm < newton_tol:
+                converged = True
+                break
+        elif dnorm < newton_tol:
+            converged = True   # already at tolerance on the first increment
             break
         dnorm_prev = dnorm
     return K, converged, rate
@@ -128,6 +139,23 @@ def _error_estimate(prob, t, y, h, K, J, lu_real):
     f0 = prob.f(t, y)
     rhs = prob.M @ (Z.T @ (RADAU_E / h)) + f0 if prob.is_dae else f0 + Z.T @ (RADAU_E / h)
     return lu_real.solve(rhs)
+
+
+def _select_initial_step(prob, t0, y0, f0, s, rtol, atol):
+    """Hairer-Wanner / SciPy initial step heuristic (error-estimator order 3)."""
+    n = y0.size
+    scale = atol + np.abs(y0) * rtol
+    d0 = np.linalg.norm(y0 / scale) / np.sqrt(n)
+    d1 = np.linalg.norm(f0 / scale) / np.sqrt(n)
+    h0 = 1e-6 if (d0 < 1e-5 or d1 < 1e-5) else 0.01 * d0 / d1
+    y1 = y0 + s * h0 * f0
+    f1 = prob.f(t0 + s * h0, y1)
+    d2 = np.linalg.norm((f1 - f0) / scale) / np.sqrt(n) / h0
+    if d1 <= 1e-15 and d2 <= 1e-15:
+        h1 = max(1e-6, h0 * 1e-3)
+    else:
+        h1 = (0.01 / max(d1, d2)) ** 0.25      # 1/(order+1), order=3
+    return min(100 * h0, h1)
 
 
 def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
@@ -145,6 +173,11 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     forward = t1 >= t0
     s = 1.0 if forward else -1.0
 
+    # Newton stage-solve tolerance, tied to the integration tolerance
+    # (Hairer-Wanner): no point solving stages tighter than the step error.
+    eps = np.finfo(float).eps
+    newton_tol = max(10 * eps / rtol, min(0.03, rtol ** 0.5))
+
     t = t0
     y = y0.copy()
     f0 = prob.f(t, y)
@@ -153,12 +186,8 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     if first_step is not None:
         h = abs(first_step)
     else:
-        # Cheap initial-step heuristic (scale-aware).
-        scale = atol + rtol * np.abs(y)
-        d0 = np.linalg.norm(y / scale) / np.sqrt(n)
-        d1 = np.linalg.norm(f0 / scale) / np.sqrt(n)
-        h = 1e-6 if (d0 < 1e-5 or d1 < 1e-5) else 0.01 * d0 / d1
-    h = min(h, abs(t1 - t0))
+        h = _select_initial_step(prob, t, y, f0, s, rtol, atol)
+    h = min(h, abs(t1 - t0), max_step)
 
     # Step records for dense output: (t_start, h, y_start, K).
     records = [] if (dense_output or t_eval is not None) else None
@@ -166,23 +195,29 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     ys = [y.copy()]
     nstep = nrej = 0
     jac_current = True
+    rejected = False
 
     while (t - t1) * s < -1e-12 and nstep < max_steps:
         h = min(h, abs(t1 - t))
         hs = s * h
         # Factor the stage system and the error operator for this (h, J).
-        n_ = n
         big = np.kron(np.eye(3), prob.M) - hs * np.kron(RADAU_A, J)
         lu3 = _dense_lu(big)
         lu_real = _dense_lu(MU_REAL / hs * prob.M - J)
         prob.nlu += 2
 
-        K, converged, rate = _solve_stages(prob, t, y, hs, J, lu3)
+        scale = atol + rtol * np.abs(y)
+        K, converged, rate = _solve_stages(prob, t, y, hs, J, lu3, scale,
+                                           newton_tol)
         if not converged:
-            if jac_current:
-                h *= 0.5            # J is fresh; the step is just too big
-            else:
+            # A stale Jacobian is the usual reason simplified Newton stalls at
+            # a larger step; refresh it at the current point and retry the
+            # same h before giving up and shrinking (Hairer-Wanner / SciPy).
+            if not jac_current:
                 J = prob.jac(t, y, prob.f(t, y)); jac_current = True
+            else:
+                h *= 0.5            # J is fresh; the step really is too big
+                rejected = True
             if h < 1e-13 * max(1.0, abs(t)):
                 raise RuntimeError(f"Radau: step underflow at t={t}")
             continue
@@ -195,8 +230,9 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         if enorm > 1:
             h *= max(_MIN_FACTOR, _SAFETY * enorm ** _ERR_EXP)
             nrej += 1
-            jac_current = False     # likely nonlinearity — refresh J next try
-            J = prob.jac(t, y, prob.f(t, y)); jac_current = True
+            rejected = True
+            if not jac_current:
+                J = prob.jac(t, y, prob.f(t, y)); jac_current = True
             continue
 
         # Accept.
@@ -207,11 +243,22 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         ts.append(t)
         ys.append(y.copy())
         nstep += 1
-        fac = _MAX_FACTOR if enorm == 0 else min(_MAX_FACTOR, _SAFETY * enorm ** _ERR_EXP)
-        h *= max(_MIN_FACTOR, fac)
-        h = min(h, max_step)
-        # Keep the Jacobian if Newton converged fast; refresh if it was slow.
-        jac_current = rate is None or rate < 0.3
+        # Step growth: don't grow right after a rejection (avoids oscillation).
+        fac = _MAX_FACTOR if enorm == 0 else _SAFETY * enorm ** _ERR_EXP
+        fac = min(_MAX_FACTOR, max(_MIN_FACTOR, fac))
+        if rejected:
+            fac = min(fac, 1.0)
+            rejected = False
+        h = min(h * fac, max_step)
+        # Jacobian for the next step: if Newton convergence was anything but
+        # excellent, refresh J now at the new point; otherwise mark it stale
+        # so a later convergence failure triggers an on-demand refresh. This
+        # keeps a frozen Jacobian only while it is genuinely working.
+        if rate is not None and rate > 1e-3:
+            f_new = prob.f(t, y)
+            J = prob.jac(t, y, f_new); jac_current = True
+        else:
+            jac_current = False
 
     ts = np.array(ts)
     ys = np.array(ys).T                          # (n, n_points), SciPy layout
