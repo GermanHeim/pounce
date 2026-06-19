@@ -276,6 +276,7 @@ def solve_bvp(
     bc_tol=None,
     method="newton",
     adaptive=True,
+    args=None,
 ):
     """Solve a boundary value problem with pounce (SciPy-compatible).
 
@@ -310,6 +311,12 @@ def solve_bvp(
     residuals: an otherwise-converged solve whose ``max|bc|`` exceeds it is
     reported as ``status=3`` (matching SciPy), ``success=False``.
 
+    ``args`` (tuple) supplies extra fixed parameters for parameterized runs,
+    appended to the solver's positional arguments — ``fun(x, y[, p], *args)``,
+    ``bc(ya, yb[, p], *args)``, and likewise ``fun_jac`` / ``bc_jac`` — so a
+    sweep over a fixed parameter needs no closure. (A pounce convenience;
+    ``scipy.integrate.solve_bvp`` has no ``args``.)
+
     Returns
     -------
     BVPResult
@@ -324,6 +331,18 @@ def solve_bvp(
         raise NotImplementedError(
             "pounce.bvp.solve_bvp does not yet support the singular term S."
         )
+
+    # Extra fixed parameters for parameterized runs: appended after the
+    # solver's positional arguments, so `fun(x, y[, p], *args)` etc.
+    if args is not None:
+        if not isinstance(args, tuple):
+            args = (args,)
+        fun = (lambda _f: (lambda *a: _f(*a, *args)))(fun)
+        bc = (lambda _b: (lambda *a: _b(*a, *args)))(bc)
+        if fun_jac is not None:
+            fun_jac = (lambda _fj: (lambda *a: _fj(*a, *args)))(fun_jac)
+        if bc_jac is not None:
+            bc_jac = (lambda _bj: (lambda *a: _bj(*a, *args)))(bc_jac)
 
     if adaptive:
         return _solve_bvp_adaptive(

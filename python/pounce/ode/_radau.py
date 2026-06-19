@@ -1,0 +1,268 @@
+"""Adaptive Radau IIA (order 5) integrator — the engine behind ``solve_ivp``.
+
+A 3-stage Radau IIA collocation method (Hairer & Wanner, *Solving Ordinary
+Differential Equations II*, §IV.8 — the ``RADAU5`` scheme, the same method
+SciPy's ``Radau`` implements). It is L-stable and 5th-order, so it handles
+**stiff** systems that explicit methods choke on, and — written in
+mass-matrix form ``M y' = f(t, y)`` — it also integrates **index-1
+differential-algebraic equations** when ``M`` is singular.
+
+Each step solves the coupled 3-stage system by a simplified Newton
+iteration; the ``(3n × 3n)`` stage Jacobian (and the ``n × n`` error-
+estimate operator) are factored with FERAL's sparse LU
+(:class:`pounce._pounce.SparseLU`). The Jacobian and its factorisation are
+reused across steps and only refreshed when Newton convergence degrades —
+the standard Hairer-Wanner efficiency trick.
+
+Adaptivity uses the embedded order-3 error estimate (the ``E`` weights with
+the ``(γ/h)M − J`` smoothing) and an elementary step-size controller.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from .._pounce import SparseLU
+
+# --- Radau IIA (5) tableau (Hairer-Wanner) --------------------------------
+_S6 = 6 ** 0.5
+RADAU_C = np.array([(4 - _S6) / 10, (4 + _S6) / 10, 1.0])
+RADAU_A = np.array([
+    [(88 - 7 * _S6) / 360, (296 - 169 * _S6) / 1800, (-2 + 3 * _S6) / 225],
+    [(296 + 169 * _S6) / 1800, (88 + 7 * _S6) / 360, (-2 - 3 * _S6) / 225],
+    [(16 - _S6) / 36, (16 + _S6) / 36, 1 / 9],
+])
+RADAU_B = RADAU_A[-1]                       # stiffly accurate: y_{n+1} = Y_s
+# Embedded order-3 error-estimate weights and the real eigenvalue of A^{-1}.
+RADAU_E = np.array([-13 - 7 * _S6, -13 + 7 * _S6, -1.0]) / 3
+MU_REAL = 3 + 3 ** (2 / 3) - 3 ** (1 / 3)
+
+# Dense-output: the collocation polynomial through (y_n, stage values). We
+# build per-step interpolation coefficients from the stages.
+_NEWTON_MAXITER = 8
+_MIN_FACTOR, _MAX_FACTOR, _SAFETY = 0.2, 10.0, 0.9
+_ERR_EXP = -1 / 4                           # 1 / (error-estimator order + 1)
+
+
+def _dense_lu(Mat):
+    """Factor a dense ``(N × N)`` matrix with FERAL's sparse LU."""
+    N = Mat.shape[0]
+    idx = np.arange(N, dtype=np.int64)
+    lu = SparseLU(N, np.repeat(idx, N), np.tile(idx, N))
+    lu.factor(np.ascontiguousarray(Mat, dtype=np.float64).reshape(-1))
+    return lu
+
+
+def _fd_jac(f, t, y, f0):
+    """Forward-difference Jacobian ``df/dy``."""
+    n = y.size
+    J = np.empty((n, n))
+    for j in range(n):
+        d = (np.sqrt(np.finfo(float).eps)) * max(1.0, abs(y[j]))
+        yj = y.copy()
+        yj[j] += d
+        J[:, j] = (f(t, yj) - f0) / d
+    return J
+
+
+class _RadauProblem:
+    """Holds the RHS, mass matrix, Jacobian, and counters for one solve."""
+
+    def __init__(self, fun, n, mass=None, jac=None):
+        self.fun = fun
+        self.n = n
+        self.M = np.eye(n) if mass is None else np.asarray(mass, dtype=float)
+        self.is_dae = mass is not None and np.linalg.matrix_rank(self.M) < n
+        self._user_jac = jac
+        self.nfev = 0
+        self.njev = 0
+        self.nlu = 0
+
+    def f(self, t, y):
+        self.nfev += 1
+        return np.asarray(self.fun(t, y), dtype=float)
+
+    def jac(self, t, y, f0):
+        self.njev += 1
+        if self._user_jac is not None:
+            return np.asarray(self._user_jac(t, y), dtype=float)
+        # FD costs n extra fun evals (counted).
+        J = _fd_jac(self.f, t, y, f0)
+        return J
+
+
+def _solve_stages(prob, t, y, h, J, lu3):
+    """Simplified-Newton solve of the 3-stage system for stage derivatives K.
+
+    ``M K_i = f(t + c_i h, y + h Σ_j A_ij K_j)``. Returns ``(K, converged,
+    rate)``; ``lu3`` factors ``I_3 ⊗ M − h (A ⊗ J)`` (reused across the
+    Newton iterations of this step).
+    """
+    n = prob.n
+    K = np.zeros((3, n))
+    dnorm_prev = None
+    rate = None
+    converged = False
+    for it in range(_NEWTON_MAXITER):
+        G = np.empty((3, n))
+        for i in range(3):
+            stage_y = y + h * (RADAU_A[i] @ K)
+            G[i] = prob.M @ K[i] - prob.f(t + RADAU_C[i] * h, stage_y)
+        dK = lu3.solve(-G.reshape(-1)).reshape(3, n)
+        K = K + dK
+        dnorm = np.linalg.norm(dK)
+        if dnorm_prev is not None and dnorm_prev > 0:
+            rate = dnorm / dnorm_prev
+            if rate >= 1:
+                break          # diverging — bail, caller shrinks h / refreshes J
+        if dnorm < 1e-10 * max(1.0, np.linalg.norm(K)):
+            converged = True
+            break
+        dnorm_prev = dnorm
+    return K, converged, rate
+
+
+def _error_estimate(prob, t, y, h, K, J, lu_real):
+    """Embedded order-3 error estimate, smoothed by ``(MU_REAL/h)M − J``."""
+    Z = h * (RADAU_A @ K)                       # stage increments Y_i − y
+    f0 = prob.f(t, y)
+    rhs = prob.M @ (Z.T @ (RADAU_E / h)) + f0 if prob.is_dae else f0 + Z.T @ (RADAU_E / h)
+    return lu_real.solve(rhs)
+
+
+def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
+              max_step=np.inf, mass=None, jac=None, t_eval=None,
+              dense_output=False, max_steps=10**6):
+    """Adaptive Radau IIA(5) integration of ``M y' = f`` from ``t0`` to ``t1``.
+
+    Returns a dict with ``t``, ``y`` (shape ``(n, n_points)``), plus
+    ``nfev`` / ``njev`` / ``nlu`` / ``nstep`` / ``nrej`` and (when requested)
+    a dense-output callable ``sol`` and the value at ``t_eval``.
+    """
+    y0 = np.asarray(y0, dtype=float)
+    n = y0.size
+    prob = _RadauProblem(fun, n, mass=mass, jac=jac)
+    forward = t1 >= t0
+    s = 1.0 if forward else -1.0
+
+    t = t0
+    y = y0.copy()
+    f0 = prob.f(t, y)
+    J = prob.jac(t, y, f0)
+
+    if first_step is not None:
+        h = abs(first_step)
+    else:
+        # Cheap initial-step heuristic (scale-aware).
+        scale = atol + rtol * np.abs(y)
+        d0 = np.linalg.norm(y / scale) / np.sqrt(n)
+        d1 = np.linalg.norm(f0 / scale) / np.sqrt(n)
+        h = 1e-6 if (d0 < 1e-5 or d1 < 1e-5) else 0.01 * d0 / d1
+    h = min(h, abs(t1 - t0))
+
+    # Step records for dense output: (t_start, h, y_start, K).
+    records = [] if (dense_output or t_eval is not None) else None
+    ts = [t]
+    ys = [y.copy()]
+    nstep = nrej = 0
+    jac_current = True
+
+    while (t - t1) * s < -1e-12 and nstep < max_steps:
+        h = min(h, abs(t1 - t))
+        hs = s * h
+        # Factor the stage system and the error operator for this (h, J).
+        n_ = n
+        big = np.kron(np.eye(3), prob.M) - hs * np.kron(RADAU_A, J)
+        lu3 = _dense_lu(big)
+        lu_real = _dense_lu(MU_REAL / hs * prob.M - J)
+        prob.nlu += 2
+
+        K, converged, rate = _solve_stages(prob, t, y, hs, J, lu3)
+        if not converged:
+            if jac_current:
+                h *= 0.5            # J is fresh; the step is just too big
+            else:
+                J = prob.jac(t, y, prob.f(t, y)); jac_current = True
+            if h < 1e-13 * max(1.0, abs(t)):
+                raise RuntimeError(f"Radau: step underflow at t={t}")
+            continue
+
+        y_new = y + hs * (RADAU_B @ K)
+        err = _error_estimate(prob, t, y, hs, K, J, lu_real)
+        scale = atol + rtol * np.maximum(np.abs(y), np.abs(y_new))
+        enorm = np.sqrt(np.mean((err / scale) ** 2))
+
+        if enorm > 1:
+            h *= max(_MIN_FACTOR, _SAFETY * enorm ** _ERR_EXP)
+            nrej += 1
+            jac_current = False     # likely nonlinearity — refresh J next try
+            J = prob.jac(t, y, prob.f(t, y)); jac_current = True
+            continue
+
+        # Accept.
+        if records is not None:
+            records.append((t, hs, y.copy(), K.copy()))
+        t = t + hs
+        y = y_new
+        ts.append(t)
+        ys.append(y.copy())
+        nstep += 1
+        fac = _MAX_FACTOR if enorm == 0 else min(_MAX_FACTOR, _SAFETY * enorm ** _ERR_EXP)
+        h *= max(_MIN_FACTOR, fac)
+        h = min(h, max_step)
+        # Keep the Jacobian if Newton converged fast; refresh if it was slow.
+        jac_current = rate is None or rate < 0.3
+
+    ts = np.array(ts)
+    ys = np.array(ys).T                          # (n, n_points), SciPy layout
+
+    out = dict(t=ts, y=ys, nstep=nstep, nrej=nrej,
+               nfev=prob.nfev, njev=prob.njev, nlu=prob.nlu)
+
+    if records is not None:
+        sol = _make_dense(records, n)
+        out["sol"] = sol
+        if t_eval is not None:
+            te = np.asarray(t_eval, dtype=float)
+            out["t"] = te
+            out["y"] = sol(te)
+    return out
+
+
+def _make_dense(records, n):
+    """Continuous extension via the per-step collocation polynomial.
+
+    On ``[t_k, t_k + h]`` the collocation solution is the degree-3 polynomial
+    with ``u(t_k) = y_k`` and ``u'(t_k + c_i h) = K_i``; we evaluate it from
+    the Lagrange form of the stage derivatives.
+    """
+    starts = np.array([r[0] for r in records])
+    hs = np.array([r[1] for r in records])
+    ends = starts + hs
+
+    # Precompute, per step, the monomial coefficients of u(τ), τ∈[0,1]:
+    # u(τ) = y_k + h Σ_m P[m] τ^{m+1}, where P maps stage derivatives K to the
+    # polynomial whose derivative interpolates K at the nodes c_i.
+    # Fit u'(τ) = Σ_i K_i ℓ_i(τ) (Lagrange on nodes c), integrate.
+    C = RADAU_C
+    # Vandermonde for u'(τ)=Σ a_j τ^j (degree 2) matching u'(c_i)=K_i.
+    V = np.vander(C, 3, increasing=True)         # (3,3)
+    Vinv = np.linalg.inv(V)
+
+    def sol(tq):
+        tq = np.atleast_1d(np.asarray(tq, dtype=float))
+        # locate step index for each query point
+        idx = np.searchsorted(ends, tq, side="left")
+        idx = np.clip(idx, 0, len(records) - 1)
+        out = np.empty((n, tq.size))
+        for q in range(tq.size):
+            k = idx[q]
+            t_k, h, y_k, K = records[k]
+            tau = (tq[q] - t_k) / h
+            a = Vinv @ K                          # (3,n): coeffs of u'(τ)
+            # u(τ) = y_k + h ∫_0^τ Σ a_j τ'^j dτ' = y_k + h Σ a_j τ^{j+1}/(j+1)
+            powers = np.array([tau ** (j + 1) / (j + 1) for j in range(3)])
+            out[:, q] = y_k + h * (powers @ a)
+        return out
+
+    return sol
