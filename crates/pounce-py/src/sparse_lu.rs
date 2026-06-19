@@ -143,4 +143,68 @@ impl PySparseLu {
         })?;
         Ok(rhs.into_pyarray_bound(py))
     }
+
+    /// Solve `A X = B` for `n_rhs` right-hand sides against the single held
+    /// factor. ``b_flat`` is the row-major flatten of the ``(n_rhs, n)``
+    /// RHS block; the result is the matching flat ``(n_rhs, n)`` solution.
+    /// One factorization, many back-solves — the multi-RHS path the
+    /// implicit-diff Jacobian (``jax.jacobian`` / batched VJP) needs.
+    fn solve_many<'py>(
+        &mut self,
+        py: Python<'py>,
+        b_flat: PyReadonlyArray1<f64>,
+        n_rhs: usize,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        self.multi(py, b_flat, n_rhs, false)
+    }
+
+    /// Like :meth:`solve_many` but solves `Aᵀ X = B` (the VJP direction).
+    fn solve_transpose_many<'py>(
+        &mut self,
+        py: Python<'py>,
+        b_flat: PyReadonlyArray1<f64>,
+        n_rhs: usize,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        self.multi(py, b_flat, n_rhs, true)
+    }
+}
+
+impl PySparseLu {
+    fn multi<'py>(
+        &mut self,
+        py: Python<'py>,
+        b_flat: PyReadonlyArray1<f64>,
+        n_rhs: usize,
+        transpose: bool,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let lu = self
+            .lu
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("SparseLU: call factor() first"))?;
+        let nn = lu.dim();
+        let b = b_flat.as_slice()?;
+        if b.len() != n_rhs * nn {
+            return Err(PyValueError::new_err(format!(
+                "SparseLU multi-solve: rhs length {} != n_rhs ({}) * n ({}) = {}",
+                b.len(),
+                n_rhs,
+                nn,
+                n_rhs * nn
+            )));
+        }
+        let mut out = vec![0.0_f64; b.len()];
+        for r in 0..n_rhs {
+            let mut rhs = b[r * nn..(r + 1) * nn].to_vec();
+            let res = if transpose {
+                lu.btran(&mut rhs)
+            } else {
+                lu.ftran(&mut rhs)
+            };
+            res.map_err(|e| {
+                PyRuntimeError::new_err(format!("SparseLU multi-solve failed: {e:?}"))
+            })?;
+            out[r * nn..(r + 1) * nn].copy_from_slice(&rhs);
+        }
+        Ok(out.into_pyarray_bound(py))
+    }
 }

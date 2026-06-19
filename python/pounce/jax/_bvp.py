@@ -55,7 +55,7 @@ class JaxBVPSolution:
     sol: Callable
 
 
-def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol):
+def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
     """First-order-differentiable feral-Newton solve (``method="newton"``).
 
     Forward: damped Newton on ``R(z, theta) = 0`` factoring the ``N x N``
@@ -102,15 +102,34 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol):
         return np.asarray(z_star, dtype=np.float64)
 
     def _host_btran(z_star_np, theta_np, v_np):
+        # Under vmap_method="broadcast_all" (jax.jacobian / batched VJP), all
+        # inputs arrive with a leading batch axis. ``z_star`` / ``theta`` are
+        # identical across the batch (the primal is fixed), so collapse them;
+        # ``v`` carries the distinct cotangents. Factor R_z ONCE, then do all
+        # the R_z^T back-solves with a single multi-RHS call.
+        v_np = np.asarray(v_np, np.float64)
+        z_star_np = np.asarray(z_star_np, np.float64)
+        theta_np = np.asarray(theta_np)
+        batched = v_np.ndim == 2
+        if z_star_np.ndim == 2:
+            z_star_np = z_star_np[0]
+        if theta_np.ndim == theta_ndim + 1:
+            theta_np = theta_np[0]
+
         nfun, nbc = _np_normalized(theta_np)
         jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
         rows, cols = jac.structure()
         lu = SparseLU(n * m + k, np.asarray(rows, np.int64), np.asarray(cols, np.int64))
-        Y = np.asarray(z_star_np)[: n * m].reshape(n, m)
-        pp = np.asarray(z_star_np)[n * m :]
-        lu.factor(jac.values(Y, pp))
-        # Solve R_z^T u = v.
-        return np.asarray(lu.solve_transpose(np.asarray(v_np, np.float64)), np.float64)
+        Y = z_star_np[: n * m].reshape(n, m)
+        pp = z_star_np[n * m :]
+        lu.factor(jac.values(Y, pp))  # one factorization
+        if batched:
+            B = v_np.shape[0]
+            u = np.asarray(
+                lu.solve_transpose_many(v_np.reshape(-1), B), np.float64
+            ).reshape(B, n * m + k)
+            return u
+        return np.asarray(lu.solve_transpose(v_np), np.float64)
 
     N = n * m + k
 
@@ -131,11 +150,12 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol):
     def bwd(res, v):
         z_star, theta = res
         # jax.jacobian vmaps the VJP over output basis vectors, which vmaps
-        # this callback — declare a vmap_method so JAX loops it (each cotangent
-        # is a fresh R_z^T solve).
+        # this callback. vmap_method="broadcast_all" hands the whole cotangent
+        # batch to one callback invocation, so R_z is factored once and the
+        # back-solves run as a single multi-RHS solve_transpose_many.
         u = jax.pure_callback(
             _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z_star, theta, v, vmap_method="sequential",
+            z_star, theta, v, vmap_method="broadcast_all",
         )
         # dL/dtheta = -(dR/dtheta)^T u, via VJP of the residual at z*.
         _, vjp_theta = jax.vjp(lambda th: residual_jax(z_star, th), theta)
@@ -231,7 +251,9 @@ def solve_bvp(
                 "(the Newton path's forward is an opaque callback, so it is "
                 "first-order differentiable)."
             )
-        solve_root = _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol)
+        solve_root = _make_newton_vjp(
+            fun, bc, x, n, m, k, uses_p, z0, tol, int(jnp.ndim(theta))
+        )
         z_star = solve_root(theta)
     elif method == "ipm":
         if second_order:
