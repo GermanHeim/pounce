@@ -31,6 +31,7 @@ import numpy as np
 
 from .._pounce import Problem
 from . import _core
+from ._jac import CollocationJacobian
 
 
 @dataclass
@@ -59,31 +60,64 @@ class BVPResult:
 
 
 def _make_spline(x, y, yp):
-    """Cubic-Hermite interpolant ``sol(xq) -> (n, ...)`` from node states
-    ``y`` ``(n, m)`` and node derivatives ``yp`` ``(n, m)``."""
-    from scipy.interpolate import CubicHermiteSpline
+    """Lazily-built cubic-Hermite interpolant ``sol(xq) -> (n, ...)`` from
+    node states ``y`` ``(n, m)`` and node derivatives ``yp`` ``(n, m)``.
 
-    # CubicHermiteSpline interpolates along axis 0; feed (m, n) and
-    # transpose the query result back to SciPy's (n, ...) convention.
-    spline = CubicHermiteSpline(x, y.T, yp.T)
+    Construction is deferred to the first call so callers that only read
+    ``res.y`` / ``res.p`` don't pay for the spline build.
+    """
+    cache = {}
 
     def sol(xq):
-        return spline(xq).T
+        if "spline" not in cache:
+            from scipy.interpolate import CubicHermiteSpline
+
+            # CubicHermiteSpline interpolates along axis 0; feed (m, n) and
+            # transpose the query result back to SciPy's (n, ...) layout.
+            cache["spline"] = CubicHermiteSpline(x, y.T, yp.T)
+        return cache["spline"](xq).T
 
     return sol
 
 
-def _numerical_residual_jac(residual_fn, z, r0):
-    """Dense forward-difference Jacobian ``dR/dz`` at ``z`` (``r0 = R(z)``)."""
-    N = z.shape[0]
-    J = np.empty((N, N), dtype=np.float64)
-    eps = np.sqrt(np.finfo(np.float64).eps)
-    for j in range(N):
-        step = eps * max(1.0, abs(z[j]))
-        zj = z.copy()
-        zj[j] += step
-        J[:, j] = (residual_fn(zj) - r0) / step
-    return J
+def _make_jac_adapters(fun_jac, bc_jac, uses_p, k):
+    """Adapt SciPy-style ``fun_jac`` / ``bc_jac`` to the per-node block
+    callables :class:`CollocationJacobian` expects, or return ``None`` to
+    select the finite-difference path.
+
+    ``fun_jac(x, y[, p])`` returns ``df_dy`` ``(n, n, mq)`` (and ``df_dp``
+    ``(n, k, mq)`` when ``p`` is present); we transpose to the ``(mq, n,
+    *)`` block layout. ``bc_jac(ya, yb[, p])`` returns
+    ``(dbc_dya, dbc_dyb[, dbc_dp])``.
+    """
+    df_blocks = None
+    if fun_jac is not None:
+        def df_blocks(xq, Yq, p, fq):
+            if uses_p:
+                out = fun_jac(xq, Yq, p)
+                df_dy, df_dp = out if isinstance(out, tuple) else (out, None)
+            else:
+                df_dy, df_dp = fun_jac(xq, Yq), None
+            J = np.transpose(np.asarray(df_dy, dtype=np.float64), (2, 0, 1))
+            if k > 0:
+                K = np.transpose(np.asarray(df_dp, dtype=np.float64), (2, 0, 1))
+            else:
+                K = None
+            return J, K
+
+    dbc_block = None
+    if bc_jac is not None:
+        def dbc_block(ya, yb, p, b0):
+            if uses_p:
+                dya, dyb, dp = bc_jac(ya, yb, p)
+            else:
+                dya, dyb = bc_jac(ya, yb)
+                dp = np.zeros((ya.shape[0], 0), dtype=np.float64)
+            return (np.asarray(dya, dtype=np.float64),
+                    np.asarray(dyb, dtype=np.float64),
+                    np.asarray(dp, dtype=np.float64))
+
+    return df_blocks, dbc_block
 
 
 class _BvpNlp:
@@ -91,17 +125,30 @@ class _BvpNlp:
 
     The objective and its gradient are identically zero, so the
     interior-point method reduces to a Newton iteration on the square
-    collocation residual. The Jacobian is dense forward-difference; the
-    Hessian is omitted so pounce falls back to its limited-memory
-    quasi-Newton approximation.
+    collocation residual. The constraint Jacobian is the exact **sparse**
+    collocation Jacobian (:class:`CollocationJacobian`).
+
+    The Lagrangian Hessian is supplied as **exactly zero**. This is not an
+    approximation: for ``min 0`` s.t. ``R(z) = 0`` with a square,
+    nonsingular ``J = dR/dz``, the KKT stationarity ``Jᵀλ = 0`` forces the
+    optimal multipliers ``λ* = 0``, so the Lagrangian Hessian
+    ``Σ_t λ_t ∇²R_t`` vanishes at the solution. With the zero-Hessian
+    block the IPM step solves ``[[0, Jᵀ],[J, 0]] [dz; dλ] = [-Jᵀλ; -R]``,
+    whose primal part is ``dz = -J⁻¹ R`` — precisely the Newton step on the
+    collocation system that SciPy's ``solve_bvp`` takes (SciPy likewise
+    uses only the residual Jacobian, never second derivatives of ``f``).
+    Supplying it directly avoids the limited-memory quasi-Newton machinery
+    and converges in one Newton step on linear problems.
     """
 
-    def __init__(self, residual_fn, N):
+    def __init__(self, residual_fn, jac, n, m, k):
         self._r = residual_fn
-        self._N = N
-        idx = np.arange(N)
-        self._rows = np.repeat(idx, N)
-        self._cols = np.tile(idx, N)
+        self._jac = jac
+        self._n = n
+        self._m = m
+        self._N = n * m + k
+        self._empty = np.zeros(0, dtype=np.float64)
+        self._empty_idx = np.zeros(0, dtype=np.int64)
 
     def objective(self, z):
         return 0.0
@@ -113,12 +160,19 @@ class _BvpNlp:
         return np.asarray(self._r(z), dtype=np.float64)
 
     def jacobianstructure(self):
-        return (self._rows, self._cols)
+        return self._jac.structure()
 
     def jacobian(self, z):
         z = np.asarray(z, dtype=np.float64)
-        r0 = np.asarray(self._r(z), dtype=np.float64)
-        return _numerical_residual_jac(self._r, z, r0).reshape(-1)
+        Y = z[: self._n * self._m].reshape(self._n, self._m)
+        p = z[self._n * self._m :]
+        return self._jac.values(Y, p)
+
+    def hessianstructure(self):
+        return (self._empty_idx, self._empty_idx)
+
+    def hessian(self, z, lagrange, obj_factor):
+        return self._empty
 
 
 def solve_bvp(
@@ -181,12 +235,18 @@ def solve_bvp(
     def residual_fn(z):
         return _core.residual_of_z(z, nfun, nbc, x, n, m, k, np.concatenate)
 
-    obj = _BvpNlp(residual_fn, N)
+    df_blocks, dbc_block = _make_jac_adapters(fun_jac, bc_jac, uses_p, k)
+    jac = CollocationJacobian(
+        nfun, nbc, x, n, m, k, df_blocks=df_blocks, dbc_block=dbc_block,
+    )
+    obj = _BvpNlp(residual_fn, jac, n, m, k)
     cl = np.zeros(N, dtype=np.float64)
     cu = np.zeros(N, dtype=np.float64)
     problem = Problem(n=N, m=N, problem_obj=obj, cl=cl, cu=cu)
     problem.add_option("tol", float(tol))
-    problem.add_option("hessian_approximation", "limited-memory")
+    # Collocation residuals are naturally well-scaled; skip the scaling
+    # pass (its setup cost buys nothing here).
+    problem.add_option("nlp_scaling_method", "none")
     problem.add_option("print_level", 5 if verbose >= 2 else 0)
 
     z0 = _core.pack_z(y, p0, np.concatenate)

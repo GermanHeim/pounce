@@ -62,13 +62,20 @@ res.p           # ≈ [π]
   refinement. This keeps the solution map `θ ↦ y` smooth, which is what the
   differentiable frontends exploit. Refine by passing a denser `x`;
   `max_nodes` is accepted for signature compatibility.
-- **Derivatives.** The collocation Jacobian handed to the interior-point
-  solver is formed by forward finite differences of the residual, and the
-  Hessian uses pounce's limited-memory quasi-Newton approximation.
-  `fun_jac` / `bc_jac` are accepted for signature compatibility (an exact
-  sparse-Jacobian assembly is a planned optimisation). Accuracy is
-  identical to SciPy (same collocation); the NumPy path is currently
-  slower because of the dense finite-difference Jacobian.
+- **Derivatives & performance.** The interior-point solver is handed the
+  exact **sparse** collocation Jacobian (analytic per-node `∂f/∂y` blocks,
+  from `fun_jac`/`bc_jac` if supplied, else a vectorised finite difference
+  that perturbs each state across the whole mesh — `O(n)` `fun` calls, not
+  `O(n·m)`), together with an exact **zero** Lagrangian Hessian (correct
+  here: the optimal multipliers are zero, so the IPM step is the Newton
+  step `dz = -J⁻¹R` on the collocation system — the same step SciPy takes).
+  Accuracy is identical to SciPy and the solve scales **linearly** in the
+  mesh size. It is still ~2–4× slower than SciPy: pounce's IPM factorises
+  the `2N` symmetric saddle KKT `[[H, Jᵀ],[J, 0]]` each iteration, while
+  SciPy factorises only the `N`-dimensional unsymmetric collocation-Newton
+  system `J`. That 2× dimension is structural to the NLP formulation
+  (pounce's linear algebra is symmetric-indefinite LDLᵀ). The payoff is
+  differentiability.
 - **Singular term `S`** is not yet supported.
 
 ## Differentiable solves (JAX / PyTorch)

@@ -83,13 +83,16 @@ def accuracy_and_speed():
               f"{t_sp * 1e3:>9.2f} {t_pc * 1e3:>10.2f}")
 
     print("\nNote: pounce matches scipy's accuracy exactly (same 4th-order "
-          "Hermite--\nSimpson collocation). It is slower here because the "
-          "NumPy path forms the\ncollocation Jacobian by dense finite "
-          "differences (O(N) residual evals per\nIPM iteration); an exact "
-          "sparse-Jacobian assembly is the obvious next step.\npounce uses "
-          "the fixed mesh as given (no adaptive refinement); scipy refines.\n"
-          "The payoff for the collocation-as-NLP formulation is "
-          "differentiability ↓.")
+          "Hermite--\nSimpson collocation) and now scales linearly in the "
+          "mesh size via an exact\nsparse collocation Jacobian + an exact "
+          "(zero) Lagrangian Hessian, so the IPM\ntakes Newton steps. It "
+          "remains ~2-4x slower than scipy: pounce's interior-\npoint method "
+          "factorises the 2N symmetric saddle KKT [[H, Jᵀ],[J, 0]] each\n"
+          "iteration, whereas scipy factorises only the N-dimensional "
+          "unsymmetric\ncollocation-Newton system J. That 2x dimension is "
+          "structural to the NLP\nformulation. pounce uses the fixed mesh as "
+          "given (no adaptive refinement).\nThe payoff for the "
+          "collocation-as-NLP formulation is differentiability ↓.")
 
 
 # --------------------------------------------------------------------------

@@ -59,6 +59,36 @@ def test_solve_bvp_unknown_parameter_eigenvalue():
     assert abs(res.p[0] - np.pi) < 1e-3
 
 
+def test_solve_bvp_analytic_jac_matches_fd():
+    """Supplying fun_jac / bc_jac gives the same solution as the FD path."""
+    def fun(x, y):
+        return np.vstack((y[1], -np.exp(y[0])))
+
+    def bc(ya, yb):
+        return np.array([ya[0], yb[0]])
+
+    def fun_jac(x, y):
+        # df/dy with shape (n, n, m): row 0 -> [0, 1]; row 1 -> [-e^{y0}, 0].
+        n, mm = 2, x.size
+        J = np.zeros((n, n, mm))
+        J[0, 1, :] = 1.0
+        J[1, 0, :] = -np.exp(y[0])
+        return J
+
+    def bc_jac(ya, yb):
+        dya = np.array([[1.0, 0.0], [0.0, 0.0]])
+        dyb = np.array([[0.0, 0.0], [1.0, 0.0]])
+        return dya, dyb
+
+    x = np.linspace(0, 1, 41)
+    y0 = np.zeros((2, x.size))
+
+    res_fd = pounce.solve_bvp(fun, bc, x, y0)
+    res_an = pounce.solve_bvp(fun, bc, x, y0, fun_jac=fun_jac, bc_jac=bc_jac)
+    assert res_fd.success and res_an.success
+    assert np.max(np.abs(res_fd.y - res_an.y)) < 1e-8
+
+
 def test_solve_bvp_validates_inputs():
     def fun(x, y):
         return np.vstack((y[1], -y[0]))

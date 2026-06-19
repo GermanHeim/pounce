@@ -20,6 +20,11 @@ differentiable JAX/PyTorch frontends:
   collocation root-find as a pounce feasibility NLP. Returns a SciPy-shaped
   bunch (`sol`, `x`, `y`, `yp`, `p`, `rms_residuals`, `niter`, `status`,
   `message`, `success`). Accuracy matches SciPy (same collocation scheme).
+  Uses the exact **sparse** collocation Jacobian (analytic per-node blocks
+  from `fun_jac`/`bc_jac`, else a vectorised finite difference) plus an
+  exact zero Lagrangian Hessian, so the solve scales **linearly** in the
+  mesh size (≈3 orders of magnitude faster than the initial dense-FD
+  prototype on fine meshes).
 - **`pounce.jax.solve_bvp` / `pounce.torch.solve_bvp`** — the same solve made
   differentiable w.r.t. a `theta` parameter threaded into `fun` / `bc`, via
   the implicit-function theorem on the collocation KKT system. Supports
