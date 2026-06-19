@@ -188,6 +188,7 @@ def solve_bvp(
     max_nodes=1000,
     verbose=0,
     bc_tol=None,
+    method="newton",
 ):
     """Solve a boundary value problem on a fixed mesh with pounce.
 
@@ -195,6 +196,17 @@ def solve_bvp(
     returns the ``(n, m)`` RHS over the mesh; ``bc(ya, yb[, p])`` returns
     the ``n + k`` boundary residuals. See the module docstring for the
     (small) behavioural differences from SciPy.
+
+    ``method`` selects the forward solver:
+
+    * ``"newton"`` (default) — damped Newton on the square collocation
+      system, factoring the ``N x N`` Jacobian with FERAL's unsymmetric
+      sparse LU. This is the fast path (matches SciPy's algorithm and
+      beats it on speed); it bypasses the interior-point method.
+    * ``"ipm"`` — pose the collocation system as a pounce feasibility NLP
+      (``min 0`` s.t. ``R(z) = 0``) and solve with the interior-point
+      method. Slower (it factors the ``2N`` saddle KKT each iteration),
+      kept as a reference and for the constrained extension.
 
     Returns
     -------
@@ -239,20 +251,35 @@ def solve_bvp(
     jac = CollocationJacobian(
         nfun, nbc, x, n, m, k, df_blocks=df_blocks, dbc_block=dbc_block,
     )
-    obj = _BvpNlp(residual_fn, jac, n, m, k)
-    cl = np.zeros(N, dtype=np.float64)
-    cu = np.zeros(N, dtype=np.float64)
-    problem = Problem(n=N, m=N, problem_obj=obj, cl=cl, cu=cu)
-    problem.add_option("tol", float(tol))
-    # Collocation residuals are naturally well-scaled; skip the scaling
-    # pass (its setup cost buys nothing here).
-    problem.add_option("nlp_scaling_method", "none")
-    problem.add_option("print_level", 5 if verbose >= 2 else 0)
-
     z0 = _core.pack_z(y, p0, np.concatenate)
-    z_star, info = problem.solve(x0=z0)
-    z_star = np.asarray(z_star, dtype=np.float64)
 
+    if method == "newton":
+        from ._newton import newton_solve
+
+        z_star, niter, converged, _rn = newton_solve(
+            residual_fn, jac, z0, n, m, k, tol=float(tol),
+        )
+        info = {}
+        status = 0 if converged else 1
+        message = "converged" if converged else "Newton did not converge"
+    elif method == "ipm":
+        obj = _BvpNlp(residual_fn, jac, n, m, k)
+        cl = np.zeros(N, dtype=np.float64)
+        cu = np.zeros(N, dtype=np.float64)
+        problem = Problem(n=N, m=N, problem_obj=obj, cl=cl, cu=cu)
+        problem.add_option("tol", float(tol))
+        # Collocation residuals are naturally well-scaled; skip the scaling
+        # pass (its setup cost buys nothing here).
+        problem.add_option("nlp_scaling_method", "none")
+        problem.add_option("print_level", 5 if verbose >= 2 else 0)
+        z_star, info = problem.solve(x0=z0)
+        niter = int(info.get("iter_count", 0))
+        status = 0 if info.get("status", 1) in (0, 1) else 1
+        message = info.get("status_msg", "")
+    else:
+        raise ValueError(f"unknown method {method!r}; use 'newton' or 'ipm'.")
+
+    z_star = np.asarray(z_star, dtype=np.float64)
     Y, p_star = _core.unpack_z(z_star, n, m)
     Y = np.array(Y)
     yp = np.asarray(nfun(x, Y, p_star), dtype=np.float64)
@@ -262,9 +289,7 @@ def solve_bvp(
     col = r_star[: n * (m - 1)].reshape(n, m - 1)
     rms_residuals = np.sqrt(np.mean(col**2, axis=0))
 
-    status = 0 if info.get("status", 1) in (0, 1) else 1
     success = status == 0
-    message = info.get("status_msg", "")
     sol = _make_spline(x, Y, yp)
 
     return BVPResult(
@@ -274,7 +299,7 @@ def solve_bvp(
         y=Y,
         yp=yp,
         rms_residuals=rms_residuals,
-        niter=int(info.get("iter_count", 0)),
+        niter=int(niter),
         status=status,
         message=message,
         success=success,

@@ -53,10 +53,26 @@ def test_solve_bvp_unknown_parameter_eigenvalue():
     y0[0] = np.sin(np.pi * x)
     y0[1] = np.pi * np.cos(np.pi * x)
 
-    res = pounce.solve_bvp(fun, bc, x, y0, p=[3.0])
+    res = pounce.solve_bvp(fun, bc, x, y0, p=[3.0], tol=1e-6)
     assert res.success
     assert res.p is not None
     assert abs(res.p[0] - np.pi) < 1e-3
+
+
+def test_solve_bvp_newton_and_ipm_agree():
+    """The fast Newton path and the IPM feasibility path give the same y."""
+    def fun(x, y):
+        return np.vstack((y[1], -np.exp(y[0])))
+
+    def bc(ya, yb):
+        return np.array([ya[0], yb[0]])
+
+    x = np.linspace(0, 1, 51)
+    y0 = np.zeros((2, x.size))
+    r_newton = pounce.solve_bvp(fun, bc, x, y0, method="newton", tol=1e-8)
+    r_ipm = pounce.solve_bvp(fun, bc, x, y0, method="ipm", tol=1e-8)
+    assert r_newton.success and r_ipm.success
+    assert np.max(np.abs(r_newton.y - r_ipm.y)) < 1e-7
 
 
 def test_solve_bvp_analytic_jac_matches_fd():

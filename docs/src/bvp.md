@@ -62,20 +62,18 @@ res.p           # ≈ [π]
   refinement. This keeps the solution map `θ ↦ y` smooth, which is what the
   differentiable frontends exploit. Refine by passing a denser `x`;
   `max_nodes` is accepted for signature compatibility.
-- **Derivatives & performance.** The interior-point solver is handed the
-  exact **sparse** collocation Jacobian (analytic per-node `∂f/∂y` blocks,
-  from `fun_jac`/`bc_jac` if supplied, else a vectorised finite difference
-  that perturbs each state across the whole mesh — `O(n)` `fun` calls, not
-  `O(n·m)`), together with an exact **zero** Lagrangian Hessian (correct
-  here: the optimal multipliers are zero, so the IPM step is the Newton
-  step `dz = -J⁻¹R` on the collocation system — the same step SciPy takes).
-  Accuracy is identical to SciPy and the solve scales **linearly** in the
-  mesh size. It is still ~2–4× slower than SciPy: pounce's IPM factorises
-  the `2N` symmetric saddle KKT `[[H, Jᵀ],[J, 0]]` each iteration, while
-  SciPy factorises only the `N`-dimensional unsymmetric collocation-Newton
-  system `J`. That 2× dimension is structural to the NLP formulation
-  (pounce's linear algebra is symmetric-indefinite LDLᵀ). The payoff is
-  differentiability.
+- **Solver (`method`).** `method="newton"` (default) runs a damped Newton
+  on the square collocation system and factorises the `N×N` Jacobian with
+  FERAL's unsymmetric sparse LU (`pounce._pounce.SparseLU`) — the same
+  algorithm SciPy uses, and **typically faster than SciPy** (≈2–3× on fine
+  meshes; both scale linearly). The Jacobian is the exact **sparse**
+  collocation Jacobian (analytic per-node `∂f/∂y` blocks from
+  `fun_jac`/`bc_jac` if supplied, else a vectorised finite difference that
+  perturbs each state across the whole mesh — `O(n)` `fun` calls, not
+  `O(n·m)`). `method="ipm"` instead poses the system as a pounce feasibility
+  NLP and solves with the interior-point method (factoring the `2N` saddle
+  KKT each iteration — slower, but the basis for the constrained solver
+  below). Accuracy is identical to SciPy either way.
 - **Singular term `S`** is not yet supported.
 
 ## Differentiable solves (JAX / PyTorch)
