@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.6.0] - 2026-06-20
+
 ### Performance — stiff ODE stepper (`pounce.ode`)
 
 - **Stage predictor.** The adaptive Radau stepper now warm-starts each step's
@@ -142,6 +145,42 @@ JAX/PyTorch frontends:
   drop-in.
 - Docs: `docs/src/ode.md`; worked stiff/DAE/differentiability comparison in
   `python/examples/ode_scipy_compare.py`.
+
+### Added — GAMS solver link, now pip-installable (`pounce-solver[gams]`)
+
+- **`pip install pounce-solver[gams]` + `pounce-gams register`** registers
+  POUNCE as a GAMS NLP solver (`option nlp = pounce;`) with no compiler, no
+  `sudo`, and nothing GAMS-owned redistributed — built on GAMS's own
+  `gamsapi[core]` GMO/GEV bindings. The link wires GMO's numerical evaluators
+  straight into the solver's cyipopt-style `Problem` callbacks (POUNCE is a
+  local NLP solver, so no opcode translator is needed). Registration merges a
+  per-user `gamsconfig.yaml` `solverConfig` entry, preserving other solvers and
+  surviving GAMS upgrades. The native C link in `gams/` remains as the
+  alternative route. Adds the `pounce-gams` / `pounce-gams-link` console scripts
+  and the `[gams]` extra. Docs: `docs/src/gams.md`.
+
+### Added — solver & `.nl` parser
+
+- **`mu_strategy_fallback`** (opt-in, default off): on a
+  `Solved_To_Acceptable_Level` or `Maximum_Iterations_Exceeded` exit, flip
+  `mu_strategy` (adaptive↔monotone) once and re-solve, promoting the retry only
+  if it reaches `Solve_Succeeded` (otherwise the original outcome is kept).
+  Recovers genuine adaptive-μ stalls.
+- **AMPL power opcodes** `o81` / `o82` / `o83` (`OP1POW` / `OP2POW` / `OPCPOW`)
+  in the `.nl` reader. AMPL emits these as a hint that one operand is constant;
+  they previously hit the unsupported-opcode fallthrough, so any `.nl` emitting
+  them failed to parse. They lower to the existing negative-base-safe
+  constant-power path.
+
+### Fixed
+
+- **`acceptable_iter=0` now disables acceptable-level termination** (restoring
+  upstream Ipopt's `acceptable_iter_ > 0` guard) instead of firing on the very
+  first acceptable iterate. The GAMS link also now defaults `acceptable_iter=0`,
+  mirroring the GAMS–Ipopt link, which removes premature
+  `Solved_To_Acceptable_Level` exits on several princetonlib models.
+- **CLI:** honor `presolve` on the convex LP/QP path (#139); report reduced
+  (post-fixed-variable-removal) dimensions in the solver banner (#140).
 
 
 ## [0.5.0] - 2026-06-14
