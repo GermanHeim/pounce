@@ -32,7 +32,7 @@ The publishable set is exactly "every workspace member without
 | `pounce-sensitivity`   | yes        | sIPOPT port / parametric warm-start          |
 | `pounce-solve-report`  | yes        | `pounce.solve-report/v1` JSON writer         |
 | `pounce-cinterface`    | yes        | C ABI (CreateIpoptProblem / IpoptSolve)      |
-| `pounce-convex`        | yes        | LP/QP/SOCP/SDP conic IPM (**not yet on crates.io**) |
+| `pounce-convex`        | yes        | LP/QP/SOCP/SDP conic IPM                      |
 | `pounce-nl`            | yes        | `.nl` reader + AD tape; pounce-cli depends   |
 | `pounce-studio-core`   | yes        | solve-report parsers; pounce-cli dep (0.4.0+)|
 | `pounce-cli`           | yes        | `pounce` and `pounce_sens` binaries          |
@@ -79,17 +79,15 @@ crates.io rate-limits **new crate names** to 5 publishes burst, then 1 per
 ~10 minutes. New *versions* of *existing* crates are 1/min (burst 30), so a
 routine release is unaffected.
 
-As of 0.4.0, **18 of the 19** crates are already published — only one new
-crate name is subject to the new-crate limit on its first publish:
+As of 0.6.0, **all 19** crates are published (the last new name,
+`pounce-convex`, first published in 0.5.0). Every release since is a version
+bump of existing crates — 1/min, burst 30 — so the new-crate rate limit does
+not apply to a routine release.
 
-- `pounce-convex` — not yet on crates.io (the QCQP→SOCP wiring took
-  `pounce-cli` to a hard dependency on it, so the next release must publish
-  it).
-
-One new name is well under the 5-burst limit, so no exemption is needed for
-this release. If a future release introduces **several** new crate names at
-once and you would exceed the burst, either set `SLEEP=600` on the publish
-script or email **help@crates.io** ahead of time for a temporary exemption
+The new-crate burst limit only matters if a future release introduces **new**
+crate names. If one does and you would exceed the 5-burst limit, either set
+`SLEEP=600` on the publish script or email **help@crates.io** ahead of time
+for a temporary exemption
 (they typically respond within a business day); list the new crate names and
 note they all share the `pounce-` prefix under account `jkitchin`.
 
