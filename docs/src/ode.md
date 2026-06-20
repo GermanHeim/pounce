@@ -124,6 +124,41 @@ back-solve as [`pounce.jax.solve_bvp`](bvp.md). The result is the collocation
 solution on the mesh you pass, and its gradients are **exact** for that
 discretisation.
 
+## Performance
+
+`pounce.ode` runs the *same* algorithm as `scipy.integrate.solve_ivp(method=
+"Radau")` (a faithful RADAU5), so it takes essentially the same number of steps
+and reaches the same accuracy. The wall-clock difference is implementation
+overhead: pounce's stepper is pure Python, SciPy's inner loop is compiled.
+
+Practical guidance:
+
+* **Small / few-state stiff systems** (state dimension up to roughly 10–20):
+  pounce is **at or below SciPy's wall-clock**. There is effectively no speed
+  penalty for a single solve — and you get DAE support and differentiability on
+  top.
+* **Large stiff systems** (hundreds of states, e.g. a method-of-lines PDE):
+  pounce is currently **~3–4× slower** than SciPy in absolute terms, but still
+  sub-second. That gap matters only when solving such a system many thousands
+  of times in a loop — and if you need the *differentiable* path, SciPy is not
+  an option at all.
+
+Illustrative single-solve timings (best of 7; relative ratios are stable, the
+absolute milliseconds are machine-dependent):
+
+| problem | states | `pounce.ode` | SciPy `Radau` |
+|---|---|---|---|
+| Van der Pol, μ=1000, t∈[0, 3000] | 2 | ~100 ms | ~105 ms |
+| Brusselator (method-of-lines) | 100 | ~80 ms | ~24 ms |
+| Brusselator (method-of-lines) | 300 | ~410 ms | ~94 ms |
+
+These reflect three optimisations in the stepper, none of which change accuracy
+or the public API: a RADAU5 **stage predictor** (warm-start each step's Newton
+from the previous step's collocation polynomial), a **wider step-size hold band**
+(reuse the cached factor across more steps), and **reusing the LU pattern**
+across refactors (build FERAL's symbolic analysis once per solve, refactor in
+place). The last is what makes the large-`n` cost scale sensibly.
+
 ## What it is and isn't
 
 * It is a faithful, L-stable Radau IIA(5) implementation that tracks SciPy's
