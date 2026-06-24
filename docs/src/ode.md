@@ -165,6 +165,10 @@ place). The last is what makes the large-`n` cost scale sensibly.
   `Radau` step-for-step on stiff problems and adds DAE and differentiability
   support SciPy lacks.
 * It is **not** a general non-stiff integrator: only `method="Radau"` is
-  implemented. Event detection (`events=`) is not yet supported.
+  implemented.
+* Event detection (`events=`) is supported, matching SciPy: each event is a
+  callable `g(t, y)` with optional `terminal` (`bool` / count) and `direction`
+  attributes; crossings are root-found on the dense output and returned in
+  `t_events` / `y_events` (a terminal event stops with `status=1`).
 * The differentiable layer is **fixed-mesh** (the mesh keeps `theta → y`
   smooth); the adaptive solver is the non-differentiable `solve_ivp`.

@@ -9,6 +9,17 @@ changes.
 
 ## [Unreleased]
 
+### Added — event detection (`pounce.ode.solve_ivp` / `solve_dae`)
+
+- **SciPy-compatible `events=`.** `solve_ivp` now locates zero crossings of
+  event functions `g(t, y)` during integration, root-found on each step's
+  dense-output polynomial. Each event may carry `terminal` (`bool` or a
+  positive `int` count — stops the integration with `status=1`) and `direction`
+  (`>0` rising, `<0` falling, `0` either); crossings are returned in
+  `res.t_events` / `res.y_events`, and `args` are forwarded to events as in
+  SciPy. Event times match `scipy.integrate.solve_ivp` to solver tolerance.
+  (Resolves #165 item 4.)
+
 ### Added — fully-implicit DAEs (`pounce.ode.solve_dae`)
 
 - **`pounce.ode.solve_dae(F, t_span, y0, yp0=None, ...)`** integrates a

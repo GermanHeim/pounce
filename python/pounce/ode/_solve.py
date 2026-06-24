@@ -44,6 +44,8 @@ class OdeResult(ResultMixin):
     success: bool
     nstep: int = 0
     nrej: int = 0
+    t_events: Any = None
+    y_events: Any = None
     info: dict = field(default_factory=dict, repr=False)
 
 
@@ -108,8 +110,15 @@ def solve_ivp(
         output). If ``None``, the solver's own steps are returned.
     dense_output : bool
         If ``True``, attach a continuous solution ``res.sol(t)``.
+    events : callable, list of callables, or None
+        SciPy-style event functions ``g(t, y)`` whose zero crossings are
+        located (root-found on the dense output) and returned in
+        ``res.t_events`` / ``res.y_events``. Each may carry ``terminal``
+        (``bool`` or a positive ``int`` count — stops the integration with
+        ``status=1``) and ``direction`` (``>0`` rising, ``<0`` falling, ``0``
+        either) attributes.
     args : tuple or None
-        Extra arguments passed to ``fun`` / ``jac``.
+        Extra arguments passed to ``fun`` / ``jac`` / ``events``.
     mass : array (n, n) or None
         Constant mass matrix ``M`` (``M y' = f``). A singular ``M`` makes
         this an index-1 DAE solve — a pounce extension beyond SciPy.
@@ -131,8 +140,6 @@ def solve_ivp(
             f"got method={method!r}. For non-stiff explicit integration use "
             "scipy.integrate.solve_ivp or diffrax."
         )
-    if events is not None:
-        raise NotImplementedError("event detection is not yet supported.")
     # gh #165: don't silently no-op SciPy parameters.
     if vectorized:
         warnings.warn(
@@ -157,11 +164,20 @@ def solve_ivp(
         if jac is not None:
             _jac = jac
             jac = lambda t, y: _jac(t, y, *args)
+        if events is not None:
+            evs = [events] if callable(events) else list(events)
+            wrapped = []
+            for _e in evs:
+                w = (lambda _f: (lambda t, y: _f(t, y, *args)))(_e)
+                w.terminal = getattr(_e, "terminal", False)
+                w.direction = getattr(_e, "direction", 0.0)
+                wrapped.append(w)
+            events = wrapped[0] if callable(events) and len(wrapped) == 1 else wrapped
 
     res = _radau.integrate(
         fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
         max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,
-        dense_output=dense_output or t_eval is not None,
+        dense_output=dense_output or t_eval is not None, events=events,
     )
     # Like SciPy's solve_ivp, a numerical failure (step underflow, step cap)
     # is reported as status < 0 / success = False with the partial trajectory
@@ -178,6 +194,8 @@ def solve_ivp(
         success=res["success"],
         nstep=res["nstep"],
         nrej=res["nrej"],
+        t_events=res.get("t_events"),
+        y_events=res.get("y_events"),
     )
 
 

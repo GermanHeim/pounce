@@ -64,7 +64,60 @@ _ODE_MESSAGES = {
         " at t={t}); the system may be too stiff or ill-posed for this tol.",
     -2: "The maximum number of internal steps (max_steps) was reached before"
         " the end of the integration interval.",
+    1: "A termination event occurred.",
 }
+
+
+def _normalize_events(events):
+    """SciPy-style events -> (funcs, directions, terminal-counts). ``terminal``
+    may be ``bool`` or a positive ``int`` (stop after that many occurrences);
+    ``direction`` filters rising (>0) / falling (<0) / either (0) crossings."""
+    if events is None:
+        return None, None, None
+    if callable(events):
+        events = [events]
+    funcs = list(events)
+    dirs = np.array([float(getattr(e, "direction", 0.0) or 0.0) for e in funcs])
+    terms = [int(getattr(e, "terminal", False) or 0) for e in funcs]
+    return funcs, dirs, terms
+
+
+def _bisect_root(g, p, q, gp, gq, xtol=1e-12, maxiter=100):
+    """Root of ``g`` bracketed by ``[p, q]`` with ``g(p)=gp``, ``g(q)=gq`` of
+    opposite sign (order-agnostic in ``p``/``q``)."""
+    for _ in range(maxiter):
+        c = 0.5 * (p + q)
+        gc = g(c)
+        if gc == 0.0 or abs(q - p) <= xtol * (1.0 + abs(c)):
+            return c
+        if (gp < 0.0) != (gc < 0.0):
+            q, gq = c, gc
+        else:
+            p, gp = c, gc
+    return 0.5 * (p + q)
+
+
+def _detect_events(events, dirs, t0, g0, t1, g1, step_data, n):
+    """Crossings of each event on the just-accepted step ``[t0, t1]``.
+
+    ``step_data = (t_k, h_signed, y_k, K)`` builds the step's collocation
+    polynomial for the root-find. Returns ``[(idx, t_root, y_root), ...]``,
+    direction-filtered, ordered by event index.
+    """
+    sol = _make_dense([step_data], n)
+    found = []
+    for i, ev in enumerate(events):
+        a, b = g0[i], g1[i]
+        cross = (a < 0.0 < b) or (a > 0.0 > b)
+        if not cross:
+            continue
+        d = dirs[i]
+        if d != 0.0 and not ((d > 0.0 and a < 0.0) or (d < 0.0 and a > 0.0)):
+            continue
+        gfun = lambda tt: float(ev(tt, sol(tt)[:, 0]))
+        tr = _bisect_root(gfun, t0, t1, a, b)
+        found.append((i, tr, sol(tr)[:, 0]))
+    return found
 
 
 def _dense_lu_pattern(N):
@@ -214,7 +267,7 @@ def _select_initial_step(prob, t0, y0, f0, s, rtol, atol):
 
 def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
               max_step=np.inf, mass=None, jac=None, t_eval=None,
-              dense_output=False, max_steps=10**6):
+              dense_output=False, max_steps=10**6, events=None):
     """Adaptive Radau IIA(5) integration of ``M y' = f`` from ``t0`` to ``t1``.
 
     Returns a dict with ``t``, ``y`` (shape ``(n, n_points)``), plus
@@ -271,6 +324,15 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
 
     status, message = 0, _ODE_MESSAGES[0]
 
+    # Event detection (SciPy-style): track each event function's value at the
+    # last accepted point and root-find a crossing on each step's dense poly.
+    ev_funcs, ev_dirs, ev_terms = _normalize_events(events)
+    if ev_funcs is not None:
+        g_prev = np.array([float(e(t, y)) for e in ev_funcs])
+        t_events = [[] for _ in ev_funcs]
+        y_events = [[] for _ in ev_funcs]
+        ev_count = [0 for _ in ev_funcs]
+
     while (t - t1) * s < -1e-12 and nstep < max_steps:
         h = min(h, abs(t1 - t))
         hs = s * h
@@ -324,6 +386,27 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
             records.append((t, hs, y.copy(), K.copy()))
         K_prev = K.copy()           # warm-start seed for the next step
         h_prev = h
+
+        if ev_funcs is not None:
+            t_new = t + hs
+            g_new = np.array([float(e(t_new, y_new)) for e in ev_funcs])
+            found = _detect_events(ev_funcs, ev_dirs, t, g_prev, t_new, g_new,
+                                   (t, hs, y, K), n)
+            g_prev = g_new
+            term_t = term_y = None
+            for (i, tr, yr) in found:
+                t_events[i].append(tr)
+                y_events[i].append(yr)
+                ev_count[i] += 1
+                if ev_terms[i] and ev_count[i] >= ev_terms[i]:
+                    if term_t is None or abs(tr - t) < abs(term_t - t):
+                        term_t, term_y = tr, yr
+            if term_t is not None:          # stop at the earliest terminal event
+                t, y = term_t, term_y
+                ts.append(t); ys.append(y.copy()); nstep += 1
+                status, message = 1, _ODE_MESSAGES[1]
+                break
+
         t = t + hs
         y = y_new
         ts.append(t)
@@ -367,7 +450,10 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
 
     out = dict(t=ts, y=ys, nstep=nstep, nrej=nrej,
                nfev=prob.nfev, njev=prob.njev, nlu=prob.nlu,
-               status=status, message=message, success=status == 0)
+               status=status, message=message, success=status >= 0)
+    if ev_funcs is not None:
+        out["t_events"] = [np.array(te) for te in t_events]
+        out["y_events"] = [np.array(ye).reshape(-1, n) for ye in y_events]
 
     if records is not None and len(records) > 0:
         sol = _make_dense(records, n)
