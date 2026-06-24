@@ -21,7 +21,7 @@ import numpy as np
 from ..ode import _dae_collocation as C
 
 
-def daeint(F, y0, t, theta, *, tol=1e-10):
+def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     t = jnp.asarray(t, dtype=jnp.float64)
     theta = jnp.asarray(theta, dtype=jnp.float64)
@@ -45,27 +45,36 @@ def daeint(F, y0, t, theta, *, tol=1e-10):
     def _host_solve(p_np):
         p_np = np.asarray(p_np, np.float64)
         th, y0v = _split(p_np)
-        Y = C.be_forward(_np_F(np.asarray(th)), t_np, np.asarray(y0v), tol=tol)
+        Y = C.collocation_forward(_np_F(np.asarray(th)), t_np, np.asarray(y0v),
+                                  order=order, tol=tol)
         return np.ascontiguousarray(Y[:, 1:].T.reshape(-1))   # node-major flat
 
     def _host_btran(z_np, p_np, v_np):
         p_np = np.asarray(p_np, np.float64)
         th, y0v = _split(p_np)
         Y = _full_from_flat_np(z_np, y0v)
-        return C.be_transpose_solve(_np_F(np.asarray(th)), t_np, Y,
-                                    np.asarray(y0v), np.asarray(v_np))
+        return C.collocation_transpose_solve(
+            _np_F(np.asarray(th)), t_np, Y, np.asarray(v_np), order=order)
+
+    def _wp(Yfull, j):
+        # backward-difference y' stencil matching the collocation core; the
+        # coefficients are constants of the (fixed) mesh, the y-values traced.
+        h = float(t_np[j + 1] - t_np[j])
+        if order == 1 or j == 0:
+            return (Yfull[:, j + 1] - Yfull[:, j]) / h
+        hm = float(t_np[j] - t_np[j - 1]); rho = h / hm
+        c_w = (1.0 + 2.0 * rho) / (1.0 + rho) / h
+        c_k = -(1.0 + rho) / h
+        c_km1 = rho * rho / (1.0 + rho) / h
+        return c_w * Yfull[:, j + 1] + c_k * Yfull[:, j] + c_km1 * Yfull[:, j - 1]
 
     # JAX-traced residual R(zflat, p) for the parameter VJP
     def _residual_jax(zflat, p):
         th, y0v = _split(p)
         Yint = zflat.reshape(m - 1, n).T                      # (n, m-1)
         Yfull = jnp.concatenate([y0v[:, None], Yint], axis=1)  # (n, m)
-        rows = []
-        for j in range(m - 1):
-            h = t[j + 1] - t[j]
-            w = Yfull[:, j + 1]
-            wp = (w - Yfull[:, j]) / h
-            rows.append(F(t[j + 1], w, wp, th))
+        rows = [F(t[j + 1], Yfull[:, j + 1], _wp(Yfull, j), th)
+                for j in range(m - 1)]
         return jnp.concatenate(rows)
 
     @jax.custom_vjp

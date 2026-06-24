@@ -322,3 +322,48 @@ def test_unknown_option_warns():
     """gh #165: unrecognized options warn instead of vanishing silently."""
     with pytest.warns(UserWarning, match="unrecognized options"):
         po.solve_ivp(lambda t, y: [-y[0]], (0, 1), [1.0], not_a_real_option=3)
+
+
+# --- events (SciPy-compatible) -----------------------------------------------
+
+def test_events_non_terminal_match_analytic():
+    """y' = -y, y0=1 => y=e^-t. Threshold crossings at ln2 (y=0.5), ln5 (y=0.2)."""
+    def f(t, y):
+        return [-y[0]]
+
+    def make(level):
+        e = lambda t, y: y[0] - level
+        return e
+
+    r = po.solve_ivp(f, (0, 5), [1.0], events=[make(0.5), make(0.2)],
+                     rtol=1e-9, atol=1e-12)
+    assert r.success and r.status == 0
+    assert abs(r.t_events[0][0] - np.log(2)) < 1e-7
+    assert abs(r.t_events[1][0] - np.log(5)) < 1e-7
+    assert abs(r.y_events[0][0, 0] - 0.5) < 1e-9     # state at the event
+
+
+def test_terminal_event_stops_with_status_1():
+    def f(t, y):
+        return [-y[0]]
+    ev = lambda t, y: y[0] - 0.5
+    ev.terminal = True
+    r = po.solve_ivp(f, (0, 5), [1.0], events=ev, rtol=1e-9, atol=1e-12)
+    assert r.success and r.status == 1               # terminated by event
+    assert abs(r.t[-1] - np.log(2)) < 1e-7           # stopped at the event
+    assert "termination event" in r.message.lower()
+
+
+def test_event_direction_filter():
+    """y only falls, so a rising-only event never fires; falling fires once."""
+    def f(t, y):
+        return [-y[0]]
+    rising = lambda t, y: y[0] - 0.5
+    rising.direction = 1.0
+    falling = lambda t, y: y[0] - 0.5
+    falling.direction = -1.0
+    r_up = po.solve_ivp(f, (0, 5), [1.0], events=rising, rtol=1e-8, atol=1e-10)
+    r_dn = po.solve_ivp(f, (0, 5), [1.0], events=falling, rtol=1e-8, atol=1e-10)
+    assert r_up.t_events[0].size == 0
+    assert r_dn.t_events[0].size == 1
+    assert abs(r_dn.t_events[0][0] - np.log(2)) < 1e-7

@@ -44,7 +44,22 @@ class OdeResult(ResultMixin):
     success: bool
     nstep: int = 0
     nrej: int = 0
+    t_events: Any = None
+    y_events: Any = None
     info: dict = field(default_factory=dict, repr=False)
+
+
+def _wrap_events_args(events, args):
+    """Bind ``*args`` into each event ``g(t, y)`` (SciPy passes args to events
+    too), preserving ``terminal`` / ``direction`` attributes."""
+    evs = [events] if callable(events) else list(events)
+    out = []
+    for e in evs:
+        w = (lambda _f: (lambda t, y: _f(t, y, *args)))(e)
+        w.terminal = getattr(e, "terminal", False)
+        w.direction = getattr(e, "direction", 0.0)
+        out.append(w)
+    return out[0] if callable(events) and len(out) == 1 else out
 
 
 def mesh_initial_guess(fun_np, t_np, y0_np, n, m):
@@ -108,11 +123,21 @@ def solve_ivp(
         output). If ``None``, the solver's own steps are returned.
     dense_output : bool
         If ``True``, attach a continuous solution ``res.sol(t)``.
+    events : callable, list of callables, or None
+        SciPy-style event functions ``g(t, y)`` whose zero crossings are
+        located (root-found on the dense output) and returned in
+        ``res.t_events`` / ``res.y_events``. Each may carry ``terminal``
+        (``bool`` or a positive ``int`` count — stops the integration with
+        ``status=1``) and ``direction`` (``>0`` rising, ``<0`` falling, ``0``
+        either) attributes.
     args : tuple or None
-        Extra arguments passed to ``fun`` / ``jac``.
-    mass : array (n, n) or None
-        Constant mass matrix ``M`` (``M y' = f``). A singular ``M`` makes
-        this an index-1 DAE solve — a pounce extension beyond SciPy.
+        Extra arguments passed to ``fun`` / ``jac`` / ``events``.
+    mass : array (n, n), callable, or None
+        Mass matrix ``M`` in ``M y' = f`` — either a constant array or a
+        callable ``M(t, y)`` (``M(t, y, *args)`` with ``args``) for a
+        state/time-dependent mass. A singular ``M`` makes this an index-1 DAE
+        solve (a pounce extension beyond SciPy); a callable ``M`` is routed
+        through the fully-implicit DAE engine (:func:`solve_dae`).
     rtol, atol : float
         Relative / absolute error tolerances.
     jac : callable or None
@@ -131,8 +156,6 @@ def solve_ivp(
             f"got method={method!r}. For non-stiff explicit integration use "
             "scipy.integrate.solve_ivp or diffrax."
         )
-    if events is not None:
-        raise NotImplementedError("event detection is not yet supported.")
     # gh #165: don't silently no-op SciPy parameters.
     if vectorized:
         warnings.warn(
@@ -157,12 +180,33 @@ def solve_ivp(
         if jac is not None:
             _jac = jac
             jac = lambda t, y: _jac(t, y, *args)
+        if callable(mass):
+            _mass = mass
+            mass = lambda t, y: _mass(t, y, *args)
+        if events is not None:
+            events = _wrap_events_args(events, args)
 
-    res = _radau.integrate(
-        fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
-        max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,
-        dense_output=dense_output or t_eval is not None,
-    )
+    if callable(mass):
+        # State/time-dependent mass M(t, y) y' = f(t, y): route through the
+        # fully-implicit DAE engine as F(t, y, y') = M(t, y) y' - f(t, y).
+        from . import _dae
+
+        def _F(t, y, yp):
+            return np.asarray(mass(t, y), dtype=float) @ yp - np.asarray(fun(t, y), dtype=float)
+
+        prob = _dae._DaeProblem(_F, y0.size)
+        y0c, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, None)
+        res = _dae.integrate_dae(
+            _F, t0, t1, y0c, yp0, rtol=rtol, atol=atol, first_step=first_step,
+            max_step=max_step, t_eval=t_eval,
+            dense_output=dense_output or t_eval is not None, events=events,
+        )
+    else:
+        res = _radau.integrate(
+            fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
+            max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,
+            dense_output=dense_output or t_eval is not None, events=events,
+        )
     # Like SciPy's solve_ivp, a numerical failure (step underflow, step cap)
     # is reported as status < 0 / success = False with the partial trajectory
     # accumulated so far — never raised.
@@ -178,6 +222,8 @@ def solve_ivp(
         success=res["success"],
         nstep=res["nstep"],
         nrej=res["nrej"],
+        t_events=res.get("t_events"),
+        y_events=res.get("y_events"),
     )
 
 
@@ -195,6 +241,7 @@ def solve_dae(
     max_step=np.inf,
     t_eval=None,
     dense_output=False,
+    events=None,
     args=None,
 ):
     """Solve a fully-implicit index-1 DAE ``F(t, y, y') = 0`` with pounce.
@@ -237,6 +284,8 @@ def solve_dae(
         if jac is not None:
             _jac = jac
             jac = lambda t, y, yp: _jac(t, y, yp, *args)
+        if events is not None:
+            events = _wrap_events_args(events, args)
 
     if consistent == "project":
         prob = _dae._DaeProblem(F, y0.size, jac=jac)
@@ -250,11 +299,12 @@ def solve_dae(
     res = _dae.integrate_dae(
         F, t0, t1, y0, yp0, rtol=rtol, atol=atol, jac=jac,
         first_step=first_step, max_step=max_step, t_eval=t_eval,
-        dense_output=dense_output or t_eval is not None,
+        dense_output=dense_output or t_eval is not None, events=events,
     )
     return OdeResult(
         t=res["t"], y=res["y"], sol=res.get("sol"),
         nfev=res["nfev"], njev=res["njev"], nlu=res["nlu"],
         status=res["status"], message=res["message"], success=res["success"],
         nstep=res["nstep"], nrej=res["nrej"],
+        t_events=res.get("t_events"), y_events=res.get("y_events"),
     )

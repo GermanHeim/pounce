@@ -67,8 +67,9 @@ on a **fixed mesh** and return the node trajectory differentiable w.r.t. the
 parameters `theta` **and** the initial condition `y0`, via the
 implicit-function theorem on the collocation system. As with
 `pounce.jax.odeint`, the mesh is fixed (keeping the solution map smooth);
-accuracy is controlled by the mesh, and the scheme is backward Euler (L-stable,
-order 1 — refine the mesh for accuracy). `F` must be framework-traceable.
+accuracy is controlled by the mesh. The default scheme is **BDF2** (`order=2`,
+L-stable, second-order); pass `order=1` for backward Euler. `F` must be
+framework-traceable.
 
 ```python
 import jax, jax.numpy as jnp

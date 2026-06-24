@@ -15,7 +15,7 @@ import torch
 from ..ode import _dae_collocation as C
 
 
-def daeint(F, y0, t, theta, *, tol=1e-10):
+def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
     y0 = torch.as_tensor(y0, dtype=torch.float64)
     theta = torch.as_tensor(theta, dtype=torch.float64)
     t_t = torch.as_tensor(t, dtype=torch.float64)
@@ -42,7 +42,8 @@ def daeint(F, y0, t, theta, *, tol=1e-10):
         def forward(ctx, theta_, y0_):
             th_np = theta_.detach().cpu().numpy()
             y0_np = y0_.detach().cpu().numpy()
-            Y = C.be_forward(_np_F(th_np), t_np, y0_np, tol=tol)
+            Y = C.collocation_forward(_np_F(th_np), t_np, y0_np, order=order,
+                                      tol=tol)
             z = np.ascontiguousarray(Y[:, 1:].T.reshape(-1))
             ctx.save_for_backward(theta_, y0_)
             ctx._z = z
@@ -56,8 +57,9 @@ def daeint(F, y0, t, theta, *, tol=1e-10):
             y0_np = y0_.detach().cpu().numpy()
             Yfull = _full_from_flat(z, y0_np)
             # R_Y^T u = grad_z  (host, FERAL sparse LU)
-            u = C.be_transpose_solve(_np_F(th_np), t_np, Yfull, y0_np,
-                                     grad_z.detach().cpu().numpy())
+            u = C.collocation_transpose_solve(
+                _np_F(th_np), t_np, Yfull, grad_z.detach().cpu().numpy(),
+                order=order)
             u_t = torch.as_tensor(u, dtype=torch.float64)
             # IFT: dL/dp = -(dR/dp)^T u, via torch autodiff of the residual at z*.
             # Function.backward runs under no_grad, so build the residual graph
@@ -70,15 +72,21 @@ def daeint(F, y0, t, theta, *, tol=1e-10):
             gth, gy0 = torch.autograd.grad(R, (th, y0v), grad_outputs=-u_t)
             return gth, gy0
 
+    def _wp(Yfull, j):
+        h = float(t_np[j + 1] - t_np[j])
+        if order == 1 or j == 0:
+            return (Yfull[:, j + 1] - Yfull[:, j]) / h
+        hm = float(t_np[j] - t_np[j - 1]); rho = h / hm
+        c_w = (1.0 + 2.0 * rho) / (1.0 + rho) / h
+        c_k = -(1.0 + rho) / h
+        c_km1 = rho * rho / (1.0 + rho) / h
+        return c_w * Yfull[:, j + 1] + c_k * Yfull[:, j] + c_km1 * Yfull[:, j - 1]
+
     def _residual_torch(zflat, th, y0v):
         Yint = zflat.reshape(m - 1, n).T                       # (n, m-1)
         Yfull = torch.cat([y0v[:, None], Yint], dim=1)         # (n, m)
-        rows = []
-        for j in range(m - 1):
-            h = t_t[j + 1] - t_t[j]
-            w = Yfull[:, j + 1]
-            wp = (w - Yfull[:, j]) / h
-            rows.append(F(float(t_np[j + 1]), w, wp, th))
+        rows = [F(float(t_np[j + 1]), Yfull[:, j + 1], _wp(Yfull, j), th)
+                for j in range(m - 1)]
         return torch.cat(rows)
 
     z = _Solve.apply(theta, y0)

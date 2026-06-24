@@ -164,7 +164,7 @@ def _error_estimate_dae(Fyp, h, K, yp_base, lu_real):
 
 def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
                   first_step=None, max_step=np.inf, jac=None, t_eval=None,
-                  dense_output=False, max_steps=10**6):
+                  dense_output=False, max_steps=10**6, events=None):
     """Adaptive Radau IIA(5) integration of ``F(t, y, y') = 0`` from t0 to t1.
 
     ``yp0`` must be consistent (``F(t0, y0, yp0) == 0``); use
@@ -208,6 +208,13 @@ def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
     K_prev = None
     h_prev = None
     status, message = 0, R._ODE_MESSAGES[0]
+
+    ev_funcs, ev_dirs, ev_terms = R._normalize_events(events)
+    if ev_funcs is not None:
+        g_prev = np.array([float(e(t, y)) for e in ev_funcs])
+        t_events = [[] for _ in ev_funcs]
+        y_events = [[] for _ in ev_funcs]
+        ev_count = [0 for _ in ev_funcs]
 
     while (t - t1) * s < -1e-12 and nstep < max_steps:
         h = min(h, abs(t1 - t))
@@ -258,6 +265,26 @@ def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
         if records is not None:
             records.append((t, hs, y.copy(), K.copy()))
         K_prev = K.copy(); h_prev = h
+
+        if ev_funcs is not None:
+            t_new = t + hs
+            g_new = np.array([float(e(t_new, y_new)) for e in ev_funcs])
+            found = R._detect_events(ev_funcs, ev_dirs, t, g_prev, t_new, g_new,
+                                     (t, hs, y, K), n)
+            g_prev = g_new
+            term_t = term_y = None
+            for (i, tr, yr) in found:
+                t_events[i].append(tr); y_events[i].append(yr)
+                ev_count[i] += 1
+                if ev_terms[i] and ev_count[i] >= ev_terms[i]:
+                    if term_t is None or abs(tr - t) < abs(term_t - t):
+                        term_t, term_y = tr, yr
+            if term_t is not None:
+                t, y = term_t, term_y
+                ts.append(t); ys.append(y.copy()); nstep += 1
+                status, message = 1, R._ODE_MESSAGES[1]
+                break
+
         t = t + hs
         y = y_new
         yp = K[2].copy()                # stiffly accurate: consistent y' at t
@@ -287,7 +314,10 @@ def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
     ys = np.array(ys).T
     out = dict(t=ts, y=ys, nstep=nstep, nrej=nrej, nfev=prob.nfev,
                njev=prob.njev, nlu=prob.nlu, status=status, message=message,
-               success=status == 0)
+               success=status >= 0)
+    if ev_funcs is not None:
+        out["t_events"] = [np.array(te) for te in t_events]
+        out["y_events"] = [np.array(ye).reshape(-1, n) for ye in y_events]
     if records is not None and len(records) > 0:
         sol = R._make_dense(records, n)      # collocation poly of K — reused
         out["sol"] = sol
