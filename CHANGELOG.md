@@ -9,6 +9,31 @@ changes.
 
 ## [Unreleased]
 
+### Added — fully-implicit DAEs (`pounce.ode.solve_dae`)
+
+- **`pounce.ode.solve_dae(F, t_span, y0, yp0=None, ...)`** integrates a
+  fully-implicit, index-1 DAE `F(t, y, y') = 0` with the same Radau IIA(5)
+  collocation as `solve_ivp`, in residual form. A pounce extension —
+  `scipy.integrate.solve_ivp` has no fully-implicit DAE solver. Reuses the
+  whole stiff engine (sparse-LU stage solve + pattern reuse, stage predictor,
+  adaptive control, dense output / `t_eval`). Index-1 only.
+- **Consistent initial conditions** computed automatically
+  (`consistent="project"`, the default): algebraic variables are detected from
+  the sparsity of `∂F/∂y'`, then `(y0, y'0)` are Newton-projected onto
+  `F(t0, y0, y'0) = 0` (the IDA `IDA_YA_YDP_INIT` computation), so an
+  approximate `y0` and `yp0=None` are accepted. `consistent="assume"` uses a
+  caller-supplied consistent `yp0` as-is.
+- Optional analytic `jac(t, y, yp) -> (∂F/∂y, ∂F/∂y')`; both blocks are
+  finite-differenced otherwise. Docs: `docs/src/dae.md`.
+
+### Changed
+
+- **`pounce.ode.solve_ivp` no longer silently no-ops SciPy parameters**
+  (gh #165): passing `vectorized=True` (ignored) or an unrecognized option now
+  emits a `UserWarning` instead of vanishing. The fully-implicit `solve_dae`
+  above also supersedes the "constant mass only" limitation for callers needing
+  a general implicit form.
+
 
 ## [0.6.0] - 2026-06-20
 
