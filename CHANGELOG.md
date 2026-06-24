@@ -25,6 +25,11 @@ changes.
   caller-supplied consistent `yp0` as-is.
 - Optional analytic `jac(t, y, yp) -> (∂F/∂y, ∂F/∂y')`; both blocks are
   finite-differenced otherwise. Docs: `docs/src/dae.md`.
+- **`pounce.jax.daeint` / `pounce.torch.daeint`** — differentiable fixed-mesh
+  integration of `F(t, y, y', theta) = 0`, returning the trajectory
+  differentiable w.r.t. `theta` and `y0` via the implicit-function theorem on a
+  backward-Euler collocation (the FERAL sparse-LU back-solve mirrors
+  `pounce.jax.odeint`). Gradients validated against finite differences.
 
 ### Changed
 

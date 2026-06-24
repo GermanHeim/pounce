@@ -59,3 +59,31 @@ FD cost and improves robustness on stiff problems.
 - Same adaptive Radau engine as `solve_ivp` — stiff-capable, sparse-LU stage
   solve, dense output (`dense_output=True` / `t_eval=`), `args=`.
 - Events are not supported.
+
+## Differentiable integration (JAX / PyTorch)
+
+`pounce.jax.daeint` / `pounce.torch.daeint` integrate `F(t, y, y', theta) = 0`
+on a **fixed mesh** and return the node trajectory differentiable w.r.t. the
+parameters `theta` **and** the initial condition `y0`, via the
+implicit-function theorem on the collocation system. As with
+`pounce.jax.odeint`, the mesh is fixed (keeping the solution map smooth);
+accuracy is controlled by the mesh, and the scheme is backward Euler (L-stable,
+order 1 — refine the mesh for accuracy). `F` must be framework-traceable.
+
+```python
+import jax, jax.numpy as jnp
+from pounce.jax import daeint
+
+def F(t, y, yp, theta):                 # y0' + theta*y0 - y1 = 0 ; y0 + y1 = 1
+    return jnp.array([yp[0] + theta*y[0] - y[1], y[0] + y[1] - 1.0])
+
+t  = jnp.linspace(0.0, 2.0, 81)
+y0 = jnp.array([0.5, 0.5])
+loss = lambda th: daeint(F, y0, t, th)[0, -1] ** 2
+g = jax.grad(loss)(1.3)                  # exact for the discretisation
+```
+
+The forward solve and the `R_yᵀ` back-solve run on the host (FERAL sparse LU);
+the parameter VJP is taken by framework autodiff of the collocation residual at
+the converged nodes. Gradients are validated against finite differences in the
+test suite (`python/tests/test_dae.py`).
