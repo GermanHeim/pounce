@@ -129,3 +129,65 @@ def test_torch_daeint_gradient_matches_fd():
         fd = (float(loss(torch.tensor(1.3 + 1e-6))) -
               float(loss(torch.tensor(1.3 - 1e-6)))) / 2e-6
     assert abs(float(th.grad) - fd) <= 1e-5 * abs(fd)
+
+
+# --- M(t, y) mass sugar + events on the DAE engine (item 2) ------------------
+
+def test_callable_mass_matches_explicit_ode():
+    """solve_ivp(mass=M(t,y)) routes through the DAE engine and matches the
+    explicit equivalent y' = M(t,y)^-1 f solved by SciPy."""
+    sp = pytest.importorskip("scipy.integrate")
+
+    def Mf(t, y):
+        return np.diag([2.0 + y[0] ** 2, 1.0])
+
+    def f(t, y):
+        return np.array([-y[0], -y[1]])
+
+    def f_expl(t, y):
+        return np.linalg.solve(Mf(t, y), f(t, y))
+
+    y0, span, kw = [1.0, 1.0], (0.0, 3.0), dict(rtol=1e-8, atol=1e-10)
+    p = solve_ivp(f, span, y0, mass=Mf, dense_output=True, **kw)
+    s = sp.solve_ivp(f_expl, span, y0, method="Radau", dense_output=True, **kw)
+    assert p.success
+    tq = np.linspace(0, 3, 50)
+    assert np.max(np.abs(p.sol(tq) - s.sol(tq))) < 1e-7
+
+
+def test_solve_dae_terminal_event():
+    """Events work on the DAE engine too (solve_dae)."""
+    ev = lambda t, y: y[0] - 0.5
+    ev.terminal = True
+    r = solve_dae(_F, (0, 1e4), [1.0, 0, 0], yp0=[-_k1, _k1, 0.0],
+                  consistent="assume", events=ev, rtol=1e-8, atol=1e-10)
+    assert r.success and r.status == 1
+    assert abs(r.y_events[0][0, 0] - 0.5) < 1e-6
+    assert abs(r.y.sum(axis=0)[-1] - 1.0) < 1e-9       # constraint still holds
+
+
+# --- higher-order differentiable DAE: BDF2 is order 2 (item 3) ---------------
+
+def test_daeint_bdf2_is_order_2():
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from pounce.jax import daeint
+
+    th = 1.3
+    def F(t, y, yp, p):
+        return jnp.array([yp[0] + p * y[0] - y[1], y[0] + y[1] - 1.0])
+
+    def exact_y0(T):                                   # analytic final y0
+        yss = 1.0 / (th + 1.0)
+        return yss + (0.5 - yss) * np.exp(-(th + 1.0) * T)
+
+    def err(order, mm):
+        Y = np.asarray(daeint(F, jnp.array([0.5, 0.5]), jnp.linspace(0, 2, mm),
+                              th, order=order))
+        return abs(Y[0, -1] - exact_y0(2.0))
+
+    r1 = np.log2(err(1, 81) / err(1, 161))
+    r2 = np.log2(err(2, 81) / err(2, 161))
+    assert 0.8 < r1 < 1.3                              # backward Euler ~ order 1
+    assert 1.7 < r2 < 2.3                              # BDF2 ~ order 2

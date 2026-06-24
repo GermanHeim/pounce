@@ -11,14 +11,26 @@ changes.
 
 ### Added — event detection (`pounce.ode.solve_ivp` / `solve_dae`)
 
-- **SciPy-compatible `events=`.** `solve_ivp` now locates zero crossings of
-  event functions `g(t, y)` during integration, root-found on each step's
-  dense-output polynomial. Each event may carry `terminal` (`bool` or a
-  positive `int` count — stops the integration with `status=1`) and `direction`
-  (`>0` rising, `<0` falling, `0` either); crossings are returned in
+- **SciPy-compatible `events=`** on both `solve_ivp` and `solve_dae`. Zero
+  crossings of event functions `g(t, y)` are located during integration,
+  root-found on each step's dense-output polynomial. Each event may carry
+  `terminal` (`bool` or a positive `int` count — stops with `status=1`) and
+  `direction` (`>0` rising, `<0` falling, `0` either); crossings are returned in
   `res.t_events` / `res.y_events`, and `args` are forwarded to events as in
   SciPy. Event times match `scipy.integrate.solve_ivp` to solver tolerance.
   (Resolves #165 item 4.)
+
+### Added — state-dependent mass + higher-order differentiable DAE
+
+- **`solve_ivp(mass=M(t, y))`** now accepts a callable mass (state/time-
+  dependent `M(t, y) y' = f`), routed through the fully-implicit DAE engine as
+  `F = M(t,y) y' − f`; the constant-array form is unchanged. (Resolves #165
+  item 3.)
+- **`pounce.jax.daeint` / `pounce.torch.daeint` default to BDF2** (`order=2`,
+  L-stable, second-order) instead of backward Euler; pass `order=1` for BE.
+  Same node-value collocation (one extra Jacobian subdiagonal), same IFT
+  backward — validated as order-2 convergent with gradients matching finite
+  differences.
 
 ### Added — fully-implicit DAEs (`pounce.ode.solve_dae`)
 
