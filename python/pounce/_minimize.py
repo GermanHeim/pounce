@@ -18,8 +18,11 @@ Notes
 * When ``hess`` is omitted, or when constraints are present, the solver
   is driven with ``hessian_approximation = limited-memory``.
 * Equality / inequality dicts are concatenated into a single ``g(x)``
-  with bound vectors ``cl`` / ``cu``. Constraint Jacobian is dense by
-  design — sparse Jacobians belong on the :class:`Problem` API.
+  with bound vectors ``cl`` / ``cu``. A dict constraint whose ``jac`` returns
+  a scipy-sparse matrix declares that matrix's (fixed) COO structure, so a
+  genuinely sparse constraint Jacobian stays sparse through to the
+  :class:`Problem` API (mirroring cyipopt's detect-by-return-type); a dense or
+  absent ``jac`` keeps a fully-dense per-row pattern.
 * ``callback`` accepts both scipy signatures (chosen by parameter-name
   introspection): ``callback(intermediate_result=OptimizeResult)`` or
   ``callback(xk)``. Raise ``StopIteration`` to terminate early.
@@ -588,14 +591,25 @@ def _wrap_constraints(constraints, n: int, x0=None):
                 out[start:end] = blk.constant_vals
             elif blk.sparse_jac:
                 # Sparse dict Jacobian: stream COO data in the same canonical
-                # order declared at build time (``.tocsr().tocoo()``).
+                # order declared at build time (``.tocsr().tocoo()``). Verify
+                # the *full* structure (row/col positions), not just the nnz
+                # count: Ipopt requires a fixed sparsity pattern, and a Jacobian
+                # that keeps the same number of nonzeros but moves one to a
+                # different position would otherwise misalign its values against
+                # the declared structure and be fed to Ipopt as silently-wrong
+                # derivatives.
                 J = blk.jac(x, *blk.args).tocsr().tocoo()
-                if J.data.size != (end - start):
+                if (
+                    J.data.size != (end - start)
+                    or not np.array_equal(J.row, blk.rows)
+                    or not np.array_equal(J.col, blk.cols)
+                ):
                     raise ValueError(
                         "constraint Jacobian sparsity pattern changed between "
-                        "probe and solve; the pattern must be fixed across "
-                        f"iterations (declared {end - start} nonzeros, got "
-                        f"{J.data.size})"
+                        "probe and solve; the pattern (nonzero row/col positions) "
+                        "must be fixed across iterations "
+                        f"(declared {end - start} nonzeros at the build-time "
+                        f"pattern, got {J.data.size})"
                     )
                 out[start:end] = J.data
             elif blk.jac is not None:

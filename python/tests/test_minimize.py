@@ -283,6 +283,30 @@ def test_minimize_dict_sparse_jac_pattern_change_raises():
         jac_values(np.ones(n))
 
 
+def test_minimize_dict_sparse_jac_position_change_raises():
+    """A jac that keeps the *same nnz count* but moves a nonzero to a different
+    column must also raise — otherwise its values would be silently misaligned
+    against the build-time structure and fed to Ipopt as wrong derivatives."""
+    from pounce._minimize import _wrap_constraints
+
+    n = 3
+    calls = {"k": 0}
+
+    def jac(x):
+        calls["k"] += 1
+        # Same count (2 nonzeros) at every call, but the second column moves
+        # from col 1 (probe/build) to col 2 (solve) → position change.
+        if calls["k"] == 1:
+            return sparse.coo_array(([1.0, 1.0], ([0, 0], [0, 1])), shape=(1, n))
+        return sparse.coo_array(([1.0, 1.0], ([0, 0], [0, 2])), shape=(1, n))
+
+    con = {"type": "ineq", "fun": lambda x: np.array([x[0]]), "jac": jac}
+    _, _, jac_values, _, _, jr, jc = _wrap_constraints([con], n, x0=np.zeros(n))
+    np.testing.assert_array_equal(jc, [0, 1])  # declared from the probe
+    with pytest.raises(ValueError, match="sparsity pattern changed"):
+        jac_values(np.ones(n))
+
+
 def test_minimize_dict_dense_jac_still_dense():
     """Regression: a dict jac returning a dense ndarray keeps the dense pattern."""
     from pounce._minimize import _wrap_constraints
