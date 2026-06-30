@@ -57,6 +57,48 @@ x, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
 print(info['status_msg'], info['obj_val'], x)
 ```
 
+### Verifying convergence / trustworthy duals
+
+`info` carries the final KKT residuals so a consumer can independently
+check how converged a returned point is — useful when the duals
+(`info["mult_g"]`, `info["mult_x_L"]`, `info["mult_x_U"]`) feed a
+downstream certificate (e.g. dual bound tightening). Two flavors:
+
+- `final_kkt_error` / `final_dual_inf` / `final_constr_viol` /
+  `final_compl` — the residuals the convergence test saw, in the
+  **internally-scaled** NLP space (the `nlp_scaling_method` factors).
+- `final_unscaled_kkt_error` / `final_unscaled_dual_inf` /
+  `final_unscaled_constr_viol` / `final_unscaled_compl` — the same
+  residuals with the scaling divided back out, i.e. in your **original
+  problem units**. Equal to the scaled values when no scaling activates.
+
+On ill-conditioned problems `nlp_scaling` can deflate the scaled residual
+enough that the default test reports `Solve_Succeeded` while the
+*unscaled* duals have drifted. The robust guard is to **read the residual
+yourself** rather than trust the status enum alone — `info["status"]` is a
+coarse signal, and some callers treat `Solve_Succeeded` (0) and
+`Solved_To_Acceptable_Level` (1) identically:
+
+```python
+x, info = prob.solve(x0=...)
+converged = info['final_unscaled_kkt_error'] <= 1e-6   # your own threshold
+```
+
+If you're feeding the duals into a downstream certificate (e.g. a dual
+bound), prefer building a *safe* bound from the multipliers — valid for any
+dual-feasible point, so it doesn't hinge on the solver's exact convergence.
+
+Two convenience knobs back this up:
+
+- **Tighten the (unscaled) component tolerances** — `dual_inf_tol`,
+  `constr_viol_tol`, `compl_inf_tol` gate on the unscaled residuals, so the
+  solver keeps iterating until it actually meets them (or exits non-success).
+- **`kkt_fidelity_tol`** (default 0 = off) — a defensive post-solve relabel:
+  a `Solve_Succeeded` whose `final_unscaled_kkt_error` exceeds it is demoted
+  to `Solved_To_Acceptable_Level`. Note this only helps a caller that
+  distinguishes those two statuses; if yours doesn't, gate on the residual
+  directly as above.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one
