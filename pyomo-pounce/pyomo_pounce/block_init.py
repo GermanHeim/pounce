@@ -1,25 +1,34 @@
 """Block-sequential initialization for Pyomo models (experimental).
 
 IDAES-style initialization without hand-written initialization routines:
-take the model's active **equality** constraints, find the square
-(well-determined) part of the variable/constraint incidence graph, order
-it into diagonal blocks (Dulmage-Mendelsohn / block triangularization,
-via ``pyomo.contrib.incidence_analysis``), and solve the blocks in
-topological order, writing each block's solution into ``Var.value``.
-1x1 blocks are solved with Pyomo's Newton one-liner
-(``calculate_variable_from_constraint``); larger blocks become square
-subsystem solves with POUNCE.
+hold the *decision* variables at their current values, take the model's
+active **equality** constraints, extract the square (well-determined)
+part of the variable/constraint incidence graph (Dulmage-Mendelsohn,
+via ``pyomo.contrib.incidence_analysis``), and solve it block by block
+in topological order, writing the solution into ``Var.value``. The
+block-by-block solve itself is delegated to Pyomo's
+``solve_strongly_connected_components`` (1x1 blocks by Newton, larger
+blocks by POUNCE); this module contributes the decision handling, the
+square-part extraction, the seeding, and the diagnostics.
 
-The result is a starting point that satisfies the model's sequential
-"calculation order" structure — usually a dramatically better start
-than zeros for flowsheet-shaped models.
+The distillation-column shape of the workflow::
 
-**Experimental.** The API and semantics may change; in particular:
-variables in the square subsystem are (re)computed in place, using any
-existing values as Newton starting guesses. Variables in the under- or
-over-determined parts (degrees of freedom, redundant specifications)
-are left untouched — pair with
-:func:`pyomo_pounce.initialize_missing_values` to fill the remainder.
+    report = pyomo_pounce.block_initialize(
+        model, decisions=[m.feed, m.reflux, m.boilup])
+    if not report.square:
+        print(report)   # names of what you forgot to specify
+
+set the decisions, solve for a physical profile with them held
+constant, then let the optimizer move them.
+
+**Experimental.** Variables in the square subsystem are (re)computed in
+place, using any existing values as Newton starting guesses. Variables
+in the under- or over-determined parts (degrees of freedom you did not
+flag as decisions, redundant specifications) are left untouched and
+reported **by name** — pair with
+:func:`pyomo_pounce.initialize_missing_values` /
+:func:`pyomo_pounce.project_to_feasible` to handle the remainder (or
+use the :func:`pyomo_pounce.initialize` pipeline).
 
 Requires ``pyomo.contrib.incidence_analysis`` (needs ``networkx`` and
 ``scipy``); raises ``ImportError`` with instructions otherwise.
@@ -35,14 +44,25 @@ __all__ = ["block_initialize", "BlockInitReport"]
 
 @dataclass
 class BlockInitReport:
-    """What :func:`block_initialize` did."""
+    """What :func:`block_initialize` did (and could not do)."""
 
+    #: True when the equality system (after fixing decisions) is exactly
+    #: square: no unmatched/underconstrained variables and no
+    #: unmatched/overconstrained constraints.
+    square: bool = True
+    n_decisions_fixed: int = 0
     n_blocks: int = 0
     n_1x1: int = 0
     n_subsystem_solves: int = 0
     n_vars_initialized: int = 0
     skipped_underdetermined: int = 0
     skipped_overdetermined: int = 0
+    #: Names of unmatched/underconstrained variables (capped): the
+    #: things you probably forgot to specify or flag as decisions.
+    underconstrained_variables: List[str] = field(default_factory=list)
+    #: Names of unmatched/overconstrained constraints (capped):
+    #: redundant or conflicting specifications.
+    overconstrained_constraints: List[str] = field(default_factory=list)
     failures: List[str] = field(default_factory=list)
 
     @property
@@ -52,39 +72,73 @@ class BlockInitReport:
     def __str__(self) -> str:
         lines = [
             "pyomo-pounce block_initialize",
+            f"  decisions fixed   : {self.n_decisions_fixed}",
+            f"  system square     : {self.square}",
             f"  blocks solved     : {self.n_blocks} "
             f"({self.n_1x1} by Newton 1x1, {self.n_subsystem_solves} subsystem solves)",
             f"  vars initialized  : {self.n_vars_initialized}",
             f"  left untouched    : {self.skipped_underdetermined} underdetermined, "
             f"{self.skipped_overdetermined} overdetermined",
         ]
+        if self.underconstrained_variables:
+            lines.append(
+                "  underconstrained vars (specify or flag as decisions): "
+                + ", ".join(self.underconstrained_variables)
+            )
+        if self.overconstrained_constraints:
+            lines.append(
+                "  overconstrained cons (redundant/conflicting specs): "
+                + ", ".join(self.overconstrained_constraints)
+            )
         for f in self.failures:
             lines.append(f"  FAILED: {f}")
         return "\n".join(lines)
 
 
+def _flatten_vars(vars_like):
+    """Accept VarData, indexed Var containers, or iterables of either."""
+    out = []
+    for v in vars_like:
+        if hasattr(v, "values") and callable(v.values):  # indexed container
+            out.extend(v.values())
+        else:
+            out.append(v)
+    return out
+
+
 def block_initialize(
     model,
+    decisions=None,
     solver=None,
     *,
-    max_block_solver_iter: int = 100,
+    max_list: int = 10,
     tee: bool = False,
 ) -> BlockInitReport:
     """Fill ``Var.value`` by solving equality blocks in calculation order.
 
     Args:
         model: A Pyomo model (Block). Only active equality constraints
-            and unfixed variables participate; fix a variable to treat
-            it as a known input.
+            and unfixed variables participate.
+        decisions: Variables (VarData or indexed Var containers) to hold
+            at their **current values** during the initialization solve,
+            then release — the degrees of freedom the optimizer will
+            move later. Each must have a value (``ValueError``
+            otherwise). Already-fixed variables may be listed and stay
+            fixed. Equivalent to fixing them yourself, but scoped and
+            self-documenting.
         solver: A Pyomo solver (from ``SolverFactory``) for blocks
-            larger than 1x1. Default: ``SolverFactory("pounce")``.
-            Never invoked when every block is 1x1.
-        max_block_solver_iter: ``max_iter`` passed to the block solver.
+            larger than 1x1. Default: ``SolverFactory("pounce")``,
+            constructed only when such a block exists.
+        max_list: Cap on the reported name lists.
         tee: Echo block-solver output.
 
-    Returns a :class:`BlockInitReport`; ``report.failures`` lists blocks
-    whose solve did not converge (their variables keep whatever values
-    they had).
+    Returns a :class:`BlockInitReport`. ``report.square`` is False when
+    the equality system (with decisions fixed) is not exactly square;
+    the offending variable/constraint **names** are reported, and the
+    square part is still solved best-effort. ``report.failures``
+    is non-empty when the block solve itself failed (Pyomo's
+    ``solve_strongly_connected_components`` fails fast, so variables in
+    blocks downstream of a failure keep their seed values).
     """
     import pyomo.environ as pyo
 
@@ -94,82 +148,94 @@ def block_initialize(
         # would only blow up (DeferredImportError) at first use.
         import networkx  # noqa: F401
 
-        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+        from pyomo.contrib.incidence_analysis import (
+            IncidenceGraphInterface,
+            solve_strongly_connected_components,
+        )
     except ImportError as e:  # pragma: no cover - environment-dependent
         raise ImportError(
             "block_initialize requires pyomo.contrib.incidence_analysis "
             "and its optional dependencies (pip install networkx scipy)"
         ) from e
-    from pyomo.util.calc_var_value import calculate_variable_from_constraint
     from pyomo.util.subsystems import TemporarySubsystemManager, create_subsystem_block
 
     report = BlockInitReport()
 
-    igraph = IncidenceGraphInterface(model, include_inequality=False)
-    if not igraph.constraints:
-        return report
+    # --- hold the decisions -------------------------------------------
+    fixed_by_us = []
+    if decisions is not None:
+        for vd in _flatten_vars(decisions):
+            if vd.fixed:
+                continue  # already an input; leave as the user set it
+            if vd.value is None:
+                raise ValueError(
+                    f"decision variable {vd.name!r} has no value: a decision "
+                    "must be held at a concrete value during initialization"
+                )
+            vd.fix()
+            fixed_by_us.append(vd)
+    report.n_decisions_fixed = len(fixed_by_us)
 
-    # The square (well-determined) part of the equality system: DM
-    # decomposition separates it from degrees of freedom and redundant
-    # specifications.
-    var_dm, con_dm = igraph.dulmage_mendelsohn()
-    report.skipped_underdetermined = len(var_dm.unmatched) + len(
-        var_dm.underconstrained
-    )
-    report.skipped_overdetermined = len(con_dm.unmatched) + len(con_dm.overconstrained)
-    square_vars = list(var_dm.square)
-    square_cons = list(con_dm.square)
-    if not square_vars:
-        return report
+    try:
+        igraph = IncidenceGraphInterface(model, include_inequality=False)
+        if not igraph.constraints:
+            return report
 
-    var_blocks, con_blocks = igraph.block_triangularize(
-        variables=square_vars, constraints=square_cons
-    )
+        # The square (well-determined) part of the equality system: the
+        # DM decomposition separates it from remaining degrees of
+        # freedom and redundant specifications — and names them.
+        var_dm, con_dm = igraph.dulmage_mendelsohn()
+        under_vars = list(var_dm.unmatched) + list(var_dm.underconstrained)
+        over_cons = list(con_dm.unmatched) + list(con_dm.overconstrained)
+        report.skipped_underdetermined = len(under_vars)
+        report.skipped_overdetermined = len(over_cons)
+        report.underconstrained_variables = [v.name for v in under_vars[:max_list]]
+        report.overconstrained_constraints = [c.name for c in over_cons[:max_list]]
+        report.square = not under_vars and not over_cons
 
-    for vars_blk, cons_blk in zip(var_blocks, con_blocks):
-        report.n_blocks += 1
-        if len(vars_blk) == 1 and len(cons_blk) == 1:
-            var, con = vars_blk[0], cons_blk[0]
-            if var.value is None:
-                _seed_var(var)
-            try:
-                calculate_variable_from_constraint(var, con)
-                report.n_1x1 += 1
-                report.n_vars_initialized += 1
-            except Exception as e:  # noqa: BLE001 - collect, keep going
-                report.failures.append(f"{con.name} -> {var.name}: {e}")
-            continue
+        square_vars = list(var_dm.square)
+        square_cons = list(con_dm.square)
+        if not square_vars:
+            return report
 
-        # k x k block: square subsystem solve. Other variables appearing
-        # in these constraints are temporarily fixed at their current
-        # values (they were computed by earlier blocks).
-        if solver is None:
-            solver = pyo.SolverFactory("pounce")
-        blk = create_subsystem_block(cons_blk, vars_blk)
-        for v in vars_blk:
+        # Solve-plan statistics (the SCC solve below follows exactly
+        # this block structure).
+        var_blocks, _con_blocks = igraph.block_triangularize(
+            variables=square_vars, constraints=square_cons
+        )
+        report.n_blocks = len(var_blocks)
+        report.n_1x1 = sum(1 for blk in var_blocks if len(blk) == 1)
+        n_large = report.n_blocks - report.n_1x1
+
+        for v in square_vars:
             if v.value is None:
                 _seed_var(v)
-        blk._obj = pyo.Objective(expr=0.0)
+
+        if n_large > 0 and solver is None:
+            solver = pyo.SolverFactory("pounce")
+
+        # Delegate the block-by-block solve to Pyomo's own machinery:
+        # 1x1 blocks via calculate_variable_from_constraint, larger
+        # blocks via `solver`. Variables that appear in the square
+        # constraints but belong to the non-square part are temporarily
+        # fixed at their current values.
+        blk = create_subsystem_block(square_cons, square_vars)
         try:
             with TemporarySubsystemManager(to_fix=list(blk.input_vars.values())):
-                results = solver.solve(
-                    blk, tee=tee, options={"max_iter": max_block_solver_iter}
+                solve_strongly_connected_components(
+                    blk,
+                    solver=solver,
+                    solve_kwds={"tee": tee},
                 )
-            cond = str(results.solver.termination_condition)
-            if cond not in ("optimal", "locallyOptimal", "feasible"):
-                report.failures.append(
-                    f"block of {len(vars_blk)} vars "
-                    f"({vars_blk[0].name}, ...): termination {cond}"
-                )
-            else:
-                report.n_subsystem_solves += 1
-                report.n_vars_initialized += len(vars_blk)
-        except Exception as e:  # noqa: BLE001
+            report.n_subsystem_solves = n_large
+            report.n_vars_initialized = len(square_vars)
+        except Exception as e:  # noqa: BLE001 - report, don't raise
             report.failures.append(
-                f"block of {len(vars_blk)} vars ({vars_blk[0].name}, ...): {e}"
+                f"strongly-connected-component solve failed: {e}"
             )
-        finally:
-            blk.del_component(blk._obj)
+    finally:
+        for vd in fixed_by_us:
+            vd.unfix()
 
     return report
 

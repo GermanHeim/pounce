@@ -40,6 +40,7 @@ def test_triangular_system_solved_by_newton_only():
 
     report = pyomo_pounce.block_initialize(m)
     assert report.ok, str(report)
+    assert report.square
     assert report.n_blocks == 3
     assert report.n_1x1 == 3
     assert report.n_subsystem_solves == 0  # no solver needed
@@ -48,7 +49,7 @@ def test_triangular_system_solved_by_newton_only():
     assert m.z.value == pytest.approx(2.0)
 
 
-def test_degrees_of_freedom_left_untouched():
+def test_degrees_of_freedom_left_untouched_and_named():
     m = pyo.ConcreteModel()
     m.x = pyo.Var()
     m.w = pyo.Var()  # free DOF: appears only in the objective
@@ -59,9 +60,106 @@ def test_degrees_of_freedom_left_untouched():
     assert report.ok, str(report)
     assert m.x.value == pytest.approx(4.0)
     assert m.w.value is None
+    # w participates in no equality, so the equality system is square
+    # over {x}; the DM partition never sees w. Nothing to name.
+    assert report.square
     # ... and initialize_missing_values fills the rest.
     pyomo_pounce.initialize_missing_values(m)
     assert m.w.value == 0.0
+
+
+def test_underconstrained_names_reported():
+    # Two variables coupled by one equation: without a decision the
+    # system is underdetermined, and the names say which variables.
+    m = pyo.ConcreteModel()
+    m.feed = pyo.Var()
+    m.split = pyo.Var(bounds=(0.0, 1.0))
+    m.out = pyo.Var()
+    m.c = pyo.Constraint(expr=m.out == m.split * m.feed)
+    m.obj = pyo.Objective(expr=m.out)
+
+    report = pyomo_pounce.block_initialize(m)
+    assert not report.square
+    assert report.skipped_underdetermined >= 2
+    named = set(report.underconstrained_variables)
+    assert {"feed", "split"} & named, str(report)
+    assert "underconstrained" in str(report)
+
+
+def test_decisions_square_the_system_and_are_released():
+    m = pyo.ConcreteModel()
+    m.feed = pyo.Var(initialize=10.0)
+    m.split = pyo.Var(bounds=(0.0, 1.0), initialize=0.3)
+    m.out1 = pyo.Var()
+    m.out2 = pyo.Var()
+    m.c1 = pyo.Constraint(expr=m.out1 == m.split * m.feed)
+    m.c2 = pyo.Constraint(expr=m.out2 == (1.0 - m.split) * m.feed)
+    m.obj = pyo.Objective(expr=m.out1)
+
+    report = pyomo_pounce.block_initialize(m, decisions=[m.feed, m.split])
+    assert report.ok, str(report)
+    assert report.square
+    assert report.n_decisions_fixed == 2
+    assert m.out1.value == pytest.approx(3.0)
+    assert m.out2.value == pytest.approx(7.0)
+    # Decisions are released afterwards (the optimizer moves them next).
+    assert not m.feed.fixed and not m.split.fixed
+    assert m.feed.value == pytest.approx(10.0)
+
+
+def test_decisions_accept_indexed_containers():
+    m = pyo.ConcreteModel()
+    m.d = pyo.Var([1, 2], initialize={1: 2.0, 2: 3.0})
+    m.y = pyo.Var()
+    m.c = pyo.Constraint(expr=m.y == m.d[1] + m.d[2])
+    m.obj = pyo.Objective(expr=m.y)
+
+    report = pyomo_pounce.block_initialize(m, decisions=[m.d])
+    assert report.ok and report.square, str(report)
+    assert report.n_decisions_fixed == 2
+    assert m.y.value == pytest.approx(5.0)
+    assert not m.d[1].fixed and not m.d[2].fixed
+
+
+def test_decision_without_value_raises():
+    m = pyo.ConcreteModel()
+    m.feed = pyo.Var()  # no value: cannot be held at anything
+    m.out = pyo.Var()
+    m.c = pyo.Constraint(expr=m.out == 2.0 * m.feed)
+    m.obj = pyo.Objective(expr=m.out)
+
+    with pytest.raises(ValueError, match="feed"):
+        pyomo_pounce.block_initialize(m, decisions=[m.feed])
+    assert not m.feed.fixed  # nothing leaked
+
+
+def test_already_fixed_decision_stays_fixed():
+    m = pyo.ConcreteModel()
+    m.feed = pyo.Var()
+    m.feed.fix(10.0)
+    m.out = pyo.Var()
+    m.c = pyo.Constraint(expr=m.out == 0.5 * m.feed)
+    m.obj = pyo.Objective(expr=m.out)
+
+    report = pyomo_pounce.block_initialize(m, decisions=[m.feed])
+    assert report.ok, str(report)
+    assert report.n_decisions_fixed == 0  # was already fixed, not by us
+    assert m.out.value == pytest.approx(5.0)
+    assert m.feed.fixed  # user's fix survives
+
+
+def test_overconstrained_names_reported():
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var()
+    m.c1 = pyo.Constraint(expr=m.x == 1.0)
+    m.c2 = pyo.Constraint(expr=2.0 * m.x == 2.0)  # redundant spec
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.block_initialize(m)
+    assert not report.square
+    assert report.skipped_overdetermined >= 1
+    assert report.overconstrained_constraints, str(report)
+    assert "overconstrained" in str(report)
 
 
 def test_fixed_vars_act_as_inputs():
@@ -99,7 +197,7 @@ def test_coupled_block_uses_subsystem_solve(solver):
 def test_failure_is_reported_not_raised():
     m = pyo.ConcreteModel()
     m.x = pyo.Var(bounds=(0.0, 1.0))
-    # No solution in the bounds: Newton cannot satisfy x == 5.
+    # No solution in the bounds: Newton cannot satisfy x == 5 inside them.
     m.c = pyo.Constraint(expr=m.x**3 == 125.0)
     m.obj = pyo.Objective(expr=m.x)
 
