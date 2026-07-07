@@ -538,6 +538,118 @@ def verify_solution(
     }
 
 
+# ---- check-x0 (starting-point preflight) -----------------------------
+
+
+@mcp.tool()
+def check_x0(
+    nl_file: str | None = None,
+    builtin: str | None = None,
+    x0_file: str | None = None,
+    feas_tol: float = 1e-6,
+    bound_push: float = 1e-2,
+    bound_frac: float = 1e-2,
+    max_list: int = 5,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Preflight a model's starting point before any solve.
+
+    Evaluates the model once at its starting point (the `.nl` initial-guess
+    segment, or `x0_file`) and reports what iteration 0 will see: NaN/inf
+    evaluations (fatal — the solve would abort with
+    `Invalid_Number_Detected`), bound violations of x0, how far the
+    `bound_push` interior clamp will move the point, initial constraint
+    violation per row, and derivative magnitude spread (the early signal
+    for scaling trouble). Costs one evaluation of each callback: no
+    factorization, no solve.
+
+    Use this BEFORE `run_problem` when a model is new, when a previous
+    solve died with `Invalid_Number_Detected`, or when a warm start did
+    not help (on-bound components + the clamp preview explain that case).
+
+    Args:
+        nl_file: Path to the AMPL `.nl` problem. Exactly one of `nl_file`
+            or `builtin` must be given.
+        builtin: Name of a built-in problem (see `list_builtins`).
+        x0_file: Optional whitespace-separated file of n values overriding
+            the model's starting point (e.g. a candidate warm-start point).
+        feas_tol: Violations above this are counted (default 1e-6).
+        bound_push: `bound_push` used for the clamp preview (default 1e-2,
+            the solver default).
+        bound_frac: `bound_frac` used for the clamp preview (default 1e-2).
+        max_list: Max offenders listed per category.
+        timeout_seconds: Kill the check after this many seconds.
+
+    Returns:
+        Dict with `fatal` (the bottom line: True means a solve from this
+        point would abort), `verdict` (CLEAN / WARNINGS / FATAL),
+        `warnings` (human-readable findings), `exit_code` (0 clean or
+        warnings, 21 fatal), and `report` (the full parsed
+        `pounce.check-x0/v1` JSON: evaluation, bounds, interior_clamp,
+        constraint_violation, derivative_scale sections).
+    """
+    if (nl_file is None) == (builtin is None):
+        raise ValueError("pass exactly one of nl_file or builtin")
+    binary = _find_pounce_bin()
+
+    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="pounce-check-x0-")
+    os.close(fd)
+    report_path = Path(tmp)
+
+    argv: list[str] = [binary, "check-x0"]
+    if nl_file is not None:
+        nl = Path(nl_file).expanduser()
+        if not nl.exists():
+            raise FileNotFoundError(f"no such .nl file: {nl}")
+        argv.append(str(nl))
+    else:
+        argv += ["--builtin", str(builtin)]
+    if x0_file is not None:
+        x0 = Path(x0_file).expanduser()
+        if not x0.exists():
+            raise FileNotFoundError(f"no such x0 file: {x0}")
+        argv += ["--x0-file", str(x0)]
+    argv += [
+        "--feas-tol", repr(feas_tol),
+        "--bound-push", repr(bound_push),
+        "--bound-frac", repr(bound_frac),
+        "--max-list", str(max_list),
+        "--json-output", str(report_path),
+    ]
+
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(
+            f"pounce check-x0 did not finish within {timeout_seconds}s"
+        ) from e
+
+    report: dict[str, Any] = {}
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+        except json.JSONDecodeError:
+            report = {}
+        finally:
+            report_path.unlink(missing_ok=True)
+
+    return {
+        "fatal": bool(report.get("fatal", proc.returncode == 21)),
+        "verdict": report.get("verdict"),
+        "warnings": report.get("warnings", []),
+        "exit_code": proc.returncode,
+        "max_constraint_violation": report.get("constraint_violation", {}).get(
+            "max_violation"
+        ),
+        "n_clamp_moved": report.get("interior_clamp", {}).get("n_moved"),
+        "stdout_tail": proc.stdout[-2000:],
+        "stderr_tail": proc.stderr[-2000:],
+        "report": report,
+    }
+
+
 # ---- explain / citations --------------------------------------------
 
 

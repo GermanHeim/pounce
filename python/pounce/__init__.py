@@ -25,6 +25,7 @@ from ._curve_fit import (
     CurveFitResult,
 )
 from ._minima import find_minima, MinimaResult
+from ._preflight import preflight, PreflightReport
 from ._critical import (
     find_critical_points, find_saddles, reaction_network,
     CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
@@ -66,6 +67,9 @@ __all__ = [
     "Connection",
     "ReactionNetwork",
     "classify_working_set",
+    # Starting-point preflight (see docs: initialization.md)
+    "preflight",
+    "PreflightReport",
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
     "QpResult",
     "QpFactorization",

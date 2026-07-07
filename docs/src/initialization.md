@@ -190,6 +190,25 @@ parameter trajectory via `JaxProblem`; see
 
 ## Diagnosing a bad start
 
+The first stop is the preflight check, which evaluates the model once
+at its starting point (no solve) and reports everything this page has
+warned about: NaN/inf evaluations, bound violations, how far the
+interior clamp will move the point, initial constraint violation, and
+derivative scale spread.
+
+```sh
+pounce check-x0 model.nl              # text report; --json for tools
+pounce check-x0 model.nl --x0-file candidate.txt
+```
+
+```python
+report = pounce.preflight(problem_obj, x0, lb=lb, ub=ub, cl=cl, cu=cu)
+print(report)          # report.fatal, report.warnings, report.to_dict()
+```
+
+Exit code 0 means the model evaluates cleanly at x0 (warnings allowed);
+21 means a solve from this point would abort. The other diagnostics:
+
 * **`Invalid_Number_Detected`** means an evaluator returned NaN/inf,
   and the very first evaluation at the starting point is the usual
   culprit (`log(0)` or a division at an all-zeros default start).
