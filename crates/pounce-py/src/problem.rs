@@ -370,6 +370,15 @@ impl PyProblem {
         // convenience. Lets a reduced-space / variable-aggregation caller
         // attribute runtime (e.g. densified-Hessian eval cost) directly
         // instead of inferring it.
+        //
+        // NOTE (issue #190): the *detailed* per-subsystem timers are gated
+        // on the `timing_statistics` option (default "no"), matching
+        // upstream Ipopt — running them unconditionally costs two
+        // `getrusage` syscalls per timed section, which is 16-20% of busy
+        // CPU on fast-objective NLPs. So every key except `overall_alg`
+        // (and `wall_time`) is reported as `0.0` unless the caller passes
+        // `timing_statistics="yes"`. `overall_alg`/`wall_time` are always
+        // populated.
         let timing = app.timing_stats();
         let timing_dict = PyDict::new_bound(py);
         for (label, secs) in timing.wall_time_breakdown() {

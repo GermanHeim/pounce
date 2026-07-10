@@ -28,7 +28,10 @@ changes.
   split, and the per-callback objective / gradient / constraint / Jacobian /
   Lagrangian-Hessian eval time); `pounce.minimize` mirrors these as
   `res.wall_time` / `res.timing`. Lets a caller attribute a reduced-space
-  solve's runtime (e.g. densified-Hessian eval cost) directly.
+  solve's runtime (e.g. densified-Hessian eval cost) directly. The detailed
+  breakdown is opt-in via `timing_statistics="yes"` (see #190 under Fixed);
+  without it, `wall_time` / `overall_alg` are populated and the per-subsystem
+  entries read `0.0`.
 - **Block-triangular / Schur KKT solve** (item 2). A structure-aware presolve
   can hand pounce the reducible block of the KKT system; that block is
   Schur-complemented out and only the two diagonal blocks are factorized, with
@@ -52,6 +55,17 @@ changes.
 
 ### Fixed
 
+- **`timing_statistics=no` no longer runs the detailed timers every iteration
+  (#190).** Every `TimedTask::start`/`end` pair calls `getrusage(RUSAGE_SELF)`
+  (twice — once each), and the per-subsystem / per-callback timers wrap hot
+  paths (each objective/gradient/constraint/Jacobian/Hessian evaluation, plus
+  every solve phase). Upstream Ipopt gates these detailed timers on
+  `timing_statistics` (default `no`), but pounce mirrored the timers without
+  the gating — so the syscalls were paid unconditionally, measuring at 16–20%
+  of busy CPU on fast-objective, high-iteration NLPs. The detailed timers are
+  now disabled unless `timing_statistics yes` (or `print_timing_statistics
+  yes`, which implies it) is set. `OverallAlgorithm` stays live regardless: it
+  feeds the `max_cpu_time` convergence check and its total is always reported.
 - **pip GAMS link honors `json_output` / `json_detail` (#187).** The pure-Python
   GAMS link parsed those option-file keys and then discarded them, so a
   `pounce.opt` requesting a `pounce.solve-report/v1` JSON was a silent no-op on

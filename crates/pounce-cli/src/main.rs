@@ -2101,6 +2101,12 @@ fn write_diagnostics_manifest(
 
 /// Emit a sibling `timing.json` so dump consumers can correlate
 /// per-iter files with the solve's wall-clock budget.
+///
+/// `overall_alg_secs` is always populated. The
+/// `linear_system_*` splits are detailed timers gated on
+/// `timing_statistics` (default "no", issue #190), so they read `0.0`
+/// unless the run set `timing_statistics yes` (or
+/// `print_timing_statistics yes`, which implies it).
 fn write_diagnostics_timing(diag: &DiagnosticsState, app: &IpoptApplication) {
     let t = app.timing_stats();
     let body = format!(

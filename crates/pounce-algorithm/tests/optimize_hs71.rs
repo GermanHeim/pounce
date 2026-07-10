@@ -771,6 +771,56 @@ fn hs071_output_file_captures_timing_report() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Regression test for issue #190: with `timing_statistics` at its
+/// default (`no`), the detailed per-subsystem timers must be disabled so
+/// a fast-objective solve doesn't pay two `getrusage` syscalls per timed
+/// section. `overall_alg` stays live regardless (it feeds `max_cpu_time`
+/// and is always reported). Setting the option back on re-enables the
+/// detailed breakdown.
+#[test]
+fn hs071_timing_statistics_gates_detailed_timers() {
+    // Default configuration — `timing_statistics` unset (⇒ "no").
+    let mut app = IpoptApplication::new();
+    app.initialize_with_options_str("").unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+    let t = app.timing_stats();
+    // Overall timer runs unconditionally.
+    assert!(t.overall_alg.is_enabled(), "overall_alg must stay enabled");
+    assert!(t.overall_alg.total_wallclock_time() >= 0.0);
+    // Every detailed timer is disabled ⇒ accumulated nothing.
+    assert!(!t.eval_obj.is_enabled(), "eval_obj should be gated off");
+    assert_eq!(
+        t.eval_obj.total_wallclock_time(),
+        0.0,
+        "detailed eval timer accumulated despite timing_statistics=no",
+    );
+    assert_eq!(t.total_function_evaluation_time.total_wallclock_time(), 0.0,);
+    assert_eq!(t.check_convergence.total_wallclock_time(), 0.0);
+
+    // Opting in re-enables the detailed timers, so the breakdown is
+    // populated again.
+    let mut app = IpoptApplication::new();
+    app.initialize_with_options_str("timing_statistics yes\n")
+        .unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let _ = app.optimize_tnlp(tnlp);
+    let t = app.timing_stats();
+    assert!(t.eval_obj.is_enabled(), "eval_obj should be enabled");
+    assert!(
+        t.check_convergence.is_enabled(),
+        "check_convergence should be enabled when timing_statistics=yes",
+    );
+}
+
 /// Wave-4 smoke: the eight `warm_start_*` knobs and the
 /// `warm_start_init_point` toggle parse through
 /// `algorithm_builder_from_options` without erroring. End-to-end

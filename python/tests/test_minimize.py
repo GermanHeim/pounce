@@ -51,7 +51,15 @@ def test_minimize_reports_timing_breakdown():
     breakdown (``res.timing`` / ``res.info["timing"]``) plus a top-level
     ``res.wall_time``, so a caller can attribute solve runtime (func /
     gradient / Jacobian / Hessian eval time, factorization vs back-solve)
-    without patching the solver."""
+    without patching the solver.
+
+    The *detailed* breakdown is opt-in via ``timing_statistics="yes"``
+    (issue #190): running the per-subsystem timers unconditionally costs
+    two ``getrusage`` syscalls per timed section, so by default only
+    ``overall_alg`` / ``wall_time`` are populated and the rest read
+    ``0.0``. The breakdown schema (keys present, non-negative, the
+    linear-algebra total equal to the sum of its parts) holds either way.
+    """
 
     def f(x):
         return float(x @ x)
@@ -59,7 +67,13 @@ def test_minimize_reports_timing_breakdown():
     def grad(x):
         return 2.0 * x
 
-    res = pounce.minimize(f, x0=np.array([1.0, 2.0, 3.0]), jac=grad, print_level=0)
+    res = pounce.minimize(
+        f,
+        x0=np.array([1.0, 2.0, 3.0]),
+        jac=grad,
+        print_level=0,
+        timing_statistics="yes",
+    )
     assert res.success
 
     # Top-level convenience fields.
@@ -91,6 +105,40 @@ def test_minimize_reports_timing_breakdown():
         res.timing["linear_system_factorization"]
         + res.timing["linear_system_back_solve"]
     )
+
+
+def test_minimize_timing_breakdown_gated_by_default():
+    """Issue #190: with ``timing_statistics`` at its default (``no``), the
+    detailed per-subsystem timers are disabled — the solve stops paying two
+    ``getrusage`` syscalls per timed section on fast objectives. The
+    breakdown schema is still present (keys exist), ``overall_alg`` /
+    ``wall_time`` are still populated, but every detailed key reads ``0.0``.
+    """
+
+    def f(x):
+        return float(x @ x)
+
+    def grad(x):
+        return 2.0 * x
+
+    res = pounce.minimize(f, x0=np.array([1.0, 2.0, 3.0]), jac=grad, print_level=0)
+    assert res.success
+
+    # Overall totals survive the gating.
+    assert res.wall_time >= 0.0
+    assert res.timing["overall_alg"] >= 0.0
+
+    # Detailed per-callback / linear-algebra timers are gated off ⇒ 0.0.
+    for key in (
+        "eval_objective",
+        "eval_gradient",
+        "function_evaluations_total",
+        "linear_system_factorization",
+        "linear_system_back_solve",
+    ):
+        assert res.timing[key] == 0.0, (
+            f"{key} accumulated despite timing_statistics=no (#190)"
+        )
 
 
 def test_minimize_eq_constraint():

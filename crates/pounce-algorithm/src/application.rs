@@ -1225,6 +1225,25 @@ impl IpoptApplication {
         // via [`Self::timing_stats`].
         let timing = Rc::new(TimingStatistics::new());
         *self.timing.borrow_mut() = Rc::clone(&timing);
+        // Gate the *detailed* per-subsystem timers on `timing_statistics`
+        // (default "no"), matching upstream Ipopt. Without this, every
+        // timed `eval_*` / phase section pays two `getrusage` syscalls per
+        // start/end even when statistics are off — 16-20% of busy CPU on
+        // fast-objective NLPs (issue #190). `print_timing_statistics=yes`
+        // implies `timing_statistics=yes` (per its option help), so either
+        // one enables the detailed timers. `overall_alg` is started
+        // unconditionally below: it feeds the `max_cpu_time` check and is
+        // reported regardless of the option.
+        let timing_enabled = ["timing_statistics", "print_timing_statistics"]
+            .iter()
+            .any(|opt| {
+                self.options
+                    .get_bool_value(opt, "")
+                    .ok()
+                    .and_then(|(v, f)| f.then_some(v))
+                    .unwrap_or(false)
+            });
+        timing.set_detailed_enabled(timing_enabled);
         timing.overall_alg.start();
 
         // Reset the linear-solver summary sink so back-to-back solves
