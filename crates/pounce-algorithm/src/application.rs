@@ -1457,6 +1457,14 @@ impl IpoptApplication {
         if let Ok((v, true)) = self.options.get_numeric_value("slack_move", "") {
             cq.borrow_mut().slack_move = v;
         }
+        // `kappa_d` — weight of the linear damping term added to the
+        // barrier objective/gradient to handle one-sided bounds
+        // (`IpIpoptCalculatedQuantities.cpp`). Registered (default 1e-5)
+        // but previously never read, so a user override was silently
+        // ignored (#191). Routed through the builder for parity with the
+        // other numeric knobs; the default matches the registered
+        // default, so only explicit overrides change behavior.
+        cq.borrow_mut().kappa_d = builder.kappa_d;
 
         // Seed `data.curr` with a zero-valued iterate of the correct
         // dimensions. The `IterateInitializer` consumes these as its
@@ -1551,6 +1559,15 @@ impl IpoptApplication {
             alg = alg.with_debug_hook(hook);
         }
         alg.max_iter = max_iter;
+        // `kappa_sigma` — factor bounding how far the bound multipliers
+        // may deviate from their primal estimates; the clamp runs after
+        // every accepted step (`IpIpoptAlg.cpp`, Eqn. (16)). Registered
+        // (default 1e10) but previously never read, so a user override —
+        // including the documented `< 1` "disable the correction" — was
+        // silently ignored (#191). Routed through the builder; the struct
+        // default matches the registered default, so default runs are
+        // unchanged.
+        alg.kappa_sigma = builder.kappa_sigma;
         // Honor `print_level == 0`: suppress the per-iteration table
         // that the algorithm writes straight to stdout. (The Phase-7
         // journalist surface respects `print_level` already; this is
@@ -1991,6 +2008,18 @@ impl IpoptApplication {
             builder.conv_check.infeas_max_streak = v;
         }
 
+        // Bound-multiplier / barrier damping constants (#191). Both were
+        // registered but never read, so user overrides were silently
+        // dropped; the algorithm ran with the hard-coded struct defaults.
+        // Defaults equal the registered defaults, so this changes nothing
+        // for a run that doesn't set them.
+        if let Some(v) = read_num("kappa_sigma") {
+            builder.kappa_sigma = v;
+        }
+        if let Some(v) = read_num("kappa_d") {
+            builder.kappa_d = v;
+        }
+
         // Barrier-parameter (μ) options — consumers in
         // `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp`. Both
         // updaters share the same option names; the builder forwards
@@ -2152,6 +2181,49 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("max_soft_resto_iters") {
             builder.line_search.max_soft_resto_iters = v;
+        }
+
+        // Filter switching / Armijo / margin constants (#191). Consumed
+        // by `FilterLsAcceptor` (only on the `Filter` line-search path);
+        // registered but never read, so overrides were silently dropped.
+        // Defaults equal the registered defaults.
+        if let Some(v) = read_num("eta_phi") {
+            builder.line_search.eta_phi = v;
+        }
+        if let Some(v) = read_num("theta_min_fact") {
+            builder.line_search.theta_min_fact = v;
+        }
+        if let Some(v) = read_num("theta_max_fact") {
+            builder.line_search.theta_max_fact = v;
+        }
+        if let Some(v) = read_num("gamma_phi") {
+            builder.line_search.gamma_phi = v;
+        }
+        if let Some(v) = read_num("gamma_theta") {
+            builder.line_search.gamma_theta = v;
+        }
+        if let Some(v) = read_num("s_phi") {
+            builder.line_search.s_phi = v;
+        }
+        if let Some(v) = read_num("s_theta") {
+            builder.line_search.s_theta = v;
+        }
+        if let Some(v) = read_num("alpha_min_frac") {
+            builder.line_search.alpha_min_frac = v;
+        }
+        if let Some(v) = read_num("obj_max_inc") {
+            builder.line_search.obj_max_inc = v;
+        }
+        // Second-order-correction constants (#191), consumed by
+        // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
+        if let Some(v) = read_int("max_soc") {
+            builder.line_search.max_soc = v;
+        }
+        if let Some(v) = read_num("kappa_soc") {
+            builder.line_search.kappa_soc = v;
+        }
+        if let Some(v) = read_int("soc_method") {
+            builder.line_search.soc_method = v;
         }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.

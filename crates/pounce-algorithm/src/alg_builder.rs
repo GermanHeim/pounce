@@ -213,6 +213,19 @@ pub struct AlgorithmBuilder {
     /// option-parser in `application.rs` is responsible for the
     /// cascading defaults (`mu_oracle = probing` etc.).
     pub mehrotra_algorithm: bool,
+    /// `kappa_sigma` — factor bounding how far the bound multipliers may
+    /// deviate from their primal estimates. The clamp
+    /// (`kappa_sigma_clamp`) runs after every accepted step; `< 1`
+    /// disables the correction. Mirrors `IpIpoptAlg.cpp` (Eqn. (16)),
+    /// default `1e10`. Baked onto [`crate::ipopt_alg::IpoptAlgorithm`] by
+    /// the solve path.
+    pub kappa_sigma: Number,
+    /// `kappa_d` — weight of the linear damping term added to the barrier
+    /// objective/gradient (and dual-infeasibility) to handle one-sided
+    /// bounds. Mirrors `IpIpoptCalculatedQuantities.cpp`, default `1e-5`.
+    /// Baked onto [`crate::ipopt_cq::IpoptCalculatedQuantities`] by the
+    /// solve path.
+    pub kappa_d: Number,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
@@ -461,6 +474,49 @@ pub struct LineSearchOptions {
     /// step length. Upstream default is `Primal`; the Mehrotra cascade
     /// switches to `BoundMult`.
     pub alpha_for_y: crate::line_search::backtracking::AlphaForY,
+
+    // Filter switching / Armijo / margin constants baked onto the
+    // assembled [`crate::line_search::filter_acceptor::FilterLsAcceptor`]
+    // (only when `line_search_method = Filter`). All were registered but
+    // never read (#191); defaults mirror `IpFilterLSAcceptor.cpp`.
+    /// `eta_phi` — relaxation factor in the Armijo condition (Eqn. (20)).
+    pub eta_phi: Number,
+    /// `theta_min_fact` — constraint-violation threshold factor in the
+    /// switching rule.
+    pub theta_min_fact: Number,
+    /// `theta_max_fact` — upper-bound factor for constraint violation in
+    /// the filter (Eqn. (21)).
+    pub theta_max_fact: Number,
+    /// `gamma_phi` — filter margin factor for the barrier function
+    /// (Eqn. (18a)).
+    pub gamma_phi: Number,
+    /// `gamma_theta` — filter margin factor for the constraint violation
+    /// (Eqn. (18b)).
+    pub gamma_theta: Number,
+    /// `s_phi` — exponent for the linear barrier model in the switching
+    /// rule (Eqn. (19)).
+    pub s_phi: Number,
+    /// `s_theta` — exponent for the current constraint violation in the
+    /// switching rule (Eqn. (19)).
+    pub s_theta: Number,
+    /// `alpha_min_frac` — safety factor for the minimal step size before
+    /// switching to restoration (gamma_alpha, Eqn. (23)).
+    pub alpha_min_frac: Number,
+    /// `obj_max_inc` — max acceptable increase (orders of magnitude) of
+    /// the barrier objective for a trial point.
+    pub obj_max_inc: Number,
+
+    // Second-order-correction constants baked onto the assembled
+    // [`BacktrackingLineSearch`]. Registered but never read (#191);
+    // defaults mirror `IpBacktrackingLineSearch.cpp`.
+    /// `max_soc` — max second-order-correction trial steps per iteration;
+    /// `0` disables SOC.
+    pub max_soc: Index,
+    /// `kappa_soc` — sufficient-reduction factor for a SOC step to be
+    /// continued.
+    pub kappa_soc: Number,
+    /// `soc_method` — `0` (paper method) or `1` (alpha-on-rhs variant).
+    pub soc_method: Index,
 }
 
 impl Default for LineSearchOptions {
@@ -472,6 +528,18 @@ impl Default for LineSearchOptions {
             max_soft_resto_iters: 10,
             accept_every_trial_step: false,
             alpha_for_y: crate::line_search::backtracking::AlphaForY::Primal,
+            eta_phi: 1e-8,
+            theta_min_fact: 1e-4,
+            theta_max_fact: 1e4,
+            gamma_phi: 1e-8,
+            gamma_theta: 1e-5,
+            s_phi: 2.3,
+            s_theta: 1.1,
+            alpha_min_frac: 0.05,
+            obj_max_inc: 5.0,
+            max_soc: 4,
+            kappa_soc: 0.99,
+            soc_method: 0,
         }
     }
 }
@@ -520,6 +588,8 @@ impl Default for AlgorithmBuilder {
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
+            kappa_sigma: 1e10,
+            kappa_d: 1e-5,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
@@ -688,7 +758,24 @@ impl AlgorithmBuilder {
         };
 
         let acceptor: Box<dyn BacktrackingLsAcceptor> = match self.line_search_method {
-            LineSearchChoice::Filter => Box::new(FilterLsAcceptor::default()),
+            LineSearchChoice::Filter => {
+                // Filter switching / Armijo / margin constants (#191):
+                // registered but previously never read. Set them on the
+                // concrete acceptor before boxing; defaults equal the
+                // registered defaults, so a run that doesn't set them is
+                // unchanged.
+                let mut f = FilterLsAcceptor::default();
+                f.eta_phi = self.line_search.eta_phi;
+                f.theta_min_fact = self.line_search.theta_min_fact;
+                f.theta_max_fact = self.line_search.theta_max_fact;
+                f.gamma_phi = self.line_search.gamma_phi;
+                f.gamma_theta = self.line_search.gamma_theta;
+                f.s_phi = self.line_search.s_phi;
+                f.s_theta = self.line_search.s_theta;
+                f.alpha_min_frac = self.line_search.alpha_min_frac;
+                f.obj_max_inc = self.line_search.obj_max_inc;
+                Box::new(f)
+            }
             LineSearchChoice::Penalty => Box::new(PenaltyLsAcceptor::default()),
             // CG-penalty acceptor lands with the rest of the
             // CG-penalty path; fall back to the penalty acceptor's
@@ -704,6 +791,12 @@ impl AlgorithmBuilder {
         line_search.max_soft_resto_iters = self.line_search.max_soft_resto_iters;
         line_search.accept_every_trial_step = self.line_search.accept_every_trial_step;
         line_search.alpha_for_y = self.line_search.alpha_for_y;
+        // Second-order-correction constants (#191): registered but
+        // previously never read. Same direct-field pattern as the
+        // watchdog knobs above.
+        line_search.max_soc = self.line_search.max_soc;
+        line_search.kappa_soc = self.line_search.kappa_soc;
+        line_search.soc_method = self.line_search.soc_method;
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
             Box::new(OptErrorConvCheck {
@@ -854,6 +947,8 @@ mod tests {
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
+                            kappa_sigma: 1e10,
+                            kappa_d: 1e-5,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
                             line_search: LineSearchOptions::default(),
