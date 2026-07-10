@@ -1457,6 +1457,14 @@ impl IpoptApplication {
         if let Ok((v, true)) = self.options.get_numeric_value("slack_move", "") {
             cq.borrow_mut().slack_move = v;
         }
+        // `kappa_d` — weight of the linear damping term added to the
+        // barrier objective/gradient to handle one-sided bounds
+        // (`IpIpoptCalculatedQuantities.cpp`). Registered (default 1e-5)
+        // but previously never read, so a user override was silently
+        // ignored (#191). Routed through the builder for parity with the
+        // other numeric knobs; the default matches the registered
+        // default, so only explicit overrides change behavior.
+        cq.borrow_mut().kappa_d = builder.kappa_d;
 
         // Seed `data.curr` with a zero-valued iterate of the correct
         // dimensions. The `IterateInitializer` consumes these as its
@@ -1551,6 +1559,15 @@ impl IpoptApplication {
             alg = alg.with_debug_hook(hook);
         }
         alg.max_iter = max_iter;
+        // `kappa_sigma` — factor bounding how far the bound multipliers
+        // may deviate from their primal estimates; the clamp runs after
+        // every accepted step (`IpIpoptAlg.cpp`, Eqn. (16)). Registered
+        // (default 1e10) but previously never read, so a user override —
+        // including the documented `< 1` "disable the correction" — was
+        // silently ignored (#191). Routed through the builder; the struct
+        // default matches the registered default, so default runs are
+        // unchanged.
+        alg.kappa_sigma = builder.kappa_sigma;
         // Honor `print_level == 0`: suppress the per-iteration table
         // that the algorithm writes straight to stdout. (The Phase-7
         // journalist surface respects `print_level` already; this is
@@ -1989,6 +2006,18 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("infeas_max_streak") {
             builder.conv_check.infeas_max_streak = v;
+        }
+
+        // Bound-multiplier / barrier damping constants (#191). Both were
+        // registered but never read, so user overrides were silently
+        // dropped; the algorithm ran with the hard-coded struct defaults.
+        // Defaults equal the registered defaults, so this changes nothing
+        // for a run that doesn't set them.
+        if let Some(v) = read_num("kappa_sigma") {
+            builder.kappa_sigma = v;
+        }
+        if let Some(v) = read_num("kappa_d") {
+            builder.kappa_d = v;
         }
 
         // Barrier-parameter (μ) options — consumers in

@@ -213,6 +213,19 @@ pub struct AlgorithmBuilder {
     /// option-parser in `application.rs` is responsible for the
     /// cascading defaults (`mu_oracle = probing` etc.).
     pub mehrotra_algorithm: bool,
+    /// `kappa_sigma` — factor bounding how far the bound multipliers may
+    /// deviate from their primal estimates. The clamp
+    /// (`kappa_sigma_clamp`) runs after every accepted step; `< 1`
+    /// disables the correction. Mirrors `IpIpoptAlg.cpp` (Eqn. (16)),
+    /// default `1e10`. Baked onto [`crate::ipopt_alg::IpoptAlgorithm`] by
+    /// the solve path.
+    pub kappa_sigma: Number,
+    /// `kappa_d` — weight of the linear damping term added to the barrier
+    /// objective/gradient (and dual-infeasibility) to handle one-sided
+    /// bounds. Mirrors `IpIpoptCalculatedQuantities.cpp`, default `1e-5`.
+    /// Baked onto [`crate::ipopt_cq::IpoptCalculatedQuantities`] by the
+    /// solve path.
+    pub kappa_d: Number,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
@@ -520,6 +533,8 @@ impl Default for AlgorithmBuilder {
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
+            kappa_sigma: 1e10,
+            kappa_d: 1e-5,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
@@ -854,6 +869,8 @@ mod tests {
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
+                            kappa_sigma: 1e10,
+                            kappa_d: 1e-5,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
                             line_search: LineSearchOptions::default(),

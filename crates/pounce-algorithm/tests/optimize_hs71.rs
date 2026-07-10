@@ -971,3 +971,92 @@ fn warm_start_options_flow_through_builder() {
         assert!(found, "{key} did not parse through the registry");
     }
 }
+
+/// #191: `kappa_sigma` (bound-multiplier deviation clamp) was registered
+/// but never read, so a user override was silently ignored. Honoring it
+/// must change the multiplier trajectory. `kappa_sigma = 1.0` tightens
+/// the clamp band to a point every accepted step, reshaping the solve
+/// while still converging to the same optimum; the default (1e10) leaves
+/// the clamp effectively slack.
+#[test]
+fn hs071_honors_user_kappa_sigma() {
+    let solve = |kappa_sigma: Option<Number>| {
+        let mut app = IpoptApplication::new();
+        if let Some(k) = kappa_sigma {
+            app.options_mut()
+                .set_numeric_value("kappa_sigma", k, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+        let status = app.optimize_tnlp(tnlp);
+        (
+            status,
+            app.statistics().iteration_count,
+            app.statistics().final_objective,
+        )
+    };
+
+    let (st_default, iters_default, obj_default) = solve(None);
+    let (st_tight, iters_tight, obj_tight) = solve(Some(1.0));
+
+    eprintln!(
+        "HS71 kappa_sigma: default(iters={iters_default}, {st_default:?}) \
+         vs 1.0(iters={iters_tight}, {st_tight:?})",
+    );
+
+    // Both still reach the true optimum...
+    assert!((obj_default - 17.014017).abs() < 1e-4);
+    assert!((obj_tight - 17.014017).abs() < 1e-4);
+    assert!(matches!(
+        st_default,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    ));
+    // ...but the tightened clamp reshapes the trajectory. Before the fix
+    // the option was ignored and both runs took the same iteration count.
+    assert_ne!(
+        iters_default, iters_tight,
+        "kappa_sigma was ignored: both runs took {iters_default} iters",
+    );
+}
+
+/// #191: `kappa_d` (linear damping weight for one-sided bounds) was
+/// registered but never read. A large weight measurably perturbs the
+/// barrier problem on a bounded NLP, so honoring the option changes the
+/// solve path (the true optimum is unchanged since the damping term
+/// vanishes as mu -> 0).
+#[test]
+fn hs071_honors_user_kappa_d() {
+    let solve = |kappa_d: Option<Number>| {
+        let mut app = IpoptApplication::new();
+        if let Some(k) = kappa_d {
+            app.options_mut()
+                .set_numeric_value("kappa_d", k, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+        let status = app.optimize_tnlp(tnlp);
+        (
+            status,
+            app.statistics().iteration_count,
+            app.statistics().final_objective,
+        )
+    };
+
+    let (_, iters_default, obj_default) = solve(None);
+    let (_, iters_damped, obj_damped) = solve(Some(100.0));
+
+    eprintln!("HS71 kappa_d: default(iters={iters_default}) vs 100(iters={iters_damped})");
+
+    // The damping term vanishes at the solution, so the objective is the
+    // same either way...
+    assert!((obj_default - 17.014017).abs() < 1e-4);
+    assert!((obj_damped - 17.014017).abs() < 1e-4);
+    // ...but a large weight reshapes the path. Before the fix the option
+    // was ignored and both runs were identical.
+    assert_ne!(
+        iters_default, iters_damped,
+        "kappa_d was ignored: both runs took {iters_default} iters",
+    );
+}
