@@ -143,6 +143,18 @@ pub fn make_resto_inner_solver(
 /// the ℓ₁-on-restoration-failure auto-fallback — must instead use
 /// [`make_default_restoration_factory_provider`] together with
 /// [`pounce_algorithm::application::IpoptApplication::set_restoration_factory_provider`].
+/// Copy the restoration options the outer [`AlgorithmBuilder`] carries
+/// (read from the `OptionsList` in `algorithm_builder_from_options`) into
+/// the [`RestoAlgorithmBuilder`], which every frontend constructs with
+/// bare defaults and never options-configures (#191). Defaults match, so a
+/// run that doesn't set these options is unchanged.
+fn apply_outer_resto_options(rb: &mut RestoAlgorithmBuilder, ab: &AlgorithmBuilder) {
+    rb.rho = ab.resto.resto_penalty_parameter;
+    rb.eta_factor = ab.resto.resto_proximity_weight;
+    rb.bound_mult_reset_threshold = ab.resto.bound_mult_reset_threshold;
+    rb.constr_mult_reset_threshold = ab.resto.constr_mult_reset_threshold;
+}
+
 pub fn make_default_restoration_factory(
     resto_builder: RestoAlgorithmBuilder,
     inner_alg_builder: AlgorithmBuilder,
@@ -150,9 +162,10 @@ pub fn make_default_restoration_factory(
 ) -> Box<dyn FnMut() -> Box<dyn pounce_algorithm::restoration::RestorationPhase>> {
     let mut state = Some((resto_builder, inner_alg_builder, backend_factory_factory));
     Box::new(move || {
-        let (rb, ab, bff) = state
+        let (mut rb, ab, bff) = state
             .take()
             .expect("restoration factory invoked more than once");
+        apply_outer_resto_options(&mut rb, &ab);
         let inner = make_resto_inner_solver(rb, ab, bff);
         let driver = crate::min_c_1nrm::MinC1NormRestoration::new().with_inner_solver(inner);
         Box::new(driver) as Box<dyn pounce_algorithm::restoration::RestorationPhase>
@@ -860,6 +873,46 @@ fn downcast_dense_mut(v: &mut dyn Vector) -> &mut DenseVector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_outer_resto_options_propagates_overrides() {
+        // #191: restoration options set on the outer builder must reach
+        // the restoration builder (which frontends construct with bare
+        // defaults).
+        let mut ab = AlgorithmBuilder::new();
+        ab.resto.resto_penalty_parameter = 2.5e3;
+        ab.resto.resto_proximity_weight = 4.0;
+        ab.resto.bound_mult_reset_threshold = 7.0e2;
+        ab.resto.constr_mult_reset_threshold = 9.0;
+
+        let mut rb = RestoAlgorithmBuilder::new();
+        apply_outer_resto_options(&mut rb, &ab);
+
+        assert_eq!(rb.rho, 2.5e3);
+        assert_eq!(rb.eta_factor, 4.0);
+        assert_eq!(rb.bound_mult_reset_threshold, 7.0e2);
+        assert_eq!(rb.constr_mult_reset_threshold, 9.0);
+    }
+
+    #[test]
+    fn apply_outer_resto_options_defaults_are_unchanged() {
+        // Default outer options must reproduce the restoration builder's
+        // own defaults exactly, so a run that sets nothing is untouched.
+        let ab = AlgorithmBuilder::new();
+        let mut rb = RestoAlgorithmBuilder::new();
+        let baseline = RestoAlgorithmBuilder::new();
+        apply_outer_resto_options(&mut rb, &ab);
+        assert_eq!(rb.rho, baseline.rho);
+        assert_eq!(rb.eta_factor, baseline.eta_factor);
+        assert_eq!(
+            rb.bound_mult_reset_threshold,
+            baseline.bound_mult_reset_threshold
+        );
+        assert_eq!(
+            rb.constr_mult_reset_threshold,
+            baseline.constr_mult_reset_threshold
+        );
+    }
 
     #[test]
     fn placeholder_resto_iv_has_correct_shapes() {

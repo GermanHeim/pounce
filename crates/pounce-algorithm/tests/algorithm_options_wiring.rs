@@ -263,3 +263,32 @@ fn perturbation_constants_override_flows_through() {
     assert_eq!(p.jacobian_regularization_exponent, 0.5);
     assert!(p.perturb_always_cd);
 }
+
+#[test]
+fn resto_constants_default_match_registered() {
+    let r = builder_from(|_| {}).resto;
+    assert_eq!(r.bound_mult_reset_threshold, 1e3);
+    assert_eq!(r.constr_mult_reset_threshold, 0.0);
+    assert_eq!(r.resto_penalty_parameter, 1e3);
+    assert_eq!(r.resto_proximity_weight, 1.0);
+}
+
+#[test]
+fn resto_constants_override_flows_through() {
+    let r = builder_from(|app| {
+        let o = app.options_mut();
+        for (k, v) in [
+            ("bound_mult_reset_threshold", 5e2),
+            ("constr_mult_reset_threshold", 3.0),
+            ("resto_penalty_parameter", 2e3),
+            ("resto_proximity_weight", 2.0),
+        ] {
+            o.set_numeric_value(k, v, true, false).unwrap();
+        }
+    })
+    .resto;
+    assert_eq!(r.bound_mult_reset_threshold, 5e2);
+    assert_eq!(r.constr_mult_reset_threshold, 3.0);
+    assert_eq!(r.resto_penalty_parameter, 2e3);
+    assert_eq!(r.resto_proximity_weight, 2.0);
+}

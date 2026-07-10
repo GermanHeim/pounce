@@ -244,6 +244,7 @@ pub struct AlgorithmBuilder {
     pub line_search: LineSearchOptions,
     pub refinement: RefinementOptions,
     pub perturbation: PerturbationOptions,
+    pub resto: RestoOptions,
     pub output: OutputOptions,
     pub warm: WarmStartOptions,
     /// SQP-specific options (consulted only when
@@ -611,6 +612,40 @@ impl Default for PerturbationOptions {
     }
 }
 
+/// Restoration-phase knobs carried on the outer builder and copied into
+/// the `RestoAlgorithmBuilder` when the restoration factory is minted
+/// (`pounce-restoration`). The restoration builder is constructed with
+/// defaults by each frontend and never options-configured, so these were
+/// registered but never read (#191). Defaults mirror upstream's
+/// restoration `RegisterOptions`.
+#[derive(Debug, Clone)]
+pub struct RestoOptions {
+    /// `bound_mult_reset_threshold` — reset bound multipliers to 1 after
+    /// restoration if the largest exceeds this.
+    pub bound_mult_reset_threshold: Number,
+    /// `constr_mult_reset_threshold` — ignore the least-square constraint
+    /// multiplier estimate after restoration if its norm exceeds this
+    /// (`0` keeps the estimate).
+    pub constr_mult_reset_threshold: Number,
+    /// `resto_penalty_parameter` — penalty on the slack 1-norm in the
+    /// restoration objective (`rho`).
+    pub resto_penalty_parameter: Number,
+    /// `resto_proximity_weight` — proximity-term weight (`eta_factor`;
+    /// `η = eta_factor · sqrt(μ)`).
+    pub resto_proximity_weight: Number,
+}
+
+impl Default for RestoOptions {
+    fn default() -> Self {
+        Self {
+            bound_mult_reset_threshold: 1e3,
+            constr_mult_reset_threshold: 0.0,
+            resto_penalty_parameter: 1e3,
+            resto_proximity_weight: 1.0,
+        }
+    }
+}
+
 /// Iterative-refinement knobs baked onto the assembled
 /// [`crate::kkt::pd_full_space_solver::PdFullSpaceSolver`]. Defaults
 /// mirror `IpPDFullSpaceSolver.cpp:RegisterOptions`. All were registered
@@ -699,6 +734,7 @@ impl Default for AlgorithmBuilder {
             line_search: LineSearchOptions::default(),
             refinement: RefinementOptions::default(),
             perturbation: PerturbationOptions::default(),
+            resto: RestoOptions::default(),
             output: OutputOptions::default(),
             warm: WarmStartOptions::default(),
             sqp: crate::sqp::SqpOptions::default(),
@@ -1087,6 +1123,7 @@ mod tests {
                             line_search: LineSearchOptions::default(),
                             refinement: RefinementOptions::default(),
                             perturbation: PerturbationOptions::default(),
+                            resto: RestoOptions::default(),
                             output: OutputOptions::default(),
                             warm: WarmStartOptions::default(),
                             sqp: crate::sqp::SqpOptions::default(),

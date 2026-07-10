@@ -2295,6 +2295,25 @@ impl IpoptApplication {
             builder.refinement.residual_improvement_factor = v;
         }
 
+        // Restoration-phase constants (#191). Carried on the outer builder
+        // and copied into the `RestoAlgorithmBuilder` when the restoration
+        // factory is minted (the frontends pass this builder in). The
+        // restoration builder was never options-configured, so these were
+        // registered but never read. Defaults equal the registered
+        // defaults.
+        if let Some(v) = read_num("bound_mult_reset_threshold") {
+            builder.resto.bound_mult_reset_threshold = v;
+        }
+        if let Some(v) = read_num("constr_mult_reset_threshold") {
+            builder.resto.constr_mult_reset_threshold = v;
+        }
+        if let Some(v) = read_num("resto_penalty_parameter") {
+            builder.resto.resto_penalty_parameter = v;
+        }
+        if let Some(v) = read_num("resto_proximity_weight") {
+            builder.resto.resto_proximity_weight = v;
+        }
+
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {
             builder.output.print_frequency_iter = v;
