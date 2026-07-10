@@ -2183,6 +2183,49 @@ impl IpoptApplication {
             builder.line_search.max_soft_resto_iters = v;
         }
 
+        // Filter switching / Armijo / margin constants (#191). Consumed
+        // by `FilterLsAcceptor` (only on the `Filter` line-search path);
+        // registered but never read, so overrides were silently dropped.
+        // Defaults equal the registered defaults.
+        if let Some(v) = read_num("eta_phi") {
+            builder.line_search.eta_phi = v;
+        }
+        if let Some(v) = read_num("theta_min_fact") {
+            builder.line_search.theta_min_fact = v;
+        }
+        if let Some(v) = read_num("theta_max_fact") {
+            builder.line_search.theta_max_fact = v;
+        }
+        if let Some(v) = read_num("gamma_phi") {
+            builder.line_search.gamma_phi = v;
+        }
+        if let Some(v) = read_num("gamma_theta") {
+            builder.line_search.gamma_theta = v;
+        }
+        if let Some(v) = read_num("s_phi") {
+            builder.line_search.s_phi = v;
+        }
+        if let Some(v) = read_num("s_theta") {
+            builder.line_search.s_theta = v;
+        }
+        if let Some(v) = read_num("alpha_min_frac") {
+            builder.line_search.alpha_min_frac = v;
+        }
+        if let Some(v) = read_num("obj_max_inc") {
+            builder.line_search.obj_max_inc = v;
+        }
+        // Second-order-correction constants (#191), consumed by
+        // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
+        if let Some(v) = read_int("max_soc") {
+            builder.line_search.max_soc = v;
+        }
+        if let Some(v) = read_num("kappa_soc") {
+            builder.line_search.kappa_soc = v;
+        }
+        if let Some(v) = read_int("soc_method") {
+            builder.line_search.soc_method = v;
+        }
+
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {
             builder.output.print_frequency_iter = v;

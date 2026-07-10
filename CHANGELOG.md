@@ -55,18 +55,24 @@ changes.
 
 ### Fixed
 
-- **`kappa_sigma` and `kappa_d` overrides are now honored (#191).** Both options
-  were registered but never read, so the solver always ran with the hard-coded
-  defaults and a user-set value was silently dropped. `kappa_sigma` (default
-  `1e10`) bounds how far the bound multipliers may deviate from their primal
-  estimates via a clamp applied after every accepted step — including the
-  documented `< 1` value that disables the correction; `kappa_d` (default
-  `1e-5`) weights the linear damping term for one-sided bounds in the barrier
-  objective/gradient. Both are now read into `AlgorithmBuilder` and baked onto
-  the algorithm / calculated-quantities at solve setup. Defaults are unchanged,
-  so only runs that explicitly set these options are affected. First tranche of
-  the broader "registered but unread algorithmic constants" audit tracked in
-  #191.
+- **Registered-but-unread algorithmic tuning options are now honored (#191).**
+  A range of options were registered but never read, so the solver always ran
+  with the hard-coded defaults and any user-set value was silently dropped.
+  Now wired through `AlgorithmBuilder`:
+  - `kappa_sigma` (default `1e10`) — bounds how far the bound multipliers may
+    deviate from their primal estimates via a clamp applied after every
+    accepted step, including the documented `< 1` value that disables the
+    correction.
+  - `kappa_d` (default `1e-5`) — weight of the linear damping term for
+    one-sided bounds in the barrier objective/gradient.
+  - Filter switching / Armijo / margin constants for the filter line search:
+    `eta_phi`, `theta_min_fact`, `theta_max_fact`, `gamma_phi`, `gamma_theta`,
+    `s_phi`, `s_theta`, `alpha_min_frac`, `obj_max_inc`.
+  - Second-order-correction constants: `max_soc` (incl. `0` to disable SOC),
+    `kappa_soc`, `soc_method`.
+
+  Every default equals the previously-hard-coded value, so runs that don't set
+  these options are unchanged. Remaining unread constants stay tracked in #191.
 - **`timing_statistics=no` no longer runs the detailed timers every iteration
   (#190).** Every `TimedTask::start`/`end` pair calls `getrusage(RUSAGE_SELF)`
   (twice — once each), and the per-subsystem / per-callback timers wrap hot

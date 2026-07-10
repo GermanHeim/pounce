@@ -50,3 +50,90 @@ fn kappa_d_override_flows_through() {
     });
     assert_eq!(b.kappa_d, 0.0);
 }
+
+#[test]
+fn filter_constants_default_match_registered() {
+    let b = builder_from(|_| {}).line_search;
+    assert_eq!(b.eta_phi, 1e-8);
+    assert_eq!(b.theta_min_fact, 1e-4);
+    assert_eq!(b.theta_max_fact, 1e4);
+    assert_eq!(b.gamma_phi, 1e-8);
+    assert_eq!(b.gamma_theta, 1e-5);
+    assert_eq!(b.s_phi, 2.3);
+    assert_eq!(b.s_theta, 1.1);
+    assert_eq!(b.alpha_min_frac, 0.05);
+    assert_eq!(b.obj_max_inc, 5.0);
+}
+
+#[test]
+fn filter_constants_override_flows_through() {
+    let b = builder_from(|app| {
+        let o = app.options_mut();
+        for (k, v) in [
+            ("eta_phi", 2e-8),
+            ("theta_min_fact", 2e-4),
+            ("theta_max_fact", 2e4),
+            ("gamma_phi", 2e-8),
+            ("gamma_theta", 2e-5),
+            ("s_phi", 2.5),
+            ("s_theta", 1.2),
+            ("alpha_min_frac", 0.1),
+            ("obj_max_inc", 6.0),
+        ] {
+            o.set_numeric_value(k, v, true, false).unwrap();
+        }
+    })
+    .line_search;
+    assert_eq!(b.eta_phi, 2e-8);
+    assert_eq!(b.theta_min_fact, 2e-4);
+    assert_eq!(b.theta_max_fact, 2e4);
+    assert_eq!(b.gamma_phi, 2e-8);
+    assert_eq!(b.gamma_theta, 2e-5);
+    assert_eq!(b.s_phi, 2.5);
+    assert_eq!(b.s_theta, 1.2);
+    assert_eq!(b.alpha_min_frac, 0.1);
+    assert_eq!(b.obj_max_inc, 6.0);
+}
+
+#[test]
+fn soc_constants_default_match_registered() {
+    let b = builder_from(|_| {}).line_search;
+    assert_eq!(b.max_soc, 4);
+    assert_eq!(b.kappa_soc, 0.99);
+    assert_eq!(b.soc_method, 0);
+}
+
+#[test]
+fn soc_constants_override_flows_through() {
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("max_soc", 0, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("kappa_soc", 0.5, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("soc_method", 1, true, false)
+            .unwrap();
+    })
+    .line_search;
+    assert_eq!(b.max_soc, 0);
+    assert_eq!(b.kappa_soc, 0.5);
+    assert_eq!(b.soc_method, 1);
+}
+
+/// The SOC constants must survive `build()` onto the concrete
+/// `BacktrackingLineSearch` in the assembled bundle — this covers the
+/// builder → line-search assignment (`build_inner`), not just the
+/// option → builder step above.
+#[test]
+fn soc_constants_reach_assembled_line_search() {
+    let mut builder = AlgorithmBuilder::new();
+    builder.line_search.max_soc = 0;
+    builder.line_search.kappa_soc = 0.5;
+    builder.line_search.soc_method = 1;
+    let bundle = builder.build();
+    assert_eq!(bundle.line_search.max_soc, 0);
+    assert_eq!(bundle.line_search.kappa_soc, 0.5);
+    assert_eq!(bundle.line_search.soc_method, 1);
+}
