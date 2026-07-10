@@ -83,13 +83,19 @@ changes.
   - Iterative-refinement constants on the KKT full-space solver:
     `min_refinement_steps`, `max_refinement_steps`, `residual_ratio_max`,
     `residual_ratio_singular`, `residual_improvement_factor`.
+  - Restoration-phase constants: `bound_mult_reset_threshold`,
+    `constr_mult_reset_threshold`, `resto_penalty_parameter`,
+    `resto_proximity_weight`. The outer builder carries these (read from the
+    options list) and propagates them into the restoration builder when the
+    restoration factory is minted, so all frontends honor them without
+    per-frontend plumbing.
 
   Every default equals the previously-hard-coded value, so runs that don't set
-  these options are unchanged. The remaining unread constants — restoration
-  reset/penalty thresholds (`bound_mult_reset_threshold`,
-  `constr_mult_reset_threshold`, `resto_penalty_parameter`,
-  `resto_proximity_weight`), which need per-frontend restoration-builder
-  plumbing — stay tracked in #191.
+  these options are unchanged. The only options still not wired are ones whose
+  underlying behavior is not yet implemented (e.g. `neg_curv_test_tol`'s
+  non-zero branch, `expect_infeasible_problem`, `start_with_resto`,
+  `alpha_for_y_tol`); wiring those would be misleading until the feature
+  lands.
 - **`timing_statistics=no` no longer runs the detailed timers every iteration
   (#190).** Every `TimedTask::start`/`end` pair calls `getrusage(RUSAGE_SELF)`
   (twice — once each), and the per-subsystem / per-callback timers wrap hot
