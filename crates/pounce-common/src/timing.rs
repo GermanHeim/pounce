@@ -366,6 +366,54 @@ impl TimingStatistics {
         ]
     }
 
+    /// Enable or disable the *detailed* per-subsystem timers, mirroring
+    /// upstream Ipopt's `timing_statistics` gating (`IpoptApplication`
+    /// only measures the detailed function/phase timers when
+    /// `timing_statistics=yes`). When `on` is `false` every `start()` /
+    /// `end()` on these tasks becomes a no-op, so a fast-objective solve
+    /// stops paying two `getrusage` syscalls per timed section (issue
+    /// #190).
+    ///
+    /// [`Self::overall_alg`] is deliberately left untouched: its
+    /// `live_cpu_time()` feeds the `max_cpu_time` convergence check and
+    /// its total is reported regardless of the option — upstream's help
+    /// text is explicit that "the overall algorithm time is unaffected by
+    /// this option". Callers that need the detailed
+    /// [`Self::wall_time_breakdown`] populated (the Python `info["timing"]`
+    /// dict, the CLI `timing.json`) must therefore set `timing_statistics`
+    /// (or `print_timing_statistics`, which implies it) to `yes`.
+    pub fn set_detailed_enabled(&self, on: bool) {
+        let set = |t: &TimedTask| {
+            if on {
+                t.enable();
+            } else {
+                t.disable();
+            }
+        };
+        // Every field except `overall_alg`.
+        set(&self.print_problem_statistics);
+        set(&self.initialize_iterates);
+        set(&self.update_hessian);
+        set(&self.output_iteration);
+        set(&self.update_barrier_parameter);
+        set(&self.compute_search_direction);
+        set(&self.compute_acceptable_trial_point);
+        set(&self.accept_trial_point);
+        set(&self.check_convergence);
+        set(&self.linear_system_factorization);
+        set(&self.linear_system_back_solve);
+        set(&self.linear_system_structure_converter);
+        set(&self.linear_system_structure_converter_init);
+        set(&self.quality_function_search);
+        set(&self.total_callback_time);
+        set(&self.total_function_evaluation_time);
+        set(&self.eval_obj);
+        set(&self.eval_grad_obj);
+        set(&self.eval_constr);
+        set(&self.eval_constr_jac);
+        set(&self.eval_lag_hess);
+    }
+
     /// Reset all counters. Mirrors upstream `ResetTimes()`.
     pub fn reset(&self) {
         self.overall_alg.reset();
@@ -415,6 +463,36 @@ mod tests {
         t.start();
         t.end();
         assert_eq!(t.total_wallclock_time(), 0.0);
+    }
+
+    #[test]
+    fn set_detailed_enabled_gates_all_but_overall_alg() {
+        let stats = TimingStatistics::new();
+        // Default: every timer enabled.
+        assert!(stats.overall_alg.is_enabled());
+        assert!(stats.eval_obj.is_enabled());
+        assert!(stats.check_convergence.is_enabled());
+
+        // Disabling the detail timers (issue #190: `timing_statistics=no`)
+        // must leave `overall_alg` alive — it feeds the `max_cpu_time`
+        // check and is always reported — while every other timer becomes
+        // a no-op that skips the `getrusage` syscalls.
+        stats.set_detailed_enabled(false);
+        assert!(stats.overall_alg.is_enabled(), "overall_alg must stay live");
+        assert!(!stats.eval_obj.is_enabled());
+        assert!(!stats.check_convergence.is_enabled());
+        assert!(!stats.total_function_evaluation_time.is_enabled());
+        assert!(!stats.linear_system_factorization.is_enabled());
+
+        // A disabled detail timer accumulates nothing even across start/end.
+        stats.eval_obj.start();
+        stats.eval_obj.end();
+        assert_eq!(stats.eval_obj.total_wallclock_time(), 0.0);
+
+        // Re-enabling restores them.
+        stats.set_detailed_enabled(true);
+        assert!(stats.eval_obj.is_enabled());
+        assert!(stats.check_convergence.is_enabled());
     }
 
     #[test]
