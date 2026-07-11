@@ -1006,15 +1006,27 @@ def minimize(
     else:
         router_jac_combined = jac_combined  # value-vec; never read when nlp
 
+    # Bind the objective's extra `args` into `fun`/`jac`/`hess` before handing
+    # them to the routers, which probe them as bare `f(x)`. The NLP path below
+    # applies `args` itself (`fun(x, *args)`), but the router copies would
+    # otherwise call the raw callables without `args` — so a parameterized
+    # convex objective either never routes (auto falls back to NLP) or is
+    # wrongly rejected as "not convex" under a forced solver_selection. (#196
+    # sibling: a user input silently not honored on the convex route.)
+    def _bind_args(f):
+        if f is None or not args:
+            return f
+        return lambda x, _f=f, _a=args: _f(x, *_a)
+
     # Wrap router callables in one shared point-cache (M34): the LP/QP and SOCP
     # routers probe an identical point set (same seed), so caching makes the
     # second router's probes cache hits instead of re-evaluating the objective.
     # Only these router copies are cached; the NLP fallback below still calls
     # the original `fun`/`jac`/… so the actual solve is unaffected.
     route_kw = dict(
-        fun=_point_cache(fun),
-        jac=_point_cache(jac),
-        hess=_point_cache(hess),
+        fun=_point_cache(_bind_args(fun)),
+        jac=_point_cache(_bind_args(jac)),
+        hess=_point_cache(_bind_args(hess)),
         lb=lb,
         ub=ub,
         m=m,
