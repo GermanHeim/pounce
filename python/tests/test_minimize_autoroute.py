@@ -152,6 +152,26 @@ def test_convex_route_warns_dropped_callback():
     assert seen == []  # callback did not fire — exactly what the warning says
 
 
+def test_args_are_bound_into_convex_router_probes():
+    # A parameterized convex QP min (x0 − c)² + x1² with args=(c,). The router
+    # probes fun/jac/hess as bare f(x), so before the fix `args` was dropped:
+    # `auto` silently fell back to NLP (never routed) and a forced `qp-ipm` was
+    # wrongly rejected as "not convex". Both must now route and land x0 = c.
+    fun = lambda x, c: (x[0] - c) ** 2 + x[1] ** 2
+    jac = lambda x, c: np.array([2 * (x[0] - c), 2 * x[1]])
+    hess = lambda x, c: np.array([[2.0, 0.0], [0.0, 2.0]])
+    kw = dict(args=(3.0,), jac=jac, hess=hess, bounds=[(-10, 10), (-10, 10)])
+
+    auto = minimize(fun, [0.0, 0.0], options={"solver_selection": "auto"}, **kw)
+    assert _routed_to(auto) == "qp-ipm"  # args-bound probe now detects the QP
+    np.testing.assert_allclose(auto.x, [3.0, 0.0], atol=1e-6)
+
+    # Forced convex must no longer spuriously reject a genuinely convex QP.
+    forced = minimize(fun, [0.0, 0.0], options={"solver_selection": "qp-ipm"}, **kw)
+    assert _routed_to(forced) == "qp-ipm"
+    np.testing.assert_allclose(forced.x, [3.0, 0.0], atol=1e-6)
+
+
 def test_forced_lp_on_nonlinear_raises():
     fun = lambda x: (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
     with pytest.raises(ValueError):

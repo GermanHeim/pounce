@@ -55,6 +55,14 @@ changes.
 
 ### Fixed
 
+- **`pounce.minimize(..., args=...)` now works with convex routing.** The extra
+  objective `args` were applied on the NLP path but not bound into the copies of
+  `fun`/`jac`/`hess` handed to the LP/QP/SOCP routers, which probe them as bare
+  `f(x)`. A parameterized convex objective therefore either silently never
+  routed (`solver_selection=auto` fell back to NLP) or was wrongly rejected as
+  "not convex" under a forced `solver_selection`. `args` are now bound into the
+  router probes, so a parameterized convex QP/LP/QCQP routes to the specialized
+  solver as expected.
 - **Post-optimal requests are no longer silently dropped on the specialized
   solve paths (#196).** When an `.nl` declared the sIPOPT sensitivity suffixes
   (`sens_state_1` / `sens_state_value_1` / `sens_init_constr`) or the solve
