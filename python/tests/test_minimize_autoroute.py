@@ -132,6 +132,26 @@ def test_nonconvex_qp_stays_on_nlp():
     assert _routed_to(res) is None
 
 
+def test_convex_route_warns_dropped_callback():
+    # issue #196 (related): the convex/SOCP routers consume the extracted
+    # quadratic form and never call back into Python, so a user `callback`
+    # cannot fire on that route. `callback` is a named argument (not in
+    # `options`), so it must be surfaced explicitly in the dropped-options
+    # warning rather than silently ignored.
+    fun = lambda x: x[0] ** 2 + x[1] ** 2 - 3 * x[0] - 4 * x[1] + 5.0
+    jac = lambda x: np.array([2 * x[0] - 3, 2 * x[1] - 4])
+    hess = lambda x: np.array([[2.0, 0.0], [0.0, 2.0]])
+    seen = []
+    with pytest.warns(UserWarning, match=r"callback \(argument\)"):
+        res = minimize(
+            fun, [0.5, 0.5], jac=jac, hess=hess, bounds=[(0, 1), (0, 1)],
+            callback=lambda xk: seen.append(1),
+            options={"solver_selection": "auto"},
+        )
+    assert _routed_to(res) == "qp-ipm"  # still took the convex fast path
+    assert seen == []  # callback did not fire — exactly what the warning says
+
+
 def test_forced_lp_on_nonlinear_raises():
     fun = lambda x: (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
     with pytest.raises(ValueError):

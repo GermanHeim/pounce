@@ -68,14 +68,19 @@ struct SolveOut {
     x: Vec<Number>,
 }
 
+/// On-converged capture slot: the lifted full-length primal `x` plus the
+/// base-problem constraint duals `lambda` of the most recent solve.
+type SolveCapture = Rc<RefCell<Option<(Vec<Number>, Vec<Number>)>>>;
+
 /// The find-minima driver. Holds the single application and base problem and
 /// runs the chosen strategy until a [`Stop`].
 struct Driver<'a> {
     app: &'a mut IpoptApplication,
     base: Rc<RefCell<dyn TNLP>>,
     /// Filled by the `on_converged` hook with the converged primal (full
-    /// length); cleared before each solve, taken after.
-    capture: Rc<RefCell<Option<Vec<Number>>>>,
+    /// length) plus the base-problem constraint duals; cleared before each
+    /// solve, taken after.
+    capture: SolveCapture,
     cfg: &'a MinimaArgs,
     n: usize,
     m: usize,
@@ -133,13 +138,47 @@ impl<'a> Driver<'a> {
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         );
         match self.capture.borrow_mut().take() {
-            Some(x) if success => Ok(SolveOut { success: true, x }),
+            // Only the primal is needed for acceptance; the duals are recovered
+            // later by `recover_duals` (a clean base re-solve) so a point
+            // accepted from an augmented penalty/tunnel solve still gets the
+            // base problem's multipliers.
+            Some((x, _lambda)) if success => Ok(SolveOut { success: true, x }),
             // A failed solve has no usable captured point; acceptance needs
             // success anyway, so the empty x is never read.
             _ => Ok(SolveOut {
                 success: false,
                 x: Vec::new(),
             }),
+        }
+    }
+
+    /// Recover the base-problem constraint duals at an accepted minimum `x`.
+    /// The accepting solve may have run on an augmented (penalty / tunnel)
+    /// objective, whose multipliers are not the base problem's, so re-solve the
+    /// clean base objective once from `x` — it is already optimal, so this
+    /// converges immediately — and take the captured `lambda`. Budget-exempt:
+    /// the point is already kept, so this does not consume a `--max-solves`
+    /// slot. Falls back to zeros if the recovery solve does not converge or the
+    /// nlp exposes no user-facing duals (length ≠ `m`).
+    fn recover_duals(&mut self, x: &[Number]) -> Vec<Number> {
+        let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeededTnlp::new(
+            Rc::clone(&self.base),
+            x.to_vec(),
+        )));
+        let _ = self
+            .app
+            .options_mut()
+            .read_from_str("hessian_approximation exact\n", true);
+        *self.capture.borrow_mut() = None;
+        let status = self.app.optimize_tnlp(t);
+        let ok = matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        );
+        match self.capture.borrow_mut().take() {
+            Some((_x, lambda)) if ok && lambda.len() == self.m => lambda,
+            _ => vec![0.0; self.m],
         }
     }
 
@@ -358,7 +397,12 @@ impl<'a> Driver<'a> {
         let accepted =
             finite && self.in_bounds(&x) && self.is_minimum(&x) && !self.archive.is_known(&x);
         if accepted {
-            self.archive.add(x, fval);
+            // Recover the base-problem duals at the accepted point before
+            // archiving (issue #196, related): the search may have accepted a
+            // point from an augmented penalty/tunnel solve whose multipliers
+            // are not the base problem's.
+            let lambda = self.recover_duals(&x);
+            self.archive.add(x, lambda, fval);
             self.stagnant = 0;
             if self.archive.len() >= self.cfg.n_minima {
                 return Err(Stop::TargetReached);
@@ -646,6 +690,9 @@ impl<'a> Driver<'a> {
 struct Minimum {
     x: Vec<Number>,
     objective: Number,
+    /// Base-problem constraint duals at this minimum (length `m`), recovered by
+    /// a clean re-solve (issue #196, related). Zeros if unavailable.
+    lambda: Vec<Number>,
 }
 
 /// Entry point: run the `--minima` search on `base` (the raw problem TNLP —
@@ -715,14 +762,21 @@ pub fn run(
         })
         .collect();
 
-    // Capture the converged primal of each solve via the on-converged hook.
-    let capture: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
+    // Capture the converged primal AND the base-problem constraint duals of
+    // each solve via the on-converged hook. `lambda` uses the same
+    // `finalize_solution_lambda` convention as the main NLP `.sol` path (c/d
+    // split inversion + unscaling), so the `.sol` duals match a plain solve.
+    // An nlp that does not expose user-facing duals returns an empty vec; that
+    // (or any length mismatch) falls back to zeros where the duals are stored.
+    let capture: SolveCapture = Rc::new(RefCell::new(None));
     {
         let cap = Rc::clone(&capture);
         app.set_on_converged(Box::new(move |data, _cq, nlp, _pd| {
             if let Some(curr) = data.borrow().curr.clone() {
-                let x = nlp.borrow().lift_x_to_full(&*curr.x);
-                *cap.borrow_mut() = Some(x);
+                let nlp_ref = nlp.borrow();
+                let x = nlp_ref.lift_x_to_full(&*curr.x);
+                let lambda = nlp_ref.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
+                *cap.borrow_mut() = Some((x, lambda));
             }
         }));
     }
@@ -777,6 +831,7 @@ pub fn run(
         .map(|&i| Minimum {
             x: driver.archive.xs[i].clone(),
             objective: driver.archive.fs[i],
+            lambda: driver.archive.ls[i].clone(),
         })
         .collect();
     let best_obj = order.first().map(|&i| driver.archive.fs[i]);
@@ -837,10 +892,17 @@ fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize) {
             "POUNCE {} find-minima rank {rank}: Solve_Succeeded",
             env!("CARGO_PKG_VERSION")
         );
+        // Real base-problem duals recovered per minimum (issue #196, related);
+        // `recover_duals` guarantees length `m`, but guard defensively.
+        let lambda = if mn.lambda.len() == m {
+            &mn.lambda
+        } else {
+            &zeros
+        };
         let payload = crate::nl_writer::SolutionFile {
             message: &message,
             x: &mn.x,
-            lambda: &zeros,
+            lambda,
             solve_result_num: status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded),
             suffixes: &[],
         };
@@ -892,7 +954,13 @@ fn write_json_report(
             status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded);
         builder.solution.objective = best.objective;
         builder.solution.x = best.x.clone();
-        builder.solution.lambda = vec![0.0; m];
+        // Real base-problem duals for the best minimum (issue #196, related);
+        // `recover_duals` guarantees length `m`, guard defensively.
+        builder.solution.lambda = if best.lambda.len() == m {
+            best.lambda.clone()
+        } else {
+            vec![0.0; m]
+        };
     }
     let report = builder.finish();
 

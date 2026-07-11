@@ -25,6 +25,10 @@ pub struct Archive {
     l: Vec<Number>,
     pub xs: Vec<Vec<Number>>,
     pub fs: Vec<Number>,
+    /// Per-minimum base-problem constraint duals (length `m`), recovered by a
+    /// clean re-solve at the accepted point (issue #196, related). Parallel to
+    /// `xs` / `fs`.
+    pub ls: Vec<Vec<Number>>,
 }
 
 impl Archive {
@@ -34,6 +38,7 @@ impl Archive {
             l,
             xs: Vec::new(),
             fs: Vec::new(),
+            ls: Vec::new(),
         }
     }
 
@@ -59,8 +64,9 @@ impl Archive {
             .any(|m| scaled_distance(x, m, &self.l) <= radius)
     }
 
-    pub fn add(&mut self, x: Vec<Number>, f: Number) {
+    pub fn add(&mut self, x: Vec<Number>, lambda: Vec<Number>, f: Number) {
         self.xs.push(x);
+        self.ls.push(lambda);
         self.fs.push(f);
     }
 
