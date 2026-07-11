@@ -614,11 +614,44 @@ pub fn main() -> ExitCode {
         }
     };
 
+    // issue #196 (and related): does the .nl / CLI request post-optimal work
+    // that only the general NLP filter-IPM path provides — the sIPOPT
+    // parametric sensitivity step (sens_* suffixes) or a reduced-Hessian
+    // computation (--compute-red-hessian)? Neither the --minima multistart
+    // driver nor the specialized convex solvers run it, so detect it up front
+    // and make sure no path silently drops the request.
+    let wants_sens = nl_suffixes
+        .as_ref()
+        .map(sens::is_sensitivity_input)
+        .unwrap_or(false);
+    let wants_nlp_postopt = wants_sens || args.compute_red_hessian;
+    // Human-readable description of the requested post-optimal work, reused in
+    // the "not available on this path" messages below.
+    let postopt_what = match (wants_sens, args.compute_red_hessian) {
+        (true, true) => {
+            "a parametric sensitivity step (sIPOPT sens_* suffixes) and a \
+             reduced-Hessian computation"
+        }
+        (true, false) => "a parametric sensitivity step (sIPOPT sens_* suffixes)",
+        _ => "a reduced-Hessian computation",
+    };
+
     // Multistart / find-minima: when a `--minima` method is set, drive the
     // local solver in a loop over the *raw* problem TNLP (presolve / counting
     // wrappers are intentionally bypassed so coordinates match the original
     // problem and the clean objective is evaluated directly) and return.
     if let Some(mcfg) = &args.minima {
+        // Related to #196: --minima is a multistart search, not a single
+        // post-optimal solve, so it does not run the sIPOPT sensitivity /
+        // reduced-Hessian step. Warn rather than silently drop the request
+        // (sensitivity at a multistart optimum is ill-defined).
+        if wants_nlp_postopt {
+            eprintln!(
+                "pounce: warning: the .nl requests {postopt_what}, but --minima \
+                 runs a multistart search that does not compute it; the request \
+                 will be skipped. Run without --minima to obtain it."
+            );
+        }
         return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
     }
 
@@ -666,15 +699,31 @@ pub fn main() -> ExitCode {
             }
         };
 
+        // issue #196: `wants_sens` / `wants_nlp_postopt` / `postopt_what` were
+        // computed above (they also gate the --minima warning). Under `auto`,
+        // decline the convex fast-path and fall through to the NLP filter-IPM
+        // (which honors the request — correctness over the specialized path's
+        // speed); under an explicit convex solver_selection, respect the forced
+        // choice but warn (below) instead of silently skipping.
+        let decline_convex_for_postopt =
+            wants_nlp_postopt && matches!(selection, SolverSelection::Auto);
+
         // Banner-level routing line: report the detected problem class and
         // which of pounce's solvers was selected for it. Gated like the
         // banner (suppressed by `sb yes` and in JSON-debug protocol mode) so
-        // stdout stays clean for machine consumers.
+        // stdout stays clean for machine consumers. When we decline the convex
+        // fast-path for a post-optimal request (#196), report the NLP path that
+        // actually runs, not the convex one `resolve_solver` picked.
         if !suppress_banner && !json_dbg {
+            let described = if decline_convex_for_postopt {
+                SolverChoice::Nlp.describe()
+            } else {
+                choice.describe()
+            };
             println!(
                 "Problem class: {}. Selected solver: {} [solver_selection={}].",
                 class.name(),
-                choice.describe(),
+                described,
                 sel_str
             );
             println!();
@@ -688,13 +737,39 @@ pub fn main() -> ExitCode {
             choice,
             SolverChoice::LpIpm | SolverChoice::QpIpm | SolverChoice::SocpIpm
         ) {
+            // issue #196: if the .nl requested a sensitivity / reduced-Hessian
+            // step, either reroute (auto) or warn (explicit convex force) so
+            // the fast path never silently drops it.
+            if wants_nlp_postopt {
+                if decline_convex_for_postopt {
+                    eprintln!(
+                        "pounce: note: this problem classifies as {} but the .nl \
+                         requests {postopt_what}, which the convex solver \
+                         (pounce-convex) does not provide; routing to the general \
+                         NLP interior-point path so the request is honored.",
+                        class.name()
+                    );
+                } else {
+                    eprintln!(
+                        "pounce: warning: the .nl requests {postopt_what}, but \
+                         solver_selection={sel_str} forces the convex solver \
+                         (pounce-convex), which does not compute it; the request \
+                         will be skipped. Use solver_selection=nlp or auto to \
+                         obtain it."
+                    );
+                }
+            }
             // The convex solvers need the parsed `NlProblem`, but the initial
             // parse moved it into `NlTnlp`. Re-parse the file here — only on
             // the convex dispatch path (LP / convex-QP / SOCP), never for a
             // general NLP solve. Only `.nl` inputs ever classify as convex, so
             // the builtin arm falls through to NLP. A parse failure surfaces
             // and exits rather than silently mis-routing to NLP (L24).
-            if let ProblemSource::NlFile(path) = &args.problem {
+            if decline_convex_for_postopt {
+                // Declined for #196: fall through to the NLP solve below, which
+                // runs the sensitivity / reduced-Hessian step in `on_converged`
+                // and writes `sens_sol_state_1` to the `.sol`.
+            } else if let ProblemSource::NlFile(path) = &args.problem {
                 let prob = match nl_reader::read_nl_file(path) {
                     Ok(p) => p,
                     Err(e) => {

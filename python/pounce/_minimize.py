@@ -1038,6 +1038,14 @@ def minimize(
         ignored = sorted(requested_opt_keys - _CONVEX_HONORED)
         if hess is not None:
             ignored.append("hess (argument)")
+        # The convex/SOCP routers consume the extracted quadratic form directly
+        # and never call back into Python, so a user `callback` would never fire
+        # on this route. It is a named argument (not in `options`), so the set
+        # diff above cannot catch it — surface it explicitly rather than let it
+        # be silently dropped (issue #196, related). Pass solver_selection='nlp'
+        # to keep the callback firing.
+        if callback is not None:
+            ignored.append("callback (argument)")
         if ignored:
             warnings.warn(
                 f"pounce.minimize routed this problem to the dedicated {route_name} "

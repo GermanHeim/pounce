@@ -55,6 +55,30 @@ changes.
 
 ### Fixed
 
+- **Post-optimal requests are no longer silently dropped on the specialized
+  solve paths (#196).** When an `.nl` declared the sIPOPT sensitivity suffixes
+  (`sens_state_1` / `sens_state_value_1` / `sens_init_constr`) or the solve
+  asked for a reduced Hessian (`--compute-red-hessian`), the request was
+  honored only on the general NLP filter-IPM path. Three fast paths bypassed it
+  without a word:
+  - **Convex LP/QP/QCQP routing.** Under `solver_selection=auto`, a problem
+    that classifies as LP / convex-QP was sent to the pounce-convex solver,
+    which has no sensitivity / reduced-Hessian machinery, so no
+    `sens_sol_state_1` was written. `auto` now declines the fast path and
+    routes such a solve to the NLP path (which honors the request); an
+    *explicit* convex `solver_selection` still runs convex but now warns that
+    the request is skipped.
+  - **`--minima` multistart.** The `--minima` early-return skipped the
+    post-optimal step entirely; it now warns that sensitivity / reduced-Hessian
+    is not available in a multistart search.
+  - **`--minima` `.sol` duals.** The multistart `.sol` wrote a zero placeholder
+    for the constraint multipliers; it now recovers the real base-problem duals
+    at each reported minimum (via a clean re-solve, so a point accepted from an
+    augmented penalty/tunnel solve still gets the base problem's multipliers).
+  - **Python `pounce.minimize` convex route.** A user `callback` cannot fire on
+    the convex/SOCP route (the solver consumes the extracted quadratic form and
+    never calls back into Python); it is now surfaced in the dropped-options
+    warning rather than silently ignored.
 - **Registered-but-unread algorithmic tuning options are now honored (#191).**
   A range of options were registered but never read, so the solver always ran
   with the hard-coded defaults and any user-set value was silently dropped.
