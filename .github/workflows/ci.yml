@@ -227,7 +227,7 @@ jobs:
         run: |
           # pyomo + numpy (sensitivity needs numpy); the locally-built
           # pounce-solver wheel provides the `pounce` Python package + CLI.
-          python -m pip install pyomo numpy
+          python -m pip install pyomo numpy pandas
           python -m pip install python/dist/*.whl
           # pyomo-pounce itself installed without deps: its declared
           # pounce-solver dep is satisfied by the wheel installed just above.
