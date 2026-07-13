@@ -284,9 +284,11 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
             ("no", "Solve the extracted problem directly, without presolve."),
         ],
         "Only affects the convex LP/QP path (`solver_selection` routing to \
-         pounce-convex). When on, presolve removes empty / duplicate / \
-         redundant rows, fixes and substitutes structural columns, and may \
-         report infeasible / unbounded without invoking the solver.",
+         pounce-convex), which runs only in the pounce CLI on `.nl` input; it \
+         has no effect on a library (`IpoptApplication`) solve. When on, \
+         presolve removes empty / duplicate / redundant rows, fixes and \
+         substitutes structural columns, and may report infeasible / unbounded \
+         without invoking the solver.",
     )?;
 
     // SQP outer-loop options. Inactive when `algorithm =

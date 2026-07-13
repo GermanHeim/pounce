@@ -497,6 +497,20 @@ impl IpoptApplication {
     ///   in-`pounce-nlp` Newton driver so the trivial path is
     ///   independent of the linear-solver backend.
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        if let Some(value) = self.unsupported_library_solver_selection() {
+            use pounce_common::journalist::JournalCategory;
+            self.journalist.print(
+                JournalLevel::J_ERROR,
+                JournalCategory::J_MAIN,
+                &format!(
+                    "pounce: solver_selection={value} routing is only available \
+                     through the pounce CLI (.nl input); library consumers can use \
+                     qp-active-set, nlp, or auto.\n"
+                ),
+            );
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
         // Top-level algorithm dispatch (Phase 5b §7.1). When the
         // `algorithm` option resolves to "active-set-sqp", route
         // to the Phase 5b SQP path; otherwise fall through to the
@@ -722,6 +736,20 @@ impl IpoptApplication {
     /// optimal before solving any QP), or no SQP solve has run.
     pub fn last_sqp_working_set(&self) -> Option<&pounce_qp::WorkingSet> {
         self.sqp_last_working_set.as_ref()
+    }
+
+    /// If `solver_selection` is explicitly set to a value whose routing lives
+    /// only in the CLI's `.nl` dispatch, return  it; otherwise `None`.
+    /// `optimize_tnlp` uses this to reject a forced convex selection a library
+    /// consumer cannot honor.
+    fn unsupported_library_solver_selection(&self) -> Option<&'static str> {
+        let (v, found) = self.options.get_string_value("solver_selection", "").ok()?;
+        if !found {
+            return None;
+        }
+        ["lp-ipm", "qp-ipm", "socp"]
+            .into_iter()
+            .find(|c| v.eq_ignore_ascii_case(c))
     }
 
     fn is_sqp_algorithm_selected(&self) -> bool {

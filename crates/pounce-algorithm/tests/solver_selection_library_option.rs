@@ -163,6 +163,19 @@ fn default_selection_does_not_run_sqp() {
 }
 
 #[test]
+fn forced_convex_selection_is_rejected_in_library() {
+    for forced in ["lp-ipm", "qp-ipm", "socp"] {
+        let (_app, status, _out) =
+            solve_hs35_with(&format!("print_level 0\nsolver_selection {forced}\n"));
+        assert_eq!(
+            status,
+            ApplicationReturnStatus::InvalidOption,
+            "solver_selection={forced} must error in a library solve, not fall back to NLP"
+        );
+    }
+}
+
+#[test]
 fn solver_selection_and_qp_presolve_are_registered() {
     let mut app = IpoptApplication::new();
     let opts = app.options_mut();

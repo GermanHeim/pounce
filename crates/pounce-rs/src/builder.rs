@@ -419,6 +419,17 @@ mod tests {
     }
 
     #[test]
+    fn forced_convex_selection_fails_in_builder() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_str("solver_selection", "qp-ipm")
+            .solve();
+        assert!(!sol.success, "forced qp-ipm must not silently succeed via NLP");
+        assert_eq!(sol.status, ApplicationReturnStatus::InvalidOption);
+    }
+
+    #[test]
     #[should_panic(expected = "already sized to 2")]
     fn mismatched_sizes_panic() {
         let _ = Nlp::new(Quad)
