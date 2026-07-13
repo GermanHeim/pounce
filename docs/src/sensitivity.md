@@ -110,6 +110,16 @@ declarations solve through the ordinary AMPL/CLI path, unchanged. See
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
 
+### Watching the solve (`tee=True`)
+
+`SolverFactory("pounce").solve(m, tee=True)` streams the solver's full
+Ipopt-style log — banner, problem statistics, iteration table, and
+end-of-run summary — live to standard output, including inside a Jupyter
+notebook cell. The log is emitted by the engine itself (the same blocks the
+`pounce` CLI prints), so the in-process path just tails it: a long solve
+shows its iteration table as it runs rather than as one block at the end.
+Without `tee=True` the solve is silent, matching the Pyomo convention.
+
 ## Parameter covariance and identifiability
 
 For a parameter-estimation model whose objective is a **plain sum of

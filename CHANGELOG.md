@@ -9,6 +9,18 @@ changes.
 
 ## [Unreleased]
 
+### Changed — pyomo-pounce streams the engine's log under `tee=True`
+
+- **`SolverFactory('pounce').solve(m, tee=True)` now streams the engine's own
+  log — banner, problem statistics, iteration table, and end-of-run summary —
+  live to `sys.stdout`, including in Jupyter.** The ~300-line Python
+  reproduction of the CLI's blocks is gone: the solver core emits them (see
+  below) and pyomo-pounce tails fd 1 to `sys.stdout` on a worker thread, so a
+  long solve shows its iteration table as it runs rather than as one block at
+  the end. The results object regained `solver.name` and the objective
+  bounds, and `solver.time` now measures the solve alone (excluding stream and
+  decode). Requires `pounce-solver >= 0.9.0`.
+
 ### Changed — the solver core emits its own console log
 
 - **The problem-statistics and end-of-run summary blocks are now emitted by

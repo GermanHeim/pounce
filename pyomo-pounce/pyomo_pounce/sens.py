@@ -35,9 +35,13 @@ pounce.Solver session's parametric_step answers gradient()/estimate()
 queries from the stored factorization -- the sIPOPT computation, with no
 suffixes and no upfront perturbation values.
 """
+import codecs
 import os
 import shutil
+import sys
 import tempfile
+import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -197,6 +201,129 @@ def _iter_data(comp):
         yield comp
 
 
+# Engine status -> (termination condition, solver status), mirroring the
+# semantics Pyomo's .sol reader gives the ordinary path via the AMPL
+# exit-code ranges (optimal / infeasible / unbounded / limit / error).
+_STATUS_RESULT = {
+    "Solve_Succeeded":
+        (TerminationCondition.optimal, SolverStatus.ok),
+    "Solved_To_Acceptable_Level":
+        (TerminationCondition.optimal, SolverStatus.warning),
+    "Feasible_Point_Found":
+        (TerminationCondition.feasible, SolverStatus.warning),
+    "Infeasible_Problem_Detected":
+        (TerminationCondition.infeasible, SolverStatus.warning),
+    "Diverging_Iterates":
+        (TerminationCondition.unbounded, SolverStatus.warning),
+    "Maximum_Iterations_Exceeded":
+        (TerminationCondition.maxIterations, SolverStatus.warning),
+    "Maximum_CpuTime_Exceeded":
+        (TerminationCondition.maxTimeLimit, SolverStatus.warning),
+    "Maximum_WallTime_Exceeded":
+        (TerminationCondition.maxTimeLimit, SolverStatus.warning),
+    "User_Requested_Stop":
+        (TerminationCondition.userInterrupt, SolverStatus.aborted),
+}
+
+
+def _stream_solve(solver, x0):
+    """Run ``solver.solve(x0)`` with the engine's log streamed to sys.stdout.
+
+    The engine (and ``pounce.print_banner``) write straight to the process
+    stdout, fd 1, bypassing ``sys.stdout``: visible in a terminal, invisible
+    in Jupyter and under ``contextlib.redirect_stdout``. When ``sys.stdout``
+    already is fd 1 the log streams itself. Otherwise redirect fd 1 to a temp
+    file, run the solve on a worker thread, and tail the file to
+    ``sys.stdout`` so notebooks (and redirected streams) see the banner,
+    problem statistics, iteration table, and summary live, not as one block
+    at the end. ipykernel's OutStream coalesces on its own ~30-200 ms timer,
+    so updates arrive in bursts.
+
+    Returns ``(result, solve_secs)`` with ``solve_secs`` measured strictly
+    around the solve, excluding banner/stream/decode overhead.
+    """
+    import pounce
+    banner = getattr(pounce, "print_banner", lambda: None)
+
+    def _timed():
+        t0 = time.perf_counter()
+        out = solver.solve(x0)
+        return out, time.perf_counter() - t0
+
+    try:
+        live = sys.stdout.fileno() == 1
+    except Exception:                                     # noqa: BLE001
+        live = False
+    if live:
+        banner()
+        return _timed()
+
+    # Tail a regular temp file, never an os.pipe: a stalled pipe reader would
+    # block the solver forever (its ~64 KB kernel buffer), whereas a file
+    # never applies write backpressure. A separate read handle with its own
+    # tracked offset keeps tailing from disturbing the engine's write position
+    # (a dup'd fd would share the offset).
+    # `saved` is the only resource acquired before the try; the temp file and
+    # its reader open inside it, so a failure there still reaches the cleanup
+    # (the finally guards each handle with a None check).
+    saved = os.dup(1)
+    fd_w = path = reader = None
+    try:
+        fd_w, path = tempfile.mkstemp(prefix="pounce_tee_")
+        reader = open(path, "rb")
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        pos = 0
+        stop = threading.Event()
+
+        def _drain(final=False):
+            nonlocal pos
+            reader.seek(pos)
+            chunk = reader.read()
+            pos = reader.tell()
+            text = dec.decode(chunk, final)
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+
+        def _tail():
+            # The solve runs on THIS (main) thread -- pounce.Solver is a pyo3
+            # unsendable object and would panic if moved to a worker. It
+            # releases the GIL during the solve, so it is the tailing that
+            # lives on the worker: read new bytes as the engine writes them,
+            # until the solve finishes and signals stop.
+            while not stop.is_set():
+                _drain()
+                time.sleep(0.05)
+
+        os.dup2(fd_w, 1)
+        banner()
+        tailer = threading.Thread(target=_tail, daemon=True)
+        tailer.start()
+        try:
+            t0 = time.perf_counter()
+            out = solver.solve(x0)
+            solve_secs = time.perf_counter() - t0
+        finally:
+            # Stop the tailer and drain the tail even if the solve raised, so
+            # its partial log still reaches the user before the error does.
+            stop.set()
+            tailer.join()
+            _drain(final=True)
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+        if reader is not None:
+            reader.close()
+        if fd_w is not None:
+            os.close(fd_w)
+        if path is not None:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return out, solve_secs
+
+
 def sens_solve(model, tee=False, sens_params=None, fitted=None,
                residuals=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
@@ -244,15 +371,78 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    prob = pounce.Problem(nl.n, nl.m, _NlBridge(nl),
+    bridge = _NlBridge(nl)
+    prob = pounce.Problem(nl.n, nl.m, bridge,
                           lb=nl.x_l, ub=nl.x_u, cl=nl.g_l, cu=nl.g_u)
+    if not tee:
+        # Pyomo convention is silence unless tee=True; print_level 0 makes
+        # the engine emit nothing at all.
+        prob.add_option("print_level", 0)
     solver = pounce.Solver(prob)
-    x, info = solver.solve(np.asarray(nl.x0))
     if tee:
-        print(info.get("status_msg", info))
+        # At the default print_level the engine emits its own banner (via
+        # print_banner), problem statistics, iteration table, and summary;
+        # _stream_solve tails them to sys.stdout live and times the solve
+        # alone (excluding banner/stream overhead).
+        (x, info), solve_secs = _stream_solve(solver, np.asarray(nl.x0))
+    else:
+        t_solve = time.perf_counter()
+        x, info = solver.solve(np.asarray(nl.x0))
+        solve_secs = time.perf_counter() - t_solve
+
+    status_msg = str(info.get("status_msg", ""))
+    tc, ss = _STATUS_RESULT.get(
+        status_msg, (TerminationCondition.error, SolverStatus.error))
+
+    # Return a Pyomo SolverResults indistinguishable from an ordinary
+    # solve's: same fields (counts, time, Id/Error rc, emptied Solution
+    # block), same message spelling, same exit-status mapping, same
+    # noncommittal bounds/sense.
+    def build_results():
+        results = SolverResults()
+        results.solver.name = "pounce (in-process sensitivity session)"
+        results.solver.status = ss
+        results.solver.termination_condition = tc
+        # the binary's .sol message spells the status without underscores
+        results.solver.message = (
+            f"POUNCE {pounce.__version__}: {status_msg.replace('_', '')}")
+        results.solver.id = 0
+        results.solver.error_rc = 0
+        # solve_secs is the solve alone (the tee stream/decode is excluded)
+        results.solver.time = solve_secs
+        results.problem.number_of_objectives = 1
+        results.problem.number_of_constraints = int(nl.m)
+        results.problem.number_of_variables = int(nl.n)
+        # objective bounds, like the .sol path: both set to the final value
+        obj_val = info.get("obj_val")
+        if obj_val is not None:
+            results.problem.upper_bound = float(obj_val)
+            results.problem.lower_bound = float(obj_val)
+        # the ordinary path's repr carries an emptied Solution block
+        # (the parsed solution is loaded into the model, then cleared)
+        results.solution.add()
+        results.solution.clear()
+        return results
+
     if not solver.converged:
-        raise RuntimeError(
-            f"pounce did not converge: {info.get('status_msg')}")
+        # Report the outcome through the results object (infeasible /
+        # maxIterations / error) and load the final iterate, but drop
+        # any session: a failed re-solve must not leave a prior
+        # converged solve's factorization live, or
+        # gradient()/estimate()/covariance() would silently answer from
+        # the stale solve. With the session cleared they raise their
+        # usual "no sensitivity session" error. Note the Feasible_Point_Found
+        # asymmetry: the engine's on_converged callback fires only for
+        # Solve_Succeeded / Solved_To_Acceptable_Level, so a feasible-point
+        # solve reports termination_condition=feasible yet has converged=False
+        # and lands here -- no KKT factorization is retained, so its session
+        # is dropped even though the status is not a hard failure.
+        reg.session = None
+        for name, val in zip(var_names, np.asarray(x)):
+            ov = model.find_component(name)
+            if ov is not None:
+                ov.set_value(float(val), skip_validation=True)
+        return build_results()
 
     pins = ComponentMap()
     con_alias = {}
@@ -296,7 +486,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     for name, val in zip(var_names, session.base_x):
         ov = model.find_component(name)
         if ov is not None:
-            ov.set_value(val, skip_validation=True)
+            ov.set_value(float(val), skip_validation=True)
 
     # consistency check: declared residuals should reproduce the objective
     if session.res_rows:
@@ -313,17 +503,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
                 "regularization) will make the noise-variance estimate "
                 "wrong.")
 
-    # Return a Pyomo SolverResults so callers see the same shape as an
-    # ordinary solve (res.solver.termination_condition etc).
-    results = SolverResults()
-    results.solver.name = "pounce (in-process sensitivity session)"
-    results.solver.status = SolverStatus.ok
-    results.solver.termination_condition = TerminationCondition.optimal
-    results.solver.message = str(info.get("status_msg", ""))
-    if info.get("obj_val") is not None:
-        results.problem.upper_bound = float(info["obj_val"])
-        results.problem.lower_bound = float(info["obj_val"])
-    return results
+    return build_results()
 
 
 # ── queries ───────────────────────────────────────────────────────────────────
