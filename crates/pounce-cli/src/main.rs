@@ -106,7 +106,6 @@ pub fn main() -> ExitCode {
 
     let mut app = IpoptApplication::new();
 
-
     // ---- Convex LP/QP interior-point knobs (pounce-convex `QpOptions`) ----
     // These only affect the `solver_selection` paths that route to
     // pounce-convex (`lp-ipm` / `qp-ipm` / `auto` on an LP / convex QP, and

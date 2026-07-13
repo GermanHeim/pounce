@@ -425,7 +425,10 @@ mod tests {
             .constraint_bounds(&[3.0], &[3.0])
             .option_str("solver_selection", "qp-ipm")
             .solve();
-        assert!(!sol.success, "forced qp-ipm must not silently succeed via NLP");
+        assert!(
+            !sol.success,
+            "forced qp-ipm must not silently succeed via NLP"
+        );
         assert_eq!(sol.status, ApplicationReturnStatus::InvalidOption);
     }
 
