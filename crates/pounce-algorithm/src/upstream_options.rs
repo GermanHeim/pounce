@@ -234,6 +234,61 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         ],
         "Selects between the IPM (default) and the active-set SQP driver.",
     )?;
+
+    // Pounce-extension: LP/QP/QCQP solver routing. Registered here
+    // so a `pounce-rs`/`IpoptApplication` consumer can set and read it.
+    r.add_string_option(
+        "solver_selection",
+        "Which solver to route the problem to.",
+        "auto",
+        &[
+            (
+                "auto",
+                "Most specialized solver matching the detected problem class.",
+            ),
+            (
+                "nlp",
+                "Always the filter-IPM NLP solver (current default behavior).",
+            ),
+            (
+                "lp-ipm",
+                "Force IPM-LP; errors if the problem is not an LP.",
+            ),
+            (
+                "qp-ipm",
+                "Force IPM-QP; errors if the problem is not LP/convex-QP.",
+            ),
+            (
+                "qp-active-set",
+                "Force active-set QP; errors if not LP/convex-QP.",
+            ),
+            (
+                "socp",
+                "Force the SOCP conic IPM; errors if not a convex LP/QP/QCQP.",
+            ),
+        ],
+        "Selects the solver by problem class. `auto` routes LP and convex \
+         QP to the specialized convex interior-point solver (pounce-convex), \
+         a convex QCQP to the SOCP conic IPM, and all other classes to the \
+         NLP filter-IPM. `qp-active-set` routes an LP / convex QP through the \
+         active-set SQP engine (pounce-qp QP subproblems) instead of the IPM; \
+         on these classes it converges in essentially one QP solve. `socp` \
+         forces the conic IPM (a convex QCQP routes there under `auto`).",
+    )?;
+    r.add_string_option(
+        "qp_presolve",
+        "Run presolve before the convex LP/QP interior-point solve.",
+        "yes",
+        &[
+            ("yes", "Reduce the problem (and detect trivial infeasibility / unboundedness) before solving."),
+            ("no", "Solve the extracted problem directly, without presolve."),
+        ],
+        "Only affects the convex LP/QP path (`solver_selection` routing to \
+         pounce-convex). When on, presolve removes empty / duplicate / \
+         redundant rows, fixes and substitutes structural columns, and may \
+         report infeasible / unbounded without invoking the solver.",
+    )?;
+
     // SQP outer-loop options. Inactive when `algorithm =
     // interior-point`. Defaults mirror `SqpOptions::default()`.
     r.add_string_option(

@@ -725,10 +725,18 @@ impl IpoptApplication {
     }
 
     fn is_sqp_algorithm_selected(&self) -> bool {
-        match self.options.get_string_value("algorithm", "") {
-            Ok((v, true)) => v.eq_ignore_ascii_case("active-set-sqp"),
-            _ => false,
-        }
+        // `algorithm` is the primary selector.
+        // `solver_selection = qp-active-set` selects the
+        // same active-set SQP engine.
+        let algo_sqp = matches!(
+            self.options.get_string_value("algorithm", ""),
+            Ok((v, true)) if v.eq_ignore_ascii_case("active-set-sqp")
+        );
+        let selection_sqp = matches!(
+            self.options.get_string_value("solver_selection", ""),
+            Ok((v, true)) if v.eq_ignore_ascii_case("qp-active-set")
+        );
+        algo_sqp || selection_sqp
     }
 
     /// Phase 5b SQP entry point. Builds the same NLP chain
