@@ -185,3 +185,133 @@ def test_explicit_declarations_without_model_error():
     m = build()
     with pytest.raises(ValueError, match="no model was passed"):
         pyo.SolverFactory("pounce").solve(sens_params=[m.p])
+
+
+def test_tee_prints_engine_log(capfd):
+    m = build()
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m, tee=True)
+    out = capfd.readouterr().out
+    assert "This is POUNCE version" in out    # banner
+    assert "Total number of variables" in out # problem statistics
+    assert "inf_pr" in out                    # iteration-table header
+    assert "Number of Iterations....:" in out # summary
+    assert "EXIT: Optimal Solution Found." in out
+
+
+def test_no_tee_is_silent(capfd):
+    m = build()
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    out = capfd.readouterr().out
+    assert "inf_pr" not in out and "POUNCE" not in out
+
+
+def test_tee_streams_under_redirect_stdout():
+    """The capture-and-stream (non-live) branch of the tee path. Unlike
+    capfd, which captures fd 1 (the live path), redirect_stdout captures
+    sys.stdout, so this exercises the branch that tails the engine's fd-1
+    log to sys.stdout for notebooks (review #206)."""
+    import contextlib
+    import io
+    m = build()
+    declare_sens_param(m.p)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pyo.SolverFactory("pounce").solve(m, tee=True)
+    out = buf.getvalue()
+    assert "This is POUNCE version" in out     # banner (via print_banner)
+    assert "Total number of variables" in out  # problem statistics (engine)
+    assert "inf_pr" in out                     # iteration table (engine)
+    assert "Number of Iterations....:" in out  # summary (engine)
+
+
+def test_results_fields_match_asl_shape():
+    m = build()
+    declare_sens_param(m.p)
+    res = pyo.SolverFactory("pounce").solve(m)
+    assert res.problem.number_of_variables > 0
+    assert res.problem.number_of_constraints >= 1
+    assert float(res.solver.time) >= 0.0
+    assert res.solver.message.startswith("POUNCE ")
+    assert "_" not in res.solver.message      # SolveSucceeded, like the .sol
+    assert ": " in res.solver.message         # "POUNCE <ver>: <status>"
+    assert res.solver.id == 0 and res.solver.error_rc == 0
+    assert res.solver.name == "pounce (in-process sensitivity session)"
+    assert res.problem.upper_bound is not None        # objective bounds restored
+    assert res.problem.lower_bound == res.problem.upper_bound
+    assert list(res.solver[0].keys())[-1] == "Time"   # field order parity
+    assert len(res.solution) == 0             # emptied Solution block
+
+
+def test_nonconvergence_returns_mapped_results():
+    """An unsolvable declared model must return a results object with the
+    mapped termination (like the ordinary .sol path) instead of raising,
+    and must leave no session behind for the sensitivity queries."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(initialize=1.0)
+    m.c1 = pyo.Constraint(expr=m.x == 1.0)
+    m.c2 = pyo.Constraint(expr=m.x == 3.0)     # contradictory
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    res = pyo.SolverFactory("pounce").solve(m)
+    assert res.solver.termination_condition in (
+        pyo.TerminationCondition.infeasible,
+        pyo.TerminationCondition.error,
+        pyo.TerminationCondition.maxIterations,
+    )
+    assert res.solver.status != pyo.SolverStatus.ok
+    with pytest.raises(RuntimeError, match="no sensitivity session"):
+        gradient(m.x, wrt=m.p)
+
+
+def test_failed_resolve_clears_prior_session():
+    """A converged solve leaves a live session; a failed re-solve of the
+    same model must drop it, or gradient() would silently answer from
+    the stale factorization."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(initialize=1.0)
+    m.y = pyo.Var(initialize=1.0)
+    m.c = pyo.Constraint(expr=m.x + m.y == m.p)
+    m.obj = pyo.Objective(expr=(m.x - 1) ** 2 + (m.y - 0.5) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert gradient(m.x, wrt=m.p) is not None      # session is live
+
+    m.bad = pyo.Constraint(expr=m.x == m.x + 1.0)  # 0 == 1
+    pyo.SolverFactory("pounce").solve(m)
+    with pytest.raises(RuntimeError, match="no sensitivity session"):
+        gradient(m.x, wrt=m.p)
+
+
+def test_all_three_declarations_coexist():
+    """declare_sens_param + declare_fitted + declare_residual on one
+    model: one solve serves both the sensitivity and the covariance
+    queries from the same held factorization."""
+    import numpy as np
+    from pyomo_pounce import declare_fitted, declare_residual, covariance
+    rng = np.random.default_rng(7)
+    tt = np.linspace(0, 3, 20)
+    y = 2.0 * np.exp(-1.3 * tt) + 0.05 * rng.standard_normal(20)
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(0, 19)
+    m.shift = pyo.Param(initialize=0.0, mutable=True)
+    m.A = pyo.Var(initialize=1.5)
+    m.k = pyo.Var(initialize=1.0)
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(m.I, rule=lambda mm, i: mm.r[i]
+                           == float(y[i]) + mm.shift
+                           - mm.A * pyo.exp(-mm.k * float(tt[i])))
+    m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+    declare_sens_param(m.shift)
+    declare_fitted(m.A, m.k)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+
+    g = gradient(m.A, wrt=m.shift)          # sensitivity family
+    assert np.isfinite(g) and g != 0.0
+    cov = covariance(m)                     # estimation family
+    assert cov.std_err[m.A] > 0 and cov.std_err[m.k] > 0
+    assert abs(cov.correlation[m.A, m.k]) < 1.0

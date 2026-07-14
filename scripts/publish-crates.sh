@@ -45,10 +45,10 @@ CRATES=(
   pounce-observability
   pounce-presolve
   pounce-qp
+  pounce-solve-report
   pounce-algorithm
   pounce-restoration
   pounce-sensitivity
-  pounce-solve-report
   pounce-cinterface
   pounce-convex
   pounce-nl
