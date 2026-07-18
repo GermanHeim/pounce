@@ -25,6 +25,16 @@
 //! the report captures only the outer solve's iterations (including
 //! `'R'`-marked outer iters) and not the restoration sub-solve's inner
 //! IPM iterations — matching the pre-tracing behavior exactly.
+//!
+//! ## Thread-scoped capture for embedders
+//!
+//! Hosts that must not claim the global subscriber (libraries embedding
+//! POUNCE as a solver backend) use the scoped helpers instead of
+//! [`init_subscriber`]: [`with_iter_capture`] wraps one solve in a
+//! closure and returns its trajectory, [`ScopedIterCapture`] is the
+//! guard-shaped equivalent, and [`collector_scope`] installs just the
+//! collector for drivers that manage their own [`IterCaptureGuard`]
+//! (the iteration-history application path).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -58,6 +68,12 @@ thread_local! {
 /// per-iteration event is emitted (for the JSON sink) even when no
 /// in-process capture is active.
 static JSON_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set when [`install`] successfully claimed the global subscriber, whose
+/// layers include the collector. [`collector_scope`] then skips its
+/// shadowing thread-default install, so capture composes with the
+/// global console/JSON output instead of silencing it.
+static GLOBAL_COLLECTOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the per-iteration `pounce::iteration` event has a consumer
 /// right now, so the algorithm can skip emitting it (and the field
@@ -124,6 +140,23 @@ fn push_record(rec: IterRecord) {
     CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push(rec);
+        }
+    });
+}
+
+/// Append copies of `records` to the active capture slot, if any.
+///
+/// Called by the solver driver after it drains its own iteration-history
+/// capture, so an enclosing [`IterCaptureGuard`] still receives the
+/// trajectory instead of finding its buffer emptied by the driver's
+/// inner guard. No-op when no capture is active on this thread.
+pub fn extend_active_capture(records: &[IterRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.extend_from_slice(records);
         }
     });
 }
@@ -227,6 +260,105 @@ fn collector_admits(m: &tracing::Metadata<'_>) -> bool {
     m.is_span() || m.target() == ITER_TARGET
 }
 
+// ---- Scoped capture helpers ----
+
+/// Opaque RAII scope guaranteeing [`IterCollectorLayer`] is active on
+/// this thread until drop.
+#[must_use = "the collector uninstalls as soon as this guard drops"]
+pub struct CollectorScope {
+    _default: Option<tracing::subscriber::DefaultGuard>,
+}
+
+/// Ensure [`IterCollectorLayer`] is active on this thread until the
+/// returned guard drops.
+///
+/// For the [`IterCaptureGuard`]-managed application path: with iteration
+/// history enabled the solver driver runs its own capture guard around
+/// the solve and drains the records into its solve statistics, so the
+/// caller only needs the collector active for the solve's duration:
+///
+/// ```ignore
+/// let _scope = pounce_observability::collector_scope();
+/// app.enable_iter_history();
+/// app.optimize_tnlp(problem)?;
+/// let iters = app.statistics().iterations;
+/// ```
+///
+/// When [`init_subscriber`] has claimed the global subscriber, its
+/// collector already covers this thread and the scope is a no-op.
+/// Otherwise a collector-only registry is installed as the thread-default
+/// subscriber, which shadows the host's own subscriber (its log output
+/// from this thread is dropped) for the scope's lifetime.
+pub fn collector_scope() -> CollectorScope {
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::prelude::*;
+
+    if GLOBAL_COLLECTOR.load(std::sync::atomic::Ordering::Relaxed) {
+        return CollectorScope { _default: None };
+    }
+    let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
+    let subscriber = tracing_subscriber::registry().with(collector);
+    CollectorScope {
+        _default: Some(tracing::subscriber::set_default(subscriber)),
+    }
+}
+
+/// [`IterCaptureGuard`] bundled with a [`collector_scope`] subscriber
+/// install: everything needed to capture one solve's iteration history
+/// on this thread, with no `tracing` wiring on the caller's side.
+///
+/// For solves that don't fit inside a closure; otherwise prefer
+/// [`with_iter_capture`]. Combining with the driver's own
+/// iteration-history capture (`enable_iter_history`) is safe.
+#[must_use = "call finish() to retrieve the captured iteration history"]
+pub struct ScopedIterCapture {
+    capture: IterCaptureGuard,
+    _scope: CollectorScope,
+}
+
+impl ScopedIterCapture {
+    /// Install the collector on this thread and begin capturing.
+    pub fn start() -> Self {
+        let scope = collector_scope();
+        let capture = IterCaptureGuard::start();
+        Self {
+            capture,
+            _scope: scope,
+        }
+    }
+
+    /// End capture, uninstall the collector, and return the records
+    /// collected since [`start`].
+    ///
+    /// [`start`]: ScopedIterCapture::start
+    pub fn finish(self) -> Vec<IterRecord> {
+        let Self { capture, _scope } = self;
+        let records = capture.finish();
+        drop(_scope);
+        records
+    }
+}
+
+/// Run `f` with iteration capture active on this thread, returning its
+/// result alongside the recorded trajectory.
+///
+/// Equivalent to wrapping `f` in a [`ScopedIterCapture`]: installs
+/// [`IterCollectorLayer`] as the thread-default subscriber,
+/// activates an [`IterCaptureGuard`], runs `f`, and tears both
+/// down before returning.
+///
+/// Records exist only for solver paths that emit the [`ITER_TARGET`]
+/// event. An active-set SQP solve inside `f` captures nothing.
+///
+/// ```ignore
+/// let (solution, iters) = pounce_observability::with_iter_capture(|| nlp.solve());
+/// ```
+pub fn with_iter_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<IterRecord>) {
+    let scope = ScopedIterCapture::start();
+    let result = f();
+    (result, scope.finish())
+}
+
 // ---- Tiger/rust themed text formatter ----
 
 /// Foreground style for a log level in the tiger/rust theme.
@@ -324,16 +456,17 @@ fn install() {
     // subject to the console's `pounce::iteration=off` suppression, so
     // it carries its own target filter. It is constructed inside each
     // branch so its subscriber type parameter is inferred per-branch.
-    if want_json {
+    let claimed = if want_json {
         let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let json_layer = tracing_subscriber::fmt::layer()
             .json()
             .with_writer(std::io::stderr)
             .with_filter(env_filter());
-        let _ = tracing_subscriber::registry()
+        tracing_subscriber::registry()
             .with(json_layer)
             .with(collector)
-            .try_init();
+            .try_init()
+            .is_ok()
     } else {
         let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let ansi = ansi_enabled();
@@ -342,10 +475,14 @@ fn install() {
             .with_ansi(ansi)
             .with_writer(std::io::stderr)
             .with_filter(console_filter());
-        let _ = tracing_subscriber::registry()
+        tracing_subscriber::registry()
             .with(text_layer)
             .with(collector)
-            .try_init();
+            .try_init()
+            .is_ok()
+    };
+    if claimed {
+        GLOBAL_COLLECTOR.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `RUST_LOG` filter, defaulting to `info`.
@@ -537,6 +674,121 @@ mod tests {
         assert!(
             got.iter().any(|m| m.contains("bridged log record")),
             "log record did not reach the tracing layer; captured: {got:?}"
+        );
+    }
+
+    /// Emit a synthetic `pounce::iteration` event as the algorithm does.
+    fn emit_iter(iter: i64, ch: char) {
+        let s = ch.to_string();
+        tracing::info!(
+            target: ITER_TARGET,
+            iter = iter,
+            objective = 0.5,
+            alpha_primal = 1.0,
+            alpha_char = s.as_str(),
+        );
+    }
+
+    #[test]
+    fn extend_active_capture_appends_to_enclosing_buffer() {
+        let outer = IterCaptureGuard::start();
+        push_record(sample_record(0, 1.0, ' '));
+        let inner = IterCaptureGuard::start();
+        push_record(sample_record(1, 0.5, ' '));
+        let inner_got = inner.finish();
+        extend_active_capture(&inner_got);
+        let outer_got = outer.finish();
+        let iters: Vec<i32> = outer_got.iter().map(|r| r.iter).collect();
+        assert_eq!(iters, vec![0, 1]);
+
+        extend_active_capture(&inner_got);
+        let fresh = IterCaptureGuard::start();
+        assert!(fresh.finish().is_empty());
+    }
+
+    #[test]
+    fn with_iter_capture_captures_events_and_threads_result() {
+        let (result, records) = with_iter_capture(|| {
+            emit_iter(0, ' ');
+            emit_iter(1, 'R');
+            "sentinel"
+        });
+        assert_eq!(result, "sentinel");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].iter, 0);
+        assert_eq!(records[1].iter, 1);
+        assert_eq!(records[1].alpha_primal_char, 'R');
+        assert!((records[1].objective - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn with_iter_capture_ignores_events_outside_scope() {
+        emit_iter(7, ' '); // before the scope: no consumer
+        let ((), records) = with_iter_capture(|| ());
+        emit_iter(8, ' '); // after the scope: no consumer
+        assert!(records.is_empty());
+        assert!(
+            !iteration_event_wanted(),
+            "capture slot must be torn down after with_iter_capture returns"
+        );
+    }
+
+    #[test]
+    fn with_iter_capture_excludes_restoration_subsolve() {
+        let ((), records) = with_iter_capture(|| {
+            emit_iter(0, ' ');
+            {
+                let _resto = tracing::info_span!("restoration").entered();
+                let _inner_iter = tracing::info_span!("iteration").entered();
+                emit_iter(99, 'R');
+            }
+            emit_iter(1, ' ');
+        });
+        let iters: Vec<i32> = records.iter().map(|r| r.iter).collect();
+        assert_eq!(
+            iters,
+            vec![0, 1],
+            "inner restoration iteration leaked: {iters:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_iter_capture_nesting_restores_outer_buffer() {
+        let outer = ScopedIterCapture::start();
+        emit_iter(0, ' ');
+        let ((), inner) = with_iter_capture(|| emit_iter(99, 'R'));
+        emit_iter(1, ' ');
+        let outer_got = outer.finish();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].iter, 99);
+        let iters: Vec<i32> = outer_got.iter().map(|r| r.iter).collect();
+        assert_eq!(iters, vec![0, 1]);
+    }
+
+    #[test]
+    fn collector_scope_feeds_manual_guard() {
+        let scope = collector_scope();
+        let guard = IterCaptureGuard::start();
+        emit_iter(0, ' ');
+        let records = guard.finish();
+        drop(scope);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].iter, 0);
+
+        let guard = IterCaptureGuard::start();
+        emit_iter(1, ' ');
+        assert!(guard.finish().is_empty());
+    }
+
+    #[test]
+    fn with_iter_capture_is_panic_safe() {
+        let unwound = std::panic::catch_unwind(|| {
+            let _ = with_iter_capture(|| panic!("solve blew up"));
+        });
+        assert!(unwound.is_err());
+        assert!(
+            !iteration_event_wanted(),
+            "capture slot must be restored when the closure unwinds"
         );
     }
 

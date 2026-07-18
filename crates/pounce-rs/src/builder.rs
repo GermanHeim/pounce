@@ -40,7 +40,7 @@ use std::rc::Rc;
 
 use crate::{
     ApplicationReturnStatus, BoundsInfo, IndexStyle, IpoptApplication, IpoptCq, IpoptData, NlpInfo,
-    Solution as TnlpSolution, SparsityRequest, StartingPoint, TNLP,
+    Solution as TnlpSolution, SolveStatistics, SparsityRequest, StartingPoint, TNLP,
 };
 
 const FD: f64 = 1.4901161193847656e-8; // sqrt(f64::EPSILON)
@@ -77,18 +77,36 @@ pub trait Problem {
 }
 
 /// The outcome of [`Nlp::solve`].
+///
+/// The vector fields (`x`, `multipliers`, `g`, `z_l`, `z_u`) are filled
+/// by the solver's `finalize_solution` callback. They stay empty
+/// when the solve aborts before finalization, so check
+/// `success`/`status` before indexing.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Solution {
     /// Solver status; `success` is the convenient boolean.
     pub status: ApplicationReturnStatus,
     /// `true` for `SolveSucceeded` / `SolvedToAcceptableLevel`.
     pub success: bool,
-    /// Optimal variables.
+    /// Optimal variables (length `n`).
     pub x: Vec<f64>,
     /// Objective at the solution.
     pub objective: f64,
     /// Constraint multipliers `λ` (length `n_constraints`).
     pub multipliers: Vec<f64>,
+    /// Constraint values `g(x)` at the solution (length `n_constraints`).
+    pub g: Vec<f64>,
+    /// Lower-bound multipliers `z_L` (length `n`).
+    pub z_l: Vec<f64>,
+    /// Upper-bound multipliers `z_U` (length `n`).
+    pub z_u: Vec<f64>,
+    /// Per-solve statistics: wall time (`total_wallclock_time_secs`),
+    /// `iteration_count`, evaluation counts, final scaled and unscaled
+    /// infeasibilities, final barrier `final_mu`, restoration counters.
+    /// `stats.iterations` holds the per-iteration trajectory and is
+    ///  non-empty only when [`Nlp::capture_iterations`] was requested.
+    pub stats: SolveStatistics,
 }
 
 /// Builder: `Nlp::new(problem)` then `.var_bounds(..)` / `.x0(..)` (which fix
@@ -104,6 +122,7 @@ pub struct Nlp<P: Problem> {
     num: Vec<(String, f64)>,
     int: Vec<(String, i32)>,
     string: Vec<(String, String)>,
+    capture_iterations: bool,
 }
 
 impl<P: Problem + 'static> Nlp<P> {
@@ -125,6 +144,7 @@ impl<P: Problem + 'static> Nlp<P> {
             num: Vec::new(),
             int: Vec::new(),
             string: Vec::new(),
+            capture_iterations: false,
         }
     }
 
@@ -182,6 +202,20 @@ impl<P: Problem + 'static> Nlp<P> {
         self
     }
 
+    /// Record the per-iteration trajectory: one
+    /// [`IterRecord`](crate::IterRecord) per Newton iteration into
+    /// [`Solution::stats`]`.iterations` (empty without this call).
+    ///
+    /// Interior-point solves only, since the per-iteration event
+    /// is emitted by the IPM engine, so on the active-set SQP engine
+    /// (`solver_selection=qp-active-set`/`algorithm=active-set-sqp`)
+    /// `stats.iterations` stays empty even though
+    /// `stats.iteration_count` still reports the iterations run.
+    pub fn capture_iterations(mut self) -> Self {
+        self.capture_iterations = true;
+        self
+    }
+
     /// Build the `TNLP` adapter and run the interior-point solver.
     ///
     /// # Panics
@@ -204,6 +238,9 @@ impl<P: Problem + 'static> Nlp<P> {
             sol_x: Vec::new(),
             sol_obj: 0.0,
             sol_lambda: Vec::new(),
+            sol_g: Vec::new(),
+            sol_z_l: Vec::new(),
+            sol_z_u: Vec::new(),
         }));
 
         let mut app = IpoptApplication::new();
@@ -233,8 +270,14 @@ impl<P: Problem + 'static> Nlp<P> {
             let _ = app.options_mut().set_integer_value(k, *v, true, true);
         }
 
+        let scope = self.capture_iterations.then(|| {
+            app.enable_iter_history();
+            crate::collector_scope()
+        });
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&adapter) as _;
         let status = app.optimize_tnlp(tnlp);
+        drop(scope);
+        let stats = app.statistics();
         let a = adapter.borrow();
         Solution {
             status,
@@ -246,6 +289,10 @@ impl<P: Problem + 'static> Nlp<P> {
             x: a.sol_x.clone(),
             objective: a.sol_obj,
             multipliers: a.sol_lambda.clone(),
+            g: a.sol_g.clone(),
+            z_l: a.sol_z_l.clone(),
+            z_u: a.sol_z_u.clone(),
+            stats,
         }
     }
 }
@@ -264,6 +311,9 @@ struct Adapter<P: Problem> {
     sol_x: Vec<f64>,
     sol_obj: f64,
     sol_lambda: Vec<f64>,
+    sol_g: Vec<f64>,
+    sol_z_l: Vec<f64>,
+    sol_z_u: Vec<f64>,
 }
 
 impl<P: Problem> TNLP for Adapter<P> {
@@ -367,6 +417,9 @@ impl<P: Problem> TNLP for Adapter<P> {
         self.sol_x = sol.x.to_vec();
         self.sol_obj = sol.obj_value;
         self.sol_lambda = sol.lambda.to_vec();
+        self.sol_g = sol.g.to_vec();
+        self.sol_z_l = sol.z_l.to_vec();
+        self.sol_z_u = sol.z_u.to_vec();
     }
 }
 
@@ -405,6 +458,54 @@ mod tests {
             .x0(&[0.0, 0.0]) // n inferred = 2
             .solve();
         assert!(sol.success);
+    }
+
+    #[test]
+    fn solve_populates_stats_and_duals() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .solve();
+        assert!(sol.success);
+        assert!(sol.stats.iteration_count > 0);
+        assert!(sol.stats.total_wallclock_time_secs > 0.0);
+        assert!(sol.stats.num_obj_evals > 0);
+        assert!(sol.stats.final_constr_viol < 1e-6);
+        assert_eq!(sol.g.len(), 1);
+        assert!((sol.g[0] - 3.0).abs() < 1e-6, "g at solution: {:?}", sol.g);
+        assert_eq!(sol.z_l.len(), 2);
+        assert_eq!(sol.z_u.len(), 2);
+        assert!(sol.stats.iterations.is_empty());
+    }
+
+    #[test]
+    fn capture_iterations_fills_trajectory() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .capture_iterations()
+            .solve();
+        assert!(sol.success);
+        let iters = &sol.stats.iterations;
+        assert!(!iters.is_empty(), "no iteration records captured");
+        assert_eq!(iters[0].iter, 0, "trajectory must start at iteration 0");
+        assert!(
+            iters.windows(2).all(|w| w[0].iter < w[1].iter),
+            "iteration counter must be strictly increasing"
+        );
+    }
+
+    #[test]
+    fn capture_iterations_is_empty_on_sqp_engine() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_str("solver_selection", "qp-active-set")
+            .capture_iterations()
+            .solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!(sol.stats.iteration_count > 0);
+        assert!(sol.stats.iterations.is_empty());
     }
 
     #[test]
