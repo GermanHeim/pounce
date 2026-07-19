@@ -256,3 +256,78 @@ certificate was shown a report that agreed with it. The unscaled statistics
 were already computed and already surfaced through the Python bindings; only
 the console dropped them. Upstream Ipopt prints the unscaled value correctly,
 so this was a porting defect, not a deviation.
+
+
+## 9. Findings from adversarial review (2026-07-19)
+
+Two independent reviews were commissioned specifically to attack the fix. Both
+found defects that the fix's own tests had missed; all are fixed, and each is
+now pinned by a test that fails when the fix is reverted.
+
+### 9.1 Blocked acceptable-level termination had no safety net (REGRESSION)
+
+The veto gates the acceptable-level branch on `!masked`, but the fallback that
+undoes a refusal was armed only by `refusing_strict`. A run whose best available
+outcome was `Solved_To_Acceptable_Level` therefore had its exit blocked with
+nothing to catch it, and surfaced a bare failure:
+
+```
+f = A(x-a)^4 - K*sqrt(1+y^2)      (quartic pins obj_scale at 1e-8;
+                                   the second term holds the unscaled dual
+                                   infeasibility on a plateau above dual_inf_tol)
+  baseline  Solved_To_Acceptable_Level  f=-6.83e14   40 iters
+  veto      Maximum_Iterations_Exceeded             300 iters
+```
+
+Fixed: acceptable-level refusals are tracked separately (`acceptable_veto_fired`,
+`vetoed_acceptable_iterate`) and restored as `StopAtAcceptablePoint` — claiming
+`Success` for one would over-report. Since that termination is count-based, a
+shadow counter follows the suppressed streak so the refusal is recorded at the
+iterate where the baseline would really have stopped.
+
+### 9.2 The unscaled accessors divided by a SIGNED scale factor (PRE-EXISTING)
+
+`obj_scaling_factor` is signed (`-1` is the documented way to maximize) while
+`curr_dual_infeasibility_max` / `curr_complementarity_max` are max-norms.
+Dividing one by the other returned a **negative** "max-norm", which passes every
+`<= tol` comparison trivially. Consequences:
+
+- The veto was silently disabled on every maximization.
+- More broadly `passes_component_tols` compares those same values against
+  `dual_inf_tol` / `compl_inf_tol`, so the unscaled residual gate added for
+  **pounce#173 was defeated on maximization** — a false certificate could pass
+  the very check added to catch false certificates. This predates #200.
+
+Verified on a concave quartic (`max g = -sum (x-a)^4`, optimum 0) against the
+identical minimization: `2.27 -> 4.05e-8` (min) vs `-2.27 -> -2.27` (max).
+Fixed by taking the magnitude; now symmetric.
+
+### 9.3 The SQP path does NOT share the bug — the §3 backstop is unnecessary
+
+§3 called for a default-on relabel in `apply_kkt_fidelity_gate` so no exit path
+could report `Solve_Succeeded` at a masked point, and §8 dropped it. Measured
+rather than assumed: the SQP path has no `ConvCheck` (so it cannot use the veto)
+but does evaluate through `OrigIpoptNlp`, so exposure was an open question. On
+the masked quartic whose minimum is 0:
+
+```
+SQP:  Solve_Succeeded  obj = 2.66e-5      (IPM unfixed stops at ~2.27)
+```
+
+It converges to essentially the right answer, so there is no false certificate
+to relabel. Adding the backstop would have been actively harmful: the same
+predicate that fires on `quartc` also fires on `meyer3`, so a relabel would
+reintroduce precisely the collateral §8.1 removed. Pinned by
+`sqp_path_behaviour_on_a_masked_objective_is_pinned`.
+
+### 9.4 Still open
+
+- **Wall time.** The 9.1 case still runs 300 iterations where the baseline used
+  40. The §6 criterion (~5%) is unmeasured and this is the mechanism that
+  threatens it.
+- `nlp_scaling_method=user-scaling` with a deliberately small user
+  `obj_scaling_factor` would trip the veto on every solve of a well-conditioned
+  problem.
+- `mu_strategy_fallback` / `l1_auto_fallback` trigger on exactly the statuses the
+  fallback now converts, so the veto may suppress a retry.
+- The §6 benchmark sweep has not been run.

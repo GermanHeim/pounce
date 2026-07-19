@@ -1011,3 +1011,60 @@ fn the_veto_is_not_disabled_by_a_negative_objective_scaling_factor() {
          maximization only {max_gain:.6e} — the mechanism is sign-dependent"
     );
 }
+
+/// Does the SQP path share the gh #200 bug?
+///
+/// The plan's §3 called for a relabel backstop so no exit path could report
+/// success at a masked point; §8 dropped it when the design changed from
+/// predicting a false stop to testing for one. The SQP path has no `ConvCheck`
+/// and so cannot use the veto, but it *does* evaluate through `OrigIpoptNlp`,
+/// which applies the objective scaling — so whether it is exposed is a question
+/// about its convergence test, not something to assume either way.
+///
+/// This pins the answer. If SQP reports success on the masked quartic at a
+/// point far from the minimum, it has the bug and needs its own remedy; if it
+/// lands near the minimum, it does not, and the dropped backstop was
+/// unnecessary rather than an omission.
+#[test]
+fn sqp_path_behaviour_on_a_masked_objective_is_pinned() {
+    let a: Vec<Number> = (0..50).map(|i| 1e3 + i as Number).collect();
+    let spec = Spec {
+        n: 50,
+        p: 4,
+        a,
+        c: vec![1.0; 50],
+        w: vec![0.0; 50],
+        x0: 2.0,
+        arows: Vec::new(),
+        brhs: Vec::new(),
+        eq: true,
+    };
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("algorithm", "active-set-sqp", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("max_iter", 300, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+        spec,
+        Rc::new(RefCell::new(Vec::new())),
+    )));
+    let status = app.optimize_tnlp(t);
+    let obj = app.statistics().final_objective;
+    eprintln!("SQP on the masked quartic: {status:?} obj={obj:.6e} (true minimum 0)");
+
+    // The IPM path, unfixed, stops around 2.27 here and calls it optimal.
+    // Assert the SQP path does not do the same thing silently.
+    if succeeded(status) {
+        assert!(
+            obj < 1e-3,
+            "SQP reported {status:?} at objective {obj:.6e} on a masked problem whose minimum \
+             is 0 — it shares the gh #200 false-certificate bug and needs its own remedy"
+        );
+    }
+}
