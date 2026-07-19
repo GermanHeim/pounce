@@ -992,6 +992,8 @@ impl AlgorithmBuilder {
                 infeas_streak: 0,
                 obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
                 veto_fired: false,
+                acceptable_veto_fired: false,
+                shadow_acceptable_count: 0,
             });
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point

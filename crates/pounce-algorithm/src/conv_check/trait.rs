@@ -62,6 +62,13 @@ pub trait ConvCheck {
         false
     }
 
+    /// Whether this policy ever refused an *acceptable-level* termination it
+    /// judged masked (gh #200). Undone differently from a strict refusal — see
+    /// `OptErrorConvCheck::acceptable_veto_fired`.
+    fn acceptable_certificate_vetoed(&self) -> bool {
+        false
+    }
+
     fn check_convergence_with_state(
         &mut self,
         nlp_err: Number,

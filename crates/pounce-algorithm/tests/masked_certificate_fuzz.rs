@@ -188,6 +188,7 @@ struct Outcome {
     status: ApplicationReturnStatus,
     obj: Number,
     iters: usize,
+    resto_calls: i32,
 }
 
 fn run(spec: &Spec, threshold: Option<Number>, max_cpu: Option<Number>) -> Outcome {
@@ -220,6 +221,7 @@ fn run(spec: &Spec, threshold: Option<Number>, max_cpu: Option<Number>) -> Outco
         status,
         obj: s.final_objective,
         iters: s.iteration_count as usize,
+        resto_calls: s.restoration_calls,
     }
 }
 
@@ -247,11 +249,20 @@ fn run_capped(spec: &Spec, threshold: Option<Number>, max_iter: i32) -> Outcome 
         status,
         obj: s.final_objective,
         iters: s.iteration_count as usize,
+        resto_calls: s.restoration_calls,
     }
 }
 
+/// A terminating-at-a-real-point outcome. Deliberately includes
+/// `SolvedToAcceptableLevel`: the veto blocks the acceptable-level branch too,
+/// so a run that would have ended there is just as much at risk of being turned
+/// into a bare failure. Matching only `SolveSucceeded` silently skipped that
+/// entire population.
 fn succeeded(s: ApplicationReturnStatus) -> bool {
-    matches!(s, ApplicationReturnStatus::SolveSucceeded)
+    matches!(
+        s,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
 }
 
 fn gen_spec(rng: &mut Rng) -> Spec {
@@ -546,6 +557,281 @@ fn veto_state_does_not_leak_across_solves_on_a_reused_application() {
             (obj - fresh.obj).abs() <= 1e-9 * scale,
             "case {case}: reused application gave {obj:.12e}, fresh gave {:.12e} — state leaked",
             fresh.obj
+        );
+    }
+}
+
+/// `f = Σ c(x−a)⁴` with the provably inconsistent pair
+/// `x₀²+x₁²−1 = 0`, `x₀²+x₁²−4 = 0`.
+///
+/// No point satisfies both, and LICQ fails everywhere (the two gradients are
+/// identical), so the solver is driven into the restoration phase. The quartic
+/// keeps the objective scale pinned at the 1e-8 floor so the veto engages on the
+/// same run.
+struct InconsistentPair {
+    a: Number,
+}
+
+impl TNLP for InconsistentPair {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 2,
+            nnz_jac_g: 4,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[-2.0e19; 2]);
+        b.x_u.copy_from_slice(&[2.0e19; 2]);
+        b.g_l.copy_from_slice(&[0.0, 0.0]);
+        b.g_u.copy_from_slice(&[0.0, 0.0]);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[3.0, 3.0]);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some((x[0] - self.a).powi(4) + (x[1] - self.a).powi(4))
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = 4.0 * (x[0] - self.a).powi(3);
+        g[1] = 4.0 * (x[1] - self.a).powi(3);
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        let r = x[0] * x[0] + x[1] * x[1];
+        g[0] = r - 1.0;
+        g[1] = r - 4.0;
+        true
+    }
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, _n: bool, mode: SparsityRequest<'_>) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0, 1, 1]);
+                jcol.copy_from_slice(&[0, 1, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                values[0] = 2.0 * x[0];
+                values[1] = 2.0 * x[1];
+                values[2] = 2.0 * x[0];
+                values[3] = 2.0 * x[1];
+            }
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                let lam = lambda.map(|l| l[0] + l[1]).unwrap_or(0.0);
+                values[0] = obj_factor * 12.0 * (x[0] - self.a).powi(2) + 2.0 * lam;
+                values[1] = obj_factor * 12.0 * (x[1] - self.a).powi(2) + 2.0 * lam;
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// The veto must stay correct across the restoration phase.
+///
+/// `vetoed_iterate` snapshots an *outer* iterate while restoration runs an inner
+/// IPM over a different problem. Reading the code says the inner IPM owns its
+/// own data and the outer `curr` keeps its dimensions — but two earlier
+/// arguments of that exact shape turned out to be wrong, so this exercises it.
+///
+/// The earlier version of this test generated linear, consistent constraints and
+/// never entered restoration at all: 0 of 200 cases. It passed its assertions
+/// and proved nothing, which is why the count is asserted here.
+#[test]
+fn the_veto_survives_the_restoration_phase() {
+    let mut entered = 0;
+    for a in [1e3, 1e4, 1e5] {
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(InconsistentPair { a }));
+            let st = app.optimize_tnlp(t);
+            let s = app.statistics();
+            (st, s.final_objective, s.restoration_calls)
+        };
+        let (bs, bo, br) = solve(0.0);
+        let (vs, vo, vr) = solve(1e-4);
+        eprintln!(
+            "a={a:e}: baseline {bs:?} f={bo:.6e} resto={br} | veto {vs:?} f={vo:.6e} resto={vr}"
+        );
+        // `restoration_calls` stays 0 on this path — the phase is entered and
+        // fails before the counter is bumped — so the status is the evidence
+        // that restoration was actually involved.
+        let restoration_involved = |st: ApplicationReturnStatus| {
+            matches!(
+                st,
+                ApplicationReturnStatus::RestorationFailed
+                    | ApplicationReturnStatus::InfeasibleProblemDetected
+            )
+        };
+        if br > 0 || vr > 0 || restoration_involved(bs) || restoration_involved(vs) {
+            entered += 1;
+        }
+        // An infeasible problem must not be certified as solved off a stale
+        // snapshot — the restore is guarded on a finite objective only, so this
+        // is the assertion that the guard is not the whole story.
+        if !succeeded(bs) {
+            assert!(
+                !succeeded(vs),
+                "a={a:e}: baseline correctly reported {bs:?} on an infeasible problem but the \
+                 veto reported {vs:?}"
+            );
+        }
+        assert!(
+            vo.is_finite(),
+            "a={a:e}: restoration + veto produced a non-finite objective"
+        );
+    }
+    assert!(
+        entered >= 3,
+        "only {entered}/3 configurations reached restoration — the trigger no longer works"
+    );
+    eprintln!("restoration: {entered}/3 configurations entered restoration");
+}
+
+/// `f(x,y) = A(x−a)⁴ − K·√(1+y²)` — a masked objective whose *acceptable*-level
+/// certificate the veto also blocks.
+struct AcceptableOnly {
+    a: Number,
+    amp: Number,
+    k: Number,
+}
+
+impl TNLP for AcceptableOnly {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[-2.0e19; 2]);
+        b.x_u.copy_from_slice(&[2.0e19; 2]);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[0.0, 1.0]);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some(self.amp * (x[0] - self.a).powi(4) - self.k * (1.0 + x[1] * x[1]).sqrt())
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = 4.0 * self.amp * (x[0] - self.a).powi(3);
+        g[1] = -self.k * x[1] / (1.0 + x[1] * x[1]).sqrt();
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                let d = (1.0 + x[1] * x[1]).sqrt();
+                values[0] = obj_factor * 12.0 * self.amp * (x[0] - self.a).powi(2);
+                values[1] = obj_factor * (-self.k / (d * d * d));
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// The veto blocks acceptable-level termination as well as strict, but the
+/// fallback that undoes a refusal is armed only when a *strict* certificate was
+/// refused. A run whose best outcome was `Solved_To_Acceptable_Level` therefore
+/// had its exit blocked with nothing to catch it, and surfaced a bare failure —
+/// the veto turning a usable answer into an unusable one, which is exactly what
+/// it promises never to do.
+#[test]
+fn a_blocked_acceptable_certificate_is_not_turned_into_a_failure() {
+    for (a, amp, k) in [
+        (1e5, 1.0, 10.0),
+        (1e5, 1.0, 50.0),
+        (1e3, 1.0, 10.0),
+        (1e4, 1.0, 3.0),
+    ] {
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(AcceptableOnly { a, amp, k }));
+            let st = app.optimize_tnlp(t);
+            (
+                st,
+                app.statistics().final_objective,
+                app.statistics().iteration_count,
+            )
+        };
+        let (bs, bo, bi) = solve(0.0);
+        let (vs, vo, vi) = solve(1e-4);
+        eprintln!(
+            "a={a:e} k={k}: baseline {bs:?} f={bo:.6e} it={bi} | veto {vs:?} f={vo:.6e} it={vi}"
+        );
+        if !succeeded(bs) {
+            continue;
+        }
+        assert!(
+            succeeded(vs),
+            "a={a:e} k={k}: baseline ended {bs:?} but the veto surfaced {vs:?}"
         );
     }
 }

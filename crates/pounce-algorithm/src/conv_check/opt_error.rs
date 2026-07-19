@@ -57,10 +57,24 @@ pub struct OptErrorConvCheck {
     /// (gh #200). See [`certificate_masked`]. `0` disables the mechanism
     /// entirely, restoring bit-for-bit upstream-Ipopt behaviour.
     pub obj_scale_certificate_threshold: Number,
-    /// Whether a masked certificate was ever refused during this solve.
-    /// The failure paths read it to decide whether to fall back to the
-    /// stored acceptable point rather than report a bare failure.
+    /// Whether a masked **strict** certificate was ever refused this solve.
     pub veto_fired: bool,
+    /// Whether a masked **acceptable-level** termination was ever refused.
+    ///
+    /// Tracked separately because the two refusals must be undone differently:
+    /// a refused strict certificate restores as `Success`, a refused
+    /// acceptable-level one as `StopAtAcceptablePoint`. Conflating them would
+    /// either over-claim a status or, as originally written, leave the
+    /// acceptable-level refusal with no safety net at all.
+    pub acceptable_veto_fired: bool,
+    /// Shadow of `acceptable_count` for the run the veto is suppressing.
+    ///
+    /// Acceptable-level termination is count-based — it needs `acceptable_iter`
+    /// consecutive qualifying iterates — so knowing that one iterate *would*
+    /// have qualified is not enough to know the baseline would have stopped.
+    /// This counts the suppressed streak so the refusal is recorded at the
+    /// iterate where the baseline would actually have terminated.
+    pub shadow_acceptable_count: Index,
 }
 
 /// Is a passing strict certificate *masked* by an extreme objective scale
@@ -133,6 +147,8 @@ impl Default for OptErrorConvCheck {
             // [`certificate_masked`].
             obj_scale_certificate_threshold: 1e-4,
             veto_fired: false,
+            acceptable_veto_fired: false,
+            shadow_acceptable_count: 0,
         }
     }
 }
@@ -242,6 +258,10 @@ impl ConvCheck for OptErrorConvCheck {
         self.veto_fired
     }
 
+    fn acceptable_certificate_vetoed(&self) -> bool {
+        self.acceptable_veto_fired
+    }
+
     fn check_convergence(&mut self, nlp_err: Number, iter_count: Index) -> ConvergenceStatus {
         if nlp_err <= self.tol {
             return ConvergenceStatus::Converged;
@@ -336,10 +356,22 @@ impl ConvCheck for OptErrorConvCheck {
         // not merely swapped for an acceptable-level one at the same wrong
         // point. Acceptable-point *storage* is deliberately left un-vetoed —
         // that stashed point is the rollback target if the run later stalls.
-        if !masked
-            && self.acceptable_iter > 0
-            && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f)
-        {
+        let acceptable_now = self.acceptable_iter > 0
+            && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f);
+        if masked {
+            // Suppressed, but tracked: the baseline would have terminated once
+            // this streak reached `acceptable_iter`, and that is the iterate the
+            // fallback has to be able to hand back.
+            if acceptable_now {
+                self.shadow_acceptable_count += 1;
+                if self.shadow_acceptable_count >= self.acceptable_iter {
+                    self.acceptable_veto_fired = true;
+                }
+            } else {
+                self.shadow_acceptable_count = 0;
+            }
+            self.acceptable_count = 0;
+        } else if acceptable_now {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
                 return ConvergenceStatus::ConvergedToAcceptable;

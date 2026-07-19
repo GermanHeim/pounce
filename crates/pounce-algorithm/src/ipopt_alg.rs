@@ -173,6 +173,10 @@ pub struct IpoptAlgorithm {
     /// continued run does not do better. Deliberately not the acceptable
     /// snapshot: that one is overwritten unconditionally and drifts.
     vetoed_iterate: Option<crate::iterates_vector::IteratesVector>,
+    /// The iterate at which a refused *acceptable-level* termination would have
+    /// fired. Held separately from `vetoed_iterate` because it restores under a
+    /// weaker status, and claiming `Success` for it would over-report.
+    vetoed_acceptable_iterate: Option<crate::iterates_vector::IteratesVector>,
     acceptable_iter_number: Index,
     /// Shared per-solve diagnostics state. `None` unless the CLI
     /// requested `--dump <cat>:<spec>`. When set, the outer loop
@@ -243,6 +247,7 @@ impl IpoptAlgorithm {
             resto_near_feasible_count: 0,
             acceptable_iterate: None,
             vetoed_iterate: None,
+            vetoed_acceptable_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
             debug: None,
@@ -322,8 +327,17 @@ impl IpoptAlgorithm {
         if matches!(result, SolverReturn::Success) {
             return result;
         }
-        let Some(refused) = self.vetoed_iterate.clone() else {
-            return result;
+        // A strict refusal outranks an acceptable-level one: it restores under
+        // the stronger status, which is what the baseline would have reported.
+        // When only an acceptable-level termination was refused, restoring it as
+        // `Success` would over-claim, so it comes back as what it was.
+        let (refused, restored_status) = match (
+            self.vetoed_iterate.clone(),
+            self.vetoed_acceptable_iterate.clone(),
+        ) {
+            (Some(strict), _) => (strict, SolverReturn::Success),
+            (None, Some(acc)) => (acc, SolverReturn::StopAtAcceptablePoint),
+            (None, None) => return result,
         };
         {
             let mut d = self.data.borrow_mut();
@@ -331,7 +345,7 @@ impl IpoptAlgorithm {
             d.accept_trial_point();
         }
         if self.cq.borrow().curr_f().is_finite() {
-            SolverReturn::Success
+            restored_status
         } else {
             result
         }
@@ -632,6 +646,11 @@ impl IpoptAlgorithm {
         // better one, so it must not overwrite this.
         if self.vetoed_iterate.is_none() && self.bundle.conv_check.certificate_vetoed() {
             self.vetoed_iterate = self.data.borrow().curr.as_ref().cloned();
+        }
+        if self.vetoed_acceptable_iterate.is_none()
+            && self.bundle.conv_check.acceptable_certificate_vetoed()
+        {
+            self.vetoed_acceptable_iterate = self.data.borrow().curr.as_ref().cloned();
         }
         match conv_status {
             ConvergenceStatus::Continue => {}
