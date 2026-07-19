@@ -188,7 +188,6 @@ struct Outcome {
     status: ApplicationReturnStatus,
     obj: Number,
     iters: usize,
-    resto_calls: i32,
 }
 
 fn run(spec: &Spec, threshold: Option<Number>, max_cpu: Option<Number>) -> Outcome {
@@ -221,7 +220,6 @@ fn run(spec: &Spec, threshold: Option<Number>, max_cpu: Option<Number>) -> Outco
         status,
         obj: s.final_objective,
         iters: s.iteration_count as usize,
-        resto_calls: s.restoration_calls,
     }
 }
 
@@ -249,7 +247,6 @@ fn run_capped(spec: &Spec, threshold: Option<Number>, max_iter: i32) -> Outcome 
         status,
         obj: s.final_objective,
         iters: s.iteration_count as usize,
-        resto_calls: s.restoration_calls,
     }
 }
 

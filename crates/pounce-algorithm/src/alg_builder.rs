@@ -993,6 +993,7 @@ impl AlgorithmBuilder {
                 obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
                 veto_fired: false,
                 acceptable_veto_fired: false,
+                veto_extra_iters: 0,
                 shadow_acceptable_count: 0,
             });
 

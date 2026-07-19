@@ -67,6 +67,16 @@ pub struct OptErrorConvCheck {
     /// either over-claim a status or, as originally written, leave the
     /// acceptable-level refusal with no safety net at all.
     pub acceptable_veto_fired: bool,
+    /// Iterations spent since the veto first refused a certificate.
+    ///
+    /// The veto is a bet that continuing reaches a better point. Some problems
+    /// never let it pay off — an unscaled error pinned above `acceptable_tol`
+    /// by an unbounded direction keeps the veto engaged until `max_iter`,
+    /// turning a 40-iteration solve into a 300-iteration one for nothing. Past
+    /// [`VETO_MAX_EXTRA_ITERS`] the bet is called off and the run is allowed to
+    /// terminate normally; correctness does not depend on the cap, because the
+    /// refused certificate is restored either way.
+    pub veto_extra_iters: Index,
     /// Shadow of `acceptable_count` for the run the veto is suppressing.
     ///
     /// Acceptable-level termination is count-based — it needs `acceptable_iter`
@@ -76,6 +86,16 @@ pub struct OptErrorConvCheck {
     /// iterate where the baseline would actually have terminated.
     pub shadow_acceptable_count: Index,
 }
+
+/// How many iterations the veto may spend before its bet is called off.
+///
+/// Generous relative to what a successful rescue costs — the reported quartics
+/// reach the true minimum in 11-15 extra iterations — but bounded, so a veto
+/// that can never lift (an unscaled error pinned above `acceptable_tol` by an
+/// unbounded direction) cannot run to `max_iter`. Correctness does not rest on
+/// this number: whatever happens after the budget is spent, the refused
+/// certificate is still restored if the run ends without a better one.
+const VETO_MAX_EXTRA_ITERS: Index = 60;
 
 /// Is a passing strict certificate *masked* by an extreme objective scale
 /// (gh #200)?
@@ -151,6 +171,7 @@ impl Default for OptErrorConvCheck {
             obj_scale_certificate_threshold: 1e-4,
             veto_fired: false,
             acceptable_veto_fired: false,
+            veto_extra_iters: 0,
             shadow_acceptable_count: 0,
         }
     }
@@ -325,12 +346,21 @@ impl ConvCheck for OptErrorConvCheck {
         // `acceptable_tol`, the veto lifts, and an honest strict certificate is
         // issued. Refusing to stop early is the whole intervention; the strict
         // tolerance in scaled space is untouched.
-        let masked = certificate_masked(
-            obj_scale,
-            unscaled_err,
-            self.obj_scale_certificate_threshold,
-            self.acceptable_tol,
-        );
+        if self.veto_fired || self.acceptable_veto_fired {
+            self.veto_extra_iters += 1;
+        }
+        // Call the bet off once it has plainly not paid off, so a veto that can
+        // never lift cannot cost an unbounded number of iterations. The refused
+        // certificate is restored regardless, so this bounds cost, not
+        // correctness.
+        let budget_spent = self.veto_extra_iters > VETO_MAX_EXTRA_ITERS;
+        let masked = !budget_spent
+            && certificate_masked(
+                obj_scale,
+                unscaled_err,
+                self.obj_scale_certificate_threshold,
+                self.acceptable_tol,
+            );
         // Record a refusal only when a strict certificate was genuinely on the
         // table. `masked` alone is far broader — it holds on ordinary iterates
         // long before convergence — and using it would arm the fallback (and

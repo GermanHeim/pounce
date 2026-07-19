@@ -173,6 +173,9 @@ pub struct IpoptAlgorithm {
     /// continued run does not do better. Deliberately not the acceptable
     /// snapshot: that one is overwritten unconditionally and drifts.
     vetoed_iterate: Option<crate::iterates_vector::IteratesVector>,
+    /// Objective at `vetoed_iterate`, so the refused point can be compared
+    /// against whatever the continued run reached without re-evaluating it.
+    vetoed_obj: Option<Number>,
     /// The iterate at which a refused *acceptable-level* termination would have
     /// fired. Held separately from `vetoed_iterate` because it restores under a
     /// weaker status, and claiming `Success` for it would over-report.
@@ -247,6 +250,7 @@ impl IpoptAlgorithm {
             resto_near_feasible_count: 0,
             acceptable_iterate: None,
             vetoed_iterate: None,
+            vetoed_obj: None,
             vetoed_acceptable_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
@@ -325,6 +329,31 @@ impl IpoptAlgorithm {
     ///   that was refused.
     fn honour_refused_certificate(&mut self, result: SolverReturn) -> SolverReturn {
         if matches!(result, SolverReturn::Success) {
+            // The continued run produced a certificate of its own — but not
+            // necessarily a better *point*. Both it and the refused iterate
+            // passed the strict test, so both are feasible to tolerance and
+            // comparing objectives is legitimate; keep whichever is lower.
+            //
+            // This is what makes "never worse" hold even when the bet loses in
+            // a way that still converges: on a non-convex problem the extra
+            // travel can reach a different, worse stationary point, and the
+            // budget cap (`VETO_MAX_EXTRA_ITERS`) can also hand back a
+            // late-but-converged point. Neither may silently replace a better
+            // answer the solver already had in hand.
+            let Some(refused_obj) = self.vetoed_obj else {
+                return result;
+            };
+            let Some(refused) = self.vetoed_iterate.clone() else {
+                return result;
+            };
+            if self.cq.borrow().curr_f() <= refused_obj {
+                return result;
+            }
+            {
+                let mut d = self.data.borrow_mut();
+                d.set_trial(refused);
+                d.accept_trial_point();
+            }
             return result;
         }
         // A strict refusal outranks an acceptable-level one: it restores under
@@ -646,6 +675,7 @@ impl IpoptAlgorithm {
         // better one, so it must not overwrite this.
         if self.vetoed_iterate.is_none() && self.bundle.conv_check.certificate_vetoed() {
             self.vetoed_iterate = self.data.borrow().curr.as_ref().cloned();
+            self.vetoed_obj = Some(self.cq.borrow().curr_f());
         }
         if self.vetoed_acceptable_iterate.is_none()
             && self.bundle.conv_check.acceptable_certificate_vetoed()
