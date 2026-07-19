@@ -62,16 +62,25 @@ struct Spec {
     c: Vec<Number>,
     w: Vec<Number>,
     x0: Number,
+    /// Dense rows of a linear constraint block `A x {=,<=} b`. Linear keeps the
+    /// Lagrangian Hessian free of multiplier terms while still exercising the
+    /// machinery the unconstrained fuzz cannot reach at all: constraint
+    /// violation, equality/inequality multipliers, barrier complementarity,
+    /// the filter line search, and restoration.
+    arows: Vec<Vec<Number>>,
+    brhs: Vec<Number>,
+    /// `true` → equalities (`= b`), `false` → inequalities (`<= b`).
+    eq: bool,
 }
 
-struct Problem(Spec);
+struct Problem(Spec, Rc<RefCell<Vec<Number>>>);
 
 impl TNLP for Problem {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: self.0.n as i32,
-            m: 0,
-            nnz_jac_g: 0,
+            m: self.0.arows.len() as i32,
+            nnz_jac_g: (self.0.arows.len() * self.0.n) as i32,
             nnz_h_lag: self.0.n as i32,
             index_style: IndexStyle::C,
         })
@@ -82,6 +91,11 @@ impl TNLP for Problem {
         }
         for v in b.x_u.iter_mut() {
             *v = 2.0e19;
+        }
+        let s = &self.0;
+        for (k, rhs) in s.brhs.iter().enumerate() {
+            b.g_u[k] = *rhs;
+            b.g_l[k] = if s.eq { *rhs } else { -2.0e19 };
         }
         true
     }
@@ -106,10 +120,35 @@ impl TNLP for Problem {
         }
         true
     }
-    fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+    fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        for (k, row) in self.0.arows.iter().enumerate() {
+            g[k] = row.iter().zip(x).map(|(a, xi)| a * xi).sum();
+        }
         true
     }
-    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, mode: SparsityRequest<'_>) -> bool {
+        let s = &self.0;
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                let mut t = 0;
+                for k in 0..s.arows.len() {
+                    for j in 0..s.n {
+                        irow[t] = k as i32;
+                        jcol[t] = j as i32;
+                        t += 1;
+                    }
+                }
+            }
+            SparsityRequest::Values { values } => {
+                let mut t = 0;
+                for row in &s.arows {
+                    for a in row {
+                        values[t] = *a;
+                        t += 1;
+                    }
+                }
+            }
+        }
         true
     }
     fn eval_h(
@@ -140,7 +179,9 @@ impl TNLP for Problem {
         }
         true
     }
-    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    fn finalize_solution(&mut self, s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+        *self.1.borrow_mut() = s.x.to_vec();
+    }
 }
 
 struct Outcome {
@@ -169,7 +210,10 @@ fn run(spec: &Spec, threshold: Option<Number>, max_cpu: Option<Number>) -> Outco
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(spec.clone())));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+        spec.clone(),
+        Rc::new(RefCell::new(Vec::new())),
+    )));
     let status = app.optimize_tnlp(tnlp);
     let s = app.statistics();
     Outcome {
@@ -193,7 +237,10 @@ fn run_capped(spec: &Spec, threshold: Option<Number>, max_iter: i32) -> Outcome 
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(spec.clone())));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+        spec.clone(),
+        Rc::new(RefCell::new(Vec::new())),
+    )));
     let status = app.optimize_tnlp(tnlp);
     let s = app.statistics();
     Outcome {
@@ -219,13 +266,33 @@ fn gen_spec(rng: &mut Rng) -> Spec {
     // Non-convexity: 0 for convex, positive adds a concave well.
     let wmag = rng.pick(&[0.0, 0.0, 1.0, 100.0]);
     let x0 = rng.pick(&[0.0, 2.0, -50.0]);
+    // Constraint block: none, equalities, or inequalities. Kept small relative
+    // to `n` so the problems stay solvable.
+    let m = rng.pick(&[0usize, 0, 1, 3]).min(n.saturating_sub(1));
+    let eq = rng.pick(&[true, false]);
+    let a: Vec<Number> = (0..n).map(|_| (rng.unit() * 2.0 - 1.0) * amag).collect();
+    let arows: Vec<Vec<Number>> = (0..m)
+        .map(|_| (0..n).map(|_| rng.unit() * 2.0 - 1.0).collect())
+        .collect();
+    // Route each row near the unconstrained minimum so the feasible set is
+    // non-empty and the constraints sometimes bind.
+    let brhs = arows
+        .iter()
+        .map(|row| {
+            let at_min: Number = row.iter().zip(&a).map(|(r, ai)| r * ai).sum();
+            at_min + (rng.unit() * 2.0 - 1.0) * amag.sqrt()
+        })
+        .collect();
     Spec {
         n,
         p,
-        a: (0..n).map(|_| (rng.unit() * 2.0 - 1.0) * amag).collect(),
+        a,
         c: (0..n).map(|_| 1.0 + rng.unit() * (cspread - 1.0)).collect(),
         w: (0..n).map(|_| rng.unit() * wmag).collect(),
         x0,
+        arows,
+        brhs,
+        eq,
     }
 }
 
@@ -381,6 +448,104 @@ fn opt_out_is_inert_and_the_solver_stays_deterministic() {
             "case {case}: veto objective differs between runs: {} vs {}",
             c.obj,
             d.obj
+        );
+    }
+}
+
+/// Evaluate the objective directly, independent of the solver's own bookkeeping.
+fn eval_obj(spec: &Spec, x: &[Number]) -> Number {
+    (0..spec.n)
+        .map(|i| spec.c[i] * (x[i] - spec.a[i]).powi(spec.p) - spec.w[i] * x[i] * x[i])
+        .sum()
+}
+
+/// The returned point must be the point the reported objective describes.
+///
+/// This is the failure mode a statistics-only test cannot see: the veto's
+/// fallback rewrites the iterate *after* the solve loop has ended, so if the
+/// restore and the reported statistics were drawn at different moments a caller
+/// would receive an `x` that does not correspond to the objective it was handed
+/// — a silent, and much nastier, kind of wrong answer than a bad status.
+#[test]
+fn the_returned_point_matches_the_reported_objective() {
+    let mut rng = Rng(0xF00D_2000);
+    let mut checked = 0;
+    for case in 0..120 {
+        let spec = gen_spec(&mut rng);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_integer_value("max_iter", 300, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("print_level", 0, true, false)
+            .unwrap();
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(Problem(spec.clone(), Rc::clone(&seen))));
+        let status = app.optimize_tnlp(tnlp);
+        let reported = app.statistics().final_objective;
+        let x = seen.borrow().clone();
+        if x.len() != spec.n || !reported.is_finite() {
+            continue;
+        }
+        checked += 1;
+        let direct = eval_obj(&spec, &x);
+        let scale = reported.abs().max(direct.abs()).max(1.0);
+        assert!(
+            (direct - reported).abs() <= 1e-6 * scale,
+            "case {case} ({status:?}): returned x evaluates to {direct:.12e} but the reported \
+             objective is {reported:.12e}"
+        );
+    }
+    assert!(
+        checked >= 60,
+        "only {checked} cases produced a usable solution vector"
+    );
+    eprintln!("solution-consistency fuzz: {checked} cases checked");
+}
+
+/// Veto state must not leak between solves on a reused application object.
+///
+/// `vetoed_iterate` holds a full iterate snapshot. If it survived into a second
+/// solve — a different problem, possibly a different dimension — restoring it
+/// would at best return a stranger's answer and at worst corrupt the iterate.
+/// Reusing one `IpoptApplication` across solves is ordinary in warm-start and
+/// parametric workflows, and every other test here builds a fresh app, so
+/// nothing else would catch this.
+#[test]
+fn veto_state_does_not_leak_across_solves_on_a_reused_application() {
+    let mut rng = Rng(0xBEEF_2000);
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("max_iter", 300, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    for case in 0..40 {
+        let spec = gen_spec(&mut rng);
+        // Reference: same problem on a pristine application.
+        let fresh = run(&spec, None, None);
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let tnlp: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(Problem(spec.clone(), Rc::clone(&seen))));
+        let status = app.optimize_tnlp(tnlp);
+        let obj = app.statistics().final_objective;
+
+        assert_eq!(
+            format!("{status:?}"),
+            format!("{:?}", fresh.status),
+            "case {case}: reused application gave a different status than a fresh one"
+        );
+        let scale = obj.abs().max(fresh.obj.abs()).max(1.0);
+        assert!(
+            (obj - fresh.obj).abs() <= 1e-9 * scale,
+            "case {case}: reused application gave {obj:.12e}, fresh gave {:.12e} — state leaked",
+            fresh.obj
         );
     }
 }
