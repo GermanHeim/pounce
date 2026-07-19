@@ -120,3 +120,49 @@ block-triangular calculation order. Use it to diagnose a large model's
 specification, or as the structural front end for tooling that decides
 *what* to specify before calling `initialize` /
 `block_initialize` to do the work.
+
+## Repairing a bad specification
+
+Some specifications are structurally wrong, not just badly started. On
+a distillation column at steady state, holding **all** the flow
+controls leaves the drum levels undetermined while the holdup balances
+become redundant — square by count, singular in structure, and no
+starting point fixes that. `block_repair_plan` plans a valid
+specification instead of failing on the broken one:
+
+```python
+plan = pyomo_pounce.block_repair_plan(
+    model,
+    decision_candidates=[m.LT, m.VB, m.D, m.B])  # what you would like held
+plan.decisions   # candidates a square system can hold
+plan.pruned      # candidates the equalities claim: solved for instead
+plan.pinned      # what nothing determines: hold at values you choose
+```
+
+The candidates are pruned to the subset a valid specification can
+hold: matching prefers plain variables over candidates, which provably
+minimizes the number pruned. The pins need **no user input**: a
+variable is pinned when every one of its edges is provably unusable —
+the key case being an equation `0 == f/g`, which cannot determine a
+variable appearing only in the denominator `g`, since its sensitivity
+there vanishes at every solution. That is exactly the shape
+substituting `d/dt = 0` into a dynamic balance produces, which is how
+loose integrators (drum levels with no weir feedback) hide in
+steady-state models. Like `block_analyze` it is a plan, not an action:
+nothing is fixed, read, or written, and no values are needed.
+`loose_variables` (undetermined, not repairable) and
+`redundant_constraints` (satisfiable by no specification) are genuine
+model defects.
+
+`initialize` and `block_initialize` run the same check on their
+`decisions` **automatically** — no new arguments. A square
+specification is used exactly as given, the shipped behavior. A broken
+one is repaired: the decisions become the candidate pool, conflicting
+ones are pruned (they need no values), pins are seeded bounds-aware
+when valueless, and `report.repair` records the plan (None when
+nothing was needed). The repair is call-scoped exactly like the
+decisions themselves (fixed flags restored, values only), so it never
+changes your model's own specification. To *apply* a plan to a model
+you intend to solve — a square simulation, say — fix `plan.decisions`
+and `plan.pinned` and leave `plan.pruned` free; which variables to fix
+is a modeling decision, so the plan leaves it to you.
