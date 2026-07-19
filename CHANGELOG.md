@@ -9,7 +9,7 @@ changes.
 
 ## [Unreleased]
 
-### Added — automatic specification repair: `block_repair_plan`, and repair inside `initialize`/`block_initialize` (Pyomo)
+### Added — automatic specification repair: `block_repair_plan`, and repair inside `initialize`/`block_initialize` (Pyomo, #228)
 
 - **A structurally broken specification now initializes anyway, and the report
   says what was repaired.** Some specifications are wrong by structure, not by
