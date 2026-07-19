@@ -1065,3 +1065,55 @@ fn sqp_path_behaviour_on_a_masked_objective_is_pinned() {
         );
     }
 }
+
+/// The barrier parameter reported alongside a restored point must belong to
+/// that point.
+///
+/// `curr_mu` lives on `IpoptData`, not in the `IteratesVector`, so restoring the
+/// refused iterate does not rewind it — while `stats.final_mu` is read after the
+/// restore. Left unhandled, a run that falls back reports the *continued* run's
+/// barrier parameter next to the *refused* run's `x`. That pair is not
+/// cosmetic: `final_mu` feeds a warm-started corrector's `mu_init` /
+/// `warm_start_target_mu` and is exported to callers as `info["mu"]`, so a
+/// warm-start chain would resume from a rewound point at a barrier parameter
+/// belonging to a far more converged one.
+#[test]
+fn the_reported_barrier_parameter_belongs_to_the_returned_point() {
+    for (a, k) in [(1e5, 10.0), (1e3, 10.0)] {
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(AcceptableOnly { a, amp: 1.0, k }));
+            let st = app.optimize_tnlp(t);
+            let s = app.statistics();
+            (st, s.final_objective, s.final_mu)
+        };
+        let (bs, bo, bmu) = solve(0.0);
+        let (vs, vo, vmu) = solve(1e-4);
+        eprintln!(
+            "a={a:e} k={k}: baseline {bs:?} f={bo:.6e} mu={bmu:.3e} | veto {vs:?} f={vo:.6e} mu={vmu:.3e}"
+        );
+        // The fallback restores the refused point, so the objective matches the
+        // baseline exactly — and the barrier parameter must match too, since it
+        // describes the same iterate.
+        assert!(
+            (vo - bo).abs() <= 1e-9 * bo.abs().max(1.0),
+            "premise: the fallback should return the baseline point"
+        );
+        assert!(
+            (vmu - bmu).abs() <= 1e-6 * bmu.abs().max(1e-300),
+            "a={a:e}: returned the baseline point (f={vo:.6e}) but reported mu={vmu:.3e} \
+             where the point's own barrier parameter is {bmu:.3e} — an (x, mu) pair that \
+             never existed"
+        );
+    }
+}

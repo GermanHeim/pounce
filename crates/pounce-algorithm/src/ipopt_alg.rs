@@ -176,6 +176,18 @@ pub struct IpoptAlgorithm {
     /// Objective at `vetoed_iterate`, so the refused point can be compared
     /// against whatever the continued run reached without re-evaluating it.
     vetoed_obj: Option<Number>,
+    /// Barrier parameter at `vetoed_iterate`.
+    ///
+    /// `curr_mu` lives on `IpoptData` rather than in the `IteratesVector`, so
+    /// restoring the iterate does not rewind it, and `stats.final_mu` is read
+    /// after the restore — leaving the continued run's barrier parameter
+    /// reported next to the refused run's `x`. That pair feeds a warm-started
+    /// corrector's `mu_init` and reaches callers as `info["mu"]`, so it must
+    /// describe the point actually returned. (Not currently observable: `mu`
+    /// has bottomed out at its floor in every fallback case reachable so far,
+    /// making the two values coincide. Kept correct rather than left to depend
+    /// on that.)
+    vetoed_mu: Option<Number>,
     /// The iterate at which a refused *acceptable-level* termination would have
     /// fired. Held separately from `vetoed_iterate` because it restores under a
     /// weaker status, and claiming `Success` for it would over-report.
@@ -251,6 +263,7 @@ impl IpoptAlgorithm {
             acceptable_iterate: None,
             vetoed_iterate: None,
             vetoed_obj: None,
+            vetoed_mu: None,
             vetoed_acceptable_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
@@ -353,6 +366,9 @@ impl IpoptAlgorithm {
                 let mut d = self.data.borrow_mut();
                 d.set_trial(refused);
                 d.accept_trial_point();
+                if let Some(mu) = self.vetoed_mu {
+                    d.curr_mu = mu;
+                }
             }
             return result;
         }
@@ -360,11 +376,15 @@ impl IpoptAlgorithm {
         // the stronger status, which is what the baseline would have reported.
         // When only an acceptable-level termination was refused, restoring it as
         // `Success` would over-claim, so it comes back as what it was.
+        let mut restored_strict = false;
         let (refused, restored_status) = match (
             self.vetoed_iterate.clone(),
             self.vetoed_acceptable_iterate.clone(),
         ) {
-            (Some(strict), _) => (strict, SolverReturn::Success),
+            (Some(strict), _) => {
+                restored_strict = true;
+                (strict, SolverReturn::Success)
+            }
             (None, Some(acc)) => (acc, SolverReturn::StopAtAcceptablePoint),
             (None, None) => return result,
         };
@@ -372,6 +392,13 @@ impl IpoptAlgorithm {
             let mut d = self.data.borrow_mut();
             d.set_trial(refused);
             d.accept_trial_point();
+            // The restored point's own barrier parameter, not the continued
+            // run's — see `vetoed_mu`.
+            if restored_strict {
+                if let Some(mu) = self.vetoed_mu {
+                    d.curr_mu = mu;
+                }
+            }
         }
         if self.cq.borrow().curr_f().is_finite() {
             restored_status
@@ -676,6 +703,7 @@ impl IpoptAlgorithm {
         if self.vetoed_iterate.is_none() && self.bundle.conv_check.certificate_vetoed() {
             self.vetoed_iterate = self.data.borrow().curr.as_ref().cloned();
             self.vetoed_obj = Some(self.cq.borrow().curr_f());
+            self.vetoed_mu = Some(self.data.borrow().curr_mu);
         }
         if self.vetoed_acceptable_iterate.is_none()
             && self.bundle.conv_check.acceptable_certificate_vetoed()
