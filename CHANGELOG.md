@@ -35,13 +35,20 @@ changes.
   identically under every matching order, where raw-incidence matching left
   an order-dependent (and numerically singular) choice.
 - `initialize` and `block_initialize` run the same check on their `decisions`
-  automatically — no new arguments. A square specification is used exactly
-  as given (the shipped behavior); a broken one is repaired, with
-  `report.repair` recording the plan (None when nothing was needed). The
-  repair is call-scoped like the decisions themselves, so it never alters
-  the model's own specification. A pruned decision no longer needs a value
-  (it gets solved for); a valueless pinned variable gets a bounds-aware
-  seed.
+  automatically (`repair="auto"`, the default). A square specification is
+  used exactly as given (the shipped behavior); a broken one is repaired,
+  with `report.repair` recording the plan (None when nothing was needed)
+  and `n_pinned` counting pins separately from decisions. The repair is
+  call-scoped like the decisions themselves, so it never alters the model's
+  own specification. A pruned decision no longer needs a value (it gets
+  solved for); a valueless pinned variable gets a bounds-aware seed that is
+  never exactly zero (a pin lives in denominators). `repair="off"` is the
+  strict path: decisions held exactly as given, non-square specifications
+  reported instead of repaired.
+- Pruning ties are deterministic and user-steerable: among candidates,
+  earlier-listed ones are preferentially kept, so the `decision_candidates`
+  listing order is an implicit priority. Fixing a variable removes it from
+  the plan entirely.
 
 ### Added — `pyomo_pounce.block_analyze`, the analysis half of `block_initialize` on its own (Pyomo, #224)
 

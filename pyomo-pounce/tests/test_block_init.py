@@ -483,6 +483,101 @@ def test_block_initialize_pins_and_seeds_automatically():
     assert not m.M.fixed  # the pin is call-scoped, like the decisions
 
 
+def test_repair_plan_tie_break_prefers_earlier_listed():
+    # Among conflicting candidates, listing order is the priority: the
+    # pruned one is the latest-listed that resolves the conflict.
+    m = splitter_model()
+    plan = pyomo_pounce.block_repair_plan(m, decision_candidates=[m.F, m.D, m.B])
+    assert plan.pruned == [m.B]
+    plan = pyomo_pounce.block_repair_plan(m, decision_candidates=[m.B, m.D, m.F])
+    assert plan.pruned == [m.F]
+
+
+def test_repair_plan_fixed_candidate_is_an_input():
+    m = splitter_model()
+    m.F.fix()
+    plan = pyomo_pounce.block_repair_plan(m, decision_candidates=[m.F, m.D, m.B])
+    assert plan.square
+    # F is an input, not part of the plan; the conflict resolves among
+    # the remaining candidates by listing order.
+    assert all(v is not m.F for v in plan.decisions + plan.pruned + plan.pinned)
+    assert plan.decisions == [m.D]
+    assert plan.pruned == [m.B]
+    m.F.unfix()
+
+
+def unbounded_drum_model():
+    m = pyo.ConcreteModel()
+    m.u = pyo.Var(initialize=2.0)
+    m.x = pyo.Var()
+    m.M = pyo.Var()  # no bounds, no value: _seed_var would give 0
+    m.c1 = pyo.Constraint(expr=0 == (m.x - m.u) / m.M)
+    m.obj = pyo.Objective(expr=m.x)
+    return m
+
+
+def test_pin_never_seeds_to_zero_unbounded():
+    m = unbounded_drum_model()
+    report = pyomo_pounce.block_initialize(m, decisions=[m.u])
+    assert report.ok, str(report)
+    assert report.repair.pinned == [m.M]
+    assert report.n_pinned == 1
+    assert m.M.value == pytest.approx(1.0)  # not the zero seed
+    assert m.x.value == pytest.approx(2.0)
+
+
+def test_pin_never_seeds_to_zero_symmetric_bounds():
+    m = unbounded_drum_model()
+    m.M.setlb(-1.0)
+    m.M.setub(1.0)  # midpoint is exactly zero
+    report = pyomo_pounce.block_initialize(m, decisions=[m.u])
+    assert report.ok, str(report)
+    assert m.M.value is not None and m.M.value != 0.0
+    assert m.x.value == pytest.approx(2.0)
+
+
+def test_block_initialize_repair_off_reports_instead():
+    m = splitter_model()
+    report = pyomo_pounce.block_initialize(
+        m, decisions=[m.F, m.D, m.B], repair="off"
+    )
+    assert report.repair is None
+    assert not report.square  # reported, not repaired
+    assert report.n_pinned == 0
+    # nothing pruned or solved: the user's values survive untouched
+    assert (m.F.value, m.D.value, m.B.value) == (10.0, 4.0, 7.0)
+    assert not m.F.fixed and not m.D.fixed and not m.B.fixed
+
+
+def test_block_initialize_repair_off_does_not_pin():
+    m = drum_model()
+    report = pyomo_pounce.block_initialize(m, decisions=[m.u], repair="off")
+    assert report.repair is None
+    assert not report.square
+    assert m.M.value is None  # untouched: previously surfaced, not fixed
+    assert not m.M.fixed
+
+
+def test_block_initialize_rejects_bad_repair_value():
+    m = splitter_model()
+    with pytest.raises(ValueError, match="repair"):
+        pyomo_pounce.block_initialize(m, decisions=[m.F], repair="strict")
+
+
+def test_partial_fix_unwound_on_valueless_decision():
+    # A ValueError on the second decision must not leave the first fixed.
+    m = pyo.ConcreteModel()
+    m.u1 = pyo.Var(initialize=1.0)
+    m.u2 = pyo.Var()  # no value
+    m.x = pyo.Var()
+    m.c = pyo.Constraint(expr=m.x == m.u1 + m.u2)
+    m.obj = pyo.Objective(expr=m.x)
+
+    with pytest.raises(ValueError, match="u2"):
+        pyomo_pounce.block_initialize(m, decisions=[m.u1, m.u2])
+    assert not m.u1.fixed and not m.u2.fixed
+
+
 def test_failure_is_reported_not_raised():
     m = pyo.ConcreteModel()
     m.x = pyo.Var(bounds=(0.0, 1.0))

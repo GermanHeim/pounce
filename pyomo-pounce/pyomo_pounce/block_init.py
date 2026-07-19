@@ -55,6 +55,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional
 
+from pyomo.core.expr.numeric_expr import DivisionExpression, NegationExpression
+from pyomo.environ import value
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pyomo.core.base.constraint import ConstraintData
     from pyomo.core.base.var import VarData
@@ -78,6 +81,9 @@ class BlockInitReport:
     #: unmatched/overconstrained constraints.
     square: bool = True
     n_decisions_fixed: int = 0
+    #: Pinned variables held during the solve (repair="auto" only);
+    #: not counted in ``n_decisions_fixed``.
+    n_pinned: int = 0
     n_blocks: int = 0
     n_1x1: int = 0
     n_subsystem_solves: int = 0
@@ -105,6 +111,8 @@ class BlockInitReport:
             "pyomo-pounce block_initialize",
             f"  decisions fixed   : {self.n_decisions_fixed}",
         ]
+        if self.n_pinned:
+            lines.append(f"  pins held         : {self.n_pinned}")
         if self.repair is not None:
             lines.append(
                 f"  spec repair       : {len(self.repair.decisions)} decisions "
@@ -335,13 +343,13 @@ def _usable_incident(con, incident):
     is singular at every solution. This is the shape substituting
     ``dx/dt = 0`` into ``dx/dt == f/M`` produces, which is how loose
     integrators (drum levels) hide in steady-state reductions.
-    """
-    from pyomo.core.expr.numeric_expr import (
-        DivisionExpression,
-        NegationExpression,
-    )
-    from pyomo.environ import value
 
+    The rule is deliberately shallow and conservative: only a division
+    at the top of the body qualifies, so a nested ``0 == (a/b)/c``
+    keeps the ``b`` edge even though ``b`` is equally undeterminable.
+    False negatives only — do not make this recursive without thinking
+    through the false-positive direction.
+    """
     if con.lower is None or con.upper is None:
         return incident
     if value(con.lower) != 0 or value(con.upper) != 0:
@@ -355,6 +363,33 @@ def _usable_incident(con, incident):
 
     numerator_ids = {id(v) for v in get_incident_variables(body.args[0])}
     return [v for v in incident if id(v) in numerator_ids]
+
+
+def _seed_pin(v) -> None:
+    """Seed a pinned variable, never at exactly zero.
+
+    A pin appears only in denominators of ``0 == f/g`` rows — that is
+    what made every edge unusable — so zero is the one value guaranteed
+    to break every equation it touches. Falls back from the bounds-aware
+    seed to a nonzero in-bounds point.
+    """
+    _seed_var(v)
+    if v.value != 0.0:
+        return
+    lo, hi = v.lb, v.ub
+    finite = lambda b: b is not None and abs(b) < 1e19  # noqa: E731
+    if finite(lo) and finite(hi):
+        for frac in (0.75, 0.6):  # midpoint was zero; try off-center
+            cand = lo + frac * (hi - lo)
+            if cand != 0.0:
+                v.set_value(cand, skip_validation=True)
+                return
+    elif finite(lo):
+        v.set_value(lo + 2.0, skip_validation=True)  # lo + 1 was zero
+    elif finite(hi):
+        v.set_value(hi - 2.0, skip_validation=True)  # hi - 1 was zero
+    else:
+        v.set_value(1.0, skip_validation=True)
 
 
 def _tiered_matching(var_adj, tiers):
@@ -406,11 +441,13 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
     valid specification can hold — those are the ``decisions`` — and
     prunes the rest, which the equalities claim and solve for. Matching
     prefers plain variables over candidates, which provably minimizes
-    the number pruned. Variables the equalities provably cannot
-    determine are identified automatically and come back ``pinned``:
-    hold them at a value of your choosing. On a well-specified system
-    the plan is a no-op: every candidate selected, nothing pruned or
-    pinned.
+    the number pruned; among candidates, **earlier-listed ones are
+    preferentially kept**, so the listing order is an implicit priority
+    when a pruning tie could go either way. Variables the equalities
+    provably cannot determine are identified automatically and come
+    back ``pinned``: hold them at a value of your choosing. On a
+    well-specified system the plan is a no-op: every candidate
+    selected, nothing pruned or pinned.
 
     Args:
         model: A Pyomo model (Block). Only active equality constraints
@@ -430,10 +467,7 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
         # would only blow up (DeferredImportError) at first use.
         import networkx  # noqa: F401
 
-        from pyomo.contrib.incidence_analysis import (
-            IncidenceGraphInterface,
-            get_incident_variables,
-        )
+        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
     except ImportError as e:  # pragma: no cover - environment-dependent
         raise ImportError(
             "block_repair_plan requires pyomo.contrib.incidence_analysis "
@@ -449,6 +483,9 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
             candidate_ids.add(id(vd))
             candidates.append(vd)
 
+    # TODO: block_repair_plan, block_analyze, and the initialize pipeline
+    # each build their own IncidenceGraphInterface; on very large models
+    # a single shared graph would remove the repeated structural pass.
     igraph = IncidenceGraphInterface(model, include_inequality=False)
     eqs = list(igraph.constraints)
     gvars = list(igraph.variables)
@@ -463,8 +500,10 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
     raw_degree = [0] * len(gvars)
     var_adj = [[] for _ in gvars]
     for e, con in enumerate(eqs):
+        # raw incidence comes from the graph already built above; the
+        # expression body is only inspected on 0 == f/g shaped rows
         incident = [
-            v for v in get_incident_variables(con.body) if id(v) in vindex
+            v for v in igraph.get_adjacent_to(con) if id(v) in vindex
         ]
         for v in incident:
             raw_degree[vindex[id(v)]] += 1
@@ -478,10 +517,13 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
         if raw_degree[i] > 0 and not var_adj[i] and id(gvars[i]) not in candidate_ids
     ]
 
+    # candidates augment in reverse listing order: greedy augmentation
+    # preferentially matches (prunes) the earliest-processed vertex, so
+    # reversing makes earlier-listed candidates preferentially kept
     tiers = (
         [i for i, v in enumerate(gvars)
          if id(v) not in candidate_ids and var_adj[i]],
-        [i for i, v in enumerate(gvars) if id(v) in candidate_ids],
+        [vindex[id(v)] for v in reversed(candidates) if id(v) in vindex],
     )
     eq_match, var_match = _tiered_matching(var_adj, tiers)
 
@@ -585,6 +627,7 @@ def block_initialize(
     decisions=None,
     solver=None,
     *,
+    repair: str = "auto",
     max_list: int = 10,
     tee: bool = False,
 ) -> BlockInitReport:
@@ -603,20 +646,25 @@ def block_initialize(
         solver: A Pyomo solver (from ``SolverFactory``) for blocks
             larger than 1x1. Default: ``SolverFactory("pounce")``,
             constructed only when such a block exists.
+        repair: ``"auto"`` (default) checks and repairs the
+            specification as described below; ``"off"`` holds the
+            decisions exactly as given — nothing pruned, nothing
+            pinned, every decision needs a value, and a non-square
+            system is reported (``report.square``) instead of repaired.
         max_list: Cap on the reported name lists.
         tee: Echo block-solver output.
 
-    The specification is checked before anything is held. When holding
-    the given decisions would leave the equality system exactly square,
-    they are used as-is. When it would not, they are treated as the
-    candidate pool of :func:`block_repair_plan`: conflicting decisions
-    are pruned (solved for instead of held), variables the equalities
-    provably cannot determine are pinned automatically, at their
-    current values or a bounds-aware seed if they have none, and
-    ``report.repair`` records the plan (None when the decisions were
-    used as-is). The repair is scoped to this call like the decisions
-    themselves — flags are restored, so it never alters the model's own
-    specification.
+    With ``repair="auto"`` the specification is checked before anything
+    is held. When holding the given decisions would leave the equality
+    system exactly square, they are used as-is. When it would not, they
+    are treated as the candidate pool of :func:`block_repair_plan`:
+    conflicting decisions are pruned (solved for instead of held),
+    variables the equalities provably cannot determine are pinned
+    automatically, at their current values or a nonzero bounds-aware
+    seed if they have none, and ``report.repair`` records the plan
+    (None when the decisions were used as-is). The repair is scoped to
+    this call like the decisions themselves — flags are restored, so it
+    never alters the model's own specification.
 
     Returns a :class:`BlockInitReport`. ``report.square`` is False when
     the equality system (after the repair) is still not exactly square;
@@ -644,34 +692,53 @@ def block_initialize(
         ) from e
     from pyomo.util.subsystems import TemporarySubsystemManager, create_subsystem_block
 
+    if repair not in ("auto", "off"):
+        raise ValueError(
+            f"block_initialize: repair must be 'auto' or 'off', got {repair!r}"
+        )
+
     report = BlockInitReport()
 
     # --- check the specification, then hold it -------------------------
-    # On a well-specified system the plan is a no-op (every decision
-    # selected) and this is exactly the shipped behavior. A pruned
-    # decision needs no value (it gets solved for); a pinned variable
-    # without one gets a bounds-aware seed (the pin is the repair's
-    # choice, not the user's, so erroring on it would be hostile).
-    plan = block_repair_plan(model, decision_candidates=decisions)
-    if plan.pruned or plan.pinned:
-        report.repair = plan
+    # repair="auto": on a well-specified system the plan is a no-op
+    # (every decision selected), which is exactly the shipped behavior;
+    # a broken one is repaired. A pruned decision needs no value (it
+    # gets solved for); a pinned variable without one gets a nonzero
+    # bounds-aware seed (the pin is the repair's choice, not the user's,
+    # so erroring on it would be hostile). repair="off" holds the
+    # decisions exactly as given and reports instead of repairing.
+    plan = None
+    if repair == "auto":
+        plan = block_repair_plan(model, decision_candidates=decisions)
+        if plan.pruned or plan.pinned:
+            report.repair = plan
     fixed_by_us = []
-    for vd in plan.decisions:
-        if vd.value is None:
-            raise ValueError(
-                f"decision variable {vd.name!r} has no value: a decision "
-                "must be held at a concrete value during initialization"
-            )
-        vd.fix()
-        fixed_by_us.append(vd)
-    for vd in plan.pinned:
-        if vd.value is None:
-            _seed_var(vd)
-        vd.fix()
-        fixed_by_us.append(vd)
-    report.n_decisions_fixed = len(fixed_by_us)
-
     try:
+        # Fixing happens inside the try so a mid-loop ValueError cannot
+        # leave earlier decisions fixed on the model.
+        if plan is not None:
+            to_hold = plan.decisions
+        else:
+            to_hold = [
+                vd for vd in _flatten_vars(decisions or []) if not vd.fixed
+            ]
+        for vd in to_hold:
+            if vd.value is None:
+                raise ValueError(
+                    f"decision variable {vd.name!r} has no value: a decision "
+                    "must be held at a concrete value during initialization"
+                )
+            vd.fix()
+            fixed_by_us.append(vd)
+        report.n_decisions_fixed = len(fixed_by_us)
+        if plan is not None:
+            for vd in plan.pinned:
+                if vd.value is None:
+                    _seed_pin(vd)
+                vd.fix()
+                fixed_by_us.append(vd)
+            report.n_pinned = len(plan.pinned)
+
         # The square (well-determined) part of the equality system: the
         # DM decomposition separates it from remaining degrees of
         # freedom and redundant specifications — and names them. The

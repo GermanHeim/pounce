@@ -141,7 +141,10 @@ plan.pinned      # what nothing determines: hold at values you choose
 
 The candidates are pruned to the subset a valid specification can
 hold: matching prefers plain variables over candidates, which provably
-minimizes the number pruned. The pins need **no user input**: a
+minimizes the number pruned, and among candidates **earlier-listed
+ones are preferentially kept**, so the listing order acts as an
+implicit priority when a pruning tie could go either way. The pins
+need **no user input**: a
 variable is pinned when every one of its edges is provably unusable —
 the key case being an equation `0 == f/g`, which cannot determine a
 variable appearing only in the denominator `g`, since its sensitivity
@@ -155,12 +158,15 @@ nothing is fixed, read, or written, and no values are needed.
 model defects.
 
 `initialize` and `block_initialize` run the same check on their
-`decisions` **automatically** — no new arguments. A square
+`decisions` **automatically** (`repair="auto"`, the default). A square
 specification is used exactly as given, the shipped behavior. A broken
 one is repaired: the decisions become the candidate pool, conflicting
 ones are pruned (they need no values), pins are seeded bounds-aware
-when valueless, and `report.repair` records the plan (None when
-nothing was needed). The repair is call-scoped exactly like the
+and never at zero when valueless (a pin lives in denominators, so zero
+is the one forbidden seed), and `report.repair` records the plan (None
+when nothing was needed). Pass `repair="off"` for the strict path:
+decisions held exactly as given, and a non-square specification is
+reported (`report.square`, the name lists) instead of repaired. The repair is call-scoped exactly like the
 decisions themselves (fixed flags restored, values only), so it never
 changes your model's own specification. To *apply* a plan to a model
 you intend to solve — a square simulation, say — fix `plan.decisions`

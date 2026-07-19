@@ -123,3 +123,22 @@ def test_initialize_pins_automatically(solver):
     assert m.x.value == pytest.approx(2.0)
     assert not m.u.fixed and not m.M.fixed
     assert "spec repair" in str(report)
+
+
+def test_initialize_repair_off_reports_instead(solver):
+    # The strict path: nothing pruned, nothing pinned, the non-square
+    # specification is reported rather than repaired.
+    m = pyo.ConcreteModel()
+    m.u = pyo.Var(initialize=2.0)
+    m.x = pyo.Var()
+    m.M = pyo.Var(bounds=(1.0, 3.0))
+    m.c1 = pyo.Constraint(expr=0 == (m.x - m.u) / m.M)
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.initialize(
+        m, solver=solver, decisions=[m.u], repair="off"
+    )
+    assert report.repair is None
+    assert report.n_pinned == 0
+    assert not report.block.square
+    assert not m.M.fixed

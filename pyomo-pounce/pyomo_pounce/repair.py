@@ -25,7 +25,9 @@ from typing import List, Optional
 from pyomo_pounce.block_init import (
     BlockInitReport,
     BlockRepairPlan,
+    _flatten_vars,
     _preview,
+    _seed_pin,
     _seed_var,
     block_initialize,
     block_repair_plan,
@@ -106,6 +108,9 @@ class InitializeReport:
     """What :func:`initialize` did, stage by stage."""
 
     n_decisions_fixed: int = 0
+    #: Pinned variables held for the pipeline (repair="auto" only);
+    #: not counted in ``n_decisions_fixed``.
+    n_pinned: int = 0
     n_filled: int = 0
     #: Termination condition of the projection solve, or None when the
     #: projection stage was skipped.
@@ -126,6 +131,8 @@ class InitializeReport:
             "pyomo-pounce initialize (fill -> repair -> block-solve)",
             f"  decisions held: {self.n_decisions_fixed}",
         ]
+        if self.n_pinned:
+            lines.append(f"  pins held     : {self.n_pinned}")
         if self.repair is not None:
             lines.append(
                 f"  spec repair   : {len(self.repair.pruned)} pruned "
@@ -149,6 +156,7 @@ def initialize(
     decisions=None,
     solver=None,
     *,
+    repair: str = "auto",
     fill: str = "midpoint",
     project: bool = True,
     options: Optional[dict] = None,
@@ -158,15 +166,18 @@ def initialize(
 
     ``decisions`` are held (fixed) at their current values for the
     **whole** pipeline — the projection must not drift the feed or the
-    reflux you just specified — and released at the end. The
-    specification is checked first: when holding the decisions as given
-    leaves the equality system square, they are used as-is. When it
-    does not, they become the candidate pool of
-    :func:`block_repair_plan`: conflicting decisions are pruned (solved
-    for instead of held), variables the equalities provably cannot
-    determine are pinned automatically, and ``report.repair`` records
-    the plan. The repair is call-scoped like the decisions themselves.
-    The three stages, each skippable:
+    reflux you just specified — and released at the end. With
+    ``repair="auto"`` (default) the specification is checked first:
+    when holding the decisions as given leaves the equality system
+    square, they are used as-is. When it does not, they become the
+    candidate pool of :func:`block_repair_plan`: conflicting decisions
+    are pruned (solved for instead of held), variables the equalities
+    provably cannot determine are pinned automatically, and
+    ``report.repair`` records the plan. The repair is call-scoped like
+    the decisions themselves. ``repair="off"`` holds the decisions
+    exactly as given — nothing pruned or pinned, every decision needs a
+    value, and a non-square system is reported, not repaired. The three
+    stages, each skippable:
 
     1. **Fill** — :func:`initialize_missing_values` gives every
        valueless unfixed variable a bounds-aware value
@@ -181,45 +192,62 @@ def initialize(
     Returns an :class:`InitializeReport`; ``report.block.square`` and
     the name lists tell you what the model is still missing.
     """
+    if repair not in ("auto", "off"):
+        raise ValueError(
+            f"initialize: repair must be 'auto' or 'off', got {repair!r}"
+        )
+
     report = InitializeReport()
 
     # Check the specification first, on the untouched model, then hold
     # it across ALL stages: filling must not paper over a valueless
     # held decision, and the projection must not drift them. A pruned
     # decision stays free (it gets solved for); a valueless pinned
-    # variable gets a bounds-aware seed before being held.
-    plan = block_repair_plan(model, decision_candidates=decisions)
-    if plan.pruned or plan.pinned:
-        report.repair = plan
-    if plan.redundant_constraints:
-        report.warnings.append(
-            f"{len(plan.redundant_constraints)} redundant/conflicting "
-            "equalities no specification can satisfy: "
-            + _preview(plan.redundant_constraints)
-        )
-    if plan.loose_variables:
-        report.warnings.append(
-            f"{len(plan.loose_variables)} variables undetermined by the "
-            "equalities and not repairable: "
-            + _preview(plan.loose_variables)
-        )
-    fixed_by_us = []
-    for vd in plan.decisions:
-        if vd.value is None:
-            raise ValueError(
-                f"decision variable {vd.name!r} has no value: a decision "
-                "must be held at a concrete value during initialization"
+    # variable gets a nonzero bounds-aware seed before being held.
+    plan = None
+    if repair == "auto":
+        plan = block_repair_plan(model, decision_candidates=decisions)
+        if plan.pruned or plan.pinned:
+            report.repair = plan
+        if plan.redundant_constraints:
+            report.warnings.append(
+                f"{len(plan.redundant_constraints)} redundant/conflicting "
+                "equalities no specification can satisfy: "
+                + _preview(plan.redundant_constraints)
             )
-        vd.fix()
-        fixed_by_us.append(vd)
-    for vd in plan.pinned:
-        if vd.value is None:
-            _seed_var(vd)
-        vd.fix()
-        fixed_by_us.append(vd)
-    report.n_decisions_fixed = len(fixed_by_us)
-
+        if plan.loose_variables:
+            report.warnings.append(
+                f"{len(plan.loose_variables)} variables undetermined by the "
+                "equalities and not repairable: "
+                + _preview(plan.loose_variables)
+            )
+    fixed_by_us = []
     try:
+        # Fixing happens inside the try so a mid-loop ValueError cannot
+        # leave earlier decisions fixed on the model.
+        if plan is not None:
+            to_hold = plan.decisions
+        else:
+            to_hold = [
+                vd for vd in _flatten_vars(decisions or []) if not vd.fixed
+            ]
+        for vd in to_hold:
+            if vd.value is None:
+                raise ValueError(
+                    f"decision variable {vd.name!r} has no value: a decision "
+                    "must be held at a concrete value during initialization"
+                )
+            vd.fix()
+            fixed_by_us.append(vd)
+        report.n_decisions_fixed = len(fixed_by_us)
+        if plan is not None:
+            for vd in plan.pinned:
+                if vd.value is None:
+                    _seed_pin(vd)
+                vd.fix()
+                fixed_by_us.append(vd)
+            report.n_pinned = len(plan.pinned)
+
         if fill is not None:
             report.n_filled = initialize_missing_values(model, strategy=fill)
         if project:
@@ -234,9 +262,12 @@ def initialize(
                     )
             except ValueError as e:
                 report.warnings.append(str(e))
-        # The repaired decision set is already fixed, so block_initialize
-        # sees it as plain inputs; its own plan is then a no-op.
-        report.block = block_initialize(model, solver=solver, tee=tee)
+        # The held decision set is already fixed, so block_initialize
+        # sees it as plain inputs; in auto mode its own plan is then a
+        # no-op, and repair="off" passes through so nothing gets pinned.
+        report.block = block_initialize(
+            model, solver=solver, tee=tee, repair=repair
+        )
     finally:
         for vd in fixed_by_us:
             vd.unfix()
