@@ -46,7 +46,7 @@ pub struct IterRecord {
     pub ls_trials: Index,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolveStatistics {
     pub iteration_count: Index,
@@ -111,6 +111,64 @@ pub struct SolveStatistics {
     /// the binary's `--json-detail summary` mode). Populated in order
     /// by [`IpoptAlgorithm::iterate`] when enabled.
     pub iterations: Vec<IterRecord>,
+}
+
+/// The eight residual fields default to **NaN, not zero**.
+///
+/// They are populated by the convergence check at the end of a solve. A solve
+/// that never gets that far -- rejected during setup (`Not_Enough_Degrees_Of_Freedom`,
+/// `Invalid_Problem_Definition`), aborted, or caught by the batch panic
+/// handler -- leaves them untouched, and a default of `0.0` there reads as
+/// "converged perfectly" rather than "never computed".
+///
+/// That is not hypothetical. `pounce.minimize` upgrades a non-success status
+/// to `success=True` when the final KKT error is within the acceptable
+/// tolerance, which is right for a solve that stalled near a good point. With
+/// a zero default it also fired for problems the solver had *refused*: an
+/// over-determined NLP returned `Not_Enough_Degrees_Of_Freedom` together with
+/// `success=True` and an `x` outside its own variable bounds. NaN makes the
+/// existing `is_finite` guard on that path do what its comment already claims.
+///
+/// Consequences worth knowing:
+///
+/// * NaN compares false against everything, so any `residual <= tol` test now
+///   fails closed for an uncomputed value. That is the intent.
+/// * `serde_json` renders non-finite floats as `null`, so these fields appear
+///   as `null` rather than `0.0` in a solve report for an aborted solve. See
+///   `docs/src/schema/solve-report-v1.md`.
+///
+/// `final_mu` is deliberately *not* in this set: `0.0` is its documented value
+/// on the barrier-free SQP path, where mu has no meaning.
+impl Default for SolveStatistics {
+    fn default() -> Self {
+        Self {
+            iteration_count: 0,
+            total_cpu_time_secs: 0.0,
+            total_sys_time_secs: 0.0,
+            total_wallclock_time_secs: 0.0,
+            num_obj_evals: 0,
+            num_constr_evals: 0,
+            num_obj_grad_evals: 0,
+            num_constr_jac_evals: 0,
+            num_hess_evals: 0,
+            final_objective: 0.0,
+            final_scaled_objective: 0.0,
+            final_dual_inf: Number::NAN,
+            final_constr_viol: Number::NAN,
+            final_compl: Number::NAN,
+            final_kkt_error: Number::NAN,
+            final_unscaled_dual_inf: Number::NAN,
+            final_unscaled_constr_viol: Number::NAN,
+            final_unscaled_compl: Number::NAN,
+            final_unscaled_kkt_error: Number::NAN,
+            final_mu: 0.0,
+            restoration_calls: 0,
+            restoration_inner_iters: 0,
+            restoration_outer_iters: 0,
+            restoration_wall_secs: 0.0,
+            iterations: Vec::new(),
+        }
+    }
 }
 
 impl SolveStatistics {

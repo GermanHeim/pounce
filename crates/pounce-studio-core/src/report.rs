@@ -203,14 +203,36 @@ pub struct SolutionSuffix {
     pub int_values: Vec<i32>,
 }
 
+/// NaN, for a residual slot that was never filled in.
+fn uncomputed() -> f64 {
+    f64::NAN
+}
+
+/// Accept `null` for a residual the solve never computed.
+///
+/// The writer defaults these to NaN when the convergence check never ran, and
+/// `serde_json` renders a non-finite float as `null`. Mirrors the same helper
+/// in `pounce-solve-report`; kept local because this crate is deliberately
+/// dependency-light and WASM-clean.
+fn null_as_nan<'de, D>(de: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(de)?.unwrap_or_else(uncomputed))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatisticsInfo {
     pub iteration_count: i32,
     pub final_objective: f64,
     pub final_scaled_objective: f64,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_dual_inf: f64,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_constr_viol: f64,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_compl: f64,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_kkt_error: f64,
     pub num_obj_evals: i32,
     pub num_constr_evals: i32,

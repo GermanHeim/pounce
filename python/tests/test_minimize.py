@@ -1311,3 +1311,44 @@ def test_non_mapping_options_is_rejected_not_silently_dropped():
     # The supported forms are untouched.
     assert M.minimize(fun, np.ones(2), jac=jac, options={"tol": 1e-9}).success
     assert M.minimize(fun, np.ones(2), jac=jac).success
+
+
+def test_refused_problem_does_not_report_success():
+    """A problem the solver *declines* must not come back ``success=True``.
+
+    ``minimize`` upgrades a non-success status to success when the final KKT
+    error is within the acceptable tolerance -- right for a solve that stalled
+    near a good point. It used to fire for problems the solver had refused
+    outright, because ``SolveStatistics`` defaulted its residuals to ``0.0``
+    and "never computed" was indistinguishable from "converged exactly". An
+    over-determined NLP came back ``Not_Enough_Degrees_Of_Freedom`` *and*
+    ``success=True``, with an ``x`` outside its own declared bounds.
+
+    The residuals now default to NaN, so the ``isfinite`` guard on that
+    fallback does what its comment always claimed.
+    """
+    # 2 variables, 3 equality constraints.
+    res = pounce.minimize(
+        lambda v: (v[1] - 1.0) ** 2 + v[0] ** 2,
+        [0.5, 0.0],
+        jac=lambda v: np.array([2 * v[0], 2 * (v[1] - 1.0)]),
+        bounds=[(0.3, 0.7), (-1e20, 1e20)],
+        constraints=[
+            {
+                "type": "eq",
+                "fun": lambda v: np.array([v[0] - 5.0, v[0] + 5.0]),
+                "jac": lambda v: np.array([[1.0, 0.0], [1.0, 0.0]]),
+            },
+            {
+                "type": "eq",
+                "fun": lambda v: np.array([v[1] - v[0] + 0.5]),
+                "jac": lambda v: np.array([[-1.0, 1.0]]),
+            },
+        ],
+    )
+    assert not res.success, "a refused problem must not report success"
+    assert res.info["status"] == -10  # Not_Enough_Degrees_Of_Freedom
+    assert np.isnan(res.info["final_kkt_error"]), (
+        "an uncomputed residual must be NaN, not 0.0 -- a zero here is what "
+        "made the acceptable-KKT fallback fire on a refused solve"
+    )
