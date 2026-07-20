@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from pyomo_pounce.block_init import (
+    OK_TERMINATIONS,
     BlockInitReport,
     BlockRepairPlan,
     _flatten_vars,
@@ -60,12 +61,13 @@ def project_to_feasible(
         options: Solver options dict (e.g. ``{"tol": 1e-8}``).
         tee: Echo solver output.
 
-    Returns the solver termination condition as a string (``"optimal"``
-    / ``"locallyOptimal"`` on success). On any other termination the
-    pre-projection values are restored, so a diverged projection never
-    writes its iterate into the model. Raises ``ValueError`` when no
-    unfixed variable has a value (nothing to anchor; run
-    ``initialize_missing_values`` first).
+    Returns the solver termination condition as a string; success is
+    membership in :data:`~pyomo_pounce.block_init.OK_TERMINATIONS`
+    (``"optimal"`` / ``"locallyOptimal"`` in practice). On any other
+    termination the pre-projection values are restored, so a diverged
+    projection never writes its iterate into the model. Raises
+    ``ValueError`` when no unfixed variable has a value (nothing to
+    anchor; run ``initialize_missing_values`` first).
     """
     import pyomo.environ as pyo
 
@@ -101,7 +103,7 @@ def project_to_feasible(
     try:
         results = solver.solve(model, tee=tee, options=dict(options or {}))
         cond = str(results.solver.termination_condition)
-        restore = cond not in ("optimal", "locallyOptimal", "globallyOptimal", "feasible")
+        restore = cond not in OK_TERMINATIONS
         return cond
     finally:
         if restore:
@@ -132,7 +134,7 @@ class InitializeReport:
 
     @property
     def ok(self) -> bool:
-        proj_ok = self.projection in (None, "optimal", "locallyOptimal", "feasible")
+        proj_ok = self.projection is None or self.projection in OK_TERMINATIONS
         return proj_ok and (self.block is None or self.block.ok)
 
     def __str__(self) -> str:
@@ -264,7 +266,7 @@ def initialize(
                 report.projection = project_to_feasible(
                     model, solver=solver, options=options, tee=tee
                 )
-                if report.projection not in ("optimal", "locallyOptimal", "feasible"):
+                if report.projection not in OK_TERMINATIONS:
                     report.warnings.append(
                         f"projection ended {report.projection}; continuing with "
                         "the unrepaired point"

@@ -22,12 +22,11 @@ changes.
   "initialized" point, containing a diverged 1500-variable block iterate,
   did not. The block loop is now in this module: each block's verdict is
   checked before its values are kept, a failed block restores its seed
-  values, the loop stops there (downstream blocks feed on the failed one by
-  construction), and the failure names the block. `project_to_feasible` had
+  values, the loop stops there (later blocks typically feed on the failed
+  one), and the failure names the block. `project_to_feasible` had
   the same defect — a diverged projection loaded its iterate, making the
   pipeline's "continuing with the unrepaired point" warning untrue — and now
   restores the pre-projection point on any non-optimal termination.
-
 
 ### Added — automatic specification repair: `block_repair_plan`, and repair inside `initialize`/`block_initialize` (Pyomo, #228)
 

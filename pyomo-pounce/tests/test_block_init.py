@@ -387,6 +387,24 @@ def test_failure_stops_before_downstream_blocks(solver):
     assert m.z.value == 42.0
 
 
+def test_failure_keeps_earlier_solved_blocks():
+    # block 1 solves, block 2 fails: the solved value stays, the
+    # failed block's seed comes back, and the count says one variable
+    # was initialized
+    m = pyo.ConcreteModel()
+    m.a = pyo.Var(initialize=10.0)
+    m.x = pyo.Var(initialize=3.0)
+    m.c1 = pyo.Constraint(expr=m.a == 4.0)
+    m.c2 = pyo.Constraint(expr=m.x**2 == -m.a)  # no real solution
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.block_initialize(m)
+    assert not report.ok
+    assert m.a.value == 4.0  # solved, kept
+    assert m.x.value == 3.0  # failed, restored
+    assert report.n_vars_initialized == 1
+
+
 def test_repair_plan_no_op_on_square_system():
     m = pyo.ConcreteModel()
     m.feed = pyo.Var(initialize=10.0)

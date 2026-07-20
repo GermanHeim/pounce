@@ -72,6 +72,9 @@ __all__ = [
     "BlockRepairPlan",
 ]
 
+#: Termination conditions under which a solve's values may be kept.
+OK_TERMINATIONS = ("optimal", "locallyOptimal", "globallyOptimal", "feasible")
+
 
 @dataclass
 class BlockInitReport:
@@ -773,12 +776,12 @@ def block_initialize(
 
         # The block loop is ours so every solve's verdict is checked
         # before its values are kept: a failed block restores its seed
-        # values instead of poisoning the model, then the loop stops
-        # (downstream blocks feed on this block by construction). 1x1
+        # values instead of poisoning the model, then the loop stops.
+        # (Later blocks typically feed on the failed one; some may be
+        # independent of it — stopping is the conservative choice.) 1x1
         # blocks solve by Pyomo's single-constraint Newton, larger ones
         # by `solver`; variables outside the block are held at their
         # current values while it solves.
-        ok_conditions = ("optimal", "locallyOptimal", "globallyOptimal", "feasible")
         n_done = 0
         n_sub = 0
         outer = create_subsystem_block(square_cons, square_vars)
@@ -797,7 +800,7 @@ def block_initialize(
                         ):
                             results = solver.solve(sub, tee=tee)
                         cond = str(results.solver.termination_condition)
-                        if cond not in ok_conditions:
+                        if cond not in OK_TERMINATIONS:
                             raise RuntimeError(f"termination condition {cond}")
                         n_sub += 1
                     n_done += len(vblk)
