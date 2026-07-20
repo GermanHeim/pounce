@@ -994,7 +994,6 @@ impl AlgorithmBuilder {
                 veto_fired: false,
                 acceptable_veto_fired: false,
                 veto_extra_iters: 0,
-                shadow_acceptable_count: 0,
             });
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point

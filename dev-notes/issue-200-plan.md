@@ -418,3 +418,91 @@ covers least well, and it holds anyway — which is the point. Correctness does
 not rest on that argument. The fallback restores the refused certificate however
 the continuation behaves, so a weaker trajectory argument costs iterations, not
 correctness.
+
+
+## 10. Formal analysis (2026-07-20)
+
+A state-machine analysis of the mechanism — as opposed to more testing — was
+commissioned to either establish the never-worse invariant or exhibit a state
+that breaks it. It exhibited one, and the defect is now fixed.
+
+### 10.1 The invariant, stated properly
+
+Because the veto's check is side-effect-free with respect to step computation,
+the vetoed run's trajectory is bit-identical to the unvetoed run's on every
+iteration both execute. So there is a well-defined **first deviation** k\*: the
+iterate where the baseline terminates and the mechanism continues. The baseline
+returns `(status_B, x_B)` there, and `status_B ∈ {Success, StopAtAcceptablePoint}`
+— those are the only two decisions the veto suppresses.
+
+The invariant therefore needs only a fragment of an order, not a total one:
+`Success ⪰ everything`, `StopAtAcceptablePoint ⪰ everything but Success`, plus
+reflexivity. It must be read **lexicographically, status-dominant**, with the
+objective clause claimed only *within* an equal-status pair. The conjunctive
+phrasing used earlier in this file overstates it: when both a strict and an
+acceptable snapshot exist, the mechanism prefers the strict one and can return a
+*better status at a higher objective* than the baseline's acceptable-level
+answer. That is an improvement, not a violation — and the raw objectives are not
+comparable there anyway, being measured at different constraint violations.
+
+### 10.2 The defect: `masked` is not constant over a run
+
+`obj_scale` is fixed per run, but `masked` also requires
+`unscaled_err > acceptable_tol`, and that quantity crosses the bar during the
+endgame — the crossing **is** the veto lifting. So an acceptable-level streak
+can straddle the boundary, and the implementation kept two disjoint counters
+(`acceptable_count`, `shadow_acceptable_count`), each zeroed by the other's
+phase.
+
+Concretely, with the default `acceptable_iter = 15`: fourteen unmasked
+qualifying iterates leave the real count at 14; one masked qualifying iterate
+zeroes it and starts the shadow at 1. The baseline would have reached 15 and
+returned `Solved_To_Acceptable_Level`. The mechanism instead falls through to
+`max_iter` (or a tiny step, or a time budget) and returns a **bare failure**,
+with no snapshot armed — the shadow having only just started — so the fallback
+is inert. Never-worse, violated.
+
+The window is mechanically reachable on constrained problems: with `df` at the
+1e-8 floor and constraint violation inside `(tol, acceptable_tol]`, the strict
+test fails in both arms every iterate, the acceptable test passes in both, and
+`masked` flips purely on the user-space dual residual crossing `acceptable_tol`
+— exactly what wobbles during a masked run's endgame.
+
+Empirical fuzzing was unlikely to find this: it needs the unscaled dual to hover
+at `acceptable_tol` while the violation sits in a two-decade band for fifteen
+consecutive iterates. It is a state-machine seam, not a numerical regime.
+
+### 10.3 The fix
+
+One counter, advanced on `acceptable_now` regardless of `masked`; `masked`
+decides only what happens when it crosses the threshold — terminate, or record
+that a termination was refused *here*, which is exactly the iterate the baseline
+would have returned. `shadow_acceptable_count` is gone. Pinned by
+`acceptable_streak_survives_a_masked_boundary_mid_streak`, which covers both
+straddle directions and the reset semantics, and which fails when the old
+two-counter behaviour is restored.
+
+### 10.4 Findings accepted without code change
+
+- **First-vs-best snapshot.** Keeping the *first* refused certificate is
+  never-worse *by identity* — it is precisely what the baseline returned.
+  A later refusal at a lower objective is discarded, which leaves value on the
+  table but cannot violate the invariant. "Best-of-refused" would weakly
+  dominate; not adopted, as it trades a by-identity argument for a numerical one.
+- **`UserRequestedStop → Success`.** The stop request necessarily arrives
+  *after* k\*, so in the baseline world the callback was never fired — the
+  mechanism returns what the baseline returned to a user who was never asked.
+  Sound, but a caller doing callback-driven early stopping receives a different
+  `x` than the iterate it observed; a documented deviation from upstream
+  semantics rather than a defect.
+- **Objective comparison on the Success path** is valid for the invariant: both
+  points passed `passes_component_tols`, so both are equally-valid certificates
+  by the solver's own definition, and either branch is ⪰ baseline. It can prefer
+  a lower-objective point at a larger (still sub-tolerance) violation; a merit
+  comparison would be more defensible, but cannot affect never-worse.
+- **Termination and state consistency** verified: the veto suppresses only the
+  two convergence verdicts, never `max_iter` or the time budgets, so the
+  driver-loop termination argument is intact; statistics are drained after the
+  restore, so they describe the returned point. The restoration inner IPM is
+  immune — its adapter delegates to the *scalar* `check_convergence`, which has
+  no veto logic.

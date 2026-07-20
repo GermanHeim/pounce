@@ -77,14 +77,6 @@ pub struct OptErrorConvCheck {
     /// terminate normally; correctness does not depend on the cap, because the
     /// refused certificate is restored either way.
     pub veto_extra_iters: Index,
-    /// Shadow of `acceptable_count` for the run the veto is suppressing.
-    ///
-    /// Acceptable-level termination is count-based — it needs `acceptable_iter`
-    /// consecutive qualifying iterates — so knowing that one iterate *would*
-    /// have qualified is not enough to know the baseline would have stopped.
-    /// This counts the suppressed streak so the refusal is recorded at the
-    /// iterate where the baseline would actually have terminated.
-    pub shadow_acceptable_count: Index,
 }
 
 /// How many iterations the veto may spend before its bet is called off.
@@ -172,7 +164,6 @@ impl Default for OptErrorConvCheck {
             veto_fired: false,
             acceptable_veto_fired: false,
             veto_extra_iters: 0,
-            shadow_acceptable_count: 0,
         }
     }
 }
@@ -243,6 +234,50 @@ impl OptErrorConvCheck {
             }
         }
         true
+    }
+
+    /// Advance the acceptable-level streak, returning whether the run should
+    /// terminate with `ConvergedToAcceptable`.
+    ///
+    /// Acceptable-level termination is **count-based**: it needs
+    /// `acceptable_iter` *consecutive* qualifying iterates. The masked-scale
+    /// veto (gh #200) suppresses that termination, so the count has to keep
+    /// running underneath the suppression — otherwise the mechanism cannot know
+    /// where the unvetoed run would have stopped.
+    ///
+    /// The subtle part, and an earlier bug: `masked` is **not constant over a
+    /// run**. `obj_scale` is fixed, but the veto's other condition is
+    /// `unscaled_err > acceptable_tol`, and that quantity crosses the bar
+    /// during the endgame — the crossing *is* the veto lifting. A streak can
+    /// therefore straddle the boundary. Keeping two disjoint counters (a real
+    /// one and a shadow), each reset by the other's phase, silently discarded a
+    /// streak the unvetoed run would have kept: fourteen unmasked qualifying
+    /// iterates followed by one masked qualifying iterate left the real count at
+    /// zero, where the baseline would have reached fifteen and stopped. The run
+    /// then fell through to `max_iter` — with no snapshot armed, because the
+    /// shadow had only just started — and returned a bare failure where the
+    /// baseline returned `Solved_To_Acceptable_Level`. That is precisely the
+    /// "never worse" guarantee failing.
+    ///
+    /// So there is **one** counter, advanced on `acceptable_now` regardless of
+    /// `masked`. `masked` decides only what happens when it crosses the
+    /// threshold: terminate, or record that a termination was refused here —
+    /// which is exactly the iterate the unvetoed run would have returned.
+    fn note_acceptable(&mut self, acceptable_now: bool, masked: bool) -> bool {
+        if !acceptable_now {
+            self.acceptable_count = 0;
+            return false;
+        }
+        self.acceptable_count += 1;
+        if self.acceptable_count < self.acceptable_iter {
+            return false;
+        }
+        if masked {
+            self.acceptable_veto_fired = true;
+            false
+        } else {
+            true
+        }
     }
 
     /// Pure predicate for a single infeasible-stationary iterate: the
@@ -393,26 +428,8 @@ impl ConvCheck for OptErrorConvCheck {
         // that stashed point is the rollback target if the run later stalls.
         let acceptable_now = self.acceptable_iter > 0
             && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f);
-        if masked {
-            // Suppressed, but tracked: the baseline would have terminated once
-            // this streak reached `acceptable_iter`, and that is the iterate the
-            // fallback has to be able to hand back.
-            if acceptable_now {
-                self.shadow_acceptable_count += 1;
-                if self.shadow_acceptable_count >= self.acceptable_iter {
-                    self.acceptable_veto_fired = true;
-                }
-            } else {
-                self.shadow_acceptable_count = 0;
-            }
-            self.acceptable_count = 0;
-        } else if acceptable_now {
-            self.acceptable_count += 1;
-            if self.acceptable_count >= self.acceptable_iter {
-                return ConvergenceStatus::ConvergedToAcceptable;
-            }
-        } else {
-            self.acceptable_count = 0;
+        if self.note_acceptable(acceptable_now, masked) {
+            return ConvergenceStatus::ConvergedToAcceptable;
         }
         if iter_count >= self.max_iter {
             return ConvergenceStatus::MaxIterExceeded;
@@ -612,6 +629,75 @@ mod tests {
         assert!(c.last_acceptable_obj.is_none());
         ConvCheck::set_curr_acceptable_obj(&mut c, 4.2);
         assert_eq!(c.last_acceptable_obj, Some(4.2));
+    }
+
+    #[test]
+    fn acceptable_streak_survives_a_masked_boundary_mid_streak() {
+        // gh #200. `masked` is not constant over a run: it also depends on the
+        // unscaled error crossing `acceptable_tol`, and that crossing is exactly
+        // what happens during the endgame. So an acceptable-level streak can
+        // straddle the boundary.
+        //
+        // The earlier implementation kept two disjoint counters, each reset by
+        // the other's phase. Fourteen unmasked qualifying iterates followed by
+        // one masked qualifying iterate left the real count at 0 while the
+        // unvetoed run would have reached 15 and stopped — so the run fell
+        // through to `max_iter` and returned a bare failure where the baseline
+        // returned `Solved_To_Acceptable_Level`, with no snapshot armed to roll
+        // back to. Never-worse, violated.
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 15,
+            ..Default::default()
+        };
+        // 14 qualifying iterates while unmasked: no termination yet.
+        for i in 0..14 {
+            assert!(!c.note_acceptable(true, false), "terminated early at {i}");
+        }
+        // The 15th qualifies too, but the veto is now engaged. The streak must
+        // be honoured — recorded as a refused termination, not discarded.
+        assert!(
+            !c.note_acceptable(true, true),
+            "a masked iterate must not terminate the run"
+        );
+        assert!(
+            c.acceptable_veto_fired,
+            "the streak crossed `acceptable_iter` while masked, so a termination was \
+             refused here and must be recorded — otherwise the fallback has nothing to \
+             restore and the run returns a bare failure"
+        );
+
+        // The mirror direction: a streak that begins masked and finishes
+        // unmasked must terminate on the same iterate the baseline would.
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 15,
+            ..Default::default()
+        };
+        for _ in 0..14 {
+            assert!(!c.note_acceptable(true, true));
+        }
+        assert!(
+            c.note_acceptable(true, false),
+            "the veto lifted with the streak already at 14; the 15th qualifying iterate \
+             must terminate exactly as it would without the mechanism"
+        );
+
+        // And a non-qualifying iterate still breaks the streak, in either phase.
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 3,
+            ..Default::default()
+        };
+        assert!(!c.note_acceptable(true, false));
+        assert!(!c.note_acceptable(false, true));
+        assert_eq!(
+            c.acceptable_count, 0,
+            "a non-qualifying iterate resets the streak"
+        );
+        assert!(!c.note_acceptable(true, false));
+        assert!(!c.note_acceptable(true, false));
+        assert!(
+            c.note_acceptable(true, false),
+            "3 consecutive qualifying iterates terminate"
+        );
     }
 
     #[test]
