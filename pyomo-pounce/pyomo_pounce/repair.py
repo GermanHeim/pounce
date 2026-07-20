@@ -61,7 +61,9 @@ def project_to_feasible(
         tee: Echo solver output.
 
     Returns the solver termination condition as a string (``"optimal"``
-    / ``"locallyOptimal"`` on success). Raises ``ValueError`` when no
+    / ``"locallyOptimal"`` on success). On any other termination the
+    pre-projection values are restored, so a diverged projection never
+    writes its iterate into the model. Raises ``ValueError`` when no
     unfixed variable has a value (nothing to anchor; run
     ``initialize_missing_values`` first).
     """
@@ -78,6 +80,7 @@ def project_to_feasible(
             "project_to_feasible: no unfixed variable has a value to anchor "
             "the projection; run initialize_missing_values(model) first"
         )
+    snapshot = [(v, v.value) for v in variables]
     for v in variables:
         if v.value is None:
             _seed_var(v)
@@ -94,10 +97,16 @@ def project_to_feasible(
     model._pounce_projection_objective = pyo.Objective(
         expr=sum((v - v0) ** 2 for v, v0 in anchored)
     )
+    restore = True
     try:
         results = solver.solve(model, tee=tee, options=dict(options or {}))
-        return str(results.solver.termination_condition)
+        cond = str(results.solver.termination_condition)
+        restore = cond not in ("optimal", "locallyOptimal", "globallyOptimal", "feasible")
+        return cond
     finally:
+        if restore:
+            for v, val in snapshot:
+                v.set_value(val, skip_validation=True)
         model.del_component(model._pounce_projection_objective)
         for obj in deactivated:
             obj.activate()

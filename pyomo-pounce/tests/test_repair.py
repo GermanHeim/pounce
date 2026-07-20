@@ -142,3 +142,18 @@ def test_initialize_repair_off_reports_instead(solver):
     assert report.n_pinned == 0
     assert not report.block.square
     assert not m.M.fixed
+
+
+def test_projection_failure_restores_values(solver):
+    # projecting onto contradictory constraints fails; the point the
+    # caller had must come back, so the pipeline's "continuing with the
+    # unrepaired point" is literally true
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(initialize=5.0)
+    m.c1 = pyo.Constraint(expr=m.x == 1.0)
+    m.c2 = pyo.Constraint(expr=m.x == 2.0)
+    m.obj = pyo.Objective(expr=m.x)
+
+    cond = pyomo_pounce.project_to_feasible(m, solver=solver)
+    assert cond not in ("optimal", "locallyOptimal")
+    assert m.x.value == 5.0

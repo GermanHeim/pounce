@@ -341,6 +341,52 @@ def drum_model():
     return m
 
 
+def test_failed_block_solve_keeps_seed_values(solver):
+    # A coupled block with no solution inside the bounds: the solve
+    # fails, and the seeds must survive untouched.
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(-10.0, 0.0), initialize=-1.0)  # solution needs x=2
+    m.y = pyo.Var(initialize=1.0)
+    m.c1 = pyo.Constraint(expr=m.x + m.y == 3.0)
+    m.c2 = pyo.Constraint(expr=m.x - m.y == 1.0)
+    m.obj = pyo.Objective(expr=m.y)
+
+    report = pyomo_pounce.block_initialize(m, solver=solver)
+    assert not report.ok
+    assert report.failures and "restored" in report.failures[0]
+    assert report.n_vars_initialized == 0
+    assert m.x.value == -1.0 and m.y.value == 1.0  # seeds, not the wreck
+
+
+def test_failed_newton_block_restores_seed():
+    # x**2 == -1 has no real solution: the single-constraint Newton
+    # fails, and the seed must come back.
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(initialize=3.0)
+    m.c = pyo.Constraint(expr=m.x**2 == -1.0)
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.block_initialize(m)
+    assert not report.ok
+    assert m.x.value == 3.0
+
+
+def test_failure_stops_before_downstream_blocks(solver):
+    # the block after a failed one must keep its seed, not consume wreckage
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(-10.0, 0.0), initialize=-1.0)
+    m.y = pyo.Var(initialize=1.0)
+    m.z = pyo.Var(initialize=42.0)  # downstream of the failing 2x2
+    m.c1 = pyo.Constraint(expr=m.x + m.y == 3.0)
+    m.c2 = pyo.Constraint(expr=m.x - m.y == 1.0)
+    m.c3 = pyo.Constraint(expr=m.z == m.x * m.y)
+    m.obj = pyo.Objective(expr=m.z)
+
+    report = pyomo_pounce.block_initialize(m, solver=solver)
+    assert not report.ok
+    assert m.z.value == 42.0
+
+
 def test_repair_plan_no_op_on_square_system():
     m = pyo.ConcreteModel()
     m.feed = pyo.Var(initialize=10.0)
