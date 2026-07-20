@@ -9,7 +9,7 @@ changes.
 
 ## [Unreleased]
 
-### Fixed — failed initialization solves no longer poison variable values (Pyomo)
+### Fixed — failed initialization solves no longer poison variable values (Pyomo, #230)
 
 - **A failed solve anywhere in the initialization pipeline now leaves
   variable values exactly as they were.** Previously `block_initialize`
