@@ -320,50 +320,49 @@ predicate that fires on `quartc` also fires on `meyer3`, so a relabel would
 reintroduce precisely the collateral §8.1 removed. Pinned by
 `sqp_path_behaviour_on_a_masked_objective_is_pinned`.
 
-### 9.5 Post-optimal sensitivity after a fallback restore — OPEN DEFECT
+### 9.5 Post-optimal sensitivity after a fallback restore — NOT a defect
 
-Verified present, cause not found, **not fixed**. Filed rather than hidden.
+Reported here first as an open defect. **That was wrong**, and the correction is
+recorded because the wrong reasoning is easy to repeat.
 
-On the gh #200 masked problem both arms return the *identical* point and status,
-and the sensitivity object differs by nine orders of magnitude:
+`PdSensBacksolver` reuses the solver's **held factor**, so restoring an earlier
+iterate after the run has travelled on raises a fair question about whether the
+factor still describes the returned point. The first probe appeared to answer
+yes-there-is-a-problem: both arms returned a byte-identical `x` and objective,
+and the sensitivity differed by nine orders of magnitude (`4.5e10` vs `9.7e19`).
+
+**The probe was the problem.** Its objective carried a `−k·√(1+y²)` term, which
+is unbounded below; the run drove `y` to `6.8e13` and stopped at a point that is
+not a minimum. With no minimum the KKT system is singular along the unbounded
+direction, so "sensitivity" there is an artifact of whichever inertia-correction
+perturbation happened to be in force — the quantity is not defined, and the two
+arms are under no obligation to agree.
+
+On a **well-posed** masked problem (`Σ(xᵢ−a)⁴`, genuine minimum at `x = a`),
+with the vetoed run cut off at the baseline's own iteration count so it must
+fall back to exactly that point:
 
 ```
-baseline (threshold=0)  Solved_To_Acceptable_Level  f=-6.833859e14
-                        x=[99999.99095622574, 68338588703875.97]
-                        solve_scaled_space(e0) = [4.5283e10, 0]
-veto (falls back)       Solved_To_Acceptable_Level  f=-6.833859e14
-                        x=[99999.99095622574, 68338588703875.97]   <- byte-identical
-                        solve_scaled_space(e0) = [9.6844e19, 0]     <- 2.1e9 relative
+baseline (never vetoes)  Solve_Succeeded  sens = [13617951.376845466, 0]
+fallback                 Solve_Succeeded  sens = [13617951.376845466, 0]
+                                          max |diff| = 0
 ```
 
-Baseline does not have this problem: it stops at the point it factorized, so its
-held factor and its returned iterate agree. The fallback restores an earlier
-iterate after the run travelled on, so `PdSensBacksolver` — which explicitly
-reuses the **held factor** — solves against state belonging to a different
-point. A consumer receives a `dx/dp` that does not correspond to the solution it
-was handed, silently.
+Bit-identical. Pinned by
+`crates/pounce-sensitivity/tests/masked_certificate_sensitivity.rs`.
 
-Three hypotheses were tried and all three were wrong, which is why this is
-reported rather than patched:
+Two hypotheses were also eliminated along the way, by direct instrumentation
+rather than argument:
 
-1. **Refresh the factorization** at the restored point via
-   `PdSearchDirCalc::compute_search_direction` (clearing `delta` first, since it
-   short-circuits when a regularization delta is pending). It ran (`ok=true`)
-   and changed nothing.
-2. **Restore `curr_mu`** with the iterate. Correct on its own merits and kept
-   (see 9.6), but it did not change the sensitivity either.
-3. **A malformed probe** — `solve_scaled_space` rejects a mismatched length and
-   it returned `true`, so the compound dimension really is 2 here and the probe
-   is valid.
-
-Whatever carries the discrepancy is therefore neither the factor as refreshed by
-that entry point, nor `mu`, nor the returned iterate. Likely candidates not yet
-eliminated: cached `IpoptCq` quantities that `set_trial`/`accept_trial_point`
-outside the main loop does not invalidate, or a `pd` solver instance distinct
-from the one `compute_search_direction` refreshes.
-
-Scope: runs that fall back **and** have an `on_converged` sensitivity consumer
-attached. Correctness of the returned point, objective and status is unaffected.
+- **The factorization is not stale.** Forcing a re-factorization at the restored
+  point (via `compute_search_direction`, after clearing `delta` — it
+  short-circuits when a regularization delta is pending) produces a genuine
+  cache miss and rebuilds the factor, confirmed by instrumenting the 13-tag
+  dependency cache in `pd_full_space_solver.rs`. It changed nothing on either
+  problem, so it was **removed** rather than kept: it costs a KKT factorization
+  on every fallback and buys nothing.
+- **`curr_mu` is not the carrier** either, though restoring it is correct on its
+  own merits and is kept (9.6).
 
 ### 9.6 Barrier parameter restored with the iterate
 
@@ -396,4 +395,4 @@ defect (9.5) was opened by the same pass:
 - **The §6 benchmark sweep — DONE.** 780 problems across both suites: zero
   strict-status losses, zero objective changes among still-strict runs, all
   targets met.
-- **9.5 is open** and is the one item that should not be forgotten.
+- **9.5 turned out not to be a defect** — see the correction there.
