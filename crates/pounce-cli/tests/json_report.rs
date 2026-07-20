@@ -84,6 +84,71 @@ fn pounce_emits_summary_report_without_iterations() {
 }
 
 #[test]
+fn pounce_records_solve_affecting_env_override() {
+    // A solve-affecting FERAL knob exported in the environment is recorded
+    // in the report's FAIR metadata, so a run that differs because of it
+    // says so (pounce#235).
+    let json_path = tmp_path("pounce_env.json");
+    let status = Command::new(pounce_exe())
+        .arg(fixture_nl())
+        .arg("--json-output")
+        .arg(&json_path)
+        .env("POUNCE_FERAL_PIVTOL", "1e-6")
+        .status()
+        .expect("spawn pounce");
+    assert!(status.success(), "pounce exited with {status:?}");
+
+    let text = std::fs::read_to_string(&json_path).unwrap();
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
+    let hit = report
+        .fair_metadata
+        .environment
+        .iter()
+        .find(|e| e.name == "POUNCE_FERAL_PIVTOL")
+        .expect("POUNCE_FERAL_PIVTOL recorded in environment");
+    assert_eq!(hit.value, "1e-6");
+    let _ = std::fs::remove_file(&json_path);
+}
+
+#[test]
+fn pounce_omits_environment_when_no_override_set() {
+    // No solve-affecting env var set: the block is empty and the
+    // skip-if-empty serde tag keeps the key out of the JSON entirely.
+    let json_path = tmp_path("pounce_noenv.json");
+    let status = Command::new(pounce_exe())
+        .arg(fixture_nl())
+        .arg("--json-output")
+        .arg(&json_path)
+        // Clear the FERAL knobs in case the test host exported one.
+        .env_remove("POUNCE_FERAL_PIVTOL")
+        .env_remove("POUNCE_FERAL_ORDERING")
+        .env_remove("POUNCE_FERAL_SCALING")
+        .env_remove("POUNCE_FERAL_REFINE")
+        .env_remove("POUNCE_FERAL_CASCADE_BREAK")
+        .env_remove("POUNCE_FERAL_FMA")
+        .env_remove("POUNCE_FERAL_SINGULAR_PIVOT_FLOOR")
+        .env_remove("POUNCE_FERAL_MIN_PAR_FLOPS")
+        .env_remove("FERAL_PIVTOL")
+        .env_remove("FERAL_PARALLEL")
+        .status()
+        .expect("spawn pounce");
+    assert!(status.success(), "pounce exited with {status:?}");
+
+    let text = std::fs::read_to_string(&json_path).unwrap();
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
+    assert!(
+        report.fair_metadata.environment.is_empty(),
+        "no override set → empty environment, got {:?}",
+        report.fair_metadata.environment
+    );
+    assert!(
+        !text.contains("\"environment\""),
+        "skip-if-empty should drop the key: {text}"
+    );
+    let _ = std::fs::remove_file(&json_path);
+}
+
+#[test]
 fn pounce_emits_full_report_with_iterations() {
     let json_path = tmp_path("pounce_full.json");
     let status = Command::new(pounce_exe())

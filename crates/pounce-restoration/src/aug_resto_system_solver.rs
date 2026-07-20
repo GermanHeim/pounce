@@ -258,7 +258,16 @@ impl AugSystemSolver for AugRestoSystemSolver {
         let m_eq = self.m_eq as usize;
         let m_ineq = self.m_ineq as usize;
 
-        let dbg = std::env::var("POUNCE_RESTO_DBG").is_ok();
+        // Restoration debug gate. The canonical spelling is
+        // `POUNCE_DBG_RESTO` — the `POUNCE_DBG_*` convention shared by
+        // every other debug gate, and already used by the restoration
+        // entry trace in `pounce-algorithm/src/ipopt_alg.rs`. The
+        // historical `POUNCE_RESTO_DBG` (this crate only) is retained as
+        // a deprecated alias so existing invocations keep working; either
+        // spelling enables this output. Reconciles pounce#235's two-
+        // spellings trap onto one guessable name.
+        let dbg =
+            std::env::var("POUNCE_DBG_RESTO").is_ok() || std::env::var("POUNCE_RESTO_DBG").is_ok();
         if dbg {
             tracing::debug!(target: "pounce::restoration",
                 "[resto-aug] n_orig={} m_eq={} m_ineq={} W.nz={} J_c.nz={} J_d.nz={} delta_x={:.3e} delta_c={:.3e} delta_d={:.3e}",

@@ -9,6 +9,52 @@ changes.
 
 ## [Unreleased]
 
+### Added — the last FERAL numerics env knob is now a registered option (#235)
+
+- **`POUNCE_FERAL_MIN_PAR_FLOPS` is now the `feral_min_par_flops` option**,
+  with the env var kept as a fallback — matching the pattern the other
+  `feral_*` knobs already follow. FERAL's parallel-dispatch flop gate
+  (feral#19) was previously reachable only through the environment: it was
+  not a registered option, could not be set per solve, and left no trace in
+  the solve report. It is registered as a lower-bounded
+  **number** option (not integer) because the gate is a `u64` — an `i32`
+  cannot hold large flop counts or the `u64::MAX` reject-all sentinel; the
+  value is cast to `u64` with saturation. The four other numerics knobs the
+  audit in #235 flagged (`feral_refine`, `feral_fma`, `feral_cascade_break`,
+  `feral_singular_pivot_floor`) were already registered options.
+
+### Added — the solve report records active environment overrides (#235)
+
+- **The JSON solve report now captures solve-affecting environment
+  variables** in `fair_metadata.environment`. A run that differs because
+  `POUNCE_FERAL_PIVTOL` (or any `POUNCE_FERAL_*` knob, or the legacy
+  `FERAL_PIVTOL` / `FERAL_PARALLEL`) was exported in a shell profile now
+  says so, instead of differing silently between machines — closing the
+  reproducibility gap the report is built to serve. Each entry is a
+  `{ name, value }` pair; the block is omitted when nothing is set (the
+  common case), and the `POUNCE_DBG_*` debug gates are deliberately not
+  captured (they never change the result). Additive to
+  `pounce.solve-report/v1` — older readers ignore the new field, and older
+  reports deserialize unchanged.
+
+### Changed — restoration debug gate reconciled onto one spelling (#235)
+
+- **`POUNCE_DBG_RESTO` now also enables the augmented restoration-system
+  stats** that previously answered only to `POUNCE_RESTO_DBG`. The two live
+  spellings gated different output in different crates, so guessing the
+  wrong one produced silence with no way to tell a spelling mistake from a
+  code path that did not run. `POUNCE_DBG_RESTO` is the canonical name (the
+  `POUNCE_DBG_*` convention every other gate follows); `POUNCE_RESTO_DBG` is
+  retained as a deprecated alias.
+
+### Docs — the previously source-only environment gates are documented (#235)
+
+- **A new [Environment overrides](docs/src/options.md) section** tables the
+  `POUNCE_FERAL_*` numerics fallbacks (each mapped to its option) and every
+  `POUNCE_DBG_*` / diagnostic gate, noting which take a value, which tracing
+  target each needs under `RUST_LOG`, and which print straight to stderr.
+  `troubleshooting.md` points to it from the logging recipes.
+
 ### Fixed — failed initialization solves no longer poison variable values (Pyomo, #230)
 
 - **A failed solve anywhere in the initialization pipeline now leaves

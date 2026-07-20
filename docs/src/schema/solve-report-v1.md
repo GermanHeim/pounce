@@ -37,7 +37,7 @@ verified via Crossref on 2026-05-14):
 | **F**indable | `result_id` (`<unix_nanos>-<pid>`, globally unique and time-ordered), `created_at_iso`, `created_at_unix_nanos`. |
 | **A**ccessible | Plain-text JSON on disk; no protocol gating; UTF-8. Same trust model as the `.sol` file. |
 | **I**nteroperable | Schema-versioned (`pounce.solve-report/v1`); JSON primitives only (no binary blobs); units documented per-field below; `solution.status` is the enum-variant string for cross-language consumption. |
-| **R**eusable | `solver` (name + version + git commit + target triple), `license`, `input` (kind + path + size) capture enough provenance to reproduce a solve. |
+| **R**eusable | `solver` (name + version + git commit + target triple), `license`, `input` (kind + path + size), and `environment` (solve-affecting env-var overrides in force) capture enough provenance to reproduce a solve. |
 
 ## Versioning policy
 
@@ -89,6 +89,7 @@ prefix; minor / patch (additive) changes do not.
 | `solver` | object | See below. |
 | `license` | string | SPDX identifier. Always `"EPL-2.0"` for this version. |
 | `input` | object | See `Input descriptor` below. |
+| `environment` | array \| omitted | Solve-affecting environment overrides in force. Omitted when none are set. See `Environment overrides` below. |
 
 #### `solver` sub-object
 
@@ -116,6 +117,32 @@ Tagged enum keyed on `kind`. Possible shapes:
   `pounce --problem rosenbrock`).
 * `tnlp-direct` — used by library callers building a TNLP in-process
   without a `.nl` round-trip.
+
+#### `Environment overrides` (`environment`)
+
+An array of `{ "name", "value" }` objects, one per solve-affecting
+environment variable set in the process at report time:
+
+```json
+"environment": [
+  { "name": "POUNCE_FERAL_PIVTOL", "value": "1e-6" }
+]
+```
+
+The whole array is omitted when none are set (the common case). Only the
+variables that change pounce's numerics or parallelism are captured — the
+`POUNCE_FERAL_*` linear-solver knobs and the legacy `FERAL_PIVTOL` /
+`FERAL_PARALLEL`. These alter the factorization and can otherwise silently
+differ a run between two machines (e.g. one with `POUNCE_FERAL_PIVTOL`
+exported in a shell profile) with nothing in the report saying so. The
+`POUNCE_DBG_*` debug gates are deliberately **not** captured — they only
+add diagnostic output and never change the result.
+
+Presence records that the variable was *set*, not that it took effect: an
+explicit `OptionsList` setting (e.g. `feral_pivtol` in an options file)
+takes precedence over the env fallback. See
+[Options › Environment overrides](../options.md#environment-overrides-feral-and-debug-gates)
+for the option each variable maps to.
 
 ### `problem` (object, required)
 

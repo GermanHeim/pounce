@@ -2727,6 +2727,13 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
         cfg.singular_pivot_floor = v;
     }
+    // Number option (not integer): the gate is a u64 and Index is i32, too
+    // narrow for large flop counts or the u64::MAX reject-all sentinel. The
+    // lower bound (0.0) rules out negatives; `as u64` then saturates a very
+    // large finite value to u64::MAX (reject all tree-level parallelism).
+    if let Ok((v, true)) = options.get_numeric_value("feral_min_par_flops", "") {
+        cfg.min_par_flops = Some(v as u64);
+    }
     if let Ok((v, true)) = options.get_numeric_value("feral_pivtol", "") {
         cfg.pivtol = v;
     }
@@ -3168,6 +3175,36 @@ mod tests {
         app.initialize_with_options_str("algorithm active-set-sqp\n")
             .unwrap();
         assert!(app.is_sqp_algorithm_selected());
+    }
+
+    #[test]
+    fn feral_min_par_flops_option_reaches_config() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        // Unset on the OptionsList: falls through to FeralConfig::from_env,
+        // which leaves it None (inherit feral's built-in default) when the
+        // POUNCE_FERAL_MIN_PAR_FLOPS env var is also absent.
+        assert_eq!(
+            feral_config_from_options(app.options()).min_par_flops,
+            None,
+            "unset feral_min_par_flops should not force an override"
+        );
+        // Explicit set is mapped through, cast to u64. `0` is the "dispatch
+        // on every eligible tree" setting and must survive the cast.
+        app.initialize_with_options_str("feral_min_par_flops 0\n")
+            .unwrap();
+        assert_eq!(
+            feral_config_from_options(app.options()).min_par_flops,
+            Some(0)
+        );
+        // A large finite value passes through intact (5e8 > i32::MAX, which
+        // is why this is a number option, not an integer one).
+        app.initialize_with_options_str("feral_min_par_flops 5e8\n")
+            .unwrap();
+        assert_eq!(
+            feral_config_from_options(app.options()).min_par_flops,
+            Some(500_000_000)
+        );
     }
 
     /// Convex equality NLP fixture for end-to-end SQP testing

@@ -169,6 +169,16 @@ pub struct FeralConfig {
     /// issue #79). feral reads `Solver::use_parallel` fresh on every
     /// `factor()`, so two backends with different settings never interfere.
     pub parallel: Option<bool>,
+    /// FERAL's parallel-dispatch flop gate (`min_parallel_flops`,
+    /// feral#19). A supernode tree is only handed to rayon once its
+    /// estimated flop count clears this threshold. `None` (the pounce
+    /// default) inherits feral's `NumericParams::default()` value
+    /// (10^8). `Some(0)` fires the gate on every multi-child tree ≥
+    /// `N_PAR_MIN` supernodes; `Some(u64::MAX)` rejects all
+    /// tree-level parallel dispatch. Overridable via the
+    /// `feral_min_par_flops` OptionsList option or the
+    /// `POUNCE_FERAL_MIN_PAR_FLOPS` env var.
+    pub min_par_flops: Option<u64>,
 }
 
 impl Default for FeralConfig {
@@ -185,6 +195,7 @@ impl Default for FeralConfig {
             ordering: OrderingMethod::Auto,
             scaling: ScalingStrategy::Auto,
             parallel: None,
+            min_par_flops: None,
         }
     }
 }
@@ -207,7 +218,8 @@ impl FeralConfig {
     /// Read the knobs from `POUNCE_FERAL_CASCADE_BREAK`,
     /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE`,
     /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR`, `POUNCE_FERAL_PIVTOL`,
-    /// `POUNCE_FERAL_ORDERING`, `POUNCE_FERAL_SCALING` environment
+    /// `POUNCE_FERAL_ORDERING`, `POUNCE_FERAL_SCALING`,
+    /// `POUNCE_FERAL_MIN_PAR_FLOPS` environment
     /// variables. Used as a fallback when the IPM has no `OptionsList` to
     /// consult (tests, legacy callers). The pivot threshold also accepts the
     /// deprecated bare `FERAL_PIVTOL` as a legacy alias (see
@@ -250,6 +262,13 @@ impl FeralConfig {
             // want an explicit per-backend setting use `FeralConfig.parallel`
             // directly (e.g. `FeralSolverInterface::serial`).
             parallel: None,
+            // `None` inherits feral's built-in `min_parallel_flops`
+            // default; an unset or unparseable env value falls through
+            // to it. A `u64` so the `u64::MAX` reject-all sentinel and
+            // large flop counts stay representable.
+            min_par_flops: std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok()),
         }
     }
 }
@@ -277,15 +296,14 @@ pub fn parse_ordering_method(s: &str) -> Option<OrderingMethod> {
 /// identically (same pivot threshold, cascade-break, parallelism, ordering,
 /// scaling) as the monolithic path.
 pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
-    // `POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` overrides feral's parallel-dispatch
-    // flop gate (feral#19, default 10^8). `0` fires the gate on every
-    // multi-child tree ≥ N_PAR_MIN supernodes; `u64::MAX` rejects all
-    // parallel dispatch at the tree level.
+    // FERAL's parallel-dispatch flop gate (`feral_min_par_flops` option /
+    // `POUNCE_FERAL_MIN_PAR_FLOPS` env, resolved into `cfg.min_par_flops`).
+    // feral#19, default 10^8. `Some(0)` fires the gate on every multi-child
+    // tree ≥ N_PAR_MIN supernodes; `Some(u64::MAX)` rejects all parallel
+    // dispatch at the tree level. `None` inherits feral's own default.
     let mut np = NumericParams::default();
-    if let Ok(s) = std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS") {
-        if let Ok(v) = s.parse::<u64>() {
-            np.min_parallel_flops = Some(v);
-        }
+    if let Some(v) = cfg.min_par_flops {
+        np.min_parallel_flops = Some(v);
     }
     // Relative Bunch-Kaufman partial-pivoting threshold — the analog of
     // Ipopt's `ma27_pivtol` / `ma57_pivtol` (`feral_pivtol` option /

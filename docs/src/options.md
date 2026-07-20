@@ -166,9 +166,11 @@ documented in [Auxiliary-Equality Preprocessing](auxiliary-presolve.md):
 
 `linear_solver=feral` (the default — see
 [Commonly used options](#commonly-used-options)) is configurable
-through six `feral_*` options. Defaults are tuned for the IPM
+through seven `feral_*` options. Defaults are tuned for the IPM
 workload and rarely need changing; reach for these when profiling a
-specific problem.
+specific problem. Each also falls back to a matching `POUNCE_FERAL_*`
+environment variable when left unset on the OptionsList (see
+[Environment overrides](#environment-overrides-feral-and-debug-gates)).
 
 | Option                       | Default | Meaning                                                                                                                                                                                  |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -178,6 +180,7 @@ specific problem.
 | `feral_cascade_break`        | (unset) | Tri-state. Unset → inherit feral's Phase B default (CB on with bounded delayed-pivot catchment). `yes` records explicit intent (no behavioural change). `no` reproduces pre-Phase-B behaviour by surfacing `DelayBudgetExceeded` on non-root cascade victims.  |
 | `feral_fma`                  | `no`    | Dispatch dense kernels through fused multiply-add intrinsics. Roughly 2× throughput on aarch64 / x86_v3, at the cost of per-pivot rounding drift that trips more `WrongInertia` checks. Turn on when kernel throughput dominates and the IPM tolerates a noisier inertia signal. |
 | `feral_singular_pivot_floor` | `1e-20` | Pounce's analog of MA57's `CNTL(2)`. After a successful factor, the smallest accepted `D`-block pivot magnitude (scaled space) is compared against this absolute floor; if it falls below, the factor is reported `Singular` so the IPM bumps `δ_w`. `0` disables. |
+| `feral_min_par_flops`        | `1e8`   | Flop threshold above which a supernode subtree is dispatched to a parallel worker (feral#19). Lower → dispatch more aggressively (`0` fires on every multi-child tree at/above `N_PAR_MIN` supernodes); a very large value rejects all tree-level parallelism. Only matters when feral's internal parallelism is active; no effect on a serial factor. |
 
 ### `feral_ordering` variants
 
@@ -222,6 +225,72 @@ factorization with an error on a wrong length or duplicate — a valid but
 poor ordering only costs fill/time, never correctness. This maps to
 FERAL's `OrderingMethod::External` (feral#107) and honors only the default
 FERAL backend.
+
+## Environment overrides (FERAL and debug gates)
+
+A handful of knobs are reachable through environment variables. The
+`feral_*` numerics knobs read their `POUNCE_FERAL_*` variable **only as a
+fallback** when the matching option is left unset on the OptionsList — set
+the option (per solve, recordable, discoverable via the debugger's `opt`
+command) in preference to the env var (process-wide, invisible to the solve
+report). The debug gates below have no option equivalent; they exist purely
+to switch on extra diagnostic output.
+
+### FERAL numerics fallbacks
+
+Each maps one-to-one to a registered option in
+[FERAL backend tuning](#feral-backend-tuning). Prefer the option; the env
+var is the fallback for callers with no OptionsList (some tests, legacy
+embeddings).
+
+| Variable                            | Option                       |
+|-------------------------------------|------------------------------|
+| `POUNCE_FERAL_ORDERING`             | `feral_ordering`             |
+| `POUNCE_FERAL_SCALING`              | `feral_scaling`              |
+| `POUNCE_FERAL_PIVTOL`               | `feral_pivtol` (deprecated bare `FERAL_PIVTOL` also accepted) |
+| `POUNCE_FERAL_REFINE`               | `feral_refine`               |
+| `POUNCE_FERAL_CASCADE_BREAK`        | `feral_cascade_break`        |
+| `POUNCE_FERAL_FMA`                  | `feral_fma`                  |
+| `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR` | `feral_singular_pivot_floor` |
+| `POUNCE_FERAL_MIN_PAR_FLOPS`        | `feral_min_par_flops`        |
+
+`FERAL_PARALLEL=0` (legacy, no `POUNCE_` prefix) forces feral's internal
+factor serial process-wide; the first-class per-backend lever is the
+solver API, not an option.
+
+### Debug and diagnostic gates
+
+These switch on extra diagnostic emission for a specific subsystem. Most
+emit at **debug** level under a `pounce::*` [tracing](#logging-and-colored-output)
+target, so setting the gate alone is not enough — pair it with a matching
+`RUST_LOG` (e.g. `RUST_LOG=pounce::mu=debug`) or the output stays filtered.
+Presence-only unless a value is noted; they are diagnostic aids, not part
+of the stable interface, and may change between releases.
+
+| Variable | Subsystem (`RUST_LOG` target) | Emits |
+|---|---|---|
+| `POUNCE_DBG_AMU` | `pounce::mu` | Adaptive-μ per-iteration state (θ, f, oracle inputs). |
+| `POUNCE_DBG_ORACLE` | `pounce::mu` | μ-oracle probe-guard decisions (probe-Newton → restoration requests). |
+| `POUNCE_DBG_QF` | `pounce::mu` | Quality-function μ-oracle σ search (floor, current μ). |
+| `POUNCE_DBG_QF_AGGR` | `pounce::mu` | Quality-function aggregate step/complementarity terms per σ. |
+| `POUNCE_DBG_QF_SWEEP=<iter>` | `pounce::mu` | Dumps the full quality-function σ sweep at the given iteration number. |
+| `POUNCE_DBG_DELTA` | `pounce::algorithm` | Primal-dual search direction `δ` per iteration. |
+| `POUNCE_DBG_LS=1` | `pounce::linesearch` | Filter line-search / backtracking acceptance trace (must equal `1`). |
+| `POUNCE_DBG_PERT` | `pounce::linsol` | Inertia-perturbation handler decisions (`WRONG_INERTIA`, `δ_w` escalation). |
+| `POUNCE_DBG_PD_TAGS` | `pounce::linsol` | Primal-dual full-space solver dependent-block tag changes. |
+| `POUNCE_DBG_KKT_DUMP=<path>` | `pounce::linsol` | Writes the tagged KKT matrix to `<path>`. |
+| `POUNCE_DBG_KKT_DUMP_SKIP=<n>` | — | Skip the first `<n>` factorizations before honoring `POUNCE_DBG_KKT_DUMP`. |
+| `POUNCE_DUMP_KKT=<path>` | `pounce::linsol` | Writes the standard augmented-system KKT matrix to `<path>`. **Deprecated** — prefer `--dump kkt:<iter-spec>` (see `pounce --help`). |
+| `POUNCE_DBG_RESTO` | `pounce::algorithm`, `pounce::restoration` | Restoration entry trace **and** the augmented restoration-system stats. Canonical spelling; the legacy `POUNCE_RESTO_DBG` (restoration-system stats only) is a deprecated alias. |
+| `POUNCE_DBG_RESTO_CYCLE` | `pounce::algorithm` | Restoration no-progress cycle-detector relative-step metrics. |
+| `POUNCE_DBG_RESTO_INIT` | `pounce::restoration` | Restoration initial-point vectors. |
+| `POUNCE_DBG_RESTO_KAPPA` | `pounce::restoration` | Restoration `κ_resto` convergence-guard evaluation. |
+| `POUNCE_DBG_RESTO_LOCINF` | `pounce::restoration` | Restoration local-infeasibility verdict inputs. |
+| `POUNCE_DBG_TAPE_STATS` | — (stderr) | AD tape counts after parsing an `.nl` model. Printed straight to stderr; no `RUST_LOG` needed. |
+| `POUNCE_SIMPLEX_DEBUG` | — (stderr) | Convex/LP-QP simplex pivoting trace. Printed straight to stderr; no `RUST_LOG` needed. |
+
+Two already-documented gates round out the set: `POUNCE_DBG_LLM` and
+`POUNCE_DBG_VIEWER` (see [the debugger guide](./debugger.md)).
 
 ## Logging and colored output
 

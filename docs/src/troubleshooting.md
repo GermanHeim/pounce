@@ -437,6 +437,17 @@ restoration-heavy solve is visible at a glance. When stdout is not a
 terminal (or `NO_COLOR` is set) the table is emitted as plain text with
 the same column layout.
 
+### Subsystem debug gates
+
+For output finer than `RUST_LOG=<target>=debug` gives on its own, several
+subsystems have a `POUNCE_DBG_*` gate that switches on extra per-iteration
+diagnostics (adaptive-μ oracle decisions, the quality-function σ sweep,
+inertia-perturbation choices, restoration internals, KKT-matrix dumps, …).
+Most emit at debug level, so pair the gate with the matching `RUST_LOG`
+target. The full table — including which gate takes a value and which
+prints straight to stderr — is in
+[Options › Environment overrides](options.md#environment-overrides-feral-and-debug-gates).
+
 ## Contributing a new recipe
 
 A recipe earns a place here when:
