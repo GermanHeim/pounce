@@ -267,6 +267,26 @@ pub struct SolutionSuffix {
     pub int_values: Vec<Index>,
 }
 
+/// NaN, for a residual slot that was never filled in.
+fn uncomputed() -> Number {
+    Number::NAN
+}
+
+/// Accept `null` for a residual the solve never computed.
+///
+/// `SolveStatistics` defaults its residual fields to NaN rather than `0.0`, so
+/// that "the convergence check never ran" is distinguishable from "converged
+/// exactly". `serde_json` renders a non-finite float as `null`, so a report
+/// written for a solve that was refused during setup carries `null` in these
+/// slots. Without this the report round-trip fails — pounce would write
+/// reports its own `--cite` / studio / verify paths could not read back.
+fn null_as_nan<'de, D>(de: D) -> Result<Number, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Number>::deserialize(de)?.unwrap_or_else(uncomputed))
+}
+
 /// Subset of `SolveStatistics` projected for the report. Mirrors the
 /// fields the existing console summary prints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,9 +294,13 @@ pub struct StatisticsInfo {
     pub iteration_count: Index,
     pub final_objective: Number,
     pub final_scaled_objective: Number,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_dual_inf: Number,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_constr_viol: Number,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_compl: Number,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_kkt_error: Number,
     pub num_obj_evals: Index,
     pub num_constr_evals: Index,

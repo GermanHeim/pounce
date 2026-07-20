@@ -170,10 +170,21 @@ the per-iteration history (which lives at the top level when present).
 | `iteration_count` | integer | Number of accepted outer iterations. |
 | `final_objective` | float | Unscaled. Matches `solution.objective`. |
 | `final_scaled_objective` | float | Scaled by the IPM's internal NLP scaling. Equal to `final_objective` when no scaling is in effect. |
-| `final_dual_inf` | float | `||∇L||∞` at termination. |
-| `final_constr_viol` | float | `||c(x)||∞` (primal infeasibility). |
-| `final_compl` | float | Max complementarity over the four bound blocks. |
-| `final_kkt_error` | float | Overall KKT error reported by the convergence check. |
+| `final_dual_inf` | float \| null | `||∇L||∞` at termination. `null` if never computed — see below. |
+| `final_constr_viol` | float \| null | `||c(x)||∞` (primal infeasibility). `null` if never computed. |
+| `final_compl` | float \| null | Max complementarity over the four bound blocks. `null` if never computed. |
+| `final_kkt_error` | float \| null | Overall KKT error reported by the convergence check. `null` if never computed. |
+
+> **`null` residuals.** These four are produced by the convergence check at the
+> end of a solve. A solve the solver *refused* — rejected during setup
+> (`NotEnoughDegreesOfFreedom`, `InvalidProblemDefinition`), aborted, or caught
+> by the batch panic handler — never reaches it, and these slots are emitted as
+> `null` rather than `0.0`. A zero there is indistinguishable from a perfect
+> solve, and consumers acted on it: it was enough to make `pounce.minimize`
+> report `success=True` for a problem the solver had declined to attempt.
+>
+> Consumers should treat `null` as "not computed", not as zero. pounce's own
+> readers map it to NaN, which fails closed against any `residual <= tol` test.
 | `num_obj_evals` | integer | `eval_f` call count. |
 | `num_constr_evals` | integer | `eval_g` call count. |
 | `num_obj_grad_evals` | integer | `eval_grad_f` count. |

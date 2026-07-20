@@ -861,6 +861,15 @@ impl IpoptApplication {
             stats.final_dual_inf = res.final_stationarity;
             stats.final_constr_viol = res.final_constr_viol;
             stats.final_compl = 0.0; // SQP has no barrier — no compl term.
+            // Overall KKT error. This was previously left at the struct
+            // default, which made every successful SQP solve report an
+            // overall error of exactly 0.0 — indistinguishable from a
+            // genuinely perfect solve, and enough on its own to make
+            // `pounce.minimize`'s acceptable-KKT fallback upgrade any status
+            // on this path to `success=True`. Same expression as the unscaled
+            // twin below; the two agree because the SQP path does not thread
+            // nlp_scaling through its residuals.
+            stats.final_kkt_error = res.final_stationarity.max(res.final_constr_viol);
             // Unscaled residuals (pounce#173). The SQP path does not thread
             // the nlp_scaling factors through to its residuals yet, so these
             // mirror the SQP-side values: correct when no scaling is active
