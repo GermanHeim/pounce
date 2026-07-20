@@ -266,8 +266,8 @@ impl AugSystemSolver for AugRestoSystemSolver {
         // a deprecated alias so existing invocations keep working; either
         // spelling enables this output. Reconciles pounce#235's two-
         // spellings trap onto one guessable name.
-        let dbg = std::env::var("POUNCE_DBG_RESTO").is_ok()
-            || std::env::var("POUNCE_RESTO_DBG").is_ok();
+        let dbg =
+            std::env::var("POUNCE_DBG_RESTO").is_ok() || std::env::var("POUNCE_RESTO_DBG").is_ok();
         if dbg {
             tracing::debug!(target: "pounce::restoration",
                 "[resto-aug] n_orig={} m_eq={} m_ineq={} W.nz={} J_c.nz={} J_d.nz={} delta_x={:.3e} delta_c={:.3e} delta_d={:.3e}",
