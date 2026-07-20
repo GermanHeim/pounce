@@ -29,6 +29,7 @@ from ._curve_fit import (
     CurveFitResult,
 )
 from ._minima import find_minima, MinimaResult
+from .trf import trf_minimize, TRFResult, TRFConfig
 from ._preflight import preflight, PreflightReport
 from ._starts import generate_starts, project_to_feasible, race_starts
 from ._critical import (
@@ -66,6 +67,10 @@ __all__ = [
     "CurveFitResult",
     "find_minima",
     "MinimaResult",
+    # Glass box / black box (trust-region filter)
+    "trf_minimize",
+    "TRFResult",
+    "TRFConfig",
     "find_critical_points",
     "find_saddles",
     "reaction_network",

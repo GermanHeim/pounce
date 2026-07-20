@@ -33,6 +33,7 @@
 - [Boundary Value Problems](bvp.md)
 - [ODE / DAE Initial Value Problems](ode.md)
 - [Implicit DAEs](dae.md)
+- [Glass Box / Black Box Optimization](trf.md)
 
 # Global Search
 

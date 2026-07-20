@@ -71,6 +71,12 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 20 | [`20_find_minima_restart.ipynb`](20_find_minima_restart.ipynb) | `find_minima` — the multistart/restart family. |
 | 21 | [`21_find_minima_hopping.ipynb`](21_find_minima_hopping.ipynb) | `find_minima` — the basin-hopping family. |
 
+## Glass box / black box
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 29 | [`29_trust_region_filter.ipynb`](29_trust_region_filter.ipynb) | `pounce.trf_minimize` — optimize a model that is part algebra, part opaque simulation. Why fitting a surrogate and optimizing it converges to a local *maximum*, how the zero/first-order corrections fix it, why an affine basis is provably useless (only curvature survives), and how fitting a basis once and freezing it cuts truth-model calls from 10 to 4. |
+
 ## Curve fitting
 
 | # | Notebook | What it shows |
