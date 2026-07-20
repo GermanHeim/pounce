@@ -68,42 +68,32 @@ __all__ = ["trf_minimize", "TRFResult", "TRFConfig"]
 # note in _surrogate.py.
 _BASES = {"zero": ZeroBasis, "quadratic": QuadraticBasis}
 
-# ApplicationReturnStatus codes that mean the solver never validly set up the
-# problem, as opposed to trying and stalling.
-#
-# We cannot rely on ``OptimizeResult.success`` alone here. ``pounce.minimize``
-# upgrades a non-success status to ``success=True`` whenever the final KKT
-# error is below the acceptable tolerance (see ``_minimize.py``, the
-# ``_NO_KKT_FALLBACK_STATUS`` logic) -- a reasonable rule for a solve that
-# stalled near a good point, but wrong for these codes, where the reported KKT
-# error describes a problem that was rejected rather than solved. Observed in
-# practice: an over-determined subproblem returns status -10 with
-# ``success=True`` and an ``x`` that violates its own variable bounds. Feeding
-# that into the filter as a trial step corrupts the whole run.
-_STRUCTURAL_FAILURE_STATUS = frozenset(
-    {
-        -10,  # Not_Enough_Degrees_Of_Freedom
-        -11,  # Invalid_Problem_Definition
-        -12,  # Invalid_Option
-        -13,  # Invalid_Number_Detected
-        -199,  # Internal_Error
-    }
-)
-
-
 _INFEASIBLE_STATUS = 2  # Infeasible_Problem_Detected
 
 
 def _subproblem_status(res) -> str:
-    """Classify a subproblem outcome as ``ok`` / ``incompatible`` / ``failed``."""
-    status = res.info.get("status") if hasattr(res, "info") else None
-    status = int(status) if status is not None else None
+    """Classify a subproblem outcome as ``ok`` / ``incompatible`` / ``failed``.
 
-    if status in _STRUCTURAL_FAILURE_STATUS:
-        return "failed"
-    if status == _INFEASIBLE_STATUS:
+    The extra distinction beyond ``success`` is that an *incompatible*
+    subproblem -- the glass-box constraints having no solution inside the
+    current trust region -- is not a numerical breakdown. It calls for
+    expanding the trust region rather than contracting it, so the loop has to
+    tell it apart from every other failure.
+
+    ``res.success`` can be trusted for the rest. That is worth stating because
+    it was briefly untrue: ``pounce.minimize`` used to upgrade a refused solve
+    to ``success=True`` when its (never-computed, defaulted-to-zero) KKT error
+    looked small, so an over-determined subproblem came back successful with an
+    ``x`` outside its own bounds. Feeding that to the filter as a trial step
+    corrupted the run. Residuals now default to NaN, which fails that test
+    closed.
+    """
+    if res.success:
+        return "ok"
+    status = res.info.get("status") if hasattr(res, "info") else None
+    if status is not None and int(status) == _INFEASIBLE_STATUS:
         return "incompatible"
-    return "ok" if res.success else "failed"
+    return "failed"
 
 
 @dataclass
