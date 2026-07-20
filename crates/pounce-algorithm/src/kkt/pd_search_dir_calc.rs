@@ -99,15 +99,35 @@ impl PdSearchDirCalc {
             n.x_l().dim() + n.x_u().dim() + n.d_l().dim() + n.d_u().dim()
         };
 
-        if nbounds > 0 && self.mehrotra_algorithm {
-            let delta_aff = {
-                let d = data.borrow();
-                d.delta_aff
-                    .clone()
-                    .unwrap_or_else(|| panic!("PdSearchDirCalc: delta_aff missing for Mehrotra"))
-            };
+        // The Mehrotra corrector needs the affine (predictor) step, which
+        // the adaptive-μ oracle stores in `data.delta_aff`. Several
+        // legitimate paths leave it unset at this point even though
+        // `mehrotra_algorithm` is on: the affine solve can fail and fall
+        // back to the LOQO oracle (which computes no predictor step), the
+        // probing iterate-quality guard can return early without one, or we
+        // may be on an iteration before any affine step has been taken. In
+        // those cases fall back to the plain primal-dual z-blocks rather
+        // than panicking — the corrector is a second-order refinement, and
+        // the plain direction is a valid (if less aggressive) step. If the
+        // KKT system is genuinely unsolvable, `pd_solver.solve` below will
+        // report it by returning `false`, which the caller surfaces as a
+        // failed solve (`ErrorInStepComputation`) — a status callers can
+        // catch, unlike a process-killing panic (gh #231).
+        let delta_aff = if nbounds > 0 && self.mehrotra_algorithm {
+            data.borrow().delta_aff.clone()
+        } else {
+            None
+        };
+
+        if let Some(delta_aff) = delta_aff {
             self.fill_mehrotra_z_blocks(&delta_aff, cq, nlp, &mut rhs);
         } else {
+            if nbounds > 0 && self.mehrotra_algorithm {
+                tracing::debug!(target: "pounce::algorithm",
+                    "PdSearchDirCalc: Mehrotra corrector requested but no \
+                     affine step available; using the plain primal-dual \
+                     direction this iteration.");
+            }
             let cq_ref = cq.borrow();
             rhs.z_l.copy(&*cq_ref.curr_relaxed_compl_x_l());
             rhs.z_u.copy(&*cq_ref.curr_relaxed_compl_x_u());
