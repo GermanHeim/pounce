@@ -396,3 +396,25 @@ defect (9.5) was opened by the same pass:
   strict-status losses, zero objective changes among still-strict runs, all
   targets met.
 - **9.5 turned out not to be a defect** — see the correction there.
+
+### 9.7 Configuration sweep (2026-07-20)
+
+Every configuration that changes *when* or *how* a run terminates is a candidate
+for an interaction the default-options fuzz cannot see. The ones that had been
+named but never checked are now checked, each against the same never-worse
+invariant (status never degrades, objective never worse) with a guard requiring
+that the veto actually engaged:
+
+| configuration | why it was suspect | cases / engaged | result |
+|---|---|---|---|
+| `hessian_approximation=limited-memory` | the scale-invariance argument is weakest here — curvature comes from accumulated gradient differences built on the pre-veto trajectory | 80 / 31 | holds |
+| `mu_strategy=adaptive` | changes where the unscaled error crosses `acceptable_tol`, i.e. when the veto lifts | 80 / 49 | holds |
+| `acceptable_iter=0` | disables acceptable-level termination, making the strict fallback the *only* rollback | 80 / 28 | holds |
+| `kkt_fidelity_tol=1e-4` | acts on the same signal as the veto; the restored point has a large unscaled error by construction | 80 / 40 | holds |
+| warm-start chain | `final_mu` feeds the next solve's `mu_init`; a latent inconsistency in what is carried across shows up in a chain, not a single solve | 60 / 6 | holds |
+
+L-BFGS is worth singling out: it is the case the scale-invariance justification
+covers least well, and it holds anyway — which is the point. Correctness does
+not rest on that argument. The fallback restores the refused certificate however
+the continuation behaves, so a weaker trajectory argument costs iterations, not
+correctness.

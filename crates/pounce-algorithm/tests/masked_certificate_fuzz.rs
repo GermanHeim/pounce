@@ -1318,3 +1318,425 @@ fn the_veto_does_not_suppress_a_fallback_retry() {
         );
     }
 }
+
+/// L-BFGS is the case the scale-invariance argument covers least well.
+///
+/// The justification for continuing past a refused certificate is that a
+/// constant objective scale cancels out of the Newton step, so the run follows
+/// the trajectory an unscaled run would take. With an exact Hessian that is
+/// clean. Under `hessian_approximation=limited-memory` the curvature comes from
+/// accumulated gradient differences instead, and the memory carried past the
+/// refusal was built on the pre-veto trajectory — so the continued run is not
+/// obviously the same run an unscaled solve would have produced.
+///
+/// The guarantee does not actually depend on that argument being tight (the
+/// fallback restores the refused certificate whatever happens), but a
+/// configuration this common should not be untested.
+#[test]
+fn the_guarantee_holds_under_limited_memory_hessians() {
+    let mut rng = Rng(0x11BF_6500);
+    let (mut cases, mut engaged) = (0, 0);
+    for case in 0..80 {
+        let spec = gen_spec(&mut rng);
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_string_value("hessian_approximation", "limited-memory", true, false)
+                .unwrap();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+                spec.clone(),
+                Rc::new(RefCell::new(Vec::new())),
+            )));
+            let st = app.optimize_tnlp(t);
+            let s = app.statistics();
+            (st, s.final_objective, s.iteration_count)
+        };
+        let (bs, bo, bi) = solve(0.0);
+        let (vs, vo, vi) = solve(1e-4);
+        cases += 1;
+        if vi != bi {
+            engaged += 1;
+        }
+        if !succeeded(bs) {
+            continue;
+        }
+        assert!(
+            succeeded(vs),
+            "case {case} (n={} p={}): under L-BFGS the baseline ended {bs:?} but the veto gave {vs:?}",
+            spec.n,
+            spec.p
+        );
+        assert!(
+            vo <= bo + 1e-9 * bo.abs().max(1.0),
+            "case {case} (n={} p={}): under L-BFGS the veto returned {vo:.12e}, worse than \
+             baseline {bo:.12e}",
+            spec.n,
+            spec.p
+        );
+    }
+    assert!(
+        engaged >= 5,
+        "only {engaged}/{cases} L-BFGS cases changed trajectory — not exercising the veto"
+    );
+    eprintln!("L-BFGS: {cases} cases, veto changed the run on {engaged}");
+}
+
+/// Run the core never-worse invariant under an arbitrary extra option.
+///
+/// The mechanism interacts with the termination machinery, so any option that
+/// changes *when* or *how* a run stops is a candidate for an interaction the
+/// default-options fuzz cannot see.
+fn assert_invariant_under(
+    label: &str,
+    seed: u64,
+    n_cases: usize,
+    opts: &[(&str, &str)],
+    int_opts: &[(&str, i32)],
+) {
+    let mut rng = Rng(seed);
+    let (mut cases, mut engaged) = (0, 0);
+    for case in 0..n_cases {
+        let spec = gen_spec(&mut rng);
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            for (k, v) in opts {
+                app.options_mut()
+                    .set_string_value(k, v, true, false)
+                    .unwrap();
+            }
+            for (k, v) in int_opts {
+                app.options_mut()
+                    .set_integer_value(k, *v, true, false)
+                    .unwrap();
+            }
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+                spec.clone(),
+                Rc::new(RefCell::new(Vec::new())),
+            )));
+            let st = app.optimize_tnlp(t);
+            let s = app.statistics();
+            (st, s.final_objective, s.iteration_count)
+        };
+        let (bs, bo, bi) = solve(0.0);
+        let (vs, vo, vi) = solve(1e-4);
+        cases += 1;
+        if vi != bi {
+            engaged += 1;
+        }
+        if !succeeded(bs) {
+            continue;
+        }
+        assert!(
+            succeeded(vs),
+            "{label} case {case} (n={} p={}): baseline ended {bs:?} but the veto gave {vs:?}",
+            spec.n,
+            spec.p
+        );
+        assert!(
+            vo <= bo + 1e-9 * bo.abs().max(1.0),
+            "{label} case {case} (n={} p={}): veto objective {vo:.12e} worse than baseline {bo:.12e}",
+            spec.n,
+            spec.p
+        );
+    }
+    assert!(
+        engaged >= 3,
+        "{label}: only {engaged}/{cases} cases changed trajectory — not exercising the veto"
+    );
+    eprintln!("{label}: {cases} cases, veto changed the run on {engaged}");
+}
+
+/// `acceptable_iter = 0` disables acceptable-level termination entirely, which
+/// makes the strict fallback the *only* rollback the mechanism has. Nothing
+/// else in the suite generates this configuration.
+#[test]
+fn the_guarantee_holds_with_acceptable_termination_disabled() {
+    assert_invariant_under(
+        "acceptable_iter=0",
+        0xACCE_9700,
+        80,
+        &[],
+        &[("acceptable_iter", 0)],
+    );
+}
+
+/// The adaptive barrier strategy changes where the unscaled error crosses
+/// `acceptable_tol`, and hence when the veto lifts — the timing the whole
+/// mechanism turns on.
+#[test]
+fn the_guarantee_holds_under_the_adaptive_mu_strategy() {
+    assert_invariant_under(
+        "mu=adaptive",
+        0xADAF_9700,
+        80,
+        &[("mu_strategy", "adaptive")],
+        &[],
+    );
+}
+
+/// `kkt_fidelity_tol` downgrades `Solve_Succeeded` when the final unscaled KKT
+/// error exceeds it. The point the fallback restores has an unscaled error
+/// above `acceptable_tol` *by construction*, so the two features act on exactly
+/// the same signal and could plausibly fight. They should not: the baseline
+/// returns that same point, so the gate sees the same input in both arms.
+#[test]
+fn the_guarantee_holds_alongside_the_kkt_fidelity_gate() {
+    let mut rng = Rng(0xF1DE_9700);
+    let (mut cases, mut engaged) = (0, 0);
+    for case in 0..80 {
+        let spec = gen_spec(&mut rng);
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_numeric_value("kkt_fidelity_tol", 1e-4, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+                spec.clone(),
+                Rc::new(RefCell::new(Vec::new())),
+            )));
+            let st = app.optimize_tnlp(t);
+            let s = app.statistics();
+            (st, s.final_objective, s.iteration_count)
+        };
+        let (bs, bo, bi) = solve(0.0);
+        let (vs, vo, vi) = solve(1e-4);
+        cases += 1;
+        if vi != bi {
+            engaged += 1;
+        }
+        if !succeeded(bs) {
+            continue;
+        }
+        assert!(
+            succeeded(vs),
+            "kkt_fidelity case {case}: baseline {bs:?} but veto {vs:?} — the gate and the veto \
+             disagree on the same point"
+        );
+        assert!(
+            vo <= bo + 1e-9 * bo.abs().max(1.0),
+            "kkt_fidelity case {case}: {vo:.12e} > {bo:.12e}"
+        );
+    }
+    assert!(
+        engaged >= 3,
+        "kkt_fidelity: only {engaged}/{cases} engaged the veto"
+    );
+    eprintln!("kkt_fidelity_tol: {cases} cases, veto changed the run on {engaged}");
+}
+
+/// A problem that can be seeded from a previous solve's primal and bound duals.
+struct WarmSeeded {
+    spec: Spec,
+    seed: Option<(Vec<Number>, Vec<Number>, Vec<Number>)>,
+    captured: Rc<RefCell<Option<(Vec<Number>, Vec<Number>, Vec<Number>)>>>,
+}
+
+impl TNLP for WarmSeeded {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: self.spec.n as i32,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: self.spec.n as i32,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        // Finite bounds so there are bound multipliers to carry across.
+        for v in b.x_l.iter_mut() {
+            *v = -1.0e6;
+        }
+        for v in b.x_u.iter_mut() {
+            *v = 1.0e6;
+        }
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        match &self.seed {
+            Some((x, zl, zu)) => {
+                sp.x.copy_from_slice(x);
+                if sp.init_z {
+                    sp.z_l.copy_from_slice(zl);
+                    sp.z_u.copy_from_slice(zu);
+                }
+                true
+            }
+            None => {
+                for v in sp.x.iter_mut() {
+                    *v = self.spec.x0;
+                }
+                true
+            }
+        }
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        let s = &self.spec;
+        Some(
+            (0..s.n)
+                .map(|i| s.c[i] * (x[i] - s.a[i]).powi(s.p) - s.w[i] * x[i] * x[i])
+                .sum(),
+        )
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        let s = &self.spec;
+        for i in 0..s.n {
+            g[i] = s.c[i] * s.p as Number * (x[i] - s.a[i]).powi(s.p - 1) - 2.0 * s.w[i] * x[i];
+        }
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _n: bool,
+        o: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        let s = &self.spec;
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                for i in 0..s.n {
+                    irow[i] = i as i32;
+                    jcol[i] = i as i32;
+                }
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                for i in 0..s.n {
+                    let pp = s.p as Number;
+                    values[i] = o
+                        * (s.c[i] * pp * (pp - 1.0) * (x[i] - s.a[i]).powi(s.p - 2) - 2.0 * s.w[i]);
+                }
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+        *self.captured.borrow_mut() = Some((s.x.to_vec(), s.z_l.to_vec(), s.z_u.to_vec()));
+    }
+}
+
+/// A warm-start chain must not diverge because of the veto.
+///
+/// The fallback restores an earlier iterate, and `stats.final_mu` — which feeds
+/// a warm-started corrector's `mu_init` — is read afterwards. Restoring `mu`
+/// with the iterate was fixed on the argument that the pair must describe the
+/// same point, but that fix was never exercised through an actual chain: solve,
+/// take the result, seed the next solve from it. Latent inconsistencies in what
+/// is carried across are exactly what a chain surfaces and a single solve does
+/// not.
+#[test]
+fn a_warm_start_chain_is_unaffected_by_the_veto() {
+    let mut rng = Rng(0x3A57_9700);
+    let (mut cases, mut engaged) = (0, 0);
+    for case in 0..60 {
+        let spec = gen_spec(&mut rng);
+        let chain = |threshold: Number| {
+            let run = |seed: Option<(Vec<Number>, Vec<Number>, Vec<Number>)>| {
+                let cap = Rc::new(RefCell::new(None));
+                let mut app = IpoptApplication::new();
+                app.options_mut()
+                    .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                    .unwrap();
+                if seed.is_some() {
+                    app.options_mut()
+                        .set_string_value("warm_start_init_point", "yes", true, false)
+                        .unwrap();
+                }
+                app.options_mut()
+                    .set_integer_value("max_iter", 300, true, false)
+                    .unwrap();
+                app.options_mut()
+                    .set_integer_value("print_level", 0, true, false)
+                    .unwrap();
+                app.initialize().unwrap();
+                let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(WarmSeeded {
+                    spec: spec.clone(),
+                    seed,
+                    captured: Rc::clone(&cap),
+                }));
+                let st = app.optimize_tnlp(t);
+                let s = app.statistics();
+                (
+                    st,
+                    s.final_objective,
+                    s.iteration_count,
+                    cap.borrow().clone(),
+                )
+            };
+            let (s1, o1, i1, c1) = run(None);
+            let (s2, o2, i2, _) = run(c1);
+            (s1, o1, i1, s2, o2, i2)
+        };
+        let (bs1, bo1, bi1, bs2, bo2, _) = chain(0.0);
+        let (vs1, vo1, vi1, vs2, vo2, _) = chain(1e-4);
+        cases += 1;
+        if vi1 != bi1 {
+            engaged += 1;
+        }
+        // First leg: the usual guarantee.
+        if succeeded(bs1) {
+            assert!(succeeded(vs1), "case {case} leg1: {bs1:?} -> {vs1:?}");
+            assert!(
+                vo1 <= bo1 + 1e-9 * bo1.abs().max(1.0),
+                "case {case} leg1 objective"
+            );
+        }
+        // Second leg: warm-started from leg 1. If anything inconsistent were
+        // carried across, the chain is where it shows up.
+        if succeeded(bs2) {
+            assert!(
+                succeeded(vs2),
+                "case {case} leg2 (warm-started): baseline chain ended {bs2:?} but the veto \
+                 chain gave {vs2:?} — inconsistent state carried across the restore"
+            );
+            assert!(
+                vo2 <= bo2 + 1e-9 * bo2.abs().max(1.0),
+                "case {case} leg2: warm-started veto chain reached {vo2:.12e}, worse than the \
+                 baseline chain's {bo2:.12e}"
+            );
+        }
+    }
+    assert!(
+        engaged >= 3,
+        "warm-start: only {engaged}/{cases} engaged the veto"
+    );
+    eprintln!("warm-start chain: {cases} cases, veto changed leg 1 on {engaged}");
+}
