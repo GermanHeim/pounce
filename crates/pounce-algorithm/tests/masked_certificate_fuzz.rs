@@ -1117,3 +1117,144 @@ fn the_reported_barrier_parameter_belongs_to_the_returned_point() {
         );
     }
 }
+
+/// A well-conditioned problem the user has deliberately scaled down.
+///
+/// `obj_scaling_factor` is a *user* option. Someone who sets it to 1e-6 on a
+/// perfectly ordinary problem is not in the pathological regime this fix exists
+/// for — nothing is masked, the solve converges normally — but the veto's gate
+/// is on the scale factor, so it arms anyway. Worse, the bar it then has to
+/// clear is the *unscaled* error, which is `1/df` times the scaled one: with
+/// `df = 1e-6`, lifting the veto needs a scaled error of 1e-12, four orders
+/// tighter than `tol`. So the veto cannot lift, and every such solve pays the
+/// full continuation budget for nothing.
+///
+/// This is the user-scaling interaction flagged in plan section 9.4. It is a
+/// cost question, not a correctness one — the fallback still returns the
+/// refused certificate — but a silent per-solve tax on a legitimate
+/// configuration would be a poor trade.
+struct WellConditioned;
+
+impl TNLP for WellConditioned {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 10,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: 10,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        // Active lower bounds: the barrier leaves a non-zero complementarity at
+        // convergence, so the solve takes real iterations and its residual does
+        // not collapse to exactly zero — without which the veto could never
+        // engage and this test would pass vacuously.
+        b.x_l.copy_from_slice(&[5.0; 10]);
+        b.x_u.copy_from_slice(&[2.0e19; 10]);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[8.0; 10]);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some(
+            x.iter()
+                .enumerate()
+                .map(|(i, v)| (v - i as Number).powi(2))
+                .sum(),
+        )
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        for (i, gi) in g.iter_mut().enumerate() {
+            *gi = 2.0 * (x[i] - i as Number);
+        }
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                for i in 0..10 {
+                    irow[i] = i as i32;
+                    jcol[i] = i as i32;
+                }
+            }
+            SparsityRequest::Values { values } => {
+                for v in values.iter_mut() {
+                    *v = obj_factor * 2.0;
+                }
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+#[test]
+fn user_scaled_well_conditioned_problems_do_not_pay_a_veto_tax() {
+    for df in [1e-5, 1e-6, 1e-8] {
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_numeric_value("obj_scaling_factor", df, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(WellConditioned));
+            let st = app.optimize_tnlp(t);
+            let s = app.statistics();
+            (
+                st,
+                s.final_objective,
+                s.iteration_count,
+                s.final_unscaled_kkt_error,
+            )
+        };
+        let (bs, bo, bi, berr) = solve(0.0);
+        let (vs, vo, vi, _) = solve(1e-4);
+        eprintln!(
+            "obj_scaling_factor={df:e}: baseline {bs:?} f={bo:.6e} it={bi} unscaled_err={berr:.2e} | veto {vs:?} f={vo:.6e} it={vi}"
+        );
+        // Guard the premise: the veto can only engage where the unscaled error
+        // is above acceptable_tol at the stopping point. If it is not, this
+        // configuration never reaches the regime and the test proves nothing.
+        assert!(
+            bi > 3 && berr > 1e-6,
+            "premise: df={df:e} did not reach the veto regime (it={bi}, unscaled_err={berr:.2e}) \
+             — this test would pass vacuously"
+        );
+        assert_eq!(
+            format!("{bs:?}"),
+            format!("{vs:?}"),
+            "df={df:e}: user scaling changed the status"
+        );
+        assert!(
+            vi <= bi + 2,
+            "df={df:e}: a deliberately user-scaled, well-conditioned solve took {vi} iterations \
+             with the veto vs {bi} without — a per-solve tax on a legitimate configuration"
+        );
+    }
+}

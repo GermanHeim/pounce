@@ -335,7 +335,9 @@ impl ConvCheck for OptErrorConvCheck {
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         let curr_f = cq_ref.curr_f();
         let unscaled_err = cq_ref.curr_unscaled_nlp_error();
-        let obj_scale = cq_ref.obj_scaling_factor();
+        // The gate asks whether *our* scaling clamped, not how the user chose
+        // to scale their objective — see `certificate_masked`.
+        let obj_scale = cq_ref.computed_obj_scaling_factor();
         drop(cq_ref);
 
         // gh #200: refuse a certificate the objective scaling has masked, and
