@@ -24,6 +24,24 @@ optionally, the per-iteration trajectory.
 Choose `summary` for production logs and batch runs; `full` for
 debugging — it is the JSON equivalent of upstream's `print_level=8`.
 
+## Reproducibility: recorded environment overrides
+
+Solve-affecting environment variables — the `POUNCE_FERAL_*` linear-solver
+knobs and the legacy `FERAL_PIVTOL` / `FERAL_PARALLEL` — are captured into
+`fair_metadata.environment` when set, so a run that differs because one was
+exported in a shell profile says so instead of differing silently:
+
+```json
+"environment": [
+  { "name": "POUNCE_FERAL_PIVTOL", "value": "1e-6" }
+]
+```
+
+The block is omitted entirely when no such variable is set (the common
+case). Debug-only gates (`POUNCE_DBG_*`) are not captured. See
+[the schema reference](schema/solve-report-v1.md#environment-overrides-environment)
+for the full field contract.
+
 ## Schema stability
 
 The schema is versioned (`pounce.solve-report/v1`) so downstream

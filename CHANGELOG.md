@@ -23,6 +23,20 @@ changes.
   audit in #235 flagged (`feral_refine`, `feral_fma`, `feral_cascade_break`,
   `feral_singular_pivot_floor`) were already registered options.
 
+### Added — the solve report records active environment overrides (#235)
+
+- **The JSON solve report now captures solve-affecting environment
+  variables** in `fair_metadata.environment`. A run that differs because
+  `POUNCE_FERAL_PIVTOL` (or any `POUNCE_FERAL_*` knob, or the legacy
+  `FERAL_PIVTOL` / `FERAL_PARALLEL`) was exported in a shell profile now
+  says so, instead of differing silently between machines — closing the
+  reproducibility gap the report is built to serve. Each entry is a
+  `{ name, value }` pair; the block is omitted when nothing is set (the
+  common case), and the `POUNCE_DBG_*` debug gates are deliberately not
+  captured (they never change the result). Additive to
+  `pounce.solve-report/v1` — older readers ignore the new field, and older
+  reports deserialize unchanged.
+
 ### Changed — restoration debug gate reconciled onto one spelling (#235)
 
 - **`POUNCE_DBG_RESTO` now also enables the augmented restoration-system

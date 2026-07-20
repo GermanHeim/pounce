@@ -514,6 +514,7 @@ mod tests {
                 },
                 license: "EPL-2.0".into(),
                 input: InputDescriptor::TnlpDirect,
+                environment: Vec::new(),
             },
             problem: ProblemInfo {
                 n_variables: 1,

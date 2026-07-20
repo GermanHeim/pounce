@@ -172,6 +172,68 @@ pub struct FairMetadata {
     /// Input descriptor. `kind` is `nl-file`, `builtin`, or
     /// `tnlp-direct` (for library callers).
     pub input: InputDescriptor,
+    /// Solve-affecting environment variables present in the process
+    /// environment at report time (`POUNCE_FERAL_*` numerics knobs and
+    /// the legacy `FERAL_PIVTOL` / `FERAL_PARALLEL`). These alter the
+    /// factorization or parallelism and can otherwise silently differ a
+    /// run between two machines — e.g. one with `POUNCE_FERAL_PIVTOL`
+    /// exported in a shell profile — with nothing in the report saying
+    /// so (pounce#235). Recorded for reproducibility (the FAIR **R**
+    /// principle). Presence here means the variable was set, not
+    /// necessarily that it took effect: an explicit `OptionsList` setting
+    /// (e.g. a `feral_pivtol` in an options file) takes precedence over
+    /// the env fallback. Empty (and omitted from the JSON) when none are
+    /// set. Additive — older `pounce.solve-report/v1` JSON without this
+    /// field deserializes unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub environment: Vec<EnvOverride>,
+}
+
+/// One solve-affecting environment variable and its value, as captured
+/// into [`FairMetadata::environment`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvOverride {
+    /// Variable name, e.g. `POUNCE_FERAL_PIVTOL`.
+    pub name: String,
+    /// Its value verbatim, as read from the environment.
+    pub value: String,
+}
+
+/// Environment variables that change pounce's numerics or parallelism —
+/// the ones worth recording for reproducibility. Deliberately excludes the
+/// `POUNCE_DBG_*` debug gates (they only add diagnostic output, never
+/// altering the result) and compile-time / logging vars. Kept in a fixed
+/// order so [`capture_solve_env_overrides`] is deterministic.
+const SOLVE_AFFECTING_ENV_VARS: &[&str] = &[
+    "POUNCE_FERAL_ORDERING",
+    "POUNCE_FERAL_SCALING",
+    "POUNCE_FERAL_PIVTOL",
+    "POUNCE_FERAL_REFINE",
+    "POUNCE_FERAL_CASCADE_BREAK",
+    "POUNCE_FERAL_FMA",
+    "POUNCE_FERAL_SINGULAR_PIVOT_FLOOR",
+    "POUNCE_FERAL_MIN_PAR_FLOPS",
+    // Legacy aliases without the `POUNCE_` prefix (still honored by the
+    // FERAL backend): the deprecated pivot-threshold spelling and the
+    // process-wide internal-parallelism switch.
+    "FERAL_PIVTOL",
+    "FERAL_PARALLEL",
+];
+
+/// Snapshot the solve-affecting environment variables ([`SOLVE_AFFECTING_ENV_VARS`])
+/// that are currently set, for [`FairMetadata::environment`]. Reads the
+/// process environment, so call it in the solving process. Returns them in
+/// the fixed list order; absent variables are simply skipped.
+pub fn capture_solve_env_overrides() -> Vec<EnvOverride> {
+    SOLVE_AFFECTING_ENV_VARS
+        .iter()
+        .filter_map(|&name| {
+            std::env::var(name).ok().map(|value| EnvOverride {
+                name: name.to_string(),
+                value,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,6 +485,7 @@ impl ReportBuilder {
                 },
                 license: "EPL-2.0".to_string(),
                 input: self.input,
+                environment: capture_solve_env_overrides(),
             },
             problem: self.problem,
             solution: self.solution,
