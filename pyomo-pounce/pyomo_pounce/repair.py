@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from pyomo_pounce.block_init import (
+    OK_TERMINATIONS,
     BlockInitReport,
     BlockRepairPlan,
     _flatten_vars,
@@ -60,10 +61,13 @@ def project_to_feasible(
         options: Solver options dict (e.g. ``{"tol": 1e-8}``).
         tee: Echo solver output.
 
-    Returns the solver termination condition as a string (``"optimal"``
-    / ``"locallyOptimal"`` on success). Raises ``ValueError`` when no
-    unfixed variable has a value (nothing to anchor; run
-    ``initialize_missing_values`` first).
+    Returns the solver termination condition as a string; success is
+    membership in :data:`~pyomo_pounce.block_init.OK_TERMINATIONS`
+    (``"optimal"`` / ``"locallyOptimal"`` in practice). On any other
+    termination the pre-projection values are restored, so a diverged
+    projection never writes its iterate into the model. Raises
+    ``ValueError`` when no unfixed variable has a value (nothing to
+    anchor; run ``initialize_missing_values`` first).
     """
     import pyomo.environ as pyo
 
@@ -78,6 +82,7 @@ def project_to_feasible(
             "project_to_feasible: no unfixed variable has a value to anchor "
             "the projection; run initialize_missing_values(model) first"
         )
+    snapshot = [(v, v.value) for v in variables]
     for v in variables:
         if v.value is None:
             _seed_var(v)
@@ -94,10 +99,16 @@ def project_to_feasible(
     model._pounce_projection_objective = pyo.Objective(
         expr=sum((v - v0) ** 2 for v, v0 in anchored)
     )
+    restore = True
     try:
         results = solver.solve(model, tee=tee, options=dict(options or {}))
-        return str(results.solver.termination_condition)
+        cond = str(results.solver.termination_condition)
+        restore = cond not in OK_TERMINATIONS
+        return cond
     finally:
+        if restore:
+            for v, val in snapshot:
+                v.set_value(val, skip_validation=True)
         model.del_component(model._pounce_projection_objective)
         for obj in deactivated:
             obj.activate()
@@ -123,7 +134,7 @@ class InitializeReport:
 
     @property
     def ok(self) -> bool:
-        proj_ok = self.projection in (None, "optimal", "locallyOptimal", "feasible")
+        proj_ok = self.projection is None or self.projection in OK_TERMINATIONS
         return proj_ok and (self.block is None or self.block.ok)
 
     def __str__(self) -> str:
@@ -255,7 +266,7 @@ def initialize(
                 report.projection = project_to_feasible(
                     model, solver=solver, options=options, tee=tee
                 )
-                if report.projection not in ("optimal", "locallyOptimal", "feasible"):
+                if report.projection not in OK_TERMINATIONS:
                     report.warnings.append(
                         f"projection ended {report.projection}; continuing with "
                         "the unrepaired point"

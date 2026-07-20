@@ -84,6 +84,12 @@ one); `project_to_feasible` repairs that by minimizing
 bounds — the full nonlinear projection, solved with POUNCE, with the
 original objective restored afterwards.
 
+Both stages guarantee that a failed solve leaves variable values
+exactly as they were: a diverged projection restores the
+pre-projection point, and a failed block solve restores that block's
+seeds and stops, so initialization can never make your starting point
+worse than it found it.
+
 `block_initialize` is IDAES-flavored initialization without
 hand-written routines. `decisions=` holds the listed variables at
 their current values for the solve and releases them afterwards (each

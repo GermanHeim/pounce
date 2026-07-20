@@ -6,10 +6,11 @@ active **equality** constraints, extract the square (well-determined)
 part of the variable/constraint incidence graph (Dulmage-Mendelsohn,
 via ``pyomo.contrib.incidence_analysis``), and solve it block by block
 in topological order, writing the solution into ``Var.value``. The
-block-by-block solve itself is delegated to Pyomo's
-``solve_strongly_connected_components`` (1x1 blocks by Newton, larger
-blocks by POUNCE); this module contributes the decision handling, the
-square-part extraction, the seeding, and the diagnostics.
+blocks solve one at a time (1x1 blocks by Newton, larger blocks by
+POUNCE), and every solve's verdict is checked before its values are
+kept: a failed block restores its seed values instead of poisoning the
+model. This module contributes the decision handling, the square-part
+extraction, the seeding, the checked block loop, and the diagnostics.
 
 The distillation-column shape of the workflow::
 
@@ -70,6 +71,9 @@ __all__ = [
     "BlockInitReport",
     "BlockRepairPlan",
 ]
+
+#: Termination conditions under which a solve's values may be kept.
+OK_TERMINATIONS = ("optimal", "locallyOptimal", "globallyOptimal", "feasible")
 
 
 @dataclass
@@ -669,10 +673,11 @@ def block_initialize(
     Returns a :class:`BlockInitReport`. ``report.square`` is False when
     the equality system (after the repair) is still not exactly square;
     the offending variable/constraint **names** are reported, and the
-    square part is still solved best-effort. ``report.failures``
-    is non-empty when the block solve itself failed (Pyomo's
-    ``solve_strongly_connected_components`` fails fast, so variables in
-    blocks downstream of a failure keep their seed values).
+    square part is still solved best-effort. ``report.failures`` is
+    non-empty when a block solve failed: the failed block's variables
+    are restored to their seed values, the loop stops there, and the
+    downstream blocks keep their seeds — a failed solve never writes
+    its values into the model.
     """
     import pyomo.environ as pyo
 
@@ -682,14 +687,13 @@ def block_initialize(
         # would only blow up (DeferredImportError) at first use.
         import networkx  # noqa: F401
 
-        from pyomo.contrib.incidence_analysis import (
-            solve_strongly_connected_components,
-        )
+        import pyomo.contrib.incidence_analysis  # noqa: F401
     except ImportError as e:  # pragma: no cover - environment-dependent
         raise ImportError(
             "block_initialize requires pyomo.contrib.incidence_analysis "
             "and its optional dependencies (pip install networkx scipy)"
         ) from e
+    from pyomo.util.calc_var_value import calculate_variable_from_constraint
     from pyomo.util.subsystems import TemporarySubsystemManager, create_subsystem_block
 
     if repair not in ("auto", "off"):
@@ -770,25 +774,48 @@ def block_initialize(
         if n_large > 0 and solver is None:
             solver = pyo.SolverFactory("pounce")
 
-        # Delegate the block-by-block solve to Pyomo's own machinery:
-        # 1x1 blocks via calculate_variable_from_constraint, larger
-        # blocks via `solver`. Variables that appear in the square
-        # constraints but belong to the non-square part are temporarily
-        # fixed at their current values.
-        blk = create_subsystem_block(square_cons, square_vars)
-        try:
-            with TemporarySubsystemManager(to_fix=list(blk.input_vars.values())):
-                solve_strongly_connected_components(
-                    blk,
-                    solver=solver,
-                    solve_kwds={"tee": tee},
-                )
-            report.n_subsystem_solves = n_large
-            report.n_vars_initialized = len(square_vars)
-        except Exception as e:  # noqa: BLE001 - report, don't raise
-            report.failures.append(
-                f"strongly-connected-component solve failed: {e}"
-            )
+        # The block loop is ours so every solve's verdict is checked
+        # before its values are kept: a failed block restores its seed
+        # values instead of poisoning the model, then the loop stops.
+        # (Later blocks typically feed on the failed one; some may be
+        # independent of it — stopping is the conservative choice.) 1x1
+        # blocks solve by Pyomo's single-constraint Newton, larger ones
+        # by `solver`; variables outside the block are held at their
+        # current values while it solves.
+        n_done = 0
+        n_sub = 0
+        outer = create_subsystem_block(square_cons, square_vars)
+        with TemporarySubsystemManager(to_fix=list(outer.input_vars.values())):
+            for vblk, cblk in zip(
+                analysis.variable_blocks, analysis.constraint_blocks
+            ):
+                snapshot = [(vd, vd.value) for vd in vblk]
+                try:
+                    if len(vblk) == 1:
+                        calculate_variable_from_constraint(vblk[0], cblk[0])
+                    else:
+                        sub = create_subsystem_block(cblk, vblk)
+                        with TemporarySubsystemManager(
+                            to_fix=list(sub.input_vars.values())
+                        ):
+                            results = solver.solve(sub, tee=tee)
+                        cond = str(results.solver.termination_condition)
+                        if cond not in OK_TERMINATIONS:
+                            raise RuntimeError(f"termination condition {cond}")
+                        n_sub += 1
+                    n_done += len(vblk)
+                except Exception as e:  # noqa: BLE001 - report, don't raise
+                    for vd, val in snapshot:
+                        vd.set_value(val, skip_validation=True)
+                    report.failures.append(
+                        f"{len(vblk)}x{len(vblk)} block at {cblk[0].name!r} "
+                        f"failed ({e}); its seed values are restored and "
+                        f"the {len(square_vars) - n_done - len(vblk)} "
+                        f"downstream variables keep their seeds"
+                    )
+                    break
+        report.n_subsystem_solves = n_sub
+        report.n_vars_initialized = n_done
     finally:
         for vd in fixed_by_us:
             vd.unfix()

@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — failed initialization solves no longer poison variable values (Pyomo, #230)
+
+- **A failed solve anywhere in the initialization pipeline now leaves
+  variable values exactly as they were.** Previously `block_initialize`
+  delegated its block loop to Pyomo's `solve_strongly_connected_components`,
+  which loads whatever the subsystem solver returns: a diverged block with a
+  warning-status result (infeasible, iteration limit) was written into
+  `Var.value` and the loop continued, reporting success. On a 1525-equation
+  air-separation model this turned a solvable steady state into a
+  3000-iteration stall — the model's own build point solved fine, but the
+  "initialized" point, containing a diverged 1500-variable block iterate,
+  did not. The block loop is now in this module: each block's verdict is
+  checked before its values are kept, a failed block restores its seed
+  values, the loop stops there (later blocks typically feed on the failed
+  one), and the failure names the block. `project_to_feasible` had
+  the same defect — a diverged projection loaded its iterate, making the
+  pipeline's "continuing with the unrepaired point" warning untrue — and now
+  restores the pre-projection point on any non-optimal termination.
+
 ### Added — automatic specification repair: `block_repair_plan`, and repair inside `initialize`/`block_initialize` (Pyomo, #228)
 
 - **A structurally broken specification now initializes anyway, and the report
