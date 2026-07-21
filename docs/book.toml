@@ -6,6 +6,11 @@ language = "en"
 src = "src"
 
 [output.html]
+# trf.md and dae.md write math with mdBook's escaped delimiters (`\\(...\\)`,
+# `\\[...\\]`). mdBook emits those as MathJax delimiters but only injects the
+# MathJax script when this is set, so without it the equations render as raw
+# `\(f, h, g\)` text.
+mathjax-support = true
 default-theme = "navy"
 preferred-dark-theme = "navy"
 additional-css = ["assets/pounce.css"]
