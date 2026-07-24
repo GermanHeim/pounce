@@ -1074,7 +1074,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.20723801191442165,
+    "pounce_obj": 0.19978661367769956,
     "ipopt_obj": 0.20723801191442126,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1222,9 +1222,9 @@
   {
     "name": "cresc100",
     "suite": "Vanderbei",
-    "pounce_status": "Infeasible_Problem_Detected",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 4.975760008518364,
+    "pounce_obj": 402101.6052740682,
     "ipopt_obj": -5.284832597191212e-08,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1234,7 +1234,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 36.10676497570239,
+    "pounce_obj": -9.209443346990666e-10,
     "ipopt_obj": -4.447533416283649e-15,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1254,7 +1254,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 4.663840246067644e-10,
+    "pounce_obj": 1.3609383572584533e-07,
     "ipopt_obj": -4.6030278911203385e-12,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1354,7 +1354,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 115711099.43277532,
+    "pounce_obj": 115711099.43277475,
     "ipopt_obj": 115711110.78519969,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -1484,7 +1484,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.00022218992260911126,
+    "pounce_obj": 3.1829516988570155e-10,
     "ipopt_obj": 0.00022218992260910372,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1562,11 +1562,11 @@
   {
     "name": "dixchlnv",
     "suite": "Vanderbei",
-    "pounce_status": "Search_Direction_Becomes_Too_Small",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.0,
     "ipopt_obj": 0.0,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -1734,7 +1734,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 39.358183203648096,
+    "pounce_obj": 7.031057252699007e-07,
     "ipopt_obj": 39.357317904415126,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2654,7 +2654,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Solver_Error",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": 0.0,
+    "pounce_obj": null,
     "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -3262,11 +3262,11 @@
   {
     "name": "hs012",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -30.000000000000014,
     "ipopt_obj": -30.000000122494,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -3572,11 +3572,11 @@
   {
     "name": "hs043",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -44.0000000000004,
     "ipopt_obj": -44.0000001749944,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -3964,7 +3964,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -5280335.246923827,
+    "pounce_obj": -5280335.247108854,
     "ipopt_obj": -5280335.246923825,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4102,11 +4102,11 @@
   {
     "name": "hs099",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -831079891.5101074,
+    "pounce_obj": -831079891.5101079,
     "ipopt_obj": -831079891.5101079,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -4452,9 +4452,9 @@
   {
     "name": "indef",
     "suite": "Vanderbei",
-    "pounce_status": "Search_Direction_Becomes_Too_Small",
+    "pounce_status": "Solver_Error",
     "ipopt_status": "Search_Direction_Becomes_Too_Small",
-    "pounce_obj": -6.412013635011277e+17,
+    "pounce_obj": -751814403395754.8,
     "ipopt_obj": -3.092737303891266e+17,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -4534,7 +4534,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 0.0001501084616540948,
+    "pounce_obj": 0.00015010806174158483,
     "ipopt_obj": 4.025057815122093e-06,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -4554,7 +4554,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Solver_Error",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": 0.0,
+    "pounce_obj": null,
     "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -4812,11 +4812,11 @@
   {
     "name": "makela2",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 7.199999999999812,
     "ipopt_obj": 7.199999853410457,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -4844,7 +4844,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7.555994667075849e-19,
+    "pounce_obj": 1.4645891097008416e-21,
     "ipopt_obj": 7.555008619404852e-19,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5002,11 +5002,11 @@
   {
     "name": "minmaxbd",
     "suite": "Vanderbei",
-    "pounce_status": "Restoration_Failed",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 115.70643951644008,
     "ipopt_obj": 115.70643951851932,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -5304,7 +5304,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.6049924214118457e-13,
+    "pounce_obj": 2.3065918159732405e-25,
     "ipopt_obj": 2.604993527627745e-13,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5642,11 +5642,11 @@
   {
     "name": "palmer1c",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.09759819148166571,
+    "pounce_obj": 7.932114085779176,
     "ipopt_obj": 0.09759799126306348,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -5664,7 +5664,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0008352686464244502,
+    "pounce_obj": 0.0008352682686770296,
     "ipopt_obj": 0.0008352682686820063,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5912,11 +5912,11 @@
   {
     "name": "palmer7c",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.6019868837029207,
     "ipopt_obj": 0.6019856723142903,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -5964,7 +5964,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.4394978143979325,
+    "pounce_obj": 0.009686176592852756,
     "ipopt_obj": 6.439497814397947,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6104,7 +6104,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Restoration_Failed",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": null,
+    "pounce_obj": 1186.7806738919462,
     "ipopt_obj": 116235.9744191567,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -6112,11 +6112,11 @@
   {
     "name": "polak4",
     "suite": "Vanderbei",
-    "pounce_status": "Restoration_Failed",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 6.077175712335526e-12,
     "ipopt_obj": -3.513953381583422e-09,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -6144,7 +6144,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.4277841527820317e-08,
+    "pounce_obj": 7.035283726033791e-17,
     "ipopt_obj": 1.4277841516153786e-08,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6404,7 +6404,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 248.88231196976838,
+    "pounce_obj": 8.782411571680482e-07,
     "ipopt_obj": 248.8809166246306,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6502,11 +6502,11 @@
   {
     "name": "rosenmmx",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": -43.99999999999963,
     "ipopt_obj": -44.00000017949011,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -6574,7 +6574,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1003162.9022145123,
+    "pounce_obj": -1003162.9024131879,
     "ipopt_obj": -1003162.9022145125,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6584,7 +6584,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1003162.8985085124,
+    "pounce_obj": -1003162.9024131879,
     "ipopt_obj": -1003162.8985085123,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6594,7 +6594,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1003162.9023263588,
+    "pounce_obj": -1003162.9024131879,
     "ipopt_obj": -1003162.902326359,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6832,11 +6832,11 @@
   {
     "name": "spanhyd",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 239.73800065816613,
+    "pounce_obj": 239.73800065810792,
     "ipopt_obj": 239.73800065823025,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -6914,7 +6914,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Solver_Error",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": -3.1745478125948147e+44,
+    "pounce_obj": -5.402076991889588e+26,
     "ipopt_obj": -3.390754267835726e+44,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -6942,7 +6942,7 @@
   {
     "name": "steenbrc",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Solver_Error",
     "ipopt_status": "Unknown_Error",
     "pounce_obj": 19468.939970771837,
     "ipopt_obj": 25976.2448442355,
@@ -7194,7 +7194,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.459129224110081e-09,
+    "pounce_obj": 8.061172375227214e-30,
     "ipopt_obj": 2.4591295477048317e-09,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7594,7 +7594,7 @@
     "suite": "Gas",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 83.1245532292003,
+    "pounce_obj": 83.12455322202113,
     "ipopt_obj": 57.02748996410721,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -7974,7 +7974,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 738127.4256007143,
+    "pounce_obj": 738127.4256000603,
     "ipopt_obj": 738127.4329147094,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -7984,7 +7984,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 93279.08901274562,
+    "pounce_obj": 93279.08901274565,
     "ipopt_obj": 93279.08901274561,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8054,7 +8054,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -6.639447222846816,
+    "pounce_obj": -6.639447222846842,
     "ipopt_obj": -6.639447264497432,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8354,7 +8354,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 115711099.43277532,
+    "pounce_obj": 115711099.43277475,
     "ipopt_obj": 115711104.1563345,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8894,7 +8894,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 13744447.892313497,
+    "pounce_obj": 13744447.892313514,
     "ipopt_obj": 13744447.807831159,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9044,7 +9044,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -42798713.872541346,
+    "pounce_obj": -42798713.87254135,
     "ipopt_obj": -42798713.91311967,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9204,7 +9204,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 904.5600138528723,
+    "pounce_obj": 904.5600138530259,
     "ipopt_obj": 904.5600005693974,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9234,7 +9234,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 940.763574218724,
+    "pounce_obj": 940.7635742187252,
     "ipopt_obj": 940.763520242705,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9244,7 +9244,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1415.8611111071032,
+    "pounce_obj": 1415.861111107103,
     "ipopt_obj": 1415.8610624853216,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9264,7 +9264,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1438.7546808988093,
+    "pounce_obj": 1438.7546808988054,
     "ipopt_obj": 1438.7546303790668,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9324,7 +9324,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2424993.6730044773,
+    "pounce_obj": 2424993.6730038915,
     "ipopt_obj": 2424993.6689381874,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9334,7 +9334,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2376040.6165791694,
+    "pounce_obj": 2376040.616579172,
     "ipopt_obj": 2376040.605414064,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9344,7 +9344,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2385728.851390573,
+    "pounce_obj": 2385728.851390579,
     "ipopt_obj": 2385728.8456512373,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9354,7 +9354,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3018876.5771803516,
+    "pounce_obj": 3018876.577180322,
     "ipopt_obj": 3018876.5641543125,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9614,7 +9614,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -35991767.286576495,
+    "pounce_obj": -35991767.28657649,
     "ipopt_obj": -35991768.4962268,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9624,7 +9624,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -20239252.35597791,
+    "pounce_obj": -20239252.355977114,
     "ipopt_obj": -20239252.41281752,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9634,7 +9634,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 10312115.935089236,
+    "pounce_obj": 10312115.935089296,
     "ipopt_obj": 10312115.829987584,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9784,7 +9784,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2690.012914095108,
+    "pounce_obj": 2690.0129140955046,
     "ipopt_obj": 2690.0128611642604,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9794,7 +9794,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 581.8930577696838,
+    "pounce_obj": 581.8930577727721,
     "ipopt_obj": 581.8930497993287,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9824,7 +9824,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 714469.5537510114,
+    "pounce_obj": 714469.5537508867,
     "ipopt_obj": 714469.5377092436,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9834,7 +9834,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -99.66666667965846,
+    "pounce_obj": -99.66666667597157,
     "ipopt_obj": -99.66666819456985,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9844,7 +9844,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 400133.8074719834,
+    "pounce_obj": 400133.8074728228,
     "ipopt_obj": 400133.8009840115,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9874,7 +9874,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -5.226393001694743,
+    "pounce_obj": -5.226393002390838,
     "ipopt_obj": -5.2263920121070635,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9914,7 +9914,7 @@
     "suite": "LP",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Restoration_Failed",
-    "pounce_obj": 65211982295.309746,
+    "pounce_obj": 65220362796.06038,
     "ipopt_obj": 9891854759.786541,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -9944,7 +9944,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -987.2940000333095,
+    "pounce_obj": -987.2940000329602,
     "ipopt_obj": -987.2940110081616,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10094,7 +10094,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 153.49854483465617,
+    "pounce_obj": 153.49854483466984,
     "ipopt_obj": 153.49609413869186,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10334,7 +10334,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 90.99999999986855,
+    "pounce_obj": 90.99999999879549,
     "ipopt_obj": 90.99995740314986,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10502,9 +10502,9 @@
   {
     "name": "gen",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.61558201582348e-08,
+    "pounce_obj": 5.948689450066421e-08,
     "ipopt_obj": -1.0974845560297915e-05,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10512,9 +10512,9 @@
   {
     "name": "gen1",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5.61558201582348e-08,
+    "pounce_obj": 5.948689450066421e-08,
     "ipopt_obj": -1.0974845560297915e-05,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10532,9 +10532,9 @@
   {
     "name": "gen4",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.7683464361224363e-08,
+    "pounce_obj": null,
     "ipopt_obj": -2.221400501318905e-05,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10614,7 +10614,7 @@
     "suite": "LP",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 60.22768008946832,
+    "pounce_obj": -1029453.0,
     "ipopt_obj": 2714.404056580304,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -10704,7 +10704,7 @@
     "suite": "LP",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
-    "pounce_obj": -90402333930521.86,
+    "pounce_obj": -90403984178534.53,
     "ipopt_obj": -100000000000000.11,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -11104,7 +11104,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -58063.74370003671,
+    "pounce_obj": -58063.743700038125,
     "ipopt_obj": -58063.744058754826,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11174,7 +11174,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49380.08549071071,
+    "pounce_obj": 49380.08549079153,
     "ipopt_obj": 49380.081808936135,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11184,7 +11184,7 @@
     "suite": "LP",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": 351447.96162949444,
+    "pounce_obj": 351447.96162949514,
     "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -11244,7 +11244,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -291794.83606655395,
+    "pounce_obj": -291794.8360879541,
     "ipopt_obj": -291794.83678711316,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11254,7 +11254,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 14076036.487562742,
+    "pounce_obj": 14076036.487562712,
     "ipopt_obj": 14076036.210751375,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11354,7 +11354,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 522.8943499870275,
+    "pounce_obj": 522.8943499855737,
     "ipopt_obj": 522.8939869556042,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11364,7 +11364,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -504429724.4578512,
+    "pounce_obj": -504429718.66171783,
     "ipopt_obj": -504429743.7875043,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11374,7 +11374,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -586462359.2929115,
+    "pounce_obj": -586462349.9231238,
     "ipopt_obj": -586462382.8152354,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11384,7 +11384,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -584036209.0992593,
+    "pounce_obj": -584036208.6634583,
     "ipopt_obj": -584036234.9143798,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11394,7 +11394,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 672183856.8297011,
+    "pounce_obj": 672183864.1752106,
     "ipopt_obj": 672183849.8590347,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11404,7 +11404,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -583744165.9158096,
+    "pounce_obj": -583744164.638069,
     "ipopt_obj": -583744190.1272225,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11474,7 +11474,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 556000.2766258804,
+    "pounce_obj": 556000.2766258764,
     "ipopt_obj": 556000.2744292311,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11524,7 +11524,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 56809.4568883637,
+    "pounce_obj": 56809.4568883636,
     "ipopt_obj": 56809.45653413305,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11534,7 +11534,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 137416.4196126845,
+    "pounce_obj": 137416.41961268487,
     "ipopt_obj": 137416.41872468663,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11554,7 +11554,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 89.9999999928642,
+    "pounce_obj": 89.99999999994276,
     "ipopt_obj": 90.00000000000011,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11584,7 +11584,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -6113.136465523512,
+    "pounce_obj": -6113.136465275704,
     "ipopt_obj": -6113.137237724252,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11612,11 +11612,11 @@
   {
     "name": "pilot87",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 301.71039645887464,
+    "pounce_obj": 301.7108790715641,
     "ipopt_obj": 301.71035063475375,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11804,7 +11804,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -931.6388452151896,
+    "pounce_obj": -931.6388456497621,
     "ipopt_obj": -931.6389006101173,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11814,7 +11814,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 557831.859040355,
+    "pounce_obj": 557831.8590405157,
     "ipopt_obj": 557831.8568622585,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11954,7 +11954,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -10.070493453696495,
+    "pounce_obj": -10.07049345389932,
     "ipopt_obj": -10.070494028482905,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12234,7 +12234,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2875.9833637387487,
+    "pounce_obj": 2875.9833637387474,
     "ipopt_obj": 2875.9833437809943,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12244,7 +12244,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2875.9833637059187,
+    "pounce_obj": 2875.9833637389374,
     "ipopt_obj": 2875.9833437819893,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12254,7 +12254,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2877.56386373652,
+    "pounce_obj": 2877.563863736799,
     "ipopt_obj": 2877.5638470588024,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12284,7 +12284,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2877.5638637391626,
+    "pounce_obj": 2877.5638637395296,
     "ipopt_obj": 2877.5638437807247,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12764,7 +12764,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 249.25000000015243,
+    "pounce_obj": 249.25000000015189,
     "ipopt_obj": 249.24999926276402,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12774,7 +12774,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 344.0000000002056,
+    "pounce_obj": 344.00000000020447,
     "ipopt_obj": 343.9999989795677,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12854,7 +12854,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -415.7322409168914,
+    "pounce_obj": -415.7322408947309,
     "ipopt_obj": -415.73224775327964,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12934,7 +12934,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 15394362.183631932,
+    "pounce_obj": 15394362.18363192,
     "ipopt_obj": 15394362.151516596,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12944,7 +12944,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 29.895366379499936,
+    "pounce_obj": 29.89536637949994,
     "ipopt_obj": 29.895365609972774,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13104,7 +13104,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.6804930063804788,
+    "pounce_obj": 1.6804930338746156,
     "ipopt_obj": 1.679980147829401,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13234,7 +13234,7 @@
     "suite": "LPopt",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 2454384.786902424,
+    "pounce_obj": 2454384.9709539344,
     "ipopt_obj": 48035.512857471454,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -13244,7 +13244,7 @@
     "suite": "LPopt",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 1040.9940351954624,
+    "pounce_obj": 1040.9940351954615,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
