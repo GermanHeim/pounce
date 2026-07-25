@@ -163,6 +163,23 @@ def test_check_binary_flags_a_shadowing_build(tmp_path, monkeypatch):
     assert "deadbeef" in shadow_ids, info["path_pounce_binaries"]
 
 
+def test_env_skip_guard_is_inert_when_bundled():
+    """The conftest "solver never ran → skip" guard keys on ``using_bundled``.
+
+    That flag is the safety property: it makes the guard incapable of firing
+    wherever the bundled binary is in use — notably CI, which stages one — so a
+    real defect can never be silently skipped there. This pins the contract the
+    hook depends on (gh #366).
+    """
+    if ps._bundled_path() is None:
+        pytest.skip("no bundled binary in this environment")
+    info = pyomo_pounce.check_binary(verbose=False)
+    assert info["using_bundled"] is True, (
+        "a bundled binary exists but is not the resolved one; the conftest "
+        "environment guard would be live in a build it should not be"
+    )
+
+
 # ── the fallback warning ────────────────────────────────────────────────────
 
 
