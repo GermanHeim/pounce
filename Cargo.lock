@@ -1107,6 +1107,7 @@ dependencies = [
  "pounce-common",
  "pounce-linalg",
  "pounce-nlp",
+ "tracing",
 ]
 
 [[package]]

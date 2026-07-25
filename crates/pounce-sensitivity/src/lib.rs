@@ -109,9 +109,10 @@ pub(crate) fn optimize_tnlp_for_sensitivity(
         .map(|(value, _)| value)
         .unwrap_or(false);
     if presolve_enabled {
-        eprintln!(
-            "pounce: disabling generic presolve for sensitivity / reduced-Hessian \
-             analysis; its KKT coordinates must match the original TNLP"
+        tracing::warn!(
+            target: "pounce::sensitivity",
+            "disabling generic presolve for sensitivity / reduced-Hessian analysis; \
+             its KKT coordinates must match the original TNLP"
         );
     }
     app.optimize_tnlp_without_presolve(tnlp)
