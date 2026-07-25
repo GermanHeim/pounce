@@ -1,4 +1,4 @@
-# Active-set-aware parametric sensitivity: roadmap proposal
+# Active-set-aware parametric sensitivity: v0.10 roadmap
 
 **Status: roadmap proposal for pyomo-pounce, targeting v0.10.** This note
 scopes extending pyomo-pounce's `estimate()` to handle active-set changes,
@@ -20,38 +20,31 @@ uses are all in the literature: Fiacco's stability theory and the
 directional-derivative QP; the Büskens/Maurer active-set-change
 sensitivity for real-time control; and the sIPOPT paper itself, which
 derives multi-step path-following and the eq. 14 QP but leaves them
-unimplemented. A light survey of where the boxes are checked
-(base predictor, fix-relax, path-following, degeneracy QP, corrector):
+unimplemented. Where the boxes are checked (base predictor, fix-relax,
+path-following, degeneracy QP, corrector), for the two whose coverage is
+established from primary sources:
 
 | solver / module | base | fix-relax | path | degen | corr |
 |---|:--:|:--:|:--:|:--:|:--:|
 | IPOPT + sIPOPT / k_aug (open) | ✓ | ✓ | ✗ | ✗ | ✗ |
-| WORHP Zen (commercial) | ✓ | ~ | ~ | ? | ~ |
-| KNITRO | ~ | ✗ | ✗ | ✗ | ✗ |
-| SNOPT | ✗ | ✗ | ✗ | ✗ | ✗ |
-| acados RTI (SQP paradigm) | ✗ | ~ | ~ | ✗ | ✓ |
 | CasADi sensitivity | ✓ | ✗ | ✗ | ✗ | ✗ |
 
-No single solver checks the full menu in the held-factorization paradigm.
-sIPOPT, the open reference, checks two boxes; WORHP Zen is the strongest
-but is closed and its full coverage is unconfirmed; acados checks the
-corrector box in a different paradigm. The techniques exist scattered
-across the literature and these tools, but the full integrated set in one
-open solver does not.
+sIPOPT is the open reference and checks two: the paper states outright that
+the eq. 14 QP is not implemented, and neither multi-step path-following nor
+a corrector loop appears. WORHP Zen documents parametric sensitivity for a
+closed solver (Kuhlmann et al., below); acados works the corrector in the
+SQP paradigm rather than this one. Their per-technique coverage is not
+established here, so the claim this roadmap rests on is the one about the
+open reference, which is checkable.
 
 ## Benefit hypothesis
 
-The contribution is not new sensitivity mathematics: every method here is
-established (see State of the art above). Its value is assembling the
-known menu into one coherent, open, cleanly-layered implementation — an
-explicit ordered-mode plus diagnostics API, automatic degeneracy handling,
-and the mechanism/policy split that keeps the primitives in pounce and the
-control policy in the caller — which no open package offers today, and
-which the one commercial package that might (WORHP Zen) keeps closed. The
-payoff is that pounce becomes the open reference for full active-set-aware
-parametric sensitivity, so advanced-step NMPC, RTO, and estimation can be
-built on an auditable open stack instead of half-measures (a clamp) or a
-closed one.
+Every method here is established. The value is assembling the known menu
+into one open implementation: an explicit ordered-mode plus diagnostics API,
+automatic degeneracy handling, and the mechanism/policy split. No open
+package offers that today, and the closest commercial work is closed. The
+payoff is that advanced-step NMPC, RTO, and estimation get an auditable open
+stack instead of a clamp.
 
 ## Where we are
 
@@ -83,26 +76,40 @@ on real problems. Two properties matter for this roadmap:
    Schur-refinement loop" in its own words.
 2. **The predictor is `base_x + dx`, with no barrier-parameter
    correction.** It is evaluated against the factorization at the final
-   `mu` but carries no explicit `mu`-correction term.
+   `μ` but carries no explicit `μ`-correction term.
 
-### The precise gap versus sIPOPT
+## The reference: what sIPOPT implements, and the gap
 
-sIPOPT's bound handling is also an option, `sens_boundcheck`, and it
-defaults **off** (pounce mirrors this: `sens_app.rs` registers
-`sens_boundcheck` default `false`, "Mirrors upstream ...
-SensApplication.cpp:63"). The difference is what that option *does* when
-on. sIPOPT runs the **iterative Schur-refinement fix-relax**: each
-violation adds a row to the augmented system pinning that variable, then
-re-solves, so the non-violating coordinates **shift** to stay consistent
-with the implicit-function-theorem relations under the pin. pounce pins
-the offender and **freezes** the rest.
+From Pirnay, López-Negrete & Biegler, *Optimal sensitivity based on
+IPOPT*, Math. Program. Comput. 4 (2012) 307–331
+([DOI](https://doi.org/10.1007/s12532-012-0043-2)), §2.3–2.4:
 
-So the gap is not "no bound handling" and not "no scaffolding". It is the
-re-solve: pounce clamps one coordinate, sIPOPT lets the whole solution
-bend to absorb the pin. That is exactly what matters on a deep violation,
-where the estimate flattens against a bound. The `boundcheck.rs` pointer
-to pounce#7 for "the full refinement" is stale (that umbrella issue is
-closed); no open issue currently tracks this.
+- **Base linear predictor** — the same Schur-complement step pounce does.
+- **Fix-relax.** When a perturbed variable would violate its bound, sIPOPT
+  augments the KKT system with a row pinning that variable to the bound and
+  relaxes the matching complementarity condition with a new multiplier,
+  solved through the Schur complement on the already-held factorization. A
+  low-rank update rather than a refactor.
+- **Evaluated at the final `μ` with an explicit `μ`-correction** (the
+  paper's eq. 10).
+
+Explicitly **not** implemented in sIPOPT, per the paper: the QP/LCP
+directional method (eq. 14, "the current version of sIPOPT does not
+include an implementation of (14)"), multi-step path-following, and any
+predictor-corrector loop.
+
+Fix-relax is an option there too, `sens_boundcheck`, defaulting **off**
+(pounce mirrors this: `sens_app.rs` registers it `false`, "Mirrors upstream
+... SensApplication.cpp:63"). The gap is what the option does when on.
+sIPOPT re-solves: each violation adds a row to the augmented system pinning
+that variable, so the non-violating coordinates **shift** to stay consistent
+with the implicit-function-theorem relations under the pin. pounce pins the
+offender and **freezes** the rest, which is what matters on a deep
+violation, where the estimate flattens against a bound. pounce also omits
+the eq. 10 `μ`-correction. Item 1 closes both.
+
+The `boundcheck.rs` pointer to pounce#7 for "the full refinement" is stale
+(that umbrella issue is closed); no open issue currently tracks this.
 
 ## Related sensitivity work in other pounce frontends
 
@@ -113,7 +120,7 @@ primitives rather than reinvent them.
 - The jax and torch frontends ship a predictor-corrector path follower
   (`PathFollower`, pounce#90): a held-factor predictor, an
   active-set-margin monitor (pounce#89), and a warm re-solve corrector
-  built on the barrier-`mu` warm start (pounce#86). It traces problems
+  built on the barrier-`μ` warm start (pounce#86). It traces problems
   defined through those autodiff frontends and crosses active-set changes
   by re-solving, not by fix-relax.
 - The convex-QP frontend ships `QpSensitivity` (`python/pounce/qp.py`,
@@ -125,38 +132,10 @@ primitives rather than reinvent them.
 
 Neither lives on the held-factorization / pyomo path that `estimate()`
 exposes to Pyomo models, so neither delivers the pyomo-pounce capability
-below. But item 0's diagnostics and item 3's weak-activity scan should
-reuse `QpSensitivity`'s vocabulary and detection primitive, and the pyomo
-path should share the same core Schur backsolve the jax follower already
-leans on.
-
-## The reference: what sIPOPT actually implements
-
-From Pirnay, López-Negrete & Biegler, *Optimal sensitivity based on
-IPOPT*, Math. Program. Comput. 4 (2012) 307–331
-([DOI](https://doi.org/10.1007/s12532-012-0043-2)), read against the
-paper's §2.3–2.4:
-
-- **Base linear predictor** — the same Schur-complement step pounce does.
-- **Single-crossing fix-relax.** When a perturbed variable would violate
-  its bound, sIPOPT augments the KKT system with a row pinning that
-  variable to the bound and relaxes the matching complementarity condition
-  with a new multiplier, solved through the Schur complement on the
-  already-held factorization. This is a genuine active-set correction, not
-  a clamp, done as a low-rank update rather than a refactor.
-- **Evaluated at the final `mu` with an explicit `mu`-correction** (the
-  paper's eq. 10).
-
-Explicitly **not** implemented in sIPOPT, per the paper: the QP/LCP
-directional method (eq. 14, "the current version of sIPOPT does not
-include an implementation of (14)"), multi-step path-following, and any
-predictor-corrector loop.
-
-So today pounce is *behind* sIPOPT by one material step, detailed under
-"Where we are" above: sIPOPT's `sens_boundcheck` re-solves so the
-solution bends around the pinned variable, where pounce's clamp freezes
-the rest. (It also omits sIPOPT's minor eq. 10 `mu`-correction; both are
-closed by roadmap item 1.)
+below, and neither supplies the classifier item 0 needs: `QpSensitivity`
+screens on a solver with no `μ`, so the barrier ratio that separates the
+regimes does not exist there. The pyomo path should share the same core Schur
+backsolve the jax follower already leans on.
 
 ## Two failure modes (they want different treatments)
 
@@ -167,7 +146,9 @@ closed by roadmap item 1.)
    (at its bound with a near-zero multiplier), so strict complementarity
    fails where we linearize. The linear step gives a two-sided derivative
    that is wrong on at least one side; the correct object is a directional
-   derivative from a small QP.
+   derivative from a small QP. The step also sits strictly between the two
+   one-sided values at every `μ`, so tightening the solver tolerance does
+   not move it toward either.
 
 ## Roadmap
 
@@ -177,31 +158,54 @@ the parity step.
 
 **0. Diagnostics foundation → past sIPOPT.** Breakpoint detection (the
 ratio test to the first crossing) and a report the estimate returns:
-which variables crossed, the residual, the `mu` used. Cheap, needed by
-everything below, and useful on its own — it turns the current silent
-clamp into "here is what happened" (sIPOPT exposes no such report).
+which variables crossed, the residual, the `μ` used, and the activity
+classification, so a caller can tell a derivative from one element of a
+set. Useful on its own — it turns the current silent clamp into "here is
+what happened" (sIPOPT exposes no such report).
 
-**1. Fix-relax + `mu`-correction → sIPOPT parity.** Two changes together
+The classification is which regime each bounded variable is in, inactive,
+weakly active or strongly active, read off the ratio of its barrier curvature
+to the objective's own curvature there. That ratio is `O(μ)`, `O(1)` and
+`O(1/μ)` across the three, so it separates them at any `μ`. The cutoffs, the
+degenerate cases and the core work are specified as item 0 of the covariance
+roadmap (`covariance-information-roadmap.md`), which is the same classifier
+rather than a second one. That is Rust core work, since the multipliers, `μ`
+and the barrier diagonal all have to be exposed through `crates/pounce-py`
+first, and it gates this item and item 3. The breakpoint half has no such
+dependency.
+
+The report also carries the provenance of the number it returns: the `μ` it
+was evaluated at, whether the solver relaxed the bounds, and whether
+`kkt_perturbations` is non-zero. Those are the three things that separate the
+predictor from the exact active-set value, they are all cheap, and without
+them a caller comparing against a re-solve cannot tell which one explains the
+gap.
+
+**1. Fix-relax + `μ`-correction → sIPOPT parity.** Two changes together
 constitute full parity. **(a) Fix-relax** (the substantial one): upgrade
 `boundcheck.rs` from the single-pass clamp to the Schur-refinement loop —
 augment the held factorization with a row pinning the first crossing
 variable, re-solve so the non-violating coordinates absorb the pin, via
 the `IndexSchurData` path that already does the augmented backsolve
-(`parametric_step` in `solver.rs`). The `sens_boundcheck` option and the module
-already exist, so this is a scoped change to one module, not greenfield;
-low-rank Schur update, no refactor; validate against upstream
-`SensStdStepCalc.cpp`. Since pounce#7 no longer covers it, it should get
-its own issue. **(b) `mu`-correction** (minor): apply the eq. 10 term that
-corrects the predictor for the factorization sitting at `mu` > 0 rather
-than `mu` = 0. Automatic, inside the predictor, negligible at tight
-tolerance — the small remaining formal gap. Fix-relax carries the active
-set, the `mu`-correction finishes the predictor, and the two are full
-sIPOPT parity.
+(`parametric_step` in `solver.rs`). The `sens_boundcheck` option and the
+module already exist, so this is one module and a low-rank Schur update.
+Validate against upstream `SensStdStepCalc.cpp`. Since pounce#7 no longer
+covers it, it should get its own issue. **(b) `μ`-correction** (minor):
+apply the eq. 10 term that
+corrects the predictor for the factorization sitting at `μ` > 0 rather
+than `μ` = 0. Automatic, inside the predictor, and negligible at tight
+tolerance under strict complementarity. It is not the fix for failure mode
+2: eq. 10 is derived under the paper's Property 1, whose third condition is
+strict complementarity, so where that fails the correction does not apply
+and item 3 is what handles it. Fix-relax carries the active set, the
+`μ`-correction finishes the predictor, and the two are full sIPOPT parity.
 
 **2. Multi-crossing path-following → past sIPOPT (crossing axis).** Iterate
 the fix-relax across successive breakpoints toward the target
-perturbation. This is the stepwise continuation the 2012 paper derived
-(§2.3) but left unimplemented. Needs breakpoint ordering, constraint add
+perturbation. The 2012 paper takes the same stepwise shape for its QP
+(§2.3, solve at the first active-set change, then again from there to the
+target) and credits stepwise application of the base sensitivity step to
+earlier work; neither is in sIPOPT. Needs breakpoint ordering, constraint add
 *and* drop, and anti-cycling. Cost scales with active-set churn, up to a
 re-solve.
 
@@ -210,16 +214,24 @@ base point, solve the small QP (the paper's eq. 14) over the weakly-active
 set for the correct one-sided derivative. Those constraints are already
 rows in the held factorization, so this is an active-set search over them
 on that factor, the same held-factor Schur primitive fix-relax uses
-(`IndexSchurData`), not a fresh QP solve. Detection reuses the
-weak-activity screen the convex-QP frontend already ships
-(`QpSensitivity`, `sensitivity.rs`); the correction is what pyomo-pounce
-adds. Independent of items 1 and 2, auto-triggered when the solve detects
-weak activity, not a user knob. Cost is conditional: the detection is a
-negligible threshold scan over the converged multipliers, always paid; the
-QP fires only on a degenerate base point, and when it does it is small, over
-the weakly-active set (dimension = the number of weakly-active constraints,
-usually a handful), at roughly a backsolve per weakly-active constraint
-against the held factorization, no refactor and well short of a re-solve.
+(`IndexSchurData`), not a fresh QP solve. Detection is item 0's classifier;
+the correction is what pyomo-pounce adds. Independent of items 1 and 2,
+auto-triggered on a weakly active base point, not a user knob. Cost is
+conditional: the classification is a threshold scan, always paid; the QP
+fires only on a degenerate base point, over the weakly-active set, at roughly
+a backsolve per weakly-active constraint.
+
+There is no side to choose for `estimate()`. The call names a perturbation, so
+the direction is given, and eq. 14 takes `Δp` as an input. It returns the
+directional value for the direction asked, with no signature change and no
+refusal, so a loop stepping a saturated control keeps running.
+
+`gradient()` is where the two-valuedness is real, since `dx/dp` with no
+direction has two answers at a kink. It keeps returning a float, warns that
+the base point is degenerate and the value one-sided, and reports which side,
+so a caller who needs the other one asks through `estimate()`. Refusing would
+break a call that always answers today over a condition most users will not
+recognize.
 
 **4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
 iteration reusing the held factorization, returning the residual. Small
@@ -234,16 +246,12 @@ the raw step. Cost is ~1 backsolve per iteration.
 
 ## API surface
 
-The sensitivity API surface is four elements of two types. Three are
-**modes** of `estimate()`, an ordered ladder on a single `mode` argument
-(`linear` the baseline, `fix_relax` item 1, `path` item 2), each a
-correctness-superset of the one below. The fourth is the **corrector
-step** (item 4), a separate primitive the caller drives in a loop. Item 3
-(QP directional) is not part of the surface: it is applied automatically
-inside `estimate()` when the base point is degenerate, so the caller
-neither selects nor calls it. The cost unit is a **backsolve** against the
-held factorization (microseconds; the cheap operation the feature exists
-to exploit); a **re-solve** is the expensive bound.
+Three **modes** of `estimate()`, an ordered ladder on a single `mode`
+argument, each a correctness-superset of the one below, plus the
+**corrector step**, a separate primitive the caller drives in a loop. Item 3
+is not on the surface: it applies automatically inside `estimate()` when the
+base point is degenerate. Costs are in **backsolves** against the held
+factorization; a **re-solve** is the expensive bound.
 
 | element | choose when | cost | type |
 |---------|-------------|------|------|
@@ -253,39 +261,27 @@ to exploit); a **re-solve** is the expensive bound.
 | corrector step | the caller polishes the estimate toward feasibility / optimality, in a loop | ~1 backsolve per iteration | primitive |
 
 The report is always returned; the modes are one ordered knob, not a
-matrix of independent flags. The `mu`-correction folded into item 1 is
-always applied inside the predictor, so every mode is `mu`-corrected. The
+matrix of independent flags. The `μ`-correction folded into item 1 is
+always applied inside the predictor, so every mode is `μ`-corrected. The
 default is `linear`, which matches today's active-set semantics up to that
-negligible `mu`-correction, and matches the reference: sIPOPT ships with
+negligible `μ`-correction, and matches the reference: sIPOPT ships with
 `sens_boundcheck` off, i.e. it defaults to the plain predictor and makes
 the active-set correction opt-in.
 
 ## Scope boundary: mechanism in pounce, policy in the caller
 
-Everything above is a **mechanism**: a stateless operation on the held
-factorization (a step, a corrector iteration, a fix-relax solve, a
-breakpoint test) plus the diagnostics to decide. The **policy** — how many
-correctors, when to stop, which mode per cycle, whether to abandon the
-estimate and call a full `solve()` instead, the advanced-step
-solve-ahead-then-update orchestration — belongs to the downstream consumer
-(an advanced-step NMPC controller, an RTO or estimation loop), because
-those decisions depend on a real-time budget the solver has no business
-knowing.
-
-Keeping the split means the primitives serve estimation, RTO, and control
-alike, and pounce stays a general solver rather than absorbing a
-controller. Concretely: a loop whose size is fixed by the problem or by
-numerical convergence runs to completion inside pounce — path-following
-across its crossings, or a corrector loop to a residual tolerance. A loop
-whose size is fixed by an external budget — a deadline-bounded corrector
-loop — lives in the caller and drives the raw single step, because only
-the caller knows the deadline.
+A loop whose size is fixed by the problem or by numerical convergence runs to
+completion inside pounce, so path-following across its crossings and a
+corrector loop to a residual tolerance both live here. A loop whose size is
+fixed by an external budget lives in the caller and drives the raw single
+step, because only the caller knows the deadline.
 
 ## Validation
 
 - **diagnostics** — breakpoint detection (which variable crosses first,
   and the step fraction) against a brute-force ratio-test scan; the report
-  fields (crossed set, residual, `mu`) against ground truth.
+  fields (crossed set, residual, `μ`, classification) against ground truth.
+  The classifier itself is validated in the covariance roadmap.
 - **fix-relax** against sIPOPT's own worked example (the paper's §2.8
   parametric QP with a documented active-set change) and against a full
   re-solve.
