@@ -91,3 +91,28 @@ pub use schur_driver::{DenseGenSchurDriver, SchurDriver};
 pub use sens_app::{SensApplication, SensOptions, register_options};
 pub use solver::{ConvergedState, Solver, SolverError};
 pub use step_calc::{SensStepCalc, StdStepCalc, WithBacksolver};
+
+/// Run a sensitivity-producing solve in the original TNLP coordinate system.
+///
+/// Presolve can reduce or reorder the KKT system, while sIPOPT pin indices and
+/// reduced-Hessian coordinates are defined against the submitted TNLP. Keep
+/// the public `presolve` option intact for callers, but bypass its generic
+/// wrapper for this solve.
+pub(crate) fn optimize_tnlp_for_sensitivity(
+    app: &mut pounce_algorithm::IpoptApplication,
+    tnlp: std::rc::Rc<std::cell::RefCell<dyn pounce_nlp::TNLP>>,
+) -> pounce_nlp::return_codes::ApplicationReturnStatus {
+    let presolve_enabled = app
+        .options()
+        .get_bool_value("presolve", "")
+        .ok()
+        .map(|(value, _)| value)
+        .unwrap_or(false);
+    if presolve_enabled {
+        eprintln!(
+            "pounce: disabling generic presolve for sensitivity / reduced-Hessian \
+             analysis; its KKT coordinates must match the original TNLP"
+        );
+    }
+    app.optimize_tnlp_without_presolve(tnlp)
+}

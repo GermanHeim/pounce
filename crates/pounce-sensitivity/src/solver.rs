@@ -195,7 +195,7 @@ impl Solver {
                 });
             }));
 
-        let status = self.app.optimize_tnlp(Rc::clone(&self.tnlp));
+        let status = crate::optimize_tnlp_for_sensitivity(&mut self.app, Rc::clone(&self.tnlp));
         if let Some(s) = self.state.borrow_mut().as_mut() {
             s.status = status;
         }

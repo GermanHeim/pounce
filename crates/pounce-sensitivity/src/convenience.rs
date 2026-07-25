@@ -451,7 +451,7 @@ impl SensSolve {
             }
         }));
 
-        let status = app.optimize_tnlp(tnlp);
+        let status = crate::optimize_tnlp_for_sensitivity(app, tnlp);
         let out = outbox.borrow();
         SensResult {
             status,

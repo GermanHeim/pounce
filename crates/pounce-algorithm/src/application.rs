@@ -284,6 +284,23 @@ impl IpoptApplication {
         self.presolve_already_applied = applied;
     }
 
+    /// Solve without materializing the generic presolve wrapper.
+    ///
+    /// This is for consumers that require the original TNLP coordinate system
+    /// for the solve's KKT matrix, such as sensitivity and reduced-Hessian
+    /// drivers. It is scoped to this invocation and does not change the
+    /// application's `presolve` option or persistent explicit-wrapper setting.
+    pub fn optimize_tnlp_without_presolve(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+    ) -> ApplicationReturnStatus {
+        let explicit_wrapper = self.presolve_already_applied;
+        self.presolve_already_applied = true;
+        let status = self.optimize_tnlp(tnlp);
+        self.presolve_already_applied = explicit_wrapper;
+        status
+    }
+
     pub fn registered_options(&self) -> &Rc<RegisteredOptions> {
         &self.reg_options
     }

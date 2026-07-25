@@ -218,6 +218,33 @@ fn solver_parametric_step_matches_sens_solve_builder() {
 }
 
 #[test]
+fn solver_keeps_sensitivity_kkt_in_original_space_when_presolve_is_enabled() {
+    let mut app = make_app();
+    app.options_mut()
+        .set_string_value("presolve", "yes", true, false)
+        .unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(app, tnlp);
+
+    let status = solver.solve();
+    assert!(matches!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    ));
+    assert!(solver.converged().is_some());
+    assert!(
+        solver
+            .app()
+            .options()
+            .get_bool_value("presolve", "")
+            .unwrap()
+            .0,
+        "the sensitivity guard must not overwrite the user's option"
+    );
+    assert!(solver.parametric_step(&[2, 3], &[-0.5, 0.0]).is_ok());
+}
+
+#[test]
 fn solver_kkt_solve_against_zero_rhs_returns_zero() {
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
     let mut solver = Solver::new(make_app(), tnlp);
