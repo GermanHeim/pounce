@@ -1525,15 +1525,17 @@ def test_active_set_sqp_honors_hessian_approximation():
 
 def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
     """Explicit ``sqp_hessian=exact`` with no available Hessian must fall back
-    to L-BFGS, not die with ``Internal_Error`` (issue #348).
+    to a quasi-Newton approximation, not die with ``Internal_Error`` (issue #348).
 
     The automatic ``hessian_approximation=limited-memory`` downgrade is applied
     first, but an explicit ``sqp_hessian=exact`` in the user options is applied
     *after* it and re-enabled the ``Exact`` source with no Hessian behind it:
     the driver evaluated a zero Lagrangian Hessian, so the QP subproblem went
     unbounded and the solve died with ``Internal_Error``. The fix downgrades an
-    exact request to L-BFGS (with a warning) whenever the problem exposes no
-    ``hessian`` / ``hessianstructure``.
+    exact request to the dense Powell-damped BFGS (with a warning) whenever the
+    problem exposes no ``hessian`` / ``hessianstructure`` (damped-BFGS rather
+    than L-BFGS: the latter stalls on convex QPs with an active inequality,
+    issue #358).
     """
     fun = lambda v: (v[0] - 3.0) ** 2 + (v[1] - 2.0) ** 2
     jac = lambda v: np.array([2 * (v[0] - 3.0), 2 * (v[1] - 2.0)])
@@ -1562,7 +1564,7 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
             )
         assert r.success, f"exact-without-hessian must not fail: {r.message}"
         np.testing.assert_allclose(r.x, expected, atol=1e-6)
-        assert r.nhev == 0, "downgrade to L-BFGS means the exact Hessian is unused"
+        assert r.nhev == 0, "the quasi-Newton downgrade means the exact Hessian is unused"
 
     # (b) genuinely nonlinear constraint + hess: same downgrade, still solves.
     nl_con = [
@@ -1604,6 +1606,44 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
         "exact Hessian was requested" in str(w.message) for w in rec
     ), "exact must be honored (not downgraded) when a Hessian is available"
     assert r.nhev > 0, "the exact Hessian should actually be used here"
+
+
+def test_qp_active_set_facade_solves_convex_qp_with_active_inequality():
+    """The default ``qp-active-set`` facade path must converge on an easy convex
+    QP whose general inequality is active at the optimum (issue #358).
+
+    With no ``hess`` supplied, ``pounce.minimize`` sets
+    ``hessian_approximation=limited-memory`` automatically. That used to select
+    the L-BFGS Lagrangian Hessian on the active-set-SQP path, which stalled with
+    ``Search_Direction_Becomes_Too_Small`` and returned ``success=False`` with a
+    wrong ``x`` — even on a well-conditioned 3-D QP. The fix maps the automatic
+    approximation to the dense Powell-damped BFGS (which materializes the same
+    dense QP-subproblem Hessian but is far more robust); the explicit
+    ``sqp_hessian=lbfgs`` opt-in is unchanged.
+    """
+    rng = np.random.default_rng(113)
+    Q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+    P = (Q * np.geomspace(1, 10, 3)) @ Q.T  # SPD, cond(P) = 10
+    xu = rng.standard_normal(3)  # unconstrained minimiser
+    c = -P @ xu
+    a = rng.standard_normal(3)
+    G = a.reshape(1, 3)
+    h = np.array([a @ xu - 1.0])  # one inequality a·x <= a·xu - 1 (ACTIVE)
+
+    fun = lambda x: 0.5 * x @ P @ x + c @ x
+    jac = lambda x: P @ x + c
+    con = [{"type": "ineq", "fun": lambda x: (h - G @ x), "jac": lambda x: -G}]
+
+    # Closed-form KKT optimum (single active inequality).
+    kkt = np.block([[P, G.T], [G, np.zeros((1, 1))]])
+    x_star = np.linalg.solve(kkt, np.concatenate([-c, h]))[:3]
+
+    r = pounce.minimize(
+        fun, np.zeros(3), jac=jac, constraints=con,
+        options={"solver_selection": "qp-active-set"},
+    )
+    assert r.success, f"qp-active-set must converge here: {r.message}"
+    np.testing.assert_allclose(r.x, x_star, atol=1e-5)
 
 
 def test_uncomputed_objective_is_nan_not_zero():

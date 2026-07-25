@@ -2960,10 +2960,26 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     // with variable bounds, a run to the box corner along the null-space
     // direction.)
     //
-    // Read it before `sqp_hessian` so an explicit setting still wins.
+    // The quasi-Newton source picked here is the *dense Powell-damped BFGS*,
+    // not the limited-memory one, even though the requesting option is spelled
+    // `limited-memory`. On this active-set-SQP path L-BFGS buys nothing: its
+    // `as_triplet` materializes a full dense `n×n` Hessian for the QP
+    // subproblem exactly as `DampedBfgs` does (the matrix-free product
+    // interface that would make L-BFGS cheaper is not implemented yet), and it
+    // is markedly less robust -- it stalls with
+    // `Search_Direction_Becomes_Too_Small` (or reports the QP subproblem
+    // `unbounded`) on easy, well-conditioned convex QPs whenever a general
+    // inequality is active at the optimum, returning `success=False` with a
+    // wrong `x` (issue #358). `DampedBfgs` solves those. So the automatic
+    // approximation the facade injects when no analytic Hessian is available
+    // maps to the robust dense update; a caller who genuinely wants
+    // limited-memory storage can still request it explicitly with
+    // `sqp_hessian = "lbfgs"` below (read after this, so it wins).
+    //
+    // Read this before `sqp_hessian` so an explicit setting still wins.
     if let Ok((s, true)) = options.get_string_value("hessian_approximation", "") {
         if s == "limited-memory" {
-            opts.hessian = SqpHessianSource::Lbfgs;
+            opts.hessian = SqpHessianSource::DampedBfgs;
         }
     }
     if let Ok((s, true)) = options.get_string_value("sqp_hessian", "") {
@@ -3449,6 +3465,44 @@ mod tests {
         assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
         assert_eq!(snap.sqp.print_level, 2);
         assert_eq!(snap.sqp.lbfgs_max_history, 12);
+    }
+
+    #[test]
+    fn application_sqp_hessian_approximation_maps_to_damped_bfgs() {
+        // The frontend sets `hessian_approximation = limited-memory` when no
+        // exact Lagrangian Hessian is available (e.g. `pounce.minimize` with
+        // no `hess`). On the active-set-SQP path that must resolve to the
+        // dense Powell-damped BFGS, NOT the limited-memory update: L-BFGS
+        // materializes the same dense Hessian for the QP subproblem yet stalls
+        // (`Search_Direction_Becomes_Too_Small` / wrong `x`) on convex QPs with
+        // an active inequality (issue #358); damped-BFGS solves them.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             hessian_approximation limited-memory\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_snapshot().sqp.hessian,
+            crate::sqp::SqpHessianSource::DampedBfgs
+        );
+
+        // An explicit `sqp_hessian = lbfgs` is still honored (it is read after
+        // `hessian_approximation`, so it wins): callers who genuinely want the
+        // limited-memory update can still ask for it.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             hessian_approximation limited-memory\n\
+             sqp_hessian lbfgs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_snapshot().sqp.hessian,
+            crate::sqp::SqpHessianSource::Lbfgs
+        );
     }
 
     #[test]

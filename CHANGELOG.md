@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `qp-active-set` facade returned `success=False` and a wrong `x` on convex QPs with an active inequality (#358)
+
+- **The default `pounce.minimize(..., solver_selection="qp-active-set")` path
+  now converges** on easy, well-conditioned convex QPs whose general inequality
+  is active at the optimum. When the caller supplies no analytic Hessian the
+  facade sets `hessian_approximation=limited-memory`, which on the
+  active-set-SQP path selected the L-BFGS Lagrangian Hessian — it stalled with
+  `Search_Direction_Becomes_Too_Small` (or reported the QP subproblem
+  `unbounded`) and returned `success=False` together with a silently wrong `x`,
+  even at `cond(P)=10`, `n=3`. On a 36-instance sweep 29/36 failed.
+  - Fix: on the SQP path the automatic quasi-Newton approximation now maps to
+    the dense Powell-damped BFGS (`crates/pounce-algorithm/src/application.rs`),
+    which is far more robust and — because L-BFGS materializes the same dense
+    `n×n` Hessian for the QP subproblem today — costs nothing extra. An explicit
+    `sqp_hessian="lbfgs"` opt-in is still honored unchanged. The `#348`
+    exact-without-Hessian downgrade now targets damped-BFGS for the same reason.
+  - Independent oracles (closed-form KKT, `pounce.solve_qp` IPM, scipy SLSQP)
+    and every other pounce path already solved these; only the facade's L-BFGS
+    SQP default was affected.
+
 ## [0.9.0] - 2026-07-24
 
 ### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
