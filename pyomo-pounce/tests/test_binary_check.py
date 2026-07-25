@@ -167,6 +167,11 @@ def test_check_binary_flags_a_shadowing_build(tmp_path, monkeypatch):
     resolved = pyomo_pounce.check_binary(verbose=False)["resolved_executable"]
     if resolved is None:
         pytest.skip("no pounce executable resolvable")
+    if ps._build_id(resolved) is None:
+        # the mechanism under test is build-id discrimination, so a resolved
+        # binary with no queryable build id (a foreign `pounce` on PATH, gh
+        # #366) can neither shadow nor be shadowed meaningfully
+        pytest.skip("resolved pounce has no queryable build id")
     if ps._bundled_path() is None:
         monkeypatch.setattr(ps, "_bundled_path", lambda: resolved)
 
@@ -254,6 +259,4 @@ def test_default_executable_no_warning_when_bundled_present():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         SolverFactory("pounce")._default_executable()
-    assert not [
-        w for w in caught if "no wheel-bundled" in str(w.message)
-    ]
+    assert not [w for w in caught if "no wheel-bundled" in str(w.message)]
