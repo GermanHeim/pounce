@@ -23,6 +23,14 @@ changes.
 - Fixed by standing the real binary in as the bundled one when none is
   installed, so the scenario is still exercised locally rather than skipped.
   CI, which stages the built CLI into the wheel, is unaffected either way.
+- `pyomo-pounce/README.md` gains a **Running the tests locally** section. The
+  staging step that makes a local run match CI (`cp target/release/pounce
+  python/pounce/bin/pounce` *before* building the wheel) was discoverable only
+  by reading `ci.yml`, so a source checkout silently exercised the PATH
+  fallback rather than the bundled path — the root of the confusion behind
+  this issue. It also points at `check_binary()` as the first thing to check
+  when a dual/multiplier test fails, since a stale binary reports a plausible
+  version string.
 - Context for the wider report behind #366: the `pyomo-pounce` suite is green
   on `main` (82 passed, 2 skipped) when run against a binary built from the
   same commit. The other four failures reported there did not reproduce, and
