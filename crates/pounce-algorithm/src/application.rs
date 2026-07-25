@@ -2123,11 +2123,28 @@ impl IpoptApplication {
         // has `linear_solver: Feral`, so gating on `found` would
         // silently route default runs through Feral while the banner
         // (and ipopt-compatible behavior) advertises MA57.
+        //
+        // Record the **effective** backend, not the requested one. MA57 lives
+        // behind the optional `ma57` cargo feature (HSL is licensed and needs a
+        // Fortran toolchain); without it `default_backend_factory` silently
+        // substitutes FERAL. Storing `Ma57` here therefore made
+        // `builder.linear_solver` disagree with the backend actually built, and
+        // consumers acted on the lie: the Schur KKT gate in
+        // `alg_builder::build_with_backend` tests `== Feral`, so on the
+        // pure-Rust default build — where the registry default "ma57" resolves
+        // to FERAL anyway — `set_kkt_schur_block()` silently never engaged for
+        // ANY user. Resolving here keeps the field truthful for every consumer.
         if let Ok((v, _found)) = self.options.get_string_value("linear_solver", "") {
-            builder.linear_solver = match v.as_str() {
+            let requested = match v.as_str() {
                 "ma57" => LinearSolverChoice::Ma57,
                 _ => LinearSolverChoice::Feral,
             };
+            builder.linear_solver =
+                if matches!(requested, LinearSolverChoice::Ma57) && !cfg!(feature = "ma57") {
+                    LinearSolverChoice::Feral
+                } else {
+                    requested
+                };
         }
 
         // `linear_system_scaling` — symmetric scaling of the augmented
@@ -3549,6 +3566,57 @@ mod tests {
         assert_eq!(
             app.algorithm_builder_snapshot().sqp.hessian,
             crate::sqp::SqpHessianSource::Lbfgs
+        );
+    }
+
+    /// `builder.linear_solver` must name the backend that will actually be
+    /// built, not the one the option string asked for.
+    ///
+    /// The option registry defaults `linear_solver` to "ma57", but MA57 is
+    /// behind the optional `ma57` cargo feature; without it
+    /// `default_backend_factory` silently substitutes FERAL. Recording `Ma57`
+    /// anyway made the field disagree with reality, and the Schur KKT gate in
+    /// `alg_builder::build_with_backend` (which tests `== Feral`) consumed that
+    /// disagreement — so `set_kkt_schur_block()` never engaged on the default
+    /// pure-Rust build for any user, while the transparent fallback kept every
+    /// answer correct and every test green.
+    #[test]
+    fn application_linear_solver_records_the_effective_backend() {
+        // Default options: registry says "ma57"; a build without the feature
+        // must still report FERAL, because FERAL is what gets constructed.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let got = app.algorithm_builder_from_options().linear_solver;
+        if cfg!(feature = "ma57") {
+            assert_eq!(got, LinearSolverChoice::Ma57);
+        } else {
+            assert_eq!(
+                got,
+                LinearSolverChoice::Feral,
+                "default build has no MA57; the effective backend is FERAL"
+            );
+        }
+
+        // An explicit ma57 request resolves the same way.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("linear_solver ma57\n")
+            .unwrap();
+        let got = app.algorithm_builder_from_options().linear_solver;
+        if cfg!(feature = "ma57") {
+            assert_eq!(got, LinearSolverChoice::Ma57);
+        } else {
+            assert_eq!(got, LinearSolverChoice::Feral);
+        }
+
+        // An explicit feral request is honored in every build.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("linear_solver feral\n")
+            .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().linear_solver,
+            LinearSolverChoice::Feral
         );
     }
 
