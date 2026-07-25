@@ -9,6 +9,58 @@ changes.
 
 ## [Unreleased]
 
+### Tests — pyomo-pounce: the shadowing-binary test failed on any source checkout (#366)
+
+- `test_check_binary_flags_a_shadowing_build` asserted that a different-build
+  `pounce` prepended to `PATH` is reported as shadowing. That only holds when
+  the resolved binary is PATH-independent, i.e. when a wheel-bundled binary
+  exists. Without one, `_default_executable` falls back to `shutil.which`, so
+  the fake *became* the resolved binary and shadowed nothing — the assertion
+  inverted and the test failed on every source checkout with no
+  `pounce-solver` wheel installed. Its sibling tests guard with
+  `if _bundled_path() is None: skip`; this one only guarded on
+  `resolved is None`.
+- Fixed by standing the real binary in as the bundled one when none is
+  installed, so the scenario is still exercised locally rather than skipped.
+  CI, which stages the built CLI into the wheel, is unaffected either way.
+- `pyomo-pounce/README.md` gains a **Running the tests locally** section. The
+  staging step that makes a local run match CI (`cp target/release/pounce
+  python/pounce/bin/pounce` *before* building the wheel) was discoverable only
+  by reading `ci.yml`, so a source checkout silently exercised the PATH
+  fallback rather than the bundled path — the root of the confusion behind
+  this issue. It also points at `check_binary()` as the first thing to check
+  when a dual/multiplier test fails, since a stale binary reports a plausible
+  version string.
+- Context for the wider report behind #366: the `pyomo-pounce` suite is green
+  on `main` (82 passed, 2 skipped) when run against a binary built from the
+  same commit. The other four failures reported there did not reproduce, and
+  the two multiplier tests among them (`test_bound_multipliers_populate_ipopt_zL_zU`,
+  `test_multiplier_gradient_matches_finite_difference`) guard #296 and
+  #271/#272 — both of which landed *in* 0.9.0. Since builds from before and
+  after the dual-sign fix both report `0.9.0`, a locally built binary from a
+  slightly stale checkout fails exactly those two while looking current, which
+  is the scenario `check_binary()` exists to detect.
+
+### Performance — pyomo-pounce: `sens.py` resolved every row by linear scan, making `gradient(target=None).to_dataframe()` quadratic (#365)
+
+- **Name-to-row lookups are now dict lookups instead of `list.index` scans.**
+  Every query in `pyomo_pounce.sens` resolved a component name to its row by
+  scanning `var_names` or `con_names`, which is O(n) per lookup. The full
+  Jacobian was the worst case: `gradient(wrt=p)` with no target fans out over
+  *every* variable, and `to_dataframe()` then re-scanned the name list once per
+  cell — **O(n²·p)** string comparisons. At n = 2,000 that is unnoticeable; at
+  n = 50,000, a size an ordinary DAE discretization reaches, it is ~2.5e9
+  comparisons and the call effectively hangs.
+- The per-solve paths are fixed too: the fitted-variable and residual loops in
+  `sens_solve` were O(k·n) for k residuals, paid on *every* solve — which the
+  repeated-solve NMPC workflow the module is built around pays each cycle.
+- `_Session` now builds `{name: row}` maps once (`_row_index`), and
+  `sens_solve` hands over the maps it already built rather than having them
+  rebuilt. No API or behavior change: `var_entry`/`mult_entry` still raise
+  `ValueError` for an unknown name rather than leaking the dict's `KeyError`,
+  and the `con_alias` translation and inequality-multiplier errors are
+  untouched.
+
 ### Fixed — pyomo-pounce: a declared Param in a `Var` bound reported exactly zero sensitivity (#356)
 
 - **A limit written as a variable bound now moves with the Param that sets

@@ -496,3 +496,58 @@ def test_both_bounds_rewritten_are_both_recorded():
     assert lo_rec == pytest.approx(-1.0)
     assert hi_rec == pytest.approx(2.0)
     assert gradient(m.x, wrt=m.hi) == pytest.approx(1.0, abs=1e-6)
+
+
+# ── name -> row maps (jkitchin/pounce#365) ───────────────────────────────────
+#
+# Every name-to-row lookup used to be a `list.index` scan, which made
+# gradient(target=None).to_dataframe() O(n^2) in the variable count. These
+# are pure unit tests on _Session: no solve, so they pin the lookup contract
+# without needing the solver. The value-correctness of the fan-out path is
+# already covered by test_gradient_object_for_containers.
+
+def _fake_session(names, cons, row_offset=1000, **kw):
+    from pyomo_pounce.sens import _Session
+
+    class _Solver:
+        def multiplier_rows(self, gs):
+            return [None if row_offset is None else gs[0] + row_offset]
+
+    return _Session(None, None, _Solver(), names, cons, {},
+                    {"orig.c": cons[-1]}, **kw)
+
+
+def test_row_maps_agree_with_the_list_scan_they_replaced():
+    names = [f"x[{i}]" for i in range(200)] + ["y", "z"]
+    cons = ["c1", "c2", "blk.c[3]"]
+    s = _fake_session(names, cons)
+
+    assert isinstance(s._var_row, dict)          # a map, not a scan
+    assert all(s.var_entry(n) == names.index(n) for n in names)
+    assert s.mult_entry("c2") == cons.index("c2") + 1000
+    # the con_alias translation still happens before the lookup
+    assert s.mult_entry("orig.c") == cons.index("blk.c[3]") + 1000
+
+
+def test_row_maps_are_reused_when_the_caller_supplies_them():
+    """sens_solve builds them once and hands them over; no rebuild."""
+    from pyomo_pounce.sens import _row_index
+    names, cons = ["a", "b"], ["c"]
+    vr, cr = _row_index(names), _row_index(cons)
+    s = _fake_session(names, cons, var_row=vr, con_row=cr)
+    assert s._var_row is vr and s._con_row is cr
+
+
+def test_unknown_name_raises_value_error_not_key_error():
+    """The scans raised ValueError; the dicts must not leak KeyError."""
+    s = _fake_session(["a"], ["c"])
+    with pytest.raises(ValueError):
+        s.var_entry("nope")
+    with pytest.raises(ValueError):
+        s.mult_entry("nope")
+
+
+def test_inequality_multiplier_error_is_unchanged():
+    s = _fake_session(["a"], ["c"], row_offset=None)
+    with pytest.raises(ValueError, match="equality constraints"):
+        s.mult_entry("c")
