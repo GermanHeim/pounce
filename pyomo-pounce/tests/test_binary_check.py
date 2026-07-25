@@ -20,7 +20,18 @@ from pyomo_pounce import pounce_solver as ps
 
 
 def _write_fake_pounce(path, about_first_line):
-    """A minimal `pounce` whose `--about` prints the given first line."""
+    """A minimal `pounce` whose `--about` prints the given first line.
+
+    On Windows a shell script cannot be executed, so the fake is a `.bat`
+    file instead; `subprocess` runs those directly when the extension is in
+    the filename. Callers that pass the path straight to `_build_id` are
+    indifferent to the name; callers that need PATH resolution handle the
+    platform's executable name themselves.
+    """
+    if os.name == "nt":
+        path = path.with_suffix(".bat")
+        path.write_text(f"@echo {about_first_line}\n")
+        return path
     path.write_text("#!/bin/sh\n" f'echo "{about_first_line}"\n')
     path.chmod(0o755)
     return path
@@ -78,9 +89,21 @@ def test_build_id_treats_unknown_commit_as_unqueryable(tmp_path):
 
 
 def test_all_path_pounce_finds_binary(tmp_path, monkeypatch):
-    exe = _write_fake_pounce(
-        tmp_path / "pounce", "pounce 0.9.0 (commit abc123, built x)"
-    )
+    if os.name == "nt":
+        # The scan resolves `pounce.exe` on Windows, and a fabricated fake
+        # cannot be an .exe, so the discoverable binary is a copy of the
+        # real one; the assertion is about discovery, not about its output.
+        import shutil
+
+        real = ps._bundled_path() or shutil.which("pounce.exe")
+        if real is None:
+            pytest.skip("no real pounce.exe to stand in as the PATH binary")
+        exe = tmp_path / "pounce.exe"
+        shutil.copyfile(real, exe)
+    else:
+        exe = _write_fake_pounce(
+            tmp_path / "pounce", "pounce 0.9.0 (commit abc123, built x)"
+        )
     monkeypatch.setenv("PATH", str(tmp_path))
     found = ps._all_path_pounce()
     assert any(os.path.realpath(f) == os.path.realpath(str(exe)) for f in found)
@@ -150,13 +173,32 @@ def test_check_binary_flags_a_shadowing_build(tmp_path, monkeypatch):
     # A fake `pounce` on PATH whose `--about` reports a DIFFERENT commit.
     fake_dir = tmp_path / "stale"
     fake_dir.mkdir()
-    fake = fake_dir / "pounce"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'echo "pounce 0.9.0 (commit deadbeef, built 2000-01-01T00:00:00Z)"\n'
-    )
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", str(fake_dir) + ":" + __import__("os").environ["PATH"])
+    if os.name == "nt":
+        # A fabricated .exe cannot print a chosen --about, so the fake is a
+        # copy of the real binary with its build id injected at the seam
+        # `check_binary` already reads through. The comparison logic under
+        # test is untouched; the subprocess probe has its own coverage via
+        # the .bat fakes above.
+        import shutil
+
+        fake = fake_dir / "pounce.exe"
+        shutil.copyfile(resolved, fake)
+        real_build_id = ps._build_id
+
+        def _spoofed(exe):
+            if exe and os.path.realpath(str(exe)) == os.path.realpath(str(fake)):
+                return "deadbeef"
+            return real_build_id(exe)
+
+        monkeypatch.setattr(ps, "_build_id", _spoofed)
+    else:
+        fake = fake_dir / "pounce"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'echo "pounce 0.9.0 (commit deadbeef, built 2000-01-01T00:00:00Z)"\n'
+        )
+        fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_dir) + os.pathsep + os.environ["PATH"])
 
     info = pyomo_pounce.check_binary(verbose=False)
     shadow_ids = {b["build_id"] for b in info["shadowing_path_binaries"]}

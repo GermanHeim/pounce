@@ -227,6 +227,22 @@ integer-only seeds the solver is bit-for-bit reproducible, and the #358 work in
 fact improved that family substantially (92 → 38 failures/144) before #361 took
 it to 0.
 
+
+### ### Tests — pyomo-pounce: `test_binary_check.py` failed on any Windows checkout (#366)
+
+- Three tests were POSIX-only: the shadowing test joined `PATH` with a
+  hardcoded `":"` instead of `os.pathsep`, and the fake `pounce` binaries were
+  extensionless shell scripts, which Windows can neither execute (so
+  `_build_id` probed them to `None`) nor resolve (the scan looks for
+  `pounce.exe`). They failed on every Windows machine and passed on Linux,
+  which is why CI never saw them and why they were misread as pre-existing
+  failures on `main`.
+- Fakes are `.bat` files on Windows where the path is probed directly; where
+  PATH resolution is exercised, the stand-in is a copy of the real binary,
+  with the shadowing fake's build id injected at the seam `check_binary`
+  reads through, since a fabricated `.exe` cannot print a chosen `--about`.
+
+
 ## [0.9.0] - 2026-07-24
 
 ### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
