@@ -180,7 +180,25 @@ impl DampedBfgs {
                 .zip(prev_grad_lag.iter())
                 .map(|(a, b)| a - b)
                 .collect();
+            self.update_sy(&s, &y);
+        }
 
+        self.prev_x = Some(x_new.to_vec());
+        self.prev_grad_lag = Some(grad_lag_new.to_vec());
+    }
+
+    /// Apply the Powell-damped rank-2 update from an explicit curvature
+    /// pair `(s, y)`.
+    ///
+    /// Prefer this over [`Self::update`] when the caller can form `y`
+    /// itself: the SQP driver must difference `∇L` at a **single, fixed**
+    /// multiplier (see the note in `sqp_alg.rs`), which the `(x, ∇L)` form
+    /// of [`Self::update`] cannot express because it stores the previous
+    /// `∇L` as evaluated at the previous multiplier.
+    pub fn update_sy(&mut self, s: &[Number], y: &[Number]) {
+        assert_eq!(s.len(), self.n, "BFGS::update_sy: s.len() != n");
+        assert_eq!(y.len(), self.n, "BFGS::update_sy: y.len() != n");
+        {
             // One-time initial Hessian sizing (Nocedal-Wright §6.1). The
             // identity seed `B_0 = I` is a catastrophic scale on
             // ill-conditioned problems: when `‖∇²L‖ ≫ 1` the first QP
@@ -256,9 +274,6 @@ impl DampedBfgs {
                 }
             }
         }
-
-        self.prev_x = Some(x_new.to_vec());
-        self.prev_grad_lag = Some(grad_lag_new.to_vec());
     }
 
     /// Produce the current B as a `Triplet` over the upper
@@ -359,6 +374,32 @@ mod tests {
             mean_diag > 10.0,
             "sanity: the retained scale should reflect the problem, not 1"
         );
+    }
+
+    #[test]
+    fn update_sy_matches_the_x_grad_lag_form() {
+        // `update_sy` is the primitive; `update` is the (s, y)-from-stored-
+        // prev convenience wrapper. Feeding the same curvature pair through
+        // either path must land on the identical matrix, so the driver's
+        // switch to `update_sy` (gh #361) changes only *which* y is formed,
+        // never how it is applied.
+        let mut via_update = DampedBfgs::new(2);
+        via_update.update(&[0.0, 0.0], &[1.0, 2.0]);
+        via_update.update(&[1.0, 3.0], &[4.0, 9.0]);
+
+        let mut via_sy = DampedBfgs::new(2);
+        via_sy.update_sy(&[1.0, 3.0], &[3.0, 7.0]); // s = x1-x0, y = g1-g0
+
+        for i in 0..2 {
+            for j in 0..=i {
+                assert!(
+                    (via_update.get(i, j) - via_sy.get(i, j)).abs() < 1e-12,
+                    "B[{i},{j}]: update={} update_sy={}",
+                    via_update.get(i, j),
+                    via_sy.get(i, j)
+                );
+            }
+        }
     }
 
     #[test]

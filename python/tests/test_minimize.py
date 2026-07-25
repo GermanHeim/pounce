@@ -1720,6 +1720,71 @@ def test_qp_active_set_facade_sweep_matches_issue_358_scope():
     assert not failures, f"{len(failures)}/36 instances failed: {failures}"
 
 
+def test_qp_active_set_equality_constrained_ill_conditioned():
+    """Ill-conditioned *equality*-constrained QPs must converge (gh #361).
+
+    These used to exit ``Maximum_Iterations_Exceeded`` **at the right answer**:
+    the quasi-Newton curvature pair differenced ``∇L`` across two different
+    multipliers, injecting a spurious ``Aᵀ(λ_k − λ_{k−1})`` term (pure
+    multiplier noise for linear constraints). The multiplier then diverged while
+    ``x`` sat on the optimum, and the reported stationarity residual — computed
+    from that multiplier — never met the tolerance.
+    """
+    failures = []
+    for n in (3, 5, 8):
+        for cond in (100, 1000):
+            for seed in range(4):
+                rng = np.random.default_rng(50000 + n * 1000 + cond + seed * 7)
+                Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+                P = (Q * np.geomspace(1, cond, n)) @ Q.T
+                xu = rng.standard_normal(n)
+                c = -P @ xu
+                a = rng.standard_normal(n)
+                b = a @ xu - 0.5
+
+                fun = lambda x, P=P, c=c: 0.5 * x @ P @ x + c @ x
+                jac = lambda x, P=P, c=c: P @ x + c
+                con = [{
+                    "type": "eq",
+                    "fun": lambda x, a=a, b=b: np.array([a @ x - b]),
+                    "jac": lambda x, a=a, n=n: a.reshape(1, n),
+                }]
+                kkt = np.block([[P, a.reshape(-1, 1)],
+                                [a.reshape(1, -1), np.zeros((1, 1))]])
+                x_star = np.linalg.solve(kkt, np.concatenate([-c, [b]]))[:n]
+
+                r = pounce.minimize(
+                    fun, np.zeros(n), jac=jac, constraints=con,
+                    options={"solver_selection": "qp-active-set"},
+                )
+                if not r.success or np.linalg.norm(r.x - x_star, np.inf) > 1e-4:
+                    failures.append((n, cond, seed, r.message))
+    assert not failures, f"{len(failures)}/24 equality instances failed: {failures}"
+
+
+def test_sqp_qp_subproblem_options_are_settable():
+    """The ``sqp_qp_*`` inner-QP options must be accepted (gh #360).
+
+    They were read by the backend but never registered, so every one of them
+    raised ``Unknown option`` and the documented knobs were unusable.
+    """
+    fun = lambda x: x @ x
+    jac = lambda x: 2 * x
+    for key, val in [
+        ("sqp_qp_max_iter", 500),
+        ("sqp_qp_feas_tol", 1e-7),
+        ("sqp_qp_opt_tol", 1e-7),
+        ("sqp_qp_elastic_gamma", 1e5),
+        ("sqp_qp_anti_cycling", "bland"),
+    ]:
+        r = pounce.minimize(
+            fun, np.ones(2), jac=jac,
+            options={"solver_selection": "qp-active-set", key: val},
+        )
+        assert r.success, f"{key}={val!r}: {r.message}"
+        np.testing.assert_allclose(r.x, np.zeros(2), atol=1e-6)
+
+
 def test_uncomputed_objective_is_nan_not_zero():
     """An objective that was never evaluated must not be reported as ``0.0``.
 

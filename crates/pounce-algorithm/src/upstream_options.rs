@@ -430,6 +430,67 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         6,
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
+    // ----- Inner QP-subproblem knobs (`sqp_qp_*`) -----
+    //
+    // Read by `application::apply_qp_subproblem_options` into
+    // `pounce_qp::QpOptions`. These were previously read but never
+    // registered here, so the options registry rejected every one of them
+    // with OPTION_INVALID ("Unknown option") and the reader was
+    // unreachable — the whole family was undocumented dead code (gh #360).
+    // Defaults below mirror `pounce_qp::QpOptions::default()`; each is
+    // forwarded only when the user explicitly sets it, so the pounce-qp
+    // defaults still stand otherwise.
+    //
+    // NOTE: the SQP driver additionally scales `sqp_qp_feas_tol` /
+    // `sqp_qp_opt_tol` by the QP-subproblem data magnitude at each
+    // iteration (gh #358) — these values are the *base* tolerances that
+    // scaling multiplies, not a hard floor on the inner solve.
+    r.add_lower_bounded_integer_option(
+        "sqp_qp_max_iter",
+        "Iteration cap for the SQP inner QP subproblem solver.",
+        0,
+        200,
+        "Maximum active-set iterations allowed for each QP subproblem. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_qp_feas_tol",
+        "Primal-feasibility tolerance for the SQP inner QP subproblem.",
+        0.0,
+        true,
+        1e-9,
+        "Base primal-feasibility tolerance of the inner QP solve; the driver scales it by the subproblem's data magnitude. Loosen it if QP subproblems report \"maximum iterations\" on badly scaled problems. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_qp_opt_tol",
+        "Optimality (dual) tolerance for the SQP inner QP subproblem.",
+        0.0,
+        true,
+        1e-9,
+        "Base dual/optimality tolerance of the inner QP solve; the driver scales it by the subproblem's data magnitude. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_qp_elastic_gamma",
+        "Elastic-mode penalty weight for the SQP inner QP subproblem.",
+        0.0,
+        true,
+        1e6,
+        "Weight on the elastic slacks used when a QP subproblem is infeasible. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_string_option(
+        "sqp_qp_anti_cycling",
+        "Anti-cycling rule for the SQP inner QP subproblem.",
+        "expand",
+        &[
+            (
+                "expand",
+                "EXPAND: slowly growing feasibility tolerance (Gill et al. 1989)",
+            ),
+            ("bland", "Bland's rule: lowest-index entering constraint"),
+            ("none", "no anti-cycling safeguard"),
+        ],
+        "Selects the degeneracy safeguard used by the inner active-set QP solver. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19 (Curtis-Reid; minimizes sum of log^2 |a_ij|)"), ("ruiz", "use iterative symmetric infinity-norm equilibration (Ruiz, 2001)"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
 

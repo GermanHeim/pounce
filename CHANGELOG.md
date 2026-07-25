@@ -81,16 +81,58 @@ unchanged (median `6e-11`, max true constraint violation `4e-11`).
   (retaining the matrix's scale), rebuilds the subproblem, and re-solves once
   from cold.
 
-Remaining known gap, **pre-existing and out of scope here**: equality-constrained
-ill-conditioned QPs (`cond ≳ 1e2`) still converge slowly and can exit
-`Maximum_Iterations_Exceeded` / `Internal_Error` — a different signature from
-the inequality-active stall #358 reported. Measured unchanged by this work
-(mean 36.3/144 before vs 35.7/144 after, over 6 runs each). Note those runs also
-exposed genuine **run-to-run nondeterminism** on that path (same binary, same
-inputs, ±4 instances), which the inequality path does not show; that is tracked
-separately. The exact-Hessian, IPM, and `solver_selection="auto"` routes solve
-all of these to machine precision and remain the recommendation for very
-ill-conditioned QPs.
+### Fixed — quasi-Newton curvature pair used inconsistent multipliers (#361)
+
+- **The active-set-SQP quasi-Newton update now differences `∇L` at a single
+  fixed multiplier**, per Nocedal-Wright §18.3:
+  `y = ∇L(x_k, λ_k) − ∇L(x_{k−1}, λ_k)`. It previously held
+  `∇L(x_{k−1}, λ_{k−1})` inside the Hessian object and differenced against
+  `∇L(x_k, λ_k)` — two *different* multipliers — which for linear constraints
+  contributes a spurious `Aᵀ(λ_k − λ_{k−1})` term: pure multiplier difference,
+  carrying no curvature at all (the true `∇²L` equals `∇²f` there).
+  - That fed a divergent loop — a perturbed `B` yields a worse QP multiplier,
+    which injects a larger error into the next `y`, which corrupts `B` further.
+    On equality-constrained QPs (where `λ` is sign-free) the multiplier was
+    observed oscillating and growing exponentially
+    (`−13, 19, −69, 104, −145, 581, −1320, 3176, …`) while **`x` sat on the
+    exact optimum**. The solve burned its whole iteration budget and exited
+    `Maximum_Iterations_Exceeded` *at the right answer*, because the reported
+    stationarity residual is formed from that multiplier.
+  - Equality-constrained sweep (144 instances): **92 failures on 0.9.0 → 0**.
+    Inequality sweep (500 instances): **4 → 0**. All constraint families
+    (linear equality, linear inequality, nonlinear inequality) now solve clean.
+  - Fixed for both `damped-bfgs` and `lbfgs`. The consistent-multiplier form
+    telescopes to `Σλᵢ(∇cᵢ(x_k) − ∇cᵢ(x_{k−1}))`, which correctly vanishes for
+    linear constraints and is retained for nonlinear ones.
+
+- **`sqp_tol` is now honored.** It was registered and documented as the max-norm
+  KKT stationarity tolerance (default `1e-8`) but never read, so the looser
+  `sqp_dual_inf_tol` (`1e-4`) governed alone and silently capped attainable
+  accuracy. The convergence test now requires the tighter of the two — the only
+  reading under which neither option is inert. Worst-case error on the #358
+  sweep improves from `7e-5` to `5e-9` for ~10% more iterations. Same
+  registered-but-inert defect family as #360.
+
+### Fixed — `sqp_qp_*` inner-QP options were unusable (#360)
+
+- **The five `sqp_qp_*` options are now registered** and reach
+  `pounce_qp::QpOptions`: `sqp_qp_max_iter`, `sqp_qp_feas_tol`,
+  `sqp_qp_opt_tol`, `sqp_qp_elastic_gamma`, `sqp_qp_anti_cycling`.
+  `apply_qp_subproblem_options` read all five, but none was registered, so the
+  options registry rejected every one with `OPTION_INVALID` ("Unknown option")
+  and the reader was unreachable — the whole documented family was dead code.
+  Added a guard test asserting each key is settable *and* propagates, and that
+  unset keys keep the `pounce-qp` defaults.
+
+**Correction to an earlier note in this section:** a previous revision of this
+entry stated that equality-constrained ill-conditioned QPs were "measured
+unchanged" by the #358 work and that the path showed run-to-run
+nondeterminism. Both claims were wrong — artifacts of a benchmark harness that
+seeded `numpy` from `hash()` of a tuple **containing a string**, which Python
+randomizes per process, so every run silently generated different problems. With
+integer-only seeds the solver is bit-for-bit reproducible, and the #358 work in
+fact improved that family substantially (92 → 38 failures/144) before #361 took
+it to 0.
 
 ## [0.9.0] - 2026-07-24
 

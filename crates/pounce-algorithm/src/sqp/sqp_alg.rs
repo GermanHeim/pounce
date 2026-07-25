@@ -163,6 +163,12 @@ impl SqpAlgorithm {
         // LS already computed them at the new iterate).
         let mut f_cached: Option<Number> = None;
         let mut c_cached: Option<Vec<Number>> = None;
+        // Previous iterate's `(x, ∇f, ∇c)`, kept so the quasi-Newton
+        // curvature pair can difference `∇L` at a single fixed multiplier
+        // (see [`curvature_pair`]). Storing `∇L` directly — as the older
+        // `DampedBfgs::update(x, ∇L)` form did — bakes in the multiplier
+        // that was current at the time, which is precisely the bug.
+        let mut prev_point: Option<(Vec<Number>, Vec<Number>, Triplet)> = None;
 
         // Damped-BFGS state, allocated only if needed. The
         // matrix is updated at the END of each iteration (after
@@ -270,20 +276,28 @@ impl SqpAlgorithm {
                 SqpHessianSource::Exact => nlp.eval_hess_lag(&iter.x, &iter.lambda_g),
                 SqpHessianSource::DampedBfgs => {
                     let bfgs = bfgs.as_mut().expect("DampedBfgs state initialized above");
-                    // Update on the *current* (x, ∇L). The
-                    // very first iteration's update is a no-op
-                    // (no previous pair); the matrix stays I.
-                    let grad_lag = compute_grad_lag(&grad_f, &jac_c, &iter.lambda_g, n);
-                    bfgs.update(&iter.x, &grad_lag);
+                    if let Some((s, y)) =
+                        curvature_pair(prev_point.as_ref(), &iter, &grad_f, &jac_c, n)
+                    {
+                        bfgs.update_sy(&s, &y);
+                    }
                     bfgs.as_triplet()
                 }
                 SqpHessianSource::Lbfgs => {
                     let lb = lbfgs.as_mut().expect("LBfgs state initialized above");
-                    let grad_lag = compute_grad_lag(&grad_f, &jac_c, &iter.lambda_g, n);
-                    lb.update(&iter.x, &grad_lag);
+                    if let Some((s, y)) =
+                        curvature_pair(prev_point.as_ref(), &iter, &grad_f, &jac_c, n)
+                    {
+                        lb.update_sy(&s, &y);
+                    }
                     lb.as_triplet()
                 }
             };
+
+            // Remember this iterate's `(x, ∇f, ∇c)` so the next
+            // iteration can build its curvature pair at a fixed
+            // multiplier. See `curvature_pair`.
+            prev_point = Some((iter.x.clone(), grad_f.clone(), jac_c.clone()));
 
             // KKT check uses the current iterate's evaluations.
             let kkt = check_kkt(
@@ -304,8 +318,17 @@ impl SqpAlgorithm {
                 );
             }
 
-            if kkt.stationarity <= self.opts.dual_inf_tol
-                && kkt.constr_viol <= self.opts.constr_viol_tol
+            // `sqp_tol` and `sqp_dual_inf_tol` are both registered and both
+            // documented as a max-norm tolerance on the stationarity
+            // residual, but only `dual_inf_tol` was ever read — `opts.tol`
+            // (default 1e-8) was dead, so the loose 1e-4 governed alone and
+            // silently capped attainable accuracy (max x-error `7e-5` on the
+            // #358 sweep). Honor both by requiring the tighter, which is the
+            // only reading under which neither option is a no-op. Restores
+            // `~5e-9` worst-case accuracy for ~10% more iterations. Same
+            // registered-but-inert defect family as gh #360.
+            let stationarity_tol = self.opts.tol.min(self.opts.dual_inf_tol);
+            if kkt.stationarity <= stationarity_tol && kkt.constr_viol <= self.opts.constr_viol_tol
             {
                 self.iterates = Some(iter.clone());
                 return Ok(SqpResult {
@@ -740,6 +763,67 @@ fn mat_vec_gen(a: &GenTMatrix, p: &[Number], m: usize) -> Vec<Number> {
         out[i] += vals[k] * p[j];
     }
     out
+}
+
+/// Build the quasi-Newton curvature pair `(s, y)` for the step from the
+/// previous iterate to the current one, differencing `∇L` at a **single,
+/// fixed multiplier** (Nocedal-Wright §18.3):
+///
+/// ```text
+///     s = x_k − x_{k−1}
+///     y = ∇L(x_k, λ_k) − ∇L(x_{k−1}, λ_k)        ← the SAME λ_k twice
+/// ```
+///
+/// Returns `None` on the first iteration (no previous point yet).
+///
+/// **Why the fixed multiplier matters (gh #361).** The previous code held
+/// `∇L(x_{k−1}, λ_{k−1})` inside the Hessian object and differenced against
+/// `∇L(x_k, λ_k)`, giving
+///
+/// ```text
+///     y = (∇f_k − ∇f_{k−1}) + (J_kᵀλ_k − J_{k−1}ᵀλ_{k−1})
+/// ```
+///
+/// For **linear** constraints `J` is constant, so that second group collapses
+/// to `Aᵀ(λ_k − λ_{k−1})` — pure *multiplier* difference, carrying no
+/// curvature information at all. Since the true `∇²L` equals `∇²f` there, the
+/// whole term is spurious, and it feeds a divergent loop: a perturbed `B`
+/// yields a worse QP multiplier, which injects a larger error into the next
+/// `y`, which corrupts `B` further. On equality-constrained QPs (where `λ` is
+/// sign-free and can swing hard) the multiplier was observed oscillating and
+/// growing exponentially — `−13, 19, −69, 104, −145, 581, −1320, 3176, …` —
+/// while `x` itself sat on the exact optimum. The solve then burned its whole
+/// iteration budget and exited `Maximum_Iterations_Exceeded` *at the right
+/// answer*, because the stationarity residual is computed from that garbage
+/// multiplier.
+///
+/// Using one multiplier at both points makes the term telescope to
+/// `Σλᵏᵢ(∇cᵢ(x_k) − ∇cᵢ(x_{k−1}))`, which is the genuine constraint-curvature
+/// contribution: it vanishes identically for linear constraints (as it must)
+/// and is retained for nonlinear ones.
+fn curvature_pair(
+    prev: Option<&(Vec<Number>, Vec<Number>, Triplet)>,
+    iter: &SqpIterates,
+    grad_f: &[Number],
+    jac_c: &Triplet,
+    n: usize,
+) -> Option<(Vec<Number>, Vec<Number>)> {
+    let (prev_x, prev_grad_f, prev_jac) = prev?;
+    let s: Vec<Number> = iter
+        .x
+        .iter()
+        .zip(prev_x.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    // Both evaluated at the *current* multiplier `iter.lambda_g`.
+    let lag_curr = compute_grad_lag(grad_f, jac_c, &iter.lambda_g, n);
+    let lag_prev = compute_grad_lag(prev_grad_f, prev_jac, &iter.lambda_g, n);
+    let y: Vec<Number> = lag_curr
+        .iter()
+        .zip(lag_prev.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    Some((s, y))
 }
 
 /// Lagrangian gradient `∇L(x, λ_g) = ∇f(x) + J_c(x)ᵀ λ_g` at the

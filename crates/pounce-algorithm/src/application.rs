@@ -3467,6 +3467,53 @@ mod tests {
         assert_eq!(snap.sqp.lbfgs_max_history, 12);
     }
 
+    /// Every `sqp_qp_*` key that [`apply_qp_subproblem_options`] reads must
+    /// actually be *registered*, and must reach `pounce_qp::QpOptions`.
+    ///
+    /// The whole family was readable-but-unregistered (gh #360): the options
+    /// registry rejected each one with OPTION_INVALID, so the reader was
+    /// unreachable and the documented knobs were unusable. This is the guard
+    /// that class of omission needs — it fails both if a key stops being
+    /// registered and if a newly-read key is never registered at all.
+    #[test]
+    fn application_sqp_qp_subproblem_options_are_registered_and_propagate() {
+        use pounce_qp::AntiCyclingChoice;
+
+        // Source of truth: the keys `apply_qp_subproblem_options` reads.
+        // Kept in step with that function by the round-trip assertions below.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             sqp_qp_max_iter 37\n\
+             sqp_qp_feas_tol 1e-7\n\
+             sqp_qp_opt_tol 2e-7\n\
+             sqp_qp_elastic_gamma 1e4\n\
+             sqp_qp_anti_cycling bland\n",
+        )
+        .expect("every sqp_qp_* option must be registered (gh #360)");
+
+        let qp = &app.algorithm_builder_snapshot().sqp_qp;
+        assert_eq!(qp.max_iter, 37);
+        assert!((qp.feas_tol - 1e-7).abs() < 1e-20);
+        assert!((qp.opt_tol - 2e-7).abs() < 1e-20);
+        assert!((qp.elastic_gamma - 1e4).abs() < 1e-9);
+        assert_eq!(qp.anti_cycling, AntiCyclingChoice::Bland);
+
+        // Untouched options must keep the pounce-qp defaults, not be
+        // overwritten with zeros by the "explicitly set" gate.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        let defaults = pounce_qp::QpOptions::default();
+        let qp = &app.algorithm_builder_snapshot().sqp_qp;
+        assert_eq!(qp.max_iter, defaults.max_iter);
+        assert!((qp.feas_tol - defaults.feas_tol).abs() < 1e-20);
+        assert!((qp.opt_tol - defaults.opt_tol).abs() < 1e-20);
+        assert_eq!(qp.anti_cycling, defaults.anti_cycling);
+    }
+
     #[test]
     fn application_sqp_hessian_approximation_maps_to_damped_bfgs() {
         // The frontend sets `hessian_approximation = limited-memory` when no

@@ -256,6 +256,111 @@ fn sqp_optimize_convex_eq_nlp_one_iter() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Ill-conditioned equality-constrained QP (gh #361):
+//
+//     min ½ xᵀPx + cᵀx   s.t.  x₁ + x₂ + x₃ = 3
+//     P = diag(1, 100, 1000),  c = (−2, −101, −1001)
+//
+// Closed form: x* = (1, 1, 1), λ* = 1, f* = −553.5.
+//
+// Under a quasi-Newton Hessian this used to expose the
+// inconsistent-multiplier curvature pair: `y` was differenced across
+// *two different* multipliers, so for these (linear) constraints it
+// carried a spurious `Aᵀ(λ_k − λ_{k−1})` term. The multiplier then
+// oscillated and diverged (−13, 19, −69, 104, −145, 581, −1320, 3176, …)
+// while `x` sat on the exact optimum, and the solve exited
+// `MaxIter` *at the right answer* because the stationarity residual is
+// formed from that multiplier. Hence the assertions below check the
+// multiplier and the status, not just `x`.
+// ─────────────────────────────────────────────────────────────────
+struct IllConditionedEqQp;
+
+impl SqpProblemSpec for IllConditionedEqQp {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0, 0.0, 0.0]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 3], vec![NLP_UPPER_BOUND_INF; 3])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0], vec![0.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        0.5 * (x[0] * x[0] + 100.0 * x[1] * x[1] + 1000.0 * x[2] * x[2])
+            - 2.0 * x[0]
+            - 101.0 * x[1]
+            - 1001.0 * x[2]
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] - 2.0, 100.0 * x[1] - 101.0, 1000.0 * x[2] - 1001.0]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] + x[1] + x[2] - 3.0]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 3,
+            irow: vec![1, 1, 1],
+            jcol: vec![1, 2, 3],
+            vals: vec![1.0, 1.0, 1.0],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 3,
+            n_cols: 3,
+            irow: vec![1, 2, 3],
+            jcol: vec![1, 2, 3],
+            vals: vec![1.0, 100.0, 1000.0],
+        }
+    }
+}
+
+#[test]
+fn issue_361_ill_conditioned_eq_qp_converges_under_quasi_newton() {
+    for hess in [
+        SqpHessianSource::DampedBfgs,
+        SqpHessianSource::Lbfgs,
+        SqpHessianSource::Exact,
+    ] {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let mut opts = SqpOptions::default();
+        opts.hessian = hess;
+        let mut alg = SqpAlgorithm::new(qp_solver, opts);
+        let mut nlp = IllConditionedEqQp;
+        let res = alg.optimize(&mut nlp).unwrap();
+
+        assert_eq!(res.status, SqpStatus::Optimal, "hess={hess:?}: {res:?}");
+        for (i, xi) in res.x.iter().enumerate() {
+            assert!(
+                (xi - 1.0).abs() < 1e-6,
+                "hess={hess:?}: x[{i}] = {xi}, expected 1"
+            );
+        }
+        // The multiplier is the quantity the old inconsistent-`y` update
+        // destroyed, so assert it directly.
+        assert!(
+            (res.lambda_g[0] - 1.0).abs() < 1e-4,
+            "hess={hess:?}: λ_g = {}, expected 1",
+            res.lambda_g[0]
+        );
+        assert!(
+            (res.obj - (-553.5)).abs() < 1e-5,
+            "hess={hess:?}: obj = {}",
+            res.obj
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Nonlinear NLP:
 //
 //     min ½(x − 3)² + ½(y − 2)²   s.t.  x² + y² = 4
