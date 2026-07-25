@@ -103,12 +103,60 @@ estimate(m, [(m.p, 2.5)])               # first-order solution estimate at
 backsolves, no finite differencing); `estimate` combines the stored
 derivative columns for arbitrary perturbed values after the fact, and
 warns when the linear step leaves the variable bounds (a single-pass
-projection analogous to the CLI's `--sens-boundcheck`). Multiplier
-sensitivities are available for equality constraints. Models without
-declarations solve through the ordinary AMPL/CLI path, unchanged. See
+projection analogous to the CLI's `--sens-boundcheck`) — with one
+exception, a bound written on a declared Param, covered in
+[Declared Params in variable bounds](#declared-params-in-variable-bounds)
+below. Multiplier sensitivities are available for equality constraints.
+Models without declarations solve through the ordinary AMPL/CLI path,
+unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
+
+### Declared Params in variable bounds
+
+A limit is often most naturally written as a bound rather than a
+constraint:
+
+```python
+m.u_max = pyo.Param(initialize=1.0, mutable=True)
+declare_sens_param(m.u_max)
+m.u = pyo.Var(m.t, bounds=(0, m.u_max))   # the cap, as a bound
+```
+
+`pyomo.contrib.sensitivity_toolbox`, which supplies the expression
+surgery underneath, substitutes declared Params in *constraint*
+expressions only. A Param left in a bound is written to the `.nl` file
+as a constant at its pre-perturbation value, so the bound never moves
+and `gradient(m.u[t], wrt=m.u_max)` reads exactly `0.0` — a wrong
+answer that is indistinguishable from a legitimate insensitivity.
+
+POUNCE rewrites such a bound as a constraint over the substituted
+variable before the solve, so both spellings of the same limit give the
+same derivative. Expression bounds work too, e.g.
+`bounds=(0, 2 * m.p + 1)`. Two kinds of variable are deliberately left
+alone: **fixed** Vars, whose bounds the solver never enforces, and Vars
+on **deactivated** Blocks.
+
+This is a deliberate divergence from `sensitivity_calculation`, which
+still reports zero for the same model. Four things follow from it:
+
+- **The bound is dropped on the clone that is solved.** `m.x.ub` reads
+  `None` there and the NL row carries the reader's no-bound sentinel
+  `1e19` — finite, so an `isinf()` test will not catch it. The model you
+  wrote is never modified.
+- **`estimate()` does not clamp against a rewritten bound**, and raises
+  no clamp warning for it. That is correct rather than an oversight: the
+  bound now moves with the perturbation, so the linear step already
+  respects it to first order.
+- **`covariance()`'s bound-active projection still fires.** The value
+  the bound held at the solve point is recorded and read back for the
+  activity test, so a `declare_fitted` variable capped by a declared
+  Param is still projected and still warns.
+- **It costs a row.** A simple bound is handled directly in the barrier;
+  a general inequality costs a slack and a Jacobian row. A model with
+  many Param-dependent bounds trades roughly one row per bound. Only
+  models that write a bound in terms of a declared Param pay this.
 
 ### Watching the solve (`tee=True`)
 
@@ -234,7 +282,13 @@ covariance conditional on the active bound (zero variance in the
 pinned direction, computed by inverting the free block of the
 information matrix) and still warns, since boundary asymptotics are
 nonstandard. Only variable bounds on the fitted parameters themselves
-are detected; other active constraints are not.
+are detected; a parameter held at the same value by an active
+*constraint row* is treated as free
+([#362](https://github.com/jkitchin/pounce/issues/362)). A bound
+rewritten into a constraint by the rule in
+[Declared Params in variable bounds](#declared-params-in-variable-bounds)
+is the one exception: the value it held at the solve point is recorded,
+so it is still detected and still projected.
 
 **Relation to `pyomo.contrib.parmest`.** parmest is an estimation
 workflow: multi-experiment data management, bootstrap resampling, and
