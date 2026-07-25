@@ -9,6 +9,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
     StartingPoint, TNLP,
 };
+use pounce_presolve::{PresolveOptions, wrap_from_options, wrap_with_presolve};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -248,4 +249,25 @@ fn explicit_presolve_bypass_preserves_user_option_and_unwrapped_tnlp() {
         "without generic wrapping, the active original row retains its dual: {}",
         final_payload.lambda[0]
     );
+}
+
+#[test]
+fn manual_presolve_wrapper_is_not_wrapped_again_when_option_is_enabled() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("presolve", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TightenedRow::default()));
+    let manual = wrap_with_presolve(
+        inner,
+        PresolveOptions {
+            enabled: true,
+            ..PresolveOptions::defaults()
+        },
+    )
+    .unwrap();
+    let automatic = wrap_from_options(Rc::clone(&manual), app.options()).unwrap();
+    assert!(Rc::ptr_eq(&manual, &automatic));
 }

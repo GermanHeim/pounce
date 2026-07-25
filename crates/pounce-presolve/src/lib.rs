@@ -113,7 +113,7 @@ pub fn wrap_with_presolve(
     inner: Rc<RefCell<dyn TNLP>>,
     opts: PresolveOptions,
 ) -> Result<Rc<RefCell<dyn TNLP>>, PresolveError> {
-    if !opts.enabled {
+    if !opts.enabled || inner.borrow().is_presolve_wrapper() {
         return Ok(inner);
     }
     Ok(Rc::new(RefCell::new(PresolveTnlp::new(inner, opts))))
@@ -1001,6 +1001,10 @@ fn apply_redundant_verdicts(
 // becomes `Some`).
 #[allow(clippy::expect_used)]
 impl TNLP for PresolveTnlp {
+    fn is_presolve_wrapper(&self) -> bool {
+        true
+    }
+
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         let s = self.ensure_init()?;
         Some(s.info_outer)

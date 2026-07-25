@@ -268,6 +268,15 @@ pub trait TNLP {
     /// Final metadata pass — called just before
     /// [`Self::finalize_solution`]. Default does nothing.
     fn finalize_metadata(&mut self, _var: &MetaData, _con: &MetaData) {}
+
+    /// Whether this TNLP is already an explicit generic-presolve wrapper.
+    ///
+    /// This lets the application preserve the public `wrap_with_presolve`
+    /// workflow when `presolve=yes` is also present in its options. Ordinary
+    /// TNLPs and unrelated decorators return `false`.
+    fn is_presolve_wrapper(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
