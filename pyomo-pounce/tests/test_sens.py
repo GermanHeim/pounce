@@ -381,9 +381,10 @@ def test_undeclared_param_in_bound_is_left_alone():
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(m)
 
+    assert m.x.ub == 5.0                              # original untouched
     session = m.__dict__["_pounce_sens"].session
-    r = session.var_names.index("x")
-    assert session.nl.x_u[r] == pytest.approx(5.0)    # still an NL bound
+    r = session.var_entry(m.x.name)
+    assert session.nl.x_u[r] == pytest.approx(5.0)    # survived into the solve
     assert session.moved_bounds == {}                 # nothing was rewritten
     assert pyo.value(m.x) == pytest.approx(5.0, abs=1e-6)
 
@@ -399,7 +400,7 @@ def test_moved_bound_is_recorded_for_covariance():
     pyo.SolverFactory("pounce").solve(m)
 
     session = m.__dict__["_pounce_sens"].session
-    r = session.var_names.index("x")
+    r = session.var_entry(m.x.name)
     assert session.nl.x_u[r] >= 1e19                  # NL no-bound sentinel
     assert session.moved_bounds["x"] == (None, pytest.approx(2.0))
 
@@ -469,7 +470,7 @@ def test_rewritten_bound_still_projects_in_covariance():
     pyo.SolverFactory("pounce").solve(m)
 
     session = m.__dict__["_pounce_sens"].session
-    assert session.nl.x_u[session.var_names.index("A")] >= 1e19
+    assert session.nl.x_u[session.var_entry(m.A.name)] >= 1e19
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         covariance(m)
