@@ -586,6 +586,7 @@ pub fn main() -> ExitCode {
                  will be skipped. Run without --minima to obtain it."
             );
         }
+        app.set_presolve_already_applied(true);
         return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
     }
 
@@ -1021,12 +1022,10 @@ pub fn main() -> ExitCode {
 
     // The CLI owns its explicit wrapper so `.nl` input can supply an
     // ExpressionProvider for FBBT and so it can report presolve diagnostics
-    // before solving. Prevent the public application entry point from adding
-    // a second generic wrapper around it. This also keeps the sensitivity
-    // branch above genuinely un-presolved when it disabled the local wrapper.
-    let _ = app
-        .options_mut()
-        .set_bool_value("presolve", false, true, false);
+    // before solving. This also keeps the sensitivity branch above un-presolved
+    // when it disabled the local wrapper, without mutating the user's `presolve`
+    // option.
+    app.set_presolve_already_applied(true);
 
     // Wrap so we can pull eval-call counts out for the final summary.
     let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&post_presolve))));
@@ -1081,12 +1080,6 @@ pub fn main() -> ExitCode {
     // and run again. Without `resolve`, this runs exactly once.
     let mut solve_tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp);
     let mut status = loop {
-        // `resolve` may have staged a `presolve` override, but this CLI solve
-        // continues to use the wrapper selected above. Keep the application
-        // entry point from double-wrapping that fixed instance.
-        let _ = app
-            .options_mut()
-            .set_bool_value("presolve", false, true, false);
         let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
         let req = restart_cell.borrow_mut().take();
         let Some(req) = req else { break st };

@@ -144,6 +144,7 @@ fn solve(
     presolve: bool,
     warm_start: bool,
     max_iter: Option<i32>,
+    presolve_already_applied: bool,
 ) -> (ApplicationReturnStatus, TightenedRow) {
     let mut app = IpoptApplication::new();
     app.options_mut()
@@ -160,6 +161,7 @@ fn solve(
             .unwrap();
     }
     app.initialize().unwrap();
+    app.set_presolve_already_applied(presolve_already_applied);
 
     let problem = Rc::new(RefCell::new(TightenedRow::default()));
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&problem) as Rc<RefCell<dyn TNLP>>;
@@ -170,8 +172,8 @@ fn solve(
 
 #[test]
 fn library_presolve_off_preserves_unwrapped_solution_and_callback_shape() {
-    let (off_status, off) = solve(false, false, None);
-    let (on_status, on) = solve(true, false, None);
+    let (off_status, off) = solve(false, false, None, false);
+    let (on_status, on) = solve(true, false, None, false);
 
     assert!(
         matches!(
@@ -217,7 +219,7 @@ fn library_presolve_off_preserves_unwrapped_solution_and_callback_shape() {
 
 #[test]
 fn library_presolve_projects_warm_start_and_restores_original_payload() {
-    let (status, problem) = solve(true, true, None);
+    let (status, problem) = solve(true, true, None, false);
     assert!(matches!(
         status,
         ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
@@ -232,7 +234,7 @@ fn library_presolve_projects_warm_start_and_restores_original_payload() {
 
 #[test]
 fn library_presolve_preserves_max_iter_failure_and_callback_shape() {
-    let (status, problem) = solve(true, false, Some(0));
+    let (status, problem) = solve(true, false, Some(0), false);
     assert_eq!(status, ApplicationReturnStatus::MaximumIterationsExceeded);
     let final_payload = problem
         .final_payload
@@ -240,4 +242,20 @@ fn library_presolve_preserves_max_iter_failure_and_callback_shape() {
     assert_eq!(final_payload.status, SolverReturn::MaxiterExceeded);
     assert_eq!(final_payload.g.len(), 2);
     assert_eq!(final_payload.lambda.len(), 2);
+}
+
+#[test]
+fn explicit_presolve_bypass_preserves_user_option_and_unwrapped_tnlp() {
+    let (status, problem) = solve(true, false, None, true);
+    assert!(matches!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    ));
+    let final_payload = problem.final_payload.expect("finalize_solution");
+    assert_eq!(final_payload.lambda.len(), 2);
+    assert!(
+        final_payload.lambda[0].abs() > 1.0,
+        "without generic wrapping, the active original row retains its dual: {}",
+        final_payload.lambda[0]
+    );
 }

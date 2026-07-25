@@ -101,6 +101,9 @@ use std::time::Instant;
 
 pub struct IpoptApplication {
     options: OptionsList,
+    /// Whether the submitted TNLP has already been explicitly wrapped by the
+    /// caller's presolve layer.
+    presolve_already_applied: bool,
     reg_options: Rc<RegisteredOptions>,
     journalist: Rc<Journalist>,
     statistics: RefCell<SolveStatistics>,
@@ -240,6 +243,7 @@ impl IpoptApplication {
         let reg = Rc::new(reg);
         Self {
             options: OptionsList::with_registered(Rc::clone(&reg)),
+            presolve_already_applied: false,
             reg_options: reg,
             journalist: Rc::new(Journalist::new()),
             statistics: RefCell::new(SolveStatistics::new()),
@@ -266,6 +270,18 @@ impl IpoptApplication {
 
     pub fn options_mut(&mut self) -> &mut OptionsList {
         &mut self.options
+    }
+
+    /// Declare whether callers have already applied an explicit presolve
+    /// wrapper to the TNLPs submitted to [`Self::optimize_tnlp`].
+    ///
+    /// When set, `optimize_tnlp` leaves its input TNLP unchanged even if the
+    /// `presolve` option is enabled. This preserves the option table for
+    /// reporting and debugger use while allowing specialized frontends to
+    /// supply a wrapper with capabilities unavailable to generic callback
+    /// TNLPs, such as an expression provider for FBBT.
+    pub fn set_presolve_already_applied(&mut self, applied: bool) {
+        self.presolve_already_applied = applied;
     }
 
     pub fn registered_options(&self) -> &Rc<RegisteredOptions> {
@@ -520,16 +536,20 @@ impl IpoptApplication {
         // path below (including retry paths) continues to postsolve into
         // the original user-facing space. With `presolve=no`, this returns
         // the exact same Rc unchanged.
-        let tnlp = match pounce_presolve::wrap_from_options(tnlp, &self.options) {
-            Ok(tnlp) => tnlp,
-            Err(err) => {
-                use pounce_common::journalist::JournalCategory;
-                self.journalist.print(
-                    JournalLevel::J_ERROR,
-                    JournalCategory::J_MAIN,
-                    &format!("pounce: could not materialize presolve options: {err}\n"),
-                );
-                return ApplicationReturnStatus::InvalidOption;
+        let tnlp = if self.presolve_already_applied {
+            tnlp
+        } else {
+            match pounce_presolve::wrap_from_options(tnlp, &self.options) {
+                Ok(tnlp) => tnlp,
+                Err(err) => {
+                    use pounce_common::journalist::JournalCategory;
+                    self.journalist.print(
+                        JournalLevel::J_ERROR,
+                        JournalCategory::J_MAIN,
+                        &format!("pounce: could not materialize presolve options: {err}\n"),
+                    );
+                    return ApplicationReturnStatus::InvalidOption;
+                }
             }
         };
 
