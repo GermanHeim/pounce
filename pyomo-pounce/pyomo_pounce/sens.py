@@ -142,7 +142,8 @@ def _reformulate_param_bounds(clone):
     one the surgery has already built. Returns {var name: (lb, ub)} of the
     numeric values the moved bounds had at the solve point, with None on the
     side that was not moved; covariance()'s active-bound projection reads
-    NL bounds, which now say +/-inf for these rows.
+    NL bounds, which for these rows now hold the reader's no-bound sentinel
+    of +/-1e19. That value is finite, so an isinf() test would never fire.
     """
     block = clone.component(SensitivityInterface.get_default_block_name())
     if block is None:
@@ -922,7 +923,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             "regularized rather than exact. Linearly dependent (structurally"
             " unidentifiable) parameters are the usual cause.")
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    # a bound moved to a constraint row reads as +/-inf here, which would
+    # a bound moved to a constraint row reads as the no-bound sentinel
+    # +/-1e19 here (finite, so isinf() would never catch it), which would
     # silently skip the projection for that parameter; put the value the
     # bound had at the solve point back for the test only
     for name, (mlo, mhi) in session.moved_bounds.items():

@@ -475,3 +475,24 @@ def test_rewritten_bound_still_projects_in_covariance():
         warnings.simplefilter("always")
         covariance(m)
     assert any("sits on its bound" in str(x.message) for x in w)
+    # and the projected answer, not just the warning: identical to what the
+    # same model gives with the bound left alone
+    assert covariance(m).std_err[m.A] == 0.0
+
+
+def test_both_bounds_rewritten_are_both_recorded():
+    """A Var with both bounds on declared Params records both sides; the
+    single-sided tests pass even if the merge dropped one."""
+    m = pyo.ConcreteModel()
+    m.lo = pyo.Param(initialize=-1.0, mutable=True)
+    m.hi = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(m.lo, m.hi), initialize=0.0)
+    m.obj = pyo.Objective(expr=-m.x)
+    declare_sens_param(m.lo, m.hi)
+    pyo.SolverFactory("pounce").solve(m)
+
+    session = m.__dict__["_pounce_sens"].session
+    lo_rec, hi_rec = session.moved_bounds[m.x.name]
+    assert lo_rec == pytest.approx(-1.0)
+    assert hi_rec == pytest.approx(2.0)
+    assert gradient(m.x, wrt=m.hi) == pytest.approx(1.0, abs=1e-6)
