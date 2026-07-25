@@ -76,6 +76,68 @@ impl DampedBfgs {
         self.prev_x.is_some()
     }
 
+    /// Seed `B = γI` directly and mark the one-time sizing done, so the
+    /// first [`Self::update`] applies its rank-2 correction on top of
+    /// this scale instead of re-seeding from its own `(s, y)`.
+    ///
+    /// Used by the driver's iteration-0 curvature probe: the internal
+    /// sizing in [`Self::update`] cannot fire until a first `(s, y)` pair
+    /// exists, i.e. not until iteration 1 — but iteration **0** already
+    /// solves a QP against `B`, and with the identity seed that step
+    /// overshoots by `~cond(∇²L)` on an ill-conditioned problem. See the
+    /// sizing comment in [`Self::update`] for why that is fatal.
+    ///
+    /// `gamma` must be finite and strictly positive; anything else is
+    /// ignored (leaving `B = I`) rather than corrupting the matrix.
+    pub fn seed_scale(&mut self, gamma: Number) {
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return;
+        }
+        for i in 0..self.n {
+            self.set(i, i, gamma);
+        }
+        self.sized = true;
+    }
+
+    /// Discard the accumulated rank-2 curvature and fall back to a
+    /// scaled identity `γI`, where `γ` is the current mean diagonal
+    /// (a scale the accumulated matrix has already vouched for).
+    /// `prev_x` / `prev_grad_lag` are retained, so the next
+    /// [`Self::update`] resumes accumulating from the reset base.
+    ///
+    /// Used as a recovery step when the QP subproblem fails: a
+    /// quasi-Newton matrix that has drifted ill-conditioned makes the
+    /// step subproblem numerically unsolvable, and that is recoverable
+    /// — far better than aborting an otherwise healthy solve.
+    /// Off-diagonals are zeroed; the diagonal keeps the problem's scale.
+    pub fn reset_to_scale(&mut self) {
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for i in 0..self.n {
+            let d = self.get(i, i);
+            if d.is_finite() && d > 0.0 {
+                sum += d;
+                count += 1;
+            }
+        }
+        let gamma = if count > 0 {
+            sum / count as Number
+        } else {
+            1.0
+        };
+        let gamma = if gamma.is_finite() && gamma > 0.0 {
+            gamma
+        } else {
+            1.0
+        };
+        for v in self.b.iter_mut() {
+            *v = 0.0;
+        }
+        for i in 0..self.n {
+            self.set(i, i, gamma);
+        }
+    }
+
     fn idx(&self, i: usize, j: usize) -> usize {
         debug_assert!(i < self.n && j < self.n);
         let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
@@ -249,6 +311,53 @@ mod tests {
             (diag(&b, 0) - 9.0).abs() < 1e-9,
             "on-axis diagonal should be 9 after sizing + rank-2 update, got {}",
             diag(&b, 0)
+        );
+    }
+
+    #[test]
+    fn seed_scale_sets_the_diagonal_and_marks_sized() {
+        let mut b = DampedBfgs::new(3);
+        b.seed_scale(25.0);
+        assert!(b.sized, "seeding must suppress the later one-time sizing");
+        for i in 0..3 {
+            assert!((diag(&b, i) - 25.0).abs() < 1e-12);
+        }
+        // A degenerate scale must be ignored, not written into B.
+        let mut c = DampedBfgs::new(2);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            c.seed_scale(bad);
+            assert!(!c.sized, "seed_scale({bad}) must be refused");
+            assert!((diag(&c, 0) - 1.0).abs() < 1e-12, "B must stay I");
+        }
+    }
+
+    #[test]
+    fn reset_to_scale_drops_curvature_but_keeps_magnitude() {
+        // Build up genuine off-diagonal curvature, then reset: the
+        // off-diagonals must vanish and the diagonal must retain the
+        // matrix's own scale (its mean diagonal), not collapse to 1.
+        let mut b = DampedBfgs::new(2);
+        b.seed_scale(100.0);
+        b.update(&[0.0, 0.0], &[0.0, 0.0]);
+        b.update(&[1.0, 1.0], &[150.0, 40.0]); // rank-2 update -> off-diagonals
+        assert!(
+            b.get(1, 0).abs() > 1e-9,
+            "test precondition: expected off-diagonal curvature, got {}",
+            b.get(1, 0)
+        );
+        let mean_diag = (diag(&b, 0) + diag(&b, 1)) / 2.0;
+        b.reset_to_scale();
+        assert!(b.get(1, 0).abs() < 1e-12, "off-diagonals must be zeroed");
+        for i in 0..2 {
+            assert!(
+                (diag(&b, i) - mean_diag).abs() < 1e-9,
+                "diagonal must keep the mean scale {mean_diag}, got {}",
+                diag(&b, i)
+            );
+        }
+        assert!(
+            mean_diag > 10.0,
+            "sanity: the retained scale should reflect the problem, not 1"
         );
     }
 

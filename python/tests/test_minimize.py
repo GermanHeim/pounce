@@ -1681,6 +1681,45 @@ def test_qp_active_set_facade_solves_ill_conditioned_tail(n, cond, seed):
     np.testing.assert_allclose(r.x, x_star, atol=1e-4)
 
 
+def test_qp_active_set_facade_sweep_matches_issue_358_scope():
+    """Guard the #358 scope measurement itself: the whole 36-instance grid.
+
+    The issue reported 29/36 of these failing on 0.9.0. This asserts the grid
+    solves clean, so a future regression in the active-set-SQP quasi-Newton
+    path cannot silently reintroduce it. Deterministic (fixed seeds).
+    """
+    failures = []
+    for n in (3, 5, 8):
+        for cond in (10, 100, 1000):
+            for seed in range(4):
+                rng = np.random.default_rng(1000 + seed * 7 + n * 100 + cond)
+                Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+                P = (Q * np.geomspace(1, cond, n)) @ Q.T
+                xu = rng.standard_normal(n)
+                c = -P @ xu
+                a = rng.standard_normal(n)
+                G = a.reshape(1, n)
+                h = np.array([a @ xu - 1.0])
+
+                fun = lambda x, P=P, c=c: 0.5 * x @ P @ x + c @ x
+                jac = lambda x, P=P, c=c: P @ x + c
+                con = [{
+                    "type": "ineq",
+                    "fun": lambda x, h=h, G=G: (h - G @ x),
+                    "jac": lambda x, G=G: -G,
+                }]
+                kkt = np.block([[P, G.T], [G, np.zeros((1, 1))]])
+                x_star = np.linalg.solve(kkt, np.concatenate([-c, h]))[:n]
+
+                r = pounce.minimize(
+                    fun, np.zeros(n), jac=jac, constraints=con,
+                    options={"solver_selection": "qp-active-set"},
+                )
+                if not r.success or np.linalg.norm(r.x - x_star, np.inf) > 1e-4:
+                    failures.append((n, cond, seed, r.message))
+    assert not failures, f"{len(failures)}/36 instances failed: {failures}"
+
+
 def test_uncomputed_objective_is_nan_not_zero():
     """An objective that was never evaluated must not be reported as ``0.0``.
 

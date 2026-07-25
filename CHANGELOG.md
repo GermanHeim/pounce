@@ -45,10 +45,52 @@ changes.
     persistent damped updates still accumulate on top. Halves the failure rate
     on a broad ill-conditioned-QP sweep (~21% → ~10%) and clears the #358
     36-instance tail sweep entirely.
-  - Not a complete cure for *extreme* conditioning: `cond(P) ≳ 1e4` (especially
-    small `n`) remains harder for the quasi-Newton path than for the
-    exact-Hessian / IPM / `solver_selection="auto"` routes, which solve these to
-    machine precision. Prefer those for very ill-conditioned QPs.
+  - Three further fixes below close the rest of this gap.
+
+### Fixed — three more active-set-SQP robustness holes on ill-conditioned QPs (#358)
+
+Continuing the above: on a 500-instance convex-QP sweep (`n ∈ {2,3,5,8,12}`,
+`cond ∈ {1…1e4}`, 20 seeds) failures fell from **~10% to 0.8%**, and the
+`Search_Direction_Becomes_Too_Small` failure mode was eliminated entirely
+(46 → 0). The error distribution of the solves that already succeeded is
+unchanged (median `6e-11`, max true constraint violation `4e-11`).
+
+- **Iteration-0 curvature probe.** The one-time BFGS sizing above cannot fire
+  until iteration 1 — but iteration **0** already solves a QP, against the raw
+  identity seed. Before that first QP, the driver now differences the gradient
+  across a short steepest-descent probe step and seeds `B = γI` with the
+  resulting Rayleigh quotient (one extra gradient evaluation). This is applied
+  **only when the constraint Jacobian is detected constant** (linear
+  constraints, or none), because the probe measures `∇²f`, which equals the
+  Lagrangian Hessian `∇²L = ∇²f + Σλᵢ∇²cᵢ` only when the constraint-curvature
+  term vanishes. On the Maratos problem `∇²f = 4I` while `∇²L ≈ I`, so probing
+  there would over-scale fourfold — the linearity gate keeps that path
+  untouched.
+- **Scale-relative inner-QP tolerances.** `QpOptions::{feas_tol, opt_tol}` are
+  absolute `1e-9`. As an *inner* subproblem the QP inherits the NLP's scale, so
+  with `‖∇f‖ ~ ‖B‖ ~ 1e3` that is `~1e-12` relative — the f64 noise floor. The
+  active-set solver could not certify its own optimality, burned its iteration
+  budget, returned `MaxIter`, and the driver aborted with `QpStepFailed`. Both
+  tolerances are now scaled by the QP data magnitude (clamped at `1e6`).
+  Correctness is unaffected: the outer loop still gates optimality on the true,
+  unscaled NLP KKT residuals, so a sloppier inner step can cost an extra outer
+  iteration but never a false `Optimal`.
+- **Quasi-Newton reset-and-retry.** A QP subproblem that still fails is usually
+  reporting a drifted quasi-Newton Hessian, not a bad linearization. Rather than
+  abort the whole solve, the driver now discards the accumulated curvature
+  (retaining the matrix's scale), rebuilds the subproblem, and re-solves once
+  from cold.
+
+Remaining known gap, **pre-existing and out of scope here**: equality-constrained
+ill-conditioned QPs (`cond ≳ 1e2`) still converge slowly and can exit
+`Maximum_Iterations_Exceeded` / `Internal_Error` — a different signature from
+the inequality-active stall #358 reported. Measured unchanged by this work
+(mean 36.3/144 before vs 35.7/144 after, over 6 runs each). Note those runs also
+exposed genuine **run-to-run nondeterminism** on that path (same binary, same
+inputs, ±4 instances), which the inequality path does not show; that is tracked
+separately. The exact-Hessian, IPM, and `solver_selection="auto"` routes solve
+all of these to machine precision and remain the recommendation for very
+ill-conditioned QPs.
 
 ## [0.9.0] - 2026-07-24
 
