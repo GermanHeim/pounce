@@ -315,3 +315,184 @@ def test_all_three_declarations_coexist():
     cov = covariance(m)                     # estimation family
     assert cov.std_err[m.A] > 0 and cov.std_err[m.k] > 0
     assert abs(cov.correlation[m.A, m.k]) < 1.0
+
+
+# ── declared Params in variable bounds (jkitchin/pounce#356) ─────────────────
+#
+# SensitivityInterface substitutes declared Params in constraint expressions
+# only, so a Param left in a bound used to be written to the NL file as a
+# constant and its sensitivity read as exactly zero. sens_solve now rewrites
+# such a bound as a constraint over the substituted Var. Each case below is
+# a limit the objective drives the variable straight into, so dx/dp is known
+# in closed form.
+
+def _bounded(ub=None, lb=None, sense=-1.0, x0=1.0):
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(lb(m) if lb else None, ub(m) if ub else None),
+                  initialize=x0)
+    m.obj = pyo.Objective(expr=sense * m.x)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+@pytest.mark.parametrize("ub, dxdp, pnew, xnew", [
+    (lambda m: m.p, 1.0, 3.0, 3.0),            # bare Param
+    (lambda m: 2 * m.p + 1, 2.0, 3.0, 7.0),    # expression around it
+])
+def test_upper_bound_on_declared_param_is_differentiable(ub, dxdp, pnew, xnew):
+    m = _bounded(ub=ub)
+    assert gradient(m.x, wrt=m.p) == pytest.approx(dxdp, abs=1e-6)
+    assert estimate(m, [(m.p, pnew)])[m.x] == pytest.approx(xnew, abs=1e-6)
+
+
+def test_lower_bound_on_declared_param_is_differentiable():
+    m = _bounded(lb=lambda m: m.p, sense=1.0, x0=3.0)
+    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert estimate(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
+
+
+def test_bound_as_constraint_is_unchanged():
+    """The already-working spelling keeps working and agrees with the bound."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(0, None), initialize=1.0)
+    m.cap = pyo.Constraint(expr=m.x <= m.p)
+    m.obj = pyo.Objective(expr=-m.x)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert estimate(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
+
+
+def test_undeclared_param_in_bound_is_left_alone():
+    """Only declared Params are rewritten; an undeclared one stays a bound.
+
+    Asserted on the clone that was actually solved, via the NL bounds the
+    session carries. Asserting on the original model would pass no matter
+    what, since the rewrite runs on a clone and never touches it.
+    """
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.cap = pyo.Param(initialize=5.0, mutable=True)   # never declared
+    m.x = pyo.Var(bounds=(0, m.cap), initialize=1.0)
+    m.obj = pyo.Objective(expr=-m.x)                  # drive x onto the cap
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+
+    assert m.x.ub == 5.0                              # original untouched
+    session = m.__dict__["_pounce_sens"].session
+    r = session.var_entry(m.x.name)
+    assert session.nl.x_u[r] == pytest.approx(5.0)    # survived into the solve
+    assert session.moved_bounds == {}                 # nothing was rewritten
+    assert pyo.value(m.x) == pytest.approx(5.0, abs=1e-6)
+
+
+def test_moved_bound_is_recorded_for_covariance():
+    """A rewritten bound reads as the NL no-bound sentinel, so the value it
+    had is recorded; covariance()'s projection reads that instead."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(0, m.p), initialize=1.0)
+    m.obj = pyo.Objective(expr=-m.x)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+
+    session = m.__dict__["_pounce_sens"].session
+    r = session.var_entry(m.x.name)
+    assert session.nl.x_u[r] >= 1e19                  # NL no-bound sentinel
+    assert session.moved_bounds["x"] == (None, pytest.approx(2.0))
+
+
+def test_fixed_var_bound_is_not_rewritten():
+    """A fixed Var's bounds are not enforced, so turning one into a
+    constraint would impose a restriction the original model never had."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.f = pyo.Var(bounds=(0, m.p), initialize=5.0)
+    m.f.fix(5.0)                                  # legally outside its bound
+    m.x = pyo.Var(bounds=(0, None), initialize=1.0)
+    m.c = pyo.Constraint(expr=m.x <= m.p)
+    m.obj = pyo.Objective(expr=-m.x)
+    declare_sens_param(m.p)
+    res = pyo.SolverFactory("pounce").solve(m)
+    assert res.solver.termination_condition == pyo.TerminationCondition.optimal
+    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_deactivated_block_var_is_not_rewritten():
+    """Stripping a bound on a dead Block and adding an active constraint
+    would pull the Var into the NL as a free column."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(0, None), initialize=1.0)
+    m.c = pyo.Constraint(expr=m.x <= m.p)
+    m.obj = pyo.Objective(expr=-m.x)
+    m.dead = pyo.Block()
+    m.dead.y = pyo.Var(bounds=(0, m.p), initialize=1.0)
+    m.dead.c = pyo.Constraint(expr=m.dead.y <= 1)
+    m.dead.deactivate()
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+
+    names = m.__dict__["_pounce_sens"].session.var_names
+    assert not any("dead.y" in n for n in names)
+
+
+def test_indexed_var_bound_on_declared_param():
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(3)
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(m.I, bounds=(0, m.p), initialize=1.0)
+    m.obj = pyo.Objective(expr=-sum(m.x[i] for i in m.I))
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    for i in m.I:
+        assert gradient(m.x[i], wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_rewritten_bound_still_projects_in_covariance():
+    """A fitted Var capped by a declared Param still triggers covariance()'s
+    active-bound projection, even though its NL bound is now the no-bound
+    sentinel (jkitchin/pounce#357 review)."""
+    from pyomo_pounce import covariance, declare_fitted, declare_residual
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(5)
+    m.cap = pyo.Param(initialize=1.0, mutable=True)
+    m.A = pyo.Var(bounds=(0, m.cap), initialize=0.5)
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(m.I, rule=lambda mm, i: mm.r[i] == 3.0 - mm.A)
+    m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+    declare_sens_param(m.cap)
+    declare_fitted(m.A)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+
+    session = m.__dict__["_pounce_sens"].session
+    assert session.nl.x_u[session.var_entry(m.A.name)] >= 1e19
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        covariance(m)
+    assert any("sits on its bound" in str(x.message) for x in w)
+    # and the projected answer, not just the warning: identical to what the
+    # same model gives with the bound left alone
+    assert covariance(m).std_err[m.A] == 0.0
+
+
+def test_both_bounds_rewritten_are_both_recorded():
+    """A Var with both bounds on declared Params records both sides; the
+    single-sided tests pass even if the merge dropped one."""
+    m = pyo.ConcreteModel()
+    m.lo = pyo.Param(initialize=-1.0, mutable=True)
+    m.hi = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(m.lo, m.hi), initialize=0.0)
+    m.obj = pyo.Objective(expr=-m.x)
+    declare_sens_param(m.lo, m.hi)
+    pyo.SolverFactory("pounce").solve(m)
+
+    session = m.__dict__["_pounce_sens"].session
+    lo_rec, hi_rec = session.moved_bounds[m.x.name]
+    assert lo_rec == pytest.approx(-1.0)
+    assert hi_rec == pytest.approx(2.0)
+    assert gradient(m.x, wrt=m.hi) == pytest.approx(1.0, abs=1e-6)
