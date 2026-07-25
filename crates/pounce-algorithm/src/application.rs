@@ -2960,10 +2960,26 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     // with variable bounds, a run to the box corner along the null-space
     // direction.)
     //
-    // Read it before `sqp_hessian` so an explicit setting still wins.
+    // The quasi-Newton source picked here is the *dense Powell-damped BFGS*,
+    // not the limited-memory one, even though the requesting option is spelled
+    // `limited-memory`. On this active-set-SQP path L-BFGS buys nothing: its
+    // `as_triplet` materializes a full dense `n×n` Hessian for the QP
+    // subproblem exactly as `DampedBfgs` does (the matrix-free product
+    // interface that would make L-BFGS cheaper is not implemented yet), and it
+    // is markedly less robust -- it stalls with
+    // `Search_Direction_Becomes_Too_Small` (or reports the QP subproblem
+    // `unbounded`) on easy, well-conditioned convex QPs whenever a general
+    // inequality is active at the optimum, returning `success=False` with a
+    // wrong `x` (issue #358). `DampedBfgs` solves those. So the automatic
+    // approximation the facade injects when no analytic Hessian is available
+    // maps to the robust dense update; a caller who genuinely wants
+    // limited-memory storage can still request it explicitly with
+    // `sqp_hessian = "lbfgs"` below (read after this, so it wins).
+    //
+    // Read this before `sqp_hessian` so an explicit setting still wins.
     if let Ok((s, true)) = options.get_string_value("hessian_approximation", "") {
         if s == "limited-memory" {
-            opts.hessian = SqpHessianSource::Lbfgs;
+            opts.hessian = SqpHessianSource::DampedBfgs;
         }
     }
     if let Ok((s, true)) = options.get_string_value("sqp_hessian", "") {
@@ -3449,6 +3465,91 @@ mod tests {
         assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
         assert_eq!(snap.sqp.print_level, 2);
         assert_eq!(snap.sqp.lbfgs_max_history, 12);
+    }
+
+    /// Every `sqp_qp_*` key that [`apply_qp_subproblem_options`] reads must
+    /// actually be *registered*, and must reach `pounce_qp::QpOptions`.
+    ///
+    /// The whole family was readable-but-unregistered (gh #360): the options
+    /// registry rejected each one with OPTION_INVALID, so the reader was
+    /// unreachable and the documented knobs were unusable. This is the guard
+    /// that class of omission needs — it fails both if a key stops being
+    /// registered and if a newly-read key is never registered at all.
+    #[test]
+    fn application_sqp_qp_subproblem_options_are_registered_and_propagate() {
+        use pounce_qp::AntiCyclingChoice;
+
+        // Source of truth: the keys `apply_qp_subproblem_options` reads.
+        // Kept in step with that function by the round-trip assertions below.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             sqp_qp_max_iter 37\n\
+             sqp_qp_feas_tol 1e-7\n\
+             sqp_qp_opt_tol 2e-7\n\
+             sqp_qp_elastic_gamma 1e4\n\
+             sqp_qp_anti_cycling bland\n",
+        )
+        .expect("every sqp_qp_* option must be registered (gh #360)");
+
+        let qp = &app.algorithm_builder_snapshot().sqp_qp;
+        assert_eq!(qp.max_iter, 37);
+        assert!((qp.feas_tol - 1e-7).abs() < 1e-20);
+        assert!((qp.opt_tol - 2e-7).abs() < 1e-20);
+        assert!((qp.elastic_gamma - 1e4).abs() < 1e-9);
+        assert_eq!(qp.anti_cycling, AntiCyclingChoice::Bland);
+
+        // Untouched options must keep the pounce-qp defaults, not be
+        // overwritten with zeros by the "explicitly set" gate.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        let defaults = pounce_qp::QpOptions::default();
+        let qp = &app.algorithm_builder_snapshot().sqp_qp;
+        assert_eq!(qp.max_iter, defaults.max_iter);
+        assert!((qp.feas_tol - defaults.feas_tol).abs() < 1e-20);
+        assert!((qp.opt_tol - defaults.opt_tol).abs() < 1e-20);
+        assert_eq!(qp.anti_cycling, defaults.anti_cycling);
+    }
+
+    #[test]
+    fn application_sqp_hessian_approximation_maps_to_damped_bfgs() {
+        // The frontend sets `hessian_approximation = limited-memory` when no
+        // exact Lagrangian Hessian is available (e.g. `pounce.minimize` with
+        // no `hess`). On the active-set-SQP path that must resolve to the
+        // dense Powell-damped BFGS, NOT the limited-memory update: L-BFGS
+        // materializes the same dense Hessian for the QP subproblem yet stalls
+        // (`Search_Direction_Becomes_Too_Small` / wrong `x`) on convex QPs with
+        // an active inequality (issue #358); damped-BFGS solves them.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             hessian_approximation limited-memory\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_snapshot().sqp.hessian,
+            crate::sqp::SqpHessianSource::DampedBfgs
+        );
+
+        // An explicit `sqp_hessian = lbfgs` is still honored (it is read after
+        // `hessian_approximation`, so it wins): callers who genuinely want the
+        // limited-memory update can still ask for it.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             hessian_approximation limited-memory\n\
+             sqp_hessian lbfgs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.algorithm_builder_snapshot().sqp.hessian,
+            crate::sqp::SqpHessianSource::Lbfgs
+        );
     }
 
     #[test]

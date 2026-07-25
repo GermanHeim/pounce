@@ -1525,15 +1525,17 @@ def test_active_set_sqp_honors_hessian_approximation():
 
 def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
     """Explicit ``sqp_hessian=exact`` with no available Hessian must fall back
-    to L-BFGS, not die with ``Internal_Error`` (issue #348).
+    to a quasi-Newton approximation, not die with ``Internal_Error`` (issue #348).
 
     The automatic ``hessian_approximation=limited-memory`` downgrade is applied
     first, but an explicit ``sqp_hessian=exact`` in the user options is applied
     *after* it and re-enabled the ``Exact`` source with no Hessian behind it:
     the driver evaluated a zero Lagrangian Hessian, so the QP subproblem went
     unbounded and the solve died with ``Internal_Error``. The fix downgrades an
-    exact request to L-BFGS (with a warning) whenever the problem exposes no
-    ``hessian`` / ``hessianstructure``.
+    exact request to the dense Powell-damped BFGS (with a warning) whenever the
+    problem exposes no ``hessian`` / ``hessianstructure`` (damped-BFGS rather
+    than L-BFGS: the latter stalls on convex QPs with an active inequality,
+    issue #358).
     """
     fun = lambda v: (v[0] - 3.0) ** 2 + (v[1] - 2.0) ** 2
     jac = lambda v: np.array([2 * (v[0] - 3.0), 2 * (v[1] - 2.0)])
@@ -1562,7 +1564,7 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
             )
         assert r.success, f"exact-without-hessian must not fail: {r.message}"
         np.testing.assert_allclose(r.x, expected, atol=1e-6)
-        assert r.nhev == 0, "downgrade to L-BFGS means the exact Hessian is unused"
+        assert r.nhev == 0, "the quasi-Newton downgrade means the exact Hessian is unused"
 
     # (b) genuinely nonlinear constraint + hess: same downgrade, still solves.
     nl_con = [
@@ -1604,6 +1606,183 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
         "exact Hessian was requested" in str(w.message) for w in rec
     ), "exact must be honored (not downgraded) when a Hessian is available"
     assert r.nhev > 0, "the exact Hessian should actually be used here"
+
+
+def test_qp_active_set_facade_solves_convex_qp_with_active_inequality():
+    """The default ``qp-active-set`` facade path must converge on an easy convex
+    QP whose general inequality is active at the optimum (issue #358).
+
+    With no ``hess`` supplied, ``pounce.minimize`` sets
+    ``hessian_approximation=limited-memory`` automatically. That used to select
+    the L-BFGS Lagrangian Hessian on the active-set-SQP path, which stalled with
+    ``Search_Direction_Becomes_Too_Small`` and returned ``success=False`` with a
+    wrong ``x`` — even on a well-conditioned 3-D QP. The fix maps the automatic
+    approximation to the dense Powell-damped BFGS (which materializes the same
+    dense QP-subproblem Hessian but is far more robust); the explicit
+    ``sqp_hessian=lbfgs`` opt-in is unchanged.
+    """
+    rng = np.random.default_rng(113)
+    Q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+    P = (Q * np.geomspace(1, 10, 3)) @ Q.T  # SPD, cond(P) = 10
+    xu = rng.standard_normal(3)  # unconstrained minimiser
+    c = -P @ xu
+    a = rng.standard_normal(3)
+    G = a.reshape(1, 3)
+    h = np.array([a @ xu - 1.0])  # one inequality a·x <= a·xu - 1 (ACTIVE)
+
+    fun = lambda x: 0.5 * x @ P @ x + c @ x
+    jac = lambda x: P @ x + c
+    con = [{"type": "ineq", "fun": lambda x: (h - G @ x), "jac": lambda x: -G}]
+
+    # Closed-form KKT optimum (single active inequality).
+    kkt = np.block([[P, G.T], [G, np.zeros((1, 1))]])
+    x_star = np.linalg.solve(kkt, np.concatenate([-c, h]))[:3]
+
+    r = pounce.minimize(
+        fun, np.zeros(3), jac=jac, constraints=con,
+        options={"solver_selection": "qp-active-set"},
+    )
+    assert r.success, f"qp-active-set must converge here: {r.message}"
+    np.testing.assert_allclose(r.x, x_star, atol=1e-5)
+
+
+@pytest.mark.parametrize("n,cond,seed", [(8, 1000, 0), (8, 1000, 1), (3, 100, 0)])
+def test_qp_active_set_facade_solves_ill_conditioned_tail(n, cond, seed):
+    """The ``cond(P) ≳ 1e3`` tail of issue #358.
+
+    These convex QPs (active inequality) previously failed even with the
+    damped-BFGS Hessian: the identity-seeded quasi-Newton first step overshoots
+    the Newton step by ``~cond(P)``, and the empty filter accepts the
+    objective-blowing step at the near-feasible start, corrupting the working
+    set and diverging to ``‖x‖ ~ 1e4`` before dying with
+    ``Search_Direction_Becomes_Too_Small``. One-time initial Hessian sizing
+    (``B₀ ← (sᵀy/sᵀs)·I`` before the first update) fixes them.
+    """
+    rng = np.random.default_rng(1000 + seed * 7 + n * 100 + cond)
+    Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    P = (Q * np.geomspace(1, cond, n)) @ Q.T
+    xu = rng.standard_normal(n)
+    c = -P @ xu
+    a = rng.standard_normal(n)
+    G = a.reshape(1, n)
+    h = np.array([a @ xu - 1.0])
+
+    fun = lambda x: 0.5 * x @ P @ x + c @ x
+    jac = lambda x: P @ x + c
+    con = [{"type": "ineq", "fun": lambda x: (h - G @ x), "jac": lambda x: -G}]
+    kkt = np.block([[P, G.T], [G, np.zeros((1, 1))]])
+    x_star = np.linalg.solve(kkt, np.concatenate([-c, h]))[:n]
+
+    r = pounce.minimize(
+        fun, np.zeros(n), jac=jac, constraints=con,
+        options={"solver_selection": "qp-active-set"},
+    )
+    assert r.success, f"n={n} cond={cond}: {r.message}"
+    np.testing.assert_allclose(r.x, x_star, atol=1e-4)
+
+
+def test_qp_active_set_facade_sweep_matches_issue_358_scope():
+    """Guard the #358 scope measurement itself: the whole 36-instance grid.
+
+    The issue reported 29/36 of these failing on 0.9.0. This asserts the grid
+    solves clean, so a future regression in the active-set-SQP quasi-Newton
+    path cannot silently reintroduce it. Deterministic (fixed seeds).
+    """
+    failures = []
+    for n in (3, 5, 8):
+        for cond in (10, 100, 1000):
+            for seed in range(4):
+                rng = np.random.default_rng(1000 + seed * 7 + n * 100 + cond)
+                Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+                P = (Q * np.geomspace(1, cond, n)) @ Q.T
+                xu = rng.standard_normal(n)
+                c = -P @ xu
+                a = rng.standard_normal(n)
+                G = a.reshape(1, n)
+                h = np.array([a @ xu - 1.0])
+
+                fun = lambda x, P=P, c=c: 0.5 * x @ P @ x + c @ x
+                jac = lambda x, P=P, c=c: P @ x + c
+                con = [{
+                    "type": "ineq",
+                    "fun": lambda x, h=h, G=G: (h - G @ x),
+                    "jac": lambda x, G=G: -G,
+                }]
+                kkt = np.block([[P, G.T], [G, np.zeros((1, 1))]])
+                x_star = np.linalg.solve(kkt, np.concatenate([-c, h]))[:n]
+
+                r = pounce.minimize(
+                    fun, np.zeros(n), jac=jac, constraints=con,
+                    options={"solver_selection": "qp-active-set"},
+                )
+                if not r.success or np.linalg.norm(r.x - x_star, np.inf) > 1e-4:
+                    failures.append((n, cond, seed, r.message))
+    assert not failures, f"{len(failures)}/36 instances failed: {failures}"
+
+
+def test_qp_active_set_equality_constrained_ill_conditioned():
+    """Ill-conditioned *equality*-constrained QPs must converge (gh #361).
+
+    These used to exit ``Maximum_Iterations_Exceeded`` **at the right answer**:
+    the quasi-Newton curvature pair differenced ``∇L`` across two different
+    multipliers, injecting a spurious ``Aᵀ(λ_k − λ_{k−1})`` term (pure
+    multiplier noise for linear constraints). The multiplier then diverged while
+    ``x`` sat on the optimum, and the reported stationarity residual — computed
+    from that multiplier — never met the tolerance.
+    """
+    failures = []
+    for n in (3, 5, 8):
+        for cond in (100, 1000):
+            for seed in range(4):
+                rng = np.random.default_rng(50000 + n * 1000 + cond + seed * 7)
+                Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+                P = (Q * np.geomspace(1, cond, n)) @ Q.T
+                xu = rng.standard_normal(n)
+                c = -P @ xu
+                a = rng.standard_normal(n)
+                b = a @ xu - 0.5
+
+                fun = lambda x, P=P, c=c: 0.5 * x @ P @ x + c @ x
+                jac = lambda x, P=P, c=c: P @ x + c
+                con = [{
+                    "type": "eq",
+                    "fun": lambda x, a=a, b=b: np.array([a @ x - b]),
+                    "jac": lambda x, a=a, n=n: a.reshape(1, n),
+                }]
+                kkt = np.block([[P, a.reshape(-1, 1)],
+                                [a.reshape(1, -1), np.zeros((1, 1))]])
+                x_star = np.linalg.solve(kkt, np.concatenate([-c, [b]]))[:n]
+
+                r = pounce.minimize(
+                    fun, np.zeros(n), jac=jac, constraints=con,
+                    options={"solver_selection": "qp-active-set"},
+                )
+                if not r.success or np.linalg.norm(r.x - x_star, np.inf) > 1e-4:
+                    failures.append((n, cond, seed, r.message))
+    assert not failures, f"{len(failures)}/24 equality instances failed: {failures}"
+
+
+def test_sqp_qp_subproblem_options_are_settable():
+    """The ``sqp_qp_*`` inner-QP options must be accepted (gh #360).
+
+    They were read by the backend but never registered, so every one of them
+    raised ``Unknown option`` and the documented knobs were unusable.
+    """
+    fun = lambda x: x @ x
+    jac = lambda x: 2 * x
+    for key, val in [
+        ("sqp_qp_max_iter", 500),
+        ("sqp_qp_feas_tol", 1e-7),
+        ("sqp_qp_opt_tol", 1e-7),
+        ("sqp_qp_elastic_gamma", 1e5),
+        ("sqp_qp_anti_cycling", "bland"),
+    ]:
+        r = pounce.minimize(
+            fun, np.ones(2), jac=jac,
+            options={"solver_selection": "qp-active-set", key: val},
+        )
+        assert r.success, f"{key}={val!r}: {r.message}"
+        np.testing.assert_allclose(r.x, np.zeros(2), atol=1e-6)
 
 
 def test_uncomputed_objective_is_nan_not_zero():

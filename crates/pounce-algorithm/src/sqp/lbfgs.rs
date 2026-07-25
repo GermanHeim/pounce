@@ -104,18 +104,31 @@ impl LBfgs {
                 .zip(prev_grad_lag.iter())
                 .map(|(a, b)| a - b)
                 .collect();
-            // Skip degenerate pairs (s ≈ 0).
-            let s_norm2: Number = s.iter().map(|v| v * v).sum();
-            if s_norm2 > 1e-30 {
-                if self.pairs.len() == self.m_history {
-                    self.pairs.pop_front();
-                }
-                self.pairs.push_back((s, y));
-            }
+            self.update_sy(&s, &y);
         }
 
         self.prev_x = Some(x_new.to_vec());
         self.prev_grad_lag = Some(grad_lag_new.to_vec());
+    }
+
+    /// Record an explicit curvature pair `(s, y)`.
+    ///
+    /// Prefer this over [`Self::update`] when the caller can form `y`
+    /// itself: the SQP driver must difference `∇L` at a **single, fixed**
+    /// multiplier (see `sqp_alg::curvature_pair`), which the `(x, ∇L)`
+    /// form cannot express because it stores the previous `∇L` as
+    /// evaluated at the previous multiplier.
+    pub fn update_sy(&mut self, s: &[Number], y: &[Number]) {
+        assert_eq!(s.len(), self.n, "LBFGS::update_sy: s.len() != n");
+        assert_eq!(y.len(), self.n, "LBFGS::update_sy: y.len() != n");
+        // Skip degenerate pairs (s ≈ 0).
+        let s_norm2: Number = s.iter().map(|v| v * v).sum();
+        if s_norm2 > 1e-30 {
+            if self.pairs.len() == self.m_history {
+                self.pairs.pop_front();
+            }
+            self.pairs.push_back((s.to_vec(), y.to_vec()));
+        }
     }
 
     /// Materialize the current B_k as a dense `Triplet` over the

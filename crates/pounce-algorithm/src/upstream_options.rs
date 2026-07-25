@@ -430,6 +430,78 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         6,
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
+    // ----- Inner QP-subproblem knobs (`sqp_qp_*`) -----
+    //
+    // Consulted only on `solver_selection=qp-active-set` (the active-set SQP
+    // engine, whose step QPs are solved by pounce-qp). Read into the algorithm
+    // builder by `application::apply_qp_subproblem_options`; each forwards only
+    // when explicitly set, otherwise the pounce-qp default stands. The outer
+    // SQP loop has its own `sqp_*` family, registered above; these `sqp_qp_*`
+    // knobs tune the inner QP solver specifically.
+    //
+    // These used to be registered by the CLI binary alone (`pounce-cli`'s
+    // `main`), so they worked on the command line but were rejected with
+    // OPTION_INVALID ("Unknown option") on the library / Python path, where
+    // `apply_qp_subproblem_options` could therefore never see them (gh #360).
+    // Registering here — in the core registry every entry point initializes —
+    // serves both. Do NOT re-add a CLI-side copy: duplicate registration
+    // raises OPTION_ALREADY_REGISTERED and aborts the binary at startup.
+    //
+    // NOTE: the SQP driver additionally scales `sqp_qp_feas_tol` /
+    // `sqp_qp_opt_tol` by the QP-subproblem data magnitude at each iteration
+    // (gh #358) — these are the *base* tolerances that scaling multiplies, not
+    // a hard floor on the inner solve.
+    r.add_lower_bounded_number_option(
+        "sqp_qp_feas_tol",
+        "Active-set QP-subproblem feasibility tolerance > 0.",
+        0.0,
+        true,
+        1e-9,
+        "Active-set SQP only (solver_selection=qp-active-set). Constraint \
+         feasibility tolerance for the pounce-qp subproblem solve. \
+         Default 1e-9.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_qp_opt_tol",
+        "Active-set QP-subproblem optimality (KKT) tolerance > 0.",
+        0.0,
+        true,
+        1e-9,
+        "Active-set SQP only. Optimality / KKT tolerance for the pounce-qp \
+         subproblem solve. Default 1e-9.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "sqp_qp_max_iter",
+        "Active-set QP-subproblem iteration cap.",
+        1,
+        200,
+        "Active-set SQP only. Maximum active-set pivots per QP subproblem \
+         solve. Default 200.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_qp_elastic_gamma",
+        "Active-set QP-subproblem elastic-mode penalty γ > 0.",
+        0.0,
+        true,
+        1e6,
+        "Active-set SQP only. Penalty on the elastic (phase-1) slacks used \
+         to recover from an infeasible QP subproblem. Large enough that the \
+         slacks vanish at the solution of a feasible QP, small enough not to \
+         dominate the Hessian conditioning. Default 1e6.",
+    )?;
+    r.add_string_option(
+        "sqp_qp_anti_cycling",
+        "Active-set QP-subproblem anti-cycling rule.",
+        "expand",
+        &[
+            ("expand", "EXPAND tolerance-growth + Harris two-pass (Gill-Murray-Saunders-Wright 1989). Default."),
+            ("bland", "Bland's rule: slower but guaranteed finite; mainly for tests."),
+            ("none", "No anti-cycling — benchmarking only; may cycle on degenerate QPs."),
+        ],
+        "Active-set SQP only. Anti-cycling strategy for the pounce-qp \
+         subproblem ratio test. Default expand.",
+    )?;
+
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19 (Curtis-Reid; minimizes sum of log^2 |a_ij|)"), ("ruiz", "use iterative symmetric infinity-norm equilibration (Ruiz, 2001)"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
 

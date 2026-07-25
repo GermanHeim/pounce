@@ -9,6 +9,131 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `qp-active-set` facade returned `success=False` and a wrong `x` on convex QPs with an active inequality (#358)
+
+- **The default `pounce.minimize(..., solver_selection="qp-active-set")` path
+  now converges** on easy, well-conditioned convex QPs whose general inequality
+  is active at the optimum. When the caller supplies no analytic Hessian the
+  facade sets `hessian_approximation=limited-memory`, which on the
+  active-set-SQP path selected the L-BFGS Lagrangian Hessian — it stalled with
+  `Search_Direction_Becomes_Too_Small` (or reported the QP subproblem
+  `unbounded`) and returned `success=False` together with a silently wrong `x`,
+  even at `cond(P)=10`, `n=3`. On a 36-instance sweep 29/36 failed.
+  - Fix: on the SQP path the automatic quasi-Newton approximation now maps to
+    the dense Powell-damped BFGS (`crates/pounce-algorithm/src/application.rs`),
+    which is far more robust and — because L-BFGS materializes the same dense
+    `n×n` Hessian for the QP subproblem today — costs nothing extra. An explicit
+    `sqp_hessian="lbfgs"` opt-in is still honored unchanged. The `#348`
+    exact-without-Hessian downgrade now targets damped-BFGS for the same reason.
+  - Independent oracles (closed-form KKT, `pounce.solve_qp` IPM, scipy SLSQP)
+    and every other pounce path already solved these; only the facade's L-BFGS
+    SQP default was affected.
+
+### Fixed — active-set-SQP quasi-Newton overshoot on ill-conditioned QPs (#358 tail)
+
+- **The damped-BFGS active-set-SQP now sizes its initial Hessian**, fixing the
+  ill-conditioned tail of #358 (`cond(P) ≳ 1e3`). The identity seed `B₀ = I` is
+  a catastrophic scale when `‖∇²L‖ ≫ 1`: the first QP step overshoots the Newton
+  step by `~cond(∇²L)`, and the filter line search — with an empty filter at a
+  near-feasible start (`θ_curr` tiny) — accepts the objective-blowing step
+  because it drives the negligible constraint violation to zero. The working set
+  is corrupted and the solve diverges to `‖x‖ ~ 1e4` before dying with
+  `Search_Direction_Becomes_Too_Small`.
+  - Fix (`crates/pounce-algorithm/src/sqp/bfgs.rs`): before the first rank-2
+    update, rescale `B` from `I` to `γI` with the Rayleigh-quotient curvature
+    estimate `γ = sᵀy / sᵀs ∈ [λ_min(∇²L), λ_max(∇²L)]` — applied once, so the
+    persistent damped updates still accumulate on top. Halves the failure rate
+    on a broad ill-conditioned-QP sweep (~21% → ~10%) and clears the #358
+    36-instance tail sweep entirely.
+  - Three further fixes below close the rest of this gap.
+
+### Fixed — three more active-set-SQP robustness holes on ill-conditioned QPs (#358)
+
+Continuing the above: on a 500-instance convex-QP sweep (`n ∈ {2,3,5,8,12}`,
+`cond ∈ {1…1e4}`, 20 seeds) failures fell from **~10% to 0.8%**, and the
+`Search_Direction_Becomes_Too_Small` failure mode was eliminated entirely
+(46 → 0). The error distribution of the solves that already succeeded is
+unchanged (median `6e-11`, max true constraint violation `4e-11`).
+
+- **Iteration-0 curvature probe.** The one-time BFGS sizing above cannot fire
+  until iteration 1 — but iteration **0** already solves a QP, against the raw
+  identity seed. Before that first QP, the driver now differences the gradient
+  across a short steepest-descent probe step and seeds `B = γI` with the
+  resulting Rayleigh quotient (one extra gradient evaluation). This is applied
+  **only when the constraint Jacobian is detected constant** (linear
+  constraints, or none), because the probe measures `∇²f`, which equals the
+  Lagrangian Hessian `∇²L = ∇²f + Σλᵢ∇²cᵢ` only when the constraint-curvature
+  term vanishes. On the Maratos problem `∇²f = 4I` while `∇²L ≈ I`, so probing
+  there would over-scale fourfold — the linearity gate keeps that path
+  untouched.
+- **Scale-relative inner-QP tolerances.** `QpOptions::{feas_tol, opt_tol}` are
+  absolute `1e-9`. As an *inner* subproblem the QP inherits the NLP's scale, so
+  with `‖∇f‖ ~ ‖B‖ ~ 1e3` that is `~1e-12` relative — the f64 noise floor. The
+  active-set solver could not certify its own optimality, burned its iteration
+  budget, returned `MaxIter`, and the driver aborted with `QpStepFailed`. Both
+  tolerances are now scaled by the QP data magnitude (clamped at `1e6`).
+  Correctness is unaffected: the outer loop still gates optimality on the true,
+  unscaled NLP KKT residuals, so a sloppier inner step can cost an extra outer
+  iteration but never a false `Optimal`.
+- **Quasi-Newton reset-and-retry.** A QP subproblem that still fails is usually
+  reporting a drifted quasi-Newton Hessian, not a bad linearization. Rather than
+  abort the whole solve, the driver now discards the accumulated curvature
+  (retaining the matrix's scale), rebuilds the subproblem, and re-solves once
+  from cold.
+
+### Fixed — quasi-Newton curvature pair used inconsistent multipliers (#361)
+
+- **The active-set-SQP quasi-Newton update now differences `∇L` at a single
+  fixed multiplier**, per Nocedal-Wright §18.3:
+  `y = ∇L(x_k, λ_k) − ∇L(x_{k−1}, λ_k)`. It previously held
+  `∇L(x_{k−1}, λ_{k−1})` inside the Hessian object and differenced against
+  `∇L(x_k, λ_k)` — two *different* multipliers — which for linear constraints
+  contributes a spurious `Aᵀ(λ_k − λ_{k−1})` term: pure multiplier difference,
+  carrying no curvature at all (the true `∇²L` equals `∇²f` there).
+  - That fed a divergent loop — a perturbed `B` yields a worse QP multiplier,
+    which injects a larger error into the next `y`, which corrupts `B` further.
+    On equality-constrained QPs (where `λ` is sign-free) the multiplier was
+    observed oscillating and growing exponentially
+    (`−13, 19, −69, 104, −145, 581, −1320, 3176, …`) while **`x` sat on the
+    exact optimum**. The solve burned its whole iteration budget and exited
+    `Maximum_Iterations_Exceeded` *at the right answer*, because the reported
+    stationarity residual is formed from that multiplier.
+  - Equality-constrained sweep (144 instances): **92 failures on 0.9.0 → 0**.
+    Inequality sweep (500 instances): **4 → 0**. All constraint families
+    (linear equality, linear inequality, nonlinear inequality) now solve clean.
+  - Fixed for both `damped-bfgs` and `lbfgs`. The consistent-multiplier form
+    telescopes to `Σλᵢ(∇cᵢ(x_k) − ∇cᵢ(x_{k−1}))`, which correctly vanishes for
+    linear constraints and is retained for nonlinear ones.
+
+- **`sqp_tol` is now honored.** It was registered and documented as the max-norm
+  KKT stationarity tolerance (default `1e-8`) but never read, so the looser
+  `sqp_dual_inf_tol` (`1e-4`) governed alone and silently capped attainable
+  accuracy. The convergence test now requires the tighter of the two — the only
+  reading under which neither option is inert. Worst-case error on the #358
+  sweep improves from `7e-5` to `5e-9` for ~10% more iterations. Same
+  registered-but-inert defect family as #360.
+
+### Fixed — `sqp_qp_*` inner-QP options were unusable (#360)
+
+- **The five `sqp_qp_*` options are now registered** and reach
+  `pounce_qp::QpOptions`: `sqp_qp_max_iter`, `sqp_qp_feas_tol`,
+  `sqp_qp_opt_tol`, `sqp_qp_elastic_gamma`, `sqp_qp_anti_cycling`.
+  `apply_qp_subproblem_options` read all five, but none was registered, so the
+  options registry rejected every one with `OPTION_INVALID` ("Unknown option")
+  and the reader was unreachable — the whole documented family was dead code.
+  Added a guard test asserting each key is settable *and* propagates, and that
+  unset keys keep the `pounce-qp` defaults.
+
+**Correction to an earlier note in this section:** a previous revision of this
+entry stated that equality-constrained ill-conditioned QPs were "measured
+unchanged" by the #358 work and that the path showed run-to-run
+nondeterminism. Both claims were wrong — artifacts of a benchmark harness that
+seeded `numpy` from `hash()` of a tuple **containing a string**, which Python
+randomizes per process, so every run silently generated different problems. With
+integer-only seeds the solver is bit-for-bit reproducible, and the #358 work in
+fact improved that family substantially (92 → 38 failures/144) before #361 took
+it to 0.
+
 ## [0.9.0] - 2026-07-24
 
 ### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
