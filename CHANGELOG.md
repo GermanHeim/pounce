@@ -9,6 +9,47 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: a declared Param in a `Var` bound reported exactly zero sensitivity (#356)
+
+- **A limit written as a variable bound now moves with the Param that sets
+  it.** `pyomo.contrib.sensitivity_toolbox`, which supplies the expression
+  surgery behind `declare_sens_param`, substitutes declared Params in
+  *constraint* expressions only. A Param left in a `Var` bound was written to
+  the `.nl` file as a constant at its pre-perturbation value, so the bound
+  never moved and `gradient(m.x, wrt=m.p)` read exactly `0.0` — a wrong answer
+  indistinguishable from a legitimate insensitivity. `sens_solve` now rewrites
+  such a bound as a constraint over the substituted variable, so the two
+  spellings of the same limit agree. Expression bounds such as
+  `bounds=(0, 2*p + 1)` are handled, not just a bare Param.
+  - On a minimum-time racing problem with an acceleration cap, discretized at
+    `nfe=100`, `d tf/d u_up` goes from `0.000000` to `-6.323665` — matching the
+    constraint spelling of the same cap to every digit, and cutting the
+    estimate error at a 10% perturbation from `5.81e-01` to `5.17e-02`.
+- Fixed Vars and Vars on deactivated Blocks are deliberately skipped. A fixed
+  Var's bounds are never enforced by the solver (Pyomo substitutes it out as a
+  constant), so rewriting one would impose a restriction on the pinned Param
+  that the original model never had; a deactivated Block's Var would be pulled
+  into the `.nl` file as a free column restricted only by the new row.
+- Two consequences are deliberate and worth knowing. The rewrite **drops the
+  bound** on the clone that is solved: `m.x.ub` reads `None` there and the NL
+  row carries the reader's no-bound sentinel `1e19` (finite, so an `isinf()`
+  test would not catch it). The original model is untouched. And `estimate()`
+  no longer clamps or warns for those variables — correct, because the bound
+  now moves with the perturbation, so the linear step already respects it to
+  first order. `covariance()`'s bound-active projection is unaffected: the
+  pre-rewrite bound value is recorded at solve time and read back for the
+  activity test.
+- Cost: a simple bound is handled directly in the barrier, whereas a general
+  inequality costs a slack and a Jacobian row, so a model with many
+  Param-dependent bounds trades roughly one row per bound. Only models that
+  write a bound in terms of a declared Param pay this.
+- This makes pyomo-pounce answer **differently from `sensitivity_calculation`**
+  on the same model, deliberately: writing a limit as a bound is the natural
+  spelling, and requiring a manual rewrite to a constraint is precisely the
+  usability problem `declare_sens_param` exists to avoid. Recorded in the
+  `pyomo_pounce.sens` module docstring so it is discoverable without being
+  opt-in-able.
+
 ### Fixed — `qp-active-set` facade returned `success=False` and a wrong `x` on convex QPs with an active inequality (#358)
 
 - **The default `pounce.minimize(..., solver_selection="qp-active-set")` path
