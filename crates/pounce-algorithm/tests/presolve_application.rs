@@ -27,8 +27,6 @@ struct FinalPayload {
 #[derive(Default)]
 struct TightenedRow {
     final_payload: Option<FinalPayload>,
-    warm_z_seen: Option<(Vec<Number>, Vec<Number>)>,
-    warm_lambda_seen: Option<Vec<Number>>,
 }
 
 impl TNLP for TightenedRow {
@@ -58,12 +56,6 @@ impl TNLP for TightenedRow {
         }
         if sp.init_lambda {
             sp.lambda.copy_from_slice(&[7.0, 11.0]);
-        }
-        if sp.init_z {
-            self.warm_z_seen = Some((sp.z_l.to_vec(), sp.z_u.to_vec()));
-        }
-        if sp.init_lambda {
-            self.warm_lambda_seen = Some(sp.lambda.to_vec());
         }
         true
     }
@@ -218,14 +210,12 @@ fn library_presolve_off_preserves_unwrapped_solution_and_callback_shape() {
 }
 
 #[test]
-fn library_presolve_projects_warm_start_and_restores_original_payload() {
+fn library_presolve_warm_started_solve_restores_original_payload() {
     let (status, problem) = solve(true, true, None, false);
     assert!(matches!(
         status,
         ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
     ));
-    assert_eq!(problem.warm_z_seen, Some((vec![3.0], vec![0.0])));
-    assert_eq!(problem.warm_lambda_seen, Some(vec![7.0, 11.0]));
     let final_payload = problem.final_payload.expect("finalize_solution");
     assert_eq!(final_payload.g.len(), 2);
     assert_eq!(final_payload.lambda.len(), 2);

@@ -84,8 +84,8 @@ impl IterateInitializer for WarmStartIterateInitializer {
             }
         };
 
-        if needs_seed_from_nlp {
-            seed_from_nlp(data, nlp, &self.opts);
+        if needs_seed_from_nlp && !seed_from_nlp(data, nlp, &self.opts) {
+            return false;
         }
 
         if self.opts.mult_init_max > 0.0 || self.opts.mult_bound_push > 0.0 {
@@ -133,7 +133,14 @@ impl IterateInitializer for WarmStartIterateInitializer {
 /// install the result on `data.curr`. Mirrors steps 1-4 of
 /// `DefaultIterateInitializer::set_initial_iterates`, but with
 /// upstream's warm-start option block governing the push.
-fn seed_from_nlp(data: &IpoptDataHandle, nlp: &Rc<RefCell<dyn IpoptNlp>>, opts: &WarmStartOptions) {
+fn seed_from_nlp(
+    data: &IpoptDataHandle,
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    opts: &WarmStartOptions,
+) -> bool {
+    if !nlp.borrow_mut().prepare_warm_start() {
+        return false;
+    }
     let (n_x, n_s, n_yc, n_yd, n_zl, n_zu, n_vl, n_vu) = {
         let borrow = data.borrow();
         let c = borrow.curr.as_ref().unwrap();
@@ -207,6 +214,7 @@ fn seed_from_nlp(data: &IpoptDataHandle, nlp: &Rc<RefCell<dyn IpoptNlp>>, opts: 
         Rc::new(v_u),
     );
     data.borrow_mut().set_curr(iv);
+    true
 }
 
 fn is_initialized(v: &Rc<dyn Vector>) -> bool {

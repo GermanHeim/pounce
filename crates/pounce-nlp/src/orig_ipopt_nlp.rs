@@ -180,6 +180,9 @@ pub struct OrigIpoptNlp {
     /// full-size scratch allocations that requires) on every line-search
     /// trial. (Code review 2026-06 item M17.)
     c_rhs: Vec<Number>,
+    /// Full TNLP start point fetched once for a warm start, then projected
+    /// through the split x/y/z accessor calls without re-entering the TNLP.
+    warm_start_snapshot: RefCell<Option<StartingPointSnapshot>>,
 
     // ----- expansion matrices (instances; spaces above) -----
     px_l: Rc<dyn Matrix>,
@@ -242,6 +245,14 @@ pub struct OrigIpoptNlp {
     /// [`Self::set_timing_stats`]; when `None`, all `eval_*` entry
     /// points skip the timing overhead.
     timing: RefCell<Option<Rc<TimingStatistics>>>,
+}
+
+#[derive(Clone)]
+struct StartingPointSnapshot {
+    x: Vec<Number>,
+    z_l: Vec<Number>,
+    z_u: Vec<Number>,
+    lambda: Vec<Number>,
 }
 
 impl std::fmt::Debug for OrigIpoptNlp {
@@ -541,6 +552,7 @@ impl OrigIpoptNlp {
             d_l: Rc::new(d_l),
             d_u: Rc::new(d_u),
             c_rhs,
+            warm_start_snapshot: RefCell::new(None),
             px_l,
             px_u,
             pd_l,
@@ -1281,6 +1293,30 @@ impl OrigIpoptNlp {
 
     // -------------------- Initialization --------------------
 
+    fn fetch_warm_start_snapshot(&self) -> Option<StartingPointSnapshot> {
+        let cls = self.adapter.borrow().classification().clone();
+        let mut snapshot = StartingPointSnapshot {
+            x: vec![0.0; cls.n_full_x as usize],
+            z_l: vec![0.0; cls.n_full_x as usize],
+            z_u: vec![0.0; cls.n_full_x as usize],
+            lambda: vec![0.0; cls.n_full_g as usize],
+        };
+        let ok = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.get_starting_point(StartingPoint {
+                init_x: true,
+                x: &mut snapshot.x,
+                init_z: true,
+                z_l: &mut snapshot.z_l,
+                z_u: &mut snapshot.z_u,
+                init_lambda: true,
+                lambda: &mut snapshot.lambda,
+            })
+        };
+        ok.then_some(snapshot)
+    }
+
     /// Fill the algorithm's iterate slots with the TNLP's starting
     /// point. Mirrors the second half of upstream
     /// `InitializeStructures`. The caller passes already-allocated
@@ -1923,11 +1959,28 @@ impl IpoptNlp for OrigIpoptNlp {
         names.any_present().then_some(names)
     }
 
+    fn prepare_warm_start(&mut self) -> bool {
+        let Some(snapshot) = self.fetch_warm_start_snapshot() else {
+            return false;
+        };
+        *self.warm_start_snapshot.borrow_mut() = Some(snapshot);
+        true
+    }
+
     /// Populate `x` (length `n_x_var`) from the TNLP's starting point,
     /// compressed via `x_not_fixed_map`. Mirrors the `init_x` arm of
     /// upstream `IpOrigIpoptNLP::GetStartingPoint`.
     fn get_starting_x(&mut self, x: &mut dyn Vector) -> bool {
         let cls = self.adapter.borrow().classification().clone();
+        if let Some(snapshot) = self.warm_start_snapshot.borrow().as_ref() {
+            let Some(dx) = x.as_any_mut().downcast_mut::<DenseVector>() else {
+                return false;
+            };
+            for (var_idx, &full_idx) in cls.x_not_fixed_map.iter().enumerate() {
+                dx.values_mut()[var_idx] = snapshot.x[full_idx as usize];
+            }
+            return true;
+        }
         let n_full_x = cls.n_full_x as usize;
         let n_full_g = cls.n_full_g as usize;
         let mut full_x = vec![0.0; n_full_x];
@@ -1967,6 +2020,21 @@ impl IpoptNlp for OrigIpoptNlp {
         let Some(y_d) = y_d.as_any_mut().downcast_mut::<DenseVector>() else {
             return false;
         };
+        if let Some(snapshot) = self.warm_start_snapshot.borrow().as_ref() {
+            let cls = self.adapter.borrow().classification().clone();
+            let obj_scal = self.obj_scale_factor.get();
+            let c_scale = self.c_scale.borrow();
+            for (i, &g_idx) in cls.c_map.iter().enumerate() {
+                let cs = c_scale.as_ref().map(|v| v[i]).unwrap_or(1.0);
+                y_c.values_mut()[i] = snapshot.lambda[g_idx as usize] / cs * obj_scal;
+            }
+            let d_scale = self.d_scale.borrow();
+            for (i, &g_idx) in cls.d_map.iter().enumerate() {
+                let ds = d_scale.as_ref().map(|v| v[i]).unwrap_or(1.0);
+                y_d.values_mut()[i] = snapshot.lambda[g_idx as usize] / ds * obj_scal;
+            }
+            return true;
+        }
         let mut x = DenseVectorSpace::new(self.n()).make_new_dense();
         let mut z_l = DenseVectorSpace::new(self.x_l.dim()).make_new_dense();
         let mut z_u = DenseVectorSpace::new(self.x_u.dim()).make_new_dense();
@@ -1988,6 +2056,21 @@ impl IpoptNlp for OrigIpoptNlp {
         let Some(z_u) = z_u.as_any_mut().downcast_mut::<DenseVector>() else {
             return false;
         };
+        if let Some(snapshot) = self.warm_start_snapshot.borrow().as_ref() {
+            let cls = self.adapter.borrow().classification().clone();
+            let obj_scal = self.obj_scale_factor.get();
+            for (i, slot) in z_l.values_mut().iter_mut().enumerate() {
+                let var_idx = cls.x_l_map[i] as usize;
+                let full_idx = cls.x_not_fixed_map[var_idx] as usize;
+                *slot = snapshot.z_l[full_idx] * obj_scal;
+            }
+            for (i, slot) in z_u.values_mut().iter_mut().enumerate() {
+                let var_idx = cls.x_u_map[i] as usize;
+                let full_idx = cls.x_not_fixed_map[var_idx] as usize;
+                *slot = snapshot.z_u[full_idx] * obj_scal;
+            }
+            return true;
+        }
         let mut x = DenseVectorSpace::new(self.n()).make_new_dense();
         let mut y_c = DenseVectorSpace::new(self.m_eq()).make_new_dense();
         let mut y_d = DenseVectorSpace::new(self.m_ineq()).make_new_dense();
@@ -2140,6 +2223,7 @@ mod tests {
         eval_jac_g_value_calls: usize,
         eval_h_value_calls: usize,
         get_bounds_info_calls: usize,
+        get_starting_point_calls: usize,
     }
 
     impl TNLP for Hs071 {
@@ -2163,7 +2247,15 @@ mod tests {
             true
         }
         fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.get_starting_point_calls += 1;
             sp.x.copy_from_slice(&[1.0, 5.0, 5.0, 1.0]);
+            if sp.init_z {
+                sp.z_l.copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+                sp.z_u.copy_from_slice(&[5.0, 6.0, 7.0, 8.0]);
+            }
+            if sp.init_lambda {
+                sp.lambda.copy_from_slice(&[11.0, 13.0]);
+            }
             true
         }
         fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
@@ -2502,6 +2594,48 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(x.values(), &[1.0, 5.0, 5.0, 1.0]);
+    }
+
+    #[test]
+    fn warm_start_duals_are_forwarded_into_algorithm_vectors() {
+        let (_, mut nlp) = build_orig_nlp();
+        let mut y_c = nlp.c_space().make_new_dense();
+        let mut y_d = nlp.d_space().make_new_dense();
+        assert!(nlp.get_starting_y(&mut y_c, &mut y_d));
+        assert_eq!(y_c.values(), &[13.0], "equality multiplier g1");
+        assert_eq!(y_d.values(), &[11.0], "inequality multiplier g0");
+
+        let mut z_l = nlp.x_l_space().make_new_dense();
+        let mut z_u = nlp.x_u_space().make_new_dense();
+        let mut v_l = nlp.d_l_space().make_new_dense();
+        let mut v_u = nlp.d_u_space().make_new_dense();
+        assert!(nlp.get_starting_z(&mut z_l, &mut z_u, &mut v_l, &mut v_u));
+        assert_eq!(z_l.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(z_u.values(), &[5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn warm_start_prefetches_one_tnlp_snapshot_for_x_y_and_z() {
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        assert!(nlp.prepare_warm_start());
+
+        let mut x = nlp.x_space().make_new_dense();
+        let mut y_c = nlp.c_space().make_new_dense();
+        let mut y_d = nlp.d_space().make_new_dense();
+        let mut z_l = nlp.x_l_space().make_new_dense();
+        let mut z_u = nlp.x_u_space().make_new_dense();
+        let mut v_l = nlp.d_l_space().make_new_dense();
+        let mut v_u = nlp.d_u_space().make_new_dense();
+        assert!(nlp.get_starting_x(&mut x));
+        assert!(nlp.get_starting_y(&mut y_c, &mut y_d));
+        assert!(nlp.get_starting_z(&mut z_l, &mut z_u, &mut v_l, &mut v_u));
+
+        assert_eq!(tnlp.borrow().get_starting_point_calls, 1);
+        assert_eq!(x.values(), &[1.0, 5.0, 5.0, 1.0]);
+        assert_eq!(y_c.values(), &[13.0]);
+        assert_eq!(y_d.values(), &[11.0]);
+        assert_eq!(z_l.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(z_u.values(), &[5.0, 6.0, 7.0, 8.0]);
     }
 
     /// Two-variable TNLP with `x[0]` fixed at 7.0 (`x_l == x_u`) and
