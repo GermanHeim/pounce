@@ -1646,6 +1646,41 @@ def test_qp_active_set_facade_solves_convex_qp_with_active_inequality():
     np.testing.assert_allclose(r.x, x_star, atol=1e-5)
 
 
+@pytest.mark.parametrize("n,cond,seed", [(8, 1000, 0), (8, 1000, 1), (3, 100, 0)])
+def test_qp_active_set_facade_solves_ill_conditioned_tail(n, cond, seed):
+    """The ``cond(P) ≳ 1e3`` tail of issue #358.
+
+    These convex QPs (active inequality) previously failed even with the
+    damped-BFGS Hessian: the identity-seeded quasi-Newton first step overshoots
+    the Newton step by ``~cond(P)``, and the empty filter accepts the
+    objective-blowing step at the near-feasible start, corrupting the working
+    set and diverging to ``‖x‖ ~ 1e4`` before dying with
+    ``Search_Direction_Becomes_Too_Small``. One-time initial Hessian sizing
+    (``B₀ ← (sᵀy/sᵀs)·I`` before the first update) fixes them.
+    """
+    rng = np.random.default_rng(1000 + seed * 7 + n * 100 + cond)
+    Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    P = (Q * np.geomspace(1, cond, n)) @ Q.T
+    xu = rng.standard_normal(n)
+    c = -P @ xu
+    a = rng.standard_normal(n)
+    G = a.reshape(1, n)
+    h = np.array([a @ xu - 1.0])
+
+    fun = lambda x: 0.5 * x @ P @ x + c @ x
+    jac = lambda x: P @ x + c
+    con = [{"type": "ineq", "fun": lambda x: (h - G @ x), "jac": lambda x: -G}]
+    kkt = np.block([[P, G.T], [G, np.zeros((1, 1))]])
+    x_star = np.linalg.solve(kkt, np.concatenate([-c, h]))[:n]
+
+    r = pounce.minimize(
+        fun, np.zeros(n), jac=jac, constraints=con,
+        options={"solver_selection": "qp-active-set"},
+    )
+    assert r.success, f"n={n} cond={cond}: {r.message}"
+    np.testing.assert_allclose(r.x, x_star, atol=1e-4)
+
+
 def test_uncomputed_objective_is_nan_not_zero():
     """An objective that was never evaluated must not be reported as ``0.0``.
 

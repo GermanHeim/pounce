@@ -29,6 +29,27 @@ changes.
     and every other pounce path already solved these; only the facade's L-BFGS
     SQP default was affected.
 
+### Fixed — active-set-SQP quasi-Newton overshoot on ill-conditioned QPs (#358 tail)
+
+- **The damped-BFGS active-set-SQP now sizes its initial Hessian**, fixing the
+  ill-conditioned tail of #358 (`cond(P) ≳ 1e3`). The identity seed `B₀ = I` is
+  a catastrophic scale when `‖∇²L‖ ≫ 1`: the first QP step overshoots the Newton
+  step by `~cond(∇²L)`, and the filter line search — with an empty filter at a
+  near-feasible start (`θ_curr` tiny) — accepts the objective-blowing step
+  because it drives the negligible constraint violation to zero. The working set
+  is corrupted and the solve diverges to `‖x‖ ~ 1e4` before dying with
+  `Search_Direction_Becomes_Too_Small`.
+  - Fix (`crates/pounce-algorithm/src/sqp/bfgs.rs`): before the first rank-2
+    update, rescale `B` from `I` to `γI` with the Rayleigh-quotient curvature
+    estimate `γ = sᵀy / sᵀs ∈ [λ_min(∇²L), λ_max(∇²L)]` — applied once, so the
+    persistent damped updates still accumulate on top. Halves the failure rate
+    on a broad ill-conditioned-QP sweep (~21% → ~10%) and clears the #358
+    36-instance tail sweep entirely.
+  - Not a complete cure for *extreme* conditioning: `cond(P) ≳ 1e4` (especially
+    small `n`) remains harder for the quasi-Newton path than for the
+    exact-Hessian / IPM / `solver_selection="auto"` routes, which solve these to
+    machine precision. Prefer those for very ill-conditioned QPs.
+
 ## [0.9.0] - 2026-07-24
 
 ### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
