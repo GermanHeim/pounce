@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+### Performance — pyomo-pounce: `sens.py` resolved every row by linear scan, making `gradient(target=None).to_dataframe()` quadratic (#365)
+
+- **Name-to-row lookups are now dict lookups instead of `list.index` scans.**
+  Every query in `pyomo_pounce.sens` resolved a component name to its row by
+  scanning `var_names` or `con_names`, which is O(n) per lookup. The full
+  Jacobian was the worst case: `gradient(wrt=p)` with no target fans out over
+  *every* variable, and `to_dataframe()` then re-scanned the name list once per
+  cell — **O(n²·p)** string comparisons. At n = 2,000 that is unnoticeable; at
+  n = 50,000, a size an ordinary DAE discretization reaches, it is ~2.5e9
+  comparisons and the call effectively hangs.
+- The per-solve paths are fixed too: the fitted-variable and residual loops in
+  `sens_solve` were O(k·n) for k residuals, paid on *every* solve — which the
+  repeated-solve NMPC workflow the module is built around pays each cycle.
+- `_Session` now builds `{name: row}` maps once (`_row_index`), and
+  `sens_solve` hands over the maps it already built rather than having them
+  rebuilt. No API or behavior change: `var_entry`/`mult_entry` still raise
+  `ValueError` for an unknown name rather than leaking the dict's `KeyError`,
+  and the `con_alias` translation and inequality-multiplier errors are
+  untouched.
+
 ### Fixed — pyomo-pounce: a declared Param in a `Var` bound reported exactly zero sensitivity (#356)
 
 - **A limit written as a variable bound now moves with the Param that sets
