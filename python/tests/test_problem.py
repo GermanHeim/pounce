@@ -257,7 +257,18 @@ def _convex_eq_qp(target, A, b):
 
 def test_kkt_schur_block_matches_full_space_solve():
     """A Schur partition (the constraint-dual block) reaches the same optimum
-    as the standard full-space solve, and round-trips through the API."""
+    as the standard full-space solve, and round-trips through the API.
+
+    NOTE: this test cannot detect whether the Schur solver actually *engaged* —
+    the path falls back to the standard full-space solver transparently, so a
+    silently-disabled Schur path produces exactly the assertions below. It once
+    did: the gate compared the *requested* linear solver against FERAL while the
+    registry default "ma57" was recorded even on builds that substitute FERAL,
+    so `set_kkt_schur_block()` was a no-op for every default user and this test
+    still passed. The guard for that is
+    `application_linear_solver_records_the_effective_backend` on the Rust side;
+    coverage of `kkt/schur_aug_system_solver.rs` is the end-to-end signal.
+    """
     target = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     A = np.array([[1.0, 1.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 1.0]])
     b = np.array([3.0, 12.0])
