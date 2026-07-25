@@ -315,3 +315,77 @@ def test_all_three_declarations_coexist():
     cov = covariance(m)                     # estimation family
     assert cov.std_err[m.A] > 0 and cov.std_err[m.k] > 0
     assert abs(cov.correlation[m.A, m.k]) < 1.0
+
+
+# ── declared Params in variable bounds (jkitchin/pounce#356) ─────────────────
+#
+# SensitivityInterface substitutes declared Params in constraint expressions
+# only, so a Param left in a bound used to be written to the NL file as a
+# constant and its sensitivity read as exactly zero. sens_solve now rewrites
+# such a bound as a constraint over the substituted Var. Each case below is
+# a limit the objective drives the variable straight into, so dx/dp is known
+# in closed form.
+
+def _bounded(ub=None, lb=None, sense=-1.0, x0=1.0):
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(lb(m) if lb else None, ub(m) if ub else None),
+                  initialize=x0)
+    m.obj = pyo.Objective(expr=sense * m.x)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+@pytest.mark.parametrize("ub, dxdp, pnew, xnew", [
+    (lambda m: m.p, 1.0, 3.0, 3.0),            # bare Param
+    (lambda m: 2 * m.p + 1, 2.0, 3.0, 7.0),    # expression around it
+])
+def test_upper_bound_on_declared_param_is_differentiable(ub, dxdp, pnew, xnew):
+    m = _bounded(ub=ub)
+    assert gradient(m.x, wrt=m.p) == pytest.approx(dxdp, abs=1e-6)
+    assert estimate(m, [(m.p, pnew)])[m.x] == pytest.approx(xnew, abs=1e-6)
+
+
+def test_lower_bound_on_declared_param_is_differentiable():
+    m = _bounded(lb=lambda m: m.p, sense=1.0, x0=3.0)
+    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert estimate(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
+
+
+def test_bound_as_constraint_is_unchanged():
+    """The already-working spelling keeps working and agrees with the bound."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(bounds=(0, None), initialize=1.0)
+    m.cap = pyo.Constraint(expr=m.x <= m.p)
+    m.obj = pyo.Objective(expr=-m.x)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+    assert estimate(m, [(m.p, 3.0)])[m.x] == pytest.approx(3.0, abs=1e-6)
+
+
+def test_undeclared_param_in_bound_is_left_alone():
+    """Only declared Params are rewritten; an undeclared one stays a bound."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.cap = pyo.Param(initialize=5.0, mutable=True)   # never declared
+    m.x = pyo.Var(bounds=(0, m.cap), initialize=1.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    assert m.x.ub == 5.0                              # bound survived
+    assert gradient(m.x, wrt=m.p) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_indexed_var_bound_on_declared_param():
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(3)
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(m.I, bounds=(0, m.p), initialize=1.0)
+    m.obj = pyo.Objective(expr=-sum(m.x[i] for i in m.I))
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    for i in m.I:
+        assert gradient(m.x[i], wrt=m.p) == pytest.approx(1.0, abs=1e-6)

@@ -50,6 +50,8 @@ import pyomo.environ as pyo
 from pyomo.common.collections import ComponentMap
 from pyomo.contrib.sensitivity_toolbox.sens import SensitivityInterface
 from pyomo.core.base.constraint import Constraint
+from pyomo.core.expr import identify_mutable_parameters
+from pyomo.core.expr.visitor import replace_expressions
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
 _REG = "_pounce_sens"
@@ -115,6 +117,51 @@ def declare_residual(*containers, group=None):
     to the heteroscedastic sandwich form."""
     for container in containers:
         _registry(container.model()).residuals.append((container, group))
+
+
+def _reformulate_param_bounds(clone):
+    """Move Var bounds that reference a declared Param into constraints.
+
+    `SensitivityInterface` substitutes declared Params in constraint
+    expressions only. A Param left in a bound is therefore written to the
+    NL file as a constant at its pre-perturbation value, so the bound never
+    moves and the reported sensitivity to that Param reads as exactly zero
+    (jkitchin/pounce#356). Rewriting the bound as a constraint over the
+    substituted Var puts it where the perturbation already reaches, which
+    makes the answer exact in the bound rather than approximating it.
+
+    Runs after `setup_sensitivity`, so the Param-to-Var map it needs is the
+    one the surgery has already built.
+    """
+    block = clone.component(SensitivityInterface.get_default_block_name())
+    if block is None:
+        return
+    sub = {id(param): var for var, param, _, _ in block._sens_data_list}
+    if not sub:
+        return
+
+    moved = []
+    for v in clone.component_data_objects(pyo.Var, descend_into=True):
+        for attr in ("_lb", "_ub"):
+            expr = getattr(v, attr, None)
+            if expr is None or isinstance(expr, (int, float)):
+                continue
+            if not any(id(p) in sub
+                       for p in identify_mutable_parameters(expr)):
+                continue
+            moved.append((v, attr, replace_expressions(expr, sub)))
+
+    if not moved:
+        return
+
+    block.boundConst = pyo.ConstraintList()
+    for v, attr, expr in moved:
+        if attr == "_lb":
+            v.setlb(None)
+            block.boundConst.add(expr <= v)
+        else:
+            v.setub(None)
+            block.boundConst.add(v <= expr)
 
 
 def has_declarations(model):
@@ -352,6 +399,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         si = SensitivityInterface(model, clone_model=True)
         si.setup_sensitivity(eff_params)
         clone = si.model_instance
+        _reformulate_param_bounds(clone)
     else:
         # estimation-only: nothing to pin, solve the model as written
         si = None
