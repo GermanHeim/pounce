@@ -515,6 +515,24 @@ impl IpoptApplication {
         // `algorithm` option resolves to "active-set-sqp", route
         // to the Phase 5b SQP path; otherwise fall through to the
         // existing IPM flow unchanged.
+        // Materialize generic TNLP presolve once at the public entry point.
+        // The wrapper owns the submitted callback TNLP, so every algorithm
+        // path below (including retry paths) continues to postsolve into
+        // the original user-facing space. With `presolve=no`, this returns
+        // the exact same Rc unchanged.
+        let tnlp = match pounce_presolve::wrap_from_options(tnlp, &self.options) {
+            Ok(tnlp) => tnlp,
+            Err(err) => {
+                use pounce_common::journalist::JournalCategory;
+                self.journalist.print(
+                    JournalLevel::J_ERROR,
+                    JournalCategory::J_MAIN,
+                    &format!("pounce: could not materialize presolve options: {err}\n"),
+                );
+                return ApplicationReturnStatus::InvalidOption;
+            }
+        };
+
         if self.is_sqp_algorithm_selected() {
             return self.optimize_sqp_tnlp(tnlp);
         }
