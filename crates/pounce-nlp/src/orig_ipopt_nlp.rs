@@ -1960,6 +1960,42 @@ impl IpoptNlp for OrigIpoptNlp {
         true
     }
 
+    fn get_starting_y(&mut self, y_c: &mut dyn Vector, y_d: &mut dyn Vector) -> bool {
+        let Some(y_c) = y_c.as_any_mut().downcast_mut::<DenseVector>() else {
+            return false;
+        };
+        let Some(y_d) = y_d.as_any_mut().downcast_mut::<DenseVector>() else {
+            return false;
+        };
+        let mut x = DenseVectorSpace::new(self.n()).make_new_dense();
+        let mut z_l = DenseVectorSpace::new(self.x_l.dim()).make_new_dense();
+        let mut z_u = DenseVectorSpace::new(self.x_u.dim()).make_new_dense();
+        self.initialize_starting_point(
+            &mut x, false, y_c, true, y_d, true, &mut z_l, false, &mut z_u, false,
+        )
+    }
+
+    fn get_starting_z(
+        &mut self,
+        z_l: &mut dyn Vector,
+        z_u: &mut dyn Vector,
+        _v_l: &mut dyn Vector,
+        _v_u: &mut dyn Vector,
+    ) -> bool {
+        let Some(z_l) = z_l.as_any_mut().downcast_mut::<DenseVector>() else {
+            return false;
+        };
+        let Some(z_u) = z_u.as_any_mut().downcast_mut::<DenseVector>() else {
+            return false;
+        };
+        let mut x = DenseVectorSpace::new(self.n()).make_new_dense();
+        let mut y_c = DenseVectorSpace::new(self.m_eq()).make_new_dense();
+        let mut y_d = DenseVectorSpace::new(self.m_ineq()).make_new_dense();
+        self.initialize_starting_point(
+            &mut x, false, &mut y_c, false, &mut y_d, false, z_l, true, z_u, true,
+        )
+    }
+
     fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
         OrigIpoptNlp::lift_x_to_full(self, x)
     }
