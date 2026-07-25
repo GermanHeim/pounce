@@ -9,6 +9,30 @@ changes.
 
 ## [Unreleased]
 
+### Tests — pyomo-pounce: the shadowing-binary test failed on any source checkout (#366)
+
+- `test_check_binary_flags_a_shadowing_build` asserted that a different-build
+  `pounce` prepended to `PATH` is reported as shadowing. That only holds when
+  the resolved binary is PATH-independent, i.e. when a wheel-bundled binary
+  exists. Without one, `_default_executable` falls back to `shutil.which`, so
+  the fake *became* the resolved binary and shadowed nothing — the assertion
+  inverted and the test failed on every source checkout with no
+  `pounce-solver` wheel installed. Its sibling tests guard with
+  `if _bundled_path() is None: skip`; this one only guarded on
+  `resolved is None`.
+- Fixed by standing the real binary in as the bundled one when none is
+  installed, so the scenario is still exercised locally rather than skipped.
+  CI, which stages the built CLI into the wheel, is unaffected either way.
+- Context for the wider report behind #366: the `pyomo-pounce` suite is green
+  on `main` (82 passed, 2 skipped) when run against a binary built from the
+  same commit. The other four failures reported there did not reproduce, and
+  the two multiplier tests among them (`test_bound_multipliers_populate_ipopt_zL_zU`,
+  `test_multiplier_gradient_matches_finite_difference`) guard #296 and
+  #271/#272 — both of which landed *in* 0.9.0. Since builds from before and
+  after the dual-sign fix both report `0.9.0`, a locally built binary from a
+  slightly stale checkout fails exactly those two while looking current, which
+  is the scenario `check_binary()` exists to detect.
+
 ### Performance — pyomo-pounce: `sens.py` resolved every row by linear scan, making `gradient(target=None).to_dataframe()` quadratic (#365)
 
 - **Name-to-row lookups are now dict lookups instead of `list.index` scans.**

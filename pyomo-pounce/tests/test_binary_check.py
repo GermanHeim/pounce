@@ -131,10 +131,21 @@ def test_check_binary_reports_resolved_and_bundled():
 
 def test_check_binary_flags_a_shadowing_build(tmp_path, monkeypatch):
     """A *different-build* `pounce` earlier on PATH is reported as shadowing;
-    an identical-build copy is not."""
+    an identical-build copy is not.
+
+    Shadowing only means anything when the resolved binary is PATH-independent,
+    i.e. when a bundled binary exists. Without one, `_default_executable` falls
+    back to `shutil.which`, so the fake prepended below simply *becomes* the
+    resolved binary and shadows nothing — the assertion then inverts and the
+    test fails on any source checkout with no wheel installed (gh #366). Stand
+    the real binary in as the bundled one in that case, so the scenario is
+    still exercised rather than skipped.
+    """
     resolved = pyomo_pounce.check_binary(verbose=False)["resolved_executable"]
     if resolved is None:
         pytest.skip("no pounce executable resolvable")
+    if ps._bundled_path() is None:
+        monkeypatch.setattr(ps, "_bundled_path", lambda: resolved)
 
     # A fake `pounce` on PATH whose `--about` reports a DIFFERENT commit.
     fake_dir = tmp_path / "stale"
