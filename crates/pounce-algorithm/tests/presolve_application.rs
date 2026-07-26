@@ -28,6 +28,7 @@ struct FinalPayload {
 #[derive(Default)]
 struct TightenedRow {
     final_payload: Option<FinalPayload>,
+    reject_warm_start: bool,
 }
 
 impl TNLP for TightenedRow {
@@ -50,6 +51,9 @@ impl TNLP for TightenedRow {
     }
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        if self.reject_warm_start && sp.init_z && sp.init_lambda {
+            return false;
+        }
         sp.x[0] = 3.0;
         if sp.init_z {
             sp.z_l[0] = 3.0;
@@ -221,6 +225,28 @@ fn library_presolve_warm_started_solve_restores_original_payload() {
     assert_eq!(final_payload.g.len(), 2);
     assert_eq!(final_payload.lambda.len(), 2);
     assert!(final_payload.lambda[0].abs() < 1e-10);
+}
+
+#[test]
+fn refused_warm_start_is_an_invalid_problem_definition() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value("warm_start_init_point", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("presolve", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let problem = Rc::new(RefCell::new(TightenedRow {
+        reject_warm_start: true,
+        ..TightenedRow::default()
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&problem) as Rc<RefCell<dyn TNLP>>;
+    let status = app.optimize_tnlp(tnlp);
+
+    assert_eq!(status, ApplicationReturnStatus::InvalidProblemDefinition);
+    assert!(problem.borrow().final_payload.is_none());
 }
 
 #[test]

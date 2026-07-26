@@ -1885,6 +1885,8 @@ impl IpoptApplication {
             stats.restoration_outer_iters = alg.resto_outer_iters;
             stats.restoration_wall_secs = alg.resto_wall_secs;
             stats.iterations = captured_iters;
+            // A refused starting point does not produce a valid iterate.
+            // Leave final objective/residual fields at their NaN defaults.
             // Capture the final *scaled* objective at the algorithm's
             // (compressed `x_var`-space) iterate via the NLP: the
             // algorithm-side `eval_f` returns `f * obj_scale_factor`.
@@ -1892,40 +1894,42 @@ impl IpoptApplication {
             // fallback; the success path below overwrites it with the
             // true unscaled objective from `finalize_via_orig_nlp`
             // (which evaluates the user TNLP directly).
-            let curr_x = alg.data.borrow().curr.as_ref().map(|c| c.x.clone());
-            if let Some(x) = curr_x {
-                if let Ok(f) = try_eval_curr_f(&nlp_handle, &x) {
-                    stats.final_objective = f;
-                    stats.final_scaled_objective = f;
+            if solver_status != SolverReturn::InvalidProblemDefinition {
+                let curr_x = alg.data.borrow().curr.as_ref().map(|c| c.x.clone());
+                if let Some(x) = curr_x {
+                    if let Ok(f) = try_eval_curr_f(&nlp_handle, &x) {
+                        stats.final_objective = f;
+                        stats.final_scaled_objective = f;
+                    }
                 }
+				// Final residuals straight off the cq cache. These mirror
+				// the values upstream prints in its end-of-run summary
+				// ("Dual infeasibility / Constraint violation /
+				// Complementarity / Overall NLP error").
+                let cq = alg.cq.borrow();
+                stats.final_dual_inf = cq.curr_dual_infeasibility_max();
+                stats.final_constr_viol = cq.curr_primal_infeasibility_max();
+				// Infinity-norm complementarity, max over all four bound
+				// blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
+				// empty-bound blocks return `0` from amax(), so the max is
+				// safe even when only one side has bounds.
+                let compl = cq
+                    .curr_compl_x_l()
+                    .amax()
+                    .max(cq.curr_compl_x_u().amax())
+                    .max(cq.curr_compl_s_l().amax())
+                    .max(cq.curr_compl_s_u().amax());
+                stats.final_compl = compl;
+                stats.final_kkt_error = cq.curr_nlp_error();
+				// Unscaled (user-space) counterparts — divide the nlp_scaling
+				// back out so a consumer can verify the certificate in its own
+				// units (pounce#173). Identical to the scaled fields when no
+				// scaling is active.
+                stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
+                stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
+                stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
+                stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
             }
-            // Final residuals straight off the cq cache. These mirror
-            // the values upstream prints in its end-of-run summary
-            // ("Dual infeasibility / Constraint violation /
-            // Complementarity / Overall NLP error").
-            let cq = alg.cq.borrow();
-            stats.final_dual_inf = cq.curr_dual_infeasibility_max();
-            stats.final_constr_viol = cq.curr_primal_infeasibility_max();
-            // Infinity-norm complementarity, max over all four bound
-            // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
-            // empty-bound blocks return `0` from amax(), so the max is
-            // safe even when only one side has bounds.
-            let compl = cq
-                .curr_compl_x_l()
-                .amax()
-                .max(cq.curr_compl_x_u().amax())
-                .max(cq.curr_compl_s_l().amax())
-                .max(cq.curr_compl_s_u().amax());
-            stats.final_compl = compl;
-            stats.final_kkt_error = cq.curr_nlp_error();
-            // Unscaled (user-space) counterparts — divide the nlp_scaling
-            // back out so a consumer can verify the certificate in its own
-            // units (pounce#173). Identical to the scaled fields when no
-            // scaling is active.
-            stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
-            stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
-            stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
-            stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
         }
 
         // Map SolverReturn → ApplicationReturnStatus per
@@ -1955,13 +1959,13 @@ impl IpoptApplication {
         // unscaled iterate, so it overrides the scaled best-effort
         // value stashed in `final_objective` above (the algorithm-side
         // `eval_f` returns `f * obj_scale_factor`).
-        match finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp) {
-            Ok(f_unscaled) => {
-                self.statistics.borrow_mut().final_objective = f_unscaled;
-            }
-            Err(()) => {
-                // Couldn't finalize; keep the scaled fallback and
-                // surface the original status.
+        if solver_status != SolverReturn::InvalidProblemDefinition {
+            match finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp) {
+                Ok(f_unscaled) => {
+                    self.statistics.borrow_mut().final_objective = f_unscaled;
+                }
+                Err(()) => {
+                }
             }
         }
 
@@ -2872,6 +2876,7 @@ fn solver_return_to_app_status(s: SolverReturn) -> ApplicationReturnStatus {
         SolverReturn::ErrorInStepComputation => ApplicationReturnStatus::ErrorInStepComputation,
         SolverReturn::InvalidNumberDetected => ApplicationReturnStatus::InvalidNumberDetected,
         SolverReturn::TooFewDegreesOfFreedom => ApplicationReturnStatus::NotEnoughDegreesOfFreedom,
+        SolverReturn::InvalidProblemDefinition => ApplicationReturnStatus::InvalidProblemDefinition,
         SolverReturn::InvalidOption => ApplicationReturnStatus::InvalidOption,
         SolverReturn::OutOfMemory => ApplicationReturnStatus::InsufficientMemory,
         SolverReturn::InternalError | SolverReturn::Unassigned => {
