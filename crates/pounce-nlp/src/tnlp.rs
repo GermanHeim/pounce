@@ -274,6 +274,11 @@ pub trait TNLP {
     /// This lets the application preserve the public `wrap_with_presolve`
     /// workflow when `presolve=yes` is also present in its options. Ordinary
     /// TNLPs and unrelated decorators return `false`.
+    ///
+    /// A transparent decorator around another TNLP should override this and
+    /// forward `inner.borrow().is_presolve_wrapper()`. Otherwise the public
+    /// solve entry point cannot see a presolve wrapper below the decorator and
+    /// may add a second one.
     fn is_presolve_wrapper(&self) -> bool {
         false
     }
