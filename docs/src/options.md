@@ -121,6 +121,14 @@ starts. It tightens variable bounds, drops redundant rows, and
 (optionally) eliminates square auxiliary-equality sub-systems
 structurally. All are off by default — set the master switch first:
 
+`presolve=yes` applies equally to CLI solves and to every
+`IpoptApplication::optimize_tnlp` library solve; callers no longer need to
+wrap a callback TNLP manually.
+The wrapper postsolves before `finalize_solution`, so callback payloads remain
+in the submitted TNLP's original variable and constraint space. Bare callback
+TNLPs do not expose an expression provider, so `presolve_fbbt=yes` remains a
+no-op for this library entry point.
+
 | Option                                  | Default | Meaning                                                                        |
 |-----------------------------------------|---------|--------------------------------------------------------------------------------|
 | `presolve`                              | `no`    | Master switch for the whole presolve layer. Off → wrapper is a no-op.          |

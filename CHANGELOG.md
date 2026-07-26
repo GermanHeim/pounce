@@ -9,6 +9,17 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`pounce-nlp` warm starts now fetch one coherent TNLP starting-point
+  snapshot.** With `warm_start_init_point=yes`, the adapter calls
+  `TNLP::get_starting_point` once with the primal, bound-multiplier, and
+  constraint-multiplier flags enabled, then projects that single payload into
+  the IPM's `x`, `y`, and `z` blocks. This replaces three independent callback
+  invocations, matching Ipopt's `GetStartingPoint` contract and avoiding
+  inconsistent or side-effect-dependent warm starts in existing library,
+  Python, and C-bridge users.
+
 ## [0.9.0] - 2026-07-24
 
 ### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
