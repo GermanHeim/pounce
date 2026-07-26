@@ -56,6 +56,7 @@ use pounce_nlp::TNLP;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 
 use crate::PdSensBacksolver;
+use crate::activity::ActivityReport;
 use crate::backsolver::SensBacksolver;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
@@ -83,6 +84,10 @@ pub enum SolverError {
     /// The underlying [`SensApplication`] step failed (e.g. row mapping
     /// invalid for the current problem).
     SensComputationFailed(String),
+    /// An option the requested computation depends on holds an
+    /// incompatible value; the message names the option and the value
+    /// required.
+    BadOptions(String),
 }
 
 /// State captured at convergence: the user-visible iterate plus the
@@ -225,6 +230,35 @@ impl Solver {
     /// no converged factor is held.
     pub fn block_dims(&self) -> Option<[usize; 8]> {
         self.converged().map(|c| c.block_dims())
+    }
+
+    /// Classify every bounded variable and every finite-bounded
+    /// inequality row of the converged solve by activity: see
+    /// [`crate::activity`] and
+    /// `dev-notes/covariance-information-roadmap.md` item 0 (gh #362).
+    ///
+    /// Requires `bound_relax_factor=0` (the Ipopt default is `1e-8`):
+    /// with relaxed bounds the solver's slacks are measured against
+    /// perturbed bounds, and the complementarity products the
+    /// classifier reads no longer track `μ`.
+    pub fn classify_activity(&self) -> Result<ActivityReport, SolverError> {
+        let brf = self
+            .app
+            .options()
+            .get_numeric_value("bound_relax_factor", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-8);
+        if brf != 0.0 {
+            return Err(SolverError::BadOptions(format!(
+                "classify_activity requires bound_relax_factor=0 \
+                 (currently {brf:e}): relaxed bounds shift the slacks \
+                 the classifier reads"
+            )));
+        }
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        Ok(crate::activity::compute(&state.backsolver))
     }
 
     /// Solve `K · lhs = rhs` against the converged KKT factor. Both

@@ -22,6 +22,7 @@ use numpy::{IntoPyArray, PyArray1};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
+use pounce_sensitivity::activity;
 use pounce_sensitivity::{Solver as RustSolver, SolverError};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -378,6 +379,78 @@ impl PySolver {
             .map(|s| s.inner.converged().is_some())
             .unwrap_or(false)
     }
+
+    /// Classify every bounded variable and every finite-bounded
+    /// inequality row of the held solve by activity, from the ratio of
+    /// barrier curvature to the objective's own curvature at the
+    /// converged iterate (covariance-information-roadmap item 0,
+    /// pounce#362).
+    ///
+    /// Returns a dict:
+    ///
+    /// - `"mu"`: the converged barrier parameter.
+    /// - `"var_status"`, `"row_status"`: list of str per variable /
+    ///   inequality row: `"inactive"`, `"weakly_active"`,
+    ///   `"strongly_active"`, `"ambiguous"`, `"unidentified"`, or
+    ///   `"unbounded"` where there is no finite bound.
+    /// - `"var_ratio"`, `"row_ratio"`: ndarray of the ratio `Σ/q`
+    ///   (NaN where unbounded).
+    /// - `"var_q_sign"`, `"row_q_sign"`: ndarray of the sign of the
+    ///   signed curvature, so an indefinite direction is visible.
+    /// - `"var_off_central_path"`, `"row_off_central_path"`: list of
+    ///   bool, true where `s·z` differs from `μ` by more than 10× on
+    ///   some side.
+    /// - `"var_contaminated"`: list of bool, true where classified
+    ///   inactive yet carrying non-negligible barrier curvature.
+    ///
+    /// Requires `bound_relax_factor=0` (raises `ValueError` otherwise;
+    /// the Ipopt default is `1e-8`): relaxed bounds shift the slacks
+    /// the classifier reads.
+    fn classify_activity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("classify_activity: no converged factor (call solve() first)")
+        })?;
+        let rep = s.inner.classify_activity().map_err(solver_error_to_py)?;
+        let status_str = |codes: &[i8]| -> Vec<&'static str> {
+            codes
+                .iter()
+                .map(|&c| match c {
+                    activity::INACTIVE => "inactive",
+                    activity::WEAKLY_ACTIVE => "weakly_active",
+                    activity::STRONGLY_ACTIVE => "strongly_active",
+                    activity::AMBIGUOUS => "ambiguous",
+                    activity::UNIDENTIFIED => "unidentified",
+                    _ => "unbounded",
+                })
+                .collect()
+        };
+        let out = PyDict::new_bound(py);
+        out.set_item("mu", rep.mu)?;
+        out.set_item("var_status", status_str(&rep.var_status))?;
+        out.set_item("var_ratio", rep.var_ratio.into_pyarray_bound(py))?;
+        out.set_item(
+            "var_q_sign",
+            rep.var_q_sign
+                .iter()
+                .map(|&s| s as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py),
+        )?;
+        out.set_item("var_off_central_path", rep.var_off_central_path)?;
+        out.set_item("var_contaminated", rep.var_contaminated)?;
+        out.set_item("row_status", status_str(&rep.row_status))?;
+        out.set_item("row_ratio", rep.row_ratio.into_pyarray_bound(py))?;
+        out.set_item(
+            "row_q_sign",
+            rep.row_q_sign
+                .iter()
+                .map(|&s| s as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py),
+        )?;
+        out.set_item("row_off_central_path", rep.row_off_central_path)?;
+        Ok(out)
+    }
 }
 
 fn validate_pins(pin_constraint_indices: &[i64], m: usize) -> PyResult<Vec<Index>> {
@@ -409,5 +482,6 @@ fn solver_error_to_py(e: SolverError) -> PyErr {
         SolverError::SensComputationFailed(msg) => {
             PyRuntimeError::new_err(format!("Solver: sensitivity computation failed: {msg}"))
         }
+        SolverError::BadOptions(msg) => PyValueError::new_err(format!("Solver: {msg}")),
     }
 }

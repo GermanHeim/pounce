@@ -125,6 +125,14 @@ struct ConjPair {
 }
 
 impl PdSensBacksolver {
+    /// The retained handles the activity classifier reads
+    /// (crate-internal; see [`crate::activity`]).
+    pub(crate) fn activity_handles(
+        &self,
+    ) -> (&IpoptDataHandle, &IpoptCqHandle, &Rc<RefCell<dyn IpoptNlp>>) {
+        (&self.data, &self.cq, &self.nlp)
+    }
+
     /// Construct from the four handles handed in by the `on_converged`
     /// callback. Errors if `data` has no `curr` (i.e. the algorithm
     /// never reached an iterate — should not happen on

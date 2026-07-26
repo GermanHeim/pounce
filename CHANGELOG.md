@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+### Added — post-solve activity classification on `Solver` (#362, covariance roadmap item 0)
+
+- `Solver.classify_activity()` (Rust: `pounce_sensitivity::activity`)
+  classifies every bounded variable and every finite-bounded inequality row
+  of the held converged solve as `inactive`, `weakly_active`,
+  `strongly_active`, `ambiguous`, or `unidentified`, from the ratio `r = Σ/q`
+  of barrier curvature (`Σ = z/s`, summed over the sides that exist) to the
+  model's own curvature (`q = |H_ii|` for a variable, curvature along the
+  constraint normal for a row) at the converged iterate. `r` is O(μ)
+  inactive, O(1) weakly active, O(1/μ) strongly active, so one ratio
+  separates the regimes where no fixed threshold on a slack or multiplier
+  alone can: both are O(√μ) at weak activity. Edges sit at √μ and 1/√μ with
+  a fixed inner band [1e-1, 1e1]; gaps report `ambiguous`; at μ > 1e-4 only
+  the two clear calls are made. Curvature below `√ε·max(1, max_j|H_jj|)`
+  reports `unidentified`, with the sign of the raw value.
+- Inequality rows classify through the same rule as variable bounds, which
+  is the gap behind #362: a bound moved onto a row disappears from the
+  bound-multiplier view but not from this one. The tests walk the same
+  scalar geometry through both formulations and require identical statuses.
+- Per-entry honesty flags: `off_central_path` (`s·z` differs from `μ` by
+  more than 10× on some side) and `contaminated` (classified inactive yet
+  carrying non-negligible barrier curvature). `classify_activity` refuses
+  to run with `bound_relax_factor != 0` (the Ipopt default is `1e-8`):
+  relaxed bounds shift the slacks the classifier reads.
+- Item 0 of `dev-notes/covariance-information-roadmap.md` (#262).
+  Everything the classifier reads was already retained at convergence
+  (`Σ`, the solver's slacks, the bound multipliers, `μ`, and the exact
+  Lagrangian Hessian), so the change is exposure plus the rule, not new
+  computation. Items 1-4 build on these statuses.
+
 ### Fixed — active-set SQP: a warm start was discarded whenever the active set moved (#428)
 
 - `solve_with_working_set` pins the hinted active rows to their new
