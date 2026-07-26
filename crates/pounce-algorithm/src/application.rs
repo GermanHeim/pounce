@@ -1902,17 +1902,17 @@ impl IpoptApplication {
                         stats.final_scaled_objective = f;
                     }
                 }
-				// Final residuals straight off the cq cache. These mirror
-				// the values upstream prints in its end-of-run summary
-				// ("Dual infeasibility / Constraint violation /
-				// Complementarity / Overall NLP error").
+                // Final residuals straight off the cq cache. These mirror
+                // the values upstream prints in its end-of-run summary
+                // ("Dual infeasibility / Constraint violation /
+                // Complementarity / Overall NLP error").
                 let cq = alg.cq.borrow();
                 stats.final_dual_inf = cq.curr_dual_infeasibility_max();
                 stats.final_constr_viol = cq.curr_primal_infeasibility_max();
-				// Infinity-norm complementarity, max over all four bound
-				// blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
-				// empty-bound blocks return `0` from amax(), so the max is
-				// safe even when only one side has bounds.
+                // Infinity-norm complementarity, max over all four bound
+                // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
+                // empty-bound blocks return `0` from amax(), so the max is
+                // safe even when only one side has bounds.
                 let compl = cq
                     .curr_compl_x_l()
                     .amax()
@@ -1921,10 +1921,10 @@ impl IpoptApplication {
                     .max(cq.curr_compl_s_u().amax());
                 stats.final_compl = compl;
                 stats.final_kkt_error = cq.curr_nlp_error();
-				// Unscaled (user-space) counterparts — divide the nlp_scaling
-				// back out so a consumer can verify the certificate in its own
-				// units (pounce#173). Identical to the scaled fields when no
-				// scaling is active.
+                // Unscaled (user-space) counterparts — divide the nlp_scaling
+                // back out so a consumer can verify the certificate in its own
+                // units (pounce#173). Identical to the scaled fields when no
+                // scaling is active.
                 stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
                 stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
                 stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
@@ -1964,8 +1964,7 @@ impl IpoptApplication {
                 Ok(f_unscaled) => {
                     self.statistics.borrow_mut().final_objective = f_unscaled;
                 }
-                Err(()) => {
-                }
+                Err(()) => {}
             }
         }
 
