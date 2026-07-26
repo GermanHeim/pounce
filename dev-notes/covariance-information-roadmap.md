@@ -165,7 +165,12 @@ bounds rather than marginalizing over them.
 
 $S$ is built from the exact Lagrangian Hessian (`curr_exact_hessian`, which
 the solver retains), formed densely on the small fitted block: full precision
-at any `μ`, no recovery from the barrier-augmented factor.
+at any `μ`, no recovery from the barrier-augmented factor. Binding rows enter
+the same dense construction: with $Z$ an orthonormal basis for the null space
+of their normals on the fitted block, covariance is
+$2\sigma^2 Z (Z^T H_{FF} Z)^{-1} Z^T$ and information is its pseudo-inverse
+$Z (Z^T H_{FF} Z) Z^T$. No binding rows means $Z = I$ and both collapse to
+the table.
 
 The last two rows warn as well as return: `ambiguous` that re-solving
 tighter will settle it, which works because the drift into the band is
@@ -179,23 +184,33 @@ decoration.
 `tol = 1e-6 * (1.0 + abs(xv))`), which pins a weakly active variable and
 deletes its information.
 
-An active constraint row is classified but not projected, because the table
-is indexed by coordinate and a row removes a direction rather than a
-coordinate. `A ≤ cap` pins the coordinate `A`, but `A + B ≤ 1` pins a
-combination and deleting either coordinate is wrong. The general case is the
-reduced Hessian on the null space of the active Jacobian, out of scope for
-v0.10 on that basis rather than because it does not matter. So a row-pinned
-fitted variable comes back classified and warned, which is the signal missing
-today (jkitchin/pounce#362), with the unprojected number. Where the row's
-normal is a single fitted coordinate, as the bound rewrite in
-jkitchin/pounce#357 produces, the existing disposition applies and the two
-spellings agree.
+A strongly active constraint row projects too, on the null space of its
+normal. `A ≤ cap` pins the coordinate `A` and the table's disposition states
+the truth; `A + B ≤ 1` pins a combination, and no per-coordinate disposition
+can. So the reduction happens on the null space of the binding row normals
+restricted to the fitted block, pushed back to the original coordinates.
+Both accessors stay full-block, one row per fitted variable, singular by
+exactly the number of binding rows. `covariance()` reports zero variance
+along the pinned combination, and the surviving correlation structure says
+what the data still determines: with `A + B` binding, both variances shrink
+and the correlation is `-1`, the data determines only the difference.
+`information()` is the pseudo-inverse, the Hessian projected on both sides
+onto the free directions. Each binding row is named in a warning, and the
+conditional information of the pinned combination itself, the row analog of
+a pinned variable's $S_{ii}$, is a per-row scalar reported with that
+warning, since it belongs to no variable's row of the matrix. Where the
+row's normal is a single fitted coordinate, as the bound rewrite in
+jkitchin/pounce#357 produces, the projection reduces to the table's
+disposition, so the two spellings of the same limit agree
+(jkitchin/pounce#362) in the returned matrices, not only in item 0's
+classification.
 
 **2. `information()`, the un-inverted sibling of `covariance()`.** Returns the
 reduced Hessian over the block, formed as the Schur complement onto the
 block's rows off the held factor rather than by inverting the covariance.
 Natural units, the core's convention; pyomo `covariance()` carries the `2σ²`
 on top. Same `hessian=` selector, Lagrangian (default) or Gauss-Newton.
+Binding rows follow item 1's projection rule, identically in both accessors.
 
 Three things it has to do that `covariance()` does not:
 
@@ -283,9 +298,10 @@ exactly the v0.10 no-argument default, so the v0.9 surface is a
 forward-compatible subset.
 
 Items 0 and 1 are the exception. Item 1 changes which variables
-`covariance()` projects out, and a kept weakly active variable's value
-corrects from the factor's `2q` to the true `q`, so a model with a weakly
-active bound gets different numbers than v0.9 returns on both counts. Item 0 is Rust core work rather than
+`covariance()` projects out, corrects a kept weakly active variable's value
+from the factor's `2q` to the true `q`, and projects binding general rows
+that v0.9 passes through unprojected, so a model in any of those cases gets
+different numbers than v0.9 returns. Item 0 is Rust core work rather than
 pyomo surface, because the bound multipliers, `μ` and the Hessian diagonal
 are not reachable from the pyomo session: it carries only the primal and the
 bounds, and the held factor is barrier-augmented, so `kkt_solve` inverts $W$
@@ -343,6 +359,14 @@ a weakly active bound exactly as `covariance()` does now.
 - Two strongly active fitted variables: the off-diagonal $S_{ij}$ matches the
   same construction, and $S_{ii}$ differs from the same variable's value when
   the other is free.
+- The row spelling of a limit against its bound spelling: identical
+  `covariance()` and `information()` matrices, item 0's agreement
+  (jkitchin/pounce#362) carried into item 1's outputs. Then a genuinely
+  two-coordinate binding row (`A + B ≤ 1`): rank drops by one, variance
+  vanishes along the normal and survives along the difference with
+  correlation `-1`, the free block matches the same model solved with the
+  row as an equality, and the per-row conditional-information scalar matches
+  that model's $S_{ii}$ construction applied to the combination.
 - The `μ` sweep is necessary, not sufficient, on its own: the weakly-active
   case is `μ`-invariant and barrier-inflated at once, so it only certifies
   anything alongside item 0's classification. A block conditioned on a strongly
