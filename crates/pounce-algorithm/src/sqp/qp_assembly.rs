@@ -40,6 +40,7 @@ pub struct SqpQpData {
 
 /// Sparse-triplet view of a derivative matrix. Indices are
 /// 1-based per the pounce-linalg convention; values are owned.
+#[derive(Clone)]
 pub struct Triplet {
     pub n_rows: usize,
     pub n_cols: usize,

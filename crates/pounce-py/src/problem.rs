@@ -832,10 +832,18 @@ impl PyProblem {
         for (k, v) in &self.str_opts {
             let effective = if !self.has_hessian && v.eq_ignore_ascii_case("exact") {
                 match k.as_str() {
+                    // Downgrade to the dense Powell-damped BFGS, not L-BFGS:
+                    // on the active-set-SQP path L-BFGS materializes the same
+                    // dense Hessian yet stalls on convex QPs with an active
+                    // inequality (issue #358), whereas damped-BFGS solves them.
                     "sqp_hessian" => {
                         downgraded_exact = true;
-                        Some("lbfgs")
+                        Some("damped-bfgs")
                     }
+                    // `hessian_approximation = limited-memory` is itself mapped
+                    // to the dense damped-BFGS on the SQP path (see
+                    // `apply_sqp_options`), so this fallback is robust too and
+                    // stays the correct spelling for the IPM path.
                     "hessian_approximation" => {
                         downgraded_exact = true;
                         Some("limited-memory")

@@ -33,6 +33,11 @@ pub struct DampedBfgs {
     /// Previous `x` and ∇L; updated at the end of each `update` call.
     prev_x: Option<Vec<Number>>,
     prev_grad_lag: Option<Vec<Number>>,
+    /// Whether the one-time initial sizing has been applied yet (see
+    /// [`Self::update`]). `false` until the first `(s, y)` pair with
+    /// `sᵀy > 0` arrives, at which point `B` is rescaled from the
+    /// identity to `γI` and this flips to `true`.
+    sized: bool,
     /// Pre-computed sparsity pattern for `as_triplet`. Fixed:
     /// every (i, j) with `i ≥ j`. 1-based.
     h_irow: Vec<Index>,
@@ -59,6 +64,7 @@ impl DampedBfgs {
             b,
             prev_x: None,
             prev_grad_lag: None,
+            sized: false,
             h_irow,
             h_jcol,
         }
@@ -68,6 +74,68 @@ impl DampedBfgs {
     /// first call to [`Self::update`].
     pub fn has_prev(&self) -> bool {
         self.prev_x.is_some()
+    }
+
+    /// Seed `B = γI` directly and mark the one-time sizing done, so the
+    /// first [`Self::update`] applies its rank-2 correction on top of
+    /// this scale instead of re-seeding from its own `(s, y)`.
+    ///
+    /// Used by the driver's iteration-0 curvature probe: the internal
+    /// sizing in [`Self::update`] cannot fire until a first `(s, y)` pair
+    /// exists, i.e. not until iteration 1 — but iteration **0** already
+    /// solves a QP against `B`, and with the identity seed that step
+    /// overshoots by `~cond(∇²L)` on an ill-conditioned problem. See the
+    /// sizing comment in [`Self::update`] for why that is fatal.
+    ///
+    /// `gamma` must be finite and strictly positive; anything else is
+    /// ignored (leaving `B = I`) rather than corrupting the matrix.
+    pub fn seed_scale(&mut self, gamma: Number) {
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return;
+        }
+        for i in 0..self.n {
+            self.set(i, i, gamma);
+        }
+        self.sized = true;
+    }
+
+    /// Discard the accumulated rank-2 curvature and fall back to a
+    /// scaled identity `γI`, where `γ` is the current mean diagonal
+    /// (a scale the accumulated matrix has already vouched for).
+    /// `prev_x` / `prev_grad_lag` are retained, so the next
+    /// [`Self::update`] resumes accumulating from the reset base.
+    ///
+    /// Used as a recovery step when the QP subproblem fails: a
+    /// quasi-Newton matrix that has drifted ill-conditioned makes the
+    /// step subproblem numerically unsolvable, and that is recoverable
+    /// — far better than aborting an otherwise healthy solve.
+    /// Off-diagonals are zeroed; the diagonal keeps the problem's scale.
+    pub fn reset_to_scale(&mut self) {
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for i in 0..self.n {
+            let d = self.get(i, i);
+            if d.is_finite() && d > 0.0 {
+                sum += d;
+                count += 1;
+            }
+        }
+        let gamma = if count > 0 {
+            sum / count as Number
+        } else {
+            1.0
+        };
+        let gamma = if gamma.is_finite() && gamma > 0.0 {
+            gamma
+        } else {
+            1.0
+        };
+        for v in self.b.iter_mut() {
+            *v = 0.0;
+        }
+        for i in 0..self.n {
+            self.set(i, i, gamma);
+        }
     }
 
     fn idx(&self, i: usize, j: usize) -> usize {
@@ -112,6 +180,64 @@ impl DampedBfgs {
                 .zip(prev_grad_lag.iter())
                 .map(|(a, b)| a - b)
                 .collect();
+            self.update_sy(&s, &y);
+        }
+
+        self.prev_x = Some(x_new.to_vec());
+        self.prev_grad_lag = Some(grad_lag_new.to_vec());
+    }
+
+    /// Apply the Powell-damped rank-2 update from an explicit curvature
+    /// pair `(s, y)`.
+    ///
+    /// Prefer this over [`Self::update`] when the caller can form `y`
+    /// itself: the SQP driver must difference `∇L` at a **single, fixed**
+    /// multiplier (see the note in `sqp_alg.rs`), which the `(x, ∇L)` form
+    /// of [`Self::update`] cannot express because it stores the previous
+    /// `∇L` as evaluated at the previous multiplier.
+    pub fn update_sy(&mut self, s: &[Number], y: &[Number]) {
+        assert_eq!(s.len(), self.n, "BFGS::update_sy: s.len() != n");
+        assert_eq!(y.len(), self.n, "BFGS::update_sy: y.len() != n");
+        {
+            // One-time initial Hessian sizing (Nocedal-Wright §6.1). The
+            // identity seed `B_0 = I` is a catastrophic scale on
+            // ill-conditioned problems: when `‖∇²L‖ ≫ 1` the first QP
+            // step, computed against `B = I`, overshoots the true Newton
+            // step by a factor `~cond(∇²L)`, and the filter line search —
+            // with an empty filter at the first iterate, where the
+            // starting point is near-feasible so `θ_curr` is tiny — accepts
+            // the objective-blowing step because it happens to drive the
+            // (negligible) constraint violation to zero. The overshoot
+            // corrupts the working set and the solve then diverges to
+            // `‖x‖ ~ 1e4` before dying with
+            // `Search_Direction_Becomes_Too_Small`, on easy convex QPs
+            // (issue #358 tail: `cond(P) ≳ 1e3`). Before applying the very
+            // first rank-2 update, rescale `B` from `I` to `γI` with the
+            // Rayleigh-quotient curvature estimate `γ = sᵀy / sᵀs`, which
+            // for a quadratic lies in `[λ_min(∇²L), λ_max(∇²L)]` — a
+            // representative scale that keeps the first post-sizing step
+            // in range. Applied *once* on the first curvature pair, not
+            // every iteration: re-seeding each step would discard the
+            // curvature the persistent damped update accumulates (that
+            // re-seeding is exactly what makes the L-BFGS path oscillate).
+            // Halves the ill-conditioned-QP failure rate on a broad sweep
+            // and clears the #358 tail; a fully robust cure for extreme
+            // conditioning (`cond ≳ 1e4`) still needs the exact-Hessian or
+            // IPM path.
+            if !self.sized {
+                let s_y: Number = s.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
+                let s_s: Number = s.iter().map(|v| v * v).sum();
+                if s_y > 1e-30 && s_s > 1e-30 {
+                    let gamma = s_y / s_s;
+                    for i in 0..self.n {
+                        self.set(i, i, gamma);
+                    }
+                }
+                // Mark sized once a genuine pair is seen, even if the
+                // ratio was degenerate (leave B = I in that rare case) —
+                // we only ever size on the first curvature pair.
+                self.sized = true;
+            }
 
             // bs = B · s
             let bs: Vec<Number> = (0..self.n)
@@ -148,9 +274,6 @@ impl DampedBfgs {
                 }
             }
         }
-
-        self.prev_x = Some(x_new.to_vec());
-        self.prev_grad_lag = Some(grad_lag_new.to_vec());
     }
 
     /// Produce the current B as a `Triplet` over the upper
@@ -169,5 +292,133 @@ impl DampedBfgs {
             jcol: self.h_jcol.clone(),
             vals,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diag(b: &DampedBfgs, i: usize) -> Number {
+        b.get(i, i)
+    }
+
+    #[test]
+    fn first_update_sizes_the_identity_seed() {
+        // Curvature pair along axis 0 from the quadratic f = ½·9‖x‖²
+        // (∇²f = 9I): s = (1, 0), y = 9 s = (9, 0), so the sizing
+        // factor is γ = sᵀy / sᵀs = 9. After the first update the
+        // *untouched* direction (axis 1) must carry the sized scale
+        // γ = 9, not the identity seed 1 — that is the whole point of
+        // sizing on an ill-conditioned problem (issue #358). Along the
+        // updated axis the Powell-damped rank-2 term keeps it at 9 too.
+        let mut b = DampedBfgs::new(2);
+        b.update(&[0.0, 0.0], &[0.0, 0.0]); // record start (no pair yet)
+        assert!((diag(&b, 0) - 1.0).abs() < 1e-12, "seed must be I");
+        assert!((diag(&b, 1) - 1.0).abs() < 1e-12, "seed must be I");
+        b.update(&[1.0, 0.0], &[9.0, 0.0]); // first genuine (s, y): sizes then updates
+        assert!(
+            (diag(&b, 1) - 9.0).abs() < 1e-9,
+            "off-axis diagonal should be sized to γ = 9, got {}",
+            diag(&b, 1)
+        );
+        assert!(
+            (diag(&b, 0) - 9.0).abs() < 1e-9,
+            "on-axis diagonal should be 9 after sizing + rank-2 update, got {}",
+            diag(&b, 0)
+        );
+    }
+
+    #[test]
+    fn seed_scale_sets_the_diagonal_and_marks_sized() {
+        let mut b = DampedBfgs::new(3);
+        b.seed_scale(25.0);
+        assert!(b.sized, "seeding must suppress the later one-time sizing");
+        for i in 0..3 {
+            assert!((diag(&b, i) - 25.0).abs() < 1e-12);
+        }
+        // A degenerate scale must be ignored, not written into B.
+        let mut c = DampedBfgs::new(2);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            c.seed_scale(bad);
+            assert!(!c.sized, "seed_scale({bad}) must be refused");
+            assert!((diag(&c, 0) - 1.0).abs() < 1e-12, "B must stay I");
+        }
+    }
+
+    #[test]
+    fn reset_to_scale_drops_curvature_but_keeps_magnitude() {
+        // Build up genuine off-diagonal curvature, then reset: the
+        // off-diagonals must vanish and the diagonal must retain the
+        // matrix's own scale (its mean diagonal), not collapse to 1.
+        let mut b = DampedBfgs::new(2);
+        b.seed_scale(100.0);
+        b.update(&[0.0, 0.0], &[0.0, 0.0]);
+        b.update(&[1.0, 1.0], &[150.0, 40.0]); // rank-2 update -> off-diagonals
+        assert!(
+            b.get(1, 0).abs() > 1e-9,
+            "test precondition: expected off-diagonal curvature, got {}",
+            b.get(1, 0)
+        );
+        let mean_diag = (diag(&b, 0) + diag(&b, 1)) / 2.0;
+        b.reset_to_scale();
+        assert!(b.get(1, 0).abs() < 1e-12, "off-diagonals must be zeroed");
+        for i in 0..2 {
+            assert!(
+                (diag(&b, i) - mean_diag).abs() < 1e-9,
+                "diagonal must keep the mean scale {mean_diag}, got {}",
+                diag(&b, i)
+            );
+        }
+        assert!(
+            mean_diag > 10.0,
+            "sanity: the retained scale should reflect the problem, not 1"
+        );
+    }
+
+    #[test]
+    fn update_sy_matches_the_x_grad_lag_form() {
+        // `update_sy` is the primitive; `update` is the (s, y)-from-stored-
+        // prev convenience wrapper. Feeding the same curvature pair through
+        // either path must land on the identical matrix, so the driver's
+        // switch to `update_sy` (gh #361) changes only *which* y is formed,
+        // never how it is applied.
+        let mut via_update = DampedBfgs::new(2);
+        via_update.update(&[0.0, 0.0], &[1.0, 2.0]);
+        via_update.update(&[1.0, 3.0], &[4.0, 9.0]);
+
+        let mut via_sy = DampedBfgs::new(2);
+        via_sy.update_sy(&[1.0, 3.0], &[3.0, 7.0]); // s = x1-x0, y = g1-g0
+
+        for i in 0..2 {
+            for j in 0..=i {
+                assert!(
+                    (via_update.get(i, j) - via_sy.get(i, j)).abs() < 1e-12,
+                    "B[{i},{j}]: update={} update_sy={}",
+                    via_update.get(i, j),
+                    via_sy.get(i, j)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sizing_happens_only_once() {
+        // A second pair must NOT re-seed the diagonal; the persistent
+        // rank-2 updates accumulate on top of the one-time sized base.
+        let mut b = DampedBfgs::new(2);
+        b.update(&[0.0, 0.0], &[0.0, 0.0]);
+        b.update(&[1.0, 0.0], &[9.0, 0.0]); // sizes to γ = 9
+        assert!(b.sized);
+        // A second pair along axis 1 with a *different* curvature (4):
+        // γ would have been 4 had we re-sized, but we must not.
+        b.update(&[1.0, 1.0], &[9.0, 4.0]); // s = (0,1), y = (0,4)
+        // Axis-0 diagonal is untouched by this axis-1 pair and must
+        // still reflect the first sizing (9), never re-seeded to 4.
+        assert!(
+            (diag(&b, 0) - 9.0).abs() < 1e-9,
+            "second pair must not re-seed; axis-0 diagonal = {}",
+            diag(&b, 0)
+        );
     }
 }

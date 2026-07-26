@@ -203,71 +203,12 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // ---- Active-set SQP QP-subproblem knobs (pounce-qp `QpOptions`) ----
-    // Consulted only on `solver_selection=qp-active-set` (the active-set SQP
-    // engine, whose step QPs are solved by pounce-qp). Read into the algorithm
-    // builder by `application::apply_qp_subproblem_options`; each forwards only
-    // when explicitly set, otherwise the pounce-qp default stands. The outer
-    // SQP loop has its own `sqp_*` family (registered with the SQP options);
-    // these `sqp_qp_*` knobs tune the inner QP solver specifically.
-    let sqp_qp_knobs: Result<(), pounce_common::SolverException> = (|| {
-        let r = app.registered_options();
-        r.add_lower_bounded_number_option(
-            "sqp_qp_feas_tol",
-            "Active-set QP-subproblem feasibility tolerance > 0.",
-            0.0,
-            true,
-            1e-9,
-            "Active-set SQP only (solver_selection=qp-active-set). Constraint \
-             feasibility tolerance for the pounce-qp subproblem solve. \
-             Default 1e-9.",
-        )?;
-        r.add_lower_bounded_number_option(
-            "sqp_qp_opt_tol",
-            "Active-set QP-subproblem optimality (KKT) tolerance > 0.",
-            0.0,
-            true,
-            1e-9,
-            "Active-set SQP only. Optimality / KKT tolerance for the pounce-qp \
-             subproblem solve. Default 1e-9.",
-        )?;
-        r.add_lower_bounded_integer_option(
-            "sqp_qp_max_iter",
-            "Active-set QP-subproblem iteration cap.",
-            1,
-            200,
-            "Active-set SQP only. Maximum active-set pivots per QP subproblem \
-             solve. Default 200.",
-        )?;
-        r.add_lower_bounded_number_option(
-            "sqp_qp_elastic_gamma",
-            "Active-set QP-subproblem elastic-mode penalty γ > 0.",
-            0.0,
-            true,
-            1e6,
-            "Active-set SQP only. Penalty on the elastic (phase-1) slacks used \
-             to recover from an infeasible QP subproblem. Large enough that the \
-             slacks vanish at the solution of a feasible QP, small enough not to \
-             dominate the Hessian conditioning. Default 1e6.",
-        )?;
-        r.add_string_option(
-            "sqp_qp_anti_cycling",
-            "Active-set QP-subproblem anti-cycling rule.",
-            "expand",
-            &[
-                ("expand", "EXPAND tolerance-growth + Harris two-pass (Gill-Murray-Saunders-Wright 1989). Default."),
-                ("bland", "Bland's rule: slower but guaranteed finite; mainly for tests."),
-                ("none", "No anti-cycling — benchmarking only; may cycle on degenerate QPs."),
-            ],
-            "Active-set SQP only. Anti-cycling strategy for the pounce-qp \
-             subproblem ratio test. Default expand.",
-        )?;
-        Ok(())
-    })();
-    if let Err(e) = sqp_qp_knobs {
-        eprintln!("pounce: failed to register active-set QP options: {e}");
-        return ExitCode::from(2);
-    }
+    // NOTE: the active-set SQP QP-subproblem knobs (`sqp_qp_feas_tol`,
+    // `sqp_qp_opt_tol`, `sqp_qp_max_iter`, `sqp_qp_elastic_gamma`,
+    // `sqp_qp_anti_cycling`) used to be registered here. They now live in the
+    // core registry (`pounce_algorithm::upstream_options`) so the library and
+    // Python paths see them too — registering them here as well would raise
+    // OPTION_ALREADY_REGISTERED and abort the binary at startup (gh #360).
 
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they

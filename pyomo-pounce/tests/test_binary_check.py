@@ -131,10 +131,21 @@ def test_check_binary_reports_resolved_and_bundled():
 
 def test_check_binary_flags_a_shadowing_build(tmp_path, monkeypatch):
     """A *different-build* `pounce` earlier on PATH is reported as shadowing;
-    an identical-build copy is not."""
+    an identical-build copy is not.
+
+    Shadowing only means anything when the resolved binary is PATH-independent,
+    i.e. when a bundled binary exists. Without one, `_default_executable` falls
+    back to `shutil.which`, so the fake prepended below simply *becomes* the
+    resolved binary and shadows nothing — the assertion then inverts and the
+    test fails on any source checkout with no wheel installed (gh #366). Stand
+    the real binary in as the bundled one in that case, so the scenario is
+    still exercised rather than skipped.
+    """
     resolved = pyomo_pounce.check_binary(verbose=False)["resolved_executable"]
     if resolved is None:
         pytest.skip("no pounce executable resolvable")
+    if ps._bundled_path() is None:
+        monkeypatch.setattr(ps, "_bundled_path", lambda: resolved)
 
     # A fake `pounce` on PATH whose `--about` reports a DIFFERENT commit.
     fake_dir = tmp_path / "stale"
@@ -150,6 +161,23 @@ def test_check_binary_flags_a_shadowing_build(tmp_path, monkeypatch):
     info = pyomo_pounce.check_binary(verbose=False)
     shadow_ids = {b["build_id"] for b in info["shadowing_path_binaries"]}
     assert "deadbeef" in shadow_ids, info["path_pounce_binaries"]
+
+
+def test_env_skip_guard_is_inert_when_bundled():
+    """The conftest "solver never ran → skip" guard keys on ``using_bundled``.
+
+    That flag is the safety property: it makes the guard incapable of firing
+    wherever the bundled binary is in use — notably CI, which stages one — so a
+    real defect can never be silently skipped there. This pins the contract the
+    hook depends on (gh #366).
+    """
+    if ps._bundled_path() is None:
+        pytest.skip("no bundled binary in this environment")
+    info = pyomo_pounce.check_binary(verbose=False)
+    assert info["using_bundled"] is True, (
+        "a bundled binary exists but is not the resolved one; the conftest "
+        "environment guard would be live in a build it should not be"
+    )
 
 
 # ── the fallback warning ────────────────────────────────────────────────────

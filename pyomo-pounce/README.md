@@ -89,6 +89,45 @@ install fails on the dependency. Two workarounds:
    pip install pyomo-pounce
    ```
 
+## Running the tests locally
+
+Which binary the tests exercise depends on whether a *bundled* one is
+present: the plugin prefers `pounce/bin/pounce` inside the installed
+`pounce-solver` package and falls back to `PATH` only when that is absent.
+Neither setup above bundles anything, so a plain source checkout takes the
+fallback path while CI takes the bundled one. Tests that describe the
+bundled arrangement then skip, and the suite you run locally is not the
+suite CI runs.
+
+To match CI, stage the freshly built CLI into the package *before* building
+the wheel — this is what `.github/workflows/ci.yml` does:
+
+```bash
+cargo build --release --bin pounce
+mkdir -p python/pounce/bin
+cp target/release/pounce python/pounce/bin/pounce   # the step that bundles it
+(cd python && maturin build --release --out dist)
+pip install python/dist/*.whl                       # pounce module + bundled CLI
+pip install --no-deps -e pyomo-pounce
+pytest pyomo-pounce/tests -q
+```
+
+`networkx` and `scipy` are needed for `test_block_init.py` and
+`test_repair.py`; without them those two files skip.
+
+If a test involving duals, multipliers, or bound reduced costs fails, check
+the binary before the code:
+
+```python
+import pyomo_pounce; pyomo_pounce.check_binary()
+```
+
+It reports which executable will actually run, its build *commit*, and
+whether anything on `PATH` shadows it. Two builds can share a version
+string while differing in commit, so a stale binary reports a plausible
+`X.Y.Z` while returning pre-fix results — that is the failure mode gh #315
+added `check_binary()` for, and the one gh #366 turned out to be about.
+
 ## License
 
 EPL-2.0, same as POUNCE.

@@ -34,6 +34,14 @@ is written to .nl and evaluated in-process via pounce.read_nl, and the
 pounce.Solver session's parametric_step answers gradient()/estimate()
 queries from the stored factorization -- the sIPOPT computation, with no
 suffixes and no upfront perturbation values.
+
+One deliberate divergence from pyomo.contrib.sensitivity_toolbox: a
+declared Param appearing in a Var's BOUND is rewritten as a constraint
+before the solve, so its sensitivity is real rather than zero. The
+toolbox substitutes declared Params in constraint expressions only, and
+leaves such a bound frozen at its pre-perturbation value. On the clone
+that is solved the bound is dropped, so m.x.ub reads None there and the
+NL carries the no-bound sentinel for that row.
 """
 import codecs
 import os
@@ -50,6 +58,8 @@ import pyomo.environ as pyo
 from pyomo.common.collections import ComponentMap
 from pyomo.contrib.sensitivity_toolbox.sens import SensitivityInterface
 from pyomo.core.base.constraint import Constraint
+from pyomo.core.expr import identify_mutable_parameters
+from pyomo.core.expr.visitor import replace_expressions
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
 _REG = "_pounce_sens"
@@ -117,6 +127,72 @@ def declare_residual(*containers, group=None):
         _registry(container.model()).residuals.append((container, group))
 
 
+def _reformulate_param_bounds(clone):
+    """Move Var bounds that reference a declared Param into constraints.
+
+    `SensitivityInterface` substitutes declared Params in constraint
+    expressions only. A Param left in a bound is therefore written to the
+    NL file as a constant at its pre-perturbation value, so the bound never
+    moves and the reported sensitivity to that Param reads as exactly zero
+    (jkitchin/pounce#356). Rewriting the bound as a constraint over the
+    substituted Var puts it where the perturbation already reaches, which
+    makes the answer exact in the bound rather than approximating it.
+
+    Runs after `setup_sensitivity`, so the Param-to-Var map it needs is the
+    one the surgery has already built. Returns {var name: (lb, ub)} of the
+    numeric values the moved bounds had at the solve point, with None on the
+    side that was not moved; covariance()'s active-bound projection reads
+    NL bounds, which for these rows now hold the reader's no-bound sentinel
+    of +/-1e19. That value is finite, so an isinf() test would never fire.
+    """
+    block = clone.component(SensitivityInterface.get_default_block_name())
+    if block is None:
+        return {}
+    sub = {id(param): var for var, param, _, _ in block._sens_data_list}
+    if not sub:
+        return {}
+
+    moved = []
+    # active=True so deactivated Blocks are skipped: stripping a bound there
+    # and adding an active constraint would pull the Var into the NL as a
+    # free column. Fixed Vars are skipped because their bounds are not
+    # enforced -- Pyomo substitutes them out as constants -- so turning one
+    # into a constraint would impose a restriction on the pinned Param that
+    # the original model never had.
+    for v in clone.component_data_objects(pyo.Var, active=True,
+                                          descend_into=True):
+        if v.fixed:
+            continue
+        for attr in ("_lb", "_ub"):
+            expr = getattr(v, attr, None)
+            if expr is None or isinstance(expr, (int, float)):
+                continue
+            if not any(id(p) in sub
+                       for p in identify_mutable_parameters(expr)):
+                continue
+            # the numeric value the NL would have carried, kept so
+            # covariance() can still see where the bound was
+            moved.append((v, attr, float(pyo.value(expr)),
+                          replace_expressions(expr, sub)))
+
+    if not moved:
+        return {}
+
+    recorded = {}
+    block.boundConst = pyo.ConstraintList()
+    for v, attr, val, expr in moved:
+        lo, hi = recorded.get(v.name, (None, None))
+        if attr == "_lb":
+            v.setlb(None)
+            block.boundConst.add(expr <= v)
+            recorded[v.name] = (val, hi)
+        else:
+            v.setub(None)
+            block.boundConst.add(v <= expr)
+            recorded[v.name] = (lo, val)
+    return recorded
+
+
 def has_declarations(model):
     reg = getattr(model, "__dict__", {}).get(_REG)
     return bool(reg and (reg.params or reg.fitted or reg.residuals))
@@ -154,17 +230,36 @@ class _NlBridge:
 
 # ── session ───────────────────────────────────────────────────────────────────
 
+def _row_index(names):
+    """{name: position} for a .col/.row name list.
+
+    The NL writer emits unique symbolic labels, so first-wins and last-wins
+    agree; enumerate order matches `list.index` either way.
+    """
+    return {nm: i for i, nm in enumerate(names)}
+
+
 class _Session:
     def __init__(self, model, nl, solver, var_names, con_names, pins,
-                 con_alias):
+                 con_alias, var_row=None, con_row=None):
         self.model = model            # original model
         self.nl = nl
         self.solver = solver
         self.var_names = var_names    # .col order = x-vector order
         self.con_names = con_names    # .row order = g-vector order
+        # Reverse maps for the two orders above. Every query resolves a
+        # component name to its row, and a list scan makes that O(n) per
+        # lookup -- quadratic for gradient(target=None).to_dataframe(),
+        # which asks for every variable (gh #365). Built once here, or
+        # reused from the caller when it has already built them.
+        # `is None`, not truthiness: an unconstrained model's con_row is a
+        # legitimately empty dict, which `or` would discard and rebuild.
+        self._var_row = _row_index(var_names) if var_row is None else var_row
+        self._con_row = _row_index(con_names) if con_row is None else con_row
         self.pins = pins              # ComponentMap: param data -> pin row
         self.con_alias = con_alias    # original con name -> clone row name
         self.base_x = None
+        self.moved_bounds = {}        # var name -> (lb, ub) moved to rows
         self._columns = {}            # pin row -> full KKT-space column
 
     def orig_var(self, name):
@@ -178,13 +273,23 @@ class _Session:
         return self._columns[pin_idx]
 
     def var_entry(self, name):
-        return self.var_names.index(name)
+        # ValueError, not the dict's KeyError: this used to be a list scan
+        # and callers (and the message a user sees) expect ValueError.
+        try:
+            return self._var_row[name]
+        except KeyError:
+            raise ValueError(
+                f"{name}: not a variable of the solved model") from None
 
     def mult_entry(self, con_name):
         # the sensitivity surgery replaces user constraints with copies on
         # its data block; translate the original name to the clone's row
         con_name = self.con_alias.get(con_name, con_name)
-        g = self.con_names.index(con_name)
+        try:
+            g = self._con_row[con_name]
+        except KeyError:
+            raise ValueError(
+                f"{con_name}: not a constraint of the solved model") from None
         row = self.solver.multiplier_rows([g])[0]
         if row is None:
             raise ValueError(
@@ -352,10 +457,12 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         si = SensitivityInterface(model, clone_model=True)
         si.setup_sensitivity(eff_params)
         clone = si.model_instance
+        moved_bounds = _reformulate_param_bounds(clone)
     else:
         # estimation-only: nothing to pin, solve the model as written
         si = None
         clone = model
+        moved_bounds = {}
 
     # The .nl/.col/.row files exist only to hand the model to read_nl;
     # everything needed later (evaluators, bounds, names) lives in memory,
@@ -444,6 +551,13 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
                 ov.set_value(float(val), skip_validation=True)
         return build_results()
 
+    # name -> row maps, built once here and handed to the session below.
+    # Every pin / fitted / residual lookup that follows, and every later
+    # query, would otherwise scan the whole name list (gh #365). Built
+    # after the non-converged early return, which has no use for them.
+    var_row = _row_index(var_names)
+    con_row = _row_index(con_names)
+
     pins = ComponentMap()
     con_alias = {}
     if si is not None:
@@ -454,7 +568,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
             orig_comp = eff_params[list_idx]
             orig_data = (orig_comp if not orig_comp.is_indexed()
                          else orig_comp[comp_idx])
-            pins[orig_data] = con_names.index(con.name)
+            pins[orig_data] = con_row[con.name]
         # original-name -> clone-row-name aliases for replaced constraints
         if getattr(block, "_has_replaced_expressions", False):
             for new_comp, old_comp in block._replaced_map.items():
@@ -463,19 +577,20 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
                     con_alias[od.name] = nd.name
 
     session = _Session(model, nl, solver, var_names, con_names, pins,
-                       con_alias)
+                       con_alias, var_row=var_row, con_row=con_row)
     session.base_x = np.asarray(x)
+    session.moved_bounds = moved_bounds
 
     # fitted parameters: their rows in the primal vector
     session.fit_rows = ComponentMap()
     for comp in eff_fitted:
         for vd in _iter_data(comp):
-            session.fit_rows[vd] = var_names.index(vd.name)
+            session.fit_rows[vd] = var_row[vd.name]
 
     # residual groups: member rows per group key (None = the common pool)
     session.res_rows = {}
     for container, group in eff_residuals:
-        rows = [var_names.index(rd.name) for rd in _iter_data(container)]
+        rows = [var_row[rd.name] for rd in _iter_data(container)]
         session.res_rows.setdefault(group, []).extend(rows)
 
     reg.session = session
@@ -620,6 +735,12 @@ def estimate(model, perturb, clamp=True):
     ComponentMap (plain dicts don't work: Pyomo components are unhashable).
     Returns a ComponentMap {original var data: estimated value}. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
+
+    A bound written in terms of a declared Param is a constraint by the
+    time the model is solved, so it is not clamped against here and no
+    clamp warning is raised for it. That is deliberate: the bound moves
+    with the perturbation, so the linear step already respects it to
+    first order.
     """
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
@@ -837,6 +958,16 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             "regularized rather than exact. Linearly dependent (structurally"
             " unidentifiable) parameters are the usual cause.")
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
+    # a bound moved to a constraint row reads as the no-bound sentinel
+    # +/-1e19 here (finite, so isinf() would never catch it), which would
+    # silently skip the projection for that parameter; put the value the
+    # bound had at the solve point back for the test only
+    for name, (mlo, mhi) in session.moved_bounds.items():
+        r = session.var_entry(name)
+        if mlo is not None:
+            lo[r] = mlo
+        if mhi is not None:
+            hi[r] = mhi
     active = []
     for i, p in enumerate(params):
         r = session.fit_rows[p]

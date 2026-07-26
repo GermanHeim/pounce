@@ -35,6 +35,223 @@ changes.
   Python, and C-bridge users. A TNLP that refuses that requested warm-start
   payload now fails explicitly with `Invalid_Problem_Definition` rather than
   silently using default iterates.
+### Tests — pyomo-pounce: the shadowing-binary test failed on any source checkout (#366)
+
+- `test_check_binary_flags_a_shadowing_build` asserted that a different-build
+  `pounce` prepended to `PATH` is reported as shadowing. That only holds when
+  the resolved binary is PATH-independent, i.e. when a wheel-bundled binary
+  exists. Without one, `_default_executable` falls back to `shutil.which`, so
+  the fake *became* the resolved binary and shadowed nothing — the assertion
+  inverted and the test failed on every source checkout with no
+  `pounce-solver` wheel installed. Its sibling tests guard with
+  `if _bundled_path() is None: skip`; this one only guarded on
+  `resolved is None`.
+- Fixed by standing the real binary in as the bundled one when none is
+  installed, so the scenario is still exercised locally rather than skipped.
+  CI, which stages the built CLI into the wheel, is unaffected either way.
+- `pyomo-pounce/README.md` gains a **Running the tests locally** section. The
+  staging step that makes a local run match CI (`cp target/release/pounce
+  python/pounce/bin/pounce` *before* building the wheel) was discoverable only
+  by reading `ci.yml`, so a source checkout silently exercised the PATH
+  fallback rather than the bundled path — the root of the confusion behind
+  this issue. It also points at `check_binary()` as the first thing to check
+  when a dual/multiplier test fails, since a stale binary reports a plausible
+  version string.
+- Context for the wider report behind #366: the `pyomo-pounce` suite is green
+  on `main` (82 passed, 2 skipped) when run against a binary built from the
+  same commit. The other four failures reported there did not reproduce, and
+  the two multiplier tests among them (`test_bound_multipliers_populate_ipopt_zL_zU`,
+  `test_multiplier_gradient_matches_finite_difference`) guard #296 and
+  #271/#272 — both of which landed *in* 0.9.0. Since builds from before and
+  after the dual-sign fix both report `0.9.0`, a locally built binary from a
+  slightly stale checkout fails exactly those two while looking current, which
+  is the scenario `check_binary()` exists to detect.
+
+### Performance — pyomo-pounce: `sens.py` resolved every row by linear scan, making `gradient(target=None).to_dataframe()` quadratic (#365)
+
+- **Name-to-row lookups are now dict lookups instead of `list.index` scans.**
+  Every query in `pyomo_pounce.sens` resolved a component name to its row by
+  scanning `var_names` or `con_names`, which is O(n) per lookup. The full
+  Jacobian was the worst case: `gradient(wrt=p)` with no target fans out over
+  *every* variable, and `to_dataframe()` then re-scanned the name list once per
+  cell — **O(n²·p)** string comparisons. At n = 2,000 that is unnoticeable; at
+  n = 50,000, a size an ordinary DAE discretization reaches, it is ~2.5e9
+  comparisons and the call effectively hangs.
+- The per-solve paths are fixed too: the fitted-variable and residual loops in
+  `sens_solve` were O(k·n) for k residuals, paid on *every* solve — which the
+  repeated-solve NMPC workflow the module is built around pays each cycle.
+- `_Session` now builds `{name: row}` maps once (`_row_index`), and
+  `sens_solve` hands over the maps it already built rather than having them
+  rebuilt. No API or behavior change: `var_entry`/`mult_entry` still raise
+  `ValueError` for an unknown name rather than leaking the dict's `KeyError`,
+  and the `con_alias` translation and inequality-multiplier errors are
+  untouched.
+
+### Fixed — pyomo-pounce: a declared Param in a `Var` bound reported exactly zero sensitivity (#356)
+
+- **A limit written as a variable bound now moves with the Param that sets
+  it.** `pyomo.contrib.sensitivity_toolbox`, which supplies the expression
+  surgery behind `declare_sens_param`, substitutes declared Params in
+  *constraint* expressions only. A Param left in a `Var` bound was written to
+  the `.nl` file as a constant at its pre-perturbation value, so the bound
+  never moved and `gradient(m.x, wrt=m.p)` read exactly `0.0` — a wrong answer
+  indistinguishable from a legitimate insensitivity. `sens_solve` now rewrites
+  such a bound as a constraint over the substituted variable, so the two
+  spellings of the same limit agree. Expression bounds such as
+  `bounds=(0, 2*p + 1)` are handled, not just a bare Param.
+  - On a minimum-time racing problem with an acceleration cap, discretized at
+    `nfe=100`, `d tf/d u_up` goes from `0.000000` to `-6.323665` — matching the
+    constraint spelling of the same cap to every digit, and cutting the
+    estimate error at a 10% perturbation from `5.81e-01` to `5.17e-02`.
+- Fixed Vars and Vars on deactivated Blocks are deliberately skipped. A fixed
+  Var's bounds are never enforced by the solver (Pyomo substitutes it out as a
+  constant), so rewriting one would impose a restriction on the pinned Param
+  that the original model never had; a deactivated Block's Var would be pulled
+  into the `.nl` file as a free column restricted only by the new row.
+- Two consequences are deliberate and worth knowing. The rewrite **drops the
+  bound** on the clone that is solved: `m.x.ub` reads `None` there and the NL
+  row carries the reader's no-bound sentinel `1e19` (finite, so an `isinf()`
+  test would not catch it). The original model is untouched. And `estimate()`
+  no longer clamps or warns for those variables — correct, because the bound
+  now moves with the perturbation, so the linear step already respects it to
+  first order. `covariance()`'s bound-active projection is unaffected: the
+  pre-rewrite bound value is recorded at solve time and read back for the
+  activity test.
+- Cost: a simple bound is handled directly in the barrier, whereas a general
+  inequality costs a slack and a Jacobian row, so a model with many
+  Param-dependent bounds trades roughly one row per bound. Only models that
+  write a bound in terms of a declared Param pay this.
+- This makes pyomo-pounce answer **differently from `sensitivity_calculation`**
+  on the same model, deliberately: writing a limit as a bound is the natural
+  spelling, and requiring a manual rewrite to a constraint is precisely the
+  usability problem `declare_sens_param` exists to avoid. Recorded in the
+  `pyomo_pounce.sens` module docstring so it is discoverable without being
+  opt-in-able.
+
+### Fixed — `qp-active-set` facade returned `success=False` and a wrong `x` on convex QPs with an active inequality (#358)
+
+- **The default `pounce.minimize(..., solver_selection="qp-active-set")` path
+  now converges** on easy, well-conditioned convex QPs whose general inequality
+  is active at the optimum. When the caller supplies no analytic Hessian the
+  facade sets `hessian_approximation=limited-memory`, which on the
+  active-set-SQP path selected the L-BFGS Lagrangian Hessian — it stalled with
+  `Search_Direction_Becomes_Too_Small` (or reported the QP subproblem
+  `unbounded`) and returned `success=False` together with a silently wrong `x`,
+  even at `cond(P)=10`, `n=3`. On a 36-instance sweep 29/36 failed.
+  - Fix: on the SQP path the automatic quasi-Newton approximation now maps to
+    the dense Powell-damped BFGS (`crates/pounce-algorithm/src/application.rs`),
+    which is far more robust and — because L-BFGS materializes the same dense
+    `n×n` Hessian for the QP subproblem today — costs nothing extra. An explicit
+    `sqp_hessian="lbfgs"` opt-in is still honored unchanged. The `#348`
+    exact-without-Hessian downgrade now targets damped-BFGS for the same reason.
+  - Independent oracles (closed-form KKT, `pounce.solve_qp` IPM, scipy SLSQP)
+    and every other pounce path already solved these; only the facade's L-BFGS
+    SQP default was affected.
+
+### Fixed — active-set-SQP quasi-Newton overshoot on ill-conditioned QPs (#358 tail)
+
+- **The damped-BFGS active-set-SQP now sizes its initial Hessian**, fixing the
+  ill-conditioned tail of #358 (`cond(P) ≳ 1e3`). The identity seed `B₀ = I` is
+  a catastrophic scale when `‖∇²L‖ ≫ 1`: the first QP step overshoots the Newton
+  step by `~cond(∇²L)`, and the filter line search — with an empty filter at a
+  near-feasible start (`θ_curr` tiny) — accepts the objective-blowing step
+  because it drives the negligible constraint violation to zero. The working set
+  is corrupted and the solve diverges to `‖x‖ ~ 1e4` before dying with
+  `Search_Direction_Becomes_Too_Small`.
+  - Fix (`crates/pounce-algorithm/src/sqp/bfgs.rs`): before the first rank-2
+    update, rescale `B` from `I` to `γI` with the Rayleigh-quotient curvature
+    estimate `γ = sᵀy / sᵀs ∈ [λ_min(∇²L), λ_max(∇²L)]` — applied once, so the
+    persistent damped updates still accumulate on top. Halves the failure rate
+    on a broad ill-conditioned-QP sweep (~21% → ~10%) and clears the #358
+    36-instance tail sweep entirely.
+  - Three further fixes below close the rest of this gap.
+
+### Fixed — three more active-set-SQP robustness holes on ill-conditioned QPs (#358)
+
+Continuing the above: on a 500-instance convex-QP sweep (`n ∈ {2,3,5,8,12}`,
+`cond ∈ {1…1e4}`, 20 seeds) failures fell from **~10% to 0.8%**, and the
+`Search_Direction_Becomes_Too_Small` failure mode was eliminated entirely
+(46 → 0). The error distribution of the solves that already succeeded is
+unchanged (median `6e-11`, max true constraint violation `4e-11`).
+
+- **Iteration-0 curvature probe.** The one-time BFGS sizing above cannot fire
+  until iteration 1 — but iteration **0** already solves a QP, against the raw
+  identity seed. Before that first QP, the driver now differences the gradient
+  across a short steepest-descent probe step and seeds `B = γI` with the
+  resulting Rayleigh quotient (one extra gradient evaluation). This is applied
+  **only when the constraint Jacobian is detected constant** (linear
+  constraints, or none), because the probe measures `∇²f`, which equals the
+  Lagrangian Hessian `∇²L = ∇²f + Σλᵢ∇²cᵢ` only when the constraint-curvature
+  term vanishes. On the Maratos problem `∇²f = 4I` while `∇²L ≈ I`, so probing
+  there would over-scale fourfold — the linearity gate keeps that path
+  untouched.
+- **Scale-relative inner-QP tolerances.** `QpOptions::{feas_tol, opt_tol}` are
+  absolute `1e-9`. As an *inner* subproblem the QP inherits the NLP's scale, so
+  with `‖∇f‖ ~ ‖B‖ ~ 1e3` that is `~1e-12` relative — the f64 noise floor. The
+  active-set solver could not certify its own optimality, burned its iteration
+  budget, returned `MaxIter`, and the driver aborted with `QpStepFailed`. Both
+  tolerances are now scaled by the QP data magnitude (clamped at `1e6`).
+  Correctness is unaffected: the outer loop still gates optimality on the true,
+  unscaled NLP KKT residuals, so a sloppier inner step can cost an extra outer
+  iteration but never a false `Optimal`.
+- **Quasi-Newton reset-and-retry.** A QP subproblem that still fails is usually
+  reporting a drifted quasi-Newton Hessian, not a bad linearization. Rather than
+  abort the whole solve, the driver now discards the accumulated curvature
+  (retaining the matrix's scale), rebuilds the subproblem, and re-solves once
+  from cold.
+
+### Fixed — quasi-Newton curvature pair used inconsistent multipliers (#361)
+
+- **The active-set-SQP quasi-Newton update now differences `∇L` at a single
+  fixed multiplier**, per Nocedal-Wright §18.3:
+  `y = ∇L(x_k, λ_k) − ∇L(x_{k−1}, λ_k)`. It previously held
+  `∇L(x_{k−1}, λ_{k−1})` inside the Hessian object and differenced against
+  `∇L(x_k, λ_k)` — two *different* multipliers — which for linear constraints
+  contributes a spurious `Aᵀ(λ_k − λ_{k−1})` term: pure multiplier difference,
+  carrying no curvature at all (the true `∇²L` equals `∇²f` there).
+  - That fed a divergent loop — a perturbed `B` yields a worse QP multiplier,
+    which injects a larger error into the next `y`, which corrupts `B` further.
+    On equality-constrained QPs (where `λ` is sign-free) the multiplier was
+    observed oscillating and growing exponentially
+    (`−13, 19, −69, 104, −145, 581, −1320, 3176, …`) while **`x` sat on the
+    exact optimum**. The solve burned its whole iteration budget and exited
+    `Maximum_Iterations_Exceeded` *at the right answer*, because the reported
+    stationarity residual is formed from that multiplier.
+  - Equality-constrained sweep (144 instances): **92 failures on 0.9.0 → 0**.
+    Inequality sweep (500 instances): **4 → 0**. All constraint families
+    (linear equality, linear inequality, nonlinear inequality) now solve clean.
+  - Fixed for both `damped-bfgs` and `lbfgs`. The consistent-multiplier form
+    telescopes to `Σλᵢ(∇cᵢ(x_k) − ∇cᵢ(x_{k−1}))`, which correctly vanishes for
+    linear constraints and is retained for nonlinear ones.
+
+- **`sqp_tol` is now honored.** It was registered and documented as the max-norm
+  KKT stationarity tolerance (default `1e-8`) but never read, so the looser
+  `sqp_dual_inf_tol` (`1e-4`) governed alone and silently capped attainable
+  accuracy. The convergence test now requires the tighter of the two — the only
+  reading under which neither option is inert. Worst-case error on the #358
+  sweep improves from `7e-5` to `5e-9` for ~10% more iterations. Same
+  registered-but-inert defect family as #360.
+
+### Fixed — `sqp_qp_*` inner-QP options were unusable (#360)
+
+- **The five `sqp_qp_*` options are now registered** and reach
+  `pounce_qp::QpOptions`: `sqp_qp_max_iter`, `sqp_qp_feas_tol`,
+  `sqp_qp_opt_tol`, `sqp_qp_elastic_gamma`, `sqp_qp_anti_cycling`.
+  `apply_qp_subproblem_options` read all five, but none was registered, so the
+  options registry rejected every one with `OPTION_INVALID` ("Unknown option")
+  and the reader was unreachable — the whole documented family was dead code.
+  Added a guard test asserting each key is settable *and* propagates, and that
+  unset keys keep the `pounce-qp` defaults.
+
+**Correction to an earlier note in this section:** a previous revision of this
+entry stated that equality-constrained ill-conditioned QPs were "measured
+unchanged" by the #358 work and that the path showed run-to-run
+nondeterminism. Both claims were wrong — artifacts of a benchmark harness that
+seeded `numpy` from `hash()` of a tuple **containing a string**, which Python
+randomizes per process, so every run silently generated different problems. With
+integer-only seeds the solver is bit-for-bit reproducible, and the #358 work in
+fact improved that family substantially (92 → 38 failures/144) before #361 took
+it to 0.
 
 ## [0.9.0] - 2026-07-24
 
