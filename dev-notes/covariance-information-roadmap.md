@@ -77,9 +77,9 @@ the shipped classifier, which is correct for interior solutions. Items 0 and 1
 are what make the answer right at a bound, and item 1 consumes item 0.
 
 Notation used throughout. `Σ_i = z^L_i/s^L_i + z^U_i/s^U_i` is the barrier
-diagonal on variable `i`, summed over both bounds. $W$ is the primal Hessian
-block the held factor carries and $H = W - \Sigma$ is the Lagrangian one, so
-`H_ii` is that variable's objective curvature with the barrier removed. $F$ is
+diagonal on variable `i`, summed over both bounds. $H$ is the Lagrangian
+Hessian, so `H_ii` is that variable's objective curvature; the held factor
+carries $W = H + \Sigma$, the barrier-augmented block. $F$ is
 the set of variables the reduction keeps, $A$ the ones it projects out.
 
 **0. The activity classifier → Rust core.** Which regime each bounded variable
@@ -91,7 +91,8 @@ classify(i):                          # a bounded variable, or an inequality row
     q = |H_ii|                                  variable: curvature in that coordinate
         ∇gᵢᵀ H ∇gᵢ / ‖∇gᵢ‖²                     row: curvature along the normal
 
-    if q < curvature_scale(H_FF):     return unidentified, sign(H_ii)
+    if q < sqrt(eps_machine) * max(1, max_j |H_jj|):
+                                      return unidentified, sign of q's value
     r = Σ / q
 
     if μ > 1e-4:                      # the μ-edges have closed inside the band
@@ -110,8 +111,9 @@ it, since the shipped default lets a converged primal sit outside its bound
 and a user hits that by doing nothing. Two more conditions are checked on
 every call, not only in the tests: `s·z` away from `μ`, meaning the point is
 off the central path or the bound was relaxed, and `Σ_i/|H_ii|` non-negligible
-on a variable the reduction kept, meaning barrier curvature survived the
-projection.
+on a variable classified inactive, meaning barrier curvature survived where
+none should be (a weakly active variable is kept with ratio near one by
+design, so the check excludes it).
 
 Why it is shaped that way:
 
@@ -129,7 +131,8 @@ Why it is shaped that way:
   the objective curves. An inactive bound a full unit from its variable
   classifies as `ambiguous` once `H_ii` reaches `1e-6` and as `strongly
   active` by `1e-13`, and tightening `μ` relocates the misfile rather than
-  removing it.
+  removing it. Below the square root of machine precision, relative to the
+  block's largest curvature, a diagonal is noise.
 - **Rows use the same `r`.** A row carries a slack and a multiplier with
   `s_j z_j = μ` exactly as a bound does, and its denominator reduces to
   `H_ii` when the row is a bound in disguise, so a limit written either way
@@ -153,20 +156,20 @@ The `s` and `z` columns say what each regime looks like, not how it is
 detected: weak activity is the case where both vanish together, and item 0
 classifies on `Σ/q` rather than on either alone. The `Σ` column shows how the
 barrier diagonal gets where it does, through the slack when the bound is
-inactive and through the multiplier when it is active, and is what skipping
-the subtraction in $H$ would cost.
+inactive and through the multiplier when it is active, and is what using the
+factor's $W$ in place of $H$ would cost.
 
-$S$ carries two caveats the table cannot. It is conditional on the rest of
-$A$: with more than one pinned variable, $S_{ii}$ holds the others at their
-bounds rather than marginalizing over them. And it is the least accurate
-thing either accessor returns, since recovering $H$ there subtracts a `Σ` of
-order `1/μ`, turning the factorization's relative error into an absolute one
-of `eps · Σ`. So $S$ loses roughly `log10(Σ)` digits, and gets worse as the
-solve tightens, the opposite direction from the re-solve `ambiguous` asks
-for. Free rows and weakly active variables are unaffected.
+$S$ carries one caveat the table cannot: it is conditional on the rest of
+$A$. With more than one pinned variable, $S_{ii}$ holds the others at their
+bounds rather than marginalizing over them.
 
-The last two rows warn as well as return: `ambiguous` that re-solving tighter will settle it, which
-works because the drift into the band is `O(1)` while the edges move as
+$S$ is built from the exact Lagrangian Hessian (`curr_exact_hessian`, which
+the solver retains), formed densely on the small fitted block: full precision
+at any `μ`, no recovery from the barrier-augmented factor.
+
+The last two rows warn as well as return: `ambiguous` that re-solving
+tighter will settle it, which works because the drift into the band is
+`O(1)` while the edges move as
 `sqrt(μ)`; `unidentified` that the variance is large rather than small. $F$
 is the conservative side for `covariance()` and the anti-conservative side
 for `information()`, so those warnings are load-bearing rather than
@@ -280,12 +283,15 @@ exactly the v0.10 no-argument default, so the v0.9 surface is a
 forward-compatible subset.
 
 Items 0 and 1 are the exception. Item 1 changes which variables
-`covariance()` projects out, so a model with a weakly active bound gets
-different numbers than v0.9 returns. Item 0 is Rust core work rather than
+`covariance()` projects out, and a kept weakly active variable's value
+corrects from the factor's `2q` to the true `q`, so a model with a weakly
+active bound gets different numbers than v0.9 returns on both counts. Item 0 is Rust core work rather than
 pyomo surface, because the bound multipliers, `μ` and the Hessian diagonal
 are not reachable from the pyomo session: it carries only the primal and the
 bounds, and the held factor is barrier-augmented, so `kkt_solve` inverts $W$
-and neither `Σ` nor $H$ can be recovered above it.
+and neither `Σ` nor $H$ can be recovered above it. The Rust side retains
+everything the classifier needs at the converged iterate, so item 0 is
+exposure, not computation.
 
 Until they land, `information()` inherits the shipped slack-only
 classification, so items 2 to 4 are complete for interior solutions and misfile
