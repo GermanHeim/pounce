@@ -138,6 +138,13 @@ pub trait IpoptNlp: Nlp {
         true
     }
 
+    /// Release any temporary state prepared for the warm-start projections.
+    ///
+    /// Called once the initializer has obtained its `x`, `y`, and `z` blocks.
+    /// The default is a no-op; adapters that cache a TNLP callback payload use
+    /// this to keep that snapshot scoped to one initialization only.
+    fn finish_warm_start(&mut self) {}
+
     /// Fill `y_c` / `y_d` with initial multiplier guesses (mirrors
     /// `IpoptNLP::GetStartingPoint`'s `init_lambda` flag). Default
     /// impl leaves them at their current contents (zeros).

@@ -202,6 +202,7 @@ fn seed_from_nlp(
     v_u.set(0.0);
     nlp.borrow_mut()
         .get_starting_z(&mut z_l, &mut z_u, &mut v_l, &mut v_u);
+    nlp.borrow_mut().finish_warm_start();
 
     let iv = IteratesVector::new(
         Rc::new(x),

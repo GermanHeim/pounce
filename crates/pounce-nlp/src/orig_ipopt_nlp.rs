@@ -1967,6 +1967,10 @@ impl IpoptNlp for OrigIpoptNlp {
         true
     }
 
+    fn finish_warm_start(&mut self) {
+        self.warm_start_snapshot.borrow_mut().take();
+    }
+
     /// Populate `x` (length `n_x_var`) from the TNLP's starting point,
     /// compressed via `x_not_fixed_map`. Mirrors the `init_x` arm of
     /// upstream `IpOrigIpoptNLP::GetStartingPoint`.
@@ -2636,6 +2640,15 @@ mod tests {
         assert_eq!(y_d.values(), &[11.0]);
         assert_eq!(z_l.values(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(z_u.values(), &[5.0, 6.0, 7.0, 8.0]);
+
+        nlp.finish_warm_start();
+        let mut x_after_init = nlp.x_space().make_new_dense();
+        assert!(nlp.get_starting_x(&mut x_after_init));
+        assert_eq!(
+            tnlp.borrow().get_starting_point_calls,
+            2,
+            "the snapshot must not affect later starting-point requests"
+        );
     }
 
     /// Two-variable TNLP with `x[0]` fixed at 7.0 (`x_l == x_u`) and
