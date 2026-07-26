@@ -14,8 +14,8 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
-    TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
+    StartingPoint, TNLP,
 };
 use pounce_sensitivity::{SensSolve, Solver};
 
@@ -40,8 +40,8 @@ impl TNLP for ParametricTNLP {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: 5,
-            m: 4,
-            nnz_jac_g: 10,
+            m: 5,
+            nnz_jac_g: 11,
             nnz_h_lag: 5,
             index_style: IndexStyle::C,
         })
@@ -64,6 +64,11 @@ impl TNLP for ParametricTNLP {
         b.g_u[2] = self.nominal_eta1;
         b.g_l[3] = self.nominal_eta2;
         b.g_u[3] = self.nominal_eta2;
+        // This duplicates x[0]'s lower bound. Generic presolve tightens the
+        // bound and drops the redundant inequality, while sensitivity must
+        // keep the original-space KKT dimensions.
+        b.g_l[4] = 0.0;
+        b.g_u[4] = 1.0e19;
         true
     }
 
@@ -73,6 +78,12 @@ impl TNLP for ParametricTNLP {
         sp.x[2] = 0.0;
         sp.x[3] = 0.0;
         sp.x[4] = 0.0;
+        true
+    }
+
+    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        types.fill(Linearity::NonLinear);
+        types[4] = Linearity::Linear;
         true
     }
 
@@ -95,6 +106,7 @@ impl TNLP for ParametricTNLP {
         g[1] = eta2 * x1 + x2 - x3 - 1.0;
         g[2] = eta1;
         g[3] = eta2;
+        g[4] = x1;
         true
     }
 
@@ -106,8 +118,8 @@ impl TNLP for ParametricTNLP {
     ) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                let rs: [Index; 10] = [0, 0, 0, 0, 1, 1, 1, 1, 2, 3];
-                let cs: [Index; 10] = [0, 1, 2, 3, 0, 1, 2, 4, 3, 4];
+                let rs: [Index; 11] = [0, 0, 0, 0, 1, 1, 1, 1, 2, 3, 4];
+                let cs: [Index; 11] = [0, 1, 2, 3, 0, 1, 2, 4, 3, 4, 0];
                 irow.copy_from_slice(&rs);
                 jcol.copy_from_slice(&cs);
             }
@@ -123,6 +135,7 @@ impl TNLP for ParametricTNLP {
                 values[7] = x[0];
                 values[8] = 1.0;
                 values[9] = 1.0;
+                values[10] = 1.0;
             }
         }
         true
@@ -231,7 +244,13 @@ fn solver_keeps_sensitivity_kkt_in_original_space_when_presolve_is_enabled() {
         status,
         ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
     ));
-    assert!(solver.converged().is_some());
+    let converged = solver.converged().expect("converged state captured");
+    assert_eq!(
+        converged.block_dims(),
+        [5, 1, 4, 1, 3, 0, 1, 0],
+        "sensitivity must retain the original five-row TNLP KKT layout"
+    );
+    drop(converged);
     assert!(
         solver
             .app()
