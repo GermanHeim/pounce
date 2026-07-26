@@ -2055,7 +2055,7 @@ impl IpoptNlp for OrigIpoptNlp {
         _v_u: &mut dyn Vector,
     ) -> bool {
         // TNLP exposes only variable-bound multipliers.
-		// Slack-bound v_l/v_u have no user-facing warm-start payload to forward.
+        // Slack-bound v_l/v_u have no user-facing warm-start payload to forward.
         let Some(z_l) = z_l.as_any_mut().downcast_mut::<DenseVector>() else {
             return false;
         };
