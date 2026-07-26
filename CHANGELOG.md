@@ -9,6 +9,20 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Generic presolve for library TNLP solves.** `presolve=yes` now wraps every
+  `IpoptApplication::optimize_tnlp` call once, before algorithm dispatch, so
+  IPM, SQP, and retry paths all use the same reduced TNLP while
+  `finalize_solution` continues to receive original-space values and
+  multipliers. Library code no longer needs to call `wrap_with_presolve` for
+  the ordinary callback-TNLP case.
+  - `IpoptApplication::set_presolve_already_applied` declares an explicit
+    caller-owned presolve wrapper; `optimize_tnlp_without_presolve` is the
+    scoped bypass for consumers, such as sensitivity analysis, that require
+    the original KKT coordinate system; and `TNLP::is_presolve_wrapper` lets
+    generic TNLP decorators preserve the no-double-wrap marker.
+
 ### Changed
 
 - **`pounce-nlp` warm starts now fetch one coherent TNLP starting-point
@@ -18,7 +32,9 @@ changes.
   the IPM's `x`, `y`, and `z` blocks. This replaces three independent callback
   invocations, matching Ipopt's `GetStartingPoint` contract and avoiding
   inconsistent or side-effect-dependent warm starts in existing library,
-  Python, and C-bridge users.
+  Python, and C-bridge users. A TNLP that refuses that requested warm-start
+  payload now fails explicitly with `Invalid_Problem_Definition` rather than
+  silently using default iterates.
 
 ## [0.9.0] - 2026-07-24
 
