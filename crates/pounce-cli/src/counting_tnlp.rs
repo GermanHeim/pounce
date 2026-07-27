@@ -14,8 +14,8 @@
 
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo, ScalingRequest, Solution,
-    SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, InfeasibilityProof, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo,
+    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -144,5 +144,13 @@ impl TNLP for CountingTnlp {
 
     fn finalize_metadata(&mut self, var: &MetaData, con: &MetaData) {
         self.inner.borrow_mut().finalize_metadata(var, con)
+    }
+
+    /// Transparent decorator: forward the presolve infeasibility proof, or the
+    /// application never sees it. The CLI stacks this counter *above* the
+    /// presolve wrapper, so without this the proof is swallowed here and the
+    /// solve runs anyway.
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        self.inner.borrow().presolve_infeasibility_proof()
     }
 }

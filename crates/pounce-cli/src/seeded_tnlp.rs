@@ -11,8 +11,8 @@
 
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo, ScalingRequest, Solution,
-    SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, InfeasibilityProof, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo,
+    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -103,5 +103,11 @@ impl TNLP for SeededTnlp {
     }
     fn finalize_metadata(&mut self, var: &MetaData, con: &MetaData) {
         self.inner.borrow_mut().finalize_metadata(var, con)
+    }
+
+    /// Transparent decorator: forward the presolve infeasibility proof so a
+    /// certified-empty feasible region is not swallowed on the way up.
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        self.inner.borrow().presolve_infeasibility_proof()
     }
 }

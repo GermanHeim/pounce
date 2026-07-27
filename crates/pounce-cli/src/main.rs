@@ -33,7 +33,7 @@ use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::SolveStatistics;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
-use pounce_nlp::tnlp::TNLP;
+use pounce_nlp::tnlp::{InfeasibilityProof, TNLP};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
@@ -1094,9 +1094,17 @@ pub fn main() -> ExitCode {
         pounce_algorithm::application::feral_config_from_options(app.options()).scaling,
         pounce_feral::ScalingStrategy::Mc64Symmetric
     );
+    // A presolve-*certified* infeasibility is exempt. This retry exists to
+    // second-guess a numerical local-infeasibility verdict that a bad scaling
+    // may have manufactured; re-solving to double-check an exact proof would
+    // burn a whole solve to re-derive something scaling cannot affect.
+    let presolve_certified = presolve_handle
+        .as_ref()
+        .and_then(|p| p.borrow().certified_infeasible());
     if scaling_retry_enabled
         && debug_hook.is_none()
         && !already_mc64
+        && presolve_certified.is_none()
         && status == ApplicationReturnStatus::InfeasibleProblemDetected
     {
         eprintln!(
@@ -1377,12 +1385,43 @@ pub fn main() -> ExitCode {
             .borrow()
             .clone()
             .unwrap_or_else(|| (vec![0.0; n], vec![0.0; m]));
-        let message = format!("POUNCE {}: {status:?}", env!("CARGO_PKG_VERSION"));
+        // A presolve-certified infeasibility is reported as `201` rather than
+        // the generic `200`. Both sit in AMPL's 200..299 "infeasible" band, so
+        // every consumer that reads the band — Pyomo maps the whole range to
+        // `TerminationCondition.infeasible` in both its readers — is unaffected,
+        // while a caller reading `solve_result_num` directly can tell a *proof*
+        // (bound propagation / interval arithmetic established the feasible
+        // region is empty) from the numerical verdict `200` (converged to a
+        // stationary point of the constraint violation, which on a nonconvex
+        // problem does not preclude a feasible point elsewhere). Sub-coding
+        // inside a band is the AMPL-native idiom — it is what Ipopt itself does
+        // with 500/501/502 in the failure band.
+        let (message, srn) = match presolve_certified {
+            Some(proof) => {
+                let detail = match proof {
+                    InfeasibilityProof::BoundPropagation => "bound propagation".to_string(),
+                    InfeasibilityProof::IntervalArithmetic { witness } => {
+                        format!("interval arithmetic, constraint {witness}")
+                    }
+                };
+                (
+                    format!(
+                        "POUNCE {}: InfeasibleProblemDetected (proved by presolve: {detail})",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    201,
+                )
+            }
+            None => (
+                format!("POUNCE {}: {status:?}", env!("CARGO_PKG_VERSION")),
+                status_to_solve_result_num(status),
+            ),
+        };
         let payload = nl_writer::SolutionFile {
             message: &message,
             x: &x,
             mult_g: &lambda,
-            solve_result_num: status_to_solve_result_num(status),
+            solve_result_num: srn,
             suffixes: &sol_suffixes,
         };
         match nl_writer::write_sol_file(sol_path, &payload) {

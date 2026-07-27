@@ -46,8 +46,8 @@ use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
-    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData,
+    NlpInfo, ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
 pub mod auxiliary;
@@ -203,6 +203,14 @@ struct PresolveState {
 
     /// Phase 1 report.
     tighten_report: TightenReport,
+    /// A proof that the feasible region is empty, when presolve derived one on
+    /// an *un-clamped* box. `None` unless one of the four certifiable sites in
+    /// `ensure_init` fired — in particular an infeasibility detected while a
+    /// Phase-0 auxiliary elimination is in force is deliberately NOT recorded
+    /// here, because a dropped row can fabricate one (the #53 / F6 hazard).
+    /// Such a detection is re-checked on the rolled-back box first, and only
+    /// the surviving result is certified.
+    certified_infeasible: Option<InfeasibilityProof>,
     /// FBBT report (`None` when `presolve_fbbt` was off or the inner
     /// TNLP did not expose an `ExpressionProvider`).
     fbbt_report: Option<crate::fbbt::FbbtReport>,
@@ -277,6 +285,18 @@ impl PresolveTnlp {
             .as_ref()
             .map(|s| s.tighten_report.clone())
             .unwrap_or_default()
+    }
+
+    /// A proof that the feasible region is empty, if presolve derived one on
+    /// an un-clamped box. `None` means "not proved", not "feasible".
+    ///
+    /// Distinct from `tighten_report().infeasible` /
+    /// `fbbt_report().infeasibility_witness`, which are raw detections: those
+    /// also fire for a contradiction manufactured by a Phase-0 auxiliary
+    /// elimination, which is why they were never safe to act on. This returns
+    /// only detections that survive on the original box.
+    pub fn certified_infeasible(&self) -> Option<InfeasibilityProof> {
+        self.state.as_ref().and_then(|s| s.certified_infeasible)
     }
 
     /// Number of constraint rows dropped by Phase 2 (0 if presolve
@@ -594,6 +614,9 @@ impl PresolveTnlp {
 
         // Phase 1: bound tightening using linear rows.
         let mut tighten_report = TightenReport::default();
+        // Set only where a contradiction is derived on an un-clamped box; see
+        // the field doc on `PresolveState::certified_infeasible`.
+        let mut certified_infeasible: Option<InfeasibilityProof> = None;
         if self.opts.bound_tightening && !linear_rows.is_empty() {
             tighten_report = tighten_bounds(
                 &linear_rows,
@@ -660,11 +683,20 @@ impl PresolveTnlp {
         if tighten_report.infeasible {
             x_l.copy_from_slice(&inner_x_l);
             x_u.copy_from_slice(&inner_x_u);
+            // Reaching here implies the tightening ran on an un-clamped box:
+            // the aux rollback above either did not fire (empty reduction
+            // stack ⇒ Phase 0 changed nothing) or fired and recomputed
+            // `tighten_report` on the restored box. Either way this is a
+            // genuine contradiction in the user's model, not a presolve
+            // artifact, so it is certifiable. The crossed bounds are still
+            // discarded — a degenerate box must not reach the solver — but the
+            // *verdict* now survives.
+            certified_infeasible = Some(InfeasibilityProof::BoundPropagation);
             tracing::warn!(
                 target: "pounce::presolve",
                 "Phase 1 bound tightening proved the feasible region empty; its \
-                 crossed bounds are being discarded — the solve proceeds on the \
-                 original box so the IPM can certify infeasibility itself."
+                 crossed bounds are being discarded, and the emptiness is \
+                 reported as a certified infeasibility."
             );
         }
 
@@ -761,12 +793,15 @@ impl PresolveTnlp {
                     if tighten_report.infeasible {
                         x_l.copy_from_slice(&inner_x_l);
                         x_u.copy_from_slice(&inner_x_u);
+                        // Derived on the rolled-back, un-clamped box, so the
+                        // aux elimination cannot be to blame — certifiable.
+                        certified_infeasible = Some(InfeasibilityProof::BoundPropagation);
                         tracing::warn!(
                             target: "pounce::presolve",
                             "Phase 1 bound tightening on the rolled-back (un-clamped) \
                              box proved the feasible region empty; its crossed bounds \
-                             are being discarded — the solve proceeds on the original \
-                             box so the IPM can certify infeasibility itself."
+                             are being discarded, and the emptiness is reported as a \
+                             certified infeasibility."
                         );
                     }
                     // Re-run FBBT on the un-clamped, all-kept box.
@@ -785,36 +820,36 @@ impl PresolveTnlp {
                         &cfg,
                     );
                     drop(provider_borrow);
-                    if report.infeasibility_witness.is_some() {
+                    if let Some(witness) = report.infeasibility_witness {
                         // Survives without the aux clamp: a genuine
-                        // infeasibility of the original problem. Discard
-                        // FBBT's undefined bounds and let the IPM certify it.
+                        // infeasibility of the original problem, so it is
+                        // certifiable. FBBT's own bounds are still undefined
+                        // per the `FbbtReport` contract and are discarded.
+                        certified_infeasible =
+                            Some(InfeasibilityProof::IntervalArithmetic { witness });
                         tracing::warn!(
                             target: "pounce::presolve",
-                            witness = report.infeasibility_witness,
+                            witness,
                             "FBBT still reports infeasibility on the un-clamped box; \
-                             treating it as genuine and proceeding on the pre-FBBT \
-                             box so the IPM can certify infeasibility itself."
+                             treating it as genuine and reporting a certified \
+                             infeasibility."
                         );
                         x_l.copy_from_slice(&rerun_x_l_pre);
                         x_u.copy_from_slice(&rerun_x_u_pre);
                     }
-                } else if report.infeasibility_witness.is_some() {
+                } else if let Some(witness) = report.infeasibility_witness {
                     // No aux elimination active (empty reduction stack): the
-                    // witnessed infeasibility cannot be a Phase-0 artifact.
-                    // Presolve has no channel to certify infeasibility to the
-                    // solver, so — mirroring the Phase 1 rollback — discard
-                    // FBBT's corrupted bounds and let the IPM run on the
-                    // pre-FBBT box and certify infeasibility itself. The
-                    // report is still surfaced via `fbbt_report()` for
-                    // diagnostics.
+                    // witnessed infeasibility cannot be a Phase-0 artifact, so
+                    // it is certifiable. FBBT's tightened bounds are undefined
+                    // per the `FbbtReport` contract and are still discarded —
+                    // only the verdict survives.
+                    certified_infeasible = Some(InfeasibilityProof::IntervalArithmetic { witness });
                     tracing::warn!(
                         target: "pounce::presolve",
-                        witness = report.infeasibility_witness,
-                        "FBBT reported a constraint infeasibility; its tightened \
-                         bounds are undefined and are being discarded — the solve \
-                         proceeds on the pre-FBBT box so the IPM can certify \
-                         infeasibility itself."
+                        witness,
+                        "FBBT proved a constraint's feasible range empty; its \
+                         tightened bounds are undefined and are being discarded, \
+                         and the emptiness is reported as a certified infeasibility."
                     );
                     x_l.copy_from_slice(&fbbt_x_l_pre);
                     x_u.copy_from_slice(&fbbt_x_u_pre);
@@ -949,6 +984,7 @@ impl PresolveTnlp {
             jac_irow_outer,
             jac_jcol_outer,
             tighten_report,
+            certified_infeasible,
             fbbt_report,
             n_dropped_rows,
             licq_verdict,
@@ -1003,6 +1039,10 @@ fn apply_redundant_verdicts(
 impl TNLP for PresolveTnlp {
     fn is_presolve_wrapper(&self) -> bool {
         true
+    }
+
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        self.certified_infeasible()
     }
 
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
@@ -2531,6 +2571,16 @@ mod tests {
             "Phase 1 must still flag the empty feasible region"
         );
 
+        // ...and, with no Phase-0 elimination in force, it is a genuine
+        // contradiction in the model rather than a presolve artifact, so it is
+        // certified. This is what lets the solver report "proved infeasible"
+        // instead of re-deriving a weaker numerical verdict.
+        assert_eq!(
+            wrapped.certified_infeasible(),
+            Some(InfeasibilityProof::BoundPropagation),
+            "a Phase-1 contradiction on an un-clamped box must be certified"
+        );
+
         // But the box handed to the IPM is the original, valid box — not the
         // crossed `[5, 3]` Phase 1 derived.
         let b = wrapped.cached_bounds().expect("inited");
@@ -2654,6 +2704,13 @@ mod tests {
 
         // FBBT must have reached the infeasible row.
         let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        // No Phase-0 elimination is in force here, so the witness cannot be an
+        // artifact — it is certified, and carries the witnessing row.
+        assert_eq!(
+            wrapped.certified_infeasible(),
+            Some(InfeasibilityProof::IntervalArithmetic { witness: 1 }),
+            "an FBBT witness on an un-clamped box must be certified"
+        );
         assert_eq!(
             rpt.infeasibility_witness,
             Some(1),
@@ -2836,6 +2893,19 @@ mod tests {
             rpt.infeasibility_witness.is_none(),
             "FBBT must not witness infeasibility on the un-clamped box, got {:?}",
             rpt.infeasibility_witness
+        );
+
+        // The soundness property for the certification channel, on the one
+        // scenario that can break it: this model *is feasible*, and the only
+        // infeasibility ever seen was manufactured by Phase 0's own clamp.
+        // Certifying it would make POUNCE report "proved infeasible" for a
+        // problem that has solutions — strictly worse than the numerical
+        // verdict this replaces. The proof must be withheld.
+        assert_eq!(
+            wrapped.certified_infeasible(),
+            None,
+            "a presolve-manufactured infeasibility must never be certified — \
+             this model is feasible"
         );
 
         // x0 is no longer pinned to the aux value 2; FBBT over `x0 + x2 = 20`
