@@ -273,6 +273,41 @@ fn witness_refutes_infeasibility(
     false
 }
 
+/// Whether the model's numbers are representable enough to base an
+/// infeasibility verdict on.
+///
+/// **Only the FBBT path consults this, deliberately.** Wiring the
+/// bound-propagation path to it was tried and measured: every genuinely
+/// infeasible model dropped from a certified verdict to the numerical one,
+/// because POUNCE stores an unbounded constraint bound as the finite sentinel
+/// `INF_BOUND` rather than `f64::INFINITY` — so `is_infinite()` is false, the
+/// `< INF_BOUND` test fails on equality, and any model with a one-sided
+/// constraint (nearly all of them) is rejected. Making the comparison inclusive
+/// admits the sentinel, but then it also admits `1e300`: under POUNCE's own
+/// convention `|v| >= INF_BOUND` *means* unbounded, so a bounds-magnitude test
+/// cannot separate "no bound" from "absurd finite value". A guard that cannot
+/// make that distinction should not be spread to a second path.
+///
+/// The overflow it does catch on the FBBT path comes from constraint
+/// *coefficients*, not bounds; a check on the Jacobian magnitudes would be the
+/// mechanism that generalises. See the commit history for the measured
+/// alternatives (1e150 -> 99/400, 1e20 -> 37/400, sentinel-inclusive -> 37/400,
+/// against a 3/400 baseline). Rejects NaN and finite magnitudes at or beyond the
+/// unbounded sentinel, where interval arithmetic overflows; genuine infinities
+/// stay admissible because they mean "no bound", not "a number".
+fn certificate_data_is_admissible(
+    x_l: &[Number],
+    x_u: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+) -> bool {
+    let sane = |v: &Number| {
+        let v = *v;
+        !v.is_nan() && (v.is_infinite() || v.abs() < crate::bound_tighten::INF_BOUND)
+    };
+    x_l.iter().all(sane) && x_u.iter().all(sane) && g_l.iter().all(sane) && g_u.iter().all(sane)
+}
+
 fn certify_margin(tol: Number) -> Number {
     // Guard against a degenerate or absurdly tight `tol`; below ~1e-12 the
     // margin would drop into the float-noise band the whole check exists to
@@ -334,15 +369,7 @@ fn fbbt_infeasibility_survives_margin(
     // are the INF sentinel and mean "unbounded". What cannot be trusted is a
     // *finite* magnitude at or beyond the sentinel, which is where the
     // arithmetic stops being representable.
-    let sane = |v: &Number| {
-        let v = *v;
-        !v.is_nan() && (v.is_infinite() || v.abs() < crate::bound_tighten::INF_BOUND)
-    };
-    if !x_l.iter().all(sane)
-        || !x_u.iter().all(sane)
-        || !g_l.iter().all(sane)
-        || !g_u.iter().all(sane)
-    {
+    if !certificate_data_is_admissible(x_l, x_u, g_l, g_u) {
         return false;
     }
     let mut probe_x_l = x_l.to_vec();
