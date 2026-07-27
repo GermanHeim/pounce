@@ -520,8 +520,8 @@ pub fn run_inner_resto(
     // exit at exactly the entry `inf_pr` as locally-infeasible
     // (HATFLDF, POLAK6, ROSENMMX, ... regress).
     let outer_tol = outer_data.borrow().tol;
-    let orig_inf_pr_at_final =
-        eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or(0.0);
+    let (orig_inf_pr_at_final, orig_inf_pr_scaled) =
+        eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or((0.0, 0.0));
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
     // Square problems: upstream `IpRestoMinC_1Nrm.cpp:357-371` returns
@@ -647,19 +647,49 @@ pub fn run_inner_resto(
         && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4)
         && orig_inf_pr_at_final.is_finite();
 
-    let locally_infeasible = strict_locally_infeasible
-        || alt_locally_infeasible
-        || cycle_locally_infeasible
-        || step_failure_locally_infeasible
-        || tiny_step_locally_infeasible;
+    // Admissibility guard over ALL of the gates above, in one place.
+    //
+    // Never claim infeasibility at a point the solver's own convergence test
+    // would accept as feasible. `orig_inf_pr_at_final` is measured *unscaled*
+    // (correctly — the floors it is compared against are absolute, user-facing
+    // magnitudes), but `inner_kkt_err` and the convergence check are in the
+    // *scaled* space. Comparing across the two is the same units mismatch the
+    // unscaling was introduced to fix, just moved: on a model whose rows are
+    // scaled down, the inner can stop at a point it considers feasible
+    // (scaled violation below `tol`) while the unscaled violation still clears
+    // a `1e-4` floor, and a gate then reports a feasible model infeasible.
+    //
+    // Measured: two feasible instances (property-test seeds 99 and 193) turned
+    // from `Solve_Succeeded` into `Infeasible_Problem_Detected` exactly this
+    // way. Seed 99's numbers make the mechanism plain — `inner_kkt_err`
+    // 3.249625e-9 against `orig_inf_pr` 3.249625e-3, the same mantissa scaled
+    // by 1e6, the row scaling factor.
+    //
+    // The guard costs nothing on models that carry no row scaling (the two
+    // measures coincide) and nothing on genuinely infeasible ones, whose scaled
+    // violation is comfortably above `tol` — `infeasible_equalities.nl`, the
+    // model the unscaling was introduced for, sits at 6.7e-7 against a `1e-8`
+    // tolerance and still certifies.
+    //
+    // Applied once to the combination rather than to each disjunct: the two
+    // preceding safeguards in this area were each added to one path and not its
+    // twin, and a hole survived both times.
+    let solver_would_call_it_feasible = orig_inf_pr_scaled <= outer_tol;
+    let locally_infeasible = !solver_would_call_it_feasible
+        && (strict_locally_infeasible
+            || alt_locally_infeasible
+            || cycle_locally_infeasible
+            || step_failure_locally_infeasible
+            || tiny_step_locally_infeasible);
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} tiny_step={} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} tiny_step={} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
             orig_inf_pr_at_final,
+            orig_inf_pr_scaled,
             outer_tol,
             strict_locally_infeasible,
             alt_locally_infeasible,
@@ -717,7 +747,7 @@ fn eval_orig_inf_pr_at_inner_curr(
     inner_x: &dyn Vector,
     inner_s: &dyn Vector,
     orig_rc: &Rc<RefCell<dyn IpoptNlp>>,
-) -> Option<f64> {
+) -> Option<(f64, f64)> {
     let xc = inner_x.as_any().downcast_ref::<CompoundVector>()?;
     let x_orig = xc.comp(BLOCK_X);
     let mut orig = orig_rc.borrow_mut();
@@ -727,19 +757,22 @@ fn eval_orig_inf_pr_at_inner_curr(
     let c_amax = if m_eq > 0 {
         let mut buf = DenseVectorSpace::new(m_eq).make_new_dense();
         orig.eval_c(x_orig, &mut buf);
-        unscaled_block_amax(&buf, dc.as_deref())
+        (unscaled_block_amax(&buf, dc.as_deref()), buf.amax())
     } else {
-        0.0
+        (0.0, 0.0)
     };
     let d_minus_s_amax = if m_ineq > 0 {
         let mut buf = DenseVectorSpace::new(m_ineq).make_new_dense();
         orig.eval_d(x_orig, &mut buf);
         buf.axpy(-1.0, inner_s);
-        unscaled_block_amax(&buf, dd.as_deref())
+        (unscaled_block_amax(&buf, dd.as_deref()), buf.amax())
     } else {
-        0.0
+        (0.0, 0.0)
     };
-    Some(c_amax.max(d_minus_s_amax))
+    Some((
+        c_amax.0.max(d_minus_s_amax.0),
+        c_amax.1.max(d_minus_s_amax.1),
+    ))
 }
 
 /// Capture the pieces of the outer iterate the resto initializer needs.
