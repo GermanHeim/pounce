@@ -14,7 +14,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AMPL="${AMPL:-ampl}"
-OUT="${1:-${POUNCE_BENCH_DATA:-$HOME/Dropbox/projects/pounce-bench-data}/globallib/nl}"
+# Corpus root via the shared resolver: the old inline fallback went straight to
+# Dropbox and never found the local mirror.
+. "$HERE/../../scripts/bench_data_root.sh"
+OUT="${1:-$BENCH_DATA_ROOT/globallib/nl}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

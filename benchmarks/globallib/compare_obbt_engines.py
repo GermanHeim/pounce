@@ -44,6 +44,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+def _bench_root():
+    """Corpus root via the shared resolver (local mirror preferred)."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from bench_data import bench_data_root
+
+    return bench_data_root()
+
+
 HERE = Path(__file__).parent
 RUNNER = HERE / "run_globallib.py"
 
@@ -86,7 +96,7 @@ def main():
     ap.add_argument("--nl-dir",
                     default=str(__import__("os").environ.get(
                         "POUNCE_BENCH_DATA",
-                        str(Path.home() / "Dropbox/projects/pounce-bench-data"))
+                        str(_bench_root()))
                         ) + "/globallib/nl")
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--max-vars", type=int, default=None)

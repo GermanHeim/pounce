@@ -31,6 +31,17 @@ import os
 import tempfile
 import time
 
+def _bench_root():
+    """Corpus root via the shared resolver (local mirror preferred)."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from bench_data import bench_data_root
+
+    return bench_data_root()
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.dirname(HERE)
 ROOT = os.path.dirname(BENCH)
@@ -43,7 +54,7 @@ cmp_pc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cmp_pc)
 
 GROUND_TRUTH = os.path.expanduser(
-    "~/Dropbox/projects/pounce-bench-data/qp/Maros-Meszaros-answers.json")
+    str(_bench_root() / "qp" / "Maros-Meszaros-answers.json"))
 
 POUNCE_OK = cmp_pc.POUNCE_OK            # {"SolveSucceeded","SolvedToAcceptableLevel"}
 CLARABEL_OK = cmp_pc.CLARABEL_OK        # {"Solved","AlmostSolved"}
