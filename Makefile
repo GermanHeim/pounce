@@ -179,9 +179,20 @@ help:
 # A stale binary that still works is far worse than one that fails.
 #
 # `python/pounce/bin/` is already gitignored for exactly this artifact.
+#
+# The `rm -f` before `install` is load-bearing. If the staged path is a symlink
+# back to $(CLI_BIN) — an easy thing to set up by hand, since it makes the stage
+# track rebuilds automatically — then `install` sees one file, refuses with
+# "are the same file", and exits 64. That takes down `python-ext` and
+# `python-test` with it, including the restore step `make coverage` tells you to
+# run. Removing the destination first makes the target idempotent whatever is
+# there (real file, symlink, or nothing) and keeps the stage a real copy, which
+# is what the wheel ships. `rm -f` on a symlink unlinks the symlink, not
+# $(CLI_BIN).
 python-cli-bin:
 	$(CARGO) build -p pounce-cli $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS)
 	install -d python/pounce/bin
+	rm -f python/pounce/bin/pounce
 	install -m 0755 "$(CLI_BIN)" python/pounce/bin/pounce
 
 python-ext: python-cli-bin
