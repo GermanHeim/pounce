@@ -16,6 +16,7 @@ pub mod reg_options;
 pub mod style;
 pub mod tagged;
 pub mod timing;
+pub mod tolerance;
 pub mod types;
 pub mod utils;
 
