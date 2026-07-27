@@ -61,20 +61,33 @@ echo "    $(wc -l < "$COV_OUT/objects.txt") test binaries"
 
 echo "==> [2/5] building instrumented CLI + Python extension"
 cargo build --workspace >/dev/null 2>&1
-[ -x target/debug/pounce ] && echo target/debug/pounce >> "$COV_OUT/objects.txt"
+# Absolute path: cargo's JSON already reports absolute executables, so a
+# relative entry here would hand llvm-cov the same object twice.
+[ -x target/debug/pounce ] && echo "$REPO/target/debug/pounce" >> "$COV_OUT/objects.txt"
 (cd python && maturin develop --release 2>&1 | tail -1)
 SO="$(python -c 'import pounce._pounce as m; print(m.__file__)')"
 echo "$SO" >> "$COV_OUT/objects.txt"
 echo "    extension: $SO"
 
+# Run a pytest suite, surfacing which tests failed. Piping straight to
+# `tail -1` keeps the output short but hides the FAILED lines, which turns a
+# single failure into a full re-run to find out what broke.
+run_pytest() {
+  local label="$1"; shift
+  local log="$COV_OUT/pytest-$label.log"
+  "$@" > "$log" 2>&1
+  grep -E '^(FAILED|ERROR)' "$log" | sed 's/^/    /'
+  tail -1 "$log" | sed 's/^/    /'
+}
+
 echo "==> [3/5] running Rust tests"
 cargo test --workspace >/dev/null 2>&1
 echo "==> [4/5] running Python + pyomo suites"
 if [ "$QUICK" = "1" ]; then
-  (cd python && python -m pytest tests/ -q -x -k "problem or minimize" 2>&1 | tail -1)
+  (cd python && run_pytest python python -m pytest tests/ -q -x -k "problem or minimize")
 else
-  (cd python && python -m pytest tests/ -q 2>&1 | tail -1)
-  python -m pytest pyomo-pounce/tests -q 2>&1 | tail -1
+  (cd python && run_pytest python python -m pytest tests/ -q)
+  run_pytest pyomo python -m pytest pyomo-pounce/tests -q
 fi
 
 echo "==> [5/5] merging $(find "$PROFDIR" -name '*.profraw' | wc -l | tr -d ' ') profraw files and reporting"

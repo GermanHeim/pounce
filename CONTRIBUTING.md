@@ -99,11 +99,21 @@ CLI, and the installed `.so` — as an explicit `-object`. It needs
   corrupt a solve, and it would otherwise crowd out the gaps that can.
 - `lcov.info` — for editor/CI consumption.
 
-Two things to know before running it:
+As a sanity check that the attribution actually worked: `crates/pounce-py/*`
+is reachable *only* through the extension module, so those rows read 0% in a
+Rust-only report and 60–90% here. If you see `pounce-py` at zero, the `.so`
+did not get attributed and the whole report is suspect.
+
+Three things to know before running it:
 
 - **The run leaves `python/pounce/_pounce*.so` built with instrumentation**,
   which is slower and can upset timing-sensitive tests. Restore it with
-  `make python-ext`.
+  `make python-ext` (or `cd python && maturin develop --release`).
+- **`test_qp_solve_releases_the_gil` fails during the run.** That is expected,
+  not a regression: it asserts that a QP solve actually releases the GIL by
+  timing concurrent threads, and the instrumentation overhead breaks the
+  timing margin. It passes normally once the extension is restored. Any *other*
+  failure is worth investigating.
 - **Build everything under instrumentation first, then run, then report.**
   Rebuilding any artifact between profiling and reporting changes its
   coverage-mapping hash and silently yields a 0% report. The script already
