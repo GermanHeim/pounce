@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a trivially infeasible NLP was reported as `Restoration_Failed` at tight `tol` (#372)
+
+- **A visibly contradictory model now reports `Infeasible_Problem_Detected`
+  (AMPL `solve_result_num` 200, Pyomo `TerminationCondition.infeasible`) at any
+  user `tol`, not just the default.** The reporter's model is a one-variable
+  contradiction — `min x³ + x²  s.t.  x ≥ 0.7`, `0 ≤ x ≤ 0.6` — which Ipopt
+  3.14.16 diagnoses as `Converged to a locally infeasible point`. POUNCE
+  returned `Restoration_Failed`, which lands in the AMPL 500 *failure* range
+  and surfaces through Pyomo as `SolverStatus.error` /
+  `TerminationCondition.internalSolverError`, leaving client code unable to
+  distinguish a mathematically infeasible model from a solver bug.
+  - Root cause: the trigger was the reporter's `tol=1e-10`, not the model — the
+    identical model at the default `tol=1e-8` was already diagnosed correctly.
+    The locally-infeasible gates in `resto_inner_solver.rs` all key off *how*
+    the restoration inner sub-IPM terminated. At a tight `tol` the inner
+    reaches the same stationary point of the feasibility problem
+    (`inner_kkt_err ≈ 1.2e-10`, `orig_inf_pr = 1.0e-1`) but can no longer
+    certify it against its own, equally tightened, convergence test — every
+    remaining step is below the tiny-step threshold, so it exits
+    `StopAtTinyStep` rather than `Success`. No gate admitted that status, so a
+    correct infeasibility diagnosis was discarded and the solve fell through to
+    `Restoration_Failed`.
+  - Fix: a `tiny_step_locally_infeasible` gate. A step shrunk to machine
+    precision *is* the numerical stationarity evidence, so unlike the `strict`
+    gate it does not additionally demand `inner_kkt_err ≤ 10·outer_tol` — the
+    threshold the inner cannot reach at tight `tol`, which is exactly how the
+    case arises. It keeps the `alt` gate's looser `1e-2` KKT ceiling to reject
+    inners that stalled without ever approaching stationarity, and mirrors
+    `strict`'s `!is_square_problem` guard and `max(100·outer_tol, 1e-4)`
+    violation floor, so a merely near-feasible kappa-guard exit still cannot
+    manufacture a false infeasibility verdict.
+  - The AMPL status mapping is unchanged: `Restoration_Failed` stays in the 500
+    range, matching Ipopt's own `AmplTNLP` mapping. The defect was the
+    classification, not the mapping.
+  - Regression: `crates/pounce-cli/tests/issue_372_infeasible_bounds_status.rs`
+    pins the reporter's exact option set, sweeps `tol` from `1e-6` to `1e-12`,
+    and asserts the result is never advertised in the AMPL *solved* family.
+
 ### Tests — pyomo-pounce: the shadowing-binary test failed on any source checkout (#366)
 
 - `test_check_binary_flags_a_shadowing_build` asserted that a different-build

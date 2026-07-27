@@ -622,14 +622,40 @@ pub fn run_inner_resto(
         && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
         && orig_inf_pr_at_final.is_finite();
 
+    // Tiny-step locally-infeasible gate (gh #372). At a tight user `tol`
+    // the inner sub-IPM can drive the resto NLP to its stationary point
+    // and then be unable to certify it against its own (equally tight)
+    // convergence test — every remaining step is below the tiny-step
+    // threshold, so it exits `StopAtTinyStep` instead of `Success`. The
+    // reproducer is `0 <= x <= 0.6, x >= 0.7` at `tol=1e-10`: the inner
+    // stops after 13 iters with `inner_kkt_err = 1.2e-10` and
+    // `orig_inf_pr = 1.0e-1`, and every gate above rejects the exit
+    // status, so a one-inequality contradiction landed in
+    // `Restoration_Failed` (AMPL 500, Pyomo `internalSolverError`) while
+    // the identical model at the default `tol=1e-8` exits `Success` and
+    // is correctly diagnosed. A step that has shrunk to machine
+    // precision IS the numerical stationarity evidence, so unlike
+    // `strict` this gate does not additionally demand `inner_kkt_err <=
+    // 10*outer_tol` (a threshold the inner cannot reach at tight `tol`,
+    // which is exactly how the case arises); it uses the `alt` gate's
+    // looser `1e-2` KKT ceiling to reject inners that stalled without
+    // ever approaching stationarity. `!is_square_problem` and the
+    // `max(100*outer_tol, 1e-4)` violation floor mirror `strict`.
+    let tiny_step_locally_infeasible = !is_square_problem
+        && matches!(status, SolverReturn::StopAtTinyStep)
+        && inner_kkt_err <= 1e-2
+        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4)
+        && orig_inf_pr_at_final.is_finite();
+
     let locally_infeasible = strict_locally_infeasible
         || alt_locally_infeasible
         || cycle_locally_infeasible
-        || step_failure_locally_infeasible;
+        || step_failure_locally_infeasible
+        || tiny_step_locally_infeasible;
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} tiny_step={} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
@@ -639,6 +665,7 @@ pub fn run_inner_resto(
             alt_locally_infeasible,
             cycle_locally_infeasible,
             step_failure_locally_infeasible,
+            tiny_step_locally_infeasible,
             locally_infeasible
         );
     }
