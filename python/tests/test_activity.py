@@ -151,8 +151,9 @@ def test_variable_bound_regimes(p, status):
 def test_variable_bound_ratio_scales():
     # on the central path z·s = μ with unit curvature: r ≈ μ inactive,
     # r ≈ 1/μ strongly active, r ≈ 1 weakly active
-    mu = _solve_bound(1.0)["mu"]
-    assert _solve_bound(1.0)["var_ratio"][0] == pytest.approx(mu, rel=10.0)
+    rep_in = _solve_bound(1.0)
+    mu = rep_in["mu"]
+    assert rep_in["var_ratio"][0] == pytest.approx(mu, rel=10.0)
     assert _solve_bound(-1.0)["var_ratio"][0] > 1.0 / np.sqrt(mu)
     assert _solve_bound(0.0)["var_ratio"][0] == pytest.approx(1.0, rel=0.5)
 
@@ -196,7 +197,8 @@ def test_relaxed_bounds_are_refused():
     prob.add_option("print_level", 0)
     prob.add_option("sb", "yes")
     solver = pounce.Solver(prob)
-    solver.solve(x0=np.array([0.5]))
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
     with pytest.raises(ValueError, match="bound_relax_factor"):
         solver.classify_activity()
 
@@ -208,3 +210,93 @@ def test_classify_before_solve_raises():
     ))
     with pytest.raises(RuntimeError, match="no converged factor"):
         pounce.Solver(prob).classify_activity()
+
+
+def test_loose_mu_reports_ambiguous():
+    # the weakly active geometry solved only to μ = 1e-2: r ≈ 1 sits in
+    # the fixed band, but at this μ the edges give it no margin, so the
+    # classifier refuses rather than guesses
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=ScalarBound(0.0),
+        lb=[0.0], ub=[1e19], cl=[], cu=[],
+    )
+    prob.add_option("mu_target", 1e-2)
+    # the outer test measures unbarriered complementarity, which the
+    # μ-floored point holds at ~1e-2, so both gates must sit above it
+    prob.add_option("tol", 5e-2)
+    prob.add_option("compl_inf_tol", 5e-2)
+    prob.add_option("bound_relax_factor", 0.0)
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    rep = solver.classify_activity()
+    assert rep["mu"] == pytest.approx(1e-2, rel=1e-6)
+    assert rep["var_status"] == ["ambiguous"]
+    assert rep["var_ratio"][0] == pytest.approx(1.0, rel=0.5)
+
+
+class MixedModel:
+    """Four variables, two constraints, every status in one report:
+
+    min ½(x0-5)² + ½(x1+1)² + ½(x2-2)² + ½(x3+1)²
+    s.t. x0 + x2 = 7        (equality row)
+         x1 >= 0            (inequality row, pulled active by the objective)
+         0 <= x0 <= 10      (two-sided bound, inactive: x0* = 5)
+         x2 = 2             (fixed variable, removed internally)
+         x3 >= 0            (bound, pulled active)
+         x1 free
+    """
+
+    def objective(self, x):
+        return 0.5 * ((x[0] - 5) ** 2 + (x[1] + 1) ** 2
+                      + (x[2] - 2) ** 2 + (x[3] + 1) ** 2)
+
+    def gradient(self, x):
+        return np.array([x[0] - 5, x[1] + 1, x[2] - 2, x[3] + 1])
+
+    def constraints(self, x):
+        return np.array([x[0] + x[2], x[1]])
+
+    def jacobianstructure(self):
+        rows = np.array([0, 0, 1], dtype=np.int64)
+        cols = np.array([0, 2, 1], dtype=np.int64)
+        return rows, cols
+
+    def jacobian(self, x):
+        return np.array([1.0, 1.0, 1.0])
+
+    def hessianstructure(self):
+        idx = np.array([0, 1, 2, 3], dtype=np.int64)
+        return idx, idx
+
+    def hessian(self, x, lagrange, obj_factor):
+        return obj_factor * np.ones(4)
+
+
+def test_mixed_model_reports_in_user_space():
+    # a fixed variable is removed from the internal solve
+    # (make_parameter); the report must keep the user's indices, with
+    # the fixed slot marked rather than everything after it shifted,
+    # and rows indexed by the user's constraint order with the
+    # equality as a placeholder
+    prob = _options(pounce.Problem(
+        n=4, m=2, problem_obj=MixedModel(),
+        lb=[0.0, -1e19, 2.0, 0.0], ub=[10.0, 1e19, 2.0, 1e19],
+        cl=[7.0, 0.0], cu=[7.0, 1e19],
+    ))
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([4.0, 0.5, 2.0, 0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    rep = solver.classify_activity()
+    assert rep["var_status"] == [
+        "inactive", "unbounded", "fixed", "strongly_active",
+    ]
+    assert rep["row_status"] == ["equality", "strongly_active"]
+    assert len(rep["var_ratio"]) == 4 and len(rep["row_ratio"]) == 2
+    assert np.isnan(rep["var_ratio"][1]) and np.isnan(rep["var_ratio"][2])
+    assert np.isnan(rep["row_ratio"][0])
+    assert rep["var_q_sign"][0] == 1 and rep["var_q_sign"][3] == 1
+    assert rep["row_q_sign"][1] == 1
+    assert not any(rep["var_contaminated"]) and not any(rep["row_contaminated"])

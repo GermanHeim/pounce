@@ -382,26 +382,36 @@ impl PySolver {
 
     /// Classify every bounded variable and every finite-bounded
     /// inequality row of the held solve by activity, from the ratio of
-    /// barrier curvature to the objective's own curvature at the
+    /// barrier curvature to the model's own curvature (the exact
+    /// Lagrangian Hessian, so constraint curvature contributes) at the
     /// converged iterate (covariance-information-roadmap item 0,
     /// pounce#362).
+    ///
+    /// Indexing is **user space**: `var_*` entries follow your `n`
+    /// variables and `row_*` entries your `m` constraints, in your
+    /// order. A variable fixed by its bounds (`lb == ub`) reports
+    /// `"fixed"` (the solve removes it and classifies no barrier
+    /// geometry for it), and an equality constraint reports
+    /// `"equality"`, so indices never shift.
     ///
     /// Returns a dict:
     ///
     /// - `"mu"`: the converged barrier parameter.
     /// - `"var_status"`, `"row_status"`: list of str per variable /
-    ///   inequality row: `"inactive"`, `"weakly_active"`,
-    ///   `"strongly_active"`, `"ambiguous"`, `"unidentified"`, or
-    ///   `"unbounded"` where there is no finite bound.
+    ///   constraint: `"inactive"`, `"weakly_active"`,
+    ///   `"strongly_active"`, `"ambiguous"`, `"unidentified"`,
+    ///   `"unbounded"` where there is no finite bound, plus the
+    ///   `"fixed"` / `"equality"` placeholders above.
     /// - `"var_ratio"`, `"row_ratio"`: ndarray of the ratio `Σ/q`
-    ///   (NaN where unbounded).
+    ///   (NaN where nothing was classified).
     /// - `"var_q_sign"`, `"row_q_sign"`: ndarray of the sign of the
     ///   signed curvature, so an indefinite direction is visible.
     /// - `"var_off_central_path"`, `"row_off_central_path"`: list of
     ///   bool, true where `s·z` differs from `μ` by more than 10× on
     ///   some side.
-    /// - `"var_contaminated"`: list of bool, true where classified
-    ///   inactive yet carrying non-negligible barrier curvature.
+    /// - `"var_contaminated"`, `"row_contaminated"`: list of bool,
+    ///   true where classified inactive yet carrying non-negligible
+    ///   barrier curvature.
     ///
     /// Requires `bound_relax_factor=0` (raises `ValueError` otherwise;
     /// the Ipopt default is `1e-8`): relaxed bounds shift the slacks
@@ -415,12 +425,15 @@ impl PySolver {
             codes
                 .iter()
                 .map(|&c| match c {
+                    activity::UNBOUNDED => "unbounded",
                     activity::INACTIVE => "inactive",
                     activity::WEAKLY_ACTIVE => "weakly_active",
                     activity::STRONGLY_ACTIVE => "strongly_active",
                     activity::AMBIGUOUS => "ambiguous",
                     activity::UNIDENTIFIED => "unidentified",
-                    _ => "unbounded",
+                    activity::FIXED => "fixed",
+                    activity::EQUALITY => "equality",
+                    _ => unreachable!("unknown activity status code {c}"),
                 })
                 .collect()
         };
@@ -449,6 +462,7 @@ impl PySolver {
                 .into_pyarray_bound(py),
         )?;
         out.set_item("row_off_central_path", rep.row_off_central_path)?;
+        out.set_item("row_contaminated", rep.row_contaminated)?;
         Ok(out)
     }
 }

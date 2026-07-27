@@ -3,13 +3,16 @@
 //!
 //! Classifies every bounded variable and every finite-bounded inequality
 //! row of a converged barrier solve into one of five statuses, keyed on
-//! the ratio of barrier curvature to the objective's own curvature:
+//! the ratio of barrier curvature to the model's own curvature:
 //!
 //! ```text
 //! r = Σ / q,   Σ = z/s summed over the sides that exist,
 //!              q = |H_ii|                        (variable)
 //!                  |∇dⱼᵀ H ∇dⱼ| / ‖∇dⱼ‖²         (inequality row)
 //! ```
+//!
+//! `H` is the exact Lagrangian Hessian, so constraint curvature
+//! contributes to `q` alongside the objective's.
 //!
 //! `r` is `O(μ)` when the bound is inactive, `O(1)` when weakly active
 //! (slack and multiplier vanish together), and `O(1/μ)` when strongly
@@ -23,13 +26,21 @@
 //! solver's own slacks, `Σ` as `curr_sigma_x` / `curr_sigma_s`, the
 //! barrier parameter, and the exact Lagrangian Hessian, so `H` is
 //! never recovered from the barrier-augmented factor.
+//!
+//! The report is indexed in **user space**: `var_*` arrays have the
+//! user TNLP's full variable count and `row_*` arrays its full
+//! constraint count. A variable removed internally by
+//! `fixed_variable_treatment = make_parameter` (`lb == ub`, the
+//! default) reports [`FIXED`] at its own user index, and an equality
+//! constraint reports [`EQUALITY`], so user indices never shift.
 
 use std::rc::Rc;
 
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 use pounce_linalg::Matrix;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::expansion_matrix::ExpansionMatrix;
+use pounce_linalg::triplet::SymTMatrix;
 
 use crate::PdSensBacksolver;
 use crate::vec_util::dense_to_vec;
@@ -48,17 +59,28 @@ pub const AMBIGUOUS: i8 = 3;
 /// The curvature `q` is below noise scale: the bound question does not
 /// arise, and the direction is poorly identified.
 pub const UNIDENTIFIED: i8 = 4;
+/// `lb == ub`: the variable was removed from the solve as a parameter
+/// (`fixed_variable_treatment = make_parameter`), so there is no
+/// barrier geometry to classify.
+pub const FIXED: i8 = 5;
+/// An equality constraint: always active by construction, with no
+/// slack or multiplier pair on the barrier, so outside this
+/// classification.
+pub const EQUALITY: i8 = 6;
 
 /// Per-variable and per-row classification of a converged solve.
 ///
-/// Vectors are full-length (`n` variables, `m_d` inequality rows);
-/// entries with no finite bound hold [`UNBOUNDED`] and `NaN` ratios.
+/// All vectors are **user-space**: `var_*` have length `n_full_x` (the
+/// user TNLP's `n`) and `row_*` length `n_full_g` (the user's `m`).
+/// Entries with no finite bound hold [`UNBOUNDED`]; [`FIXED`]
+/// variables and [`EQUALITY`] rows are placeholders for entries the
+/// barrier never classified. All three carry `NaN` ratios.
 pub struct ActivityReport {
     /// Barrier parameter of the converged iterate.
     pub mu: Number,
-    /// Status per variable (codes above).
+    /// Status per user variable (codes above).
     pub var_status: Vec<i8>,
-    /// `Σ_i / q_i` per variable; `NaN` where unbounded.
+    /// `Σ_i / q_i` per user variable; `NaN` where not classified.
     pub var_ratio: Vec<Number>,
     /// Sign of the signed curvature `H_ii` (−1, 0, +1); the absolute
     /// value goes into `q`, so an indefinite direction is reported
@@ -70,21 +92,26 @@ pub struct ActivityReport {
     /// Classified inactive yet `r` non-negligible: barrier curvature
     /// where none should be.
     pub var_contaminated: Vec<bool>,
-    /// Status per inequality row.
+    /// Status per user constraint row.
     pub row_status: Vec<i8>,
-    /// `Σ_j / q_j` per row; `NaN` where the row has no finite bound.
+    /// `Σ_j / q_j` per user row; `NaN` where not classified.
     pub row_ratio: Vec<Number>,
     /// Sign of the signed row curvature `∇dⱼᵀ H ∇dⱼ`.
     pub row_q_sign: Vec<i8>,
     /// Central-path check per row, as for variables.
     pub row_off_central_path: Vec<bool>,
+    /// Contamination check per row, as for variables.
+    pub row_contaminated: Vec<bool>,
 }
 
 /// The classification rule of the roadmap's item 0.
 fn classify(r: Number, mu: Number) -> i8 {
     if mu > 1e-4 {
-        // the μ-edges have closed inside the fixed band: only the two
-        // clear calls are made, everything else is honest refusal
+        // The band is fixed at [1e-1, 1e1] while the μ-edges √μ and
+        // 1/√μ move with the solve: they meet the band at μ = 1e-2,
+        // and a full decade separates them from it at μ = 1e-4. Above
+        // 1e-4 that margin is what's thinning, so only the two calls
+        // that stay clear are made and the middle is honest refusal.
         if r < 1e-1 {
             INACTIVE
         } else if r > 1e1 {
@@ -116,46 +143,64 @@ fn sign_of(x: Number) -> i8 {
 /// Scatter a compressed (bounded-entries-only) vector to full length
 /// through its expansion matrix. Entries without that bound stay 0.
 fn expand(compressed: &[Number], px: &Rc<dyn Matrix>, n: usize) -> Vec<Number> {
+    let em = px
+        .as_any()
+        .downcast_ref::<ExpansionMatrix>()
+        .expect("bound projection is an ExpansionMatrix (orig_ipopt_nlp builds no other kind)");
+    let idx = em.expanded_pos_indices();
+    assert_eq!(
+        idx.len(),
+        compressed.len(),
+        "compressed bound vector length disagrees with its expansion",
+    );
     let mut full = vec![0.0; n];
-    if let Some(em) = px.as_any().downcast_ref::<ExpansionMatrix>() {
-        for (k, &pos) in em.expanded_pos_indices().iter().enumerate() {
-            if k < compressed.len() {
-                full[pos as usize] = compressed[k];
-            }
-        }
+    for (k, &pos) in idx.iter().enumerate() {
+        full[pos as usize] = compressed[k];
     }
     full
 }
 
 /// Presence mask for a bound side, from the same expansion.
 fn present(px: &Rc<dyn Matrix>, n: usize) -> Vec<bool> {
+    let em = px
+        .as_any()
+        .downcast_ref::<ExpansionMatrix>()
+        .expect("bound projection is an ExpansionMatrix (orig_ipopt_nlp builds no other kind)");
     let mut mask = vec![false; n];
-    if let Some(em) = px.as_any().downcast_ref::<ExpansionMatrix>() {
-        for &pos in em.expanded_pos_indices() {
-            mask[pos as usize] = true;
-        }
+    for &pos in em.expanded_pos_indices() {
+        mask[pos as usize] = true;
     }
     mask
 }
 
-/// `y = H · e_i` restricted to entry `i`: the exact Hessian diagonal,
-/// one sparse product per bounded variable.
-fn hessian_diag_entry(
-    hess: &Rc<dyn pounce_linalg::SymMatrix>,
-    i: usize,
-    n: usize,
-    work_in: &mut DenseVector,
-    work_out: &mut DenseVector,
-) -> Number {
-    work_in.values_mut().fill(0.0);
-    work_in.values_mut()[i] = 1.0;
-    work_out.values_mut().fill(0.0);
-    hess.mult_vector(1.0, work_in, 0.0, work_out);
-    // values_mut, not values: a zero product may have left the output
-    // homogeneous (empty backing slice); this materializes it
-    let out = work_out.values_mut();
-    debug_assert_eq!(out.len(), n);
-    out[i]
+/// The exact Hessian diagonal: one pass over the triplet structure for
+/// the type `eval_h` builds today. The mat-vec fallback keeps any
+/// future non-triplet `SymMatrix` correct, at O(n·nnz) cost.
+fn hessian_diagonal(hess: &Rc<dyn pounce_linalg::SymMatrix>, n: usize) -> Vec<Number> {
+    let mut diag = vec![0.0; n];
+    if let Some(t) = hess.as_any().downcast_ref::<SymTMatrix>() {
+        // triplet indices are 1-based (the GenTMatrix convention);
+        // duplicates accumulate, matching mult_vector
+        for ((&i, &j), &v) in t.irows().iter().zip(t.jcols()).zip(t.values()) {
+            if i == j {
+                diag[(i - 1) as usize] += v;
+            }
+        }
+        return diag;
+    }
+    let space = DenseVectorSpace::new(n as i32);
+    let mut e = DenseVector::new(space.clone());
+    let mut he = DenseVector::new(space);
+    for (i, d) in diag.iter_mut().enumerate() {
+        e.values_mut().fill(0.0);
+        e.values_mut()[i] = 1.0;
+        he.values_mut().fill(0.0);
+        hess.mult_vector(1.0, &e, 0.0, &mut he);
+        // values_mut, not values: a zero product may have left the
+        // output homogeneous (empty backing slice); this materializes
+        *d = he.values_mut()[i];
+    }
+    diag
 }
 
 /// Central-path check for one side: `s·z` within a factor of ten of `μ`.
@@ -166,6 +211,55 @@ fn off_path(s: Number, z: Number, mu: Number) -> bool {
 
 /// `r` above this while classified inactive flags contamination.
 const CONTAMINATION_FLOOR: Number = 1e-3;
+
+fn contaminated(status: i8, r: Number) -> bool {
+    status == INACTIVE && r > CONTAMINATION_FLOOR
+}
+
+/// One classified entry in internal space, before the user-space
+/// scatter.
+#[derive(Clone, Copy)]
+struct Entry {
+    status: i8,
+    ratio: Number,
+    q_sign: i8,
+    off_path: bool,
+    contaminated: bool,
+}
+
+const NOT_CLASSIFIED: Entry = Entry {
+    status: UNBOUNDED,
+    ratio: Number::NAN,
+    q_sign: 0,
+    off_path: false,
+    contaminated: false,
+};
+
+/// Classify one bounded variable or row from its `Σ` and signed `q`.
+/// `off_path` is the caller's to fill: it reads the per-side slack and
+/// multiplier, not the ratio.
+fn classify_entry(sigma: Number, q_signed: Number, floor: Number, mu: Number) -> Entry {
+    let q_sign = sign_of(q_signed);
+    let q = q_signed.abs();
+    if q < floor {
+        return Entry {
+            status: UNIDENTIFIED,
+            ratio: sigma / floor,
+            q_sign,
+            off_path: false,
+            contaminated: false,
+        };
+    }
+    let r = sigma / q;
+    let status = classify(r, mu);
+    Entry {
+        status,
+        ratio: r,
+        q_sign,
+        off_path: false,
+        contaminated: contaminated(status, r),
+    }
+}
 
 pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let (data, cq, nlp) = bs.activity_handles();
@@ -192,7 +286,7 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     };
     let cq = cq.borrow();
 
-    // --- variables -----------------------------------------------------
+    // --- variables, in internal space ------------------------------------
     let has_l = present(&px_l, n);
     let has_u = present(&px_u, n);
     let z_l = expand(&dense_to_vec(mult_z_l.as_ref()), &px_l, n);
@@ -202,46 +296,25 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let sigma_x = dense_to_vec(cq.curr_sigma_x().as_ref());
 
     let hess = cq.curr_exact_hessian();
-    let space = DenseVectorSpace::new(n as i32);
-    let mut w_in = DenseVector::new(space.clone());
-    let mut w_out = DenseVector::new(space);
-
     // the identification floor is relative to the largest curvature
     // anywhere on the diagonal, not just the bounded entries, so a
     // row-only model still measures q against the model's own scale
-    let mut diag = vec![0.0; n];
-    let mut max_abs_diag: Number = 0.0;
-    for i in 0..n {
-        diag[i] = hessian_diag_entry(&hess, i, n, &mut w_in, &mut w_out);
-        max_abs_diag = max_abs_diag.max(diag[i].abs());
-    }
+    let diag = hessian_diagonal(&hess, n);
+    let max_abs_diag = diag.iter().fold(0.0, |a: Number, d| a.max(d.abs()));
     let floor = Number::EPSILON.sqrt() * max_abs_diag.max(1.0);
 
-    let mut var_status = vec![UNBOUNDED; n];
-    let mut var_ratio = vec![Number::NAN; n];
-    let mut var_q_sign = vec![0i8; n];
-    let mut var_off = vec![false; n];
-    let mut var_cont = vec![false; n];
+    let mut vars = vec![NOT_CLASSIFIED; n];
     for i in 0..n {
         if !(has_l[i] || has_u[i]) {
             continue;
         }
-        var_q_sign[i] = sign_of(diag[i]);
-        let q = diag[i].abs();
-        if q < floor {
-            var_status[i] = UNIDENTIFIED;
-            var_ratio[i] = sigma_x[i] / floor;
-            continue;
-        }
-        let r = sigma_x[i] / q;
-        var_ratio[i] = r;
-        var_status[i] = classify(r, mu);
-        var_off[i] = (has_l[i] && off_path(s_l[i], z_l[i], mu))
+        let mut e = classify_entry(sigma_x[i], diag[i], floor, mu);
+        e.off_path = (has_l[i] && off_path(s_l[i], z_l[i], mu))
             || (has_u[i] && off_path(s_u[i], z_u[i], mu));
-        var_cont[i] = var_status[i] == INACTIVE && r > CONTAMINATION_FLOOR;
+        vars[i] = e;
     }
 
-    // --- inequality rows ----------------------------------------------
+    // --- inequality rows, in internal space -------------------------------
     let rhas_l = present(&pd_l, m_d);
     let rhas_u = present(&pd_u, m_d);
     let v_l = expand(&dense_to_vec(mult_v_l.as_ref()), &pd_l, m_d);
@@ -257,10 +330,7 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let mut grad = DenseVector::new(nspace.clone());
     let mut hgrad = DenseVector::new(nspace);
 
-    let mut row_status = vec![UNBOUNDED; m_d];
-    let mut row_ratio = vec![Number::NAN; m_d];
-    let mut row_q_sign = vec![0i8; m_d];
-    let mut row_off = vec![false; m_d];
+    let mut rows = vec![NOT_CLASSIFIED; m_d];
     for j in 0..m_d {
         if !(rhas_l[j] || rhas_u[j]) {
             continue;
@@ -273,44 +343,153 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         grad.values_mut().fill(0.0);
         jac_d.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
         let norm2: Number = grad.values_mut().iter().map(|g| *g * *g).sum();
-        if norm2 <= 0.0 {
-            continue;
-        }
-        hgrad.values_mut().fill(0.0);
-        hess.mult_vector(1.0, &grad, 0.0, &mut hgrad);
-        let ghg: Number = {
-            let h = hgrad.values_mut();
-            grad.values_mut()
-                .iter()
-                .zip(h.iter())
-                .map(|(g, h)| g * h)
-                .sum()
+        let mut e = if norm2 <= 0.0 {
+            // a bounded row whose gradient vanishes at the iterate has
+            // no direction to measure curvature along: unidentified,
+            // exactly as a below-floor q, never `unbounded` (the
+            // bounds are real)
+            Entry {
+                status: UNIDENTIFIED,
+                ratio: sigma_s[j] / floor,
+                q_sign: 0,
+                off_path: false,
+                contaminated: false,
+            }
+        } else {
+            hgrad.values_mut().fill(0.0);
+            hess.mult_vector(1.0, &grad, 0.0, &mut hgrad);
+            let ghg: Number = {
+                let h = hgrad.values_mut();
+                grad.values_mut()
+                    .iter()
+                    .zip(h.iter())
+                    .map(|(g, h)| g * h)
+                    .sum()
+            };
+            classify_entry(sigma_s[j], ghg / norm2, floor, mu)
         };
-        let q_signed = ghg / norm2;
-        row_q_sign[j] = sign_of(q_signed);
-        let q = q_signed.abs();
-        if q < floor {
-            row_status[j] = UNIDENTIFIED;
-            row_ratio[j] = sigma_s[j] / floor;
-            continue;
-        }
-        let r = sigma_s[j] / q;
-        row_ratio[j] = r;
-        row_status[j] = classify(r, mu);
-        row_off[j] = (rhas_l[j] && off_path(rs_l[j], v_l[j], mu))
+        e.off_path = (rhas_l[j] && off_path(rs_l[j], v_l[j], mu))
             || (rhas_u[j] && off_path(rs_u[j], v_u[j], mu));
+        rows[j] = e;
     }
+
+    // --- scatter to user space --------------------------------------------
+    // all Cq evaluation is done, so borrowing the NLP again is safe
+    let nl = nlp.borrow();
+    let n_full_x = nl.n_full_x() as usize;
+    let n_full_g = nl.n_full_g() as usize;
+
+    let fixed_entry = Entry {
+        status: FIXED,
+        ..NOT_CLASSIFIED
+    };
+    let mut var_full = vec![fixed_entry; n_full_x];
+    for (i, e) in vars.iter().enumerate() {
+        var_full[nl.var_x_to_full_x(i as Index) as usize] = *e;
+    }
+
+    let equality_entry = Entry {
+        status: EQUALITY,
+        ..NOT_CLASSIFIED
+    };
+    let mut row_full = vec![equality_entry; n_full_g];
+    // BoundClassification's d_map is one ascending scan over the
+    // user's g, so the j-th full-g index outside the c-block is
+    // internal inequality row j
+    let mut d_pos = 0usize;
+    for (full_idx, slot) in row_full.iter_mut().enumerate() {
+        if nl.full_g_to_c_block(full_idx as Index).is_none() {
+            *slot = rows[d_pos];
+            d_pos += 1;
+        }
+    }
+    assert_eq!(d_pos, m_d, "inequality count disagrees with the c/d split");
 
     ActivityReport {
         mu,
-        var_status,
-        var_ratio,
-        var_q_sign,
-        var_off_central_path: var_off,
-        var_contaminated: var_cont,
-        row_status,
-        row_ratio,
-        row_q_sign,
-        row_off_central_path: row_off,
+        var_status: var_full.iter().map(|e| e.status).collect(),
+        var_ratio: var_full.iter().map(|e| e.ratio).collect(),
+        var_q_sign: var_full.iter().map(|e| e.q_sign).collect(),
+        var_off_central_path: var_full.iter().map(|e| e.off_path).collect(),
+        var_contaminated: var_full.iter().map(|e| e.contaminated).collect(),
+        row_status: row_full.iter().map(|e| e.status).collect(),
+        row_ratio: row_full.iter().map(|e| e.ratio).collect(),
+        row_q_sign: row_full.iter().map(|e| e.q_sign).collect(),
+        row_off_central_path: row_full.iter().map(|e| e.off_path).collect(),
+        row_contaminated: row_full.iter().map(|e| e.contaminated).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tight_mu_walks_all_five_regions() {
+        let mu = 1e-10; // edges at 1e-5 and 1e5
+        assert_eq!(classify(0.9e-5, mu), INACTIVE);
+        assert_eq!(classify(1.1e-5, mu), AMBIGUOUS); // gap: edge..band
+        assert_eq!(classify(0.5, mu), WEAKLY_ACTIVE);
+        assert_eq!(classify(50.0, mu), AMBIGUOUS); // gap: band..edge
+        assert_eq!(classify(2e5, mu), STRONGLY_ACTIVE);
+    }
+
+    #[test]
+    fn band_edges_are_inclusive_and_mu_edges_separate() {
+        let mu = 1e-10;
+        assert_eq!(classify(1e-1, mu), WEAKLY_ACTIVE);
+        assert_eq!(classify(1e1, mu), WEAKLY_ACTIVE);
+        // either side of each μ-edge (exactly-on is float-fragile:
+        // √(1e-10) is not exactly 1e-5)
+        assert_eq!(classify(0.99e-5, mu), INACTIVE);
+        assert_eq!(classify(1.01e-5, mu), AMBIGUOUS);
+        assert_eq!(classify(0.99e5, mu), AMBIGUOUS);
+        assert_eq!(classify(1.01e5, mu), STRONGLY_ACTIVE);
+    }
+
+    #[test]
+    fn loose_mu_refuses_the_weak_call() {
+        // μ > 1e-4: three statuses only, the band reports ambiguous
+        for mu in [1e-3, 1e-2, 1e-1] {
+            assert_eq!(classify(0.05, mu), INACTIVE);
+            assert_eq!(classify(1.0, mu), AMBIGUOUS);
+            assert_eq!(classify(50.0, mu), STRONGLY_ACTIVE);
+        }
+        // at μ = 1e-4 exactly the μ-branch is not taken: the weak call
+        // is available, with a decade of margin edge-to-band
+        assert_eq!(classify(1.0, 1e-4), WEAKLY_ACTIVE);
+    }
+
+    #[test]
+    fn off_path_is_a_factor_of_ten_both_ways() {
+        let mu = 1e-2;
+        assert!(!off_path(1.0, 1e-2, mu)); // s·z = μ exactly
+        assert!(!off_path(0.5, 1e-2, mu)); // within 10×
+        assert!(off_path(1.0, 0.2, mu)); // 20× above
+        assert!(off_path(1.0, 5e-4, mu)); // 20× below
+    }
+
+    #[test]
+    fn contamination_flags_inactive_only() {
+        assert!(contaminated(INACTIVE, 1e-2));
+        assert!(!contaminated(INACTIVE, 1e-4));
+        assert!(!contaminated(WEAKLY_ACTIVE, 1.0));
+        assert!(!contaminated(STRONGLY_ACTIVE, 1e5));
+    }
+
+    #[test]
+    fn below_floor_reports_unidentified_with_the_sign() {
+        let e = classify_entry(0.5, 1e-12, 1e-8, 1e-10);
+        assert_eq!(e.status, UNIDENTIFIED);
+        assert_eq!(e.q_sign, 1);
+        let e = classify_entry(0.5, -1e-12, 1e-8, 1e-10);
+        assert_eq!(e.status, UNIDENTIFIED);
+        assert_eq!(e.q_sign, -1);
+        // negative curvature above the floor classifies on |q| but
+        // keeps its sign visible
+        let e = classify_entry(1.0, -2.0, 1e-8, 1e-10);
+        assert_eq!(e.status, WEAKLY_ACTIVE);
+        assert_eq!(e.q_sign, -1);
+        assert_eq!(e.ratio, 0.5);
     }
 }

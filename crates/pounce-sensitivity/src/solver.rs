@@ -242,13 +242,14 @@ impl Solver {
     /// perturbed bounds, and the complementarity products the
     /// classifier reads no longer track `μ`.
     pub fn classify_activity(&self) -> Result<ActivityReport, SolverError> {
+        // the registry supplies its own default when the option is
+        // unset, so no second copy of the default lives here
         let brf = self
             .app
             .options()
             .get_numeric_value("bound_relax_factor", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(1e-8);
+            .map(|(v, _)| v)
+            .expect("bound_relax_factor is a registered core option");
         if brf != 0.0 {
             return Err(SolverError::BadOptions(format!(
                 "classify_activity requires bound_relax_factor=0 \

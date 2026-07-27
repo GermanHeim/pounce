@@ -28,11 +28,17 @@ changes.
   is the gap behind #362: a bound moved onto a row disappears from the
   bound-multiplier view but not from this one. The tests walk the same
   scalar geometry through both formulations and require identical statuses.
-- Per-entry honesty flags: `off_central_path` (`s·z` differs from `μ` by
-  more than 10× on some side) and `contaminated` (classified inactive yet
-  carrying non-negligible barrier curvature). `classify_activity` refuses
-  to run with `bound_relax_factor != 0` (the Ipopt default is `1e-8`):
-  relaxed bounds shift the slacks the classifier reads.
+- The report is indexed in user space: `var_*` follow the user's `n`
+  variables and `row_*` the user's `m` constraints, in their order. A
+  variable removed internally by `fixed_variable_treatment = make_parameter`
+  (`lb == ub`) reports `fixed` at its own index and an equality constraint
+  reports `equality`, so user indices never shift.
+- Per-entry honesty flags on variables and rows alike: `off_central_path`
+  (`s·z` differs from `μ` by more than 10× on some side) and `contaminated`
+  (classified inactive yet carrying non-negligible barrier curvature).
+  `classify_activity` refuses to run with `bound_relax_factor != 0` (the
+  Ipopt default is `1e-8`): relaxed bounds shift the slacks the classifier
+  reads.
 - Item 0 of `dev-notes/covariance-information-roadmap.md` (#262).
   Everything the classifier reads was already retained at convergence
   (`Σ`, the solver's slacks, the bound multipliers, `μ`, and the exact
