@@ -258,3 +258,49 @@ fn json_report_and_sol_agree_on_the_code() {
         );
     }
 }
+
+/// Interval-arithmetic **overflow** must never be mistaken for a proof.
+///
+/// `presolve_overflow_feasible.nl` is `x in [-1e300, 1e300]` with
+/// `1e300*x >= 1e300` — i.e. `x >= 1`, plainly feasible (`x = 1`). But
+/// `1e300 * 1e300` overflows to infinity, and `Interval::is_empty` treats a NaN
+/// endpoint as an empty range, so FBBT reported "this constraint cannot be
+/// satisfied" and it was certified as **proved infeasible** — a false proof on
+/// a feasible model, the worst failure this feature can produce. Meanwhile
+/// `presolve_fbbt=no` solved the same model, so POUNCE contradicted itself.
+///
+/// The margin probe cannot catch this: an overflow is unaffected by widening
+/// bounds `1e-9`. The guard is therefore on the *inputs* — a finite magnitude
+/// at or beyond the INF sentinel is where the arithmetic stops being
+/// representable, so no proof may rest on it. Genuine infinities (`x >= 5` has
+/// `g_u = +inf`) are ordinary and still certify normally.
+#[test]
+fn interval_overflow_is_never_mistaken_for_a_proof() {
+    let sol = std::env::temp_dir().join("pounce_presolve_overflow.sol");
+    let _ = std::fs::remove_file(&sol);
+    let out = Command::new(pounce_exe())
+        .arg(fixture("presolve_overflow_feasible.nl"))
+        .arg("-AMPL")
+        .arg("--sol-output")
+        .arg(&sol)
+        .arg("print_level=0")
+        .arg("solver_selection=nlp")
+        .arg("presolve=yes")
+        .arg("presolve_fbbt=yes")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
+    let text = std::fs::read_to_string(&sol).expect("read .sol");
+    let srn = solve_result_num(&text);
+
+    assert!(
+        !text.contains("proved by presolve"),
+        "a feasible model (x >= 1) was reported as *proved* infeasible because \
+         1e300*1e300 overflowed to inf:\n{text}"
+    );
+    assert!(
+        !(200..300).contains(&srn),
+        "feasible model reported in the AMPL infeasible band \
+         (solve_result_num={srn}):\n{text}"
+    );
+}

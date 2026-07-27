@@ -216,6 +216,30 @@ fn fbbt_infeasibility_survives_margin(
             }
         })
         .collect();
+    // Overflow guard. Interval arithmetic on absurd-but-finite magnitudes
+    // overflows to +/-inf, and `Interval::is_empty` treats a NaN endpoint as an
+    // empty range — so `1e300 * 1e300` reads as "this constraint cannot be
+    // satisfied" and would be certified as a *proof*. It is not: the model
+    // `x in [-1e300, 1e300], 1e300*x >= 1e300` is plainly feasible (`x = 1`),
+    // yet was reported proved infeasible while `presolve_fbbt=no` solved it.
+    // Widening the bounds cannot expose this — an overflow is unaffected by a
+    // 1e-9 relaxation — so the check has to be on the inputs.
+    //
+    // A genuine infinity is fine and common (`x >= 5` has `g_u = +inf`): those
+    // are the INF sentinel and mean "unbounded". What cannot be trusted is a
+    // *finite* magnitude at or beyond the sentinel, which is where the
+    // arithmetic stops being representable.
+    let sane = |v: &Number| {
+        let v = *v;
+        !v.is_nan() && (v.is_infinite() || v.abs() < crate::bound_tighten::INF_BOUND)
+    };
+    if !x_l.iter().all(sane)
+        || !x_u.iter().all(sane)
+        || !g_l.iter().all(sane)
+        || !g_u.iter().all(sane)
+    {
+        return false;
+    }
     let mut probe_x_l = x_l.to_vec();
     let mut probe_x_u = x_u.to_vec();
     let report = crate::fbbt::run_fbbt(
