@@ -74,7 +74,13 @@ fn rc_from(v: Box<dyn Vector>) -> Rc<dyn Vector> {
 /// the identity (no divide) so a degenerate scale never yields infinities.
 /// Falls back to `v.amax()` for a non-dense backing — POUNCE is dense-only,
 /// so that branch is defensive.
-fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
+///
+/// Public because `pounce-restoration`'s locally-infeasible gates compare a
+/// constraint violation against absolute floors (`1e-4` / `1e-3`) and so must
+/// measure it in the same user-facing units this produces — see
+/// `resto_inner_solver::eval_orig_inf_pr_at_inner_curr`. One definition, so
+/// the two call sites cannot drift.
+pub fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
     let Some(s) = scale else {
         return v.amax();
     };
