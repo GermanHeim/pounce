@@ -5,6 +5,8 @@
 #   make build            # release build (alias)
 #   make debug            # debug build
 #   make test             # run all tests
+#   make coverage         # combined Rust + Python coverage report
+#   make coverage-quick   # same, skipping the slow pytest suite
 #   make check            # cargo check
 #   make clippy           # lint with clippy (treats warnings as errors)
 #   make fmt              # rustfmt the workspace
@@ -70,7 +72,7 @@ endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
-        python-ext python-cli-bin python-test \
+        python-ext python-cli-bin python-test coverage coverage-quick \
         benchmark benchmark-rerun benchmark-report benchmark-gams
 
 all: build
@@ -83,6 +85,24 @@ debug:
 
 test:
 	$(CARGO) test --workspace $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS)
+
+# ---- Coverage ------------------------------------------------------------
+# `cargo llvm-cov --workspace` instruments only the Rust test suite, so every
+# path reached solely through the Python extension or the pytest/pyomo-driven
+# CLI reads as 0% — which turns the report into a source of invented gaps
+# rather than a usable "what is under-tested?" signal. `coverage` drives
+# llvm-profdata / llvm-cov directly and attributes every instrumented artifact
+# (Rust test binaries, the CLI, and the installed extension module), so the
+# number reflects what the whole project actually exercises.
+#
+# Note: the run leaves `python/pounce/_pounce*.so` built WITH instrumentation,
+# which is slower and can upset timing-sensitive tests. Restore it with
+# `make python-ext` (or `cd python && maturin develop --release`).
+coverage:
+	scripts/coverage-combined.sh
+
+coverage-quick:
+	scripts/coverage-combined.sh --quick
 
 check:
 	$(CARGO) check --workspace $(CARGO_FLAGS)
