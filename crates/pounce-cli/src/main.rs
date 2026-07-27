@@ -74,7 +74,7 @@ fn presolve_verdict(
             };
             (
                 format!(
-                    "POUNCE {}: InfeasibleProblemDetected (proved by presolve: {detail})",
+                    "POUNCE {}: InfeasibleProblemDetected (detected by presolve: {detail})",
                     env!("CARGO_PKG_VERSION")
                 ),
                 201,

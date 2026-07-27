@@ -14,7 +14,7 @@ changes.
 - **When presolve proves the feasible region empty, that proof is now the
   verdict.** With `presolve=yes`, a model whose emptiness bound propagation or
   FBBT can establish is reported immediately as
-  `InfeasibleProblemDetected (proved by presolve: <method>)` with AMPL
+  `InfeasibleProblemDetected (detected by presolve: <method>)` with AMPL
   `solve_result_num` **201**, and the solve is skipped entirely.
   - Previously presolve detected these cases, logged a warning, threw the result
     away, and let the IPM re-derive a strictly *weaker* numerical verdict — a

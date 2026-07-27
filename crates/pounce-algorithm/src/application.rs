@@ -611,7 +611,7 @@ impl IpoptApplication {
                 JournalLevel::J_SUMMARY,
                 JournalCategory::J_MAIN,
                 &format!(
-                    "\nEXIT: Problem proved infeasible by presolve ({detail}).\n\
+                    "\nEXIT: Presolve detected the feasible region is empty ({detail}).\n\
                      No feasible point exists; the solve was not run.\n"
                 ),
             );

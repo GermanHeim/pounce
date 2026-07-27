@@ -11,7 +11,7 @@
 //! The two verdicts are now distinguishable:
 //!
 //! ```text
-//!   proved   -> solve_result_num 201, "... (proved by presolve: <how>)"
+//!   proved   -> solve_result_num 201, "... (detected by presolve: <how>)"
 //!   local    -> solve_result_num 200, "InfeasibleProblemDetected"
 //! ```
 //!
@@ -79,7 +79,7 @@ fn presolve_proves_the_contradiction_and_says_so() {
          sub-code 201, not the generic local-infeasibility 200:\n{text}"
     );
     assert!(
-        text.contains("proved by presolve"),
+        text.contains("detected by presolve"),
         "the message must say the verdict is a proof, not a local \
          verdict:\n{text}"
     );
@@ -103,7 +103,7 @@ fn without_presolve_the_numerical_verdict_is_unchanged() {
         "without presolve the verdict is the numerical local one (200):\n{text}"
     );
     assert!(
-        !text.contains("proved by presolve"),
+        !text.contains("detected by presolve"),
         "the IPM's local verdict must not claim to be a proof:\n{text}"
     );
 }
@@ -202,7 +202,7 @@ fn float_noise_infeasibility_is_never_certified() {
         let srn = solve_result_num(&text);
 
         assert!(
-            !text.contains("proved by presolve"),
+            !text.contains("detected by presolve"),
             "{opts:?}: a model infeasible by 5.5e-17 must never be reported as \
              *proved* infeasible — POUNCE solves it successfully on every other \
              route:\n{text}"
@@ -294,7 +294,7 @@ fn interval_overflow_is_never_mistaken_for_a_proof() {
     let srn = solve_result_num(&text);
 
     assert!(
-        !text.contains("proved by presolve"),
+        !text.contains("detected by presolve"),
         "a feasible model (x >= 1) was reported as *proved* infeasible because \
          1e300*1e300 overflowed to inf:\n{text}"
     );
