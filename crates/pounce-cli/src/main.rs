@@ -527,6 +527,7 @@ pub fn main() -> ExitCode {
                  will be skipped. Run without --minima to obtain it."
             );
         }
+        app.set_presolve_already_applied(true);
         return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
     }
 
@@ -959,6 +960,13 @@ pub fn main() -> ExitCode {
         Some(p) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
         None => Rc::clone(&inner_tnlp),
     };
+
+    // The CLI owns its explicit wrapper so `.nl` input can supply an
+    // ExpressionProvider for FBBT and so it can report presolve diagnostics
+    // before solving. This also keeps the sensitivity branch above un-presolved
+    // when it disabled the local wrapper, without mutating the user's `presolve`
+    // option.
+    app.set_presolve_already_applied(true);
 
     // Wrap so we can pull eval-call counts out for the final summary.
     let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&post_presolve))));

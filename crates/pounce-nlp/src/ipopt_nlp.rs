@@ -126,6 +126,25 @@ pub trait IpoptNlp: Nlp {
         true
     }
 
+    /// Prepare a complete primal-dual starting-point snapshot for a warm
+    /// start. The default is a no-op for NLP implementations that do not
+    /// route through a TNLP callback.
+    ///
+    /// The warm-start initializer calls this once before its separate
+    /// `get_starting_x` / `get_starting_y` / `get_starting_z` projections.
+    /// Implementations can therefore fetch all requested data in one callback,
+    /// matching Ipopt's single `GetStartingPoint` call.
+    fn prepare_warm_start(&mut self) -> bool {
+        true
+    }
+
+    /// Release any temporary state prepared for the warm-start projections.
+    ///
+    /// Called once the initializer has obtained its `x`, `y`, and `z` blocks.
+    /// The default is a no-op; adapters that cache a TNLP callback payload use
+    /// this to keep that snapshot scoped to one initialization only.
+    fn finish_warm_start(&mut self) {}
+
     /// Fill `y_c` / `y_d` with initial multiplier guesses (mirrors
     /// `IpoptNLP::GetStartingPoint`'s `init_lambda` flag). Default
     /// impl leaves them at their current contents (zeros).

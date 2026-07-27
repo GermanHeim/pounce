@@ -2876,7 +2876,7 @@ impl IpoptAlgorithm {
                 drop(pd_guard);
                 timing.initialize_iterates.end();
                 if !ok {
-                    return SolverReturn::InternalError;
+                    return SolverReturn::InvalidProblemDefinition;
                 }
             }
         }

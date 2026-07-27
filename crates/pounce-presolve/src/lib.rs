@@ -113,7 +113,7 @@ pub fn wrap_with_presolve(
     inner: Rc<RefCell<dyn TNLP>>,
     opts: PresolveOptions,
 ) -> Result<Rc<RefCell<dyn TNLP>>, PresolveError> {
-    if !opts.enabled {
+    if !opts.enabled || inner.borrow().is_presolve_wrapper() {
         return Ok(inner);
     }
     Ok(Rc::new(RefCell::new(PresolveTnlp::new(inner, opts))))
@@ -130,7 +130,7 @@ pub fn wrap_with_presolve_provider(
     expr_provider: Rc<RefCell<dyn ExpressionProvider>>,
     opts: PresolveOptions,
 ) -> Result<Rc<RefCell<dyn TNLP>>, PresolveError> {
-    if !opts.enabled {
+    if !opts.enabled || inner.borrow().is_presolve_wrapper() {
         return Ok(inner);
     }
     Ok(Rc::new(RefCell::new(
@@ -1001,6 +1001,10 @@ fn apply_redundant_verdicts(
 // becomes `Some`).
 #[allow(clippy::expect_used)]
 impl TNLP for PresolveTnlp {
+    fn is_presolve_wrapper(&self) -> bool {
+        true
+    }
+
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         let s = self.ensure_init()?;
         Some(s.info_outer)
@@ -1595,6 +1599,9 @@ mod tests {
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 
+    struct NoopProvider;
+    impl ExpressionProvider for NoopProvider {}
+
     #[test]
     fn c1_redundancy_mask_realigned_after_phase0_drop() {
         // Regression for C1. `find_redundant_rows` returns a verdict
@@ -1666,6 +1673,20 @@ mod tests {
         let info = wrapped.borrow_mut().get_nlp_info().unwrap();
         assert_eq!(info.n, 1);
         assert_eq!(info.m, 0);
+    }
+
+    #[test]
+    fn provider_wrapper_does_not_nest_an_existing_presolve_wrapper() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Probe));
+        let opts = PresolveOptions {
+            enabled: true,
+            ..PresolveOptions::defaults()
+        };
+        let manual = wrap_with_presolve(inner, opts.clone()).unwrap();
+        let provider: Rc<RefCell<dyn ExpressionProvider>> = Rc::new(RefCell::new(NoopProvider));
+        let wrapped = wrap_with_presolve_provider(manual.clone(), provider, opts).unwrap();
+
+        assert!(Rc::ptr_eq(&manual, &wrapped));
     }
 
     #[test]

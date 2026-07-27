@@ -21,6 +21,7 @@ pub enum SolverReturn {
     ErrorInStepComputation,
     InvalidNumberDetected,
     TooFewDegreesOfFreedom,
+    InvalidProblemDefinition,
     InvalidOption,
     OutOfMemory,
     InternalError,

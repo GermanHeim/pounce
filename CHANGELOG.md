@@ -9,6 +9,32 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Generic presolve for library TNLP solves.** `presolve=yes` now wraps every
+  `IpoptApplication::optimize_tnlp` call once, before algorithm dispatch, so
+  IPM, SQP, and retry paths all use the same reduced TNLP while
+  `finalize_solution` continues to receive original-space values and
+  multipliers. Library code no longer needs to call `wrap_with_presolve` for
+  the ordinary callback-TNLP case.
+  - `IpoptApplication::set_presolve_already_applied` declares an explicit
+    caller-owned presolve wrapper; `optimize_tnlp_without_presolve` is the
+    scoped bypass for consumers, such as sensitivity analysis, that require
+    the original KKT coordinate system; and `TNLP::is_presolve_wrapper` lets
+    generic TNLP decorators preserve the no-double-wrap marker.
+
+### Changed
+
+- **`pounce-nlp` warm starts now fetch one coherent TNLP starting-point
+  snapshot.** With `warm_start_init_point=yes`, the adapter calls
+  `TNLP::get_starting_point` once with the primal, bound-multiplier, and
+  constraint-multiplier flags enabled, then projects that single payload into
+  the IPM's `x`, `y`, and `z` blocks. This replaces three independent callback
+  invocations, matching Ipopt's `GetStartingPoint` contract and avoiding
+  inconsistent or side-effect-dependent warm starts in existing library,
+  Python, and C-bridge users. A TNLP that refuses that requested warm-start
+  payload now fails explicitly with `Invalid_Problem_Definition` rather than
+  silently using default iterates.
 ### Tests — pyomo-pounce: the shadowing-binary test failed on any source checkout (#366)
 
 - `test_check_binary_flags_a_shadowing_build` asserted that a different-build

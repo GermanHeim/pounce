@@ -15,6 +15,7 @@ pounce-common.workspace = true
 pounce-linalg.workspace = true
 pounce-algorithm.workspace = true
 pounce-nlp.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
