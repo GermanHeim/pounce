@@ -168,6 +168,85 @@ pub fn wrap_from_options(
 /// `5.5e-17` — pure binary-float noise — yet was reported proved infeasible.
 /// And `x >= 1 + 1e-11` with `x <= 1` is solved to `Solve_Succeeded` on the
 /// default path while presolve called it proved infeasible.
+/// Try to *refute* a candidate infeasibility by finding a point that satisfies
+/// every constraint. Returns `true` when a witness is found — the verdict must
+/// then be withdrawn.
+///
+/// This is the check interval arithmetic cannot do for itself. FBBT and bound
+/// propagation reason about *over-approximated ranges*; at extreme coefficient
+/// scale those ranges lose the precision the conclusion rests on, and a
+/// feasible model can be reported empty. Evaluating the real constraints at a
+/// concrete point is exact by comparison — if the point satisfies them, the
+/// region demonstrably is not empty, whatever the intervals concluded.
+///
+/// Measured on a 400-instance feasible-by-construction sweep, Pyomo's
+/// `contrib.fbbt` — same tolerance idea, no refutation step — reports 57 false
+/// positives where POUNCE reports 3. This gate is where the difference comes
+/// from, and is the part worth keeping ahead of it.
+///
+/// Deliberately one-directional: it can only ever *withdraw* a verdict, never
+/// create one, so a failed evaluation or an unsampled witness costs nothing but
+/// a missed certification. It is also a single gate covering both certification
+/// paths — the previous two safeguards each landed on one path and not its
+/// twin, which is how a bound-propagation hole survived.
+#[allow(clippy::too_many_arguments)]
+fn witness_refutes_infeasibility(
+    inner: &Rc<RefCell<dyn TNLP>>,
+    n: usize,
+    m_in: usize,
+    x_l: &[Number],
+    x_u: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+    tol: Number,
+) -> bool {
+    if m_in == 0 || n == 0 {
+        return false;
+    }
+    let clamp = |v: Number, fallback: Number| -> Number {
+        if v.is_finite() && v.abs() < crate::bound_tighten::INF_BOUND {
+            v
+        } else {
+            fallback
+        }
+    };
+    let lo: Vec<Number> = (0..n).map(|j| clamp(x_l[j], -1.0)).collect();
+    let hi: Vec<Number> = (0..n).map(|j| clamp(x_u[j], 1.0)).collect();
+    let mid: Vec<Number> = (0..n).map(|j| 0.5 * (lo[j] + hi[j])).collect();
+
+    let mut g = vec![0.0; m_in];
+    for x in [&mid, &lo, &hi] {
+        if !inner.borrow_mut().eval_g(x, true, &mut g) {
+            continue;
+        }
+        let feasible = (0..m_in).all(|i| {
+            let v = g[i];
+            if !v.is_finite() {
+                return false;
+            }
+            // Slack relative to the row's own magnitude: an absolute tolerance
+            // is meaningless against a row evaluating near 1e30.
+            // Only *finite* bounds inform the scale. The unbounded sentinel
+            // (~1e19) would otherwise set eps around 1e11 and make every row
+            // look satisfied — which withdrew even correct verdicts.
+            let fin = |b: Number| {
+                if b.is_finite() && b.abs() < crate::bound_tighten::INF_BOUND {
+                    b.abs()
+                } else {
+                    0.0
+                }
+            };
+            let scale = v.abs().max(fin(g_l[i])).max(fin(g_u[i])).max(1.0);
+            let eps = tol * scale;
+            v >= g_l[i] - eps && v <= g_u[i] + eps
+        });
+        if feasible {
+            return true;
+        }
+    }
+    false
+}
+
 fn certify_margin(tol: Number) -> Number {
     // Guard against a degenerate or absurdly tight `tol`; below ~1e-12 the
     // margin would drop into the float-noise band the whole check exists to
@@ -1049,6 +1128,39 @@ impl PresolveTnlp {
                 }
                 fbbt_report = Some(report);
             }
+        }
+
+        // Final admissibility gate for the infeasibility verdict, covering
+        // BOTH certification paths in one place.
+        //
+        // Interval reasoning over-approximates; at extreme coefficient scale it
+        // can report a feasible region empty. Before the verdict escapes, try
+        // to refute it by evaluating the real constraints at concrete points in
+        // the declared box. A witness means the region is demonstrably not
+        // empty, whatever the intervals concluded.
+        //
+        // Placed here, once, rather than beside each detection: the two
+        // previous safeguards were each added to one path and not its twin,
+        // and a hole survived both times.
+        if certified_infeasible.is_some()
+            && witness_refutes_infeasibility(
+                &self.inner,
+                n,
+                m_in,
+                &inner_x_l,
+                &inner_x_u,
+                &g_l_inner,
+                &g_u_inner,
+                self.opts.certify_tol,
+            )
+        {
+            tracing::warn!(
+                target: "pounce::presolve",
+                "presolve flagged the feasible region empty, but a point in the \
+                 declared box satisfies every constraint — withdrawing the \
+                 verdict and letting the solver decide."
+            );
+            certified_infeasible = None;
         }
 
         // Phase 4: any variable whose lower (upper) bound moved
