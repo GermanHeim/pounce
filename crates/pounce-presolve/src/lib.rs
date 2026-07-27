@@ -214,8 +214,34 @@ fn witness_refutes_infeasibility(
     let hi: Vec<Number> = (0..n).map(|j| clamp(x_u[j], 1.0)).collect();
     let mid: Vec<Number> = (0..n).map(|j| 0.5 * (lo[j] + hi[j])).collect();
 
+    // The model's own starting point is the first candidate. It is a witness
+    // the modeller supplied, and at extreme coefficient scale it is not
+    // reproducible from the bounds: `0.5*(lo+hi)` and the modeller's
+    // `lo + 0.5*(hi-lo)` differ by an ulp, and against a 1e30 coefficient that
+    // ulp moves the row value by ~1e5 — enough to turn a satisfied row into a
+    // violated one. Sampling geometry alone therefore missed witnesses that
+    // `pounce check-x0` reports as exactly feasible.
+    let mut x0 = vec![0.0; n];
+    let mut z_l = vec![0.0; n];
+    let mut z_u = vec![0.0; n];
+    let mut lam = vec![0.0; m_in];
+    let have_x0 = inner.borrow_mut().get_starting_point(StartingPoint {
+        init_x: true,
+        x: &mut x0,
+        init_z: false,
+        z_l: &mut z_l,
+        z_u: &mut z_u,
+        init_lambda: false,
+        lambda: &mut lam,
+    });
+
     let mut g = vec![0.0; m_in];
-    for x in [&mid, &lo, &hi] {
+    let mut candidates: Vec<&Vec<Number>> = Vec::with_capacity(4);
+    if have_x0 && x0.iter().all(|v| v.is_finite()) {
+        candidates.push(&x0);
+    }
+    candidates.extend([&mid, &lo, &hi]);
+    for x in candidates {
         if !inner.borrow_mut().eval_g(x, true, &mut g) {
             continue;
         }
