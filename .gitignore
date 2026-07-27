@@ -180,3 +180,10 @@ pyomo-pounce/pyomo_pounce.egg-info/
 # release and not part of the published book — docs/src/ holds that. Pattern
 # rather than the exact file so the next version doesn't reappear untracked.
 docs/linkedin-v*.org
+
+# LLVM coverage profiles. `make coverage` points LLVM_PROFILE_FILE at
+# target/coverage-combined/profraw, but the instrumented extension module keeps
+# emitting profiles for any process that imports it — so running pytest (or a
+# bare `python -c 'import pounce'`) outside that scope drops a
+# default_*.profraw wherever you happened to be. Ignore them everywhere.
+*.profraw
