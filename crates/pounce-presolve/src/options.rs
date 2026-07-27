@@ -211,7 +211,10 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
         "If yes, wraps the user TNLP with a presolve layer that may \
          tighten variable bounds, drop redundant constraints, and \
          detect rank-deficient equality blocks before the IPM starts. \
-         Off by default; the per-pass options below are then dormant.",
+         Off by default; the per-pass options below are then dormant. \
+         A removed row that tightened a variable bound may be returned with \
+         a zero row multiplier, while its dual attribution is carried by the \
+         corresponding tightened variable-bound multiplier.",
     )?;
 
     reg.add_bool_option(

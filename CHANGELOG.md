@@ -47,6 +47,33 @@ changes.
     pins the reporter's exact option set, sweeps `tol` from `1e-6` to `1e-12`,
     and asserts the result is never advertised in the AMPL *solved* family.
 
+### Added
+
+- **Generic presolve for library TNLP solves.** `presolve=yes` now wraps every
+  `IpoptApplication::optimize_tnlp` call once, before algorithm dispatch, so
+  IPM, SQP, and retry paths all use the same reduced TNLP while
+  `finalize_solution` continues to receive original-space values and
+  multipliers. Library code no longer needs to call `wrap_with_presolve` for
+  the ordinary callback-TNLP case.
+  - `IpoptApplication::set_presolve_already_applied` declares an explicit
+    caller-owned presolve wrapper; `optimize_tnlp_without_presolve` is the
+    scoped bypass for consumers, such as sensitivity analysis, that require
+    the original KKT coordinate system; and `TNLP::is_presolve_wrapper` lets
+    generic TNLP decorators preserve the no-double-wrap marker.
+
+### Changed
+
+- **`pounce-nlp` warm starts now fetch one coherent TNLP starting-point
+  snapshot.** With `warm_start_init_point=yes`, the adapter calls
+  `TNLP::get_starting_point` once with the primal, bound-multiplier, and
+  constraint-multiplier flags enabled, then projects that single payload into
+  the IPM's `x`, `y`, and `z` blocks. This replaces three independent callback
+  invocations, matching Ipopt's `GetStartingPoint` contract and avoiding
+  inconsistent or side-effect-dependent warm starts in existing library,
+  Python, and C-bridge users. A TNLP that refuses that requested warm-start
+  payload now fails explicitly with `Invalid_Problem_Definition` rather than
+  silently using default iterates.
+
 ### Tests — pyomo-pounce: the shadowing-binary test failed on any source checkout (#366)
 
 - `test_check_binary_flags_a_shadowing_build` asserted that a different-build
@@ -264,6 +291,22 @@ randomizes per process, so every run silently generated different problems. With
 integer-only seeds the solver is bit-for-bit reproducible, and the #358 work in
 fact improved that family substantially (92 → 38 failures/144) before #361 took
 it to 0.
+
+
+### ### Tests — pyomo-pounce: `test_binary_check.py` failed on any Windows checkout (#366)
+
+- Three tests were POSIX-only: the shadowing test joined `PATH` with a
+  hardcoded `":"` instead of `os.pathsep`, and the fake `pounce` binaries were
+  extensionless shell scripts, which Windows can neither execute (so
+  `_build_id` probed them to `None`) nor resolve (the scan looks for
+  `pounce.exe`). They failed on every Windows machine and passed on Linux,
+  which is why CI never saw them and why they were misread as pre-existing
+  failures on `main`.
+- Fakes are `.bat` files on Windows where the path is probed directly; where
+  PATH resolution is exercised, the stand-in is a copy of the real binary,
+  with the shadowing fake's build id injected at the seam `check_binary`
+  reads through, since a fabricated `.exe` cannot print a chosen `--about`.
+
 
 ## [0.9.0] - 2026-07-24
 
