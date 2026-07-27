@@ -29,6 +29,9 @@
 !/benchmarks/README.md
 !/benchmarks/Makefile
 !/benchmarks/benchmark_report.py
+# The corpus-root resolver is source, not generated data — every harness
+# imports it, so it must be tracked despite the /benchmarks/* blanket ignore.
+!/benchmarks/bench_data.py
 !/benchmarks/BENCHMARK_REPORT.md
 !/benchmarks/BENCHMARK_REPORT.json
 !/benchmarks/qp_three_way.md

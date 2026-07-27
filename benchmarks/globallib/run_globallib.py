@@ -18,7 +18,7 @@ Usage:
                    [--max-vars N] [--out report.json] [stems...]
 
 Default nl-dir: $POUNCE_BENCH_DATA/globallib/nl or
-                ~/Dropbox/projects/pounce-bench-data/globallib/nl
+                <corpus>/globallib/nl  (see benchmarks/bench_data.py)
 """
 import argparse
 import json
@@ -36,10 +36,18 @@ STATUS_RE = re.compile(r"pounce-global\):\s*(?P<msg>[^.]+\.)")
 
 
 def default_nl_dir():
-    env = os.environ.get("POUNCE_BENCH_DATA")
-    if env:
-        return Path(env) / "globallib" / "nl"
-    return Path.home() / "Dropbox/projects/pounce-bench-data/globallib/nl"
+    """Corpus subdir via the shared resolver.
+
+    The previous inline lookup honoured $POUNCE_BENCH_DATA but fell back
+    straight to Dropbox, so it never found the local mirror and accepted a
+    root that did not actually hold the corpus.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from bench_data import bench_data_root
+
+    return bench_data_root() / "globallib" / "nl"
 
 
 def load_optima(path):
