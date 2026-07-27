@@ -2429,8 +2429,27 @@ impl IpoptAlgorithm {
         // honest exit is `LocalInfeasibility`. Below that threshold
         // the failure is numerical, not algorithmic, so retain
         // `ErrorInStepComputation`.
+        //
+        // The violation is measured **unscaled**. `reference_theta` is the
+        // row-scaled residual, but the floor below is an absolute, user-facing
+        // magnitude, so comparing the two mixes unit systems — and on a problem
+        // whose rows are scaled down the scaled residual can never clear it.
+        // `infeasible_equalities.nl` is the worked example: a square 2x2 system
+        // with a true violation of 2.0 that NLP scaling reports as 6.67e-7, so
+        // this test read `6.67e-7 > 1e-4` = false and a blatantly infeasible
+        // model exited `Error_In_Step_Computation` (AMPL 500, Pyomo
+        // `internalSolverError`). Square problems have no restoration-side
+        // locally-infeasible gate — `strict` carves them out so the outer gets
+        // another shot — so this cycle exit *is* their safety net, and it was
+        // disabled by the unit mismatch. Same user-visible family as gh #372.
+        //
+        // Note this also moves from a 1-norm (`curr_constraint_violation`) to a
+        // max-norm. Max-norm <= 1-norm, so the test is marginally stricter
+        // about declaring infeasibility on an unscaled problem — the safe
+        // direction for a verdict this consequential.
         let outer_tol_for_cycle = self.bundle.conv_check.tol_or_default();
-        let cycle_exit = if reference_theta > (100.0 * outer_tol_for_cycle).max(1e-4) {
+        let reference_theta_unscaled = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+        let cycle_exit = if reference_theta_unscaled > (100.0 * outer_tol_for_cycle).max(1e-4) {
             SolverReturn::LocalInfeasibility
         } else {
             SolverReturn::ErrorInStepComputation

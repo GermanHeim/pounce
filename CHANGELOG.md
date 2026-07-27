@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — an infeasible model's verdict depended on the user's `tol` (follow-up to #372)
+
+- **A genuinely infeasible model now reports `Infeasible_Problem_Detected` (AMPL
+  200, Pyomo `TerminationCondition.infeasible`) at every tolerance.** Sweeping
+  `tol` across the other infeasible fixtures after #372 found a second,
+  independent instance of the same user-visible defect — pre-existing, and
+  triggered from the opposite end. `infeasible_equalities.nl` reported
+  `Error_In_Step_Computation` (AMPL 500, Pyomo `internalSolverError`) for
+  `tol >= 3e-7` and `Infeasible_Problem_Detected` for `tol <= 1e-7`, a
+  non-monotonic split on a model whose true constraint violation is `2.0`.
+  - Root cause: a **units mismatch**. The constraint violation was measured
+    *scaled* (`eval_c` returns `dc ⊙ c_user`; `curr_constraint_violation`
+    likewise) but compared against *absolute* floors —
+    `max(100·outer_tol, 1e-4)`. Those floors are user-facing magnitudes meaning
+    "the violation is meaningfully nonzero", so the comparison mixed two unit
+    systems. NLP scaling shrinks this fixture's rows by ~3e6, so a violation of
+    `2.0` read as `6.67e-7` and could never clear a `1e-4` floor.
+  - Two sites had to change, because the fixture is a *square* 2×2 system:
+    `resto_inner_solver::eval_orig_inf_pr_at_inner_curr`, which feeds every
+    restoration locally-infeasible gate; and `ipopt_alg`'s outer `cycle_exit`.
+    Square problems are deliberately carved out of the `strict` restoration
+    gate so the outer loop gets another attempt, which makes that cycle exit
+    their *only* locally-infeasible safety net — and the unit mismatch had
+    silently disabled it.
+  - `ipopt_cq::unscaled_block_amax` is now public and shared by both call sites
+    rather than duplicated, so the two cannot drift.
+  - The `cycle_exit` test also moves from a 1-norm to a max-norm. Max-norm ≤
+    1-norm, so it is marginally *stricter* about declaring infeasibility on an
+    unscaled problem — the safe direction for a verdict this consequential.
+  - Regression: `crates/pounce-cli/tests/infeasible_status_tol_invariance.rs`
+    sweeps four infeasible fixtures over `tol` from `1e-3` to `1e-12`
+    (including the `3e-7` value that failed while its neighbour `1e-7` passed)
+    and pins the tolerance-invariance property rather than specific tolerances.
+  - Verified no false-positive risk: across 477 real `.nl` problems the count of
+    `Infeasible_Problem_Detected` verdicts is unchanged (1 before, 1 after) and
+    no problem changed verdict.
+
 ### Fixed — a trivially infeasible NLP was reported as `Restoration_Failed` at tight `tol` (#372)
 
 - **A visibly contradictory model now reports `Infeasible_Problem_Detected`

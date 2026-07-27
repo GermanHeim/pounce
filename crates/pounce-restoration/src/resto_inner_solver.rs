@@ -43,7 +43,7 @@ use crate::resto_alg_builder::RestoAlgorithmBuilder;
 use crate::resto_nlp::BLOCK_X;
 use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory};
 use pounce_algorithm::ipopt_alg::IpoptAlgorithm;
-use pounce_algorithm::ipopt_cq::{IpoptCalculatedQuantities, IpoptCqHandle};
+use pounce_algorithm::ipopt_cq::{IpoptCalculatedQuantities, IpoptCqHandle, unscaled_block_amax};
 use pounce_algorithm::ipopt_data::{IpoptData, IpoptDataHandle};
 use pounce_algorithm::ipopt_nlp::IpoptNlp;
 use pounce_algorithm::iterates_vector::IteratesVector;
@@ -692,10 +692,27 @@ pub fn run_inner_resto(
 }
 
 /// Evaluate `max(||c(x_orig)||∞, ||d(x_orig) − s||∞)` at the inner
-/// IPM's converged iterate. Returns `None` on any downcast / dim
-/// mismatch (caller treats as `0.0` and the locally-infeasible gate
-/// fails closed — i.e. we don't spuriously declare infeasibility on
-/// a fixture we can't evaluate).
+/// IPM's converged iterate, in **unscaled** (user) units. Returns `None` on
+/// any downcast / dim mismatch (caller treats as `0.0` and the
+/// locally-infeasible gate fails closed — i.e. we don't spuriously declare
+/// infeasibility on a fixture we can't evaluate).
+///
+/// The unscaling is load-bearing, not cosmetic. `eval_c` / `eval_d` return the
+/// row-scaled residual (`c_scaled = dc ⊙ c_user`), while every gate above
+/// compares this value against an *absolute* floor — `max(100·outer_tol, 1e-4)`
+/// or `1e-3`. Those floors are user-facing magnitudes meaning "the constraint
+/// violation is meaningfully nonzero", so mixing them with a scaled residual
+/// compares two different unit systems.
+///
+/// On a problem whose constraint scaling is small the mismatch silently
+/// disables the gates. `infeasible_equalities.nl` is the worked example: NLP
+/// scaling shrinks the rows by ~3e6, so a true violation of `2.0` reads as
+/// `6.67e-7` scaled and can never clear a `1e-4` floor. The `strict` gate then
+/// fails on that one term alone (its KKT condition passes), the diagnosis is
+/// discarded, and a blatantly infeasible model exits `Error_In_Step_Computation`
+/// — the AMPL 500 failure range, Pyomo `internalSolverError`. Same user-visible
+/// family as gh #372, opposite trigger: this one bites at *loose* `tol`, where
+/// the surviving detector that masked it at `tol <= 1e-7` no longer fires.
 fn eval_orig_inf_pr_at_inner_curr(
     inner_x: &dyn Vector,
     inner_s: &dyn Vector,
@@ -706,10 +723,11 @@ fn eval_orig_inf_pr_at_inner_curr(
     let mut orig = orig_rc.borrow_mut();
     let m_eq = orig.m_eq();
     let m_ineq = orig.m_ineq();
+    let (dc, dd) = (orig.c_scale_vec(), orig.d_scale_vec());
     let c_amax = if m_eq > 0 {
         let mut buf = DenseVectorSpace::new(m_eq).make_new_dense();
         orig.eval_c(x_orig, &mut buf);
-        buf.amax()
+        unscaled_block_amax(&buf, dc.as_deref())
     } else {
         0.0
     };
@@ -717,7 +735,7 @@ fn eval_orig_inf_pr_at_inner_curr(
         let mut buf = DenseVectorSpace::new(m_ineq).make_new_dense();
         orig.eval_d(x_orig, &mut buf);
         buf.axpy(-1.0, inner_s);
-        buf.amax()
+        unscaled_block_amax(&buf, dd.as_deref())
     } else {
         0.0
     };
