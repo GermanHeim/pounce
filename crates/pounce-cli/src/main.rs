@@ -43,6 +43,50 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 
+/// The reported `(message, solve_result_num)` for a finished solve.
+///
+/// Single source of truth shared by the JSON report and the `.sol` writer — a
+/// run reporting `201` in one and `200` in the other is a bug a caller has no
+/// way to reconcile.
+///
+/// A presolve-certified infeasibility reports `201`; everything else uses the
+/// standard status mapping. Both sit in AMPL's `200..299` infeasible band, so
+/// band-reading consumers (Pyomo included) are unaffected either way.
+fn presolve_verdict(
+    certified: Option<InfeasibilityProof>,
+    status: ApplicationReturnStatus,
+) -> (String, i32) {
+    // The certificate only *relabels* an infeasibility verdict — it never
+    // manufactures one. The application short-circuits on a proof before
+    // dispatch, so the two normally agree; but the SQP engine is dispatched
+    // ahead of that check and reports its own status, and the CLI computes
+    // `certified` from its own presolve handle. Without this guard a
+    // disagreement would write "proved infeasible" with `201` on top of a
+    // successful solve's `x` — a self-contradictory `.sol` that no caller
+    // could reconcile. If they ever disagree, trust the engine that ran.
+    match certified.filter(|_| status == ApplicationReturnStatus::InfeasibleProblemDetected) {
+        Some(proof) => {
+            let detail = match proof {
+                InfeasibilityProof::BoundPropagation => "bound propagation".to_string(),
+                InfeasibilityProof::IntervalArithmetic { witness } => {
+                    format!("interval arithmetic, constraint {witness}")
+                }
+            };
+            (
+                format!(
+                    "POUNCE {}: InfeasibleProblemDetected (proved by presolve: {detail})",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                201,
+            )
+        }
+        None => (
+            format!("POUNCE {}: {status:?}", env!("CARGO_PKG_VERSION")),
+            status_to_solve_result_num(status),
+        ),
+    }
+}
+
 pub fn main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
@@ -1294,7 +1338,9 @@ pub fn main() -> ExitCode {
             builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
         }
         builder.solution.status = status;
-        builder.solution.solve_result_num = status_to_solve_result_num(status);
+        // Same source of truth as the `.sol` writer below — a run must not
+        // report 201 in one output and 200 in the other.
+        builder.solution.solve_result_num = presolve_verdict(presolve_certified, status).1;
         builder.solution.objective = solve_stats.final_objective;
         if let Some((x, lambda)) = nominal_capture.borrow().clone() {
             builder.solution.x = x;
@@ -1396,27 +1442,7 @@ pub fn main() -> ExitCode {
         // problem does not preclude a feasible point elsewhere). Sub-coding
         // inside a band is the AMPL-native idiom — it is what Ipopt itself does
         // with 500/501/502 in the failure band.
-        let (message, srn) = match presolve_certified {
-            Some(proof) => {
-                let detail = match proof {
-                    InfeasibilityProof::BoundPropagation => "bound propagation".to_string(),
-                    InfeasibilityProof::IntervalArithmetic { witness } => {
-                        format!("interval arithmetic, constraint {witness}")
-                    }
-                };
-                (
-                    format!(
-                        "POUNCE {}: InfeasibleProblemDetected (proved by presolve: {detail})",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                    201,
-                )
-            }
-            None => (
-                format!("POUNCE {}: {status:?}", env!("CARGO_PKG_VERSION")),
-                status_to_solve_result_num(status),
-            ),
-        };
+        let (message, srn) = presolve_verdict(presolve_certified, status);
         let payload = nl_writer::SolutionFile {
             message: &message,
             x: &x,

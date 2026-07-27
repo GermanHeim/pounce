@@ -153,3 +153,108 @@ fn certified_infeasibility_skips_the_mc64_second_opinion() {
          cannot affect; it must be skipped for a proof:\n{combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial regressions. Both were found by trying to break the certificate
+// rather than confirm it, and both were real.
+// ---------------------------------------------------------------------------
+
+/// A model infeasible only by floating-point noise must NOT be certified.
+///
+/// `presolve_float_trap.nl` is `x >= 0.1 + 0.2` with `x <= 0.3`. In binary
+/// floating point `0.1 + 0.2 == 0.30000000000000004`, so it is infeasible — by
+/// `5.5e-17`. A modeller writing that means `x >= 0.3`, and POUNCE agrees:
+/// `presolve=no` returns `Solve_Succeeded` and the LP route reports "Optimal
+/// Solution Found".
+///
+/// Before the fix, `presolve=yes presolve_fbbt=yes` reported it **proved
+/// infeasible** — the strongest claim the solver can make, on the flimsiest
+/// possible margin, contradicting three other routes on the same model. The
+/// cause was an asymmetry between the two proof paths: Phase-1 bound
+/// propagation requires the crossing to exceed `1e-12`, while FBBT's emptiness
+/// tests carry no margin at all. `FBBT_CERTIFY_MARGIN` closes it.
+///
+/// A second, pre-existing defect sat underneath: Phase-1 declines to call a
+/// sub-margin crossing infeasible but still *wrote* the crossed bounds, so the
+/// solver received `x_l > x_u` and rejected it as `Invalid_Problem_Definition`
+/// (504) — a well-posed model failing outright the moment presolve was on.
+#[test]
+fn float_noise_infeasibility_is_never_certified() {
+    for (tag, opts) in [
+        ("ft_none", vec!["presolve=no"]),
+        ("ft_p", vec!["presolve=yes", "presolve_fbbt=no"]),
+        ("ft_pf", vec!["presolve=yes", "presolve_fbbt=yes"]),
+    ] {
+        let sol = std::env::temp_dir().join(format!("pounce_{tag}.sol"));
+        let _ = std::fs::remove_file(&sol);
+        let out = Command::new(pounce_exe())
+            .arg(fixture("presolve_float_trap.nl"))
+            .arg("-AMPL")
+            .arg("--sol-output")
+            .arg(&sol)
+            .arg("print_level=0")
+            .arg("solver_selection=nlp")
+            .args(&opts)
+            .output()
+            .expect("spawn pounce");
+        assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
+        let text = std::fs::read_to_string(&sol).expect("read .sol");
+        let srn = solve_result_num(&text);
+
+        assert!(
+            !text.contains("proved by presolve"),
+            "{opts:?}: a model infeasible by 5.5e-17 must never be reported as \
+             *proved* infeasible — POUNCE solves it successfully on every other \
+             route:\n{text}"
+        );
+        assert_eq!(
+            srn, 0,
+            "{opts:?}: expected the same Solve_Succeeded (0) every other route \
+             gives, got solve_result_num={srn}. 504 here means presolve handed \
+             the solver a crossed box `x_l > x_u`:\n{text}"
+        );
+    }
+}
+
+/// The JSON report and the `.sol` must never disagree about the same run.
+///
+/// The certified sub-code was initially applied only in the `.sol` writer, so a
+/// single run reported `201` in one output and `200` in the other — a
+/// contradiction a caller reading both has no way to reconcile.
+#[test]
+fn json_report_and_sol_agree_on_the_code() {
+    for (tag, opt) in [("cmp_on", "presolve=yes"), ("cmp_off", "presolve=no")] {
+        let sol = std::env::temp_dir().join(format!("pounce_{tag}.sol"));
+        let json = std::env::temp_dir().join(format!("pounce_{tag}.json"));
+        let _ = std::fs::remove_file(&sol);
+        let _ = std::fs::remove_file(&json);
+        let out = Command::new(pounce_exe())
+            .arg(fixture("issue_372_infeasible_bounds.nl"))
+            .arg("-AMPL")
+            .arg("--sol-output")
+            .arg(&sol)
+            .arg("--json-output")
+            .arg(&json)
+            .arg("print_level=0")
+            .arg(opt)
+            .output()
+            .expect("spawn pounce");
+        assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
+
+        let text = std::fs::read_to_string(&sol).expect("read .sol");
+        let sol_srn = solve_result_num(&text);
+        let raw = std::fs::read_to_string(&json).expect("read json");
+        let json_srn: i32 = raw
+            .split("\"solve_result_num\"")
+            .nth(1)
+            .and_then(|s| s.split(&[':', ',', '}'][..]).nth(1))
+            .and_then(|s| s.trim().parse().ok())
+            .expect("solve_result_num in JSON report");
+
+        assert_eq!(
+            sol_srn, json_srn,
+            "{opt}: the .sol says {sol_srn} and the JSON report says \
+             {json_srn} for the same run"
+        );
+    }
+}
