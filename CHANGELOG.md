@@ -9,6 +9,56 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — presolve could still certify infeasibility from an absent-bound sentinel (#402)
+
+- **The last of the presolve machinery behind #396's witness gate now reads the
+  sentinel directionally.** #396 fixed the gate that *guards* the infeasibility
+  certificate; four sites behind it still asked whether a bound was real by
+  magnitude, and one of them could manufacture the certificate in the first
+  place. A verdict of "proved infeasible" is the strongest claim POUNCE makes,
+  and it should not depend on a downstream gate to be withdrawn.
+- **The crossed-box test had no presence check** (`bound_tighten.rs`). These
+  arrays hold raw `±INF_BOUND` sentinels, not infinities, so a variable with no
+  lower bound (`x_l = -1e19`) and a real upper bound (`x_u = -5e20`) satisfied
+  `x_l > x_u` on the *first* pass, before any propagation. That is #398's
+  failure mode with `infeasible` as the verdict instead of an error, and
+  `crossing_is_certifiable` had the same hole — the gap is `5e20`, far too large
+  for `is_negligible` to dismiss, so it certified.
+- **`mul_bound` was magnitude-driven and could produce `NaN`.** It had no idea
+  whether it was converting a lower or an upper bound: a real upper bound of
+  `-5e20` was discarded as an infinity, and a real *lower* bound of `+5e20`
+  became `+INFINITY`, which `row_activity` summed into `lo_finite` (it counts
+  only `NEG_INFINITY`), after which `others_for` computed `inf - inf`. Presence
+  is now decided in `contribution`, where the side is known, which makes the
+  `NaN` **structurally unreachable**: `cj_lo` can only be finite or `-∞` and
+  `cj_hi` only finite or `+∞`, so `row_activity`'s counters classify every term
+  correctly. A zero coefficient now short-circuits to `(0, 0)` rather than
+  reaching `0 * ∞`.
+  - Worth recording precisely: in `tighten_bounds` the `NaN` was *masked* — the
+    ungated crossed-box test fires on the same variable and returns `infeasible`
+    before the poisoned bound is used. So the observable defect on that path was
+    the false infeasibility, and the `NaN` was latent behind it.
+- **The margin probe failed open.** `fbbt_infeasibility_survives_margin` sized
+  each row's acceptance slack with a symmetric `|b| < INF_BOUND` test, so a row
+  whose real bound is `-5e20` contributed `0.0` and the margin collapsed to
+  `tol * 1.0` — a widening of `1e-8` on a row written at `5e20`. Any
+  infeasibility survives that, which is exactly what the probe exists to rule
+  out. Its own two `relaxed` maps, three lines below, already used the
+  directional form; the halves of the function disagreed. The logic is now a
+  named `row_margin_for` so it can be tested directly.
+- **`trivial_elim` fixed variables from a sentinel.** `big_bound` is a parameter
+  of `find_trivial_eliminations` and was already consulted directionally for
+  rows eight lines away, but never for variables — so `x_l = x_u = -5e20`
+  ("no lower bound, upper bound `-5e20`") was declared FIXED at `-5e20`, and
+  `x_l = x_u = -1e19` fixed at the sentinel itself. Not test-only: the result
+  feeds `diag.trivially_fixed_vars` and `excluded_vars_buf` via `auxiliary.rs`.
+- All four use the shared `lower_bound_present` / `upper_bound_present` helpers
+  introduced in #401, so this predicate now has one spelling across the tree.
+- Ten regression tests, all verified to fail against the old predicates and pass
+  with the fix. The genuine cases are preserved: `x in [5, 3]` still reports
+  infeasible, a sub-tolerance crossing still refuses to certify (the #380 rule),
+  and a variable with both bounds present and equal is still fixed.
+
 ### Fixed — the convex route silently dropped constraints bounded past the opposite sentinel (#401)
 
 - **An LP/QP/QCQP no longer reports `Optimal` at a point its own bounds

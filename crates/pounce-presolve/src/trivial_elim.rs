@@ -59,7 +59,15 @@ pub fn find_trivial_eliminations(
 ) -> TrivialEliminationReport {
     let mut fixed_vars: Vec<usize> = Vec::new();
     for i in 0..n_vars {
-        if x_l[i].is_finite() && x_u[i].is_finite() && (x_u[i] - x_l[i]).abs() <= eq_tol {
+        // A variable is fixed only when *both* bounds are present (gh #402).
+        // `big_bound` is already consulted directionally for rows eight lines
+        // down, but was never consulted here — so `x_l = x_u = -5e20`, which
+        // directionally means "no lower bound, upper bound -5e20", was declared
+        // FIXED at `-5e20`, and `x_l = x_u = -1e19` was declared fixed at the
+        // sentinel itself.
+        let lo_present = x_l[i].is_finite() && x_l[i] > -big_bound;
+        let hi_present = x_u[i].is_finite() && x_u[i] < big_bound;
+        if lo_present && hi_present && (x_u[i] - x_l[i]).abs() <= eq_tol {
             fixed_vars.push(i);
         }
     }
@@ -303,5 +311,46 @@ mod tests {
             &[Linearity::Linear],
         );
         assert!(r.trivially_slack_rows.is_empty());
+    }
+
+    /// **gh #402.** A variable is fixed only when *both* bounds are present.
+    ///
+    /// `big_bound` is a parameter of `find_trivial_eliminations` and is already
+    /// consulted directionally for rows, but was never consulted for variables:
+    /// the test was a bare `is_finite()` pair. So `x_l = x_u = -5e20` — which
+    /// directionally means "no lower bound, upper bound `-5e20`" — was declared
+    /// FIXED at `-5e20`, and the result feeds `diag.trivially_fixed_vars` and
+    /// `excluded_vars_buf` by way of `auxiliary.rs`.
+    #[test]
+    fn equal_bounds_past_the_sentinel_are_not_a_fixed_var() {
+        let r = run(
+            3,
+            0,
+            // var 0: really `x <= -5e20`, unbounded below — not fixed.
+            // var 1: really `x >= 5e20`, unbounded above — not fixed.
+            // var 2: genuinely fixed at 2.0.
+            &[-5e20, 5e20, 2.0],
+            &[-5e20, 5e20, 2.0],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            r.fixed_vars,
+            vec![2],
+            "only the variable whose bounds are both present and equal is fixed"
+        );
+    }
+
+    /// The sentinel value itself is likewise not a fixed variable: `x_l = x_u =
+    /// -1e19` is `x <= -1e19` with no lower bound, not a variable pinned at the
+    /// sentinel.
+    #[test]
+    fn a_variable_pinned_at_the_sentinel_is_not_fixed() {
+        let r = run(1, 0, &[-1e19], &[-1e19], &[], &[], &[], &[], &[], &[]);
+        assert!(r.fixed_vars.is_empty(), "got {:?}", r.fixed_vars);
     }
 }
