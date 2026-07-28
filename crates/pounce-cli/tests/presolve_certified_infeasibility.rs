@@ -99,11 +99,11 @@ fn solve_fixture(model: &str, tag: &str, extra: &[&str]) -> String {
 /// the row's real *upper* bound because `|−5e20|` exceeds that same sentinel's
 /// magnitude. See `pounce_presolve::witness_refutes_infeasibility`.
 ///
-/// The assertion is on the band, not on a specific code. This model still does
-/// not solve — it returns `Invalid_Problem_Definition` (504) because the
-/// adapter reads the same out-of-range bound as a crossed constraint pair,
-/// which is tracked separately. What must never come back is a claim that a
-/// model with a feasible point has none.
+/// The assertion is on the band, not on a specific code — what must never come
+/// back is a claim that a model with a feasible point has none. (The model also
+/// failed to solve at all, with `Invalid_Problem_Definition` (504), until the
+/// adapter learned the same directional reading of the sentinel; that is gh
+/// #398, pinned by `feasible_sentinel_bound_model_solves` below.)
 #[test]
 fn a_feasible_model_is_never_certified_infeasible() {
     for (tag, opts) in [
@@ -118,6 +118,51 @@ fn a_feasible_model_is_never_certified_infeasible() {
              `rows violated: 0  max violation: 0.000e0` at its own starting \
              point, and the convex route solves it — so no code in the AMPL \
              infeasible band is defensible, least of all the certified 201 \
+             (got {srn}):\n{text}"
+        );
+    }
+}
+
+/// **gh #398.** The same model must actually *solve*, not merely stay out of
+/// the infeasible band.
+///
+/// `TNLPAdapter` classified row `c[3]` — `-1e30·x[0] <= -5.0000000000000007e20`,
+/// which the `.nl` hands over as `g_l = -1e19` (the absent-lower sentinel),
+/// `g_u = -5e20` — as a *crossed* bound pair, because `-1e19 > -5e20` under a
+/// symmetric magnitude reading. Nothing is inconsistent: `-5e20` is an ordinary
+/// finite upper bound, and the absent lower bound is not a bound to compare it
+/// against. The constructor errored before the first iteration, so the model
+/// came back `Invalid_Problem_Definition` — AMPL 504, Pyomo
+/// `internalSolverError` — on a model whose declared `x0` POUNCE itself
+/// measures at exactly zero violation.
+///
+/// A feasible model answered with 504 is a wrong answer of a different shape
+/// than a false infeasibility, and `test_infeasibility_no_false_positives.py`
+/// does not see it: 504 is outside the 200..299 band that test watches.
+#[test]
+fn feasible_sentinel_bound_model_solves() {
+    for (tag, opts) in [
+        (
+            "s223_solves_nlp",
+            vec!["solver_selection=nlp", "presolve=no"],
+        ),
+        (
+            "s223_solves_presolve",
+            vec!["solver_selection=nlp", "presolve=yes", "presolve_fbbt=yes"],
+        ),
+    ] {
+        let text = solve_fixture("feasible_x0_sentinel_bound.nl", tag, &opts);
+        let srn = solve_result_num(&text);
+        assert_ne!(
+            srn, 504,
+            "{opts:?}: a one-sided constraint bound of -5e20 is a legitimate \
+             finite bound, not a crossed pair — the adapter must not reject \
+             the model as Invalid_Problem_Definition:\n{text}"
+        );
+        assert_eq!(
+            srn, 0,
+            "{opts:?}: this model is feasible and the convex QP route solves it \
+             to optimality; the NLP route must reach Solve_Succeeded too \
              (got {srn}):\n{text}"
         );
     }

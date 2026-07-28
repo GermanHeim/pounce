@@ -129,15 +129,21 @@ pub fn starting_point_refutes_infeasibility(
     // clamped point still is one if it satisfies the rows, since it is inside
     // the box by construction.
     for j in 0..n {
+        let lo_present = x_l[j].is_finite() && x_l[j] > lower_bound_inf;
+        let hi_present = x_u[j].is_finite() && x_u[j] < upper_bound_inf;
         // A crossed box (`x_l > x_u`) cannot be clamped into; that is presolve's
-        // territory and not something to refute from.
-        if x_l[j].is_finite() && x_u[j].is_finite() && x_l[j] > x_u[j] {
+        // territory and not something to refute from. The test is on *present*
+        // bounds only, matching the two clamps below and the row magnitudes
+        // farther down (gh #398): an absent lower bound sitting at the `-1e19`
+        // sentinel is not crossed with a real upper bound of `-5e20`, and
+        // bailing there would withhold a perfectly good witness.
+        if lo_present && hi_present && x_l[j] > x_u[j] {
             return None;
         }
-        if x_l[j].is_finite() && x_l[j] > lower_bound_inf && x[j] < x_l[j] {
+        if lo_present && x[j] < x_l[j] {
             x[j] = x_l[j];
         }
-        if x_u[j].is_finite() && x_u[j] < upper_bound_inf && x[j] > x_u[j] {
+        if hi_present && x[j] > x_u[j] {
             x[j] = x_u[j];
         }
     }
@@ -473,5 +479,24 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    /// **gh #398.** A box with no lower bound and a real upper bound past the
+    /// *opposite* sentinel is not crossed — it is `x <= -5e20`. Testing the raw
+    /// pair saw `LO_INF > -5e20` and bailed, withholding a witness the row
+    /// plainly admits, in the one file whose every other bound test is already
+    /// directional.
+    #[test]
+    fn an_upper_bound_past_the_lower_sentinel_is_not_a_crossed_box() {
+        let w = refute(OneRow::new(
+            vec![0.0],
+            vec![LO_INF],
+            vec![-5.0e20],
+            vec![1.0],
+            LO_INF,
+            -1.0e20,
+        ))
+        .expect("x0 clamps to -5e20, which satisfies x <= -1e20");
+        assert_eq!(w.x, vec![-5.0e20]);
     }
 }
