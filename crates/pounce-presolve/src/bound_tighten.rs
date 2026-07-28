@@ -26,7 +26,7 @@
 //! pattern so it is straightforward to unit-test on hand-built
 //! fixtures.
 
-use pounce_common::types::{Index, Number};
+use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 
 /// Anything outside `(-INF_BOUND, +INF_BOUND)` is treated as
 /// unbounded — matches `nlp_lower_bound_inf` / `nlp_upper_bound_inf`.
@@ -125,7 +125,14 @@ fn tighten_pass(
                     }
                 }
             }
-            if x_l[j] > x_u[j] + tol {
+            // Both sides must be *present* before a crossing means anything
+            // (gh #402). These arrays hold raw `±INF_BOUND` sentinels, not
+            // infinities, so an absent lower bound sitting at `-1e19` against a
+            // real upper bound of `-5e20` is not a crossing — and declaring it
+            // one here hands `crossing_is_certifiable` a gap of `5e20`, which
+            // sails past `is_negligible` and certifies a feasible model as
+            // *proved* infeasible.
+            if lower_bound_present(x_l[j]) && upper_bound_present(x_u[j]) && x_l[j] > x_u[j] + tol {
                 report.infeasible = true;
                 return report;
             }
@@ -218,28 +225,49 @@ fn row_activity(row: &LinearRow, x_l: &[Number], x_u: &[Number]) -> RowActivity 
     a
 }
 
-/// Contribution of `a * x_j` to (min activity, max activity), with
-/// `|x| >= INF_BOUND` propagating to ±∞ in the result.
+/// Contribution of `a * x_j` to (min activity, max activity), with an *absent*
+/// bound propagating to ∓∞ in the result.
+///
+/// Presence is decided **here**, where the side of each bound is known (gh
+/// #402). The old `mul_bound` decided it from `|x|` alone and had no idea
+/// whether it was converting a lower or an upper bound, with two consequences:
+/// a real upper bound of `-5e20` was thrown away as an infinity, and a real
+/// *lower* bound of `+5e20` became `+INFINITY` — which `row_activity` then
+/// summed into `lo_finite`, since it only counts `NEG_INFINITY`, after which
+/// `others_for` computed `inf - inf` = `NaN` and poisoned the propagated bound.
+///
+/// Deciding presence by side makes that structurally impossible: `cj_lo` is now
+/// either finite or `-∞`, and `cj_hi` either finite or `+∞`, so the counters in
+/// `row_activity` classify every term correctly and no `inf - inf` can arise.
 fn contribution(a: Number, xl: Number, xu: Number) -> (Number, Number) {
-    if a > 0.0 {
-        (mul_bound(a, xl), mul_bound(a, xu))
-    } else {
-        (mul_bound(a, xu), mul_bound(a, xl))
+    if a == 0.0 {
+        // A zero coefficient contributes nothing — and short-circuits the
+        // `0 * ∞` = `NaN` that the ±∞ arithmetic below would otherwise hit.
+        return (0.0, 0.0);
     }
+    let lo = if lower_bound_present(xl) {
+        xl
+    } else {
+        Number::NEG_INFINITY
+    };
+    let hi = if upper_bound_present(xu) {
+        xu
+    } else {
+        Number::INFINITY
+    };
+    // `a` flips which end of the box gives the min and which the max.
+    let (lo_end, hi_end) = if a > 0.0 { (lo, hi) } else { (hi, lo) };
+    (mul_inf(a, lo_end), mul_inf(a, hi_end))
 }
 
-fn mul_bound(a: Number, x: Number) -> Number {
-    if x >= INF_BOUND {
-        if a > 0.0 {
+/// `a * x` where `x` may be a true ±∞ standing in for an absent bound.
+/// `a` is never zero here — `contribution` returns early on that.
+fn mul_inf(a: Number, x: Number) -> Number {
+    if x.is_infinite() {
+        if (a > 0.0) == (x > 0.0) {
             Number::INFINITY
         } else {
             Number::NEG_INFINITY
-        }
-    } else if x <= -INF_BOUND {
-        if a > 0.0 {
-            Number::NEG_INFINITY
-        } else {
-            Number::INFINITY
         }
     } else {
         a * x
@@ -380,5 +408,124 @@ mod tests {
         let mut xu = vec![10.0, 10.0];
         let rep = tighten_bounds(&r, &mut xl, &mut xu, 1, 1e-12);
         assert!(rep.n_tightened > 0);
+    }
+
+    /// **gh #402.** An absent lower bound against a real upper bound past the
+    /// *opposite* sentinel is not a crossed box.
+    ///
+    /// These arrays hold raw `±INF_BOUND` sentinels, not infinities. `x_l =
+    /// -1e19` (absent) with `x_u = -5e20` (real) satisfied `x_l > x_u` on the
+    /// first pass, before any propagation, and reported `infeasible` — which
+    /// `crossing_is_certifiable` then reads as a `5e20` gap and certifies as a
+    /// *proof*. #398 fixed exactly this pair in `TNLPAdapter`.
+    #[test]
+    fn an_absent_lower_bound_does_not_cross_a_real_upper_bound() {
+        // x <= -5e20, with a row that constrains nothing new.
+        let r = rows(&[(&[(0, 1.0)], -INF_BOUND, INF_BOUND)]);
+        let mut xl = vec![-INF_BOUND];
+        let mut xu = vec![-5.0e20];
+        let rep = tighten_bounds(&r, &mut xl, &mut xu, 3, 1e-12);
+        assert!(
+            !rep.infeasible,
+            "`x <= -5e20` with no lower bound is perfectly feasible; the \
+             sentinel is not a bound to compare against"
+        );
+    }
+
+    /// The mirror image on the other side: a real *lower* bound past `+1e19`
+    /// with no upper bound.
+    #[test]
+    fn a_real_lower_bound_past_the_upper_sentinel_is_not_a_crossing() {
+        let r = rows(&[(&[(0, 1.0)], -INF_BOUND, INF_BOUND)]);
+        let mut xl = vec![5.0e20];
+        let mut xu = vec![INF_BOUND];
+        let rep = tighten_bounds(&r, &mut xl, &mut xu, 3, 1e-12);
+        assert!(
+            !rep.infeasible,
+            "`x >= 5e20` with no upper bound is feasible"
+        );
+    }
+
+    /// A genuinely crossed box — both bounds present — must still be caught.
+    #[test]
+    fn a_genuinely_crossed_present_box_is_still_infeasible() {
+        let r = rows(&[(&[(0, 1.0)], -INF_BOUND, INF_BOUND)]);
+        let mut xl = vec![5.0];
+        let mut xu = vec![3.0];
+        let rep = tighten_bounds(&r, &mut xl, &mut xu, 3, 1e-12);
+        assert!(
+            rep.infeasible,
+            "x in [5, 3] is empty and must stay detected"
+        );
+    }
+
+    /// **gh #402.** A real lower bound past `+INF_BOUND` must propagate
+    /// soundly, and must not leave a `NaN` behind.
+    ///
+    /// Two defects met here. `mul_bound` was magnitude-driven and turned
+    /// `x_l = +5e20` into `+INFINITY`; `row_activity` only counts
+    /// `NEG_INFINITY` toward `lo_neg_inf`, so that `+inf` was summed into
+    /// `lo_finite` as if finite, and `others_for` then computed
+    /// `lo_finite - cj_lo` = `inf - inf` = `NaN`. On *this* fixture the NaN is
+    /// masked — the ungated crossed-box test fires on the same variable and
+    /// returns `infeasible` before the poisoned bound can be used — so what the
+    /// old code actually fails here is the feasibility assertion. The NaN guard
+    /// stays as a guard; deciding presence by side (see
+    /// `contribution_is_signed_by_side_not_by_magnitude`) makes it structurally
+    /// unreachable, since `cj_lo` can then only be finite or `-∞`.
+    #[test]
+    fn a_lower_bound_past_the_sentinel_does_not_produce_nan() {
+        // x0 >= 5e20 (no upper), x1 in [0, 10], row: x0 + x1 <= 1e21.
+        let r = rows(&[(&[(0, 1.0), (1, 1.0)], -INF_BOUND, 1.0e21)]);
+        let mut xl = vec![5.0e20, 0.0];
+        let mut xu = vec![INF_BOUND, 10.0];
+        let rep = tighten_bounds(&r, &mut xl, &mut xu, 3, 1e-12);
+        assert!(
+            xl.iter().chain(xu.iter()).all(|v| !v.is_nan()),
+            "propagation produced a NaN bound: xl={xl:?} xu={xu:?}"
+        );
+        assert!(
+            !rep.infeasible,
+            "the model is feasible (e.g. x0=5e20, x1=0)"
+        );
+        // The row genuinely implies x0 <= 1e21, so the upper bound must land
+        // there rather than at NaN or the sentinel.
+        assert!(
+            xu[0] <= 1.0e21 + 1.0,
+            "x0's implied upper bound should be ~1e21, got {}",
+            xu[0]
+        );
+    }
+
+    /// A zero coefficient contributes nothing, and must not reach the ±∞
+    /// arithmetic where it would produce `0 * inf` = `NaN`.
+    #[test]
+    fn a_zero_coefficient_contributes_nothing() {
+        assert_eq!(contribution(0.0, -INF_BOUND, INF_BOUND), (0.0, 0.0));
+    }
+
+    /// `contribution` must classify by *side*, so `cj_lo` is never `+∞` and
+    /// `cj_hi` never `-∞` — the invariant `row_activity`'s counters rely on.
+    #[test]
+    fn contribution_is_signed_by_side_not_by_magnitude() {
+        // Absent on both sides -> (-inf, +inf) regardless of coefficient sign.
+        assert_eq!(
+            contribution(1.0, -INF_BOUND, INF_BOUND),
+            (Number::NEG_INFINITY, Number::INFINITY)
+        );
+        assert_eq!(
+            contribution(-1.0, -INF_BOUND, INF_BOUND),
+            (Number::NEG_INFINITY, Number::INFINITY)
+        );
+        // A real upper bound of -5e20 is kept, not discarded as "infinite".
+        assert_eq!(
+            contribution(1.0, -INF_BOUND, -5.0e20),
+            (Number::NEG_INFINITY, -5.0e20)
+        );
+        // A real lower bound of +5e20 is kept, and lands on the *min* side.
+        assert_eq!(
+            contribution(1.0, 5.0e20, INF_BOUND),
+            (5.0e20, Number::INFINITY)
+        );
     }
 }

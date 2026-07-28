@@ -44,7 +44,7 @@ use pounce_common::exception::SolverException;
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::tolerance::is_negligible;
-use pounce_common::types::{Index, Number};
+use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData,
@@ -438,9 +438,16 @@ fn certify_margin(tol: Number) -> Number {
 /// bounds near `3e11` is float noise (relative `2e-16`), and the absolute
 /// margin used to certify it.
 fn crossing_is_certifiable(x_l: &[Number], x_u: &[Number], tol: Number) -> bool {
-    x_l.iter()
-        .zip(x_u)
-        .any(|(&l, &u)| l > u && !is_negligible(l - u, l.abs().max(u.abs()), tol))
+    x_l.iter().zip(x_u).any(|(&l, &u)| {
+        // Both sides present before a crossing counts (gh #402) — otherwise an
+        // absent lower bound at the `-1e19` sentinel against a real upper bound
+        // of `-5e20` reads as a `5e20` crossing, far too large for
+        // `is_negligible` to dismiss, and certifies a feasible model infeasible.
+        lower_bound_present(l)
+            && upper_bound_present(u)
+            && l > u
+            && !is_negligible(l - u, l.abs().max(u.abs()), tol)
+    })
 }
 
 /// Re-run FBBT with every constraint's bounds widened by that row's own
@@ -459,6 +466,31 @@ fn crossing_is_certifiable(x_l: &[Number], x_u: &[Number], tol: Number) -> bool 
 /// proof and leaves the previous behavior (let the IPM decide), while a false
 /// `true` would be a wrong "proved infeasible" — so the test is written to fail
 /// closed.
+/// The acceptance slack for one row: `tol * max(|bound|, 1)` over the row's
+/// *present* bounds.
+///
+/// Only a present bound carries magnitude information, and presence is
+/// **directional** (gh #402). The symmetric `|b| < INF_BOUND` test this used to
+/// run failed **open**: a row whose real bound is `-5e20` contributed `0.0`, so
+/// the margin collapsed to `tol * 1.0` on a row written at `5e20` scale — the
+/// infeasibility then survived an absurdly small widening and certified, which
+/// is precisely the direction `fbbt_infeasibility_survives_margin` exists to
+/// rule out. (The two `relaxed` maps in that function already used the
+/// directional form; its halves disagreed.)
+fn row_margin_for(g_l: Number, g_u: Number, tol: Number) -> Number {
+    let lo_mag = if lower_bound_present(g_l) {
+        g_l.abs()
+    } else {
+        0.0
+    };
+    let hi_mag = if upper_bound_present(g_u) {
+        g_u.abs()
+    } else {
+        0.0
+    };
+    tol * lo_mag.max(hi_mag).max(1.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fbbt_infeasibility_survives_margin(
     provider: &dyn ExpressionProvider,
@@ -472,14 +504,7 @@ fn fbbt_infeasibility_survives_margin(
     cfg: &crate::fbbt::FbbtConfig,
     tol: Number,
 ) -> bool {
-    let fin = |b: Number| {
-        if b.is_finite() && b.abs() < crate::bound_tighten::INF_BOUND {
-            b.abs()
-        } else {
-            0.0
-        }
-    };
-    let row_margin = |i: usize| -> Number { tol * fin(g_l[i]).max(fin(g_u[i])).max(1.0) };
+    let row_margin = |i: usize| -> Number { row_margin_for(g_l[i], g_u[i], tol) };
     let g_l_relaxed: Vec<Number> = g_l
         .iter()
         .enumerate()
@@ -2162,6 +2187,53 @@ pub fn register(reg: &RegisteredOptions) -> Result<(), SolverException> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **gh #402.** A crossing between an absent bound and a real one past the
+    /// *opposite* sentinel is not a crossing, and must never certify.
+    ///
+    /// The test was a bare `l > u`, so `x_l = -1e19` (absent) against
+    /// `x_u = -5e20` (real) read as a `5e20` gap — far too large for
+    /// `is_negligible` to dismiss — and certified a feasible model as *proved*
+    /// infeasible, the strongest claim POUNCE makes.
+    #[test]
+    fn a_sentinel_against_a_real_bound_never_certifies_a_crossing() {
+        let tol = 1e-8;
+        assert!(
+            !crossing_is_certifiable(&[-1e19], &[-5e20], tol),
+            "`x <= -5e20` with no lower bound is feasible, not a crossed box"
+        );
+        assert!(
+            !crossing_is_certifiable(&[5e20], &[1e19], tol),
+            "`x >= 5e20` with no upper bound is feasible too"
+        );
+        // A genuine crossing between two present bounds still certifies.
+        assert!(crossing_is_certifiable(&[5.0], &[3.0], tol));
+        // And a sub-tolerance one still does not (the #380 rule).
+        assert!(!crossing_is_certifiable(&[1.0 + 1e-13], &[1.0], tol));
+    }
+
+    /// **gh #402.** The acceptance slack must track the row's own scale, even
+    /// when the row's real bound lies past the opposite sentinel.
+    ///
+    /// The old symmetric test contributed `0.0` for a bound of `-5e20`, so the
+    /// margin collapsed to `tol * 1.0` — a widening of `1e-8` on a row written
+    /// at `5e20`. Any infeasibility survives that, which is the fail-open
+    /// direction this margin exists to prevent.
+    #[test]
+    fn the_row_margin_tracks_a_bound_past_the_opposite_sentinel() {
+        let tol = 1e-8;
+        // `g <= -5e20`, no lower bound. Magnitude is 5e20, not 1.
+        let m = row_margin_for(-1e19, -5e20, tol);
+        assert!(
+            (m - tol * 5e20).abs() <= tol * 5e20 * 1e-12,
+            "margin should be tol*5e20 = {}, got {m}",
+            tol * 5e20
+        );
+        // Absent on both sides -> the floor of 1.
+        assert_eq!(row_margin_for(-1e19, 1e19, tol), tol);
+        // An ordinary two-sided row uses the larger magnitude.
+        assert_eq!(row_margin_for(-2.0, 7.0, tol), tol * 7.0);
+    }
 
     struct Probe;
     impl TNLP for Probe {
