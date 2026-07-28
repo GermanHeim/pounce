@@ -123,9 +123,9 @@ BASELINE_WRONG = {
     "feas_simple": 0,
     "feas_two": 0,
     "feas_eq": 0,
-    "inf_372": 5,
-    "inf_clear": 5,
-    "inf_two": 5,
+    "inf_372": 4,
+    "inf_clear": 4,
+    "inf_two": 4,
     "inf_eq": 13,
 }
 
