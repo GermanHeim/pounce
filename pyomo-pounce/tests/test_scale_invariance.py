@@ -105,6 +105,30 @@ def _inf_eq(m, s):
     m.e2 = pyo.Constraint(expr=s * m.x == s * 0.8)
 
 
+def _inf_eq_nl(m, s):
+    """gh#390: a *nonlinear* equality contradiction, out of bound propagation's reach.
+
+    ``x*y == 1`` and ``x + y == 0.5`` ask for two reals whose sum is 0.5 and
+    whose product is 1 — i.e. roots of ``t**2 - 0.5*t + 1``, discriminant
+    ``0.25 - 4 < 0``. There are none. Refuting it needs the discriminant, not
+    intervals: each row is individually satisfiable over the box, and interval
+    propagation narrows neither variable, so neither the DOF gate's linear
+    bound propagation (both rows are nonlinear) nor FBBT can prove it. The
+    verdict has to come from the runtime feasibility test — which is exactly
+    the surface that had no scale-relative measure on equality rows.
+
+    Both right-hand sides are non-zero on purpose: a homogeneous row has no
+    declared magnitude, so the relative measure abstains on it, and a model
+    whose least-infeasible point parks all its residual on such a row would
+    not exercise the fix.
+    """
+    m.x = pyo.Var(bounds=(-10, 10), initialize=0.5)
+    m.y = pyo.Var(bounds=(-10, 10), initialize=-0.5)
+    m.o = pyo.Objective(expr=m.x**2 + m.y**2)
+    m.e1 = pyo.Constraint(expr=s * (m.x * m.y) == s * 1.0)
+    m.e2 = pyo.Constraint(expr=s * (m.x + m.y) == s * 0.5)
+
+
 MODELS = [
     ("feas_simple", _feas_simple, "SOLVED"),
     ("feas_two", _feas_two, "SOLVED"),
@@ -113,6 +137,7 @@ MODELS = [
     ("inf_clear", _inf_clear, "INFEAS"),
     ("inf_two", _inf_two, "INFEAS"),
     ("inf_eq", _inf_eq, "INFEAS"),
+    ("inf_eq_nl", _inf_eq_nl, "INFEAS"),
 ]
 
 #: Wrong-verdict cells per model, out of len(KS), measured on the
@@ -134,6 +159,11 @@ BASELINE_WRONG = {
     # proof. On the DOF path the solve cannot run, so the witness measures
     # against the row's declared magnitude instead.
     "inf_eq": 0,
+    # gh#390: with the equality block covered by the scale-relative runtime
+    # feasibility measure this model is right at every scale (was 5 wrong:
+    # SOLVED at k in {-10, -8, -6} — the verdict flip the issue describes —
+    # and a non-verdict at k in {-12, -4}).
+    "inf_eq_nl": 0,
 }
 
 

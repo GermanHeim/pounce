@@ -9,6 +9,54 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — equality rows had no scale-relative runtime feasibility measure (#390)
+
+- **A nonlinear equality contradiction is no longer accepted as solved once its
+  rows are written small enough.** `x*y == 1` with `x + y == 0.5` has no real
+  solution (the roots would need discriminant `0.25 - 4 < 0`), and refuting it
+  needs the discriminant, not intervals — so neither the DOF gate's linear
+  bound propagation (#389) nor FBBT can reach it, and the verdict comes from
+  the runtime feasibility test. Multiplying both rows by `1e-6` used to flip
+  that verdict from `Infeasible_Problem_Detected` to `Solve_Succeeded`. Same
+  empty solution set, opposite answers.
+- **Cause:** POUNCE folds an equality's right-hand side into `c(x) = 0`, so
+  `|c_i|` *is* the violation and carries no independent magnitude. The
+  scale-relative measure added for inequality rows in #386
+  (`curr_relative_primal_infeasibility_max`) therefore skipped the `c` block
+  entirely, and every runtime feasibility decision on an equality row was
+  against an absolute tolerance — which down-scaling walks straight under.
+- **Fix:** the pre-fold RHS is plumbed back out as
+  `IpoptNlp::declared_c_rhs`, the same "declared, not live" pattern
+  `declared_d_bounds` established for inequality rows, and reported in the
+  same internally-scaled space as `eval_c` so the solver's own row scaling
+  cancels. The measure now covers the `c` block with `|c_i| / |b_i|`, which is
+  identical at every writing of the row. Both consumers pick it up unchanged:
+  the certificate/acceptable-point veto and the rapid-infeasibility
+  pre-filter.
+- **A homogeneous row (`b_i = 0`) keeps the absolute test and contributes
+  nothing** — it has no declared magnitude, and needs none, since `s·g(x) == 0`
+  is the same row at every `s`. Dividing by a fabricated floor there would turn
+  float-noise residuals into 100% "violations" on the most common equality row
+  there is. An NLP that does not track the RHS (the trait default — e.g. the
+  restoration NLP, whose `c` block is not the user's rows) abstains wholesale
+  rather than invent a magnitude.
+- Covered by a new `inf_eq_nl` model in
+  `pyomo-pounce/tests/test_scale_invariance.py`: 5 wrong cells out of 13 row
+  scalings before (`SOLVED` at `k in {-10, -8, -6}`, no verdict at
+  `k in {-12, -4}`), 0 after. No other model in the harness moved, and a
+  differential sweep over the repository's `.nl` fixtures shows no verdict
+  changes. `crates/pounce-algorithm/tests/issue_390_nonlinear_equality_scale.rs`
+  pins the same property on the direct driver, in both directions.
+- Trade-off worth knowing: refusing a certificate keeps the run going, so on a
+  *nonconvex* model the continued trajectory can land in a different basin than
+  the premature stop did. The measured instance — the same product/sum pair
+  started at `(1, 1)`, where the feasible twin already converges to a
+  locally-infeasible point at unit scale — traded a `Solve_Succeeded` at row
+  scale `1e-8` for a local-infeasibility verdict. What was given up there was
+  not, in general, a solution: at `1e-12` the same "success" returned
+  `x = y = 2.3e-14`, which satisfies neither `x*y == 1` nor `x + y == 2.5`.
+- This closes out #387; #389 and #391 handled the linear half at the DOF gate.
+
 ### Fixed — the last 3 `inf_eq` cells: the DOF-gate proof survives sub-tolerance row scales (#391)
 
 - **A contradictory over-determined equality system is now reported infeasible
@@ -81,11 +129,10 @@ changes.
     / `get_constraints_linearity` (trait default `false`), so anything stacked
     above them — including this probe — saw every row as nonlinear and silently
     lost linear-row bound propagation.
-  - What remains of #387: equality rows still have no scale-relative *runtime*
-    feasibility measure (`curr_relative_primal_infeasibility_max` skips the `c`
-    block because the fold into `c(x) = 0` erases the RHS magnitude), so a
-    genuinely *nonlinear* equality contradiction — out of bound propagation's
-    reach — still depends on absolute tolerances.
+  - What remained of #387 — equality rows having no scale-relative *runtime*
+    feasibility measure, so a genuinely *nonlinear* equality contradiction (out
+    of bound propagation's reach) still depended on absolute tolerances — was
+    split out as #390 and is fixed above.
 
 ### Added — presolve can now certify infeasibility instead of discarding the proof
 
@@ -158,6 +205,47 @@ changes.
     where it previously emitted `"objective": null` and no `x`.
   - Unaffected: the infeasible and feasible cases on the same selector, which
     already answered `200` and `0` correctly.
+
+### Fixed — presolve *certified* a feasible model infeasible, from an absent-bound sentinel (#396)
+
+- **A model with a feasible point is no longer reported `solve_result_num` 201.**
+  `201` claims a *proof*, which is the strongest thing POUNCE says; this one was
+  false. The model (property-test seed 223) is feasible by construction, and
+  `pounce check-x0` measures its own declared starting point at **exactly** zero
+  violation — `rows violated: 0, max violation: 0.000e0` — while the convex QP
+  route solves it to optimality.
+  - Root cause is the absent-bound sentinel, mishandled in **both directions on
+    the same row**. POUNCE stores an absent constraint bound as `±1e19`
+    (`INF_BOUND`), not as an infinity, so every use has to ask whether a bound is
+    real. `witness_refutes_infeasibility` asked twice, differently, and got both
+    wrong for row `-1e30·x[0] <= -5.0000000000000007e20`:
+    - The violation term was `(g_l - v).max(v - g_u)` with **no** presence test,
+      so it scored `4.9e20` against a lower bound the row does not have — at a
+      point whose true violation is zero.
+    - The magnitude term used a **symmetric** test, `|b| < INF_BOUND`, which
+      called the row's genuine upper bound `-5e20` absent and discarded a real
+      constraint.
+  - Either error alone sinks the witness, so no candidate point could ever
+    refute the verdict, and the certification escaped.
+  - Fix: one **directional** predicate, matching the convention
+    `pounce_presolve::bound_tighten` already uses (`x_l <= -INF_BOUND`,
+    `x_u >= INF_BOUND`) — a lower bound is absent below `-INF_BOUND`, an upper
+    bound above `+INF_BOUND` — derived once and used for both the magnitude and
+    the violation, so the two cannot drift apart again.
+  - Strictly one-directional, like the gate it sits in: it can only ever
+    *withdraw* a verdict. Every certified-infeasibility test still passes,
+    including the must-still-detect cases.
+  - **The property sweep is now at zero.** Over 400 feasible-by-construction
+    instances, false positives in the AMPL infeasible band go `1 → 0` on the full
+    presolve option set (and stay at 0 on the numerical path from #379).
+    `MAX_FALSE_POSITIVES` ratchets `1 → 0` — a floor, not a target.
+  - **Still open on this model:** it does not solve. It now returns
+    `Invalid_Problem_Definition` (504), because `TNLPAdapter` reads the same
+    out-of-range bound as a crossed constraint pair — `g_l = -1e19` against
+    `g_u = -5e20` trips the `lo > hi` check. That is a separate defect in the
+    sentinel convention for constraint bounds, affecting any model with a
+    one-sided bound beyond `±1e19`; it is tracked on its own. The regression test
+    here asserts the *band*, not a specific code, for that reason.
 
 ### Fixed — the NLP path reported `Infeasible_Problem_Detected` on models whose own starting point is feasible (#379)
 

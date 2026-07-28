@@ -13,17 +13,22 @@ not an assumption; it is guaranteed by construction. Any verdict in AMPL's
 Magnitudes deliberately span the ranges that broke earlier rounds: float noise
 (``1e-320``), sub-tolerance gaps, unit scale, and near-overflow (``1e30``).
 
-The assertion is a *ratchet*, not zero. The floating-point interval arithmetic
-underneath is not exact, and a handful of extreme-scale knife-edge instances
-(zero-slack active constraints on ``1e-9``-wide boxes) are still misclassified.
-Pinning the measured rate stops it silently getting worse — a change that pushes
-it up is a regression even if every hand-written case still passes. Lowering
-``MAX_FALSE_POSITIVES`` as the path improves is the point.
+The assertion is a *ratchet*. Pinning the measured rate stops it silently
+getting worse — a change that pushes it up is a regression even if every
+hand-written case still passes. Lowering ``MAX_FALSE_POSITIVES`` as the paths
+improve is the point, and it has now reached zero:
 
-It has been lowered once, for gh #379: the numerical path (``solver_selection=nlp
-presolve=no``) now reports zero over 400 instances, because no path may claim
-infeasibility while the model's own starting point satisfies every constraint
-(``pounce_algorithm::infeasibility_refutation``).
+* gh #379 took the **numerical** path to 0/400. No path may claim infeasibility
+  while the model's own starting point satisfies every constraint
+  (``pounce_algorithm::infeasibility_refutation``).
+* gh #396 took the **presolve certification** path to 0/400. Its witness gate
+  was mishandling the absent-bound sentinel in both directions on one row —
+  scoring a violation of a bound the row did not have, and discarding a real
+  bound whose magnitude exceeded the sentinel.
+
+Zero is now the claim, not an aspiration: hold it there. A single false positive
+means a feasible-by-construction model is being reported infeasible, which is
+the defect this file exists to catch.
 """
 
 from __future__ import annotations
@@ -40,13 +45,11 @@ pyo = pytest.importorskip("pyomo.environ")
 #: Instances per run. Large enough to be sensitive, small enough for CI.
 N_INSTANCES = 200
 
-#: Ratchet. Landed at 3 of 400 (~0.75%); gh #379's refutation gate took the
-#: numerical path to 0 of 400, leaving 1 of 400 — seed 223, on the presolve
-#: certification path. That seed is outside this run's first ``N_INSTANCES``, so
-#: the measured count here is 0; the 1 is headroom for a machine-dependent flip
-#: on a knife-edge instance, not a known failure. Lower it again as the presolve
-#: path improves.
-MAX_FALSE_POSITIVES = 1
+#: Ratchet, now at its floor. Landed at 3 of 400 (~0.75%), then 1 of 400 after
+#: gh #379, then 0 of 400 after gh #396 — measured over the full 400-seed range
+#: on both the numerical (``presolve=no``) and full-presolve option sets.
+#: Raising this again needs a reason recorded here, not a bump.
+MAX_FALSE_POSITIVES = 0
 
 _SCALES = [1e-320, 1e-12, 1e-8, 1.0, 1e8, 1e18, 1e30]
 

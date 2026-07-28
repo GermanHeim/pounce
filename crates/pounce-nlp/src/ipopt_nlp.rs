@@ -109,6 +109,25 @@ pub trait IpoptNlp: Nlp {
         None
     }
 
+    /// The *declared* equality right-hand sides `b` — the pre-fold constants
+    /// subtracted to turn `g_i(x) == b_i` into the algorithm's residual
+    /// `c_i(x) = 0` — reported in the same (internally scaled) space as
+    /// [`Nlp::eval_c`]'s output, so `|c_i| / |b_i|` is a pure ratio.
+    ///
+    /// The fold is exactly what erases the row's magnitude: `|c_i|` *is* the
+    /// violation and carries no independent scale, so a scale-relative
+    /// feasibility measure has nothing to divide by unless the RHS is plumbed
+    /// back. Same "declared, not live" contract as [`Self::declared_d_bounds`]:
+    /// the value is the one the user wrote (times any row scaling the solver
+    /// itself applied), never a relaxed or otherwise adjusted stand-in.
+    ///
+    /// `None` (the default) means "not tracked" — callers must then abstain
+    /// from any relative verdict on the `c` block rather than substitute a
+    /// magnitude of their own.
+    fn declared_c_rhs(&self) -> Option<Vec<Number>> {
+        None
+    }
+
     /// Bound expansion matrices: `Px_L` extracts the
     /// `x` components that have a finite lower bound, etc.
     fn px_l(&self) -> Rc<dyn Matrix>;
