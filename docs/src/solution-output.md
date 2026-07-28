@@ -66,6 +66,27 @@ it is off by default. A presolve-derived infeasibility is only reported when the
 contradiction holds on the *original* box — one produced by presolve's own
 auxiliary elimination is re-checked after rollback and never certified.
 
+### One more route to `200`: over-determined systems
+
+An **over-determined** model — more equality rows than free variables, such as
+`x == 0.2` with `x == 0.8` — cannot be solved at all: it fails a structural gate
+before the first iteration. That used to be reported as
+`Not_Enough_Degrees_Of_Freedom` (`504`, the failure band), which says "cannot
+attempt this" for a model whose answer is already decided.
+
+POUNCE now checks such a model for a bound-propagation contradiction on that
+failure path and reports `200` when it finds one. This does not need
+`presolve=yes` — nothing is transformed and no solve runs through the check — so
+it is the one way to reach the infeasible band with the default options and no
+iterations. A *consistent* over-determined system is unaffected and still
+reports `504`.
+
+Because the solve provably cannot run here, this route measures constraint
+residuals against each row's declared magnitude rather than an absolute
+tolerance, so the verdict does not change when every row is multiplied by a
+constant. Elsewhere — wherever a solve *can* run — an infeasibility smaller than
+the feasibility tolerance is still withheld, as described above.
+
 ## Choosing an output format
 
 | You want… | Use |
