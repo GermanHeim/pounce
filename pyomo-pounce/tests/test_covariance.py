@@ -402,3 +402,105 @@ def test_varargs_declarations_equal_singles():
     pyo.SolverFactory("pounce").solve(m2)
     cov_single = covariance(m2)
     np.testing.assert_allclose(cov_va.matrix, cov_single.matrix, rtol=1e-9)
+
+
+def test_weakly_active_bound_kept_with_true_variance():
+    # data shifted so the unconstrained intercept optimum sits EXACTLY
+    # on its bound: slack and multiplier vanish together (weakly
+    # active). The classifier keeps the parameter and the value
+    # correction removes the barrier diagonal, so the variance is the
+    # full unconstrained one; the factor alone would report half of it
+    # (W = H + Sigma with Sigma = q at weak activity), and the old
+    # slack test would have deleted it outright.
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    y2 = y + (2.0 - beta[0])
+    m = linear_model(x, y2, declare=False)
+    m.a.setlb(2.0)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    assert any("weakly active" in str(wi.message) for wi in w)
+    cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-5)
+
+
+def test_inactive_bound_changes_nothing():
+    # a far-away bound classifies inactive: no warning, and the
+    # numbers match the boundless model to solver precision (the
+    # Sigma subtraction removes an O(mu) drift, never adds one)
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    m.a.setlb(-50.0)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    assert not w
+    cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-7)
+
+
+def test_binding_row_projects_the_combination():
+    # a + b <= cap binding: zero variance along (1,1), finite along
+    # the difference, correlation -1, and the matrix equals the
+    # restricted-least-squares covariance of the equality-constrained
+    # fit. Gauss-Newton agrees on this linear model (step-6 parity).
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    cap = float(beta[0] + beta[1]) - 0.5
+    m = linear_model(x, y, declare=False)
+    m.capcon = pyo.Constraint(expr=m.a + m.b <= cap)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    assert any("pins the fitted combination" in str(wi.message) for wi in w)
+    C = cov.matrix
+    u = np.array([1.0, 1.0])
+    assert abs(u @ C @ u) < 1e-9 * max(1.0, float(np.abs(C).max()))
+    assert cov.correlation[m.a, m.b] == pytest.approx(-1.0, abs=1e-6)
+    # restricted least squares: C_r = C0 - C0 u (u' C0 u)^-1 u' C0
+    C0 = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    Cr = C0 - np.outer(C0 @ u, u @ C0) / float(u @ C0 @ u)
+    np.testing.assert_allclose(C, Cr, rtol=1e-5, atol=1e-12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cov_gn = covariance(m, sigma_sq=SIGMA_LIN**2,
+                            hessian="gauss-newton")
+    np.testing.assert_allclose(cov_gn.matrix, C, rtol=1e-6, atol=1e-12)
+
+
+def test_bound_and_row_spellings_agree():
+    # jkitchin/pounce#362 at the matrix level: the same limit spelled
+    # as a variable bound and as a constraint row returns identical
+    # covariance matrices, not only identical classifications
+    x, y, X = linear_data()
+    mA = linear_model(x, y, declare=False)
+    mA.a.setlb(2.0)
+    declare_fitted(mA.a)
+    declare_fitted(mA.b)
+    declare_residual(mA.r)
+    pyo.SolverFactory("pounce").solve(mA)
+    mB = linear_model(x, y, declare=False)
+    mB.bnd = pyo.Constraint(expr=mB.a >= 2.0)
+    declare_fitted(mB.a)
+    declare_fitted(mB.b)
+    declare_residual(mB.r)
+    pyo.SolverFactory("pounce").solve(mB)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        covA = covariance(mA, sigma_sq=SIGMA_LIN**2)
+        covB = covariance(mB, sigma_sq=SIGMA_LIN**2)
+    np.testing.assert_allclose(covB.matrix, covA.matrix,
+                               rtol=1e-6, atol=1e-12)

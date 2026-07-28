@@ -9,6 +9,47 @@ changes.
 
 ## [Unreleased]
 
+### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
+
+- Bound and constraint activity on the fitted parameters now classifies
+  through the item-0 rule applied at the reduced fitted block, where a
+  fitted parameter's curvature actually lives (its raw Lagrangian diagonal
+  is zero in the residual-variable idiom, so the per-coordinate report
+  alone cannot decide membership there). The slack-only test
+  (`tol = 1e-6 * (1 + |x|)`) and its moved-bounds re-injection are gone.
+- Dispositions per the item-1 table: strongly active projects (zero
+  variance, conditional, warned); weakly active is KEPT at its full
+  finite variance, where the slack test deleted it and the raw factor
+  would have halved it; ambiguous and unidentified are kept and warned.
+- The value correction subtracts the fitted rows' retained barrier
+  diagonal (`var_sigma`, new in the activity report along with
+  `row_sigma`) from the factor's reduced Hessian: a weakly active kept
+  parameter reports its true curvature `q`, not the factor's `2q`, and
+  inactive rows shed an O(μ) drift. On kept rows Σ is at most the
+  curvature's own size, so nothing cancels; pinned coordinates and
+  binding directions never enter (excluded by the free restriction and
+  annihilated by the projection, which also annihilates the binding
+  rows' huge barrier weight exactly).
+- A strongly active inequality row whose normal touches the fitted
+  block pins a combination, not a coordinate: both accessor paths
+  (Lagrangian and Gauss-Newton) project on the null space of the
+  binding normals, the matrix goes singular by one per binding row,
+  and the warning names the constraint, the pinned combination, and
+  its conditional information. A bound moved onto a row
+  (jkitchin/pounce#357) is the single-coordinate case and returns
+  exactly the variable-bound disposition, so the two spellings of one
+  limit agree in the matrices (#362), not only in the classification.
+- Declaration-triggered solves set `bound_relax_factor=0`: the
+  classifier reads slacks as distances to the user's own bounds.
+- `Solver.row_normal(j)`: a constraint row's gradient at the converged
+  iterate in user variable order, serving the projection direction.
+- Tests pin the analytics: the weakly active kept variance equals the
+  unconstrained `σ²(XᵀX)⁻¹` entry; a binding `a + b <= cap` matches
+  restricted least squares with corr −1 and a rank drop; bound and row
+  spellings agree to 1e-6; an inactive far bound changes nothing to
+  1e-7; Gauss-Newton matches on the linear model, projection included.
+
+
 ### Fixed — feasible convex QPs reported locally infeasible on the NLP path
 
 - With `solver_selection=nlp`, POUNCE reported `Converged to a point of
