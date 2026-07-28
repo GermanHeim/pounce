@@ -452,13 +452,15 @@ impl ConvCheck for OptErrorConvCheck {
         let obj_scale = cq_ref.computed_obj_scaling_factor();
         drop(cq_ref);
 
-        // Scale-relative feasibility veto (#385, Step 6). The absolute
+        // Scale-relative feasibility veto (#385 Step 6; extended to equality
+        // rows by #390, which plumbs the pre-fold RHS back so `|c_i|` has a
+        // declared magnitude to be relative to). The absolute
         // `constr_viol_tol` gate cannot tell "satisfied" from "violated by 14%
         // of everything the row is" once the row's numbers are small: `x >= 0.7`
         // written as `1e-12·x >= 0.7e-12` has an absolute violation of `1e-13`
         // at `x = 0.6` — under every absolute tolerance, while the same empty
         // feasible set written at unit scale is reported infeasible. Refuse a
-        // certificate whose point still has an inequality row violated by more
+        // certificate whose point still has a constraint row violated by more
         // than `relative_viol_threshold` of its own magnitude, and let the run
         // continue: for a genuinely infeasible model the rapid-infeasibility
         // detection below then reaches the honest verdict (its violation floor
@@ -530,7 +532,7 @@ impl ConvCheck for OptErrorConvCheck {
                         rel_viol,
                         constr_viol,
                         threshold = self.relative_viol_threshold(),
-                        "refusing a success certificate: an inequality row is still \
+                        "refusing a success certificate: a constraint row is still \
                          violated by more than the scale-relative threshold of its own \
                          magnitude; continuing (bounded by the veto budget)"
                     );
@@ -705,7 +707,7 @@ impl ConvCheck for OptErrorConvCheck {
         // unlike the masked-scale (#200) veto above it. That veto refuses a
         // possibly-premature stop at a point that is still genuinely feasible,
         // so the stash stays a legitimate rollback target. Here the point has
-        // an inequality row violated by more than the relative threshold of
+        // a constraint row violated by more than the relative threshold of
         // its own magnitude — it is not acceptable in any honest sense, and a
         // stall later in the run must not roll back to it and surface
         // `Solved_To_Acceptable_Level` on an infeasible model (measured: an
