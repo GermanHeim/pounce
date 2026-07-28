@@ -32,7 +32,9 @@ Examples:
 
 When running multiple problems, run the full workflow (steps 1–7) for each
 sequentially, picking a **different family each time** to keep balance (unless
-topic guidance pins one). Print the summary table (step 9) at the end.
+topic guidance pins one). Print the summary table (step 9) at the end. The
+branch sync (step 0) runs **once at session start** and the publish (step 10)
+**once at session end** — not per problem.
 
 ## Solver families & their oracles
 
@@ -138,6 +140,28 @@ does not clearly discriminate. Keep all families moving.
   optimum** and `pounce verify`, and say so in the report.
 
 ## Workflow
+
+### 0. Sync from the shared branch
+The **`adversary-runs` branch is the canonical `adversary/` state** — the daily
+cloud routine (gh#395) and local runs both publish there. The local working
+tree's `adversary/` is ignored via `.git/info/exclude` (so it never shows as
+noise on `main`), which means local and branch can silently diverge. Reconcile
+before selecting targets:
+
+```bash
+git fetch origin adversary-runs
+git show origin/adversary-runs:adversary/log.org > /tmp/adv-branch-log.org
+```
+
+Compare the newest `** [YYYY-MM-DD]` entries in `/tmp/adv-branch-log.org` and
+`adversary/log.org`:
+- Branch has entries the local log lacks, local has none the branch lacks (the
+  normal case — cloud runs happened since the last local run): overwrite the
+  local `adversary/log.org` with the branch version.
+- Both sides have unique entries (a local run that never published): splice the
+  missing entries into the branch version, take the per-family **max** of the
+  two coverage counts, and use that as the new local log.
+Rotation and open-findings checks then run against the reconciled log.
 
 ### 1. Pick a target (coverage first, then the log)
 Read `target/coverage-combined/core.txt` and `adversary/log.org`, and apply
@@ -435,6 +459,36 @@ When `count > 1`, print at the end:
 ```
 `Speedup = oracle_time / pounce_time` (> 1 means pounce is faster). Include
 total PASS/FAIL counts and a list of any issues filed (with numbers).
+
+### 10. Publish to the shared branch
+Every run ends by pushing its results to `adversary-runs`, or the next run
+(local or cloud) starts from stale state and the unified log falls apart.
+Publish through a throwaway worktree so the current checkout is untouched:
+
+```bash
+git fetch origin adversary-runs
+git worktree add /tmp/adv-publish adversary-runs 2>/dev/null \
+  || git worktree add /tmp/adv-publish -b adversary-runs origin/adversary-runs
+git -C /tmp/adv-publish pull --ff-only origin adversary-runs
+# Copy ONLY what this run produced/changed: log.org + the new top-level
+# runs/ files. Never copy runs/ subdirectories.
+cp adversary/log.org /tmp/adv-publish/adversary/log.org
+cp adversary/runs/$(date +%Y-%m-%d)_* /tmp/adv-publish/adversary/runs/ 2>/dev/null
+git -C /tmp/adv-publish add -f adversary/   # -f: .git/info/exclude is shared
+git -C /tmp/adv-publish commit -m "adversary: <one-line run summary> [skip ci]"
+git -C /tmp/adv-publish push origin adversary-runs \
+  || (git -C /tmp/adv-publish pull --rebase origin adversary-runs \
+      && git -C /tmp/adv-publish push origin adversary-runs)
+git worktree remove /tmp/adv-publish
+```
+
+Before that `commit`, check the staged list against `adversary/.gitignore`'s
+intent — **this repo is public**: no `runs/` subdirectories (scratch), no
+`*.lst`/GAMS logs (they embed the site license banner), never `gamslice.dat` /
+`gamscntr.dat` (the license file itself), and nothing resembling credentials
+or keys. `git -C /tmp/adv-publish status --short` and read it. The `[skip ci]`
+suffix is mandatory — ci.yml triggers on every branch push and a report-only
+commit must not re-run the matrix.
 
 ## Constraints
 - **NEVER** modify `crates/*/src`, `python/pounce/**`, `pyomo-pounce/**`, or any
