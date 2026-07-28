@@ -306,24 +306,53 @@ fn witness_refutes_infeasibility(
             if !v.is_finite() {
                 return false;
             }
-            // Slack relative to the row's own magnitude: an absolute tolerance
-            // is meaningless against a row evaluating near 1e30. This is the
-            // accepting direction, so it goes through `is_negligible` — the
-            // shared clamped form, never stricter than the absolute `tol`.
-            // Only *finite* bounds inform the scale. The unbounded sentinel
-            // (~1e19) would otherwise set the slack around 1e11 and make every
-            // row look satisfied — which withdrew even correct verdicts.
-            let fin = |b: Number| {
-                if b.is_finite() && b.abs() < crate::bound_tighten::INF_BOUND {
-                    b.abs()
-                } else {
-                    0.0
-                }
-            };
-            let declared = fin(g_l[i]).max(fin(g_u[i]));
+            // An absent bound is stored as the sentinel (`±INF_BOUND`), not as
+            // an infinity, so every use of a bound has to ask whether it is
+            // real — and the question is **directional**. A lower bound is
+            // absent when it is at or below `-INF_BOUND`; an upper bound when
+            // it is at or above `+INF_BOUND`. This is the convention
+            // [`crate::bound_tighten`] already uses (`x_l[j] <= -INF_BOUND`,
+            // `x_u[j] >= INF_BOUND`).
+            //
+            // gh #396 is what the symmetric magnitude test (`|b| < INF_BOUND`)
+            // cost, and it went wrong in both directions at once on the same
+            // row. Property-test seed 223 carries
+            // `-1e30·x[0] <= -5.0000000000000007e20` over `x[0] ∈ [0, 1e-9]`,
+            // with a starting point landing *exactly* on that upper bound:
+            //
+            //   * `g_l = -1e19` is the sentinel for an absent lower bound, but
+            //     `viol` had no presence test at all, so it scored
+            //     `g_l - v = 4.9e20` — a violation of a bound the row does not
+            //     have, against a point whose true violation is zero.
+            //   * `g_u = -5e20` is a genuine, finite upper bound, but
+            //     `|−5e20| < 1e19` is false, so the magnitude test called it
+            //     absent — discarding a real constraint.
+            //
+            // Either error alone sinks the witness. With no candidate able to
+            // pass, presolve certified a *feasible* model infeasible and
+            // reported `solve_result_num` 201, which asserts a proof.
+            let lo_present = |b: Number| b.is_finite() && b > -crate::bound_tighten::INF_BOUND;
+            let up_present = |b: Number| b.is_finite() && b < crate::bound_tighten::INF_BOUND;
+            // Only *real* bounds inform the declared magnitude. The sentinel
+            // would otherwise set the slack around 1e11 and make every row look
+            // satisfied — which withdrew even correct verdicts.
+            let declared = (if lo_present(g_l[i]) {
+                g_l[i].abs()
+            } else {
+                0.0
+            })
+            .max(if up_present(g_u[i]) {
+                g_u[i].abs()
+            } else {
+                0.0
+            });
             let scale = v.abs().max(declared);
-            let viol = (g_l[i] - v).max(v - g_u[i]).max(0.0);
+            let lo_viol = if lo_present(g_l[i]) { g_l[i] - v } else { 0.0 };
+            let hi_viol = if up_present(g_u[i]) { v - g_u[i] } else { 0.0 };
+            let viol = lo_viol.max(hi_viol).max(0.0);
             match rule {
+                // Accepting direction, so the shared clamped form: never
+                // stricter than the absolute `tol`.
                 WitnessRule::SolverAcceptance => is_negligible(viol, scale, tol),
                 // Pure relative against the *declared* magnitude — no clamp, so
                 // the test moves with the row under scaling. A row with no
@@ -331,6 +360,12 @@ fn witness_refutes_infeasibility(
                 // has nothing to be relative to and keeps the absolute floor,
                 // which is the fail-closed direction here: it accepts the
                 // point, and accepting withdraws the verdict.
+                //
+                // The directional presence tests above make "no declared
+                // magnitude" mean what it says. Under the previous symmetric
+                // test a row could have a perfectly real bound of `-5e20` and
+                // still report `declared == 0`, dropping into the absolute
+                // floor by accident rather than by the reasoning above.
                 WitnessRule::DeclaredRowRelative if declared > 0.0 => {
                     viol.is_finite() && viol <= tol * declared
                 }
@@ -2866,6 +2901,137 @@ mod tests {
             got_g,
             vec![0.0, 0.0],
             "failed eval_g must not forward stale/garbage constraint values",
+        );
+    }
+
+    /// gh #396's shape, reduced to its essentials: one `<=`-only row whose
+    /// genuine upper bound is *more negative* than the `-INF_BOUND` sentinel
+    /// that stands in for its absent lower bound, and a starting point sitting
+    /// exactly on that upper bound.
+    ///
+    /// `-1e30 · x <= -5e20` over `x ∈ [0, 1e-9]`, with `x0 = 5e-10`, so
+    /// `g(x0) == g_u` exactly. True violation: zero.
+    struct SentinelLowerBoundRow;
+    impl TNLP for SentinelLowerBoundRow {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 1e-9;
+            b.g_l[0] = -1e19; // absent — the sentinel
+            b.g_u[0] = -5e20; // real, and beyond the sentinel's magnitude
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 5e-10;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = -1e30 * x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => {
+                    values[0] = -1e30;
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// **gh #396.** The absent-bound sentinel must not manufacture a violation,
+    /// and a genuine bound beyond the sentinel's magnitude must not be
+    /// discarded.
+    ///
+    /// Both errors landed on this one row pre-fix. `viol` had no presence test,
+    /// so it scored `g_l - v = 4.9e20` against a lower bound the row does not
+    /// have; and the magnitude test `|b| < INF_BOUND` called the row's *real*
+    /// upper bound `-5e20` absent. Either alone sinks the witness, and with no
+    /// candidate able to pass, presolve certified a feasible model infeasible
+    /// with `solve_result_num` 201 — a claimed proof.
+    #[test]
+    fn absent_bound_sentinel_does_not_manufacture_a_violation() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SentinelLowerBoundRow));
+        assert!(
+            witness_refutes_infeasibility(
+                &inner,
+                1,
+                1,
+                &[0.0],
+                &[1e-9],
+                &[-1e19],
+                &[-5e20],
+                1e-8,
+                WitnessRule::SolverAcceptance,
+            ),
+            "x0 = 5e-10 puts the row exactly on its only real bound — that is a \
+             witness, and the -1e19 sentinel standing in for the absent lower \
+             bound must not turn it into a 4.9e20 violation"
+        );
+    }
+
+    /// The other direction, and the reason the fix is a *directional* presence
+    /// test rather than dropping the terms: a point that genuinely violates a
+    /// real bound must still fail, so correct verdicts survive.
+    ///
+    /// Tightening the ceiling to `-5.1e20` over `x ∈ [4e-10, 5e-10]` puts every
+    /// candidate — including `x0` — strictly above it, so there is genuinely no
+    /// witness and the verdict must stand.
+    ///
+    /// This one does *not* reproduce #396: pre-fix it also returned `false`,
+    /// via the phantom lower-bound violation rather than the real upper-bound
+    /// one. It is here to pin the direction the fix could plausibly have broken
+    /// — making `up_present` admit the bound must not make real violations
+    /// invisible.
+    #[test]
+    fn a_real_bound_beyond_the_sentinel_still_blocks_the_witness() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SentinelLowerBoundRow));
+        assert!(
+            !witness_refutes_infeasibility(
+                &inner,
+                1,
+                1,
+                &[4e-10],
+                &[5e-10],
+                &[-1e19],
+                &[-5.1e20],
+                1e-8,
+                WitnessRule::SolverAcceptance,
+            ),
+            "no point in [4e-10, 5e-10] satisfies -1e30*x <= -5.1e20, so there \
+             is no witness — a real bound of magnitude 5.1e20 must not be \
+             discarded as the infinity sentinel"
         );
     }
 
