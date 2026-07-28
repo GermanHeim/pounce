@@ -107,14 +107,13 @@ fn contradictory_equalities_report_infeasible_band() {
 }
 
 /// Multiplying every row by `s > 0` leaves the feasible set unchanged, so the
-/// verdict must agree at every scale the certification can speak to. Scales
-/// at or below ~1e-8 are excluded deliberately: there the solver's own
-/// acceptance test would wave any point in the box through, so the
-/// fail-closed witness rule withholds the proof (see the algorithm-level
-/// test's `sub_tolerance_scales_keep_the_dof_error`).
+/// verdict must agree at every scale — including the sub-`1e-8` scalings this
+/// sweep used to skip. Those were excluded because the witness gate's absolute
+/// floor withdrew the proof there; gh#391 removed the floor on this path, where
+/// the solve provably cannot run and so cannot disagree.
 #[test]
 fn verdict_is_scale_invariant_where_certifiable() {
-    for k in [-6, -3, 0, 3, 6, 9, 12] {
+    for k in [-12, -9, -6, -3, 0, 3, 6, 9, 12] {
         let text = solve(&format!("k{k}"), &inf_eq_nl(10.0_f64.powi(k)));
         let srn = solve_result_num(&text);
         assert!(
