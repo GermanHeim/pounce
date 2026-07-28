@@ -126,7 +126,14 @@ BASELINE_WRONG = {
     "inf_372": 0,
     "inf_clear": 0,
     "inf_two": 0,
-    "inf_eq": 13,
+    # gh#387 took this 13 -> 3 by having the DOF gate consult bound-propagation
+    # certification; gh#391 took the last 3 (k in {-12, -10, -8}) to 0. Those
+    # cells were the witness gate's absolute floor: below a row magnitude of 1,
+    # `tol * max(scale, 1)` stops moving with the row, every point of the box
+    # "satisfies" both rows, and a crossing that is 0.6 at every scale lost its
+    # proof. On the DOF path the solve cannot run, so the witness measures
+    # against the row's declared magnitude instead.
+    "inf_eq": 0,
 }
 
 

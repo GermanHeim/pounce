@@ -19,6 +19,11 @@ underneath is not exact, and a handful of extreme-scale knife-edge instances
 Pinning the measured rate stops it silently getting worse — a change that pushes
 it up is a regression even if every hand-written case still passes. Lowering
 ``MAX_FALSE_POSITIVES`` as the path improves is the point.
+
+It has been lowered once, for gh #379: the numerical path (``solver_selection=nlp
+presolve=no``) now reports zero over 400 instances, because no path may claim
+infeasibility while the model's own starting point satisfies every constraint
+(``pounce_algorithm::infeasibility_refutation``).
 """
 
 from __future__ import annotations
@@ -35,9 +40,13 @@ pyo = pytest.importorskip("pyomo.environ")
 #: Instances per run. Large enough to be sensitive, small enough for CI.
 N_INSTANCES = 200
 
-#: Measured on the implementation this test landed with: 3 of 400 (~0.75%).
-#: Scaled to N_INSTANCES with headroom for generator jitter across seeds.
-MAX_FALSE_POSITIVES = 4
+#: Ratchet. Landed at 3 of 400 (~0.75%); gh #379's refutation gate took the
+#: numerical path to 0 of 400, leaving 1 of 400 — seed 223, on the presolve
+#: certification path. That seed is outside this run's first ``N_INSTANCES``, so
+#: the measured count here is 0; the 1 is headroom for a machine-dependent flip
+#: on a knife-edge instance, not a known failure. Lower it again as the presolve
+#: path improves.
+MAX_FALSE_POSITIVES = 1
 
 _SCALES = [1e-320, 1e-12, 1e-8, 1.0, 1e8, 1e18, 1e30]
 

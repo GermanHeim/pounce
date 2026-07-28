@@ -14,7 +14,7 @@
 
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, InfeasibilityProof, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo,
+    BoundsInfo, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::{Cell, RefCell};
@@ -121,6 +121,24 @@ impl TNLP for CountingTnlp {
 
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
         self.inner.borrow_mut().get_scaling_parameters(req)
+    }
+
+    fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner.borrow_mut().get_variables_linearity(types)
+    }
+
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_objective_variables_linearity(types)
+    }
+
+    // Without this forward, anything stacked above the counter (the
+    // application's DOF-gate infeasibility probe, a presolve wrapper) sees
+    // the trait default `false` and treats every row as nonlinear, silently
+    // disabling linear-row bound propagation (gh#387).
+    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner.borrow_mut().get_constraints_linearity(types)
     }
 
     fn get_number_of_nonlinear_variables(&mut self) -> Index {

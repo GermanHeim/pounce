@@ -1020,6 +1020,23 @@ impl IpoptApplication {
             ),
         };
 
+        // Same gate as the IPM path: an infeasible-subproblem exit is a
+        // numerical inference, and a feasible starting point disproves it
+        // (gh #379). Only the infeasibility verdict is rewritten — every other
+        // status passes through untouched, so the pair stays in lockstep.
+        let refuted = withdraw_infeasibility_if_refuted(
+            &tnlp,
+            solver_status,
+            self.nlp_lower_bound_inf(),
+            self.nlp_upper_bound_inf(),
+            self.user_tol(),
+        );
+        let (app_status, solver_status) = if refuted == solver_status {
+            (app_status, solver_status)
+        } else {
+            (solver_return_to_app_status(refuted), refuted)
+        };
+
         // Forward to the user TNLP's finalize_solution. We pass
         // the SQP iterate and recovered multipliers via the
         // OrigIpoptNlp's lifting hooks. Failure here is silent
@@ -1067,6 +1084,35 @@ impl IpoptApplication {
             }
         }
         app_status
+    }
+
+    /// `nlp_lower_bound_inf` — the magnitude at or below which a bound is
+    /// treated as absent.
+    fn nlp_lower_bound_inf(&self) -> Number {
+        self.options
+            .get_numeric_value("nlp_lower_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF)
+    }
+
+    /// `nlp_upper_bound_inf` — the magnitude at or above which a bound is
+    /// treated as absent.
+    fn nlp_upper_bound_inf(&self) -> Number {
+        self.options
+            .get_numeric_value("nlp_upper_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF)
+    }
+
+    /// The user's convergence tolerance `tol`.
+    fn user_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("tol", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1e-8)
     }
 
     /// Emit the Ipopt-style problem-statistics block (#206) from the
@@ -1385,15 +1431,30 @@ impl IpoptApplication {
                     | ApplicationReturnStatus::SolvedToAcceptableLevel
             ) && slack_sum.is_finite()
                 && slack_sum > slack_tol;
-            let final_app_status = if infeasible_certificate {
-                ApplicationReturnStatus::InfeasibleProblemDetected
-            } else {
-                last_status
+            // …unless the model's own starting point satisfies every
+            // constraint, which disproves the certificate outright (gh #379).
+            // Same gate as the IPM and SQP paths; see
+            // `withdraw_infeasibility_if_refuted`.
+            let refuted = infeasible_certificate
+                && withdraw_infeasibility_if_refuted(
+                    &tnlp,
+                    SolverReturn::LocalInfeasibility,
+                    self.nlp_lower_bound_inf(),
+                    self.nlp_upper_bound_inf(),
+                    self.user_tol(),
+                ) != SolverReturn::LocalInfeasibility;
+            let final_solver_status = match (infeasible_certificate, refuted) {
+                (true, false) => SolverReturn::LocalInfeasibility,
+                // The slacks did not collapse, so the returned point is not
+                // feasible and `Solve_Succeeded` would be just as wrong as
+                // `Infeasible_Problem_Detected`. Report the breakdown.
+                (true, true) => SolverReturn::ErrorInStepComputation,
+                (false, _) => solver_status,
             };
-            let final_solver_status = if infeasible_certificate {
-                SolverReturn::LocalInfeasibility
-            } else {
-                solver_status
+            let final_app_status = match (infeasible_certificate, refuted) {
+                (true, false) => ApplicationReturnStatus::InfeasibleProblemDetected,
+                (true, true) => ApplicationReturnStatus::ErrorInStepComputation,
+                (false, _) => last_status,
             };
 
             // Recompute f(x*) and c(x*) on the inner.
@@ -1432,6 +1493,54 @@ impl IpoptApplication {
     /// Constrained-NLP path: build adapter → OrigIpoptNlp → algorithm
     /// bundle, run `optimize`, populate statistics, and call
     /// `finalize_solution` on the user's TNLP.
+    /// Whether an over-determined model (more equality rows than free
+    /// variables) is *provably* infeasible by linear bound propagation.
+    ///
+    /// Consulted only on the `NotEnoughDegreesOfFreedom` failure path, where
+    /// the solve never runs and therefore can never itself discover the
+    /// infeasibility (gh#387). Builds a throwaway presolve wrapper with only
+    /// Phase 1 (bound tightening) enabled and asks it for a certified proof —
+    /// this inherits the certification safety net wholesale: the crossing must
+    /// exceed the solver's own acceptance margin at the crossed pair's scale,
+    /// and a concrete witness point satisfying every constraint withdraws the
+    /// verdict. A `false` here costs nothing but keeping the DOF error.
+    ///
+    /// The witness gate runs under [`pounce_presolve::WitnessRule`]'s
+    /// `DeclaredRowRelative` form, which is admissible only because the solve
+    /// cannot run on this path (gh#391) — see the comment on the probe below.
+    ///
+    /// Deliberately independent of the `presolve` master switch: this is not a
+    /// model transformation (the wrapper is dropped without solving through
+    /// it), it is a last check before reporting a structural error for a
+    /// problem whose verdict is already decided.
+    fn overdetermined_model_certified_infeasible(&self, tnlp: &Rc<RefCell<dyn TNLP>>) -> bool {
+        let mut opts = pounce_presolve::PresolveOptions::from_options_list(&self.options)
+            .unwrap_or_else(|_| pounce_presolve::PresolveOptions::defaults());
+        opts.enabled = true;
+        opts.bound_tightening = true;
+        // Certification needs Phase 1 only; every transformative or
+        // diagnostic phase is dead weight on a wrapper that is never
+        // solved through.
+        opts.auxiliary = false;
+        opts.fbbt = false;
+        opts.redundant_constraint_removal = false;
+        opts.licq_check = false;
+        opts.warm_z_bounds = false;
+        // The one place the witness rule is raised off the solver's own
+        // acceptance test (gh#391). It is sound *here specifically* because the
+        // gate has already established the solve cannot run: the alternative to
+        // the proof is the structural 5xx error, never `Solve_Succeeded`, so
+        // the #380 "two routes, two answers" contradiction the clamp exists to
+        // prevent has no second route to contradict. See `WitnessRule` for the
+        // full argument and the homogeneous-row fallback.
+        let mut probe =
+            pounce_presolve::PresolveTnlp::new(Rc::clone(tnlp), opts).probing_without_a_solve();
+        if probe.get_nlp_info().is_none() {
+            return false;
+        }
+        probe.certified_infeasible().is_some()
+    }
+
     fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         let t_start = Instant::now();
 
@@ -1601,6 +1710,29 @@ impl IpoptApplication {
         let n_c = orig_nlp.c_space().dim();
         if n_x_var > 0 && n_x_var < n_c {
             timing.overall_alg.end();
+            // An over-determined system can still be *provably* infeasible —
+            // `x == 0.2` with `x == 0.8` is about as provable as infeasibility
+            // gets — and for such a model the structural DOF error is the
+            // strictly weaker answer: it reports "cannot attempt this" for a
+            // problem whose verdict is already decided (gh#387). The DOF gate
+            // fires before any iteration runs, so nothing downstream will ever
+            // get the chance to detect the infeasibility; check for a
+            // bound-propagation proof here, on the rare failure path only.
+            // The probe reuses presolve's full certification pipeline
+            // (crossing margin + witness refutation), so a model the solver
+            // would accept as feasible at its own tolerance is never upgraded
+            // to "proved infeasible" — those still report the DOF error.
+            if self.overdetermined_model_certified_infeasible(&tnlp) {
+                use pounce_common::journalist::JournalCategory;
+                self.journalist.print(
+                    JournalLevel::J_SUMMARY,
+                    JournalCategory::J_MAIN,
+                    "\nEXIT: Problem has too few degrees of freedom, and bound \
+                     propagation proves its constraints inconsistent.\n\
+                     No feasible point exists; the solve was not run.\n",
+                );
+                return ApplicationReturnStatus::InfeasibleProblemDetected;
+            }
             return ApplicationReturnStatus::NotEnoughDegreesOfFreedom;
         }
 
@@ -1981,6 +2113,15 @@ impl IpoptApplication {
                 stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
             }
         }
+
+        // Never report `Infeasible_Problem_Detected` while holding a point that
+        // satisfies every constraint. The gates that produce this verdict argue
+        // from a stalled feasibility sub-problem, and gh #379 is what that looks
+        // like when the argument is wrong — a model whose own starting point is
+        // exactly feasible, reported infeasible. See
+        // `withdraw_infeasibility_if_refuted`.
+        let solver_status =
+            withdraw_infeasibility_if_refuted(&tnlp, solver_status, lo_inf, up_inf, tol);
 
         // Map SolverReturn → ApplicationReturnStatus per
         // MAIN_LOOP.md's exception table, then apply the opt-in
@@ -2919,6 +3060,60 @@ pub fn feral_config_from_options(
         }
     }
     cfg
+}
+
+/// Withdraw a numerical infeasibility verdict the model's own starting point
+/// disproves.
+///
+/// Applied at every site in this file that can return
+/// `Infeasible_Problem_Detected` from a *numerical* argument — the IPM path's
+/// restoration / cycle gates, the SQP path's infeasible-subproblem exit, and the
+/// ℓ₁ wrapper's uncollapsed-slack certificate. Deliberately one gate rather than
+/// three: the two preceding safeguards in this area (gh #376, gh #380) were each
+/// added to one path and not its twin, and a hole survived both times.
+///
+/// Not applied to a presolve *certificate*
+/// (`TNLP::presolve_infeasibility_proof`), which carries its own, tighter
+/// refutation
+/// (`pounce_presolve::witness_refutes_infeasibility`) and is a proof rather than
+/// a numerical inference.
+///
+/// The replacement is `Error_In_Step_Computation`, the status this codebase
+/// already uses for "the solve broke down and we are **not** claiming
+/// infeasibility" — see the `cycle_exit` fallback in
+/// [`crate::ipopt_alg::IpoptAlgorithm::invoke_restoration`], which picks between
+/// exactly these two on exactly this question. It maps to AMPL 500, an honest
+/// failure the caller can see, instead of AMPL 200, a wrong answer they cannot.
+///
+/// gh #379.
+fn withdraw_infeasibility_if_refuted(
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+    solver_status: SolverReturn,
+    lo_inf: Number,
+    up_inf: Number,
+    tol: Number,
+) -> SolverReturn {
+    if solver_status != SolverReturn::LocalInfeasibility {
+        return solver_status;
+    }
+    // A presolve proof is not a numerical inference; it does its own refutation.
+    if tnlp.borrow().presolve_infeasibility_proof().is_some() {
+        return solver_status;
+    }
+    match crate::infeasibility_refutation::starting_point_refutes_infeasibility(
+        tnlp, lo_inf, up_inf, tol,
+    ) {
+        Some(w) => {
+            tracing::debug!(
+                target: "pounce::application",
+                "[PN_INFEAS_REFUTED] the model's starting point satisfies every constraint \
+                 (max violation {:.3e}) — withdrawing Infeasible_Problem_Detected",
+                w.max_violation
+            );
+            SolverReturn::ErrorInStepComputation
+        }
+        None => solver_status,
+    }
 }
 
 /// Map upstream `SolverReturn` codes to `ApplicationReturnStatus`.
