@@ -149,6 +149,60 @@ pub fn wrap_from_options(
     wrap_with_presolve(inner, opts)
 }
 
+/// Which accepting test the witness-refutation gate uses to decide that a
+/// sampled point satisfies a row.
+///
+/// The two forms exist because the question the witness answers is not always
+/// the same question. Both are *accepting* tests, so both must fail closed —
+/// when in doubt, accept the point, withdraw the verdict, keep the proof
+/// unclaimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WitnessRule {
+    /// **Default, and the only rule for any path where the solve can run.**
+    ///
+    /// Accepts a row when the residual is negligible at the row's *live*
+    /// magnitude through the clamped form `tol * max(scale, 1)` — i.e. exactly
+    /// what the solver's own acceptance test would wave through. This is the
+    /// #380 rule: never certify what the solver itself would accept as
+    /// feasible, or the same model reports "proved infeasible" with presolve on
+    /// and `Solve_Succeeded` with it off.
+    #[default]
+    SolverAcceptance,
+    /// **Only for paths where the solve provably cannot run**, so no
+    /// `Solve_Succeeded` counterfactual exists to contradict (today: the
+    /// too-few-degrees-of-freedom gate, gh#391).
+    ///
+    /// Accepts a row when the residual is negligible relative to the row's
+    /// **declared** magnitude, `max(|g_l|, |g_u|)` over its *finite* bounds,
+    /// with no absolute clamp. Declared, not live: the live value moves with
+    /// the sampled point, while the bounds are the magnitude the modeller wrote
+    /// the row in — the same "declared, not live" pattern
+    /// `fbbt_infeasibility_survives_margin` uses for its per-row margin.
+    ///
+    /// Why the clamp has to go here: `tol * max(scale, 1)` reinstates an
+    /// absolute floor once the row's magnitude drops below 1, so multiplying
+    /// every row of an infeasible model by `1e-12` — which changes the feasible
+    /// set not at all — makes every point of the box "satisfy" every row and
+    /// withdraws a scale-free bound-propagation proof. That is the whole of
+    /// gh#391: `s*x == 0.2*s` with `s*x == 0.8*s` crosses by `0.6` at every `s`,
+    /// yet the verdict flipped at `s <= ~3e-8`.
+    ///
+    /// Why it is still safe: the clamp's job is to not demand more precision
+    /// than the solver promised, because a solver converges to *absolute*
+    /// residuals. On this path the solver never produces a point at all, so
+    /// there is no converged residual to be compatible with — the alternative
+    /// to the proof is a structural error, not a solution.
+    ///
+    /// The `b = 0` hazard is handled explicitly and fails closed: a homogeneous
+    /// row (`g_l = g_u = 0`, or a row with no finite bound at all) has no
+    /// declared magnitude, which would make the relative test unsatisfiable by
+    /// construction — `viol == scale` for any nonzero float noise — and a
+    /// genuinely feasible point would fail to refute. Such a row keeps
+    /// [`WitnessRule::SolverAcceptance`]'s clamped form, i.e. the absolute
+    /// floor.
+    DeclaredRowRelative,
+}
+
 /// Cached, reduced view of the problem after presolve passes have
 /// run. Exposed for inspection from integration tests.
 /// How far a model must be from satisfiable before an emptiness detection is
@@ -200,6 +254,7 @@ fn witness_refutes_infeasibility(
     g_l: &[Number],
     g_u: &[Number],
     tol: Number,
+    rule: WitnessRule,
 ) -> bool {
     if m_in == 0 || n == 0 {
         return false;
@@ -278,27 +333,44 @@ fn witness_refutes_infeasibility(
             // reported `solve_result_num` 201, which asserts a proof.
             let lo_present = |b: Number| b.is_finite() && b > -crate::bound_tighten::INF_BOUND;
             let up_present = |b: Number| b.is_finite() && b < crate::bound_tighten::INF_BOUND;
-            // Only *real* bounds inform the scale. The sentinel would otherwise
-            // set the slack around 1e11 and make every row look satisfied —
-            // which withdrew even correct verdicts.
-            let scale = v
-                .abs()
-                .max(if lo_present(g_l[i]) {
-                    g_l[i].abs()
-                } else {
-                    0.0
-                })
-                .max(if up_present(g_u[i]) {
-                    g_u[i].abs()
-                } else {
-                    0.0
-                });
+            // Only *real* bounds inform the declared magnitude. The sentinel
+            // would otherwise set the slack around 1e11 and make every row look
+            // satisfied — which withdrew even correct verdicts.
+            let declared = (if lo_present(g_l[i]) {
+                g_l[i].abs()
+            } else {
+                0.0
+            })
+            .max(if up_present(g_u[i]) {
+                g_u[i].abs()
+            } else {
+                0.0
+            });
+            let scale = v.abs().max(declared);
             let lo_viol = if lo_present(g_l[i]) { g_l[i] - v } else { 0.0 };
             let hi_viol = if up_present(g_u[i]) { v - g_u[i] } else { 0.0 };
             let viol = lo_viol.max(hi_viol).max(0.0);
-            // Accepting direction, so the shared clamped form: never stricter
-            // than the absolute `tol`.
-            is_negligible(viol, scale, tol)
+            match rule {
+                // Accepting direction, so the shared clamped form: never
+                // stricter than the absolute `tol`.
+                WitnessRule::SolverAcceptance => is_negligible(viol, scale, tol),
+                // Pure relative against the *declared* magnitude — no clamp, so
+                // the test moves with the row under scaling. A row with no
+                // declared magnitude (homogeneous, or unbounded on both sides)
+                // has nothing to be relative to and keeps the absolute floor,
+                // which is the fail-closed direction here: it accepts the
+                // point, and accepting withdraws the verdict.
+                //
+                // The directional presence tests above make "no declared
+                // magnitude" mean what it says. Under the previous symmetric
+                // test a row could have a perfectly real bound of `-5e20` and
+                // still report `declared == 0`, dropping into the absolute
+                // floor by accident rather than by the reasoning above.
+                WitnessRule::DeclaredRowRelative if declared > 0.0 => {
+                    viol.is_finite() && viol <= tol * declared
+                }
+                WitnessRule::DeclaredRowRelative => is_negligible(viol, scale, tol),
+            }
         });
         if feasible {
             return true;
@@ -484,6 +556,15 @@ pub struct PresolveTnlp {
     expr_provider: Option<Rc<RefCell<dyn ExpressionProvider>>>,
     opts: PresolveOptions,
 
+    /// Which accepting test the final witness-refutation gate uses. Left at
+    /// [`WitnessRule::SolverAcceptance`] for every wrapper that is actually
+    /// solved through; raised to [`WitnessRule::DeclaredRowRelative`] only by
+    /// callers that have already established the solve cannot run (gh#391).
+    /// Deliberately *not* a `PresolveOptions` field: it is a property of the
+    /// call site, not a user-tunable knob, and no user should be able to switch
+    /// a live solve onto the stricter rule.
+    witness_rule: WitnessRule,
+
     /// `None` until init has run; afterwards `Some(state)`.
     state: Option<PresolveState>,
 
@@ -560,9 +641,25 @@ impl PresolveTnlp {
             inner,
             expr_provider: None,
             opts,
+            witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
         }
+    }
+
+    /// Switch the final witness-refutation gate to
+    /// [`WitnessRule::DeclaredRowRelative`].
+    ///
+    /// **Only legitimate when the caller has already established that the solve
+    /// cannot run**, so the "never certify what the solver would accept"
+    /// counterfactual has nothing to compare against. Today that is the
+    /// too-few-degrees-of-freedom gate alone (gh#391). Calling this on a
+    /// wrapper that will be solved through reintroduces the #380 defect: a
+    /// small-magnitude model would report "proved infeasible" with presolve on
+    /// and `Solve_Succeeded` with it off.
+    pub fn probing_without_a_solve(mut self) -> Self {
+        self.witness_rule = WitnessRule::DeclaredRowRelative;
+        self
     }
 
     /// Build a presolve wrapper with an `ExpressionProvider` handle on
@@ -580,6 +677,7 @@ impl PresolveTnlp {
             inner,
             expr_provider: Some(expr_provider),
             opts,
+            witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
         }
@@ -1293,6 +1391,12 @@ impl PresolveTnlp {
         // Placed here, once, rather than beside each detection: the two
         // previous safeguards were each added to one path and not its twin,
         // and a hole survived both times.
+        //
+        // Which accepting test decides "satisfies" is the call site's choice,
+        // not an option — see `WitnessRule`. Every wrapper that is solved
+        // through uses the solver's own acceptance; only a caller that has
+        // established the solve cannot run may raise it to the declared,
+        // scale-relative form.
         if certified_infeasible.is_some()
             && witness_refutes_infeasibility(
                 &self.inner,
@@ -1303,6 +1407,7 @@ impl PresolveTnlp {
                 &g_l_inner,
                 &g_u_inner,
                 self.opts.certify_tol,
+                self.witness_rule,
             )
         {
             tracing::warn!(
@@ -2879,7 +2984,17 @@ mod tests {
     fn absent_bound_sentinel_does_not_manufacture_a_violation() {
         let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SentinelLowerBoundRow));
         assert!(
-            witness_refutes_infeasibility(&inner, 1, 1, &[0.0], &[1e-9], &[-1e19], &[-5e20], 1e-8,),
+            witness_refutes_infeasibility(
+                &inner,
+                1,
+                1,
+                &[0.0],
+                &[1e-9],
+                &[-1e19],
+                &[-5e20],
+                1e-8,
+                WitnessRule::SolverAcceptance,
+            ),
             "x0 = 5e-10 puts the row exactly on its only real bound — that is a \
              witness, and the -1e19 sentinel standing in for the absent lower \
              bound must not turn it into a 4.9e20 violation"
@@ -2912,6 +3027,7 @@ mod tests {
                 &[-1e19],
                 &[-5.1e20],
                 1e-8,
+                WitnessRule::SolverAcceptance,
             ),
             "no point in [4e-10, 5e-10] satisfies -1e30*x <= -5.1e20, so there \
              is no witness — a real bound of magnitude 5.1e20 must not be \
@@ -3800,5 +3916,229 @@ mod tests {
             .insert("two_globals".to_string(), vec![1.5, 2.5]);
         let reduced2 = project_con_metadata(&inner2, &rows_kept, m_in);
         assert_eq!(reduced2.numerics["two_globals"], vec![1.5, 2.5]);
+    }
+
+    /// gh#391 scratch. One variable in `[0, 1]`, `m` rows evaluated as
+    /// `coeff[i] * x + offset[i]` against per-row declared bounds — enough to
+    /// drive `witness_refutes_infeasibility` directly and compare the two
+    /// [`WitnessRule`] forms on the same numbers.
+    struct WitnessProbeRows {
+        coeff: Vec<Number>,
+        offset: Vec<Number>,
+        g_l: Vec<Number>,
+        g_u: Vec<Number>,
+        x0: Number,
+    }
+
+    impl TNLP for WitnessProbeRows {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: self.coeff.len() as Index,
+                nnz_jac_g: self.coeff.len() as Index,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 1.0;
+            b.g_l.copy_from_slice(&self.g_l);
+            b.g_u.copy_from_slice(&self.g_u);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = self.x0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for ((out, &c), &o) in g.iter_mut().zip(&self.coeff).zip(&self.offset) {
+                *out = c * x[0] + o;
+            }
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    for (i, r) in irow.iter_mut().enumerate() {
+                        *r = i as Index;
+                    }
+                    jcol.fill(0);
+                }
+                SparsityRequest::Values { values } => values.copy_from_slice(&self.coeff),
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types.fill(Linearity::Linear);
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    fn refutes(model: WitnessProbeRows, rule: WitnessRule) -> bool {
+        let (g_l, g_u) = (model.g_l.clone(), model.g_u.clone());
+        let m = g_l.len();
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+        witness_refutes_infeasibility(&inner, 1, m, &[0.0], &[1.0], &g_l, &g_u, 1e-8, rule)
+    }
+
+    /// The gh#391 mechanism in one assertion pair, on identical numbers.
+    ///
+    /// `s*x == 0.2*s` with `s*x == 0.8*s` over `x ∈ [0, 1]` is empty at every
+    /// `s > 0` — the crossing is `0.6` regardless. At `s = 1e-12` the clamped
+    /// accepting form reinstates the absolute floor (`tol * max(scale, 1)` =
+    /// `1e-8`), every point of the box "satisfies" both rows, and the witness
+    /// withdraws a scale-free proof. Measured against the row's declared
+    /// magnitude with no clamp, the same point violates by `0.6` relative and
+    /// refutes nothing.
+    #[test]
+    fn down_scaled_rows_only_defeat_the_clamped_witness_form() {
+        let model = |_s: Number| WitnessProbeRows {
+            coeff: vec![1e-12, 1e-12],
+            offset: vec![0.0, 0.0],
+            g_l: vec![0.2e-12, 0.8e-12],
+            g_u: vec![0.2e-12, 0.8e-12],
+            x0: 0.5,
+        };
+        assert!(
+            refutes(model(1e-12), WitnessRule::SolverAcceptance),
+            "the clamped form accepts every point of the box at this row scale \
+             — this is the behavior gh#391 is about, pinned so the contrast \
+             below stays meaningful"
+        );
+        assert!(
+            !refutes(model(1e-12), WitnessRule::DeclaredRowRelative),
+            "0.6 of the row's own declared magnitude is a violation at every \
+             scale; the strict rule must not withdraw the proof"
+        );
+    }
+
+    /// The same rows at unit scale: both forms agree, which is the point —
+    /// the strict rule changes nothing where the clamp was never active.
+    #[test]
+    fn unit_scale_rows_refute_under_neither_form() {
+        let model = || WitnessProbeRows {
+            coeff: vec![1.0, 1.0],
+            offset: vec![0.0, 0.0],
+            g_l: vec![0.2, 0.8],
+            g_u: vec![0.2, 0.8],
+            x0: 0.5,
+        };
+        assert!(!refutes(model(), WitnessRule::SolverAcceptance));
+        assert!(!refutes(model(), WitnessRule::DeclaredRowRelative));
+    }
+
+    /// The hazard the strict rule has to handle explicitly: a *homogeneous* row
+    /// (`g_l = g_u = 0`) has no declared magnitude, so a pure relative test
+    /// would be unsatisfiable by construction — the violation *is* the scale,
+    /// and any float-noise residual reads as a full-magnitude violation. Such a
+    /// row keeps the absolute floor, so a genuinely feasible point still
+    /// refutes and the proof is still withheld. Fail closed.
+    #[test]
+    fn homogeneous_row_keeps_the_absolute_floor_under_the_strict_rule() {
+        // `x - 0.5 == 0` evaluated at the modeller's `x0 = 0.5`, off by an ulp
+        // of noise. Feasible; the witness must say so under both rules.
+        let noisy = || WitnessProbeRows {
+            coeff: vec![1.0],
+            offset: vec![-0.5 + 1e-16],
+            g_l: vec![0.0],
+            g_u: vec![0.0],
+            x0: 0.5,
+        };
+        assert!(refutes(noisy(), WitnessRule::SolverAcceptance));
+        assert!(
+            refutes(noisy(), WitnessRule::DeclaredRowRelative),
+            "a homogeneous row has nothing to be relative to; float noise on it \
+             must not be promoted to a violation"
+        );
+
+        // A real violation on a homogeneous row still refutes nothing: the
+        // fallback is the absolute floor, not blanket acceptance.
+        let violated = || WitnessProbeRows {
+            coeff: vec![1.0],
+            offset: vec![0.6],
+            g_l: vec![0.0],
+            g_u: vec![0.0],
+            x0: 0.5,
+        };
+        assert!(!refutes(violated(), WitnessRule::SolverAcceptance));
+        assert!(!refutes(violated(), WitnessRule::DeclaredRowRelative));
+    }
+
+    /// The strict rule is relative, not absolute: on a row declared near `1e30`
+    /// a residual of `1e5` is fifteen relative digits of agreement and still
+    /// refutes. This is the extreme-coefficient class the witness gate exists
+    /// for, and it must survive the rule change.
+    #[test]
+    fn strict_rule_still_refutes_at_extreme_row_magnitude() {
+        let model = || WitnessProbeRows {
+            coeff: vec![2e30],
+            offset: vec![1e5],
+            g_l: vec![1e30],
+            g_u: vec![1e30],
+            x0: 0.5,
+        };
+        assert!(refutes(model(), WitnessRule::SolverAcceptance));
+        assert!(refutes(model(), WitnessRule::DeclaredRowRelative));
+    }
+
+    /// End-to-end through the wrapper: the rule is a property of the call site,
+    /// so a default wrapper (one that would be solved through) keeps the #380
+    /// behavior at sub-tolerance row scale, and only a caller that has
+    /// established the solve cannot run gets the proof.
+    #[test]
+    fn probing_without_a_solve_certifies_where_the_default_wrapper_withholds() {
+        let opts = PresolveOptions {
+            enabled: true,
+            bound_tightening: true,
+            auxiliary: false,
+            ..PresolveOptions::defaults()
+        };
+        let model = || WitnessProbeRows {
+            coeff: vec![1e-12, 1e-12],
+            offset: vec![0.0, 0.0],
+            g_l: vec![0.2e-12, 0.8e-12],
+            g_u: vec![0.2e-12, 0.8e-12],
+            x0: 0.5,
+        };
+
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model()));
+        let mut solved_through = PresolveTnlp::new(inner, opts);
+        solved_through.get_nlp_info().expect("init ok");
+        assert!(
+            solved_through.tighten_report().infeasible,
+            "bound propagation sees the contradiction at every scale"
+        );
+        assert_eq!(
+            solved_through.certified_infeasible(),
+            None,
+            "#380: a wrapper that will be solved through must not claim a proof \
+             the solver's own acceptance test would contradict"
+        );
+
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model()));
+        let mut probe = PresolveTnlp::new(inner, opts).probing_without_a_solve();
+        probe.get_nlp_info().expect("init ok");
+        assert_eq!(
+            probe.certified_infeasible(),
+            Some(InfeasibilityProof::BoundPropagation),
+            "gh#391: with no solve to contradict, the scale-free crossing is a \
+             proof at every row scale"
+        );
     }
 }

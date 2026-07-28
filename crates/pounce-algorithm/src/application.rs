@@ -1495,6 +1495,10 @@ impl IpoptApplication {
     /// and a concrete witness point satisfying every constraint withdraws the
     /// verdict. A `false` here costs nothing but keeping the DOF error.
     ///
+    /// The witness gate runs under [`pounce_presolve::WitnessRule`]'s
+    /// `DeclaredRowRelative` form, which is admissible only because the solve
+    /// cannot run on this path (gh#391) — see the comment on the probe below.
+    ///
     /// Deliberately independent of the `presolve` master switch: this is not a
     /// model transformation (the wrapper is dropped without solving through
     /// it), it is a last check before reporting a structural error for a
@@ -1512,7 +1516,15 @@ impl IpoptApplication {
         opts.redundant_constraint_removal = false;
         opts.licq_check = false;
         opts.warm_z_bounds = false;
-        let mut probe = pounce_presolve::PresolveTnlp::new(Rc::clone(tnlp), opts);
+        // The one place the witness rule is raised off the solver's own
+        // acceptance test (gh#391). It is sound *here specifically* because the
+        // gate has already established the solve cannot run: the alternative to
+        // the proof is the structural 5xx error, never `Solve_Succeeded`, so
+        // the #380 "two routes, two answers" contradiction the clamp exists to
+        // prevent has no second route to contradict. See `WitnessRule` for the
+        // full argument and the homogeneous-row fallback.
+        let mut probe =
+            pounce_presolve::PresolveTnlp::new(Rc::clone(tnlp), opts).probing_without_a_solve();
         if probe.get_nlp_info().is_none() {
             return false;
         }
