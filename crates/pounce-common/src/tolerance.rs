@@ -75,6 +75,48 @@ pub fn is_significant(value: Number, scale: Number, tol: Number) -> bool {
     value.abs() > threshold
 }
 
+/// Whether `value` is small enough, relative to its own natural magnitude, to
+/// be treated as satisfied — the **accepting** direction.
+///
+/// Threshold is `tol * max(|scale|, 1)`: never *stricter* than the plain
+/// absolute `tol`, but scaled up for a large row.
+///
+/// # Why this is not the negation of [`is_significant`]
+///
+/// The two answer different questions and are conservative in opposite
+/// directions, so they need different thresholds:
+///
+/// * *"Is this residual small enough to call the point feasible?"* — must never
+///   demand more precision than the solver promised. A solver converges to
+///   **absolute** residuals, so on a row of magnitude `1e-3` a residual of
+///   `1e-8` is a converged solution; a pure relative test with `tol = 1e-6`
+///   would reject it at a `1e-9` threshold. Hence the clamp.
+/// * *"Is this residual large enough to prove no point is feasible?"* — must not
+///   depend on how the model is written, so it uses [`is_significant`]'s pure
+///   `tol * scale`. A clamp there would reinstate the absolute floor and miss
+///   the down-scaled direction entirely.
+///
+/// Using one form for both was measured and fails: pure relative in the
+/// accepting direction rejects genuine solutions on small-magnitude rows.
+///
+/// ```
+/// use pounce_common::tolerance::is_negligible;
+/// // A converged absolute residual stays acceptable on a small row.
+/// assert!(is_negligible(1e-8, 1e-3, 1e-6));
+/// // On a row near 5e13, a residual of 3.15e3 is eleven relative digits.
+/// assert!(is_negligible(3.15e3, 5e13, 1e-6));
+/// // Genuine violations are still caught.
+/// assert!(!is_negligible(0.5, 1.0, 1e-6));
+/// ```
+pub fn is_negligible(value: Number, scale: Number, tol: Number) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
+    let s = scale.abs();
+    let widened = if s.is_finite() { s.max(1.0) } else { 1.0 };
+    value.abs() <= tol * widened
+}
+
 /// The natural magnitude of a row, from the NLP scaling factor applied to it.
 ///
 /// POUNCE's scaling picks `dc_i` so that `dc_i * c_i` is O(1); the row's own
@@ -156,6 +198,45 @@ mod tests {
         // Strict `>` keeps the boundary on the conservative side.
         assert!(!is_significant(1e-8, 1.0, 1e-8));
         assert!(is_significant(1.0000001e-8, 1.0, 1e-8));
+    }
+
+    #[test]
+    fn accepting_direction_never_stricter_than_absolute() {
+        let tol = 1e-6;
+        // The case that made a pure relative test reject genuine solutions:
+        // a converged absolute residual on a small-magnitude row.
+        assert!(is_negligible(1e-8, 1e-3, tol));
+        // Pure relative would have rejected it:
+        assert!(
+            1e-8f64 > tol * 1e-3,
+            "pure relative flags it — that is the bug"
+        );
+    }
+
+    #[test]
+    fn accepting_direction_scales_up_for_large_rows() {
+        let tol = 1e-6;
+        // Eleven relative digits on a 5e13 row: acceptable.
+        assert!(is_negligible(3.15e3, 5e13, tol));
+        // A real violation at the same scale is not.
+        assert!(!is_negligible(1e10, 5e13, tol));
+    }
+
+    #[test]
+    fn the_two_directions_are_not_negations() {
+        let tol = 1e-6;
+        let (value, scale) = (1e-8, 1e-3);
+        // Both can be true at once: too small to accept as a violation, and
+        // too small to prove infeasibility from. They are different questions.
+        assert!(is_negligible(value, scale, tol));
+        assert!(is_significant(value, scale, tol));
+    }
+
+    #[test]
+    fn non_finite_is_never_negligible() {
+        let tol = 1e-6;
+        assert!(!is_negligible(f64::NAN, 1.0, tol));
+        assert!(!is_negligible(f64::INFINITY, 1.0, tol));
     }
 
     #[test]

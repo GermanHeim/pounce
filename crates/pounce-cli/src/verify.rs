@@ -41,6 +41,7 @@
 //! residual.
 
 use crate::nl_reader;
+use pounce_common::tolerance::is_negligible;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, TNLP};
 use std::path::PathBuf;
@@ -202,6 +203,49 @@ pub(crate) fn is_finite_bound(b: Number) -> bool {
 /// through `f64::max` (which drops NaN operands) and let a fabricated `.sol`
 /// slip past the feasibility gate — the exact threat this checker defends
 /// against. An unbounded variable pinned at ±∞ is likewise not a real point.
+/// The natural magnitude of a row, for a scale-relative feasibility test.
+///
+/// `verify` reads a `.nl` and a `.sol`; no solver scaling has been applied, so
+/// the magnitude has to come from the row's own numbers — the evaluated value
+/// and whichever bounds are finite. Infinite bounds carry no magnitude
+/// information and are skipped.
+pub(crate) fn row_magnitude(value: Number, lo: Number, hi: Number) -> Number {
+    let mut m = if value.is_finite() { value.abs() } else { 0.0 };
+    if is_finite_bound(lo) {
+        m = m.max(lo.abs());
+    }
+    if is_finite_bound(hi) {
+        m = m.max(hi.abs());
+    }
+    m
+}
+
+/// Whether a row's violation is real, judged relative to the row's own
+/// magnitude.
+///
+/// An absolute tolerance is meaningless against a row evaluating near `1e13`:
+/// `--feas-tol 1e-6` is unreachable there, so a solution correct to eleven
+/// relative digits was reported REJECTED. Scaling the tolerance by the row
+/// magnitude makes the verdict independent of how the model happens to be
+/// written.
+///
+/// Uses the **accepting** direction (`is_negligible`), which is never stricter
+/// than the plain absolute `tol`. A pure relative test was tried first and
+/// rejected genuine solutions: the solver converges to *absolute* residuals, so
+/// on a row of magnitude `1e-3` a residual of `1e-8` is converged, while a
+/// relative test at `tol = 1e-6` would demand `1e-9`.
+///
+/// The non-finite case is handled here rather than inside the primitive, which
+/// reports an unjudgeable value as not-negligible-and-not-significant. A `.sol`
+/// carrying `NaN` or `±inf` is not a point at all and must be rejected — which
+/// is what `box_violation` returning infinity encodes.
+pub(crate) fn row_is_violated(viol: Number, magnitude: Number, feas_tol: Number) -> bool {
+    if !viol.is_finite() {
+        return true;
+    }
+    !is_negligible(viol, magnitude, feas_tol)
+}
+
 pub(crate) fn box_violation(v: Number, lo: Number, hi: Number) -> Number {
     if !v.is_finite() {
         return Number::INFINITY;
@@ -318,8 +362,12 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     // --- bound feasibility ---
     let mut max_bound_violation = 0.0_f64;
     let mut worst_bound: Option<RowReport> = None;
+    let mut any_bound_violated = false;
     for j in 0..n {
         let viol = box_violation(x[j], x_l[j], x_u[j]);
+        if row_is_violated(viol, row_magnitude(x[j], x_l[j], x_u[j]), args.feas_tol) {
+            any_bound_violated = true;
+        }
         if viol > max_bound_violation {
             max_bound_violation = viol;
             worst_bound = Some(RowReport {
@@ -340,8 +388,12 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     }
     let mut max_con_violation = 0.0_f64;
     let mut worst_con: Option<RowReport> = None;
+    let mut any_con_violated = false;
     for i in 0..m {
         let viol = box_violation(g[i], g_l[i], g_u[i]);
+        if row_is_violated(viol, row_magnitude(g[i], g_l[i], g_u[i]), args.feas_tol) {
+            any_con_violated = true;
+        }
         if viol > max_con_violation {
             max_con_violation = viol;
             worst_con = Some(RowReport {
@@ -355,7 +407,9 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         }
     }
 
-    let feasible = max_con_violation <= args.feas_tol && max_bound_violation <= args.feas_tol;
+    // Per-row and scale-relative: a single absolute threshold across rows of
+    // wildly different magnitude answers a different question for each of them.
+    let feasible = !any_con_violated && !any_bound_violated;
 
     // --- objective ---
     let objective = tnlp.eval_f(&x, true);
