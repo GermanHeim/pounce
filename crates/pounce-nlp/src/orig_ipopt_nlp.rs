@@ -1901,6 +1901,21 @@ impl IpoptNlp for OrigIpoptNlp {
         Some((dl, du))
     }
 
+    fn declared_c_rhs(&self) -> Option<Vec<Number>> {
+        // `c_rhs` is captured at construction from the user's `g_l` and never
+        // touched afterwards — no relaxation applies to an equality row, so it
+        // is already the declared value. Only the row scaling has to be
+        // reapplied: `eval_c` emits `c_scale_i · (g_i(x) − b_i)`, so the RHS
+        // must carry the same factor for the ratio to cancel it.
+        let mut b = self.c_rhs.clone();
+        if let Some(dc) = self.c_scale.borrow().as_ref() {
+            for (i, slot) in b.iter_mut().enumerate() {
+                *slot *= dc[i];
+            }
+        }
+        Some(b)
+    }
+
     fn px_l(&self) -> Rc<dyn Matrix> {
         Rc::clone(&self.px_l)
     }
@@ -3009,6 +3024,67 @@ mod tests {
         fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
     }
 
+    /// Equality twin of [`OneIneqLargeOffset`]: `1000·x == 4e6`, whose
+    /// Jacobian magnitude likewise trips `nlp_scaling_max_gradient`, giving
+    /// `c_scale = 100/1000 = 0.1`. Used to check that the declared equality
+    /// RHS is reported in the same scaled space as `eval_c` (gh#390).
+    struct OneEqLargeOffset;
+    impl TNLP for OneEqLargeOffset {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1.0e19;
+            b.x_u[0] = 1.0e19;
+            b.g_l[0] = 4.0e6;
+            b.g_u[0] = 4.0e6;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 5000.0;
+            true
+        }
+        fn eval_f(&mut self, _: &[Number], _: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = 1000.0 * x[0];
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, m: SparsityRequest<'_>) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => values[0] = 1000.0,
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            _: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            _: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
     #[test]
     fn gradient_based_scaling_scales_d_l_and_d_u() {
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneIneqLargeOffset));
@@ -3512,6 +3588,58 @@ mod tests {
         let (dl, du) = nlp.declared_d_bounds().expect("snapshotted at relax");
         assert_eq!(dl, vec![25.0], "declared bound is the pre-relax value");
         assert!(du.is_empty() || du[0] >= 25.0); // HS071: no finite d upper
+    }
+
+    /// gh#390: the equality RHS folded into `c(x) = 0` is plumbed back out, so
+    /// the runtime feasibility measure has a magnitude to judge `|c_i|`
+    /// against. Unlike an inequality bound it is never relaxed — an equality
+    /// row has no bound to widen — so the captured value is already the
+    /// declared one, at every point in the solve.
+    #[test]
+    fn declared_c_rhs_is_the_pre_fold_right_hand_side() {
+        // HS071's equality row is `x1² + x2² + x3² + x4² == 40`.
+        let (_adapter, mut nlp) = build_orig_nlp();
+        assert_eq!(nlp.declared_c_rhs(), Some(vec![40.0]));
+        nlp.relax_bounds(1e-2, 1.0);
+        assert_eq!(
+            nlp.declared_c_rhs(),
+            Some(vec![40.0]),
+            "bound relaxation must not reach the equality RHS"
+        );
+    }
+
+    /// The RHS is reported in the same space as `eval_c`'s output, so the
+    /// ratio `|c_i| / |b_i|` cancels the solver's own row scaling — the
+    /// property that makes it a scale-*free* measure rather than one that
+    /// merely moved which scale it depends on.
+    #[test]
+    fn declared_c_rhs_carries_the_row_scaling() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneEqLargeOffset));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let mut nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+        assert_eq!(nlp.declared_c_rhs(), Some(vec![4.0e6]));
+
+        nlp.determine_scaling_from_starting_point(
+            ScalingMethod::GradientBased,
+            100.0,
+            1e-8,
+            0.0,
+            0.0,
+        );
+        // c_scale = 100 / 1000 = 0.1.
+        let rhs = nlp.declared_c_rhs().unwrap();
+        assert!(
+            (rhs[0] - 4.0e5).abs() < 1e-9,
+            "declared RHS should carry c_scale=0.1; got {}",
+            rhs[0]
+        );
+
+        // At x = 5000: unscaled residual 5e6 - 4e6 = 1e6 over an unscaled RHS
+        // of 4e6 is 0.25 — and the scaled pair reads the same 0.25.
+        let x = dense_x(&[5000.0], nlp.x_space());
+        let mut c = nlp.c_space().make_new_dense();
+        nlp.eval_c(&x, &mut c);
+        assert!((c.values()[0] / rhs[0] - 0.25).abs() < 1e-12);
     }
 
     #[test]

@@ -844,8 +844,79 @@ impl IpoptCalculatedQuantities {
         c_max.max(dms_max)
     }
 
-    /// Largest primal infeasibility of an inequality row **relative to that
-    /// row's own magnitude**: `max_i |d_i − s_i| / max(|d_i|, |d_l_i|, |d_u_i|)`.
+    /// Largest primal infeasibility of a constraint row **relative to that
+    /// row's own magnitude** — `|c_i| / |b_i|` over the equality block and
+    /// `dist(d_i, [d_l_i, d_u_i]) / max(|d_l_i|, |d_u_i|)` over the
+    /// inequality block, whichever is worse.
+    ///
+    /// See [`Self::relative_d_infeasibility_max`] and
+    /// [`Self::relative_c_infeasibility_max`] for the two blocks; both use
+    /// the row's **declared** magnitude, never a live or relaxed stand-in,
+    /// and both abstain (contribute nothing) on a row that has no declared
+    /// magnitude to be relative to.
+    pub fn curr_relative_primal_infeasibility_max(&self) -> Number {
+        self.relative_d_infeasibility_max()
+            .max(self.relative_c_infeasibility_max())
+    }
+
+    /// The equality-block half of
+    /// [`Self::curr_relative_primal_infeasibility_max`]: `max_i |c_i| / |b_i|`,
+    /// where `b_i` is the row's declared right-hand side
+    /// ([`IpoptNlp::declared_c_rhs`]).
+    ///
+    /// POUNCE folds `g_i(x) == b_i` into `c_i(x) = 0`, so `|c_i|` *is* the
+    /// violation and by itself carries no magnitude to be judged against —
+    /// which is why every runtime feasibility decision on an equality row was
+    /// an absolute one, and why down-scaling such a row shrank `|c_i|` under
+    /// the absolute tolerance and flipped a true infeasibility verdict to
+    /// `Solve_Succeeded` (gh #390, residual of #387). Dividing by the pre-fold
+    /// RHS restores it: `s·g(x) == s·b` has residual `s·(g(x) − b)` and RHS
+    /// `s·b`, so the ratio is the same at every `s` — the point.
+    ///
+    /// Both numerator and denominator are taken in the internally-scaled
+    /// space, so the solver's own row scaling `dc_i` cancels too.
+    ///
+    /// A **homogeneous** row (`b_i = 0`) contributes nothing. It has no
+    /// declared magnitude to be relative to, and needs none: `s·g(x) == 0` is
+    /// the same row at every `s`, so the absolute test is already invariant
+    /// there. Dividing by zero — or by a fabricated floor — would turn
+    /// float-noise residuals into 100% "violations" on the single most common
+    /// equality row there is. Non-finite entries likewise contribute nothing:
+    /// an unjudgeable row must not fabricate a relative verdict. When the NLP
+    /// does not track the RHS at all (`declared_c_rhs` is `None` — e.g. the
+    /// restoration NLP, whose `c` block is not the user's rows), the whole
+    /// block abstains.
+    pub fn relative_c_infeasibility_max(&self) -> Number {
+        let c = self.curr_c();
+        if c.dim() == 0 {
+            return 0.0;
+        }
+        let Some(rhs) = self.nlp.borrow().declared_c_rhs() else {
+            return 0.0;
+        };
+        let Some(c) = c.as_any().downcast_ref::<DenseVector>() else {
+            return 0.0;
+        };
+        if !c.is_initialized() {
+            return 0.0;
+        }
+        let cv = c.expanded_values();
+        if cv.len() != rhs.len() {
+            return 0.0;
+        }
+        let mut worst = 0.0_f64;
+        for (&ci, &bi) in cv.iter().zip(rhs.iter()) {
+            let mag = bi.abs();
+            if mag > 0.0 && mag.is_finite() && ci.is_finite() {
+                worst = worst.max(ci.abs() / mag);
+            }
+        }
+        worst
+    }
+
+    /// The inequality-block half of
+    /// [`Self::curr_relative_primal_infeasibility_max`]:
+    /// `max_i |d_i − s_i| / max(|d_i|, |d_l_i|, |d_u_i|)`.
     ///
     /// This is the scale-free companion to
     /// [`Self::curr_unscaled_primal_infeasibility_max`]. An absolute violation
@@ -870,10 +941,10 @@ impl IpoptCalculatedQuantities {
     /// first place: `s·g >= 0` is the same row at every `s`, so the absolute
     /// test is already invariant there. Rows whose bounds are all zero or
     /// non-finite therefore contribute nothing (the relative measure
-    /// abstains), as do equality rows — their right-hand side is folded into
-    /// `c(x) = 0`, so `|c_i|` *is* the violation and carries no independent
-    /// magnitude. Non-finite entries contribute nothing — an unjudgeable row
-    /// must not fabricate a relative verdict.
+    /// abstains). Equality rows are judged by
+    /// [`Self::relative_c_infeasibility_max`], which plumbs the pre-fold RHS
+    /// back to supply the magnitude the fold into `c(x) = 0` erased.
+    ///
     /// The violation judged is the **distance of `d(x)` outside the declared
     /// box** — NOT the lifted residual `|d − s|` the absolute measure uses.
     /// `|d − s|` only bounds the true violation from above: mid-solve the
@@ -884,7 +955,7 @@ impl IpoptCalculatedQuantities {
     /// confirmation is vacuous (the violation is already ~0, so no materially
     /// less-violating point exists) — and 18 feasible CUTEr QPs were reported
     /// locally infeasible. Measured, not hypothetical.
-    pub fn curr_relative_primal_infeasibility_max(&self) -> Number {
+    pub fn relative_d_infeasibility_max(&self) -> Number {
         let dms = self.curr_d_minus_s();
         if dms.dim() == 0 {
             return 0.0;
@@ -2049,9 +2120,17 @@ mod tests {
         // Jacobian to exercise the finiteness guard in `curr_nlp_error`.
         nan_grad: bool,
         nan_jac_c: bool,
+        // gh#390: the declared equality RHS the c-block relative measure
+        // divides by. `None` (the default) is the "not tracked" contract.
+        c_rhs: Option<Vec<Number>>,
     }
 
     impl MockNlp {
+        fn with_c_rhs(mut self, rhs: Option<Vec<Number>>) -> Self {
+            self.c_rhs = rhs;
+            self
+        }
+
         fn with_nan_grad(mut self) -> Self {
             self.nan_grad = true;
             self
@@ -2102,6 +2181,7 @@ mod tests {
                 d_scale: None,
                 nan_grad: false,
                 nan_jac_c: false,
+                c_rhs: None,
             }
         }
     }
@@ -2203,6 +2283,9 @@ mod tests {
         }
         fn d_scale_vec(&self) -> Option<Vec<Number>> {
             self.d_scale.clone()
+        }
+        fn declared_c_rhs(&self) -> Option<Vec<Number>> {
+            self.c_rhs.clone()
         }
     }
 
@@ -2353,6 +2436,54 @@ mod tests {
         // theta = 4 + 2 = 6.
         let cq = fixture();
         assert!((cq.curr_constraint_violation() - 6.0).abs() < 1e-13);
+    }
+
+    /// gh#390. The fixture's equality row is `x0 + x1 == 1` at `x = (2, 3)`,
+    /// so `c = 4`. Judged against a declared RHS of 2 that is a 200% violation
+    /// — and it is 200% however the row is written, which is the point.
+    #[test]
+    fn relative_c_infeasibility_is_residual_over_declared_rhs() {
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![2.0])));
+        assert_eq!(cq.relative_c_infeasibility_max(), 2.0);
+        // The fixture's inequality row (`d = 2` against `d >= 1`) is satisfied,
+        // so the combined measure is the equality block's verdict.
+        assert_eq!(cq.relative_d_infeasibility_max(), 0.0);
+        assert_eq!(cq.curr_relative_primal_infeasibility_max(), 2.0);
+    }
+
+    /// An NLP that does not track the pre-fold RHS (the trait default, e.g.
+    /// the restoration NLP) must abstain rather than invent a magnitude.
+    #[test]
+    fn relative_c_infeasibility_abstains_without_declared_rhs() {
+        let cq = fixture();
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+        assert_eq!(cq.curr_relative_primal_infeasibility_max(), 0.0);
+    }
+
+    /// A homogeneous row (`g(x) == 0`) has no declared magnitude and needs
+    /// none — `s·g(x) == 0` is the same row at every `s`. Dividing by its zero
+    /// RHS would report every float-noise residual as an infinite violation.
+    #[test]
+    fn relative_c_infeasibility_abstains_on_homogeneous_row() {
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![0.0])));
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+    }
+
+    /// An unjudgeable row must not fabricate a relative verdict.
+    #[test]
+    fn relative_c_infeasibility_abstains_on_non_finite_rhs() {
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![Number::INFINITY])));
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![Number::NAN])));
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+    }
+
+    /// A row-count mismatch means the RHS does not describe this `c` block;
+    /// pairing them up anyway would judge rows against other rows' magnitudes.
+    #[test]
+    fn relative_c_infeasibility_abstains_on_length_mismatch() {
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![2.0, 2.0])));
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
     }
 
     #[test]
