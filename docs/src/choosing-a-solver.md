@@ -17,16 +17,16 @@ pluggable backend (FERAL by default, HSL MA57 optionally).
 
 | Solver | Problem class | Optimum | Crate | Entry points |
 |---|---|---|---|---|
-| **NLP filter-IPM** | general smooth NLP (nonconvex OK) | local (KKT) | `pounce-algorithm` + `pounce-nlp` | CLI default; Python `Problem`/`minimize`; `--solver nlp` |
+| **NLP filter-IPM** | general smooth NLP (nonconvex OK) | local (KKT) | `pounce-algorithm` + `pounce-nlp` | CLI default; Python `Problem`/`minimize`; `solver_selection=nlp` |
 | **NLP active-set SQP** | general smooth NLP | local | `pounce-algorithm` (subproblems via `pounce-qp`) | `algorithm=active-set-sqp` |
-| **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `--solver lp-ipm`/`qp-ipm` |
-| **Convex IPM (conic)** | SOCP, exp/power/PSD cones, convex QCQP | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `minimize` (convex QCQP); `--solver socp`; `pounce <file>.cbf` |
-| **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `--solver qp-active-set` |
+| **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `solver_selection=lp-ipm`/`qp-ipm` |
+| **Convex IPM (conic)** | SOCP, exp/power/PSD cones, convex QCQP | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `minimize` (convex QCQP); `solver_selection=socp`; `pounce <file>.cbf` |
+| **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `solver_selection=qp-active-set` |
 | **SOS / Lasserre** | polynomial (nonconvex) | **global** | `pounce-convex` | `sos_minimize`; `pounce.sos_minimize` |
 
 > A general-purpose **spatial branch-and-bound** solver for factorable nonconvex
 > NLPs (`pounce-global`) is in development on the `feature/global` branch and is
-> **not part of this release** — there is no `--solver global` CLI route or
+> **not part of this release** — there is no `solver_selection=global` CLI route or
 > `minimize_global` Python entry point yet. Today the only certified-global path
 > for nonconvex problems is SOS / Lasserre, for *polynomials*.
 
@@ -126,16 +126,19 @@ The CLI classifies each `.nl` problem and picks a solver, but you can force
 the choice:
 
 ```sh
-pounce model.nl --solver auto          # default: classify, then route
-pounce model.nl --solver nlp           # filter-IPM (or active-set-sqp via algorithm=)
-pounce model.nl --solver lp-ipm        # convex LP interior-point
-pounce model.nl --solver qp-ipm        # convex QP interior-point
-pounce model.nl --solver socp          # conic interior-point (convex QCQP)
-pounce model.nl --solver qp-active-set # active-set QP
+pounce model.nl solver_selection=auto          # default: classify, then route
+pounce model.nl solver_selection=nlp           # filter-IPM (or active-set-sqp via algorithm=)
+pounce model.nl solver_selection=lp-ipm        # convex LP interior-point
+pounce model.nl solver_selection=qp-ipm        # convex QP interior-point
+pounce model.nl solver_selection=socp          # conic interior-point (convex QCQP)
+pounce model.nl solver_selection=qp-active-set # active-set QP
 ```
 
-(The CLI spelling of the option is `solver_selection=<value>`, e.g.
-`pounce model.nl solver_selection=qp-ipm`.)
+`solver_selection` is an ordinary POUNCE option, not a command-line flag:
+it is passed as a trailing `KEY=VALUE` pair (the ipopt CLI convention), and
+so also works from an options file, the `pounce_options` environment
+variable, or Pyomo's `solver.options`. Forcing a value the problem class
+does not support is rejected with a message rather than silently ignored.
 
 See [LP / QP Solver Routing](lp-qp-routing.md) for how classification works
 and when it falls back to the more general solver.

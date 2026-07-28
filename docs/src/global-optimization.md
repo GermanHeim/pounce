@@ -18,7 +18,7 @@ minimizer(s).
 > the `feature/global` branch and is not part of this release**. It is described
 > at the end of this chapter for context, but there is no `pounce-global` crate
 > in the shipped workspace, no `pounce.minimize_global` Python entry point, and
-> no `--solver global` CLI route here.
+> no `solver_selection=global` CLI route here.
 
 ## The SOS / Lasserre path (polynomials)
 

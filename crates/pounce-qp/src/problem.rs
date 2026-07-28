@@ -139,6 +139,16 @@ pub struct QpSolution {
     pub obj: Number,
     pub status: QpStatus,
     pub stats: QpStats,
+    /// The certified recession direction `d` behind a
+    /// [`QpStatus::Unbounded`] verdict: `Hd ≈ 0`, `d` feasible for every
+    /// step length, `∇q(x)ᵀd < 0`. `None` for every other status.
+    ///
+    /// Callers that embed this QP as a *subproblem* need the witness, not
+    /// just the verdict: an unbounded step QP is only evidence about the
+    /// local model, so an SQP driver has to re-test the ray against the
+    /// true NLP before it can report the NLP unbounded (gh #388). The
+    /// direction is not normalized.
+    pub unbounded_ray: Option<Vec<Number>>,
 }
 
 /// Per-solve counters and timers reported alongside the solution.

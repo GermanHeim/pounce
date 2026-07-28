@@ -522,15 +522,64 @@ impl SqpAlgorithm {
                         working_set: iter.working,
                     });
                 }
-                // `Unbounded` on a step QP is a genuine pathology (an
-                // indefinite/negative-curvature ray); keep the historical
-                // hard-error behavior.
-                other => {
-                    return Err(SqpError::QpFailure(
-                        pounce_qp::QpError::LinearSolverFailure(format!(
-                            "QP subproblem returned status {other}"
-                        )),
-                    ));
+                // The step QP is unbounded below along a certified
+                // recession ray of the LOCAL model (zero curvature,
+                // feasible for every step length, strict descent). That
+                // is a statement about the linearization, not yet about
+                // the NLP — so re-test the ray against the true
+                // objective and constraints. If it survives, the NLP
+                // itself is unbounded and we say so with the same
+                // `Diverging_Iterates` verdict every other POUNCE path
+                // returns; if it does not, the QP simply failed to
+                // produce a usable step, which is `QpStepFailed`.
+                //
+                // Neither outcome is a hard error. This used to return
+                // `QpFailure(LinearSolverFailure("QP subproblem returned
+                // status unbounded"))`, which surfaced to AMPL / Pyomo /
+                // GAMS consumers as `Internal_Error` /
+                // `solve_result_num=500` — "the solver broke" — on a
+                // model that is merely unbounded (`300`), and named a
+                // linear-solver failure when no linear solver had failed
+                // (gh #388).
+                QpStatus::Unbounded => {
+                    let certified = sol.unbounded_ray.as_ref().is_some_and(|d| {
+                        ray_certifies_unbounded(
+                            nlp,
+                            &iter.x,
+                            d,
+                            f_curr,
+                            &grad_f,
+                            &bl_c,
+                            &bu_c,
+                            &xl,
+                            &xu,
+                            self.opts.constr_viol_tol,
+                        )
+                    });
+                    if !certified {
+                        tracing::debug!(target: "pounce::sqp",
+                            "unbounded step QP whose recession ray does not survive \
+                             re-testing against the NLP — reporting qp-step-failed \
+                             rather than claiming unboundedness (gh #388)");
+                    }
+                    let obj = nlp.eval_f(&iter.x);
+                    self.iterates = Some(iter.clone());
+                    return Ok(SqpResult {
+                        x: iter.x,
+                        lambda_g: iter.lambda_g,
+                        lambda_x: iter.lambda_x,
+                        obj,
+                        status: if certified {
+                            SqpStatus::Unbounded
+                        } else {
+                            SqpStatus::QpStepFailed
+                        },
+                        n_iter: outer,
+                        n_qp_solves,
+                        final_stationarity,
+                        final_constr_viol,
+                        working_set: iter.working,
+                    });
                 }
             }
 
@@ -741,6 +790,141 @@ impl SqpAlgorithm {
             crate::sqp::SqpHessianSource::Lbfgs => HessianInertia::Psd,
         }
     }
+}
+
+/// gh #388: does the step QP's certified recession ray certify the **NLP**
+/// unbounded below?
+///
+/// The inner QP hands back a direction `d` that is a recession ray *of the
+/// linearization at `x`*: `∇²L d ≈ 0`, `d` feasible for the linearized
+/// constraints at every step length, `∇q(x)ᵀd < 0`. On an LP or a QP that
+/// linearization is exact and `d` is a recession ray of the original
+/// problem; on a general NLP it need not be — the constraints curve back
+/// and the objective can turn around. The two cases must not share a
+/// status, so we settle it by evaluation rather than by faith: walk the
+/// ray and check, at the **true** `f` and `c`, that
+///
+///  1. every probe point is *feasible* (variable bounds and constraint
+///     bounds, the latter with a roundoff allowance that grows with the
+///     row scale so a linear row evaluated at `‖x‖ ~ 1e12` is not failed
+///     on cancellation noise), and
+///  2. the objective keeps falling at **at least half** the initial linear
+///     rate `∇f(x)ᵀd` — not merely falling. A ray that decelerates is
+///     settling onto a finite optimum, the same distinction the IPM's
+///     divergence guard draws (#248/#252/#285).
+///
+/// Probes span twelve decades of step length, so a "pass" is a family of
+/// genuinely feasible points whose objective marches to `−∞` at a linear
+/// rate over `1e12`. Anything short of that — one infeasible probe, one
+/// decelerating decade, a NaN — returns `false` and the caller reports the
+/// non-committal `QpStepFailed` instead. False negatives cost an honest
+/// "no step" status; a false positive would tell a modeler their bounded
+/// model is unbounded, so the asymmetry is deliberate.
+///
+/// `dir` need not be normalized (it is rescaled to unit max-norm here, so
+/// the probe lengths are in the iterate's own units).
+#[allow(clippy::too_many_arguments)]
+fn ray_certifies_unbounded<N: SqpProblemSpec>(
+    nlp: &mut N,
+    x: &[Number],
+    dir: &[Number],
+    f_x: Number,
+    grad_f: &[Number],
+    bl_c: &[Number],
+    bu_c: &[Number],
+    xl: &[Number],
+    xu: &[Number],
+    constr_viol_tol: Number,
+) -> bool {
+    /// Step lengths along the unit-max-norm ray, spanning twelve decades.
+    const PROBES: [Number; 7] = [1e0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];
+    /// Roundoff allowance per unit of `row_scale · ‖x‖∞` when checking a
+    /// constraint at a far-out probe: comfortably above f64 epsilon
+    /// (`2.2e-16`) to absorb accumulation over a row, far below anything
+    /// a real violation would produce.
+    const ROUNDOFF_REL: Number = 1e-12;
+
+    let n = x.len();
+    if dir.len() != n || grad_f.len() != n || !f_x.is_finite() {
+        return false;
+    }
+    let scale = dir.iter().map(|v| v.abs()).fold(0.0, f64::max);
+    if !scale.is_finite() || scale <= 0.0 {
+        return false;
+    }
+    let d: Vec<Number> = dir.iter().map(|v| v / scale).collect();
+
+    // Descent of the TRUE objective along the ray. The QP certified this
+    // for its own (possibly quasi-Newton) model gradient; re-derive it
+    // from `∇f(x)` so the rate we hold the probes to is the real one.
+    let slope: Number = grad_f.iter().zip(d.iter()).map(|(g, di)| g * di).sum();
+    let g_norm = grad_f.iter().map(|v| v * v).sum::<Number>().sqrt();
+    // Numerically meaningful (not roundoff-scale) descent; a NaN slope
+    // fails the `is_finite` guard rather than sneaking past the comparison.
+    let descent_bar = -1e-9 * g_norm.max(1.0);
+    if !slope.is_finite() || slope >= descent_bar {
+        return false;
+    }
+
+    // Per-row `max_j |∂c_i/∂x_j|`, the scale a linear row's value grows
+    // with along the ray — the basis for the roundoff allowance in (1).
+    let m = bl_c.len();
+    let mut row_scale: Vec<Number> = vec![0.0; m];
+    {
+        let jac = nlp.eval_jac_c(x);
+        for k in 0..jac.vals.len() {
+            let i = (jac.irow[k] - 1) as usize;
+            row_scale[i] = row_scale[i].max(jac.vals[k].abs());
+        }
+    }
+
+    for &t in PROBES.iter() {
+        let xt: Vec<Number> = x.iter().zip(d.iter()).map(|(xi, di)| xi + t * di).collect();
+        if xt.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+
+        // (1a) Variable bounds. These are exact linear rows in the probe's
+        // own arithmetic, so the tolerance stays tight.
+        for i in 0..n {
+            let tol = 1e-9 * (1.0 + xt[i].abs());
+            if xl[i] > NLP_LOWER_BOUND_INF && xt[i] < xl[i] - tol {
+                return false;
+            }
+            if xu[i] < NLP_UPPER_BOUND_INF && xt[i] > xu[i] + tol {
+                return false;
+            }
+        }
+
+        // (1b) Constraint bounds, at the true (possibly nonlinear) `c`.
+        let x_inf = xt.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let c = nlp.eval_c(&xt);
+        if c.len() != m {
+            return false;
+        }
+        for i in 0..m {
+            if c[i].is_nan() {
+                return false;
+            }
+            let tol =
+                constr_viol_tol.max(0.0) * (1.0 + c[i].abs()) + ROUNDOFF_REL * row_scale[i] * x_inf;
+            if bl_c[i] > NLP_LOWER_BOUND_INF && c[i] < bl_c[i] - tol {
+                return false;
+            }
+            if bu_c[i] < NLP_UPPER_BOUND_INF && c[i] > bu_c[i] + tol {
+                return false;
+            }
+        }
+
+        // (2) Sustained (non-decelerating) descent. `-inf` passes: an
+        // objective that has already overflowed downward is not evidence
+        // against unboundedness.
+        let f_t = nlp.eval_f(&xt);
+        if f_t.is_nan() || f_t > f_x + 0.5 * slope * t {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Copy)]
