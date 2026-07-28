@@ -149,6 +149,16 @@ pub struct OrigIpoptNlp {
     c_scale: RefCell<Option<Vec<Number>>>,
     /// Same as [`Self::c_scale`] but for inequality rows.
     d_scale: RefCell<Option<Vec<Number>>>,
+    /// The *declared* compressed `d_L / d_U` — snapshotted (unscaled) at
+    /// [`Self::relax_bounds`] time, before `bound_relax_factor` widens the
+    /// live bounds and before any safe-slack adjustment moves them. The
+    /// scale-relative feasibility measure keys row magnitudes off these: a
+    /// relaxed zero bound reads as `~1e-8` on the live vector and would
+    /// fabricate a magnitude for a row that has none. `None` until
+    /// `relax_bounds` runs (direct drivers that skip it fall back to the
+    /// live bounds).
+    declared_d_l: RefCell<Option<Vec<Number>>>,
+    declared_d_u: RefCell<Option<Vec<Number>>>,
 
     // ----- vector / matrix spaces (shared via Rc) -----
     x_space: Rc<DenseVectorSpace>,
@@ -533,6 +543,8 @@ impl OrigIpoptNlp {
             computed_obj_scale: Cell::new(1.0),
             c_scale: RefCell::new(None),
             d_scale: RefCell::new(None),
+            declared_d_l: RefCell::new(None),
+            declared_d_u: RefCell::new(None),
             x_space,
             c_space,
             d_space,
@@ -687,6 +699,12 @@ impl OrigIpoptNlp {
     /// affect scaling — but the bounds themselves should be the
     /// post-relax values when they enter the algorithm).
     pub fn relax_bounds(&mut self, bound_relax_factor: Number, constr_viol_tol: Number) {
+        // Snapshot the declared inequality bounds before anything widens them
+        // — even when relaxation is disabled, so `declared_d_bounds` has one
+        // authoritative answer per solve. Safe-slack adjustments come later
+        // and only touch the live vectors.
+        *self.declared_d_l.borrow_mut() = Some(self.d_l.expanded_values());
+        *self.declared_d_u.borrow_mut() = Some(self.d_u.expanded_values());
         if bound_relax_factor <= 0.0 {
             return;
         }
@@ -697,6 +715,31 @@ impl OrigIpoptNlp {
             for x in xs.iter_mut() {
                 let delta = (relax * x.abs().max(1.0)).min(cap);
                 *x += sign * delta;
+            }
+        };
+        // Inequality-row bounds use a *scale-relative* delta (#385, Step 6):
+        // `min(relax, cap) · |b|`, with the absolute `min(relax, cap)` kept
+        // only for a declared-zero bound (`s·g >= 0` is the same row at every
+        // `s`, so zero has no scale and the absolute form is already
+        // invariant there). The upstream formula's `max(|b|, 1)` clamp is the
+        // same absolute floor this migration removes everywhere else: it
+        // relaxed a `2e-12`-bound row by `1e-8` — 5000× the bound — silently
+        // erasing every down-scaled constraint before the solver saw it,
+        // which is exactly how an infeasible model at row scale `1e-8` and
+        // below reported `Solve_Succeeded`. In the other direction the
+        // absolute `cap` pinned a `1e13`-bound row's relaxation at `1e-4` —
+        // relative `1e-17`, i.e. no relaxation at all. Both directions are
+        // now relative: `min(relax, cap)` is the *relative* width, identical
+        // to the upstream formula on `1 <= |b| <= cap/relax`, which is where
+        // the corpus lives. Variable bounds keep the upstream formula — row
+        // scaling never touches them, and their relaxation is not this
+        // change's business.
+        let apply_d = |v: &mut DenseVector, sign: Number| {
+            let rel_width = relax.min(cap);
+            let xs = v.values_mut();
+            for x in xs.iter_mut() {
+                let scale = if *x == 0.0 { 1.0 } else { x.abs() };
+                *x += sign * rel_width * scale;
             }
         };
         // The bound `Rc`s are uniquely owned (nothing clones them — the same
@@ -713,11 +756,11 @@ impl OrigIpoptNlp {
             Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
             1.0,
         );
-        apply(
+        apply_d(
             Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"),
             -1.0,
         );
-        apply(
+        apply_d(
             Rc::get_mut(&mut self.d_u).expect("relax_bounds: d_u is uniquely owned"),
             1.0,
         );
@@ -1839,6 +1882,25 @@ impl IpoptNlp for OrigIpoptNlp {
     fn d_u(&self) -> &dyn Vector {
         &*self.d_u
     }
+
+    fn declared_d_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        let mut dl = self.declared_d_l.borrow().clone()?;
+        let mut du = self.declared_d_u.borrow().clone()?;
+        // Return them in the live vectors' space: `apply_d_scale_to_bounds`
+        // scaled `d_l`/`d_u` in place after the snapshot was taken, so the
+        // same per-row factors apply here.
+        if let Some(dd) = self.d_scale.borrow().as_ref() {
+            let cls = self.adapter.borrow().classification().clone();
+            for (i, slot) in dl.iter_mut().enumerate() {
+                *slot *= dd[cls.d_l_map[i] as usize];
+            }
+            for (i, slot) in du.iter_mut().enumerate() {
+                *slot *= dd[cls.d_u_map[i] as usize];
+            }
+        }
+        Some((dl, du))
+    }
+
     fn px_l(&self) -> Rc<dyn Matrix> {
         Rc::clone(&self.px_l)
     }
@@ -3428,6 +3490,28 @@ mod tests {
         for (b, a) in x_u_before.iter().zip(nlp.x_u.values()) {
             assert!(a > b, "x_u should relax upward: {a} !> {b}");
         }
+    }
+
+    /// #385 Step 6: inequality-row bounds relax by a *scale-relative* delta
+    /// (`min(relax, cap) · |b|`), and the declared (pre-relax) bounds stay
+    /// available for the scale-relative feasibility measure — the live vector
+    /// alone cannot distinguish a declared `2e-12` bound from a relaxed zero.
+    #[test]
+    fn relax_bounds_is_scale_relative_on_d_and_snapshots_declared() {
+        // HS071's inequality row is `x1*x2*x3*x4 >= 25`.
+        let (_adapter, mut nlp) = build_orig_nlp();
+        assert_eq!(nlp.d_l.values(), &[25.0]);
+        assert_eq!(nlp.declared_d_bounds(), None, "no snapshot before relax");
+        nlp.relax_bounds(1e-2, 1.0);
+        // delta = min(1e-2, 1.0) * 25 = 0.25 — proportional to the bound, so
+        // the same row written at any scaling relaxes to the same feasible
+        // set. The upstream form `min(cap, relax*max(|b|,1))` coincides here;
+        // where they differ (|b| < 1) the old absolute floor erased
+        // down-scaled rows entirely (a 2e-12 bound relaxed by 1e-8).
+        assert_eq!(nlp.d_l.values(), &[25.0 - 0.25]);
+        let (dl, du) = nlp.declared_d_bounds().expect("snapshotted at relax");
+        assert_eq!(dl, vec![25.0], "declared bound is the pre-relax value");
+        assert!(du.is_empty() || du[0] >= 25.0); // HS071: no finite d upper
     }
 
     #[test]

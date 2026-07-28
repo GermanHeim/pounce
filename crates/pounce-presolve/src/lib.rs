@@ -43,6 +43,7 @@ use std::rc::Rc;
 use pounce_common::exception::SolverException;
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::RegisteredOptions;
+use pounce_common::tolerance::is_negligible;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{
@@ -251,10 +252,12 @@ fn witness_refutes_infeasibility(
                 return false;
             }
             // Slack relative to the row's own magnitude: an absolute tolerance
-            // is meaningless against a row evaluating near 1e30.
+            // is meaningless against a row evaluating near 1e30. This is the
+            // accepting direction, so it goes through `is_negligible` — the
+            // shared clamped form, never stricter than the absolute `tol`.
             // Only *finite* bounds inform the scale. The unbounded sentinel
-            // (~1e19) would otherwise set eps around 1e11 and make every row
-            // look satisfied — which withdrew even correct verdicts.
+            // (~1e19) would otherwise set the slack around 1e11 and make every
+            // row look satisfied — which withdrew even correct verdicts.
             let fin = |b: Number| {
                 if b.is_finite() && b.abs() < crate::bound_tighten::INF_BOUND {
                     b.abs()
@@ -262,9 +265,9 @@ fn witness_refutes_infeasibility(
                     0.0
                 }
             };
-            let scale = v.abs().max(fin(g_l[i])).max(fin(g_u[i])).max(1.0);
-            let eps = tol * scale;
-            v >= g_l[i] - eps && v <= g_u[i] + eps
+            let scale = v.abs().max(fin(g_l[i])).max(fin(g_u[i]));
+            let viol = (g_l[i] - v).max(v - g_u[i]).max(0.0);
+            is_negligible(viol, scale, tol)
         });
         if feasible {
             return true;
@@ -315,9 +318,39 @@ fn certify_margin(tol: Number) -> Number {
     tol.max(1e-12)
 }
 
-/// Re-run FBBT with every constraint bound widened by [`certify_margin`].
-/// Returns `true` only if the problem is *still* infeasible with that slack —
-/// i.e. the infeasibility is robust, not a hair's-breadth modelling artifact.
+/// Whether some variable's crossed bounds are crossed by more than the solver
+/// itself would accept as feasible — the condition for promoting a Phase-1
+/// detection to a certified proof.
+///
+/// The scale is the crossed pair's own magnitude, through `is_negligible`'s
+/// clamped accepting form — deliberately NOT the pure-relative proving form
+/// (`is_significant`). The #380 rule binds here: a crossing so small that the
+/// solver's acceptance test would wave a point through must never be certified,
+/// or the same model reports "proved infeasible" with presolve on and
+/// `Solve_Succeeded` with it off. The clamp hazard that rules the proving form
+/// out for *row residuals* does not arise for bound crossings: row scaling
+/// divides out of a propagated bound (`s*x >= 2*s` implies `x >= 2` at every
+/// `s`), so crossings do not shrink in the down-scaled direction. What the
+/// relative part fixes is the *up-scaled* model — a crossing of `6e-5` on
+/// bounds near `3e11` is float noise (relative `2e-16`), and the absolute
+/// margin used to certify it.
+fn crossing_is_certifiable(x_l: &[Number], x_u: &[Number], tol: Number) -> bool {
+    x_l.iter()
+        .zip(x_u)
+        .any(|(&l, &u)| l > u && !is_negligible(l - u, l.abs().max(u.abs()), tol))
+}
+
+/// Re-run FBBT with every constraint's bounds widened by that row's own
+/// acceptance slack, `tol * max(|bound|, 1)` — the same clamped form
+/// `is_negligible` uses. Returns `true` only if the problem is *still*
+/// infeasible with that slack — i.e. the infeasibility is robust at the scale
+/// the row is written in, not a hair's-breadth modelling artifact.
+///
+/// Per-row rather than one absolute margin: an absolute `1e-8` widening is
+/// invisible on a row whose bounds sit near `5e13`, so an "infeasibility" of
+/// `3e3` there (eleven relative digits — a violation `pounce verify` accepts)
+/// would survive the probe and be certified, contradicting the verifier on the
+/// same model.
 ///
 /// Sound in the conservative direction: a false `false` merely withholds the
 /// proof and leaves the previous behavior (let the IPM decide), while a false
@@ -334,25 +367,35 @@ fn fbbt_infeasibility_survives_margin(
     g_u: &[Number],
     row_kept: &[bool],
     cfg: &crate::fbbt::FbbtConfig,
-    margin: Number,
+    tol: Number,
 ) -> bool {
+    let fin = |b: Number| {
+        if b.is_finite() && b.abs() < crate::bound_tighten::INF_BOUND {
+            b.abs()
+        } else {
+            0.0
+        }
+    };
+    let row_margin = |i: usize| -> Number { tol * fin(g_l[i]).max(fin(g_u[i])).max(1.0) };
     let g_l_relaxed: Vec<Number> = g_l
         .iter()
-        .map(|&v| {
+        .enumerate()
+        .map(|(i, &v)| {
             if v <= -crate::bound_tighten::INF_BOUND {
                 v
             } else {
-                v - margin
+                v - row_margin(i)
             }
         })
         .collect();
     let g_u_relaxed: Vec<Number> = g_u
         .iter()
-        .map(|&v| {
+        .enumerate()
+        .map(|(i, &v)| {
             if v >= crate::bound_tighten::INF_BOUND {
                 v
             } else {
-                v + margin
+                v + row_margin(i)
             }
         })
         .collect();
@@ -921,8 +964,6 @@ impl PresolveTnlp {
         if tighten_report.infeasible {
             // Measure the crossing *before* the restore below overwrites it.
             let crossing = (0..n).map(|j| x_l[j] - x_u[j]).fold(0.0_f64, f64::max);
-            x_l.copy_from_slice(&inner_x_l);
-            x_u.copy_from_slice(&inner_x_u);
             // Reaching here implies the tightening ran on an un-clamped box:
             // the aux rollback above either did not fire (empty reduction
             // stack ⇒ Phase 0 changed nothing) or fired and recomputed
@@ -932,12 +973,14 @@ impl PresolveTnlp {
             // discarded — a degenerate box must not reach the solver — but the
             // *verdict* now survives.
             // Phase 1 flags a crossing above its own `1e-12` test, which is
-            // far below what the solver treats as feasible. Measure the actual
-            // crossing (the crossed bounds are still in place here — they are
-            // restored on the next line) and certify only if it clears
-            // `certify_margin`, so a model POUNCE would solve to
-            // `Solve_Succeeded` can never be called proved infeasible.
-            let robust = crossing > certify_margin(self.opts.certify_tol);
+            // far below what the solver treats as feasible. Certify only a
+            // crossing the solver's own acceptance would call a real violation
+            // at that variable's scale (see `crossing_is_certifiable`), so a
+            // model POUNCE would solve to `Solve_Succeeded` can never be
+            // called proved infeasible.
+            let robust = crossing_is_certifiable(&x_l, &x_u, certify_margin(self.opts.certify_tol));
+            x_l.copy_from_slice(&inner_x_l);
+            x_u.copy_from_slice(&inner_x_u);
             if robust {
                 certified_infeasible = Some(InfeasibilityProof::BoundPropagation);
             }
@@ -974,17 +1017,26 @@ impl PresolveTnlp {
         // `honor_original_bounds`. Clamping to the original box keeps the
         // reported point admissible.
         //
-        // Only *sub-margin* crossings collapse. A crossing the solver itself
-        // would call a real violation — above `certify_margin` — is not float
-        // noise; it is a user-declared empty box (`x in [5, 3]`) on a variable
-        // no linear row ever propagated into, which Phase 1 therefore never
-        // flagged. Collapsing that would turn `Invalid_Problem_Definition`
-        // into `Solve_Succeeded` at a point the model excludes — a wrong
-        // answer replacing a correct error. Those stay crossed so the solver
-        // rejects them exactly as it does with presolve off.
-        let collapse_margin = certify_margin(self.opts.certify_tol);
+        // Only *negligible* crossings collapse — `is_negligible` at the
+        // crossed pair's own magnitude, the exact complement of
+        // `crossing_is_certifiable`, so every crossing is either collapsed
+        // here or certifiable there, never both. A crossing the solver itself
+        // would call a real violation is not float noise; it is a
+        // user-declared empty box (`x in [5, 3]`) on a variable no linear row
+        // ever propagated into, which Phase 1 therefore never flagged.
+        // Collapsing that would turn `Invalid_Problem_Definition` into
+        // `Solve_Succeeded` at a point the model excludes — a wrong answer
+        // replacing a correct error. Those stay crossed so the solver rejects
+        // them exactly as it does with presolve off.
+        let collapse_tol = certify_margin(self.opts.certify_tol);
         for j in 0..n {
-            if x_l[j] > x_u[j] && x_l[j] - x_u[j] <= collapse_margin {
+            if x_l[j] > x_u[j]
+                && is_negligible(
+                    x_l[j] - x_u[j],
+                    x_l[j].abs().max(x_u[j].abs()),
+                    collapse_tol,
+                )
+            {
                 let mid = (0.5 * (x_l[j] + x_u[j]))
                     .max(inner_x_l[j])
                     .min(inner_x_u[j]);
@@ -1086,11 +1138,16 @@ impl PresolveTnlp {
                     if tighten_report.infeasible {
                         // Measure the crossing before the restore wipes it.
                         let crossing = (0..n).map(|j| x_l[j] - x_u[j]).fold(0.0_f64, f64::max);
+                        // Derived on the rolled-back, un-clamped box, so the
+                        // aux elimination cannot be to blame — certifiable when
+                        // the crossing is real at the variable's own scale.
+                        let robust = crossing_is_certifiable(
+                            &x_l,
+                            &x_u,
+                            certify_margin(self.opts.certify_tol),
+                        );
                         x_l.copy_from_slice(&inner_x_l);
                         x_u.copy_from_slice(&inner_x_u);
-                        // Derived on the rolled-back, un-clamped box, so the
-                        // aux elimination cannot be to blame — certifiable.
-                        let robust = crossing > certify_margin(self.opts.certify_tol);
                         if robust {
                             certified_infeasible = Some(InfeasibilityProof::BoundPropagation);
                         }

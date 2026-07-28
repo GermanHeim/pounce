@@ -77,6 +77,18 @@ pub struct OptErrorConvCheck {
     /// terminate normally; correctness does not depend on the cap, because the
     /// refused certificate is restored either way.
     pub veto_extra_iters: Index,
+    /// Iterations on which the scale-relative feasibility veto blocked a
+    /// certificate (strict or acceptable) that the absolute tolerances had
+    /// passed. Bounded by [`VETO_MAX_EXTRA_ITERS`]; past the budget the veto
+    /// disengages and the run terminates as it would have without it, so the
+    /// worst case is a bounded number of extra iterations, never a lost
+    /// verdict. See [`Self::relative_viol_threshold`].
+    pub rel_infeas_extra_iters: Index,
+    /// Relative primal infeasibility at the previous
+    /// [`Self::note_infeasible_stationary`] call — the progress signal for the
+    /// relative arm's streak (see that method). `NAN` until first set, which
+    /// compares as "not improving" and lets the first iterate count.
+    pub prev_rel_viol: Number,
 }
 
 /// How many iterations the veto may spend before its bet is called off.
@@ -164,6 +176,8 @@ impl Default for OptErrorConvCheck {
             veto_fired: false,
             acceptable_veto_fired: false,
             veto_extra_iters: 0,
+            rel_infeas_extra_iters: 0,
+            prev_rel_viol: Number::NAN,
         }
     }
 }
@@ -280,17 +294,54 @@ impl OptErrorConvCheck {
         }
     }
 
+    /// Fraction of a row's own magnitude a violation must exceed before the
+    /// scale-relative machinery treats the row as genuinely violated —
+    /// used both to veto a success certificate and as an alternative
+    /// violation floor for rapid infeasibility detection.
+    ///
+    /// `max(100·constr_viol_tol, 1e-2)`: at the default `constr_viol_tol =
+    /// 1e-4` this is 1% — a row eaten to 1% of everything it is made of is not
+    /// a satisfied row at any scale. The `1e-2` floor is deliberate slack for
+    /// the accepting direction: an interior-point run converges inequality
+    /// residuals to *absolute* levels, so on a row of magnitude `1e-6` a
+    /// converged residual near `1e-9` is a solved row at 0.1% relative — a
+    /// tighter relative bar would veto genuine solutions on small-magnitude
+    /// rows, the exact failure the clamped form in
+    /// `pounce_common::tolerance::is_negligible` exists to avoid. The scale
+    /// non-invariance this leaves (`x >= 0.7` at row scale `1e-12` is violated
+    /// by 14%, well above any plausible bar; a knife-edge 0.9% violation is
+    /// not) is the conservative direction: too-loose withholds a verdict,
+    /// too-tight fabricates one.
+    fn relative_viol_threshold(&self) -> Number {
+        (100.0 * self.constr_viol_tol).max(1e-2)
+    }
+
     /// Pure predicate for a single infeasible-stationary iterate: the
-    /// constraint violation is bounded away from zero
-    /// (`constr_viol > infeas_viol_kappa · constr_viol_tol`) and the
-    /// scaled infeasibility gradient `‖Jᵀc‖/max(1,‖c‖)` is at or below
-    /// `infeas_stationarity_tol`. Returns `false` when rapid
+    /// constraint violation is bounded away from zero — absolutely
+    /// (`constr_viol > infeas_viol_kappa · constr_viol_tol`) **or relative to
+    /// the violated row's own magnitude** (`rel_viol` above
+    /// [`Self::relative_viol_threshold`]; a row violated by 10% of everything
+    /// it is made of is bounded away from feasible no matter how small its
+    /// numbers are) — and the scaled infeasibility gradient `‖Jᵀc‖/max(1,‖c‖)`
+    /// is at or below `infeas_stationarity_tol`. Returns `false` when rapid
     /// infeasibility detection is disabled (either knob non-positive).
-    fn is_infeasible_stationary(&self, constr_viol: Number, stationarity: Number) -> bool {
+    ///
+    /// The relative arm changes only this pre-filter; the verdict still
+    /// requires the direct no-descent confirmation in
+    /// `check_convergence_with_state`, which is what protects against the
+    /// false-infeasibility failures the surrogate alone was measured to
+    /// produce.
+    fn is_infeasible_stationary(
+        &self,
+        constr_viol: Number,
+        rel_viol: Number,
+        stationarity: Number,
+    ) -> bool {
         if self.infeas_stationarity_tol <= 0.0 || self.infeas_max_streak <= 0 {
             return false;
         }
-        constr_viol > self.infeas_viol_kappa * self.constr_viol_tol
+        (constr_viol > self.infeas_viol_kappa * self.constr_viol_tol
+            || rel_viol > self.relative_viol_threshold())
             && stationarity <= self.infeas_stationarity_tol
     }
 
@@ -301,8 +352,33 @@ impl OptErrorConvCheck {
     /// reaches `infeas_max_streak`, signalling the caller to terminate
     /// with `ConvergenceStatus::LocallyInfeasible`. The streak guards
     /// against firing on a transient flat spot.
-    fn note_infeasible_stationary(&mut self, constr_viol: Number, stationarity: Number) -> bool {
-        if self.is_infeasible_stationary(constr_viol, stationarity) {
+    ///
+    /// The **relative** arm additionally requires the relative violation to
+    /// have stopped improving — "bounded away from feasible" must mean *not
+    /// still converging*. The no-descent confirmation cannot provide that
+    /// guard here: it compares violations absolutely, so in the small-scale
+    /// regime the relative arm targets (violation ~1e-9 and falling), no
+    /// "materially less-violating" point registers and the confirmation is
+    /// vacuous. Measured on QSCORPIO: the detector fired at iteration 57 with
+    /// the endgame still cutting the violation 16× over its last five
+    /// iterations (4.6e-9 → 2.9e-10 relative 4.6e-2 → 2.9e-3); five more
+    /// iterations reached `Optimal Solution Found`. An iterate that improved
+    /// the relative violation by more than 10% since the previous check
+    /// therefore resets the streak; a genuinely infeasible row's violation is
+    /// pinned at its infeasibility gap and cannot improve at all.
+    fn note_infeasible_stationary(
+        &mut self,
+        constr_viol: Number,
+        rel_viol: Number,
+        stationarity: Number,
+    ) -> bool {
+        let still_improving = rel_viol < 0.9 * self.prev_rel_viol;
+        self.prev_rel_viol = rel_viol;
+        // Only the relative arm is progress-gated; the absolute arm keeps its
+        // own guard (the direct no-descent confirmation, which is meaningful
+        // at absolute violation scales).
+        let effective_rel = if still_improving { 0.0 } else { rel_viol };
+        if self.is_infeasible_stationary(constr_viol, effective_rel, stationarity) {
             self.infeas_streak += 1;
             self.infeas_streak >= self.infeas_max_streak
         } else {
@@ -368,12 +444,31 @@ impl ConvCheck for OptErrorConvCheck {
         let dual_inf = cq_ref.curr_unscaled_dual_infeasibility_max();
         let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
+        let rel_viol = cq_ref.curr_relative_primal_infeasibility_max();
         let curr_f = cq_ref.curr_f();
         let unscaled_err = cq_ref.curr_unscaled_nlp_error();
         // The gate asks whether *our* scaling clamped, not how the user chose
         // to scale their objective — see `certificate_masked`.
         let obj_scale = cq_ref.computed_obj_scaling_factor();
         drop(cq_ref);
+
+        // Scale-relative feasibility veto (#385, Step 6). The absolute
+        // `constr_viol_tol` gate cannot tell "satisfied" from "violated by 14%
+        // of everything the row is" once the row's numbers are small: `x >= 0.7`
+        // written as `1e-12·x >= 0.7e-12` has an absolute violation of `1e-13`
+        // at `x = 0.6` — under every absolute tolerance, while the same empty
+        // feasible set written at unit scale is reported infeasible. Refuse a
+        // certificate whose point still has an inequality row violated by more
+        // than `relative_viol_threshold` of its own magnitude, and let the run
+        // continue: for a genuinely infeasible model the rapid-infeasibility
+        // detection below then reaches the honest verdict (its violation floor
+        // understands the same relative measure), and for anything else the
+        // budget bounds the cost — after `VETO_MAX_EXTRA_ITERS` blocked
+        // iterations the veto disengages and the run terminates exactly as it
+        // would have, so no verdict is ever lost to it.
+        let rel_veto = rel_viol > self.relative_viol_threshold()
+            && self.rel_infeas_extra_iters < VETO_MAX_EXTRA_ITERS;
+        let mut rel_veto_blocked = false;
 
         // gh #200: refuse a certificate the objective scaling has masked, and
         // keep iterating. A constant objective scale cancels out of the Newton
@@ -428,7 +523,21 @@ impl ConvCheck for OptErrorConvCheck {
         }
 
         if !masked && self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf) {
-            return ConvergenceStatus::Converged;
+            if rel_veto {
+                rel_veto_blocked = true;
+                if self.rel_infeas_extra_iters == 0 {
+                    tracing::info!(
+                        rel_viol,
+                        constr_viol,
+                        threshold = self.relative_viol_threshold(),
+                        "refusing a success certificate: an inequality row is still \
+                         violated by more than the scale-relative threshold of its own \
+                         magnitude; continuing (bounded by the veto budget)"
+                    );
+                }
+            } else {
+                return ConvergenceStatus::Converged;
+            }
         }
         // `acceptable_iter == 0` disables acceptable-level termination
         // (upstream `IpOptErrorConvCheck.cpp:241`). See `check_convergence`.
@@ -436,8 +545,18 @@ impl ConvCheck for OptErrorConvCheck {
         // not merely swapped for an acceptable-level one at the same wrong
         // point. Acceptable-point *storage* is deliberately left un-vetoed —
         // that stashed point is the rollback target if the run later stalls.
-        let acceptable_now = self.acceptable_iter > 0
+        let mut acceptable_now = self.acceptable_iter > 0
             && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f);
+        // The scale-relative veto covers the acceptable band for the same
+        // reason the masked-scale veto does: a refused strict certificate must
+        // not be swapped for an acceptable-level one at the same wrong point.
+        if acceptable_now && rel_veto {
+            acceptable_now = false;
+            rel_veto_blocked = true;
+        }
+        if rel_veto_blocked {
+            self.rel_infeas_extra_iters += 1;
+        }
         if self.note_acceptable(acceptable_now, masked) {
             return ConvergenceStatus::ConvergedToAcceptable;
         }
@@ -470,7 +589,7 @@ impl ConvCheck for OptErrorConvCheck {
             // that no local move reduces the violation -- is confirmed directly
             // before the verdict is issued.
             let stationarity = cq.borrow().curr_infeasibility_stationarity();
-            if self.note_infeasible_stationary(constr_viol, stationarity) {
+            if self.note_infeasible_stationary(constr_viol, rel_viol, stationarity) {
                 if cq.borrow().infeasibility_descent_available() {
                     // Descent exists: not a stationary point of the violation,
                     // so the surrogate was wrong here. Drop the streak and keep
@@ -579,8 +698,25 @@ impl ConvCheck for OptErrorConvCheck {
         let dual_inf = cq_ref.curr_unscaled_dual_infeasibility_max();
         let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
+        let rel_viol = cq_ref.curr_relative_primal_infeasibility_max();
         let curr_f = cq_ref.curr_f();
         drop(cq_ref);
+        // The scale-relative veto reaches acceptable-point *storage* too,
+        // unlike the masked-scale (#200) veto above it. That veto refuses a
+        // possibly-premature stop at a point that is still genuinely feasible,
+        // so the stash stays a legitimate rollback target. Here the point has
+        // an inequality row violated by more than the relative threshold of
+        // its own magnitude — it is not acceptable in any honest sense, and a
+        // stall later in the run must not roll back to it and surface
+        // `Solved_To_Acceptable_Level` on an infeasible model (measured: an
+        // infeasible row at scale `1e-10`, 100% violated, exited exactly that
+        // way through this stash). Budget-aware like the certificate veto, so
+        // a spent budget restores the old behaviour entirely.
+        if rel_viol > self.relative_viol_threshold()
+            && self.rel_infeas_extra_iters < VETO_MAX_EXTRA_ITERS
+        {
+            return false;
+        }
         self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f)
     }
 
@@ -597,6 +733,70 @@ mod tests {
     fn converges_at_tol() {
         let mut c = OptErrorConvCheck::new();
         assert_eq!(c.check_convergence(1e-9, 0), ConvergenceStatus::Converged);
+    }
+
+    /// The scale-relative arm of rapid infeasibility detection (#385 Step 6):
+    /// a row violated by a large fraction of its own magnitude is bounded away
+    /// from feasible no matter how small its numbers are, so the pre-filter
+    /// must fire even when the absolute violation is far below
+    /// `infeas_viol_kappa * constr_viol_tol`.
+    #[test]
+    fn relative_violation_arms_the_infeasibility_prefilter() {
+        let c = OptErrorConvCheck::new();
+        // `x >= 0.7` at row scale 1e-12: absolute violation 1e-13 (invisible
+        // to the absolute arm, floor is 1e-2), relative violation 0.14.
+        assert!(c.is_infeasible_stationary(1e-13, 0.14, 1e-9));
+        // The same iterate without the relative signal must NOT fire — this
+        // is exactly the old behaviour.
+        assert!(!c.is_infeasible_stationary(1e-13, 0.0, 1e-9));
+        // A converged small-magnitude row (residual 1e-9 on a 1e-6-bound row,
+        // 0.1% relative) stays under the 1% threshold.
+        assert!(!c.is_infeasible_stationary(1e-9, 1e-3, 1e-9));
+    }
+
+    /// The relative arm's streak resets while the relative violation is still
+    /// improving — "bounded away from feasible" must mean *not still
+    /// converging*. QSCORPIO's endgame was cutting its violation 16× over
+    /// five iterations when the un-guarded arm declared it locally
+    /// infeasible; five more iterations reached the optimum.
+    #[test]
+    fn improving_relative_violation_resets_the_streak() {
+        let mut c = OptErrorConvCheck::new();
+        c.infeas_max_streak = 3;
+        // A pinned relative violation (an infeasibility gap) accumulates.
+        assert!(!c.note_infeasible_stationary(1e-13, 0.14, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-13, 0.14, 1e-9));
+        assert!(c.note_infeasible_stationary(1e-13, 0.14, 1e-9));
+        // A geometrically shrinking one (a converging endgame) never fires.
+        let mut c = OptErrorConvCheck::new();
+        c.infeas_max_streak = 3;
+        let mut rel = 0.5;
+        for _ in 0..20 {
+            assert!(
+                !c.note_infeasible_stationary(1e-13, rel, 1e-9),
+                "a converging endgame must not be declared infeasible"
+            );
+            rel *= 0.5;
+        }
+    }
+
+    /// The relative-violation veto blocks a strict certificate the absolute
+    /// tolerances would grant, and its budget bounds the cost: once spent,
+    /// the certificate goes through exactly as before.
+    #[test]
+    fn relative_viol_threshold_is_floored() {
+        let mut c = OptErrorConvCheck::new();
+        // Default constr_viol_tol = 1e-4 -> threshold 1e-2.
+        assert_eq!(c.relative_viol_threshold(), 1e-2);
+        // A loosened constr_viol_tol loosens the relative bar with it.
+        c.constr_viol_tol = 1e-3;
+        assert_eq!(c.relative_viol_threshold(), 1e-1);
+        // A tightened one must not push the relative bar below 1% — an
+        // interior-point run converges inequality residuals to absolute
+        // levels, and a tighter relative bar vetoes genuine solutions on
+        // small-magnitude rows.
+        c.constr_viol_tol = 1e-8;
+        assert_eq!(c.relative_viol_threshold(), 1e-2);
     }
 
     #[test]
@@ -897,13 +1097,13 @@ mod tests {
         };
         // Violation well above 1e-2 and the infeasibility gradient
         // essentially zero → counts as infeasible-stationary.
-        assert!(c.is_infeasible_stationary(1e-1, 1e-9));
+        assert!(c.is_infeasible_stationary(1e-1, 0.0, 1e-9));
         // Violation above threshold but the gradient is not flat →
         // still making feasibility progress, does not count.
-        assert!(!c.is_infeasible_stationary(1e-1, 1e-3));
+        assert!(!c.is_infeasible_stationary(1e-1, 0.0, 1e-3));
         // Gradient flat but violation below threshold → nearly
         // feasible, does not count.
-        assert!(!c.is_infeasible_stationary(1e-3, 1e-9));
+        assert!(!c.is_infeasible_stationary(1e-3, 0.0, 1e-9));
     }
 
     #[test]
@@ -913,13 +1113,13 @@ mod tests {
             infeas_max_streak: 5,
             ..Default::default()
         };
-        assert!(!off_tol.is_infeasible_stationary(1e9, 0.0));
+        assert!(!off_tol.is_infeasible_stationary(1e9, 0.0, 0.0));
         let off_streak = OptErrorConvCheck {
             infeas_stationarity_tol: 1e-8,
             infeas_max_streak: 0,
             ..Default::default()
         };
-        assert!(!off_streak.is_infeasible_stationary(1e9, 0.0));
+        assert!(!off_streak.is_infeasible_stationary(1e9, 0.0, 0.0));
     }
 
     #[test]
@@ -933,9 +1133,9 @@ mod tests {
         };
         // Infeasible-stationary iterate: violation 1e-1 > 1e-2, flat
         // gradient. Streak accrues but does not fire until the third.
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
-        assert!(c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
     }
 
     #[test]
@@ -947,15 +1147,15 @@ mod tests {
             infeas_max_streak: 3,
             ..Default::default()
         };
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
         // A non-stationary iterate (gradient not flat) resets the streak.
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-3));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-3));
         assert_eq!(c.infeas_streak, 0);
         // The streak must rebuild from scratch — no carry-over credit.
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
-        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
-        assert!(c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
+        assert!(c.note_infeasible_stationary(1e-1, 0.0, 1e-9));
     }
 
     #[test]
@@ -966,7 +1166,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..20 {
-            assert!(!c.note_infeasible_stationary(1e9, 0.0));
+            assert!(!c.note_infeasible_stationary(1e9, 0.0, 0.0));
         }
         assert_eq!(c.infeas_streak, 0);
     }

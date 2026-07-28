@@ -844,6 +844,139 @@ impl IpoptCalculatedQuantities {
         c_max.max(dms_max)
     }
 
+    /// Largest primal infeasibility of an inequality row **relative to that
+    /// row's own magnitude**: `max_i |d_i − s_i| / max(|d_i|, |d_l_i|, |d_u_i|)`.
+    ///
+    /// This is the scale-free companion to
+    /// [`Self::curr_unscaled_primal_infeasibility_max`]. An absolute violation
+    /// measure cannot tell "satisfied" from "violated by 10% of everything the
+    /// row is" once the row's numbers are small — `x >= 0.7` written as
+    /// `1e-12·x >= 0.7e-12` has an absolute violation of `1e-13` at `x = 0.6`,
+    /// under every absolute tolerance, while the row is violated by a seventh
+    /// of its own right-hand side. The ratio is `0.14` at every writing of the
+    /// row.
+    ///
+    /// Computed entirely in the internally-scaled space: numerator and
+    /// denominator both carry the row scaling `dd_i`, so it cancels and the
+    /// ratio is invariant under it — which is the point.
+    ///
+    /// The magnitude comes from the row's **declared bounds only** — the
+    /// current value `d_i` is deliberately excluded. On an *active* row the
+    /// value converges to the bound, so for a zero-bound row (`g(x) >= 0`,
+    /// ubiquitous) both the violation and `|d_i|` go to zero together and
+    /// their ratio hovers near 1 at a perfectly converged point — including
+    /// `|d_i|` made HS13's genuine solution read as 100% violated and vetoed
+    /// its certificate. A zero bound also needs no relative treatment in the
+    /// first place: `s·g >= 0` is the same row at every `s`, so the absolute
+    /// test is already invariant there. Rows whose bounds are all zero or
+    /// non-finite therefore contribute nothing (the relative measure
+    /// abstains), as do equality rows — their right-hand side is folded into
+    /// `c(x) = 0`, so `|c_i|` *is* the violation and carries no independent
+    /// magnitude. Non-finite entries contribute nothing — an unjudgeable row
+    /// must not fabricate a relative verdict.
+    /// The violation judged is the **distance of `d(x)` outside the declared
+    /// box** — NOT the lifted residual `|d − s|` the absolute measure uses.
+    /// `|d − s|` only bounds the true violation from above: mid-solve the
+    /// slack lags `d` while `d` is comfortably inside its bounds, so a
+    /// slack-lag of 1% of a small row's magnitude read as "violated" at
+    /// points that are genuinely feasible. That armed the rapid-infeasibility
+    /// pre-filter at degenerate QP endgames, where the no-descent
+    /// confirmation is vacuous (the violation is already ~0, so no materially
+    /// less-violating point exists) — and 18 feasible CUTEr QPs were reported
+    /// locally infeasible. Measured, not hypothetical.
+    pub fn curr_relative_primal_infeasibility_max(&self) -> Number {
+        let dms = self.curr_d_minus_s();
+        if dms.dim() == 0 {
+            return 0.0;
+        }
+        let d = self.curr_d();
+        let (lo, hi, mask_l, mask_u) = {
+            let nlp = self.nlp.borrow();
+            // The *declared* bounds where the NLP tracks them: the live
+            // `d_l`/`d_u` carry the `bound_relax_factor` widening, under which
+            // a declared-zero bound reads as `~1e-8` — a fabricated magnitude
+            // for a row that has none (that misread both vetoed HS13's genuine
+            // solution and manufactured "relative" verdicts out of thin air).
+            let (mut cl, mut cu) = (nlp.d_l().make_new(), nlp.d_u().make_new());
+            match nlp.declared_d_bounds() {
+                Some((dl, du)) => {
+                    let (Some(cld), Some(cud)) = (
+                        cl.as_any_mut().downcast_mut::<DenseVector>(),
+                        cu.as_any_mut().downcast_mut::<DenseVector>(),
+                    ) else {
+                        return 0.0;
+                    };
+                    cld.set_values(&dl);
+                    cud.set_values(&du);
+                }
+                None => {
+                    cl.copy(nlp.d_l());
+                    cu.copy(nlp.d_u());
+                }
+            }
+            let mut lo = dms.make_new();
+            lo.set(0.0);
+            nlp.pd_l().mult_vector(1.0, &*cl, 0.0, &mut *lo);
+            let mut hi = dms.make_new();
+            hi.set(0.0);
+            nlp.pd_u().mult_vector(1.0, &*cu, 0.0, &mut *hi);
+            // A projected 0 is ambiguous — "no bound on this side" and "a
+            // declared zero bound" both read 0 — so project an all-ones
+            // vector through the same expansion to get presence masks.
+            let mut ones_l = nlp.d_l().make_new();
+            ones_l.set(1.0);
+            let mut mask_l = dms.make_new();
+            mask_l.set(0.0);
+            nlp.pd_l().mult_vector(1.0, &*ones_l, 0.0, &mut *mask_l);
+            let mut ones_u = nlp.d_u().make_new();
+            ones_u.set(1.0);
+            let mut mask_u = dms.make_new();
+            mask_u.set(0.0);
+            nlp.pd_u().mult_vector(1.0, &*ones_u, 0.0, &mut *mask_u);
+            (lo, hi, mask_l, mask_u)
+        };
+        let (Some(d), Some(lo), Some(hi), Some(mask_l), Some(mask_u)) = (
+            d.as_any().downcast_ref::<DenseVector>(),
+            lo.as_any().downcast_ref::<DenseVector>(),
+            hi.as_any().downcast_ref::<DenseVector>(),
+            mask_l.as_any().downcast_ref::<DenseVector>(),
+            mask_u.as_any().downcast_ref::<DenseVector>(),
+        ) else {
+            return 0.0;
+        };
+        if !(d.is_initialized()
+            && lo.is_initialized()
+            && hi.is_initialized()
+            && mask_l.is_initialized()
+            && mask_u.is_initialized())
+        {
+            return 0.0;
+        }
+        let dv = d.expanded_values();
+        let lov = lo.expanded_values();
+        let hiv = hi.expanded_values();
+        let mlv = mask_l.expanded_values();
+        let muv = mask_u.expanded_values();
+        let mut worst = 0.0_f64;
+        for i in 0..dv.len() {
+            let (has_l, has_u) = (mlv[i] > 0.5, muv[i] > 0.5);
+            let mut viol = 0.0_f64;
+            let mut mag = 0.0_f64;
+            if has_l {
+                viol = viol.max(lov[i] - dv[i]);
+                mag = mag.max(lov[i].abs());
+            }
+            if has_u {
+                viol = viol.max(dv[i] - hiv[i]);
+                mag = mag.max(hiv[i].abs());
+            }
+            if mag > 0.0 && mag.is_finite() && viol.is_finite() && viol > 0.0 {
+                worst = worst.max(viol / mag);
+            }
+        }
+        worst
+    }
+
     /// The objective scaling factor `df` currently in force (`1.0` when no
     /// objective scaling is active).
     ///
