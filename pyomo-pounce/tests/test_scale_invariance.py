@@ -126,7 +126,12 @@ BASELINE_WRONG = {
     "inf_372": 0,
     "inf_clear": 0,
     "inf_two": 0,
-    "inf_eq": 13,
+    # gh#387: the DOF gate now consults bound-propagation certification, so
+    # the contradiction is proved at every scale the certification is willing
+    # to speak to. The 3 remaining cells are k in {-12, -10, -8}, where every
+    # point in the box satisfies both rows within the solver's own acceptance
+    # tolerance and the fail-closed witness rule withholds the proof.
+    "inf_eq": 3,
 }
 
 

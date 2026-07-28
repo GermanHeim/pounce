@@ -1422,6 +1422,42 @@ impl IpoptApplication {
     /// Constrained-NLP path: build adapter → OrigIpoptNlp → algorithm
     /// bundle, run `optimize`, populate statistics, and call
     /// `finalize_solution` on the user's TNLP.
+    /// Whether an over-determined model (more equality rows than free
+    /// variables) is *provably* infeasible by linear bound propagation.
+    ///
+    /// Consulted only on the `NotEnoughDegreesOfFreedom` failure path, where
+    /// the solve never runs and therefore can never itself discover the
+    /// infeasibility (gh#387). Builds a throwaway presolve wrapper with only
+    /// Phase 1 (bound tightening) enabled and asks it for a certified proof —
+    /// this inherits the certification safety net wholesale: the crossing must
+    /// exceed the solver's own acceptance margin at the crossed pair's scale,
+    /// and a concrete witness point satisfying every constraint withdraws the
+    /// verdict. A `false` here costs nothing but keeping the DOF error.
+    ///
+    /// Deliberately independent of the `presolve` master switch: this is not a
+    /// model transformation (the wrapper is dropped without solving through
+    /// it), it is a last check before reporting a structural error for a
+    /// problem whose verdict is already decided.
+    fn overdetermined_model_certified_infeasible(&self, tnlp: &Rc<RefCell<dyn TNLP>>) -> bool {
+        let mut opts = pounce_presolve::PresolveOptions::from_options_list(&self.options)
+            .unwrap_or_else(|_| pounce_presolve::PresolveOptions::defaults());
+        opts.enabled = true;
+        opts.bound_tightening = true;
+        // Certification needs Phase 1 only; every transformative or
+        // diagnostic phase is dead weight on a wrapper that is never
+        // solved through.
+        opts.auxiliary = false;
+        opts.fbbt = false;
+        opts.redundant_constraint_removal = false;
+        opts.licq_check = false;
+        opts.warm_z_bounds = false;
+        let mut probe = pounce_presolve::PresolveTnlp::new(Rc::clone(tnlp), opts);
+        if probe.get_nlp_info().is_none() {
+            return false;
+        }
+        probe.certified_infeasible().is_some()
+    }
+
     fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         let t_start = Instant::now();
 
@@ -1591,6 +1627,29 @@ impl IpoptApplication {
         let n_c = orig_nlp.c_space().dim();
         if n_x_var > 0 && n_x_var < n_c {
             timing.overall_alg.end();
+            // An over-determined system can still be *provably* infeasible —
+            // `x == 0.2` with `x == 0.8` is about as provable as infeasibility
+            // gets — and for such a model the structural DOF error is the
+            // strictly weaker answer: it reports "cannot attempt this" for a
+            // problem whose verdict is already decided (gh#387). The DOF gate
+            // fires before any iteration runs, so nothing downstream will ever
+            // get the chance to detect the infeasibility; check for a
+            // bound-propagation proof here, on the rare failure path only.
+            // The probe reuses presolve's full certification pipeline
+            // (crossing margin + witness refutation), so a model the solver
+            // would accept as feasible at its own tolerance is never upgraded
+            // to "proved infeasible" — those still report the DOF error.
+            if self.overdetermined_model_certified_infeasible(&tnlp) {
+                use pounce_common::journalist::JournalCategory;
+                self.journalist.print(
+                    JournalLevel::J_SUMMARY,
+                    JournalCategory::J_MAIN,
+                    "\nEXIT: Problem has too few degrees of freedom, and bound \
+                     propagation proves its constraints inconsistent.\n\
+                     No feasible point exists; the solve was not run.\n",
+                );
+                return ApplicationReturnStatus::InfeasibleProblemDetected;
+            }
             return ApplicationReturnStatus::NotEnoughDegreesOfFreedom;
         }
 
