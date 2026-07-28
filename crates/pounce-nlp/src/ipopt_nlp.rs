@@ -97,6 +97,18 @@ pub trait IpoptNlp: Nlp {
     fn d_l(&self) -> &dyn Vector;
     fn d_u(&self) -> &dyn Vector;
 
+    /// The *declared* compressed inequality bounds `(d_L, d_U)`, in the same
+    /// (internally scaled) space as [`Self::d_l`] / [`Self::d_u`] but without
+    /// the `bound_relax_factor` widening or safe-slack adjustments the live
+    /// vectors carry. The scale-relative feasibility measure keys row
+    /// magnitudes off these: on the live vector a relaxed zero bound reads as
+    /// `~1e-8`, fabricating a magnitude for a row that has none. `None` (the
+    /// default) means "not tracked" — callers should fall back to the live
+    /// bounds.
+    fn declared_d_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        None
+    }
+
     /// Bound expansion matrices: `Px_L` extracts the
     /// `x` components that have a finite lower bound, etc.
     fn px_l(&self) -> Rc<dyn Matrix>;
