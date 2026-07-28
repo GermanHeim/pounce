@@ -194,6 +194,72 @@ fn hs13_neither_scaling_path_reports_infeasible() {
     }
 }
 
+/// gh #379: the two shapes where the *numerical* path called a feasible model
+/// infeasible, found by the feasible-by-construction property sweep in
+/// `pyomo-pounce/tests/test_infeasibility_no_false_positives.py`.
+///
+/// Both are linear-constrained sum-of-squares models — convex, so the auto-route
+/// sends them to the QP IPM and a user on defaults never sees this. They reach
+/// the numerical path only under `solver_selection=nlp`, which is also what every
+/// genuinely nonlinear model uses, where there is no second solver to disagree
+/// and no way to notice.
+///
+/// `feasible_x0_extreme_row` (property seed 294) is the sharper of the two: the
+/// model's own starting point `(5e5, 5e5)` satisfies both rows *exactly*, and
+/// `pounce verify` reports `0.000e0` constraint and bound violation on the convex
+/// route's solution. Its first row carries `±1e30` coefficients; in the scaled
+/// space that row's slack initializes far from anything `x` can follow, the outer
+/// line search walks the violation up rather than down, restoration burns its
+/// 3000-iteration budget, and the cycle gate reported
+/// `Infeasible_Problem_Detected` — AMPL 200 — about a model the solver was
+/// *handed a feasible point for*.
+///
+/// The fix is a refutation rather than a retune: no numerical path may claim
+/// infeasibility while the starting point satisfies every constraint. See
+/// `pounce_algorithm::infeasibility_refutation`. The solve still fails here — the
+/// `±1e30` row is genuinely hostile — but it fails as AMPL 500, which a caller
+/// can see, instead of AMPL 200, which is a wrong answer they cannot.
+///
+/// `feasible_x0_wide_scale` (property seed 102) is the same family at milder
+/// scale (`1e8` row coefficients, right-hand sides near `5e13`). It was a false
+/// positive before the scale-relative tolerance work (#382–#386) and solves
+/// cleanly now; it is pinned here so that stays true.
+#[test]
+fn feasible_models_with_a_feasible_start_are_not_reported_infeasible() {
+    for model in ["feasible_x0_extreme_row.nl", "feasible_x0_wide_scale.nl"] {
+        let report = solve(
+            model,
+            &["solver_selection=nlp", "presolve=no", "print_level=0"],
+        );
+        let code = report.solution.solve_result_num;
+        assert!(
+            !(200..300).contains(&code),
+            "{model} is feasible — its own starting point satisfies every \
+             constraint, and POUNCE's convex QP route solves it to optimality — \
+             but the NLP path reported the AMPL infeasible band \
+             (solve_result_num={code}, status={:?})",
+            report.solution.status,
+        );
+    }
+}
+
+/// The contradiction that made gh #379 unambiguous: POUNCE's own convex solver
+/// returns `Optimal Solution Found` on the same models. Pinned so the two routes
+/// cannot drift back into disagreeing about whether the feasible set is empty.
+#[test]
+fn the_convex_route_still_solves_both_shapes() {
+    for model in ["feasible_x0_extreme_row.nl", "feasible_x0_wide_scale.nl"] {
+        let report = solve(model, &["print_level=0"]);
+        let code = report.solution.solve_result_num;
+        assert_eq!(
+            code, 0,
+            "{model} is a convex QP the auto-route solves; got \
+             solve_result_num={code}, status={:?}",
+            report.solution.status,
+        );
+    }
+}
+
 /// The other direction, and the test whose absence caused two wrong fixes.
 ///
 /// The probe withholds the verdict when a materially less-violating point sits

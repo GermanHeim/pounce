@@ -14,11 +14,18 @@
 //! fail-closed safety net is inherited wholesale:
 //!
 //! * a *consistent* over-determined system still reports the DOF error, and
-//! * at row scales so small that the solver's own acceptance test would wave
-//!   any point through (`|s*x - 0.2*s| <= tol` for every `x` in the box), the
-//!   witness-refutation rule withholds the proof and the DOF error stands —
-//!   "proved infeasible" is never claimed for a model the solver would accept
-//!   as feasible.
+//! * the witness-refutation rule still withdraws the proof whenever a point in
+//!   the declared box genuinely satisfies every row.
+//!
+//! gh #391 closed the residual: the three smallest row scalings still reported
+//! the DOF error, because the witness test's *clamped* accepting form
+//! (`tol * max(scale, 1)`) reinstates an absolute floor once a row's magnitude
+//! drops below 1, so at `s <= ~3e-8` every point of `[0, 1]` "satisfied" both
+//! rows and withdrew a proof whose crossing is `0.6` at every `s`. On this path
+//! the solve cannot run, so there is no `Solve_Succeeded` counterfactual for
+//! the clamp to protect; the witness now measures against the row's *declared*
+//! magnitude with no clamp (`pounce_presolve::WitnessRule`), and the verdict is
+//! scale-invariant across the full range.
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -172,11 +179,11 @@ fn contradictory_equalities_are_infeasible_not_dof_error() {
 }
 
 /// Multiplying every row by `s > 0` leaves the feasible set unchanged, so the
-/// verdict must not depend on `s` wherever the certification is willing to
-/// speak at all.
+/// verdict must not depend on `s` — over the *whole* range the scale-invariance
+/// harness sweeps, not just the part above the old absolute floor (gh#391).
 #[test]
 fn verdict_is_scale_invariant_where_certifiable() {
-    for k in [-6, -4, -2, 0, 2, 4, 6, 8, 10, 12] {
+    for k in [-12, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12] {
         let status = solve(TwoEqualities::contradictory(10.0_f64.powi(k)));
         assert_eq!(
             status,
@@ -186,14 +193,32 @@ fn verdict_is_scale_invariant_where_certifiable() {
     }
 }
 
-/// Below the certification floor the proof is *withheld*, not manufactured:
-/// at `s = 1e-12` every point in `[0, 1]` satisfies both rows within the
-/// solver's own acceptance tolerance, so claiming "proved infeasible" would
-/// contradict what the solver itself would report if it could run. The
-/// fail-closed answer is the structural DOF error, unchanged from before.
+/// gh#391: the deliberate flip of what this test used to pin.
+///
+/// It formerly asserted the DOF error at `s = 1e-12`, on the reading that
+/// claiming "proved infeasible" would contradict what the solver would report
+/// if it could run. The premise does not hold on this path — *the solver
+/// cannot run*, that is why the gate fired — so there was never a
+/// `Solve_Succeeded` to contradict, only the structural error the proof
+/// replaces. The witness now measures against the row's declared magnitude, and
+/// the sub-tolerance scales are certified like every other.
 #[test]
-fn sub_tolerance_scales_keep_the_dof_error() {
+fn sub_tolerance_scales_are_certified_too() {
     let status = solve(TwoEqualities::contradictory(1e-12));
+    assert_eq!(
+        status,
+        ApplicationReturnStatus::InfeasibleProblemDetected,
+        "the crossing is 0.6 at every row scale; only the witness's absolute \
+         floor made 1e-12 different"
+    );
+}
+
+/// The safety net the flip above must not have cut: a genuinely feasible model
+/// at the same sub-tolerance row scale is still refuted by the witness, so the
+/// DOF error stands. `x == 0.2` with `2x == 0.4` is consistent at `x = 0.2`.
+#[test]
+fn sub_tolerance_consistent_system_still_reports_dof_error() {
+    let status = solve(TwoEqualities::consistent(1e-12));
     assert_eq!(status, ApplicationReturnStatus::NotEnoughDegreesOfFreedom);
 }
 

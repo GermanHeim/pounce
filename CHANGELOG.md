@@ -55,7 +55,50 @@ changes.
   scale `1e-8` for a local-infeasibility verdict. What was given up there was
   not, in general, a solution: at `1e-12` the same "success" returned
   `x = y = 2.3e-14`, which satisfies neither `x*y == 1` nor `x + y == 2.5`.
-- This closes out #387; #389 handled the linear half at the DOF gate.
+- This closes out #387; #389 and #391 handled the linear half at the DOF gate.
+
+### Fixed — the last 3 `inf_eq` cells: the DOF-gate proof survives sub-tolerance row scales (#391)
+
+- **A contradictory over-determined equality system is now reported infeasible
+  at every row scale, including the sub-`1e-8` ones.** #387 took
+  `test_scale_invariance.py`'s `inf_eq` from 13 wrong cells to 3; the residual
+  three (`k ∈ {-12, -10, -8}`) still reported the 504 structural error. The
+  `inf_eq` baseline goes **3 → 0** and the model is now scale-invariant across
+  the harness's full 25 decades.
+- **Root cause: an absolute floor in the witness gate, not in the proof.** The
+  bound-propagation proof is already scale-free — `s*x == 0.2*s` with
+  `s*x == 0.8*s` crosses by `0.6` at every `s`. What moved was the refutation:
+  the witness test accepts a row when the residual is negligible through the
+  *clamped* form `tol * max(scale, 1)`, and that clamp reinstates an absolute
+  floor once a row's magnitude drops below 1. At `s <= ~3e-8` every point of
+  `[0, 1]` therefore "satisfied" both rows, refuted the verdict, and the proof
+  was withdrawn.
+- **The fix is scoped to the one path where the solve cannot run.** The clamp
+  exists to honor #380 — never certify what the solver itself would accept as
+  feasible, or the same model reports "proved infeasible" with presolve on and
+  `Solve_Succeeded` with it off. On the DOF-gate path that counterfactual never
+  materializes: the gate fired *because* the solve cannot run (1 variable, 2
+  equality rows), so the alternative to the proof is the structural error, not a
+  solution. Only there does the witness switch to
+  `pounce_presolve::WitnessRule::DeclaredRowRelative`, which measures the
+  residual against the row's **declared** magnitude — `max(|g_l|, |g_u|)` over
+  its finite bounds, the same "declared, not live" pattern
+  `fbbt_infeasibility_survives_margin` already uses — with no clamp. Every
+  wrapper that is actually solved through keeps the clamped form; the rule is a
+  property of the call site (`PresolveTnlp::probing_without_a_solve`), not a
+  user-settable option.
+- **The `b = 0` hazard is handled explicitly and fails closed.** A homogeneous
+  row (`g_l = g_u = 0`, or one with no finite bound at all) has no declared
+  magnitude, which would make a pure relative test unsatisfiable by construction
+  — the violation *is* the scale, so float noise on a genuinely feasible point
+  would read as a full-magnitude violation and fail to refute. Such rows keep
+  the absolute floor.
+- Unchanged, and covered by tests: a *consistent* over-determined system still
+  reports the DOF error at every scale, and at extreme row magnitude
+  (declared `~1e30`) the witness still refutes on a residual of `1e5` — fifteen
+  relative digits — which is the over-approximation class the gate exists for.
+- The algorithm-level `sub_tolerance_scales_keep_the_dof_error` test is
+  deliberately flipped to `sub_tolerance_scales_are_certified_too`.
 
 ### Fixed — provably infeasible over-determined systems reported a DOF failure (#387)
 
@@ -78,9 +121,9 @@ changes.
   - Consequences of fail-closed: a *consistent* over-determined system still
     reports the DOF error, and at row scales at or below ~`1e-8` — where every
     point in the box satisfies both rows within the solver's own acceptance
-    tolerance — the proof is withheld and the DOF error stands. Those are the
+    tolerance — the proof is withheld and the DOF error stands. Those were the
     3 remaining wrong cells in `test_scale_invariance.py`'s `inf_eq` baseline
-    (13 → 3).
+    (13 → 3); #391 above takes them to 0.
   - Also fixed on the way: the CLI's `CountingTnlp` / `SeededTnlp` wrappers did
     not forward `get_variables_linearity` / `get_objective_variables_linearity`
     / `get_constraints_linearity` (trait default `false`), so anything stacked
@@ -125,6 +168,64 @@ changes.
     still reports `200` via the numerical route.
   - Docs: [Solution output](docs/src/solution-output.md) gains a
     `solve_result_num` band table and the proved-vs-local distinction.
+
+### Fixed — the NLP path reported `Infeasible_Problem_Detected` on models whose own starting point is feasible (#379)
+
+- **No numerical path may now claim infeasibility while holding a point that
+  satisfies every constraint.** The feasible-by-construction property sweep in
+  `pyomo-pounce/tests/test_infeasibility_no_false_positives.py` found a model
+  (seed 294) that POUNCE was *handed a feasible starting point for* — `(5e5, 5e5)`,
+  satisfying both rows exactly — and reported as infeasible: AMPL
+  `solve_result_num` 200, Pyomo `TerminationCondition.infeasible`. POUNCE's own
+  convex QP route solves the same model to optimality, and `pounce verify`
+  reports `0.000e0` constraint and bound violation on that solution.
+  - Root cause is not a threshold. The gates that produce this verdict — the
+    restoration gates, the outer cycle detector, the SQP infeasible-subproblem
+    exit, the ℓ₁ wrapper's uncollapsed-slack certificate — all argue from a
+    *stalled feasibility sub-problem*: the violation is bounded away from zero
+    and no local move reduces it. That is evidence, not proof. On this model the
+    first row carries `±1e30` coefficients; in the scaled space its slack
+    initializes far from anything `x` can follow, the outer line search walks the
+    violation *up* from an exactly feasible start, restoration burns its
+    3000-iteration budget, and the cycle gate concluded infeasibility from the
+    exhaustion.
+  - Fix: a refutation. `pounce_algorithm::infeasibility_refutation` evaluates the
+    model's own starting point, clamped into the variable box, and withdraws the
+    verdict if it satisfies every row. One concrete feasible point settles the
+    question outright, whatever a local argument concluded.
+  - Applied as **one gate over all four claim sites**, not per-site. The two
+    preceding safeguards in this area were each added to one path and not its
+    twin, and a hole survived both times.
+  - One-directional by construction: it can only ever *withdraw* a verdict, never
+    create one. A model with no feasible point cannot produce a witness, so every
+    correct verdict is untouched — and a failure to evaluate simply declines to
+    refute.
+  - The withdrawn verdict becomes `Error_In_Step_Computation` (AMPL 500), the
+    status this codebase already uses for "the solve broke down and we are *not*
+    claiming infeasibility". The solve still fails on the `±1e30` model — that row
+    is genuinely hostile — but it fails visibly instead of returning a confident
+    wrong answer.
+  - The witness test is **pure relative** (`tol · scale`), not the clamped
+    accepting form. Measured: the clamped form withdrew *correct* infeasibility
+    verdicts on three models at row scalings `1e-12 … 1e-8`, because the clamp
+    reinstates an absolute floor exactly in the down-scaled direction. Caught by
+    `pyomo-pounce/tests/test_scale_invariance.py` before it could ship.
+  - Presolve *certificates* are exempt: a proof is not a numerical inference, and
+    it carries its own, tighter refutation.
+  - Measured: false positives on the numerical path (`solver_selection=nlp
+    presolve=no`) over 400 feasible-by-construction instances go **1 → 0**; over
+    the property test's full option set, **3 → 1** (the remaining one is seed 223
+    on the presolve path, unrelated to this fix). `MAX_FALSE_POSITIVES` ratchets
+    from 4 to 1.
+  - Not a bug: the CLI's MC64 second-opinion re-solve did not overturn these. That
+    guard exists for *hypersensitivity* — two backward-stable scalings falling
+    into different basins — and this failure reproduces under both scalings, so
+    the second opinion correctly agreed. The refutation runs before it, so the
+    wasted re-solve is now skipped too.
+  - Regression: `crates/pounce-cli/tests/false_local_infeasibility.rs` gains both
+    reported shapes and pins that the convex route still solves them, so the two
+    routes cannot drift back into disagreeing about whether the feasible set is
+    empty.
 
 ### Fixed — an infeasible model's verdict depended on the user's `tol` (follow-up to #372)
 

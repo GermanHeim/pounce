@@ -151,12 +151,14 @@ BASELINE_WRONG = {
     "inf_372": 0,
     "inf_clear": 0,
     "inf_two": 0,
-    # gh#387: the DOF gate now consults bound-propagation certification, so
-    # the contradiction is proved at every scale the certification is willing
-    # to speak to. The 3 remaining cells are k in {-12, -10, -8}, where every
-    # point in the box satisfies both rows within the solver's own acceptance
-    # tolerance and the fail-closed witness rule withholds the proof.
-    "inf_eq": 3,
+    # gh#387 took this 13 -> 3 by having the DOF gate consult bound-propagation
+    # certification; gh#391 took the last 3 (k in {-12, -10, -8}) to 0. Those
+    # cells were the witness gate's absolute floor: below a row magnitude of 1,
+    # `tol * max(scale, 1)` stops moving with the row, every point of the box
+    # "satisfies" both rows, and a crossing that is 0.6 at every scale lost its
+    # proof. On the DOF path the solve cannot run, so the witness measures
+    # against the row's declared magnitude instead.
+    "inf_eq": 0,
     # gh#390: with the equality block covered by the scale-relative runtime
     # feasibility measure this model is right at every scale (was 5 wrong:
     # SOLVED at k in {-10, -8, -6} — the verdict flip the issue describes —

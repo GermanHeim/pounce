@@ -53,6 +53,16 @@ different in kind — on a nonconvex problem a positive local minimum of the
 violation does **not** rule out a feasible point elsewhere, which is why the
 console message says "Problem may be infeasible."
 
+Because `200` is an inference rather than a proof, it is withdrawn when POUNCE
+holds a point that contradicts it. Before any numerical path reports `200`, the
+model's own starting point is evaluated against every constraint; if it
+satisfies them all, the feasible set is demonstrably non-empty and the verdict
+becomes `Error_In_Step_Computation` (`500`) — an honest "the solve broke down"
+rather than a wrong answer. This can only ever *withdraw* a verdict: a model
+with no feasible point cannot produce such a point, so a correct `200` is
+unaffected. Supplying a feasible starting point is therefore worth doing on a
+model you believe is feasible but POUNCE reports otherwise.
+
 When the region is found empty the solve is skipped entirely and the message
 names how it was found, so the claim is checkable:
 
@@ -65,6 +75,27 @@ objno 0 201
 it is off by default. A presolve-derived infeasibility is only reported when the
 contradiction holds on the *original* box — one produced by presolve's own
 auxiliary elimination is re-checked after rollback and never certified.
+
+### One more route to `200`: over-determined systems
+
+An **over-determined** model — more equality rows than free variables, such as
+`x == 0.2` with `x == 0.8` — cannot be solved at all: it fails a structural gate
+before the first iteration. That used to be reported as
+`Not_Enough_Degrees_Of_Freedom` (`504`, the failure band), which says "cannot
+attempt this" for a model whose answer is already decided.
+
+POUNCE now checks such a model for a bound-propagation contradiction on that
+failure path and reports `200` when it finds one. This does not need
+`presolve=yes` — nothing is transformed and no solve runs through the check — so
+it is the one way to reach the infeasible band with the default options and no
+iterations. A *consistent* over-determined system is unaffected and still
+reports `504`.
+
+Because the solve provably cannot run here, this route measures constraint
+residuals against each row's declared magnitude rather than an absolute
+tolerance, so the verdict does not change when every row is multiplied by a
+constant. Elsewhere — wherever a solve *can* run — an infeasibility smaller than
+the feasibility tolerance is still withheld, as described above.
 
 ## Choosing an output format
 
