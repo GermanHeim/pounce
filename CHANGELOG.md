@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — provably infeasible over-determined systems reported a DOF failure (#387)
+
+- **A contradictory over-determined equality system now reports
+  `Infeasible_Problem_Detected` (AMPL 200 band) instead of
+  `NotEnoughDegreesOfFreedom` (504).** `x == 0.2` with `x == 0.8` over
+  `x in [0, 1]` has an empty feasible set — about as provable as infeasibility
+  gets — yet it exited through the too-few-degrees-of-freedom gate (1 variable,
+  2 equality rows) before any iteration ran, so nothing downstream ever got the
+  chance to look at the constraints. On the scale-invariance harness the model
+  was wrong at all 13 row scalings; it is now wrong at 3 (see below).
+  - The DOF gate now consults presolve's bound-propagation certification on its
+    failure path before reporting the structural error. The probe runs only when
+    the gate fires, is independent of the `presolve` master switch (nothing is
+    transformed — the wrapper is dropped without solving through it), and
+    inherits the certification's fail-closed safety net wholesale: the crossing
+    must exceed the solver's own acceptance margin at the crossed pair's scale,
+    and a concrete witness point satisfying every constraint withdraws the
+    verdict.
+  - Consequences of fail-closed: a *consistent* over-determined system still
+    reports the DOF error, and at row scales at or below ~`1e-8` — where every
+    point in the box satisfies both rows within the solver's own acceptance
+    tolerance — the proof is withheld and the DOF error stands. Those are the
+    3 remaining wrong cells in `test_scale_invariance.py`'s `inf_eq` baseline
+    (13 → 3).
+  - Also fixed on the way: the CLI's `CountingTnlp` / `SeededTnlp` wrappers did
+    not forward `get_variables_linearity` / `get_objective_variables_linearity`
+    / `get_constraints_linearity` (trait default `false`), so anything stacked
+    above them — including this probe — saw every row as nonlinear and silently
+    lost linear-row bound propagation.
+  - What remains of #387: equality rows still have no scale-relative *runtime*
+    feasibility measure (`curr_relative_primal_infeasibility_max` skips the `c`
+    block because the fold into `c(x) = 0` erases the RHS magnitude), so a
+    genuinely *nonlinear* equality contradiction — out of bound propagation's
+    reach — still depends on absolute tolerances.
+
 ### Added — presolve can now certify infeasibility instead of discarding the proof
 
 - **When presolve proves the feasible region empty, that proof is now the
