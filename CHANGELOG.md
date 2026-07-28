@@ -9,6 +9,50 @@ changes.
 
 ## [Unreleased]
 
+### Tests — two correctness ratchets silently measured whatever `pounce` was on `PATH`
+
+- **`test_infeasibility_no_false_positives` and `test_scale_invariance` now
+  refuse to run against a binary this checkout cannot vouch for.** Both resolved
+  the solver with a bare `shutil.which("pounce")` and `subprocess.run`, so they
+  measured whatever happened to be installed. Found while fixing #403: a
+  pip-installed `pounce` from the previous day reported **49 of 200**
+  feasible-by-construction models in the AMPL infeasible band, against a ratchet
+  whose limit is `0`.
+- **Neither existing guard could reach this.** The #366 `conftest` hook covers
+  tests that go through pyomo's `SolverFactory` and fires only on
+  `ApplicationError: ... did not exit normally` — the solver producing *no*
+  result. These two use neither: no `SolverFactory`, so the plugin's
+  bundled-binary resolution never runs; and a foreign binary that answers
+  *incorrectly* exits cleanly and writes a valid `.sol`. That narrowness is
+  deliberate and still correct — #366's docstring argues a guard broad enough to
+  swallow wrong answers makes the suite meaningless — it just leaves this gap.
+- **Resolution path is not evidence; the build is.** The first cut preferred the
+  wheel-bundled binary, on the documented reasoning that it is "by construction
+  the build under test". That holds in CI, which stages it fresh, and fails in a
+  working tree, where `python/pounce/bin/pounce` is gitignored and survives
+  across days and commits — the binary that produced the 49 false positives was
+  sitting exactly there, one day and six commits stale. Both builds reported
+  `0.9.0`; only the embedded commit distinguished them (`10a6fe0c+dirty` vs
+  `e17b0279`), which is what `_build_id` exists for.
+- The new `pounce_exe` fixture compares the resolved binary's build against the
+  checkout's `HEAD` and skips with an actionable message naming both. Two
+  deliberate asymmetries:
+  - **It refuses only on a *proven* mismatch** — both ids readable and
+    different. An unreadable id must never skip, because a skipped ratchet
+    proves nothing and is the same silent loss by another route.
+    `crates/pounce-cli/build.rs` embeds `unknown` when it builds outside a git
+    checkout (a wheel built in a container without `.git`), and CI is where a
+    silent skip would hurt most.
+  - **The `+dirty` flag is ignored**, so a clean build against an edited tree
+    still runs. That staleness is real but narrow, already covered by the
+    source-mtime guard, and failing on it would fire during ordinary
+    edit-build-test work — which trains people to bypass the guard.
+- `POUNCE_TEST_EXE` names a binary explicitly and steps the guard aside.
+  Explicit beats bypassing: it records *which* binary was meant, where `PATH`
+  manipulation records nothing.
+- The guard is load-bearing, so it has its own coverage:
+  `pyomo-pounce/tests/test_exe_guard.py`, ten cases over both directions.
+
 ### Fixed — `verify` accepted a `.sol` that violates a bound past the opposite sentinel (#403)
 
 - **`pounce verify` no longer reports ACCEPTED for a solution outside the
