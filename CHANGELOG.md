@@ -9,6 +9,49 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the last 3 `inf_eq` cells: the DOF-gate proof survives sub-tolerance row scales (#391)
+
+- **A contradictory over-determined equality system is now reported infeasible
+  at every row scale, including the sub-`1e-8` ones.** #387 took
+  `test_scale_invariance.py`'s `inf_eq` from 13 wrong cells to 3; the residual
+  three (`k ∈ {-12, -10, -8}`) still reported the 504 structural error. The
+  `inf_eq` baseline goes **3 → 0** and the model is now scale-invariant across
+  the harness's full 25 decades.
+- **Root cause: an absolute floor in the witness gate, not in the proof.** The
+  bound-propagation proof is already scale-free — `s*x == 0.2*s` with
+  `s*x == 0.8*s` crosses by `0.6` at every `s`. What moved was the refutation:
+  the witness test accepts a row when the residual is negligible through the
+  *clamped* form `tol * max(scale, 1)`, and that clamp reinstates an absolute
+  floor once a row's magnitude drops below 1. At `s <= ~3e-8` every point of
+  `[0, 1]` therefore "satisfied" both rows, refuted the verdict, and the proof
+  was withdrawn.
+- **The fix is scoped to the one path where the solve cannot run.** The clamp
+  exists to honor #380 — never certify what the solver itself would accept as
+  feasible, or the same model reports "proved infeasible" with presolve on and
+  `Solve_Succeeded` with it off. On the DOF-gate path that counterfactual never
+  materializes: the gate fired *because* the solve cannot run (1 variable, 2
+  equality rows), so the alternative to the proof is the structural error, not a
+  solution. Only there does the witness switch to
+  `pounce_presolve::WitnessRule::DeclaredRowRelative`, which measures the
+  residual against the row's **declared** magnitude — `max(|g_l|, |g_u|)` over
+  its finite bounds, the same "declared, not live" pattern
+  `fbbt_infeasibility_survives_margin` already uses — with no clamp. Every
+  wrapper that is actually solved through keeps the clamped form; the rule is a
+  property of the call site (`PresolveTnlp::probing_without_a_solve`), not a
+  user-settable option.
+- **The `b = 0` hazard is handled explicitly and fails closed.** A homogeneous
+  row (`g_l = g_u = 0`, or one with no finite bound at all) has no declared
+  magnitude, which would make a pure relative test unsatisfiable by construction
+  — the violation *is* the scale, so float noise on a genuinely feasible point
+  would read as a full-magnitude violation and fail to refute. Such rows keep
+  the absolute floor.
+- Unchanged, and covered by tests: a *consistent* over-determined system still
+  reports the DOF error at every scale, and at extreme row magnitude
+  (declared `~1e30`) the witness still refutes on a residual of `1e5` — fifteen
+  relative digits — which is the over-approximation class the gate exists for.
+- The algorithm-level `sub_tolerance_scales_keep_the_dof_error` test is
+  deliberately flipped to `sub_tolerance_scales_are_certified_too`.
+
 ### Fixed — provably infeasible over-determined systems reported a DOF failure (#387)
 
 - **A contradictory over-determined equality system now reports
@@ -30,9 +73,9 @@ changes.
   - Consequences of fail-closed: a *consistent* over-determined system still
     reports the DOF error, and at row scales at or below ~`1e-8` — where every
     point in the box satisfies both rows within the solver's own acceptance
-    tolerance — the proof is withheld and the DOF error stands. Those are the
+    tolerance — the proof is withheld and the DOF error stands. Those were the
     3 remaining wrong cells in `test_scale_invariance.py`'s `inf_eq` baseline
-    (13 → 3).
+    (13 → 3); #391 above takes them to 0.
   - Also fixed on the way: the CLI's `CountingTnlp` / `SeededTnlp` wrappers did
     not forward `get_variables_linearity` / `get_objective_variables_linearity`
     / `get_constraints_linearity` (trait default `false`), so anything stacked
