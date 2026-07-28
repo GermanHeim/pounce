@@ -46,8 +46,8 @@ use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
-    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData,
+    NlpInfo, ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
 pub mod auxiliary;
@@ -150,6 +150,244 @@ pub fn wrap_from_options(
 
 /// Cached, reduced view of the problem after presolve passes have
 /// run. Exposed for inspection from integration tests.
+/// How far a model must be from satisfiable before an emptiness detection is
+/// promoted from a *detection* to a *proof*.
+///
+/// The rule: **never certify what the solver itself would accept as feasible.**
+/// POUNCE returns `Solve_Succeeded` for a violation up to its feasibility
+/// tolerance `tol`, so certifying anything smaller makes the same model report
+/// "proved infeasible" with presolve on and "solved" with it off — a
+/// contradiction no caller can reconcile.
+///
+/// Presolve's internal emptiness tests are far tighter than this: bound
+/// propagation uses a `1e-12` crossing margin and FBBT's tests are exact
+/// (`is_empty`, `new_lo > new_hi` — no margin at all). Those are right for
+/// deciding whether to keep propagating, and wrong for the word "proved".
+///
+/// Two models forced this. `x >= 0.1 + 0.2` with `x <= 0.3` is infeasible by
+/// `5.5e-17` — pure binary-float noise — yet was reported proved infeasible.
+/// And `x >= 1 + 1e-11` with `x <= 1` is solved to `Solve_Succeeded` on the
+/// default path while presolve called it proved infeasible.
+/// Try to *refute* a candidate infeasibility by finding a point that satisfies
+/// every constraint. Returns `true` when a witness is found — the verdict must
+/// then be withdrawn.
+///
+/// This is the check interval arithmetic cannot do for itself. FBBT and bound
+/// propagation reason about *over-approximated ranges*; at extreme coefficient
+/// scale those ranges lose the precision the conclusion rests on, and a
+/// feasible model can be reported empty. Evaluating the real constraints at a
+/// concrete point is exact by comparison — if the point satisfies them, the
+/// region demonstrably is not empty, whatever the intervals concluded.
+///
+/// Measured on a 400-instance feasible-by-construction sweep, Pyomo's
+/// `contrib.fbbt` — same tolerance idea, no refutation step — reports 57 false
+/// positives where POUNCE reports 3. This gate is where the difference comes
+/// from, and is the part worth keeping ahead of it.
+///
+/// Deliberately one-directional: it can only ever *withdraw* a verdict, never
+/// create one, so a failed evaluation or an unsampled witness costs nothing but
+/// a missed certification. It is also a single gate covering both certification
+/// paths — the previous two safeguards each landed on one path and not its
+/// twin, which is how a bound-propagation hole survived.
+#[allow(clippy::too_many_arguments)]
+fn witness_refutes_infeasibility(
+    inner: &Rc<RefCell<dyn TNLP>>,
+    n: usize,
+    m_in: usize,
+    x_l: &[Number],
+    x_u: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+    tol: Number,
+) -> bool {
+    if m_in == 0 || n == 0 {
+        return false;
+    }
+    let clamp = |v: Number, fallback: Number| -> Number {
+        if v.is_finite() && v.abs() < crate::bound_tighten::INF_BOUND {
+            v
+        } else {
+            fallback
+        }
+    };
+    let lo: Vec<Number> = (0..n).map(|j| clamp(x_l[j], -1.0)).collect();
+    let hi: Vec<Number> = (0..n).map(|j| clamp(x_u[j], 1.0)).collect();
+    let mid: Vec<Number> = (0..n).map(|j| 0.5 * (lo[j] + hi[j])).collect();
+
+    // The model's own starting point is the first candidate. It is a witness
+    // the modeller supplied, and at extreme coefficient scale it is not
+    // reproducible from the bounds: `0.5*(lo+hi)` and the modeller's
+    // `lo + 0.5*(hi-lo)` differ by an ulp, and against a 1e30 coefficient that
+    // ulp moves the row value by ~1e5 — enough to turn a satisfied row into a
+    // violated one. Sampling geometry alone therefore missed witnesses that
+    // `pounce check-x0` reports as exactly feasible.
+    let mut x0 = vec![0.0; n];
+    let mut z_l = vec![0.0; n];
+    let mut z_u = vec![0.0; n];
+    let mut lam = vec![0.0; m_in];
+    let have_x0 = inner.borrow_mut().get_starting_point(StartingPoint {
+        init_x: true,
+        x: &mut x0,
+        init_z: false,
+        z_l: &mut z_l,
+        z_u: &mut z_u,
+        init_lambda: false,
+        lambda: &mut lam,
+    });
+
+    let mut g = vec![0.0; m_in];
+    let mut candidates: Vec<&Vec<Number>> = Vec::with_capacity(4);
+    if have_x0 && x0.iter().all(|v| v.is_finite()) {
+        candidates.push(&x0);
+    }
+    candidates.extend([&mid, &lo, &hi]);
+    for x in candidates {
+        if !inner.borrow_mut().eval_g(x, true, &mut g) {
+            continue;
+        }
+        let feasible = (0..m_in).all(|i| {
+            let v = g[i];
+            if !v.is_finite() {
+                return false;
+            }
+            // Slack relative to the row's own magnitude: an absolute tolerance
+            // is meaningless against a row evaluating near 1e30.
+            // Only *finite* bounds inform the scale. The unbounded sentinel
+            // (~1e19) would otherwise set eps around 1e11 and make every row
+            // look satisfied — which withdrew even correct verdicts.
+            let fin = |b: Number| {
+                if b.is_finite() && b.abs() < crate::bound_tighten::INF_BOUND {
+                    b.abs()
+                } else {
+                    0.0
+                }
+            };
+            let scale = v.abs().max(fin(g_l[i])).max(fin(g_u[i])).max(1.0);
+            let eps = tol * scale;
+            v >= g_l[i] - eps && v <= g_u[i] + eps
+        });
+        if feasible {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the model's numbers are representable enough to base an
+/// infeasibility verdict on.
+///
+/// **Only the FBBT path consults this, deliberately.** Wiring the
+/// bound-propagation path to it was tried and measured: every genuinely
+/// infeasible model dropped from a certified verdict to the numerical one,
+/// because POUNCE stores an unbounded constraint bound as the finite sentinel
+/// `INF_BOUND` rather than `f64::INFINITY` — so `is_infinite()` is false, the
+/// `< INF_BOUND` test fails on equality, and any model with a one-sided
+/// constraint (nearly all of them) is rejected. Making the comparison inclusive
+/// admits the sentinel, but then it also admits `1e300`: under POUNCE's own
+/// convention `|v| >= INF_BOUND` *means* unbounded, so a bounds-magnitude test
+/// cannot separate "no bound" from "absurd finite value". A guard that cannot
+/// make that distinction should not be spread to a second path.
+///
+/// The overflow it does catch on the FBBT path comes from constraint
+/// *coefficients*, not bounds; a check on the Jacobian magnitudes would be the
+/// mechanism that generalises. See the commit history for the measured
+/// alternatives (1e150 -> 99/400, 1e20 -> 37/400, sentinel-inclusive -> 37/400,
+/// against a 3/400 baseline). Rejects NaN and finite magnitudes at or beyond the
+/// unbounded sentinel, where interval arithmetic overflows; genuine infinities
+/// stay admissible because they mean "no bound", not "a number".
+fn certificate_data_is_admissible(
+    x_l: &[Number],
+    x_u: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+) -> bool {
+    let sane = |v: &Number| {
+        let v = *v;
+        !v.is_nan() && (v.is_infinite() || v.abs() < crate::bound_tighten::INF_BOUND)
+    };
+    x_l.iter().all(sane) && x_u.iter().all(sane) && g_l.iter().all(sane) && g_u.iter().all(sane)
+}
+
+fn certify_margin(tol: Number) -> Number {
+    // Guard against a degenerate or absurdly tight `tol`; below ~1e-12 the
+    // margin would drop into the float-noise band the whole check exists to
+    // exclude.
+    tol.max(1e-12)
+}
+
+/// Re-run FBBT with every constraint bound widened by [`certify_margin`].
+/// Returns `true` only if the problem is *still* infeasible with that slack —
+/// i.e. the infeasibility is robust, not a hair's-breadth modelling artifact.
+///
+/// Sound in the conservative direction: a false `false` merely withholds the
+/// proof and leaves the previous behavior (let the IPM decide), while a false
+/// `true` would be a wrong "proved infeasible" — so the test is written to fail
+/// closed.
+#[allow(clippy::too_many_arguments)]
+fn fbbt_infeasibility_survives_margin(
+    provider: &dyn ExpressionProvider,
+    n: usize,
+    m_in: usize,
+    x_l: &[Number],
+    x_u: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+    row_kept: &[bool],
+    cfg: &crate::fbbt::FbbtConfig,
+    margin: Number,
+) -> bool {
+    let g_l_relaxed: Vec<Number> = g_l
+        .iter()
+        .map(|&v| {
+            if v <= -crate::bound_tighten::INF_BOUND {
+                v
+            } else {
+                v - margin
+            }
+        })
+        .collect();
+    let g_u_relaxed: Vec<Number> = g_u
+        .iter()
+        .map(|&v| {
+            if v >= crate::bound_tighten::INF_BOUND {
+                v
+            } else {
+                v + margin
+            }
+        })
+        .collect();
+    // Overflow guard. Interval arithmetic on absurd-but-finite magnitudes
+    // overflows to +/-inf, and `Interval::is_empty` treats a NaN endpoint as an
+    // empty range — so `1e300 * 1e300` reads as "this constraint cannot be
+    // satisfied" and would be certified as a *proof*. It is not: the model
+    // `x in [-1e300, 1e300], 1e300*x >= 1e300` is plainly feasible (`x = 1`),
+    // yet was reported proved infeasible while `presolve_fbbt=no` solved it.
+    // Widening the bounds cannot expose this — an overflow is unaffected by a
+    // 1e-9 relaxation — so the check has to be on the inputs.
+    //
+    // A genuine infinity is fine and common (`x >= 5` has `g_u = +inf`): those
+    // are the INF sentinel and mean "unbounded". What cannot be trusted is a
+    // *finite* magnitude at or beyond the sentinel, which is where the
+    // arithmetic stops being representable.
+    if !certificate_data_is_admissible(x_l, x_u, g_l, g_u) {
+        return false;
+    }
+    let mut probe_x_l = x_l.to_vec();
+    let mut probe_x_u = x_u.to_vec();
+    let report = crate::fbbt::run_fbbt(
+        provider,
+        n,
+        m_in,
+        &mut probe_x_l,
+        &mut probe_x_u,
+        &g_l_relaxed,
+        &g_u_relaxed,
+        Some(row_kept),
+        cfg,
+    );
+    report.infeasibility_witness.is_some()
+}
+
 pub struct CachedBounds {
     pub x_l: Vec<Number>,
     pub x_u: Vec<Number>,
@@ -203,6 +441,14 @@ struct PresolveState {
 
     /// Phase 1 report.
     tighten_report: TightenReport,
+    /// A proof that the feasible region is empty, when presolve derived one on
+    /// an *un-clamped* box. `None` unless one of the four certifiable sites in
+    /// `ensure_init` fired — in particular an infeasibility detected while a
+    /// Phase-0 auxiliary elimination is in force is deliberately NOT recorded
+    /// here, because a dropped row can fabricate one (the #53 / F6 hazard).
+    /// Such a detection is re-checked on the rolled-back box first, and only
+    /// the surviving result is certified.
+    certified_infeasible: Option<InfeasibilityProof>,
     /// FBBT report (`None` when `presolve_fbbt` was off or the inner
     /// TNLP did not expose an `ExpressionProvider`).
     fbbt_report: Option<crate::fbbt::FbbtReport>,
@@ -277,6 +523,18 @@ impl PresolveTnlp {
             .as_ref()
             .map(|s| s.tighten_report.clone())
             .unwrap_or_default()
+    }
+
+    /// A proof that the feasible region is empty, if presolve derived one on
+    /// an un-clamped box. `None` means "not proved", not "feasible".
+    ///
+    /// Distinct from `tighten_report().infeasible` /
+    /// `fbbt_report().infeasibility_witness`, which are raw detections: those
+    /// also fire for a contradiction manufactured by a Phase-0 auxiliary
+    /// elimination, which is why they were never safe to act on. This returns
+    /// only detections that survive on the original box.
+    pub fn certified_infeasible(&self) -> Option<InfeasibilityProof> {
+        self.state.as_ref().and_then(|s| s.certified_infeasible)
     }
 
     /// Number of constraint rows dropped by Phase 2 (0 if presolve
@@ -594,6 +852,9 @@ impl PresolveTnlp {
 
         // Phase 1: bound tightening using linear rows.
         let mut tighten_report = TightenReport::default();
+        // Set only where a contradiction is derived on an un-clamped box; see
+        // the field doc on `PresolveState::certified_infeasible`.
+        let mut certified_infeasible: Option<InfeasibilityProof> = None;
         if self.opts.bound_tightening && !linear_rows.is_empty() {
             tighten_report = tighten_bounds(
                 &linear_rows,
@@ -658,14 +919,78 @@ impl PresolveTnlp {
         // `tighten_report.infeasible` flag is preserved and surfaced via
         // `tighten_report()` for diagnostics.
         if tighten_report.infeasible {
+            // Measure the crossing *before* the restore below overwrites it.
+            let crossing = (0..n).map(|j| x_l[j] - x_u[j]).fold(0.0_f64, f64::max);
             x_l.copy_from_slice(&inner_x_l);
             x_u.copy_from_slice(&inner_x_u);
+            // Reaching here implies the tightening ran on an un-clamped box:
+            // the aux rollback above either did not fire (empty reduction
+            // stack ⇒ Phase 0 changed nothing) or fired and recomputed
+            // `tighten_report` on the restored box. Either way this is a
+            // genuine contradiction in the user's model, not a presolve
+            // artifact, so it is certifiable. The crossed bounds are still
+            // discarded — a degenerate box must not reach the solver — but the
+            // *verdict* now survives.
+            // Phase 1 flags a crossing above its own `1e-12` test, which is
+            // far below what the solver treats as feasible. Measure the actual
+            // crossing (the crossed bounds are still in place here — they are
+            // restored on the next line) and certify only if it clears
+            // `certify_margin`, so a model POUNCE would solve to
+            // `Solve_Succeeded` can never be called proved infeasible.
+            let robust = crossing > certify_margin(self.opts.certify_tol);
+            if robust {
+                certified_infeasible = Some(InfeasibilityProof::BoundPropagation);
+            }
             tracing::warn!(
                 target: "pounce::presolve",
-                "Phase 1 bound tightening proved the feasible region empty; its \
-                 crossed bounds are being discarded — the solve proceeds on the \
-                 original box so the IPM can certify infeasibility itself."
+                crossing,
+                certified = robust,
+                "Phase 1 bound tightening found the feasible region empty; its \
+                 crossed bounds are being discarded."
             );
+        }
+
+        // Phase 1 declares infeasibility only when the crossing exceeds its
+        // `1e-12` margin, so a *sub-margin* crossing survives the block above:
+        // `infeasible` is false, nothing is restored, and `x_l[j] > x_u[j]`
+        // by a hair is handed to the solver, which rejects it as
+        // `Invalid_Problem_Definition`. The model that surfaced this is
+        // `x >= 0.1 + 0.2` with `x <= 0.3` — in binary floating point the two
+        // differ by `5.5e-17`, so the box arrives crossed by that much and a
+        // model POUNCE otherwise solves cleanly (`presolve=no` gives
+        // `Solve_Succeeded`, the LP route gives "Optimal Solution Found")
+        // failed with an invalid-problem error the moment presolve was on.
+        //
+        // Collapse those to a point. The crossing is below the margin at which
+        // the tightening itself is willing to call the region empty, so the
+        // honest reading is a single feasible value, not an empty set — and it
+        // keeps every route's answer consistent.
+        // The collapsed point must stay inside the *declared* box. The crossing
+        // exists because tightening moved a bound past its partner, so the
+        // midpoint of the crossed pair lies strictly outside the original range
+        // — for `x >= 0.1 + 0.2`, `x <= 0.3` it lands on `0.30000000000000004`,
+        // above the user's `x <= 0.3`. Returning that would silently violate a
+        // declared bound, which is worse than the error it replaces and defeats
+        // `honor_original_bounds`. Clamping to the original box keeps the
+        // reported point admissible.
+        //
+        // Only *sub-margin* crossings collapse. A crossing the solver itself
+        // would call a real violation — above `certify_margin` — is not float
+        // noise; it is a user-declared empty box (`x in [5, 3]`) on a variable
+        // no linear row ever propagated into, which Phase 1 therefore never
+        // flagged. Collapsing that would turn `Invalid_Problem_Definition`
+        // into `Solve_Succeeded` at a point the model excludes — a wrong
+        // answer replacing a correct error. Those stay crossed so the solver
+        // rejects them exactly as it does with presolve off.
+        let collapse_margin = certify_margin(self.opts.certify_tol);
+        for j in 0..n {
+            if x_l[j] > x_u[j] && x_l[j] - x_u[j] <= collapse_margin {
+                let mid = (0.5 * (x_l[j] + x_u[j]))
+                    .max(inner_x_l[j])
+                    .min(inner_x_u[j]);
+                x_l[j] = mid;
+                x_u[j] = mid;
+            }
         }
 
         // Phase 1b — FBBT (issue #62). Runs interval arithmetic over
@@ -759,14 +1084,23 @@ impl PresolveTnlp {
                     // M25: a genuine Phase-1 infeasibility on the un-clamped
                     // box must not reach the IPM as crossed bounds.
                     if tighten_report.infeasible {
+                        // Measure the crossing before the restore wipes it.
+                        let crossing = (0..n).map(|j| x_l[j] - x_u[j]).fold(0.0_f64, f64::max);
                         x_l.copy_from_slice(&inner_x_l);
                         x_u.copy_from_slice(&inner_x_u);
+                        // Derived on the rolled-back, un-clamped box, so the
+                        // aux elimination cannot be to blame — certifiable.
+                        let robust = crossing > certify_margin(self.opts.certify_tol);
+                        if robust {
+                            certified_infeasible = Some(InfeasibilityProof::BoundPropagation);
+                        }
                         tracing::warn!(
                             target: "pounce::presolve",
+                            crossing,
+                            certified = robust,
                             "Phase 1 bound tightening on the rolled-back (un-clamped) \
-                             box proved the feasible region empty; its crossed bounds \
-                             are being discarded — the solve proceeds on the original \
-                             box so the IPM can certify infeasibility itself."
+                             box found the feasible region empty; its crossed bounds \
+                             are being discarded."
                         );
                     }
                     // Re-run FBBT on the un-clamped, all-kept box.
@@ -785,42 +1119,111 @@ impl PresolveTnlp {
                         &cfg,
                     );
                     drop(provider_borrow);
-                    if report.infeasibility_witness.is_some() {
+                    if let Some(witness) = report.infeasibility_witness {
                         // Survives without the aux clamp: a genuine
-                        // infeasibility of the original problem. Discard
-                        // FBBT's undefined bounds and let the IPM certify it.
+                        // infeasibility of the original problem, so it is
+                        // certifiable *if* it is more than a hair's breadth —
+                        // see `certify_margin`. FBBT's own bounds are
+                        // still undefined per the `FbbtReport` contract and are
+                        // discarded either way.
+                        let provider_borrow = provider.borrow();
+                        let robust = fbbt_infeasibility_survives_margin(
+                            &*provider_borrow,
+                            n,
+                            m_in,
+                            &inner_x_l,
+                            &inner_x_u,
+                            &g_l_inner,
+                            &g_u_inner,
+                            &row_kept_inner,
+                            &cfg,
+                            certify_margin(self.opts.certify_tol),
+                        );
+                        drop(provider_borrow);
+                        if robust {
+                            certified_infeasible =
+                                Some(InfeasibilityProof::IntervalArithmetic { witness });
+                        }
                         tracing::warn!(
                             target: "pounce::presolve",
-                            witness = report.infeasibility_witness,
+                            witness,
+                            certified = robust,
                             "FBBT still reports infeasibility on the un-clamped box; \
-                             treating it as genuine and proceeding on the pre-FBBT \
-                             box so the IPM can certify infeasibility itself."
+                             treating it as genuine."
                         );
                         x_l.copy_from_slice(&rerun_x_l_pre);
                         x_u.copy_from_slice(&rerun_x_u_pre);
                     }
-                } else if report.infeasibility_witness.is_some() {
+                } else if let Some(witness) = report.infeasibility_witness {
                     // No aux elimination active (empty reduction stack): the
-                    // witnessed infeasibility cannot be a Phase-0 artifact.
-                    // Presolve has no channel to certify infeasibility to the
-                    // solver, so — mirroring the Phase 1 rollback — discard
-                    // FBBT's corrupted bounds and let the IPM run on the
-                    // pre-FBBT box and certify infeasibility itself. The
-                    // report is still surfaced via `fbbt_report()` for
-                    // diagnostics.
+                    // witnessed infeasibility cannot be a Phase-0 artifact, so
+                    // it is certifiable *if* it is more than a hair's breadth —
+                    // see `certify_margin`. FBBT's tightened bounds are
+                    // undefined per the `FbbtReport` contract and are discarded
+                    // either way.
+                    let provider_borrow = provider.borrow();
+                    let robust = fbbt_infeasibility_survives_margin(
+                        &*provider_borrow,
+                        n,
+                        m_in,
+                        &inner_x_l,
+                        &inner_x_u,
+                        &g_l_inner,
+                        &g_u_inner,
+                        &row_kept_inner,
+                        &cfg,
+                        certify_margin(self.opts.certify_tol),
+                    );
+                    drop(provider_borrow);
+                    if robust {
+                        certified_infeasible =
+                            Some(InfeasibilityProof::IntervalArithmetic { witness });
+                    }
                     tracing::warn!(
                         target: "pounce::presolve",
-                        witness = report.infeasibility_witness,
-                        "FBBT reported a constraint infeasibility; its tightened \
-                         bounds are undefined and are being discarded — the solve \
-                         proceeds on the pre-FBBT box so the IPM can certify \
-                         infeasibility itself."
+                        witness,
+                        certified = robust,
+                        "FBBT reported a constraint's feasible range empty; its \
+                         tightened bounds are undefined and are being discarded."
                     );
                     x_l.copy_from_slice(&fbbt_x_l_pre);
                     x_u.copy_from_slice(&fbbt_x_u_pre);
                 }
                 fbbt_report = Some(report);
             }
+        }
+
+        // Final admissibility gate for the infeasibility verdict, covering
+        // BOTH certification paths in one place.
+        //
+        // Interval reasoning over-approximates; at extreme coefficient scale it
+        // can report a feasible region empty. Before the verdict escapes, try
+        // to refute it by evaluating the real constraints at concrete points in
+        // the declared box. A witness means the region is demonstrably not
+        // empty, whatever the intervals concluded.
+        //
+        // Placed here, once, rather than beside each detection: the two
+        // previous safeguards were each added to one path and not its twin,
+        // and a hole survived both times.
+        if certified_infeasible.is_some()
+            && witness_refutes_infeasibility(
+                &self.inner,
+                n,
+                m_in,
+                &inner_x_l,
+                &inner_x_u,
+                &g_l_inner,
+                &g_u_inner,
+                self.opts.certify_tol,
+            )
+        {
+            tracing::warn!(
+                target: "pounce::presolve",
+                "presolve flagged the feasible region empty, but a point in the \
+                 declared box satisfies every constraint — withdrawing the \
+                 verdict and letting the solver decide."
+            );
+            certified_infeasible = None;
         }
 
         // Phase 4: any variable whose lower (upper) bound moved
@@ -949,6 +1352,7 @@ impl PresolveTnlp {
             jac_irow_outer,
             jac_jcol_outer,
             tighten_report,
+            certified_infeasible,
             fbbt_report,
             n_dropped_rows,
             licq_verdict,
@@ -1003,6 +1407,10 @@ fn apply_redundant_verdicts(
 impl TNLP for PresolveTnlp {
     fn is_presolve_wrapper(&self) -> bool {
         true
+    }
+
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        self.certified_infeasible()
     }
 
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
@@ -2531,6 +2939,16 @@ mod tests {
             "Phase 1 must still flag the empty feasible region"
         );
 
+        // ...and, with no Phase-0 elimination in force, it is a genuine
+        // contradiction in the model rather than a presolve artifact, so it is
+        // certified. This is what lets the solver report "proved infeasible"
+        // instead of re-deriving a weaker numerical verdict.
+        assert_eq!(
+            wrapped.certified_infeasible(),
+            Some(InfeasibilityProof::BoundPropagation),
+            "a Phase-1 contradiction on an un-clamped box must be certified"
+        );
+
         // But the box handed to the IPM is the original, valid box — not the
         // crossed `[5, 3]` Phase 1 derived.
         let b = wrapped.cached_bounds().expect("inited");
@@ -2654,6 +3072,13 @@ mod tests {
 
         // FBBT must have reached the infeasible row.
         let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        // No Phase-0 elimination is in force here, so the witness cannot be an
+        // artifact — it is certified, and carries the witnessing row.
+        assert_eq!(
+            wrapped.certified_infeasible(),
+            Some(InfeasibilityProof::IntervalArithmetic { witness: 1 }),
+            "an FBBT witness on an un-clamped box must be certified"
+        );
         assert_eq!(
             rpt.infeasibility_witness,
             Some(1),
@@ -2836,6 +3261,19 @@ mod tests {
             rpt.infeasibility_witness.is_none(),
             "FBBT must not witness infeasibility on the un-clamped box, got {:?}",
             rpt.infeasibility_witness
+        );
+
+        // The soundness property for the certification channel, on the one
+        // scenario that can break it: this model *is feasible*, and the only
+        // infeasibility ever seen was manufactured by Phase 0's own clamp.
+        // Certifying it would make POUNCE report "proved infeasible" for a
+        // problem that has solutions — strictly worse than the numerical
+        // verdict this replaces. The proof must be withheld.
+        assert_eq!(
+            wrapped.certified_infeasible(),
+            None,
+            "a presolve-manufactured infeasibility must never be certified — \
+             this model is feasible"
         );
 
         // x0 is no longer pinned to the aux value 2; FBBT over `x0 + x2 = 20`

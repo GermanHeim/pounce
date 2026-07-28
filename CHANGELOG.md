@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Added — presolve can now certify infeasibility instead of discarding the proof
+
+- **When presolve proves the feasible region empty, that proof is now the
+  verdict.** With `presolve=yes`, a model whose emptiness bound propagation or
+  FBBT can establish is reported immediately as
+  `InfeasibleProblemDetected (detected by presolve: <method>)` with AMPL
+  `solve_result_num` **201**, and the solve is skipped entirely.
+  - Previously presolve detected these cases, logged a warning, threw the result
+    away, and let the IPM re-derive a strictly *weaker* numerical verdict — a
+    stationary point of the constraint violation, which on a nonconvex problem
+    does not rule out a feasible point elsewhere. The code said why: *"Presolve
+    has no channel to certify infeasibility."* This adds that channel
+    (`TNLP::presolve_infeasibility_proof`).
+  - The two verdicts are now distinguishable. `200` remains the numerical
+    "converged to a point of local infeasibility"; `201` means *proved*. Both sit
+    in AMPL's `200..299` infeasible band, so band-reading consumers are
+    unaffected — Pyomo maps the whole range to
+    `TerminationCondition.infeasible` in both of its SOL readers. Sub-coding
+    within a band is the AMPL-native idiom (Ipopt does the same with 500/501/502
+    in the failure band).
+  - Both proof methods are sound. Propagating a linear row over a box is a
+    decision procedure, and the crossing must exceed a `1e-12` margin before it
+    counts; FBBT's interval arithmetic is outward-rounded (one ULP per side), so
+    an empty computed interval means the true range is empty.
+  - **Soundness guard:** a contradiction found while a Phase-0 auxiliary
+    elimination is in force can be an artifact of that elimination — presolve
+    breaking a *feasible* model. Those are re-checked on the rolled-back box and
+    only certified if they survive. Pinned by a test on exactly that scenario.
+  - A certified verdict also skips the MC64 second-opinion re-solve, which exists
+    to second-guess a numerical local infeasibility and cannot overturn a proof.
+  - Unchanged by default: presolve is off unless requested, so the default path
+    still reports `200` via the numerical route.
+  - Docs: [Solution output](docs/src/solution-output.md) gains a
+    `solve_result_num` band table and the proved-vs-local distinction.
+
 ### Fixed — an infeasible model's verdict depended on the user's `tol` (follow-up to #372)
 
 - **A genuinely infeasible model now reports `Infeasible_Problem_Detected` (AMPL

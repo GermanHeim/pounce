@@ -577,6 +577,46 @@ impl IpoptApplication {
             Some(info) => info,
             None => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
+
+        // Presolve-certified infeasibility. `get_nlp_info` above is what forces
+        // the (lazy) presolve init, so this is the first point at which the
+        // proof exists. If bound propagation or FBBT established that the
+        // feasible region is empty, there is nothing left to compute: return
+        // the verdict directly.
+        //
+        // Short-circuiting *here*, before dispatch, is deliberate. Running the
+        // solve anyway would only re-derive a strictly weaker result — a
+        // stationary point of the constraint violation, which for a nonconvex
+        // problem proves nothing globally — and would also hand an
+        // `InfeasibleProblemDetected` to the ℓ₁ auto-fallback below
+        // (`is_l1_fallback_trigger`), which would then burn a whole second
+        // solve retrying a problem already proved to have no solution.
+        //
+        // Soundness rests on `presolve_infeasibility_proof` returning `Some`
+        // only for a contradiction derived on an *un-clamped* box — a
+        // detection made while a Phase-0 auxiliary elimination is in force can
+        // be an artifact of that elimination and is re-checked after rollback
+        // before it is certified. See `PresolveState::certified_infeasible`.
+        if let Some(proof) = tnlp.borrow().presolve_infeasibility_proof() {
+            use pounce_common::journalist::JournalCategory;
+            let detail = match proof {
+                pounce_nlp::tnlp::InfeasibilityProof::BoundPropagation => {
+                    "bound propagation crossed a variable's bounds".to_string()
+                }
+                pounce_nlp::tnlp::InfeasibilityProof::IntervalArithmetic { witness } => {
+                    format!("interval arithmetic emptied constraint {witness}'s range")
+                }
+            };
+            self.journalist.print(
+                JournalLevel::J_SUMMARY,
+                JournalCategory::J_MAIN,
+                &format!(
+                    "\nEXIT: Presolve detected the feasible region is empty ({detail}).\n\
+                     No feasible point exists; the solve was not run.\n"
+                ),
+            );
+            return ApplicationReturnStatus::InfeasibleProblemDetected;
+        }
         // ℓ₁-exact penalty-barrier opt-in (pounce#10).
         // Phase 3 wraps the user TNLP and runs an outer Byrd-Nocedal-
         // Waltz ρ-escalation loop around the constrained IPM, with a

@@ -20,6 +20,17 @@ pub struct PresolveOptions {
     /// Master switch (`presolve`). When `false`, the wrapper is a
     /// no-op and `wrap_with_presolve` returns the inner TNLP.
     pub enabled: bool,
+    /// The solve's feasibility tolerance (`tol`), used as the floor below
+    /// which an infeasibility is too small to *certify*.
+    ///
+    /// Presolve's own emptiness tests are far tighter than this (`1e-12` for
+    /// bound propagation, exact for FBBT), which is right for deciding whether
+    /// to keep propagating but wrong for the word "proved": the solver accepts
+    /// a violation up to `tol` as feasible, so certifying anything smaller
+    /// makes POUNCE report "proved infeasible" for a model it would otherwise
+    /// solve to `Solve_Succeeded`. Tracking the live `tol` keeps the two in
+    /// step when a user loosens it.
+    pub certify_tol: Number,
     /// `presolve_bound_tightening` — Phase 1.
     pub bound_tightening: bool,
     /// `presolve_redundant_constraint_removal` — Phase 2.
@@ -123,6 +134,7 @@ impl PresolveOptions {
             fbbt_tol: 1e-6,
             fbbt_max_iter: 10,
             fbbt_max_constraints: 0,
+            certify_tol: 1e-8,
         }
     }
 
@@ -130,6 +142,12 @@ impl PresolveOptions {
     /// back to registered defaults where unset.
     pub fn from_options_list(opts: &OptionsList) -> Result<Self, SolverException> {
         let enabled = opts.get_bool_value("presolve", "")?.0;
+        // `tol` is the solver's own feasibility tolerance; fall back to the
+        // registered default if it is somehow unset.
+        let certify_tol = opts
+            .get_numeric_value("tol", "")
+            .map(|v| v.0)
+            .unwrap_or(1e-8);
         let bound_tightening = opts.get_bool_value("presolve_bound_tightening", "")?.0;
         let redundant_constraint_removal = opts
             .get_bool_value("presolve_redundant_constraint_removal", "")?
@@ -195,6 +213,7 @@ impl PresolveOptions {
             fbbt_tol,
             fbbt_max_iter,
             fbbt_max_constraints,
+            certify_tol,
         })
     }
 }

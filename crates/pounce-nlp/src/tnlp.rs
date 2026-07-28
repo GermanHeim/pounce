@@ -282,6 +282,49 @@ pub trait TNLP {
     fn is_presolve_wrapper(&self) -> bool {
         false
     }
+
+    /// A *proof* that this problem has no feasible point, if presolve found
+    /// one. `None` (the default) means "not proved" — which is not the same as
+    /// "feasible".
+    ///
+    /// This is the channel presolve previously lacked. Bound propagation and
+    /// FBBT can both establish emptiness of the feasible region **exactly**,
+    /// but with nowhere to report it they discarded the result and let the IPM
+    /// re-derive a strictly weaker numerical verdict — a stationary point of
+    /// the constraint violation, which for a nonconvex problem proves nothing
+    /// globally. Surfacing the proof lets the solver distinguish *"proved
+    /// infeasible"* from *"converged to a locally infeasible point"*.
+    ///
+    /// A transparent decorator around another TNLP should override this and
+    /// forward `inner.borrow().presolve_infeasibility_proof()`, for the same
+    /// reason [`Self::is_presolve_wrapper`] must be forwarded.
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        None
+    }
+}
+
+/// How presolve established that the feasible region is empty.
+///
+/// Both variants are *proofs*, not heuristics — see the per-variant notes for
+/// why each is sound in floating point. Anything less than a proof must not be
+/// reported here; the numerical "converged to a locally infeasible point"
+/// verdict has its own path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfeasibilityProof {
+    /// Linear bound propagation drove some variable's bounds past each other
+    /// (`x_l[j] > x_u[j]`). Over a box, propagating a linear row is exact, and
+    /// the crossing must exceed a `1e-12` margin before it counts — so the
+    /// test errs toward *not* declaring infeasibility.
+    BoundPropagation,
+    /// FBBT interval arithmetic emptied the feasible range of constraint
+    /// `witness`. Sound because every interval operation is **outward
+    /// rounded** (one ULP out on each side), so the computed interval always
+    /// contains the true range: an empty computed interval means the true
+    /// range is empty too.
+    IntervalArithmetic {
+        /// Index of the constraint whose range was proved empty.
+        witness: usize,
+    },
 }
 
 #[cfg(test)]
