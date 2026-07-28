@@ -195,6 +195,42 @@ so POUNCE-MA57 is compared against the same linear-solver family.
 `libipopt` via `pkg-config` FFI, have been retired in favour of the `.nl`
 suites — there is no longer an FFI path.)
 
+## Head-to-head solver comparisons
+
+Alongside the per-suite runs above, two scripts grade *multiple solvers on the
+same problem* against published optima rather than against each other:
+
+| script | set | solvers | output |
+|---|---|---|---|
+| `scripts/compare_pounce_clarabel.py` | Netlib LP + Maros-Mészáros QP | pounce (`lp-ipm`/`qp-ipm`) vs Clarabel | `clarabel_compare.md` |
+| `scripts/compare_qp_four_way.py` | Maros-Mészáros QP (138) | pounce `qp-ipm`, `nlp`, `qp-active-set`; Clarabel | `qp_four_way.md` |
+
+```sh
+python3 benchmarks/scripts/compare_qp_four_way.py [--limit N] [--time-limit S]
+```
+
+The `qp-active-set` column was added because that engine had almost no
+benchmark exposure: it was graded on 3 hand-constructed problems in
+`adversarial_convex.md`, while the IPM path was graded on all 138 here. It is
+the engine behind `algorithm=active-set-sqp` — the one that matters for
+warm-started sequences (MPC, branch-and-bound nodes, homotopy continuation) —
+and a degeneracy-rich published set with ground truth is where it should be
+held to account.
+
+Two things to know before reading its numbers:
+
+- **The timings are cold-start**, which is the case an active-set method is
+  least suited to; its design point is carrying the working set *across*
+  solves. Read the speed line as a floor, not a verdict.
+- **`solved-but-wrong` is the number that matters.** A solver reporting success
+  with an objective off ground truth is far worse than one that fails visibly,
+  so the report breaks those out separately for the active-set column.
+
+Both scripts need the release binary to be current — they invoke
+`target/release/pounce` directly, so rebuild before running or you will
+benchmark whatever was there last (`cargo build --release --bin pounce`; check
+with `pounce --about`, which prints the commit).
+
 ## Adding a new suite
 
 1. Create `benchmarks/<suite>/` with a `README.md` describing the
