@@ -9,6 +9,70 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a one-sided bound beyond `±1e19` was read as a crossed bound pair (#398)
+
+- **A feasible model no longer comes back `Invalid_Problem_Definition`.**
+  `TNLPAdapter` rejected any model carrying a legitimate one-sided bound whose
+  value lies past the *opposite* absent-bound sentinel, reporting AMPL
+  `solve_result_num` **504** / Pyomo `internalSolverError` before the first
+  iteration — so there was no solver output to diagnose it from. The model in
+  question (property-test seed 223, the same one #396 stopped presolve from
+  certifying infeasible) has a starting point `pounce check-x0` measures at
+  *exactly* zero violation, and the convex QP route solves it to optimality.
+  It now solves on the NLP route too.
+- **Cause: a symmetric reading of a directional convention.** A `<=`-only row
+  reaches the adapter with its absent lower bound filled in by the `-1e19`
+  sentinel. On row `-1e30·x[0] <= -5.0000000000000007e20` that gives
+  `g_l = -1e19`, `g_u = -5e20`, and the adapter's `lo > hi` test fired.
+  Nothing is inconsistent — `-5e20` is an ordinary finite upper bound, and the
+  sentinel standing in for the absent lower bound is not a bound to compare it
+  against at all. The bound is only "beyond infinity" if you read the sentinel
+  as a magnitude.
+- **Fix:** `classify_bounds` now derives presence directionally, the same
+  convention `pounce_presolve::bound_tighten` and the #396 witness gate use — a
+  lower bound is absent iff `lo <= nlp_lower_bound_inf`, an upper bound iff
+  `hi >= nlp_upper_bound_inf` — and classifies equality / one-sided /
+  two-sided / free from the *present* bounds only. This closes an asymmetry
+  that had been live for some time: a *variable* bound past the sentinel was
+  already handled directionally by `bound_tighten`, while a *constraint* bound
+  past it was a hard error.
+- `INCONSISTENT_BOUNDS` is now reserved for the case it was meant for — both
+  bounds present and genuinely crossed, a modelling error. `x in [5, 3]` still
+  returns 504 on both the `presolve=yes` and `presolve=no` routes
+  (`user_declared_crossed_box_is_still_rejected`).
+- The equality and fixed-variable tests are gated on presence for the same
+  reason: `g_l == g_u == 1e20` describes `g >= 1e20`, a one-sided row, not an
+  equality at `1e20`, and `x_l = 5e20` with no upper bound is a
+  lower-bounded variable, not one fixed at `5e20`.
+- **Scope.** Any model with a one-sided bound outside `±1e19` — unusual but not
+  pathological. `nlp_lower_bound_inf` / `nlp_upper_bound_inf` are user-settable
+  options, so a well-scaled model trips this the moment someone lowers the
+  threshold, and an `.nl` may legitimately carry a bound of `1e20`.
+- **One sibling of the same predicate fixed alongside it.**
+  `starting_point_refutes_infeasibility`'s crossed-box guard
+  (`pounce-algorithm/src/infeasibility_refutation.rs`) tested the raw pair too,
+  and was the only bound test in that file not already directional — so a
+  variable declared `x <= -5e20` with no lower bound made it decline to refute,
+  withholding a witness the model plainly admits. Failing that way is safe (the
+  gate can only *withdraw* an infeasibility verdict, never issue one), which is
+  why it had gone unnoticed; it is now consistent with the two clamps
+  immediately below it.
+- **A deliberate divergence from upstream**, noted in the source so it is not
+  "corrected" back by a future porter. `IpTNLPAdapter` runs the same raw
+  `lower == upper` / `lower > upper` tests before consulting the sentinels, and
+  inherits the same rejection. Models upstream accepts classify identically
+  here; the divergence is confined to bounds outside the sentinels, which
+  upstream cannot express at all.
+- Covered by `feasible_sentinel_bound_model_solves` in
+  `crates/pounce-cli/tests/presolve_certified_infeasibility.rs` (asserts
+  `Solve_Succeeded`, on both the presolve and no-presolve routes) and four unit
+  tests on `classify_bounds` in `crates/pounce-nlp/src/tnlp_adapter.rs`
+  covering the row, the variable box, the still-rejected crossed pair, and the
+  sentinel-valued equality. The existing property sweep does not see this class
+  of defect: `test_infeasibility_no_false_positives.py` watches the `200..299`
+  infeasible band, and `504` is outside it — a feasible model answered with
+  `Invalid_Problem_Definition` is a wrong answer of a different shape.
+
 ### Fixed — equality rows had no scale-relative runtime feasibility measure (#390)
 
 - **A nonlinear equality contradiction is no longer accepted as solved once its
@@ -239,13 +303,14 @@ changes.
     instances, false positives in the AMPL infeasible band go `1 → 0` on the full
     presolve option set (and stay at 0 on the numerical path from #379).
     `MAX_FALSE_POSITIVES` ratchets `1 → 0` — a floor, not a target.
-  - **Still open on this model:** it does not solve. It now returns
-    `Invalid_Problem_Definition` (504), because `TNLPAdapter` reads the same
+  - **Was still open on this model:** it did not solve. It returned
+    `Invalid_Problem_Definition` (504), because `TNLPAdapter` read the same
     out-of-range bound as a crossed constraint pair — `g_l = -1e19` against
-    `g_u = -5e20` trips the `lo > hi` check. That is a separate defect in the
+    `g_u = -5e20` tripped the `lo > hi` check. That is a separate defect in the
     sentinel convention for constraint bounds, affecting any model with a
-    one-sided bound beyond `±1e19`; it is tracked on its own. The regression test
-    here asserts the *band*, not a specific code, for that reason.
+    one-sided bound beyond `±1e19`; it was tracked and fixed as #398 (above).
+    The regression test here asserts the *band*, not a specific code, for that
+    reason, and did not have to be rewritten.
 
 ### Fixed — the NLP path reported `Infeasible_Problem_Detected` on models whose own starting point is feasible (#379)
 

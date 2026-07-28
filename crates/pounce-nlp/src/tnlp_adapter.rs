@@ -305,6 +305,27 @@ impl TNLPAdapter {
     }
 }
 
+/// Split the full variable / constraint sets into fixed vs. free variables and
+/// equality vs. inequality rows, recording which sides carry a real bound.
+///
+/// **Deliberate divergence from upstream (gh #398).** `IpTNLPAdapter` tests
+/// `lower == upper` and `lower > upper` on the *raw* bound pair, before asking
+/// whether either side is present, and only consults `nlp_lower_bound_inf` /
+/// `nlp_upper_bound_inf` afterwards. That is safe only while every real bound
+/// sits inside the sentinels. A `<=`-only row arrives with its absent lower
+/// bound filled in at `-1e19`; if the row's genuine upper bound is more
+/// negative than that (`-5e20` is perfectly ordinary, and both sentinels are
+/// user-settable options besides), the raw pair reads as crossed and a feasible
+/// model is rejected as `Invalid_Problem_Definition`.
+///
+/// So presence is decided first, and *directionally* — a lower bound is absent
+/// at or below `lo_inf`, an upper bound at or above `up_inf`, the convention
+/// `pounce_presolve::bound_tighten` already uses. Equality, fixed-variable, and
+/// crossed-pair tests then run on the present bounds only, which leaves
+/// `INCONSISTENT_BOUNDS` for what it is meant for: a modeller who declared both
+/// sides and crossed them. Models upstream accepts classify identically; the
+/// divergence is confined to bounds outside the sentinels, which upstream
+/// cannot express at all.
 #[allow(clippy::too_many_arguments)]
 fn classify_bounds(
     n_full_x: Index,
@@ -332,7 +353,14 @@ fn classify_bounds(
     for i in 0..nx {
         let lo = x_l[i];
         let hi = x_u[i];
-        if lo > hi {
+        // Presence is *directional*, not a symmetric magnitude test: a lower
+        // bound is absent only at or below `lo_inf`, an upper bound only at or
+        // above `up_inf`. A finite bound past the opposite sentinel (say an
+        // upper bound of -5e20) is an ordinary bound, not an "infinite" one, so
+        // it must not be compared against the absent side's sentinel value.
+        let lo_present = lo > lo_inf;
+        let hi_present = hi < up_inf;
+        if lo_present && hi_present && lo > hi {
             return Err(SolverException::new(
                 ExceptionKind::INCONSISTENT_BOUNDS,
                 format!(
@@ -343,7 +371,7 @@ fn classify_bounds(
                 line!() as Index,
             ));
         }
-        if lo == hi {
+        if lo_present && hi_present && lo == hi {
             match treatment {
                 FixedVarTreatment::MakeParameter => {
                     // Drop fixed vars from x_var entirely. Their values are
@@ -371,10 +399,10 @@ fn classify_bounds(
         let var_idx = x_not_fixed_map.len() as Index;
         x_not_fixed_map.push(i as Index);
         full_to_var[i] = var_idx;
-        if lo > lo_inf {
+        if lo_present {
             x_l_map.push(var_idx);
         }
-        if hi < up_inf {
+        if hi_present {
             x_u_map.push(var_idx);
         }
     }
@@ -388,27 +416,36 @@ fn classify_bounds(
     for i in 0..ng {
         let lo = g_l[i];
         let hi = g_u[i];
-        if lo == hi {
-            c_map.push(i as Index);
-        } else if lo > hi {
-            return Err(SolverException::new(
-                ExceptionKind::INCONSISTENT_BOUNDS,
-                format!(
-                    "There are inconsistent bounds on constraint function {i}: \
-                     lower = {lo:25.16e} and upper = {hi:25.16e}."
-                ),
-                file!(),
-                line!() as Index,
-            ));
-        } else {
-            let d_idx = d_map.len() as Index;
-            d_map.push(i as Index);
-            if lo > lo_inf {
-                d_l_map.push(d_idx);
+        // Same directional presence test as the variable box above. A
+        // `<=`-only row arrives with `g_l` at the `-1e19` sentinel; if its real
+        // upper bound is more negative than that (a legitimate `-5e20`), the
+        // pair only looks crossed under a symmetric reading of the sentinel.
+        let lo_present = lo > lo_inf;
+        let hi_present = hi < up_inf;
+        if lo_present && hi_present {
+            if lo > hi {
+                return Err(SolverException::new(
+                    ExceptionKind::INCONSISTENT_BOUNDS,
+                    format!(
+                        "There are inconsistent bounds on constraint function {i}: \
+                         lower = {lo:25.16e} and upper = {hi:25.16e}."
+                    ),
+                    file!(),
+                    line!() as Index,
+                ));
             }
-            if hi < up_inf {
-                d_u_map.push(d_idx);
+            if lo == hi {
+                c_map.push(i as Index);
+                continue;
             }
+        }
+        let d_idx = d_map.len() as Index;
+        d_map.push(i as Index);
+        if lo_present {
+            d_l_map.push(d_idx);
+        }
+        if hi_present {
+            d_u_map.push(d_idx);
         }
     }
 
@@ -790,5 +827,152 @@ mod tests {
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Bad));
         let err = TNLPAdapter::new(tnlp).unwrap_err();
         assert_eq!(err.kind, ExceptionKind::INCONSISTENT_BOUNDS);
+    }
+
+    /// A TNLP that reports whatever bounds it is handed and nothing else —
+    /// enough to drive `classify_bounds` through the adapter constructor.
+    struct BoundsOnly {
+        x_l: Vec<Number>,
+        x_u: Vec<Number>,
+        g_l: Vec<Number>,
+        g_u: Vec<Number>,
+    }
+    impl TNLP for BoundsOnly {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: self.x_l.len() as Index,
+                m: self.g_l.len() as Index,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&self.x_l);
+            b.x_u.copy_from_slice(&self.x_u);
+            b.g_l.copy_from_slice(&self.g_l);
+            b.g_u.copy_from_slice(&self.g_u);
+            true
+        }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _m: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    fn classify(b: BoundsOnly) -> Result<BoundClassification, SolverException> {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(b));
+        TNLPAdapter::new(tnlp).map(|a| a.classification().clone())
+    }
+
+    /// **gh #398.** A `<=`-only row whose real upper bound is *more negative*
+    /// than the absent-lower sentinel is an ordinary one-sided row, not a
+    /// crossed pair.
+    ///
+    /// `.nl` fills the absent lower bound of `-1e30·x <= -5e20` with the
+    /// `-1e19` sentinel, so a symmetric magnitude reading sees
+    /// `-1e19 > -5e20` and calls the pair inconsistent — `504
+    /// Invalid_Problem_Definition` on a model whose declared `x0` sits at
+    /// exactly zero violation. Presence is directional: a *lower* bound is
+    /// absent only at or below `nlp_lower_bound_inf`, so the sentinel is not a
+    /// bound to compare against at all.
+    #[test]
+    fn one_sided_row_beyond_the_sentinel_is_not_a_crossed_pair() {
+        let c = classify(BoundsOnly {
+            x_l: vec![-2.0e19],
+            x_u: vec![2.0e19],
+            g_l: vec![DEFAULT_NLP_LOWER_BOUND_INF],
+            g_u: vec![-5.0000000000000007e20],
+        })
+        .expect("a one-sided row at -5e20 must classify, not error");
+        assert_eq!(c.n_c, 0, "not an equality row");
+        assert_eq!(c.n_d, 1);
+        assert!(
+            c.d_l_map.is_empty(),
+            "the -1e19 lower bound is the absent-bound sentinel"
+        );
+        assert_eq!(c.d_u_map, vec![0], "-5e20 is a real, present upper bound");
+    }
+
+    /// The mirror image on the variable box: a lower bound past `+INF` with no
+    /// upper bound. Symmetrically read, `+5e20 > +1e19` looked like a crossed
+    /// box (and `lo == hi` at the sentinel looked like a *fixed* variable);
+    /// directionally it is a lower-bounded-only variable.
+    #[test]
+    fn one_sided_var_bound_beyond_the_sentinel_is_not_crossed() {
+        let c = classify(BoundsOnly {
+            x_l: vec![5.0e20],
+            x_u: vec![DEFAULT_NLP_UPPER_BOUND_INF],
+            g_l: vec![],
+            g_u: vec![],
+        })
+        .expect("x >= 5e20 with no upper bound must classify, not error");
+        assert_eq!(c.n_x_fixed, 0, "an absent upper bound does not fix the var");
+        assert_eq!(c.n_x_var(), 1);
+        assert_eq!(c.x_l_map, vec![0]);
+        assert!(c.x_u_map.is_empty());
+    }
+
+    /// The guard that must survive the fix: when *both* bounds are present and
+    /// crossed, that is a genuine modelling error and still an error here.
+    #[test]
+    fn genuinely_crossed_present_bounds_are_still_rejected() {
+        let err = classify(BoundsOnly {
+            x_l: vec![-2.0e19],
+            x_u: vec![2.0e19],
+            g_l: vec![5.0],
+            g_u: vec![3.0],
+        })
+        .expect_err("5 <= g <= 3 is inconsistent");
+        assert_eq!(err.kind, ExceptionKind::INCONSISTENT_BOUNDS);
+
+        let err = classify(BoundsOnly {
+            x_l: vec![5.0],
+            x_u: vec![3.0],
+            g_l: vec![],
+            g_u: vec![],
+        })
+        .expect_err("x in [5, 3] is inconsistent");
+        assert_eq!(err.kind, ExceptionKind::INCONSISTENT_BOUNDS);
+    }
+
+    /// Equality detection is likewise gated on both bounds being present: two
+    /// equal bounds that are *both* the same sentinel value describe a
+    /// one-sided row, not an equality. `g_l = g_u = 1e20` is `g >= 1e20`.
+    #[test]
+    fn equal_bounds_past_the_sentinel_are_one_sided_not_an_equality() {
+        let c = classify(BoundsOnly {
+            x_l: vec![-2.0e19],
+            x_u: vec![2.0e19],
+            g_l: vec![1.0e20],
+            g_u: vec![1.0e20],
+        })
+        .expect("classify");
+        assert_eq!(
+            c.n_c, 0,
+            "the upper bound is absent, so this is no equality"
+        );
+        assert_eq!(c.n_d, 1);
+        assert_eq!(c.d_l_map, vec![0]);
+        assert!(c.d_u_map.is_empty());
     }
 }
