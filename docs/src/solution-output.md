@@ -53,6 +53,16 @@ different in kind — on a nonconvex problem a positive local minimum of the
 violation does **not** rule out a feasible point elsewhere, which is why the
 console message says "Problem may be infeasible."
 
+Because `200` is an inference rather than a proof, it is withdrawn when POUNCE
+holds a point that contradicts it. Before any numerical path reports `200`, the
+model's own starting point is evaluated against every constraint; if it
+satisfies them all, the feasible set is demonstrably non-empty and the verdict
+becomes `Error_In_Step_Computation` (`500`) — an honest "the solve broke down"
+rather than a wrong answer. This can only ever *withdraw* a verdict: a model
+with no feasible point cannot produce such a point, so a correct `200` is
+unaffected. Supplying a feasible starting point is therefore worth doing on a
+model you believe is feasible but POUNCE reports otherwise.
+
 When the region is found empty the solve is skipped entirely and the message
 names how it was found, so the claim is checkable:
 

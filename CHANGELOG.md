@@ -79,6 +79,64 @@ changes.
   - Docs: [Solution output](docs/src/solution-output.md) gains a
     `solve_result_num` band table and the proved-vs-local distinction.
 
+### Fixed — the NLP path reported `Infeasible_Problem_Detected` on models whose own starting point is feasible (#379)
+
+- **No numerical path may now claim infeasibility while holding a point that
+  satisfies every constraint.** The feasible-by-construction property sweep in
+  `pyomo-pounce/tests/test_infeasibility_no_false_positives.py` found a model
+  (seed 294) that POUNCE was *handed a feasible starting point for* — `(5e5, 5e5)`,
+  satisfying both rows exactly — and reported as infeasible: AMPL
+  `solve_result_num` 200, Pyomo `TerminationCondition.infeasible`. POUNCE's own
+  convex QP route solves the same model to optimality, and `pounce verify`
+  reports `0.000e0` constraint and bound violation on that solution.
+  - Root cause is not a threshold. The gates that produce this verdict — the
+    restoration gates, the outer cycle detector, the SQP infeasible-subproblem
+    exit, the ℓ₁ wrapper's uncollapsed-slack certificate — all argue from a
+    *stalled feasibility sub-problem*: the violation is bounded away from zero
+    and no local move reduces it. That is evidence, not proof. On this model the
+    first row carries `±1e30` coefficients; in the scaled space its slack
+    initializes far from anything `x` can follow, the outer line search walks the
+    violation *up* from an exactly feasible start, restoration burns its
+    3000-iteration budget, and the cycle gate concluded infeasibility from the
+    exhaustion.
+  - Fix: a refutation. `pounce_algorithm::infeasibility_refutation` evaluates the
+    model's own starting point, clamped into the variable box, and withdraws the
+    verdict if it satisfies every row. One concrete feasible point settles the
+    question outright, whatever a local argument concluded.
+  - Applied as **one gate over all four claim sites**, not per-site. The two
+    preceding safeguards in this area were each added to one path and not its
+    twin, and a hole survived both times.
+  - One-directional by construction: it can only ever *withdraw* a verdict, never
+    create one. A model with no feasible point cannot produce a witness, so every
+    correct verdict is untouched — and a failure to evaluate simply declines to
+    refute.
+  - The withdrawn verdict becomes `Error_In_Step_Computation` (AMPL 500), the
+    status this codebase already uses for "the solve broke down and we are *not*
+    claiming infeasibility". The solve still fails on the `±1e30` model — that row
+    is genuinely hostile — but it fails visibly instead of returning a confident
+    wrong answer.
+  - The witness test is **pure relative** (`tol · scale`), not the clamped
+    accepting form. Measured: the clamped form withdrew *correct* infeasibility
+    verdicts on three models at row scalings `1e-12 … 1e-8`, because the clamp
+    reinstates an absolute floor exactly in the down-scaled direction. Caught by
+    `pyomo-pounce/tests/test_scale_invariance.py` before it could ship.
+  - Presolve *certificates* are exempt: a proof is not a numerical inference, and
+    it carries its own, tighter refutation.
+  - Measured: false positives on the numerical path (`solver_selection=nlp
+    presolve=no`) over 400 feasible-by-construction instances go **1 → 0**; over
+    the property test's full option set, **3 → 1** (the remaining one is seed 223
+    on the presolve path, unrelated to this fix). `MAX_FALSE_POSITIVES` ratchets
+    from 4 to 1.
+  - Not a bug: the CLI's MC64 second-opinion re-solve did not overturn these. That
+    guard exists for *hypersensitivity* — two backward-stable scalings falling
+    into different basins — and this failure reproduces under both scalings, so
+    the second opinion correctly agreed. The refutation runs before it, so the
+    wasted re-solve is now skipped too.
+  - Regression: `crates/pounce-cli/tests/false_local_infeasibility.rs` gains both
+    reported shapes and pins that the convex route still solves them, so the two
+    routes cannot drift back into disagreeing about whether the feasible set is
+    empty.
+
 ### Fixed — an infeasible model's verdict depended on the user's `tol` (follow-up to #372)
 
 - **A genuinely infeasible model now reports `Infeasible_Problem_Detected` (AMPL

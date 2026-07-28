@@ -28,6 +28,7 @@ pub mod debug;
 pub mod debug_rank;
 pub mod eq_mult;
 pub mod hess;
+pub mod infeasibility_refutation;
 pub mod init;
 pub mod intermediate;
 pub mod ipopt_alg;
