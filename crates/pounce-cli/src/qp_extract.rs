@@ -21,21 +21,21 @@
 //!   g_u`. An equality (`g_l == g_u`) becomes a row of `A`; a one- or
 //!   two-sided inequality becomes one or two rows of `G` (`row ≤ g_u`
 //!   and/or `−row ≤ −g_l`).
-//! - **Variable bounds.** Finite `x_l`/`x_u` become `G` rows
-//!   (`−x_i ≤ −x_l`, `x_i ≤ x_u`); the `.nl` "infinity" sentinel
-//!   (`|v| ≥ 1e19`) is treated as no bound.
+//! - **Variable bounds.** Present `x_l`/`x_u` become `G` rows
+//!   (`−x_i ≤ −x_l`, `x_i ≤ x_u`). The `.nl` "infinity" sentinel is
+//!   read directionally: `x_l ≤ -1e19` is no lower bound, `x_u ≥ 1e19`
+//!   is no upper bound. A bound past the *opposite* sentinel (an upper
+//!   bound of `-5e20`) is an ordinary bound and is kept.
 
 use crate::dispatch::analyze_quadratic_full;
 use crate::nl_reader::NlProblem;
+// Bound presence is read **directionally** — a lower bound is absent only at
+// or below `-1e19`, an upper bound only at or above `+1e19`. This file used a
+// symmetric `|v| < 1e19` test (gh #401): a real upper bound of `-5e20` failed
+// it and was dropped from `G` entirely, so the QP was solved over a strictly
+// larger box and reported `Optimal` at a point the model excludes.
+use pounce_common::types::{lower_bound_present, upper_bound_present};
 use pounce_convex::{ConeSpec, QpProblem, Triplet};
-
-/// The `.nl` infinity sentinel: AMPL writes ±1e20-ish for "no bound";
-/// upstream Ipopt treats anything with magnitude ≥ 1e19 as infinite.
-const NL_INF: f64 = 1e19;
-
-fn is_finite_bound(v: f64) -> bool {
-    v.abs() < NL_INF
-}
 
 /// Convert a classified LP/convex-QP `NlProblem` into `QpProblem`
 /// standard form. Returns `None` if the objective is not actually a
@@ -131,7 +131,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
         }
         let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
 
-        if lo == hi && is_finite_bound(lo) {
+        if lo == hi && lower_bound_present(lo) && upper_bound_present(hi) {
             // Equality row.
             let eq_row = next_row(&b);
             for (var, v) in nonzeros() {
@@ -141,7 +141,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
             con_map.push(ConRowMap::Eq { a_row: eq_row });
         } else {
             // Upper bound: row ≤ hi.
-            let upper = if is_finite_bound(hi) {
+            let upper = if upper_bound_present(hi) {
                 let gr = next_row(&h);
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, *v));
@@ -152,7 +152,7 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
                 None
             };
             // Lower bound: row ≥ lo  ⇔  −row ≤ −lo.
-            let lower = if is_finite_bound(lo) {
+            let lower = if lower_bound_present(lo) {
                 let gr = next_row(&h);
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, -*v));
@@ -170,12 +170,12 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
     for i in 0..n {
         let xl = prob.x_l[i];
         let xu = prob.x_u[i];
-        if is_finite_bound(xu) {
+        if upper_bound_present(xu) {
             let gr = next_row(&h);
             g.push(Triplet::new(gr, i, 1.0)); // x_i ≤ xu
             h.push(xu);
         }
-        if is_finite_bound(xl) {
+        if lower_bound_present(xl) {
             let gr = next_row(&h);
             g.push(Triplet::new(gr, i, -1.0)); // −x_i ≤ −xl
             h.push(-xl);
@@ -293,13 +293,13 @@ pub fn recover_bound_mults(
     let mut z_ub = vec![0.0; n];
     let mut row = n_con_ineq_rows;
     for i in 0..n {
-        if is_finite_bound(prob.x_u[i]) {
+        if upper_bound_present(prob.x_u[i]) {
             if let Some(&zv) = z.get(row) {
                 z_ub[i] = zv;
             }
             row += 1;
         }
-        if is_finite_bound(prob.x_l[i]) {
+        if lower_bound_present(prob.x_l[i]) {
             if let Some(&zv) = z.get(row) {
                 z_lb[i] = zv;
             }
@@ -456,7 +456,7 @@ pub fn extract_socp_with_map(
             coef[*var] += *v;
         }
         let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
-        if lo == hi && is_finite_bound(lo) {
+        if lo == hi && lower_bound_present(lo) && upper_bound_present(hi) {
             let eq_row = next_row(&b);
             for (var, v) in nonzeros() {
                 a.push(Triplet::new(eq_row, var, *v));
@@ -464,7 +464,7 @@ pub fn extract_socp_with_map(
             b.push(lo - const_shift);
             con_map.push(ConSocpMap::Eq { a_row: eq_row });
         } else {
-            let upper = if is_finite_bound(hi) {
+            let upper = if upper_bound_present(hi) {
                 let gr = next_row(&h);
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, *v));
@@ -474,7 +474,7 @@ pub fn extract_socp_with_map(
             } else {
                 None
             };
-            let lower = if is_finite_bound(lo) {
+            let lower = if lower_bound_present(lo) {
                 let gr = next_row(&h);
                 for (var, v) in nonzeros() {
                     g.push(Triplet::new(gr, var, -*v));
@@ -492,12 +492,12 @@ pub fn extract_socp_with_map(
     for i in 0..n {
         let xl = prob.x_l[i];
         let xu = prob.x_u[i];
-        if is_finite_bound(xu) {
+        if upper_bound_present(xu) {
             let gr = next_row(&h);
             g.push(Triplet::new(gr, i, 1.0));
             h.push(xu);
         }
-        if is_finite_bound(xl) {
+        if lower_bound_present(xl) {
             let gr = next_row(&h);
             g.push(Triplet::new(gr, i, -1.0));
             h.push(-xl);
@@ -1157,5 +1157,142 @@ mod tests {
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         assert!((sol.x[0] - 5.0).abs() < 1e-6, "x0={}", sol.x[0]);
+    }
+
+    /// **gh #401.** A real bound past the *opposite* absent-bound sentinel is
+    /// an ordinary bound, and must survive into `G`.
+    ///
+    /// `is_finite_bound` was `|v| < 1e19`, a symmetric magnitude test. An upper
+    /// bound of `-5e20` failed it and the row `x_0 <= -5e20` never entered `G`,
+    /// so the QP was solved over a strictly larger box — `min x_0` subject to
+    /// nothing, which the IPM answers `Optimal` at a point the model excludes.
+    #[test]
+    fn variable_bound_past_the_opposite_sentinel_is_kept() {
+        let prob = NlProblem {
+            n: 1,
+            m: 0,
+            num_obj: 1,
+            minimize: false, // maximize x0, so the -5e20 upper bound binds
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            // No lower bound (`-1e21` is past the lower sentinel, so absent);
+            // a real upper bound of `-5e20`, which is *not*.
+            x_l: vec![-1e21],
+            x_u: vec![-5e20],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![-7e20],
+            lambda0: vec![],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        };
+        let qp = extract_qp(&prob).expect("extract");
+        assert_eq!(
+            qp.m_ineq(),
+            1,
+            "`x0 <= -5e20` is a real bound and must become a G row; the \
+             symmetric |v| < 1e19 test dropped it, leaving 0 rows and an \
+             unbounded-above box the model does not declare"
+        );
+        assert_eq!(qp.h[0], -5e20, "the upper bound's RHS");
+    }
+
+    /// **gh #401.** A row with equal bounds past the sentinel used to vanish
+    /// from the problem *entirely* — contributing nothing to `A` and nothing
+    /// to `G`.
+    ///
+    /// Directionally, `g_l = g_u = -5e20` is not an equality at all: the lower
+    /// bound is absent (it is past `-1e19`) and the upper bound is real, so the
+    /// row is the one-sided `x0 + x1 <= -5e20`. The old code got there by a
+    /// different route and lost it: `lo == hi && is_finite_bound(lo)` failed, so
+    /// the row fell into the inequality branch — where `is_finite_bound(hi)` and
+    /// `is_finite_bound(lo)` were false too, leaving `upper` and `lower` both
+    /// `None`. Silently deleted.
+    ///
+    /// (Note there is no such thing as an equality row outside `±1e19` under
+    /// this convention: an equality needs both bounds present, and the two
+    /// presence tests only overlap inside the band.)
+    #[test]
+    fn a_row_with_equal_bounds_past_the_sentinel_does_not_vanish() {
+        let prob = NlProblem {
+            n: 2,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![Expr::Const(0.0)],
+            con_linear: vec![vec![(0, 1.0), (1, 1.0)]],
+            x_l: vec![-2e19, -2e19],
+            x_u: vec![2e19, 2e19],
+            g_l: vec![-5e20],
+            g_u: vec![-5e20],
+            x0: vec![0.0, 0.0],
+            lambda0: vec![0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        };
+        let qp = extract_qp(&prob).expect("extract");
+        assert_eq!(
+            qp.m_eq(),
+            0,
+            "the lower bound is absent, so this is no equality"
+        );
+        assert_eq!(
+            qp.m_ineq(),
+            1,
+            "`x0 + x1 <= -5e20` is a real constraint and must reach G; it used \
+             to disappear from the problem entirely"
+        );
+        assert_eq!(qp.h[0], -5e20);
+    }
+
+    /// **gh #401.** `recover_bound_mults` walks the G-row layout with the same
+    /// predicate the builder uses, so the two must agree or the returned
+    /// `z_lb` / `z_ub` shift by a row. Pins them together on a box that only
+    /// the directional reading admits.
+    #[test]
+    fn bound_multipliers_stay_aligned_with_the_built_rows() {
+        let prob = NlProblem {
+            n: 2,
+            m: 0,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0), (1, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            // x0: upper bound past the *lower* sentinel, no lower bound.
+            // x1: an ordinary two-sided box.
+            x_l: vec![-2e19, 0.0],
+            x_u: vec![-5e20, 1.0],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![-6e20, 0.5],
+            lambda0: vec![],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        };
+        let qp = extract_qp(&prob).expect("extract");
+        // x0 contributes 1 row (upper only); x1 contributes 2 (upper, lower).
+        assert_eq!(qp.m_ineq(), 3);
+        // Tag each G row with its index so a misalignment is visible.
+        let z = vec![10.0, 20.0, 30.0];
+        let (z_lb, z_ub) = recover_bound_mults(&prob, 0, &z);
+        assert_eq!(z_ub[0], 10.0, "row 0 is x0's upper bound");
+        assert_eq!(z_lb[0], 0.0, "x0 has no lower bound");
+        assert_eq!(z_ub[1], 20.0, "row 1 is x1's upper bound");
+        assert_eq!(z_lb[1], 30.0, "row 2 is x1's lower bound");
     }
 }
