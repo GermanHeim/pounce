@@ -121,3 +121,15 @@ def test_preflight_then_init_clears_warning():
     report = pyomo_pounce.preflight(m)
     assert not report.fatal
     assert math.isfinite(report.objective)
+
+
+def test_box_violation_scores_a_bound_past_the_opposite_sentinel():
+    """gh #403. ``abs(b) < 1e19`` called a real upper bound of -5e20 absent."""
+    from pyomo_pounce.preflight import _box_violation
+
+    assert _box_violation(0.0, None, -5e20) == 5e20
+    assert _box_violation(0.0, 5e20, None) == 5e20
+    assert _box_violation(-6e20, None, -5e20) == 0.0
+    # An absent bound is still absent.
+    assert _box_violation(1e30, None, None) == 0.0
+    assert _box_violation(1e30, -1e19, 1e19) == 0.0

@@ -9,6 +9,50 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `verify` accepted a `.sol` that violates a bound past the opposite sentinel (#403)
+
+- **`pounce verify` no longer reports ACCEPTED for a solution outside the
+  model's declared box.** `verify` exists to be the *independent* check on a
+  `.sol`, so a checker that under-reports is worth more than its blast radius
+  suggests — this is the surface a user reaches for when they doubt the solver.
+- **Cause:** `is_finite_bound(b) = b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF`
+  — a *band* membership test, applied to `lo` and `hi` alike. A real upper bound
+  of `-5e20` failed it, so `box_violation`'s `above` term became `-inf` and the
+  violation read `0.0`. Mirror case for a real lower bound of `+5e20`. The same
+  predicate also sized `row_magnitude`, so a row written at `5e20` scale
+  reported a magnitude ignoring its own bound — which then fed the
+  scale-relative feasibility comparison.
+- The existing coverage pinned only the *sentinel* case, so it passed either
+  way. That is why this survived.
+- **`pounce check-x0` shared the helper** and used it for bound-activity
+  counting and `clamp_to_interior`, so a real out-of-range bound was not clamped
+  against and the reported starting point was not the one the solver would
+  actually begin from. Note the irony: `check-x0` measuring a fixture at exactly
+  zero violation is what established the #396/#398 model was feasible in the
+  first place.
+- Two further equality/fixed-variable tests in `verify.rs` were gated on
+  presence at the same time, the same class #398 and #402 fixed: a row with
+  `g_l = g_u = -5e20` is the one-sided `g <= -5e20`, not an equality, and
+  skipping it dropped a real complementarity term.
+- **The Python surfaces carried exact twins**, now directional too:
+  `python/pounce/_preflight.py` (`_box_violation`, `_clamp_to_interior`,
+  `at_lo`/`at_hi`), `python/pounce/_starts.py`,
+  `pyomo-pounce/pyomo_pounce/preflight.py`, and
+  `pyomo-pounce/pyomo_pounce/block_init.py` — where `_seed_var` on a variable
+  with `ub = -5e20` and no `lb` fell through to seeding `0.0`, outside the
+  variable's own declared box.
+- Five regression tests (two Rust, three Python), all verified to fail against
+  the old band predicate.
+- **This closes the sentinel family opened by #396.** Four issues, one root
+  cause: reading a directional convention as a magnitude. Every site now goes
+  through the shared `lower_bound_present` / `upper_bound_present` helpers
+  introduced in #401.
+  - Checked and deliberately left alone: `python/pounce/_route.py` uses plain
+    `np.isfinite`, which is *correct* there — its bounds come from
+    `_normalize_bounds` (scipy `±inf`) and `_wrap_constraints`, neither of which
+    uses the sentinel convention. `python/pounce/gams/link.py` and
+    `gams/gams_pounce.c` were already directional by construction.
+
 ### Fixed — presolve could still certify infeasibility from an absent-bound sentinel (#402)
 
 - **The last of the presolve machinery behind #396's witness gate now reads the

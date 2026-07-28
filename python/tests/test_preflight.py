@@ -122,3 +122,32 @@ def test_report_dict_and_str():
     assert d["fatal"] is False
     text = str(r)
     assert "VERDICT" in text and "preflight" in text
+
+
+def test_box_violation_scores_a_bound_past_the_opposite_sentinel():
+    """gh #403. Presence is directional, not a magnitude band.
+
+    ``_finite_bound`` was ``-_BOUND_INF < b < _BOUND_INF`` applied to both
+    sides, so a real upper bound of ``-5e20`` read as absent and the violation
+    scored 0.0 — the report said a starting point was inside a box it is
+    outside of.
+    """
+    from pounce._preflight import _BOUND_INF, _box_violation
+
+    # x <= -5e20, no lower bound. The point 0.0 misses it by 5e20.
+    assert _box_violation(0.0, -_BOUND_INF, -5e20) == 5e20
+    # Mirror: x >= 5e20, no upper bound.
+    assert _box_violation(0.0, 5e20, _BOUND_INF) == 5e20
+    # A point that satisfies the same bound still scores zero.
+    assert _box_violation(-6e20, -_BOUND_INF, -5e20) == 0.0
+    # The sentinels themselves still mean "no bound".
+    assert _box_violation(1e30, -_BOUND_INF, _BOUND_INF) == 0.0
+
+
+def test_clamp_to_interior_respects_a_bound_past_the_opposite_sentinel():
+    """The clamp reports the point the solver would actually start from."""
+    from pounce._preflight import _BOUND_INF, _clamp_to_interior
+
+    # Upper bound only, at -5e20: a point above it must be pulled inside.
+    out = _clamp_to_interior(0.0, -_BOUND_INF, -5e20, 1e-2, 1e-2)
+    assert out < -5e20, f"expected a point strictly inside x <= -5e20, got {out}"
