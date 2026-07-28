@@ -34,7 +34,6 @@ the defect this file exists to catch.
 from __future__ import annotations
 
 import random
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -62,13 +61,6 @@ _OPTS = [
     "presolve_redundant_constraint_removal=yes",
     "print_level=0",
 ]
-
-
-def _pounce() -> str:
-    exe = shutil.which("pounce")
-    if exe is None:
-        pytest.skip("pounce not on PATH")
-    return exe
 
 
 def _build(seed: int):
@@ -109,8 +101,8 @@ def _solve_result_num(sol: Path) -> int | None:
     return None
 
 
-def test_feasible_models_are_not_reported_infeasible(tmp_path):
-    exe = _pounce()
+def test_feasible_models_are_not_reported_infeasible(tmp_path, pounce_exe):
+    exe = pounce_exe
     executed = 0
     false_positives = []
 

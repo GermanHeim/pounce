@@ -32,7 +32,6 @@ that is the point.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -44,13 +43,6 @@ pyo = pytest.importorskip("pyomo.environ")
 KS = list(range(-12, 13, 2))
 
 _OPTS = ["solver_selection=nlp", "print_level=0"]
-
-
-def _pounce() -> str:
-    exe = shutil.which("pounce")
-    if exe is None:
-        pytest.skip("pounce not on PATH")
-    return exe
 
 
 # --- models -----------------------------------------------------------------
@@ -200,8 +192,8 @@ def _solve(exe, tmp_path, name, builder, k) -> int | None:
     return None
 
 
-def test_scale_invariance_does_not_regress(tmp_path):
-    exe = _pounce()
+def test_scale_invariance_does_not_regress(tmp_path, pounce_exe):
+    exe = pounce_exe
     executed = 0
     report = []
     regressions = []

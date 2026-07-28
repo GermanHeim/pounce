@@ -32,7 +32,142 @@ To run the full suite locally, give the plugin the binary you just built::
     ln -sf "$PWD/target/release/pounce" python/pounce/bin/pounce
 """
 
+import os
+import shutil
+import subprocess
+
 import pytest
+
+
+#: Escape hatch: name the executable explicitly and the guard steps aside.
+#: Explicit beats bypassing — this records *which* binary you meant, where
+#: `PATH` manipulation silently records nothing.
+_EXE_ENV = "POUNCE_TEST_EXE"
+
+
+def _resolve_pounce_exe():
+    """Resolve the `pounce` executable for tests that shell out to it directly,
+    and say why it is trustworthy — or refuse it (gh #403).
+
+    Returns ``(path, reason_to_skip)``; exactly one is None.
+
+    The suite's other guard (:func:`pytest_runtest_call` below, gh #366) covers
+    tests that go through pyomo's ``SolverFactory``, and only fires when the
+    solver produced *no result at all*. Neither half of that reaches a test that
+    calls ``shutil.which("pounce")`` and ``subprocess.run`` itself: the plugin's
+    bundled-binary resolution never runs, and a foreign binary that answers
+    *incorrectly* exits cleanly, writes a valid ``.sol``, and sails through.
+
+    That is not hypothetical. A pip-installed `pounce` from the previous day
+    reported 49 of 200 feasible-by-construction models in the AMPL infeasible
+    band — against a ratchet whose limit is 0. Both binaries said ``0.9.0``;
+    only the embedded commit distinguished them (``10a6fe0c+dirty`` vs
+    ``ad0991df``), which is exactly the discriminator ``_build_id`` exists to
+    provide.
+
+    The failure is silent in *both* directions, which is what makes it worth a
+    guard: on a different `PATH` the same setup reports a comfortable green
+    while the working tree is broken.
+    """
+    explicit = os.environ.get(_EXE_ENV)
+    if explicit:
+        if not os.path.isfile(explicit):
+            return None, f"{_EXE_ENV}={explicit!r} is not a file"
+        return explicit, None
+
+    try:
+        import pyomo_pounce
+        from pyomo_pounce.pounce_solver import _build_id, _bundled_path
+    except Exception as exc:  # noqa: BLE001 - a broken probe must not mislead
+        return None, f"cannot import pyomo_pounce to resolve the binary: {exc}"
+    del pyomo_pounce
+
+    # Resolution order mirrors the plugin's: bundled first, then PATH.
+    found = _bundled_path() or shutil.which("pounce")
+    if found is None:
+        return None, "no bundled binary and no pounce on PATH"
+
+    # ...but *where* it came from does not make it trustworthy. The bundled
+    # path is only "the build under test" when something staged it this run,
+    # which is true in CI and false in a working tree, where
+    # `python/pounce/bin/pounce` is gitignored and survives across days and
+    # commits. The binary that produced this guard's motivating failure was
+    # sitting there, six commits and a day stale. So verify the build itself.
+    # Refuse only on a *proven* mismatch — both ids known and different.
+    #
+    # The asymmetry is deliberate. Skipping costs the ratchet: a skipped
+    # `MAX_FALSE_POSITIVES = 0` proves nothing, and a suite that quietly stops
+    # checking is the failure this guard exists to prevent. So an id we cannot
+    # read must not skip. `crates/pounce-cli/build.rs` embeds "unknown" when it
+    # builds outside a git checkout — true of a wheel built in a container
+    # without `.git` — and CI is exactly where a silent skip would hurt most,
+    # so unknown-vs-anything runs. What is caught is the case that motivated
+    # this: two readable ids that disagree.
+    want = _checkout_build_id()
+    got = _build_id(found)
+    if want and got and not _same_commit(got, want):
+        return None, (
+            f"refusing to measure {found!r}: it is build {got}, but this "
+            f"checkout is {want}. These probes are correctness ratchets — a "
+            f"different build's verdicts are not evidence either way, in "
+            f"either direction. Rebuild and stage it (see this module's "
+            f"docstring), or set {_EXE_ENV} to choose a binary deliberately."
+        )
+    return found, None
+
+
+def _checkout_build_id():
+    """This checkout's build identifier, in ``_build_id`` form, or None when
+    we are not in a git checkout."""
+
+    def _git(*args):
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+
+    try:
+        head = _git("rev-parse", "--short=8", "HEAD")
+        if head.returncode != 0:
+            return None
+        dirty = _git("status", "--porcelain")
+    except Exception:  # noqa: BLE001
+        return None
+    commit = head.stdout.strip()
+    if not commit:
+        return None
+    return commit + ("+dirty" if dirty.stdout.strip() else "")
+
+
+def _same_commit(got, want):
+    """Compare two build ids on the *commit* only.
+
+    The ``+dirty`` flag is deliberately ignored. A binary built from a clean
+    tree that you have since edited reports ``abc123`` against a checkout of
+    ``abc123+dirty`` — a real staleness, but the narrow kind that the
+    source-mtime guard already covers, and failing on it would make this guard
+    fire constantly during ordinary edit-build-test work. What must not slip
+    through is a *different commit*, which is the days-stale case that
+    motivated this.
+    """
+    a = got.split("+")[0]
+    b = want.split("+")[0]
+    if not a or not b:
+        return False
+    n = min(len(a), len(b))
+    return a[:n] == b[:n]
+
+
+@pytest.fixture(scope="session")
+def pounce_exe():
+    """A `pounce` executable this checkout vouches for, or a skip."""
+    exe, reason = _resolve_pounce_exe()
+    if exe is None:
+        pytest.skip(reason)
+    return exe
 
 
 def _using_bundled():
