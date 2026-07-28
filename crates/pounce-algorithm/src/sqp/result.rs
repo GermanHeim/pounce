@@ -25,6 +25,17 @@ pub enum SqpStatus {
     /// — it makes no infeasibility claim it cannot back with a
     /// certificate. Maps to `Search_Direction_Becomes_Too_Small`.
     QpStepFailed,
+    /// The problem is unbounded below: the step QP returned a certified
+    /// recession ray (zero curvature, feasible for every step length,
+    /// strict descent) *and* that ray was re-verified against the true
+    /// NLP — feasible points along it drive `f` toward `−∞` at (at
+    /// least) half the linear rate out to `1e12·‖d‖`. Maps to
+    /// `Diverging_Iterates`, POUNCE's (Ipopt's) unboundedness verdict,
+    /// the same status the IPM paths report on an unbounded model
+    /// (gh #388). An *unverified* unbounded step QP is a statement about
+    /// the local model only and falls back to
+    /// [`QpStepFailed`](Self::QpStepFailed).
+    Unbounded,
 }
 
 impl fmt::Display for SqpStatus {
@@ -35,6 +46,7 @@ impl fmt::Display for SqpStatus {
             SqpStatus::InfeasibleSubproblem => write!(f, "infeasible-subproblem"),
             SqpStatus::LineSearchFailed => write!(f, "line-search-failed"),
             SqpStatus::QpStepFailed => write!(f, "qp-step-failed"),
+            SqpStatus::Unbounded => write!(f, "unbounded"),
         }
     }
 }

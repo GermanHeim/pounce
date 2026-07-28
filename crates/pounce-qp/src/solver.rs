@@ -344,6 +344,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: None,
                 });
             }
 
@@ -411,6 +412,7 @@ impl ParametricActiveSetSolver {
                 used_phase1: false,
                 time: started.elapsed(),
             },
+            unbounded_ray: None,
         })
     }
 
@@ -566,6 +568,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: None,
                 });
             }
 
@@ -623,6 +626,7 @@ impl ParametricActiveSetSolver {
                 used_phase1: false,
                 time: started.elapsed(),
             },
+            unbounded_ray: None,
         })
     }
 
@@ -747,6 +751,9 @@ impl ParametricActiveSetSolver {
             };
 
             if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x, &x) {
+                // The witness direction on this path IS the blown-up
+                // iterate `x` (see the `d = x/‖x‖` argument above).
+                let ray = x.clone();
                 return Ok(QpSolution {
                     x,
                     lambda_g,
@@ -761,6 +768,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: Some(ray),
                 });
             }
         }
@@ -790,6 +798,7 @@ impl ParametricActiveSetSolver {
                 used_phase1: false,
                 time: started.elapsed(),
             },
+            unbounded_ray: None,
         })
     }
 
@@ -1071,6 +1080,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: None,
                 });
             }
 
@@ -1162,6 +1172,7 @@ impl ParametricActiveSetSolver {
             // takes unbounded full steps until `MaxIter` (δ discarded).
             if candidates.is_empty() && delta > 0.0 && ray_is_unbounded_descent(qp.h, qp.g, &x, &p)
             {
+                let ray = p.clone();
                 return Ok(QpSolution {
                     obj: Number::NEG_INFINITY,
                     x,
@@ -1176,6 +1187,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: Some(ray),
                 });
             }
 
@@ -1277,6 +1289,7 @@ impl ParametricActiveSetSolver {
                 used_phase1: false,
                 time: started.elapsed(),
             },
+            unbounded_ray: None,
         })
     }
 
@@ -1476,6 +1489,7 @@ impl ParametricActiveSetSolver {
                     used_phase1: true,
                     time: started.elapsed(),
                 },
+                unbounded_ray: None,
             });
         }
 
@@ -1564,6 +1578,12 @@ impl ParametricActiveSetSolver {
                 used_phase1: true,
                 time: started.elapsed(),
             },
+            // Deliberately `None` even when `status` carries an `Unbounded`
+            // forwarded from phase-1: that ray lives in the *augmented*
+            // (elastic) space, so it is neither dimensioned nor meaningful
+            // for the original QP. A caller that needs a witness gets no
+            // witness and must not claim unboundedness.
+            unbounded_ray: None,
         })
     }
 
@@ -1772,6 +1792,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: None,
                 });
             }
 
@@ -1823,6 +1844,7 @@ impl ParametricActiveSetSolver {
             // Newton step never certifies and the unconditional check is
             // still safe.
             if candidates.is_empty() && ray_is_unbounded_descent(qp.h, qp.g, &x, &p) {
+                let ray = p.clone();
                 return Ok(QpSolution {
                     obj: Number::NEG_INFINITY,
                     x,
@@ -1837,6 +1859,7 @@ impl ParametricActiveSetSolver {
                         used_phase1: false,
                         time: started.elapsed(),
                     },
+                    unbounded_ray: Some(ray),
                 });
             }
 
@@ -1903,6 +1926,7 @@ impl ParametricActiveSetSolver {
                 used_phase1: false,
                 time: started.elapsed(),
             },
+            unbounded_ray: None,
         })
     }
 }

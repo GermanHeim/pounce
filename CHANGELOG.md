@@ -44,6 +44,43 @@ changes.
   - Docs: [Solution output](docs/src/solution-output.md) gains a
     `solve_result_num` band table and the proved-vs-local distinction.
 
+### Fixed — `qp-active-set` reported an unbounded model as a solver internal error (#388)
+
+- **An unbounded model solved with `solver_selection=qp-active-set` now reports
+  `Diverging_Iterates` (AMPL `solve_result_num` **300**, "your model is
+  unbounded"), matching every other selector on the identical `.nl` file.** It
+  previously reported `Internal_Error` (**500**, "the solver broke") — so a
+  modeler with a genuinely unbounded model was told POUNCE had a bug, and
+  drivers that branch on `solve_result_num` routed the result to the wrong
+  handler. Minimal reproduction: `min −x s.t. x ≥ 0`, one variable, one
+  constraint.
+  - The unboundedness was already *detected* — the inner QP said so in as many
+    words — but the SQP driver folded that correct diagnosis into
+    `QpFailure(LinearSolverFailure("QP subproblem returned status unbounded"))`,
+    which the application layer maps to `Internal_Error`. It was also mislabeled
+    a linear-solver failure with no linear solver having failed. A
+    status-mapping defect, not a numerical one.
+  - The verdict is **not** blanket-mapped, because an unbounded *step* QP is on
+    its own only a statement about the linearization: on a nonconvex NLP the
+    constraints can curve back and the objective turn around (`min −x s.t.
+    x² ≤ 1` has an unbounded step QP at `x = 0` and a bounded feasible set).
+    `pounce-qp` now returns the certified recession ray alongside the verdict
+    (`QpSolution::unbounded_ray`), and the SQP driver re-tests that ray against
+    the **true** `f` and `c` — feasible probe points spanning twelve decades of
+    step length, each required to sustain at least half the initial linear
+    descent rate, the same non-decelerating-descent bar the IPM's divergence
+    guard applies (#248/#252/#285). Only a ray that survives is reported
+    unbounded.
+  - A ray that does not survive now yields the honest non-committal
+    `Search_Direction_Becomes_Too_Small` (`QpStepFailed`) instead of the old
+    hard error — the QP could not produce a usable step, and no claim is made
+    either way.
+  - The unbounded verdict also travels the normal result path, so it reaches
+    `finalize_solution`: the JSON report carries an objective and an `x` block
+    where it previously emitted `"objective": null` and no `x`.
+  - Unaffected: the infeasible and feasible cases on the same selector, which
+    already answered `200` and `0` correctly.
+
 ### Fixed — an infeasible model's verdict depended on the user's `tol` (follow-up to #372)
 
 - **A genuinely infeasible model now reports `Infeasible_Problem_Detected` (AMPL

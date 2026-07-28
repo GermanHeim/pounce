@@ -168,5 +168,12 @@ infeasibility proof or an unbounded recession direction that is checked,
 not merely inferred), so these statuses are never reported in error; a
 problem the solver cannot certify simply runs to the iteration limit.
 
+`solver_selection=qp-active-set` follows the same contract. Its inner QP
+certifies the recession ray of the *linearization*, which on a nonlinear
+model is not yet a statement about the problem, so the ray is re-tested
+against the true objective and constraints before the 300 is reported;
+a ray that does not survive yields
+`Search_Direction_Becomes_Too_Small`, never an unboundedness claim.
+
 The design and roadmap live in
 [`dev-notes/lp-qp-routing.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/lp-qp-routing.md).

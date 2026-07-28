@@ -1008,6 +1008,16 @@ impl IpoptApplication {
                 ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
                 pounce_nlp::SolverReturn::ErrorInStepComputation,
             ),
+            // Unbounded below, with a recession ray verified against the
+            // true NLP (gh #388). `Diverging_Iterates` is POUNCE's (Ipopt's)
+            // unboundedness verdict and maps to AMPL `solve_result_num=300`
+            // — the same answer the IPM selectors give on the same model,
+            // instead of the `Internal_Error` / 500 ("the solver broke")
+            // this path used to report.
+            crate::sqp::SqpStatus::Unbounded => (
+                ApplicationReturnStatus::DivergingIterates,
+                pounce_nlp::SolverReturn::DivergingIterates,
+            ),
         };
 
         // Forward to the user TNLP's finalize_solution. We pass
