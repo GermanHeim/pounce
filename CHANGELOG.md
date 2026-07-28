@@ -9,6 +9,59 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the convex route silently dropped constraints bounded past the opposite sentinel (#401)
+
+- **An LP/QP/QCQP no longer reports `Optimal` at a point its own bounds
+  exclude.** This is the same absent-bound-sentinel confusion as #396 and #398,
+  on the convex path — where it is worse, because it does not misclassify a
+  constraint, it **deletes** it, and the solver then answers a different problem
+  than the one that was asked. Unlike its siblings it fails *silently*: #396 was
+  a false infeasibility proof and #398 a refusal to solve, both loud.
+- **Cause:** two independent copies of a symmetric magnitude test,
+  `fn is_finite_bound(v: f64) -> bool { v.abs() < NL_INF }`, in
+  `pounce-cli/src/qp_extract.rs` and `pounce-cli/src/dispatch.rs`. Presence is
+  directional — a lower bound is absent only at or below `-1e19`, an upper bound
+  only at or above `+1e19` — so a real upper bound of `-5e20` is an ordinary
+  bound and `|v| < 1e19` is simply the wrong question about it.
+- Three distinct wrong answers came out of that:
+  - **A real variable bound never entered `G`.** `x_u = -5e20` failed the test,
+    so `x_i <= -5e20` was never built and the QP was solved over a strictly
+    larger box. Mirror case for a real `x_l = +5e20`.
+  - **A row with equal bounds past the sentinel vanished from the problem
+    entirely.** `lo == hi && is_finite_bound(lo)` failed, so the row fell into
+    the inequality branch — where both `is_finite_bound(hi)` and
+    `is_finite_bound(lo)` were false too, leaving `upper` and `lower` both
+    `None`. It contributed nothing to `A` and nothing to `G`.
+  - **A real quadratic row was discarded as "vacuous".** `g(x) >= 5e20` arrives
+    as `g_l = 5e20` (real), `g_u = 1e19` (sentinel); both tests were false, so
+    `vacuous` was true and the row was skipped with "Free row: imposes
+    nothing". The model then classified as a convex QCQP and went to the conic
+    solver *as if the constraint were not there* — it is reverse-convex, and
+    the honest answer is NLP.
+- **Fix:** one shared directional pair, `lower_bound_present` /
+  `upper_bound_present`, added next to `NLP_LOWER_BOUND_INF` /
+  `NLP_UPPER_BOUND_INF` in `pounce-common::types` — so there is now one spelling
+  of this predicate in the tree to fix, rather than the several that #396, #398
+  and this issue each turned up independently. The equality test is additionally
+  gated on *both* bounds being present, as #398 did in `classify_bounds`.
+- `recover_bound_mults` walks the G-row layout with the same predicate and was
+  *consistent* with the buggy builder, so it moved in lockstep; a regression
+  test now pins the two together on a box only the directional reading admits.
+- **Worth knowing: an equality row outside `±1e19` cannot be expressed under
+  this convention at all.** An equality needs both bounds present, and the two
+  presence tests only overlap inside the band — so `g_l = g_u = -5e20` is not an
+  equality at `-5e20`, it is the one-sided `g <= -5e20` (no lower bound). The
+  original issue report described this case as a lost *equality*; the row was
+  indeed lost, but what it should become is a one-sided inequality.
+- Covered by four regression tests, all verified to fail against the old
+  symmetric predicate and pass with the fix:
+  `variable_bound_past_the_opposite_sentinel_is_kept`,
+  `a_row_with_equal_bounds_past_the_sentinel_does_not_vanish`,
+  `bound_multipliers_stay_aligned_with_the_built_rows` (all in
+  `qp_extract.rs`), and `a_quadratic_row_bounded_past_the_sentinel_is_not_vacuous`
+  (`dispatch.rs`), plus `presence_is_directional_not_symmetric` on the new
+  shared helpers.
+
 ### Fixed — a one-sided bound beyond `±1e19` was read as a crossed bound pair (#398)
 
 - **A feasible model no longer comes back `Invalid_Problem_Definition`.**

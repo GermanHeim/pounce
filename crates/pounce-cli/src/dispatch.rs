@@ -36,6 +36,7 @@
 //! tolerance" to the safe side, never to the convex path.
 
 use crate::nl_reader::{BinOp, Expr, NlProblem, UnaryOp};
+use pounce_common::types::{lower_bound_present, upper_bound_present};
 use std::collections::BTreeMap;
 
 /// Tolerance for the smallest-eigenvalue sign test in the convexity
@@ -87,17 +88,6 @@ const SOCP_SIZE_BUDGET: u64 = 100_000_000;
 /// convexity test itself is the cheap sparse factorization in
 /// [`coupled_hessian_is_psd`].
 const QCQP_SOCP_COUPLED_VARS: usize = 256;
-
-/// The `.nl` "infinity" sentinel for a missing bound: AMPL writes ±1e20-ish
-/// and upstream Ipopt treats any magnitude ≥ 1e19 as infinite. Used to read
-/// a quadratic constraint's *sense* (one-sided `≤` vs. equality / range / `≥`)
-/// when deciding whether a QCQP is convex — see [`classify_problem`].
-const NL_INF: f64 = 1e19;
-
-#[inline]
-fn is_finite_bound(v: f64) -> bool {
-    v.abs() < NL_INF
-}
 
 /// The mathematical class of a loaded problem, from most to least
 /// specialized. See the module docs and `dev-notes/lp-qp-routing.md`.
@@ -283,8 +273,16 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
                 Some(q) => {
                     let lo = prob.g_l[row];
                     let hi = prob.g_u[row];
-                    let vacuous = !is_finite_bound(lo) && !is_finite_bound(hi);
-                    let upper_only = is_finite_bound(hi) && !is_finite_bound(lo);
+                    // Presence is directional (gh #401). The symmetric
+                    // `|v| < 1e19` test this used to run called a row with a
+                    // real bound past the *opposite* sentinel — `g(x) >= 5e20`
+                    // arrives as `g_l = 5e20`, `g_u = 1e19` — free on both
+                    // sides, and `continue` below then dropped a real
+                    // constraint from the convexity decision.
+                    let lo_present = lower_bound_present(lo);
+                    let hi_present = upper_bound_present(hi);
+                    let vacuous = !lo_present && !hi_present;
+                    let upper_only = hi_present && !lo_present;
                     if vacuous {
                         // Free row: imposes nothing, so it cannot make the
                         // problem nonconvex. Ignore it.
@@ -1157,6 +1155,43 @@ mod tests {
         );
         let prob = qp_stub(obj, vec![Expr::Const(0.0)]);
         assert_eq!(classify_problem(&prob), ProblemClass::ConvexQp);
+    }
+
+    /// **gh #401.** A quadratic row whose real bound lies past the *opposite*
+    /// sentinel must not be waved through as a free row.
+    ///
+    /// `x0² + x1² >= 5e20` arrives as `g_l = 5e20` (real), `g_u = 1e19`
+    /// (the absent-upper sentinel). The symmetric `|v| < 1e19` test called
+    /// *both* sides infinite, so `vacuous` was true and the row was skipped
+    /// with "Free row: imposes nothing" — and the model then classified as a
+    /// convex QCQP and went to the conic solver as if the constraint were not
+    /// there. It is a reverse-convex row: the honest answer is NLP.
+    #[test]
+    fn a_quadratic_row_bounded_past_the_sentinel_is_not_vacuous() {
+        let con = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )),
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(1)),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let mut prob = qp_stub(Expr::Const(0.0), vec![con]);
+        prob.obj_linear = vec![(0, 1.0)];
+        prob.g_l = vec![5e20]; // real lower bound
+        prob.g_u = vec![1e19]; // absent-upper sentinel
+        assert_eq!(
+            classify_problem(&prob),
+            ProblemClass::Nlp,
+            "a `>=` quadratic row is reverse-convex and must route to NLP; \
+             treating it as a free row sent the model to the conic solver \
+             with the constraint silently dropped"
+        );
     }
 
     #[test]
