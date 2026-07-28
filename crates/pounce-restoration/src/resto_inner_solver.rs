@@ -48,6 +48,7 @@ use pounce_algorithm::ipopt_data::{IpoptData, IpoptDataHandle};
 use pounce_algorithm::ipopt_nlp::IpoptNlp;
 use pounce_algorithm::iterates_vector::IteratesVector;
 use pounce_algorithm::mu::monotone::MonotoneMuUpdate;
+use pounce_common::tolerance::is_significant;
 use pounce_common::types::Index;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::{CompoundVector, Vector};
@@ -522,6 +523,19 @@ pub fn run_inner_resto(
     let outer_tol = outer_data.borrow().tol;
     let (orig_inf_pr_at_final, orig_inf_pr_scaled) =
         eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or((0.0, 0.0));
+    // Row magnitude implied by the two measures of the same violation:
+    // `orig_inf_pr_scaled = dc * orig_inf_pr_at_final` for the worst row, so
+    // their ratio is that row's `1/dc` — its natural magnitude. Using the
+    // solver's own scaling rather than a second notion of scale keeps one
+    // authority, and it is available here without plumbing the vectors through.
+    let violation_scale = if orig_inf_pr_scaled.is_finite()
+        && orig_inf_pr_scaled > 0.0
+        && orig_inf_pr_at_final.is_finite()
+    {
+        orig_inf_pr_at_final / orig_inf_pr_scaled
+    } else {
+        1.0
+    };
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
     // Square problems: upstream `IpRestoMinC_1Nrm.cpp:357-371` returns
@@ -543,7 +557,7 @@ pub fn run_inner_resto(
             SolverReturn::Success | SolverReturn::StopAtAcceptablePoint
         )
         && inner_stationarity_converged
-        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4);
+        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol);
 
     // Alt locally-infeasible gate. PFIT2/PFIT3-style: the inner
     // resto NLP is at (or near) a stationary point — `inner_kkt_err`
@@ -583,7 +597,7 @@ pub fn run_inner_resto(
             | SolverReturn::MaxiterExceeded
             | SolverReturn::ErrorInStepComputation
     ) && inner_kkt_err <= 1e-2
-        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
         && inner_iter_count >= 30;
 
     // Cycle locally-infeasible gate (CRESC100-style). The inner has run
@@ -600,7 +614,7 @@ pub fn run_inner_resto(
     // misclassifying genuinely under-resourced solves.
     let cycle_locally_infeasible = matches!(status, SolverReturn::MaxiterExceeded)
         && inner_iter_count >= 1000
-        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
         && orig_inf_pr_at_final.is_finite();
 
     // Step-failure locally-infeasible gate (qcqp750-2nc-style). The
@@ -619,7 +633,7 @@ pub fn run_inner_resto(
     // gate's "not a premature failure".
     let step_failure_locally_infeasible = matches!(status, SolverReturn::ErrorInStepComputation)
         && inner_iter_count >= 30
-        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-3)
+        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
         && orig_inf_pr_at_final.is_finite();
 
     // Tiny-step locally-infeasible gate (gh #372). At a tight user `tol`
@@ -644,7 +658,7 @@ pub fn run_inner_resto(
     let tiny_step_locally_infeasible = !is_square_problem
         && matches!(status, SolverReturn::StopAtTinyStep)
         && inner_kkt_err <= 1e-2
-        && orig_inf_pr_at_final > (100.0 * outer_tol).max(1e-4)
+        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
         && orig_inf_pr_at_final.is_finite();
 
     // Admissibility guard over ALL of the gates above, in one place.
