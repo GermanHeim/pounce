@@ -48,14 +48,14 @@ The `solver_selection` option overrides the automatic choice. It is a
 normal POUNCE option, so it works on the command line, in an options
 file, or through Pyomo's `solver.options`.
 
-| Value           | Behavior                                                            |
-|-----------------|---------------------------------------------------------------------|
-| `auto`          | **Default.** Route by detected class (table above).                 |
-| `nlp`           | Always use the NLP filter-IPM, regardless of class.                 |
-| `lp-ipm`        | Force the convex IPM; **errors** if the problem is not an LP.        |
-| `qp-ipm`        | Force the convex IPM; **errors** if the problem is not LP/convex-QP. |
-| `socp`          | Force the conic IPM; **errors** if the problem is not a convex QCQP. |
-| `qp-active-set` | Reserved for the active-set QP track; currently falls back to NLP.  |
+| Value           | Behavior                                                                        |
+|-----------------|---------------------------------------------------------------------------------|
+| `auto`          | **Default.** Route by detected class (table above).                             |
+| `nlp`           | Always use the NLP filter-IPM, regardless of class.                             |
+| `lp-ipm`        | Force the convex IPM; **errors** if the problem is not an LP.                   |
+| `qp-ipm`        | Force the convex IPM; **errors** if the problem is not LP/convex-QP.            |
+| `socp`          | Force the conic IPM; **errors** if the problem is not a convex QCQP.            |
+| `qp-active-set` | Force the active-set SQP engine; **errors** if the problem is not LP/convex-QP. |
 
 ```sh
 # Let POUNCE decide (default):
@@ -66,6 +66,9 @@ pounce model.nl solver_selection=nlp
 
 # Insist the problem is a convex QP — fail loudly if it is not:
 pounce model.nl solver_selection=qp-ipm
+
+# Solve that same QP with the active-set engine instead of the IPM:
+pounce model.nl solver_selection=qp-active-set
 ```
 
 A forced value that does not match the detected class is rejected with
@@ -75,6 +78,16 @@ a clear message rather than silently ignored:
 pounce: problem class NLP does not match forced solver qp-ipm
         (expected an LP or convex QP)
 ```
+
+`qp-active-set` runs the active-set SQP engine, whose step QPs are solved
+by `pounce-qp`'s `ParametricActiveSetSolver`; on an LP or convex QP that
+converges in essentially one QP solve. It is the same engine the
+`algorithm=active-set-sqp` option selects — on the CLI, `solver_selection`
+additionally validates the problem class first, which is why the row above
+can promise the error. Duals are recovered and the `.sol` written exactly
+as on the IPM path. (The `minimize` library path has no `.nl` to classify,
+so there it runs on whatever problem it is given; see
+[Python](python.md#forcing-the-solver).)
 
 ### From Pyomo
 
