@@ -973,8 +973,18 @@ impl PresolveTnlp {
         // declared bound, which is worse than the error it replaces and defeats
         // `honor_original_bounds`. Clamping to the original box keeps the
         // reported point admissible.
+        //
+        // Only *sub-margin* crossings collapse. A crossing the solver itself
+        // would call a real violation — above `certify_margin` — is not float
+        // noise; it is a user-declared empty box (`x in [5, 3]`) on a variable
+        // no linear row ever propagated into, which Phase 1 therefore never
+        // flagged. Collapsing that would turn `Invalid_Problem_Definition`
+        // into `Solve_Succeeded` at a point the model excludes — a wrong
+        // answer replacing a correct error. Those stay crossed so the solver
+        // rejects them exactly as it does with presolve off.
+        let collapse_margin = certify_margin(self.opts.certify_tol);
         for j in 0..n {
-            if x_l[j] > x_u[j] {
+            if x_l[j] > x_u[j] && x_l[j] - x_u[j] <= collapse_margin {
                 let mid = (0.5 * (x_l[j] + x_u[j]))
                     .max(inner_x_l[j])
                     .min(inner_x_u[j]);

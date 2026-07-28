@@ -304,3 +304,45 @@ fn interval_overflow_is_never_mistaken_for_a_proof() {
          (solve_result_num={srn}):\n{text}"
     );
 }
+
+/// A *user-declared* crossed box must still be rejected, not silently solved.
+///
+/// `presolve_crossed_user_box.nl` is `min x^2` with `x in [5, 3]` and no
+/// constraints — an empty box straight from the modeller, on a variable no
+/// linear row ever propagates into, so Phase 1 never flags it. The sub-margin
+/// collapse exists for crossings *tightening* created out of float noise
+/// (`5.5e-17`); without its margin guard it also swallowed this one, and a
+/// model with an empty feasible region reported `Solve_Succeeded` at `x = 3` —
+/// a point the model excludes — while `presolve=no` correctly returned
+/// `Invalid_Problem_Definition` (504). The two routes must agree.
+#[test]
+fn user_declared_crossed_box_is_still_rejected() {
+    for (tag, opt) in [("xb_on", "presolve=yes"), ("xb_off", "presolve=no")] {
+        let sol = std::env::temp_dir().join(format!("pounce_{tag}.sol"));
+        let _ = std::fs::remove_file(&sol);
+        let out = Command::new(pounce_exe())
+            .arg(fixture("presolve_crossed_user_box.nl"))
+            .arg("-AMPL")
+            .arg("--sol-output")
+            .arg(&sol)
+            .arg("print_level=0")
+            .arg("solver_selection=nlp")
+            .arg(opt)
+            .output()
+            .expect("spawn pounce");
+        assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
+        let text = std::fs::read_to_string(&sol).expect("read .sol");
+        let srn = solve_result_num(&text);
+
+        assert_ne!(
+            srn, 0,
+            "{opt}: a model whose declared box is empty (x in [5, 3]) must \
+             never report Solve_Succeeded:\n{text}"
+        );
+        assert_eq!(
+            srn, 504,
+            "{opt}: expected Invalid_Problem_Definition (504), the same \
+             verdict the presolve=no route gives:\n{text}"
+        );
+    }
+}
