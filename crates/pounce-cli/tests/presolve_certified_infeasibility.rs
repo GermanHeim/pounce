@@ -65,6 +65,64 @@ fn solve(tag: &str, extra: &[&str]) -> String {
     std::fs::read_to_string(&sol).expect("read .sol")
 }
 
+fn solve_fixture(model: &str, tag: &str, extra: &[&str]) -> String {
+    let sol = std::env::temp_dir().join(format!("pounce_presolve_cert_{tag}.sol"));
+    let _ = std::fs::remove_file(&sol);
+
+    let out = Command::new(pounce_exe())
+        .arg(fixture(model))
+        .arg("-AMPL")
+        .arg("--sol-output")
+        .arg(&sol)
+        .arg("print_level=0")
+        .args(extra)
+        .output()
+        .expect("spawn pounce");
+
+    assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
+    std::fs::read_to_string(&sol).expect("read .sol")
+}
+
+/// **gh #396.** A *proof* of infeasibility is the strongest claim POUNCE makes;
+/// it must never be issued for a model that has a feasible point.
+///
+/// `feasible_x0_sentinel_bound.nl` is property-test seed 223, feasible by
+/// construction. `pounce check-x0` measures its declared starting point at
+/// **exactly** zero violation — `rows violated: 0, max violation: 0.000e0` — and
+/// the convex QP route solves it to optimality. Presolve reported
+/// `solve_result_num` 201, "detected by presolve: bound propagation".
+///
+/// The witness gate that exists to stop precisely this was mishandling the
+/// absent-bound sentinel on row `c[3]` (`-1e30·x[0] <= -5.0000000000000007e20`),
+/// in both directions at once: it scored a violation against the `-1e19`
+/// sentinel standing in for the row's absent *lower* bound, and it discarded
+/// the row's real *upper* bound because `|−5e20|` exceeds that same sentinel's
+/// magnitude. See `pounce_presolve::witness_refutes_infeasibility`.
+///
+/// The assertion is on the band, not on a specific code. This model still does
+/// not solve — it returns `Invalid_Problem_Definition` (504) because the
+/// adapter reads the same out-of-range bound as a crossed constraint pair,
+/// which is tracked separately. What must never come back is a claim that a
+/// model with a feasible point has none.
+#[test]
+fn a_feasible_model_is_never_certified_infeasible() {
+    for (tag, opts) in [
+        ("s223_presolve", vec!["presolve=yes", "presolve_fbbt=yes"]),
+        ("s223_plain", vec!["presolve=no"]),
+    ] {
+        let text = solve_fixture("feasible_x0_sentinel_bound.nl", tag, &opts);
+        let srn = solve_result_num(&text);
+        assert!(
+            !(200..300).contains(&srn),
+            "{opts:?}: this model is feasible — `pounce check-x0` reports \
+             `rows violated: 0  max violation: 0.000e0` at its own starting \
+             point, and the convex route solves it — so no code in the AMPL \
+             infeasible band is defensible, least of all the certified 201 \
+             (got {srn}):\n{text}"
+        );
+    }
+}
+
 /// `0 <= x <= 0.6` with `x >= 0.7` is a one-row contradiction over a box, which
 /// bound propagation decides exactly. With presolve on it must be reported as
 /// *proved*, not merely locally infeasible.

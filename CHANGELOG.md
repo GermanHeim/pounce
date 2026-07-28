@@ -79,6 +79,47 @@ changes.
   - Docs: [Solution output](docs/src/solution-output.md) gains a
     `solve_result_num` band table and the proved-vs-local distinction.
 
+### Fixed — presolve *certified* a feasible model infeasible, from an absent-bound sentinel (#396)
+
+- **A model with a feasible point is no longer reported `solve_result_num` 201.**
+  `201` claims a *proof*, which is the strongest thing POUNCE says; this one was
+  false. The model (property-test seed 223) is feasible by construction, and
+  `pounce check-x0` measures its own declared starting point at **exactly** zero
+  violation — `rows violated: 0, max violation: 0.000e0` — while the convex QP
+  route solves it to optimality.
+  - Root cause is the absent-bound sentinel, mishandled in **both directions on
+    the same row**. POUNCE stores an absent constraint bound as `±1e19`
+    (`INF_BOUND`), not as an infinity, so every use has to ask whether a bound is
+    real. `witness_refutes_infeasibility` asked twice, differently, and got both
+    wrong for row `-1e30·x[0] <= -5.0000000000000007e20`:
+    - The violation term was `(g_l - v).max(v - g_u)` with **no** presence test,
+      so it scored `4.9e20` against a lower bound the row does not have — at a
+      point whose true violation is zero.
+    - The magnitude term used a **symmetric** test, `|b| < INF_BOUND`, which
+      called the row's genuine upper bound `-5e20` absent and discarded a real
+      constraint.
+  - Either error alone sinks the witness, so no candidate point could ever
+    refute the verdict, and the certification escaped.
+  - Fix: one **directional** predicate, matching the convention
+    `pounce_presolve::bound_tighten` already uses (`x_l <= -INF_BOUND`,
+    `x_u >= INF_BOUND`) — a lower bound is absent below `-INF_BOUND`, an upper
+    bound above `+INF_BOUND` — derived once and used for both the magnitude and
+    the violation, so the two cannot drift apart again.
+  - Strictly one-directional, like the gate it sits in: it can only ever
+    *withdraw* a verdict. Every certified-infeasibility test still passes,
+    including the must-still-detect cases.
+  - **The property sweep is now at zero.** Over 400 feasible-by-construction
+    instances, false positives in the AMPL infeasible band go `1 → 0` on the full
+    presolve option set (and stay at 0 on the numerical path from #379).
+    `MAX_FALSE_POSITIVES` ratchets `1 → 0` — a floor, not a target.
+  - **Still open on this model:** it does not solve. It now returns
+    `Invalid_Problem_Definition` (504), because `TNLPAdapter` reads the same
+    out-of-range bound as a crossed constraint pair — `g_l = -1e19` against
+    `g_u = -5e20` trips the `lo > hi` check. That is a separate defect in the
+    sentinel convention for constraint bounds, affecting any model with a
+    one-sided bound beyond `±1e19`; it is tracked on its own. The regression test
+    here asserts the *band*, not a specific code, for that reason.
+
 ### Fixed — the NLP path reported `Infeasible_Problem_Detected` on models whose own starting point is feasible (#379)
 
 - **No numerical path may now claim infeasibility while holding a point that
