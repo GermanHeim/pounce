@@ -73,8 +73,15 @@ def _clip(x, bounds):
     return np.clip(x, lo, hi)
 
 
-def _finite(b) -> bool:
-    return b is not None and np.isfinite(b) and -_BOUND_INF < b < _BOUND_INF
+def _lower_present(b) -> bool:
+    """Is this *lower* bound real, or the absent-bound sentinel? Directional,
+    not a magnitude band (gh #403)."""
+    return b is not None and np.isfinite(b) and b > -_BOUND_INF
+
+
+def _upper_present(b) -> bool:
+    """Is this *upper* bound real? See :func:`_lower_present`."""
+    return b is not None and np.isfinite(b) and b < _BOUND_INF
 
 
 def _midpoint(bounds, x0, n):
@@ -87,7 +94,7 @@ def _midpoint(bounds, x0, n):
     for j, b in enumerate(bounds):
         lo = b[0] if b is not None else None
         hi = b[1] if b is not None else None
-        flo, fhi = _finite(lo), _finite(hi)
+        flo, fhi = _lower_present(lo), _upper_present(hi)
         if flo and fhi:
             out[j] = 0.5 * (lo + hi)
         elif flo:
@@ -234,8 +241,8 @@ def project_to_feasible(
 
     A_rows, b_rows, G_rows, h_rows = [], [], [], []
     for i in range(m):
-        lo_f = _finite(g_l[i])
-        hi_f = _finite(g_u[i])
+        lo_f = _lower_present(g_l[i])
+        hi_f = _upper_present(g_u[i])
         eq = abs(g_u[i] - g_l[i]) <= 1e-12 if (lo_f and hi_f) else False
         if eq:
             A_rows.append(J[i])

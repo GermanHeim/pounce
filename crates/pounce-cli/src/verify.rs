@@ -42,7 +42,7 @@
 
 use crate::nl_reader;
 use pounce_common::tolerance::is_negligible;
-use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
+use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, TNLP};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -192,9 +192,13 @@ pub struct RowReport {
     pub violation: Number,
 }
 
-pub(crate) fn is_finite_bound(b: Number) -> bool {
-    b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF
-}
+// `is_finite_bound(b) = b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF`
+// used to live here — a *band* membership test applied to lower and upper
+// bounds alike (gh #403). A real upper bound of `-5e20` failed it, so
+// `box_violation` scored `0.0` against it and `verify` reported ACCEPTED for a
+// `.sol` that violates a declared bound. Presence is directional; use
+// `lower_bound_present` / `upper_bound_present` from `pounce_common::types`,
+// picking the one that matches the side you hold.
 
 /// `g_l ≤ v ≤ g_u` violation: how far `v` is outside the box, 0 if inside.
 ///
@@ -211,10 +215,10 @@ pub(crate) fn is_finite_bound(b: Number) -> bool {
 /// information and are skipped.
 pub(crate) fn row_magnitude(value: Number, lo: Number, hi: Number) -> Number {
     let mut m = if value.is_finite() { value.abs() } else { 0.0 };
-    if is_finite_bound(lo) {
+    if lower_bound_present(lo) {
         m = m.max(lo.abs());
     }
-    if is_finite_bound(hi) {
+    if upper_bound_present(hi) {
         m = m.max(hi.abs());
     }
     m
@@ -250,12 +254,12 @@ pub(crate) fn box_violation(v: Number, lo: Number, hi: Number) -> Number {
     if !v.is_finite() {
         return Number::INFINITY;
     }
-    let below = if is_finite_bound(lo) {
+    let below = if lower_bound_present(lo) {
         lo - v
     } else {
         Number::NEG_INFINITY
     };
-    let above = if is_finite_bound(hi) {
+    let above = if upper_bound_present(hi) {
         v - hi
     } else {
         Number::NEG_INFINITY
@@ -522,10 +526,13 @@ fn stationarity_residual(
     // Activity tolerance for "x_j sits on a bound."
     let mut dual_inf = 0.0_f64;
     for j in 0..n {
-        let at_lo = is_finite_bound(x_l[j]) && (x[j] - x_l[j]).abs() <= 1e-8 * (1.0 + x_l[j].abs());
-        let at_hi = is_finite_bound(x_u[j]) && (x_u[j] - x[j]).abs() <= 1e-8 * (1.0 + x_u[j].abs());
-        let fixed =
-            is_finite_bound(x_l[j]) && is_finite_bound(x_u[j]) && (x_u[j] - x_l[j]).abs() <= 1e-12;
+        let at_lo =
+            lower_bound_present(x_l[j]) && (x[j] - x_l[j]).abs() <= 1e-8 * (1.0 + x_l[j].abs());
+        let at_hi =
+            upper_bound_present(x_u[j]) && (x_u[j] - x[j]).abs() <= 1e-8 * (1.0 + x_u[j].abs());
+        let fixed = lower_bound_present(x_l[j])
+            && upper_bound_present(x_u[j])
+            && (x_u[j] - x_l[j]).abs() <= 1e-12;
         let r = if fixed {
             0.0
         } else if at_lo && !at_hi {
@@ -553,15 +560,21 @@ fn constraint_complementarity(
 ) -> Number {
     let mut comp = 0.0_f64;
     for i in 0..lambda.len() {
-        if (g_u[i] - g_l[i]).abs() <= 1e-12 {
+        // An equality needs *both* bounds present (gh #403): `g_l = g_u = -5e20`
+        // is the one-sided `g <= -5e20`, not an equality at `-5e20`, and
+        // skipping it here would drop a real complementarity term.
+        if lower_bound_present(g_l[i])
+            && upper_bound_present(g_u[i])
+            && (g_u[i] - g_l[i]).abs() <= 1e-12
+        {
             continue; // equality: multiplier is free, no complementarity
         }
-        let dl = if is_finite_bound(g_l[i]) {
+        let dl = if lower_bound_present(g_l[i]) {
             (g[i] - g_l[i]).abs()
         } else {
             Number::INFINITY
         };
-        let du = if is_finite_bound(g_u[i]) {
+        let du = if upper_bound_present(g_u[i]) {
             (g_u[i] - g[i]).abs()
         } else {
             Number::INFINITY
@@ -1019,6 +1032,7 @@ pub mod sha256 {
 mod tests {
     use super::*;
     use crate::nl_writer::{SolutionFile, format_sol};
+    use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 
     #[test]
     fn sha256_known_answers() {
@@ -1127,6 +1141,52 @@ mod tests {
         assert_eq!(
             box_violation(Number::NEG_INFINITY, NLP_LOWER_BOUND_INF, 10.0),
             Number::INFINITY
+        );
+    }
+
+    /// **gh #403.** `verify` exists to be the independent check on a `.sol`.
+    /// A checker that under-reports is worse than its blast radius suggests.
+    ///
+    /// `is_finite_bound` was a *band* membership test —
+    /// `b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF` — applied to `lo`
+    /// and `hi` alike. A real upper bound of `-5e20` failed it, so `above`
+    /// became `-inf` and the violation read `0.0`: **ACCEPTED for a `.sol` that
+    /// violates a declared bound.**
+    #[test]
+    fn a_bound_past_the_opposite_sentinel_still_scores_a_violation() {
+        // x <= -5e20, no lower bound. The point 0.0 violates it by 5e20.
+        let v = box_violation(0.0, NLP_LOWER_BOUND_INF, -5.0e20);
+        assert_eq!(
+            v, 5.0e20,
+            "0 is 5e20 above an upper bound of -5e20; scoring it 0.0 lets a \
+             fabricated .sol past the feasibility gate"
+        );
+        // Mirror: x >= 5e20, no upper bound.
+        assert_eq!(box_violation(0.0, 5.0e20, NLP_UPPER_BOUND_INF), 5.0e20);
+        // A point that does satisfy the same bound still scores zero.
+        assert_eq!(box_violation(-6.0e20, NLP_LOWER_BOUND_INF, -5.0e20), 0.0);
+        // And the sentinels themselves still mean "no bound".
+        assert_eq!(
+            box_violation(1e30, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF),
+            0.0
+        );
+    }
+
+    /// The same predicate sizes a row's magnitude for the scale-relative
+    /// feasibility test. A row written at `5e20` must report that magnitude,
+    /// not fall back to its evaluated value alone.
+    #[test]
+    fn row_magnitude_counts_a_bound_past_the_opposite_sentinel() {
+        assert_eq!(
+            row_magnitude(1.0, NLP_LOWER_BOUND_INF, -5.0e20),
+            5.0e20,
+            "the row's own upper bound is its magnitude"
+        );
+        assert_eq!(row_magnitude(1.0, 5.0e20, NLP_UPPER_BOUND_INF), 5.0e20);
+        // Absent on both sides: only the evaluated value carries magnitude.
+        assert_eq!(
+            row_magnitude(3.0, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF),
+            3.0
         );
     }
 }

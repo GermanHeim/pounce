@@ -381,16 +381,20 @@ def _seed_pin(v) -> None:
     if v.value != 0.0:
         return
     lo, hi = v.lb, v.ub
-    finite = lambda b: b is not None and abs(b) < 1e19  # noqa: E731
-    if finite(lo) and finite(hi):
+    # Directional presence (gh #403): `abs(b) < 1e19` called a real bound of
+    # -5e20 absent, and this fell through to seeding 0.0 — outside the
+    # variable's own declared box.
+    lo_ok = lo is not None and lo > -1e19
+    hi_ok = hi is not None and hi < 1e19
+    if lo_ok and hi_ok:
         for frac in (0.75, 0.6):  # midpoint was zero; try off-center
             cand = lo + frac * (hi - lo)
             if cand != 0.0:
                 v.set_value(cand, skip_validation=True)
                 return
-    elif finite(lo):
+    elif lo_ok:
         v.set_value(lo + 2.0, skip_validation=True)  # lo + 1 was zero
-    elif finite(hi):
+    elif hi_ok:
         v.set_value(hi - 2.0, skip_validation=True)  # hi - 1 was zero
     else:
         v.set_value(1.0, skip_validation=True)
@@ -826,12 +830,16 @@ def block_initialize(
 def _seed_var(v) -> None:
     """Bounds-aware Newton seed for a valueless variable."""
     lo, hi = v.lb, v.ub
-    finite = lambda b: b is not None and abs(b) < 1e19  # noqa: E731
-    if finite(lo) and finite(hi):
+    # Directional presence (gh #403): `abs(b) < 1e19` called a real bound of
+    # -5e20 absent, and this fell through to seeding 0.0 — outside the
+    # variable's own declared box.
+    lo_ok = lo is not None and lo > -1e19
+    hi_ok = hi is not None and hi < 1e19
+    if lo_ok and hi_ok:
         v.set_value(0.5 * (lo + hi), skip_validation=True)
-    elif finite(lo):
+    elif lo_ok:
         v.set_value(lo + 1.0, skip_validation=True)
-    elif finite(hi):
+    elif hi_ok:
         v.set_value(hi - 1.0, skip_validation=True)
     else:
         v.set_value(0.0, skip_validation=True)

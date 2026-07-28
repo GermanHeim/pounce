@@ -186,15 +186,28 @@ def _as_bounds(bound, n: int, default: float) -> np.ndarray:
     return b
 
 
-def _finite_bound(b: float) -> bool:
-    return bool(np.isfinite(b)) and -_BOUND_INF < b < _BOUND_INF
+def _lower_present(b: float) -> bool:
+    """Is this *lower* bound real, or the absent-bound sentinel?
+
+    Presence is directional (gh #403). The single ``-_BOUND_INF < b <
+    _BOUND_INF`` band test this replaced was applied to both sides, so a real
+    upper bound of ``-5e20`` read as absent and ``_box_violation`` scored 0.0
+    against it — the report said a starting point was inside a box it is
+    outside of.
+    """
+    return bool(np.isfinite(b)) and b > -_BOUND_INF
+
+
+def _upper_present(b: float) -> bool:
+    """Is this *upper* bound real? See :func:`_lower_present`."""
+    return bool(np.isfinite(b)) and b < _BOUND_INF
 
 
 def _box_violation(v: float, lo: float, hi: float) -> float:
     if not np.isfinite(v):
         return float("inf")
-    below = lo - v if _finite_bound(lo) else -float("inf")
-    above = v - hi if _finite_bound(hi) else -float("inf")
+    below = lo - v if _lower_present(lo) else -float("inf")
+    above = v - hi if _upper_present(hi) else -float("inf")
     return max(below, above, 0.0)
 
 
@@ -203,7 +216,7 @@ def _clamp_to_interior(
 ) -> float:
     """The per-component interior clamp from the solver's
     ``DefaultIterateInitializer`` (see docs/src/initialization.md)."""
-    flo, fhi = _finite_bound(lo), _finite_bound(hi)
+    flo, fhi = _lower_present(lo), _upper_present(hi)
     if flo and fhi:
         span = hi - lo
         p_l = min(bound_push * max(abs(lo), 1.0), bound_frac * span)
@@ -349,10 +362,10 @@ def preflight(
                 max_bound_violation = max(max_bound_violation, viol)
             bound_violations.append((j, float(x0[j]), float(x_l[j]), float(x_u[j]), viol))
         if np.isfinite(x0[j]):
-            at_lo = _finite_bound(x_l[j]) and abs(x0[j] - x_l[j]) <= 1e-8 * (
+            at_lo = _lower_present(x_l[j]) and abs(x0[j] - x_l[j]) <= 1e-8 * (
                 1.0 + abs(x_l[j])
             )
-            at_hi = _finite_bound(x_u[j]) and abs(x_u[j] - x0[j]) <= 1e-8 * (
+            at_hi = _upper_present(x_u[j]) and abs(x_u[j] - x0[j]) <= 1e-8 * (
                 1.0 + abs(x_u[j])
             )
             if at_lo or at_hi:

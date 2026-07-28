@@ -32,8 +32,8 @@
 //! User-facing background: `docs/src/initialization.md`.
 
 use crate::nl_reader;
-use crate::verify::{RowReport, box_violation, is_finite_bound, name_at, sha256};
-use pounce_common::types::Number;
+use crate::verify::{RowReport, box_violation, name_at, sha256};
+use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::tnlp::{BoundsInfo, SparsityRequest, StartingPoint, TNLP};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -522,9 +522,9 @@ pub fn check_tnlp(
         }
         if x[j].is_finite() {
             let at_lo =
-                is_finite_bound(x_l[j]) && (x[j] - x_l[j]).abs() <= 1e-8 * (1.0 + x_l[j].abs());
+                lower_bound_present(x_l[j]) && (x[j] - x_l[j]).abs() <= 1e-8 * (1.0 + x_l[j].abs());
             let at_hi =
-                is_finite_bound(x_u[j]) && (x_u[j] - x[j]).abs() <= 1e-8 * (1.0 + x_u[j].abs());
+                upper_bound_present(x_u[j]) && (x_u[j] - x[j]).abs() <= 1e-8 * (1.0 + x_u[j].abs());
             if at_lo || at_hi {
                 n_on_bounds += 1;
             }
@@ -719,7 +719,7 @@ pub fn clamp_to_interior(
     bound_push: Number,
     bound_frac: Number,
 ) -> Number {
-    match (is_finite_bound(lo), is_finite_bound(hi)) {
+    match (lower_bound_present(lo), upper_bound_present(hi)) {
         (true, true) => {
             let span = hi - lo;
             let p_l = (bound_push * lo.abs().max(1.0)).min(bound_frac * span);

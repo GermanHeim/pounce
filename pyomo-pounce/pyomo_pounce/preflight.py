@@ -29,15 +29,26 @@ from typing import List, Optional, Tuple
 __all__ = ["preflight", "PyomoPreflightReport", "initialize_missing_values"]
 
 
-def _finite(b: Optional[float]) -> bool:
-    return b is not None and math.isfinite(b) and abs(b) < 1e19
+def _lower_present(b: Optional[float]) -> bool:
+    """Is this *lower* bound real, or the absent-bound sentinel?
+
+    Directional, not a magnitude test (gh #403): the ``abs(b) < 1e19`` form this
+    replaced called a real upper bound of ``-5e20`` absent, so ``_box_violation``
+    reported 0.0 against a bound the point actually violates.
+    """
+    return b is not None and math.isfinite(b) and b > -1e19
+
+
+def _upper_present(b: Optional[float]) -> bool:
+    """Is this *upper* bound real? See :func:`_lower_present`."""
+    return b is not None and math.isfinite(b) and b < 1e19
 
 
 def _box_violation(v: float, lo: Optional[float], hi: Optional[float]) -> float:
     if v is None or not math.isfinite(v):
         return math.inf
-    below = (lo - v) if _finite(lo) else -math.inf
-    above = (v - hi) if _finite(hi) else -math.inf
+    below = (lo - v) if _lower_present(lo) else -math.inf
+    above = (v - hi) if _upper_present(hi) else -math.inf
     return max(below, above, 0.0)
 
 
@@ -142,8 +153,8 @@ def preflight(model, feas_tol: float = 1e-6, max_list: int = 5) -> PyomoPrefligh
                 n_bound_violations += 1
                 bound_violations.append((v.name, val, lo, hi, viol))
             if val is not None and math.isfinite(val):
-                at_lo = _finite(lo) and abs(val - lo) <= 1e-8 * (1.0 + abs(lo))
-                at_hi = _finite(hi) and abs(hi - val) <= 1e-8 * (1.0 + abs(hi))
+                at_lo = _lower_present(lo) and abs(val - lo) <= 1e-8 * (1.0 + abs(lo))
+                at_hi = _upper_present(hi) and abs(hi - val) <= 1e-8 * (1.0 + abs(hi))
                 if at_lo or at_hi:
                     n_on_bounds += 1
         bound_violations.sort(key=lambda t: -t[4])
@@ -251,11 +262,11 @@ def initialize_missing_values(model, strategy: str = "midpoint") -> int:
         val = 0.0
         if strategy == "midpoint":
             lo, hi = v.lb, v.ub
-            if _finite(lo) and _finite(hi):
+            if _lower_present(lo) and _upper_present(hi):
                 val = 0.5 * (lo + hi)
-            elif _finite(lo):
+            elif _lower_present(lo):
                 val = lo + 1.0
-            elif _finite(hi):
+            elif _upper_present(hi):
                 val = hi - 1.0
         v.set_value(val, skip_validation=True)
         count += 1
