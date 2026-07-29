@@ -13,7 +13,7 @@ use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::{IteratesVector, IteratesVectorMut};
 use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
 use crate::kkt::pd_system_solver::PdSystemSolver;
-use crate::kkt::perturbation_handler::PdPerturbationHandler;
+use crate::kkt::perturbation_handler::{IpoptDataSink, PdPerturbationHandler};
 use pounce_common::tagged::Tag;
 use pounce_common::types::{Index, Number};
 use pounce_common::utils::{cpu_time, wallclock_time};
@@ -1046,7 +1046,7 @@ impl PdFullSpaceSolver {
         let mut deltas = self
             .perturb
             .borrow_mut()
-            .consider_new_system(curr_mu, Some(data));
+            .consider_new_system(curr_mu, Some(&IpoptDataSink(data)));
         let Some(mut d) = deltas.take() else {
             return false;
         };
@@ -1144,7 +1144,7 @@ impl PdFullSpaceSolver {
                 let next = self
                     .perturb
                     .borrow_mut()
-                    .perturb_for_singular(curr_mu, Some(data));
+                    .perturb_for_singular(curr_mu, Some(&IpoptDataSink(data)));
                 let Some(nd) = next else { return false };
                 d = nd;
             } else if retval == ESymSolverStatus::WrongInertia
@@ -1163,7 +1163,7 @@ impl PdFullSpaceSolver {
                     let next = self
                         .perturb
                         .borrow_mut()
-                        .perturb_for_singular(curr_mu, Some(data));
+                        .perturb_for_singular(curr_mu, Some(&IpoptDataSink(data)));
                     let Some(nd) = next else { return false };
                     d = nd;
                     data.borrow_mut().append_info_string("a");
@@ -1175,7 +1175,7 @@ impl PdFullSpaceSolver {
                 let next = self
                     .perturb
                     .borrow_mut()
-                    .perturb_for_wrong_inertia(curr_mu, Some(data));
+                    .perturb_for_wrong_inertia(curr_mu, Some(&IpoptDataSink(data)));
                 let Some(nd) = next else { return false };
                 d = nd;
             }
