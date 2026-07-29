@@ -1,0 +1,724 @@
+//! Active-set QP driver — the [`pounce_qp`] parametric active-set engine
+//! wired directly into the convex path, as a peer of [`crate::ipm`].
+//!
+//! # Why this module exists
+//!
+//! `solver_selection=qp-active-set` used to reach the active-set engine the
+//! long way round: the CLI rewrote it to `algorithm=active-set-sqp` and ran
+//! the **full SQP outer loop** over the QP, treating it as a general NLP.
+//!
+//! That is not mathematically wrong. With an exact Hessian and constraints
+//! that are already linear, the first SQP subproblem *is* the original QP, so
+//! a healthy run converges in one outer iteration (and did — successful solves
+//! reported `n_iter = 1`). But it is an architectural mismatch that forfeits
+//! everything the convex path already has, and pays for machinery a QP does
+//! not need:
+//!
+//! * **No presolve.** The SQP path never touches [`crate::presolve`], so the
+//!   engine faced every redundant row, fixed variable, and singleton the
+//!   IPM never sees. This matters far more for an active-set method than for
+//!   an IPM: interior-point iteration counts are nearly problem-size
+//!   independent, whereas an active-set pivot count is *combinatorial* in the
+//!   size of the active set. Presolve is the difference between a shrunk
+//!   problem and one that exhausts its iteration budget.
+//! * **No scaling.** No Ruiz equilibration, and `nlp_scaling` is not threaded
+//!   through the SQP residuals at all.
+//! * **No timing, and misleading statuses**, both of which routed through the
+//!   NLP report path rather than the convex one.
+//! * **Pointless overhead**: AMPL evaluation callbacks, BFGS storage, and a
+//!   filter/line-search globalization, none of which do anything for a
+//!   problem whose linearization is exact.
+//!
+//! This module is the direct route. It hands the QP straight to
+//! [`ParametricActiveSetSolver`], inside the same presolve → solve → postsolve
+//! wrapper the IPM runs under, so the engine inherits the convex driver's
+//! problem reduction, reporting, and status vocabulary.
+//!
+//! The SQP route is untouched and remains correct for genuine NLPs
+//! (`algorithm=active-set-sqp`), where the outer loop is doing real work.
+//!
+//! # Translation
+//!
+//! The convex → `pounce-qp` translation (and, critically, the **dual sign
+//! transform** on the way back) is the same one [`crate::crossover`] performs;
+//! see that module's docs for the derivation. The differences here are:
+//!
+//! * The Hessian is carried through. Crossover is gated to pure LPs and builds
+//!   an empty `H`; a QP driver must translate `p_lower`. Both sides store the
+//!   **lower triangle once, 1-based for `pounce-qp` and 0-based for the convex
+//!   form**, mirroring off-diagonals implicitly — see
+//!   [`QpProblem::p_mul_add`](crate::qp::QpProblem::p_mul_add) against
+//!   `pounce_qp`'s `SymTMatrixSpace`, which agree exactly, so the map is a
+//!   straight `+1` on both indices with no triangle fixup.
+//! * The starting point comes from a **simplex phase-1 feasible vertex**
+//!   rather than an IPM iterate (there is no prior iterate here to hint from).
+//!   That seed is what makes this path work at all: `pounce-qp`'s own
+//!   l1-elastic phase-1 does not terminate on the degenerate netlib-derived
+//!   QPs in the Maros-Mészáros set, and handing `solve` a feasible primal
+//!   routes it straight to phase-2, which is the part of the method that is
+//!   strong. See `crate::simplex::simplex_feasible_vertex`.
+//! * Every terminal status is mapped, not just `Optimal` — this is the primary
+//!   driver, so it must report `MaxIter` / `NumericalError` / `Infeasible` /
+//!   `Unbounded` honestly rather than falling back to a previous solution.
+
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_qp::{
+    BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver,
+    QpOptions as ActiveSetOptions, QpProblem as ActiveSetProblem, QpSolver,
+    QpStatus as ActiveSetStatus, QpWarmStart, WorkingSet,
+};
+
+use crate::ipm::QpOptions;
+use crate::qp::{QpProblem, QpSolution, QpStatus};
+
+/// Clamp a convex lower-bound value to pounce-qp's `±1e19` free convention.
+fn to_qp_lower(lb: f64) -> f64 {
+    if lb <= NLP_LOWER_BOUND_INF {
+        NLP_LOWER_BOUND_INF
+    } else {
+        lb
+    }
+}
+
+/// Clamp a convex upper-bound value to pounce-qp's `±1e19` free convention.
+fn to_qp_upper(ub: f64) -> f64 {
+    if ub >= NLP_UPPER_BOUND_INF {
+        NLP_UPPER_BOUND_INF
+    } else {
+        ub
+    }
+}
+
+/// A solution carrying no information, returned when the engine reports a
+/// status for which no iterate is meaningful. `x` is zero-filled rather than
+/// left empty so downstream residual/objective code has the right lengths.
+fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpSolution {
+    QpSolution {
+        status,
+        x: vec![0.0; n],
+        y: vec![0.0; m_eq],
+        z: vec![0.0; m_ineq],
+        z_lb: vec![0.0; n],
+        z_ub: vec![0.0; n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    }
+}
+
+/// Solve a convex QP with the [`pounce_qp`] parametric active-set engine.
+///
+/// Signature-compatible with [`crate::ipm::solve_qp_ipm`] so the CLI driver
+/// can select between them without restructuring, including the
+/// `make_backend` factory (the active-set engine may need more than one
+/// backend instance over a solve).
+pub fn solve_qp_active_set<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // Ruiz equilibration is applied as a **retry after failure**, not
+    // unconditionally, because for this engine it is a genuine trade rather
+    // than an improvement. Measured on Maros-Mészáros:
+    //
+    // | problem  | unscaled            | Ruiz-equilibrated   |
+    // |----------|---------------------|---------------------|
+    // | LOTSCHD  | MaxIter (2.36)      | **Optimal (2398.4)**|
+    // | CVXQP1_S | **Optimal (11590.7)**| MaxIter (17220)    |
+    // | CVXQP2_S | **Optimal (8120.9)** | MaxIter (9965)     |
+    //
+    // Scaling rescues the badly-scaled netlib-derived instances and breaks the
+    // well-scaled CVXQP family, so *neither* fixed choice dominates. Solving
+    // unscaled first and equilibrating only when that fails takes both columns'
+    // wins and cannot regress: we reach the retry only after the first attempt
+    // already failed to produce a verified KKT point. This mirrors the IPM's
+    // own HSDE-then-Ruiz fallback (`solve_qp_ipm_core`) and its reasoning
+    // — "there is nothing left to regress".
+    let unscaled_opts = QpOptions {
+        equilibrate: false,
+        ..*opts
+    };
+    let sol = solve_translated(prob, &unscaled_opts, make_backend);
+    if !opts.equilibrate || is_solved(sol.status) {
+        return sol;
+    }
+
+    let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+    let mut retry = solve_translated(&scaled, &unscaled_opts, make_backend);
+    scaling.unscale_solution(prob, &mut retry);
+    // Re-verify against the ORIGINAL problem: the verdict reached inside the
+    // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
+    // moves the residuals, so it has to be re-earned here rather than carried
+    // over on the strength of the wrong problem's numbers.
+    retry.status = reverify_after_unscale(retry.status, &retry, prob, opts);
+    // Keep the original failure when the retry also fails, so the reported
+    // status describes the attempt made on the problem as the user posed it.
+    if is_solved(retry.status) { retry } else { sol }
+}
+
+/// Did the solve produce a usable, verified KKT point?
+fn is_solved(s: QpStatus) -> bool {
+    matches!(s, QpStatus::Optimal | QpStatus::OptimalInaccurate)
+}
+
+/// Translate to `pounce-qp` form, solve, and verify — one attempt, no scaling
+/// decisions. `opts.equilibrate` is ignored here; the caller owns that choice.
+fn solve_translated<F>(prob: &QpProblem, opts: &QpOptions, make_backend: &mut F) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+    let m = m_eq + m_ineq;
+
+    // ---- Hessian: lower triangle, 0-based -> 1-based (no triangle fixup) ----
+    let mut h_irow = Vec::with_capacity(prob.p_lower.len());
+    let mut h_jcol = Vec::with_capacity(prob.p_lower.len());
+    let mut h_val = Vec::with_capacity(prob.p_lower.len());
+    for t in &prob.p_lower {
+        // Defensive: the convex form documents `row >= col`, but a caller
+        // that supplied the upper triangle would otherwise be silently
+        // transposed into a different matrix. Normalizing costs nothing and
+        // makes the translation total.
+        let (r, c) = if t.row >= t.col {
+            (t.row, t.col)
+        } else {
+            (t.col, t.row)
+        };
+        h_irow.push((r + 1) as i32);
+        h_jcol.push((c + 1) as i32);
+        h_val.push(t.val);
+    }
+    let h_space = SymTMatrixSpace::new(n as i32, h_irow, h_jcol);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&h_val);
+
+    // ---- Jacobian A_qp = [A_eq ; G], 1-based ----
+    let nnz = prob.a.len() + prob.g.len();
+    let mut irows = Vec::with_capacity(nnz);
+    let mut jcols = Vec::with_capacity(nnz);
+    let mut vals = Vec::with_capacity(nnz);
+    for t in &prob.a {
+        irows.push((t.row + 1) as i32);
+        jcols.push((t.col + 1) as i32);
+        vals.push(t.val);
+    }
+    for t in &prob.g {
+        irows.push((m_eq + t.row + 1) as i32);
+        jcols.push((t.col + 1) as i32);
+        vals.push(t.val);
+    }
+    let mut a_qp = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, irows, jcols));
+    a_qp.set_values(&vals);
+
+    // ---- Row bounds: eq rows bl=bu=b; ineq rows bl=-inf, bu=h ----
+    let mut bl = Vec::with_capacity(m);
+    let mut bu = Vec::with_capacity(m);
+    for &bk in &prob.b {
+        bl.push(bk);
+        bu.push(bk);
+    }
+    for &hi in &prob.h {
+        bl.push(NLP_LOWER_BOUND_INF);
+        bu.push(to_qp_upper(hi));
+    }
+
+    // ---- Variable bounds ----
+    let mut xl = Vec::with_capacity(n);
+    let mut xu = Vec::with_capacity(n);
+    for i in 0..n {
+        xl.push(to_qp_lower(prob.lb_of(i)));
+        xu.push(to_qp_upper(prob.ub_of(i)));
+    }
+
+    let g_lin = prob.c.clone();
+    let qp = ActiveSetProblem {
+        n,
+        m,
+        h: &h,
+        g: &g_lin,
+        a: &a_qp,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        // The convex path only accepts problems the class detector has already
+        // ruled convex, so the Hessian is PSD by construction.
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let qopts = ActiveSetOptions {
+        max_iter: active_set_iter_budget(opts, n, m),
+        // Absorb working-set changes as rank-2 Schur updates against a cached
+        // factor instead of assembling and factoring a fresh active-set KKT
+        // every iteration. This is the lever the wall-clock problem needs: a
+        // cold convex-QP solve here runs thousands of iterations (budget
+        // `10·(n+m)`), and a per-iteration refactorization is what turns that
+        // into a timeout — `QSCTAP1` goes from a 60s timeout to ~2s.
+        //
+        // Enabling it required fixing two real defects in that path first
+        // (`pounce-qp`: singular-Schur recovery, and iterative refinement in
+        // `SchurState::solve`); before those it silently lost ~1e-6 of
+        // accuracy and aborted outright on singular Schur blocks. See
+        // `pounce-qp/tests/schur_vs_refactor.rs`.
+        use_schur_updates: true,
+        ..ActiveSetOptions::default()
+    };
+
+    // Seed from a simplex phase-1 feasible **vertex**, when one is available.
+    //
+    // `QpSolver::solve` routes a warm start whose primal is feasible directly
+    // into phase-2 and never enters l1-elastic mode — which is the point, since
+    // that phase-1 does not terminate on the degenerate netlib-derived QPs here
+    // (see `simplex::simplex_feasible_vertex`). Phase-2 from a feasible vertex
+    // is the part of this method that works well.
+    //
+    // The working set must come from the simplex **basis**, not from
+    // tolerance-snapping the point. `solve_general` trusts the working set it
+    // is handed and steps with a zero-RHS active-set system, so:
+    //   * a *cold* working set claims nothing is active, and on these low-rank
+    //     `P` instances the reduced Hessian is then singular and the engine
+    //     certifies a spurious zero-curvature ray (measured: `QSHARE2B`
+    //     `-1.2e10`, `QSCAGR7` `-9.9e14`, both `DivergingIterates`);
+    //   * snapping every tight row instead names *more than* `n` binding rows
+    //     at a degenerate vertex, and no H-block shift repairs a rank-deficient
+    //     constraint block (the failure `crossover` documents on the GEN family).
+    // The basis avoids both: exactly `n` nonbasic variables, each on a bound,
+    // linearly independent because the basis matrix is nonsingular.
+    let seed = crate::simplex::simplex_feasible_vertex(prob).map(|v| {
+        use crate::simplex::AtBound;
+        let mut working = WorkingSet::cold(n, m);
+        for (i, st) in working.bounds.iter_mut().enumerate() {
+            // A variable fixed by equal bounds is `Fixed` regardless of which
+            // side the basis parked it on.
+            let (l, u) = (xl[i], xu[i]);
+            let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
+            *st = match (fixed, v.struct_at[i]) {
+                (true, _) => BoundStatus::Fixed,
+                (false, AtBound::Lower) => BoundStatus::AtLower,
+                (false, AtBound::Upper) => BoundStatus::AtUpper,
+                (false, AtBound::Free) => BoundStatus::Inactive,
+            };
+        }
+        // Row order matches: the translation above stacks `[A_eq ; G]` in the
+        // same order the simplex builds its rows, so index `i` is the same row.
+        for (i, st) in working.constraints.iter_mut().enumerate() {
+            *st = if i < m_eq {
+                // Equality rows are always active; their logical is boxed to
+                // `[0, 0]` on the simplex side, so it is nonbasic in any case.
+                ConsStatus::Equality
+            } else {
+                match v.row_at[i] {
+                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
+                    // `Gx = h`: the row sits at its upper bound `bu = h`.
+                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
+                    AtBound::Free => ConsStatus::Inactive,
+                }
+            };
+        }
+        QpWarmStart {
+            x: v.x,
+            lambda_g: vec![0.0; m],
+            lambda_x: vec![0.0; n],
+            working,
+        }
+    });
+
+    let mut solver = ParametricActiveSetSolver::new(make_backend());
+    let qsol = match solver.solve(&qp, seed.as_ref(), &qopts) {
+        Ok(q) => q,
+        // A hard `QpError` (singular factor, dimension mismatch) is a
+        // numerical failure, not an infeasibility claim — never assert
+        // infeasibility without a certificate.
+        Err(_) => return empty_solution(n, m_eq, m_ineq, QpStatus::NumericalFailure),
+    };
+
+    let engine_status = qsol.status;
+
+    // ---- Back-translate (sign transform — see crate::crossover docs) ----
+    let mut y = vec![0.0; m_eq];
+    if qsol.lambda_g.len() >= m_eq {
+        y.copy_from_slice(&qsol.lambda_g[..m_eq]);
+    }
+    let mut z = vec![0.0; m_ineq];
+    for i in 0..m_ineq {
+        if let Some(&l) = qsol.lambda_g.get(m_eq + i) {
+            z[i] = l.max(0.0);
+        }
+    }
+    let mut z_lb = vec![0.0; n];
+    let mut z_ub = vec![0.0; n];
+    for i in 0..n {
+        if let Some(&l) = qsol.lambda_x.get(i) {
+            z_lb[i] = l.max(0.0);
+            z_ub[i] = (-l).max(0.0);
+        }
+    }
+
+    // Objective recomputed in convex coordinates (½xᵀPx + cᵀx) rather than
+    // taken from the engine, so the two forms cannot silently drift apart.
+    let mut px = vec![0.0; n];
+    prob.p_mul(&qsol.x, &mut px);
+    let obj = (0..n).map(|i| (0.5 * px[i] + prob.c[i]) * qsol.x[i]).sum();
+
+    let mut sol = QpSolution {
+        // Provisional — `verify_status` below decides the final verdict.
+        status: QpStatus::Optimal,
+        x: qsol.x,
+        y,
+        z,
+        z_lb,
+        z_ub,
+        obj,
+        // The active-set engine counts active-set changes rather than
+        // interior-point iterations; that is its analogue of "iterations"
+        // and the quantity a user tuning `max_iter` is actually spending.
+        iters: qsol.stats.n_working_set_changes as usize,
+        iterates: Vec::new(),
+    };
+    sol.status = verify_status(engine_status, &sol, prob, opts);
+    sol
+}
+
+/// Re-earn a status against the original problem after unscaling.
+///
+/// A success carried out of the scaled solve is only evidence about the scaled
+/// QP. Rather than trust it, re-measure: keep a clean verdict only if the
+/// unscaled point still earns it, and let a solve that lands in the acceptable
+/// band say so. Non-success statuses pass through — they made no claim to
+/// re-check.
+fn reverify_after_unscale(
+    scaled_status: QpStatus,
+    sol: &QpSolution,
+    prob: &QpProblem,
+    opts: &QpOptions,
+) -> QpStatus {
+    if !matches!(
+        scaled_status,
+        QpStatus::Optimal | QpStatus::OptimalInaccurate
+    ) {
+        return scaled_status;
+    }
+    let err = sol.kkt_residuals(prob).kkt_error();
+    if !err.is_finite() {
+        QpStatus::NumericalFailure
+    } else if err <= opts.tol {
+        QpStatus::Optimal
+    } else if err <= 1e3 * opts.tol {
+        QpStatus::OptimalInaccurate
+    } else {
+        QpStatus::NumericalFailure
+    }
+}
+
+/// Decide the reported status from the engine's verdict **and** the measured
+/// KKT residuals of the point it returned.
+///
+/// The engine's own status is never propagated unchecked, for two reasons the
+/// Maros-Mészáros set demonstrates directly:
+///
+/// * **A claimed `Optimal` can be wrong.** `QSC205` returns `Optimal` with
+///   objective `0.0` against a true optimum of `−5.81e−3`. Routed through the
+///   SQP outer loop this was caught downstream — the outer loop re-tested the
+///   NLP KKT conditions and refused to converge, reporting an iteration limit.
+///   Solving directly removes that accidental safety net, so the check has to
+///   be made deliberately here. A *silently wrong* answer is the one failure
+///   mode worse than not solving: the baseline active-set column had zero
+///   solved-but-wrong across all 138 problems, and that property must survive
+///   this refactor.
+/// * **A claimed `Infeasible` can be wrong.** `DUALC1` is feasible with a
+///   published optimum of `6155.25`, and the phase-1 elastic mode certifies it
+///   infeasible. An infeasibility verdict is a *proof obligation*: the IPM
+///   only reports one behind a verified Farkas certificate, and the SQP path
+///   deliberately refuses to assert infeasibility it cannot back (#282). The
+///   active-set engine has no certificate to offer here, so its claim is
+///   downgraded to an honest "did not solve" rather than propagated as a
+///   verdict about the user's model.
+///
+/// The `Optimal` / `OptimalInaccurate` / fail banding mirrors the IPM's
+/// post-loop verdict (`hsde.rs`): within `tol` is clean, within `1e3·tol` is
+/// the "acceptable level" tier, anything worse is not a solve.
+fn verify_status(
+    engine: ActiveSetStatus,
+    sol: &QpSolution,
+    prob: &QpProblem,
+    opts: &QpOptions,
+) -> QpStatus {
+    /// Multiple of `tol` inside which a solve is downgraded to "acceptable"
+    /// rather than rejected — the IPM's `1e3·tol` band.
+    const ACCEPTABLE_FACTOR: f64 = 1e3;
+
+    let err = sol.kkt_residuals(prob).kkt_error();
+    let solved_to = |e: f64| {
+        if !e.is_finite() {
+            None
+        } else if e <= opts.tol {
+            Some(QpStatus::Optimal)
+        } else if e <= ACCEPTABLE_FACTOR * opts.tol {
+            Some(QpStatus::OptimalInaccurate)
+        } else {
+            None
+        }
+    };
+
+    match engine {
+        // Trust, but verify.
+        ActiveSetStatus::Optimal => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
+        // An unbounded ray is a genuine certificate the engine computes and
+        // checks (zero curvature, feasible for every step length, strict
+        // descent), so it is propagated.
+        ActiveSetStatus::Unbounded => QpStatus::DualInfeasible,
+        // Uncertified infeasibility claim — never propagated as a verdict.
+        // If the returned point happens to satisfy the KKT conditions anyway,
+        // report that instead; otherwise say honestly that we did not solve it.
+        ActiveSetStatus::Infeasible => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
+        // Budget or breakdown: the point may still be good enough to report at
+        // the acceptable tier (the IPM salvages solves this way), but it is
+        // never promoted to a clean `Optimal`.
+        ActiveSetStatus::MaxIter => solved_to(err).unwrap_or(QpStatus::IterationLimit),
+        ActiveSetStatus::NumericalError => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
+    }
+}
+
+/// Iteration budget for the active-set engine.
+///
+/// The engine's own default is a flat 200, which is the IPM's budget and the
+/// wrong shape for this method: an interior-point iteration count is nearly
+/// independent of problem size, whereas an active-set method needs roughly one
+/// iteration per active-set change, so its count grows with `n + m`. On the
+/// Maros-Mészáros set the flat cap was the single largest failure class —
+/// `DUALC1` (n = 9, m = 215) exhausts it and then solves *exactly*, in one
+/// outer iteration, once the budget is raised.
+///
+/// An explicit user `max_iter` always wins; otherwise scale with the problem
+/// and keep 200 as a floor for tiny instances.
+fn active_set_iter_budget(opts: &QpOptions, n: usize, m: usize) -> u32 {
+    const DEFAULT_IPM_MAX_ITER: usize = 200;
+    const PER_DIM: usize = 10;
+    if opts.max_iter != DEFAULT_IPM_MAX_ITER {
+        // User set it explicitly — respect it.
+        return opts.max_iter.min(u32::MAX as usize) as u32;
+    }
+    let scaled = n.saturating_add(m).saturating_mul(PER_DIM);
+    scaled.clamp(200, 200_000) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipm::solve_qp_ipm;
+    use crate::qp::Triplet;
+    use pounce_feral::FeralSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// `min (x₀−3)² + (x₁−2)²  s.t.  x₀ + x₁ ≤ 4`, written in `½xᵀPx + cᵀx`
+    /// form (`P = 2I`, `c = (−6, −4)`, constant 13 dropped).
+    ///
+    /// Unconstrained optimum `(3, 2)` violates the row, so it binds and the
+    /// solution is the projection onto `x₀ + x₁ = 4`: `x* = (2.5, 1.5)`,
+    /// objective `−12.5`. Stationarity `Px + c + Gᵀz = 0` gives
+    /// `(−1, −1) + z(1, 1) = 0 ⇒ z = 1`, which pins the **dual sign**: a
+    /// flipped transform would clamp `z` to 0.
+    fn projection_qp() -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-6.0, -4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![4.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    #[test]
+    fn analytic_qp_primal_dual_and_sign() {
+        let prob = projection_qp();
+        let mut mk = backend;
+        let sol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+
+        assert_eq!(sol.status, QpStatus::Optimal, "status");
+        assert!((sol.x[0] - 2.5).abs() < 1e-8, "x0 = {}", sol.x[0]);
+        assert!((sol.x[1] - 1.5).abs() < 1e-8, "x1 = {}", sol.x[1]);
+        assert!((sol.obj + 12.5).abs() < 1e-8, "obj = {}", sol.obj);
+        // The sign check: z must be +1, not 0 and not −1.
+        assert!(sol.z[0] >= -1e-12, "z must be >= 0: {}", sol.z[0]);
+        assert!((sol.z[0] - 1.0).abs() < 1e-7, "z0 = {} (sign!)", sol.z[0]);
+    }
+
+    /// The Hessian **off-diagonal** path: `p_lower` stores each pair once and
+    /// both forms mirror it implicitly, so a translation that dropped or
+    /// double-counted the mirror would change the matrix. Cross-checked
+    /// against the IPM on the same problem — the two engines must agree.
+    ///
+    /// `P = [[2, 1], [1, 2]]`, `c = (−4, −5)`, `x₀ + x₁ ≤ 3`. Stationarity
+    /// `Px = −c` gives `x* = (1, 2)` exactly, with `xᵀPx = 14` and
+    /// `cᵀx = −14`, so `obj = 7 − 14 = −7`. Getting the mirror wrong changes
+    /// `P` and moves `x*` well outside these tolerances.
+    ///
+    /// Note the optimum sits *exactly on* `x₀ + x₁ = 3`. That is deliberate —
+    /// it is the degenerate boundary case — but it means the IPM, which
+    /// approaches from the interior, stops a few `1e−5` short while the
+    /// active-set engine lands on the vertex exactly. So the analytic values
+    /// are asserted tightly and the IPM cross-check is only asked to agree to
+    /// interior-point accuracy.
+    #[test]
+    fn off_diagonal_hessian_matches_ipm() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![
+                Triplet::new(0, 0, 2.0),
+                Triplet::new(1, 0, 1.0), // the off-diagonal, stored once
+                Triplet::new(1, 1, 2.0),
+            ],
+            c: vec![-4.0, -5.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![3.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let mut mk = backend;
+        let asol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+        let isol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+
+        assert_eq!(asol.status, QpStatus::Optimal);
+        assert_eq!(isol.status, QpStatus::Optimal);
+
+        // Analytic optimum — tight, and the real test of the mirror.
+        assert!((asol.x[0] - 1.0).abs() < 1e-9, "x0 = {}", asol.x[0]);
+        assert!((asol.x[1] - 2.0).abs() < 1e-9, "x1 = {}", asol.x[1]);
+        assert!((asol.obj + 7.0).abs() < 1e-9, "obj = {}", asol.obj);
+
+        // Cross-check: the IPM must land on the same point, to its own accuracy.
+        for i in 0..2 {
+            assert!(
+                (asol.x[i] - isol.x[i]).abs() < 1e-4,
+                "x{i}: active-set {} vs ipm {}",
+                asol.x[i],
+                isol.x[i]
+            );
+        }
+        assert!(
+            (asol.obj - isol.obj).abs() < 1e-6,
+            "obj: active-set {} vs ipm {}",
+            asol.obj,
+            isol.obj
+        );
+    }
+
+    /// Equality rows and variable bounds both translate, and the bound
+    /// multipliers land in the right sign slot.
+    /// `min ½(x₀² + x₁²)  s.t.  x₀ + x₁ = 2,  x₀ ≥ 1.5`.
+    /// Optimum `(1.5, 0.5)` — the bound binds.
+    #[test]
+    fn equality_and_bounds_match_ipm() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![0.0, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            b: vec![2.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![1.5, crate::qp::NEG_INF],
+            ub: vec![],
+        };
+        let mut mk = backend;
+        let asol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+
+        assert_eq!(asol.status, QpStatus::Optimal, "status");
+        assert!((asol.x[0] - 1.5).abs() < 1e-7, "x0 = {}", asol.x[0]);
+        assert!((asol.x[1] - 0.5).abs() < 1e-7, "x1 = {}", asol.x[1]);
+        // Lower bound binds ⇒ its multiplier is the positive one.
+        assert!(asol.z_lb[0] >= -1e-12, "z_lb must be >= 0");
+        assert!(asol.z_ub[0] >= -1e-12, "z_ub must be >= 0");
+
+        let isol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert!(
+            (asol.obj - isol.obj).abs() < 1e-6,
+            "obj: active-set {} vs ipm {}",
+            asol.obj,
+            isol.obj
+        );
+    }
+
+    /// The budget scales with `n + m` instead of sitting at the IPM's flat
+    /// 200, and an explicit user setting still wins.
+    #[test]
+    fn iteration_budget_scales_and_respects_user() {
+        let d = QpOptions::default();
+        assert_eq!(d.max_iter, 200, "test assumes the IPM default is 200");
+        // Tiny problem keeps the floor.
+        assert_eq!(active_set_iter_budget(&d, 2, 1), 200);
+        // DUALC1's shape (n=9, m=215) must clear the flat 200 that broke it.
+        assert!(
+            active_set_iter_budget(&d, 9, 215) > 200,
+            "budget must scale past the flat cap for DUALC1's shape"
+        );
+        // Explicit user value wins.
+        let u = QpOptions {
+            max_iter: 37,
+            ..QpOptions::default()
+        };
+        assert_eq!(active_set_iter_budget(&u, 9, 215), 37);
+    }
+
+    /// **Singular Hessian with general inequality rows** — the geometry that
+    /// exposed the seeding contract. `P = diag(0, 1)` has no curvature along
+    /// `x₀`, so the reduced Hessian is singular unless the working set pins
+    /// that direction. Handed a feasible point with a *cold* working set the
+    /// engine sees no active rows, finds zero curvature along a feasible
+    /// descent direction, and certifies a spurious unbounded ray; the working
+    /// set has to come from the simplex basis for this to solve.
+    ///
+    /// `min ½x₁² − 2x₀ − x₁  s.t.  x₀ + x₁ ≤ 2,  x₀ ≤ 1.5,  x ≥ 0`.
+    /// Both rows bind at `x* = (1.5, 0.5)`: stationarity
+    /// `(−2, x₁−1) + z₀(1,1) + z₁(1,0) = 0` gives `z₀ = 0.5, z₁ = 1.5 ≥ 0`,
+    /// and `obj = 0.125 − 3 − 0.5 = −3.375`.
+    #[test]
+    fn singular_hessian_with_inequalities_solves() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(1, 1, 1.0)], // P = diag(0, 1)
+            c: vec![-2.0, -1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, 1.0),
+            ],
+            h: vec![2.0, 1.5],
+            lb: vec![0.0, 0.0],
+            ub: vec![],
+        };
+        let mut mk = backend;
+        let sol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+
+        assert_eq!(sol.status, QpStatus::Optimal, "status");
+        assert!((sol.x[0] - 1.5).abs() < 1e-7, "x0 = {}", sol.x[0]);
+        assert!((sol.x[1] - 0.5).abs() < 1e-7, "x1 = {}", sol.x[1]);
+        assert!((sol.obj + 3.375).abs() < 1e-7, "obj = {}", sol.obj);
+
+        let isol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert!(
+            (sol.obj - isol.obj).abs() < 1e-6,
+            "obj: active-set {} vs ipm {}",
+            sol.obj,
+            isol.obj
+        );
+    }
+}

@@ -25,6 +25,24 @@ pub enum SqpStatus {
     /// — it makes no infeasibility claim it cannot back with a
     /// certificate. Maps to `Search_Direction_Becomes_Too_Small`.
     QpStepFailed,
+    /// The QP subproblem exhausted its own iteration budget
+    /// ([`QpOptions::max_iter`], the `sqp_qp_max_iter` option) without
+    /// converging or certifying anything.
+    ///
+    /// Split out from [`QpStepFailed`](Self::QpStepFailed) because the two
+    /// call for opposite remedies and the merged status actively misled.
+    /// A budget exhaustion is *actionable* — raise the limit — whereas
+    /// `Search_Direction_Becomes_Too_Small` reads as a numerical stall with
+    /// nothing to turn. On the Maros-Mészáros set the merged mapping hid the
+    /// single largest failure class: the cold-start active-set method needs
+    /// roughly one iteration per active-set change, so the flat default of
+    /// 200 is below what a few hundred constraints require, and dozens of
+    /// problems reported a step-size failure when they had simply run out of
+    /// budget. `DUALC1` (n=9, m=215) is the type case — it exits here at the
+    /// default and solves exactly, in one outer iteration, at a larger limit.
+    ///
+    /// Maps to `Maximum_Iterations_Exceeded`.
+    QpIterationLimit,
     /// The problem is unbounded below: the step QP returned a certified
     /// recession ray (zero curvature, feasible for every step length,
     /// strict descent) *and* that ray was re-verified against the true
@@ -46,6 +64,7 @@ impl fmt::Display for SqpStatus {
             SqpStatus::InfeasibleSubproblem => write!(f, "infeasible-subproblem"),
             SqpStatus::LineSearchFailed => write!(f, "line-search-failed"),
             SqpStatus::QpStepFailed => write!(f, "qp-step-failed"),
+            SqpStatus::QpIterationLimit => write!(f, "qp-iteration-limit"),
             SqpStatus::Unbounded => write!(f, "unbounded"),
         }
     }

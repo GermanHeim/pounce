@@ -653,9 +653,22 @@ pub fn main() -> ExitCode {
         // `LpIpm`/`QpIpm` use the convex QP IPM (LP is P = 0); `SocpIpm`
         // reformulates a convex QCQP to second-order cones and uses the
         // conic IPM. Both live in `pounce-convex`.
+        //
+        // `QpActiveSet` joins them here rather than routing through the SQP
+        // outer loop as it used to. The engine is different, but everything
+        // wrapped around it — QP extraction, presolve, postsolve, `.sol`
+        // writing, status vocabulary, timing — is shared with the IPM, and
+        // that shared wrapper is the entire point: the active-set engine had
+        // been running with no presolve and no scaling, which costs an
+        // active-set method far more than it costs an IPM (its pivot count
+        // grows with the problem, an IPM's essentially does not). See
+        // `pounce_convex::active_set` for the full rationale.
         if matches!(
             choice,
-            SolverChoice::LpIpm | SolverChoice::QpIpm | SolverChoice::SocpIpm
+            SolverChoice::LpIpm
+                | SolverChoice::QpIpm
+                | SolverChoice::SocpIpm
+                | SolverChoice::QpActiveSet
         ) {
             // issue #196: if the .nl requested a sensitivity / reduced-Hessian
             // step, either reroute (auto) or warn (explicit convex force) so
@@ -735,6 +748,19 @@ pub fn main() -> ExitCode {
                     opts.get_string_value("qp_presolve", "").ok(),
                     opts.get_string_value("presolve", "").ok(),
                 );
+                // The interactive debugger is a pdb-for-the-IPM: it pauses on
+                // barrier-IPM iterations (mu, search direction, fraction-to-
+                // the-boundary). The active-set engine is a different
+                // algorithm with no such hook, so a `--debug*` request would
+                // otherwise silently no-op. Say so explicitly.
+                if matches!(choice, SolverChoice::QpActiveSet) && debug_hook.is_some() {
+                    eprintln!(
+                        "pounce: note: the interactive debugger is IPM-only and does \
+                         not engage on the active-set QP engine (solver_selection=\
+                         qp-active-set); the solve runs without pausing. Use \
+                         solver_selection=qp-ipm to debug a convex QP interactively."
+                    );
+                }
                 return run_convex_qp(
                     &prob,
                     class,
@@ -744,42 +770,22 @@ pub fn main() -> ExitCode {
                     debug_hook.as_ref(),
                     args.ampl,
                     convex_opts,
+                    matches!(choice, SolverChoice::QpActiveSet),
                 );
             }
             // Builtins never classify as convex; fall through to NLP.
         }
-        // `qp-active-set`: route the (convex-QP) problem through the
-        // active-set SQP engine instead of the IPM. `resolve_solver`
-        // already validated the class is LP / convex QP, so the SQP driver
-        // — which solves its step QPs with `pounce-qp` — converges in
-        // essentially one QP solve, and the NLP layer recovers the duals
-        // and writes the `.sol` exactly as the IPM path does. The
-        // application dispatches to that engine whenever the `algorithm`
-        // option resolves to "active-set-sqp" (`optimize_tnlp` →
-        // `optimize_sqp_tnlp`), so setting the option here is the whole
-        // wiring; the solve falls through to the NLP path below unchanged.
-        if matches!(choice, SolverChoice::QpActiveSet) {
-            if let Err(e) = app
-                .options_mut()
-                .read_from_str("algorithm active-set-sqp\n", true)
-            {
-                eprintln!("pounce: failed to select the active-set-sqp algorithm: {e}");
-                return ExitCode::from(2);
-            }
-            // The interactive debugger is a pdb-for-the-IPM: it pauses on
-            // barrier-IPM iterations (mu, search direction, fraction-to-the-
-            // boundary). The active-set SQP engine is a different algorithm
-            // with no such hook, so a `--debug*` request here would otherwise
-            // silently no-op. Say so explicitly rather than pretend it engaged.
-            if debug_hook.is_some() {
-                eprintln!(
-                    "pounce: note: the interactive debugger is IPM-only and does \
-                     not engage on the active-set QP engine (solver_selection=\
-                     qp-active-set); the solve runs without pausing. Use \
-                     solver_selection=qp-ipm to debug a convex QP interactively."
-                );
-            }
-        }
+        // `qp-active-set` no longer lands here: it is dispatched with the
+        // other convex engines above, straight into `pounce-qp` via
+        // `pounce_convex::active_set`, rather than being rewritten to
+        // `algorithm=active-set-sqp` and run through the SQP outer loop.
+        // Wrapping a QP in an SQP was never wrong — with an exact Hessian and
+        // already-linear constraints the first subproblem *is* the original QP
+        // — but it forfeited the convex path's presolve, scaling, timing, and
+        // status vocabulary in exchange for machinery a QP has no use for.
+        // The SQP route remains for genuine NLPs via `algorithm=active-set-sqp`,
+        // where the outer loop is doing real work.
+        //
         // `nlp` and any unmatched case fall through to the existing NLP
         // solve below unchanged.
         let _ = choice;
@@ -1603,7 +1609,12 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
         QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
         QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
         QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
-        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
+        // Deliberately not "failure in KKT factorization": both convex engines
+        // reach this status by failing the *post-solve* verification — the
+        // returned point's true KKT error exceeded the acceptable band — which
+        // a factorization breakdown is only one cause of. On the active-set
+        // engine it is also where an uncertified infeasibility claim lands.
+        QpStatus::NumericalFailure => ("Numerical failure (no verified KKT point).", false, 500),
     }
 }
 
@@ -1685,7 +1696,12 @@ fn run_convex_qp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
+    // Use the `pounce-qp` parametric active-set engine instead of the IPM
+    // (`solver_selection=qp-active-set`). Everything else about this driver —
+    // extraction, presolve, postsolve, reporting, `.sol` writing — is shared.
+    use_active_set: bool,
 ) -> ExitCode {
+    use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
@@ -1744,10 +1760,16 @@ fn run_convex_qp(
         // enforce the zero-iteration stop here before any solve runs
         // (pounce#186). Mirrors the NLP path's MaximumIterationsExceeded.
         trivial(QpStatus::IterationLimit)
-    } else if let Some(hook) = debug_hook {
+    } else if let Some(hook) = debug_hook.filter(|_| !use_active_set) {
         // Interactive debug: step the IPM on the extracted QP directly.
         // Presolve is skipped so the debugger's `x`/`s`/`y`/`z` blocks
         // correspond to the user's problem rather than a reduced one.
+        //
+        // Guarded on `!use_active_set`: the debugger hooks barrier-IPM
+        // iterations and has no active-set analogue, so on that engine this
+        // arm would quietly solve with a *different solver* than the one the
+        // user selected. The caller has already printed the note explaining
+        // the debugger does not engage; fall through and solve normally.
         let mut h = hook.borrow_mut();
         solve_qp_ipm_debug(&qp, &qp_opts, &mut *h, backend)
     } else if presolve_on {
@@ -1770,12 +1792,20 @@ fn run_convex_qp(
                         st.tightened_bounds,
                     );
                 }
-                let red = solve_qp_ipm(&ps.reduced, &qp_opts, backend);
+                let red = if use_active_set {
+                    let mut mk = backend;
+                    solve_qp_active_set(&ps.reduced, &qp_opts, &mut mk)
+                } else {
+                    solve_qp_ipm(&ps.reduced, &qp_opts, backend)
+                };
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),
             PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
         }
+    } else if use_active_set {
+        let mut mk = backend;
+        solve_qp_active_set(&qp, &qp_opts, &mut mk)
     } else {
         solve_qp_ipm(&qp, &qp_opts, backend)
     };
@@ -1786,8 +1816,16 @@ fn run_convex_qp(
     let reported_obj = sign * sol.obj + obj_const;
 
     let (msg, ok, srn) = convex_status_report(sol.status);
+    // Name the engine that actually ran — the two report different iteration
+    // counts (barrier iterations vs active-set changes), so labelling an
+    // active-set solve "IPM" would misread both the solver and the number.
+    let engine = if use_active_set {
+        "active-set, pounce-qp"
+    } else {
+        "IPM, pounce-convex"
+    };
     println!(
-        "POUNCE ({} IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
+        "POUNCE ({} {engine}): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
         class.name(),
         sol.iters,
     );

@@ -132,6 +132,136 @@ pub(crate) fn crossover_simplex(
     Some(s.extract(prob))
 }
 
+/// Where a variable sits at a basic feasible solution, in a form the
+/// active-set engine can consume without knowing about simplex internals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AtBound {
+    /// Basic (or free at zero): not part of the active set.
+    Free,
+    Lower,
+    Upper,
+}
+
+/// A basic feasible solution: a **vertex** of the feasible region, together
+/// with the active set the basis induces.
+///
+/// Exactly `n` of the `n + m` variables are nonbasic, and each sits on one of
+/// its bounds — so `struct_at` and `row_at` together name exactly `n` active
+/// constraints in `x`-space, and they are linearly independent *by
+/// construction* because the simplex basis matrix is nonsingular. That
+/// independence is the property the active-set engine needs and cannot get from
+/// tolerance-snapping a point (which at a degenerate vertex names more than `n`
+/// binding rows and yields a singular KKT factorization).
+pub(crate) struct FeasibleVertex {
+    /// Feasible primal point (length `n`).
+    pub x: Vec<f64>,
+    /// Per-structural bound activity (length `n`).
+    pub struct_at: Vec<AtBound>,
+    /// Per-row activity (length `m = m_eq + m_ineq`, same row order as
+    /// `[A_eq ; G]`). A row is active iff its logical is nonbasic.
+    pub row_at: Vec<AtBound>,
+}
+
+/// Find a **feasible vertex** of `prob`'s linear constraints from a cold start,
+/// running this engine's phase-1 only — phase-2 would optimize the *linear*
+/// objective, which is the wrong objective for a QP (any feasible vertex is an
+/// equally valid warm start, so the extra work buys nothing).
+///
+/// Exists because [`crate::active_set`] needs a feasible seed and cannot get
+/// one from `pounce-qp`'s own cold start: that engine's l1-elastic phase-1 does
+/// not terminate on the degenerate netlib-derived QPs in the Maros-Mészáros
+/// set. `QAFIRO` (n = 32, among the smallest instances) runs past 500,000
+/// active-set iterations without converging even with Bland's rule forced —
+/// finite in exact arithmetic, but the elastic vertices are degenerate enough
+/// that the floating-point tolerance gates keep flipping. This engine pivots on
+/// an LU basis and walks straight through exactly that degeneracy, which is why
+/// crossover already prefers it over the active-set bridge for the NETLIB GEN
+/// vertices.
+///
+/// Returns `None` on any breakdown (factorization failure, iteration cap, or a
+/// phase-1 that cannot reach feasibility). The caller must treat that as "no
+/// seed available" and fall back, **not** as an infeasibility verdict: a
+/// phase-1 that gives up is not a certificate.
+pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex> {
+    let mut s = Simplex::new(prob);
+    // `warm_start` only reads `sol.x`, clamping each structural into its box and
+    // snapping to a bound, so a zero vector is a valid *cold* seed: every
+    // structural lands at a bound (or is pushed off by `push_superbasics`) and
+    // the logicals start basic, as set up in `new`.
+    let zero = QpSolution {
+        status: crate::qp::QpStatus::Optimal,
+        x: vec![0.0; prob.n],
+        y: Vec::new(),
+        z: Vec::new(),
+        z_lb: Vec::new(),
+        z_ub: Vec::new(),
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    s.warm_start(&zero);
+    s.factor_basis()?;
+    s.recompute_basics()?;
+    s.push_superbasics()?;
+    s.run_phase1()?;
+
+    let x: Vec<f64> = (0..s.n).map(|j| s.xval[j]).collect();
+    // `run_phase1` returning `Some` means it stopped, not that it succeeded —
+    // confirm the point really is feasible before offering it as a seed.
+    if !feasible_at(prob, &x) {
+        return None;
+    }
+
+    let at = |v: usize| -> AtBound {
+        if s.slot_of[v] != usize::MAX {
+            return AtBound::Free; // basic
+        }
+        match s.nb[v] {
+            NbStatus::AtLower => AtBound::Lower,
+            NbStatus::AtUpper => AtBound::Upper,
+            // A free variable parked at zero pins no constraint, and
+            // `push_superbasics` has already cleared every superbasic.
+            NbStatus::FreeZero | NbStatus::Superbasic => AtBound::Free,
+        }
+    };
+
+    Some(FeasibleVertex {
+        struct_at: (0..s.n).map(at).collect(),
+        row_at: (0..s.m).map(|i| at(s.n + i)).collect(),
+        x,
+    })
+}
+
+/// Does `x` satisfy `Ax = b`, `Gx ≤ h`, and the variable box, to `FEAS_TOL`?
+fn feasible_at(prob: &QpProblem, x: &[f64]) -> bool {
+    let mut ax = vec![0.0; prob.m_eq()];
+    for t in &prob.a {
+        ax[t.row] += t.val * x[t.col];
+    }
+    for (i, &v) in ax.iter().enumerate() {
+        if (v - prob.b[i]).abs() > FEAS_TOL {
+            return false;
+        }
+    }
+
+    let mut gx = vec![0.0; prob.m_ineq()];
+    for t in &prob.g {
+        gx[t.row] += t.val * x[t.col];
+    }
+    for (i, &v) in gx.iter().enumerate() {
+        if v - prob.h[i] > FEAS_TOL {
+            return false;
+        }
+    }
+
+    for (i, &xi) in x.iter().enumerate() {
+        if xi < lo_bound(prob.lb_of(i)) - FEAS_TOL || xi > hi_bound(prob.ub_of(i)) + FEAS_TOL {
+            return false;
+        }
+    }
+    true
+}
+
 /// Treat `|v| ≥ 1e20` as an infinite bound (mirrors [`QpProblem`] conventions).
 fn lo_bound(v: f64) -> f64 {
     if v <= -BOUND_INF {

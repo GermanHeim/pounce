@@ -1707,7 +1707,32 @@ impl ParametricActiveSetSolver {
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
             }
-            schur.solve(&mut self.linsol, &mut rhs)?;
+            // A singular Schur complement is a normal event in SMW updating,
+            // not a solver breakdown: the accumulated rank-2 updates can leave
+            // the small dense block `S` singular while the underlying
+            // active-set KKT is perfectly well conditioned. Recover the way the
+            // count-based path already does — discard the update layer and
+            // refactor `K_max` against the current working set — then redo the
+            // solve. Nothing but the failed `S⁻¹` is thrown away, so the answer
+            // is unchanged; this is what keeps the Schur path a pure
+            // *performance* switch.
+            //
+            // Without this recovery the entire solve aborted with
+            // `LinearSolverFailure("Schur block is singular …")` on problems the
+            // refactor path solves exactly — the reason the Schur path could not
+            // be turned on by default. See `tests/schur_vs_refactor.rs`.
+            let rhs_backup = rhs.clone();
+            if let Err(e) = schur.solve(&mut self.linsol, &mut rhs) {
+                if !e.is_recoverable_factorization_failure() {
+                    return Err(e);
+                }
+                let ac = active_slot_count(&working);
+                schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                n_refactor += 1;
+                // `solve` writes through `rhs`, so restore it before retrying.
+                rhs.copy_from_slice(&rhs_backup);
+                schur.solve(&mut self.linsol, &mut rhs)?;
+            }
 
             let p: Vec<Number> = rhs[..n].to_vec();
             let p_inf = p.iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -1753,7 +1778,18 @@ impl ParametricActiveSetSolver {
                             m + i
                         }
                     };
-                    schur.apply_change(&mut self.linsol, qp, slot, false)?;
+                    // Degenerate rank-2 update ⇒ refactor instead. `working`
+                    // already carries this drop, so resetting against it
+                    // reaches exactly the state the update was meant to
+                    // produce, without the update.
+                    if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, false) {
+                        if !e.is_recoverable_factorization_failure() {
+                            return Err(e);
+                        }
+                        let ac = active_slot_count(&working);
+                        schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                        n_refactor += 1;
+                    }
                     n_changes += 1;
                     n_schur_updates += 1;
                     if schur.needs_reset(opts) {
@@ -1885,7 +1921,16 @@ impl ParametricActiveSetSolver {
                         i
                     }
                 };
-                schur.apply_change(&mut self.linsol, qp, slot, true)?;
+                // Same recovery as the drop side: `working` already carries this
+                // add, so a reset against it reproduces the intended state.
+                if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, true) {
+                    if !e.is_recoverable_factorization_failure() {
+                        return Err(e);
+                    }
+                    let ac = active_slot_count(&working);
+                    schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                    n_refactor += 1;
+                }
                 n_changes += 1;
                 n_schur_updates += 1;
                 if schur.needs_reset(opts) {

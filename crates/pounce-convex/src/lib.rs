@@ -23,6 +23,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod active_set;
 pub mod batch;
 pub mod cones;
 pub mod crossover;

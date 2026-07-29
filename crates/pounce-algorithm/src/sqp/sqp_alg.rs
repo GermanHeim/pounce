@@ -509,12 +509,23 @@ impl SqpAlgorithm {
                 QpStatus::MaxIter | QpStatus::NumericalError => {
                     let obj = nlp.eval_f(&iter.x);
                     self.iterates = Some(iter.clone());
+                    // Report *which* of the two it was. Both are honest
+                    // non-committal failures making no infeasibility claim
+                    // (#282), but only the budget one is actionable by the
+                    // user, and merging them hid the dominant Maros-Mészáros
+                    // failure mode behind a step-size verdict. See
+                    // `SqpStatus::QpIterationLimit`.
+                    let status = if sol.status == QpStatus::MaxIter {
+                        SqpStatus::QpIterationLimit
+                    } else {
+                        SqpStatus::QpStepFailed
+                    };
                     return Ok(SqpResult {
                         x: iter.x,
                         lambda_g: iter.lambda_g,
                         lambda_x: iter.lambda_x,
                         obj,
-                        status: SqpStatus::QpStepFailed,
+                        status,
                         n_iter: outer,
                         n_qp_solves,
                         final_stationarity,
