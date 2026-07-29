@@ -309,17 +309,31 @@ where
         // Row order matches: the translation above stacks `[A_eq ; G]` in the
         // same order the simplex builds its rows, so index `i` is the same row.
         for (i, st) in working.constraints.iter_mut().enumerate() {
-            *st = if i < m_eq {
-                // Equality rows are always active; their logical is boxed to
-                // `[0, 0]` on the simplex side, so it is nonbasic in any case.
-                ConsStatus::Equality
-            } else {
-                match v.row_at[i] {
-                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
-                    // `Gx = h`: the row sits at its upper bound `bu = h`.
-                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
-                    AtBound::Free => ConsStatus::Inactive,
-                }
+            // Activity comes from the basis for *every* row, equalities
+            // included. Forcing all `m_eq` equalities active instead looks
+            // harmless — an equality is always satisfied — but it breaks the
+            // rank guarantee that makes this seed worth having. The basis leaves
+            // exactly `n` variables nonbasic; if `j` of the equality logicals
+            // are among the *basic* ones, unconditionally activating their rows
+            // pushes the active count to `n + j`, and the extra rows are
+            // linearly dependent by construction. That surfaces as
+            // `KKT inertia mismatch: expected 105 negative eigenvalues, got
+            // 102` on `CVXQP3_S` — a gap of exactly `j` — and aborts the solve.
+            //
+            // A basic equality logical means that row is redundant at this
+            // vertex: it is a linear combination of the rows the basis does
+            // pin, so it stays satisfied without being in the working set. This
+            // is the same argument `cold_general_initial` makes for the
+            // redundant equalities its own rank-repair guard drops, and the
+            // ratio test skips `bl == bu` rows, so a row left `Inactive` here
+            // never spuriously re-enters.
+            *st = match v.row_at[i] {
+                // Equality row pinned by the basis.
+                _ if i < m_eq && v.row_at[i] != AtBound::Free => ConsStatus::Equality,
+                // Slack `s = h − Gx` nonbasic at its lower bound 0 means
+                // `Gx = h`: the row sits at its upper bound `bu = h`.
+                AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
+                AtBound::Free => ConsStatus::Inactive,
             };
         }
         QpWarmStart {
@@ -330,13 +344,35 @@ where
         }
     });
 
+    debug_trace(|| {
+        format!(
+            "n={n} m_eq={m_eq} m_ineq={m_ineq} seed={} budget={}",
+            if seed.is_some() {
+                "SIMPLEX-VERTEX"
+            } else {
+                "NONE (cold)"
+            },
+            qopts.max_iter,
+        )
+    });
     let mut solver = ParametricActiveSetSolver::new(make_backend());
     let qsol = match solver.solve(&qp, seed.as_ref(), &qopts) {
         Ok(q) => q,
         // A hard `QpError` (singular factor, dimension mismatch) is a
         // numerical failure, not an infeasibility claim — never assert
         // infeasibility without a certificate.
-        Err(_) => return empty_solution(n, m_eq, m_ineq, QpStatus::NumericalFailure),
+        //
+        // The error text is only surfaced under the debug env var, but it is
+        // the *only* record of why the solve died: this arm discards the
+        // engine's message and returns a zero-filled solution, so a caller
+        // otherwise sees `NumericalFailure` with no cause. Two distinct causes
+        // hide here on Maros-Mészáros — `KKT matrix is singular (LICQ
+        // violation …)`, the documented rank-detection limitation, and
+        // `KKT inertia mismatch`, which was a rank-deficient seed working set.
+        Err(e) => {
+            debug_trace(|| format!("solver.solve HARD ERROR: {e}"));
+            return empty_solution(n, m_eq, m_ineq, QpStatus::NumericalFailure);
+        }
     };
 
     let engine_status = qsol.status;
@@ -383,7 +419,30 @@ where
         iterates: Vec::new(),
     };
     sol.status = verify_status(engine_status, &sol, prob, opts);
+    debug_trace(|| {
+        format!(
+            "engine={:?} -> reported={:?} kkt_err={:.3e} obj={:.6e}",
+            engine_status,
+            sol.status,
+            sol.kkt_residuals(prob).kkt_error(),
+            sol.obj,
+        )
+    });
     sol
+}
+
+/// Emit a diagnostic line when `POUNCE_AS_DEBUG` is set in the environment.
+///
+/// This path makes three decisions that are invisible in the reported status —
+/// whether a simplex seed was obtained, what iteration budget was chosen, and
+/// what the engine's own verdict was before verification either accepted or
+/// demoted it. Reconstructing those from the outside is guesswork, and the
+/// guesses were wrong twice while this driver was being built. The closure
+/// defers formatting so an unset var costs one `env::var` and no allocation.
+fn debug_trace(msg: impl FnOnce() -> String) {
+    if std::env::var("POUNCE_AS_DEBUG").is_ok() {
+        eprintln!("[as] {}", msg());
+    }
 }
 
 /// Re-earn a status against the original problem after unscaling.
