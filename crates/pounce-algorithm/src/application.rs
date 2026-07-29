@@ -3376,6 +3376,15 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
     if let Ok((v, true)) = options.get_numeric_value("sqp_qp_elastic_gamma", "") {
         opts.elastic_gamma = v;
     }
+    if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_schur_updates", "") {
+        opts.use_schur_updates = v;
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "")
+    {
+        if v >= 1 {
+            opts.max_schur_updates_before_refactor = v as u32;
+        }
+    }
     if let Ok((s, true)) = options.get_string_value("sqp_qp_anti_cycling", "") {
         opts.anti_cycling = match s.as_str() {
             "expand" => AntiCyclingChoice::Expand,
@@ -3810,7 +3819,9 @@ mod tests {
              sqp_qp_feas_tol 1e-7\n\
              sqp_qp_opt_tol 2e-7\n\
              sqp_qp_elastic_gamma 1e4\n\
-             sqp_qp_anti_cycling bland\n",
+             sqp_qp_anti_cycling bland\n\
+             sqp_qp_use_schur_updates yes\n\
+             sqp_qp_max_schur_updates_before_refactor 12\n",
         )
         .expect("every sqp_qp_* option must be registered (gh #360)");
 
@@ -3820,6 +3831,12 @@ mod tests {
         assert!((qp.opt_tol - 2e-7).abs() < 1e-20);
         assert!((qp.elastic_gamma - 1e4).abs() < 1e-9);
         assert_eq!(qp.anti_cycling, AntiCyclingChoice::Bland);
+        // The Schur update path was implemented but reachable only through
+        // `SqpAlgorithm::with_qp_options`, so no CLI/library user could turn
+        // it on — the same unreachable-knob defect gh #360 fixed for the rest
+        // of this family.
+        assert!(qp.use_schur_updates);
+        assert_eq!(qp.max_schur_updates_before_refactor, 12);
 
         // Untouched options must keep the pounce-qp defaults, not be
         // overwritten with zeros by the "explicitly set" gate.
@@ -3833,6 +3850,14 @@ mod tests {
         assert!((qp.feas_tol - defaults.feas_tol).abs() < 1e-20);
         assert!((qp.opt_tol - defaults.opt_tol).abs() < 1e-20);
         assert_eq!(qp.anti_cycling, defaults.anti_cycling);
+        // Default stays OFF, and that is a measured choice: enabling it breaks
+        // 9 of the 46 Maros-Meszaros instances the default path solves
+        // correctly. Do not flip this without re-running that comparison.
+        assert!(!qp.use_schur_updates);
+        assert_eq!(
+            qp.max_schur_updates_before_refactor,
+            defaults.max_schur_updates_before_refactor
+        );
     }
 
     #[test]

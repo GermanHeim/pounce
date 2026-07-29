@@ -9,6 +9,40 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the active-set QP's Schur-update path was unreachable from any user-facing surface
+
+- **`sqp_qp_use_schur_updates` and `sqp_qp_max_schur_updates_before_refactor`
+  are now registered options.** `pounce-qp` has implemented Schur-complement
+  rank-2 working-set updates (Kirches 2011 / qpOASES-extended) for some time,
+  but the only way to enable them was `SqpAlgorithm::with_qp_options` — a
+  library-only entry point. No CLI user, no `.nl` run, and no benchmark could
+  reach it. That is the same unreachable-knob defect #360 fixed for the rest of
+  the `sqp_qp_*` family, and the guard test added there now covers these two.
+- **What it costs to leave off.** With updates disabled, every working-set
+  change assembles a fresh active-set KKT and factors it from scratch,
+  repeating the full symbolic analysis (fill-reducing ordering + MC64
+  matching). Profiling `Q25FV47` put **32% of total runtime** in symbolic
+  factorization, across 1000+ factorizations. Enabling updates: 19.7s → 0.5s.
+  Measured 28-88× on the instances tried.
+- **Why the default nevertheless stays `false`.** The speedup above is measured
+  on instances that fail either way — a biased sample. Re-running the 46
+  Maros-Mészáros instances the default path solves *correctly*, with updates
+  enabled: **9 regress** (4 `InternalError`, 2 stalls, 2 timeouts, 1 wrong
+  objective) and total wall time rises 107s → 251s. So this is opt-in for
+  warm-started workloads where the speedup dominates, not a general
+  accelerator. The option's own documentation records those numbers, and the
+  test asserts the default rather than leaving it to drift.
+- Caching the *symbolic* analysis was tried first and does not work: the KKT
+  pattern genuinely changes on every working-set change (instrumented:
+  0 cache hits, 1000+ misses, dimension oscillating 1620/1720/6365). The
+  reusable object is the factorization, which is exactly what the Schur path
+  maintains.
+- **Not fixed here.** Enabling updates does not make the failing instances
+  solve; it changes `Search Direction is becoming Too Small` into
+  `KKT matrix is singular (LICQ violation or rank-deficient Jacobian)`, faster.
+  The underlying rank-deficient active-set KKT on degenerate Netlib-derived
+  QPs is a separate defect, tracked on its own.
+
 ### Tests — two correctness ratchets silently measured whatever `pounce` was on `PATH`
 
 - **`test_infeasibility_no_false_positives` and `test_scale_invariance` now
