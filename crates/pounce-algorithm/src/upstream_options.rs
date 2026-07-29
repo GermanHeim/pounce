@@ -502,6 +502,41 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          subproblem ratio test. Default expand.",
     )?;
 
+    r.add_bool_option(
+        "sqp_qp_use_schur_updates",
+        "Absorb active-set changes as Schur-complement rank-2 updates.",
+        false,
+        "Active-set SQP only. When true, the QP subproblem keeps a cached \
+         factor of the fixed-dimension K_max matrix and absorbs each \
+         working-set change as a Sherman-Morrison-Woodbury rank-2 update, \
+         refactoring only every \"sqp_qp_max_schur_updates_before_refactor\" \
+         updates (Kirches 2011; qpOASES-extended). When false each iteration \
+         assembles a fresh active-set KKT and factors it from scratch -- \
+         algorithmically identical but far more expensive, since every \
+         working-set change repeats the full symbolic analysis (fill-reducing \
+         ordering and MC64 matching), which measured 32% of runtime on \
+         Q25FV47. \
+         \
+         Default false, and that is a measured choice rather than an \
+         oversight. On Maros-Meszaros instances the update path is 28-88x \
+         faster where it works (Q25FV47: 19.7s -> 0.5s), but it is currently \
+         less robust: of the 46 instances the default path solves correctly, \
+         enabling updates breaks 9 (InternalError, TimeOut, or a wrong \
+         objective), and total wall over that set rises 107s -> 251s because \
+         of the new timeouts. Treat it as opt-in for warm-started workloads \
+         where the speedup dominates, not as a general accelerator.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "sqp_qp_max_schur_updates_before_refactor",
+        "Schur updates to absorb before refactoring from scratch.",
+        1,
+        50,
+        "Active-set SQP only, and only consulted when \
+         \"sqp_qp_use_schur_updates\" is true. The dense Schur block grows by \
+         2 per working-set change, so its solve cost grows quadratically; \
+         refactoring periodically bounds that. Default 50.",
+    )?;
+
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19 (Curtis-Reid; minimizes sum of log^2 |a_ij|)"), ("ruiz", "use iterative symmetric infinity-norm equilibration (Ruiz, 2001)"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
 
