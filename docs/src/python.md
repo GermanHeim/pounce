@@ -365,7 +365,7 @@ choice — mirroring the CLI option of the same name:
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
-| `"qp-active-set"` | Run the active-set SQP engine instead of the filter-IPM. Equivalent to `algorithm="active-set-sqp"`. |
+| `"qp-active-set"` | Run the active-set engine instead of the filter-IPM. On the **library** path this is `algorithm="active-set-sqp"` (the SQP outer loop); the **CLI** routes an LP/convex QP straight into the convex active-set driver instead, so the two are no longer the same route. |
 
 Any other value raises `ValueError`. These are the same six selectors the CLI
 accepts, and matching is case-insensitive, as on the CLI.
@@ -373,9 +373,12 @@ accepts, and matching is case-insensitive, as on the CLI.
 Two differences from the CLI are worth knowing, both because `minimize` is a
 *library* consumer with no `.nl` file to classify:
 
-* `"qp-active-set"` is **not** class-validated here. The CLI restricts it to
-  LP/convex QP; the library path simply runs the SQP engine on whatever problem
-  it is given, since it has no extracted problem class to check against.
+* `"qp-active-set"` is **not** class-validated here, and it is a *different
+  route* than the CLI's. The CLI restricts the selector to LP/convex QP and
+  sends those to the convex active-set driver; the library path has no
+  extracted problem class to check against, so it simply runs the SQP outer
+  loop on whatever problem it is given. Expect the CLI and `minimize` to differ
+  in iteration counts and reported statuses for the same convex QP as a result.
 * The convex selectors (`"lp-ipm"`, `"qp-ipm"`, `"socp"`) work because
   `minimize` does its own Python-side structure detection. The equivalent Rust
   library API rejects them with `Invalid_Option`.
