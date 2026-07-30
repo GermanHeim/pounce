@@ -638,3 +638,44 @@ fn afiro_active_set_solves_under_default_anti_cycling() {
         bland.solution.objective
     );
 }
+
+/// The `sqp_qp_*` option family must actually reach the inner `pounce-qp`
+/// engine on the `qp-active-set` path.
+///
+/// These knobs were written for the QP subproblem of the active-set *SQP* outer
+/// loop. `solver_selection=qp-active-set` used to be implemented by rewriting
+/// itself to `algorithm=active-set-sqp`, so they applied for free; it now drives
+/// the engine directly through the convex path, and every one of them silently
+/// became a no-op until they were forwarded explicitly. A silent no-op on a
+/// documented option is invisible from the outside, hence this test.
+///
+/// `sqp_qp_max_iter` is the cheapest unambiguous probe: an absurdly small
+/// budget must turn a solve that otherwise succeeds into an iteration-limit
+/// stop. If forwarding regresses, `afiro` just solves and this fails.
+#[test]
+fn sqp_qp_options_reach_the_active_set_engine() {
+    let run = |extra: Option<&str>| -> String {
+        let mut cmd = Command::new(pounce_exe());
+        cmd.arg(fixture_named("lp_afiro.nl"))
+            .arg("--no-sol")
+            .arg("solver_selection=qp-active-set");
+        if let Some(e) = extra {
+            cmd.arg(e);
+        }
+        let out = cmd.output().expect("spawn pounce");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // Baseline: afiro solves on this path.
+    assert!(
+        run(None).contains("Optimal Solution Found"),
+        "afiro should solve with default options"
+    );
+
+    // A 3-iteration budget cannot reach the optimum ⇒ the option was forwarded.
+    let capped = run(Some("sqp_qp_max_iter=3"));
+    assert!(
+        capped.contains("Maximum iterations exceeded"),
+        "sqp_qp_max_iter=3 must be honoured on the qp-active-set path; got:\n{capped}"
+    );
+}

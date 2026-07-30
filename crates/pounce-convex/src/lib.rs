@@ -38,6 +38,7 @@ pub mod sensitivity;
 pub(crate) mod simplex;
 pub mod sos;
 
+pub use active_set::{ActiveSetOverrides, solve_qp_active_set};
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
     solve_qp_multi_rhs_parallel,

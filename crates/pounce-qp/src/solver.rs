@@ -989,14 +989,24 @@ impl ParametricActiveSetSolver {
                 // steepest-violation rule — faster but not cycle-
                 // free under pathological degeneracy).
                 //
-                // EXPAND (Gill-Murray-Saunders-Wright 1989) is the
-                // SOTA default per the design note; its full
-                // primal-perturbation machinery is one of the
-                // remaining Phase 5a items. Until it lands, the
-                // `Expand` enum variant aliases to the steepest-
-                // violation behavior, which is correct on every
-                // non-cycling problem in the analytical ladder and
-                // matches the qpOASES default.
+                // Scope note: EXPAND (Gill-Murray-Saunders-Wright
+                // 1989) governs the *ratio test*, and its τ
+                // primal-perturbation machinery is implemented —
+                // τ-relaxed blocker selection in `select_blocker`,
+                // plus the τ-growth and snap-reset below. It does
+                // **not** supply a drop rule, so under
+                // `AntiCyclingChoice::Expand` this choice is
+                // Dantzig's steepest-violation: correct on every
+                // non-cycling problem in the analytical ladder, and
+                // the qpOASES default, but not cycle-free on its own.
+                // The anti-stall Bland latch (`force_bland`) is what
+                // bounds the pathological case.
+                //
+                // (This comment previously said EXPAND's perturbation
+                // machinery had not landed and that `Expand` aliased
+                // wholesale to steepest-violation. That was true before
+                // c20 and stale after it — the aliasing is specific to
+                // the drop rule, not to EXPAND as a whole.)
                 let use_bland =
                     force_bland || matches!(opts.anti_cycling, AntiCyclingChoice::Bland);
 

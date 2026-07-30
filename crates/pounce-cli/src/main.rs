@@ -753,46 +753,13 @@ pub fn main() -> ExitCode {
                 // the-boundary). The active-set engine is a different
                 // algorithm with no such hook, so a `--debug*` request would
                 // otherwise silently no-op. Say so explicitly.
-                // The `sqp_qp_*` family tunes the QP subproblem *of the SQP
-                // outer loop*. On this path there is no SQP outer loop any
-                // more — the engine is driven directly by the convex driver —
-                // so those options no longer reach it. They used to, back when
-                // `qp-active-set` was implemented by rewriting itself to
-                // `algorithm=active-set-sqp`, which makes this a silent
-                // behaviour change for anyone who set one. Say so rather than
-                // ignore them quietly; forwarding them properly is still to do.
-                if matches!(choice, SolverChoice::QpActiveSet) {
-                    let o = app.options();
-                    let ignored: Vec<&str> = [
-                        "sqp_qp_max_iter",
-                        "sqp_qp_anti_cycling",
-                        "sqp_qp_feas_tol",
-                        "sqp_qp_opt_tol",
-                        "sqp_qp_elastic_gamma",
-                        "sqp_qp_use_schur_updates",
-                        "sqp_qp_max_schur_updates_before_refactor",
-                    ]
-                    .into_iter()
-                    .filter(|k| {
-                        // `true` in the tuple means the user set it explicitly.
-                        matches!(o.get_string_value(k, ""), Ok((_, true)))
-                            || matches!(o.get_numeric_value(k, ""), Ok((_, true)))
-                            || matches!(o.get_integer_value(k, ""), Ok((_, true)))
-                    })
-                    .collect();
-                    if !ignored.is_empty() {
-                        eprintln!(
-                            "pounce: warning: {} does not apply to \
-                             solver_selection=qp-active-set, which now drives the \
-                             active-set engine directly through the convex path \
-                             rather than through the active-set SQP outer loop; \
-                             the setting is ignored. Use `max_iter` / `tol` for \
-                             this path, or algorithm=active-set-sqp on a general \
-                             NLP for the SQP knobs.",
-                            ignored.join(", ")
-                        );
-                    }
-                }
+                // Forward the `sqp_qp_*` family to the inner engine. These knobs
+                // named the QP subproblem *of the SQP outer loop*, which this
+                // path no longer goes through, so every one of them silently
+                // became a no-op when the dispatch moved to the convex driver.
+                // The names are kept because they are the documented, in-use
+                // spelling; only the delivery route changed.
+                let engine_overrides = active_set_overrides(&app);
                 if matches!(choice, SolverChoice::QpActiveSet) && debug_hook.is_some() {
                     eprintln!(
                         "pounce: note: the interactive debugger is IPM-only and does \
@@ -811,6 +778,7 @@ pub fn main() -> ExitCode {
                     args.ampl,
                     convex_opts,
                     matches!(choice, SolverChoice::QpActiveSet),
+                    engine_overrides,
                 );
             }
             // Builtins never classify as convex; fall through to NLP.
@@ -1658,6 +1626,56 @@ fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32)
     }
 }
 
+/// Read the `sqp_qp_*` option family into inner-engine overrides for the
+/// active-set QP driver.
+///
+/// Only options the user set **explicitly** are forwarded (the `true` flag from
+/// the `OptionsList` accessors), so the driver keeps its own tuned defaults
+/// otherwise — it deliberately picks a size-scaled `max_iter` and enables Schur
+/// updates, and must be able to tell "unset" from "set to the default value".
+///
+/// These knobs were introduced for the QP subproblem of the active-set *SQP*
+/// outer loop. `solver_selection=qp-active-set` used to reach the engine that
+/// way, so they applied; it now drives the engine directly through the convex
+/// path, and without this they would all be silent no-ops. The `sqp_qp_`
+/// spelling is retained because it is the documented, already-in-use name.
+fn active_set_overrides(app: &IpoptApplication) -> pounce_convex::ActiveSetOverrides {
+    use pounce_qp::AntiCyclingChoice;
+    let mut o = pounce_convex::ActiveSetOverrides::default();
+    let opt = app.options();
+    if let Ok((v, true)) = opt.get_integer_value("sqp_qp_max_iter", "") {
+        if v >= 0 {
+            o.max_iter = Some(v as u32);
+        }
+    }
+    if let Ok((v, true)) = opt.get_string_value("sqp_qp_anti_cycling", "") {
+        o.anti_cycling = match v.as_str() {
+            "bland" => Some(AntiCyclingChoice::Bland),
+            "expand" => Some(AntiCyclingChoice::Expand),
+            "none" => Some(AntiCyclingChoice::None),
+            _ => None,
+        };
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("sqp_qp_feas_tol", "") {
+        o.feas_tol = Some(v);
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("sqp_qp_opt_tol", "") {
+        o.opt_tol = Some(v);
+    }
+    if let Ok((v, true)) = opt.get_numeric_value("sqp_qp_elastic_gamma", "") {
+        o.elastic_gamma = Some(v);
+    }
+    if let Ok((v, true)) = opt.get_string_value("sqp_qp_use_schur_updates", "") {
+        o.use_schur_updates = Some(v == "yes");
+    }
+    if let Ok((v, true)) = opt.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "") {
+        if v >= 0 {
+            o.max_schur_updates_before_refactor = Some(v as u32);
+        }
+    }
+    o
+}
+
 /// Build the convex IPM [`pounce_convex::QpOptions`] from the registered CLI
 /// knobs.
 ///
@@ -1740,6 +1758,8 @@ fn run_convex_qp(
     // (`solver_selection=qp-active-set`). Everything else about this driver —
     // extraction, presolve, postsolve, reporting, `.sol` writing — is shared.
     use_active_set: bool,
+    // Inner-engine overrides from the `sqp_qp_*` family; empty for the IPM.
+    engine_overrides: pounce_convex::ActiveSetOverrides,
 ) -> ExitCode {
     use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{PresolveOutcome, presolve};
@@ -1834,7 +1854,7 @@ fn run_convex_qp(
                 }
                 let red = if use_active_set {
                     let mut mk = backend;
-                    solve_qp_active_set(&ps.reduced, &qp_opts, &mut mk)
+                    solve_qp_active_set(&ps.reduced, &qp_opts, &engine_overrides, &mut mk)
                 } else {
                     solve_qp_ipm(&ps.reduced, &qp_opts, backend)
                 };
@@ -1845,7 +1865,7 @@ fn run_convex_qp(
         }
     } else if use_active_set {
         let mut mk = backend;
-        solve_qp_active_set(&qp, &qp_opts, &mut mk)
+        solve_qp_active_set(&qp, &qp_opts, &engine_overrides, &mut mk)
     } else {
         solve_qp_ipm(&qp, &qp_opts, backend)
     };

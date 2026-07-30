@@ -22,9 +22,13 @@ better fit.
 **Phase 5a — feature-complete on correctness.** Every problem
 class identified in the design note (`docs/src/active-set-sqp-warm-start.md`)
 solves end-to-end; infeasibility is certified honestly; warm-start
-is wired. Five of the six analytical-ladder problems (§8.0) pass;
-problem #4 (LICQ-violating redundant equality) is a documented
-limitation that needs rank-detection beyond inertia control.
+is wired. All six analytical-ladder problems (§8.0) pass: problem #4
+(LICQ-violating redundant equality) was the long-standing gap, and the
+rank detection it needed now runs on **both** inner paths —
+`solve_general` has long pruned a rank-deficient active set to a maximal
+linearly independent subset, and `solve_general_schur` does too via
+`schur_reset_rank_repaired`. Regression coverage:
+`tests/schur_vs_refactor.rs::licq_violating_equality_solves_on_both_paths`.
 
 **Phase 5a.1 — performance and tooling refinements landed.** The
 Harris-style two-pass ratio test (cycling-prevention core of
@@ -35,14 +39,32 @@ and basic §8.2 scaling-sweep diagnostics all ship.
 **Phase 5a.2 — algorithmic completion landed.** §4.2 sparse
 Schur-complement active-set updates (c18 standalone module +
 c19 wired into `solve_general` behind `use_schur_updates`) and
-§4.4 full GMSW EXPAND with τ-growth + snap-reset (c20) are both
-done. The Schur path is opt-in; correctness verified by Schur-
-vs-refactor cross-checks. EXPAND degrades to Harris-only
-behavior on non-cycling problems and only kicks in on
-pathological degeneracy. The remaining items (Maros-Mészáros
-oracle comparison, large-n scaling benchmarks) require FFI or
-benchmark infrastructure that fall outside the pure-Rust
-constraint.
+§4.4 GMSW EXPAND with τ-growth + snap-reset (c20) are both
+done. EXPAND degrades to Harris-only behavior on non-cycling
+problems and only kicks in on pathological degeneracy; note its
+τ-perturbation governs the *ratio test* — the drop rule under
+`AntiCyclingChoice::Expand` is Dantzig steepest-violation, with
+the anti-stall Bland latch bounding the pathological case.
+
+The Schur path is **no longer opt-in for the convex active-set
+driver** (`pounce_convex::active_set` enables it), and it is
+cross-checked against the refactor path by
+`tests/schur_vs_refactor.rs`.
+
+> Correction: this section previously claimed the Schur path's
+> "correctness verified by Schur-vs-refactor cross-checks". No such
+> cross-check existed, and the path was **not** equivalent. Writing
+> one surfaced two defects, both since fixed: a singular Schur block
+> aborted the whole solve instead of triggering the refactor the
+> count-based reset already performed, and the SMW correction lost
+> accuracy as updates accumulated (exact at a refactor interval of 1
+> or 5, ~1.5e-6 off at the default 50) until `SchurState::solve` got
+> iterative refinement. Anyone who had set `use_schur_updates` was
+> exposed to both.
+
+The remaining items (Maros-Mészáros oracle comparison, large-n
+scaling benchmarks) require FFI or benchmark infrastructure that
+fall outside the pure-Rust constraint.
 
 **Phase 5b — SQP NLP integration core landed** in
 `pounce-algorithm::sqp`. The crate is now wired into the

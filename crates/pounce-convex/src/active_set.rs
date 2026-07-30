@@ -65,13 +65,72 @@ use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_qp::{
-    BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver,
+    AntiCyclingChoice, BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver,
     QpOptions as ActiveSetOptions, QpProblem as ActiveSetProblem, QpSolver,
     QpStatus as ActiveSetStatus, QpWarmStart, WorkingSet,
 };
 
 use crate::ipm::QpOptions;
 use crate::qp::{QpProblem, QpSolution, QpStatus};
+
+/// Caller-supplied overrides for the inner `pounce-qp` engine.
+///
+/// Every field is `None` unless the user set the corresponding option
+/// explicitly, so this driver can tell "left at the default" from "asked for
+/// the default value" — a distinction it needs, because it deliberately
+/// overrides two of these itself (a size-scaled `max_iter` and
+/// `use_schur_updates: true`) and an explicit request must win over that.
+///
+/// Exists because these knobs became unreachable when `qp-active-set` moved off
+/// the SQP outer loop: the `sqp_qp_*` option family fed the SQP's QP
+/// subproblem, and with no SQP in the picture all seven silently became no-ops.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ActiveSetOverrides {
+    pub max_iter: Option<u32>,
+    pub anti_cycling: Option<AntiCyclingChoice>,
+    pub feas_tol: Option<f64>,
+    pub opt_tol: Option<f64>,
+    pub elastic_gamma: Option<f64>,
+    pub use_schur_updates: Option<bool>,
+    pub max_schur_updates_before_refactor: Option<u32>,
+}
+
+impl ActiveSetOverrides {
+    /// True when the caller set nothing.
+    pub fn is_empty(&self) -> bool {
+        self.max_iter.is_none()
+            && self.anti_cycling.is_none()
+            && self.feas_tol.is_none()
+            && self.opt_tol.is_none()
+            && self.elastic_gamma.is_none()
+            && self.use_schur_updates.is_none()
+            && self.max_schur_updates_before_refactor.is_none()
+    }
+
+    fn apply(&self, o: &mut ActiveSetOptions) {
+        if let Some(v) = self.max_iter {
+            o.max_iter = v;
+        }
+        if let Some(v) = self.anti_cycling {
+            o.anti_cycling = v;
+        }
+        if let Some(v) = self.feas_tol {
+            o.feas_tol = v;
+        }
+        if let Some(v) = self.opt_tol {
+            o.opt_tol = v;
+        }
+        if let Some(v) = self.elastic_gamma {
+            o.elastic_gamma = v;
+        }
+        if let Some(v) = self.use_schur_updates {
+            o.use_schur_updates = v;
+        }
+        if let Some(v) = self.max_schur_updates_before_refactor {
+            o.max_schur_updates_before_refactor = v;
+        }
+    }
+}
 
 /// Clamp a convex lower-bound value to pounce-qp's `±1e19` free convention.
 fn to_qp_lower(lb: f64) -> f64 {
@@ -117,6 +176,7 @@ fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpS
 pub fn solve_qp_active_set<F>(
     prob: &QpProblem,
     opts: &QpOptions,
+    engine: &ActiveSetOverrides,
     make_backend: &mut F,
 ) -> QpSolution
 where
@@ -143,13 +203,13 @@ where
         equilibrate: false,
         ..*opts
     };
-    let sol = solve_translated(prob, &unscaled_opts, make_backend);
+    let sol = solve_translated(prob, &unscaled_opts, engine, make_backend);
     if !opts.equilibrate || is_solved(sol.status) {
         return sol;
     }
 
     let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
-    let mut retry = solve_translated(&scaled, &unscaled_opts, make_backend);
+    let mut retry = solve_translated(&scaled, &unscaled_opts, engine, make_backend);
     scaling.unscale_solution(prob, &mut retry);
     // Re-verify against the ORIGINAL problem: the verdict reached inside the
     // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
@@ -168,7 +228,12 @@ fn is_solved(s: QpStatus) -> bool {
 
 /// Translate to `pounce-qp` form, solve, and verify — one attempt, no scaling
 /// decisions. `opts.equilibrate` is ignored here; the caller owns that choice.
-fn solve_translated<F>(prob: &QpProblem, opts: &QpOptions, make_backend: &mut F) -> QpSolution
+fn solve_translated<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -269,6 +334,14 @@ where
         // `pounce-qp/tests/schur_vs_refactor.rs`.
         use_schur_updates: true,
         ..ActiveSetOptions::default()
+    };
+    // Applied last: the two settings this driver picks for itself (the
+    // size-scaled `max_iter` and `use_schur_updates`) are defaults, not
+    // mandates, so an explicit user request overrides them.
+    let qopts = {
+        let mut q = qopts;
+        engine.apply(&mut q);
+        q
     };
 
     // Seed from a simplex phase-1 feasible **vertex**, when one is available.
@@ -688,7 +761,12 @@ mod tests {
     fn analytic_qp_primal_dual_and_sign() {
         let prob = projection_qp();
         let mut mk = backend;
-        let sol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+        let sol = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk,
+        );
 
         assert_eq!(sol.status, QpStatus::Optimal, "status");
         assert!((sol.x[0] - 2.5).abs() < 1e-8, "x0 = {}", sol.x[0]);
@@ -733,7 +811,12 @@ mod tests {
             ub: vec![],
         };
         let mut mk = backend;
-        let asol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+        let asol = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk,
+        );
         let isol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
 
         assert_eq!(asol.status, QpStatus::Optimal);
@@ -779,7 +862,12 @@ mod tests {
             ub: vec![],
         };
         let mut mk = backend;
-        let asol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+        let asol = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk,
+        );
 
         assert_eq!(asol.status, QpStatus::Optimal, "status");
         assert!((asol.x[0] - 1.5).abs() < 1e-7, "x0 = {}", asol.x[0]);
@@ -848,7 +936,12 @@ mod tests {
             ub: vec![],
         };
         let mut mk = backend;
-        let sol = solve_qp_active_set(&prob, &QpOptions::default(), &mut mk);
+        let sol = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk,
+        );
 
         assert_eq!(sol.status, QpStatus::Optimal, "status");
         assert!((sol.x[0] - 1.5).abs() < 1e-7, "x0 = {}", sol.x[0]);
