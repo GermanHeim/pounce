@@ -82,7 +82,10 @@ pub trait QpSolver {
 /// note). Owns a single linear-solver backend; future Schur-
 /// complement state lives here too.
 pub struct ParametricActiveSetSolver {
-    linsol: LinearSolver,
+    /// Crate-visible so sibling modules — notably [`crate::homotopy`] — can
+    /// reuse the rank-repair helpers, which take the shared linear-solver
+    /// backend rather than owning one.
+    pub(crate) linsol: LinearSolver,
 }
 
 impl ParametricActiveSetSolver {
@@ -2306,7 +2309,7 @@ const TABU_DRIFT_REL: Number = 1e-7;
 /// can rescue a rank-deficient *constraint* block). General-constraint
 /// rows are processed before variable bounds, so equality / general
 /// rows are preferred over bounds when a tie must be broken.
-fn independent_active_subset(
+pub(crate) fn independent_active_subset(
     linsol: &mut LinearSolver,
     qp: &QpProblem,
     active_cons: &[usize],

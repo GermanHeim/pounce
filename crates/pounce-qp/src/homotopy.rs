@@ -345,6 +345,10 @@ impl ParametricActiveSetSolver {
         let mut t: Number = 0.0;
         let mut n_changes: u32 = 0;
         let mut n_refactor: u32 = 0;
+        // Rank repairs allowed on this path. Each strictly shrinks the active
+        // set so the retry loop terminates on its own; the cap bounds the case
+        // where the ratio test keeps re-adding a pruned row.
+        let mut rank_repairs: u32 = (n + m).min(1000) as u32;
 
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
@@ -387,7 +391,77 @@ impl ParametricActiveSetSolver {
                 // A rank-deficient active set on the path is the same situation
                 // `solve_general` handles by pruning; rather than duplicate that
                 // logic here, hand the problem back to the conventional path.
-                Err(_) => return Ok(None),
+                // A rank-deficient active set: at a degenerate point more rows
+                // are binding than there are variables, and the surplus is
+                // linearly dependent. No H-block shift repairs a rank-deficient
+                // *constraint* block, so inertia control exhausts its shifts and
+                // reports "reduced Hessian remains non-PD on null(A_W)".
+                //
+                // Prune to a maximal independent subset and retry at the same
+                // `t`, exactly as `solve_general` does. A dropped row is a linear
+                // combination of the kept ones, so it stays satisfied at the
+                // current iterate and the feasible set is unchanged — only the
+                // rank deficiency goes away. `x` and `t` do not move, so nothing
+                // about the path's position is lost.
+                //
+                // This matters late rather than early: measured on the 24
+                // smallest problems, 4 hit this, and they hit it near the end of
+                // the path (`QSHARE2B` at t = 0.99999, `QSCAGR7` at t = 0.99986).
+                // Bailing there discards a path that was one step from done.
+                Err(e) if e.is_recoverable_factorization_failure() && rank_repairs > 0 => {
+                    let (kc, kb) = crate::solver::independent_active_subset(
+                        &mut self.linsol,
+                        &path_qp,
+                        &active_cons,
+                        &active_bounds,
+                    );
+                    if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                        // Already full rank ⇒ not a deficiency this can repair.
+                        if trace {
+                            eprintln!("[hom] KKT failure at t={t:.6e}, full rank already: {e}");
+                        }
+                        return Ok(None);
+                    }
+                    rank_repairs -= 1;
+                    let mut keep_c = vec![false; m];
+                    for &i in &kc {
+                        keep_c[i] = true;
+                    }
+                    let mut keep_b = vec![false; n];
+                    for &j in &kb {
+                        keep_b[j] = true;
+                    }
+                    for &i in &active_cons {
+                        if !keep_c[i] {
+                            working.constraints[i] = ConsStatus::Inactive;
+                            lambda_g[i] = 0.0;
+                            n_changes += 1;
+                        }
+                    }
+                    for &j in &active_bounds {
+                        if !keep_b[j] {
+                            working.bounds[j] = BoundStatus::Inactive;
+                            lambda_x[j] = 0.0;
+                            n_changes += 1;
+                        }
+                    }
+                    if trace {
+                        eprintln!(
+                            "[hom] rank repair at t={t:.6e}: {} -> {} cons, {} -> {} bounds",
+                            active_cons.len(),
+                            kc.len(),
+                            active_bounds.len(),
+                            kb.len()
+                        );
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    if trace {
+                        eprintln!("[hom] KKT factorization failed at t={t:.6e}: {e}");
+                    }
+                    return Ok(None);
+                }
             }
             n_refactor += 1;
             let dx: Vec<Number> = rhs[..n].to_vec();
