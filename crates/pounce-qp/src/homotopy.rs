@@ -106,15 +106,35 @@ enum Event {
 /// end up active.
 ///
 /// `δ` is derived, not guessed. With `H = 0` the box relaxation's solution is
-/// `x₀ = clamp(−g/δ, box)`, so `δ = ‖g‖∞ / X` places `‖x₀‖` at roughly `X`, a
-/// representative variable magnitude. `X` is the median finite box width, or 1
-/// when no variable has two finite bounds. Putting `x₀` on the box's own scale
-/// matters because the `t = 0` row bounds are relaxed outward from `A x₀`: an
-/// enormous `x₀` would make them enormous too, and the path correspondingly long.
+/// `x₀ = clamp(−g/δ, box)`, so `‖g‖∞ / X` — for `X` a representative variable
+/// magnitude (median finite box width, else 1) — is the `δ` that places `‖x₀‖`
+/// at roughly `X`. That is the *scale* reference; the regularization itself is a
+/// small relative fraction of it, [`DELTA_REL`].
+///
+/// Sizing `δ` at the box scale was the original choice and it was wrong: at
+/// `O(1)` relative size, `H + δI` is not a perturbation of the problem but a
+/// different problem, and the path faithfully predicts *its* active set. On
+/// `QRECIPE` (published optimum −266.616) that produced −104.83; at `1e-6`
+/// relative it produces the exact optimum. Measured, both directions:
+///
+/// | δ relative size | QRECIPE result | path | time |
+/// |---|---|---|---|
+/// | `1` (box scale) | −104.83, wrong | 99 changes | 34.8 s |
+/// | `1e-6` | **−266.616, exact** | 125 changes | **0.053 s** |
+///
+/// The small `δ` is *both* more accurate and far faster: a bad prediction costs
+/// the corrector far more than the slightly longer path costs the predictor. The
+/// worry that a small `δ` would blow up `‖x₀‖` and so the path length is real but
+/// mild — 99 → 125 changes here, 29 → 34 on `QAFIRO`.
 ///
 /// Returns `None` when `g` is zero — there is nothing to scale against, and with
 /// `H = 0` and `g = 0` every feasible point is optimal anyway.
 fn path_regularization_delta(qp: &QpProblem<'_>) -> Option<Number> {
+    /// `δ` as a fraction of the problem's own objective scale. Small enough that
+    /// `H + δI` is a *perturbation* rather than a different problem, large enough
+    /// to bound the box relaxation in double precision. See the table above.
+    const DELTA_REL: Number = 1e-6;
+
     let g_inf = qp.g.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
     if !(g_inf > 0.0) || !g_inf.is_finite() {
         return None;
@@ -132,7 +152,7 @@ fn path_regularization_delta(qp: &QpProblem<'_>) -> Option<Number> {
         widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         widths[widths.len() / 2]
     };
-    let delta = g_inf / x_scale.max(1e-12);
+    let delta = DELTA_REL * g_inf / x_scale.max(1e-12);
     delta.is_finite().then_some(delta.clamp(1e-12, 1e12))
 }
 
