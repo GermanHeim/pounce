@@ -77,11 +77,35 @@ pub struct QpOptions {
     /// Trace the §4.2 parametric homotopy on a **cold** solve instead of
     /// starting the conventional phase-1/phase-2 scheme.
     ///
-    /// Off by default while it is being evaluated. The homotopy is the
-    /// algorithm this crate is named for and the one the design note assumes
-    /// (§4.3 has phase-1 driving its elastic slacks to zero *as the homotopy
-    /// proceeds*); the conventional path is the substitute that exists because
-    /// the homotopy did not. See [`crate::homotopy`].
+    /// Off in this crate's defaults, and **on** in the convex QP driver
+    /// ([`pounce_convex::active_set`]) which is where it was measured. The
+    /// distinction is deliberate: this flag is read by every consumer of
+    /// `pounce-qp`, including the SQP outer loop's inner subproblem solves, and
+    /// that path has *not* been benchmarked with the homotopy. Enabling it
+    /// crate-wide changes those solves too and does break
+    /// `sqp::tests::classify_working_set_reproduces_sqp_solver_output_on_convex_eq`.
+    ///
+    /// The homotopy is the algorithm
+    /// this crate is named for and the one the design note assumes (§4.3 has
+    /// phase-1 driving its elastic slacks to zero *as the homotopy proceeds*);
+    /// the conventional phase-1/phase-2 scheme is the substitute that existed
+    /// because the homotopy did not.
+    ///
+    /// Full Maros-Mészáros, 138 problems, 120 s cap, same binary:
+    ///
+    /// | | correct | solved-but-wrong | timeouts |
+    /// |---|---|---|---|
+    /// | conventional | 58/138 | none | 54 |
+    /// | homotopy | **71/138** | none | 49 |
+    ///
+    /// The trade is not uniform: 20 problems are gained, 7 lost. Six of the
+    /// losses are *large* instances that previously solved and now hit the time
+    /// cap (`AUG2D`, `AUG2DC`, `CONT-050`, `CONT-100`, `DTOC3`, `STADAT3`) —
+    /// the homotopy is slower there, not wrong. The seventh, `QSHARE2B`,
+    /// completes its path but its corrector then exhausts its iterations.
+    /// Set this to `false` to get the old behaviour on such a workload.
+    ///
+    /// See [`crate::homotopy`].
     pub use_homotopy: bool,
 
     /// §4.4 full EXPAND anti-cycling primal perturbation. Active

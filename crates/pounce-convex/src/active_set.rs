@@ -338,6 +338,21 @@ where
         // accuracy and aborted outright on singular Schur blocks. See
         // `pounce-qp/tests/schur_vs_refactor.rs`.
         use_schur_updates: true,
+        // Trace the §4.2 parametric homotopy rather than the conventional
+        // phase-1/phase-2 scheme. Measured on the full Maros-Mészáros set at a
+        // 120 s cap, same binary: 71/138 correct against 58/138 for the
+        // conventional path, with zero solved-but-wrong in both.
+        //
+        // The trade is not uniform — 20 problems gained, 7 lost, and six of the
+        // losses are large instances that previously solved and now hit the
+        // cap (AUG2D, AUG2DC, CONT-050, CONT-100, DTOC3, STADAT3): the homotopy
+        // is slower there, not wrong. `sqp_qp_use_homotopy=no` restores the old
+        // behaviour for such a workload.
+        //
+        // Set here rather than in `QpOptions::default()` on purpose: that
+        // default is read by every `pounce-qp` consumer including the SQP outer
+        // loop's inner subproblems, which this benchmark does not cover.
+        use_homotopy: true,
         ..ActiveSetOptions::default()
     };
     // Applied last: the two settings this driver picks for itself (the
