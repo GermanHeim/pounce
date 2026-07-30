@@ -309,31 +309,37 @@ where
         // Row order matches: the translation above stacks `[A_eq ; G]` in the
         // same order the simplex builds its rows, so index `i` is the same row.
         for (i, st) in working.constraints.iter_mut().enumerate() {
-            // Activity comes from the basis for *every* row, equalities
-            // included. Forcing all `m_eq` equalities active instead looks
-            // harmless — an equality is always satisfied — but it breaks the
-            // rank guarantee that makes this seed worth having. The basis leaves
-            // exactly `n` variables nonbasic; if `j` of the equality logicals
-            // are among the *basic* ones, unconditionally activating their rows
-            // pushes the active count to `n + j`, and the extra rows are
-            // linearly dependent by construction. That surfaces as
-            // `KKT inertia mismatch: expected 105 negative eigenvalues, got
-            // 102` on `CVXQP3_S` — a gap of exactly `j` — and aborts the solve.
+            // Equality rows are ALWAYS active — they are equations, not
+            // one-sided constraints that may or may not bind.
             //
-            // A basic equality logical means that row is redundant at this
-            // vertex: it is a linear combination of the rows the basis does
-            // pin, so it stays satisfied without being in the working set. This
-            // is the same argument `cold_general_initial` makes for the
-            // redundant equalities its own rank-repair guard drops, and the
-            // ratio test skips `bl == bu` rows, so a row left `Inactive` here
-            // never spuriously re-enters.
-            *st = match v.row_at[i] {
-                // Equality row pinned by the basis.
-                _ if i < m_eq && v.row_at[i] != AtBound::Free => ConsStatus::Equality,
-                // Slack `s = h − Gx` nonbasic at its lower bound 0 means
-                // `Gx = h`: the row sits at its upper bound `bu = h`.
-                AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
-                AtBound::Free => ConsStatus::Inactive,
+            // Deriving their activity from the basis instead (leaving a row
+            // inactive when its logical is basic) is tempting: it makes the
+            // active count come out at exactly `n` and so avoids the
+            // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
+            // otherwise hits. But the premise is false. An equality's logical
+            // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
+            // variable sitting at zero, which says nothing about whether the row
+            // is a linear combination of the others. Dropping such a row drops a
+            // real constraint — the ratio test skips `bl == bu` rows, so it
+            // never comes back — and the engine is then free to move in a
+            // direction that violates it. On NETLIB `afiro` that produced a
+            // phantom `Unbounded` verdict on an LP with a finite optimum of
+            // −464.75 (issue #133's regression test caught it).
+            //
+            // More active rows than variables *is* legitimate at a degenerate
+            // vertex; the dependence among them is a rank problem, and
+            // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
+            // by pruning to a maximal independent subset with the algebra to
+            // justify each drop, rather than guessing from basis status here.
+            *st = if i < m_eq {
+                ConsStatus::Equality
+            } else {
+                match v.row_at[i] {
+                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
+                    // `Gx = h`: the row sits at its upper bound `bu = h`.
+                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
+                    AtBound::Free => ConsStatus::Inactive,
+                }
             };
         }
         QpWarmStart {
@@ -376,6 +382,8 @@ where
     };
 
     let engine_status = qsol.status;
+    // Kept for the `Unbounded` certificate re-check in `verify_status`.
+    let engine_ray = qsol.unbounded_ray.clone();
 
     // ---- Back-translate (sign transform — see crate::crossover docs) ----
     let mut y = vec![0.0; m_eq];
@@ -418,7 +426,7 @@ where
         iters: qsol.stats.n_working_set_changes as usize,
         iterates: Vec::new(),
     };
-    sol.status = verify_status(engine_status, &sol, prob, opts);
+    sol.status = verify_status(engine_status, engine_ray.as_deref(), &sol, prob, opts);
     debug_trace(|| {
         format!(
             "engine={:?} -> reported={:?} kkt_err={:.3e} obj={:.6e}",
@@ -505,6 +513,7 @@ fn reverify_after_unscale(
 /// the "acceptable level" tier, anything worse is not a solve.
 fn verify_status(
     engine: ActiveSetStatus,
+    ray: Option<&[f64]>,
     sol: &QpSolution,
     prob: &QpProblem,
     opts: &QpOptions,
@@ -529,10 +538,18 @@ fn verify_status(
     match engine {
         // Trust, but verify.
         ActiveSetStatus::Optimal => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
-        // An unbounded ray is a genuine certificate the engine computes and
-        // checks (zero curvature, feasible for every step length, strict
-        // descent), so it is propagated.
-        ActiveSetStatus::Unbounded => QpStatus::DualInfeasible,
+        // Unboundedness is a proof obligation too, and the engine's claim does
+        // not survive contact with this benchmark: `QSCSD1` (published optimum
+        // 8.667, plainly bounded) is reported `Unbounded`. Propagating that
+        // unchecked produced "Problem is unbounded (dual infeasible)" on a
+        // bounded QP — a *wrong verdict about the user's model*, which is worse
+        // than any failure status. So re-derive the certificate here from the
+        // returned ray, exactly as the `Infeasible` case is re-derived.
+        ActiveSetStatus::Unbounded => match ray {
+            Some(d) if ray_certifies_unbounded(prob, d) => QpStatus::DualInfeasible,
+            // No ray, or a ray that does not stand up: fall back on the point.
+            _ => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
+        },
         // Uncertified infeasibility claim — never propagated as a verdict.
         // If the returned point happens to satisfy the KKT conditions anyway,
         // report that instead; otherwise say honestly that we did not solve it.
@@ -543,6 +560,72 @@ fn verify_status(
         ActiveSetStatus::MaxIter => solved_to(err).unwrap_or(QpStatus::IterationLimit),
         ActiveSetStatus::NumericalError => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
     }
+}
+
+/// Does `d` actually certify that `prob` is unbounded below?
+///
+/// A recession direction of a convex QP must satisfy all four of:
+///
+/// * **zero curvature**, `Pd ≈ 0` — otherwise `½(x+td)ᵀP(x+td)` grows like `t²`
+///   and the objective turns back up;
+/// * **equalities preserved**, `Ad ≈ 0`;
+/// * **inequalities non-increasing**, `Gd ≤ 0`, so no row is eventually violated;
+/// * **box respected directionally** — a component may only move toward an
+///   *infinite* bound;
+///
+/// and then **strict descent**, `(Px + c)ᵀd < 0`, which with `Pd ≈ 0` is `cᵀd`.
+/// Together these mean `x + td` stays feasible for every `t ≥ 0` while the
+/// objective decreases without bound. Anything less is not a certificate.
+///
+/// Tolerances are relative to `‖d‖∞` because the ray is not normalized.
+fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
+    if d.len() != prob.n {
+        return false;
+    }
+    let dn = d.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    if !dn.is_finite() || dn == 0.0 {
+        return false;
+    }
+    // Scale-relative slack. Deliberately looser than `tol`: the ray comes out of
+    // a finite-precision null-space computation, so demanding `tol` here would
+    // reject genuine certificates.
+    let slack = 1e-7 * dn;
+
+    let mut pd = vec![0.0; prob.n];
+    prob.p_mul(d, &mut pd);
+    if pd.iter().any(|v| v.abs() > slack) {
+        return false;
+    }
+
+    let mut ad = vec![0.0; prob.m_eq()];
+    for t in &prob.a {
+        ad[t.row] += t.val * d[t.col];
+    }
+    if ad.iter().any(|v| v.abs() > slack) {
+        return false;
+    }
+
+    let mut gd = vec![0.0; prob.m_ineq()];
+    for t in &prob.g {
+        gd[t.row] += t.val * d[t.col];
+    }
+    if gd.iter().any(|&v| v > slack) {
+        return false;
+    }
+
+    for (i, &di) in d.iter().enumerate() {
+        if di < -slack && prob.lb_of(i) > crate::qp::NEG_INF {
+            return false;
+        }
+        if di > slack && prob.ub_of(i) < crate::qp::POS_INF {
+            return false;
+        }
+    }
+
+    // Strict descent. `Pd ≈ 0` was just established, so the directional
+    // derivative `(Px + c)ᵀd` reduces to `cᵀd` independently of `x`.
+    let slope: f64 = (0..prob.n).map(|i| prob.c[i] * d[i]).sum();
+    slope < -slack
 }
 
 /// Iteration budget for the active-set engine.

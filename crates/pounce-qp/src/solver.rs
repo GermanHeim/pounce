@@ -1661,6 +1661,99 @@ impl ParametricActiveSetSolver {
     /// always PD, so the two paths are identical; the gap is latent
     /// for indefinite inputs on the opt-in `use_schur_updates = true`
     /// path. See code-review item M10.
+    /// Reset the Schur base factor, **repairing a rank-deficient active set**
+    /// rather than failing on it.
+    ///
+    /// At a degenerate vertex more rows can be binding than there are
+    /// variables, and those extra rows are linearly dependent — an LICQ
+    /// violation. The resulting active-set KKT is singular, and no §4.5 H-block
+    /// shift can repair a rank-deficient *constraint* block, so the inertia
+    /// loop simply exhausts and reports failure.
+    ///
+    /// [`Self::solve_general`] has carried this guard for a long time;
+    /// `solve_general_schur` never did. That asymmetry was invisible while the
+    /// Schur path was opt-in, and became the dominant failure mode the moment
+    /// it was switched on for the convex active-set driver: 27 of 138
+    /// Maros-Mészáros problems (`QSHARE2B`, `QSCTAP1`, …) turned into a hard
+    /// `LinearSolverFailure("KKT matrix is singular (LICQ violation or
+    /// rank-deficient Jacobian)")` where the refactor path had merely failed to
+    /// converge.
+    ///
+    /// The repair is the same one the refactor path and
+    /// [`Self::cold_general_initial`] use: prune the active set to a maximal
+    /// linearly independent subset and deactivate the rest. A dropped row is a
+    /// linear combination of the kept ones, so it stays satisfied at the
+    /// current `x` and the feasible set is unchanged — only the rank deficiency
+    /// is removed. Deactivating a bound does not move `x`, so the iterate stays
+    /// feasible throughout.
+    ///
+    /// Each repair strictly shrinks the active set, so the inner loop
+    /// terminates. `budget` additionally caps how many repairs one *solve* may
+    /// perform: the ratio test can re-admit a pruned row on a later iteration,
+    /// and without the refactor path's rank-tabu bookkeeping there is nothing
+    /// here to stop a prune/re-add cycle. Exhausting the budget surfaces the
+    /// original error instead of spinning.
+    fn schur_reset_rank_repaired(
+        &mut self,
+        schur: &mut crate::schur::SchurState,
+        qp: &QpProblem,
+        working: &mut WorkingSet,
+        opts: &QpOptions,
+        n_changes: &mut u32,
+        budget: &mut u32,
+    ) -> Result<(), QpError> {
+        loop {
+            let ac = active_slot_count(working);
+            match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.is_recoverable_factorization_failure() => {
+                    if *budget == 0 {
+                        return Err(e);
+                    }
+                    let active_cons: Vec<usize> = (0..qp.m)
+                        .filter(|&i| working.constraints[i].is_active())
+                        .collect();
+                    let active_bounds: Vec<usize> = (0..qp.n)
+                        .filter(|&i| working.bounds[i].is_active())
+                        .collect();
+                    let (kc, kb) = independent_active_subset(
+                        &mut self.linsol,
+                        qp,
+                        &active_cons,
+                        &active_bounds,
+                    );
+                    // Already full rank ⇒ the failure is not a rank deficiency
+                    // this guard can repair; do not loop on it.
+                    if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                        return Err(e);
+                    }
+                    *budget -= 1;
+                    let mut keep_c = vec![false; qp.m];
+                    for &i in &kc {
+                        keep_c[i] = true;
+                    }
+                    let mut keep_b = vec![false; qp.n];
+                    for &i in &kb {
+                        keep_b[i] = true;
+                    }
+                    for &i in &active_cons {
+                        if !keep_c[i] {
+                            working.constraints[i] = ConsStatus::Inactive;
+                            *n_changes += 1;
+                        }
+                    }
+                    for &i in &active_bounds {
+                        if !keep_b[i] {
+                            working.bounds[i] = BoundStatus::Inactive;
+                            *n_changes += 1;
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     fn solve_general_schur(
         &mut self,
         qp: &QpProblem,
@@ -1674,6 +1767,11 @@ impl ParametricActiveSetSolver {
         let mut n_refactor: u32 = 0;
         let mut n_changes: u32 = 0;
         let mut n_schur_updates: u32 = 0;
+        // Rank repairs allowed for this solve. Generous relative to the number
+        // of genuinely dependent rows a degenerate vertex carries, but finite —
+        // see `schur_reset_rank_repaired` on why a cap is needed here and not
+        // on the refactor path.
+        let mut rank_repair_budget: u32 = (qp.n + qp.m).min(1000) as u32;
 
         let (mut x, mut working) = if let Some(w) = ws {
             (w.x.clone(), w.working.clone())
@@ -1694,8 +1792,14 @@ impl ParametricActiveSetSolver {
 
         // Initialize Schur and factor the base K_max.
         let mut schur = crate::schur::SchurState::new(n, m);
-        let active_count = active_slot_count(&working);
-        schur.reset(&mut self.linsol, qp, &working, active_count as i32, opts)?;
+        self.schur_reset_rank_repaired(
+            &mut schur,
+            qp,
+            &mut working,
+            opts,
+            &mut n_changes,
+            &mut rank_repair_budget,
+        )?;
         n_refactor += 1;
 
         // GMSW EXPAND τ — same semantics as in solve_general.
@@ -1726,8 +1830,14 @@ impl ParametricActiveSetSolver {
                 if !e.is_recoverable_factorization_failure() {
                     return Err(e);
                 }
-                let ac = active_slot_count(&working);
-                schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                self.schur_reset_rank_repaired(
+                    &mut schur,
+                    qp,
+                    &mut working,
+                    opts,
+                    &mut n_changes,
+                    &mut rank_repair_budget,
+                )?;
                 n_refactor += 1;
                 // `solve` writes through `rhs`, so restore it before retrying.
                 rhs.copy_from_slice(&rhs_backup);
@@ -1786,15 +1896,27 @@ impl ParametricActiveSetSolver {
                         if !e.is_recoverable_factorization_failure() {
                             return Err(e);
                         }
-                        let ac = active_slot_count(&working);
-                        schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                        self.schur_reset_rank_repaired(
+                            &mut schur,
+                            qp,
+                            &mut working,
+                            opts,
+                            &mut n_changes,
+                            &mut rank_repair_budget,
+                        )?;
                         n_refactor += 1;
                     }
                     n_changes += 1;
                     n_schur_updates += 1;
                     if schur.needs_reset(opts) {
-                        let ac = active_slot_count(&working);
-                        schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                        self.schur_reset_rank_repaired(
+                            &mut schur,
+                            qp,
+                            &mut working,
+                            opts,
+                            &mut n_changes,
+                            &mut rank_repair_budget,
+                        )?;
                         n_refactor += 1;
                     }
                     continue;
@@ -1927,15 +2049,27 @@ impl ParametricActiveSetSolver {
                     if !e.is_recoverable_factorization_failure() {
                         return Err(e);
                     }
-                    let ac = active_slot_count(&working);
-                    schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                    )?;
                     n_refactor += 1;
                 }
                 n_changes += 1;
                 n_schur_updates += 1;
                 if schur.needs_reset(opts) {
-                    let ac = active_slot_count(&working);
-                    schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                    )?;
                     n_refactor += 1;
                 }
             }

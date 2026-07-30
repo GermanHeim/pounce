@@ -753,6 +753,46 @@ pub fn main() -> ExitCode {
                 // the-boundary). The active-set engine is a different
                 // algorithm with no such hook, so a `--debug*` request would
                 // otherwise silently no-op. Say so explicitly.
+                // The `sqp_qp_*` family tunes the QP subproblem *of the SQP
+                // outer loop*. On this path there is no SQP outer loop any
+                // more — the engine is driven directly by the convex driver —
+                // so those options no longer reach it. They used to, back when
+                // `qp-active-set` was implemented by rewriting itself to
+                // `algorithm=active-set-sqp`, which makes this a silent
+                // behaviour change for anyone who set one. Say so rather than
+                // ignore them quietly; forwarding them properly is still to do.
+                if matches!(choice, SolverChoice::QpActiveSet) {
+                    let o = app.options();
+                    let ignored: Vec<&str> = [
+                        "sqp_qp_max_iter",
+                        "sqp_qp_anti_cycling",
+                        "sqp_qp_feas_tol",
+                        "sqp_qp_opt_tol",
+                        "sqp_qp_elastic_gamma",
+                        "sqp_qp_use_schur_updates",
+                        "sqp_qp_max_schur_updates_before_refactor",
+                    ]
+                    .into_iter()
+                    .filter(|k| {
+                        // `true` in the tuple means the user set it explicitly.
+                        matches!(o.get_string_value(k, ""), Ok((_, true)))
+                            || matches!(o.get_numeric_value(k, ""), Ok((_, true)))
+                            || matches!(o.get_integer_value(k, ""), Ok((_, true)))
+                    })
+                    .collect();
+                    if !ignored.is_empty() {
+                        eprintln!(
+                            "pounce: warning: {} does not apply to \
+                             solver_selection=qp-active-set, which now drives the \
+                             active-set engine directly through the convex path \
+                             rather than through the active-set SQP outer loop; \
+                             the setting is ignored. Use `max_iter` / `tol` for \
+                             this path, or algorithm=active-set-sqp on a general \
+                             NLP for the SQP knobs.",
+                            ignored.join(", ")
+                        );
+                    }
+                }
                 if matches!(choice, SolverChoice::QpActiveSet) && debug_hook.is_some() {
                     eprintln!(
                         "pounce: note: the interactive debugger is IPM-only and does \

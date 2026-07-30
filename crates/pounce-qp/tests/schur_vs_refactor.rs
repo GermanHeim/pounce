@@ -157,3 +157,45 @@ fn schur_accuracy_vs_refactor_interval() {
         println!("refactor_every = {every:>2}: status {st:?}  max|dx| = {err:.3e}");
     }
 }
+
+/// **LICQ-violating redundant equality** — the rank-detection case the crate
+/// README lists as a known limitation (analytical-ladder problem #4).
+///
+/// `min ½(x₀² + x₁²)  s.t.  x₀ + x₁ = 1,  2x₀ + 2x₁ = 2`
+///
+/// The second equality is exactly twice the first, so the active-set Jacobian
+/// has rank 1 with 2 rows and the active-set KKT is singular. No H-block
+/// inertia shift repairs a rank-deficient *constraint* block, so both paths
+/// must instead detect the dependence, prune to a maximal independent subset,
+/// and continue. The optimum is `x* = (0.5, 0.5)`, `f* = 0.25`.
+///
+/// `solve_general` has had this guard for a long time; `solve_general_schur`
+/// had none, so enabling `use_schur_updates` turned this shape into a hard
+/// `LinearSolverFailure("KKT matrix is singular (LICQ violation …)")`. Both
+/// paths are asserted here so the two cannot drift apart again.
+fn licq_redundant_equality_case() -> Case {
+    Case {
+        n: 2,
+        m: 2,
+        h: (vec![1, 2], vec![1, 2], vec![1.0, 1.0]), // P = I
+        g: vec![0.0, 0.0],
+        a: (vec![1, 1, 2, 2], vec![1, 2, 1, 2], vec![1.0, 1.0, 2.0, 2.0]),
+        bl: vec![1.0, 2.0],
+        bu: vec![1.0, 2.0],
+        xl: vec![NLP_LOWER_BOUND_INF, NLP_LOWER_BOUND_INF],
+        xu: vec![NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF],
+    }
+}
+
+#[test]
+fn licq_violating_equality_solves_on_both_paths() {
+    let case = licq_redundant_equality_case();
+    for schur in [false, true] {
+        let (status, x, obj) = solve(&case, schur);
+        let path = if schur { "schur" } else { "refactor" };
+        assert_eq!(status, QpStatus::Optimal, "{path} path status");
+        assert!((x[0] - 0.5).abs() < 1e-7, "{path}: x0 = {}", x[0]);
+        assert!((x[1] - 0.5).abs() < 1e-7, "{path}: x1 = {}", x[1]);
+        assert!((obj - 0.25).abs() < 1e-7, "{path}: obj = {obj}");
+    }
+}
