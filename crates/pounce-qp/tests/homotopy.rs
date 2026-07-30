@@ -157,3 +157,120 @@ fn homotopy_agrees_with_conventional_path() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Parametric (warm) solves — `QpSolver::solve_parametric`.
+//
+// This was a stub that discarded both prior arguments and cold-solved, despite
+// the crate advertising "true parametric warm starting". It now traces the
+// homotopy from the previous problem to the new one, starting from the previous
+// solution's working set.
+// ---------------------------------------------------------------------------
+
+/// Solve `case` from cold, then re-solve a `g`-perturbed version parametrically
+/// from that solution, and return both the warm result and the cold result for
+/// the *same* perturbed problem.
+fn parametric_vs_cold(
+    case: &Case,
+    dg: &[f64],
+) -> ((QpStatus, Vec<f64>, f64), (QpStatus, Vec<f64>, f64)) {
+    let h_space = SymTMatrixSpace::new(case.n as i32, case.h.0.clone(), case.h.1.clone());
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&case.h.2);
+    let a_space = GenTMatrixSpace::new(
+        case.m as i32,
+        case.n as i32,
+        case.a.0.clone(),
+        case.a.1.clone(),
+    );
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&case.a.2);
+
+    let g_new: Vec<f64> = case.g.iter().zip(dg).map(|(a, b)| a + b).collect();
+    let opts = QpOptions {
+        use_homotopy: true,
+        ..QpOptions::default()
+    };
+    // A closure returning `QpProblem<'_>` cannot tie the borrow of `g` to the
+    // returned value's lifetime, so build them explicitly.
+    macro_rules! mk {
+        ($g:expr) => {
+            QpProblem {
+                n: case.n,
+                m: case.m,
+                h: &h,
+                g: $g,
+                a: &a,
+                bl: &case.bl,
+                bu: &case.bu,
+                xl: &case.xl,
+                xu: &case.xu,
+                hessian_inertia: HessianInertia::Psd,
+            }
+        };
+    }
+
+    let mut s = new_solver();
+    let prev = s.solve(&mk!(&case.g), None, &opts).expect("cold prev");
+    let warm = s
+        .solve_parametric(&mk!(&case.g), &prev, &mk!(&g_new), &opts)
+        .expect("parametric");
+    let cold = new_solver()
+        .solve(&mk!(&g_new), None, &opts)
+        .expect("cold new");
+    (
+        (warm.status, warm.x.clone(), warm.obj),
+        (cold.status, cold.x.clone(), cold.obj),
+    )
+}
+
+/// A warm parametric solve must land on the same answer as a cold solve of the
+/// same target. Warm starting is a route, not a different problem.
+#[test]
+fn parametric_matches_cold_solve() {
+    for (name, case, dg) in [
+        ("projection", projection_case(), vec![0.5, -0.25]),
+        ("two_active", two_active_case(), vec![-1.0, 0.75]),
+    ] {
+        let ((ws, wx, wobj), (cs, cx, cobj)) = parametric_vs_cold(&case, &dg);
+        assert_eq!(ws, cs, "{name}: status warm {ws:?} vs cold {cs:?}");
+        for i in 0..case.n {
+            assert!(
+                (wx[i] - cx[i]).abs() < 1e-7,
+                "{name}: x[{i}] warm {} vs cold {}",
+                wx[i],
+                cx[i]
+            );
+        }
+        assert!(
+            (wobj - cobj).abs() < 1e-7,
+            "{name}: obj warm {wobj} vs cold {cobj}"
+        );
+    }
+}
+
+/// Re-solving an **unchanged** QP parametrically must be nearly free: the path
+/// has zero length, so no constraint can reach a bound and no multiplier can
+/// reach zero along it. This is the property that makes warm starting worth
+/// having, and the one a stub silently fails while still returning the right
+/// answer — so asserting the answer alone would not catch a regression here.
+#[test]
+fn parametric_on_unchanged_qp_is_free() {
+    for (name, case) in [
+        ("projection", projection_case()),
+        ("two_active", two_active_case()),
+    ] {
+        let ((ws, wx, wobj), (_, cx, cobj)) = parametric_vs_cold(&case, &vec![0.0; case.n]);
+        assert_eq!(ws, QpStatus::Optimal, "{name}: status");
+        for i in 0..case.n {
+            assert!(
+                (wx[i] - cx[i]).abs() < 1e-9,
+                "{name}: x[{i}] moved on an unchanged re-solve"
+            );
+        }
+        assert!(
+            (wobj - cobj).abs() < 1e-9,
+            "{name}: obj moved on an unchanged re-solve"
+        );
+    }
+}

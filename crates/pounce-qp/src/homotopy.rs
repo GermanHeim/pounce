@@ -209,9 +209,10 @@ impl ParametricActiveSetSolver {
     /// Returns `Ok(None)` when the path cannot be started (the box relaxation is
     /// unbounded or fails), which is a signal for the caller to fall back to the
     /// conventional cold path — not a verdict about `qp`.
-    pub(crate) fn solve_cold_homotopy(
+    pub(crate) fn solve_homotopy(
         &mut self,
         qp: &QpProblem<'_>,
+        warm: Option<(&QpProblem<'_>, &QpSolution)>,
         opts: &QpOptions,
     ) -> Result<Option<QpSolution>, QpError> {
         let started = Instant::now();
@@ -221,6 +222,31 @@ impl ParametricActiveSetSolver {
             // No rows to bring in: the box relaxation *is* the problem, and the
             // existing fast path already handles it.
             return Ok(None);
+        }
+
+        // ---- Warm start: QP₀ *is* the previous problem ----
+        //
+        // The prior solution is optimal for the prior QP, so the path starts on
+        // the solution manifold with no `QP₀` to construct and no box relaxation
+        // to bound — the whole reason the warm case is easier than the cold one.
+        // `g` moves too here (the cold path holds it fixed), which is the `dg`
+        // term in the direction solve below.
+        if let Some((prev, sol_prev)) = warm {
+            let mut x = sol_prev.x.clone();
+            x.resize(n, 0.0);
+            let mut working = sol_prev.working.clone();
+            working.constraints.resize(m, ConsStatus::Inactive);
+            working.bounds.resize(n, BoundStatus::Inactive);
+            let mut lambda_g = sol_prev.lambda_g.clone();
+            lambda_g.resize(m, 0.0);
+            let mut lambda_x = sol_prev.lambda_x.clone();
+            lambda_x.resize(n, 0.0);
+            let bl0 = prev.bl.to_vec();
+            let bu0 = prev.bu.to_vec();
+            let dg: Vec<Number> = (0..n).map(|j| qp.g[j] - prev.g[j]).collect();
+            return self.trace_path(
+                qp, qp.h, x, working, lambda_g, lambda_x, bl0, bu0, dg, opts, started,
+            );
         }
 
         // ---- QP₀: the box-only relaxation ----
@@ -342,6 +368,52 @@ impl ParametricActiveSetSolver {
         let mut lambda_x = box_sol.lambda_x.clone();
         lambda_x.resize(n, 0.0);
 
+        // Cold arm: hand the relaxed start to the shared tracer with a zero
+        // `dg` — the cold path holds `g` fixed and moves only the row bounds.
+        let dg = vec![0.0; n];
+        self.trace_path(
+            qp, path_h, x, working, lambda_g, lambda_x, bl0, bu0, dg, opts, started,
+        )
+    }
+
+    /// Trace the homotopy from a start state to `t = 1`, returning the corrected
+    /// solution, or `None` when the path cannot be completed.
+    ///
+    /// Shared by the cold and warm entry points: both differ only in where the
+    /// path *starts* (a box relaxation with widened row bounds, versus the
+    /// previous problem and its solution) and in whether `g` moves. Everything
+    /// after that — the two ratio tests in `t`, the working-set jumps, the rank
+    /// repair, and the final corrector — is identical.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_path(
+        &mut self,
+        qp: &QpProblem<'_>,
+        path_h: &SymTMatrix,
+        mut x: Vec<Number>,
+        mut working: WorkingSet,
+        mut lambda_g: Vec<Number>,
+        mut lambda_x: Vec<Number>,
+        bl0: Vec<Number>,
+        bu0: Vec<Number>,
+        dg: Vec<Number>,
+        opts: &QpOptions,
+        started: Instant,
+    ) -> Result<Option<QpSolution>, QpError> {
+        let n = qp.n;
+        let m = qp.m;
+        let trace = std::env::var("POUNCE_HOMOTOPY_DEBUG").is_ok();
+        let path_qp = QpProblem {
+            n,
+            m,
+            h: path_h,
+            g: qp.g,
+            a: qp.a,
+            bl: qp.bl,
+            bu: qp.bu,
+            xl: qp.xl,
+            xu: qp.xu,
+            hessian_inertia: qp.hessian_inertia,
+        };
         let mut t: Number = 0.0;
         let mut n_changes: u32 = 0;
         let mut n_refactor: u32 = 0;
@@ -369,11 +441,18 @@ impl ParametricActiveSetSolver {
 
             // ---- Direction: d/dt of (x, λ) along this segment ----
             //
-            // `H` and `g` are fixed, so the stationarity block's right-hand side
-            // does not move and the primal RHS is zero; only the active rows'
-            // bounds advance, at `bound_rate`.
+            // `H` is fixed along the path; `g` moves only on the warm path (see
+            // `dg` below). The active rows' bounds advance at `bound_rate`.
             let kkt = assemble_active_set_kkt(&path_qp, &active_cons, &active_bounds);
             let mut rhs = vec![0.0; n + k_c + k_b];
+            // Stationarity block: `H x(t) + g(t) + A_Wᵀ λ(t) = 0` differentiated
+            // in `t` gives `H dx + dg + A_Wᵀ dλ = 0`, so the primal right-hand
+            // side is `−dg`. Zero on the cold path, where `g` is held fixed and
+            // only the row bounds move; non-zero on the warm path, where the
+            // objective moves from the previous problem's to the new one's.
+            for (j, r) in rhs[..n].iter_mut().enumerate() {
+                *r = -dg[j];
+            }
             for (slot, &i) in active_cons.iter().enumerate() {
                 let is_lower = matches!(working.constraints[i], ConsStatus::AtLower);
                 rhs[n + slot] = match working.constraints[i] {

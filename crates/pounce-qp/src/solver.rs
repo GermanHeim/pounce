@@ -2725,7 +2725,7 @@ impl QpSolver for ParametricActiveSetSolver {
         // verdict, so the conventional path below still handles everything it
         // handled before.
         if ws.is_none() && opts.use_homotopy {
-            if let Some(sol) = self.solve_cold_homotopy(qp, opts)? {
+            if let Some(sol) = self.solve_homotopy(qp, None, opts)? {
                 return Ok(sol);
             }
         }
@@ -2802,12 +2802,38 @@ impl QpSolver for ParametricActiveSetSolver {
 
     fn solve_parametric(
         &mut self,
-        _qp_prev: &QpProblem,
-        _sol_prev: &QpSolution,
+        qp_prev: &QpProblem,
+        sol_prev: &QpSolution,
         qp_new: &QpProblem,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        // No parametric path yet — fall back to a fresh cold solve.
+        // Trace the homotopy from the previous problem to the new one, starting
+        // from the previous solution's working set.
+        //
+        // This is the crate's advertised feature and was a stub that discarded
+        // both prior arguments. It is the *easy* direction of the homotopy: the
+        // prior solution is already optimal for the prior QP, so the path starts
+        // on the solution manifold — there is no `QP_0` to construct and no box
+        // relaxation to bound, which is the whole difficulty of the cold case.
+        //
+        // Guards, in order: the two problems must have the same shape, and the
+        // same `H`. `H` is not interpolated along the path (only `g` and the row
+        // bounds are), so a changed Hessian would make the traced path solve a
+        // different problem than the one requested. Rather than silently
+        // mispredict, fall back to a cold solve — correct, just not warm.
+        let same_shape = qp_prev.n == qp_new.n && qp_prev.m == qp_new.m;
+        let same_h = qp_prev.h.nonzeros() == qp_new.h.nonzeros()
+            && qp_prev.h.values() == qp_new.h.values()
+            && qp_prev.h.irows() == qp_new.h.irows()
+            && qp_prev.h.jcols() == qp_new.h.jcols();
+        if same_shape
+            && same_h
+            && sol_prev.status == QpStatus::Optimal
+            && sol_prev.x.len() == qp_new.n
+            && let Some(sol) = self.solve_homotopy(qp_new, Some((qp_prev, sol_prev)), opts)?
+        {
+            return Ok(sol);
+        }
         self.solve(qp_new, None, opts)
     }
 
