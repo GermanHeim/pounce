@@ -1668,6 +1668,9 @@ fn active_set_overrides(app: &IpoptApplication) -> pounce_convex::ActiveSetOverr
     if let Ok((v, true)) = opt.get_string_value("sqp_qp_use_schur_updates", "") {
         o.use_schur_updates = Some(v == "yes");
     }
+    if let Ok((v, true)) = opt.get_string_value("sqp_qp_use_homotopy", "") {
+        o.use_homotopy = Some(v == "yes");
+    }
     if let Ok((v, true)) = opt.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "") {
         if v >= 0 {
             o.max_schur_updates_before_refactor = Some(v as u32);

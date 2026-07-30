@@ -92,6 +92,7 @@ pub struct ActiveSetOverrides {
     pub opt_tol: Option<f64>,
     pub elastic_gamma: Option<f64>,
     pub use_schur_updates: Option<bool>,
+    pub use_homotopy: Option<bool>,
     pub max_schur_updates_before_refactor: Option<u32>,
 }
 
@@ -104,6 +105,7 @@ impl ActiveSetOverrides {
             && self.opt_tol.is_none()
             && self.elastic_gamma.is_none()
             && self.use_schur_updates.is_none()
+            && self.use_homotopy.is_none()
             && self.max_schur_updates_before_refactor.is_none()
     }
 
@@ -125,6 +127,9 @@ impl ActiveSetOverrides {
         }
         if let Some(v) = self.use_schur_updates {
             o.use_schur_updates = v;
+        }
+        if let Some(v) = self.use_homotopy {
+            o.use_homotopy = v;
         }
         if let Some(v) = self.max_schur_updates_before_refactor {
             o.max_schur_updates_before_refactor = v;
@@ -364,64 +369,74 @@ where
     //     constraint block (the failure `crossover` documents on the GEN family).
     // The basis avoids both: exactly `n` nonbasic variables, each on a bound,
     // linearly independent because the basis matrix is nonsingular.
-    let seed = crate::simplex::simplex_feasible_vertex(prob).map(|v| {
-        use crate::simplex::AtBound;
-        let mut working = WorkingSet::cold(n, m);
-        for (i, st) in working.bounds.iter_mut().enumerate() {
-            // A variable fixed by equal bounds is `Fixed` regardless of which
-            // side the basis parked it on.
-            let (l, u) = (xl[i], xu[i]);
-            let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
-            *st = match (fixed, v.struct_at[i]) {
-                (true, _) => BoundStatus::Fixed,
-                (false, AtBound::Lower) => BoundStatus::AtLower,
-                (false, AtBound::Upper) => BoundStatus::AtUpper,
-                (false, AtBound::Free) => BoundStatus::Inactive,
-            };
-        }
-        // Row order matches: the translation above stacks `[A_eq ; G]` in the
-        // same order the simplex builds its rows, so index `i` is the same row.
-        for (i, st) in working.constraints.iter_mut().enumerate() {
-            // Equality rows are ALWAYS active — they are equations, not
-            // one-sided constraints that may or may not bind.
-            //
-            // Deriving their activity from the basis instead (leaving a row
-            // inactive when its logical is basic) is tempting: it makes the
-            // active count come out at exactly `n` and so avoids the
-            // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
-            // otherwise hits. But the premise is false. An equality's logical
-            // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
-            // variable sitting at zero, which says nothing about whether the row
-            // is a linear combination of the others. Dropping such a row drops a
-            // real constraint — the ratio test skips `bl == bu` rows, so it
-            // never comes back — and the engine is then free to move in a
-            // direction that violates it. On NETLIB `afiro` that produced a
-            // phantom `Unbounded` verdict on an LP with a finite optimum of
-            // −464.75 (issue #133's regression test caught it).
-            //
-            // More active rows than variables *is* legitimate at a degenerate
-            // vertex; the dependence among them is a rank problem, and
-            // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
-            // by pruning to a maximal independent subset with the algebra to
-            // justify each drop, rather than guessing from basis status here.
-            *st = if i < m_eq {
-                ConsStatus::Equality
-            } else {
-                match v.row_at[i] {
-                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
-                    // `Gx = h`: the row sits at its upper bound `bu = h`.
-                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
-                    AtBound::Free => ConsStatus::Inactive,
-                }
-            };
-        }
-        QpWarmStart {
-            x: v.x,
-            lambda_g: vec![0.0; m],
-            lambda_x: vec![0.0; n],
-            working,
-        }
-    });
+    // Skipped entirely when the homotopy is on: the seed exists *because* the
+    // parametric homotopy was missing, and the homotopy is itself the cold-start
+    // mechanism (it starts from the box relaxation and is feasible along the
+    // whole path). Computing one anyway would both pay for a phase-1 solve that
+    // is no longer needed and suppress the homotopy, whose hook in
+    // `QpSolver::solve` only fires on a genuinely cold call.
+    let seed = if qopts.use_homotopy {
+        None
+    } else {
+        crate::simplex::simplex_feasible_vertex(prob).map(|v| {
+            use crate::simplex::AtBound;
+            let mut working = WorkingSet::cold(n, m);
+            for (i, st) in working.bounds.iter_mut().enumerate() {
+                // A variable fixed by equal bounds is `Fixed` regardless of which
+                // side the basis parked it on.
+                let (l, u) = (xl[i], xu[i]);
+                let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
+                *st = match (fixed, v.struct_at[i]) {
+                    (true, _) => BoundStatus::Fixed,
+                    (false, AtBound::Lower) => BoundStatus::AtLower,
+                    (false, AtBound::Upper) => BoundStatus::AtUpper,
+                    (false, AtBound::Free) => BoundStatus::Inactive,
+                };
+            }
+            // Row order matches: the translation above stacks `[A_eq ; G]` in the
+            // same order the simplex builds its rows, so index `i` is the same row.
+            for (i, st) in working.constraints.iter_mut().enumerate() {
+                // Equality rows are ALWAYS active — they are equations, not
+                // one-sided constraints that may or may not bind.
+                //
+                // Deriving their activity from the basis instead (leaving a row
+                // inactive when its logical is basic) is tempting: it makes the
+                // active count come out at exactly `n` and so avoids the
+                // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
+                // otherwise hits. But the premise is false. An equality's logical
+                // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
+                // variable sitting at zero, which says nothing about whether the row
+                // is a linear combination of the others. Dropping such a row drops a
+                // real constraint — the ratio test skips `bl == bu` rows, so it
+                // never comes back — and the engine is then free to move in a
+                // direction that violates it. On NETLIB `afiro` that produced a
+                // phantom `Unbounded` verdict on an LP with a finite optimum of
+                // −464.75 (issue #133's regression test caught it).
+                //
+                // More active rows than variables *is* legitimate at a degenerate
+                // vertex; the dependence among them is a rank problem, and
+                // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
+                // by pruning to a maximal independent subset with the algebra to
+                // justify each drop, rather than guessing from basis status here.
+                *st = if i < m_eq {
+                    ConsStatus::Equality
+                } else {
+                    match v.row_at[i] {
+                        // Slack `s = h − Gx` nonbasic at its lower bound 0 means
+                        // `Gx = h`: the row sits at its upper bound `bu = h`.
+                        AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
+                        AtBound::Free => ConsStatus::Inactive,
+                    }
+                };
+            }
+            QpWarmStart {
+                x: v.x,
+                lambda_g: vec![0.0; m],
+                lambda_x: vec![0.0; n],
+                working,
+            }
+        })
+    };
 
     debug_trace(|| {
         format!(

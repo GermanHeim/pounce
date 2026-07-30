@@ -102,7 +102,7 @@ impl ParametricActiveSetSolver {
     /// is always checked. The `HessianInertia::Indefinite` hint
     /// merely tells the caller "shifts may be needed"; the
     /// algorithm decides what to do based on the factor's report.
-    fn factorize_with_inertia_control(
+    pub(crate) fn factorize_with_inertia_control(
         &mut self,
         mut kkt: KktTriplet,
         rhs: &mut [Number],
@@ -2713,6 +2713,17 @@ impl QpSolver for ParametricActiveSetSolver {
         if let Some(w) = ws {
             if !point_is_feasible(qp, &w.x, opts.feas_tol) {
                 return self.solve_elastic(qp, opts);
+            }
+        }
+
+        // Cold + general rows: try the parametric homotopy first. It returns
+        // `Ok(None)` when the path cannot be started (no rows, or the box
+        // relaxation is unbounded), which is a fall-through signal rather than a
+        // verdict, so the conventional path below still handles everything it
+        // handled before.
+        if ws.is_none() && opts.use_homotopy {
+            if let Some(sol) = self.solve_cold_homotopy(qp, opts)? {
+                return Ok(sol);
             }
         }
 

@@ -74,6 +74,16 @@ pub struct QpOptions {
     /// noticeably slower on large warm-started workloads.
     pub use_schur_updates: bool,
 
+    /// Trace the §4.2 parametric homotopy on a **cold** solve instead of
+    /// starting the conventional phase-1/phase-2 scheme.
+    ///
+    /// Off by default while it is being evaluated. The homotopy is the
+    /// algorithm this crate is named for and the one the design note assumes
+    /// (§4.3 has phase-1 driving its elastic slacks to zero *as the homotopy
+    /// proceeds*); the conventional path is the substitute that exists because
+    /// the homotopy did not. See [`crate::homotopy`].
+    pub use_homotopy: bool,
+
     /// §4.4 full EXPAND anti-cycling primal perturbation. Active
     /// only when `anti_cycling = Expand`. The Harris two-pass
     /// (c14) prevents cycling at non-degenerate vertices; these
@@ -110,6 +120,7 @@ impl Default for QpOptions {
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
             use_schur_updates: false,
+            use_homotopy: false,
             expand_tol_initial: 1e-12,
             expand_tol_growth: 1e-11,
             expand_tol_max: 1e-7,
