@@ -58,7 +58,7 @@
 //!   Model-Predictive Control* (2011), Ch. 5–7 — the sparse Schur extension.
 
 use crate::error::{QpError, QpStatus};
-use crate::kkt::{a_times_x, assemble_active_set_kkt, h_times_x};
+use crate::kkt::{a_times_x, assemble_active_set_kkt};
 use crate::options::QpOptions;
 use crate::problem::{QpProblem, QpSolution, QpStats};
 use crate::solver::ParametricActiveSetSolver;
@@ -66,7 +66,7 @@ use crate::solver::QpSolver as _;
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::Number;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
-use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace};
+use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use std::time::Instant;
 
 /// How far the relaxed `t = 0` row bounds sit outside `A x₀`, relative to the
@@ -91,6 +91,85 @@ enum Event {
     DropRow(usize),
     /// Active bound on variable `j` has its multiplier reach zero.
     DropBound(usize),
+}
+
+/// Primal regularization `δ` for the path, derived from the problem's own scale.
+///
+/// Needed because the path starts from the box relaxation, and that relaxation is
+/// **unbounded** whenever `H` has no curvature in a box-unbounded direction —
+/// which is most LP-like instances (`QAFIRO` returns `obj = -inf`). Running the
+/// path on `H + δI` bounds it.
+///
+/// This is sound *specifically because the path is only a predictor*: the working
+/// set it discovers is handed to a corrector that solves the true QP, so `δ`
+/// never enters the reported answer, only the prediction of which constraints
+/// end up active.
+///
+/// `δ` is derived, not guessed. With `H = 0` the box relaxation's solution is
+/// `x₀ = clamp(−g/δ, box)`, so `δ = ‖g‖∞ / X` places `‖x₀‖` at roughly `X`, a
+/// representative variable magnitude. `X` is the median finite box width, or 1
+/// when no variable has two finite bounds. Putting `x₀` on the box's own scale
+/// matters because the `t = 0` row bounds are relaxed outward from `A x₀`: an
+/// enormous `x₀` would make them enormous too, and the path correspondingly long.
+///
+/// Returns `None` when `g` is zero — there is nothing to scale against, and with
+/// `H = 0` and `g = 0` every feasible point is optimal anyway.
+fn path_regularization_delta(qp: &QpProblem<'_>) -> Option<Number> {
+    let g_inf = qp.g.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    if !(g_inf > 0.0) || !g_inf.is_finite() {
+        return None;
+    }
+    let mut widths: Vec<Number> = (0..qp.n)
+        .filter_map(|i| {
+            let (l, u) = (qp.xl[i], qp.xu[i]);
+            (l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF).then(|| (u - l).abs())
+        })
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .collect();
+    let x_scale = if widths.is_empty() {
+        1.0
+    } else {
+        widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        widths[widths.len() / 2]
+    };
+    let delta = g_inf / x_scale.max(1e-12);
+    delta.is_finite().then_some(delta.clamp(1e-12, 1e12))
+}
+
+/// `H + δI`, as a fresh symmetric triplet matrix.
+///
+/// `H` is stored lower-triangle 1-based with each pair listed once, so `δ` is
+/// added to an existing diagonal entry where one is present and appended
+/// otherwise — appending unconditionally would double-count a diagonal that `H`
+/// already carries.
+fn regularized_hessian(qp: &QpProblem<'_>, delta: Number) -> SymTMatrix {
+    let (irows, jcols, vals) = (qp.h.irows(), qp.h.jcols(), qp.h.values());
+    let mut ir: Vec<i32> = irows.to_vec();
+    let mut jc: Vec<i32> = jcols.to_vec();
+    let mut vl: Vec<Number> = vals.to_vec();
+
+    let mut has_diag = vec![false; qp.n];
+    for k in 0..ir.len() {
+        if ir[k] == jc[k] {
+            let idx = (ir[k] - 1) as usize;
+            if idx < qp.n {
+                vl[k] += delta;
+                has_diag[idx] = true;
+            }
+        }
+    }
+    for (i, seen) in has_diag.iter().enumerate() {
+        if !seen {
+            ir.push((i + 1) as i32);
+            jc.push((i + 1) as i32);
+            vl.push(delta);
+        }
+    }
+
+    let space = SymTMatrixSpace::new(qp.n as i32, ir, jc);
+    let mut h = SymTMatrix::new(space);
+    h.set_values(&vl);
+    h
 }
 
 /// Rate of change of a row bound per unit `t` (0 when the bound is infinite).
@@ -130,33 +209,88 @@ impl ParametricActiveSetSolver {
         // cross-checks `A`'s row count against `m`, so handing it the target's
         // `A` with `m = 0` is rejected outright.
         let empty_a = GenTMatrix::new(GenTMatrixSpace::new(0, n as i32, Vec::new(), Vec::new()));
-        let box_qp = QpProblem {
+        let trace = std::env::var("POUNCE_HOMOTOPY_DEBUG").is_ok();
+
+        // Built inline rather than by a closure: a closure returning
+        // `QpProblem<'_>` cannot tie the borrow of `h` to the returned value's
+        // lifetime, so it fails to compile.
+        macro_rules! box_qp {
+            ($h:expr) => {
+                QpProblem {
+                    n,
+                    m: 0,
+                    h: $h,
+                    g: qp.g,
+                    a: &empty_a,
+                    bl: &[],
+                    bu: &[],
+                    xl: qp.xl,
+                    xu: qp.xu,
+                    hessian_inertia: qp.hessian_inertia,
+                }
+            };
+        }
+
+        // Try the true `H` first, and regularize only if that fails. An
+        // unbounded box relaxation means `H` has no curvature in a
+        // box-unbounded direction; the *target* may still be bounded (a row
+        // constraint can cut the ray off), so it is not an unboundedness verdict
+        // — just a statement that the path cannot start from here.
+        //
+        // Regularizing only on failure keeps the problems that already work
+        // bit-identical: `HS21` and `QPTEST` have positive-definite `H` and never
+        // reach the retry.
+        let mut h_reg_holder: Option<SymTMatrix> = None;
+        let box_sol = {
+            let first = self.solve(&box_qp!(qp.h), None, opts);
+            if trace {
+                match &first {
+                    Ok(s) => eprintln!("[hom] box relaxation: {:?} obj={:.6e}", s.status, s.obj),
+                    Err(e) => eprintln!("[hom] box relaxation ERROR: {e}"),
+                }
+            }
+            match first {
+                Ok(s) if s.status == QpStatus::Optimal => s,
+                _ => {
+                    let Some(delta) = path_regularization_delta(qp) else {
+                        return Ok(None);
+                    };
+                    let h_reg = regularized_hessian(qp, delta);
+                    let retry = self.solve(&box_qp!(&h_reg), None, opts);
+                    if trace {
+                        match &retry {
+                            Ok(s) => eprintln!(
+                                "[hom] box relaxation (delta={delta:.3e}): {:?} obj={:.6e}",
+                                s.status, s.obj
+                            ),
+                            Err(e) => eprintln!("[hom] box relaxation (regularized) ERROR: {e}"),
+                        }
+                    }
+                    match retry {
+                        Ok(s) if s.status == QpStatus::Optimal => {
+                            h_reg_holder = Some(h_reg);
+                            s
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+            }
+        };
+
+        // Everything on the path is traced against this Hessian; the corrector at
+        // the end uses the caller's `qp` and therefore the true `H`.
+        let path_h: &SymTMatrix = h_reg_holder.as_ref().unwrap_or(qp.h);
+        let path_qp = QpProblem {
             n,
-            m: 0,
-            h: qp.h,
+            m,
+            h: path_h,
             g: qp.g,
-            a: &empty_a,
-            bl: &[],
-            bu: &[],
+            a: qp.a,
+            bl: qp.bl,
+            bu: qp.bu,
             xl: qp.xl,
             xu: qp.xu,
             hessian_inertia: qp.hessian_inertia,
-        };
-        let trace = std::env::var("POUNCE_HOMOTOPY_DEBUG").is_ok();
-        let box_attempt = self.solve(&box_qp, None, opts);
-        if trace {
-            match &box_attempt {
-                Ok(s) => eprintln!("[hom] box relaxation: {:?} obj={:.6e}", s.status, s.obj),
-                Err(e) => eprintln!("[hom] box relaxation ERROR: {e}"),
-            }
-        }
-        let box_sol = match box_attempt {
-            Ok(s) if s.status == QpStatus::Optimal => s,
-            // Unbounded box relaxation means `H` has no curvature in a
-            // box-unbounded direction. The *target* may still be bounded (a row
-            // constraint could cut the ray off), so this is not an unboundedness
-            // verdict — it just means this path cannot start here.
-            _ => return Ok(None),
         };
 
         let mut x = box_sol.x.clone();
@@ -214,7 +348,7 @@ impl ParametricActiveSetSolver {
             // `H` and `g` are fixed, so the stationarity block's right-hand side
             // does not move and the primal RHS is zero; only the active rows'
             // bounds advance, at `bound_rate`.
-            let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
+            let kkt = assemble_active_set_kkt(&path_qp, &active_cons, &active_bounds);
             let mut rhs = vec![0.0; n + k_c + k_b];
             for (slot, &i) in active_cons.iter().enumerate() {
                 let is_lower = matches!(working.constraints[i], ConsStatus::AtLower);
@@ -378,9 +512,6 @@ impl ParametricActiveSetSolver {
             used_phase1: false,
             time: started.elapsed(),
         };
-        // Keep the homotopy's own objective/`x` only if the corrector agreed it
-        // was feasible; otherwise the corrector's answer stands.
-        let _ = (h_times_x(qp.h, &x), &lambda_g);
         Ok(Some(sol))
     }
 }
