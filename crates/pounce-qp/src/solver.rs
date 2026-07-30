@@ -1815,6 +1815,42 @@ impl ParametricActiveSetSolver {
         // GMSW EXPAND τ — same semantics as in solve_general.
         let mut expand_tol = opts.expand_tol_initial;
 
+        // ---- Null-iteration guard (numerical floor / SMW drift) ----
+        //
+        // An iteration that takes the full step (`α = 1`, no blocker added)
+        // lands, in exact arithmetic, exactly on the minimizer of the current
+        // working set — so the very next `‖p‖∞` is zero and the loop moves on
+        // to the drop test. When it is *not* zero, the limit is the linear
+        // algebra rather than the algorithm, and the loop repeats a literal
+        // no-op until `max_iter`. Both variants were measured on
+        // Maros-Mészáros `CVXQP3_S` (3650 of its 3750 iterations were such
+        // no-ops):
+        //
+        //   * SMW drift — after 15 accumulated rank-2 updates the direction
+        //     no longer lies in the active rows' null space at all
+        //     (`‖A_W p‖∞ ≈ 1e-3`), so the "full Newton step" is not one.
+        //     Discarding the update layer and refactoring cures this.
+        //   * Noise floor — in the `γ = 1e6` elastic phase-1 the active-set
+        //     KKT is solved to `‖r‖∞ ≈ 1e-9`, which is all the conditioning
+        //     allows, and that leaves `‖p‖∞ ≈ 1.9e-9` permanently above the
+        //     `opt_tol = 1e-9` stationarity test. No refactor helps; the
+        //     iterate simply *is* stationary to attainable precision.
+        //
+        // So: on the first no-op, refactor. If a fresh factor still cannot
+        // shrink the step, accept the iterate as stationary for this working
+        // set and let the drop test run. Accepting is safe — `QpSolver::solve`
+        // re-audits feasibility and the convex driver re-measures the KKT
+        // error, so a point that is not really optimal is demoted, not
+        // believed — and it is strictly better than spending the whole budget
+        // re-deriving the same step.
+        let mut prev_p_inf = Number::INFINITY;
+        let mut prev_was_null_step = false;
+        let mut floor_refactored = false;
+        /// A genuine Newton step drives `‖p‖∞` to round-off, so anything short
+        /// of halving it means the step accomplished nothing.
+        const NULL_STEP_GAIN: Number = 0.5;
+
+        let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
         for _iter in 0..opts.max_iter {
             let hx = h_times_x(qp.h, &x);
             let mut rhs = vec![0.0; n + m_total];
@@ -1857,7 +1893,72 @@ impl ParametricActiveSetSolver {
             let p: Vec<Number> = rhs[..n].to_vec();
             let p_inf = p.iter().map(|pi| pi.abs()).fold(0.0, f64::max);
 
-            if p_inf <= opts.opt_tol {
+            if trace {
+                // True residual of the *active-set* KKT system at (p, λ).
+                // Row block 1: H p + Σ_active a_i λ_i = -(Hx + g)
+                // Row block 2: a_iᵀ p = 0 for every active row / bound.
+                let hp = h_times_x(qp.h, &p);
+                let hxg = h_times_x(qp.h, &x);
+                let mut r1: Vec<Number> = (0..n).map(|i| hp[i] + hxg[i] + qp.g[i]).collect();
+                let (ir, jc, av) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+                for k in 0..ir.len() {
+                    let i = (ir[k] - 1) as usize;
+                    let j = (jc[k] - 1) as usize;
+                    if working.constraints[i].is_active() {
+                        r1[j] += av[k] * rhs[n + i];
+                    }
+                }
+                for j in 0..n {
+                    if working.bounds[j].is_active() {
+                        r1[j] += rhs[n + m + j];
+                    }
+                }
+                let ap_dbg = a_times_x(qp.a, &p, m);
+                let mut r2 = 0.0_f64;
+                for i in 0..m {
+                    if working.constraints[i].is_active() {
+                        r2 = r2.max(ap_dbg[i].abs());
+                    }
+                }
+                for j in 0..n {
+                    if working.bounds[j].is_active() {
+                        r2 = r2.max(p[j].abs());
+                    }
+                }
+                let r1n = r1.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+                eprintln!(
+                    "[qp] it={_iter} RES stat={r1n:.3e} actrow={r2:.3e} pinf={p_inf:.3e} sdim={} nact={}",
+                    schur.n_schur_updates() * 2,
+                    active_slot_count(&working)
+                );
+            }
+
+            // Null-iteration guard — see the note above the loop.
+            let mut stationary = p_inf <= opts.opt_tol;
+            if !stationary && prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf {
+                if floor_refactored {
+                    // A fresh factor already failed to shrink the step: this is
+                    // the attainable-accuracy floor, not update drift.
+                    stationary = true;
+                } else {
+                    floor_refactored = true;
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                    )?;
+                    n_refactor += 1;
+                    prev_was_null_step = false;
+                    prev_p_inf = Number::INFINITY;
+                    continue;
+                }
+            }
+            prev_p_inf = p_inf;
+
+            if stationary {
                 let mut worst: Option<(DropTarget, Number)> = None;
                 for slot in 0..m_total {
                     if !crate::schur::SchurState::slot_active(&working, slot) {
@@ -1898,6 +1999,15 @@ impl ParametricActiveSetSolver {
                             m + i
                         }
                     };
+                    if trace {
+                        eprintln!(
+                            "[qp] it={_iter} DROP slot={slot} viol={:.3e} obj={:.12e} nact={} pinf={:.2e}",
+                            worst.unwrap().1,
+                            quad_objective(qp, &x),
+                            active_slot_count(&working),
+                            p_inf
+                        );
+                    }
                     // Degenerate rank-2 update ⇒ refactor instead. `working`
                     // already carries this drop, so resetting against it
                     // reaches exactly the state the update was meant to
@@ -1929,6 +2039,11 @@ impl ParametricActiveSetSolver {
                         )?;
                         n_refactor += 1;
                     }
+                    // The working set changed, so the next step is a fresh
+                    // Newton step, not a repeat: re-arm the null-iteration
+                    // guard.
+                    prev_was_null_step = false;
+                    floor_refactored = false;
                     continue;
                 }
 
@@ -2034,6 +2149,14 @@ impl ParametricActiveSetSolver {
             if alpha < 0.0 {
                 alpha = 0.0;
             }
+            if trace && blocker.is_none() {
+                eprintln!(
+                    "[qp] it={_iter} NOBLOCK alpha={alpha:.3e} pinf={p_inf:.3e} obj={:.12e} nact={} ncand={}",
+                    quad_objective(qp, &x),
+                    active_slot_count(&working),
+                    candidates.len()
+                );
+            }
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
@@ -2053,6 +2176,14 @@ impl ParametricActiveSetSolver {
                         i
                     }
                 };
+                if trace {
+                    eprintln!(
+                        "[qp] it={_iter} ADD  slot={slot} alpha={alpha:.3e} obj={:.12e} nact={} pinf={:.2e}",
+                        quad_objective(qp, &x),
+                        active_slot_count(&working),
+                        p_inf
+                    );
+                }
                 // Same recovery as the drop side: `working` already carries this
                 // add, so a reset against it reproduces the intended state.
                 if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, true) {
@@ -2098,6 +2229,17 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 expand_tol = opts.expand_tol_initial;
+            }
+
+            // Null-iteration bookkeeping. A blocker means the working set grew,
+            // so the next step solves a *different* system and the guard
+            // re-arms; no blocker means a full step was taken and the next
+            // `‖p‖∞` must be round-off if the linear algebra is sound.
+            if blocker.is_some() {
+                prev_was_null_step = false;
+                floor_refactored = false;
+            } else {
+                prev_was_null_step = true;
             }
         }
 
