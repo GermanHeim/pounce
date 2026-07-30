@@ -2602,7 +2602,33 @@ impl QpSolver for ParametricActiveSetSolver {
             if matches!(sol.status, QpStatus::Optimal)
                 && !point_is_feasible(qp, &sol.x, opts.feas_tol)
             {
-                return self.solve_elastic(qp, opts);
+                // Never-regress on the recovery. Elastic phase-1 is a *repair*
+                // for a solve that converged to a constraint-violating point,
+                // but it is not guaranteed to land somewhere better, and when it
+                // does not the substitution is destructive: on Maros-Meszaros
+                // `QADLITTL` (optimum 480319) the audited iterate sits at
+                // 500918 with a small violation, and the elastic result that
+                // replaced it was 8.07 — the elastic seed (origin projected
+                // into the box), essentially no answer at all. The symptom from
+                // outside was a *larger* `max_iter` producing a far worse
+                // objective, because only the bigger budget got far enough to
+                // reach `Optimal` and trip this audit.
+                //
+                // Keep whichever point is less infeasible. Elastic still wins
+                // whenever it does its job — driving the slacks out — which is
+                // the case this path exists for.
+                let before = max_violation(qp, &sol.x);
+                let repaired = self.solve_elastic(qp, opts)?;
+                let after = max_violation(qp, &repaired.x);
+                if after <= before {
+                    return Ok(repaired);
+                }
+                // Repair regressed feasibility: keep the audited point, but do
+                // not dress it up as `Optimal` — it violates constraints, which
+                // is exactly what the audit established.
+                let mut kept = sol;
+                kept.status = QpStatus::MaxIter;
+                return Ok(kept);
             }
             return Ok(sol);
         }
@@ -2750,6 +2776,33 @@ impl QpSolver for ParametricActiveSetSolver {
 /// reach a KKT-stationary point that violates a constraint and report
 /// it as `Optimal`. `solve` runs this audit before trusting an
 /// `Optimal` and recovers through elastic mode on failure.
+/// Largest constraint / bound violation at `x` (0.0 when feasible).
+///
+/// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
+/// path can tell whether the point it is about to substitute is actually an
+/// improvement on the one it is discarding.
+fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
+    let ax = a_times_x(qp.a, x, qp.m);
+    let mut worst: Number = 0.0;
+    for i in 0..qp.m {
+        if qp.bl[i] > NLP_LOWER_BOUND_INF {
+            worst = worst.max(qp.bl[i] - ax[i]);
+        }
+        if qp.bu[i] < NLP_UPPER_BOUND_INF {
+            worst = worst.max(ax[i] - qp.bu[i]);
+        }
+    }
+    for (i, &xi) in x.iter().enumerate() {
+        if qp.xl[i] > NLP_LOWER_BOUND_INF {
+            worst = worst.max(qp.xl[i] - xi);
+        }
+        if qp.xu[i] < NLP_UPPER_BOUND_INF {
+            worst = worst.max(xi - qp.xu[i]);
+        }
+    }
+    worst.max(0.0)
+}
+
 fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
     let ax = a_times_x(qp.a, x, qp.m);
     for i in 0..qp.m {
