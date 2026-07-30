@@ -305,24 +305,32 @@ def test_invalid_solver_selection_raises(bad):
 
 
 def test_qp_active_set_reaches_the_sqp_engine():
-    """`qp-active-set` is a valid CLI/library selector and must actually
-    dispatch, not be swallowed.
+    """`qp-active-set` must dispatch to the **convex active-set driver**, the
+    same engine the CLI reaches with `solver_selection=qp-active-set`.
 
-    Before the fix it was indistinguishable from a bogus value: both fell
-    through to the filter-IPM. The backend treats it as equivalent to
-    `algorithm=active-set-sqp`, so pinning it against that spelling proves the
-    option reached the Rust side rather than merely being accepted by Python.
+    It originally fell through to the filter-IPM, indistinguishable from a bogus
+    value. The first fix forwarded it to the backend, which ran the *SQP outer
+    loop* — so the same selector named two different algorithms depending on
+    whether you called the CLI or `minimize`. It now takes the same Python-side
+    convex extraction as `qp-ipm` and dispatches to the active-set engine, so
+    the two surfaces agree.
+
+    The tell is `nfev`: the convex route consumes the extracted quadratic form
+    and never calls back into Python, so a routed solve reports zero function
+    evaluations, while both the NLP and SQP paths report many.
     """
     fun, jac, con = _qp_problem()
     kw = dict(jac=jac, constraints=con)
 
     sel = minimize(fun, np.zeros(2), options={"solver_selection": "qp-active-set"}, **kw)
-    algo = minimize(fun, np.zeros(2), options={"algorithm": "active-set-sqp"}, **kw)
+    ipm = minimize(fun, np.zeros(2), options={"solver_selection": "qp-ipm"}, **kw)
     nlp = minimize(fun, np.zeros(2), options={"solver_selection": "nlp"}, **kw)
 
-    assert sel.nit == algo.nit, "qp-active-set must select the same engine as algorithm=active-set-sqp"
-    assert np.allclose(sel.x, algo.x)
-    assert sel.nit != nlp.nit, "qp-active-set must be distinguishable from the NLP path"
+    assert sel.nfev == 0, "qp-active-set must route to the convex driver, not a callback path"
+    assert nlp.nfev > 0, "the NLP path must be distinguishable by callback count"
+    # Same problem, same optimum, whichever convex engine ran.
+    assert np.allclose(sel.x, ipm.x, atol=1e-6)
+    assert sel.success
     assert np.allclose(sel.x, nlp.x, atol=1e-6), "both engines must still solve it"
 
 

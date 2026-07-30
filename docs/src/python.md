@@ -365,7 +365,7 @@ choice — mirroring the CLI option of the same name:
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
-| `"qp-active-set"` | Run the active-set engine instead of the filter-IPM. On the **library** path this is `algorithm="active-set-sqp"` (the SQP outer loop); the **CLI** routes an LP/convex QP straight into the convex active-set driver instead, so the two are no longer the same route. |
+| `"qp-active-set"` | Run the `pounce-qp` active-set engine on a detected LP/convex QP — the **same engine and route the CLI uses**. Raises `ValueError` if the problem is not a convex LP/QP; for the active-set *SQP outer loop* on a general NLP, pass `algorithm="active-set-sqp"`. |
 
 Any other value raises `ValueError`. These are the same six selectors the CLI
 accepts, and matching is case-insensitive, as on the CLI.
@@ -373,12 +373,14 @@ accepts, and matching is case-insensitive, as on the CLI.
 Two differences from the CLI are worth knowing, both because `minimize` is a
 *library* consumer with no `.nl` file to classify:
 
-* `"qp-active-set"` is **not** class-validated here, and it is a *different
-  route* than the CLI's. The CLI restricts the selector to LP/convex QP and
-  sends those to the convex active-set driver; the library path has no
-  extracted problem class to check against, so it simply runs the SQP outer
-  loop on whatever problem it is given. Expect the CLI and `minimize` to differ
-  in iteration counts and reported statuses for the same convex QP as a result.
+* `"qp-active-set"` *is* class-validated here, unlike the other library-side
+  differences below — it takes the same Python-side convex extraction as
+  `"qp-ipm"` and dispatches to the same engine the CLI uses, so a given problem
+  gets the same algorithm from either surface. It previously forwarded to the
+  backend and ran the SQP outer loop, which meant one selector named two
+  different solvers depending on how you called POUNCE; that is fixed, and the
+  SQP outer loop is now reached only by its own name,
+  `algorithm="active-set-sqp"`.
 * The convex selectors (`"lp-ipm"`, `"qp-ipm"`, `"socp"`) work because
   `minimize` does its own Python-side structure detection. The equivalent Rust
   library API rejects them with `Invalid_Option`.

@@ -176,8 +176,15 @@ _QP_STATUS_MESSAGE = {
 # (no `.nl` problem-structure extraction), so the split is:
 #   auto / lp-ipm / qp-ipm / socp  -- handled here by Python-side extraction
 #   nlp                            -- the default; straight to the NLP backend
-#   qp-active-set                  -- forwarded to the backend, which selects the
-#                                     active-set SQP engine
+#   qp-active-set                  -- handled here by the same Python-side
+#                                     extraction as qp-ipm, then dispatched to
+#                                     the active-set engine. This deliberately
+#                                     matches the CLI: the selector must name
+#                                     one algorithm on both surfaces. It used to
+#                                     forward to the backend and run the SQP
+#                                     outer loop, so the same string meant two
+#                                     different solvers depending on how you
+#                                     called POUNCE.
 _SOLVER_SELECTION_VALUES = frozenset(
     {"auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set", "socp"}
 )
@@ -858,7 +865,7 @@ def _build_problem_obj(
     return cls()
 
 
-def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
+def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
     """Adapt a routed convex LP/QP solve back into an :class:`OptimizeResult`.
 
     The convex solver minimizes ``½xᵀPx + cᵀx`` and never sees the objective's
@@ -879,10 +886,15 @@ def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
         ub=ex.ub,
         tol=opts.get("tol"),
         max_iter=opts.get("max_iter"),
+        method=method,
     )
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
-    selector = "lp-ipm" if ex.kind == "lp" else "qp-ipm"
+    selector = (
+        "qp-active-set"
+        if method == "active-set"
+        else ("lp-ipm" if ex.kind == "lp" else "qp-ipm")
+    )
     message = _QP_STATUS_MESSAGE.get(res.status, res.status)
     return OptimizeResult(
         x=np.asarray(res.x),
@@ -1107,13 +1119,6 @@ def minimize(
             stacklevel=2,
         )
         selection = "nlp"
-    if selection == "qp-active-set":
-        # Not a Python-side route: hand it back to the backend, whose
-        # `is_sqp_algorithm_selected` treats it as equivalent to
-        # `algorithm=active-set-sqp`. Note the library path does *not*
-        # class-validate this selector (the CLI restricts it to LP/convex QP);
-        # it simply runs the SQP engine on whatever problem it is given.
-        options["solver_selection"] = "qp-active-set"
     # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
     # NLP backend otherwise prints a full IPM iteration table by default (and
     # the log is written from Rust to fd 1, so Python stdout redirection can't
@@ -1199,7 +1204,7 @@ def minimize(
                 stacklevel=2,
             )
 
-    if selection in ("auto", "lp-ipm", "qp-ipm"):
+    if selection in ("auto", "lp-ipm", "qp-ipm", "qp-active-set"):
         extract = classify_and_extract(**route_kw)
         if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
             raise ValueError(
@@ -1211,9 +1216,24 @@ def minimize(
                 "solver_selection='qp-ipm' but the problem was not detected as "
                 "a convex LP/QP (convex-quadratic objective + linear constraints)"
             )
+        if selection == "qp-active-set" and extract is None:
+            # Matches the CLI, which refuses the selector on a non-convex-QP
+            # class rather than quietly running a different algorithm. Callers
+            # who genuinely want the SQP outer loop on an arbitrary NLP should
+            # ask for it by name.
+            raise ValueError(
+                "solver_selection='qp-active-set' but the problem was not "
+                "detected as a convex LP/QP (convex-quadratic objective + "
+                "linear constraints). For the active-set SQP outer loop on a "
+                "general NLP, pass algorithm='active-set-sqp' instead."
+            )
         if extract is not None:
             _warn_convex_dropped_opts("convex LP/QP")
-            return _solve_via_convex(extract, options)
+            return _solve_via_convex(
+                extract,
+                options,
+                method="active-set" if selection == "qp-active-set" else "ipm",
+            )
         # Auto: an LP/QP wasn't found — try a convex QCQP before giving up to
         # the NLP solver (a quadratic *constraint* lands here, not above).
         if selection == "auto":
