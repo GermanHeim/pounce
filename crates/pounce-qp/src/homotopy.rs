@@ -421,6 +421,20 @@ impl ParametricActiveSetSolver {
         // set so the retry loop terminates on its own; the cap bounds the case
         // where the ratio test keeps re-adding a pruned row.
         let mut rank_repairs: u32 = (n + m).min(1000) as u32;
+        // Rows pruned by a rank repair *at the current* `t`. Without this the
+        // repair and the primal ratio test fight each other: the repair drops a
+        // linearly dependent row, the ratio test immediately re-adds it because
+        // it is still exactly at its bound at this `t`, and the pair loops
+        // forever without advancing. Measured on QSHARE2B, which repaired
+        // 79 -> 77 constraints at t = 0.9999973 and then repeated that same
+        // repair until the budget ran out.
+        //
+        // A pruned row is a linear combination of the kept ones, so it stays
+        // satisfied and excluding it changes nothing about feasibility. The tabu
+        // is cleared the moment `t` actually advances, because at a new `t` the
+        // dependency that justified the prune no longer necessarily holds — this
+        // suppresses the cycle without permanently blinding the ratio test.
+        let mut tabu_cons = vec![false; m];
 
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
@@ -514,6 +528,7 @@ impl ParametricActiveSetSolver {
                         if !keep_c[i] {
                             working.constraints[i] = ConsStatus::Inactive;
                             lambda_g[i] = 0.0;
+                            tabu_cons[i] = true;
                             n_changes += 1;
                         }
                     }
@@ -554,7 +569,7 @@ impl ParametricActiveSetSolver {
             let mut event: Option<Event> = None;
 
             for i in 0..m {
-                if working.constraints[i].is_active() {
+                if working.constraints[i].is_active() || tabu_cons[i] {
                     continue;
                 }
                 // Upper: a_i·x(t) − bu_i(t) = 0.
@@ -623,6 +638,11 @@ impl ParametricActiveSetSolver {
 
             // ---- Advance to the event (or to t = 1) ----
             let dt = t_next - t;
+            if dt > T_EPS {
+                // Real progress along the path: the rank-repair tabu was scoped
+                // to the parameter value it was raised at, so release it.
+                tabu_cons.iter_mut().for_each(|f| *f = false);
+            }
             for (xi, &d) in x.iter_mut().zip(dx.iter()) {
                 *xi += dt * d;
             }
