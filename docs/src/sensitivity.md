@@ -214,7 +214,10 @@ against the analytical linear-regression covariance
 The noise variance comes from, in order of precedence: `sigma_sq=`
 (known measurement variance); the declared residuals (estimated as
 `SSR / (n - n_params)`, with both numbers derived from the container);
-or the `n_data=` fallback for models without explicit residuals. The
+or the `n_data=` fallback for models without explicit residuals, whose
+SSR is the objective value *at the solve* — like `estimate()`'s
+baseline, writing into the model afterwards (a measurement, a warm
+start for the next horizon) does not move the answer. The
 solve warns if the declared residuals do not reproduce the objective
 value (weights or regularization terms would silently corrupt the
 estimate).

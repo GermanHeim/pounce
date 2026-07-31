@@ -134,6 +134,21 @@ def test_n_data_ssr_is_the_solve_time_objective():
                                rtol=0, atol=0)
 
 
+def test_n_data_rejects_an_unevaluated_objective():
+    """A session whose solve evaluated no objective reports NaN, and
+    n_data= must refuse it rather than hand back a NaN covariance. NaN
+    is the sentinel the engine uses (0.0 is an ordinary objective
+    value), so the guard tests isfinite, not None."""
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_fitted(m.a, m.b)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    session.base_obj = float("nan")
+    with pytest.raises(RuntimeError, match="no usable objective value"):
+        covariance(m, n_data=N_LIN)
+
+
 def test_n_data_ignored_when_residuals_declared_warns(linear):
     m, x, y, X = linear                     # fixture declares residuals
     with warnings.catch_warnings(record=True) as w:

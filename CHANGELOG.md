@@ -19,8 +19,18 @@ changes.
   in #421's review. The `declare_residual` path was unaffected.
 - The session now stores the objective value at the solve and the
   `n_data=` branch reads that, so post-solve writes to the model cannot
-  move the answer. Regression: solve, take the covariance, overwrite the
-  model's values, take it again; the two must be identical.
+  move the answer. The stored number is the engine's `obj_val`, which is
+  `eval_f` on this model's own bridge at the final iterate — unscaled,
+  in the model's objective units, i.e. exactly what `pyo.value` returns
+  an instant after the solve. Regression: solve, take the covariance,
+  overwrite the model's values, take it again; the two must be
+  identical.
+- The unusable-objective guard tests `isfinite`, not `is None`: the
+  engine always reports `obj_val` and signals "never computed" with NaN
+  (`0.0` is an ordinary objective value), so a `None` check would have
+  been dead code guarding a condition the producer cannot emit.
+  Documented in the `covariance` docstring and the sensitivity chapter
+  alongside `estimate()`'s matching baseline guarantee.
 
 ### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
 
