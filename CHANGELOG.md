@@ -139,10 +139,41 @@ changes.
   exactly those 43 at a 120 s cap, and moved **9/43 solved to 9/43**, repairing
   none of the broken paths. It buys one large win (`STADAT2`, 10979 corrector
   iterations → 22) and one real regression (`QBEACONF`, 0.43 s → 8.23 s). Kept on
-  the `experiment/413-exchange-pivot` branch rather than merged. Note also that
-  the six instances #412 regressed (`AUG2D`, `AUG2DC`, `CONT-050`, `CONT-100`,
-  `DTOC3`, `STADAT3`) all have **clean** paths, so they are slow, not broken, and
-  nothing about path feasibility will help them.
+  the `experiment/413-exchange-pivot` branch rather than merged.
+- **And the other half of #413's timeouts is not a defect at all — it is the
+  method's complexity class.** The 39 remaining unsolved instances have
+  perfectly *clean* paths, including all six #412 regressed (`AUG2D`, `AUG2DC`,
+  `CONT-050`, `CONT-100`, `DTOC3`, `STADAT3`); they are all large, and they time
+  out because the **optimal active set is a constant fraction of `n`**:
+
+  | instance | `n` | active at the optimum |
+  |---|---|---|
+  | LISWET1 (and 11 siblings) | 10002 | 10000 (100%) |
+  | POWELL20 | 10000 | 10000 (100%) |
+  | QSHIP08L | 4283 | 4200 (98%) |
+  | CONT-050 | 2597 | 2402 (92%) |
+  | CVXQP1_M | 1000 | 887 (89%) |
+  | DTOC3 | 14999 | 7901 (53%) |
+  | AUG2D | 20200 | 10000 (50%) |
+
+  An active-set method changes the working set by one row per pivot, so from a
+  cold start these need 10³–10⁴ pivots, each at minimum a back-solve on an
+  O(`n`) KKT. The interior-point engine takes **21 iterations on LISWET1
+  regardless of size** — which is why `auto` routes cold convex QPs there and
+  why pounce solves 137/138 overall. No amount of work on the active-set path
+  closes an Ω(`n`)-versus-O(1) iteration-count gap.
+
+  #413's headline — that the timeouts are "corrector-bound, not path-bound" —
+  does not hold for these either: at a 60 s cap `LISWET1` reaches only
+  `t = 0.976` after 7050 path steps, `AUG2D` only `t = 0.50`, `QSHIP08L`
+  `t = 0.655`. The path *is* the runtime. The 4% figure in the issue was
+  profiled on `QSCTAP1` (n=480) and `QSCSD6` (n=1350) and does not generalise.
+  The Schur-update remedy that observation rules out was nonetheless tried here
+  (rank-2 updates of a cached K_max, the machinery `solve_general_schur`
+  already uses) and it made the path **slower** — 4850 steps in 60 s against
+  7050 — because K_max is fixed at dimension `n + m + n` and the SMW solve plus
+  refinement costs several back-solves per step against one factorization of a
+  smaller active-set KKT.
 
 ### Fixed — exact-Hessian SQP gave up on unconstrained nonconvex NLPs (#423)
 
