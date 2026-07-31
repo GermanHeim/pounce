@@ -106,6 +106,36 @@ duals yet self-corrects when the active set moves) and re-centers the cone
 duals for second-order blocks (a converged conic point sits on the cone
 boundary, where the scaling is singular).
 
+### The step length is what makes it pay off
+
+A warm start lowers the starting duality measure μ₀; whether that turns into
+*fewer iterations* depends on how much of each Newton step the solver is
+allowed to take. With a **static** fraction-to-boundary parameter τ, every
+step covers at most a τ fraction of the distance to the cone boundary, so μ
+falls by a fixed factor per iteration and the count is `log₁/₍₁₋τ₎(μ₀/tol)`
+however good the start was — a logarithm of the perturbation, not the one or
+two Newton steps a nearby problem deserves.
+
+So on orthant blocks the step follows the Mehrotra tail
+`τ = clamp(1 − μ, tau, tau_max)`: as the solve converges τ approaches 1 and a
+near-optimal iterate takes a near-full Newton step. On the QP families in the
+warm-start benchmark this is worth 35–60% of the warm iterations. Both ends
+are tunable, and both are `method="ipm"` only:
+
+```python
+r = solve_qp(P=P, c=c2, G=G, h=h, warm_start=base,
+             tau=0.95,        # floor: the flat τ far from the solution
+             tau_max=0.999)   # ceiling on the tail (default: just under 1)
+```
+
+Passing `tau_max=tau` pins τ flat — the most conservative setting, and the
+one to reach for if a badly-conditioned sequence starts producing
+`numerical_failure`. Two scopes are deliberate and not tunable: second-order
+and PSD blocks always keep the static `tau` (their boundary is curved, and an
+iterate that close to it breaks the Nesterov–Todd scaling), and **cold**
+solves are unaffected because they run the homogeneous self-dual embedding,
+a different loop.
+
 ## Batching and factorization reuse
 
 ```python
