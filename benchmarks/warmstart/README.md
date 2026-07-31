@@ -26,7 +26,7 @@ nearest public things and why each does not cover it:
 | [OPFData](https://arxiv.org/abs/2406.07234) / PGLearn | 300k solved AC-OPF instances per grid, loads perturbed 80–120%, plus N-1 topologies | A dataset with no protocol or metrics, single problem class, independent samples rather than a path. |
 | CUTEst, Hock-Schittkowski, Vanderbei, Mittelmann, Maros-Mészáros | The standard NLP/QP collections (several already in `benchmarks/`) | Every problem is one cold solve. No parameter, no sequence. |
 
-## The four arms
+## The arms
 
 | arm | algorithm | seeded with | runs on |
 |---|---|---|---|
@@ -34,6 +34,8 @@ nearest public things and why each does not cover it:
 | `cold-sqp` | active-set SQP | nothing | every family |
 | `warm-ipm` | general NLP filter-IPM | previous step's primal-dual point and μ | every family |
 | `warm-sqp` | active-set SQP | previous step's working set and point | every family |
+| `cold-sqp-hom` | active-set SQP, homotopy inner QP | nothing | every family |
+| `warm-sqp-hom` | active-set SQP, homotopy inner QP | previous step's working set and point | every family |
 | `cold-qp-ipm` | dedicated convex QP IPM (`pounce.solve_qp`) | nothing | QP families only |
 | `warm-qp-ipm` | dedicated convex QP IPM | previous step's primal-dual point | QP families only |
 
@@ -105,7 +107,9 @@ the mean speedup hides the failure mode that matters most.
 |---|--:|--:|---|---|---|
 | `simplex_proj` | 20 | 1 | flipping | objective | convex |
 | `moving_bound_qp` | 40 | 3 | flipping | bounds | convex |
-| `degenerate_corner` | 6 | 3 | degenerate | objective | convex |
+| `degenerate_corner` | 6 | 3 | dual degenerate | objective | convex |
+| `redundant_rows` | 6 | 5 | rank-deficient (LICQ fails) | objective | convex |
+| `degenerate_vertex` | 4 | 12 | primal degenerate | objective | convex |
 | `hanging_chain` | 30 | 15 | flipping | mixed | convex |
 | `rosenbrock_ring` | 10 | 1 | switch | rhs | nonconvex |
 | `rosenbrock_ring_cycle` | 10 | 1 | re-activation | rhs | nonconvex |
@@ -168,6 +172,25 @@ Two families are worth knowing about in detail:
   depend on the solutions, the runner records the sequence the
   reference arm produces and **replays** it for the other arms — the
   arms would otherwise be solving different problems.
+
+## What QP-solver properties this exercises
+
+The suite reaches `pounce-qp` only through the SQP outer loop, so it is
+not a QP-solver benchmark — but the questions people ask about an
+active-set QP code map onto it as follows:
+
+| property | `pounce-qp` | exercised here? |
+|---|---|---|
+| sparse or dense | sparse triplet KKT + sparse LDLᵀ; the Schur block alone is dense | **no** — families are n ≤ 47 and near-dense. Sparse coverage is the cold `.nl` Maros-Mészáros suite |
+| convex only, or indefinite | indefinite, via §4.5 inertia control and negative-curvature ratio-test handling | **yes** — 5 of 10 families are nonconvex with indefinite ∇²L along the path; two solver defects were found there |
+| primal or dual | primal; l1-elastic phase-1 for an infeasible cold start, and the homotopy is primal-feasible by construction | n/a — there is no dual variant to compare |
+| parametric with hot starts | both: working-set hot start, and the §4.2 qpOASES-lineage homotopy | **yes** — hot starts are the `warm-*` arms; the homotopy is the `-hom` arms |
+| degeneracy | Harris two-pass, GMSW EXPAND, Bland latch, rank-deficient active sets pruned to a maximal independent subset | **yes**, all three kinds: dual (`degenerate_corner`), rank-deficient / LICQ (`redundant_rows`), primal (`degenerate_vertex`) |
+
+Still uncovered, and worth knowing: **scale**. Every family is small by
+design, so nothing here says how the sparse path or the Schur updates
+behave at n in the thousands. An MPC horizon sweep would be the natural
+addition.
 
 ## Running it
 

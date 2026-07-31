@@ -71,6 +71,51 @@ changes.
   Documented in the `covariance` docstring and the sensitivity chapter
   alongside `estimate()`'s matching baseline guarantee.
 
+### Fixed — `sqp_qp_use_homotopy` was registered but never read
+
+- **Setting it on the active-set SQP path did nothing.** The option was
+  registered with the parametric-homotopy work and documented in detail, but
+  `apply_qp_subproblem_options` — the function that maps the `sqp_qp_*` family
+  onto `pounce_qp::QpOptions` — never consulted it, so `pounce-qp`'s own
+  default (`false`) always stood. Only `pounce_convex::active_set` got the
+  homotopy, and it sets the field directly in Rust rather than through options.
+  A registered knob that no code reads is worse than a missing one: it
+  validates, accepts a value, and ships working documentation for behavior the
+  user never gets.
+- **The inverse of #360, and invisible to its guard.** That issue fixed
+  read-but-unregistered and left a test walking the keys the *reader* consults,
+  asserting each is registered. Nothing checked the other direction. The new
+  `application_every_registered_sqp_qp_option_is_read_by_the_subproblem_reader`
+  enumerates the registry and fails if the two sets diverge either way; both
+  guards were checked for falsifiability rather than assumed.
+- **Found by the benchmark, not by reading.** The warm-start suite's new
+  `-hom` arms measured bit-identical results to their twins — an arm that
+  cannot differ from its control is either a perfect null or a broken
+  experiment.
+
+### Added — degeneracy families and a parametric-homotopy arm in the warm-start suite
+
+- **Two degeneracy families**, completing the three distinct ways an active-set
+  QP meets degeneracy. `degenerate_corner` already covered dual degeneracy (a
+  multiplier through zero); `redundant_rows` adds rank deficiency (duplicated
+  equality rows, so LICQ fails everywhere, plus a duplicated inequality pair
+  that activates together mid-path), and `degenerate_vertex` adds primal
+  degeneracy (12 rows tight at a 4-variable vertex — the ratio-test ties Harris
+  and GMSW EXPAND exist for). Both are convex QPs, so all three solvers take
+  them; both converge on all eight arms with zero correctness failures, and the
+  reported working set confirms the LICQ-violating vertex is pruned to its
+  maximal independent subset.
+- **`cold-sqp-hom` / `warm-sqp-hom` arms**, differing from their twins in the
+  single option above, which makes the §4.2 parametric homotopy measurable for
+  the first time. It is a sharply mixed trade: 4.2–12.3× less inner active-set
+  work on `redundant_rows`, 2.0–2.9× on `degenerate_corner`, unchanged on four
+  families, and ~2× *more* on `nmpc_vanderpol` and ~1.4× more on
+  `simplex_proj`, for 0.70× over all 30 rows. It wins on the degenerate,
+  netlib-like geometry it was designed for and loses on well-conditioned
+  MPC-shaped QPs — a mechanism-level account of #412's 20-gained/7-lost
+  Maros-Mészáros result, and an argument for the default staying off while the
+  knob is reachable.
+
 ### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
 
 - `estimate(model, perturb)` computed each step as `new value` minus the

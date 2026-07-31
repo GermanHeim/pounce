@@ -299,6 +299,59 @@ Caveat kept in the report itself: the QP arms receive matrix data once
 per step where the callback arms re-evaluate per iteration, so the wall
 time favors them by an amount this suite does not separate out.
 
+## Finding 4: `sqp_qp_use_homotopy` was registered but never read
+
+Found while adding the `-hom` arms. The option was registered by the
+homotopy work (#412) and documented in detail, but
+`apply_qp_subproblem_options` — the function that maps the `sqp_qp_*`
+family onto `pounce_qp::QpOptions` — never read it. Setting it on the
+SQP path therefore did nothing at all, silently, while the option's own
+documentation described the algorithm it would select. The first
+version of the `-hom` arms measured bit-identical results to their
+twins, which is how it surfaced: an arm that cannot differ from its
+control is either a perfect null result or a broken experiment, and it
+was the second.
+
+This is the exact inverse of #360 (read-but-unregistered), and the
+guard test that issue left behind could not catch it — that test walks
+the keys the *reader* consults and asserts each is registered, which
+says nothing about a registered key no reader consults. Fixed here by
+reading the option, and by adding
+`application_every_registered_sqp_qp_option_is_read_by_the_subproblem_reader`,
+which enumerates the registry and fails if the two sets diverge in
+either direction. Both guards were checked for falsifiability: removing
+the reader fails the round-trip test, removing the name from the
+covered list fails the new one.
+
+## Finding 5: the homotopy is a sharply mixed trade, and the split is legible
+
+With the option working, the `-hom` arms measure it. On cold inner
+solves, where it engages:
+
+| family | conventional → homotopy | ratio |
+|---|--:|--:|
+| `redundant_rows` | 247 → 30 | 4.2–12.3× |
+| `degenerate_corner` | 69 → 30 | 2.0–2.9× |
+| `moving_bound_qp` | 793 → 685 | 0.87–2.75× |
+| `degenerate_vertex` | 154 → 132 | 1.1–1.3× |
+| `simplex_proj` | 978 → 1400 | 0.63–0.74× |
+| `nmpc_vanderpol` | 2745 → 5115 | 0.52–0.55× |
+| four others | unchanged | 1.00× |
+| **all 30 rows** | **5583 → 7989** | **0.70×** |
+
+It wins where it was designed to — degenerate, rank-deficient,
+netlib-like geometry, and it *improves* with perturbation size on
+`redundant_rows` because the conventional cold solve degrades there
+while the homotopy does not — and loses roughly 2× on well-conditioned
+MPC-shaped QPs. That is a mechanism-level account of #412's
+Maros-Mészáros result (20 gained, 7 lost, the losses large instances),
+and it argues for keeping the default off on the SQP path while making
+the knob reachable, which is now the case.
+
+It also bears on #413: the homotopy's cost concentrates on
+`nmpc_vanderpol`, the family closest in shape to the corrector-bound
+instances that issue is about.
+
 ## Not done yet
 
 - **A shift-based warm-start arm for the closed-loop family.** MPC
@@ -310,6 +363,10 @@ time favors them by an amount this suite does not separate out.
   `Δx ≈ ∂x*/∂p · Δp` before the SQP corrector runs — the pattern
   documented in `docs/src/active-set-sqp.md` §4. It would slot in as a
   fifth arm and is the natural next addition.
+- **Scale.** Every family is small (n ≤ 47), so nothing here measures
+  the sparse path or the Schur updates at size. An MPC horizon sweep
+  (N = 10…160) would be the natural addition and would put the
+  `-hom` arms on problems where the homotopy's cost matters.
 - **An external solver arm.** The adapter interface is exercised by
   the pounce adapter's three paths but has no second solver behind it;
   Ipopt through cyipopt would be the obvious first one, using the same

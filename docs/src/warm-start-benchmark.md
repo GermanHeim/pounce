@@ -39,8 +39,17 @@ Each runs cold and warm, giving six arms:
 | `warm-ipm` | NLP filter-IPM | previous point + μ | every family |
 | `cold-sqp` | active-set SQP | nothing | every family |
 | `warm-sqp` | active-set SQP | previous working set + point | every family |
+| `cold-sqp-hom` | active-set SQP, homotopy inner QP | nothing | every family |
+| `warm-sqp-hom` | active-set SQP, homotopy inner QP | previous working set + point | every family |
 | `cold-qp-ipm` | convex QP IPM | nothing | QP families only |
 | `warm-qp-ipm` | convex QP IPM | previous primal-dual point | QP families only |
+
+The `-hom` pair differs from `cold-sqp` / `warm-sqp` in exactly one
+option, `sqp_qp_use_homotopy`: the inner QP's **cold** solve traces the
+§4.2 parametric homotopy — start from the box-only relaxation, tighten
+the row bounds along `t ∈ [0,1]`, jump the working set at each event —
+instead of the conventional phase-1/phase-2 scheme. It is the algorithm
+`pounce-qp` is named for.
 
 Each warm arm is scored against **its own** cold counterpart. That
 pairing is the whole point: `warm-sqp` beating `cold-ipm` would confound
@@ -49,9 +58,9 @@ comparison isolates the warm start.
 
 ## The problems
 
-Eight families, each run at three step sizes (`tiny` ×0.1, `small` ×1,
-`large` ×4 of its natural per-step parameter increment), for 24 rows and
-489 solves per arm. Warm-start payoff is a function of how far the
+Ten families, each run at three step sizes (`tiny` ×0.1, `small` ×1,
+`large` ×4 of its natural per-step parameter increment), for 30 rows and
+615 solves per arm. Warm-start payoff is a function of how far the
 problem moved, so a single step size would measure one point on a curve
 and call it the answer.
 
@@ -59,12 +68,25 @@ and call it the answer.
 |---|--:|--:|---|---|---|
 | `simplex_proj` | 20 | 1 | flipping | objective | convex |
 | `moving_bound_qp` | 40 | 3 | flipping | variable bounds | convex |
-| `degenerate_corner` | 6 | 3 | degenerate (a multiplier passes through zero) | objective | convex |
+| `degenerate_corner` | 6 | 3 | dual degenerate (a multiplier passes through zero) | objective | convex |
+| `redundant_rows` | 6 | 5 | rank-deficient (LICQ fails; duplicated rows) | objective | convex |
+| `degenerate_vertex` | 4 | 12 | primal degenerate (12 rows tight in 4 variables) | objective | convex |
 | `hanging_chain` | 30 | 15 | flipping contacts | mixed | convex |
 | `rosenbrock_ring` | 10 | 1 | one clean activation switch | constraint RHS | nonconvex |
 | `rosenbrock_ring_cycle` | 10 | 1 | switch crossed in both directions | constraint RHS | nonconvex |
 | `double_well_chain` | 12 | 0 | none — empty active set throughout | objective | nonconvex |
 | `nmpc_vanderpol` | 47 | 32 | closed-loop MPC | constraint RHS | nonconvex |
+
+The three degeneracy families cover the three distinct ways an
+active-set QP meets degeneracy, which are not interchangeable:
+`degenerate_corner` fails strict complementarity (a zero multiplier),
+`redundant_rows` fails LICQ (duplicated equality rows throughout, and a
+duplicated inequality pair that activates together partway along the
+path), and `degenerate_vertex` is primally degenerate (12 constraints
+tight at a 4-variable vertex, so the ratio test is a mass of ties —
+the case Harris's two-pass test and GMSW EXPAND exist for). The
+benchmark reports that pounce prunes that vertex's active set to its
+maximal independent subset: `|A|` never exceeds 4 of the 12 tight rows.
 
 The families are deliberately small and analytic. This is a
 *measurement* of warm-start behavior, not a scaling study — the
@@ -88,8 +110,8 @@ Three rules make the arms comparable:
    *worse* optimum than the reference. A warm start that converges
    quickly to the wrong answer is a failure, not a win.
 
-In the run reported below, **every step of every arm passed** — 489
-steps × 4 arms, plus 180 QP-arm steps, with zero correctness failures.
+In the run reported below, **every step of every arm passed** — 30 rows
+× 8 arms, 4920 solves, with zero correctness failures.
 
 ## Results
 
@@ -97,14 +119,14 @@ Run on POUNCE 0.9.0, `tol = 1e-8`, one machine, all 24 rows.
 
 ### Does warm starting pay?
 
-Totals across all 489 steps of all 24 rows:
+Totals across all 615 steps of all 30 rows:
 
 | arm | Σ outer iterations | Σ solve time | incorrect steps |
 |---|--:|--:|--:|
-| `cold-ipm` | 6682 | 3.75 s | 0 |
-| `warm-ipm` | **2156** | 1.73 s | 0 |
-| `cold-sqp` | 3872 | 12.82 s | 0 |
-| `warm-sqp` | **1138** | 3.05 s | 0 |
+| `cold-ipm` | 7796 | 4.18 s | 0 |
+| `warm-ipm` | **2399** | 2.12 s | 0 |
+| `cold-sqp` | 3998 | 13.09 s | 0 |
+| `warm-sqp` | **1261** | 2.99 s | 0 |
 
 Both solvers cut outer iterations by roughly 3×. But for the active-set
 SQP that number badly understates the effect, for a reason worth
@@ -149,9 +171,15 @@ parentheses); `IPM` is the ratio of outer iterations. Higher is better;
 | `degenerate_corner` | tiny | 1.87× (19→1) | 0 | 4.67× | 0 |
 | `degenerate_corner` | small | 1.87× (19→1) | 0 | 3.56× | 0 |
 | `degenerate_corner` | large | 1.92× (26→4) | 0 | 3.08× | 0 |
+| `redundant_rows` | tiny | 2.20× (42→1) | 0 | 5.25× | 0 |
+| `redundant_rows` | small | 3.05× (73→3) | 1 | 4.08× | 0 |
+| `redundant_rows` | large | 5.31× (114→3) | 1 | 3.54× | 0 |
+| `degenerate_vertex` | tiny | 2.16× (46→4) | 1 | 4.05× | 0 |
+| `degenerate_vertex` | small | 2.23× (50→4) | 1 | 3.17× | 0 |
+| `degenerate_vertex` | large | 2.16× (46→4) | 1 | 2.97× | 0 |
 | `hanging_chain` | tiny | 4.00× (57→0) | 0 | 1.25× | 0 |
 | `hanging_chain` | small | 4.84× (99→9) | 0 | 1.54× | 0 |
-| `hanging_chain` | large | 4.19× (237→72) | 1 | **0.85×** | **17** |
+| `hanging_chain` | large | 4.19× (237→72) | 1 | 0.85× | 17 |
 | `rosenbrock_ring` | tiny | 2.37× (30→1) | 0 | 11.37× | 0 |
 | `rosenbrock_ring` | small | 2.48× (33→1) | 0 | 8.75× | 0 |
 | `rosenbrock_ring` | large | 2.16× (30→1) | 0 | 6.73× | 0 |
@@ -200,9 +228,51 @@ Two rows show it, both at the largest step size:
 This is why the benchmark reports regressions per step rather than only
 a mean. A single averaged speedup would hide both.
 
+### The parametric homotopy: a sharply mixed trade
+
+The `-hom` arms differ from their twins in one option, so the delta is
+the homotopy alone. Comparing inner QP active-set work on the **cold**
+arms, where the homotopy actually engages (warm inner QPs mostly skip
+the cold path):
+
+| family | conventional → homotopy, cold inner work | ratio across the three scales |
+|---|--:|--:|
+| `simplex_proj` | 978 → 1400 | 0.63–0.74× |
+| `moving_bound_qp` | 793 → 685 | 0.87–2.75× |
+| `degenerate_corner` | 69 → 30 | 2.00–2.90× |
+| `redundant_rows` | 247 → 30 | 4.20–12.30× |
+| `degenerate_vertex` | 154 → 132 | 1.09–1.26× |
+| `hanging_chain` | 402 → 402 | 1.00× |
+| `rosenbrock_ring` | 98 → 98 | 1.00× |
+| `rosenbrock_ring_cycle` | 97 → 97 | 1.00× |
+| `double_well_chain` | 0 → 0 | — (no inner QP work at all) |
+| `nmpc_vanderpol` | 2745 → 5115 | 0.52–0.55× |
+| **all 30 rows** | **5583 → 7989** | **0.70×** |
+
+Above 1.00× the homotopy did less work. The split is not random — it
+tracks exactly what the homotopy was built for:
+
+- **It wins on degenerate geometry.** `redundant_rows`, whose active
+  set is linearly dependent, is its best case by a wide margin, and it
+  improves with perturbation size (4.2× → 12.3× from `tiny` to
+  `large`) because the conventional cold solve degrades there while the
+  homotopy does not. `degenerate_corner` and `degenerate_vertex` follow
+  the same pattern. This is the netlib-like geometry #412 reported it
+  gaining 20 problems on.
+- **It loses on well-conditioned MPC-shaped QPs.** `nmpc_vanderpol`
+  costs about twice the inner work with the homotopy on, consistently
+  across scales, and `simplex_proj` costs ~1.4×.
+- **It is inert on four families** — exactly 1.00×, because their inner
+  QPs never take the cold path far enough for it to matter.
+
+Net over all 30 rows it does *more* inner work (0.70×), because the two
+losers are also the two largest problems. That is an argument for
+keeping it off by default on the SQP path and reaching for it on
+degenerate models, which is what the option now allows.
+
 ### Three-way: which solver for a sequence of QPs?
 
-Three families are literally convex QPs, so all three solvers can take
+Five families are literally convex QPs, so all three solvers can take
 them. Interior-point iterations and active-set pivots are not the same
 unit of work, so the like-for-like column is each solver against itself:
 
@@ -222,11 +292,13 @@ Geometric-mean wall time over those nine rows:
 
 | cold-ipm | cold-sqp | cold-qp-ipm | warm-ipm | warm-sqp | warm-qp-ipm |
 |--:|--:|--:|--:|--:|--:|
-| 97.1 ms | 72.8 ms | 75.9 ms | 48.5 ms | 37.3 ms | **35.8 ms** |
+| 98.9 ms | 64.3 ms | 72.4 ms | 50.9 ms | 36.1 ms | **34.9 ms** |
 
-The dedicated convex solver is fastest on 6 of the 9 rows, with the
-active-set SQP taking the other 3 — the rows where the active set churns
-hardest. Note that this ranking is recent: before
+The dedicated convex solver is fastest on 8 of the 15 rows and the
+active-set SQP on the other 7, with the SQP taking the rows where the
+active set churns hardest. The two are within 4% of each other on the
+aggregate — on a problem that really is a QP, either warm-started path
+is a reasonable default. Note that this ranking is recent: before
 [#417](https://github.com/jkitchin/pounce/issues/417) was fixed the
 convex solver's warm start was capped at 1.2–1.5× and `warm-sqp` led 8
 of 9 rows.
@@ -246,6 +318,11 @@ of 9 rows.
 - **When each step moves the problem a long way** — check whether warm
   starting is helping at all. It can cost more than a cold solve, and
   the IPM path is more exposed to this than the SQP path.
+- **On degenerate models — dependent rows, vertices where many
+  constraints meet — try `sqp_qp_use_homotopy`.** It cuts inner
+  active-set work by 2–12× on the degeneracy families and is the
+  algorithm the active-set engine was designed around. Leave it off for
+  MPC-shaped problems, where it roughly doubles the work.
 - **Always verify.** A fast wrong answer is the failure mode that
   matters, which is why the harness re-checks KKT residuals and
   objectives itself rather than trusting a status code.
@@ -266,6 +343,7 @@ Hessian, nothing active) that no other suite exercised:
 | [#416](https://github.com/jkitchin/pounce/issues/416) | Exact-Hessian SQP spent its entire inner-QP iteration budget making **zero** working-set changes; a budget of 20 gave bit-identical answers ~9× faster. Fixed in #419. |
 | [#423](https://github.com/jkitchin/pounce/issues/423) | The #416 fix regressed unconstrained problems: with nothing able to block a negative-curvature direction, the solve died at iteration 1. Caught by `double_well_chain` on its first run against the new build. Fixed in #424. |
 | [#417](https://github.com/jkitchin/pounce/issues/417) | The convex QP warm start left ~40% of its iterations unclaimed — not from the seeding but from a fraction-to-boundary parameter pinned at 0.95. Fixed in #422. |
+| `sqp_qp_use_homotopy` was a no-op | Found while adding the `-hom` arms: the option was *registered* but `apply_qp_subproblem_options` never read it, so setting it on the SQP path did nothing while its documentation described what it would do. The inverse of #360 (read-but-unregistered), and invisible to that issue's guard, which only checked one direction. Fixed here, with a bidirectional guard. |
 
 ## Running it
 

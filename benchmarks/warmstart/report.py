@@ -223,7 +223,7 @@ def render(payload: dict) -> str:
         w("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
         for arm in (
             "cold-ipm", "warm-ipm", "cold-sqp", "warm-sqp",
-            "cold-qp-ipm", "warm-qp-ipm",
+            "cold-sqp-hom", "warm-sqp-hom", "cold-qp-ipm", "warm-qp-ipm",
         ):
             steps = run["arms"].get(arm)
             if not steps:
@@ -240,6 +240,59 @@ def render(payload: dict) -> str:
             )
         for arm, why in run.get("skipped", {}).items():
             w(f"| {arm} | *skipped* | | | | | | | | | {why} |")
+        w("")
+
+    # -- parametric homotopy vs the conventional inner solve ---------
+    hom_runs = [r for r in runs if "cold-sqp-hom" in r["arms"]]
+    if hom_runs:
+        w("## Parametric homotopy vs the conventional inner QP")
+        w("")
+        w(
+            "`-hom` arms set `sqp_qp_use_homotopy`, which replaces the inner "
+            "QP's **cold** phase-1/phase-2 solve with the §4.2 parametric "
+            "homotopy (box-only relaxation, then the row bounds tightened "
+            "along `t ∈ [0,1]`). Everything else about the arm is identical to "
+            "its twin, so the difference is that one option. Warm inner QPs "
+            "mostly skip the cold path, which is why the warm columns move "
+            "less than the cold ones."
+        )
+        w("")
+        w(
+            "| family | scale | cold: conventional → homotopy | ratio "
+            "| warm: conventional → homotopy | ratio |"
+        )
+        w("|---|---|--:|--:|--:|--:|")
+        tot = {"cc": 0, "ch": 0, "wc": 0, "wh": 0}
+        for run in hom_runs:
+            a = run["arms"]
+
+            def ws(arm):
+                return sum(s["n_qp_ws_changes"] or 0 for s in a[arm])
+
+            cc, ch, wc, wh = (
+                ws("cold-sqp"), ws("cold-sqp-hom"), ws("warm-sqp"), ws("warm-sqp-hom")
+            )
+            for k, v in (("cc", cc), ("ch", ch), ("wc", wc), ("wh", wh)):
+                tot[k] += v
+            w(
+                f"| `{run['family']}` | {run['scale']} | {cc} → {ch} "
+                f"| {_fmt(cc / ch if ch else None, '.2f')}× "
+                f"| {wc} → {wh} | {_fmt(wc / wh if wh else None, '.2f')}× |"
+            )
+        w(
+            f"| **total** | | **{tot['cc']} → {tot['ch']}** "
+            f"| **{tot['cc'] / tot['ch']:.2f}×** | **{tot['wc']} → {tot['wh']}** "
+            f"| **{tot['wc'] / tot['wh']:.2f}×** |"
+            if tot["ch"] and tot["wh"]
+            else ""
+        )
+        w("")
+        w(
+            "Above 1.00× the homotopy did less inner active-set work; below "
+            "it, more. A flat 1.00× means the option changed nothing on that "
+            "family — its inner QPs never take the cold path far enough for "
+            "the homotopy to matter."
+        )
         w("")
 
     # -- three-way on the QP-shaped families ------------------------
