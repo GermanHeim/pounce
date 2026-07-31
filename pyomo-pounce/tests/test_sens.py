@@ -74,6 +74,21 @@ def test_estimate_matches_resolve(solved):
     assert est[m.y] == pytest.approx(pyo.value(mt.y), abs=5e-3)
 
 
+def test_estimate_baseline_is_the_solve_point():
+    # the receding-horizon pattern: the caller writes the new value into
+    # the Param before asking. The delta is against the solve point, so
+    # the estimate matches the one asked before the write; previously the
+    # baseline was the Param's current value and the delta came out zero
+    m = build()
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    m.p.set_value(2.2)
+    est = estimate(m, [(m.p, 2.2)])
+    mt = solve_plain(build(p=2.2))
+    assert est[m.x] == pytest.approx(pyo.value(mt.x), abs=5e-3)
+    assert est[m.y] == pytest.approx(pyo.value(mt.y), abs=5e-3)
+
+
 def test_estimate_clamps_and_warns(solved):
     m = solved
     with warnings.catch_warnings(record=True) as w:

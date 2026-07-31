@@ -736,6 +736,13 @@ def estimate(model, perturb, clamp=True):
     Returns a ComponentMap {original var data: estimated value}. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
 
+    The perturbation is measured from the SOLVE point (the pin
+    constraint's stored right-hand side, which is the value the Param
+    had at the solve), not from the Param's current value on the model.
+    Writing a new value into the Param first (the receding-horizon
+    pattern: solve at a prediction, record the measurement, then ask)
+    does not change the answer.
+
     A bound written in terms of a declared Param is a constraint by the
     time the model is solved, so it is not clamped against here and no
     clamp warning is raised for it. That is deliberate: the bound moves
@@ -755,8 +762,14 @@ def estimate(model, perturb, clamp=True):
         for pd in _iter_data(comp):
             nv = newval[pd.index()] if comp.is_indexed() and hasattr(
                 newval, "__getitem__") else newval
-            pin_idx.append(_param_pin(session, pd))
-            deltas.append(float(nv) - pyo.value(pd))
+            pin = _param_pin(session, pd)
+            pin_idx.append(pin)
+            # the step shifts the pin constraint's RHS, and that RHS
+            # holds the Param's solve-time value exactly, so it is the
+            # baseline: a caller that has already written the new value
+            # into the Param (the receding-horizon pattern) gets the
+            # same estimate as one that has not
+            deltas.append(float(nv) - float(session.nl.g_l[pin]))
 
     dx = np.asarray(session.solver.parametric_step(pin_idx, deltas))
     x_new = session.base_x + dx

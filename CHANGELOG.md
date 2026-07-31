@@ -9,6 +9,27 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
+
+- `estimate(model, perturb)` computed each step as `new value` minus the
+  Param's current value on the model. The factorization the step runs
+  through describes exactly one point, the solve point, so the two agree
+  only while the Param is untouched. In the receding-horizon pattern the
+  caller solves at a prediction, writes the arriving measurement into the
+  Param, then asks for the estimate at that value: the delta came out
+  zero and `estimate()` silently returned the unperturbed solution. No
+  error, no warning, and the output is a valid solution (at the
+  prediction), so nothing looked wrong downstream.
+- The baseline is now the pin constraint's stored right-hand side: the
+  value the perturbation actually shifts, holding the Param's solve-time
+  value exactly, already retained. A caller that has not touched the
+  Param sees the same numbers as before; no new state is stored. The
+  docstring and `docs/src/sensitivity.md` state the baseline semantics.
+- Regression: solve, write the new value into the Param, ask at that
+  value, compare against a re-solve there. Fails on the old baseline
+  (zero delta), passes now.
+
+
 ### Added — a benchmark for warm starting, and the counter that makes it measurable
 
 - **`benchmarks/warmstart/` — the first suite in the tree that is not a
