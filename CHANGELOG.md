@@ -9,7 +9,7 @@ changes.
 
 ## [Unreleased]
 
-### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#TBD)
+### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
 
 - `estimate(model, perturb)` computed each step as `new value` minus the
   Param's current value on the model. The factorization the step runs
