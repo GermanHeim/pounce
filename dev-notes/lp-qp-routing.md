@@ -285,7 +285,8 @@ by `convex_cli_opts()` in `main.rs`:
 |---|---|---|---|
 | `tol` (standard) | `tol` | 1e-8 | KKT / duality convergence tolerance |
 | `max_iter` (standard) | `max_iter` | 200 | IPM iteration cap (forwarded only when set, so the convex cap is never raised to the larger Ipopt default) |
-| `qp_tau` | `tau` | 0.95 | fraction-to-boundary step damping τ ∈ (0,1) |
+| `qp_tau` | `tau` | 0.95 | fraction-to-boundary step damping τ ∈ (0,1) — the floor of the adaptive rule below, and the flat value on the predictor step and on non-orthant cones |
+| `qp_tau_max` | `tau_max` | 1−1e-12 | ceiling of the adaptive tail `τ = clamp(1 − μ, tau, tau_max)` taken by the direct driver's corrector on **orthant** blocks; set equal to `qp_tau` for the old static τ (see below) |
 | `qp_reg` | `reg` | 1e-10 | static KKT regularization δ ≥ 0 |
 | `qp_infeas_tol` | `infeas_tol` | 1e-7 | infeasibility-certificate value tolerance |
 | `qp_hsde` | `use_hsde` | yes | use the homogeneous self-dual embedding |
@@ -298,6 +299,21 @@ targets — it regressed the LP suite 3×–800× when on by default — and it 
 not yet reach an exact `Optimal` vertex on the GEN family (issue #133). It
 ships as an opt-in for small, well-behaved LPs that want exact-vertex
 refinement. See the field doc on `QpOptions::crossover`.
+
+`qp_tau_max` exists because a *static* τ caps every step at a fixed fraction
+of the distance to the boundary, so μ and the residuals fall by a fixed factor
+(~20× at τ = 0.95) per iteration once the direction stops being the limit —
+`log₂₀(μ₀/tol)` iterations no matter how good the starting point is. That is
+what capped the warm-start payoff at a logarithm of the perturbation instead
+of the one or two Newton steps a nearby problem deserves (issue #417). The
+direct driver's corrector now takes the standard Mehrotra tail τ → 1 as μ → 0,
+worth 35–60% of the warm iterations on the warm-start QP families. It is
+scoped to **nonnegative-orthant blocks**: the same rule applied to a
+second-order or PSD block puts the iterate on a curved boundary its
+Nesterov–Todd scaling cannot survive, and costs the direct driver ~60% of the
+SOC instances it solves. The HSDE (cold) driver keeps the static τ throughout
+— its step is also limited by the τ/κ ray, so the same idea needs its own
+study there.
 
 **Active-set SQP QP-subproblem** (`pounce-qp::QpOptions`; consulted only on
 `solver_selection=qp-active-set`). Read into the algorithm builder by

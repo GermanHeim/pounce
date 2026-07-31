@@ -198,6 +198,34 @@ impl CompositeCone {
             .collect()
     }
 
+    /// Fraction-to-boundary step with a **per-kind** τ: nonnegative-orthant
+    /// blocks are damped by `tau_orthant`, every other cone kind by
+    /// `tau_other`. Otherwise identical to [`Cone::max_step`], which is the
+    /// special case `tau_orthant == tau_other`.
+    ///
+    /// The split exists because the two kinds tolerate a near-boundary iterate
+    /// very differently. The orthant's boundary is a facet per coordinate and
+    /// its scaling `sᵢ/zᵢ` degrades one entry at a time, so a τ approaching 1
+    /// (the standard Mehrotra tail, which is what lets a warm-started solve
+    /// take the near-full Newton step it has earned — see
+    /// [`crate::QpOptions::tau_max`]) is safe. A second-order or PSD block's
+    /// boundary is curved and its Nesterov–Todd scaling blows up as the block
+    /// approaches it: driving τ → 1 on those kinds loses ~60% of the SOC
+    /// instances the direct driver currently solves (gh #417). Non-orthant
+    /// blocks therefore stay at the static τ.
+    pub fn max_step_split(&self, v: &[f64], dv: &[f64], tau_orthant: f64, tau_other: f64) -> f64 {
+        let mut alpha = 1.0_f64;
+        for (off, k) in &self.blocks {
+            let d = k.dim();
+            let tau = match k {
+                ConeKind::Nonneg(_) => tau_orthant,
+                _ => tau_other,
+            };
+            alpha = alpha.min(k.max_step(&v[*off..off + d], &dv[*off..off + d], tau));
+        }
+        alpha
+    }
+
     /// True iff every block is a nonnegative orthant (the LP/QP case). The
     /// complementarity product `s ∘ z` is then elementwise, so a corrector can
     /// box-project the products directly on `(s, z)` without the Jordan-algebra
@@ -399,6 +427,52 @@ mod tests {
         for i in 0..5 {
             assert!((a[i] - b[i]).abs() < 1e-15);
         }
+    }
+
+    /// `max_step_split` damps each kind with its own τ: the orthant block
+    /// with `tau_orthant`, the SOC with `tau_other`. The Mehrotra tail
+    /// (gh #417) rides on exactly this — driving τ → 1 on the SOC costs the
+    /// direct driver most of the SOC instances it solves.
+    #[test]
+    fn max_step_split_damps_each_cone_kind_with_its_own_tau() {
+        let comp = CompositeCone::new(vec![
+            ConeKind::Nonneg(NonnegCone::new(2)),
+            ConeKind::SecondOrder(SecondOrderCone::new(3)),
+        ]);
+        // Both blocks reach their boundary at α = 1 undamped, so whichever τ
+        // applies to the binding block is the composite step itself.
+        // Only the SOC binds (the orthant's direction points inward).
+        let v = [1.0, 5.0, 2.0, 0.0, 0.0];
+        let soc_binds = [1.0, 0.0, -1.0, 1.0, 0.0];
+        // Only the orthant binds (the SOC direction stays inside the cone).
+        let orthant_binds = [-1.0, 0.0, 1.0, 0.0, 0.0];
+
+        // Same τ on both kinds ⇒ identical to the plain `max_step`.
+        for dv in [&soc_binds, &orthant_binds] {
+            for tau in [0.5, 0.95, 0.999] {
+                assert!(
+                    (comp.max_step_split(&v, dv, tau, tau) - comp.max_step(&v, dv, tau)).abs()
+                        < 1e-15
+                );
+            }
+        }
+
+        // Orthant at τ → 1 while the SOC is held at 0.95: on the direction the
+        // SOC blocks, the composite step is the SOC's damped one — the orthant
+        // rule does not leak across kinds.
+        let tau_hi = 1.0 - 1e-12;
+        let step = comp.max_step_split(&v, &soc_binds, tau_hi, 0.95);
+        assert!(
+            (step - 0.95).abs() < 1e-12,
+            "SOC must keep the static τ: {step}"
+        );
+        // On the direction the orthant blocks, the same pair steps ~all the
+        // way — so the 0.95 above really was the SOC's own τ.
+        let step = comp.max_step_split(&v, &orthant_binds, tau_hi, 0.95);
+        assert!(
+            (step - tau_hi).abs() < 1e-12,
+            "orthant must take the adaptive τ: {step}"
+        );
     }
 
     #[test]

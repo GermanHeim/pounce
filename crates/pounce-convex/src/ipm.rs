@@ -91,6 +91,30 @@ pub(crate) const FARKAS_RESID_TOL: f64 = 1e-10;
 /// `DualInfeasible` on a bounded problem. See [`detect_infeasibility_with`].
 const RECESSION_CURV_TOL: f64 = 1e-20;
 
+/// Hard ceiling on any fraction-to-boundary parameter the adaptive rule
+/// produces (see [`QpOptions::tau_max`]), and the default of that option.
+/// Strictly below 1 so an accepted step always leaves the iterate in the
+/// *open* cone: at τ = 1 exactly, a blocking component lands on `sᵢ = 0` /
+/// `zᵢ = 0`, and the next iteration's `sᵢ/zᵢ` scaling and `ds` recovery
+/// divide by it. The gap is far below any tolerance the solve converges to,
+/// so this costs nothing in progress.
+const TAU_CEIL: f64 = 1.0 - 1e-12;
+
+/// The corrector's fraction-to-boundary parameter for **orthant** blocks:
+/// the Mehrotra tail `τ = clamp(1 − μ, tau, tau_max)`.
+///
+/// As μ → 0 this approaches 1 and the corrector takes essentially the full
+/// Newton step, which is what makes a warm start pay off in Newton steps
+/// rather than in a logarithm of the perturbation (gh #417). Far from the
+/// solution (μ ≥ 1 − `tau`, and on badly-scaled data where μ is large) it
+/// reduces to the static `opts.tau`, so early iterations are unchanged.
+fn adaptive_tau(mu: f64, opts: &QpOptions) -> f64 {
+    // `tau` wins if a caller sets an inverted pair (`tau_max < tau`), which is
+    // how the static behaviour is requested (`tau_max == tau`).
+    let hi = opts.tau_max.min(TAU_CEIL).max(opts.tau);
+    (1.0 - mu).clamp(opts.tau, hi)
+}
+
 /// Options for the QP interior-point solve.
 #[derive(Debug, Clone, Copy)]
 pub struct QpOptions {
@@ -98,10 +122,42 @@ pub struct QpOptions {
     pub tol: f64,
     /// Maximum iterations.
     pub max_iter: usize,
-    /// Fraction-to-boundary parameter τ ∈ (0, 1). (The centering
-    /// parameter σ is computed adaptively by the Mehrotra predictor;
-    /// it is not an option.)
+    /// Fraction-to-boundary parameter τ ∈ (0, 1) — the **floor** of the
+    /// adaptive rule described on [`Self::tau_max`], and the flat value used
+    /// everywhere that rule does not apply (the predictor step, every
+    /// non-orthant cone block, and the HSDE driver). (The centering parameter
+    /// σ is computed adaptively by the Mehrotra predictor; it is not an
+    /// option.)
     pub tau: f64,
+    /// Ceiling of the **adaptive** fraction-to-boundary rule
+    /// `τ = clamp(1 − μ, tau, tau_max)`, applied by the direct (non-HSDE)
+    /// driver to the corrector step on nonnegative-orthant blocks only.
+    ///
+    /// A static τ caps every step at a fixed fraction of the distance to the
+    /// boundary, so μ and the residuals fall by a fixed factor per iteration
+    /// (~20× at τ = 0.95) *regardless of how good the starting point is*. The
+    /// iteration count is then `log₁/₍₁₋τ₎(μ₀/tol)` and a warm start can only
+    /// lower μ₀ — it buys a logarithm of the perturbation rather than the one
+    /// or two Newton steps a nearby problem deserves. Letting τ → 1 as μ → 0
+    /// (the standard Mehrotra tail) restores the near-full step: on the
+    /// warm-start QP families this cuts warm iterations 35–60% (gh #417) with
+    /// cold counts untouched, since cold solves run HSDE.
+    ///
+    /// Scoped deliberately:
+    /// * **orthant blocks only** — τ → 1 on a second-order or PSD block drives
+    ///   the iterate onto a curved boundary its NT scaling cannot survive, and
+    ///   costs the direct driver ~60% of the SOC instances it solves. See
+    ///   [`CompositeCone::max_step_split`].
+    /// * **corrector only** — the predictor's step lengths feed Mehrotra's
+    ///   σ = (μ_aff/μ)³ heuristic, which is calibrated against a static τ.
+    /// * **direct driver only** — the HSDE loop's step is also limited by the
+    ///   τ/κ ray, so the same idea needs its own study there.
+    ///
+    /// Default `1 − 1e-12`: effectively "τ → 1" while keeping the iterate
+    /// strictly inside the cone, so a block can never land exactly on the
+    /// boundary and produce a division by a zero `zᵢ`. Set `tau_max == tau` to
+    /// restore the old static-τ behaviour exactly.
+    pub tau_max: f64,
     /// Static KKT regularization δ. Added on the (block) diagonal to make
     /// the reduced KKT system quasi-definite, so the LDLᵀ has a stable,
     /// well-defined inertia. Because convergence is tested on the
@@ -193,6 +249,7 @@ impl Default for QpOptions {
             tol: 1e-8,
             max_iter: 200,
             tau: 0.95,
+            tau_max: TAU_CEIL,
             // δ = 1e-10: small enough that the primal-residual floor δ·‖dy‖
             // clears `tol` even when the equality duals are large (badly
             // scaled NETLIB LPs such as `adlittle`, which stalls at the cap
@@ -2040,9 +2097,11 @@ fn run_ipm(
         cone.recover_ds(&s, &z, &r_c, &dz, &mut ds_aff);
         dz_aff.copy_from_slice(&dz);
 
-        // Affine step lengths and the predicted duality measure μ_aff.
+        // Affine step lengths and the predicted duality measure μ_aff. Held at
+        // the static τ: μ_aff feeds Mehrotra's σ = (μ_aff/μ)³ heuristic, whose
+        // calibration assumes the predictor's own damping.
         let (alpha_p_aff, alpha_d_aff) =
-            step_lengths(cone, &s, &ds_aff, &z, &dz_aff, opts.tau, m_ineq);
+            step_lengths(cone, &s, &ds_aff, &z, &dz_aff, (opts.tau, opts.tau), m_ineq);
         let sigma = if m_ineq == 0 {
             0.0
         } else {
@@ -2074,7 +2133,17 @@ fn run_ipm(
             split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
             cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
 
-            let (alpha_p, alpha_d) = step_lengths(cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
+            // The corrector step is the one that gets the Mehrotra tail
+            // `τ → 1` on orthant blocks; non-orthant blocks keep `opts.tau`.
+            let (alpha_p, alpha_d) = step_lengths(
+                cone,
+                &s,
+                &ds,
+                &z,
+                &dz,
+                (adaptive_tau(mu, opts), opts.tau),
+                m_ineq,
+            );
             step_p = alpha_p;
             step_d = alpha_d;
 
@@ -2490,19 +2559,28 @@ pub(crate) fn split_step(
 /// Separate fraction-to-boundary step lengths for the primal slack `s`
 /// (via `ds`) and dual `z` (via `dz`). Returns `(alpha_primal,
 /// alpha_dual)`; both are 1 when there is no cone.
+///
+/// `taus` is `(orthant, other)`: the first damps the nonnegative-orthant
+/// blocks, the second every remaining cone kind. Passing the same value for
+/// both is the plain [`Cone::max_step`]; only the corrector splits them — see
+/// [`QpOptions::tau_max`].
 fn step_lengths(
     cone: &CompositeCone,
     s: &[f64],
     ds: &[f64],
     z: &[f64],
     dz: &[f64],
-    tau: f64,
+    taus: (f64, f64),
     m_ineq: usize,
 ) -> (f64, f64) {
     if m_ineq == 0 {
         return (1.0, 1.0);
     }
-    (cone.max_step(s, ds, tau), cone.max_step(z, dz, tau))
+    let (tau_orthant, tau_other) = taus;
+    (
+        cone.max_step_split(s, ds, tau_orthant, tau_other),
+        cone.max_step_split(z, dz, tau_orthant, tau_other),
+    )
 }
 
 /// Bench-only re-export of the KKT assembly so the `scaling` example can
@@ -3077,6 +3155,65 @@ pub(crate) fn detect_infeasibility_with(
     }
 
     None
+}
+
+#[cfg(test)]
+mod adaptive_tau_tests {
+    //! The Mehrotra tail of gh #417: `τ = clamp(1 − μ, tau, tau_max)`.
+    use super::{QpOptions, TAU_CEIL, adaptive_tau};
+
+    #[test]
+    fn tau_rises_toward_one_as_mu_falls() {
+        let opts = QpOptions::default();
+        // Far out (large μ) the static τ still governs: no change to the
+        // early iterations, which is where the damping earns its keep.
+        assert_eq!(adaptive_tau(1.0, &opts), opts.tau);
+        assert_eq!(adaptive_tau(0.5, &opts), opts.tau);
+        // The rule engages once 1 − μ clears the floor, and is monotone.
+        assert!(adaptive_tau(1e-2, &opts) > opts.tau);
+        assert!(adaptive_tau(1e-6, &opts) > adaptive_tau(1e-2, &opts));
+        // Always strictly inside (0, 1): a step landing exactly on the
+        // boundary would divide by a zero `zᵢ` next iteration.
+        for mu in [1e-9, 1e-14, 0.0] {
+            let t = adaptive_tau(mu, &opts);
+            assert!(t < 1.0 && t >= opts.tau, "τ({mu:e}) = {t}");
+        }
+        assert_eq!(adaptive_tau(0.0, &opts), TAU_CEIL);
+    }
+
+    #[test]
+    fn tau_max_equal_to_tau_restores_the_static_rule() {
+        let opts = QpOptions {
+            tau_max: 0.95,
+            ..QpOptions::default()
+        };
+        assert_eq!(opts.tau, 0.95);
+        for mu in [10.0, 1.0, 1e-3, 1e-12, 0.0] {
+            assert_eq!(adaptive_tau(mu, &opts), 0.95, "μ = {mu:e}");
+        }
+        // An intermediate ceiling caps the tail where the caller asks it to.
+        let capped = QpOptions {
+            tau_max: 0.999,
+            ..QpOptions::default()
+        };
+        assert_eq!(adaptive_tau(1e-12, &capped), 0.999);
+        // Below the ceiling the rule is untouched: τ = 1 − μ.
+        assert!((adaptive_tau(0.005, &capped) - 0.995).abs() < 1e-15);
+    }
+
+    /// An inverted pair is not a panic and not a τ below the floor: the
+    /// floor wins. (`f64::clamp` panics outright when `min > max`.)
+    #[test]
+    fn an_inverted_tau_pair_falls_back_to_the_floor() {
+        let opts = QpOptions {
+            tau: 0.99,
+            tau_max: 0.5,
+            ..QpOptions::default()
+        };
+        for mu in [1.0, 1e-3, 1e-12] {
+            assert_eq!(adaptive_tau(mu, &opts), 0.99, "μ = {mu:e}");
+        }
+    }
 }
 
 #[cfg(test)]

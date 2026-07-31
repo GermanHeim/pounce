@@ -550,6 +550,8 @@ def solve_qp(
     collect_iterates: bool = False,
     check_psd: Optional[bool] = None,
     method: str = "ipm",
+    tau: Optional[float] = None,
+    tau_max: Optional[float] = None,
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
@@ -579,6 +581,17 @@ def solve_qp(
     O(n^3) eigenvalue solve; pass ``True`` to always check or ``False`` to
     never check.
 
+    ``tau`` and ``tau_max`` (``method="ipm"`` only) bound the
+    fraction-to-boundary parameter: an interior-point step covers at most that
+    fraction of the distance to the cone boundary. ``tau`` (default ``0.95``)
+    is the floor, used on the predictor step and on second-order/PSD cone
+    blocks; ``tau_max`` (default just under 1) caps the adaptive tail
+    ``τ = clamp(1 − μ, tau, tau_max)`` that nonnegative-orthant blocks take as
+    the solve converges, which is what lets a warm start pay off in Newton
+    steps rather than in a logarithm of the perturbation. Pass
+    ``tau_max=tau`` to pin τ flat — slower, maximally conservative — or raise
+    ``tau`` to push the early iterations harder too.
+
     The returned :class:`QpResult` carries the final KKT ``residuals``;
     pass ``collect_iterates=True`` to also capture the per-iteration
     convergence trace in ``result.iterates``.
@@ -596,6 +609,8 @@ def solve_qp(
             warm_start=_warm_dict(warm_start),
             collect_iterates=collect_iterates,
             method=method,
+            tau=tau,
+            tau_max=tau_max,
         )
     )
 
