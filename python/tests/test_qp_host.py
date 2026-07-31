@@ -82,6 +82,42 @@ def test_iterate_trace_is_opt_in():
     assert traced.iterates[-1]["mu"] < traced.iterates[0]["mu"]
 
 
+def test_tau_pair_reaches_the_host_wrapper():
+    """gh #417 — ``tau`` / ``tau_max`` are forwarded, not swallowed.
+
+    Exercised on a *warm* solve, the path the pair governs: cold solves run
+    the HSDE driver, which keeps the static τ throughout. With τ pinned flat
+    the trace stalls at the fraction-to-boundary cap and grinds the residuals
+    down by a fixed factor per iteration; the adaptive default lets the step
+    grow to a full Newton step as μ → 0, and the solve ends sooner.
+    """
+    n = 12
+    common = dict(
+        P=np.diag([2.0] * n),
+        G=np.ones((1, n)),
+        h=[5.0],
+        lb=[0.0] * n,
+    )
+    c0 = [-1.0 - 0.1 * k for k in range(n)]
+    base = solve_qp(c=c0, **common)
+    c1 = [v * 1.02 for v in c0]
+
+    static = solve_qp(
+        c=c1, warm_start=base, tau=0.95, tau_max=0.95, collect_iterates=True, **common
+    )
+    adaptive = solve_qp(c=c1, warm_start=base, collect_iterates=True, **common)
+    assert static.status == adaptive.status == "optimal"
+    assert abs(static.obj - adaptive.obj) < 1e-8
+    assert adaptive.iters < static.iters
+    # The tail reaches a full Newton step; the pinned run never does.
+    assert max(it["alpha_primal"] for it in adaptive.iterates) > max(
+        it["alpha_primal"] for it in static.iterates
+    )
+
+    with pytest.raises(ValueError):
+        solve_qp(P=np.diag([2.0]), c=[-1.0], lb=[0.0], tau=1.0)
+
+
 def test_conic_solve_reports_cone_aware_residuals():
     # A SOCP slack lives in a non-orthant cone, so its residuals must be
     # measured against that cone. They used to be omitted entirely (the

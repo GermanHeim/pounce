@@ -347,6 +347,20 @@ fn cone_dim(kind: &str, index: usize, v: f64, min: usize) -> PyResult<usize> {
 }
 
 fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> QpOptions {
+    opts_tau(tol, max_iter, collect_iterates, None, None)
+}
+
+/// [`opts`] plus the fraction-to-boundary pair. `tau` is the floor of the
+/// adaptive rule (and the flat value on non-orthant cones); `tau_max` its
+/// ceiling — see [`QpOptions::tau_max`]. Both `None` keeps the solver
+/// defaults; `tau_max == tau` is the static-τ behaviour.
+fn opts_tau(
+    tol: Option<f64>,
+    max_iter: Option<usize>,
+    collect_iterates: bool,
+    tau: Option<f64>,
+    tau_max: Option<f64>,
+) -> QpOptions {
     let mut o = QpOptions::default();
     if let Some(t) = tol {
         o.tol = t;
@@ -354,8 +368,35 @@ fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> Qp
     if let Some(m) = max_iter {
         o.max_iter = m;
     }
+    if let Some(t) = tau {
+        o.tau = t;
+        // A bare `tau=` means "use this τ", so the ceiling follows it up when
+        // the caller raises the floor past the default ceiling; an explicit
+        // `tau_max=` below still wins (applied after).
+        o.tau_max = o.tau_max.max(t);
+    }
+    if let Some(t) = tau_max {
+        o.tau_max = t;
+    }
     o.collect_iterates = collect_iterates;
     o
+}
+
+/// Validate a fraction-to-boundary parameter: it must be a finite number in
+/// `(0, 1)`. Rejected here rather than clamped silently, since a τ outside
+/// that range is meaningless (`τ ≥ 1` steps *onto or past* the cone boundary,
+/// `τ ≤ 0` never moves).
+fn check_tau(value: Option<f64>, name: &str) -> PyResult<()> {
+    if let Some(t) = value
+        && (!t.is_finite() || t <= 0.0 || t >= 1.0)
+    {
+        return Err(PyValueError::new_err(format!(
+            "solve_qp: `{name}` must be a finite number strictly between 0 and \
+             1 (the fraction of the distance to the cone boundary a step may \
+             cover); got {t}"
+        )));
+    }
+    Ok(())
 }
 
 /// Solve one convex QP. Returns a dict with the primal `x`, duals `y`
@@ -369,8 +410,19 @@ fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> Qp
 ///
 /// `collect_iterates` (default `false`) opts into the per-iteration
 /// convergence trace, returned under the `iterates` key.
+///
+/// `tau`/`tau_max` bound the interior-point fraction-to-boundary parameter
+/// (both `method="ipm"` only): each step covers at most that fraction of the
+/// distance to the cone boundary. `tau` is the floor — the value used on the
+/// predictor step and on non-orthant cones — and `tau_max` the ceiling of the
+/// adaptive tail `τ = clamp(1 − μ, tau, tau_max)` that the orthant blocks
+/// take as the solve converges. Raising `tau` or leaving `tau_max` at its
+/// near-1 default is more aggressive (fewer iterations, especially warm
+/// starting a sequence of nearby QPs); `tau_max=tau` pins τ flat, the most
+/// conservative setting.
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm"))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn solve_qp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
@@ -379,8 +431,12 @@ pub fn solve_qp<'py>(
     warm_start: Option<&Bound<'py, PyDict>>,
     collect_iterates: bool,
     method: &str,
+    tau: Option<f64>,
+    tau_max: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let o = opts(tol, max_iter, collect_iterates);
+    check_tau(tau, "tau")?;
+    check_tau(tau_max, "tau_max")?;
+    let o = opts_tau(tol, max_iter, collect_iterates, tau, tau_max);
     let warm = warm_start.map(warm_from_dict).transpose()?;
 
     // `method` selects the engine, so that the *same* engine is reachable from

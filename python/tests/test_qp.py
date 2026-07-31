@@ -168,6 +168,49 @@ def test_solve_qp_warm_start_matches_cold():
     assert int(warm["iters"]) <= int(cold["iters"])
 
 
+def test_solve_qp_tau_knobs_are_reachable_and_validated():
+    """gh #417 — the fraction-to-boundary pair is settable from Python.
+
+    ``tau_max=tau`` pins τ flat (the pre-#417 static rule); the default lets
+    the corrector's τ approach 1 as μ → 0 on orthant blocks, which is what
+    makes a warm start pay off. Both must reach the same optimum, and the
+    static setting must not need *fewer* iterations than the adaptive one.
+    """
+    import pytest
+
+    def qp(c, cap):
+        return p.QpProblem(
+            n=len(c),
+            c=list(c),
+            p_rows=list(range(len(c))),
+            p_cols=list(range(len(c))),
+            p_vals=[2.0] * len(c),
+            g_rows=[0] * len(c),
+            g_cols=list(range(len(c))),
+            g_vals=[1.0] * len(c),
+            h=[cap],
+            lb=[0.0] * len(c),
+        )
+
+    c0 = [-1.0 - 0.1 * k for k in range(12)]
+    base = p.solve_qp(qp(c0, 5.0))
+    pert = qp([v * 1.02 for v in c0], 5.1)
+
+    static = p.solve_qp(pert, warm_start=base, tau=0.95, tau_max=0.95)
+    adaptive = p.solve_qp(pert, warm_start=base)
+    assert static["status"] == adaptive["status"] == "optimal"
+    np.testing.assert_allclose(
+        np.asarray(adaptive["x"]), np.asarray(static["x"]), atol=1e-4
+    )
+    assert abs(adaptive["obj"] - static["obj"]) < 1e-6
+    assert int(adaptive["iters"]) <= int(static["iters"])
+
+    # A τ outside (0, 1) is meaningless — rejected, not silently clamped.
+    for kwargs in ({"tau": 1.0}, {"tau": 0.0}, {"tau": -0.5}, {"tau_max": 1.5}):
+        with pytest.raises(ValueError):
+            p.solve_qp(pert, **kwargs)
+
+
 def test_qp_problem_validation():
     import pytest
 

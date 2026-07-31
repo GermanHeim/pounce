@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+### Changed — warm-started convex QPs converge in 35–60% fewer iterations (#417)
+
+- **The warm start was never the bottleneck; the *static* fraction-to-boundary
+  parameter was.** With `τ = 0.95` fixed, every accepted step covers at most 95%
+  of the distance to the cone boundary, so once the Newton direction stops being
+  the limit, μ and the residuals fall by a fixed ~20× per iteration. The
+  iteration count is then `log₂₀(μ₀/tol)` *regardless of the starting point* — a
+  warm start can only lower μ₀, buying a logarithm of the perturbation instead
+  of the one or two Newton steps a nearby problem deserves. Warm traces showed
+  it plainly: `α_p = α_d = 0.950` exactly, from the second iteration to the last.
+- **The direct driver's corrector now takes the standard Mehrotra tail**,
+  `τ = clamp(1 − μ, tau, tau_max)`, so τ → 1 as the solve converges and a
+  near-optimal iterate takes a near-full Newton step. Measured over 20-step
+  warm sequences at three perturbation sizes, mean warm iterations per step:
+  `simplex_proj` 5.0–7.2 → 2.4–4.7, `moving_bound_qp` 6.0 → 2.0–4.2,
+  `degenerate_corner` 5.0–6.0 → 2.0–3.0. Every warm solve still returns
+  `optimal` with the objective matching its cold solve to 1e-6 relative.
+- **Scoped to nonnegative-orthant blocks, deliberately.** The same rule applied
+  to every cone kind fails `second_order_cones_agree_across_drivers` — the
+  direct driver loses ~60% of the SOC instances it solves, because an SOC/PSD
+  block's boundary is curved and its Nesterov–Todd scaling blows up as the
+  iterate approaches it. Second-order and PSD blocks therefore keep the static
+  τ, as does the predictor step (whose step lengths feed Mehrotra's
+  σ = (μ_aff/μ)³ heuristic) and the HSDE driver used by cold solves, where the
+  step is also limited by the τ/κ ray and the idea needs its own study.
+- **Cold solves are unchanged** — they run the HSDE driver, a different loop.
+- New `QpOptions::tau_max` (CLI `qp_tau_max`, Python `solve_qp(tau_max=)`)
+  caps the tail; setting it equal to `tau` restores the previous static
+  behaviour exactly. `tau` itself is now reachable from Python too
+  (`solve_qp(tau=)`), which it was not before.
+
 ### Fixed — the convex IPM reported some infeasible models as unbounded
 
 - **Found while fixing #415**, by the randomized sweep written to check that
