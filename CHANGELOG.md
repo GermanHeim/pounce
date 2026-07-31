@@ -29,7 +29,6 @@ changes.
   value, compare against a re-solve there. Fails on the old baseline
   (zero delta), passes now.
 
-
 ### Added — a benchmark for warm starting, and the counter that makes it measurable
 
 - **`benchmarks/warmstart/` — the first suite in the tree that is not a
