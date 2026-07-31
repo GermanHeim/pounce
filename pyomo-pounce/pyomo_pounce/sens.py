@@ -739,6 +739,12 @@ def estimate(model, perturb, clamp=True):
     Returns a ComponentMap {original var data: estimated value}. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
 
+    The perturbation is measured from the SOLVE point, the one point the
+    held factorization describes, not from the Param's current value on
+    the model. Writing a new value into the Param first (the
+    receding-horizon pattern: solve at a prediction, record the
+    measurement, then ask) does not change the answer.
+
     A bound written in terms of a declared Param is a constraint by the
     time the model is solved, so it is not clamped against here and no
     clamp warning is raised for it. That is deliberate: the bound moves
