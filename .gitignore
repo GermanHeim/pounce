@@ -45,6 +45,15 @@
 !/benchmarks/*/README.md
 !/benchmarks/preprocessing/*
 !/benchmarks/scripts/*
+# The warm-start suite is a Python harness rather than a directory of .nl:
+# its sources (including the two package subdirectories) are tracked, its
+# per-run results.json / results.md outputs are regenerated and ignored
+# like every other suite's.
+!/benchmarks/warmstart/*.py
+!/benchmarks/warmstart/families/
+!/benchmarks/warmstart/families/*.py
+!/benchmarks/warmstart/adapters/
+!/benchmarks/warmstart/adapters/*.py
 # Track the generated performance-profile figures: the earlier
 # `!/benchmarks/figures/*` (line ~37) is defeated by the broader
 # `/benchmarks/*/*` rule above, so re-assert it here, after that rule.

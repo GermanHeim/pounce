@@ -59,6 +59,7 @@ export IPOPT_LINEAR_SOLVER
 	ipopt-reference ipopt-reference-provenance \
 	$(addprefix ipopt-ref-,$(REF_SUITES)) \
 	gams-bench gams-rerun \
+	warmstart-run warmstart-quick warmstart-selftest warmstart-report \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report
 
 # Show available targets
@@ -91,6 +92,10 @@ help:
 	@echo "  lp-generate                (Re)generate the lp .nl files only (needs highspy/pyomo; downloads MPS)"
 	@echo "  lp-convex-run   / -rerun   LP head-to-head: pounce-convex (lp-ipm) vs pounce-nlp (reuses lp .nl)"
 	@echo "  qp-convex-run   / -rerun   QP head-to-head: pounce-convex (qp-ipm) vs pounce-nlp (reuses qp .nl)"
+	@echo "  warmstart-run              Warm-start suite: parametric NLP sequences, cold vs warm (needs the built Python ext)"
+	@echo "  warmstart-quick            Warm-start suite, short sweep (3 families, one scale)"
+	@echo "  warmstart-selftest         Finite-difference check of the warm-start families (no solver needed)"
+	@echo "  warmstart-report           Re-render warmstart/results.md from the existing results.json"
 	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
 	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
 	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
@@ -318,6 +323,31 @@ qp-convex-run: $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
 qp-convex-rerun:
 	rm -f $(QP_CONVEX_DIR)/convex.json $(QP_CONVEX_DIR)/nlp.json
 	$(MAKE) qp-convex-run
+
+# ---- warm-start suite ----------------------------------------------------
+# The only suite that is not .nl-driven: warm starting is a property of a
+# *sequence* of related solves, and carrying a working set between solves
+# needs an in-process handle, which the .nl CLI path does not offer. The
+# harness therefore drives the Python extension directly — build it first
+# with `cd python && maturin develop --release`. PYTHON can be pointed at
+# whichever interpreter has that extension installed.
+#
+# Outputs (warmstart/results.json, warmstart/results.md) are regenerated
+# per run and gitignored, like every other suite's results.
+PYTHON ?= python3
+
+warmstart-selftest:
+	cd $(CURDIR) && $(PYTHON) -m warmstart.selftest
+
+warmstart-run: warmstart-selftest
+	cd $(CURDIR) && $(PYTHON) -m warmstart.run -v
+
+warmstart-quick:
+	cd $(CURDIR) && $(PYTHON) -m warmstart.run --quick -v
+
+warmstart-report:
+	cd $(CURDIR) && $(PYTHON) -m warmstart.report \
+		warmstart/results.json -o warmstart/results.md
 
 # Mittelmann lpopt LP suite — the curated HARD subset of Hans Mittelmann's
 # lpopt benchmark (https://plato.asu.edu/ftp/lpopt.html). These are large,

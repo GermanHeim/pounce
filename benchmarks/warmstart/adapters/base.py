@@ -1,0 +1,119 @@
+"""The solver plug-in interface.
+
+An adapter's job is to solve one instance of a family at its current
+parameter, optionally seeded with a :class:`~..spec.WarmState`, and
+report back in the suite's own vocabulary. Everything
+solver-specific — option names, warm-start plumbing, status codes,
+working-set encodings — is confined to the adapter, which is what
+makes it possible to add Ipopt (or anything else) to this benchmark
+without touching a family.
+
+Arms
+----
+
+An *arm* is a (algorithm, warm-start) pairing. The four the suite
+defines:
+
+``cold-ipm``
+    Interior point, every step from the family's cold starting point.
+    This is the baseline: it is what a solver without warm-start
+    support does, and it is also the correctness reference.
+``cold-sqp``
+    Active-set SQP, every step cold. Present so that the warm-start
+    effect can be separated from the algorithm change — without it,
+    ``warm-sqp`` beating ``cold-ipm`` would confound the two.
+``warm-ipm``
+    Interior point seeded with the previous step's primal-dual point
+    and barrier parameter. The fair comparison for ``warm-sqp``.
+``warm-sqp``
+    Active-set SQP seeded with the previous step's working set and
+    primal point. The capability under test.
+``cold-qp-ipm`` / ``warm-qp-ipm``
+    The dedicated convex QP interior-point solver, handed the problem
+    in matrix form rather than through callbacks, cold and seeded with
+    the previous step's primal-dual point. Only defined for families
+    whose instances are literally QPs (``ParametricFamily.quadratic``);
+    on any other family these arms are skipped with a reason rather
+    than silently omitted. Note the asymmetry when reading wall time:
+    this arm receives the problem data once per step, where the
+    callback-driven arms re-evaluate every iteration.
+
+An adapter declares which arms it supports; unsupported arms are
+skipped and reported as such rather than silently omitted.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+from ..spec import ParametricFamily, StepResult, WarmState
+from ..sparsity import SparseCallbacks
+
+ARMS: List[str] = [
+    "cold-ipm",
+    "cold-sqp",
+    "warm-ipm",
+    "warm-sqp",
+    "cold-qp-ipm",
+    "warm-qp-ipm",
+]
+
+#: Arms that need the family's instances to be QPs.
+QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
+
+#: The arm whose per-step solutions every other arm is checked
+#: against, and which generates the parameter path for adaptive
+#: families.
+REFERENCE_ARM = "cold-ipm"
+
+
+def is_warm(arm: str) -> bool:
+    return arm.startswith("warm")
+
+
+def arm_applies(arm: str, family: ParametricFamily) -> Optional[str]:
+    """``None`` if the arm is defined for this family, else why not.
+
+    Separate from :meth:`SolverAdapter.supports`, which is about what
+    the *solver* can do. This is about what the *problem* admits: a
+    convex QP solver has nothing to say about a family with nonlinear
+    constraints, and running it there would be a category error rather
+    than a slow result.
+    """
+    if arm in QP_ARMS and not family.quadratic:
+        return "family is not a QP (nonlinear objective or constraints)"
+    return None
+
+
+class SolverAdapter(ABC):
+    """Solve one parametric instance, cold or warm."""
+
+    #: Name used in output files and the report.
+    name: str = "unnamed"
+
+    @abstractmethod
+    def supports(self, arm: str) -> bool:
+        """Whether this adapter can run the given arm."""
+
+    @abstractmethod
+    def solve(
+        self,
+        family: ParametricFamily,
+        callbacks: SparseCallbacks,
+        arm: str,
+        x0: np.ndarray,
+        warm: Optional[WarmState],
+        step: int,
+        tol: float,
+    ) -> Tuple[StepResult, Optional[WarmState]]:
+        """Solve at the family's current θ.
+
+        Returns the step's measurements and the state to hand to the
+        next step (``None`` if this arm carries nothing forward). The
+        adapter fills every :class:`~..spec.StepResult` field except
+        the correctness ones, which the runner supplies once the
+        reference solution is known.
+        """
