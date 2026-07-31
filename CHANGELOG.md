@@ -20,11 +20,11 @@ changes.
   zero and `estimate()` silently returned the unperturbed solution. No
   error, no warning, and the output is a valid solution (at the
   prediction), so nothing looked wrong downstream.
-- The baseline is now the declared Param's pinned-variable entry in the
-  stored primal vector: the solve-time value, already retained. A caller
-  that has not touched the Param sees the same numbers as before; storage
-  is one row index per declared parameter. The docstring states the
-  baseline semantics.
+- The baseline is now the pin constraint's stored right-hand side: the
+  value the perturbation actually shifts, holding the Param's solve-time
+  value exactly, already retained. A caller that has not touched the
+  Param sees the same numbers as before; no new state is stored. The
+  docstring and `docs/src/sensitivity.md` state the baseline semantics.
 - Regression: solve, write the new value into the Param, ask at that
   value, compare against a re-solve there. Fails on the old baseline
   (zero delta), passes now.

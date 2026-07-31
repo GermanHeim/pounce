@@ -101,7 +101,11 @@ estimate(m, [(m.p, 2.5)])               # first-order solution estimate at
 
 `gradient` returns exact first-order derivatives (unit-perturbation
 backsolves, no finite differencing); `estimate` combines the stored
-derivative columns for arbitrary perturbed values after the fact, and
+derivative columns for arbitrary perturbed values after the fact. Its
+perturbation is measured from the solve point, not the Param's current
+value, so writing a measurement into the Param before asking (the
+receding-horizon pattern) does not change the answer. It also
+warns
 warns when the linear step leaves the variable bounds (a single-pass
 projection analogous to the CLI's `--sens-boundcheck`) — with one
 exception, a bound written on a declared Param, covered in

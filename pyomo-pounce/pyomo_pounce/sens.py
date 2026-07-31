@@ -559,7 +559,6 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     con_row = _row_index(con_names)
 
     pins = ComponentMap()
-    pin_vars = ComponentMap()  # param data -> its pin variable's primal row
     con_alias = {}
     if si is not None:
         block = clone.component(SensitivityInterface.get_default_block_name())
@@ -570,7 +569,6 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
             orig_data = (orig_comp if not orig_comp.is_indexed()
                          else orig_comp[comp_idx])
             pins[orig_data] = con_row[con.name]
-            pin_vars[orig_data] = var_row[var.name]
         # original-name -> clone-row-name aliases for replaced constraints
         if getattr(block, "_has_replaced_expressions", False):
             for new_comp, old_comp in block._replaced_map.items():
@@ -581,7 +579,6 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias, var_row=var_row, con_row=con_row)
     session.base_x = np.asarray(x)
-    session.pin_vars = pin_vars
     session.moved_bounds = moved_bounds
 
     # fitted parameters: their rows in the primal vector
@@ -739,11 +736,12 @@ def estimate(model, perturb, clamp=True):
     Returns a ComponentMap {original var data: estimated value}. Values are
     clamped to variable bounds (with a warning) unless clamp=False.
 
-    The perturbation is measured from the SOLVE point, the one point the
-    held factorization describes, not from the Param's current value on
-    the model. Writing a new value into the Param first (the
-    receding-horizon pattern: solve at a prediction, record the
-    measurement, then ask) does not change the answer.
+    The perturbation is measured from the SOLVE point (the pin
+    constraint's stored right-hand side, which is the value the Param
+    had at the solve), not from the Param's current value on the model.
+    Writing a new value into the Param first (the receding-horizon
+    pattern: solve at a prediction, record the measurement, then ask)
+    does not change the answer.
 
     A bound written in terms of a declared Param is a constraint by the
     time the model is solved, so it is not clamped against here and no
@@ -764,15 +762,14 @@ def estimate(model, perturb, clamp=True):
         for pd in _iter_data(comp):
             nv = newval[pd.index()] if comp.is_indexed() and hasattr(
                 newval, "__getitem__") else newval
-            pin_idx.append(_param_pin(session, pd))
-            # the step is taken from the factorization point, so the
-            # baseline is the pin variable's value in the solved primal
-            # vector, not the Param's current value: a caller that has
-            # already written the new value into the Param (the
-            # receding-horizon pattern) gets the same estimate as one
-            # that has not
-            base = session.base_x[session.pin_vars[pd]]
-            deltas.append(float(nv) - float(base))
+            pin = _param_pin(session, pd)
+            pin_idx.append(pin)
+            # the step shifts the pin constraint's RHS, and that RHS
+            # holds the Param's solve-time value exactly, so it is the
+            # baseline: a caller that has already written the new value
+            # into the Param (the receding-horizon pattern) gets the
+            # same estimate as one that has not
+            deltas.append(float(nv) - float(session.nl.g_l[pin]))
 
     dx = np.asarray(session.solver.parametric_step(pin_idx, deltas))
     x_new = session.base_x + dx
