@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — exact-Hessian SQP gave up on unconstrained nonconvex NLPs (#423)
+
+- **`algorithm = active-set-sqp` with `sqp_hessian = exact` no longer stops at
+  the first indefinite iterate of a problem with nothing to block a
+  negative-curvature direction.** The reported case — a chain of coupled
+  double wells, `n = 12`, `m = 0`, no finite bounds, started inside the
+  negative-curvature region — solved to `f = 0.027424` in 24 outer iterations
+  before #419 and afterwards exited `Search_Direction_Becomes_Too_Small` at
+  outer iteration **1**, at `f = 26.0257`: ~950× the optimum, and the value at
+  a point one step from the start. It converges to `f = 0.027424` in 24
+  iterations again.
+- **The regression is #419's own mechanism reaching a case it has no answer
+  for.** #419 made an unblocked non-positive-curvature direction a recession
+  certificate, which is right for a standalone QP and right for #416's
+  Rosenbrock, where the direction runs to a bound and pivots. But a *step* QP
+  is unbounded below at every indefinite iterate that has nothing to block
+  that direction — and with `m = 0` and no finite bounds, nothing can ever
+  block, so every indefinite iterate produced one. The driver then re-verified
+  the ray against the true NLP (#388), correctly found the quartic objective
+  bounded below, and had no third branch: not-unbounded meant `QpStepFailed`.
+  The two issues are mirror images — #416 was "the δ-shifted step is capped at
+  α = 1, so the solver spins without pivoting"; this was "the δ-shifted step is
+  gone, so a solver with nothing to pivot *to* has no step at all".
+- **An unbounded model on a bounded NLP is a signal to regularize, not to
+  stop** (Nocedal-Wright §18.4) — and δ from §4.5 inertia control already *is*
+  that regularization. When the ray fails NLP re-verification the driver now
+  re-solves the same subproblem with the certificate declined
+  (`QpOptions::certify_recession_ray = false`, new, default `true`): the shift
+  stays, the unblocked direction takes the δ-shifted proximal step (`α = 1`),
+  and the QP returns a point. `QpStepFailed` is reported only if even that
+  produces nothing. #419's ratio-test cap is untouched wherever a bound exists,
+  so #416 and every Rosenbrock row stay exactly where #419 left them, and a
+  genuinely unbounded NLP still reports `Diverging_Iterates` — the re-solve
+  happens only *after* the ray has failed re-verification.
+- Standalone `solve_qp` is unaffected: `certify_recession_ray` defaults to
+  `true`, because the point of solving a QP is to learn whether it has a
+  minimizer.
+
 ### Fixed — the active-set QP crawled instead of stepping on an indefinite Hessian (#416)
 
 - **`algorithm = active-set-sqp` with `sqp_hessian = exact` now solves plain
