@@ -9,6 +9,19 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: `covariance(n_data=)` read the SSR from the live objective (#426)
+
+- The `n_data=` branch estimated the noise variance with the SSR taken
+  from `pyo.value(objective)` on the current model, which evaluates at
+  the model's current variable and Param values: anything written after
+  the solve (a measurement, a warm start for the next horizon) silently
+  rescaled the reported covariance. Same staleness class as #420, found
+  in #421's review. The `declare_residual` path was unaffected.
+- The session now stores the objective value at the solve and the
+  `n_data=` branch reads that, so post-solve writes to the model cannot
+  move the answer. Regression: solve, take the covariance, overwrite the
+  model's values, take it again; the two must be identical.
+
 ### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
 
 - `estimate(model, perturb)` computed each step as `new value` minus the

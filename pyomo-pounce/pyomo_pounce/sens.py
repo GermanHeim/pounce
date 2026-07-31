@@ -259,6 +259,7 @@ class _Session:
         self.pins = pins              # ComponentMap: param data -> pin row
         self.con_alias = con_alias    # original con name -> clone row name
         self.base_x = None
+        self.base_obj = None          # objective value at the solve
         self.moved_bounds = {}        # var name -> (lb, ub) moved to rows
         self._columns = {}            # pin row -> full KKT-space column
 
@@ -579,6 +580,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias, var_row=var_row, con_row=con_row)
     session.base_x = np.asarray(x)
+    session.base_obj = (float(info["obj_val"])
+                        if info.get("obj_val") is not None else None)
     session.moved_bounds = moved_bounds
 
     # fitted parameters: their rows in the primal vector
@@ -1051,8 +1054,16 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             raise ValueError(
                 f"covariance: n_data ({n_data}) must exceed the number of "
                 f"fitted parameters ({n_params})")
-        ssr = pyo.value(
-            next(model.component_data_objects(pyo.Objective, active=True)))
+        # the objective value AT THE SOLVE, not evaluated on the live
+        # model: pyo.value(objective) reads the model's current variable
+        # and Param values, so anything written after the solve (a
+        # measurement, a warm start for the next horizon) would silently
+        # rescale the covariance (gh #426)
+        if session.base_obj is None:
+            raise RuntimeError(
+                "covariance: the session carries no solve-time objective "
+                "value; re-solve with SolverFactory('pounce') first")
+        ssr = session.base_obj
         group_sigma = {None: ssr / (n_data - n_params)}
     else:
         raise ValueError(
