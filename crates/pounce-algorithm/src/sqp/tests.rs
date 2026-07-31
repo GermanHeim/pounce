@@ -1094,3 +1094,176 @@ fn issue_349_hs6_converges() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Issue #416 fixture — extended Rosenbrock inside a ball.
+//
+//     min Σᵢ 100(xᵢ₊₁ − xᵢ²)² + (1 − xᵢ)²
+//     s.t. ‖x‖² ≤ 10 (optional),  −5 ≤ x ≤ 5
+//
+// From the canonical `(−1.2, 1, −1.2, 1, …)` start, with
+// `sqp_hessian = exact`, ∇²L turns indefinite a few iterations in. The
+// step QP then hits §4.5 inertia control, and before the `model_step_cap`
+// fix each of its "full" steps was a δ-sized crawl: the subproblem spent
+// its entire 200-iteration budget making ZERO working-set changes and
+// exited `MaxIter`, which the outer loop reported as `QpIterationLimit`
+// after 4 iterations at f = 9.62 (against 3.99 from the interior-point
+// path). The tell was that the smallest budget that converged was 250
+// whether n was 10 or 40 — a fixed-count crawl, not active-set work.
+// ─────────────────────────────────────────────────────────────────
+struct RosenbrockBallNlp {
+    n: usize,
+    /// Include the `‖x‖² ≤ 10` row. The failure reproduces identically
+    /// with and without it (issue #416: "constraints are not involved"),
+    /// and the two shapes take different paths through the QP dispatcher
+    /// — general-inequality vs. pure-box — so both are exercised.
+    ball: bool,
+}
+
+impl SqpProblemSpec for RosenbrockBallNlp {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn m(&self) -> usize {
+        usize::from(self.ball)
+    }
+    fn x_init(&self) -> Vec<Number> {
+        (0..self.n)
+            .map(|i| if i % 2 == 0 { -1.2 } else { 1.0 })
+            .collect()
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (vec![-5.0; self.n], vec![5.0; self.n])
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        if self.ball {
+            (vec![NLP_LOWER_BOUND_INF], vec![10.0])
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        (0..self.n - 1)
+            .map(|i| {
+                let a = x[i + 1] - x[i] * x[i];
+                let b = 1.0 - x[i];
+                100.0 * a * a + b * b
+            })
+            .sum()
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        let mut g = vec![0.0; self.n];
+        for i in 0..self.n - 1 {
+            let a = x[i + 1] - x[i] * x[i];
+            g[i] += -400.0 * x[i] * a - 2.0 * (1.0 - x[i]);
+            g[i + 1] += 200.0 * a;
+        }
+        g
+    }
+    fn eval_c(&mut self, x: &[Number]) -> Vec<Number> {
+        if self.ball {
+            vec![x.iter().map(|v| v * v).sum()]
+        } else {
+            Vec::new()
+        }
+    }
+    fn eval_jac_c(&mut self, x: &[Number]) -> Triplet {
+        if self.ball {
+            Triplet {
+                n_rows: 1,
+                n_cols: self.n,
+                irow: vec![1; self.n],
+                jcol: (1..=self.n as Index).collect(),
+                vals: x.iter().map(|v| 2.0 * v).collect(),
+            }
+        } else {
+            Triplet {
+                n_rows: 0,
+                n_cols: self.n,
+                irow: Vec::new(),
+                jcol: Vec::new(),
+                vals: Vec::new(),
+            }
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], lambda_g: &[Number]) -> Triplet {
+        let n = self.n;
+        // ∇²f: tridiagonal. ∇²c = 2I when the ball row is present.
+        let mut diag = vec![0.0; n];
+        let mut sub = vec![0.0; n - 1];
+        for i in 0..n - 1 {
+            let a = x[i + 1] - x[i] * x[i];
+            diag[i] += -400.0 * a + 800.0 * x[i] * x[i] + 2.0;
+            diag[i + 1] += 200.0;
+            sub[i] = -400.0 * x[i];
+        }
+        if self.ball {
+            for d in diag.iter_mut() {
+                *d += 2.0 * lambda_g[0];
+            }
+        }
+        let mut irow: Vec<Index> = (1..=n as Index).collect();
+        let mut jcol: Vec<Index> = (1..=n as Index).collect();
+        let mut vals = diag;
+        for (i, &s) in sub.iter().enumerate() {
+            irow.push(i as Index + 2);
+            jcol.push(i as Index + 1);
+            vals.push(s);
+        }
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+}
+
+/// The issue's own repro: `n = 10`, exact Hessian, **default** QP budget.
+/// Pre-fix this exits `QpIterationLimit` after 4 outer iterations; the
+/// documented workaround was `sqp_qp_max_iter = 250`, which is why the
+/// budget is left at its default here — raising it would hide the bug.
+/// Both globalizations and both problem shapes are checked, and `n = 20`
+/// bounds-only pins the dimension-independence: a budget that genuinely
+/// ran out would need more room as `n` grows, and this one did not.
+#[test]
+fn issue_416_indefinite_rosenbrock_converges_at_the_default_qp_budget() {
+    for (n, ball) in [(10, true), (10, false), (20, false)] {
+        for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+            let qp_solver =
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+            let opts = SqpOptions {
+                hessian: SqpHessianSource::Exact,
+                globalization: glob,
+                ..SqpOptions::default()
+            };
+            let mut alg = SqpAlgorithm::new(qp_solver, opts);
+            let mut nlp = RosenbrockBallNlp { n, ball };
+            let res = alg.optimize(&mut nlp).unwrap();
+
+            assert_eq!(
+                res.status,
+                SqpStatus::Optimal,
+                "n={n} ball={ball} glob={glob:?}: {:?} after {} iters (f={:.6}, \
+                 stationarity={:.2e})",
+                res.status,
+                res.n_iter,
+                res.obj,
+                res.final_stationarity,
+            );
+            // The stall parked at f = 9.62 with a KKT error of 2.6; the
+            // interior-point path reaches 3.9866 on the same problem and start.
+            assert!(
+                res.obj < 4.1,
+                "n={n} ball={ball} glob={glob:?}: f={:.6} — the local minimum here is 3.9866",
+                res.obj,
+            );
+            assert!(
+                res.final_stationarity <= 1e-4,
+                "n={n} ball={ball} glob={glob:?}: stationarity {:.2e}",
+                res.final_stationarity,
+            );
+        }
+    }
+}

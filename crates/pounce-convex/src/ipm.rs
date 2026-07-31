@@ -386,6 +386,11 @@ where
             return retry;
         }
     }
+    // gh #414: the mirror image of the retry above — an HSDE solve that believes
+    // it converged but did not. See [`verify_or_repair_optimum`]. Touches only
+    // an `Optimal` verdict, so it composes with (and cannot disturb) the
+    // certificate handling below.
+    let sol = verify_or_repair_optimum(prob, opts, sol, &mut make_backend);
     // gh #293 (extreme tail): refute a *spurious* unboundedness certificate on a
     // QP with genuine curvature. A `DualInfeasible` verdict rests on finding a
     // recession ray whose normalized curvature `dᵀPd/‖d‖²` is below
@@ -488,6 +493,168 @@ where
     let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
     scaling.unscale_solution(prob, &mut sol);
     sol
+}
+
+/// The relative-KKT cut separating a genuine optimum from a scaling artifact,
+/// shared by [`equilibrated_kkt_rel`] (gh #414) and
+/// [`normalized_optimum_is_genuine`] (gh #324).
+///
+/// Measured on the #414 family, the false optima land in `2e-2‥1.2e2` and the
+/// repaired optima of the very same problems in `1e-12‥1e-9`; the #286
+/// huge-magnitude solves — genuine optima that only the *relative* arm can
+/// certify, the regime most at risk of being rejected here — sit at `4e-10` and
+/// `1.5e-8`. The cut therefore has better than an order of margin above every
+/// genuine solve and four below every observed failure.
+const FALSE_OPTIMUM_REL_TOL: f64 = 1e-3;
+
+/// `sol`'s KKT residual relative to the scale of its own terms, measured **in
+/// the Ruiz-equilibrated metric** — the scale-invariant answer to "is this
+/// actually a KKT point of `prob`?".
+///
+/// Each residual is normalized by the natural magnitude of its own terms, the
+/// same shape as HSDE's in-loop relative test (`crate::hsde`): stationarity by
+/// the gradient scale `‖P̂x̂‖ ∨ ‖ĉ‖ ∨ ‖Ĝᵀẑ‖ ∨ ‖Âᵀŷ‖ ∨ ‖ẑ_lb‖ ∨ ‖ẑ_ub‖`, primal
+/// by the rhs scale, and complementarity by the **objective** magnitude (its
+/// terms `ŝᵢẑᵢ` are the duality gap's, and the gap's scale is the objective's,
+/// not the gradient's — normalizing complementarity by a gradient scale that
+/// Ruiz has pulled down to `O(1)` while `ŝᵀẑ` stays invariant would reject the
+/// #286 huge-magnitude optima).
+///
+/// What makes it work where the *unscaled* relative test
+/// ([`normalized_optimum_is_genuine`]) does not is the metric, not the formula.
+/// Normalizing by a *global* ∞-norm in the original coordinates is blind to a
+/// spread in the **variable** scales: one badly-scaled column makes `‖Px‖∞`
+/// enormous, and dividing every component's residual by it grants a blanket
+/// relaxation to the well-scaled components, where the real violation lives. On
+/// the #414 family — `x_i ~ 1e-6‥1e6`, `cond(P) ~ 1e24`, trivially
+/// well-conditioned after `z = x/s` — the returned point's unscaled relative
+/// residual reads `2e-4`, inside any sane cut, while its true error is `O(1e3)`.
+/// Ruiz equilibration is exactly the diagonal change of variables that removes
+/// that spread, so in the scaled problem every variable and every row carries an
+/// `O(1)` scale and no column can mask another: measured there, the same point
+/// reads `1.2e2` against `2.9e-10` for the true optimum.
+///
+/// Orthant/box only: Ruiz is a per-row scaling, which is unsound for a
+/// non-orthant cone (see [`crate::equilibrate`]), so callers must gate on the
+/// cones being nonnegative.
+fn equilibrated_kkt_rel(prob: &QpProblem, sol: &QpSolution) -> f64 {
+    let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+    let ssol = scaling.scale_solution(sol);
+    let res = ssol.kkt_residuals(&scaled);
+    let mut px = vec![0.0; scaled.n];
+    scaled.p_mul(&ssol.x, &mut px);
+    let mut gtz = vec![0.0; scaled.n];
+    scaled.gt_mul(&ssol.z, &mut gtz);
+    let mut aty = vec![0.0; scaled.n];
+    scaled.at_mul(&ssol.y, &mut aty);
+    let mut gx = vec![0.0; scaled.m_ineq()];
+    scaled.g_mul(&ssol.x, &mut gx);
+    let mut ax = vec![0.0; scaled.m_eq()];
+    scaled.a_mul(&ssol.x, &mut ax);
+    let gscale = inf_norm(&px)
+        .max(inf_norm(&scaled.c))
+        .max(inf_norm(&gtz))
+        .max(inf_norm(&aty))
+        .max(inf_norm(&ssol.z_lb))
+        .max(inf_norm(&ssol.z_ub))
+        .max(1.0);
+    let pscale = inf_norm(&scaled.b)
+        .max(inf_norm(&scaled.h))
+        .max(inf_norm(&gx))
+        .max(inf_norm(&ax))
+        .max(1.0);
+    // The objective of the *scaled* problem, not `sol.obj`. Every other
+    // quantity here is measured in the equilibrated metric, and for a pure LP
+    // the equilibration carries a cost scaling σ = 1/max|ĉ| that multiplies
+    // `ĉ`, `ẑ` and hence both the dual residual and `ŝᵀẑ`. Dividing a
+    // σ-scaled complementarity by an unscaled objective would leave the ratio
+    // off by σ — up to `1e8` either way, a false accept on a large-cost LP and
+    // a false *reject* on a tiny-cost one. Recomputing here keeps numerator
+    // and denominator in one metric, and `σ` cancels exactly. (A QP keeps
+    // σ = 1, so this is a no-op there.)
+    let cscale = ssol
+        .x
+        .iter()
+        .zip(&px)
+        .zip(&scaled.c)
+        .map(|((&xi, &pxi), &ci)| 0.5 * xi * pxi + ci * xi)
+        .sum::<f64>()
+        .abs()
+        .max(1.0);
+    (res.dual_infeasibility / gscale)
+        .max(res.primal_infeasibility / pscale)
+        .max(res.complementarity / cscale)
+}
+
+/// Whether an `Optimal` verdict is backed by a point that really is one.
+///
+/// Short-circuits on the *absolute* KKT residual: a point already accurate to
+/// `tol` in the original coordinates is unimpeachable, needs no metric
+/// argument, and pays nothing for this check — which is every well- and
+/// moderately-scaled solve. Only a solve that reached `Optimal` through HSDE's
+/// scale-*relative* convergence arm (`crate::hsde::relative_stop_permitted`,
+/// the arm that opens once absolute `tol` accuracy is below the
+/// finite-precision floor) is measured in the equilibrated metric.
+fn optimum_is_genuine(prob: &QpProblem, sol: &QpSolution, tol: f64) -> bool {
+    sol.kkt_residuals(prob).kkt_error() <= tol
+        || equilibrated_kkt_rel(prob, sol) <= FALSE_OPTIMUM_REL_TOL
+}
+
+/// Re-check an HSDE `Optimal` and, when it is a scaling artifact, repair or
+/// demote it — never let a false success out (gh #414).
+///
+/// HSDE certifies convergence on *scale-relative* residuals once the problem's
+/// natural scale puts absolute `tol` accuracy below the finite-precision floor
+/// (`hsde::relative_stop_permitted`). Those normalizers are global ∞-norms, so
+/// on a QP whose **variables** span many decades they are dominated by the
+/// worst-scaled column and the test stops bounding the error in every other
+/// direction: the embedding reports `Optimal` at a point whose own
+/// `kkt_error` is `8.3e3` and whose objective is `67.13` against a true
+/// `-3.96`. Downstream this is a success everywhere — `success=True` from
+/// `solve_qp`, `SolveSucceeded` / `solve_result_num=0` / exit 0 from the
+/// AMPL/Pyomo/GAMS drivers — so the wrong point is consumed as an answer.
+///
+/// The instance is not hard: it is well-conditioned after a diagonal rescaling,
+/// which is precisely what Ruiz equilibration finds. So when the verdict fails
+/// [`optimum_is_genuine`], re-solve equilibrated — the same repair gh #293
+/// already applies to a *non*-converged HSDE solve, extended to the case where
+/// the driver wrongly believes it converged. On the reported instance that
+/// retry returns the oracle's `-3.958501808`.
+///
+/// If the retry cannot certify a genuine optimum either, the original verdict
+/// is demoted to [`QpStatus::NumericalFailure`] rather than upgraded: the
+/// solver has no certified answer, and saying so is the floor this function
+/// guarantees. `OptimalInaccurate` would be the wrong demotion — it means
+/// "usable at reduced accuracy" and still reports `ok` / exit 0 through the CLI,
+/// which a relative residual of `1e-3` or worse is not.
+///
+/// A no-op unless the solve is HSDE-with-equilibration-allowed and ended
+/// `Optimal`; the direct driver already runs *inside* the equilibrated metric
+/// (its absolute test is applied to the Ruiz-scaled problem), so it cannot
+/// reach this failure.
+fn verify_or_repair_optimum<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    sol: QpSolution,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if !(opts.use_hsde && opts.equilibrate)
+        || sol.status != QpStatus::Optimal
+        || optimum_is_genuine(prob, &sol, opts.tol)
+    {
+        return sol;
+    }
+    let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend);
+    if retry.status == QpStatus::Optimal && optimum_is_genuine(prob, &retry, opts.tol) {
+        return retry;
+    }
+    QpSolution {
+        status: QpStatus::NumericalFailure,
+        ..sol
+    }
 }
 
 /// The bounds-aware orthant solve without equilibration (the historical
@@ -737,7 +904,19 @@ where
         }
         return sol;
     }
-    solve_socp_symmetric(prob, cones, opts, make_backend)
+    let mut make_backend = make_backend;
+    let sol = solve_socp_symmetric(prob, cones, opts, &mut make_backend);
+    // gh #414: a cone program whose cones are *all* nonnegative is an LP/QP
+    // wearing the conic entry point's clothes (`solver_selection=socp` on a
+    // box-constrained QP lands here), and it inherits the same false `Optimal`
+    // under a variable-scale spread. Ruiz equilibration — which the repair
+    // rests on — is a per-row scaling and stays sound exactly on the orthant,
+    // so the check is gated on that and every genuine cone program is
+    // untouched. See [`verify_or_repair_optimum`].
+    if cones.iter().all(|c| matches!(c, ConeSpec::Nonneg(_))) {
+        return verify_or_repair_optimum(prob, opts, sol, &mut make_backend);
+    }
+    sol
 }
 
 /// Debug-enabled [`solve_socp_ipm`]: fires the interactive [`DebugHook`] at
@@ -3419,5 +3598,177 @@ mod non_finite_guard_tests {
             assert_eq!(demote_unusable(keep, &bad, f64::NAN), keep);
             assert_eq!(demote_unusable(keep, &good, 1.0), keep);
         }
+    }
+}
+
+#[cfg(test)]
+mod false_optimum_metric_tests {
+    //! gh #414: the measurement the false-optimum repair rests on, and the
+    //! floor it guarantees when the repair cannot succeed.
+
+    use super::{
+        FALSE_OPTIMUM_REL_TOL, QpOptions, SparseSymLinearSolverInterface, equilibrated_kkt_rel,
+        normalized_optimum_is_genuine, optimum_is_genuine, solve_qp_ipm_unscaled,
+        verify_or_repair_optimum,
+    };
+    use crate::qp::{QpProblem, QpStatus, Triplet};
+    use pounce_feral::FeralSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// The reported instance: a strictly convex box- and inequality-constrained
+    /// QP stated in variables scaled `10^-6‥10^6` (`cond(P) ~ 1e24`, `cond = 10`
+    /// after `z = x/s`). True optimum `-3.9585018079`.
+    fn illscaled_qp() -> QpProblem {
+        QpProblem {
+            n: 3,
+            p_lower: vec![
+                Triplet::new(0, 0, 8395050448209.196),
+                Triplet::new(1, 0, -1902145.0448367258),
+                Triplet::new(1, 1, 3.251598903330246),
+                Triplet::new(2, 0, 2.8600351667480353),
+                Triplet::new(2, 1, 1.1387032854093064e-07),
+                Triplet::new(2, 2, 2.5156283086289338e-12),
+            ],
+            c: vec![
+                -2410857.501637979,
+                -0.47196110542608866,
+                1.9297552321865365e-06,
+            ],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -1363466.266639565),
+                Triplet::new(0, 1, -0.34926083632221316),
+                Triplet::new(0, 2, -3.621387263107342e-07),
+            ],
+            h: vec![2.455293068675696],
+            lb: vec![
+                -1.1096628522428714e-05,
+                -10.254262623099589,
+                -9953548.897040607,
+            ],
+            ub: vec![8.903371477571285e-06, 9.745737376900411, 10046451.102959393],
+        }
+    }
+
+    /// Why the metric had to change, stated as a measurement rather than an
+    /// argument: on the *same point*, the unscaled relative test (gh #324) sees
+    /// nothing wrong and the equilibrated one sees an `O(100)` violation.
+    ///
+    /// This is the load-bearing claim of the fix. If a future change to the
+    /// normalizers makes the unscaled test able to catch this on its own, this
+    /// test fails loudly rather than leaving the extra machinery unexplained.
+    #[test]
+    fn the_false_optimum_is_invisible_unscaled_and_obvious_equilibrated() {
+        let prob = illscaled_qp();
+        let opts = QpOptions::default();
+        // The un-repaired HSDE solve: exactly what `solve_qp_ipm` used to return.
+        let bad = solve_qp_ipm_unscaled(&prob, &opts, backend);
+        assert_eq!(
+            bad.status,
+            QpStatus::Optimal,
+            "premise: the embedding certifies this point"
+        );
+        let abs = bad.kkt_residuals(&prob).kkt_error();
+        assert!(
+            abs > 1e3,
+            "premise: the certified point's own KKT error is huge (got {abs:.3e}, \
+             the issue reports 8.3e3)"
+        );
+
+        // The gh #324 test normalizes by *global* ∞-norms in the original
+        // coordinates, where the badly-scaled column inflates ‖Px‖ enough to
+        // hide the violation — it passes this point.
+        assert!(
+            normalized_optimum_is_genuine(&prob, &bad),
+            "premise: the unscaled relative test cannot see this failure"
+        );
+
+        // Measured in the equilibrated metric the same point is plainly not a
+        // KKT point, by orders of magnitude either side of the cut.
+        let rel = equilibrated_kkt_rel(&prob, &bad);
+        assert!(
+            rel > 1.0,
+            "equilibrated relative KKT should be O(1) or worse, got {rel:.3e}"
+        );
+        assert!(!optimum_is_genuine(&prob, &bad, opts.tol));
+
+        // And the repaired solve — the same problem, the real optimum — sits far
+        // below the cut, so the two are separated with room to spare.
+        let good = super::solve_qp_ipm(&prob, &opts, backend);
+        assert_eq!(good.status, QpStatus::Optimal);
+        let good_rel = equilibrated_kkt_rel(&prob, &good);
+        assert!(
+            good_rel < 1e-6,
+            "the true optimum must be far inside the cut, got {good_rel:.3e}"
+        );
+        assert!(
+            good_rel < FALSE_OPTIMUM_REL_TOL / 100.0 && rel > FALSE_OPTIMUM_REL_TOL * 100.0,
+            "cut {FALSE_OPTIMUM_REL_TOL:.0e} must sit with margin between \
+             {good_rel:.3e} and {rel:.3e}"
+        );
+    }
+
+    /// The floor: when the equilibrated re-solve cannot certify an optimum
+    /// either, the verdict is demoted — never handed back as a success.
+    ///
+    /// Forced deterministically by capping the retry at a single iteration, so
+    /// the repair provably cannot converge. What must survive is the guarantee,
+    /// not the repair: no `Optimal`, and no `OptimalInaccurate` either, since
+    /// that still reports `ok` / exit 0 through the CLI.
+    #[test]
+    fn an_unrepairable_false_optimum_is_demoted_never_reported_optimal() {
+        let prob = illscaled_qp();
+        let bad = solve_qp_ipm_unscaled(&prob, &QpOptions::default(), backend);
+        assert_eq!(bad.status, QpStatus::Optimal, "premise");
+
+        let starved = QpOptions {
+            max_iter: 1,
+            ..QpOptions::default()
+        };
+        let mut mb = backend;
+        let out = verify_or_repair_optimum(&prob, &starved, bad, &mut mb);
+        assert_eq!(
+            out.status,
+            QpStatus::NumericalFailure,
+            "an uncertifiable point must not keep a success status (got {:?})",
+            out.status
+        );
+    }
+
+    /// The check must not tax a solve that is simply correct: a well-scaled QP
+    /// reaches absolute `tol` accuracy, short-circuits before any equilibration,
+    /// and is returned untouched.
+    #[test]
+    fn a_well_scaled_optimum_short_circuits_without_equilibrating() {
+        // min ½‖x‖² − xᵀ[1,2]  s.t.  −5 ≤ x ≤ 5 — optimum x* = [1, 2].
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![-1.0, -2.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![-5.0, -5.0],
+            ub: vec![5.0, 5.0],
+        };
+        let opts = QpOptions::default();
+        let sol = solve_qp_ipm_unscaled(&prob, &opts, backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!(
+            sol.kkt_residuals(&prob).kkt_error() <= opts.tol,
+            "premise: this solve is absolutely tol-accurate"
+        );
+        assert!(optimum_is_genuine(&prob, &sol, opts.tol));
+
+        let x = sol.x.clone();
+        let mut mb = backend;
+        let out = verify_or_repair_optimum(&prob, &opts, sol, &mut mb);
+        assert_eq!(out.status, QpStatus::Optimal);
+        assert_eq!(out.x, x, "a genuine optimum must be returned unchanged");
     }
 }

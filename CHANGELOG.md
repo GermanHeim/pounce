@@ -9,6 +9,100 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the active-set QP crawled instead of stepping on an indefinite Hessian (#416)
+
+- **`algorithm = active-set-sqp` with `sqp_hessian = exact` now solves plain
+  Rosenbrock at the default QP budget.** The reported case — extended
+  Rosenbrock in a ball, `n = 10`, from the canonical `(−1.2, 1, …)` start —
+  gave up after 4 outer iterations with
+  `Search_Direction_Becomes_Too_Small`/`Maximum_Iterations_Exceeded` at
+  `f = 9.62214`, `KKT = 2.62`, against `f = 3.9866` from the interior-point
+  path. It now converges to `f = 3.9866` in 20 outer iterations, and does so
+  ~2.5× faster than the documented `sqp_qp_max_iter = 250` workaround.
+- **The budget was never the problem.** The tell in the report was that the
+  smallest cap that worked was 250 whether `n` was 10 or 40, and that the QP
+  made **zero** working-set changes while spending 200 iterations. Both follow
+  from a single line: after §4.5 inertia control factors `H + δI`, the inner
+  loop still capped its step at `α = 1`. The unit step is the model minimizer
+  only for an *unshifted* Newton direction — writing `r = Hx + g`, the shifted
+  system gives `pᵀr = −(pᵀHp + δ‖p‖²)`, so the model's own minimizer along `p`
+  is `α* = 1 + δ‖p‖²/pᵀHp`, and `+∞` when the true curvature along `p` is
+  non-positive. Capping at 1 turns the loop into proximal-point iteration with
+  parameter δ, whose per-eigenvalue contraction is `δ/(λ + δ)`. Since δ is
+  reached by multiplying `QpOptions::inertia_shift_initial` (1e-8) by
+  `inertia_shift_factor` (100) until the system is PD, it overshoots the
+  spectrum badly: on the reported QP `λ_min = −1.4` and δ = 100, putting
+  every factor within 3 % of 1. The trace shows it exactly — δ = 100,
+  `‖p‖∞ ≈ 2e−3`, `α = 1`, `pᵀHp < 0`, empty working set, 200 times over. The
+  crawl is dimension-independent because δ and the spectrum are, which is why
+  raising the cap looked like it fixed something.
+- **The fix is to take the step the model asks for.** The ratio test is now
+  capped at `α*` instead of at 1, so a negative-curvature direction runs to
+  its blocking bound and *changes the working set* — what an active-set method
+  is supposed to do with negative curvature (Nocedal-Wright §16.5). `δ = 0`
+  returns 1.0 without touching the data, so every non-shifted solve is
+  bit-identical. Applied on all four inner loops (box, equality-plus-bounds,
+  general, and the Schur-update variant, which now tracks the δ in its cached
+  base factor).
+- **A negative-curvature direction with nothing to block it is unboundedness**,
+  and is now reported as such — the F2 recession certificate with `pᵀHp < 0`
+  in place of `Hp = 0`. Two fixtures that the SQP path previously ran out of
+  iterations on, `unbounded_exp.nl` (`min −exp(x)`) and `unbounded_cubic.nl`,
+  now exit `Diverging_Iterates`, agreeing with the IPM path. The SQP driver
+  still re-verifies the ray against the true NLP before reporting it.
+- **Also fixed, found by the above:** l1-elastic phase-1 labelled its result
+  `Optimal` whenever the slacks reached zero, even when the phase-1 solve had
+  hit its own iteration limit on the way. Past the point where the slacks
+  vanish the augmented objective *is* the original one, so an unconverged
+  phase-1 leaves an ordinary suboptimal iterate — `afiro` with
+  `sqp_qp_max_iter = 3` returned `Optimal` carrying a KKT error of 10 at
+  objective 440 against a −464.75 optimum. The inner verdict is now carried
+  out; the point is still returned, just not dressed up.
+
+### Fixed — the convex QP IPM certified `Optimal` at a non-KKT point when the *variables* spanned many decades (#414)
+
+- **`solve_qp(method="ipm")` returned `status="optimal"`, `success=True`,
+  objective `67.13` — with `kkt_error = 8282.5` on the very same result
+  object**, against a true optimum of `-3.9585018079`. Through the CLI the same
+  engine reported `SolveSucceeded` / `solve_result_num=0` / exit `0`, so the
+  AMPL, Pyomo, and GAMS drivers all accepted the wrong point as a solution.
+  `solver_selection=socp` and `auto` route to the same engine and inherited it.
+  pounce's own `qp-active-set` and `nlp` engines, clarabel, and scipy
+  `trust-constr` all solve the identical model correctly.
+- **The instance is not hard — it is badly *stated*.** Variables scaled
+  `10^-6‥10^6` give `cond(P) ~ 1e24`, but one diagonal rescaling `z = x/s`
+  takes it to `cond = 10`. The failure threshold tracked exactly that spread:
+  correct at `±3` decades, wrong from `±4` up.
+- **Root cause: the convergence test was measured in a metric that does not
+  bound the error.** HSDE certifies on *scale-relative* residuals once the
+  problem's natural scale puts absolute `tol` accuracy below the
+  finite-precision floor. Those normalizers are **global** ∞-norms, so once the
+  variable scales spread, the worst-scaled column dominates `‖Px̂‖` and dividing
+  every component's residual by it hands a blanket relaxation to the components
+  where the real violation lives. `±3` decades stays under the gate that opens
+  the relative arm, which is why it was correct.
+- **The check now runs in the Ruiz-equilibrated metric**, where every variable
+  and row carries an `O(1)` scale and no column can mask another. The reported
+  point reads `1.2e2` there and the true optimum of the same problem `2.9e-10`
+  — against `2e-4` for *both* in the unscaled metric, which is why the existing
+  #324 relative re-check could not see it. A rejected `Optimal` is repaired by
+  an equilibrated re-solve, the same repair #293 already applies to a
+  *non-converged* HSDE solve; on the reported instance it returns the oracle's
+  `-3.958501808`.
+- **Never a false success.** If the re-solve cannot certify a genuine optimum
+  either, the verdict is *demoted*, not upgraded — `OptimalInaccurate` would
+  still report `ok` / exit `0` through the CLI, which a relative residual of
+  `1e-3` or worse is not.
+- **Complementarity is normalized by the objective, not the gradient.** Its
+  terms `ŝᵢẑᵢ` are the duality gap's and survive the diagonal congruence
+  unchanged while the gradient scale does not, so normalizing it by a gradient
+  scale Ruiz has pulled to `O(1)` rejects the genuine #286 huge-magnitude
+  optima. Measured: the #414 false optima land in `2e-2‥1.2e2`, their repaired
+  counterparts in `1e-12‥1e-9`, and the #286 solves — the genuine optima most
+  at risk of being rejected here — at `4e-10` and `1.5e-8`.
+- Costs nothing on a solve that reaches absolute `tol` accuracy, which
+  short-circuits before any of this runs.
+
 ### Changed — warm-started convex QPs converge in 35–60% fewer iterations (#417)
 
 - **The warm start was never the bottleneck; the *static* fraction-to-boundary
