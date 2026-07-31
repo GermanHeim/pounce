@@ -170,14 +170,16 @@ class RosenbrockRing(ParametricFamily):
     reports rather than hides.
 
     The cold start is the origin, not Rosenbrock's traditional
-    ``(−1.2, 1, −1.2, …)``. That start is a *robustness* test rather
-    than a warm-start test: from it, pounce's exact-Hessian SQP path
-    gives up with ``Search_Direction_Becomes_Too_Small`` at every step
-    of the path (the quasi-Newton modes converge from it fine), so
-    every arm would be measuring failure instead of warm-start effect.
-    From the origin both algorithms converge and agree at every step,
-    which is what makes the switch measurable. See
-    ``dev-notes/warm-start-benchmark.md`` for the failing case.
+    ``(−1.2, 1, −1.2, …)``. That was originally forced: from the
+    traditional start the exact-Hessian SQP path used to give up with
+    ``Search_Direction_Becomes_Too_Small`` at every step, so every arm
+    measured failure instead of warm-start effect (pounce#416). That
+    bug is **fixed** — the traditional start now converges in 20
+    iterations to the classical local minimum, agreeing with the IPM —
+    and the origin is kept only so this family's numbers stay
+    comparable across the runs already recorded. Switching to the
+    traditional start is now a legitimate option; it would change every
+    `rosenbrock_ring` figure in the report.
     """
 
     name = "rosenbrock_ring"

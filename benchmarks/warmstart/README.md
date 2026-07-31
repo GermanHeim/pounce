@@ -220,14 +220,29 @@ set — that an adapter consumes as much of as its solver understands.
 Arms an adapter does not support are reported as skipped rather than
 silently dropped.
 
-## Known result worth not forgetting
+## Two solver defects this suite has caught
 
-`rosenbrock_ring` starts from the origin, not Rosenbrock's traditional
-`(−1.2, 1, −1.2, …)`. From the traditional start, pounce's SQP path
-with the default exact Hessian gives up with
-`Search_Direction_Becomes_Too_Small` at every step of the path, at a
-point with a stationarity residual of ~2.6, while `damped-bfgs` and
-`lbfgs` converge from it fine. That is a cold-robustness finding, not
-a warm-start one, and letting it sit inside this family would replace
-the measurement with a wall of failures. It is written up in
-`dev-notes/warm-start-benchmark.md`.
+Both in the same configuration — nonconvex, indefinite Hessian, nothing
+active — which is why `double_well_chain` exists.
+
+1. **pounce#416, fixed.** From Rosenbrock's traditional
+   `(-1.2, 1, -1.2, ...)` start, the exact-Hessian SQP path gave up with
+   `Search_Direction_Becomes_Too_Small` at every step, at a stationarity
+   residual of ~2.6, while the quasi-Newton modes converged fine. The
+   inner QP was spending its entire 200-iteration budget making **zero**
+   working-set changes; a cap of 20 produced bit-identical answers ~9x
+   faster. Fixed in pounce#419 by capping the ratio test at the shifted
+   step's true minimizer instead of at alpha = 1. `rosenbrock_ring` still
+   starts from the origin, now only for continuity of its recorded
+   numbers.
+
+2. **pounce#423, open.** The fix for #416 regressed the *unconstrained*
+   case: with `m = 0` and no finite bounds, a negative-curvature
+   direction has nothing to block it, so the new recession-certificate
+   path is taken at every indefinite iterate and the solve dies at
+   iteration 1 (f = 26.03 against the IPM's 0.027). Pre-#419 it
+   converged in 24 iterations. Every `double_well_chain` row in the
+   report currently shows `bad = 20` because of it; the other 21 rows
+   are unaffected.
+
+Full write-ups in `dev-notes/warm-start-benchmark.md`.

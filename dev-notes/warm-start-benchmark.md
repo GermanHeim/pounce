@@ -112,7 +112,8 @@ one — while the outer-iteration column for both reads 1.00×.
 
 ## Finding 2: exact-Hessian SQP fails on Rosenbrock from the classic start
 
-Filed as **#416**; not fixed here. On
+Filed as **#416**, **fixed** in #419 — which then regressed the
+unconstrained case, see Finding 3. On
 
     min Rosenbrock(x)  s.t.  ‖x‖² ≤ r²,   n = 10,  −5 ≤ x ≤ 5
 
@@ -161,6 +162,36 @@ configuration the inner QP's iterations past ~20 change nothing. They
 are not work that ran out of budget, they are work that never mattered.
 Rosenbrock is the same waste with a worse ending, because there the
 `MaxIter` exit is not rescued.
+
+## Finding 3: #419's fix for #416 regressed the unconstrained case
+
+Filed as **#423**, open. #419 fixed #416 by capping the inner ratio test
+at the shifted step's true minimizer `α*` instead of at 1, so a
+negative-curvature direction runs to its blocking bound and changes the
+working set. Rosenbrock from the classic start now converges in 20
+iterations.
+
+But when there is **no** blocking bound — `m = 0`, no finite variable
+bounds, which is exactly `double_well_chain` — the direction runs
+forever, becomes a recession certificate, fails re-verification against
+the true NLP (the objective really is bounded below), and the solve
+ends. A/B on an identical script:
+
+| build | `active-set-sqp` + `exact` | f | iters |
+|---|---|--:|--:|
+| 301aa84 (pre-#419) | `Solve_Succeeded` | 0.027424 | 24 |
+| c15c015 (post-#419) | `Search_Direction_Becomes_Too_Small` | 26.025699 | **1** |
+
+The IPM and `damped-bfgs` are bit-identical across the two builds, so it
+is specific to the path #419 changed. The two issues are mirror images:
+#416 was "the shifted step is capped at α = 1, so the solver spins
+without pivoting"; #423 is "the shifted step is gone, so a solver with
+nothing to pivot *to* has no step at all".
+
+Worth recording as a process point: `double_well_chain` was added the day
+before #419 landed, purely to close a coverage hole (no family ran
+`m = 0`), and it caught the regression on its first run against the new
+base. The other 21 rows were bit-identical across the two commits.
 
 ## Active-set coverage, and the two families that closed the holes
 

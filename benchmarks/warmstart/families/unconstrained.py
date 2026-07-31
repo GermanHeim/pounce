@@ -7,12 +7,17 @@ of every step. Whatever speedup shows up here is what a warm start
 buys from the *primal point alone* — the zero mark the other families'
 numbers should be read against.
 
-It is also the one configuration the rest of the suite never executes.
-That matters: pounce#416 (exact-Hessian SQP burning its whole inner-QP
-budget) reproduces precisely here — unconstrained, bounds inactive or
-absent, indefinite Hessian — and the suite found it only because a
-*constrained* family happened to pass through an interior iterate on
-its way somewhere else.
+It is also the one configuration the rest of the suite never executes,
+and that has already paid for itself twice. pounce#416 (exact-Hessian
+SQP burning its whole inner-QP budget) reproduces precisely here —
+unconstrained, bounds inactive or absent, indefinite Hessian — and the
+suite originally found it only because a *constrained* family happened
+to pass through an interior iterate on its way somewhere else. Then the
+fix for #416 (pounce#419) **regressed exactly this configuration**: a
+negative-curvature direction with nothing to block it now fails the
+solve at iteration 1 where the shifted step used to converge, which
+this family caught on its first run against the new base
+(pounce#423).
 """
 
 from __future__ import annotations
