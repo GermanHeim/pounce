@@ -218,15 +218,27 @@ Two results worth keeping:
   one exception is `moving_bound_qp @ large`, where the active set
   churns hardest (15 of 19 steps change it) and `warm-qp-ipm` wins.
 - **The convex IPM warm-starts weakly**: 1.17–1.50× on iterations,
-  against 4–16× for the SQP's inner active-set work. That is the
-  textbook asymmetry — an interior-point method cannot exploit a
-  previous solution sitting exactly on the boundary, which is precisely
-  where a QP's solution lives. Notably the *general* NLP filter-IPM
-  warm-starts better in iteration terms (e.g. 182→28 on
-  `simplex_proj @ tiny`) than the dedicated convex one does, because
-  `pounce.WarmStart` seeds `mu_init` from the converged barrier
-  parameter and tightens the bound pushes, while the convex path takes
-  a plain primal-dual seed.
+  against 4–16× for the SQP's inner active-set work — and the *general*
+  NLP filter-IPM warm-starts to ~1.4 iterations/step on the same
+  problems where the dedicated convex solver needs 5–8.
+
+  Chasing that down (**#417**) ruled out the explanation that first
+  looked obvious. The convex path is *not* taking a plain primal-dual
+  seed: `init_iterate` recenters adaptively, sizing the interior floor
+  from the warm point's KKT residual on the new problem. Scaling that
+  floor across five orders of magnitude changes the iteration count by
+  about one, and a *perfect* warm start (re-solving an identical
+  problem from its own solution) converges in 0–2 iterations, so the
+  machinery is sound. The limit is the fraction-to-boundary parameter
+  `QpOptions::tau`, pinned at 0.95: the trace shows α held at exactly
+  0.950 for every late iteration, so μ and the residuals fall a fixed
+  ~20× per step and the count is `log₂₀(μ₀/tol)` however good the
+  start is. Letting τ → 1 as μ → 0 for orthant blocks cuts warm
+  iterations 35–60% with the full `pounce-convex` suite passing; doing
+  it for *every* cone kind loses 60% of the SOC instances the direct
+  driver currently solves. A filter line-search method can take a full
+  Newton step near the solution and a barrier method with static τ
+  cannot — that, not the seeding, is the whole asymmetry.
 
 Caveat kept in the report itself: the QP arms receive matrix data once
 per step where the callback arms re-evaluate per iteration, so the wall
