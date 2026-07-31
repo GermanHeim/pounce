@@ -184,8 +184,10 @@ for k in range(horizon_steps):
 ```
 
 A warm start that is working drives the second column toward
-zero while the first stays flat. `benchmarks/warmstart/` is
-built on exactly this measurement.
+zero while the first stays flat.
+[The warm-start benchmark](warm-start-benchmark.md) is built on
+exactly this measurement, and reports what the effect is worth
+across eight problem families and all three solve paths.
 
 ## 3. The working-set warm-start contract
 

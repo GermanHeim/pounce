@@ -53,6 +53,7 @@
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
 - [Troubleshooting Recipes](troubleshooting.md)
 - [Benchmarks](benchmarks.md)
+  - [The Warm-Start Benchmark](warm-start-benchmark.md)
 
 # Appendix
 

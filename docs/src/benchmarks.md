@@ -20,6 +20,14 @@ make benchmark-mittelmann
 make benchmark-vanderbei    # Vanderbei CUTE-in-AMPL collection (733 problems)
 ```
 
+One suite is deliberately not `.nl`-driven:
+[the warm-start benchmark](warm-start-benchmark.md) measures the cost of
+solving a *sequence* of related problems, cold versus warm, across all
+three of POUNCE's solve paths. Carrying a working set between solves
+needs an in-process handle, so it runs through the Python API instead of
+the CLI, and it reports on its own rather than into the composite
+report.
+
 The benchmark inputs themselves — the `.nl` problem files — and the
 per-run logs and JSON results are regenerated locally and not tracked in
 the repository. See
