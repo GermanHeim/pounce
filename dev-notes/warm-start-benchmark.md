@@ -112,7 +112,7 @@ one — while the outer-iteration column for both reads 1.00×.
 
 ## Finding 2: exact-Hessian SQP fails on Rosenbrock from the classic start
 
-Not fixed, recorded. On
+Filed as **#416**; not fixed here. On
 
     min Rosenbrock(x)  s.t.  ‖x‖² ≤ r²,   n = 10,  −5 ≤ x ≤ 5
 
@@ -131,10 +131,20 @@ indefinite exact Hessian, not a modelling problem:
 | `damped-bfgs` | ok, 99 iters, f=0 | ok, 28 iters | ok, 123 iters |
 | `lbfgs` | ok, 123 iters, f=0 | ok, 258 iters | ok, 98 iters |
 
+Narrowed down after filing groundwork (all in #416): the inner QP hits
+its `sqp_qp_max_iter` cap, which the outer loop maps to `QpStepFailed`
+→ `Search_Direction_Becomes_Too_Small`. Raising the cap from its
+default 200 to **250** converges. The cap is not really the bug: the
+failing QP makes **zero** working-set changes in those 200 iterations,
+and the 250 threshold is identical at n = 10, 20, 30 and 40, so a
+fixed-count internal loop is spinning rather than active-set work
+outgrowing its budget. Constraints are not involved — the same failure
+occurs with the ball made unreachable and with `m = 0`. The failure
+appears at the first iterate where ∇²L goes indefinite (min eigenvalue
+−1.4; it is +35.4 at the start).
+
 The family therefore starts from the origin, so the row measures warm
-starting rather than a wall of identical failures. The failing start
-is worth turning into its own regression test, or an issue, separately
-from this suite.
+starting rather than a wall of identical failures.
 
 ## Not done yet
 
