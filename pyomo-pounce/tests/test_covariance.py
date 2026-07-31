@@ -116,6 +116,39 @@ def test_n_data_fallback():
     np.testing.assert_allclose(cov.matrix, cov_classical, rtol=1e-9)
 
 
+def test_n_data_ssr_is_the_solve_time_objective():
+    """Writing into the model after the solve must not move the
+    n_data= covariance: the SSR is the solve-time objective value, not
+    an evaluation on the live model (gh #426)."""
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_fitted(m.a, m.b)
+    pyo.SolverFactory("pounce").solve(m)
+    cov_before = covariance(m, n_data=N_LIN)
+    for i in m.I:
+        m.r[i].set_value(999.0)          # the receding-horizon write
+    m.a.set_value(0.0)
+    cov_after = covariance(m, n_data=N_LIN)
+    assert cov_after.sigma_sq == cov_before.sigma_sq
+    np.testing.assert_allclose(cov_after.matrix, cov_before.matrix,
+                               rtol=0, atol=0)
+
+
+def test_n_data_rejects_an_unevaluated_objective():
+    """A session whose solve evaluated no objective reports NaN, and
+    n_data= must refuse it rather than hand back a NaN covariance. NaN
+    is the sentinel the engine uses (0.0 is an ordinary objective
+    value), so the guard tests isfinite, not None."""
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_fitted(m.a, m.b)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    session.base_obj = float("nan")
+    with pytest.raises(RuntimeError, match="no usable objective value"):
+        covariance(m, n_data=N_LIN)
+
+
 def test_n_data_ignored_when_residuals_declared_warns(linear):
     m, x, y, X = linear                     # fixture declares residuals
     with warnings.catch_warnings(record=True) as w:

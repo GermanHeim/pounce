@@ -48,6 +48,29 @@ changes.
   one-entry-wrong case, the MPC sweep at four horizons, and a hopeless
   hint that must still fall through to elastic.
 
+### Fixed — pyomo-pounce: `covariance(n_data=)` read the SSR from the live objective (#426)
+
+- The `n_data=` branch estimated the noise variance with the SSR taken
+  from `pyo.value(objective)` on the current model, which evaluates at
+  the model's current variable and Param values: anything written after
+  the solve (a measurement, a warm start for the next horizon) silently
+  rescaled the reported covariance. Same staleness class as #420, found
+  in #421's review. The `declare_residual` path was unaffected.
+- The session now stores the objective value at the solve and the
+  `n_data=` branch reads that, so post-solve writes to the model cannot
+  move the answer. The stored number is the engine's `obj_val`, which is
+  `eval_f` on this model's own bridge at the final iterate — unscaled,
+  in the model's objective units, i.e. exactly what `pyo.value` returns
+  an instant after the solve. Regression: solve, take the covariance,
+  overwrite the model's values, take it again; the two must be
+  identical.
+- The unusable-objective guard tests `isfinite`, not `is None`: the
+  engine always reports `obj_val` and signals "never computed" with NaN
+  (`0.0` is an ordinary objective value), so a `None` check would have
+  been dead code guarding a condition the producer cannot emit.
+  Documented in the `covariance` docstring and the sensitivity chapter
+  alongside `estimate()`'s matching baseline guarantee.
+
 ### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
 
 - `estimate(model, perturb)` computed each step as `new value` minus the

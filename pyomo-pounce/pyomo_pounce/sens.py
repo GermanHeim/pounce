@@ -259,6 +259,14 @@ class _Session:
         self.pins = pins              # ComponentMap: param data -> pin row
         self.con_alias = con_alias    # original con name -> clone row name
         self.base_x = None
+        # Objective value at the solve. NaN, not None, is the "never
+        # computed" sentinel: that is the convention the engine itself
+        # uses for info["obj_val"] (pounce-py's problem.rs seeds
+        # final_obj with NaN precisely because 0.0 is an ordinary
+        # objective value and cannot signal it), so one isfinite check
+        # covers both an unset session and a solve that evaluated
+        # nothing.
+        self.base_obj = float("nan")
         self.moved_bounds = {}        # var name -> (lb, ub) moved to rows
         self._columns = {}            # pin row -> full KKT-space column
 
@@ -579,6 +587,11 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias, var_row=var_row, con_row=con_row)
     session.base_x = np.asarray(x)
+    # the engine always reports obj_val (NaN when it evaluated nothing),
+    # and it is eval_f on this model's own bridge at the final iterate --
+    # unscaled, in the model's objective units, i.e. exactly what
+    # pyo.value(objective) returns an instant after the solve
+    session.base_obj = float(info.get("obj_val", float("nan")))
     session.moved_bounds = moved_bounds
 
     # fitted parameters: their rows in the primal vector
@@ -899,8 +912,10 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     when residual groups are declared); declared residuals (estimated
     per pooled or labeled group as SSR_g / (n_g - n_params)); or the
     n_data= fallback (count of data points, with SSR taken from the
-    objective value on trust). With multiple labeled groups the
-    heteroscedastic sandwich covariance is reported.
+    SOLVE-TIME objective value on trust -- writing into the model
+    first, the receding-horizon pattern of estimate(), does not change
+    the answer). With multiple labeled groups the heteroscedastic
+    sandwich covariance is reported.
 
     hessian= selects the information matrix. "lagrangian" (the default)
     inverts the exact reduced Hessian of the Lagrangian from the held
@@ -1051,15 +1066,25 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             raise ValueError(
                 f"covariance: n_data ({n_data}) must exceed the number of "
                 f"fitted parameters ({n_params})")
-        ssr = pyo.value(
-            next(model.component_data_objects(pyo.Objective, active=True)))
+        # the objective value AT THE SOLVE, not evaluated on the live
+        # model: pyo.value(objective) reads the model's current variable
+        # and Param values, so anything written after the solve (a
+        # measurement, a warm start for the next horizon) would silently
+        # rescale the covariance (gh #426)
+        if not np.isfinite(session.base_obj):
+            raise RuntimeError(
+                "covariance: the solve reported no usable objective value "
+                f"({session.base_obj}), so n_data= cannot estimate the "
+                "noise variance. Pass sigma_sq= (known variance), or "
+                "declare the residual container with declare_residual().")
+        ssr = session.base_obj
         group_sigma = {None: ssr / (n_data - n_params)}
     else:
         raise ValueError(
             "covariance: the noise variance is unknown; declare the "
             "residual container(s) with declare_residual(), or pass "
             "sigma_sq= (known variance), or pass n_data= (data count, "
-            "with the SSR taken from the objective value)")
+            "with the SSR taken from the solve-time objective value)")
 
     # ── assemble ──────────────────────────────────────────────────────────
     # Pooled covariance when there is one group or all group variances are
