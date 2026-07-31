@@ -71,6 +71,35 @@ changes.
   Documented in the `covariance` docstring and the sensitivity chapter
   alongside `estimate()`'s matching baseline guarantee.
 
+### Added — a large-scale sparse tier for the warm-start benchmark, and the defect it found
+
+- **`mpc_horizon_200/400/800`** (`--tier large`) carry the horizon sweep's
+  linear MPC to n = 602, 1202 and 2402 with a block-banded Jacobian. Nothing
+  dense is materialized: families may now declare `sparse_structure()` with
+  packed `jacobian_values()` / `hessian_values()`, and the convex-QP arm
+  receives sparse matrices — at N = 800 a dense Hessian alone would be 46 MB
+  rebuilt every iteration, and dense data costs the QP solver 60–80× by its
+  own diagnostic. The self-test finite-differences the declared structure
+  column by column and cross-checks it against the dense path wherever both
+  exist.
+- **The active-set SQP's warm start does not survive scale
+  ([#428](https://github.com/jkitchin/pounce/issues/428), open).** The
+  working-set hint is *discarded* rather than repaired the moment the true
+  active set moves by a single entry: the pinned primal then violates some
+  other row, `solve`'s admission pre-check routes it to elastic phase-1, and
+  the recovery re-solve starts from a cold working set. Cost is one inner
+  pivot per constraint row. Cold inner work is flat at 66 pivots from N = 10
+  to N = 800; warm runs 0 → 43 → 164 → 403 → 795 → 1589, tracking m; with the
+  hint admitted the same steps take 2 and reach the same optimum to 1e-11.
+  At the default `sqp_qp_max_iter` of 200 the warm-started SQP stops
+  returning an answer once m > 200 — 7 of 8 steps `Maximum_Iterations_Exceeded`
+  at every large horizon, while every other arm is clean.
+- **This corrects the horizon sweep's interpretation, not its numbers.** The
+  measured wall-time crossover stands; the explanation attached to it —
+  absolute working-set churn growing with problem size — holds for the
+  interior-point arms and is wrong for the SQP, whose cost is set by whether
+  the first entry moved rather than by how many did.
+
 ### Fixed — `sqp_qp_use_homotopy` was registered but never read
 
 - **Setting it on the active-set SQP path did nothing.** The option was

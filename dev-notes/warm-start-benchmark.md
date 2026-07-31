@@ -390,6 +390,76 @@ hundreds of active constraints, not thousands.
 Repeatability: the N = 80 numbers are deterministic — two independent
 re-runs gave 1605 → 1746 inner active-set changes to the digit.
 
+## Finding 7 — at large scale the SQP warm start is discarded, not repaired (#428)
+
+The horizon sweep stopped at n = 242 and reported a gradual erosion.
+Carrying the same MPC to n = 2402 (`--tier large`, N = 200/400/800)
+showed the erosion was not gradual and not intrinsic — it was a defect,
+now filed as #428.
+
+At default settings the warm-started SQP does not return an answer on
+the large tier: `Maximum_Iterations_Exceeded` with `iter_count = 0` on
+7 of 8 steps at every horizon, `x` left at the warm-start point.
+Everything else — `cold-sqp`, both IPM arms, both convex-QP arms —
+solves all 8 cleanly.
+
+Raising the inner-QP budget until nothing truncates, inner working-set
+changes for one step:
+
+| N | n | m | cold | warm | warm, hint admitted |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 32 | 22 | 11 | 0 | 0 |
+| 20 | 62 | 42 | 25 | 43 | 0 |
+| 40 | 122 | 82 | 48 | 1 | 1 |
+| 80 | 242 | 162 | 66 | 164 | 2 |
+| 200 | 602 | 402 | 66 | 403 | 2 |
+| 400 | 1202 | 802 | 66 | 795 | 2 |
+| 800 | 2402 | 1602 | 66 | 1589 | 2 |
+
+Cold is flat at 66 across a 75× range of m. Warm is Θ(m). The correct
+answer is flat at 2.
+
+It is a step function, not a slope. At N = 200, a parameter step that
+changes **zero** entries of the true active set gives 0 warm pivots; a
+step that changes **one** gives 400; four gives 403. The first changed
+entry costs m, every later one costs 1.
+
+Mechanism, confirmed by bisection: `solve_with_working_set` builds
+`x_init` by pinning the hinted rows to their new boundary values. When
+the active set has moved, that pinned point holds a row it should have
+released and therefore violates some *other* row — by about the
+distance the parameter moved (bracketed here to (0.01, 0.1] against a
+step of ≈0.075). `solve`'s warm-start admission pre-check
+(`pounce-qp/src/solver.rs:2855`) sees an infeasible primal and returns
+`solve_elastic`, whose recovery re-solve seeds `WorkingSet::cold(n, m)`
+— so the hint is dropped whole and every row is re-added from scratch.
+
+The causal test: raise only `sqp_qp_feas_tol` so the same hint is
+admitted, and the solve takes 2 pivots and lands on the same optimum to
+1e-11 with violation 7e-15. The work was never necessary.
+
+That tolerance is *not* a workaround, and the reason matters. `feas_tol`
+gates two unrelated decisions — whether a hint is admitted, and whether
+a converged point is accepted. At 0.1 the hint is admitted and the
+answer is right; at 0.5 the same solve returns objective 26.6175 with
+violation 6.4e-2 and KKT 2.5. There is no setting safe for both jobs.
+
+Two corrections to earlier findings this forces:
+
+- Finding 6's "warm starting turns harmful above N = 20 at large
+  steps" is this defect, not a property of active-set warm starts. The
+  wall-time crossover numbers stand as measurements; the *explanation*
+  attached to them — absolute churn growing with size — is right for
+  the IPM arms and wrong for the SQP, whose cost is set by whether the
+  first entry moved, not by how many did.
+- The suite's rule "payoff tracks absolute churn" survives for the IPM
+  and needs the caveat above for the SQP.
+
+Why nothing caught it earlier: at m = 22 the penalty is smaller than a
+cold solve outright, so the default tier's numbers look merely
+unimpressive rather than wrong. It takes m in the hundreds before the
+Θ(m) term separates from the constant.
+
 ## Not done yet
 
 - **A shift-based warm-start arm for the closed-loop family.** MPC
@@ -401,11 +471,12 @@ re-runs gave 1605 → 1746 inner active-set changes to the digit.
   `Δx ≈ ∂x*/∂p · Δp` before the SQP corrector runs — the pattern
   documented in `docs/src/active-set-sqp.md` §4. It would slot in as a
   fifth arm and is the natural next addition.
-- **Genuinely large scale.** The horizon sweep reaches n = 242, which
-  is enough to find the crossover but not enough to exercise the sparse
-  factorization or the Schur updates where they dominate. n in the
-  thousands would need the `.nl` machinery rather than dense Python
-  callbacks.
+- **Large scale beyond one problem class.** The `large` tier reaches
+  n = 2402, but it is linear-quadratic MPC — banded, mostly equalities,
+  a large active set that barely moves. Whether #428 dominates on a
+  large problem with a different sparsity pattern is untested, and a
+  second large family (a sparse least-squares or a network flow) would
+  be the way to find out.
 - **An external solver arm.** The adapter interface is exercised by
   the pounce adapter's three paths but has no second solver behind it;
   Ipopt through cyipopt would be the obvious first one, using the same

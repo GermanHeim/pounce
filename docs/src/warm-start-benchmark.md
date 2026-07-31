@@ -58,9 +58,10 @@ comparison isolates the warm start.
 
 ## The problems
 
-Fourteen families, each run at three step sizes (`tiny` ×0.1, `small`
-×1, `large` ×4 of its natural per-step parameter increment), for 42 rows
-and 855 solves per arm. Warm-start payoff is a function of how far the
+Fourteen families in the default sweep, each run at three step sizes
+(`tiny` ×0.1, `small` ×1, `large` ×4 of its natural per-step parameter
+increment), for 42 rows and 855 solves per arm, plus three more in an
+opt-in large tier. Warm-start payoff is a function of how far the
 problem moved, so a single step size would measure one point on a curve
 and call it the answer.
 
@@ -81,11 +82,26 @@ and call it the answer.
 | `mpc_horizon_40` | 122 | 82 | control saturation | constraint RHS | convex |
 | `mpc_horizon_80` | 242 | 162 | control saturation | constraint RHS | convex |
 
-The four `mpc_horizon_*` families are **the same linear-quadratic MPC
-problem at four horizons** — only `N` differs, so reading down them
+plus an **opt-in large tier** (`--tier large`), the same MPC carried out
+to a scale where the sparse factorization is what the cost is made of:
+
+| family | n | m | nnz(J) |
+|---|--:|--:|--:|
+| `mpc_horizon_200` | 602 | 402 | 1402 |
+| `mpc_horizon_400` | 1202 | 802 | 2802 |
+| `mpc_horizon_800` | 2402 | 1602 | 5602 |
+
+The seven `mpc_horizon_*` families are **the same linear-quadratic MPC
+problem at seven horizons** — only `N` differs, so reading down them
 isolates problem size from every other property. The parameter walks the
 initial state around a circle, which keeps every step about as hard as
-the last while rotating the set of saturated controls.
+the last while rotating the set of saturated controls. Nothing dense is
+ever built for them: they declare their block-banded Jacobian and
+diagonal Hessian structurally, and the convex-QP arm receives sparse
+matrices, because at N = 800 a dense Hessian alone would be 46 MB
+rebuilt every iteration and passing dense data to the QP solver is
+60–80× slower by its own diagnostic — which would have made the QP arm
+look bad for a reason that has nothing to do with the QP arm.
 
 The three degeneracy families cover the three distinct ways an
 active-set QP meets degeneracy, which are not interchangeable:
@@ -295,6 +311,70 @@ inequalities". The measured crossover is much earlier than that
 suggests: on this problem it is tens to low hundreds of active
 constraints, not thousands.
 
+### At large scale, the SQP warm start falls off a cliff
+
+Running the same MPC out to n = 2402 turned that gradual degradation
+into something else entirely, and found a defect
+([#428](https://github.com/jkitchin/pounce/issues/428)) that the small
+families could not see.
+
+At default settings the warm-started SQP **does not produce an answer**
+on the large tier: `warm-sqp` and `warm-sqp-hom` return
+`Maximum_Iterations_Exceeded` with zero outer iterations on 7 of 8 steps
+at every one of N = 200/400/800, leaving `x` at the warm-start point.
+`cold-sqp`, both IPM arms and both convex-QP arms solve all 8 cleanly.
+
+Raising the inner-QP budget until nothing truncates shows why. Inner
+working-set changes for one step, cold against warm:
+
+| N | n | m | cold | warm | warm, hint admitted |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 32 | 22 | 11 | 0 | 0 |
+| 20 | 62 | 42 | 25 | 43 | 0 |
+| 40 | 122 | 82 | 48 | 1 | 1 |
+| 80 | 242 | 162 | 66 | 164 | 2 |
+| 200 | 602 | 402 | 66 | **403** | 2 |
+| 400 | 1202 | 802 | 66 | **795** | 2 |
+| 800 | 2402 | 1602 | 66 | **1589** | 2 |
+
+Cold is constant at 66 — the cold solve does not care about the horizon
+at all. The warm arm is **Θ(m)**. And the last column is what the warm
+start *should* cost: a constant 2 pivots, reaching the same optimum to
+1e-11.
+
+The cause is not a gradual erosion. It is a step function in how far the
+problem moved (N = 200):
+
+| Δφ | entries of the true active set that changed | warm pivots |
+|--:|--:|--:|
+| 0.002 | 0 | **0** |
+| 0.005 | 0 | **0** |
+| 0.01 | 1 | **400** |
+| 0.02 | 2 | **401** |
+| 0.05 | 4 | **403** |
+
+Zero changes gives a flawless warm start at every size. *One* change
+costs the full m-sized penalty. The mechanism is an admission check:
+`solve_with_working_set` pins the hinted rows to their new boundaries,
+and when the active set has moved that pinned point violates some other
+row by roughly the distance the parameter moved. A feasibility
+pre-check in `solve` then routes the whole thing to elastic phase-1,
+whose recovery re-solve starts from a *cold* working set — so every row
+is re-added from scratch. The hint is not repaired, it is discarded.
+
+Two things follow for reading the rest of this page. The horizon sweep's
+"warm starting turns harmful above N = 20 at large steps" is now known
+to be **this defect**, not an intrinsic property of active-set warm
+starts — the same rows solve in 2 pivots once the hint is admitted. And
+the earlier rule that payoff tracks *absolute* churn holds for the IPM
+arms but understates the SQP's cliff, which is triggered by the first
+changed entry and indifferent to the rest.
+
+Until #428 is fixed: on a large problem whose active set moves between
+solves, use an interior-point path. The convex QP IPM warm start is
+0.44–0.49× cold across the whole large tier, and the NLP IPM 0.47–0.53×
+— both entirely unbothered by scale.
+
 ### The parametric homotopy: a sharply mixed trade
 
 The `-hom` arms differ from their twins in one option, so the delta is
@@ -384,6 +464,13 @@ of 9 rows.
   churn, which grows with problem size. On the horizon sweep it turned
   negative between N = 10 and N = 20 for large parameter steps, and the
   interior-point paths were the safer choice there.
+- **Above a few hundred constraints, do not warm-start the SQP across a
+  step that moves the active set** until
+  [#428](https://github.com/jkitchin/pounce/issues/428) is fixed. The
+  hint is discarded rather than repaired, at a cost of one inner pivot
+  per constraint row — on the large tier that means no answer at all at
+  the default inner-QP budget. An interior-point path is the safe
+  choice at that scale, and is flat in the horizon.
 - **For a problem with no active set to speak of** — unconstrained, or
   with constraints that never bind — the warm start still helps, but
   only through the primal point. Either solver is fine; the working set
@@ -416,6 +503,7 @@ Hessian, nothing active) that no other suite exercised:
 | [#416](https://github.com/jkitchin/pounce/issues/416) | Exact-Hessian SQP spent its entire inner-QP iteration budget making **zero** working-set changes; a budget of 20 gave bit-identical answers ~9× faster. Fixed in #419. |
 | [#423](https://github.com/jkitchin/pounce/issues/423) | The #416 fix regressed unconstrained problems: with nothing able to block a negative-curvature direction, the solve died at iteration 1. Caught by `double_well_chain` on its first run against the new build. Fixed in #424. |
 | [#417](https://github.com/jkitchin/pounce/issues/417) | The convex QP warm start left ~40% of its iterations unclaimed — not from the seeding but from a fraction-to-boundary parameter pinned at 0.95. Fixed in #422. |
+| [#428](https://github.com/jkitchin/pounce/issues/428) | **Open.** The SQP's working-set hint is discarded — not repaired — the moment the active set moves by one entry, costing one inner pivot per constraint row. Invisible below N ≈ 80; at n ≥ 602 it stops the warm-started solve from returning an answer. Found by the large tier on its first run. |
 | `sqp_qp_use_homotopy` was a no-op | Found while adding the `-hom` arms: the option was *registered* but `apply_qp_subproblem_options` never read it, so setting it on the SQP path did nothing while its documentation described what it would do. The inverse of #360 (read-but-unregistered), and invisible to that issue's guard, which only checked one direction. Fixed here, with a bidirectional guard. |
 
 ## Running it
@@ -440,7 +528,11 @@ or, for a narrower run:
 ```sh
 python -m warmstart.run --families simplex_proj,nmpc_vanderpol --scales large -v
 python -m warmstart.run --arms cold-sqp,warm-sqp --tol 1e-10
+python -m warmstart.run --tier large --scales small   # n = 602 → 2402
 ```
+
+`--tier large` is opt-in because a single active-set solve there takes
+seconds; `--tier all` runs both.
 
 Results land in `benchmarks/warmstart/results.json` (every step of every
 arm) and `results.md`. Both are regenerated per run and gitignored.
@@ -453,9 +545,15 @@ protocol are reusable against any solver with a warm-start API.
 ## Limits of these numbers
 
 - **Mostly small problems** (n ≤ 47 outside the horizon sweep, which
-  reaches n = 242). The sweep gives one scaling curve on one problem
-  shape; it is not a substitute for a large-scale study, and the
+  reaches n = 242 by default and n = 2402 with `--tier large`). The
+  sweep gives one scaling curve on one problem shape; it is not a
+  substitute for a large-scale study across problem classes, and the
   crossover it reports is specific to this MPC.
+- **The large tier is one problem class.** Linear-quadratic MPC has a
+  particular structure — banded, mostly equalities, a large active set
+  that barely moves — and #428 was found there. Whether the same cliff
+  dominates on a large problem with a different sparsity pattern is
+  untested.
 - **Wall time carries Python callback overhead** for the four
   callback-driven arms. Iteration and active-set-change counts are the
   primary measurements; times are a cross-check, and vary 10–30% between
