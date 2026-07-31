@@ -9,6 +9,50 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the convex QP IPM certified `Optimal` at a non-KKT point when the *variables* spanned many decades (#414)
+
+- **`solve_qp(method="ipm")` returned `status="optimal"`, `success=True`,
+  objective `67.13` — with `kkt_error = 8282.5` on the very same result
+  object**, against a true optimum of `-3.9585018079`. Through the CLI the same
+  engine reported `SolveSucceeded` / `solve_result_num=0` / exit `0`, so the
+  AMPL, Pyomo, and GAMS drivers all accepted the wrong point as a solution.
+  `solver_selection=socp` and `auto` route to the same engine and inherited it.
+  pounce's own `qp-active-set` and `nlp` engines, clarabel, and scipy
+  `trust-constr` all solve the identical model correctly.
+- **The instance is not hard — it is badly *stated*.** Variables scaled
+  `10^-6‥10^6` give `cond(P) ~ 1e24`, but one diagonal rescaling `z = x/s`
+  takes it to `cond = 10`. The failure threshold tracked exactly that spread:
+  correct at `±3` decades, wrong from `±4` up.
+- **Root cause: the convergence test was measured in a metric that does not
+  bound the error.** HSDE certifies on *scale-relative* residuals once the
+  problem's natural scale puts absolute `tol` accuracy below the
+  finite-precision floor. Those normalizers are **global** ∞-norms, so once the
+  variable scales spread, the worst-scaled column dominates `‖Px̂‖` and dividing
+  every component's residual by it hands a blanket relaxation to the components
+  where the real violation lives. `±3` decades stays under the gate that opens
+  the relative arm, which is why it was correct.
+- **The check now runs in the Ruiz-equilibrated metric**, where every variable
+  and row carries an `O(1)` scale and no column can mask another. The reported
+  point reads `1.2e2` there and the true optimum of the same problem `2.9e-10`
+  — against `2e-4` for *both* in the unscaled metric, which is why the existing
+  #324 relative re-check could not see it. A rejected `Optimal` is repaired by
+  an equilibrated re-solve, the same repair #293 already applies to a
+  *non-converged* HSDE solve; on the reported instance it returns the oracle's
+  `-3.958501808`.
+- **Never a false success.** If the re-solve cannot certify a genuine optimum
+  either, the verdict is *demoted*, not upgraded — `OptimalInaccurate` would
+  still report `ok` / exit `0` through the CLI, which a relative residual of
+  `1e-3` or worse is not.
+- **Complementarity is normalized by the objective, not the gradient.** Its
+  terms `ŝᵢẑᵢ` are the duality gap's and survive the diagonal congruence
+  unchanged while the gradient scale does not, so normalizing it by a gradient
+  scale Ruiz has pulled to `O(1)` rejects the genuine #286 huge-magnitude
+  optima. Measured: the #414 false optima land in `2e-2‥1.2e2`, their repaired
+  counterparts in `1e-12‥1e-9`, and the #286 solves — the genuine optima most
+  at risk of being rejected here — at `4e-10` and `1.5e-8`.
+- Costs nothing on a solve that reaches absolute `tol` accuracy, which
+  short-circuits before any of this runs.
+
 ### Fixed — the convex IPM reported some infeasible models as unbounded
 
 - **Found while fixing #415**, by the randomized sweep written to check that
