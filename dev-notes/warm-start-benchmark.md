@@ -209,7 +209,7 @@ Wall time over the 9 QP-family rows, geometric mean (ms):
 
 | cold-ipm | cold-sqp | cold-qp-ipm | warm-ipm | warm-sqp | warm-qp-ipm |
 |--:|--:|--:|--:|--:|--:|
-| 152.5 | 102.3 | 113.9 | 65.7 | **51.0** | 70.3 |
+| 137.1 | 88.4 | 98.0 | 60.3 | **44.8** | 62.1 |
 
 Two results worth keeping:
 
