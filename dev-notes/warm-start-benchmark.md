@@ -352,6 +352,44 @@ It also bears on #413: the homotopy's cost concentrates on
 `nmpc_vanderpol`, the family closest in shape to the corrector-bound
 instances that issue is about.
 
+## Finding 6: the SQP's warm-start advantage is eroded by absolute churn, and size inflates it
+
+The `mpc_horizon_10/20/40/80` families are one linear-quadratic MPC at
+four horizons, so only `N` differs. Warm/cold wall-time ratio, below 1
+meaning warm won:
+
+| N | mean &#124;A&#124; | `tiny` | `small` | `large` |
+|--:|--:|--:|--:|--:|
+| 10 | 31.5 | 0.27 | 0.38 | 0.84 |
+| 20 | 61.0 | 0.22 | 0.91 | 1.29 |
+| 40 | 119.6 | **0.08** | 0.66 | 1.95 |
+| 80 | 206.0 | 0.31 | 1.06 | **2.57** |
+
+Not "the SQP loses at scale": at `tiny` steps it stays excellent at
+every horizon, and its best row in the entire suite is N = 40 at 0.08.
+What degrades is the combination of size *and* movement. The IPM arms
+stay between 0.25 and 1.00 across the whole grid; the convex QP IPM is
+flatter still.
+
+The mechanism is in the working sets. The *fraction* of the active set
+that changes per step is horizon-independent (~3% at `large` for every
+N — the same angular perturbation moves proportionally the same
+constraints), but the *absolute* count grows with the problem: 1.05 →
+5.58 changes per step from N = 10 to N = 80. An active-set method pays
+for the absolute count, and each change also costs more as `|A|` grows.
+Two multiplying factors.
+
+So the suite's earlier rule — payoff tracks churn — was right but
+imprecise. It tracks **absolute** churn, and problem size inflates
+absolute churn even at a proportionally identical perturbation. It also
+puts a number on the qualitative caveat in `docs/src/active-set-sqp.md`
+("prefer the IPM for large-scale problems with thousands of active
+inequalities"): the measured crossover on this problem is tens to low
+hundreds of active constraints, not thousands.
+
+Repeatability: the N = 80 numbers are deterministic — two independent
+re-runs gave 1605 → 1746 inner active-set changes to the digit.
+
 ## Not done yet
 
 - **A shift-based warm-start arm for the closed-loop family.** MPC
@@ -363,10 +401,11 @@ instances that issue is about.
   `Δx ≈ ∂x*/∂p · Δp` before the SQP corrector runs — the pattern
   documented in `docs/src/active-set-sqp.md` §4. It would slot in as a
   fifth arm and is the natural next addition.
-- **Scale.** Every family is small (n ≤ 47), so nothing here measures
-  the sparse path or the Schur updates at size. An MPC horizon sweep
-  (N = 10…160) would be the natural addition and would put the
-  `-hom` arms on problems where the homotopy's cost matters.
+- **Genuinely large scale.** The horizon sweep reaches n = 242, which
+  is enough to find the crossover but not enough to exercise the sparse
+  factorization or the Schur updates where they dominate. n in the
+  thousands would need the `.nl` machinery rather than dense Python
+  callbacks.
 - **An external solver arm.** The adapter interface is exercised by
   the pounce adapter's three paths but has no second solver behind it;
   Ipopt through cyipopt would be the obvious first one, using the same

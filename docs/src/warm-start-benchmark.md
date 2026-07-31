@@ -58,9 +58,9 @@ comparison isolates the warm start.
 
 ## The problems
 
-Ten families, each run at three step sizes (`tiny` ×0.1, `small` ×1,
-`large` ×4 of its natural per-step parameter increment), for 30 rows and
-615 solves per arm. Warm-start payoff is a function of how far the
+Fourteen families, each run at three step sizes (`tiny` ×0.1, `small`
+×1, `large` ×4 of its natural per-step parameter increment), for 42 rows
+and 855 solves per arm. Warm-start payoff is a function of how far the
 problem moved, so a single step size would measure one point on a curve
 and call it the answer.
 
@@ -76,6 +76,16 @@ and call it the answer.
 | `rosenbrock_ring_cycle` | 10 | 1 | switch crossed in both directions | constraint RHS | nonconvex |
 | `double_well_chain` | 12 | 0 | none — empty active set throughout | objective | nonconvex |
 | `nmpc_vanderpol` | 47 | 32 | closed-loop MPC | constraint RHS | nonconvex |
+| `mpc_horizon_10` | 32 | 22 | control saturation | constraint RHS | convex |
+| `mpc_horizon_20` | 62 | 42 | control saturation | constraint RHS | convex |
+| `mpc_horizon_40` | 122 | 82 | control saturation | constraint RHS | convex |
+| `mpc_horizon_80` | 242 | 162 | control saturation | constraint RHS | convex |
+
+The four `mpc_horizon_*` families are **the same linear-quadratic MPC
+problem at four horizons** — only `N` differs, so reading down them
+isolates problem size from every other property. The parameter walks the
+initial state around a circle, which keeps every step about as hard as
+the last while rotating the set of saturated controls.
 
 The three degeneracy families cover the three distinct ways an
 active-set QP meets degeneracy, which are not interchangeable:
@@ -88,10 +98,9 @@ the case Harris's two-pass test and GMSW EXPAND exist for). The
 benchmark reports that pounce prunes that vertex's active set to its
 maximal independent subset: `|A|` never exceeds 4 of the 12 tight rows.
 
-The families are deliberately small and analytic. This is a
-*measurement* of warm-start behavior, not a scaling study — the
-conclusions about which solver to use transfer; the absolute timings do
-not.
+Apart from the horizon sweep, the families are deliberately small and
+analytic: this is a measurement of warm-start *behavior*, and small
+problems measure it cleanly.
 
 ## How a result is produced
 
@@ -110,23 +119,23 @@ Three rules make the arms comparable:
    *worse* optimum than the reference. A warm start that converges
    quickly to the wrong answer is a failure, not a win.
 
-In the run reported below, **every step of every arm passed** — 30 rows
-× 8 arms, 4920 solves, with zero correctness failures.
+In the run reported below, **every step of every arm passed** — 42 rows
+× 8 arms, 6840 solves, with zero correctness failures.
 
 ## Results
 
-Run on POUNCE 0.9.0, `tol = 1e-8`, one machine, all 24 rows.
+Run on POUNCE 0.9.0, `tol = 1e-8`, one machine, all 42 rows.
 
 ### Does warm starting pay?
 
-Totals across all 615 steps of all 30 rows:
+Totals across all 855 steps of all 42 rows:
 
 | arm | Σ outer iterations | Σ solve time | incorrect steps |
 |---|--:|--:|--:|
-| `cold-ipm` | 7796 | 4.18 s | 0 |
-| `warm-ipm` | **2399** | 2.12 s | 0 |
-| `cold-sqp` | 3998 | 13.09 s | 0 |
-| `warm-sqp` | **1261** | 2.99 s | 0 |
+| `cold-ipm` | 10288 | 6.40 s | 0 |
+| `warm-ipm` | **3628** | 3.30 s | 0 |
+| `cold-sqp` | 4238 | 29.38 s | 0 |
+| `warm-sqp` | **1501** | 21.82 s | 0 |
 
 Both solvers cut outer iterations by roughly 3×. But for the active-set
 SQP that number badly understates the effect, for a reason worth
@@ -228,6 +237,64 @@ Two rows show it, both at the largest step size:
 This is why the benchmark reports regressions per step rather than only
 a mean. A single averaged speedup would hide both.
 
+### How it scales: the MPC horizon sweep
+
+The same linear MPC at four horizons, warm/cold **wall-time ratio** —
+below 1.00 means warm starting won, above it means warm starting cost
+more than solving cold:
+
+| N | n | mean &#124;A&#124; | `tiny` SQP / IPM | `small` SQP / IPM | `large` SQP / IPM |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 32 | 31.5 | **0.27** / 0.41 | 0.38 / 0.49 | 0.84 / 0.78 |
+| 20 | 62 | 61.0 | **0.22** / 0.40 | 0.91 / 0.58 | 1.29 / 0.76 |
+| 40 | 122 | 119.6 | **0.08** / 0.28 | 0.66 / 0.55 | 1.95 / 1.00 |
+| 80 | 242 | 206.0 | **0.31** / 0.25 | 1.06 / 0.54 | **2.57** / 0.88 |
+
+The result is two-dimensional, and reading it as "the SQP loses at
+scale" would be wrong:
+
+- **At `tiny` perturbations the SQP warm start stays excellent at every
+  horizon** — its best row in the whole suite is N = 40 at 0.08, twelve
+  times faster than cold. A nearly-unchanged active set is nearly-exact
+  information no matter how large it is.
+- **At `large` perturbations it degrades monotonically with N and turns
+  harmful**: 0.84 → 1.29 → 1.95 → 2.57. At N = 80 the warm-started SQP
+  takes **2.6× longer than solving cold**.
+- **The interior-point arms barely care.** The NLP IPM stays between
+  0.25 and 1.00 across the whole grid, and the convex QP IPM is flatter
+  still (0.48 → 0.55 as N goes 10 → 80).
+
+The mechanism is visible in the working sets. The *fraction* of the
+active set that changes per step is essentially horizon-independent —
+about 3% at `large` for every N, by construction, since the same
+angular perturbation moves proportionally the same constraints:
+
+| N | mean &#124;A&#124; | churn/step at `large` | as a fraction |
+|--:|--:|--:|--:|
+| 10 | 31.5 | 1.05 | 3.3% |
+| 20 | 61.0 | 2.26 | 3.7% |
+| 40 | 119.6 | 4.21 | 3.5% |
+| 80 | 206.0 | 5.58 | 2.7% |
+
+But an active-set method pays for the **absolute** number of changes,
+not the fraction — and that grows with the problem, while each change
+also costs more as the active set grows. Two multiplying factors, which
+is why the ratio degrades faster than either alone.
+
+So the practical rule from earlier — *payoff tracks active-set churn* —
+needs sharpening: it tracks **absolute** churn, and problem size
+inflates absolute churn even when the perturbation is proportionally
+identical. For this problem the crossover where warm-started SQP stops
+beating cold sits between N = 10 and N = 20 at `large` steps, and above
+N = 80 at `small` ones.
+
+This is the quantitative version of the caveat in
+[Active-Set SQP & Warm Starts](active-set-sqp.md), which says to prefer
+the IPM for "large-scale problems with thousands of active
+inequalities". The measured crossover is much earlier than that
+suggests: on this problem it is tens to low hundreds of active
+constraints, not thousands.
+
 ### The parametric homotopy: a sharply mixed trade
 
 The `-hom` arms differ from their twins in one option, so the delta is
@@ -309,8 +376,14 @@ of 9 rows.
   previous result. It leads on most rows and needs no callbacks.
 - **For a general NLP whose active set is stable between solves** —
   `algorithm = active-set-sqp` carrying the working set. This is where
-  the largest effects live (up to 30× less inner active-set work), and
+  the largest effects live (up to 30× less inner active-set work, and a
+  12× wall-time win on the largest horizon at small perturbations), and
   the whole reason the active-set path exists.
+- **Check the crossover if your problem is large *and* moves a lot.**
+  The SQP's warm-start advantage is eroded by absolute working-set
+  churn, which grows with problem size. On the horizon sweep it turned
+  negative between N = 10 and N = 20 for large parameter steps, and the
+  interior-point paths were the safer choice there.
 - **For a problem with no active set to speak of** — unconstrained, or
   with constraints that never bind — the warm start still helps, but
   only through the primal point. Either solver is fine; the working set
@@ -379,10 +452,10 @@ protocol are reusable against any solver with a warm-start API.
 
 ## Limits of these numbers
 
-- **Small problems by design** (n ≤ 47). The rankings reflect algorithm
-  behavior, not scaling; per-iteration costs shift with size, and the
-  active-set path is documented to lose ground when the active set grows
-  into the thousands.
+- **Mostly small problems** (n ≤ 47 outside the horizon sweep, which
+  reaches n = 242). The sweep gives one scaling curve on one problem
+  shape; it is not a substitute for a large-scale study, and the
+  crossover it reports is specific to this MPC.
 - **Wall time carries Python callback overhead** for the four
   callback-driven arms. Iteration and active-set-change counts are the
   primary measurements; times are a cross-check, and vary 10–30% between

@@ -93,6 +93,28 @@ changes.
   cannot differ from its control is either a perfect null or a broken
   experiment.
 
+### Added — an MPC horizon sweep, and the crossover it locates
+
+- **`mpc_horizon_10/20/40/80`** — one linear-quadratic MPC at four horizons
+  (n = 32 → 242, block-banded Jacobian), so reading down them isolates problem
+  size from every other property. This closes the suite's last uncovered axis.
+- **The active-set SQP's warm-start advantage is eroded by absolute working-set
+  churn, and problem size inflates it.** Warm/cold wall time goes 0.84 → 1.29 →
+  1.95 → **2.57** across the four horizons at large parameter steps — at N = 80
+  a warm-started SQP solve takes 2.6× longer than solving cold. At small steps
+  it stays excellent at every horizon, including the suite's best single row
+  (0.08 at N = 40, twelve times faster than cold). The interior-point arms stay
+  between 0.25 and 1.00 across the whole grid.
+- **Mechanism, from the working sets:** the *fraction* of the active set that
+  changes per step is horizon-independent (~3% at large steps for every N), but
+  the *absolute* count grows with the problem (1.05 → 5.58 changes/step), and
+  each change costs more as the active set grows. An active-set method pays for
+  the absolute count, so two factors multiply.
+- This puts a number on the qualitative caveat in the active-set SQP docs
+  ("prefer the IPM for large-scale problems with thousands of active
+  inequalities"): the measured crossover is tens to low hundreds of active
+  constraints, not thousands. The docs now say so.
+
 ### Added — degeneracy families and a parametric-homotopy arm in the warm-start suite
 
 - **Two degeneracy families**, completing the three distinct ways an active-set

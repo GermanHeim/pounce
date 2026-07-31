@@ -115,6 +115,7 @@ the mean speedup hides the failure mode that matters most.
 | `rosenbrock_ring_cycle` | 10 | 1 | re-activation | rhs | nonconvex |
 | `double_well_chain` | 12 | 0 | none (empty active set) | objective | nonconvex |
 | `nmpc_vanderpol` | 47 | 32 | closed-loop | rhs | nonconvex |
+| `mpc_horizon_10/20/40/80` | 32–242 | 22–162 | saturation | rhs | convex |
 
 *regime* is how the active set behaves along the path; *channel* is
 where the parameter enters (objective, constraint right-hand side,
@@ -181,16 +182,19 @@ active-set QP code map onto it as follows:
 
 | property | `pounce-qp` | exercised here? |
 |---|---|---|
-| sparse or dense | sparse triplet KKT + sparse LDLᵀ; the Schur block alone is dense | **no** — families are n ≤ 47 and near-dense. Sparse coverage is the cold `.nl` Maros-Mészáros suite |
+| sparse or dense | sparse triplet KKT + sparse LDLᵀ; the Schur block alone is dense | **partly** — the `mpc_horizon_*` sweep reaches n = 242 with a block-banded Jacobian and gives one scaling curve; nothing here goes to n in the thousands |
 | convex only, or indefinite | indefinite, via §4.5 inertia control and negative-curvature ratio-test handling | **yes** — 5 of 10 families are nonconvex with indefinite ∇²L along the path; two solver defects were found there |
 | primal or dual | primal; l1-elastic phase-1 for an infeasible cold start, and the homotopy is primal-feasible by construction | n/a — there is no dual variant to compare |
 | parametric with hot starts | both: working-set hot start, and the §4.2 qpOASES-lineage homotopy | **yes** — hot starts are the `warm-*` arms; the homotopy is the `-hom` arms |
 | degeneracy | Harris two-pass, GMSW EXPAND, Bland latch, rank-deficient active sets pruned to a maximal independent subset | **yes**, all three kinds: dual (`degenerate_corner`), rank-deficient / LICQ (`redundant_rows`), primal (`degenerate_vertex`) |
 
-Still uncovered, and worth knowing: **scale**. Every family is small by
-design, so nothing here says how the sparse path or the Schur updates
-behave at n in the thousands. An MPC horizon sweep would be the natural
-addition.
+The horizon sweep (`mpc_horizon_10/20/40/80`, the same linear MPC at
+four sizes) is what covers the scale axis, and it is where the
+active-set path's warm-start advantage is measured turning *negative*:
+2.57× slower than cold at N = 80 with large parameter steps, against
+0.08× — twelve times faster — at N = 40 with small ones. What remains
+uncovered is genuinely large scale: nothing here reaches n in the
+thousands, where the sparse factorization and Schur updates dominate.
 
 ## Running it
 
