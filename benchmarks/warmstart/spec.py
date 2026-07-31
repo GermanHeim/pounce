@@ -73,6 +73,11 @@ class WarmState:
     mult_x_U: Optional[np.ndarray] = None
     mu: Optional[float] = None
     working_set: Optional[Sequence[np.ndarray]] = None
+    #: Adapter-private payload. An adapter whose warm start does not fit
+    #: the fields above (a conic solver's own primal-dual state, say) can
+    #: stash it here; nothing in the core inspects it, and no other
+    #: adapter should read it.
+    extra: Optional[dict] = None
 
 
 @dataclasses.dataclass
@@ -147,6 +152,14 @@ class ParametricFamily(ABC):
 
     #: Number of parameter steps in the path (the k=0 solve included).
     n_steps: int = 20
+
+    #: True when every instance along this family's path is literally a
+    #: convex QP — quadratic objective, linear constraints. Families that
+    #: set this can additionally be routed to a dedicated convex QP
+    #: solver (see :mod:`..qpform`); the suite's self-test verifies the
+    #: claim by re-deriving the family from the extracted QP data rather
+    #: than trusting the flag.
+    quadratic: bool = False
 
     #: True when the next parameter depends on the previous solution
     #: (closed-loop MPC / moving horizon). The runner then records the

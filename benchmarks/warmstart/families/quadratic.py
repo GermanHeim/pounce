@@ -41,6 +41,7 @@ class SimplexProjection(ParametricFamily):
     """
 
     name = "simplex_proj"
+    quadratic = True
     tags = {"regime": "flipping", "channel": "objective", "curvature": "convex"}
     n_steps = 20
 
@@ -118,6 +119,7 @@ class MovingBoundQP(ParametricFamily):
     """
 
     name = "moving_bound_qp"
+    quadratic = True
     tags = {"regime": "flipping", "channel": "bounds", "curvature": "convex"}
     n_steps = 20
 
@@ -207,6 +209,7 @@ class DegenerateCorner(ParametricFamily):
     """
 
     name = "degenerate_corner"
+    quadratic = True
     tags = {"regime": "degenerate", "channel": "objective", "curvature": "convex"}
     n_steps = 21  # odd, so a step lands exactly on the midpoint
 

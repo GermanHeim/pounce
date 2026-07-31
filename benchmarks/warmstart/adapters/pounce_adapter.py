@@ -9,6 +9,8 @@ cold-ipm     ``interior-point`` (default)         none
 cold-sqp     ``active-set-sqp``                   none
 warm-ipm     ``interior-point``                   ``WarmStart`` (x, λ, z, μ)
 warm-sqp     ``active-set-sqp``                   working set + previous x
+cold-qp-ipm  ``pounce.solve_qp`` (pounce-convex)  none
+warm-qp-ipm  ``pounce.solve_qp``                  previous ``QpResult``
 ===========  ===================================  =========================
 
 Two deliberate choices worth knowing when reading the numbers:
@@ -20,6 +22,20 @@ Two deliberate choices worth knowing when reading the numbers:
   is timed. It also sidesteps the fact that ``WarmStart`` applies its
   enabling options through ``add_option``, which would otherwise
   persist on a reused handle and quietly contaminate a later solve.
+
+* **The QP arms do not go through the callback interface at all.** The
+  convex solver takes matrix data, so each step assembles ``(P, c, A,
+  b, G, h, lb, ub)`` from the family (see :mod:`..qpform`) and hands it
+  over. The assembly is inside the timed region and routed through the
+  harness's counters, because it is work a caller genuinely has to do —
+  but it happens *once per step*, where the callback-driven arms
+  re-evaluate every iteration. That is a real advantage of the QP path
+  on a QP, not a measurement artifact, and it is why the report keeps
+  these arms in their own section rather than in the headline table.
+  ``check_psd`` is off: the suite's self-test already proves ``P`` is
+  positive semidefinite for every family that claims to be a QP, so
+  leaving the guard on would time an O(n³) eigenvalue decomposition
+  that a caller who knew their problem would not pay.
 
 * **Tolerances are pinned on both paths** rather than left at their
   defaults, since the two paths have separate convergence-test knobs
@@ -38,12 +54,16 @@ import numpy as np
 
 import pounce
 
+from .. import qpform
 from ..spec import ParametricFamily, StepResult, WarmState
 from ..sparsity import SparseCallbacks
-from .base import SolverAdapter, is_warm
+from .base import QP_ARMS, SolverAdapter, is_warm
 
 # ApplicationReturnStatus values that count as a solved step.
 _OK_STATUS = (0, 1)  # SolveSucceeded, SolvedToAcceptableLevel
+
+# `solve_qp` status strings that count as a solved step.
+_OK_QP_STATUS = ("optimal", "optimal_inaccurate")
 
 
 class PounceAdapter(SolverAdapter):
@@ -53,7 +73,14 @@ class PounceAdapter(SolverAdapter):
         self.max_iter = max_iter
 
     def supports(self, arm: str) -> bool:
-        return arm in ("cold-ipm", "cold-sqp", "warm-ipm", "warm-sqp")
+        return arm in (
+            "cold-ipm",
+            "cold-sqp",
+            "warm-ipm",
+            "warm-sqp",
+            "cold-qp-ipm",
+            "warm-qp-ipm",
+        )
 
     # -- problem construction --------------------------------------
 
@@ -82,6 +109,65 @@ class PounceAdapter(SolverAdapter):
             prob.add_option("max_iter", self.max_iter)
         return prob
 
+    # -- the convex-QP path ----------------------------------------
+
+    def _solve_qp_ipm(
+        self,
+        family: ParametricFamily,
+        callbacks: SparseCallbacks,
+        arm: str,
+        warm: Optional[WarmState],
+        step: int,
+        tol: float,
+    ) -> Tuple[StepResult, Optional[WarmState]]:
+        callbacks.reset_counts()
+        seed = warm.extra.get("qp") if (warm is not None and warm.extra) else None
+
+        t0 = time.perf_counter()
+        qp = qpform.extract(family, callbacks)
+        res = pounce.solve_qp(
+            P=qp.P,
+            c=qp.c,
+            A=qp.A,
+            b=qp.b,
+            G=qp.G,
+            h=qp.h,
+            lb=qp.lb,
+            ub=qp.ub,
+            tol=tol,
+            max_iter=self.max_iter,
+            warm_start=seed if is_warm(arm) else None,
+            check_psd=False,
+        )
+        elapsed = time.perf_counter() - t0
+
+        resid = res.residuals or {}
+        result = StepResult(
+            step=step,
+            theta=[],
+            success=res.status in _OK_QP_STATUS,
+            status=0 if res.status in _OK_QP_STATUS else -1,
+            status_msg=str(res.status),
+            iters=int(res.iters),
+            solve_time=elapsed,
+            # The QP form drops the objective's constant term; add it
+            # back or every objective comparison against the other arms
+            # is off by a per-step offset.
+            obj=float(res.obj) + qp.f0,
+            kkt_error=float(resid.get("kkt_error", np.nan)),
+            constr_viol=float(resid.get("primal_infeasibility", np.nan)),
+            # No working set: this is an interior-point method.
+            n_active=None,
+            n_qp_solves=None,
+            n_qp_ws_changes=None,
+            **callbacks.counts(),
+        )
+        next_warm = WarmState(
+            x=np.asarray(res.x, dtype=float).copy(),
+            extra={"qp": res},
+        )
+        return result, next_warm
+
     # -- one step --------------------------------------------------
 
     def solve(
@@ -94,6 +180,9 @@ class PounceAdapter(SolverAdapter):
         step: int,
         tol: float,
     ) -> Tuple[StepResult, Optional[WarmState]]:
+        if arm in QP_ARMS:
+            return self._solve_qp_ipm(family, callbacks, arm, warm, step, tol)
+
         prob = self._build(family, callbacks, arm, tol)
         callbacks.reset_counts()
 

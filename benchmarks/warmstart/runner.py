@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .adapters.base import REFERENCE_ARM, SolverAdapter, is_warm
+from .adapters.base import REFERENCE_ARM, SolverAdapter, arm_applies, is_warm
 from .families import make
 from .spec import SCALES, ParametricFamily, StepResult, WarmState
 from .sparsity import SparseCallbacks
@@ -196,6 +196,10 @@ def run_family_scale(
             continue
         if not adapter.supports(arm):
             skipped[arm] = f"{adapter.name} does not support {arm}"
+            continue
+        why = arm_applies(arm, family)
+        if why is not None:
+            skipped[arm] = why
             continue
         res, sol = _run_path(adapter, family, callbacks, arm, path, tol)
         arm_results[arm] = res

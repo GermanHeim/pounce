@@ -221,7 +221,10 @@ def render(payload: dict) -> str:
             "| Σ time (s) | f-evals | failed | bad | better | max KKT |"
         )
         w("|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
-        for arm in ("cold-ipm", "warm-ipm", "cold-sqp", "warm-sqp"):
+        for arm in (
+            "cold-ipm", "warm-ipm", "cold-sqp", "warm-sqp",
+            "cold-qp-ipm", "warm-qp-ipm",
+        ):
             steps = run["arms"].get(arm)
             if not steps:
                 continue
@@ -237,6 +240,56 @@ def render(payload: dict) -> str:
             )
         for arm, why in run.get("skipped", {}).items():
             w(f"| {arm} | *skipped* | | | | | | | | | {why} |")
+        w("")
+
+    # -- three-way on the QP-shaped families ------------------------
+    qp_runs = [r for r in runs if "cold-qp-ipm" in r["arms"]]
+    if qp_runs:
+        w("## Dedicated convex QP solver vs the two general paths")
+        w("")
+        w(
+            "Only for families whose instances are literally QPs — the "
+            "others skip these arms with a reason. Read wall time with the "
+            "asymmetry in mind: the QP arms are handed the problem in "
+            "matrix form once per step, while the general paths call back "
+            "into the model at every iteration. Iteration counts are not "
+            "comparable across *methods* either (an active-set pivot and "
+            "an interior-point step are different units of work); the "
+            "column that compares like with like is each arm against "
+            "itself, cold vs warm."
+        )
+        w("")
+        w(
+            "| family | scale | qp-ipm cold→warm iters | nlp-ipm cold→warm "
+            "| sqp cold→warm (QP active-set) | qp-ipm time (ms) cold→warm "
+            "| fastest warm arm |"
+        )
+        w("|---|---|--:|--:|--:|--:|---|")
+        for run in qp_runs:
+            a = run["arms"]
+            def tot(arm, key="iters"):
+                return sum(s[key] for s in a[arm]) if arm in a else None
+            def ms(arm):
+                return sum(s["solve_time"] for s in a[arm]) * 1e3 if arm in a else None
+            qp_pair = _pair_stats(run, "warm-qp-ipm", "cold-qp-ipm")
+            sqp_pair = _pair_stats(run, "warm-sqp", "cold-sqp")
+            warm_times = {
+                arm: ms(arm)
+                for arm in ("warm-ipm", "warm-sqp", "warm-qp-ipm")
+                if ms(arm) is not None
+            }
+            fastest = min(warm_times, key=warm_times.get) if warm_times else "—"
+            w(
+                f"| `{run['family']}` | {run['scale']} "
+                f"| {tot('cold-qp-ipm')}→{tot('warm-qp-ipm')} "
+                f"({_fmt(qp_pair and qp_pair['speedup'], '.2f')}×) "
+                f"| {tot('cold-ipm')}→{tot('warm-ipm')} "
+                f"| {sqp_pair['qp_cold'] if sqp_pair else '—'}→"
+                f"{sqp_pair['qp_warm'] if sqp_pair else '—'} "
+                f"({_fmt(sqp_pair and sqp_pair.get('qp_speedup'), '.2f')}×) "
+                f"| {_fmt(ms('cold-qp-ipm'), '.1f')}→{_fmt(ms('warm-qp-ipm'), '.1f')} "
+                f"| {fastest} |"
+            )
         w("")
 
     # -- regressions ------------------------------------------------

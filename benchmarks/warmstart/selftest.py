@@ -13,6 +13,12 @@ Checks, at several points along each family's path:
   ``L = obj_factor·f + λᵀg`` (the cyipopt sign convention the
   families are written to)
 
+For any family claiming ``quadratic = True`` it additionally re-derives
+the family from the extracted standard-form QP data (:mod:`qpform`) —
+objective, gradient, and every constraint row — and checks that ``P`` is
+symmetric positive semidefinite. A family that fails this is not a QP
+and must not be handed to the convex solver, whatever it declares.
+
 Run with ``python -m warmstart.selftest`` (no solver required).
 """
 
@@ -23,6 +29,7 @@ from typing import List
 
 import numpy as np
 
+from . import qpform
 from .families import REGISTRY, make
 from .spec import ParametricFamily
 from .sparsity import SparseCallbacks
@@ -147,12 +154,21 @@ def check_family(name: str, verbose: bool = True) -> List[str]:
             "outside the sampled sparsity pattern"
         )
 
+    # Families that claim to be QPs must survive being turned into one.
+    if family.quadratic:
+        for theta in thetas:
+            family.set_theta(theta)
+            qp = qpform.extract(family)
+            for msg in qpform.verify(family, qp, rng):
+                failures.append(f"{name}: QP extraction — {msg} (θ={theta})")
+
     if verbose:
         status = "FAIL" if failures else "ok"
+        qp_note = " qp:ok" if family.quadratic and not failures else ""
         print(
-            f"  {name:<18} n={family.n:<4} m={family.m:<4} "
+            f"  {name:<22} n={family.n:<4} m={family.m:<4} "
             f"grad={worst['grad']:.1e} jac={worst['jac']:.1e} "
-            f"hess={worst['hess']:.1e}  {status}"
+            f"hess={worst['hess']:.1e}  {status}{qp_note}"
         )
     return failures
 

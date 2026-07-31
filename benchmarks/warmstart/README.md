@@ -28,18 +28,34 @@ nearest public things and why each does not cover it:
 
 ## The four arms
 
-| arm | algorithm | seeded with |
-|---|---|---|
-| `cold-ipm` | interior point | nothing — the family's cold start |
-| `cold-sqp` | active-set SQP | nothing |
-| `warm-ipm` | interior point | previous step's primal-dual point and μ |
-| `warm-sqp` | active-set SQP | previous step's working set and point |
+| arm | algorithm | seeded with | runs on |
+|---|---|---|---|
+| `cold-ipm` | general NLP filter-IPM | nothing — the family's cold start | every family |
+| `cold-sqp` | active-set SQP | nothing | every family |
+| `warm-ipm` | general NLP filter-IPM | previous step's primal-dual point and μ | every family |
+| `warm-sqp` | active-set SQP | previous step's working set and point | every family |
+| `cold-qp-ipm` | dedicated convex QP IPM (`pounce.solve_qp`) | nothing | QP families only |
+| `warm-qp-ipm` | dedicated convex QP IPM | previous step's primal-dual point | QP families only |
 
 Both cold arms are there so the warm-start effect can be separated
 from the algorithm change. `warm-sqp` beating `cold-ipm` proves
 nothing on its own — it mixes "warm started" with "switched
 algorithms". Each warm arm is therefore scored against its *own* cold
 counterpart.
+
+The two `qp-ipm` arms are the dedicated convex solver, and they are
+different in kind from the other four: they take the problem as
+matrices rather than through callbacks. `qpform.py` extracts
+`(P, c, A, b, G, h, lb, ub)` from a family whose instances are QPs —
+verified by the self-test, which re-derives the family's objective,
+gradient, and every constraint row from the extracted data rather than
+trusting the family's `quadratic = True` claim. Families that are not
+QPs skip these arms with a stated reason. Two consequences worth
+holding on to when reading the numbers: the QP arms evaluate the model
+*once per step* where the others re-evaluate every iteration, and an
+interior-point iteration and an active-set pivot are not the same unit
+of work. That is why they live in their own report section, compared
+mainly against themselves cold-vs-warm.
 
 `cold-ipm` is also the **reference arm**: the arm every other is
 compared against, and the arm that generates the parameter path for

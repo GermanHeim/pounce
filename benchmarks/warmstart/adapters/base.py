@@ -28,6 +28,15 @@ defines:
 ``warm-sqp``
     Active-set SQP seeded with the previous step's working set and
     primal point. The capability under test.
+``cold-qp-ipm`` / ``warm-qp-ipm``
+    The dedicated convex QP interior-point solver, handed the problem
+    in matrix form rather than through callbacks, cold and seeded with
+    the previous step's primal-dual point. Only defined for families
+    whose instances are literally QPs (``ParametricFamily.quadratic``);
+    on any other family these arms are skipped with a reason rather
+    than silently omitted. Note the asymmetry when reading wall time:
+    this arm receives the problem data once per step, where the
+    callback-driven arms re-evaluate every iteration.
 
 An adapter declares which arms it supports; unsupported arms are
 skipped and reported as such rather than silently omitted.
@@ -43,7 +52,17 @@ import numpy as np
 from ..spec import ParametricFamily, StepResult, WarmState
 from ..sparsity import SparseCallbacks
 
-ARMS: List[str] = ["cold-ipm", "cold-sqp", "warm-ipm", "warm-sqp"]
+ARMS: List[str] = [
+    "cold-ipm",
+    "cold-sqp",
+    "warm-ipm",
+    "warm-sqp",
+    "cold-qp-ipm",
+    "warm-qp-ipm",
+]
+
+#: Arms that need the family's instances to be QPs.
+QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
 
 #: The arm whose per-step solutions every other arm is checked
 #: against, and which generates the parameter path for adaptive
@@ -53,6 +72,20 @@ REFERENCE_ARM = "cold-ipm"
 
 def is_warm(arm: str) -> bool:
     return arm.startswith("warm")
+
+
+def arm_applies(arm: str, family: ParametricFamily) -> Optional[str]:
+    """``None`` if the arm is defined for this family, else why not.
+
+    Separate from :meth:`SolverAdapter.supports`, which is about what
+    the *solver* can do. This is about what the *problem* admits: a
+    convex QP solver has nothing to say about a family with nonlinear
+    constraints, and running it there would be a category error rather
+    than a slow result.
+    """
+    if arm in QP_ARMS and not family.quadratic:
+        return "family is not a QP (nonlinear objective or constraints)"
+    return None
 
 
 class SolverAdapter(ABC):

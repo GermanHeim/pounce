@@ -17,7 +17,9 @@ changes.
   related solves. The unit of work here is a parametric family plus a
   scripted path through its parameter space, solved end to end by four arms
   (`cold-ipm`, `cold-sqp`, `warm-ipm`, `warm-sqp`) so the warm-start effect
-  is separated from the algorithm change. Eight families cover the active-set
+  is separated from the algorithm change, plus two more (`cold-qp-ipm` /
+  `warm-qp-ipm`) that route the QP-shaped families through the dedicated
+  convex solver for a three-way comparison. Eight families cover the active-set
   regimes that decide whether warm starting pays — stable, flipping,
   degenerate (a path that passes exactly through a zero multiplier), a clean
   activation switch, re-activation from an empty working set, an entirely

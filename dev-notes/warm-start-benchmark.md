@@ -196,6 +196,42 @@ set to carry, the QP-active-set column is exactly 1.00× (0→0) and the
 The QP-shaped families are the mirror image — outer flat at 1.00×, all
 effect inner. Neither column alone is a summary of this suite.
 
+## The three-way: dedicated convex QP solver vs the two general paths
+
+Added after the first results raised the question the suite could not
+then answer. `cold-qp-ipm` / `warm-qp-ipm` route the three QP-shaped
+families through `pounce.solve_qp` (pounce-convex). `qpform.py` does the
+extraction; the self-test verifies it by re-deriving the family from the
+extracted data, because a silent extraction bug would produce plausible
+and wrong numbers rather than an error.
+
+Wall time over the 9 QP-family rows, geometric mean (ms):
+
+| cold-ipm | cold-sqp | cold-qp-ipm | warm-ipm | warm-sqp | warm-qp-ipm |
+|--:|--:|--:|--:|--:|--:|
+| 152.5 | 102.3 | 113.9 | 65.7 | **51.0** | 70.3 |
+
+Two results worth keeping:
+
+- **Warm-started active-set SQP is the fastest arm on 8 of the 9 rows**,
+  including against the dedicated convex solver on its home turf. The
+  one exception is `moving_bound_qp @ large`, where the active set
+  churns hardest (15 of 19 steps change it) and `warm-qp-ipm` wins.
+- **The convex IPM warm-starts weakly**: 1.17–1.50× on iterations,
+  against 4–16× for the SQP's inner active-set work. That is the
+  textbook asymmetry — an interior-point method cannot exploit a
+  previous solution sitting exactly on the boundary, which is precisely
+  where a QP's solution lives. Notably the *general* NLP filter-IPM
+  warm-starts better in iteration terms (e.g. 182→28 on
+  `simplex_proj @ tiny`) than the dedicated convex one does, because
+  `pounce.WarmStart` seeds `mu_init` from the converged barrier
+  parameter and tightens the bound pushes, while the convex path takes
+  a plain primal-dual seed.
+
+Caveat kept in the report itself: the QP arms receive matrix data once
+per step where the callback arms re-evaluate per iteration, so the wall
+time favors them by an amount this suite does not separate out.
+
 ## Not done yet
 
 - **A shift-based warm-start arm for the closed-loop family.** MPC
@@ -207,9 +243,10 @@ effect inner. Neither column alone is a summary of this suite.
   `Δx ≈ ∂x*/∂p · Δp` before the SQP corrector runs — the pattern
   documented in `docs/src/active-set-sqp.md` §4. It would slot in as a
   fifth arm and is the natural next addition.
-- **An external solver arm.** The adapter interface exists and is
-  unused; Ipopt through cyipopt would be the obvious first one, using
-  the same families unchanged.
+- **An external solver arm.** The adapter interface is exercised by
+  the pounce adapter's three paths but has no second solver behind it;
+  Ipopt through cyipopt would be the obvious first one, using the same
+  families unchanged.
 - **Composite-report integration.** The suite writes its own
   `results.md` and stays out of `BENCHMARK_REPORT.md`, which is built
   around per-problem cold-solve rows against an Ipopt reference and
