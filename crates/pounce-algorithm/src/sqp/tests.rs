@@ -1216,69 +1216,6 @@ impl SqpProblemSpec for RosenbrockBallNlp {
             irow,
             jcol,
             vals,
-
-// ─────────────────────────────────────────────────────────────────
-// Simplex projection with bounds — the fixture the warm-start
-// benchmark (`benchmarks/warmstart/`) is built around, shrunk to
-// n = 4:
-//
-//     min ½‖x − p‖²   s.t.  Σx = 1,  x ≥ 0,   p = (0.9, 0.4, −0.2, 0.1)
-//
-// Two components clamp at zero, so a cold QP has to *find* that
-// active set, while a warm-started one is handed it.
-// ─────────────────────────────────────────────────────────────────
-struct SimplexProjNlp;
-
-const SIMPLEX_P: [f64; 4] = [0.9, 0.4, -0.2, 0.1];
-
-impl SqpProblemSpec for SimplexProjNlp {
-    fn n(&self) -> usize {
-        4
-    }
-    fn m(&self) -> usize {
-        1
-    }
-    fn x_init(&self) -> Vec<f64> {
-        vec![0.25; 4]
-    }
-    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
-        (vec![0.0; 4], vec![NLP_UPPER_BOUND_INF; 4])
-    }
-    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
-        (vec![1.0], vec![1.0])
-    }
-    fn eval_f(&mut self, x: &[f64]) -> f64 {
-        0.5 * x
-            .iter()
-            .zip(SIMPLEX_P.iter())
-            .map(|(xi, pi)| (xi - pi) * (xi - pi))
-            .sum::<f64>()
-    }
-    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
-        x.iter()
-            .zip(SIMPLEX_P.iter())
-            .map(|(xi, pi)| xi - pi)
-            .collect()
-    }
-    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
-        vec![x.iter().sum::<f64>()]
-    }
-    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
-        Triplet {
-            n_rows: 1,
-            n_cols: 4,
-            irow: vec![1; 4],
-            jcol: vec![1, 2, 3, 4],
-            vals: vec![1.0; 4],
-        }
-    }
-    fn eval_hess_lag(&mut self, _x: &[f64], _lambda_g: &[f64]) -> Triplet {
-        Triplet {
-            n_rows: 4,
-            n_cols: 4,
-            irow: vec![1, 2, 3, 4],
-            jcol: vec![1, 2, 3, 4],
-            vals: vec![1.0; 4],
         }
     }
 }
@@ -1329,48 +1266,6 @@ fn issue_416_indefinite_rosenbrock_converges_at_the_default_qp_budget() {
             );
         }
     }
-#[test]
-fn sqp_reports_qp_working_set_changes_and_warm_start_removes_them() {
-    // `n_qp_working_set_changes` is the measurement a working-set
-    // warm start is judged on, and the only one that moves on a
-    // QP-shaped NLP: the outer loop terminates in one iteration
-    // either way, so an outer-iteration comparison shows nothing.
-    // Cold must pay for finding the active set; warm-started at the
-    // optimum must pay nothing.
-    let mut nlp = SimplexProjNlp;
-
-    let qp_solver_a =
-        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
-    let mut alg_a = SqpAlgorithm::new(qp_solver_a, SqpOptions::default());
-    let cold = alg_a.optimize(&mut nlp).unwrap();
-    assert_eq!(cold.status, SqpStatus::Optimal);
-    assert!(
-        cold.n_qp_working_set_changes > 0,
-        "a cold solve has to search for the active set, but reported \
-         {} working-set changes over {} QP solves",
-        cold.n_qp_working_set_changes,
-        cold.n_qp_solves
-    );
-
-    let warm = SqpIterates {
-        x: cold.x.clone(),
-        lambda_g: cold.lambda_g.clone(),
-        lambda_x: cold.lambda_x.clone(),
-        working: Some(cold.working_set.clone().expect("cold solve produces a WS")),
-    };
-    let qp_solver_b =
-        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
-    let mut alg_b = SqpAlgorithm::new(qp_solver_b, SqpOptions::default());
-    let hot = alg_b
-        .optimize_with_warm_start(&mut nlp, Some(warm))
-        .unwrap();
-    assert_eq!(hot.status, SqpStatus::Optimal);
-    assert_eq!(
-        hot.n_qp_working_set_changes, 0,
-        "warm-started at the optimum with the right working set, no \
-         active-set change should be needed"
-    );
-    assert!(hot.n_qp_working_set_changes < cold.n_qp_working_set_changes);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1537,4 +1432,114 @@ fn issue_423_unconstrained_nonconvex_survives_an_unbounded_model() {
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Simplex projection with bounds — the fixture the warm-start
+// benchmark (`benchmarks/warmstart/`) is built around, shrunk to
+// n = 4:
+//
+//     min ½‖x − p‖²   s.t.  Σx = 1,  x ≥ 0,   p = (0.9, 0.4, −0.2, 0.1)
+//
+// Two components clamp at zero, so a cold QP has to *find* that
+// active set, while a warm-started one is handed it.
+// ─────────────────────────────────────────────────────────────────
+struct SimplexProjNlp;
+
+const SIMPLEX_P: [f64; 4] = [0.9, 0.4, -0.2, 0.1];
+
+impl SqpProblemSpec for SimplexProjNlp {
+    fn n(&self) -> usize {
+        4
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.25; 4]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0; 4], vec![NLP_UPPER_BOUND_INF; 4])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![1.0], vec![1.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        0.5 * x
+            .iter()
+            .zip(SIMPLEX_P.iter())
+            .map(|(xi, pi)| (xi - pi) * (xi - pi))
+            .sum::<f64>()
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        x.iter()
+            .zip(SIMPLEX_P.iter())
+            .map(|(xi, pi)| xi - pi)
+            .collect()
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x.iter().sum::<f64>()]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 4,
+            irow: vec![1; 4],
+            jcol: vec![1, 2, 3, 4],
+            vals: vec![1.0; 4],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 4,
+            n_cols: 4,
+            irow: vec![1, 2, 3, 4],
+            jcol: vec![1, 2, 3, 4],
+            vals: vec![1.0; 4],
+        }
+    }
+}
+
+#[test]
+fn sqp_reports_qp_working_set_changes_and_warm_start_removes_them() {
+    // `n_qp_working_set_changes` is the measurement a working-set
+    // warm start is judged on, and the only one that moves on a
+    // QP-shaped NLP: the outer loop terminates in one iteration
+    // either way, so an outer-iteration comparison shows nothing.
+    // Cold must pay for finding the active set; warm-started at the
+    // optimum must pay nothing.
+    let mut nlp = SimplexProjNlp;
+
+    let qp_solver_a =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg_a = SqpAlgorithm::new(qp_solver_a, SqpOptions::default());
+    let cold = alg_a.optimize(&mut nlp).unwrap();
+    assert_eq!(cold.status, SqpStatus::Optimal);
+    assert!(
+        cold.n_qp_working_set_changes > 0,
+        "a cold solve has to search for the active set, but reported \
+         {} working-set changes over {} QP solves",
+        cold.n_qp_working_set_changes,
+        cold.n_qp_solves
+    );
+
+    let warm = SqpIterates {
+        x: cold.x.clone(),
+        lambda_g: cold.lambda_g.clone(),
+        lambda_x: cold.lambda_x.clone(),
+        working: Some(cold.working_set.clone().expect("cold solve produces a WS")),
+    };
+    let qp_solver_b =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg_b = SqpAlgorithm::new(qp_solver_b, SqpOptions::default());
+    let hot = alg_b
+        .optimize_with_warm_start(&mut nlp, Some(warm))
+        .unwrap();
+    assert_eq!(hot.status, SqpStatus::Optimal);
+    assert_eq!(
+        hot.n_qp_working_set_changes, 0,
+        "warm-started at the optimum with the right working set, no \
+         active-set change should be needed"
+    );
+    assert!(hot.n_qp_working_set_changes < cold.n_qp_working_set_changes);
 }
