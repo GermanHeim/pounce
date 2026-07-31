@@ -1267,3 +1267,169 @@ fn issue_416_indefinite_rosenbrock_converges_at_the_default_qp_budget() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Issue #423 fixture — a chain of coupled double wells.
+//
+//     min Σᵢ (xᵢ² − cᵢ)² + K Σᵢ (xᵢ₊₁ − xᵢ)²
+//
+// `m = 0`, every variable bound infinite: the configuration with
+// **nothing that can ever block a ratio test**. Started at
+// `x = 0.35·1`, where `12xᵢ² − 4cᵢ < 0` for every i, so the very
+// first ∇²L is indefinite. The objective is a sum of quartic wells
+// and is bounded below, so the NLP is not unbounded.
+//
+// #419 made an unblocked non-positive-curvature direction a
+// recession certificate. Here every indefinite iterate produces one,
+// the driver's re-verification correctly says "the NLP is not
+// unbounded", and before #423 there was no third branch: the solve
+// died at outer iteration 1 with `QpStepFailed`
+// (`Search_Direction_Becomes_Too_Small`) at f = 26.03, ~950× the
+// f = 0.027424 the interior-point path and the damped-BFGS SQP both
+// reach from the same start.
+// ─────────────────────────────────────────────────────────────────
+struct DoubleWellChainNlp {
+    n: usize,
+}
+
+impl DoubleWellChainNlp {
+    /// Coupling stiffness K.
+    const K: Number = 0.5;
+    /// Well centres `cᵢ`, spread over `[0.6, 2.4]`.
+    fn c(&self, i: usize) -> Number {
+        0.6 + 1.8 * (i as Number) / ((self.n - 1) as Number)
+    }
+}
+
+impl SqpProblemSpec for DoubleWellChainNlp {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<Number> {
+        vec![0.35; self.n]
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (
+            vec![NLP_LOWER_BOUND_INF; self.n],
+            vec![NLP_UPPER_BOUND_INF; self.n],
+        )
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (Vec::new(), Vec::new())
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        let mut f = 0.0;
+        for (i, &xi) in x.iter().enumerate() {
+            let w = xi * xi - self.c(i);
+            f += w * w;
+        }
+        for i in 0..self.n - 1 {
+            let d = x[i + 1] - x[i];
+            f += Self::K * d * d;
+        }
+        f
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        let mut g: Vec<Number> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| 4.0 * xi * (xi * xi - self.c(i)))
+            .collect();
+        for i in 0..self.n - 1 {
+            let d = 2.0 * Self::K * (x[i + 1] - x[i]);
+            g[i] -= d;
+            g[i + 1] += d;
+        }
+        g
+    }
+    fn eval_c(&mut self, _x: &[Number]) -> Vec<Number> {
+        Vec::new()
+    }
+    fn eval_jac_c(&mut self, _x: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: self.n,
+            irow: Vec::new(),
+            jcol: Vec::new(),
+            vals: Vec::new(),
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], _lambda_g: &[Number]) -> Triplet {
+        let n = self.n;
+        let mut diag: Vec<Number> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| 12.0 * xi * xi - 4.0 * self.c(i))
+            .collect();
+        for d in diag.iter_mut().take(n - 1) {
+            *d += 2.0 * Self::K;
+        }
+        for d in diag.iter_mut().skip(1) {
+            *d += 2.0 * Self::K;
+        }
+        let mut irow: Vec<Index> = (1..=n as Index).collect();
+        let mut jcol: Vec<Index> = (1..=n as Index).collect();
+        let mut vals = diag;
+        for i in 0..n - 1 {
+            irow.push(i as Index + 2);
+            jcol.push(i as Index + 1);
+            vals.push(-2.0 * Self::K);
+        }
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+}
+
+#[test]
+fn issue_423_unconstrained_nonconvex_survives_an_unbounded_model() {
+    // (n, local minimum reached from `0.35·1` — the value the
+    // interior-point path and the pre-#419 SQP both return).
+    for (n, f_opt) in [(12, 0.027424), (20, 0.016089)] {
+        for hess in [SqpHessianSource::Exact, SqpHessianSource::DampedBfgs] {
+            for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+                let qp_solver = ParametricActiveSetSolver::new(Box::new(
+                    pounce_feral::FeralSolverInterface::new(),
+                ));
+                let opts = SqpOptions {
+                    hessian: hess,
+                    globalization: glob,
+                    ..SqpOptions::default()
+                };
+                let mut alg = SqpAlgorithm::new(qp_solver, opts);
+                let mut nlp = DoubleWellChainNlp { n };
+                let res = alg.optimize(&mut nlp).unwrap();
+
+                assert_eq!(
+                    res.status,
+                    SqpStatus::Optimal,
+                    "n={n} hess={hess:?} glob={glob:?}: {:?} after {} iters \
+                     (f={:.6}, stationarity={:.2e})",
+                    res.status,
+                    res.n_iter,
+                    res.obj,
+                    res.final_stationarity,
+                );
+                // The regression parked at f = 26.03 for n = 12 — ~950x
+                // the optimum — after a single outer iteration.
+                assert!(
+                    (res.obj - f_opt).abs() < 1e-5,
+                    "n={n} hess={hess:?} glob={glob:?}: f={:.6}, expected {f_opt:.6}",
+                    res.obj,
+                );
+                assert!(
+                    res.final_stationarity <= 1e-4,
+                    "n={n} hess={hess:?} glob={glob:?}: stationarity {:.2e}",
+                    res.final_stationarity,
+                );
+            }
+        }
+    }
+}

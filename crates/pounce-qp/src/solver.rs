@@ -380,6 +380,13 @@ impl ParametricActiveSetSolver {
                 }
             }
 
+            if !alpha.is_finite() && !opts.certify_recession_ray {
+                // The caller wants a point, not a verdict (gh #423): take
+                // the δ-shifted proximal step and keep iterating. See
+                // `QpOptions::certify_recession_ray`.
+                alpha = 1.0;
+            }
+
             if !alpha.is_finite() {
                 // The model falls forever along `p` and no bound blocks:
                 // a certified recession ray (same F2 certificate as
@@ -625,6 +632,11 @@ impl ParametricActiveSetSolver {
                     }
                 }
             }
+            if !alpha.is_finite() && !opts.certify_recession_ray {
+                // Point, not verdict (gh #423) — see
+                // `QpOptions::certify_recession_ray`.
+                alpha = 1.0;
+            }
             if !alpha.is_finite() {
                 // Nonpositive curvature along `p` with no blocking bound:
                 // certified recession ray (see `solve_box_constrained`).
@@ -774,7 +786,11 @@ impl ParametricActiveSetSolver {
         // clause `‖Hd‖∞ ≈ 0` (structural-zero floor, see
         // `ray_is_unbounded_descent`) rejects the former (there `‖Hd‖∞ ≈
         // ‖H‖`) and admits the latter.
-        if delta > 0.0 {
+        // `certify_recession_ray = false` skips the N1 test outright (gh
+        // #423): `x` here IS the δ-shifted proximal point — the exact
+        // minimizer of `q(y) + ½δ‖y‖²` over `Ay = b` — which is the step
+        // the caller asked for in place of the certificate.
+        if delta > 0.0 && opts.certify_recession_ray {
             // Feasibility of the candidate ray `d = x/‖x‖`: the saddle
             // solve enforced `Ax = b` exactly, so `Ad = b/‖x‖`, which the
             // blow-up drives to ~0. Verify it explicitly (cheap guard;
@@ -1244,8 +1260,14 @@ impl ParametricActiveSetSolver {
             // `Hp = 0`. `ray_is_unbounded_descent` cannot see that case (it
             // demands zero curvature, correctly, since it also serves the
             // PSD paths), so it is checked separately below.
+            //
+            // Both are suppressed by `certify_recession_ray = false`, which
+            // asks for a point rather than a verdict (gh #423); the α clamp
+            // below then turns the unblocked direction into the δ-shifted
+            // proximal step and the loop carries on.
             if candidates.is_empty()
                 && delta > 0.0
+                && opts.certify_recession_ray
                 && (!alpha.is_finite() || ray_is_unbounded_descent(qp.h, qp.g, &x, &p))
             {
                 let ray = p.clone();
@@ -1271,10 +1293,12 @@ impl ParametricActiveSetSolver {
                 alpha = 0.0;
             }
             if !alpha.is_finite() {
-                // Unreachable in principle: an infinite `alpha_cap` survives
-                // `select_blocker` only with an empty candidate list, which
-                // the F2 return above consumes. Clamp rather than propagate a
-                // non-finite iterate if a NaN ratio ever gets here.
+                // The δ-shifted proximal step. Reached either when
+                // `certify_recession_ray` declined the F2 return just above,
+                // or — in principle unreachably, since an infinite
+                // `alpha_cap` survives `select_blocker` only with an empty
+                // candidate list — if a NaN ratio ever gets here; clamping
+                // beats propagating a non-finite iterate.
                 alpha = 1.0;
             }
 
@@ -2220,7 +2244,11 @@ impl ParametricActiveSetSolver {
             // structural-zero floor), so a PD-reduced-Hessian Newton step
             // never certifies. F2(b) — the negative-curvature sibling, an
             // infinite `alpha_cap` with nothing to block it — rides along.
+            // Both are suppressed by `certify_recession_ray = false` (gh
+            // #423); the α clamp below then takes the δ-shifted proximal
+            // step instead.
             if candidates.is_empty()
+                && opts.certify_recession_ray
                 && (!alpha.is_finite() || ray_is_unbounded_descent(qp.h, qp.g, &x, &p))
             {
                 let ray = p.clone();
@@ -2246,10 +2274,12 @@ impl ParametricActiveSetSolver {
                 alpha = 0.0;
             }
             if !alpha.is_finite() {
-                // Unreachable in principle — an infinite cap survives
-                // `select_blocker` only with an empty candidate list, which
-                // the F2 return above consumes. Clamp rather than propagate
-                // a non-finite iterate if a NaN ratio ever gets here.
+                // The δ-shifted proximal step — reached when
+                // `certify_recession_ray` declined the F2 return above, or
+                // (unreachably in principle, since an infinite cap survives
+                // `select_blocker` only with an empty candidate list) if a
+                // NaN ratio ever gets here. Clamping beats propagating a
+                // non-finite iterate.
                 alpha = 1.0;
             }
             if trace && blocker.is_none() {

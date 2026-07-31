@@ -478,6 +478,61 @@ impl SqpAlgorithm {
                     sol = retry;
                 }
             }
+
+            // Unbounded-model fallback (gh #423). The step QP being
+            // unbounded below is a statement about the *linearization*, so
+            // re-test the ray against the true NLP (gh #388) — and when it
+            // does not survive, do not stop there. An unbounded model on a
+            // bounded NLP is not a dead end; it is the textbook signal that
+            // the model needs regularizing (Nocedal-Wright §18.4), and δ
+            // from §4.5 inertia control already *is* that regularization.
+            // So re-solve declining the certificate: the same subproblem,
+            // the same shift, but the unblocked direction takes the
+            // δ-shifted proximal step instead of certifying recession.
+            //
+            // This is not a corner case. A nonconvex NLP with `m = 0` and
+            // no finite bounds has *nothing that can ever block* a
+            // negative-curvature direction, so every indefinite iterate
+            // produces this certificate. gh #419 gave those iterates a real
+            // step where a bound exists and left them with none where one
+            // does not: a chain of coupled double wells (`n = 12`, `m = 0`)
+            // that converged to f = 0.027424 in 24 iterations died at
+            // iteration 1 with `QpStepFailed` at f = 26.03. The proximal
+            // step is slow — that slowness is what #416 was about — but it
+            // is a step, and it is only reached here where the alternative
+            // is no step at all.
+            let mut ray_certified = false;
+            if sol.status == QpStatus::Unbounded {
+                ray_certified = sol.unbounded_ray.as_ref().is_some_and(|d| {
+                    ray_certifies_unbounded(
+                        nlp,
+                        &iter.x,
+                        d,
+                        f_curr,
+                        &grad_f,
+                        &bl_c,
+                        &bu_c,
+                        &xl,
+                        &xu,
+                        self.opts.constr_viol_tol,
+                    )
+                });
+                if !ray_certified {
+                    tracing::debug!(target: "pounce::sqp",
+                        "unbounded step QP whose recession ray does not survive \
+                         re-testing against the NLP — re-solving for the δ-shifted \
+                         proximal step (gh #423)");
+                    let prox_opts = QpOptions {
+                        certify_recession_ray: false,
+                        ..self.qp_opts.clone()
+                    };
+                    let prox = self.qp_solver.solve(&qp_data.as_qp(), None, &prox_opts)?;
+                    n_qp_solves += 1;
+                    if prox.status == QpStatus::Optimal {
+                        sol = prox;
+                    }
+                }
+            }
             self.qp_opts = base;
 
             match sol.status {
@@ -537,11 +592,13 @@ impl SqpAlgorithm {
                 // recession ray of the LOCAL model (zero curvature,
                 // feasible for every step length, strict descent). That
                 // is a statement about the linearization, not yet about
-                // the NLP — so re-test the ray against the true
-                // objective and constraints. If it survives, the NLP
-                // itself is unbounded and we say so with the same
+                // the NLP — so it was re-tested against the true
+                // objective and constraints above. If it survived, the
+                // NLP itself is unbounded and we say so with the same
                 // `Diverging_Iterates` verdict every other POUNCE path
-                // returns; if it does not, the QP simply failed to
+                // returns. If it did not, the proximal re-solve above
+                // already had its chance to produce a step, and reaching
+                // here means even that failed: the QP simply could not
                 // produce a usable step, which is `QpStepFailed`.
                 //
                 // Neither outcome is a hard error. This used to return
@@ -553,26 +610,7 @@ impl SqpAlgorithm {
                 // linear-solver failure when no linear solver had failed
                 // (gh #388).
                 QpStatus::Unbounded => {
-                    let certified = sol.unbounded_ray.as_ref().is_some_and(|d| {
-                        ray_certifies_unbounded(
-                            nlp,
-                            &iter.x,
-                            d,
-                            f_curr,
-                            &grad_f,
-                            &bl_c,
-                            &bu_c,
-                            &xl,
-                            &xu,
-                            self.opts.constr_viol_tol,
-                        )
-                    });
-                    if !certified {
-                        tracing::debug!(target: "pounce::sqp",
-                            "unbounded step QP whose recession ray does not survive \
-                             re-testing against the NLP — reporting qp-step-failed \
-                             rather than claiming unboundedness (gh #388)");
-                    }
+                    let certified = ray_certified;
                     let obj = nlp.eval_f(&iter.x);
                     self.iterates = Some(iter.clone());
                     return Ok(SqpResult {

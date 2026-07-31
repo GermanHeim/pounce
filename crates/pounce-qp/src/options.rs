@@ -127,6 +127,37 @@ pub struct QpOptions {
     pub expand_tol_initial: Number,
     pub expand_tol_growth: Number,
     pub expand_tol_max: Number,
+
+    /// May this solve conclude that the QP is unbounded below?
+    ///
+    /// `true` (default) is the F2/N1 behaviour described on
+    /// [`crate::solver`]: a feasible descent direction that nothing
+    /// blocks and that the model falls forever along is returned as
+    /// `QpStatus::Unbounded` with the recession ray attached.
+    ///
+    /// `false` asks for a **point instead of a verdict**. The
+    /// certification is skipped and the unblocked direction takes the
+    /// δ-shifted proximal step (`α = 1`, the minimizer of
+    /// `q(y) + ½δ‖y − x‖²`) so the inner loop keeps going. The solve
+    /// then exits `Optimal` — at the proximal fixed point — or
+    /// `MaxIter`, but never `Unbounded`.
+    ///
+    /// This exists for the SQP outer loop (gh #423). The *step* QP of a
+    /// nonconvex NLP is unbounded below at every indefinite iterate that
+    /// has nothing to block a negative-curvature direction — which, with
+    /// `m = 0` and no finite bounds, is every indefinite iterate there
+    /// is. That is a statement about the linearization, not about the
+    /// NLP: the driver re-tests the ray against the true problem
+    /// (`ray_certifies_unbounded`), and when the NLP turns out to be
+    /// bounded it needs a usable step out of the same subproblem rather
+    /// than a second unboundedness claim. Regularizing the model is the
+    /// textbook answer there (Nocedal-Wright §18.4), and δ from §4.5
+    /// inertia control is already exactly that regularization — so the
+    /// re-solve just declines the certificate and keeps the shift.
+    ///
+    /// Leave this `true` for a standalone `solve_qp`: the *whole point*
+    /// of solving a QP is to learn whether it has a minimizer.
+    pub certify_recession_ray: bool,
 }
 
 impl Default for QpOptions {
@@ -148,6 +179,7 @@ impl Default for QpOptions {
             expand_tol_initial: 1e-12,
             expand_tol_growth: 1e-11,
             expand_tol_max: 1e-7,
+            certify_recession_ray: true,
         }
     }
 }
