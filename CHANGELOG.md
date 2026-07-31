@@ -9,6 +9,96 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the convex IPM reported some infeasible models as unbounded
+
+- **Found while fixing #415**, by the randomized sweep written to check that
+  fix: on 8 of 200 infeasible-by-construction models, `qp-ipm` returned
+  `DivergingIterates` / `solve_result_num=300` where HiGHS and pounce's own
+  active-set engine both said the model is infeasible. Wrong family, same harm
+  as #415 in the other engine — `300` sends a caller looking for an unbounded
+  objective on a model that has no feasible point at all.
+- **Not a bug in the certificate.** `DualInfeasible` rests on a recession
+  direction `d` with `Pd ≈ 0, Ad ≈ 0, −Gd ∈ K, cᵀd < 0`, and that certificate is
+  about the **dual**. It stays valid when the primal is empty — the recession
+  direction of an empty feasible set exists just the same — so a model can
+  honestly earn *both* verdicts at once, and these did. Which one gets reported
+  is then a choice, not a measurement, and it was being settled by whichever
+  residual gate happened to clear first.
+- **On the instance now pinned as a regression test**, the Farkas value held at
+  `−1.72` with `z ∈ K*` while its residual fell `1.9e-3 → 9.5e-5 → 4.7e-6 →
+  2.4e-7` toward its `8.6e-11` gate — and the recession gate opened with three
+  orders still to go.
+- **Deciding it inside the iteration means picking a tolerance, and that was
+  tried and rejected.** A rule loose enough to catch this case also suppressed
+  11 of 200 *genuine* unbounded verdicts, trading one wrong answer for more
+  missing ones. So the question is now asked directly instead of inferred: on a
+  `DualInfeasible` verdict the driver re-solves the objective-free twin
+  (`P = 0, c = 0`), which has the same feasible set and, having no objective,
+  cannot be unbounded. An infeasible twin corrects the verdict; anything else
+  leaves it alone. Costs one extra solve, only on `DualInfeasible`, and the twin
+  cannot recurse into the same branch (`c = 0` admits no `cᵀd < 0`).
+- Measured after the change: all 200 infeasible models report
+  `primal_infeasible` and agree with the active-set engine, and 200
+  feasible-and-unbounded models still certify `dual_infeasible` at exactly the
+  pre-change rate — the correction costs nothing.
+
+### Fixed — `qp-active-set` reported an infeasible model as a solver crash (#415)
+
+- **An infeasible QP now exits `InfeasibleProblemDetected` / `solve_result_num
+  = 200`, not `InternalError` / `500`.** The trigger is as plain as it gets: an
+  LP with `x₀ + x₁ ≤ 1` and `x₀ + x₁ ≥ 3`. Every other engine on the identical
+  `.nl` — `lp-ipm`, `qp-ipm`, `socp`, `auto`, `nlp` — said `200`; only
+  `qp-active-set` said `500`. The two codes are different AMPL families and
+  callers branch on them: `200` means "the model is infeasible, fix the model",
+  `500` means "the solver broke, retry or switch solvers". So a correctly
+  diagnosed model was being reported to AMPL, Pyomo, and the GAMS links as a
+  POUNCE failure. Same fix on the Python surface, where
+  `solve_qp(method="active-set")` returned `numerical_failure` where
+  `method="ipm"` returned `primal_infeasible`.
+- **The engine had it right; the driver threw the answer away.** `pounce-qp`
+  returned `Infeasible`, and the convex driver deliberately refuses to propagate
+  that on the engine's word — an infeasibility verdict is a proof obligation
+  (#282: `DUALC1` is feasible and the phase-1 elastic mode calls it infeasible).
+  But the driver had no way to *check* the claim, so it downgraded every one of
+  them to `NumericalFailure`. Correct claims and false ones got the same
+  treatment.
+- **Why the textbook Farkas test could not be used as-is.** It wants
+  `Aᵀy + Gᵀz = 0` with `bᵀy + hᵀz < 0`. These multipliers come from an l1-elastic
+  phase-1 that minimizes the *original objective plus* `γ·(violation)`, so its
+  stationarity leaves `Aᵀy + Gᵀz = −(Px + c)` — a residual that never vanishes,
+  only shrinks relative to `‖(y,z)‖ ∝ γ`. On the LP above that is `1e-6`
+  relative against a `FARKAS_RESID_TOL` of `1e-10`: a real certificate, read as
+  noise.
+- **What replaced it.** For any feasible `x`, `qᵀx ≤ bᵀy + hᵀz` where
+  `q := Aᵀy + Gᵀz`; a feasible `x` is also in the box, so
+  `qᵀx ≥ L := Σᵢ min(qᵢ·lbᵢ, qᵢ·ubᵢ)`. `L > bᵀy + hᵀz` therefore proves the
+  feasible set empty. This is the Farkas test generalized — with no finite
+  bounds it collapses back to it — and on a boxed problem it accounts for the
+  `−(Px + c)` residual *exactly* instead of tolerating it. When there is no box
+  to work with, the driver spends one more solve on the objective-free twin
+  (`P = 0, c = 0`), whose phase-1 minimizes violation alone and so returns a
+  residual-free certificate (`q = (0,0)` exactly on the same LP).
+- **Soundness is preserved, which is the point.** Every step is an inequality
+  that holds at every feasible point, so a pass is a proof up to floating point;
+  a claim that does not verify is still demoted exactly as before. A false
+  `PrimalInfeasible` would be a wrong statement about the user's model — worse
+  than any failure status — so the negative case is tested directly: a QP whose
+  feasible set is the single point `{0}` (every row active, no interior, the
+  #282 geometry) must never acquire an infeasibility verdict, and a
+  minimizing-corner slip in the box bound is caught by its own test.
+- This is the infeasible analogue of the same status-mapping gap #388 fixed for
+  unbounded problems and #313 fixed for rank-deficient equalities.
+- Two side effects worth knowing about: a certified `PrimalInfeasible` or
+  `DualInfeasible` now ends the solve instead of burning a second, equilibrated
+  attempt that could not have overturned a proof; and a `PrimalInfeasible`
+  solution's `y` / `z` now hold the multipliers that actually certify it, so the
+  verdict is re-checkable from the solution it is attached to.
+- Measured on 200 infeasible-by-construction models (random `n`, `m`, Hessian,
+  and bound pattern): `qp-active-set` went from agreeing with `qp-ipm` on almost
+  none of them to `primal_infeasible` on all 200. On 200 feasible-by-construction
+  models it produced no false infeasibility verdict and matched the IPM objective
+  throughout.
+
 ### Fixed — the active-set QP's Schur-update path was unreachable from any user-facing surface
 
 - **`sqp_qp_use_schur_updates` and `sqp_qp_max_schur_updates_before_refactor`

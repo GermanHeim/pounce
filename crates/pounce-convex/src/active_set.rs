@@ -70,7 +70,7 @@ use pounce_qp::{
     QpStatus as ActiveSetStatus, QpWarmStart, WorkingSet,
 };
 
-use crate::ipm::QpOptions;
+use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, inf_norm};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 
 /// Caller-supplied overrides for the inner `pounce-qp` engine.
@@ -208,13 +208,25 @@ where
         equilibrate: false,
         ..*opts
     };
-    let sol = solve_translated(prob, &unscaled_opts, engine, make_backend);
-    if !opts.equilibrate || is_solved(sol.status) {
+    let sol = solve_translated(
+        prob,
+        &unscaled_opts,
+        engine,
+        make_backend,
+        FeasibilityProbe::Allowed,
+    );
+    if !opts.equilibrate || is_conclusive(sol.status) {
         return sol;
     }
 
     let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
-    let mut retry = solve_translated(&scaled, &unscaled_opts, engine, make_backend);
+    let mut retry = solve_translated(
+        &scaled,
+        &unscaled_opts,
+        engine,
+        make_backend,
+        FeasibilityProbe::Allowed,
+    );
     scaling.unscale_solution(prob, &mut retry);
     // Re-verify against the ORIGINAL problem: the verdict reached inside the
     // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
@@ -223,12 +235,49 @@ where
     retry.status = reverify_after_unscale(retry.status, &retry, prob, opts);
     // Keep the original failure when the retry also fails, so the reported
     // status describes the attempt made on the problem as the user posed it.
-    if is_solved(retry.status) { retry } else { sol }
+    // `PrimalInfeasible` counts as a win here because `reverify_after_unscale`
+    // just re-earned its Farkas certificate against the *original* problem;
+    // `DualInfeasible` does not, because its witness (the engine's ray) is not
+    // available out here to re-check.
+    if is_solved(retry.status) || retry.status == QpStatus::PrimalInfeasible {
+        retry
+    } else {
+        sol
+    }
 }
 
 /// Did the solve produce a usable, verified KKT point?
 fn is_solved(s: QpStatus) -> bool {
     matches!(s, QpStatus::Optimal | QpStatus::OptimalInaccurate)
+}
+
+/// Is this verdict final — nothing a second attempt could improve on?
+///
+/// Either a verified KKT point or a *verified certificate*. Both are earned
+/// against the original problem (`verify_status` / `reverify_after_unscale`
+/// re-derive every certificate there), so there is no weaker claim here than
+/// [`is_solved`] makes: an equilibrated retry cannot overturn a proof, and
+/// running one anyway would only burn a second solve before falling back to
+/// this same answer.
+///
+/// `DualInfeasible` is deliberately absent from the retry-acceptance side of
+/// this test (see the call site): the unboundedness certificate is re-derived
+/// from a ray that only exists inside `solve_translated`, so a retry's claim
+/// has no witness left to re-check after unscaling.
+fn is_conclusive(s: QpStatus) -> bool {
+    is_solved(s) || matches!(s, QpStatus::PrimalInfeasible | QpStatus::DualInfeasible)
+}
+
+/// May this attempt spend a second solve on the objective-free feasibility twin
+/// to turn an uncertified infeasibility claim into a certified one?
+///
+/// Exists only to make the recursion finite: the probe re-enters
+/// [`solve_translated`] on a problem whose own probe would be the identical
+/// solve, so the inner call is handed [`Self::Forbidden`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeasibilityProbe {
+    Allowed,
+    Forbidden,
 }
 
 /// Translate to `pounce-qp` form, solve, and verify — one attempt, no scaling
@@ -238,6 +287,7 @@ fn solve_translated<F>(
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
     make_backend: &mut F,
+    probe: FeasibilityProbe,
 ) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -530,6 +580,30 @@ where
         iterates: Vec::new(),
     };
     sol.status = verify_status(engine_status, engine_ray.as_deref(), &sol, prob, opts);
+    // The engine says infeasible and its own multipliers could not prove it.
+    // Before demoting that to "the solver broke", spend one more solve on the
+    // objective-free twin, whose multipliers *can* — see [`feasibility_probe`].
+    if engine_status == ActiveSetStatus::Infeasible
+        && sol.status == QpStatus::NumericalFailure
+        && probe == FeasibilityProbe::Allowed
+        && let Some((y, z)) = feasibility_probe(prob, opts, engine, make_backend)
+    {
+        // Carry the *certifying* multipliers out, replacing the
+        // objective-carrying ones that proved nothing. This keeps the invariant
+        // every consumer of a `PrimalInfeasible` here relies on — the returned
+        // `(y, z)` verify the status attached to them — which is what lets
+        // `reverify_after_unscale` re-earn the verdict against the original
+        // problem after an equilibrated retry. Without it that re-check tested
+        // the wrong vectors and threw away a proof the driver had just made.
+        // The bound duals are dropped rather than left mismatched: the
+        // certificate is a statement about `(y, z)` and the box, and stale
+        // `z_lb`/`z_ub` from a different multiplier set say nothing about it.
+        sol.y = y;
+        sol.z = z;
+        sol.z_lb = vec![0.0; n];
+        sol.z_ub = vec![0.0; n];
+        sol.status = QpStatus::PrimalInfeasible;
+    }
     debug_trace(|| {
         format!(
             "engine={:?} -> reported={:?} kkt_err={:.3e} obj={:.6e}",
@@ -540,6 +614,55 @@ where
         )
     });
     sol
+}
+
+/// Re-solve the **objective-free twin** of `prob` — same `A, b, G, h` and the
+/// same box, but `P = 0` and `c = 0` — and return *its* multipliers `(y, z)`
+/// when they prove the constraint system has no solution.
+///
+/// # Why a second solve is the right answer here
+///
+/// [`certifies_primal_infeasible`] fails on an unbounded variable for a
+/// structural reason, not a tolerance one: the elastic phase-1 multipliers carry
+/// a residual `Aᵀy + Gᵀz = −(Px + c)` left behind by the original objective, and
+/// with no finite bound on that variable there is nothing to bound its
+/// contribution with. Deleting the objective deletes the residual at the source:
+/// the twin's phase-1 minimizes violation *alone*, so its stationarity is
+/// `Aᵀy + Gᵀz = 0` to machine precision — a textbook Farkas pair. Measured on
+/// the gh #415 LP with its bounds removed: `q = (0, 0)` exactly against
+/// `q = (−1, −1)` from the objective-carrying solve.
+///
+/// The twin has the *same feasible set* as `prob`, so a certificate for it is a
+/// certificate for `prob` — which is why the check below is run against `prob`
+/// itself and needs no translation back.
+///
+/// This costs a whole extra solve, so it is deliberately last: only after the
+/// engine has already claimed infeasibility *and* the free check on its own
+/// multipliers came up empty. A feasible problem reaches it only via a false
+/// `Infeasible` claim (the `DUALC1` hazard), and then the twin solve finds the
+/// feasible set is non-empty and certifies nothing — the claim stays demoted.
+fn feasibility_probe<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+) -> Option<(Vec<f64>, Vec<f64>)>
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let twin = QpProblem {
+        p_lower: Vec::new(),
+        c: vec![0.0; prob.n],
+        ..prob.clone()
+    };
+    let sol = solve_translated(
+        &twin,
+        opts,
+        engine,
+        make_backend,
+        FeasibilityProbe::Forbidden,
+    );
+    certifies_primal_infeasible(prob, &sol.y, &sol.z, opts).then_some((sol.y, sol.z))
 }
 
 /// Emit a diagnostic line when `POUNCE_AS_DEBUG` is set in the environment.
@@ -563,12 +686,26 @@ fn debug_trace(msg: impl FnOnce() -> String) {
 /// unscaled point still earns it, and let a solve that lands in the acceptable
 /// band say so. Non-success statuses pass through — they made no claim to
 /// re-check.
+///
+/// A `PrimalInfeasible` carried out of the scaled solve is a claim too, and one
+/// with the same problem: equilibration is a diagonal congruence, so it
+/// preserves *whether* the QP is infeasible but not the certificate's numbers,
+/// which `unscale_solution` has moved. So the Farkas certificate is re-derived
+/// here against the original data rather than inherited on the strength of the
+/// scaled problem's arithmetic.
 fn reverify_after_unscale(
     scaled_status: QpStatus,
     sol: &QpSolution,
     prob: &QpProblem,
     opts: &QpOptions,
 ) -> QpStatus {
+    if scaled_status == QpStatus::PrimalInfeasible {
+        return if certifies_primal_infeasible(prob, &sol.y, &sol.z, opts) {
+            QpStatus::PrimalInfeasible
+        } else {
+            QpStatus::NumericalFailure
+        };
+    }
     if !matches!(
         scaled_status,
         QpStatus::Optimal | QpStatus::OptimalInaccurate
@@ -606,10 +743,11 @@ fn reverify_after_unscale(
 ///   published optimum of `6155.25`, and the phase-1 elastic mode certifies it
 ///   infeasible. An infeasibility verdict is a *proof obligation*: the IPM
 ///   only reports one behind a verified Farkas certificate, and the SQP path
-///   deliberately refuses to assert infeasibility it cannot back (#282). The
-///   active-set engine has no certificate to offer here, so its claim is
-///   downgraded to an honest "did not solve" rather than propagated as a
-///   verdict about the user's model.
+///   deliberately refuses to assert infeasibility it cannot back (#282). So the
+///   claim is not propagated on the engine's word — it is re-derived here from
+///   the phase-1 multipliers ([`certifies_primal_infeasible`], with
+///   [`feasibility_probe`] as a second attempt) and only reported when it holds.
+///   A claim that cannot be backed is downgraded to an honest "did not solve".
 ///
 /// The `Optimal` / `OptimalInaccurate` / fail banding mirrors the IPM's
 /// post-loop verdict (`hsde.rs`): within `tol` is clean, within `1e3·tol` is
@@ -653,10 +791,23 @@ fn verify_status(
             // No ray, or a ray that does not stand up: fall back on the point.
             _ => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
         },
-        // Uncertified infeasibility claim — never propagated as a verdict.
-        // If the returned point happens to satisfy the KKT conditions anyway,
-        // report that instead; otherwise say honestly that we did not solve it.
-        ActiveSetStatus::Infeasible => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
+        // Infeasibility is a proof obligation, so the claim is re-derived from
+        // the phase-1 multipliers exactly as the `Unbounded` claim is re-derived
+        // from the ray. A certificate that stands up is the *right* verdict about
+        // the user's model and must be reported as such (gh #415: without this,
+        // a two-row LP whose contradiction is visible by inspection came back as
+        // `InternalError` / `solve_result_num=500` — "the solver broke, retry" —
+        // where every other engine said `200`, "your model is infeasible").
+        // A claim that does not stand up is still downgraded: if the returned
+        // point satisfies the KKT conditions anyway, report that; otherwise say
+        // honestly that we did not solve it.
+        ActiveSetStatus::Infeasible => {
+            if certifies_primal_infeasible(prob, &sol.y, &sol.z, opts) {
+                QpStatus::PrimalInfeasible
+            } else {
+                solved_to(err).unwrap_or(QpStatus::NumericalFailure)
+            }
+        }
         // Budget or breakdown: the point may still be good enough to report at
         // the acceptable tier (the IPM salvages solves this way), but it is
         // never promoted to a clean `Optimal`.
@@ -729,6 +880,114 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     // derivative `(Px + c)ᵀd` reduces to `cᵀd` independently of `x`.
     let slope: f64 = (0..prob.n).map(|i| prob.c[i] * d[i]).sum();
     slope < -slack
+}
+
+/// Do the multipliers `(y, z ≥ 0)` prove that `prob` has **no** feasible point?
+///
+/// # Why not the textbook Farkas test
+///
+/// The classic certificate for `{x : Ax = b, Gx ≤ h}` is `(y, z ≥ 0)` with
+/// `Aᵀy + Gᵀz = 0` and `bᵀy + hᵀz < 0`, and that is what the IPM checks
+/// ([`crate::ipm::detect_infeasibility`]). Applied to *these* multipliers it
+/// rejects every genuine certificate the active-set engine produces, because of
+/// where they come from: the l1-elastic phase-1 minimizes
+/// `½xᵀPx + cᵀx + γ·(violation)`, so its stationarity condition is
+/// `Px + c + Aᵀy + Gᵀz = 0` — the original objective is still in there, and
+/// `q := Aᵀy + Gᵀz` settles at `−(Px + c)`, not at `0`. That residual does not
+/// shrink as phase-1 converges; it only shrinks *relative to* `‖(y,z)‖ ∝ γ`.
+/// On the two-row LP of gh #415 the relative residual is `1e-6` against a
+/// `FARKAS_RESID_TOL` of `1e-10`, so the certificate — which is real — reads as
+/// noise, and the engine's correct `Infeasible` verdict was thrown away as a
+/// numerical failure.
+///
+/// # The test used instead
+///
+/// For **any** feasible `x` and any `(y, z ≥ 0)`, `yᵀ(Ax − b) = 0` and
+/// `zᵀ(Gx − h) ≤ 0`, so
+///
+/// ```text
+///     qᵀx  ≤  bᵀy + hᵀz  =:  v          where q := Aᵀy + Gᵀz
+/// ```
+///
+/// A feasible `x` also lies in the box, so `qᵀx ≥ L := min_{lb ≤ x ≤ ub} qᵀx`,
+/// which is separable: `L = Σᵢ min(qᵢ·lbᵢ, qᵢ·ubᵢ)`. Therefore
+///
+/// ```text
+///     L > v   ⟹   no feasible point exists.
+/// ```
+///
+/// This is a strict generalization of the Farkas test — with no finite bounds
+/// it *is* the Farkas test (`L` is finite only if `q ≡ 0`, and then `L = 0 > v`
+/// is exactly `v < 0`) — but on a boxed problem it does not merely *tolerate*
+/// the `−(Px + c)` residual, it accounts for it exactly. The bound multipliers
+/// `z_lb`/`z_ub` are deliberately not used: minimizing over the box is the same
+/// deduction done optimally, and it cannot be thrown off by a phase-1 iterate's
+/// noisy bound duals.
+///
+/// A variable whose *binding* side is infinite makes `L = −∞` and there is
+/// nothing to deduce — unless its `qᵢ` is negligible, which is the one place
+/// this falls back on [`FARKAS_RESID_TOL`]'s tolerance argument rather than an
+/// exact bound.
+///
+/// Soundness is the property that matters here: a false positive is a wrong
+/// verdict about the user's model, which is worse than any failure status (the
+/// `DUALC1` hazard this module's docs describe). Every step above is an
+/// inequality that holds for *every* feasible point, so a pass is a proof up to
+/// floating point, and the `ctol` margin covers that.
+fn certifies_primal_infeasible(prob: &QpProblem, y: &[f64], z: &[f64], opts: &QpOptions) -> bool {
+    if y.len() != prob.m_eq() || z.len() != prob.m_ineq() {
+        return false;
+    }
+    let dual_norm = inf_norm(y).max(inf_norm(z));
+    if !dual_norm.is_finite() || dual_norm == 0.0 {
+        return false;
+    }
+    // `z ≥ 0` is what makes `zᵀ(Gx − h) ≤ 0`; without it there is no deduction.
+    let ctol = opts.infeas_tol;
+    if z.iter().any(|&zi| zi < -ctol * dual_norm) {
+        return false;
+    }
+
+    let mut q = vec![0.0; prob.n]; // q = Aᵀy + Gᵀz
+    prob.at_mul(y, &mut q);
+    prob.gt_mul(z, &mut q);
+    let v = dot(&prob.b, y) + dot(&prob.h, z); // v = bᵀy + hᵀz
+    if !v.is_finite() {
+        return false;
+    }
+
+    // L = min over the box of qᵀx, separably.
+    let resid_slack = FARKAS_RESID_TOL * dual_norm;
+    let mut l = 0.0_f64;
+    for (i, &qi) in q.iter().enumerate() {
+        if !qi.is_finite() {
+            return false;
+        }
+        if qi == 0.0 {
+            continue;
+        }
+        // The minimizing corner: push `xᵢ` to its lower bound when `qᵢ > 0`, to
+        // its upper bound when `qᵢ < 0`.
+        let bound = if qi > 0.0 {
+            prob.lb_of(i)
+        } else {
+            prob.ub_of(i)
+        };
+        if bound > crate::qp::NEG_INF && bound < crate::qp::POS_INF {
+            l += qi * bound;
+        } else if qi.abs() > resid_slack {
+            return false; // qᵀx is unbounded below on the box — no deduction
+        }
+    }
+    if !l.is_finite() {
+        return false;
+    }
+
+    // Margin against floating-point noise, relative to the magnitudes actually
+    // compared. Scaling by `dual_norm` as well keeps a certificate whose two
+    // sides are both ~0 next to huge multipliers from passing on rounding.
+    let mag = dual_norm.max(v.abs()).max(l.abs());
+    l - v > ctol * mag
 }
 
 /// Iteration budget for the active-set engine.
@@ -912,6 +1171,125 @@ mod tests {
             "obj: active-set {} vs ipm {}",
             asol.obj,
             isol.obj
+        );
+    }
+
+    /// One row `−x ≤ −rhs` (i.e. `x ≥ rhs`) on a single variable in `[0, 10]`.
+    /// Infeasible exactly when `rhs > 10`, and infeasible *because of the box* —
+    /// the row alone is satisfiable, so the classic zero-residual Farkas test
+    /// has nothing to say here and only the box minimization can decide it.
+    fn one_row_vs_box(rhs: f64) -> QpProblem {
+        QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0)],
+            h: vec![-rhs],
+            lb: vec![0.0],
+            ub: vec![10.0],
+        }
+    }
+
+    /// The box minimization must be evaluated at the corner that *minimizes*
+    /// `qᵀx`, and getting that backwards certifies feasible problems as
+    /// infeasible. `x ≥ 5` with `x ≤ 10` is plainly satisfiable; the multiplier
+    /// `z = 1` gives `q = (−1)` and `v = −5`, so the true bound
+    /// `L = q·ub = −10` correctly fails `L > v`, whereas the wrong corner
+    /// (`q·lb = 0`) would "prove" a feasible problem empty.
+    #[test]
+    fn box_minimum_is_taken_at_the_minimizing_corner() {
+        assert!(
+            !certifies_primal_infeasible(&one_row_vs_box(5.0), &[], &[1.0], &QpOptions::default()),
+            "x ≥ 5, x ≤ 10 is feasible — no certificate may be accepted"
+        );
+    }
+
+    /// The same shape pushed past the box: `x ≥ 15` with `x ≤ 10` is empty, and
+    /// `L = −10 > v = −15` proves it.
+    #[test]
+    fn box_only_infeasibility_is_certified() {
+        assert!(certifies_primal_infeasible(
+            &one_row_vs_box(15.0),
+            &[],
+            &[1.0],
+            &QpOptions::default()
+        ));
+    }
+
+    /// A feasible QP whose feasible set is the single point `{0}` — every row
+    /// active, no interior, multipliers wildly non-unique (the #282 hazard in
+    /// miniature). Elastic-scale multipliers on it produce `q = 0` and `v = 0`:
+    /// no strict descent, so no certificate. A false positive here would be a
+    /// wrong statement about the user's model.
+    #[test]
+    fn spurious_certificate_on_feasible_qp_is_rejected() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![-1.0, -1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(2, 1, 1.0),
+                Triplet::new(3, 1, -1.0),
+            ],
+            h: vec![0.0; 4],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(!certifies_primal_infeasible(
+            &prob,
+            &[],
+            &[1e6, 1e6, 1e6, 1e6],
+            &QpOptions::default()
+        ));
+    }
+
+    /// gh #415's multipliers, verbatim from the engine: `z = (999999, 1e6)` on
+    /// `x₀ + x₁ ≤ 1` / `x₀ + x₁ ≥ 3`. They leave `q = (−1, −1) = −c`, a
+    /// *relative* residual of `1e−6` against a `FARKAS_RESID_TOL` of `1e−10`,
+    /// so the textbook Farkas test rejects them — which is how a certified
+    /// infeasibility became `NumericalFailure`. With the box `[0, 10]²` the
+    /// residual is accounted for exactly (`L = −20 > v = −2000001`).
+    ///
+    /// Delete the box and the same multipliers must stop being a proof: that is
+    /// not a regression but the reason [`feasibility_probe`] exists.
+    #[test]
+    fn box_accounts_for_the_objective_residual_the_farkas_test_rejects() {
+        let boxed = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(1, 1, -1.0),
+            ],
+            h: vec![1.0, -3.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![10.0, 10.0],
+        };
+        let z = [999_999.0, 1_000_000.0];
+        assert!(
+            certifies_primal_infeasible(&boxed, &[], &z, &QpOptions::default()),
+            "the box makes these multipliers a proof"
+        );
+
+        let free = QpProblem {
+            lb: vec![],
+            ub: vec![],
+            ..boxed
+        };
+        assert!(
+            !certifies_primal_infeasible(&free, &[], &z, &QpOptions::default()),
+            "without a box the residual is unaccounted for — must not be trusted"
         );
     }
 

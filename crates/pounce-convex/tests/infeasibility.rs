@@ -458,3 +458,125 @@ fn unconstrained_qp_optimal() {
     assert!((sol.x[1] - (-2.0)).abs() < 1e-6, "x1={}", sol.x[1]);
     assert!((sol.obj - (-13.0)).abs() < 1e-6, "obj={}", sol.obj);
 }
+
+// ---------------------------------------------------------------------------
+// Primal- AND dual-infeasible at once: which verdict gets reported.
+//
+// These two certificates are not alternatives. `DualInfeasible` rests on a
+// recession direction `d` with `Pd ≈ 0, Ad ≈ 0, −Gd ∈ K, cᵀd < 0`, which says
+// the *dual* has no feasible point — and that is perfectly true of a problem
+// whose primal is also empty, because the recession direction of an empty
+// feasible set exists just the same. So a model can honestly earn both, and
+// then the report is a choice rather than a measurement.
+//
+// The choice must be `PrimalInfeasible`: it is the actionable one (AMPL
+// `solve_result_num=200`, "fix the model", against `300`/`DivergingIterates`),
+// it is what pounce's own active-set engine returns on the same data, and it is
+// what HiGHS and Gurobi return. Left to the iteration it was a race between two
+// residual gates, and the recession gate tended to clear first.
+// ---------------------------------------------------------------------------
+
+/// A four-variable LP, found by a randomized sweep, on which this actually went
+/// wrong. Hand-crafted two-row instances do *not* reproduce it: the failure is a
+/// race between two residual gates, so it needs an instance whose dynamics let
+/// the recession gate win, and this is one.
+///
+/// **Primal infeasible by inspection**, and the test asserts that structurally
+/// rather than trusting the numbers: rows 0 and 1 are exact negatives, so they
+/// read `w·x ≤ 1` and `w·x ≥ 3`. `scipy`/HiGHS agrees (`status = 2`).
+///
+/// **Also dual infeasible**: `Gd ≤ 0` forces `w·d = 0`, and within that
+/// hyperplane there is a `d` with `row₂·d ≤ 0` and `cᵀd < 0`, which is a genuine
+/// recession certificate. Both verdicts are true, so the driver has to *choose*
+/// — and before the objective-free-twin check it chose `DualInfeasible`, i.e.
+/// `solve_result_num=300` on a model with no feasible point. Measured on this
+/// instance: the Farkas value held at `−1.72` with `z ∈ K*` while its residual
+/// fell `1.9e-3 → 9.5e-5 → 4.7e-6 → 2.4e-7` toward an `8.6e-11` gate, and the
+/// recession gate opened with three orders still to go.
+#[test]
+fn primal_and_dual_infeasible_reports_primal() {
+    // Row 0 is `w`; row 1 is `−w`; row 2 is an extra, satisfiable on its own.
+    let w = [
+        -1.336972899917,
+        -1.045019914384,
+        1.450153058953,
+        -0.540131207078,
+    ];
+    let extra = [
+        -2.104466010086,
+        -0.580699705489,
+        1.5099831e-05,
+        1.188830678537,
+    ];
+    let h = [1.0, -3.0, 1.858605832812668];
+
+    // The contradiction, asserted from the data: `w·x ≤ h₀` and `−w·x ≤ h₁`
+    // together give `h₁ ≤ −w·x` and `w·x ≤ h₀`, i.e. `−h₁ ≤ w·x ≤ h₀`, which is
+    // empty exactly when `h₀ + h₁ < 0`.
+    assert!(h[0] + h[1] < 0.0, "rows 0/1 must be contradictory");
+
+    let mut g = Vec::new();
+    for (j, &v) in w.iter().enumerate() {
+        g.push(Triplet::new(0, j, v));
+        g.push(Triplet::new(1, j, -v));
+    }
+    for (j, &v) in extra.iter().enumerate() {
+        g.push(Triplet::new(2, j, v));
+    }
+
+    let prob = QpProblem {
+        n: 4,
+        p_lower: vec![],
+        c: vec![
+            0.666683325902,
+            0.795299099602,
+            -0.699388308324,
+            -0.187589705319,
+        ],
+        a: vec![],
+        b: vec![],
+        g,
+        h: h.to_vec(),
+        lb: vec![-20.0; 4],
+        ub: vec![],
+    };
+    let sol = solve(&prob);
+    assert_eq!(
+        sol.status,
+        QpStatus::PrimalInfeasible,
+        "an infeasible model must not be reported as unbounded (got {:?} after \
+         {} iters)",
+        sol.status,
+        sol.iters
+    );
+}
+
+/// The guard above must not cost a genuine unboundedness verdict. This LP is
+/// **feasible** (`x = (0, 0)` satisfies `x₀ − x₁ ≤ 1`) and unbounded below along
+/// `d = (1, 1)`: `Gd = 0`, `cᵀd = −2 < 0`. Its objective-free twin is feasible,
+/// so the correction never fires and `DualInfeasible` stands.
+///
+/// `dual_infeasible_unbounded_lp` above covers the unconstrained-direction case;
+/// this one keeps a row *active* in the recession cone, the configuration the
+/// correction has to leave alone.
+#[test]
+fn feasible_unbounded_lp_keeps_dual_infeasible() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![],
+        c: vec![-1.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, -1.0)],
+        h: vec![1.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let sol = solve(&prob);
+    assert_eq!(
+        sol.status,
+        QpStatus::DualInfeasible,
+        "feasible-and-unbounded must still certify unbounded (iters={})",
+        sol.iters
+    );
+}
