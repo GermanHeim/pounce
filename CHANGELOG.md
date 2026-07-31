@@ -9,6 +9,56 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the active-set QP crawled instead of stepping on an indefinite Hessian (#416)
+
+- **`algorithm = active-set-sqp` with `sqp_hessian = exact` now solves plain
+  Rosenbrock at the default QP budget.** The reported case — extended
+  Rosenbrock in a ball, `n = 10`, from the canonical `(−1.2, 1, …)` start —
+  gave up after 4 outer iterations with
+  `Search_Direction_Becomes_Too_Small`/`Maximum_Iterations_Exceeded` at
+  `f = 9.62214`, `KKT = 2.62`, against `f = 3.9866` from the interior-point
+  path. It now converges to `f = 3.9866` in 20 outer iterations, and does so
+  ~2.5× faster than the documented `sqp_qp_max_iter = 250` workaround.
+- **The budget was never the problem.** The tell in the report was that the
+  smallest cap that worked was 250 whether `n` was 10 or 40, and that the QP
+  made **zero** working-set changes while spending 200 iterations. Both follow
+  from a single line: after §4.5 inertia control factors `H + δI`, the inner
+  loop still capped its step at `α = 1`. The unit step is the model minimizer
+  only for an *unshifted* Newton direction — writing `r = Hx + g`, the shifted
+  system gives `pᵀr = −(pᵀHp + δ‖p‖²)`, so the model's own minimizer along `p`
+  is `α* = 1 + δ‖p‖²/pᵀHp`, and `+∞` when the true curvature along `p` is
+  non-positive. Capping at 1 turns the loop into proximal-point iteration with
+  parameter δ, whose per-eigenvalue contraction is `δ/(λ + δ)`. Since δ is
+  reached by multiplying `QpOptions::inertia_shift_initial` (1e-8) by
+  `inertia_shift_factor` (100) until the system is PD, it overshoots the
+  spectrum badly: on the reported QP `λ_min = −1.4` and δ = 100, putting
+  every factor within 3 % of 1. The trace shows it exactly — δ = 100,
+  `‖p‖∞ ≈ 2e−3`, `α = 1`, `pᵀHp < 0`, empty working set, 200 times over. The
+  crawl is dimension-independent because δ and the spectrum are, which is why
+  raising the cap looked like it fixed something.
+- **The fix is to take the step the model asks for.** The ratio test is now
+  capped at `α*` instead of at 1, so a negative-curvature direction runs to
+  its blocking bound and *changes the working set* — what an active-set method
+  is supposed to do with negative curvature (Nocedal-Wright §16.5). `δ = 0`
+  returns 1.0 without touching the data, so every non-shifted solve is
+  bit-identical. Applied on all four inner loops (box, equality-plus-bounds,
+  general, and the Schur-update variant, which now tracks the δ in its cached
+  base factor).
+- **A negative-curvature direction with nothing to block it is unboundedness**,
+  and is now reported as such — the F2 recession certificate with `pᵀHp < 0`
+  in place of `Hp = 0`. Two fixtures that the SQP path previously ran out of
+  iterations on, `unbounded_exp.nl` (`min −exp(x)`) and `unbounded_cubic.nl`,
+  now exit `Diverging_Iterates`, agreeing with the IPM path. The SQP driver
+  still re-verifies the ray against the true NLP before reporting it.
+- **Also fixed, found by the above:** l1-elastic phase-1 labelled its result
+  `Optimal` whenever the slacks reached zero, even when the phase-1 solve had
+  hit its own iteration limit on the way. Past the point where the slacks
+  vanish the augmented objective *is* the original one, so an unconverged
+  phase-1 leaves an ordinary suboptimal iterate — `afiro` with
+  `sqp_qp_max_iter = 3` returned `Optimal` carrying a KKT error of 10 at
+  objective 440 against a −464.75 optimum. The inner verdict is now carried
+  out; the point is still returned, just not dressed up.
+
 ### Fixed — the convex IPM reported some infeasible models as unbounded
 
 - **Found while fixing #415**, by the randomized sweep written to check that
