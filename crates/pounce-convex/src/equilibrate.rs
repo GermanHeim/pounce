@@ -296,6 +296,42 @@ impl Scaling {
         }
     }
 
+    /// Map a *solution* given in the **original** problem's coordinates into
+    /// the scaled problem's coordinates — the exact inverse of
+    /// [`Scaling::unscale_solution`]'s primal/dual maps (the same algebra
+    /// [`Scaling::scale_warm_start`] applies to a warm-start point):
+    ///
+    /// ```text
+    ///   x̂ = Dc⁻¹ x,   ŷ = σ y / R_A,        ẑ = σ z / R_G,
+    ///   ẑ_lb = σ·Dc·z_lb,                    ẑ_ub = σ·Dc·z_ub.
+    /// ```
+    ///
+    /// Used to *measure* a solution in the equilibrated metric — its KKT
+    /// residual against the scaled problem, where every variable and row
+    /// carries an `O(1)` scale, so no single badly-scaled column can mask
+    /// another's violation (gh #414, see `crate::ipm::equilibrated_kkt_rel`).
+    /// `obj` and the iterate trace are left as-is; the caller reads residuals
+    /// only.
+    pub(crate) fn scale_solution(&self, sol: &QpSolution) -> QpSolution {
+        let mut s = sol.clone();
+        for (xi, &d) in s.x.iter_mut().zip(&self.dcol) {
+            *xi /= d;
+        }
+        for (yi, &d) in s.y.iter_mut().zip(&self.drow_a) {
+            *yi *= self.sigma / d;
+        }
+        for (zi, &d) in s.z.iter_mut().zip(&self.drow_g) {
+            *zi *= self.sigma / d;
+        }
+        for (zi, &d) in s.z_lb.iter_mut().zip(&self.dcol) {
+            *zi *= self.sigma * d;
+        }
+        for (zi, &d) in s.z_ub.iter_mut().zip(&self.dcol) {
+            *zi *= self.sigma * d;
+        }
+        s
+    }
+
     /// Map a warm-start point given in the **original** problem's coordinates
     /// into the scaled problem's coordinates — the exact inverse of
     /// [`Scaling::unscale_solution`]'s primal/dual maps:
