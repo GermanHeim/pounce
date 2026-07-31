@@ -146,6 +146,56 @@ appears at the first iterate where ∇²L goes indefinite (min eigenvalue
 The family therefore starts from the origin, so the row measures warm
 starting rather than a wall of identical failures.
 
+**Corroboration from `double_well_chain`** (added later, see below).
+That family is the same configuration — unconstrained, empty working
+set, indefinite exact Hessian — but benign enough that the solve
+*survives*: on a 12-variable instance the exact-Hessian SQP needs 24
+outer iterations and 36 QP solves (12 more than outer iterations, i.e.
+the rescue re-solves firing), and takes 44 ms per QP against 0.4 ms for
+`damped-bfgs`. Capping `sqp_qp_max_iter` at **20** produces a
+**bit-identical** result — same objective and same `x` to the last bit
+at every step of the 20-step path — **8.9× faster** (33.9s → 3.8s).
+
+That is the cleanest statement of the defect available: on this
+configuration the inner QP's iterations past ~20 change nothing. They
+are not work that ran out of budget, they are work that never mattered.
+Rosenbrock is the same waste with a worse ending, because there the
+`MaxIter` exit is not rescued.
+
+## Active-set coverage, and the two families that closed the holes
+
+Audited by reading the working sets the solver actually returns, per
+family and scale, rather than by reading the intent. What was already
+covered: permanently-active equality rows, bounds activating and
+releasing, inequality rows activating and releasing, and paths where
+the active set is deliberately held fixed (`simplex_proj` and
+`hanging_chain` at `tiny`, 0 changes end to end).
+
+Two holes, both closed:
+
+- **Re-activation was never tested.** `rosenbrock_ring` sweeps its
+  radius monotonically, so its switch is always active → inactive.
+  `rosenbrock_ring_cycle` makes the path a triangle — out past the
+  switch, back in — so it crosses in both directions, at exactly the
+  quarter and three-quarter steps at every scale. It measures
+  measurably *less* warm-start payoff than the monotone version at
+  `large` (1.76× vs 2.16× on QP active-set work, 8 residual changes vs
+  1), which is the expected asymmetry: carrying an empty working set
+  into a step that needs a non-empty one gives the solver nothing.
+- **No path was unconstrained.** Every family carried at least one
+  constraint row, so the suite never executed `m = 0`, and there was no
+  zero mark to read the speedups against. `double_well_chain` is
+  `m = 0` with no finite bounds — the working set is empty at every
+  iterate of every step, confirmed in the data (`|A| = 0`, 20/20 steps,
+  all scales).
+
+`double_well_chain` also inverts the report's two headline columns,
+which is worth understanding before reading any row: with no working
+set to carry, the QP-active-set column is exactly 1.00× (0→0) and the
+*entire* warm-start effect lands in outer iterations (8.3× at `tiny`).
+The QP-shaped families are the mirror image — outer flat at 1.00×, all
+effect inner. Neither column alone is a summary of this suite.
+
 ## Not done yet
 
 - **A shift-based warm-start arm for the closed-loop family.** MPC

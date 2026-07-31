@@ -92,6 +92,8 @@ the mean speedup hides the failure mode that matters most.
 | `degenerate_corner` | 6 | 3 | degenerate | objective | convex |
 | `hanging_chain` | 30 | 15 | flipping | mixed | convex |
 | `rosenbrock_ring` | 10 | 1 | switch | rhs | nonconvex |
+| `rosenbrock_ring_cycle` | 10 | 1 | re-activation | rhs | nonconvex |
+| `double_well_chain` | 12 | 0 | none (empty active set) | objective | nonconvex |
 | `nmpc_vanderpol` | 47 | 32 | closed-loop | rhs | nonconvex |
 
 *regime* is how the active set behaves along the path; *channel* is
@@ -105,6 +107,29 @@ so a single step size would measure one point on a curve and call it
 the answer. `tiny` is the continuation regime where the active set
 barely moves; `large` is where it churns and warm starting can hurt.
 
+### What the active-set regimes actually cover
+
+Read off the working sets the solver returns, not off the intent:
+
+| situation | where it is exercised |
+|---|---|
+| equality rows, permanently in the working set | `nmpc_vanderpol` (32), `moving_bound_qp` (3), `simplex_proj` (1) |
+| variable bounds activating and releasing | `simplex_proj` (15→19 clamped), `moving_bound_qp` (2→22), `nmpc_vanderpol` (control saturation) |
+| inequality rows activating and releasing | `hanging_chain` (3→12 ground contacts), `degenerate_corner`, both Rosenbrock families |
+| active set held *fixed* for a whole path | `simplex_proj` and `hanging_chain` at `tiny` — 0 changes across the path |
+| a single clean active→inactive switch | `rosenbrock_ring`, on the midpoint step at every scale |
+| inactive→active **re-activation** | `rosenbrock_ring_cycle`, which crosses the switch out and back |
+| **empty** active set, whole path, no constraint rows at all | `double_well_chain` (`m = 0`, no finite bounds) |
+
+The last two exist because their absence was a real hole. A
+monotone sweep only ever tests active→inactive; carrying an *empty*
+working set into a step that needs a non-empty one is the harder
+direction and now has a family. And with every family carrying at
+least one constraint row, the suite never executed the unconstrained
+configuration at all — which is both the zero mark the speedups
+should be read against and, per pounce#416, a configuration with real
+defects hiding in it.
+
 Two families are worth knowing about in detail:
 
 - **`degenerate_corner`** is a correctness probe, not a speed probe.
@@ -113,6 +138,14 @@ Two families are worth knowing about in detail:
   the multiplier-sign classifier that builds a working set from a
   converged iterate has no signal to work with. The midpoint step
   lands on the degeneracy at *every* scale, by construction.
+- **`double_well_chain`** is the control, and it inverts the usual
+  reading of the report. With no constraints there is no working set
+  to carry, so the QP-active-set column is 0 for both arms and the
+  entire warm-start effect lands in *outer* iterations instead —
+  cold 480 → warm 62 at `tiny`. The QP-shaped families are the mirror
+  image (flat outer, all effect inner). Any interpretation of these
+  numbers that only looks at one of the two columns is wrong on half
+  the suite.
 - **`nmpc_vanderpol`** is the only family whose path is not scripted:
   the next parameter is the state the plant reaches after applying the
   control the previous solve produced. Because that makes the path

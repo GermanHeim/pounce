@@ -12,8 +12,9 @@ from typing import Dict, List, Type
 
 from ..spec import ParametricFamily
 from .control import VanDerPolNMPC
-from .nonlinear import HangingChain, RosenbrockRing
+from .nonlinear import HangingChain, RosenbrockRing, RosenbrockRingRoundTrip
 from .quadratic import DegenerateCorner, MovingBoundQP, SimplexProjection
+from .unconstrained import DoubleWellChain
 
 _FAMILIES: List[Type[ParametricFamily]] = [
     SimplexProjection,
@@ -21,6 +22,8 @@ _FAMILIES: List[Type[ParametricFamily]] = [
     DegenerateCorner,
     HangingChain,
     RosenbrockRing,
+    RosenbrockRingRoundTrip,
+    DoubleWellChain,
     VanDerPolNMPC,
 ]
 

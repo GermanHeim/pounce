@@ -17,11 +17,13 @@ changes.
   related solves. The unit of work here is a parametric family plus a
   scripted path through its parameter space, solved end to end by four arms
   (`cold-ipm`, `cold-sqp`, `warm-ipm`, `warm-sqp`) so the warm-start effect
-  is separated from the algorithm change. Six families cover the active-set
+  is separated from the algorithm change. Eight families cover the active-set
   regimes that decide whether warm starting pays — stable, flipping,
   degenerate (a path that passes exactly through a zero multiplier), a clean
-  activation switch, and a closed-loop NMPC sequence — each at three step
-  sizes, because payoff is a function of how far the problem moved. Nothing
+  activation switch, re-activation from an empty working set, an entirely
+  unconstrained path (`m = 0`, the zero mark the other speedups are read
+  against), and a closed-loop NMPC sequence — each at three step sizes,
+  because payoff is a function of how far the problem moved. Nothing
   outside `adapters/` imports a solver. See `benchmarks/warmstart/README.md`
   and `dev-notes/warm-start-benchmark.md`; a survey of the existing
   literature is in the latter (nothing public covers this case).

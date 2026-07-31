@@ -255,3 +255,38 @@ class RosenbrockRing(ParametricFamily):
         h *= obj_factor
         h[np.arange(n), np.arange(n)] += 2.0 * lagrange[0]
         return h
+
+
+class RosenbrockRingRoundTrip(RosenbrockRing):
+    """:class:`RosenbrockRing` with a radius that goes out and comes back.
+
+    The parent sweeps the radius monotonically, so its single
+    activation switch is always active → inactive. That leaves the
+    harder direction untested: carrying an *empty* working set into a
+    step whose solution needs a non-empty one, where the warm start
+    has nothing useful to hand over and the solver must find the
+    active set anyway.
+
+    The path here is a triangle — start outside the switch radius
+    (constraint inactive), sweep in past it (active), then back out
+    (inactive again) — so it crosses in both directions, at exactly
+    the quarter and three-quarter steps, at every scale. Both crossing
+    steps land precisely on ``r = √n``, where the constraint is weakly
+    active.
+    """
+
+    name = "rosenbrock_ring_cycle"
+    tags = {"regime": "re-activation", "channel": "rhs", "curvature": "nonconvex"}
+    n_steps = 21
+
+    def theta_path(self, scale: float) -> Optional[List[np.ndarray]]:
+        half = (self.n_steps - 1) // 2
+        r_switch = float(np.sqrt(self._N))
+        amp = self._DELTA * half * scale
+        # t runs −1 → +1 → −1, so r runs (switch + amp) → (switch −
+        # amp) → (switch + amp), crossing r_switch at k = half/2 and
+        # k = 3·half/2.
+        return [
+            np.array([r_switch - amp * (1.0 - 2.0 * abs(k - half) / half)])
+            for k in range(self.n_steps)
+        ]
