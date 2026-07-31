@@ -155,6 +155,38 @@ SQP-side warm-start state doesn't leak between solves) and
 `application_default_does_not_select_sqp` (asserts the default
 solver path is IPM).
 
+### Measuring whether the warm start paid
+
+Do not judge a warm start by `info["iter_count"]`. That is the
+**outer** SQP iteration count, and on a problem whose subproblem
+is already a QP the outer loop terminates in one iteration
+whether or not you warm started — the number reads the same cold
+and warm while the work underneath differs by an order of
+magnitude. The saved work is inside the QP subproblems, and two
+further keys report it:
+
+| key | meaning |
+| --- | ------- |
+| `info["n_qp_solves"]`    | QP subproblems solved during this solve |
+| `info["n_qp_ws_changes"]`| active-set changes (adds + drops) across those QPs |
+
+Both are `0` on the IPM path, which solves no QP subproblems.
+`n_qp_ws_changes` is the measurement to watch across a sequence:
+
+```python
+prob.add_option("algorithm", "active-set-sqp")
+
+ws = None
+for k in range(horizon_steps):
+    x, info = prob.solve(x0=x_prev, working_set=ws)
+    print(k, info["iter_count"], info["n_qp_ws_changes"])
+    ws, x_prev = info["working_set"], x
+```
+
+A warm start that is working drives the second column toward
+zero while the first stays flat. `benchmarks/warmstart/` is
+built on exactly this measurement.
+
 ## 3. The working-set warm-start contract
 
 The §6 contract is the tuple `(x, λ_g, λ_x, 𝒲)` — primal, constraint

@@ -961,6 +961,11 @@ impl IpoptApplication {
         {
             let mut stats = self.statistics.borrow_mut();
             stats.iteration_count = res.n_iter as Index;
+            // Subproblem counters. The outer iteration count alone
+            // cannot show what a working-set warm start bought — the
+            // saved work is inside the QPs — so both are reported.
+            stats.sqp_qp_solves = res.n_qp_solves as Index;
+            stats.sqp_qp_working_set_changes = res.n_qp_working_set_changes as Index;
             stats.final_objective = res.obj;
             // `final_scaled_objective` defaults to NaN; the SQP path does not
             // thread nlp_scaling through the objective (same as the residuals

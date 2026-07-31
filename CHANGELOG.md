@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Added — a benchmark for warm starting, and the counter that makes it measurable
+
+- **`benchmarks/warmstart/` — the first suite in the tree that is not a
+  cold-solve set.** Every existing suite measures one problem, one solve,
+  from scratch; warm starting only means anything over a *sequence* of
+  related solves. The unit of work here is a parametric family plus a
+  scripted path through its parameter space, solved end to end by four arms
+  (`cold-ipm`, `cold-sqp`, `warm-ipm`, `warm-sqp`) so the warm-start effect
+  is separated from the algorithm change. Six families cover the active-set
+  regimes that decide whether warm starting pays — stable, flipping,
+  degenerate (a path that passes exactly through a zero multiplier), a clean
+  activation switch, and a closed-loop NMPC sequence — each at three step
+  sizes, because payoff is a function of how far the problem moved. Nothing
+  outside `adapters/` imports a solver. See `benchmarks/warmstart/README.md`
+  and `dev-notes/warm-start-benchmark.md`; a survey of the existing
+  literature is in the latter (nothing public covers this case).
+- **`info["n_qp_solves"]` and `info["n_qp_ws_changes"]` on the Python
+  path**, backed by `SqpResult::n_qp_working_set_changes` and
+  `SolveStatistics::sqp_qp_solves` / `sqp_qp_working_set_changes`. The inner
+  active-set work an SQP warm start exists to avoid was previously not
+  observable from any user-facing surface: `pounce-qp` counted per-QP
+  working-set changes, nothing accumulated them. Outer `iter_count` is not a
+  substitute — on a QP-shaped NLP the outer loop terminates in one iteration
+  warm or cold, so a cold/warm comparison reads exactly 1.00× while the
+  inner work differs by an order of magnitude (`simplex_proj`: 313 → 4
+  active-set changes; `nmpc_vanderpol`: 931 → 66). Both keys are 0 on the
+  interior-point path, which solves no QP subproblems.
 ### Fixed — exact-Hessian SQP gave up on unconstrained nonconvex NLPs (#423)
 
 - **`algorithm = active-set-sqp` with `sqp_hessian = exact` no longer stops at

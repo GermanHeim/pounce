@@ -370,6 +370,8 @@ impl PyProblem {
             stats.final_unscaled_dual_inf,
             stats.final_unscaled_constr_viol,
             stats.final_unscaled_compl,
+            stats.sqp_qp_solves,
+            stats.sqp_qp_working_set_changes,
         )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
@@ -716,6 +718,8 @@ impl PyProblem {
             stats.final_unscaled_dual_inf,
             stats.final_unscaled_constr_viol,
             stats.final_unscaled_compl,
+            stats.sqp_qp_solves,
+            stats.sqp_qp_working_set_changes,
         )?;
         info.set_item("dx", opt_vec_to_py(py, result.dx))?;
         info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
@@ -1085,6 +1089,8 @@ pub(crate) fn build_info_dict<'py>(
     final_unscaled_dual_inf: Number,
     final_unscaled_constr_viol: Number,
     final_unscaled_compl: Number,
+    sqp_qp_solves: i32,
+    sqp_qp_working_set_changes: i32,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("status", status as i32)?;
@@ -1104,6 +1110,13 @@ pub(crate) fn build_info_dict<'py>(
         bridge.state.final_z_u.clone().into_pyarray_bound(py),
     )?;
     info.set_item("iter_count", iter_count)?;
+    // Active-set SQP subproblem work. `iter_count` on that path is the
+    // *outer* iteration count, which says nothing about how much
+    // active-set searching the QPs underneath did — and that is exactly
+    // what a working-set warm start changes. Both are 0 on the IPM path,
+    // which solves no QP subproblems.
+    info.set_item("n_qp_solves", sqp_qp_solves)?;
+    info.set_item("n_qp_ws_changes", sqp_qp_working_set_changes)?;
     // Converged barrier parameter μ. Thread this into the next
     // warm-started solve's `mu_init` / `warm_start_target_mu` to seed
     // the corrector in predictor–corrector path following (pounce#86).

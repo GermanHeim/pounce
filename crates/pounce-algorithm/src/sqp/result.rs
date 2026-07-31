@@ -102,6 +102,16 @@ pub struct SqpResult {
     pub status: SqpStatus,
     pub n_iter: u32,
     pub n_qp_solves: u32,
+    /// Active-set changes (adds + drops) summed over every step QP
+    /// solved during this call — the inner work a working-set warm
+    /// start exists to avoid. Reported separately from `n_iter`
+    /// because the two move independently: on a QP-shaped NLP the
+    /// outer loop always terminates in one iteration, so the entire
+    /// warm-start effect shows up here and nowhere else.
+    ///
+    /// Excludes second-order-correction QPs, whose stats the line
+    /// search does not surface.
+    pub n_qp_working_set_changes: u32,
     /// Final stationarity residual (max-norm of `∇f + Jᵀ λ_g + λ_x`).
     pub final_stationarity: Number,
     /// Final constraint violation (max-norm of `c(x*)` for

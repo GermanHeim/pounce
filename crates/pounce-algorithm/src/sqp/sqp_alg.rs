@@ -150,6 +150,14 @@ impl SqpAlgorithm {
         };
 
         let mut n_qp_solves: u32 = 0;
+        // Inner active-set work: adds + drops summed over every step QP
+        // solved in this call. This — not the outer iteration count — is
+        // what a warm start is trying to reduce, and on a QP-shaped NLP
+        // (one outer iteration by construction) it is the *only* thing
+        // that moves. Second-order-correction QPs are not counted: they
+        // are solved inside the line search, which does not surface its
+        // subproblem stats.
+        let mut n_qp_working_set_changes: u32 = 0;
         let mut final_stationarity = 0.0;
         let mut final_constr_viol = 0.0;
         // l1-merit penalty parameter ν, adapted across iterations
@@ -339,6 +347,7 @@ impl SqpAlgorithm {
                     status: SqpStatus::Optimal,
                     n_iter: outer,
                     n_qp_solves,
+                    n_qp_working_set_changes,
                     final_stationarity,
                     final_constr_viol,
                     working_set: iter.working,
@@ -419,6 +428,7 @@ impl SqpAlgorithm {
                 self.qp_solver.solve(&qp, None, &self.qp_opts)?
             };
             n_qp_solves += 1;
+            n_qp_working_set_changes += sol.stats.n_working_set_changes;
 
             // Cold-start fallback: a warm start seeds the QP with the
             // previous iterate's working set, which is usually a big
@@ -434,6 +444,7 @@ impl SqpAlgorithm {
             if warm_started && matches!(sol.status, QpStatus::MaxIter | QpStatus::NumericalError) {
                 let cold = self.qp_solver.solve(&qp, None, &self.qp_opts)?;
                 n_qp_solves += 1;
+                n_qp_working_set_changes += cold.stats.n_working_set_changes;
                 if cold.status == QpStatus::Optimal {
                     sol = cold;
                 }
@@ -474,6 +485,7 @@ impl SqpAlgorithm {
                     .qp_solver
                     .solve(&qp_data.as_qp(), None, &self.qp_opts)?;
                 n_qp_solves += 1;
+                n_qp_working_set_changes += retry.stats.n_working_set_changes;
                 if retry.status == QpStatus::Optimal {
                     sol = retry;
                 }
@@ -548,6 +560,7 @@ impl SqpAlgorithm {
                         status: SqpStatus::InfeasibleSubproblem,
                         n_iter: outer,
                         n_qp_solves,
+                        n_qp_working_set_changes,
                         final_stationarity,
                         final_constr_viol,
                         working_set: iter.working,
@@ -583,6 +596,7 @@ impl SqpAlgorithm {
                         status,
                         n_iter: outer,
                         n_qp_solves,
+                        n_qp_working_set_changes,
                         final_stationarity,
                         final_constr_viol,
                         working_set: iter.working,
@@ -625,6 +639,7 @@ impl SqpAlgorithm {
                         },
                         n_iter: outer,
                         n_qp_solves,
+                        n_qp_working_set_changes,
                         final_stationarity,
                         final_constr_viol,
                         working_set: iter.working,
@@ -779,6 +794,7 @@ impl SqpAlgorithm {
                     status: SqpStatus::LineSearchFailed,
                     n_iter: outer,
                     n_qp_solves,
+                    n_qp_working_set_changes,
                     final_stationarity,
                     final_constr_viol,
                     working_set: Some(sol.working),
@@ -823,6 +839,7 @@ impl SqpAlgorithm {
             status: SqpStatus::MaxIter,
             n_iter: self.opts.max_iter,
             n_qp_solves,
+            n_qp_working_set_changes,
             final_stationarity,
             final_constr_viol,
             working_set: iter.working,

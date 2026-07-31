@@ -106,6 +106,21 @@ pub struct SolveStatistics {
     /// solve was restoration?" without running with high print_level.
     pub restoration_wall_secs: Number,
 
+    // ---- Active-set SQP subproblem counters. ----
+    //
+    // Populated by `IpoptApplication::optimize_sqp_tnlp`; both stay 0
+    // on the interior-point path, which has no QP subproblems.
+    //
+    /// Number of QP subproblems solved during this solve.
+    pub sqp_qp_solves: Index,
+    /// Active-set changes (adds + drops) summed over those QP
+    /// subproblems. This is the measurement a working-set warm start
+    /// is judged on: the outer iteration count can be identical
+    /// between a cold and a warm solve while this differs by an order
+    /// of magnitude, and on a QP-shaped NLP (one outer iteration by
+    /// construction) it is the only thing that moves at all.
+    pub sqp_qp_working_set_changes: Index,
+
     /// Per-iteration trajectory. Empty when the consumer doesn't ask
     /// for it (`iter_history_enabled = false` on the application or
     /// the binary's `--json-detail summary` mode). Populated in order
@@ -176,6 +191,8 @@ impl Default for SolveStatistics {
             restoration_inner_iters: 0,
             restoration_outer_iters: 0,
             restoration_wall_secs: 0.0,
+            sqp_qp_solves: 0,
+            sqp_qp_working_set_changes: 0,
             iterations: Vec::new(),
         }
     }

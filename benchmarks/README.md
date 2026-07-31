@@ -97,6 +97,14 @@ reference](#pounce-runs-vs-the-ipopt-reference) below.
 | [`lp/`](lp/README.md)               | Linear programs (Netlib + small Mészáros) | small, known optima | LP *validation* set — small classic LPs pounce solves to optimality; `.nl` converted from MPS via `generate_nl.py` |
 | [`lpopt/`](lpopt/README.md)         | Hard linear programs (Mittelmann lpopt) | large/degenerate subset | LP *stress* tier from the plato lpopt benchmark (even HiGHS/ipopt time out at short limits); run with a long limit |
 | [`water/`](water/README.md)         | Water-network design | 6 problems | MINLPLib instances, signomial nonlinearities |
+| [`warmstart/`](warmstart/README.md) | Parametric NLP **sequences** | 6 families × 3 step sizes | The one suite that is not a cold-solve set: measures warm starting (cold vs warm × IPM vs active-set SQP) over paths of related NLPs. Python-driven, not `.nl` |
+
+The `warmstart/` suite sits outside the `.nl` machinery entirely — it
+has no Ipopt reference and does not feed the composite report, because
+it measures a different thing (the cost of a *sequence* of related
+solves, cold vs warm) and needs an in-process solver handle to carry a
+working set between steps. It has its own report at
+`warmstart/results.md`; see [`warmstart/README.md`](warmstart/README.md).
 
 The GAMS nlpbench harness ([`gams/nlpbench/`](../gams/nlpbench/)) is no
 longer aggregated into the composite report — its problem coverage

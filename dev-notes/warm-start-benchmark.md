@@ -1,0 +1,156 @@
+# Warm-start benchmark — design notes and findings
+
+The suite lives at `benchmarks/warmstart/`; its README is the
+user-facing document. This note records *why* it is shaped the way it
+is, what the prior-art survey turned up, and the two solver findings
+that came out of building it.
+
+## Prior art (searched 2026-07-31): there isn't one
+
+No solver-agnostic, NLP-level, sequence-based warm-start benchmark
+exists to reuse. What does exist and why none of it covers the case:
+
+- **qpbenchmark family** (`qpsolvers/qpbenchmark`, `mpc_qpbenchmark`,
+  `ik_qpbenchmark`, Maros-Mészáros, free-for-all). QP level, and
+  explicitly cold-start: the MPC test set's README states it "does not
+  reflect the warm-starting that is frequently used on robots that do
+  model predictive control". Problems ship as independent instances
+  with the sequence structure discarded.
+- **WARP**, arXiv:2605.05728 (2026) — "A Benchmark for Primal-Dual
+  Warm-Starting of Interior-Point Solvers". The closest existing
+  thing. Interior-point only (it predicts the full primal-dual-barrier
+  state; reports IPOPT 23 → 3 iterations for an oracle start, 76% for
+  its learned model), AC-OPF only, and built around learned
+  predictions over i.i.d. instances rather than consecutive
+  perturbations. No active set, no working set, no path.
+- **Not All Warm Starts Help**, arXiv:2606.08984 (2026) — benchmarks
+  primal-dual initializations for ACOPF. An evaluation study, not a
+  reusable set. Its finding that warm starts frequently *hurt* is why
+  regressions are a first-class column here rather than an aggregate
+  the mean absorbs.
+- **OPFData** (arXiv:2406.07234) / PGLearn — 300k solved AC-OPF
+  instances per grid (loads perturbed 80–120%, plus N-1 topologies).
+  A dataset, no protocol; independent samples, not a path.
+- **acados / CasADi NMPC papers** — closed-loop timing comparisons
+  (chain-of-masses and friends) embedded in solver repos and papers.
+  Per-paper harnesses; nothing portable.
+- **CUTEst / Hock-Schittkowski / Vanderbei / Mittelmann /
+  Maros-Mészáros** — every problem is a single cold solve.
+
+## Why the unit is a family-plus-path
+
+Warm starting has no meaning for one isolated NLP, and the property
+that predicts payoff — how the active set moves between consecutive
+instances — only exists along a path. So the benchmark's unit of work
+is the whole sequence, families are tagged by the active-set regime
+they exercise, and every family is run at three step sizes (×0.1, ×1,
+×4 of its natural increment) because payoff is a function of how far
+the problem moved. A single step size measures one point on a curve
+and calls it the answer.
+
+Families are dense-callback and solver-free by construction; the only
+module that imports a solver is `adapters/pounce_adapter.py`. That is
+what keeps the option open to lift the suite out of the pounce tree,
+or to add an Ipopt arm, without touching a family.
+
+## Why the harness is Python-driven and not `.nl`-driven
+
+Every other suite runs `.nl` files through the CLI. That cannot work
+here: carrying a working set between solves needs an in-process
+handle, and the CLI has no cross-process working-set input (the
+debugger's `resolve` seeds a primal point only). The Python
+`Problem.solve(working_set=…)` / `WarmStart` surface is the one that
+supports the contract, so the harness drives it directly.
+
+## Correctness is judged on the step's own terms, not against the reference
+
+The first cut scored a step correct iff its solution matched the
+reference arm's (`cold-ipm`) to a tolerance. That is wrong on
+nonconvex families, and the benchmark demonstrated it immediately: on
+`rosenbrock_ring`, `cold-ipm` converges to Rosenbrock's well-known
+*local* minimum (f ≈ 3.9866 at x ≈ (−1, 1, …, 1)) while the SQP arms
+find the global one (f = 0). Scoring against the reference marked the
+better answer wrong.
+
+The criterion now is: converged on its own terms (success status, plus
+a KKT residual and feasibility the *harness* verifies rather than
+taking the solver's word for), and not a *worse* optimum than the
+reference by more than `--obj-tol`. A better optimum is reported in
+its own column. `‖x − x_ref‖` is a recorded diagnostic, not a gate,
+because two solves can both be optimal and still differ in `x` near a
+degenerate face — which the `moving_bound_qp` family produced at step
+9, where the SQP and IPM arms agreed on the objective to 1e-9 while
+differing in `x` by 2e-5.
+
+## Finding 1: the inner active-set work was not observable (fixed here)
+
+An SQP warm start's whole purpose is to skip active-set searching in
+the QP subproblems, and none of that was visible from Python. The
+outer iteration count is not a proxy: on a QP-shaped NLP the outer
+loop terminates in one iteration whether warm started or not, so a
+cold/warm comparison on `iter_count` reads exactly 1.00× while the
+inner work differs by an order of magnitude.
+
+`pounce-qp` already counted per-QP active-set changes in
+`QpStats::n_working_set_changes`; nothing accumulated them. Added:
+
+- `SqpResult::n_qp_working_set_changes` — summed over every step QP,
+  including the cold-start and quasi-Newton-reset fallbacks. Excludes
+  second-order-correction QPs, whose stats the line search does not
+  surface.
+- `SolveStatistics::sqp_qp_solves` / `sqp_qp_working_set_changes` —
+  0 on the IPM path, which solves no QP subproblems.
+- Python `info["n_qp_solves"]` / `info["n_qp_ws_changes"]`.
+
+Covered by `sqp_reports_qp_working_set_changes_and_warm_start_removes_them`
+in `crates/pounce-algorithm/src/sqp/tests.rs`.
+
+With it, the first full run shows what was previously invisible:
+`simplex_proj` goes from 313 active-set changes cold to 4 warm at the
+default step size, and `nmpc_vanderpol` from 931 to 66 at the smallest
+one — while the outer-iteration column for both reads 1.00×.
+
+## Finding 2: exact-Hessian SQP fails on Rosenbrock from the classic start
+
+Not fixed, recorded. On
+
+    min Rosenbrock(x)  s.t.  ‖x‖² ≤ r²,   n = 10,  −5 ≤ x ≤ 5
+
+started from the traditional `(−1.2, 1, −1.2, …)`, the default
+`sqp_hessian = exact` path terminates with
+`Search_Direction_Becomes_Too_Small` at **every** step of the
+parameter path, at a point with stationarity residual ≈ 2.6 and
+objective 9.62 (against 0.0 from other starts). `damped-bfgs` and
+`lbfgs` converge from the same start, and `exact` converges from the
+origin or from `0.9·1`. So it is a step-computation failure on an
+indefinite exact Hessian, not a modelling problem:
+
+| `sqp_hessian` | from (−1.2, 1, …) | from 0.9·1 | from 0 |
+|---|---|---|---|
+| `exact` | fails, 4 iters, KKT 2.6 | ok, 6 iters, f=0 | ok, 13 iters, f=0 |
+| `damped-bfgs` | ok, 99 iters, f=0 | ok, 28 iters | ok, 123 iters |
+| `lbfgs` | ok, 123 iters, f=0 | ok, 258 iters | ok, 98 iters |
+
+The family therefore starts from the origin, so the row measures warm
+starting rather than a wall of identical failures. The failing start
+is worth turning into its own regression test, or an issue, separately
+from this suite.
+
+## Not done yet
+
+- **A shift-based warm-start arm for the closed-loop family.** MPC
+  codes shift the previous horizon by one step before reusing it;
+  `warm-sqp` here carries the previous solution unshifted, which is
+  the honest baseline for "carry the previous answer" but understates
+  what an MPC implementation would do.
+- **The predictor + corrector arm.** `pounce-sensitivity` can supply
+  `Δx ≈ ∂x*/∂p · Δp` before the SQP corrector runs — the pattern
+  documented in `docs/src/active-set-sqp.md` §4. It would slot in as a
+  fifth arm and is the natural next addition.
+- **An external solver arm.** The adapter interface exists and is
+  unused; Ipopt through cyipopt would be the obvious first one, using
+  the same families unchanged.
+- **Composite-report integration.** The suite writes its own
+  `results.md` and stays out of `BENCHMARK_REPORT.md`, which is built
+  around per-problem cold-solve rows against an Ipopt reference and
+  has no shape for a per-sequence result.

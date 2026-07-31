@@ -125,6 +125,8 @@ impl PySolver {
             stats.final_unscaled_dual_inf,
             stats.final_unscaled_constr_viol,
             stats.final_unscaled_compl,
+            stats.sqp_qp_solves,
+            stats.sqp_qp_working_set_changes,
         )?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         let _ = bridge; // alive via inner's Rc<RefCell<dyn TNLP>> clone
