@@ -164,13 +164,64 @@ class LinearMpcBase(ParametricFamily):
         return obj_factor * np.diag(diag)
 
 
-def _horizon_family(nh: int) -> Type[LinearMpcBase]:
+    # -- sparse path -----------------------------------------------
+    #
+    # The dense methods above stay (the self-test finite-differences
+    # them at the small horizons), but nothing calls them during a
+    # solve: at N = 800 the dense Hessian alone would be 2402² doubles,
+    # 46 MB, rebuilt at every iteration. The structure below is the
+    # block-banded pattern an MPC transcription actually has —
+    # 7 nonzeros per dynamics row pair, and a diagonal Hessian.
+
+    def sparse_structure(self):
+        jr, jc = [], []
+        jr += [0, 1]
+        jc += [0, 1]
+        for k in range(self._NH):
+            r1, r2 = 2 + 2 * k, 3 + 2 * k
+            i1, i2 = 2 * k, 2 * k + 1
+            n1, n2 = 2 * (k + 1), 2 * (k + 1) + 1
+            u = self._u_off + k
+            jr += [r1, r1, r1, r2, r2, r2, r2]
+            jc += [n1, i1, i2, n2, i1, i2, u]
+        idx = np.arange(self.n)
+        return (
+            np.array(jr, dtype=np.int64),
+            np.array(jc, dtype=np.int64),
+            idx.copy(),  # Hessian is diagonal
+            idx.copy(),
+        )
+
+    def jacobian_values(self, z):
+        h, a, b = self._H, self._A, self._B
+        vals = np.empty(2 + 7 * self._NH)
+        vals[0] = 1.0
+        vals[1] = 1.0
+        block = np.array([1.0, -1.0, -h, 1.0, a * h, -1.0 + b * h, -h])
+        vals[2:] = np.tile(block, self._NH)
+        return vals
+
+    def hessian_values(self, z, lagrange, obj_factor):
+        diag = np.zeros(self.n)
+        dx = diag[: self._u_off].reshape(self._NH + 1, 2)
+        dx[:-1] = 2.0 * self._Q
+        dx[-1] = 2.0 * self._QT * self._Q
+        diag[self._u_off :] = 2.0 * self._R
+        return obj_factor * diag
+
+
+def _horizon_family(nh: int, tier: str = "default") -> Type[LinearMpcBase]:
     return type(
         f"LinearMpc{nh}",
         (LinearMpcBase,),
         {
             "name": f"mpc_horizon_{nh}",
             "_NH": nh,
+            "tier": tier,
+            # The large tier walks fewer steps: one active-set solve at
+            # N = 800 is seconds, and the per-step numbers are what
+            # matter, not the path length.
+            "n_steps": 20 if tier == "default" else 8,
             "tags": {
                 "regime": "saturation",
                 "channel": "rhs",
@@ -181,9 +232,14 @@ def _horizon_family(nh: int) -> Type[LinearMpcBase]:
     )
 
 
+#: Opt-in tier: n = 602 → 2402, where the sparse KKT and the Schur
+#: machinery start to be what the cost is made of. Not in the default
+#: sweep because a single active-set solve here takes seconds.
+MPC_LARGE_HORIZONS = (200, 400, 800)
+
 HORIZON_FAMILIES: List[Type[LinearMpcBase]] = [
     _horizon_family(nh) for nh in MPC_HORIZONS
-]
+] + [_horizon_family(nh, tier="large") for nh in MPC_LARGE_HORIZONS]
 
 HORIZON_BY_NAME: Dict[str, Type[LinearMpcBase]] = {
     f.name: f for f in HORIZON_FAMILIES
