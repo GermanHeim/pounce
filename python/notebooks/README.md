@@ -50,6 +50,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | # | Notebook | What it shows |
 |---|---|---|
 | 15 | [`15_convex_qp.ipynb`](15_convex_qp.ipynb) | Convex QP & LP with `pounce.qp`. |
+| 30 | [`30_active_set_qp.ipynb`](30_active_set_qp.ipynb) | The opt-in active-set engine (`method="active-set"` / `solver_selection="qp-active-set"`): reaching it from either surface, where it is ~2x faster than the IPM, and — measured — where it is much worse (71/138 vs 137/138 on Maros-Mészáros) plus the limitations to know before opting in. |
 | 16 | [`16_socp.ipynb`](16_socp.ipynb) | Second-order cone programs with `pounce.qp.solve_socp`. |
 
 ## Global optimization

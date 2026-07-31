@@ -82,7 +82,10 @@ pub trait QpSolver {
 /// note). Owns a single linear-solver backend; future Schur-
 /// complement state lives here too.
 pub struct ParametricActiveSetSolver {
-    linsol: LinearSolver,
+    /// Crate-visible so sibling modules — notably [`crate::homotopy`] — can
+    /// reuse the rank-repair helpers, which take the shared linear-solver
+    /// backend rather than owning one.
+    pub(crate) linsol: LinearSolver,
 }
 
 impl ParametricActiveSetSolver {
@@ -102,7 +105,7 @@ impl ParametricActiveSetSolver {
     /// is always checked. The `HessianInertia::Indefinite` hint
     /// merely tells the caller "shifts may be needed"; the
     /// algorithm decides what to do based on the factor's report.
-    fn factorize_with_inertia_control(
+    pub(crate) fn factorize_with_inertia_control(
         &mut self,
         mut kkt: KktTriplet,
         rhs: &mut [Number],
@@ -989,14 +992,24 @@ impl ParametricActiveSetSolver {
                 // steepest-violation rule — faster but not cycle-
                 // free under pathological degeneracy).
                 //
-                // EXPAND (Gill-Murray-Saunders-Wright 1989) is the
-                // SOTA default per the design note; its full
-                // primal-perturbation machinery is one of the
-                // remaining Phase 5a items. Until it lands, the
-                // `Expand` enum variant aliases to the steepest-
-                // violation behavior, which is correct on every
-                // non-cycling problem in the analytical ladder and
-                // matches the qpOASES default.
+                // Scope note: EXPAND (Gill-Murray-Saunders-Wright
+                // 1989) governs the *ratio test*, and its τ
+                // primal-perturbation machinery is implemented —
+                // τ-relaxed blocker selection in `select_blocker`,
+                // plus the τ-growth and snap-reset below. It does
+                // **not** supply a drop rule, so under
+                // `AntiCyclingChoice::Expand` this choice is
+                // Dantzig's steepest-violation: correct on every
+                // non-cycling problem in the analytical ladder, and
+                // the qpOASES default, but not cycle-free on its own.
+                // The anti-stall Bland latch (`force_bland`) is what
+                // bounds the pathological case.
+                //
+                // (This comment previously said EXPAND's perturbation
+                // machinery had not landed and that `Expand` aliased
+                // wholesale to steepest-violation. That was true before
+                // c20 and stale after it — the aliasing is specific to
+                // the drop rule, not to EXPAND as a whole.)
                 let use_bland =
                     force_bland || matches!(opts.anti_cycling, AntiCyclingChoice::Bland);
 
@@ -1661,6 +1674,99 @@ impl ParametricActiveSetSolver {
     /// always PD, so the two paths are identical; the gap is latent
     /// for indefinite inputs on the opt-in `use_schur_updates = true`
     /// path. See code-review item M10.
+    /// Reset the Schur base factor, **repairing a rank-deficient active set**
+    /// rather than failing on it.
+    ///
+    /// At a degenerate vertex more rows can be binding than there are
+    /// variables, and those extra rows are linearly dependent — an LICQ
+    /// violation. The resulting active-set KKT is singular, and no §4.5 H-block
+    /// shift can repair a rank-deficient *constraint* block, so the inertia
+    /// loop simply exhausts and reports failure.
+    ///
+    /// [`Self::solve_general`] has carried this guard for a long time;
+    /// `solve_general_schur` never did. That asymmetry was invisible while the
+    /// Schur path was opt-in, and became the dominant failure mode the moment
+    /// it was switched on for the convex active-set driver: 27 of 138
+    /// Maros-Mészáros problems (`QSHARE2B`, `QSCTAP1`, …) turned into a hard
+    /// `LinearSolverFailure("KKT matrix is singular (LICQ violation or
+    /// rank-deficient Jacobian)")` where the refactor path had merely failed to
+    /// converge.
+    ///
+    /// The repair is the same one the refactor path and
+    /// [`Self::cold_general_initial`] use: prune the active set to a maximal
+    /// linearly independent subset and deactivate the rest. A dropped row is a
+    /// linear combination of the kept ones, so it stays satisfied at the
+    /// current `x` and the feasible set is unchanged — only the rank deficiency
+    /// is removed. Deactivating a bound does not move `x`, so the iterate stays
+    /// feasible throughout.
+    ///
+    /// Each repair strictly shrinks the active set, so the inner loop
+    /// terminates. `budget` additionally caps how many repairs one *solve* may
+    /// perform: the ratio test can re-admit a pruned row on a later iteration,
+    /// and without the refactor path's rank-tabu bookkeeping there is nothing
+    /// here to stop a prune/re-add cycle. Exhausting the budget surfaces the
+    /// original error instead of spinning.
+    fn schur_reset_rank_repaired(
+        &mut self,
+        schur: &mut crate::schur::SchurState,
+        qp: &QpProblem,
+        working: &mut WorkingSet,
+        opts: &QpOptions,
+        n_changes: &mut u32,
+        budget: &mut u32,
+    ) -> Result<(), QpError> {
+        loop {
+            let ac = active_slot_count(working);
+            match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.is_recoverable_factorization_failure() => {
+                    if *budget == 0 {
+                        return Err(e);
+                    }
+                    let active_cons: Vec<usize> = (0..qp.m)
+                        .filter(|&i| working.constraints[i].is_active())
+                        .collect();
+                    let active_bounds: Vec<usize> = (0..qp.n)
+                        .filter(|&i| working.bounds[i].is_active())
+                        .collect();
+                    let (kc, kb) = independent_active_subset(
+                        &mut self.linsol,
+                        qp,
+                        &active_cons,
+                        &active_bounds,
+                    );
+                    // Already full rank ⇒ the failure is not a rank deficiency
+                    // this guard can repair; do not loop on it.
+                    if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                        return Err(e);
+                    }
+                    *budget -= 1;
+                    let mut keep_c = vec![false; qp.m];
+                    for &i in &kc {
+                        keep_c[i] = true;
+                    }
+                    let mut keep_b = vec![false; qp.n];
+                    for &i in &kb {
+                        keep_b[i] = true;
+                    }
+                    for &i in &active_cons {
+                        if !keep_c[i] {
+                            working.constraints[i] = ConsStatus::Inactive;
+                            *n_changes += 1;
+                        }
+                    }
+                    for &i in &active_bounds {
+                        if !keep_b[i] {
+                            working.bounds[i] = BoundStatus::Inactive;
+                            *n_changes += 1;
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     fn solve_general_schur(
         &mut self,
         qp: &QpProblem,
@@ -1674,6 +1780,11 @@ impl ParametricActiveSetSolver {
         let mut n_refactor: u32 = 0;
         let mut n_changes: u32 = 0;
         let mut n_schur_updates: u32 = 0;
+        // Rank repairs allowed for this solve. Generous relative to the number
+        // of genuinely dependent rows a degenerate vertex carries, but finite —
+        // see `schur_reset_rank_repaired` on why a cap is needed here and not
+        // on the refactor path.
+        let mut rank_repair_budget: u32 = (qp.n + qp.m).min(1000) as u32;
 
         let (mut x, mut working) = if let Some(w) = ws {
             (w.x.clone(), w.working.clone())
@@ -1694,25 +1805,163 @@ impl ParametricActiveSetSolver {
 
         // Initialize Schur and factor the base K_max.
         let mut schur = crate::schur::SchurState::new(n, m);
-        let active_count = active_slot_count(&working);
-        schur.reset(&mut self.linsol, qp, &working, active_count as i32, opts)?;
+        self.schur_reset_rank_repaired(
+            &mut schur,
+            qp,
+            &mut working,
+            opts,
+            &mut n_changes,
+            &mut rank_repair_budget,
+        )?;
         n_refactor += 1;
 
         // GMSW EXPAND τ — same semantics as in solve_general.
         let mut expand_tol = opts.expand_tol_initial;
 
+        // ---- Null-iteration guard (numerical floor / SMW drift) ----
+        //
+        // An iteration that takes the full step (`α = 1`, no blocker added)
+        // lands, in exact arithmetic, exactly on the minimizer of the current
+        // working set — so the very next `‖p‖∞` is zero and the loop moves on
+        // to the drop test. When it is *not* zero, the limit is the linear
+        // algebra rather than the algorithm, and the loop repeats a literal
+        // no-op until `max_iter`. Both variants were measured on
+        // Maros-Mészáros `CVXQP3_S` (3650 of its 3750 iterations were such
+        // no-ops):
+        //
+        //   * SMW drift — after 15 accumulated rank-2 updates the direction
+        //     no longer lies in the active rows' null space at all
+        //     (`‖A_W p‖∞ ≈ 1e-3`), so the "full Newton step" is not one.
+        //     Discarding the update layer and refactoring cures this.
+        //   * Noise floor — in the `γ = 1e6` elastic phase-1 the active-set
+        //     KKT is solved to `‖r‖∞ ≈ 1e-9`, which is all the conditioning
+        //     allows, and that leaves `‖p‖∞ ≈ 1.9e-9` permanently above the
+        //     `opt_tol = 1e-9` stationarity test. No refactor helps; the
+        //     iterate simply *is* stationary to attainable precision.
+        //
+        // So: on the first no-op, refactor. If a fresh factor still cannot
+        // shrink the step, accept the iterate as stationary for this working
+        // set and let the drop test run. Accepting is safe — `QpSolver::solve`
+        // re-audits feasibility and the convex driver re-measures the KKT
+        // error, so a point that is not really optimal is demoted, not
+        // believed — and it is strictly better than spending the whole budget
+        // re-deriving the same step.
+        let mut prev_p_inf = Number::INFINITY;
+        let mut prev_was_null_step = false;
+        let mut floor_refactored = false;
+        /// A genuine Newton step drives `‖p‖∞` to round-off, so anything short
+        /// of halving it means the step accomplished nothing.
+        const NULL_STEP_GAIN: Number = 0.5;
+
+        let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
         for _iter in 0..opts.max_iter {
             let hx = h_times_x(qp.h, &x);
             let mut rhs = vec![0.0; n + m_total];
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
             }
-            schur.solve(&mut self.linsol, &mut rhs)?;
+            // A singular Schur complement is a normal event in SMW updating,
+            // not a solver breakdown: the accumulated rank-2 updates can leave
+            // the small dense block `S` singular while the underlying
+            // active-set KKT is perfectly well conditioned. Recover the way the
+            // count-based path already does — discard the update layer and
+            // refactor `K_max` against the current working set — then redo the
+            // solve. Nothing but the failed `S⁻¹` is thrown away, so the answer
+            // is unchanged; this is what keeps the Schur path a pure
+            // *performance* switch.
+            //
+            // Without this recovery the entire solve aborted with
+            // `LinearSolverFailure("Schur block is singular …")` on problems the
+            // refactor path solves exactly — the reason the Schur path could not
+            // be turned on by default. See `tests/schur_vs_refactor.rs`.
+            let rhs_backup = rhs.clone();
+            if let Err(e) = schur.solve(&mut self.linsol, &mut rhs) {
+                if !e.is_recoverable_factorization_failure() {
+                    return Err(e);
+                }
+                self.schur_reset_rank_repaired(
+                    &mut schur,
+                    qp,
+                    &mut working,
+                    opts,
+                    &mut n_changes,
+                    &mut rank_repair_budget,
+                )?;
+                n_refactor += 1;
+                // `solve` writes through `rhs`, so restore it before retrying.
+                rhs.copy_from_slice(&rhs_backup);
+                schur.solve(&mut self.linsol, &mut rhs)?;
+            }
 
             let p: Vec<Number> = rhs[..n].to_vec();
             let p_inf = p.iter().map(|pi| pi.abs()).fold(0.0, f64::max);
 
-            if p_inf <= opts.opt_tol {
+            if trace {
+                // True residual of the *active-set* KKT system at (p, λ).
+                // Row block 1: H p + Σ_active a_i λ_i = -(Hx + g)
+                // Row block 2: a_iᵀ p = 0 for every active row / bound.
+                let hp = h_times_x(qp.h, &p);
+                let hxg = h_times_x(qp.h, &x);
+                let mut r1: Vec<Number> = (0..n).map(|i| hp[i] + hxg[i] + qp.g[i]).collect();
+                let (ir, jc, av) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+                for k in 0..ir.len() {
+                    let i = (ir[k] - 1) as usize;
+                    let j = (jc[k] - 1) as usize;
+                    if working.constraints[i].is_active() {
+                        r1[j] += av[k] * rhs[n + i];
+                    }
+                }
+                for j in 0..n {
+                    if working.bounds[j].is_active() {
+                        r1[j] += rhs[n + m + j];
+                    }
+                }
+                let ap_dbg = a_times_x(qp.a, &p, m);
+                let mut r2 = 0.0_f64;
+                for i in 0..m {
+                    if working.constraints[i].is_active() {
+                        r2 = r2.max(ap_dbg[i].abs());
+                    }
+                }
+                for j in 0..n {
+                    if working.bounds[j].is_active() {
+                        r2 = r2.max(p[j].abs());
+                    }
+                }
+                let r1n = r1.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+                eprintln!(
+                    "[qp] it={_iter} RES stat={r1n:.3e} actrow={r2:.3e} pinf={p_inf:.3e} sdim={} nact={}",
+                    schur.n_schur_updates() * 2,
+                    active_slot_count(&working)
+                );
+            }
+
+            // Null-iteration guard — see the note above the loop.
+            let mut stationary = p_inf <= opts.opt_tol;
+            if !stationary && prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf {
+                if floor_refactored {
+                    // A fresh factor already failed to shrink the step: this is
+                    // the attainable-accuracy floor, not update drift.
+                    stationary = true;
+                } else {
+                    floor_refactored = true;
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                    )?;
+                    n_refactor += 1;
+                    prev_was_null_step = false;
+                    prev_p_inf = Number::INFINITY;
+                    continue;
+                }
+            }
+            prev_p_inf = p_inf;
+
+            if stationary {
                 let mut worst: Option<(DropTarget, Number)> = None;
                 for slot in 0..m_total {
                     if !crate::schur::SchurState::slot_active(&working, slot) {
@@ -1753,14 +2002,51 @@ impl ParametricActiveSetSolver {
                             m + i
                         }
                     };
-                    schur.apply_change(&mut self.linsol, qp, slot, false)?;
+                    if trace {
+                        eprintln!(
+                            "[qp] it={_iter} DROP slot={slot} viol={:.3e} obj={:.12e} nact={} pinf={:.2e}",
+                            worst.unwrap().1,
+                            quad_objective(qp, &x),
+                            active_slot_count(&working),
+                            p_inf
+                        );
+                    }
+                    // Degenerate rank-2 update ⇒ refactor instead. `working`
+                    // already carries this drop, so resetting against it
+                    // reaches exactly the state the update was meant to
+                    // produce, without the update.
+                    if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, false) {
+                        if !e.is_recoverable_factorization_failure() {
+                            return Err(e);
+                        }
+                        self.schur_reset_rank_repaired(
+                            &mut schur,
+                            qp,
+                            &mut working,
+                            opts,
+                            &mut n_changes,
+                            &mut rank_repair_budget,
+                        )?;
+                        n_refactor += 1;
+                    }
                     n_changes += 1;
                     n_schur_updates += 1;
                     if schur.needs_reset(opts) {
-                        let ac = active_slot_count(&working);
-                        schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                        self.schur_reset_rank_repaired(
+                            &mut schur,
+                            qp,
+                            &mut working,
+                            opts,
+                            &mut n_changes,
+                            &mut rank_repair_budget,
+                        )?;
                         n_refactor += 1;
                     }
+                    // The working set changed, so the next step is a fresh
+                    // Newton step, not a repeat: re-arm the null-iteration
+                    // guard.
+                    prev_was_null_step = false;
+                    floor_refactored = false;
                     continue;
                 }
 
@@ -1866,6 +2152,14 @@ impl ParametricActiveSetSolver {
             if alpha < 0.0 {
                 alpha = 0.0;
             }
+            if trace && blocker.is_none() {
+                eprintln!(
+                    "[qp] it={_iter} NOBLOCK alpha={alpha:.3e} pinf={p_inf:.3e} obj={:.12e} nact={} ncand={}",
+                    quad_objective(qp, &x),
+                    active_slot_count(&working),
+                    candidates.len()
+                );
+            }
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
@@ -1885,12 +2179,41 @@ impl ParametricActiveSetSolver {
                         i
                     }
                 };
-                schur.apply_change(&mut self.linsol, qp, slot, true)?;
+                if trace {
+                    eprintln!(
+                        "[qp] it={_iter} ADD  slot={slot} alpha={alpha:.3e} obj={:.12e} nact={} pinf={:.2e}",
+                        quad_objective(qp, &x),
+                        active_slot_count(&working),
+                        p_inf
+                    );
+                }
+                // Same recovery as the drop side: `working` already carries this
+                // add, so a reset against it reproduces the intended state.
+                if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, true) {
+                    if !e.is_recoverable_factorization_failure() {
+                        return Err(e);
+                    }
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                    )?;
+                    n_refactor += 1;
+                }
                 n_changes += 1;
                 n_schur_updates += 1;
                 if schur.needs_reset(opts) {
-                    let ac = active_slot_count(&working);
-                    schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                    )?;
                     n_refactor += 1;
                 }
             }
@@ -1909,6 +2232,17 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 expand_tol = opts.expand_tol_initial;
+            }
+
+            // Null-iteration bookkeeping. A blocker means the working set grew,
+            // so the next step solves a *different* system and the guard
+            // re-arms; no blocker means a full step was taken and the next
+            // `‖p‖∞` must be round-off if the linear algebra is sound.
+            if blocker.is_some() {
+                prev_was_null_step = false;
+                floor_refactored = false;
+            } else {
+                prev_was_null_step = true;
             }
         }
 
@@ -1975,7 +2309,7 @@ const TABU_DRIFT_REL: Number = 1e-7;
 /// can rescue a rank-deficient *constraint* block). General-constraint
 /// rows are processed before variable bounds, so equality / general
 /// rows are preferred over bounds when a tie must be broken.
-fn independent_active_subset(
+pub(crate) fn independent_active_subset(
     linsol: &mut LinearSolver,
     qp: &QpProblem,
     active_cons: &[usize],
@@ -2385,6 +2719,17 @@ impl QpSolver for ParametricActiveSetSolver {
             }
         }
 
+        // Cold + general rows: try the parametric homotopy first. It returns
+        // `Ok(None)` when the path cannot be started (no rows, or the box
+        // relaxation is unbounded), which is a fall-through signal rather than a
+        // verdict, so the conventional path below still handles everything it
+        // handled before.
+        if ws.is_none() && opts.use_homotopy {
+            if let Some(sol) = self.solve_homotopy(qp, None, opts)? {
+                return Ok(sol);
+            }
+        }
+
         let has_general_inequality = !is_all_equality_constraints(qp);
 
         // Any of: caller provided a warm start, or the problem has at
@@ -2413,7 +2758,33 @@ impl QpSolver for ParametricActiveSetSolver {
             if matches!(sol.status, QpStatus::Optimal)
                 && !point_is_feasible(qp, &sol.x, opts.feas_tol)
             {
-                return self.solve_elastic(qp, opts);
+                // Never-regress on the recovery. Elastic phase-1 is a *repair*
+                // for a solve that converged to a constraint-violating point,
+                // but it is not guaranteed to land somewhere better, and when it
+                // does not the substitution is destructive: on Maros-Meszaros
+                // `QADLITTL` (optimum 480319) the audited iterate sits at
+                // 500918 with a small violation, and the elastic result that
+                // replaced it was 8.07 — the elastic seed (origin projected
+                // into the box), essentially no answer at all. The symptom from
+                // outside was a *larger* `max_iter` producing a far worse
+                // objective, because only the bigger budget got far enough to
+                // reach `Optimal` and trip this audit.
+                //
+                // Keep whichever point is less infeasible. Elastic still wins
+                // whenever it does its job — driving the slacks out — which is
+                // the case this path exists for.
+                let before = max_violation(qp, &sol.x);
+                let repaired = self.solve_elastic(qp, opts)?;
+                let after = max_violation(qp, &repaired.x);
+                if after <= before {
+                    return Ok(repaired);
+                }
+                // Repair regressed feasibility: keep the audited point, but do
+                // not dress it up as `Optimal` — it violates constraints, which
+                // is exactly what the audit established.
+                let mut kept = sol;
+                kept.status = QpStatus::MaxIter;
+                return Ok(kept);
             }
             return Ok(sol);
         }
@@ -2431,12 +2802,38 @@ impl QpSolver for ParametricActiveSetSolver {
 
     fn solve_parametric(
         &mut self,
-        _qp_prev: &QpProblem,
-        _sol_prev: &QpSolution,
+        qp_prev: &QpProblem,
+        sol_prev: &QpSolution,
         qp_new: &QpProblem,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        // No parametric path yet — fall back to a fresh cold solve.
+        // Trace the homotopy from the previous problem to the new one, starting
+        // from the previous solution's working set.
+        //
+        // This is the crate's advertised feature and was a stub that discarded
+        // both prior arguments. It is the *easy* direction of the homotopy: the
+        // prior solution is already optimal for the prior QP, so the path starts
+        // on the solution manifold — there is no `QP_0` to construct and no box
+        // relaxation to bound, which is the whole difficulty of the cold case.
+        //
+        // Guards, in order: the two problems must have the same shape, and the
+        // same `H`. `H` is not interpolated along the path (only `g` and the row
+        // bounds are), so a changed Hessian would make the traced path solve a
+        // different problem than the one requested. Rather than silently
+        // mispredict, fall back to a cold solve — correct, just not warm.
+        let same_shape = qp_prev.n == qp_new.n && qp_prev.m == qp_new.m;
+        let same_h = qp_prev.h.nonzeros() == qp_new.h.nonzeros()
+            && qp_prev.h.values() == qp_new.h.values()
+            && qp_prev.h.irows() == qp_new.h.irows()
+            && qp_prev.h.jcols() == qp_new.h.jcols();
+        if same_shape
+            && same_h
+            && sol_prev.status == QpStatus::Optimal
+            && sol_prev.x.len() == qp_new.n
+            && let Some(sol) = self.solve_homotopy(qp_new, Some((qp_prev, sol_prev)), opts)?
+        {
+            return Ok(sol);
+        }
         self.solve(qp_new, None, opts)
     }
 
@@ -2561,6 +2958,33 @@ impl QpSolver for ParametricActiveSetSolver {
 /// reach a KKT-stationary point that violates a constraint and report
 /// it as `Optimal`. `solve` runs this audit before trusting an
 /// `Optimal` and recovers through elastic mode on failure.
+/// Largest constraint / bound violation at `x` (0.0 when feasible).
+///
+/// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
+/// path can tell whether the point it is about to substitute is actually an
+/// improvement on the one it is discarding.
+fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
+    let ax = a_times_x(qp.a, x, qp.m);
+    let mut worst: Number = 0.0;
+    for i in 0..qp.m {
+        if qp.bl[i] > NLP_LOWER_BOUND_INF {
+            worst = worst.max(qp.bl[i] - ax[i]);
+        }
+        if qp.bu[i] < NLP_UPPER_BOUND_INF {
+            worst = worst.max(ax[i] - qp.bu[i]);
+        }
+    }
+    for (i, &xi) in x.iter().enumerate() {
+        if qp.xl[i] > NLP_LOWER_BOUND_INF {
+            worst = worst.max(qp.xl[i] - xi);
+        }
+        if qp.xu[i] < NLP_UPPER_BOUND_INF {
+            worst = worst.max(xi - qp.xu[i]);
+        }
+    }
+    worst.max(0.0)
+}
+
 fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
     let ax = a_times_x(qp.a, x, qp.m);
     for i in 0..qp.m {

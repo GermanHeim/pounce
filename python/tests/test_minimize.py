@@ -1301,7 +1301,7 @@ def test_convex_route_warns_on_dropped_options(monkeypatch):
     )
 
     monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
-    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
+    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts, **_kw: sentinel)
 
     f = lambda x: float(x @ x)
     with pytest.warns(UserWarning, match="had no effect|were ignored|acceptable_tol"):
@@ -1348,7 +1348,7 @@ def test_convex_route_warns_on_disp(monkeypatch):
     )
 
     monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
-    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
+    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts, **_kw: sentinel)
 
     f = lambda x: float(x @ x)
     with pytest.warns(UserWarning, match="disp"):
@@ -1476,6 +1476,11 @@ def test_refused_problem_does_not_report_success():
         "made the acceptable-KKT fallback fire on a refused solve"
     )
 def test_active_set_sqp_honors_hessian_approximation():
+    # Names the SQP path explicitly. `solver_selection="qp-active-set"` used to
+    # mean "run the SQP outer loop"; it now routes a convex QP to the convex
+    # active-set driver, where `sqp_hessian` is meaningless (and correctly
+    # reported as ignored). The subject of these tests is the SQP path, so they
+    # ask for it by name.
     """An SQP solve must not demand a Hessian the caller never supplied.
 
     ``hessian_approximation=limited-memory`` is what a frontend sets when no
@@ -1500,7 +1505,7 @@ def test_active_set_sqp_honors_hessian_approximation():
     expected = np.array([2.5, 1.5])
 
     sqp = pounce.minimize(
-        fun, [0.0, 0.0], jac=jac, constraints=con, solver_selection="qp-active-set"
+        fun, [0.0, 0.0], jac=jac, constraints=con, algorithm="active-set-sqp"
     )
     assert sqp.success, f"active-set SQP failed: {sqp.message}"
     np.testing.assert_allclose(sqp.x, expected, atol=1e-6)
@@ -1516,7 +1521,7 @@ def test_active_set_sqp_honors_hessian_approximation():
             [0.0, 0.0],
             jac=jac,
             constraints=con,
-            solver_selection="qp-active-set",
+            algorithm="active-set-sqp",
             sqp_hessian=source,
         )
         assert r.success
@@ -1559,7 +1564,7 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
                 jac=jac,
                 hess=hh,
                 constraints=dict_con,
-                solver_selection="qp-active-set",
+                algorithm="active-set-sqp",
                 sqp_hessian="exact",
             )
         assert r.success, f"exact-without-hessian must not fail: {r.message}"
@@ -1581,7 +1586,7 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
             jac=jac,
             hess=hess,
             constraints=nl_con,
-            solver_selection="qp-active-set",
+            algorithm="active-set-sqp",
             sqp_hessian="exact",
         )
     assert r.success, f"exact-without-hessian (nonlinear) must not fail: {r.message}"
@@ -1597,7 +1602,7 @@ def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
             jac=jac,
             hess=hess,
             constraints=lc,
-            solver_selection="qp-active-set",
+            algorithm="active-set-sqp",
             sqp_hessian="exact",
         )
     assert r.success

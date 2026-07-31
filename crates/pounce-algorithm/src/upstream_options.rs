@@ -503,6 +503,26 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     )?;
 
     r.add_bool_option(
+        "sqp_qp_use_homotopy",
+        "Trace the parametric homotopy on a cold convex-QP solve.",
+        false,
+        "Cold-start path for the pounce-qp active-set engine. When true, the \
+         solve traces the section 4.2 parametric homotopy: start from the \
+         box-only relaxation (all general rows dropped, which the box fast path \
+         solves directly), then tighten the row bounds toward their targets \
+         along t in [0,1], jumping the working set at each t where a row \
+         becomes binding or an active multiplier reaches zero. The iterate is \
+         feasible for the t-problem at every point on the path, so there is no \
+         phase-1 to stall in -- which is the failure mode the conventional path \
+         hits on degenerate netlib-derived QPs. \
+         \
+         This is the algorithm the crate is named for and the one its design \
+         note assumes; it was previously unimplemented (solve_parametric was a \
+         stub). Default false while it is evaluated against the conventional \
+         path.",
+    )?;
+
+    r.add_bool_option(
         "sqp_qp_use_schur_updates",
         "Absorb active-set changes as Schur-complement rank-2 updates.",
         false,

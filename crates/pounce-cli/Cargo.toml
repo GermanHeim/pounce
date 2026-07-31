@@ -51,6 +51,9 @@ pounce-observability.workspace = true
 # Specialized convex LP/QP interior-point solver, dispatched to for
 # classified LP / convex-QP `.nl` inputs.
 pounce-convex.workspace = true
+# For the AntiCyclingChoice enum when forwarding sqp_qp_* to the active-set
+# engine; already a transitive dependency via pounce-convex.
+pounce-qp.workspace = true
 feral.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

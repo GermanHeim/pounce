@@ -79,15 +79,28 @@ pounce: problem class NLP does not match forced solver qp-ipm
         (expected an LP or convex QP)
 ```
 
-`qp-active-set` runs the active-set SQP engine, whose step QPs are solved
-by `pounce-qp`'s `ParametricActiveSetSolver`; on an LP or convex QP that
-converges in essentially one QP solve. It is the same engine the
-`algorithm=active-set-sqp` option selects — on the CLI, `solver_selection`
-additionally validates the problem class first, which is why the row above
-can promise the error. Duals are recovered and the `.sol` written exactly
-as on the IPM path. (The `minimize` library path has no `.nl` to classify,
-so there it runs on whatever problem it is given; see
-[Python](python.md#forcing-the-solver).)
+`qp-active-set` hands the QP directly to `pounce-qp`'s
+`ParametricActiveSetSolver`, through the same convex driver the IPM uses —
+so it inherits presolve, postsolve, dual recovery, `.sol` writing, timing
+and the convex status vocabulary. It is **not** the same route as
+`algorithm=active-set-sqp`, which wraps the QP in the full SQP outer loop;
+that option still exists and is the right one for a genuine NLP.
+
+**Choose it deliberately.** For a *cold, one-shot* convex QP the
+interior-point path (`qp-ipm`, and what `auto` selects) is materially more
+robust: on the 138-problem Maros-Mészáros set the IPM solves 137 while the
+active-set engine solves substantially fewer, mostly by exhausting its
+iteration budget on large degenerate instances. That is the expected
+character of a cold active-set method rather than a defect — its iteration
+count is combinatorial in the size of the active set, where an
+interior-point count is nearly independent of problem size. The active-set
+engine earns its keep on **warm-started sequences** — MPC steps,
+branch-and-bound nodes, continuation — where consecutive QPs differ little
+and the working set carries over; see `solve_parametric`.
+
+What it will not do is lie: it reports `Maximum_Iterations_Exceeded` rather
+than a wrong answer, and every claimed optimum is re-verified against the
+original problem's KKT conditions before being reported.
 
 ### From Pyomo
 

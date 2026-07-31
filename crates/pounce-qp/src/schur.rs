@@ -92,6 +92,16 @@ pub struct SchurState {
     /// `S = I + Vᵀ K_0⁻¹ U`, row-major, size `s_dim × s_dim`.
     s_matrix: Vec<Number>,
     s_dim: usize,
+
+    /// The `K_0` triplet **as actually factored** at the last reset —
+    /// including any §4.5 inertia shift, so it matches the cached factor
+    /// rather than the unshifted ideal.
+    ///
+    /// Kept solely so [`Self::solve`] can form the residual
+    /// `b − (K_0 + UVᵀ)x` for iterative refinement. Without a residual there
+    /// is no way to detect that the SMW correction has drifted, and drift is
+    /// exactly this path's failure mode (see the refinement note on `solve`).
+    base_kkt: Option<KktTriplet>,
 }
 
 /// One half of a rank-2 update vector pair.
@@ -115,6 +125,7 @@ impl SchurState {
             kinv_u_cols: Vec::new(),
             s_matrix: Vec::new(),
             s_dim: 0,
+            base_kkt: None,
         }
     }
 
@@ -270,6 +281,7 @@ impl SchurState {
                 self.kinv_u_cols.clear();
                 self.s_matrix.clear();
                 self.s_dim = 0;
+                self.base_kkt = Some(kkt.clone());
                 return Ok(());
             }
             Err(ref e) if e.is_recoverable_factorization_failure() => {
@@ -290,6 +302,7 @@ impl SchurState {
                     self.kinv_u_cols.clear();
                     self.s_matrix.clear();
                     self.s_dim = 0;
+                    self.base_kkt = Some(kkt.clone());
                     return Ok(());
                 }
                 Err(ref e) if e.is_recoverable_factorization_failure() => {
@@ -379,7 +392,109 @@ impl SchurState {
     /// Solve `K_W [x; λ] = rhs` using SMW. `rhs` is overwritten
     /// with the solution. Requires that `reset` has been called
     /// at least once.
+    /// `y = (K_0 + UVᵀ) x` — a matvec against the operator the SMW formula
+    /// inverts, used to form the refinement residual.
+    ///
+    /// `K_0` is stored as **lower-triangle** 1-based triplets, so off-diagonal
+    /// entries must be applied to both `(i,j)` and `(j,i)`; getting that wrong
+    /// would silently halve the symmetric part and make refinement diverge.
+    /// Returns `None` when no base matrix has been recorded (no reset yet), in
+    /// which case the caller simply skips refinement.
+    fn kw_matvec(&self, x: &[Number]) -> Option<Vec<Number>> {
+        let kkt = self.base_kkt.as_ref()?;
+        let mut y = vec![0.0; self.dim];
+        for k in 0..kkt.irn.len() {
+            let i = (kkt.irn[k] - 1) as usize;
+            let j = (kkt.jcn[k] - 1) as usize;
+            let v = kkt.vals[k];
+            y[i] += v * x[j];
+            if i != j {
+                y[j] += v * x[i];
+            }
+        }
+        // + U (Vᵀ x)
+        for j in 0..self.s_dim {
+            let c = dot(&self.v_cols[j], x);
+            if c != 0.0 {
+                let uj = &self.u_cols[j];
+                for (yi, &uij) in y.iter_mut().zip(uj.iter()) {
+                    *yi += c * uij;
+                }
+            }
+        }
+        Some(y)
+    }
+
+    /// Solve `(K_0 + UVᵀ) x = rhs` in place, **with iterative refinement**.
+    ///
+    /// Refinement is not a nicety here; it is what makes this path a
+    /// performance switch rather than an accuracy trade. The SMW correction is
+    /// computed against a factor of `K_0`, and its error grows with the number
+    /// of accumulated rank-2 updates, so the returned step drifts as the update
+    /// layer fills. That drift lands directly in the iterate: the active-set
+    /// loop takes the (slightly wrong) step, and the final `x` inherits every
+    /// step's error. Measured on the `tests/schur_vs_refactor.rs`
+    /// singular-Hessian QP, whose exact optimum is `x₀ = 1.5`:
+    ///
+    /// | `max_schur_updates_before_refactor` | error vs refactor path |
+    /// |---|---|
+    /// | 1  | 0 (exact) |
+    /// | 5  | 0 (exact) |
+    /// | 50 (default) | 1.5e-6 |
+    ///
+    /// A `1e-6` primal error is far above the `1e-9` `opt_tol` this engine
+    /// claims, and it was enough to drop the Maros-Mészáros spot check from
+    /// 22/24 to 20/24 when the Schur path was enabled. Refining against the
+    /// true operator removes the dependence on how full the update layer is.
+    ///
+    /// Mirrors the convex IPM's `solve_refined`, for the same reason: a single
+    /// back-solve near a degenerate optimum loses digits.
     pub fn solve(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
+        /// Refinement passes. Two is enough to recover full accuracy here —
+        /// the drift is a small relative perturbation, not a conditioning wall.
+        const IR_MAX_PASSES: usize = 2;
+        /// Minimum fractional residual reduction for a pass to count as
+        /// progress. Below this the correction is round-off, not signal.
+        const IR_MIN_GAIN: Number = 0.5;
+
+        let b = rhs.to_vec();
+        self.solve_once(linsol, rhs)?;
+
+        // Deliberately NOT gated on `‖b‖`. The phase-1 elastic system carries
+        // the penalty `γ = 1e6` in its RHS, so a `‖b‖`-relative test treats an
+        // absolute residual of ~1e-8 as converged — and on an operator that
+        // `γ` has made this ill-conditioned, 1e-8 of residual is ~1e-6 of
+        // *solution* error, which is precisely the drift being fixed. Refine
+        // while the residual keeps shrinking instead, and stop when it does
+        // not: that is scale-free and cannot loop.
+        let mut prev = Number::INFINITY;
+        for _ in 0..IR_MAX_PASSES {
+            let Some(kx) = self.kw_matvec(rhs) else { break };
+            let mut r: Vec<Number> = b.iter().zip(kx.iter()).map(|(&bi, &ki)| bi - ki).collect();
+            let r_norm = r.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+            if !r_norm.is_finite() || r_norm == 0.0 {
+                break;
+            }
+            // No meaningful progress ⇒ further passes are noise.
+            if r_norm > prev * (1.0 - IR_MIN_GAIN) {
+                break;
+            }
+            prev = r_norm;
+            // A correction that cannot be computed leaves the unrefined answer
+            // in place rather than failing the solve — it is still usable, and
+            // the caller's own verification decides whether it is good enough.
+            if self.solve_once(linsol, &mut r).is_err() {
+                break;
+            }
+            for (xi, &dxi) in rhs.iter_mut().zip(r.iter()) {
+                *xi += dxi;
+            }
+        }
+        Ok(())
+    }
+
+    /// One unrefined SMW solve: `x = K_0⁻¹b − K_0⁻¹U · S⁻¹ · VᵀK_0⁻¹b`.
+    fn solve_once(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
         if rhs.len() != self.dim {
             return Err(QpError::DimensionMismatch(format!(
                 "Schur solve RHS length {} but K_max dim is {}",

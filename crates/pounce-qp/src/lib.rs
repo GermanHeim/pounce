@@ -42,6 +42,7 @@
 pub mod elastic;
 pub mod error;
 pub mod factor;
+pub(crate) mod homotopy;
 pub mod kkt;
 pub mod options;
 pub mod problem;

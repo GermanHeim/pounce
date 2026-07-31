@@ -873,6 +873,15 @@ impl IpoptApplication {
         use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
         use pounce_nlp::tnlp_adapter::TNLPAdapter;
 
+        // Wall-clock for the whole SQP solve, mirroring the IPM path's
+        // `t_start` (see the `total_wallclock_time_secs` assignment in
+        // `optimize_tnlp`). Without this the field stayed at its struct
+        // default of 0.0 on every active-set solve, so `--json-output`
+        // reported an instantaneous solve regardless of actual runtime and
+        // the engine could not be speed-compared against qp-ipm at all
+        // (benchmarks/scripts/compare_qp_four_way.py had to skip the column).
+        let t_start = std::time::Instant::now();
+
         let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
             Ok(a) => Rc::new(RefCell::new(a)),
             Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
@@ -982,6 +991,7 @@ impl IpoptApplication {
             stats.final_unscaled_constr_viol = res.final_constr_viol;
             stats.final_unscaled_compl = 0.0;
             stats.final_unscaled_kkt_error = res.final_stationarity.max(res.final_constr_viol);
+            stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
         }
         let (app_status, solver_status) = match res.status {
             crate::sqp::SqpStatus::Optimal => (
@@ -1007,6 +1017,16 @@ impl IpoptApplication {
             crate::sqp::SqpStatus::QpStepFailed => (
                 ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
                 pounce_nlp::SolverReturn::ErrorInStepComputation,
+            ),
+            // The QP subproblem ran out of its own iteration budget. Same
+            // #282 guarantee — no infeasibility is asserted — but reported as
+            // the budget exhaustion it is, so the user sees a limit they can
+            // raise (`sqp_qp_max_iter`) instead of a step-size stall with no
+            // remedy. See `SqpStatus::QpIterationLimit` for why these were
+            // split.
+            crate::sqp::SqpStatus::QpIterationLimit => (
+                ApplicationReturnStatus::MaximumIterationsExceeded,
+                pounce_nlp::SolverReturn::MaxiterExceeded,
             ),
             // Unbounded below, with a recession ray verified against the
             // true NLP (gh #388). `Diverging_Iterates` is POUNCE's (Ipopt's)

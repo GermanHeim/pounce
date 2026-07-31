@@ -65,7 +65,7 @@ use std::collections::BTreeMap;
 /// See [`detect_infeasibility_with`] for the full derivation (regression: a
 /// feasible large-`‖x*‖` QP — POWELL20 — was declared primal-infeasible when
 /// this shared `infeas_tol`).
-const FARKAS_RESID_TOL: f64 = 1e-10;
+pub(crate) const FARKAS_RESID_TOL: f64 = 1e-10;
 
 /// Tolerance on the **normalized directional curvature** `dᵀPd / ‖d‖²` of a
 /// candidate recession ray `d`. A convex QP recedes along `d` (objective
@@ -354,6 +354,55 @@ where
         if verify.status == QpStatus::Optimal {
             return verify;
         }
+    }
+    // An unboundedness verdict on a problem that has no feasible point at all.
+    //
+    // `DualInfeasible` rests on a recession direction `d` with `Pd ≈ 0, Ad ≈ 0,
+    // −Gd ∈ K, cᵀd < 0`. That certificate is about the *dual*, and it is
+    // perfectly valid on an infeasible primal — the recession direction of an
+    // empty feasible set still exists — so a problem can be, and often is, both
+    // primal- and dual-infeasible at once. When it is, both verdicts are true
+    // and the choice between them is a reporting decision. `PrimalInfeasible`
+    // is the one to give: it is what pounce's own active-set engine and every
+    // external oracle (HiGHS, Gurobi) report on such a model, and the one a
+    // caller can act on — AMPL `solve_result_num=200`, "the model is
+    // infeasible, fix it", rather than `300` (`DivergingIterates`).
+    //
+    // The two certificates cannot be separated inside the iteration: they are
+    // residual races against the same iterate, and which gate clears first is
+    // arbitrary. Measured on `w·x ≤ 1` with `w·x ≥ 3` (HiGHS: infeasible), the
+    // Farkas value held at `−1.72` with `z ∈ K*` while its residual fell
+    // `1.9e-3 → 9.5e-5 → 4.7e-6 → 2.4e-7` toward an `8.6e-11` gate — and the
+    // recession gate opened with three orders still to go. Deciding it *inside*
+    // the loop means picking a tolerance: tried, and a rule loose enough to
+    // catch this case also suppressed 11 of 200 genuine unbounded verdicts,
+    // trading one wrong answer for more missing ones.
+    //
+    // So decide it out here, where the question can be *asked directly* instead
+    // of inferred: re-solve the objective-free twin (`P = 0, c = 0`), which has
+    // the same feasible set and, having no objective, cannot be unbounded — its
+    // only possible answers are "here is a feasible point" and "there is none".
+    // A `PrimalInfeasible` twin means the recession direction was never about
+    // unboundedness, and the verdict is corrected. Anything else leaves the
+    // original verdict untouched, so a genuinely unbounded problem keeps it.
+    //
+    // Costs one extra solve, and only on a `DualInfeasible` verdict. The twin
+    // cannot re-enter this branch: with `c = 0` no direction has `cᵀd < 0`, so
+    // `DualInfeasible` is unreachable for it.
+    if sol.status == QpStatus::DualInfeasible {
+        let twin = QpProblem {
+            p_lower: Vec::new(),
+            c: vec![0.0; prob.n],
+            ..prob.clone()
+        };
+        if solve_qp_ipm_unscaled(&twin, opts, &mut make_backend).status
+            == QpStatus::PrimalInfeasible
+        {
+            let mut infeasible = sol;
+            infeasible.status = QpStatus::PrimalInfeasible;
+            return infeasible;
+        }
+        return sol;
     }
     sol
 }

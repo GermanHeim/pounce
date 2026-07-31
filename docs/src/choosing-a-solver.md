@@ -21,8 +21,20 @@ pluggable backend (FERAL by default, HSL MA57 optionally).
 | **NLP active-set SQP** | general smooth NLP | local | `pounce-algorithm` (subproblems via `pounce-qp`) | `algorithm=active-set-sqp` |
 | **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `solver_selection=lp-ipm`/`qp-ipm` |
 | **Convex IPM (conic)** | SOCP, exp/power/PSD cones, convex QCQP | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `minimize` (convex QCQP); `solver_selection=socp`; `pounce <file>.cbf` |
-| **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `solver_selection=qp-active-set` |
+| **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `solver_selection=qp-active-set` — opt-in only; `auto` never picks it (see note) |
 | **SOS / Lasserre** | polynomial (nonconvex) | **global** | `pounce-convex` | `sos_minimize`; `pounce.sos_minimize` |
+
+> **When to reach for the active-set QP.** `auto` never selects it: a cold,
+> one-shot convex QP goes to the interior-point path, which is materially more
+> robust on that workload (137 of the 138 Maros-Mészáros problems, against
+> substantially fewer for a cold active-set solve). That is the character of the
+> method rather than a defect — an active-set iteration count is combinatorial
+> in the size of the active set, while an interior-point count is nearly
+> independent of problem size. Choose `solver_selection=qp-active-set` when you
+> want an *exact vertex* solution, or when you are solving a **sequence** of
+> similar QPs — MPC steps, branch-and-bound nodes, continuation — where the
+> working set carries across solves and `solve_parametric` can trace the
+> homotopy from the previous solution instead of starting over.
 
 > A general-purpose **spatial branch-and-bound** solver for factorable nonconvex
 > NLPs (`pounce-global`) is in development on the `feature/global` branch and is

@@ -132,6 +132,153 @@ pub(crate) fn crossover_simplex(
     Some(s.extract(prob))
 }
 
+/// Where a variable sits at a basic feasible solution, in a form the
+/// active-set engine can consume without knowing about simplex internals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AtBound {
+    /// Basic (or free at zero): not part of the active set.
+    Free,
+    Lower,
+    Upper,
+}
+
+/// A basic feasible solution: a **vertex** of the feasible region, together
+/// with the active set the basis induces.
+///
+/// Exactly `n` of the `n + m` variables are nonbasic, and each sits on one of
+/// its bounds — so `struct_at` and `row_at` together name exactly `n` active
+/// constraints in `x`-space, and they are linearly independent *by
+/// construction* because the simplex basis matrix is nonsingular. That
+/// independence is the property the active-set engine needs and cannot get from
+/// tolerance-snapping a point (which at a degenerate vertex names more than `n`
+/// binding rows and yields a singular KKT factorization).
+pub(crate) struct FeasibleVertex {
+    /// Feasible primal point (length `n`).
+    pub x: Vec<f64>,
+    /// Per-structural bound activity (length `n`).
+    pub struct_at: Vec<AtBound>,
+    /// Per-row activity (length `m = m_eq + m_ineq`, same row order as
+    /// `[A_eq ; G]`). A row is active iff its logical is nonbasic.
+    pub row_at: Vec<AtBound>,
+}
+
+/// Find a **feasible vertex** of `prob`'s linear constraints from a cold start,
+/// running this engine's phase-1 only — phase-2 would optimize the *linear*
+/// objective, which is the wrong objective for a QP (any feasible vertex is an
+/// equally valid warm start, so the extra work buys nothing).
+///
+/// Exists because [`crate::active_set`] needs a feasible seed and cannot get
+/// one from `pounce-qp`'s own cold start: that engine's l1-elastic phase-1 does
+/// not terminate on the degenerate netlib-derived QPs in the Maros-Mészáros
+/// set. `QAFIRO` (n = 32, among the smallest instances) runs past 500,000
+/// active-set iterations without converging even with Bland's rule forced —
+/// finite in exact arithmetic, but the elastic vertices are degenerate enough
+/// that the floating-point tolerance gates keep flipping. This engine pivots on
+/// an LU basis and walks straight through exactly that degeneracy, which is why
+/// crossover already prefers it over the active-set bridge for the NETLIB GEN
+/// vertices.
+///
+/// Returns `None` on any breakdown (factorization failure, iteration cap, or a
+/// phase-1 that cannot reach feasibility). The caller must treat that as "no
+/// seed available" and fall back, **not** as an infeasibility verdict: a
+/// phase-1 that gives up is not a certificate.
+pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex> {
+    let mut s = Simplex::new(prob);
+    // `warm_start` only reads `sol.x`, clamping each structural into its box and
+    // snapping to a bound, so a zero vector is a valid *cold* seed: every
+    // structural lands at a bound (or is pushed off by `push_superbasics`) and
+    // the logicals start basic, as set up in `new`.
+    let zero = QpSolution {
+        status: crate::qp::QpStatus::Optimal,
+        x: vec![0.0; prob.n],
+        y: Vec::new(),
+        z: Vec::new(),
+        z_lb: Vec::new(),
+        z_ub: Vec::new(),
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    let dbg = std::env::var("POUNCE_SEED_DEBUG").is_ok();
+    macro_rules! stage {
+        ($e:expr, $name:literal) => {
+            match $e {
+                Some(v) => v,
+                None => {
+                    if dbg {
+                        eprintln!("[seed] failed at {}", $name);
+                    }
+                    return None;
+                }
+            }
+        };
+    }
+    s.warm_start(&zero);
+    stage!(s.factor_basis(), "factor_basis");
+    stage!(s.recompute_basics(), "recompute_basics");
+    stage!(s.push_superbasics(), "push_superbasics");
+    stage!(s.run_phase1(), "run_phase1");
+
+    let x: Vec<f64> = (0..s.n).map(|j| s.xval[j]).collect();
+    // `run_phase1` returning `Some` means it stopped, not that it succeeded —
+    // confirm the point really is feasible before offering it as a seed.
+    if !feasible_at(prob, &x) {
+        if dbg {
+            eprintln!("[seed] run_phase1 returned but point is INFEASIBLE");
+        }
+        return None;
+    }
+
+    let at = |v: usize| -> AtBound {
+        if s.slot_of[v] != usize::MAX {
+            return AtBound::Free; // basic
+        }
+        match s.nb[v] {
+            NbStatus::AtLower => AtBound::Lower,
+            NbStatus::AtUpper => AtBound::Upper,
+            // A free variable parked at zero pins no constraint, and
+            // `push_superbasics` has already cleared every superbasic.
+            NbStatus::FreeZero | NbStatus::Superbasic => AtBound::Free,
+        }
+    };
+
+    Some(FeasibleVertex {
+        struct_at: (0..s.n).map(at).collect(),
+        row_at: (0..s.m).map(|i| at(s.n + i)).collect(),
+        x,
+    })
+}
+
+/// Does `x` satisfy `Ax = b`, `Gx ≤ h`, and the variable box, to `FEAS_TOL`?
+fn feasible_at(prob: &QpProblem, x: &[f64]) -> bool {
+    let mut ax = vec![0.0; prob.m_eq()];
+    for t in &prob.a {
+        ax[t.row] += t.val * x[t.col];
+    }
+    for (i, &v) in ax.iter().enumerate() {
+        if (v - prob.b[i]).abs() > FEAS_TOL {
+            return false;
+        }
+    }
+
+    let mut gx = vec![0.0; prob.m_ineq()];
+    for t in &prob.g {
+        gx[t.row] += t.val * x[t.col];
+    }
+    for (i, &v) in gx.iter().enumerate() {
+        if v - prob.h[i] > FEAS_TOL {
+            return false;
+        }
+    }
+
+    for (i, &xi) in x.iter().enumerate() {
+        if xi < lo_bound(prob.lb_of(i)) - FEAS_TOL || xi > hi_bound(prob.ub_of(i)) + FEAS_TOL {
+            return false;
+        }
+    }
+    true
+}
+
 /// Treat `|v| ≥ 1e20` as an infinite bound (mirrors [`QpProblem`] conventions).
 fn lo_bound(v: f64) -> f64 {
     if v <= -BOUND_INF {
@@ -587,6 +734,24 @@ impl Simplex {
             if infeas < best_infeas - FEAS_TOL {
                 best_infeas = infeas;
                 no_progress = 0;
+                // Release the latch once progress resumes.
+                //
+                // Bland's rule is an anti-cycling *escape*, not a pricing
+                // strategy: it is finite but can take exponentially many steps,
+                // so leaving it on permanently trades a stall for a crawl. It
+                // was latched here and never cleared, and the cost is stark on
+                // `QSCTAP1` — Dantzig pricing drove infeasibility 6.5e2 → 5.0e0
+                // in 200 iterations, then the latch engaged and infeasibility
+                // sat at 3.25e0 for the next 40,000 iterations until the cap
+                // ran out. Phase-1 then returned `None`, the caller lost its
+                // feasible seed, and the QP fell back to the non-terminating
+                // l1-elastic path — which is why a large block of
+                // Maros-Mészáros problems timed out rather than solving.
+                //
+                // Latch on stall, release on progress, is the standard
+                // discipline: the anti-cycling guarantee is only needed while
+                // actually stalled.
+                self.bland = false;
             } else {
                 no_progress += 1;
                 if no_progress >= NO_PROGRESS_LIMIT {
@@ -739,6 +904,66 @@ impl Simplex {
         }
     }
 
+    /// The bound crossings the basic variables meet **ahead** on the entering ray
+    /// `x_B(θ) = x_B − α·t·θ`, as `(θ, slot, status-the-leaver-takes, |rate|)`.
+    /// Shared by both phase-1 ratio tests so they agree on what a blocker is.
+    ///
+    /// Which bounds lie ahead is decided by where the basic sits *now*, using the
+    /// same three-way test as [`Self::phase1_cost_b`] so that the breakpoint set
+    /// and the slope `f'(0) = rc·t` stay consistent:
+    ///
+    /// * feasible → it can only leave through the single bound it is heading for;
+    /// * below its lower bound → it crosses nothing unless the ray lifts it
+    ///   (`rate < 0`), and then hits its lower bound (regaining feasibility — a
+    ///   legitimate blocker, this is how an infeasibility gets *removed*) before
+    ///   its upper bound;
+    /// * above its upper bound → the mirror image.
+    ///
+    /// The `θ ≈ 0` crossings count as much as the far ones: a basic sitting *on*
+    /// the bound the ray pushes it out through is a breakpoint at `θ = 0`. What is
+    /// *not* a breakpoint is the bound a basic sits on and moves **away** from —
+    /// that crossing is behind the ray (`θ ≤ 0` only because `x = bound`), and
+    /// admitting it invents a zero-length blocker.
+    fn phase1_breakpoints(&self, t: f64, alpha: &[f64]) -> Vec<(f64, usize, NbStatus, f64)> {
+        let mut bps: Vec<(f64, usize, NbStatus, f64)> = Vec::new();
+        for slot in 0..self.m {
+            let rate = alpha[slot] * t; // basic value moves as x − rate·θ
+            if rate.abs() <= PIVOT_TOL {
+                continue;
+            }
+            let v = self.basis[slot];
+            let x = self.xval[v];
+            let arate = rate.abs();
+            let (lo, hi) = (self.lo[v], self.hi[v]);
+            if x < lo - FEAS_TOL {
+                if rate < 0.0 {
+                    bps.push(((x - lo) / rate, slot, NbStatus::AtLower, arate));
+                    if hi.is_finite() {
+                        bps.push(((x - hi) / rate, slot, NbStatus::AtUpper, arate));
+                    }
+                }
+            } else if x > hi + FEAS_TOL {
+                if rate > 0.0 {
+                    bps.push(((x - hi) / rate, slot, NbStatus::AtUpper, arate));
+                    if lo.is_finite() {
+                        bps.push(((x - lo) / rate, slot, NbStatus::AtLower, arate));
+                    }
+                }
+            } else if rate > 0.0 {
+                // Feasible and decreasing: it can only leave through its lower bound.
+                if lo.is_finite() {
+                    bps.push((((x - lo) / rate).max(0.0), slot, NbStatus::AtLower, arate));
+                }
+            } else {
+                // Feasible and increasing: it can only leave through its upper bound.
+                if hi.is_finite() {
+                    bps.push((((x - hi) / rate).max(0.0), slot, NbStatus::AtUpper, arate));
+                }
+            }
+        }
+        bps
+    }
+
     /// Phase-1 long-step (Maros) ratio test. The piecewise-linear infeasibility
     /// objective along the entering ray has directional derivative `f'(0) = rc·t <
     /// 0`, and `f'` is convex/increasing: every breakpoint (a basic reaching a
@@ -750,6 +975,13 @@ impl Simplex {
     /// point of the long step — is what drives the simplex *through* degenerate
     /// (`θ ≈ 0`) blockers that defeat a first-breakpoint short step on the GEN
     /// vertices.
+    ///
+    /// The slope bookkeeping is only valid if *every* breakpoint ahead is in the
+    /// list, including the ones at `θ = 0`: see [`Self::phase1_breakpoints`]. Omit
+    /// them and the accumulated slope is a systematic underestimate of `f'`, the
+    /// walk sails past the breakpoint where `f'` really turns nonnegative, and the
+    /// step lands beyond the ray's minimizer — i.e. phase-1 *increases* the
+    /// infeasibility it exists to remove.
     fn ratio_test_phase1(&self, q: usize, t: f64, rc: f64, alpha: &[f64]) -> Step {
         // Bland's anti-cycling guarantee requires the leaving variable to be the
         // lowest-index one among the minimum-ratio ties — which the long step does
@@ -759,31 +991,7 @@ impl Simplex {
         if self.bland {
             return self.ratio_test_phase1_bland(q, t, alpha);
         }
-        // Breakpoints: (theta, slot, bound-status-on-leaving, |rate|).
-        let mut bps: Vec<(f64, usize, NbStatus, f64)> = Vec::new();
-        for slot in 0..self.m {
-            let rate = alpha[slot] * t; // basic value moves as x − rate·θ
-            if rate.abs() <= PIVOT_TOL {
-                continue;
-            }
-            let v = self.basis[slot];
-            let x = self.xval[v];
-            let arate = rate.abs();
-            // Every bound this basic reaches at θ > 0 is a breakpoint (a bound it
-            // moves away from gives θ < 0 and is skipped).
-            for &(bound, to) in &[
-                (self.lo[v], NbStatus::AtLower),
-                (self.hi[v], NbStatus::AtUpper),
-            ] {
-                if !bound.is_finite() {
-                    continue;
-                }
-                let theta = (x - bound) / rate;
-                if theta > FEAS_TOL {
-                    bps.push((theta, slot, to, arate));
-                }
-            }
-        }
+        let mut bps = self.phase1_breakpoints(t, alpha);
         // The entering variable's own opposite bound caps the step (a flip).
         let flip = self.entering_range(q);
 
@@ -810,42 +1018,32 @@ impl Simplex {
     }
 
     /// Bland-correct phase-1 ratio test: step to the *first* bound any basic
-    /// reaches (minimum ratio), breaking ties by lowest leaving-variable index.
-    /// No basic crosses a bound during the step, so it is monotone, and the
-    /// lowest-index tie-break makes the entering/leaving pair Bland-consistent —
-    /// together that guarantees finite termination through degeneracy.
+    /// reaches (minimum ratio over [`Self::phase1_breakpoints`]), breaking ties by
+    /// lowest leaving-variable index. No basic crosses a bound during the step, so
+    /// it is monotone, and the lowest-index tie-break makes the entering/leaving
+    /// pair Bland-consistent — together that guarantees finite termination through
+    /// degeneracy.
+    ///
+    /// It shares the breakpoint set with the long step deliberately: this test used
+    /// to scan *both* bounds of every basic and accept any ratio `≥ −FEAS_TOL`,
+    /// which admits the bound a basic already sits on and is moving **away** from
+    /// (that ratio is `±0.0`, not negative). Every such phantom blocker pinned
+    /// `θ = 0`, so the Bland escape could not move at all — `QSCSD6` sat at
+    /// `infeas = 5.25` for its whole iteration budget and then failed.
     fn ratio_test_phase1_bland(&self, q: usize, t: f64, alpha: &[f64]) -> Step {
         let flip = self.entering_range(q);
         let mut best_theta = flip;
         let mut best_slot: Option<usize> = None;
         let mut best_to = NbStatus::AtLower;
-        for slot in 0..self.m {
-            let rate = alpha[slot] * t;
-            if rate.abs() <= PIVOT_TOL {
-                continue;
-            }
+        for (theta, slot, to, _) in self.phase1_breakpoints(t, alpha) {
             let v = self.basis[slot];
-            let x = self.xval[v];
-            for &(bound, to) in &[
-                (self.lo[v], NbStatus::AtLower),
-                (self.hi[v], NbStatus::AtUpper),
-            ] {
-                if !bound.is_finite() {
-                    continue;
-                }
-                let theta = (x - bound) / rate;
-                if theta < -FEAS_TOL {
-                    continue; // heading away from this bound
-                }
-                let theta = theta.max(0.0);
-                let better = theta < best_theta - FEAS_TOL
-                    || ((theta - best_theta).abs() <= FEAS_TOL
-                        && best_slot.is_none_or(|bs| v < self.basis[bs]));
-                if better {
-                    best_theta = theta;
-                    best_slot = Some(slot);
-                    best_to = to;
-                }
+            let better = theta < best_theta - FEAS_TOL
+                || ((theta - best_theta).abs() <= FEAS_TOL
+                    && best_slot.is_none_or(|bs| v < self.basis[bs]));
+            if better {
+                best_theta = theta;
+                best_slot = Some(slot);
+                best_to = to;
             }
         }
         match best_slot {

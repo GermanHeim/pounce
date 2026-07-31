@@ -549,12 +549,23 @@ def solve_qp(
     warm_start=None,
     collect_iterates: bool = False,
     check_psd: Optional[bool] = None,
+    method: str = "ipm",
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
     ``P`` (lower triangle is used; assumed symmetric) and ``A``/``G`` may
     be scipy-sparse or dense; ``None`` matrices are empty. ``c`` is
     required and sets ``n``.
+
+    ``method`` selects the engine: ``"ipm"`` (default) is the convex
+    interior-point solver; ``"active-set"`` is the ``pounce-qp`` parametric
+    active-set engine, the same one the CLI reaches with
+    ``solver_selection=qp-active-set``. For a *cold, one-shot* convex QP the
+    IPM is materially more robust — on the 138-problem Maros-Mészáros set it
+    solves 137, against substantially fewer for a cold active-set solve, whose
+    iteration count is combinatorial in the size of the active set. Choose
+    ``"active-set"`` when you want an exact vertex, or for a *sequence* of
+    similar QPs. ``warm_start=`` is not supported with ``"active-set"``.
 
     ``warm_start`` (optional) is a previous :class:`QpResult` (or a mapping
     with ``x``/``y``/``z``/``z_lb``/``z_ub``) for a *nearby* problem. It
@@ -584,6 +595,7 @@ def solve_qp(
             max_iter=max_iter,
             warm_start=_warm_dict(warm_start),
             collect_iterates=collect_iterates,
+            method=method,
         )
     )
 

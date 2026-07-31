@@ -923,6 +923,7 @@ dependencies = [
  "pounce-nlp",
  "pounce-observability",
  "pounce-presolve",
+ "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
  "pounce-solve-report",

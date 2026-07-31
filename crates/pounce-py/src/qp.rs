@@ -17,6 +17,7 @@
 //! data; `P` is the **lower triangle** of the symmetric Hessian.
 
 use numpy::IntoPyArray;
+use pounce_convex::{ActiveSetOverrides, solve_qp_active_set};
 use pounce_convex::{
     ConeSpec, QpFactorization, QpOptions, QpProblem, QpSensitivity, QpSolution, QpStatus,
     QpWarmStart, SensError, Triplet, solve_qp_batch_parallel, solve_qp_batch_parallel_warm,
@@ -369,7 +370,7 @@ fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> Qp
 /// `collect_iterates` (default `false`) opts into the per-iteration
 /// convergence trace, returned under the `iterates` key.
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm"))]
 pub fn solve_qp<'py>(
     py: Python<'py>,
     prob: &PyQpProblem,
@@ -377,14 +378,40 @@ pub fn solve_qp<'py>(
     max_iter: Option<usize>,
     warm_start: Option<&Bound<'py, PyDict>>,
     collect_iterates: bool,
+    method: &str,
 ) -> PyResult<Bound<'py, PyDict>> {
     let o = opts(tol, max_iter, collect_iterates);
     let warm = warm_start.map(warm_from_dict).transpose()?;
-    let sol = py.allow_threads(|| match &warm {
-        Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
-        None => solve_qp_ipm(&prob.inner, &o, backend),
-    });
-    solution_dict(py, sol, Some(&prob.inner), &[])
+
+    // `method` selects the engine, so that the *same* engine is reachable from
+    // Python and from the CLI. Before this, `solver_selection="qp-active-set"`
+    // meant the convex active-set driver on the CLI and the SQP outer loop in
+    // `minimize` — one selector naming two different algorithms, silently.
+    match method {
+        "ipm" => {
+            let sol = py.allow_threads(|| match &warm {
+                Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
+                None => solve_qp_ipm(&prob.inner, &o, backend),
+            });
+            solution_dict(py, sol, Some(&prob.inner), &[])
+        }
+        "active-set" => {
+            if warm.is_some() {
+                return Err(PyValueError::new_err(
+                    "solve_qp: warm_start= is not supported with method='active-set' \
+                     (the active-set engine warm-starts from a working set, not a \
+                     primal-dual point; use solve_qp(method='ipm') or the Rust \
+                     `solve_parametric` API)",
+                ));
+            }
+            let ov = ActiveSetOverrides::default();
+            let sol = py.allow_threads(|| solve_qp_active_set(&prob.inner, &o, &ov, &mut backend));
+            solution_dict(py, sol, Some(&prob.inner), &[])
+        }
+        other => Err(PyValueError::new_err(format!(
+            "solve_qp: method must be 'ipm' or 'active-set', got {other:?}"
+        ))),
+    }
 }
 
 /// Solve a standard-form conic program (LP/QP plus second-order, exponential,
