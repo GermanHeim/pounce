@@ -165,7 +165,7 @@ Rosenbrock is the same waste with a worse ending, because there the
 
 ## Finding 3: #419's fix for #416 regressed the unconstrained case
 
-Filed as **#423**, open. #419 fixed #416 by capping the inner ratio test
+Filed as **#423**, **fixed** in #424. #419 fixed #416 by capping the inner ratio test
 at the shifted step's true minimizer `α*` instead of at 1, so a
 negative-curvature direction runs to its blocking bound and changes the
 working set. Rosenbrock from the classic start now converges in 20
@@ -187,6 +187,13 @@ is specific to the path #419 changed. The two issues are mirror images:
 #416 was "the shifted step is capped at α = 1, so the solver spins
 without pivoting"; #423 is "the shifted step is gone, so a solver with
 nothing to pivot *to* has no step at all".
+
+#424 fixes it by giving the driver a third branch: "the model recedes
+but the NLP does not" is no longer a dead end. Verified on the same
+script — `f = 0.027424` in 24 iterations, exactly the pre-#419 numbers —
+and #419's own fix still holds, with Rosenbrock from the classic start
+converging in 20 iterations. Both hold simultaneously; the family's rows
+are back to `bad = 0` and its pre-#419 speedups (8.33× / 6.46× / 5.23×).
 
 Worth recording as a process point: `double_well_chain` was added the day
 before #419 landed, purely to close a coverage hole (no family ran
@@ -240,18 +247,35 @@ Wall time over the 9 QP-family rows, geometric mean (ms):
 
 | cold-ipm | cold-sqp | cold-qp-ipm | warm-ipm | warm-sqp | warm-qp-ipm |
 |--:|--:|--:|--:|--:|--:|
-| 137.1 | 88.4 | 98.0 | 60.3 | **44.8** | 62.1 |
+| 97.1 | 72.8 | 75.9 | 48.5 | 37.3 | **35.8** |
+
+(Absolute wall times drift ~10–30% between runs on this machine, so read
+the ordering and the ratios, not the milliseconds. Iteration counts are
+noise-free and are quoted below.)
 
 Two results worth keeping:
 
-- **Warm-started active-set SQP is the fastest arm on 8 of the 9 rows**,
-  including against the dedicated convex solver on its home turf. The
-  one exception is `moving_bound_qp @ large`, where the active set
-  churns hardest (15 of 19 steps change it) and `warm-qp-ipm` wins.
-- **The convex IPM warm-starts weakly**: 1.17–1.50× on iterations,
-  against 4–16× for the SQP's inner active-set work — and the *general*
-  NLP filter-IPM warm-starts to ~1.4 iterations/step on the same
-  problems where the dedicated convex solver needs 5–8.
+- **The ranking flipped once #417 was fixed.** As first measured,
+  warm-started active-set SQP was fastest on 8 of 9 rows. With #422
+  landed, `warm-qp-ipm` is fastest on **6 of 9** and marginally ahead
+  overall (35.8 ms vs 37.3 ms geometric mean). On a problem that really
+  is a QP, a properly warm-started dedicated convex solver is now
+  competitive with — and usually better than — the active-set SQP.
+- **The convex IPM used to warm-start weakly** — 1.17–1.50× on
+  iterations, against 4–16× for the SQP's inner active-set work — which
+  is what prompted #417. With #422 landed it is 1.73–3.00×, and the raw
+  counts moved exactly as the prototype predicted:
+
+  | family @ scale | warm iters before #422 | predicted | after #422 |
+  |---|--:|--:|--:|
+  | `simplex_proj` @ tiny | 103 | 46 | **46** |
+  | `simplex_proj` @ small | 124 | 75 | **75** |
+  | `simplex_proj` @ large | 141 | 96 | **96** |
+
+  The prediction came from an env-gated prototype measured in this
+  suite before the issue was filed; the shipped fix reproduces it to the
+  integer, which is about as direct a confirmation of a diagnosis as a
+  benchmark can give.
 
   Chasing that down (**#417**) ruled out the explanation that first
   looked obvious. The convex path is *not* taking a plain primal-dual

@@ -220,29 +220,41 @@ set — that an adapter consumes as much of as its solver understands.
 Arms an adapter does not support are reported as skipped rather than
 silently dropped.
 
-## Two solver defects this suite has caught
+## Three solver defects this suite has caught
 
-Both in the same configuration — nonconvex, indefinite Hessian, nothing
-active — which is why `double_well_chain` exists.
+All three are fixed. They are recorded because the shapes recur, and
+because two of them lived in the same configuration — nonconvex,
+indefinite Hessian, nothing active — which is why `double_well_chain`
+exists.
 
-1. **pounce#416, fixed.** From Rosenbrock's traditional
+1. **pounce#416, fixed in #419.** From Rosenbrock's traditional
    `(-1.2, 1, -1.2, ...)` start, the exact-Hessian SQP path gave up with
-   `Search_Direction_Becomes_Too_Small` at every step, at a stationarity
-   residual of ~2.6, while the quasi-Newton modes converged fine. The
-   inner QP was spending its entire 200-iteration budget making **zero**
-   working-set changes; a cap of 20 produced bit-identical answers ~9x
-   faster. Fixed in pounce#419 by capping the ratio test at the shifted
-   step's true minimizer instead of at alpha = 1. `rosenbrock_ring` still
-   starts from the origin, now only for continuity of its recorded
-   numbers.
+   `Search_Direction_Becomes_Too_Small` at every step. The inner QP was
+   spending its entire 200-iteration budget making **zero** working-set
+   changes; a cap of 20 produced bit-identical answers ~9x faster. Fixed
+   by capping the ratio test at the shifted step's true minimizer
+   instead of at alpha = 1. `rosenbrock_ring` still starts from the
+   origin, now only for continuity of its recorded numbers.
 
-2. **pounce#423, open.** The fix for #416 regressed the *unconstrained*
-   case: with `m = 0` and no finite bounds, a negative-curvature
-   direction has nothing to block it, so the new recession-certificate
-   path is taken at every indefinite iterate and the solve dies at
-   iteration 1 (f = 26.03 against the IPM's 0.027). Pre-#419 it
-   converged in 24 iterations. Every `double_well_chain` row in the
-   report currently shows `bad = 20` because of it; the other 21 rows
-   are unaffected.
+2. **pounce#423, fixed in #424.** The fix for #416 regressed the
+   *unconstrained* case: with `m = 0` and no finite bounds a
+   negative-curvature direction has nothing to block it, so the new
+   recession-certificate path was taken at every indefinite iterate and
+   the solve died at iteration 1 (f = 26.03 against the IPM's 0.027).
+   `double_well_chain` caught it on its first run against the new base,
+   the day after it was added. The fix gives the driver a third branch
+   for "model recedes, NLP does not"; the family is back to its
+   pre-#419 numbers exactly.
+
+3. **pounce#417, fixed in #422.** `solve_qp`'s warm start was leaving
+   ~40% of its iterations unclaimed — not because of the seeding, which
+   is sound, but because the corrector's fraction-to-boundary parameter
+   was pinned at 0.95, capping progress at ~20x per iteration however
+   good the start was. Fixed by letting tau approach 1 as mu -> 0 on
+   orthant blocks (the restriction matters: doing it for every cone kind
+   loses 60% of the SOC instances the direct driver solves). The shipped
+   fix reproduced this suite's predicted iteration counts exactly — 46,
+   75 and 96 warm iterations on `simplex_proj`, against 46, 75 and 96
+   measured from the prototype.
 
 Full write-ups in `dev-notes/warm-start-benchmark.md`.
