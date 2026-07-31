@@ -102,6 +102,14 @@ pub struct SchurState {
     /// is no way to detect that the SMW correction has drifted, and drift is
     /// exactly this path's failure mode (see the refinement note on `solve`).
     base_kkt: Option<KktTriplet>,
+
+    /// The §4.5 inertia shift δ carried by that factor (0.0 when the
+    /// unshifted KKT factored cleanly). Rank-2 updates never touch the
+    /// H block, so this stays valid until the next reset. Callers need
+    /// it to know whether the direction they just solved for is the
+    /// true Newton step or a shifted one — see
+    /// [`crate::solver::model_step_cap`].
+    shift: Number,
 }
 
 /// One half of a rank-2 update vector pair.
@@ -126,7 +134,13 @@ impl SchurState {
             s_matrix: Vec::new(),
             s_dim: 0,
             base_kkt: None,
+            shift: 0.0,
         }
+    }
+
+    /// The §4.5 inertia shift δ in the currently cached factor.
+    pub fn shift(&self) -> Number {
+        self.shift
     }
 
     /// Active flag for slot `s` derived from the user-facing
@@ -282,6 +296,7 @@ impl SchurState {
                 self.s_matrix.clear();
                 self.s_dim = 0;
                 self.base_kkt = Some(kkt.clone());
+                self.shift = 0.0;
                 return Ok(());
             }
             Err(ref e) if e.is_recoverable_factorization_failure() => {
@@ -303,6 +318,7 @@ impl SchurState {
                     self.s_matrix.clear();
                     self.s_dim = 0;
                     self.base_kkt = Some(kkt.clone());
+                    self.shift = current;
                     return Ok(());
                 }
                 Err(ref e) if e.is_recoverable_factorization_failure() => {
