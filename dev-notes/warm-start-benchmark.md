@@ -354,6 +354,12 @@ instances that issue is about.
 
 ## Finding 6: the SQP's warm-start advantage is eroded by absolute churn, and size inflates it
 
+> **Retracted by Finding 7.** The crossover below was #428, a defect
+> found by the large tier and fixed in #429, not a property of
+> active-set warm starts. The churn measurements are unchanged and
+> still correct; the mechanism and the conclusion drawn from them are
+> not. Kept as written, with the post-fix numbers in Finding 7.
+
 The `mpc_horizon_10/20/40/80` families are one linear-quadratic MPC at
 four horizons, so only `N` differs. Warm/cold wall-time ratio, below 1
 meaning warm won:
@@ -390,7 +396,7 @@ hundreds of active constraints, not thousands.
 Repeatability: the N = 80 numbers are deterministic — two independent
 re-runs gave 1605 → 1746 inner active-set changes to the digit.
 
-## Finding 7 — at large scale the SQP warm start is discarded, not repaired (#428)
+## Finding 7 — at large scale the SQP warm start was discarded, not repaired (#428, fixed in #429)
 
 The horizon sweep stopped at n = 242 and reported a gradual erosion.
 Carrying the same MPC to n = 2402 (`--tier large`, N = 200/400/800)
@@ -459,6 +465,61 @@ Why nothing caught it earlier: at m = 22 the penalty is smaller than a
 cold solve outright, so the default tier's numbers look merely
 unimpressive rather than wrong. It takes m in the hundreds before the
 Θ(m) term separates from the constant.
+
+### After the fix
+
+#429 repairs the hint instead of discarding it: the rows the pinned
+point violates are known, so they are pinned too and the KKT
+re-factored, keeping the |A| − 1 entries the hint got right. It declines
+— leaving the old elastic recovery in place — when an already-active row
+is violated, when the violated rows exceed a quarter of the hint's
+active set, when the repaired pin set would exceed n rows, or after
+three re-pin rounds.
+
+Re-measured on the same build:
+
+| N | n | m | cold | warm before | warm after |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 32 | 22 | 11 | 0 | 0 |
+| 20 | 62 | 42 | 25 | 43 | 1 |
+| 40 | 122 | 82 | 48 | 1 | 1 |
+| 80 | 242 | 162 | 66 | 164 | 3 |
+| 200 | 602 | 402 | 66 | 403 | 3 |
+| 400 | 1202 | 802 | 66 | 795 | 3 |
+| 800 | 2402 | 1602 | 66 | 1589 | 3 |
+
+Flat at 3 across a 75× range of m, same optimum to 1e-11. The Δφ scan
+now tracks the movement instead of jumping: 0/0/0/1/3/4 warm pivots for
+true active-set diffs of 0/0/1/2/4/4, against 0/0/400/401/403 before.
+
+Large tier at default settings: every arm correct on every step (was
+7 of 8 bad on both warm SQP arms), and `warm-sqp` wall time is 0.03×,
+0.03×, 0.02× its cold twin at N = 200/400/800 — the fastest arm on the
+board, where it previously did not return an answer. Inner work 514 → 11
+per path at all three horizons. At n = 2402: 1.36 s warm against 12.04 s
+cold.
+
+**Findings 6's conclusion is retracted.** The horizon sweep's crossover
+— warm/cold wall 0.84 → 1.29 → 1.95 → 2.57 turning harmful above
+N = 20 — was this defect, not a property of active-set warm starts. On
+the fixed solver the same measurement runs 0.24 → 0.12 → 0.11 → 0.10 at
+`large` and 0.17 → 0.08 → 0.04 → 0.02 at `tiny`: the ratio *improves*
+with horizon, because cold cost grows with the problem while warm cost
+is set by how far the active set moved. The churn numbers in Finding 6
+were correct and are unchanged (1.05 / 2.26 / 4.21 / 5.58); it was the
+interpretation built on them that was wrong. The suite's original rule
+— payoff tracks how much the active set moves, and problem size has
+little to do with it — stands as first written, and the "absolute churn"
+sharpening should be dropped.
+
+A caution worth keeping: Finding 6 reasoned from a plausible mechanism
+(absolute churn grows with size, each change costs more as |A| grows)
+that fit the data and was still wrong, because the data had a defect in
+it. Two multiplying factors were invented to explain what was really a
+single discarded hint. The measurement that would have caught it was
+cheap — compare warm pivots against the *true* active-set difference,
+which is 4 where the warm arm spent 164 — and it was not run until the
+large tier made the discrepancy impossible to miss.
 
 ## Not done yet
 

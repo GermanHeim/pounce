@@ -82,23 +82,29 @@ changes.
   own diagnostic. The self-test finite-differences the declared structure
   column by column and cross-checks it against the dense path wherever both
   exist.
-- **The active-set SQP's warm start does not survive scale
-  ([#428](https://github.com/jkitchin/pounce/issues/428), open).** The
-  working-set hint is *discarded* rather than repaired the moment the true
-  active set moves by a single entry: the pinned primal then violates some
-  other row, `solve`'s admission pre-check routes it to elastic phase-1, and
-  the recovery re-solve starts from a cold working set. Cost is one inner
-  pivot per constraint row. Cold inner work is flat at 66 pivots from N = 10
-  to N = 800; warm runs 0 → 43 → 164 → 403 → 795 → 1589, tracking m; with the
-  hint admitted the same steps take 2 and reach the same optimum to 1e-11.
-  At the default `sqp_qp_max_iter` of 200 the warm-started SQP stops
-  returning an answer once m > 200 — 7 of 8 steps `Maximum_Iterations_Exceeded`
-  at every large horizon, while every other arm is clean.
-- **This corrects the horizon sweep's interpretation, not its numbers.** The
-  measured wall-time crossover stands; the explanation attached to it —
-  absolute working-set churn growing with problem size — holds for the
-  interior-point arms and is wrong for the SQP, whose cost is set by whether
-  the first entry moved rather than by how many did.
+- **The large tier found [#428](https://github.com/jkitchin/pounce/issues/428)
+  on its first run** (fixed above). The warm-started SQP was returning
+  `Maximum_Iterations_Exceeded` with zero outer iterations on 7 of 8 steps at
+  every one of N = 200/400/800, while every other arm solved cleanly; inner
+  working-set changes ran 0 → 43 → 164 → 403 → 795 → 1589 against a cold arm
+  flat at 66. On the fixed solver the warm arm is flat at **3** across a 75×
+  range of m, and its wall time is 0.02–0.03× its cold twin on the large
+  tier — the fastest arm on the board where it previously did not produce an
+  answer.
+- **This retracts the horizon sweep's conclusion, not its measurements.** The
+  reported crossover — warm/cold wall time 0.84 → 1.29 → 1.95 → 2.57 turning
+  harmful above N = 20 — was this defect. Re-measured on the fixed solver the
+  same sweep runs 0.24 → 0.12 → 0.11 → 0.10 at `large` and 0.17 → 0.08 →
+  0.04 → 0.02 at `tiny`: the ratio *improves* with horizon, because cold cost
+  grows with the problem while warm cost is set by how far the active set
+  moved. The churn numbers behind the original claim were correct and are
+  unchanged; the "absolute churn inflates with size" mechanism built on them
+  was not, and is withdrawn.
+- All the suite's other headline numbers moved with the fix and have been
+  re-measured: `warm-sqp` total solve time over the 42-row sweep drops from
+  21.82 s to 3.11 s on identical iteration counts, and per-family inner-work
+  ratios rise across the board (`mpc_horizon_80` @ `tiny` 54.75×,
+  `nmpc_vanderpol` @ `tiny` 18.80×).
 
 ### Fixed — `sqp_qp_use_homotopy` was registered but never read
 

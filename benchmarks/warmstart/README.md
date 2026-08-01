@@ -195,21 +195,25 @@ active-set QP code map onto it as follows:
 | degeneracy | Harris two-pass, GMSW EXPAND, Bland latch, rank-deficient active sets pruned to a maximal independent subset | **yes**, all three kinds: dual (`degenerate_corner`), rank-deficient / LICQ (`redundant_rows`), primal (`degenerate_vertex`) |
 
 The horizon sweep (`mpc_horizon_*`, the same linear MPC at seven sizes)
-is what covers the scale axis, and it is where the active-set path's
-warm-start advantage is measured turning *negative*: 2.57× slower than
-cold at N = 80 with large parameter steps, against 0.08× — twelve times
-faster — at N = 40 with small ones.
+is what covers the scale axis, and carrying it to n = 2402
+(`--tier large`) is what found
+[#428](https://github.com/jkitchin/pounce/issues/428), the suite's
+fourth solver defect: the working-set hint was *discarded* rather than
+repaired the moment the active set moved by one entry, costing one
+inner pivot per constraint row. Cold inner work is flat at 66 pivots
+from N = 10 to N = 800; warm ran 0 → 43 → 164 → 403 → 795 → 1589,
+tracking m exactly. At the default inner-QP budget of 200 the
+warm-started SQP stopped returning an answer at all above m = 200 —
+7 of 8 steps `Maximum_Iterations_Exceeded` at every large horizon,
+while every other arm was clean.
 
-Carrying it out to n = 2402 (`--tier large`) turned that into a defect
-report, [#428](https://github.com/jkitchin/pounce/issues/428): the
-working-set hint is *discarded* rather than repaired the moment the
-active set moves by one entry, costing one inner pivot per constraint
-row. Cold inner work is flat at 66 pivots from N = 10 to N = 800; warm
-runs 0 → 43 → 164 → 403 → 795 → 1589, tracking m exactly; and with the
-hint admitted the same steps take 2. At the default inner-QP budget of
-200 the warm-started SQP stops returning an answer at all above
-m = 200 — 7 of 8 steps `Maximum_Iterations_Exceeded` at every large
-horizon, while every other arm is clean.
+Fixed in #429 (repair the hint instead of discarding it). Warm inner
+work is now flat at 3 across the whole range, and the sweep says the
+opposite of what it said before: the SQP's warm/cold wall ratio
+*improves* with horizon — 0.17 → 0.08 → 0.04 → 0.02 at `tiny` for
+N = 10…80, and 0.03 / 0.03 / 0.02 at N = 200/400/800 — because cold
+cost grows with the problem while warm cost is set by how far the
+active set moved.
 
 ## Running it
 
@@ -271,9 +275,9 @@ set — that an adapter consumes as much of as its solver understands.
 Arms an adapter does not support are reported as skipped rather than
 silently dropped.
 
-## Three solver defects this suite has caught
+## Four solver defects this suite has caught
 
-All three are fixed. They are recorded because the shapes recur, and
+All four are fixed. They are recorded because the shapes recur, and
 because two of them lived in the same configuration — nonconvex,
 indefinite Hessian, nothing active — which is why `double_well_chain`
 exists.
@@ -308,4 +312,21 @@ exists.
    75 and 96 warm iterations on `simplex_proj`, against 46, 75 and 96
    measured from the prototype.
 
-Full write-ups in `dev-notes/warm-start-benchmark.md`.
+4. **pounce#428, fixed in #429.** The SQP's working-set hint was
+   *discarded* rather than repaired the moment the true active set moved
+   by a single entry, costing one inner pivot per constraint row —
+   1589 at n = 2402, against 3 now, and 24x the cost of not warm
+   starting at all. Below N = 80 the penalty is smaller than a cold
+   solve, so the default tier's rows looked merely unimpressive; the
+   `large` tier found it on its first run, where it stopped the warm
+   arm returning an answer at all. It had also produced a *published
+   wrong conclusion*: the horizon sweep's "warm starting turns harmful
+   at scale" crossover was this defect, and on the fixed solver the
+   ratio improves with horizon instead.
+
+Full write-ups in `dev-notes/warm-start-benchmark.md`. The fourth is
+worth reading for how it was missed: the sweep's numbers were correct
+and a plausible mechanism was inferred from them that happened to be
+wrong, because nobody compared the warm arm's pivot count against the
+*true* active-set difference until the discrepancy grew to 164 against
+4.
