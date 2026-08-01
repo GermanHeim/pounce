@@ -57,7 +57,7 @@ import pounce
 from .. import qpform
 from ..spec import ParametricFamily, StepResult, WarmState
 from ..sparsity import SparseCallbacks
-from .base import QP_ARMS, SolverAdapter, is_warm
+from .base import ARMS, QP_ARMS, SolverAdapter, is_sqp, is_warm, uses_homotopy
 
 # ApplicationReturnStatus values that count as a solved step.
 _OK_STATUS = (0, 1)  # SolveSucceeded, SolvedToAcceptableLevel
@@ -73,14 +73,7 @@ class PounceAdapter(SolverAdapter):
         self.max_iter = max_iter
 
     def supports(self, arm: str) -> bool:
-        return arm in (
-            "cold-ipm",
-            "cold-sqp",
-            "warm-ipm",
-            "warm-sqp",
-            "cold-qp-ipm",
-            "warm-qp-ipm",
-        )
+        return arm in ARMS
 
     # -- problem construction --------------------------------------
 
@@ -97,11 +90,15 @@ class PounceAdapter(SolverAdapter):
         )
         prob.add_option("print_level", 0)
         prob.add_option("sb", "yes")
-        if arm.endswith("sqp"):
+        if is_sqp(arm):
             prob.add_option("algorithm", "active-set-sqp")
             prob.add_option("sqp_print_level", 0)
             prob.add_option("sqp_tol", tol)
             prob.add_option("sqp_constr_viol_tol", 1e-6)
+            # The only difference between an arm and its `-hom` twin.
+            prob.add_option(
+                "sqp_qp_use_homotopy", "yes" if uses_homotopy(arm) else "no"
+            )
             prob.add_option("sqp_max_iter", self.max_iter)
         else:
             prob.add_option("tol", tol)
@@ -192,7 +189,7 @@ class PounceAdapter(SolverAdapter):
 
         kwargs = {}
         if use_warm:
-            if arm == "warm-sqp":
+            if is_sqp(arm):
                 kwargs["x0"] = warm.x
                 if warm.working_set is not None:
                     kwargs["working_set"] = warm.working_set
@@ -240,12 +237,10 @@ class PounceAdapter(SolverAdapter):
             # Keyed off the arm rather than off the value, so a warm
             # solve that converged without solving a single QP records
             # an honest 0 instead of looking like "not measured".
-            n_qp_solves=int(info.get("n_qp_solves", 0))
-            if arm.endswith("sqp")
-            else None,
-            n_qp_ws_changes=int(info.get("n_qp_ws_changes", 0))
-            if arm.endswith("sqp")
-            else None,
+            n_qp_solves=int(info.get("n_qp_solves", 0)) if is_sqp(arm) else None,
+            n_qp_ws_changes=(
+                int(info.get("n_qp_ws_changes", 0)) if is_sqp(arm) else None
+            ),
             **callbacks.counts(),
         )
 

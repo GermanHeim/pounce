@@ -299,6 +299,228 @@ Caveat kept in the report itself: the QP arms receive matrix data once
 per step where the callback arms re-evaluate per iteration, so the wall
 time favors them by an amount this suite does not separate out.
 
+## Finding 4: `sqp_qp_use_homotopy` was registered but never read
+
+Found while adding the `-hom` arms. The option was registered by the
+homotopy work (#412) and documented in detail, but
+`apply_qp_subproblem_options` — the function that maps the `sqp_qp_*`
+family onto `pounce_qp::QpOptions` — never read it. Setting it on the
+SQP path therefore did nothing at all, silently, while the option's own
+documentation described the algorithm it would select. The first
+version of the `-hom` arms measured bit-identical results to their
+twins, which is how it surfaced: an arm that cannot differ from its
+control is either a perfect null result or a broken experiment, and it
+was the second.
+
+This is the exact inverse of #360 (read-but-unregistered), and the
+guard test that issue left behind could not catch it — that test walks
+the keys the *reader* consults and asserts each is registered, which
+says nothing about a registered key no reader consults. Fixed here by
+reading the option, and by adding
+`application_every_registered_sqp_qp_option_is_read_by_the_subproblem_reader`,
+which enumerates the registry and fails if the two sets diverge in
+either direction. Both guards were checked for falsifiability: removing
+the reader fails the round-trip test, removing the name from the
+covered list fails the new one.
+
+## Finding 5: the homotopy is a sharply mixed trade, and the split is legible
+
+With the option working, the `-hom` arms measure it. On cold inner
+solves, where it engages:
+
+| family | conventional → homotopy | ratio |
+|---|--:|--:|
+| `redundant_rows` | 247 → 30 | 4.2–12.3× |
+| `degenerate_corner` | 69 → 30 | 2.0–2.9× |
+| `moving_bound_qp` | 793 → 685 | 0.87–2.75× |
+| `degenerate_vertex` | 154 → 132 | 1.1–1.3× |
+| `simplex_proj` | 978 → 1400 | 0.63–0.74× |
+| `nmpc_vanderpol` | 2745 → 5115 | 0.52–0.55× |
+| four others | unchanged | 1.00× |
+| **all 30 rows** | **5583 → 7989** | **0.70×** |
+
+It wins where it was designed to — degenerate, rank-deficient,
+netlib-like geometry, and it *improves* with perturbation size on
+`redundant_rows` because the conventional cold solve degrades there
+while the homotopy does not — and loses roughly 2× on well-conditioned
+MPC-shaped QPs. That is a mechanism-level account of #412's
+Maros-Mészáros result (20 gained, 7 lost, the losses large instances),
+and it argues for keeping the default off on the SQP path while making
+the knob reachable, which is now the case.
+
+It also bears on #413: the homotopy's cost concentrates on
+`nmpc_vanderpol`, the family closest in shape to the corrector-bound
+instances that issue is about.
+
+## Finding 6: the SQP's warm-start advantage is eroded by absolute churn, and size inflates it
+
+> **Retracted by Finding 7.** The crossover below was #428, a defect
+> found by the large tier and fixed in #429, not a property of
+> active-set warm starts. The churn measurements are unchanged and
+> still correct; the mechanism and the conclusion drawn from them are
+> not. Kept as written, with the post-fix numbers in Finding 7.
+
+The `mpc_horizon_10/20/40/80` families are one linear-quadratic MPC at
+four horizons, so only `N` differs. Warm/cold wall-time ratio, below 1
+meaning warm won:
+
+| N | mean &#124;A&#124; | `tiny` | `small` | `large` |
+|--:|--:|--:|--:|--:|
+| 10 | 31.5 | 0.27 | 0.38 | 0.84 |
+| 20 | 61.0 | 0.22 | 0.91 | 1.29 |
+| 40 | 119.6 | **0.08** | 0.66 | 1.95 |
+| 80 | 206.0 | 0.31 | 1.06 | **2.57** |
+
+Not "the SQP loses at scale": at `tiny` steps it stays excellent at
+every horizon, and its best row in the entire suite is N = 40 at 0.08.
+What degrades is the combination of size *and* movement. The IPM arms
+stay between 0.25 and 1.00 across the whole grid; the convex QP IPM is
+flatter still.
+
+The mechanism is in the working sets. The *fraction* of the active set
+that changes per step is horizon-independent (~3% at `large` for every
+N — the same angular perturbation moves proportionally the same
+constraints), but the *absolute* count grows with the problem: 1.05 →
+5.58 changes per step from N = 10 to N = 80. An active-set method pays
+for the absolute count, and each change also costs more as `|A|` grows.
+Two multiplying factors.
+
+So the suite's earlier rule — payoff tracks churn — was right but
+imprecise. It tracks **absolute** churn, and problem size inflates
+absolute churn even at a proportionally identical perturbation. It also
+puts a number on the qualitative caveat in `docs/src/active-set-sqp.md`
+("prefer the IPM for large-scale problems with thousands of active
+inequalities"): the measured crossover on this problem is tens to low
+hundreds of active constraints, not thousands.
+
+Repeatability: the N = 80 numbers are deterministic — two independent
+re-runs gave 1605 → 1746 inner active-set changes to the digit.
+
+## Finding 7 — at large scale the SQP warm start was discarded, not repaired (#428, fixed in #429)
+
+The horizon sweep stopped at n = 242 and reported a gradual erosion.
+Carrying the same MPC to n = 2402 (`--tier large`, N = 200/400/800)
+showed the erosion was not gradual and not intrinsic — it was a defect,
+now filed as #428.
+
+At default settings the warm-started SQP does not return an answer on
+the large tier: `Maximum_Iterations_Exceeded` with `iter_count = 0` on
+7 of 8 steps at every horizon, `x` left at the warm-start point.
+Everything else — `cold-sqp`, both IPM arms, both convex-QP arms —
+solves all 8 cleanly.
+
+Raising the inner-QP budget until nothing truncates, inner working-set
+changes for one step:
+
+| N | n | m | cold | warm | warm, hint admitted |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 32 | 22 | 11 | 0 | 0 |
+| 20 | 62 | 42 | 25 | 43 | 0 |
+| 40 | 122 | 82 | 48 | 1 | 1 |
+| 80 | 242 | 162 | 66 | 164 | 2 |
+| 200 | 602 | 402 | 66 | 403 | 2 |
+| 400 | 1202 | 802 | 66 | 795 | 2 |
+| 800 | 2402 | 1602 | 66 | 1589 | 2 |
+
+Cold is flat at 66 across a 75× range of m. Warm is Θ(m). The correct
+answer is flat at 2.
+
+It is a step function, not a slope. At N = 200, a parameter step that
+changes **zero** entries of the true active set gives 0 warm pivots; a
+step that changes **one** gives 400; four gives 403. The first changed
+entry costs m, every later one costs 1.
+
+Mechanism, confirmed by bisection: `solve_with_working_set` builds
+`x_init` by pinning the hinted rows to their new boundary values. When
+the active set has moved, that pinned point holds a row it should have
+released and therefore violates some *other* row — by about the
+distance the parameter moved (bracketed here to (0.01, 0.1] against a
+step of ≈0.075). `solve`'s warm-start admission pre-check
+(`pounce-qp/src/solver.rs:2855`) sees an infeasible primal and returns
+`solve_elastic`, whose recovery re-solve seeds `WorkingSet::cold(n, m)`
+— so the hint is dropped whole and every row is re-added from scratch.
+
+The causal test: raise only `sqp_qp_feas_tol` so the same hint is
+admitted, and the solve takes 2 pivots and lands on the same optimum to
+1e-11 with violation 7e-15. The work was never necessary.
+
+That tolerance is *not* a workaround, and the reason matters. `feas_tol`
+gates two unrelated decisions — whether a hint is admitted, and whether
+a converged point is accepted. At 0.1 the hint is admitted and the
+answer is right; at 0.5 the same solve returns objective 26.6175 with
+violation 6.4e-2 and KKT 2.5. There is no setting safe for both jobs.
+
+Two corrections to earlier findings this forces:
+
+- Finding 6's "warm starting turns harmful above N = 20 at large
+  steps" is this defect, not a property of active-set warm starts. The
+  wall-time crossover numbers stand as measurements; the *explanation*
+  attached to them — absolute churn growing with size — is right for
+  the IPM arms and wrong for the SQP, whose cost is set by whether the
+  first entry moved, not by how many did.
+- The suite's rule "payoff tracks absolute churn" survives for the IPM
+  and needs the caveat above for the SQP.
+
+Why nothing caught it earlier: at m = 22 the penalty is smaller than a
+cold solve outright, so the default tier's numbers look merely
+unimpressive rather than wrong. It takes m in the hundreds before the
+Θ(m) term separates from the constant.
+
+### After the fix
+
+#429 repairs the hint instead of discarding it: the rows the pinned
+point violates are known, so they are pinned too and the KKT
+re-factored, keeping the |A| − 1 entries the hint got right. It declines
+— leaving the old elastic recovery in place — when an already-active row
+is violated, when the violated rows exceed a quarter of the hint's
+active set, when the repaired pin set would exceed n rows, or after
+three re-pin rounds.
+
+Re-measured on the same build:
+
+| N | n | m | cold | warm before | warm after |
+|--:|--:|--:|--:|--:|--:|
+| 10 | 32 | 22 | 11 | 0 | 0 |
+| 20 | 62 | 42 | 25 | 43 | 1 |
+| 40 | 122 | 82 | 48 | 1 | 1 |
+| 80 | 242 | 162 | 66 | 164 | 3 |
+| 200 | 602 | 402 | 66 | 403 | 3 |
+| 400 | 1202 | 802 | 66 | 795 | 3 |
+| 800 | 2402 | 1602 | 66 | 1589 | 3 |
+
+Flat at 3 across a 75× range of m, same optimum to 1e-11. The Δφ scan
+now tracks the movement instead of jumping: 0/0/0/1/3/4 warm pivots for
+true active-set diffs of 0/0/1/2/4/4, against 0/0/400/401/403 before.
+
+Large tier at default settings: every arm correct on every step (was
+7 of 8 bad on both warm SQP arms), and `warm-sqp` wall time is 0.03×,
+0.03×, 0.02× its cold twin at N = 200/400/800 — the fastest arm on the
+board, where it previously did not return an answer. Inner work 514 → 11
+per path at all three horizons. At n = 2402: 1.34 s warm against 12.12 s
+cold.
+
+**Findings 6's conclusion is retracted.** The horizon sweep's crossover
+— warm/cold wall 0.84 → 1.29 → 1.95 → 2.57 turning harmful above
+N = 20 — was this defect, not a property of active-set warm starts. On
+the fixed solver the same measurement runs 0.24 → 0.12 → 0.11 → 0.10 at
+`large` and 0.17 → 0.08 → 0.04 → 0.02 at `tiny`: the ratio *improves*
+with horizon, because cold cost grows with the problem while warm cost
+is set by how far the active set moved. The churn numbers in Finding 6
+were correct and are unchanged (1.05 / 2.26 / 4.21 / 5.58); it was the
+interpretation built on them that was wrong. The suite's original rule
+— payoff tracks how much the active set moves, and problem size has
+little to do with it — stands as first written, and the "absolute churn"
+sharpening should be dropped.
+
+A caution worth keeping: Finding 6 reasoned from a plausible mechanism
+(absolute churn grows with size, each change costs more as |A| grows)
+that fit the data and was still wrong, because the data had a defect in
+it. Two multiplying factors were invented to explain what was really a
+single discarded hint. The measurement that would have caught it was
+cheap — compare warm pivots against the *true* active-set difference,
+which is 4 where the warm arm spent 164 — and it was not run until the
+large tier made the discrepancy impossible to miss.
+
 ## Not done yet
 
 - **A shift-based warm-start arm for the closed-loop family.** MPC
@@ -310,6 +532,12 @@ time favors them by an amount this suite does not separate out.
   `Δx ≈ ∂x*/∂p · Δp` before the SQP corrector runs — the pattern
   documented in `docs/src/active-set-sqp.md` §4. It would slot in as a
   fifth arm and is the natural next addition.
+- **Large scale beyond one problem class.** The `large` tier reaches
+  n = 2402, but it is linear-quadratic MPC — banded, mostly equalities,
+  a large active set that barely moves. Whether #428 dominates on a
+  large problem with a different sparsity pattern is untested, and a
+  second large family (a sparse least-squares or a network flow) would
+  be the way to find out.
 - **An external solver arm.** The adapter interface is exercised by
   the pounce adapter's three paths but has no second solver behind it;
   Ipopt through cyipopt would be the obvious first one, using the same

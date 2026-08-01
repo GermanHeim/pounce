@@ -75,8 +75,22 @@ class SparseCallbacks:
     def __init__(self, family: ParametricFamily, seed: int = 0):
         self.family = family
         rng = np.random.default_rng(seed)
-        pts = _probe_points(family, rng)
 
+        # A family that declares its own structure never has a dense
+        # matrix built for it — the whole point at n in the thousands.
+        declared = family.sparse_structure()
+        if declared is not None:
+            jr, jc, hr, hc = declared
+            self._jac_rows = np.asarray(jr, dtype=np.int64)
+            self._jac_cols = np.asarray(jc, dtype=np.int64)
+            self._hess_rows = np.asarray(hr, dtype=np.int64)
+            self._hess_cols = np.asarray(hc, dtype=np.int64)
+            self._sparse = True
+            self.reset_counts()
+            return
+        self._sparse = False
+
+        pts = _probe_points(family, rng)
         n, m = family.n, family.m
 
         jac_pat = np.zeros((m, n), dtype=bool)
@@ -149,7 +163,12 @@ class SparseCallbacks:
 
     def jacobian(self, x):
         self.n_jac += 1
-        j = self.family.jacobian_dense(np.asarray(x, dtype=float))
+        x = np.asarray(x, dtype=float)
+        if self._sparse:
+            return np.ascontiguousarray(
+                self.family.jacobian_values(x), dtype=float
+            )
+        j = self.family.jacobian_dense(x)
         return np.ascontiguousarray(j[self._jac_rows, self._jac_cols], dtype=float)
 
     def hessianstructure(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -160,6 +179,15 @@ class SparseCallbacks:
 
     def hessian(self, x, lagrange, obj_factor):
         self.n_hess += 1
+        if self._sparse:
+            return np.ascontiguousarray(
+                self.family.hessian_values(
+                    np.asarray(x, dtype=float),
+                    np.asarray(lagrange, dtype=float),
+                    float(obj_factor),
+                ),
+                dtype=float,
+            )
         h = self.family.hessian_dense(
             np.asarray(x, dtype=float),
             np.asarray(lagrange, dtype=float),

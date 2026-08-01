@@ -26,10 +26,19 @@ set is stable, or grows by a few QP add/drop steps when one or
 two constraints flip.
 
 Stick with the IPM (the default) for **cold solves of a single
-problem** or **large-scale problems with thousands of active
-inequalities**. The IPM scales linearly in the active set; the
-active-set SQP's per-QP cost grows with the number of active
-constraints.
+problem**. The IPM scales linearly in the active set; the active-set
+SQP's per-QP cost grows with the number of active constraints, so a
+*cold* SQP solve does lose ground as the problem grows.
+
+A warm one does not, which is the case worth being precise about. On
+[the warm-start benchmark](warm-start-benchmark.md)'s MPC sweep the
+warm-started SQP's advantage over its own cold twin *improves* with
+problem size all the way to 1645 active constraints (0.17× → 0.02× wall
+time from N = 10 to N = 80, and 0.02–0.03× at n = 602–2402), because
+warm cost is set by how far the active set moved rather than by how
+large it is. An earlier version of this page warned against the SQP for
+"large-scale problems with thousands of active inequalities"; the
+measured behavior does not support that for warm-started sequences.
 
 ## 2. Switching to the SQP path
 

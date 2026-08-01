@@ -28,6 +28,15 @@ defines:
 ``warm-sqp``
     Active-set SQP seeded with the previous step's working set and
     primal point. The capability under test.
+``cold-sqp-hom`` / ``warm-sqp-hom``
+    The same active-set SQP, but with the inner QP's **cold** solves
+    tracing the §4.2 parametric homotopy (`sqp_qp_use_homotopy`) rather
+    than the conventional phase-1/phase-2 scheme. The homotopy is the
+    algorithm ``pounce-qp`` is named for; it is off by default in the
+    crate and on only in the convex QP driver, so without these arms
+    the suite exercises working-set hot starts but never the parametric
+    path. Paired against ``cold-sqp`` / ``warm-sqp``, which differ in
+    that one option and nothing else.
 ``cold-qp-ipm`` / ``warm-qp-ipm``
     The dedicated convex QP interior-point solver, handed the problem
     in matrix form rather than through callbacks, cold and seeded with
@@ -57,9 +66,19 @@ ARMS: List[str] = [
     "cold-sqp",
     "warm-ipm",
     "warm-sqp",
+    "cold-sqp-hom",
+    "warm-sqp-hom",
     "cold-qp-ipm",
     "warm-qp-ipm",
 ]
+
+#: Arms that run the active-set SQP driver (either inner-QP variant).
+SQP_ARMS = ("cold-sqp", "warm-sqp", "cold-sqp-hom", "warm-sqp-hom")
+
+#: Arms whose inner QP traces the §4.2 parametric homotopy on a cold
+#: solve (`sqp_qp_use_homotopy`) instead of the conventional
+#: phase-1/phase-2 scheme. Paired against their non-`-hom` twins.
+HOMOTOPY_ARMS = ("cold-sqp-hom", "warm-sqp-hom")
 
 #: Arms that need the family's instances to be QPs.
 QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
@@ -72,6 +91,15 @@ REFERENCE_ARM = "cold-ipm"
 
 def is_warm(arm: str) -> bool:
     return arm.startswith("warm")
+
+
+def is_sqp(arm: str) -> bool:
+    """Whether the arm drives the active-set SQP (either inner-QP variant)."""
+    return arm in SQP_ARMS
+
+
+def uses_homotopy(arm: str) -> bool:
+    return arm in HOMOTOPY_ARMS
 
 
 def arm_applies(arm: str, family: ParametricFamily) -> Optional[str]:

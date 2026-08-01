@@ -26,7 +26,7 @@ nearest public things and why each does not cover it:
 | [OPFData](https://arxiv.org/abs/2406.07234) / PGLearn | 300k solved AC-OPF instances per grid, loads perturbed 80–120%, plus N-1 topologies | A dataset with no protocol or metrics, single problem class, independent samples rather than a path. |
 | CUTEst, Hock-Schittkowski, Vanderbei, Mittelmann, Maros-Mészáros | The standard NLP/QP collections (several already in `benchmarks/`) | Every problem is one cold solve. No parameter, no sequence. |
 
-## The four arms
+## The arms
 
 | arm | algorithm | seeded with | runs on |
 |---|---|---|---|
@@ -34,6 +34,8 @@ nearest public things and why each does not cover it:
 | `cold-sqp` | active-set SQP | nothing | every family |
 | `warm-ipm` | general NLP filter-IPM | previous step's primal-dual point and μ | every family |
 | `warm-sqp` | active-set SQP | previous step's working set and point | every family |
+| `cold-sqp-hom` | active-set SQP, homotopy inner QP | nothing | every family |
+| `warm-sqp-hom` | active-set SQP, homotopy inner QP | previous step's working set and point | every family |
 | `cold-qp-ipm` | dedicated convex QP IPM (`pounce.solve_qp`) | nothing | QP families only |
 | `warm-qp-ipm` | dedicated convex QP IPM | previous step's primal-dual point | QP families only |
 
@@ -105,12 +107,21 @@ the mean speedup hides the failure mode that matters most.
 |---|--:|--:|---|---|---|
 | `simplex_proj` | 20 | 1 | flipping | objective | convex |
 | `moving_bound_qp` | 40 | 3 | flipping | bounds | convex |
-| `degenerate_corner` | 6 | 3 | degenerate | objective | convex |
+| `degenerate_corner` | 6 | 3 | dual degenerate | objective | convex |
+| `redundant_rows` | 6 | 5 | rank-deficient (LICQ fails) | objective | convex |
+| `degenerate_vertex` | 4 | 12 | primal degenerate | objective | convex |
 | `hanging_chain` | 30 | 15 | flipping | mixed | convex |
 | `rosenbrock_ring` | 10 | 1 | switch | rhs | nonconvex |
 | `rosenbrock_ring_cycle` | 10 | 1 | re-activation | rhs | nonconvex |
 | `double_well_chain` | 12 | 0 | none (empty active set) | objective | nonconvex |
 | `nmpc_vanderpol` | 47 | 32 | closed-loop | rhs | nonconvex |
+| `mpc_horizon_10/20/40/80` | 32–242 | 22–162 | saturation | rhs | convex |
+| `mpc_horizon_200/400/800` | 602–2402 | 402–1602 | saturation | rhs | convex |
+
+The last row is the opt-in **`large` tier** (`--tier large`; `--tier
+all` runs both). It is out of the default sweep because one active-set
+solve at N = 800 takes seconds, and it walks 8 steps rather than 20
+since the per-step numbers are what matter, not the path length.
 
 *regime* is how the active set behaves along the path; *channel* is
 where the parameter enters (objective, constraint right-hand side,
@@ -169,6 +180,41 @@ Two families are worth knowing about in detail:
   reference arm produces and **replays** it for the other arms — the
   arms would otherwise be solving different problems.
 
+## What QP-solver properties this exercises
+
+The suite reaches `pounce-qp` only through the SQP outer loop, so it is
+not a QP-solver benchmark — but the questions people ask about an
+active-set QP code map onto it as follows:
+
+| property | `pounce-qp` | exercised here? |
+|---|---|---|
+| sparse or dense | sparse triplet KKT + sparse LDLᵀ; the Schur block alone is dense | **yes** — the `mpc_horizon_*` sweep runs the same block-banded MPC from n = 32 to n = 2402 (`--tier large`), nothing dense materialized anywhere along it |
+| convex only, or indefinite | indefinite, via §4.5 inertia control and negative-curvature ratio-test handling | **yes** — 5 of 10 families are nonconvex with indefinite ∇²L along the path; two solver defects were found there |
+| primal or dual | primal; l1-elastic phase-1 for an infeasible cold start, and the homotopy is primal-feasible by construction | n/a — there is no dual variant to compare |
+| parametric with hot starts | both: working-set hot start, and the §4.2 qpOASES-lineage homotopy | **yes** — hot starts are the `warm-*` arms; the homotopy is the `-hom` arms |
+| degeneracy | Harris two-pass, GMSW EXPAND, Bland latch, rank-deficient active sets pruned to a maximal independent subset | **yes**, all three kinds: dual (`degenerate_corner`), rank-deficient / LICQ (`redundant_rows`), primal (`degenerate_vertex`) |
+
+The horizon sweep (`mpc_horizon_*`, the same linear MPC at seven sizes)
+is what covers the scale axis, and carrying it to n = 2402
+(`--tier large`) is what found
+[#428](https://github.com/jkitchin/pounce/issues/428), the suite's
+fourth solver defect: the working-set hint was *discarded* rather than
+repaired the moment the active set moved by one entry, costing one
+inner pivot per constraint row. Cold inner work is flat at 66 pivots
+from N = 10 to N = 800; warm ran 0 → 43 → 164 → 403 → 795 → 1589,
+tracking m exactly. At the default inner-QP budget of 200 the
+warm-started SQP stopped returning an answer at all above m = 200 —
+7 of 8 steps `Maximum_Iterations_Exceeded` at every large horizon,
+while every other arm was clean.
+
+Fixed in #429 (repair the hint instead of discarding it). Warm inner
+work is now flat at 3 across the whole range, and the sweep says the
+opposite of what it said before: the SQP's warm/cold wall ratio
+*improves* with horizon — 0.17 → 0.08 → 0.04 → 0.02 at `tiny` for
+N = 10…80, and 0.03 / 0.03 / 0.02 at N = 200/400/800 — because cold
+cost grows with the problem while warm cost is set by how far the
+active set moved.
+
 ## Running it
 
 The harness drives the solver in-process through the Python API (the
@@ -201,6 +247,15 @@ sparsity patterns and packed value vectors from them, so the structure
 and the values cannot fall out of sync. List the class in
 `families/__init__.py`, then:
 
+A family too large for a dense matrix may instead declare
+`sparse_structure()` plus `jacobian_values()` / `hessian_values()`, and
+set `tier = "large"`. Keep the dense methods as well where you can: the
+self-test cross-checks the two against each other at any size it can
+afford, and finite-differences the declared structure column by column
+above that, so a structure that disagrees with its values still cannot
+pass silently. That check is the only thing standing between a
+mis-declared pattern and a plausible, wrong benchmark number.
+
     python -m warmstart.selftest
 
 which finite-difference checks the gradient, Jacobian and Hessian of
@@ -220,9 +275,9 @@ set — that an adapter consumes as much of as its solver understands.
 Arms an adapter does not support are reported as skipped rather than
 silently dropped.
 
-## Three solver defects this suite has caught
+## Four solver defects this suite has caught
 
-All three are fixed. They are recorded because the shapes recur, and
+All four are fixed. They are recorded because the shapes recur, and
 because two of them lived in the same configuration — nonconvex,
 indefinite Hessian, nothing active — which is why `double_well_chain`
 exists.
@@ -257,4 +312,21 @@ exists.
    75 and 96 warm iterations on `simplex_proj`, against 46, 75 and 96
    measured from the prototype.
 
-Full write-ups in `dev-notes/warm-start-benchmark.md`.
+4. **pounce#428, fixed in #429.** The SQP's working-set hint was
+   *discarded* rather than repaired the moment the true active set moved
+   by a single entry, costing one inner pivot per constraint row —
+   1589 at n = 2402, against 3 now, and 24x the cost of not warm
+   starting at all. Below N = 80 the penalty is smaller than a cold
+   solve, so the default tier's rows looked merely unimpressive; the
+   `large` tier found it on its first run, where it stopped the warm
+   arm returning an answer at all. It had also produced a *published
+   wrong conclusion*: the horizon sweep's "warm starting turns harmful
+   at scale" crossover was this defect, and on the fixed solver the
+   ratio improves with horizon instead.
+
+Full write-ups in `dev-notes/warm-start-benchmark.md`. The fourth is
+worth reading for how it was missed: the sweep's numbers were correct
+and a plausible mechanism was inferred from them that happened to be
+wrong, because nobody compared the warm arm's pivot count against the
+*true* active-set difference until the discrepancy grew to 164 against
+4.

@@ -95,6 +95,14 @@ def main(argv=None) -> int:
         "than the reference arm's by more than this is counted incorrect",
     )
     p.add_argument("--max-iter", type=int, default=500)
+    p.add_argument(
+        "--tier",
+        default="default",
+        choices=("default", "large", "all"),
+        help="which size tier to run. `default` is the standard sweep; "
+        "`large` is the opt-in n = 602-2402 MPC horizons, where a single "
+        "active-set solve takes seconds; `all` runs both",
+    )
     p.add_argument("--quick", action="store_true", help="3 families, one scale")
     p.add_argument("--out", default=os.path.join(_HERE, "results.json"))
     p.add_argument("--no-report", action="store_true")
@@ -102,6 +110,10 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     families = _csv(args.families, list(REGISTRY), "family")
+    if args.tier != "all" and args.families == "all":
+        # An explicitly named family is always honored; the tier filter
+        # only prunes the "all" default.
+        families = [f for f in families if REGISTRY[f].tier == args.tier]
     scales = _csv(args.scales, list(SCALES), "scale")
     arms = _csv(args.arms, ARMS, "arm")
     if args.quick:

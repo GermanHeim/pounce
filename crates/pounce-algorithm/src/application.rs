@@ -3404,6 +3404,15 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
     if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_schur_updates", "") {
         opts.use_schur_updates = v;
     }
+    // Registered by the homotopy work but never read here, so the knob was a
+    // no-op on the SQP path: `pounce_qp`'s own default is `false`, and only
+    // `pounce_convex::active_set` set it (in Rust, not through options). The
+    // inverse of gh #360 — registered-but-unread rather than
+    // read-but-unregistered — and invisible to that issue's guard test, which
+    // only checked one direction.
+    if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_homotopy", "") {
+        opts.use_homotopy = v;
+    }
     if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "")
     {
         if v >= 1 {
@@ -3846,7 +3855,8 @@ mod tests {
              sqp_qp_elastic_gamma 1e4\n\
              sqp_qp_anti_cycling bland\n\
              sqp_qp_use_schur_updates yes\n\
-             sqp_qp_max_schur_updates_before_refactor 12\n",
+             sqp_qp_max_schur_updates_before_refactor 12\n\
+             sqp_qp_use_homotopy yes\n",
         )
         .expect("every sqp_qp_* option must be registered (gh #360)");
 
@@ -3862,6 +3872,7 @@ mod tests {
         // of this family.
         assert!(qp.use_schur_updates);
         assert_eq!(qp.max_schur_updates_before_refactor, 12);
+        assert!(qp.use_homotopy);
 
         // Untouched options must keep the pounce-qp defaults, not be
         // overwritten with zeros by the "explicitly set" gate.
@@ -3882,6 +3893,62 @@ mod tests {
         assert_eq!(
             qp.max_schur_updates_before_refactor,
             defaults.max_schur_updates_before_refactor
+        );
+    }
+
+    /// The other direction of the gh #360 guard: every **registered**
+    /// `sqp_qp_*` option must be one `apply_qp_subproblem_options` actually
+    /// reads.
+    ///
+    /// The sister test above checks read-keys-are-registered. It cannot catch
+    /// the inverse, and the inverse happened: `sqp_qp_use_homotopy` was
+    /// registered with the homotopy work and never wired into the reader, so
+    /// setting it on the SQP path silently did nothing while the option's own
+    /// documentation described what it would do. A registered knob that no
+    /// code reads is worse than a missing one — it validates, it accepts a
+    /// value, and it lies.
+    ///
+    /// Adding a new `sqp_qp_*` option therefore fails here until it is both
+    /// read by `apply_qp_subproblem_options` and asserted in the round-trip
+    /// test above.
+    #[test]
+    fn application_every_registered_sqp_qp_option_is_read_by_the_subproblem_reader() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+
+        let mut registered: Vec<String> = app
+            .registered_options()
+            .registered_options_in_order()
+            .iter()
+            .map(|o| o.name.clone())
+            .filter(|n| n.starts_with("sqp_qp_"))
+            .collect();
+        registered.sort();
+
+        // Kept in step by hand with the `options.get_*_value("sqp_qp_…")`
+        // calls in `apply_qp_subproblem_options`, and cross-checked by the
+        // round-trip assertions in the sister test.
+        let mut read_by_the_reader = vec![
+            "sqp_qp_anti_cycling".to_string(),
+            "sqp_qp_elastic_gamma".to_string(),
+            "sqp_qp_feas_tol".to_string(),
+            "sqp_qp_max_iter".to_string(),
+            "sqp_qp_max_schur_updates_before_refactor".to_string(),
+            "sqp_qp_opt_tol".to_string(),
+            "sqp_qp_use_homotopy".to_string(),
+            "sqp_qp_use_schur_updates".to_string(),
+        ];
+        read_by_the_reader.sort();
+
+        assert_eq!(
+            registered, read_by_the_reader,
+            "registered sqp_qp_* options and the ones \
+             `apply_qp_subproblem_options` reads have diverged. A key that is \
+             registered but unread is a no-op knob with working documentation \
+             (that is how `sqp_qp_use_homotopy` shipped); a key read but not \
+             registered is gh #360. Wire it up in both places, assert it in \
+             `application_sqp_qp_subproblem_options_are_registered_and_propagate`, \
+             then add it here."
         );
     }
 

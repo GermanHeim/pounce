@@ -71,6 +71,108 @@ changes.
   Documented in the `covariance` docstring and the sensitivity chapter
   alongside `estimate()`'s matching baseline guarantee.
 
+### Added — a large-scale sparse tier for the warm-start benchmark, and the defect it found
+
+- **`mpc_horizon_200/400/800`** (`--tier large`) carry the horizon sweep's
+  linear MPC to n = 602, 1202 and 2402 with a block-banded Jacobian. Nothing
+  dense is materialized: families may now declare `sparse_structure()` with
+  packed `jacobian_values()` / `hessian_values()`, and the convex-QP arm
+  receives sparse matrices — at N = 800 a dense Hessian alone would be 46 MB
+  rebuilt every iteration, and dense data costs the QP solver 60–80× by its
+  own diagnostic. The self-test finite-differences the declared structure
+  column by column and cross-checks it against the dense path wherever both
+  exist.
+- **The large tier found [#428](https://github.com/jkitchin/pounce/issues/428)
+  on its first run** (fixed above). The warm-started SQP was returning
+  `Maximum_Iterations_Exceeded` with zero outer iterations on 7 of 8 steps at
+  every one of N = 200/400/800, while every other arm solved cleanly; inner
+  working-set changes ran 0 → 43 → 164 → 403 → 795 → 1589 against a cold arm
+  flat at 66. On the fixed solver the warm arm is flat at **3** across a 75×
+  range of m, and its wall time is 0.02–0.03× its cold twin on the large
+  tier — the fastest arm on the board where it previously did not produce an
+  answer.
+- **This retracts the horizon sweep's conclusion, not its measurements.** The
+  reported crossover — warm/cold wall time 0.84 → 1.29 → 1.95 → 2.57 turning
+  harmful above N = 20 — was this defect. Re-measured on the fixed solver the
+  same sweep runs 0.24 → 0.12 → 0.11 → 0.10 at `large` and 0.17 → 0.08 →
+  0.04 → 0.02 at `tiny`: the ratio *improves* with horizon, because cold cost
+  grows with the problem while warm cost is set by how far the active set
+  moved. The churn numbers behind the original claim were correct and are
+  unchanged; the "absolute churn inflates with size" mechanism built on them
+  was not, and is withdrawn.
+- All the suite's other headline numbers moved with the fix and have been
+  re-measured: `warm-sqp` total solve time over the 42-row sweep drops from
+  21.82 s to 3.46 s on identical iteration counts, and per-family inner-work
+  ratios rise across the board (`mpc_horizon_80` @ `tiny` 54.75×,
+  `nmpc_vanderpol` @ `tiny` 18.80×).
+
+### Fixed — `sqp_qp_use_homotopy` was registered but never read
+
+- **Setting it on the active-set SQP path did nothing.** The option was
+  registered with the parametric-homotopy work and documented in detail, but
+  `apply_qp_subproblem_options` — the function that maps the `sqp_qp_*` family
+  onto `pounce_qp::QpOptions` — never consulted it, so `pounce-qp`'s own
+  default (`false`) always stood. Only `pounce_convex::active_set` got the
+  homotopy, and it sets the field directly in Rust rather than through options.
+  A registered knob that no code reads is worse than a missing one: it
+  validates, accepts a value, and ships working documentation for behavior the
+  user never gets.
+- **The inverse of #360, and invisible to its guard.** That issue fixed
+  read-but-unregistered and left a test walking the keys the *reader* consults,
+  asserting each is registered. Nothing checked the other direction. The new
+  `application_every_registered_sqp_qp_option_is_read_by_the_subproblem_reader`
+  enumerates the registry and fails if the two sets diverge either way; both
+  guards were checked for falsifiability rather than assumed.
+- **Found by the benchmark, not by reading.** The warm-start suite's new
+  `-hom` arms measured bit-identical results to their twins — an arm that
+  cannot differ from its control is either a perfect null or a broken
+  experiment.
+
+### Added — an MPC horizon sweep, and the crossover it locates
+
+- **`mpc_horizon_10/20/40/80`** — one linear-quadratic MPC at four horizons
+  (n = 32 → 242, block-banded Jacobian), so reading down them isolates problem
+  size from every other property. This closes the suite's last uncovered axis.
+- **The active-set SQP's warm-start advantage is eroded by absolute working-set
+  churn, and problem size inflates it.** Warm/cold wall time goes 0.84 → 1.29 →
+  1.95 → **2.57** across the four horizons at large parameter steps — at N = 80
+  a warm-started SQP solve takes 2.6× longer than solving cold. At small steps
+  it stays excellent at every horizon, including the suite's best single row
+  (0.08 at N = 40, twelve times faster than cold). The interior-point arms stay
+  between 0.25 and 1.00 across the whole grid.
+- **Mechanism, from the working sets:** the *fraction* of the active set that
+  changes per step is horizon-independent (~3% at large steps for every N), but
+  the *absolute* count grows with the problem (1.05 → 5.58 changes/step), and
+  each change costs more as the active set grows. An active-set method pays for
+  the absolute count, so two factors multiply.
+- This puts a number on the qualitative caveat in the active-set SQP docs
+  ("prefer the IPM for large-scale problems with thousands of active
+  inequalities"): the measured crossover is tens to low hundreds of active
+  constraints, not thousands. The docs now say so.
+
+### Added — degeneracy families and a parametric-homotopy arm in the warm-start suite
+
+- **Two degeneracy families**, completing the three distinct ways an active-set
+  QP meets degeneracy. `degenerate_corner` already covered dual degeneracy (a
+  multiplier through zero); `redundant_rows` adds rank deficiency (duplicated
+  equality rows, so LICQ fails everywhere, plus a duplicated inequality pair
+  that activates together mid-path), and `degenerate_vertex` adds primal
+  degeneracy (12 rows tight at a 4-variable vertex — the ratio-test ties Harris
+  and GMSW EXPAND exist for). Both are convex QPs, so all three solvers take
+  them; both converge on all eight arms with zero correctness failures, and the
+  reported working set confirms the LICQ-violating vertex is pruned to its
+  maximal independent subset.
+- **`cold-sqp-hom` / `warm-sqp-hom` arms**, differing from their twins in the
+  single option above, which makes the §4.2 parametric homotopy measurable for
+  the first time. It is a sharply mixed trade: 4.2–12.3× less inner active-set
+  work on `redundant_rows`, 2.0–2.9× on `degenerate_corner`, unchanged on four
+  families, and ~2× *more* on `nmpc_vanderpol` and ~1.4× more on
+  `simplex_proj`, for 0.70× over all 30 rows. It wins on the degenerate,
+  netlib-like geometry it was designed for and loses on well-conditioned
+  MPC-shaped QPs — a mechanism-level account of #412's 20-gained/7-lost
+  Maros-Mészáros result, and an argument for the default staying off while the
+  knob is reachable.
+
 ### Fixed — pyomo-pounce: `estimate()` measured its perturbation from the Param's current value (#420)
 
 - `estimate(model, perturb)` computed each step as `new value` minus the

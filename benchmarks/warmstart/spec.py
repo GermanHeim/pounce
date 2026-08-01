@@ -161,6 +161,12 @@ class ParametricFamily(ABC):
     #: than trusting the flag.
     quadratic: bool = False
 
+    #: Size tier. ``"default"`` families are small and fast and make up
+    #: the standard sweep; ``"large"`` families exist to exercise the
+    #: sparse path at size and are opt-in (`--tier large`), because a
+    #: single active-set solve on them can take seconds.
+    tier: str = "default"
+
     #: True when the next parameter depends on the previous solution
     #: (closed-loop MPC / moving horizon). The runner then records the
     #: path produced by the reference arm and *replays* it for the
@@ -221,7 +227,13 @@ class ParametricFamily(ABC):
 
     @abstractmethod
     def jacobian_dense(self, x: np.ndarray) -> np.ndarray:
-        """Constraint Jacobian, shape (m, n)."""
+        """Constraint Jacobian, shape (m, n).
+
+        Families large enough that an ``(m, n)`` array is impractical
+        override :meth:`sparse_structure` and the ``*_values`` methods
+        instead; this one is then only called by the self-test, at a
+        reduced size.
+        """
 
     @abstractmethod
     def hessian_dense(
@@ -232,3 +244,31 @@ class ParametricFamily(ABC):
         Sign convention matches cyipopt/Ipopt:
         ``obj_factor·∇²f + Σ_i lagrange_i·∇²g_i``.
         """
+
+    # -- optional sparse path --------------------------------------
+    #
+    # A family whose dense Jacobian or Hessian would not fit — anything
+    # past a few hundred variables — implements these three instead.
+    # The structure is fixed for the whole path (the suite requires
+    # that of every family anyway), so it is computed once.
+
+    def sparse_structure(self):
+        """``(jac_rows, jac_cols, hess_rows, hess_cols)`` or ``None``.
+
+        ``None`` (the default) means "derive the pattern from the dense
+        callbacks", which is right for every small family. Returning a
+        structure switches :class:`~.sparsity.SparseCallbacks` onto the
+        sparse path, where the dense methods are never called during a
+        solve. The Hessian entries must be lower-triangular.
+        """
+        return None
+
+    def jacobian_values(self, x: np.ndarray) -> np.ndarray:
+        """Jacobian entries at ``sparse_structure()``'s ``jac`` indices."""
+        raise NotImplementedError
+
+    def hessian_values(
+        self, x: np.ndarray, lagrange: np.ndarray, obj_factor: float
+    ) -> np.ndarray:
+        """Hessian entries at ``sparse_structure()``'s ``hess`` indices."""
+        raise NotImplementedError
