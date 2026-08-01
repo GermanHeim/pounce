@@ -398,10 +398,9 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
     if isinstance(dual, pyo.Suffix):
         for cd, val in dual.items():
             r = con_row.get(con_alias.get(cd.name, cd.name))
-            # r < m guards the .row file's trailing objective name
-            # (and the surgery's objective alias): the objective is
-            # not a constraint row and carries no dual
-            if r is not None and r < int(nl.m):
+            # con_names is trimmed to the constraint rows at the read
+            # site, so a hit here is always a row of the dual vector
+            if r is not None:
                 y[r] = -float(val)      # AMPL marginal -> internal lambda
     for sfx_name, arr, sign in (("ipopt_zL_in", zl, 1.0),
                                 ("ipopt_zU_in", zu, -1.0)):
@@ -563,6 +562,16 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         var_names = Path(nl_path[:-3] + ".col").read_text().splitlines()
         con_names = Path(nl_path[:-3] + ".row").read_text().splitlines()
         nl = pounce.read_nl(nl_path)
+        # The .row file lists the m constraint rows in nl order and
+        # then appends the objective's name -- it is a row file, not a
+        # constraint file. Trim to the constraint rows here so every
+        # consumer of con_names sees rows only: the name->row index
+        # feeds the pin map, mult_entry, and the warm-start suffix
+        # reader alike, and an objective-keyed lookup would otherwise
+        # return row m and index one past the end of the multiplier
+        # vector. Surgery on a declared model aliases the objective
+        # too, so the objective's name does reach these lookups.
+        con_names = con_names[:int(nl.m)]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

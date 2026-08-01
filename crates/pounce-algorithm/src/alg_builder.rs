@@ -124,32 +124,6 @@ pub struct AlgorithmBundle {
     pub search_dir: Option<PdSearchDirCalc>,
 }
 
-#[cfg(test)]
-mod warm_threading_tests {
-    use super::*;
-
-    #[test]
-    fn warm_options_take_the_init_default_not_their_own() {
-        let mut init = InitOptions::default();
-        init.bound_mult_init_val = 10.0; // the Mehrotra override value
-        let mut warm = WarmStartOptions::default();
-        warm.bound_mult_init_val = 123.0; // stale copy must lose
-        let resolved = resolved_warm_options(&warm, &init);
-        assert_eq!(resolved.bound_mult_init_val, 10.0);
-        // everything else passes through untouched
-        assert_eq!(resolved.mult_bound_push, warm.mult_bound_push);
-        assert_eq!(resolved.target_mu, warm.target_mu);
-    }
-
-    #[test]
-    fn default_warm_matches_default_init() {
-        assert_eq!(
-            WarmStartOptions::default().bound_mult_init_val,
-            InitOptions::default().bound_mult_init_val,
-        );
-    }
-}
-
 /// Knobs read off `OptionsList` and baked into the assembled
 /// `OptErrorConvCheck`. Defaults mirror
 /// `IpOptErrorConvCheck.cpp:RegisterOptions`.
@@ -1134,6 +1108,19 @@ impl AlgorithmBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_options_take_the_init_default_not_their_own() {
+        let mut init = InitOptions::default();
+        init.bound_mult_init_val = 10.0; // the Mehrotra override value
+        let mut warm = WarmStartOptions::default();
+        warm.bound_mult_init_val = 123.0; // stale copy must lose
+        let resolved = resolved_warm_options(&warm, &init);
+        assert_eq!(resolved.bound_mult_init_val, 10.0);
+        // everything else passes through untouched
+        assert_eq!(resolved.mult_bound_push, warm.mult_bound_push);
+        assert_eq!(resolved.target_mu, warm.target_mu);
+    }
 
     #[test]
     fn default_builder_assembles() {

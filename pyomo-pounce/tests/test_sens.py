@@ -759,3 +759,29 @@ def test_warm_start_dual_lands_on_the_aliased_row():
     row = _row_index(session.con_names)[clone_name]
     assert warm["lagrange"][row] == -2.5
     assert not np.isnan(warm["lagrange"][row])
+
+
+def test_row_file_objective_is_not_a_constraint_row():
+    """Pyomo's .row file appends the objective's name after the m
+    constraint rows, and the surgery aliases the objective along with
+    the constraints it replaces. con_names is trimmed to the
+    constraint rows at the read site, so every consumer of the
+    name->row index -- the pin map, mult_entry, the warm-start suffix
+    reader -- sees rows only, and an objective-keyed lookup raises the
+    usual ValueError instead of returning row m and indexing one past
+    the end of the multiplier vector."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(initialize=1.0)
+    m.y = pyo.Var(initialize=1.0)
+    m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+    # the objective mentions the declared Param, so the surgery
+    # replaces (and aliases) it too
+    m.obj = pyo.Objective(expr=m.y + (m.x - m.p) ** 4)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    assert len(session.con_names) == int(session.nl.m)
+    assert "obj" not in session.con_names
+    with pytest.raises(ValueError, match="not a constraint"):
+        session.mult_entry("obj")
