@@ -400,6 +400,8 @@ the full list and per-suite details.
 
 [Opyrability](https://github.com/CODES-group/opyrability#installation) now uses pounce as its default solver.
 
+[SiNDAE](https://github.com/llueg/SiNDAE)  — A Simultaneous Approach for Training Neural Differential-Algebraic Equations
+
 Devin Griffith has been creating a series of interactive optimization examples that use pounce:
 - https://quadtank.griffith-pse.com/
 - https://cstr-sensitivity.griffith-pse.com/
