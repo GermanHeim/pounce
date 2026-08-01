@@ -42,7 +42,15 @@ changes.
   the threshold is μ-relative and reachable).
   `classify_activity` refuses to run with `bound_relax_factor != 0` (the
   Ipopt default is `1e-8`): relaxed bounds shift the slacks the classifier
-  reads.
+  reads. The guard tests the value **the held solve ran under**, now
+  snapshotted as `ConvergedState::bound_relax_factor`, not the
+  application's live options: the bounds were relaxed (or not) once,
+  during that solve, so setting the option afterwards neither unlocks a
+  relaxed state nor invalidates an unrelaxed one. Re-solve to change the
+  answer.
+- Documented in `docs/src/sensitivity.md` ("Activity classification", plus
+  the scale-invariance note under "Units and NLP scaling") and listed with
+  the other session entry points in `docs/src/sessions.md`.
 - Item 0 of `dev-notes/covariance-information-roadmap.md` (#262).
   Everything the classifier reads was already retained at convergence
   (`Σ`, the solver's slacks, the bound multipliers, `μ`, and the exact

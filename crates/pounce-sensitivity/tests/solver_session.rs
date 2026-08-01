@@ -336,3 +336,66 @@ fn solver_converged_none_before_solve() {
     assert!(solver.converged().is_none());
     assert!(solver.kkt_dim().is_none());
 }
+
+/// `classify_activity` guards the `bound_relax_factor` the held solve
+/// ran under, not the application's live options. Both directions
+/// matter: the bounds were relaxed (or not) once, during the solve,
+/// and no later `set_numeric_value` re-measures the slacks the
+/// classifier reads.
+#[test]
+fn classify_activity_guards_the_solves_bound_relax_factor() {
+    let mut app = make_app();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(app, tnlp);
+    solver.solve();
+    assert_eq!(
+        solver
+            .converged()
+            .expect("converged state captured")
+            .bound_relax_factor,
+        0.0,
+    );
+    assert!(solver.classify_activity().is_ok());
+
+    // Raising the option cannot invalidate a report the held state is
+    // still perfectly good for: those bounds were never relaxed.
+    solver
+        .app_mut()
+        .options_mut()
+        .set_numeric_value("bound_relax_factor", 1e-8, true, false)
+        .unwrap();
+    assert!(
+        solver.classify_activity().is_ok(),
+        "the guard must read the solve's value, not the live option",
+    );
+}
+
+#[test]
+fn classify_activity_refuses_a_solve_that_relaxed_its_bounds() {
+    // make_app leaves bound_relax_factor at the 1e-8 default.
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let mut solver = Solver::new(make_app(), tnlp);
+    solver.solve();
+    assert!(matches!(
+        solver.classify_activity(),
+        Err(pounce_sensitivity::SolverError::BadOptions(_)),
+    ));
+
+    // Clearing the option afterwards must NOT unlock the stale state:
+    // its slacks were measured against relaxed bounds and still are.
+    solver
+        .app_mut()
+        .options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    assert!(
+        matches!(
+            solver.classify_activity(),
+            Err(pounce_sensitivity::SolverError::BadOptions(_)),
+        ),
+        "clearing the option must not retroactively un-relax the held slacks",
+    );
+}

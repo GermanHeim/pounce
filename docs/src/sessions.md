@@ -52,6 +52,10 @@ hr = solver.reduced_hessian([2, 3])
 dim = solver.kkt_dim
 rhs = np.zeros(dim)
 lhs = solver.kkt_solve(rhs)
+
+# Which bounds and rows actually hold the solution, in user index order.
+rep = solver.classify_activity()          # needs bound_relax_factor=0
+rep["var_status"], rep["row_status"]
 ```
 
 The KKT compound vector is laid out as

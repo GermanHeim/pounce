@@ -417,9 +417,13 @@ impl PySolver {
     ///   true where classified inactive yet carrying non-negligible
     ///   barrier curvature.
     ///
-    /// Requires `bound_relax_factor=0` (raises `ValueError` otherwise;
-    /// the Ipopt default is `1e-8`): relaxed bounds shift the slacks
-    /// the classifier reads.
+    /// Requires the **held solve** to have run with
+    /// `bound_relax_factor=0` (raises `ValueError` otherwise; the
+    /// Ipopt default is `1e-8`): relaxed bounds shift the slacks the
+    /// classifier reads. The guard reads the value that solve ran
+    /// under, so setting the option afterwards neither unlocks a
+    /// relaxed solve nor invalidates an unrelaxed one — set it on the
+    /// `Problem` and solve again.
     fn classify_activity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("classify_activity: no converged factor (call solve() first)")

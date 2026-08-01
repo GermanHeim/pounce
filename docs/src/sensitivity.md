@@ -312,6 +312,60 @@ See
 for a worked example with a Monte Carlo validated confidence ellipse
 and an identifiability diagnosis.
 
+## Activity classification
+
+Which bounds and constraint rows are actually *holding* the solution
+is a question the converged iterate answers only ambiguously: at a
+weakly active bound the slack and its multiplier are both `O(√μ)`, so
+no fixed threshold on either one alone separates "just touching" from
+"not binding". `Solver.classify_activity()` keys on the ratio of
+barrier curvature to the model's own curvature instead, which is
+`O(μ)`, `O(1)` and `O(1/μ)` in the three regimes:
+
+```python
+solver = pounce.Solver(problem)   # problem.add_option("bound_relax_factor", 0.0)
+x, info = solver.solve(x0=x0)
+
+rep = solver.classify_activity()
+rep["var_status"]        # ["inactive", "unbounded", "fixed", "strongly_active"]
+rep["row_status"]        # ["equality", "strongly_active"]
+rep["var_ratio"]         # the ratio behind each call (NaN where nothing was classified)
+rep["mu"]                # the barrier parameter the calls were made at
+```
+
+Statuses are `inactive`, `weakly_active`, `strongly_active`,
+`ambiguous` (the ratio fell in a gap where this `μ` cannot decide —
+re-solve tighter), and `unidentified` (the curvature is below noise
+scale, so the question does not arise). `unbounded`, `fixed` and
+`equality` mark entries with no barrier geometry to classify.
+
+Both arrays are indexed in **user space**: `var_*` follows your `n`
+variables and `row_*` your `m` constraints, in your order. A variable
+that `fixed_variable_treatment = make_parameter` removed from the
+solve (`lb == ub`) reports `fixed` at its own index rather than
+shifting everything after it.
+
+Two per-entry flags report on the assumptions rather than the
+geometry: `off_central_path` (`s·z` differs from `μ` by more than 10×
+on some side) and `contaminated` (classified inactive yet carrying
+barrier curvature well above the `O(μ)` an inactive bound should have
+— typically a bound that sits close enough to the optimum to bend it).
+
+Inequality rows classify through the same rule, via the curvature
+along the constraint normal. That is the point of classifying rows at
+all: move a bound off a variable and onto a row and the activity
+disappears from the bound-multiplier view entirely, while any
+covariance or identifiability heuristic keyed on `z` alone silently
+stops seeing it
+([#362](https://github.com/jkitchin/pounce/issues/362)).
+
+The call requires the solve to have run with `bound_relax_factor=0`
+(the Ipopt default is `1e-8`) and raises `ValueError` otherwise:
+relaxed bounds shift the very slacks the classifier reads. The guard
+tests the value that solve ran under, so setting the option after the
+fact does not change the answer — set it on the `Problem` and solve
+again.
+
 ## Units and NLP scaling
 
 All sensitivity outputs are in **natural (unscaled) units**. The IPM
@@ -323,6 +377,13 @@ pounce undoes that scaling in every held-factor back-solve, so `dx`,
 `kkt_solve`, and the reduced Hessian are independent of how the
 problem was scaled internally
 ([#128](https://github.com/jkitchin/pounce/issues/128)).
+
+`classify_activity()` is scale-invariant for the same reason, and by
+construction rather than by undoing anything: its ratios are formed so
+that rescaling a variable, a constraint row, or the objective leaves
+them fixed. Writing a constraint as `1000·x ≥ 0` instead of `x ≥ 0`
+does not move a status, and neither does the solver's own per-row
+`d_scale`.
 
 In particular, for a parameter-estimation NLP with the parameters
 pinned by equality constraints, `-inv(info["reduced_hessian"])` is
