@@ -32,7 +32,11 @@ fn earliest_crossing_wins_below_the_old_t_eps_margin() {
     r.admit(1.1e-14, Event::AddRowUpper(7));
     r.admit(2.9e-16, Event::AddRowLower(132));
 
-    assert_eq!(firing(&r), vec![Event::AddRowLower(132)], "row 132 must win");
+    assert_eq!(
+        firing(&r),
+        vec![Event::AddRowLower(132)],
+        "row 132 must win"
+    );
     assert!(
         r.t_next <= 0.5 + 2.9e-16,
         "step must stop at the earlier crossing, not overshoot it: t_next = {}",
@@ -119,7 +123,10 @@ fn unrecoverably_violated_crossing_is_not_an_event() {
     let mut r = RatioTest::new(0.75);
     r.admit(-1e-3, Event::AddRowLower(2));
     assert!(firing(&r).is_empty());
-    assert_eq!(r.t_next, 1.0, "no event ⇒ the step runs to the end of the path");
+    assert_eq!(
+        r.t_next, 1.0,
+        "no event ⇒ the step runs to the end of the path"
+    );
 }
 
 /// A crossing past the end of the path is not on this path.
