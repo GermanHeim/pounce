@@ -9,6 +9,45 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — active-set SQP: a warm start was discarded whenever the active set moved (#428)
+
+- `solve_with_working_set` pins the hinted active rows to their new
+  boundary values and hands the resulting primal to `solve`. Once the true
+  active set has moved — by even a single entry — the hint still pins a row
+  that should have been released, so that primal overshoots some *other*
+  row by roughly the distance the problem moved. `solve`'s warm-start
+  admission pre-check then rejected it and threw the whole hint away for a
+  cold l1-elastic phase-1, whose recovery re-solve starts from
+  `WorkingSet::cold`. The warm start was therefore either perfect (0
+  working-set changes) or catastrophic (≈ one change per constraint row),
+  with nothing in between, and the catastrophic branch is the one taken on
+  essentially every step of a parameter sweep. Past `m > sqp_qp_max_iter`
+  the elastic re-solve could not finish at all, so the warm arm stopped
+  returning an answer where the cold arm solved cleanly.
+- The pre-check itself was doing something legitimate (a crossover hint
+  that violates hundreds of inactive rows really does stall the zero-RHS
+  warm inner loop), so the fix is not to relax it — and it cannot be:
+  `feas_tol` also gates whether a converged point is *accepted*, and the
+  setting that admits the hint reliably also stops rejecting genuinely
+  infeasible answers. Instead the hint is now **repaired**: the rows the
+  pinned point violates are known, so they are pinned too and the solve
+  re-factored, keeping the |A| − 1 entries the hint got right. The
+  pre-check keeps its exact meaning and is simply handed a feasible point.
+- The repair declines — leaving the old elastic recovery untouched — when
+  the hint is not one it can help: an already-active row is violated, the
+  violated rows exceed a quarter of the hint's active set (the
+  badly-wrong-hint case the pre-check exists for), the repaired pin set
+  would exceed `n` rows and so be necessarily rank-deficient, or three
+  re-pin rounds do not reach feasibility.
+- Measured on a parametric linear-quadratic MPC sweep (n = 32 … 302,
+  m = 22 … 202), one θ step per solve: the warm arm previously spent
+  exactly as many working-set changes as a cold solve at every horizon
+  (10/15/19/20), i.e. the hint bought nothing. It now reaches the same
+  optimum to ~1e-13 in 0 changes. Regression tests in
+  `crates/pounce-qp/tests/warm_start_pin_repair.rs` cover the analytic
+  one-entry-wrong case, the MPC sweep at four horizons, and a hopeless
+  hint that must still fall through to elastic.
+
 ### Fixed — pyomo-pounce: `covariance(n_data=)` read the SSR from the live objective (#426)
 
 - The `n_data=` branch estimated the noise variance with the SSR taken

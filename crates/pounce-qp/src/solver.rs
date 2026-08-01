@@ -24,6 +24,22 @@ use pounce_common::{Index, Number};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::status::ESymSolverStatus;
 
+/// Re-pin rounds [`ParametricActiveSetSolver::repair_pinned_hint`] will spend
+/// on an infeasible warm-start primal before giving up on it. Each round adds
+/// the rows the current pinned point violates and re-factors, so the cost of a
+/// failed repair is bounded by this many pinned-KKT factorizations. One round
+/// suffices for the parametric case the repair targets (a hint whose active
+/// set has drifted by a few entries); the extra rounds cover a re-pin that
+/// exposes a second row behind the first.
+const PIN_REPAIR_MAX_ROUNDS: usize = 3;
+
+/// Violated rows [`ParametricActiveSetSolver::repair_pinned_hint`] will always
+/// try to re-pin, however small the hint's active set. Beyond this floor the
+/// budget scales with the active set (a quarter of it): a hint wrong in a few
+/// entries is worth repairing, one wrong in a large fraction of its rows is
+/// the badly-wrong hint that l1-elastic phase-1 exists for.
+const PIN_REPAIR_MIN_ROWS: usize = 4;
+
 /// QP subproblem solver.
 ///
 /// Two entry points: [`solve`](Self::solve) for a single QP with an
@@ -215,6 +231,169 @@ impl ParametricActiveSetSolver {
             }
         }
         Ok(rhs[..n].to_vec())
+    }
+
+    /// Pin every active row / bound of `working` to its boundary value and
+    /// factor that KKT for a primal `x`, returning `x` together with the
+    /// working set actually pinned.
+    ///
+    /// If the hint is rank-deficient — a degenerate optimum can pin more
+    /// binding rows than there are variables, and the LP-crossover bridge
+    /// hands over redundant equality rows — the saddle KKT is singular and
+    /// the §4.5 H-shift cannot repair a rank-deficient *constraint* block.
+    /// Linear-independence guard: prune the active set to a maximal
+    /// independent subset, retry once, and return the pruned working set so
+    /// the inner loop starts from a full-rank state. Dropped rows are linear
+    /// combinations of the kept ones, hence satisfied at the recovered primal
+    /// — and they stay `Inactive` in the returned set, since the ratio test
+    /// skips `bl == bu` rows so a dropped equality can never re-enter.
+    fn pin_working_set(
+        &mut self,
+        qp: &QpProblem,
+        working: &WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<(Vec<Number>, WorkingSet), QpError> {
+        let active_cons: Vec<usize> = (0..qp.m)
+            .filter(|&i| working.constraints[i].is_active())
+            .collect();
+        let active_bounds: Vec<usize> = (0..qp.n)
+            .filter(|&i| working.bounds[i].is_active())
+            .collect();
+
+        // The boundary value each active row / bound is pinned to.
+        let cons_target = |i: usize| match working.constraints[i] {
+            ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+            ConsStatus::AtUpper => qp.bu[i],
+            ConsStatus::Inactive => unreachable!(),
+        };
+        let bound_target = |i: usize| match working.bounds[i] {
+            BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[i],
+            BoundStatus::AtUpper => qp.xu[i],
+            BoundStatus::Inactive => unreachable!(),
+        };
+        let cons_targets: Vec<Number> = active_cons.iter().map(|&i| cons_target(i)).collect();
+        let bound_targets: Vec<Number> = active_bounds.iter().map(|&i| bound_target(i)).collect();
+
+        match self.factor_pinned_primal(
+            qp,
+            &active_cons,
+            &cons_targets,
+            &active_bounds,
+            &bound_targets,
+            opts,
+        ) {
+            Ok(x) => Ok((x, working.clone())),
+            Err(e) if e.is_recoverable_factorization_failure() => {
+                let (kc, kb) =
+                    independent_active_subset(&mut self.linsol, qp, &active_cons, &active_bounds);
+                if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                    // Full rank already — not a deficiency this repairs.
+                    return Err(e);
+                }
+                let kc_targets: Vec<Number> = kc.iter().map(|&i| cons_target(i)).collect();
+                let kb_targets: Vec<Number> = kb.iter().map(|&i| bound_target(i)).collect();
+                let x = self.factor_pinned_primal(qp, &kc, &kc_targets, &kb, &kb_targets, opts)?;
+
+                // Forward a pruned working set: dropped active rows /
+                // bounds revert to Inactive. A dropped row has `a·p = 0`
+                // along every active-set step (it lies in the kept rows'
+                // span), so the inner loop never re-adds it and it stays
+                // at its boundary.
+                let mut fwd = working.clone();
+                let mut keep_c = vec![false; qp.m];
+                for &i in &kc {
+                    keep_c[i] = true;
+                }
+                let mut keep_b = vec![false; qp.n];
+                for &i in &kb {
+                    keep_b[i] = true;
+                }
+                for i in 0..qp.m {
+                    if working.constraints[i].is_active() && !keep_c[i] {
+                        fwd.constraints[i] = ConsStatus::Inactive;
+                    }
+                }
+                for i in 0..qp.n {
+                    if working.bounds[i].is_active() && !keep_b[i] {
+                        fwd.bounds[i] = BoundStatus::Inactive;
+                    }
+                }
+                Ok((x, fwd))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Repair a pinned warm-start primal that came out infeasible, rather than
+    /// let `solve`'s admission pre-check discard the whole hint (#428).
+    ///
+    /// When the true active set has moved, the hint still pins a row that
+    /// should have been released, so the pinned primal overshoots some *other*
+    /// row or bound — by roughly the distance the problem moved. The old
+    /// behavior was all-or-nothing: that point failed the admission pre-check
+    /// and the entire working set was thrown away for a cold l1-elastic
+    /// phase-1, whose recovery re-solve starts from `WorkingSet::cold`. A hint
+    /// wrong by *one* entry cost the same as one wrong by hundreds — on a
+    /// parametric MPC sweep, roughly one working-set change per constraint row
+    /// (issue #428: 403 pivots where 2 were needed, and past `m ≈ max_iter` no
+    /// answer at all), while the |A| − 1 entries the hint got *right* were
+    /// exactly its value.
+    ///
+    /// The repair keeps them: the rows the pinned point violates are known, so
+    /// add them to the working set at the boundary they overshot and re-pin.
+    /// The result satisfies both the hint's rows and the violated ones, and
+    /// the inner loop then drops whichever the multiplier signs reject — a
+    /// couple of pivots instead of `m`. Nothing here relaxes a tolerance: the
+    /// admission pre-check keeps its exact meaning and is simply handed a
+    /// feasible point.
+    ///
+    /// Returns `None` — leaving the caller's original hint, hence the old
+    /// elastic recovery — when the hint is not one repair is meant for:
+    ///
+    ///   * an *active* row is itself violated (re-pinning cannot help);
+    ///   * too many rows are violated relative to the hint's active set, the
+    ///     badly-wrong-hint case the pre-check was written for (a degenerate
+    ///     NETLIB `gen` crossover vertex violating hundreds of inactive rows);
+    ///   * the repaired pin set would exceed `n` rows, hence be necessarily
+    ///     rank-deficient. A hint that already pins a full vertex therefore
+    ///     needs a *drop* the repair cannot choose without a ratio test, and
+    ///     keeps the old path;
+    ///   * the re-pin fails to factor, or does not reach feasibility within
+    ///     [`PIN_REPAIR_MAX_ROUNDS`].
+    fn repair_pinned_hint(
+        &mut self,
+        qp: &QpProblem,
+        x: &[Number],
+        working: &WorkingSet,
+        opts: &QpOptions,
+    ) -> Option<(Vec<Number>, WorkingSet)> {
+        let mut x_cur = x.to_vec();
+        let mut w_cur = working.clone();
+
+        for _ in 0..PIN_REPAIR_MAX_ROUNDS {
+            let (cons, bounds) = violated_inactive(qp, &x_cur, &w_cur, opts.feas_tol)?;
+            if cons.is_empty() && bounds.is_empty() {
+                return Some((x_cur, w_cur));
+            }
+            let n_violated = cons.len() + bounds.len();
+            let active_total = w_cur.active_count();
+            if n_violated > (active_total / 4).max(PIN_REPAIR_MIN_ROWS)
+                || active_total + n_violated > qp.n
+            {
+                return None;
+            }
+            for (i, status) in cons {
+                w_cur.constraints[i] = status;
+            }
+            for (i, status) in bounds {
+                w_cur.bounds[i] = status;
+            }
+            let (x_new, w_new) = self.pin_working_set(qp, &w_cur, opts).ok()?;
+            x_cur = x_new;
+            w_cur = w_new;
+        }
+
+        point_is_feasible(qp, &x_cur, opts.feas_tol).then_some((x_cur, w_cur))
     }
 
     /// Primal active-set path for box-constrained QPs
@@ -2984,87 +3163,23 @@ impl QpSolver for ParametricActiveSetSolver {
         qp.validate()?;
         working.validate_dims(qp.n, qp.m)?;
 
-        // Build the active-row index lists from the supplied
-        // working set.
-        let active_cons: Vec<usize> = (0..qp.m)
-            .filter(|&i| working.constraints[i].is_active())
-            .collect();
-        let active_bounds: Vec<usize> = (0..qp.n)
-            .filter(|&i| working.bounds[i].is_active())
-            .collect();
+        // Factor the pinned KKT for a primal that satisfies the hinted active
+        // rows (pruning the hint first if it is rank-deficient).
+        let (x_init, fwd_working) = self.pin_working_set(qp, working, opts)?;
 
-        // The boundary value each active row / bound is pinned to.
-        let cons_target = |i: usize| match working.constraints[i] {
-            ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
-            ConsStatus::AtUpper => qp.bu[i],
-            ConsStatus::Inactive => unreachable!(),
-        };
-        let bound_target = |i: usize| match working.bounds[i] {
-            BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[i],
-            BoundStatus::AtUpper => qp.xu[i],
-            BoundStatus::Inactive => unreachable!(),
-        };
-        let cons_targets: Vec<Number> = active_cons.iter().map(|&i| cons_target(i)).collect();
-        let bound_targets: Vec<Number> = active_bounds.iter().map(|&i| bound_target(i)).collect();
-
-        // Factor the pinned KKT for a primal that satisfies the hinted
-        // active rows. If the hint is rank-deficient — a degenerate
-        // optimum can pin more binding rows than there are variables,
-        // and the LP-crossover bridge hands over redundant equality
-        // rows — the saddle KKT is singular and the §4.5 H-shift cannot
-        // repair a rank-deficient *constraint* block. Linear-
-        // independence guard: prune the active set to a maximal
-        // independent subset, retry once, and forward the pruned
-        // working set so the inner loop starts from a full-rank state.
-        // Dropped rows are linear combinations of the kept ones, hence
-        // satisfied at the recovered primal.
-        let (x_init, fwd_working) = match self.factor_pinned_primal(
-            qp,
-            &active_cons,
-            &cons_targets,
-            &active_bounds,
-            &bound_targets,
-            opts,
-        ) {
-            Ok(x) => (x, working.clone()),
-            Err(e) if e.is_recoverable_factorization_failure() => {
-                let (kc, kb) =
-                    independent_active_subset(&mut self.linsol, qp, &active_cons, &active_bounds);
-                if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
-                    // Full rank already — not a deficiency this repairs.
-                    return Err(e);
-                }
-                let kc_targets: Vec<Number> = kc.iter().map(|&i| cons_target(i)).collect();
-                let kb_targets: Vec<Number> = kb.iter().map(|&i| bound_target(i)).collect();
-                let x = self.factor_pinned_primal(qp, &kc, &kc_targets, &kb, &kb_targets, opts)?;
-
-                // Forward a pruned working set: dropped active rows /
-                // bounds revert to Inactive. A dropped row has `a·p = 0`
-                // along every active-set step (it lies in the kept rows'
-                // span), so the inner loop never re-adds it and it stays
-                // at its boundary.
-                let mut fwd = working.clone();
-                let mut keep_c = vec![false; qp.m];
-                for &i in &kc {
-                    keep_c[i] = true;
-                }
-                let mut keep_b = vec![false; qp.n];
-                for &i in &kb {
-                    keep_b[i] = true;
-                }
-                for i in 0..qp.m {
-                    if working.constraints[i].is_active() && !keep_c[i] {
-                        fwd.constraints[i] = ConsStatus::Inactive;
-                    }
-                }
-                for i in 0..qp.n {
-                    if working.bounds[i].is_active() && !keep_b[i] {
-                        fwd.bounds[i] = BoundStatus::Inactive;
-                    }
-                }
-                (x, fwd)
-            }
-            Err(e) => return Err(e),
+        // A pinned primal that is infeasible for some *other* row is the
+        // signature of an active set that has moved since the hint was
+        // recorded. `solve`'s admission pre-check would drop the hint whole
+        // and fall back to a cold l1-elastic phase-1, spending about one
+        // working-set change per constraint row to rebuild what the hint
+        // already had right. Repair it instead — pin the violated rows too —
+        // and hand the pre-check a feasible point (#428). A hint the repair
+        // cannot rescue keeps the old path untouched.
+        let (x_init, fwd_working) = if point_is_feasible(qp, &x_init, opts.feas_tol) {
+            (x_init, fwd_working)
+        } else {
+            self.repair_pinned_hint(qp, &x_init, &fwd_working, opts)
+                .unwrap_or((x_init, fwd_working))
         };
 
         // The inner loop recomputes multipliers each iteration from a
@@ -3121,6 +3236,69 @@ fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
         }
     }
     worst.max(0.0)
+}
+
+/// Rows and bounds that `x` violates by more than `feas_tol`, each paired with
+/// the working-set status that pins it back onto the side it overshot.
+/// Companion to [`ParametricActiveSetSolver::repair_pinned_hint`].
+///
+/// Returns `None` when a row or bound the working set already marks *active*
+/// is violated. A pinned row is satisfied by construction, so that means the
+/// pin did not take (an inconsistent or numerically hopeless hint) — and since
+/// the repair only ever *adds* pins, re-pinning such a row cannot fix it.
+#[allow(clippy::type_complexity)]
+fn violated_inactive(
+    qp: &QpProblem,
+    x: &[Number],
+    working: &WorkingSet,
+    feas_tol: Number,
+) -> Option<(Vec<(usize, ConsStatus)>, Vec<(usize, BoundStatus)>)> {
+    let ax = a_times_x(qp.a, x, qp.m);
+    let mut cons = Vec::new();
+    for i in 0..qp.m {
+        let below = qp.bl[i] > NLP_LOWER_BOUND_INF && ax[i] < qp.bl[i] - feas_tol;
+        let above = qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] > qp.bu[i] + feas_tol;
+        if !below && !above {
+            continue;
+        }
+        if working.constraints[i].is_active() {
+            return None;
+        }
+        cons.push((
+            i,
+            if qp.bl[i] == qp.bu[i] {
+                ConsStatus::Equality
+            } else if below {
+                ConsStatus::AtLower
+            } else {
+                ConsStatus::AtUpper
+            },
+        ));
+    }
+
+    let mut bounds = Vec::new();
+    for (i, &xi) in x.iter().enumerate() {
+        let below = qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - feas_tol;
+        let above = qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + feas_tol;
+        if !below && !above {
+            continue;
+        }
+        if working.bounds[i].is_active() {
+            return None;
+        }
+        bounds.push((
+            i,
+            if qp.xl[i] == qp.xu[i] {
+                BoundStatus::Fixed
+            } else if below {
+                BoundStatus::AtLower
+            } else {
+                BoundStatus::AtUpper
+            },
+        ));
+    }
+
+    Some((cons, bounds))
 }
 
 fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
