@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — restoration had no verdict when its sub-problem converged
+
+- `IpRestoConvCheck::CheckConvergence` is two layers, and pounce ported
+  only the first. Layer 1 — the κ_resto reduction guard, the
+  square-problem fast path, and the outer-filter acceptance test —
+  answers *can the trial point leave restoration?*. Layer 2
+  (`IpRestoConvCheck.cpp:200-240`) answers *has the restoration
+  sub-problem itself converged?*, and it is the only thing that bounds a
+  restoration which can never satisfy layer 1 (#438).
+- Without it, a sub-problem sitting at its own KKT point — the moment it
+  has provably done everything it can — was indistinguishable from one
+  still making progress. When the κ_resto target is out of reach (the
+  outer enters restoration at a nearly-feasible point, restoration moves
+  the iterate away, and the reduction test then fails at every subsequent
+  iteration), the only remaining exits were the `maximum_iters` /
+  `max_resto_iter` caps: the wrong status, reported after orders of
+  magnitude more work than the diagnosis needed.
+- Layer 2's four-way verdict is now rendered inside the restoration
+  sub-solve: tighten the sub-problem tolerance once and continue,
+  converged-to-acceptable on a feasible square problem,
+  converged-to-a-feasible-point, or `LOCALLY_INFEASIBLE`. The tightening
+  arm keeps upstream's `tol > 1e-1 · orig_tol` guard, without which it is
+  an infinite loop.
+- Two deliberate deviations from upstream, both scoped so that #438
+  changes only the arm that had no verdict at all: the
+  converged-to-a-feasible-point arm hands the recovered point back to the
+  outer phase instead of throwing (upstream reports a restoration
+  failure), and square problems are exempt from the locally-infeasible
+  arm, matching the carve-out the post-hoc detection in
+  `resto_inner_solver` already made for them.
+- Set `POUNCE_DBG_RESTO_LAYER2=1` with `RUST_LOG=pounce::restoration=debug`
+  to trace the verdict.
 ### Fixed — port gap: no `ACCEPTABLE_POINT_REACHED` at the restoration doorway
 
 - **Upstream refuses to enter restoration from an acceptable point; pounce did

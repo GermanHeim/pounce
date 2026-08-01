@@ -340,8 +340,18 @@ pub fn run_inner_resto(
     // (carried on the inner builder's conv_check options) into the resto
     // sub-solve instead of hardcoded `(1e-8, 1e-6, 15)`. See
     // `build_resto_conv_check_adapter`.
+    let outer_tol = outer_data.borrow().tol;
     let mut adapter = build_resto_conv_check_adapter(&inner_alg_builder.conv_check)
-        .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto);
+        .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto)
+        // Layer 2 of `IpRestoConvCheck::CheckConvergence` (pounce#438).
+        // `constr_viol_tol` is read with the *original* prefix upstream
+        // (`IpRestoConvCheck::InitializeImpl`), which is exactly what the
+        // inner builder's conv-check options carry here.
+        .with_orig_convergence_verdict(
+            outer_tol,
+            inner_alg_builder.conv_check.constr_viol_tol,
+            is_square_problem,
+        );
     if let Some(cb) = orig_progress_cb {
         adapter = adapter.with_orig_progress_callback(cb);
     }
@@ -546,7 +556,6 @@ pub fn run_inner_resto(
     // `tol`). Without this gate, we'd misclassify any kappa-guard
     // exit at exactly the entry `inf_pr` as locally-infeasible
     // (HATFLDF, POLAK6, ROSENMMX, ... regress).
-    let outer_tol = outer_data.borrow().tol;
     let (orig_inf_pr_at_final, orig_inf_pr_scaled) =
         eval_orig_inf_pr_at_inner_curr(&*final_iv.x, &*final_iv.s, outer_nlp).unwrap_or((0.0, 0.0));
     // Row magnitude implied by the two measures of the same violation:
@@ -687,6 +696,22 @@ pub fn run_inner_resto(
         && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
         && orig_inf_pr_at_final.is_finite();
 
+    // Layer-2 verdict, rendered from *inside* the sub-solve (pounce#438).
+    // The inner convergence check asked, at the moment the restoration
+    // sub-problem reached its own KKT point, whether the recovered point is
+    // feasible for the ORIGINAL NLP, and answered no — upstream's
+    // `LOCALLY_INFEASIBLE` throw at `IpRestoConvCheck.cpp:240`, which
+    // `IpoptAlgorithm` turns into `LOCAL_INFEASIBILITY`.
+    //
+    // Unlike every gate above, this one needs no signature heuristics: the
+    // verdict was issued at a point the sub-solve itself certified, against
+    // the sub-solve's own (possibly tightened) tolerance, rather than
+    // reconstructed after the fact from a terminal status and a KKT residual.
+    // The gates above remain because they cover the exits where the inner
+    // never gets to render a verdict at all — line-search failure, step
+    // explosion, tiny step, iteration cap.
+    let verdict_locally_infeasible = matches!(status, SolverReturn::LocalInfeasibility);
+
     // Admissibility guard over ALL of the gates above, in one place.
     //
     // Never claim infeasibility at a point the solver's own convergence test
@@ -716,7 +741,8 @@ pub fn run_inner_resto(
     // twin, and a hole survived both times.
     let solver_would_call_it_feasible = orig_inf_pr_scaled <= outer_tol;
     let locally_infeasible = !solver_would_call_it_feasible
-        && (strict_locally_infeasible
+        && (verdict_locally_infeasible
+            || strict_locally_infeasible
             || alt_locally_infeasible
             || cycle_locally_infeasible
             || step_failure_locally_infeasible
@@ -724,13 +750,14 @@ pub fn run_inner_resto(
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",
-            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} tiny_step={} → loc_inf={}",
+            "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} outer_tol={:.6e} verdict={} strict={} alt={} cycle={} step_fail={} tiny_step={} → loc_inf={}",
             status,
             inner_iter_count,
             inner_kkt_err,
             orig_inf_pr_at_final,
             orig_inf_pr_scaled,
             outer_tol,
+            verdict_locally_infeasible,
             strict_locally_infeasible,
             alt_locally_infeasible,
             cycle_locally_infeasible,
