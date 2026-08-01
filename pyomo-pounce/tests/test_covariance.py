@@ -608,3 +608,35 @@ def test_classify_ratio_covers_all_branches():
     assert _classify_ratio(0.05, 1e-2) == "inactive"       # mu branch
     assert _classify_ratio(1.0, 1e-2) == "ambiguous"
     assert _classify_ratio(50.0, 1e-2) == "strongly_active"
+
+
+def test_issue_362_row_pinned_variable_projects():
+    """The defect of gh #362, its own reproduction: five residuals pull
+    A above a cap of 1.0. As a variable bound the old code projected
+    (std_err 0.0, warned); as a Constraint it silently returned the
+    barrier's leftover variance (7.9e-6 in the report) with no signal.
+    Both spellings must project to exactly zero and warn."""
+    def build(spelling):
+        m = pyo.ConcreteModel()
+        m.I = pyo.RangeSet(5)
+        if spelling == "bound":
+            m.A = pyo.Var(bounds=(None, 1.0), initialize=0.5)
+        else:
+            m.A = pyo.Var(initialize=0.5)
+            m.cap = pyo.Constraint(expr=m.A <= 1.0)
+        m.r = pyo.Var(m.I, initialize=0.0)
+        m.res = pyo.Constraint(
+            m.I, rule=lambda mm, i: mm.r[i] == 3.0 - mm.A)
+        m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+        declare_fitted(m.A)
+        declare_residual(m.r)
+        return m
+
+    for spelling in ("bound", "row"):
+        m = build(spelling)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            pyo.SolverFactory("pounce").solve(m)
+            cov = covariance(m, sigma_sq=0.05**2)
+        assert cov.std_err[m.A] == 0.0, spelling
+        assert any("strongly active" in str(x.message) for x in w), spelling
