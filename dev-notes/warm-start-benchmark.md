@@ -496,7 +496,7 @@ Large tier at default settings: every arm correct on every step (was
 7 of 8 bad on both warm SQP arms), and `warm-sqp` wall time is 0.03×,
 0.03×, 0.02× its cold twin at N = 200/400/800 — the fastest arm on the
 board, where it previously did not return an answer. Inner work 514 → 11
-per path at all three horizons. At n = 2402: 1.36 s warm against 12.04 s
+per path at all three horizons. At n = 2402: 1.34 s warm against 12.12 s
 cold.
 
 **Findings 6's conclusion is retracted.** The horizon sweep's crossover

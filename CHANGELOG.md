@@ -102,7 +102,7 @@ changes.
   was not, and is withdrawn.
 - All the suite's other headline numbers moved with the fix and have been
   re-measured: `warm-sqp` total solve time over the 42-row sweep drops from
-  21.82 s to 3.11 s on identical iteration counts, and per-family inner-work
+  21.82 s to 3.46 s on identical iteration counts, and per-family inner-work
   ratios rise across the board (`mpc_horizon_80` @ `tiny` 54.75×,
   `nmpc_vanderpol` @ `tiny` 18.80×).
 

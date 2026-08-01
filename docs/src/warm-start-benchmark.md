@@ -152,14 +152,14 @@ Totals across all 855 steps of all 42 rows:
 
 | arm | Σ outer iterations | Σ solve time | incorrect steps |
 |---|--:|--:|--:|
-| `cold-ipm` | 10288 | 5.97 s | 0 |
-| `warm-ipm` | **3628** | 3.17 s | 0 |
-| `cold-sqp` | 4238 | 26.01 s | 0 |
-| `warm-sqp` | **1501** | 3.11 s | 0 |
+| `cold-ipm` | 10288 | 7.71 s | 0 |
+| `warm-ipm` | **3628** | 3.55 s | 0 |
+| `cold-sqp` | 4238 | 30.31 s | 0 |
+| `warm-sqp` | **1501** | 3.46 s | 0 |
 
 Both solvers cut outer iterations by roughly 3×. But for the active-set
 SQP that number badly understates the effect — its wall time falls by
-8.4× on the same iteration count — for a reason worth understanding
+8.8× on the same iteration count — for a reason worth understanding
 before reading any further.
 
 ### The metric trap: outer iterations hide the SQP's warm start
@@ -367,13 +367,13 @@ fastest thing on the board:
 
 | N | n | `warm-sqp` wall vs its cold twin | `warm-ipm` | `warm-qp-ipm` |
 |--:|--:|--:|--:|--:|
-| 200 | 602 | **0.03** | 0.50 | 0.51 |
-| 400 | 1202 | **0.03** | 0.48 | 0.49 |
-| 800 | 2402 | **0.02** | 0.48 | 0.51 |
+| 200 | 602 | **0.03** | 0.58 | 0.48 |
+| 400 | 1202 | **0.03** | 0.57 | 0.54 |
+| 800 | 2402 | **0.02** | 0.41 | 0.50 |
 
 Inner active-set work drops 514 → 11 per path (46.7×) identically at all
-three horizons. At n = 2402 a warm-started SQP sweep takes 1.36 s
-against 12.04 s cold.
+three horizons. At n = 2402 a warm-started SQP sweep takes 1.34 s
+against 12.12 s cold.
 
 This also revises the caveat in
 [Active-Set SQP & Warm Starts](active-set-sqp.md) about preferring the
@@ -453,11 +453,11 @@ Geometric-mean wall time over those fifteen rows:
 
 | cold-ipm | cold-sqp | cold-qp-ipm | warm-ipm | warm-sqp | warm-qp-ipm |
 |--:|--:|--:|--:|--:|--:|
-| 90.8 ms | 58.7 ms | 66.5 ms | 45.8 ms | 30.3 ms | **30.1 ms** |
+| 99.1 ms | 62.5 ms | 61.6 ms | 50.1 ms | 30.9 ms | **29.5 ms** |
 
 The dedicated convex solver is fastest on 9 of the 15 rows and the
 active-set SQP on the other 6, with the SQP taking the rows where the
-active set churns hardest. The two are within 1% of each other on the
+active set churns hardest. The two are within 5% of each other on the
 aggregate — on a problem that really is a QP, either warm-started path
 is a reasonable default. Note that this ranking is recent: before
 [#417](https://github.com/jkitchin/pounce/issues/417) was fixed the
