@@ -35,10 +35,15 @@ changes.
   negative-at-upper `z_u` (#296); the session wants the internal
   `+λ` and non-negative `z_u`.
 - Entries the user did not supply are seeded NaN, a new "unseeded"
-  marker in the warm-start contract: the initializer substitutes its
-  own resolved defaults (`bound_mult_init_val`, including the
-  Mehrotra override, for bound multipliers; 0 for equality duals), so
-  the defaults live in one place. Through Ipopt's ASL interface an
+  marker in the warm-start contract of `Problem.solve` /
+  `Solver.solve`'s `lagrange`/`zl`/`zu` arguments: the warm-start
+  initializer substitutes its own resolved defaults
+  (`bound_mult_init_val`, including the Mehrotra override, for bound
+  multipliers; for equality duals the warm path's existing 0, which
+  is not the cold path's least-squares estimate), so the defaults
+  live in one place. The contract covers the warm-start initializer
+  only: the batched solver's multiplier seeds and the SQP
+  working-set arrays do not route through it and must not carry NaN. Through Ipopt's ASL interface an
   absent entry reads as a zero multiplier because a dense array
   cannot say "unknown", and a zero bound multiplier on an active
   bound is a contradictory certificate the solver must first recover

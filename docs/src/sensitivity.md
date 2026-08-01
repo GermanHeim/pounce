@@ -184,10 +184,14 @@ supply take the solver's own default initialization rather than zero.
 Through a dense ASL array an absent entry is indistinguishable from a
 zero multiplier, and a zero bound multiplier on an active bound is a
 contradictory KKT certificate the solver must first recover from. A
-suffix knows which entries exist, so an explicit zero is honored and
-absence means "initialize as you normally would". Seed everything from
-a prior solve and the two paths behave identically; seed partially and
-the in-process path degrades gracefully.
+suffix knows which entries exist, so an explicit zero is honored
+(then floored at `warm_start_mult_bound_push`, exactly as a
+round-tripped inactive multiplier is) and absence means "initialize as
+you normally would": the solver's own `bound_mult_init_val` for bound
+multipliers, and for equality duals the warm path's 0, which is not
+the cold path's least-squares estimate. Seed everything from a prior
+solve and the two paths behave identically; seed partially and the
+in-process path degrades gracefully.
 
 ### Watching the solve (`tee=True`)
 

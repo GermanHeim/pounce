@@ -730,3 +730,32 @@ def test_warm_start_partial_seed_solves_clean():
     })
     assert (res.solver.termination_condition
             == pyo.TerminationCondition.optimal)
+
+
+def test_warm_start_dual_lands_on_the_aliased_row():
+    """The alias path end to end, against a map a REAL surgery block
+    produced: a declared Param inside a constraint makes the surgery
+    replace it on the clone, and the dual must land on the replaced
+    row. The synthetic-map unit test cannot see a broken
+    _replaced_aliases, and the partial-seed test cannot tell a broken
+    alias from working defaults (both solve optimal)."""
+    from pyomo_pounce.sens import _warm_start_from_suffixes, _row_index
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(initialize=1.0)
+    m.y = pyo.Var(initialize=1.0)
+    m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+    m.obj = pyo.Objective(expr=m.y + (m.x - 1) ** 4)
+    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    assert "c" in session.con_alias, "surgery should have replaced m.c"
+    clone_name = session.con_alias["c"]
+    m.dual[m.c] = 2.5
+    warm = _warm_start_from_suffixes(
+        m, session.var_names, session.con_names, session.nl,
+        session.con_alias)
+    row = _row_index(session.con_names)[clone_name]
+    assert warm["lagrange"][row] == -2.5
+    assert not np.isnan(warm["lagrange"][row])

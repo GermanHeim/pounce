@@ -398,7 +398,10 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
     if isinstance(dual, pyo.Suffix):
         for cd, val in dual.items():
             r = con_row.get(con_alias.get(cd.name, cd.name))
-            if r is not None:
+            # r < m guards the .row file's trailing objective name
+            # (and the surgery's objective alias): the objective is
+            # not a constraint row and carries no dual
+            if r is not None and r < int(nl.m):
                 y[r] = -float(val)      # AMPL marginal -> internal lambda
     for sfx_name, arr, sign in (("ipopt_zL_in", zl, 1.0),
                                 ("ipopt_zU_in", zu, -1.0)):

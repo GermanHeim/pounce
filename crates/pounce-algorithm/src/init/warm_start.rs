@@ -97,12 +97,15 @@ impl IterateInitializer for WarmStartIterateInitializer {
             // the barrier needs them strictly positive, and a carried-in
             // 0 (e.g. an inactive bound in the previous solution) would
             // otherwise start on the boundary. This block runs even
-            // with both clamps disabled (cap = inf, floor = 0, an
-            // identity clamp) because it also resolves NaN seeds: NaN
-            // in a user-supplied multiplier means "unseeded", and takes
-            // `bound_mult_init_val` (bound multipliers) or 0 (equality
-            // multipliers) so a partial seed never needs the caller to
-            // know the solver's defaults.
+            // with both clamps disabled (cap = inf, floor = 0; the
+            // floor still clamps a negative z/v to 0) because it also
+            // resolves NaN seeds: NaN in a user-supplied multiplier
+            // means "unseeded", and takes `bound_mult_init_val` for
+            // bound multipliers, or 0 for equality multipliers. That 0
+            // is the warm path's existing unseeded value (what
+            // `seed_from_nlp` produced already), NOT the cold path's
+            // least-squares estimate; routing NaN duals through the
+            // least-squares calculator is a possible refinement.
             let mut borrow = data.borrow_mut();
             let curr = borrow.curr.as_ref().unwrap();
             let cap = if self.opts.mult_init_max > 0.0 {
@@ -263,6 +266,17 @@ fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64, nan_fill: f64) -> Rc<dyn 
                     *e = nan_fill;
                 }
             }
+        } else {
+            // Non-dense vectors (CompoundVector on the re-optimize
+            // path) skip NaN resolution: the user-seed path always
+            // builds DenseVectors, so NaN here is an upstream contract
+            // violation, not an unseeded entry. Fail loudly in debug
+            // rather than let NaN ride the clamps into the iterate.
+            debug_assert!(
+                !out.dot(&**v).is_nan(),
+                "clone_clamped: NaN in a non-dense multiplier vector; \
+                 NaN-as-unseeded requires DenseVector storage"
+            );
         }
     } else {
         out.set(0.0);

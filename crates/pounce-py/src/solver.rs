@@ -61,7 +61,10 @@ impl PySolver {
     }
 
     /// Run a (possibly cold-start) solve. Returns `(x, info_dict)` in
-    /// the same shape as [`crate::PyProblem::solve`].
+    /// the same shape as [`crate::PyProblem::solve`], including its
+    /// multiplier-seed semantics: under `warm_start_init_point=yes` a
+    /// NaN entry in `lagrange`/`zl`/`zu` means "unseeded" and takes
+    /// the initializer's own resolved default.
     #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None))]
     fn solve<'py>(
         &mut self,
