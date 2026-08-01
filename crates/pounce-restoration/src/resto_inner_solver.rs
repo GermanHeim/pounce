@@ -154,6 +154,25 @@ fn apply_outer_resto_options(rb: &mut RestoAlgorithmBuilder, ab: &AlgorithmBuild
     rb.eta_factor = ab.resto.resto_proximity_weight;
     rb.bound_mult_reset_threshold = ab.resto.bound_mult_reset_threshold;
     rb.constr_mult_reset_threshold = ab.resto.constr_mult_reset_threshold;
+    rb.required_infeasibility_reduction = ab.resto.required_infeasibility_reduction;
+}
+
+/// Resolve the κ_resto the restoration sub-solve's early-exit guard runs
+/// with, from the user's `required_infeasibility_reduction` and whether
+/// the original NLP is square.
+///
+/// Upstream applies the square-problem case by *overriding* the
+/// sub-option: `IpRestoMinC_1Nrm.cpp:157-163` sets
+/// `required_infeasibility_reduction = 0.` on `actual_resto_options`
+/// when `IsSquareProblem()`, and `IpRestoConvCheck.cpp:58` then reads
+/// that overridden value. So the square-problem case wins over whatever
+/// the user asked for — matched here rather than, say, taking the min.
+fn effective_kappa_resto(required_infeasibility_reduction: f64, is_square_problem: bool) -> f64 {
+    if is_square_problem {
+        0.0
+    } else {
+        required_infeasibility_reduction
+    }
 }
 
 pub fn make_default_restoration_factory(
@@ -285,8 +304,15 @@ pub fn run_inner_resto(
     // exits on PFIT3/PFIT4 after only a 10% feasibility reduction
     // (kappa_resto=0.9), the outer Newton step from the partially-
     // recovered iterate blows up, and we re-enter resto in a loop.
+    //
+    // The non-square value is the user's `required_infeasibility_reduction`
+    // (#439); it was hardcoded to upstream's 0.9 default here, so setting
+    // the registered option did nothing.
     let is_square_problem = n_orig == m_eq;
-    let kappa_resto = if is_square_problem { 0.0 } else { 0.9 };
+    let kappa_resto = effective_kappa_resto(
+        resto_builder.required_infeasibility_reduction,
+        is_square_problem,
+    );
 
     // ---- 4. Build the inner alg bundle and override its init /
     //         conv_check / iter_output slots with resto-side ones. ----
@@ -987,6 +1013,7 @@ mod tests {
         ab.resto.resto_proximity_weight = 4.0;
         ab.resto.bound_mult_reset_threshold = 7.0e2;
         ab.resto.constr_mult_reset_threshold = 9.0;
+        ab.resto.required_infeasibility_reduction = 0.25;
 
         let mut rb = RestoAlgorithmBuilder::new();
         apply_outer_resto_options(&mut rb, &ab);
@@ -995,6 +1022,28 @@ mod tests {
         assert_eq!(rb.eta_factor, 4.0);
         assert_eq!(rb.bound_mult_reset_threshold, 7.0e2);
         assert_eq!(rb.constr_mult_reset_threshold, 9.0);
+        assert_eq!(rb.required_infeasibility_reduction, 0.25);
+    }
+
+    /// #439: `required_infeasibility_reduction` was registered but the
+    /// κ_resto the guard runs with was hardcoded to upstream's 0.9, so
+    /// setting the option was a silent no-op.
+    #[test]
+    fn effective_kappa_resto_honors_user_option() {
+        assert_eq!(effective_kappa_resto(0.9, false), 0.9);
+        assert_eq!(effective_kappa_resto(0.25, false), 0.25);
+        // `0` disables the guard entirely — the sub-solve then runs to its
+        // own convergence.
+        assert_eq!(effective_kappa_resto(0.0, false), 0.0);
+    }
+
+    /// The square-problem case wins over the user's value, because that is
+    /// how upstream applies it: `IpRestoMinC_1Nrm.cpp:157-163` *overwrites*
+    /// the sub-option with 0 before `IpRestoConvCheck` reads it.
+    #[test]
+    fn effective_kappa_resto_square_problem_overrides_user_option() {
+        assert_eq!(effective_kappa_resto(0.9, true), 0.0);
+        assert_eq!(effective_kappa_resto(0.25, true), 0.0);
     }
 
     #[test]
@@ -1014,6 +1063,10 @@ mod tests {
         assert_eq!(
             rb.constr_mult_reset_threshold,
             baseline.constr_mult_reset_threshold
+        );
+        assert_eq!(
+            rb.required_infeasibility_reduction,
+            baseline.required_infeasibility_reduction
         );
     }
 

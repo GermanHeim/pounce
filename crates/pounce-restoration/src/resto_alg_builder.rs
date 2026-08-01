@@ -128,6 +128,13 @@ pub struct RestoAlgorithmBuilder {
     /// `obj_max_inc` — forwarded to the resto-filter conv check's
     /// outer-iterate guard.
     pub obj_max_inc: f64,
+    /// `required_infeasibility_reduction` — κ_resto, the fraction the
+    /// *original* NLP's infeasibility must fall to before the restoration
+    /// sub-solve may hand back (`IpRestoConvCheck.cpp:58`). `0` disables
+    /// the guard. Consumed by
+    /// [`crate::resto_inner_solver::run_inner_resto`], which applies
+    /// upstream's square-problem override on top.
+    pub required_infeasibility_reduction: f64,
 }
 
 impl Default for RestoAlgorithmBuilder {
@@ -144,6 +151,7 @@ impl Default for RestoAlgorithmBuilder {
             inf_pr_output: InfPrTag::Original,
             print_info_string: PrintInfoString::No,
             obj_max_inc: 5.0,
+            required_infeasibility_reduction: 0.9,
         }
     }
 }
@@ -241,6 +249,7 @@ mod tests {
         assert_eq!(b.inf_pr_output, InfPrTag::Original);
         assert_eq!(b.print_info_string, PrintInfoString::No);
         assert_eq!(b.obj_max_inc, 5.0);
+        assert_eq!(b.required_infeasibility_reduction, 0.9);
     }
 
     #[test]
