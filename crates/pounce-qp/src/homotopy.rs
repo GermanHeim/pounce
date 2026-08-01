@@ -90,14 +90,25 @@ use std::time::Instant;
 /// and the first ratio test would see a zero-length step.
 const RELAX_MARGIN: Number = 1.0;
 
-/// `t` is clamped into `[0, 1]`; an event closer than this to the current `t` is
-/// treated as coincident (a degenerate tie) rather than as forward progress, so
-/// the loop cannot spin on a zero-length advance.
+/// How close to `1` counts as having reached the end of the path.
 const T_EPS: Number = 1e-12;
 
+/// Two ratio-test events are **coincident** — the same degenerate vertex, hit at
+/// the same parameter value — when their crossing points differ by no more than
+/// this. `t` lives in `[0, 1]`, so this is a rounding-scale window (~50 ulp),
+/// not a tolerance with an algorithmic opinion in it.
+///
+/// It exists because the winning event has to bring *every* row that binds
+/// there into the working set, not just the first one the scan happened to
+/// find. A row left inactive at a bound it is exactly on gets crossed by the
+/// next direction, and a crossing is unrecoverable: the primal ratio test can
+/// only *prevent* a violation, never repair one, so from there the row drifts
+/// out for the rest of the path (`QSHARE2B` row 7 went 8e-2 -> 22 that way).
+const T_TIE: Number = 1e-14;
+
 /// Outcome of the two ratio tests: what happens first as `t` increases.
-#[derive(Debug, Clone, Copy)]
-enum Event {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Event {
     /// Inactive row `i` reaches its lower bound.
     AddRowLower(usize),
     /// Inactive row `i` reaches its upper bound.
@@ -106,6 +117,93 @@ enum Event {
     DropRow(usize),
     /// Active bound on variable `j` has its multiplier reach zero.
     DropBound(usize),
+}
+
+/// The winner set of one step's two ratio tests: the earliest crossing, and
+/// every other crossing coincident with it.
+///
+/// Both tests feed the same instance, because they compete for the same step —
+/// whichever of "a row binds" and "a multiplier vanishes" happens first sets
+/// `t_next`, and anything within [`T_TIE`] of it happens there too.
+///
+/// Separated out from the tracer because the selection rule is where gh #434's
+/// uncapped crossings came from and is worth testing on its own: it is pure,
+/// and its inputs are two numbers, while the loop it lives in needs a
+/// factorization per step to reach.
+pub(crate) struct RatioTest {
+    /// Parameter value the step will advance to.
+    pub(crate) t_next: Number,
+    /// Current parameter value; crossings are reported relative to it.
+    t: Number,
+    /// The winner and its coincident set, as `(parameter value, event)`.
+    pub(crate) winners: Vec<(Number, Event)>,
+}
+
+impl RatioTest {
+    /// A fresh test at `t`, with no crossing found yet — so the incumbent is the
+    /// end of the path.
+    pub(crate) fn new(t: Number) -> Self {
+        RatioTest {
+            t_next: 1.0,
+            t,
+            winners: Vec::new(),
+        }
+    }
+
+    /// Reset to `t` for the next step, keeping the allocation.
+    pub(crate) fn restart(&mut self, t: Number) {
+        self.t_next = 1.0;
+        self.t = t;
+        self.winners.clear();
+    }
+
+    /// Offer a crossing `dt` ahead of the current `t`.
+    ///
+    /// A slightly negative `dt` is a row a hair past its bound already; it is
+    /// admitted and clamped to `t`, so it binds now with a zero-length step.
+    /// Further out than that is a row the ratio test can no longer recover (see
+    /// the path-feasibility report in [`ParametricActiveSetSolver::trace_path`]),
+    /// and past `t = 1` is off the end of the path — neither is an event.
+    ///
+    /// The comparison against the incumbent is exact. It used to carry a
+    /// `- T_EPS` margin, which reads as a don't-bother-for-a-hair guard but is
+    /// not one: it made a crossing that happens *earlier* than the incumbent, by
+    /// less than `T_EPS`, lose to it — so the step knowingly overshot the
+    /// earlier one. Measured on `QSHARE2B`, row 132 crossed at `dt = 2.9e-16`
+    /// and lost to a step of `1.1e-14`; the row was left inactive and violated,
+    /// and since the ratio test can only prevent a violation and never repair
+    /// one, it drifted out for the rest of the path (gh #434).
+    ///
+    /// Anything strictly worse than the incumbent is dropped as it arrives, so
+    /// the winner set stays the size of one coincident group rather than growing
+    /// with the row count.
+    pub(crate) fn admit(&mut self, dt: Number, ev: Event) {
+        if dt < -T_EPS {
+            return;
+        }
+        let tc = (self.t + dt).max(self.t);
+        if tc > self.t_next + T_TIE {
+            return;
+        }
+        if tc < self.t_next - T_TIE {
+            self.winners.clear();
+        }
+        self.t_next = self.t_next.min(tc);
+        self.winners.push((tc, ev));
+    }
+
+    /// The events that fire at `t_next`: the winner plus everything coincident.
+    ///
+    /// Firing only one of a coincident set is what leaves a row sitting exactly
+    /// on a bound it is not in the working set for, which the next direction
+    /// then pushes it across.
+    pub(crate) fn firing(&self) -> impl Iterator<Item = Event> + '_ {
+        let t_next = self.t_next;
+        self.winners
+            .iter()
+            .filter(move |&&(tc, _)| tc <= t_next + T_TIE)
+            .map(|&(_, ev)| ev)
+    }
 }
 
 /// Primal regularization `δ` for the path, derived from the problem's own scale.
@@ -245,6 +343,31 @@ fn worst_path_violation(
     worst
 }
 
+/// Machine-readable one-line summary of a completed path, emitted on every
+/// exit from [`ParametricActiveSetSolver::trace_path`] when
+/// `POUNCE_HOMOTOPY_DEBUG` is set.
+///
+/// The line is a stable, parseable contract rather than prose because the
+/// measurement gh #434 asks for — path steps and final `t`, per problem, for
+/// both arms — is a benchmark sweep that has to read it back out. `exit` is one
+/// of `complete` (the path reached `t = 1`), `budget` (the step budget ran out
+/// short of it), `stalled` (the loop ended without either), `kkt` (an
+/// unrecoverable factorization failure), or `rank` (a rank repair that had
+/// nothing left to prune).
+fn trace_summary(
+    exit: &str,
+    steps: u32,
+    t: Number,
+    n_changes: u32,
+    n_refactor: u32,
+    longest_stall: u32,
+) {
+    eprintln!(
+        "[hom] summary exit={exit} steps={steps} t={t:.17} changes={n_changes} \
+         refactor={n_refactor} stall={longest_stall}"
+    );
+}
+
 /// Rate of change of a row bound per unit `t` (0 when the bound is infinite).
 fn bound_rate(relaxed: Number, target: Number, is_lower: bool) -> Number {
     let infinite = if is_lower {
@@ -378,20 +501,8 @@ impl ParametricActiveSetSolver {
         // Everything on the path is traced against this Hessian; the corrector at
         // the end uses the caller's `qp` and therefore the true `H`.
         let path_h: &SymTMatrix = h_reg_holder.as_ref().unwrap_or(qp.h);
-        let path_qp = QpProblem {
-            n,
-            m,
-            h: path_h,
-            g: qp.g,
-            a: qp.a,
-            bl: qp.bl,
-            bu: qp.bu,
-            xl: qp.xl,
-            xu: qp.xu,
-            hessian_inertia: qp.hessian_inertia,
-        };
 
-        let mut x = box_sol.x.clone();
+        let x = box_sol.x.clone();
         let mut working = WorkingSet::cold(n, m);
         for (i, st) in working.bounds.iter_mut().enumerate() {
             *st = box_sol.working.bounds[i];
@@ -416,7 +527,7 @@ impl ParametricActiveSetSolver {
             };
         }
 
-        let mut lambda_g = vec![0.0; m];
+        let lambda_g = vec![0.0; m];
         let mut lambda_x = box_sol.lambda_x.clone();
         lambda_x.resize(n, 0.0);
 
@@ -487,6 +598,22 @@ impl ParametricActiveSetSolver {
         // dependency that justified the prune no longer necessarily holds — this
         // suppresses the cycle without permanently blinding the ratio test.
         let mut tabu_cons = vec![false; m];
+        // Iterations actually executed. Distinct from `n_changes`: a rank repair
+        // and a degenerate zero-length advance both consume a step (and a
+        // factorization) without necessarily moving the working set or `t`.
+        let mut steps: u32 = 0;
+        // Hoisted out of the loop and restarted per step so the ratio tests do
+        // not allocate once per path step.
+        let mut ratio = RatioTest::new(0.0);
+        // Steps since `t` last advanced, and the worst such run on this path.
+        //
+        // A step that does not move `t` is a working-set exchange at a fixed
+        // parameter value — a degenerate pivot. A few are normal. An unbounded
+        // number of them is the path cycling, which is how the homotopy's
+        // measured losses actually fail: they are not slow paths, they are
+        // stopped ones (gh #434).
+        let mut stalled: u32 = 0;
+        let mut longest_stall: u32 = 0;
 
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
@@ -494,8 +621,9 @@ impl ParametricActiveSetSolver {
             if t >= 1.0 - T_EPS {
                 break;
             }
+            steps += 1;
             if trace && _step % 50 == 0 {
-                eprintln!("[hom] step={_step} t={t:.6e}");
+                eprintln!("[hom] step={_step} t={t:.17} stall={stalled}");
             }
 
             let active_cons: Vec<usize> = (0..m)
@@ -564,6 +692,7 @@ impl ParametricActiveSetSolver {
                         // Already full rank ⇒ not a deficiency this can repair.
                         if trace {
                             eprintln!("[hom] KKT failure at t={t:.6e}, full rank already: {e}");
+                            trace_summary("rank", steps, t, n_changes, n_refactor, longest_stall);
                         }
                         return Ok(None);
                     }
@@ -605,6 +734,7 @@ impl ParametricActiveSetSolver {
                 Err(e) => {
                     if trace {
                         eprintln!("[hom] KKT factorization failed at t={t:.6e}: {e}");
+                        trace_summary("kkt", steps, t, n_changes, n_refactor, longest_stall);
                     }
                     return Ok(None);
                 }
@@ -617,8 +747,7 @@ impl ParametricActiveSetSolver {
             // ---- Ratio test 1 (primal): when does an inactive row bind? ----
             let a_dx = a_times_x(qp.a, &dx, m);
             let ax = a_times_x(qp.a, &x, m);
-            let mut t_next: Number = 1.0;
-            let mut event: Option<Event> = None;
+            ratio.restart(t);
 
             for i in 0..m {
                 if working.constraints[i].is_active() || tabu_cons[i] {
@@ -629,11 +758,7 @@ impl ParametricActiveSetSolver {
                     let gap = bu0[i] + t * (qp.bu[i] - bu0[i]) - ax[i];
                     let rate = a_dx[i] - bound_rate(bu0[i], qp.bu[i], false);
                     if rate > 0.0 {
-                        let dt = gap / rate;
-                        if dt >= -T_EPS && t + dt < t_next - T_EPS {
-                            t_next = (t + dt).clamp(t, 1.0);
-                            event = Some(Event::AddRowUpper(i));
-                        }
+                        ratio.admit(gap / rate, Event::AddRowUpper(i));
                     }
                 }
                 // Lower: bl_i(t) − a_i·x(t) = 0.
@@ -641,11 +766,7 @@ impl ParametricActiveSetSolver {
                     let gap = ax[i] - (bl0[i] + t * (qp.bl[i] - bl0[i]));
                     let rate = bound_rate(bl0[i], qp.bl[i], true) - a_dx[i];
                     if rate > 0.0 {
-                        let dt = gap / rate;
-                        if dt >= -T_EPS && t + dt < t_next - T_EPS {
-                            t_next = (t + dt).clamp(t, 1.0);
-                            event = Some(Event::AddRowLower(i));
-                        }
+                        ratio.admit(gap / rate, Event::AddRowLower(i));
                     }
                 }
             }
@@ -665,11 +786,7 @@ impl ParametricActiveSetSolver {
                 // in this engine's packing (see `solve_general`'s drop test).
                 let heading_to_zero = (lam > 0.0 && rate < 0.0) || (lam < 0.0 && rate > 0.0);
                 if heading_to_zero {
-                    let dt = -lam / rate;
-                    if dt >= -T_EPS && t + dt < t_next - T_EPS {
-                        t_next = (t + dt).clamp(t, 1.0);
-                        event = Some(Event::DropRow(i));
-                    }
+                    ratio.admit(-lam / rate, Event::DropRow(i));
                 }
             }
             for (slot, &j) in active_bounds.iter().enumerate() {
@@ -680,20 +797,26 @@ impl ParametricActiveSetSolver {
                 let rate = dlam_b[slot];
                 let heading_to_zero = (lam > 0.0 && rate < 0.0) || (lam < 0.0 && rate > 0.0);
                 if heading_to_zero {
-                    let dt = -lam / rate;
-                    if dt >= -T_EPS && t + dt < t_next - T_EPS {
-                        t_next = (t + dt).clamp(t, 1.0);
-                        event = Some(Event::DropBound(j));
-                    }
+                    ratio.admit(-lam / rate, Event::DropBound(j));
                 }
             }
 
             // ---- Advance to the event (or to t = 1) ----
-            let dt = t_next - t;
+            //
+            // Firing a whole coincident set can leave the active set
+            // rank-deficient. That is not a new failure mode — the direction
+            // solve above already repairs it by pruning to a maximal independent
+            // subset — and it is the same trade the textbook degenerate-vertex
+            // rule makes.
+            let dt = ratio.t_next - t;
             if dt > T_EPS {
                 // Real progress along the path: the rank-repair tabu was scoped
                 // to the parameter value it was raised at, so release it.
                 tabu_cons.iter_mut().for_each(|f| *f = false);
+                stalled = 0;
+            } else {
+                stalled += 1;
+                longest_stall = longest_stall.max(stalled);
             }
             for (xi, &d) in x.iter_mut().zip(dx.iter()) {
                 *xi += dt * d;
@@ -704,7 +827,7 @@ impl ParametricActiveSetSolver {
             for (slot, &j) in active_bounds.iter().enumerate() {
                 lambda_x[j] += dt * dlam_b[slot];
             }
-            t = t_next;
+            t = ratio.t_next;
 
             // ---- Path-feasibility report ----
             //
@@ -728,16 +851,18 @@ impl ParametricActiveSetSolver {
             //    gives `a_i·dx = Σ c_j (a_j·dx)`, and nothing makes that
             //    combination track row `i`'s *own* bound rate.
             //
-            //  * **Coincident / sub-resolution events (4 of 14).** Two crossings
-            //    at the same `t_next`, or one below the `T_EPS` floor (row 132:
-            //    crossing at `dt = 2.9e-16`, step taken `1.1e-14`), lose the
-            //    strict `t + dt < t_next - T_EPS` comparison. The overshoot starts
-            //    tiny and compounds — QSHARE2B row 7 went 8e-2 -> 0.4 -> 7.5 ->
-            //    11 -> 22 over the rest of the path.
+            //  * **Coincident / sub-resolution events (4 of 14).** ~~Two
+            //    crossings at the same `t_next`, or one below the `T_EPS` floor
+            //    (row 132: crossing at `dt = 2.9e-16`, step taken `1.1e-14`),
+            //    lose the strict `t + dt < t_next - T_EPS` comparison.~~ Fixed
+            //    in gh #434: [`RatioTest`] compares crossings exactly and fires
+            //    the whole coincident set, so neither an earlier-by-a-hair
+            //    crossing nor a tied one is stepped over. That alone recovered
+            //    five of the seven instances the homotopy had been losing.
             //
-            // Repairing this properly needs an exchange pivot at the degenerate
-            // vertex (add the violated row, drop a dependent one), which is a real
-            // algorithmic addition and is left to follow-up work.
+            // Repairing the *first* mechanism properly needs an exchange pivot at
+            // the degenerate vertex (add the violated row, drop a dependent one),
+            // which is a real algorithmic addition and is left to follow-up work.
             //
             // Deliberately a *report* and not a bail-out. Abandoning the path here
             // was tried and measured worse: the corrector is a genuine corrector
@@ -750,30 +875,29 @@ impl ParametricActiveSetSolver {
                 eprintln!("[hom] path infeasible at t={t:.9e}: row {i} by {v:.3e}");
             }
 
-            match event {
-                None => {
-                    // Nothing binds before t = 1: the path is complete.
-                    t = 1.0;
-                    break;
+            if ratio.winners.is_empty() {
+                // Nothing binds before t = 1: the path is complete.
+                t = 1.0;
+                break;
+            }
+            for ev in ratio.firing() {
+                match ev {
+                    Event::AddRowUpper(i) => {
+                        working.constraints[i] = ConsStatus::AtUpper;
+                    }
+                    Event::AddRowLower(i) => {
+                        working.constraints[i] = ConsStatus::AtLower;
+                    }
+                    Event::DropRow(i) => {
+                        working.constraints[i] = ConsStatus::Inactive;
+                        lambda_g[i] = 0.0;
+                    }
+                    Event::DropBound(j) => {
+                        working.bounds[j] = BoundStatus::Inactive;
+                        lambda_x[j] = 0.0;
+                    }
                 }
-                Some(Event::AddRowUpper(i)) => {
-                    working.constraints[i] = ConsStatus::AtUpper;
-                    n_changes += 1;
-                }
-                Some(Event::AddRowLower(i)) => {
-                    working.constraints[i] = ConsStatus::AtLower;
-                    n_changes += 1;
-                }
-                Some(Event::DropRow(i)) => {
-                    working.constraints[i] = ConsStatus::Inactive;
-                    lambda_g[i] = 0.0;
-                    n_changes += 1;
-                }
-                Some(Event::DropBound(j)) => {
-                    working.bounds[j] = BoundStatus::Inactive;
-                    lambda_x[j] = 0.0;
-                    n_changes += 1;
-                }
+                n_changes += 1;
             }
         }
 
@@ -786,10 +910,17 @@ impl ParametricActiveSetSolver {
         if t < 1.0 - T_EPS {
             if trace {
                 eprintln!("[hom] path did NOT reach t=1 (stopped at {t:.6e}); falling back");
+                let exit = if steps >= opts.max_iter {
+                    "budget"
+                } else {
+                    "stalled"
+                };
+                trace_summary(exit, steps, t, n_changes, n_refactor, longest_stall);
             }
             return Ok(None);
         }
         if trace {
+            trace_summary("complete", steps, t, n_changes, n_refactor, longest_stall);
             eprintln!(
                 "[hom] reached t=1 after {n_changes} working-set changes; handoff x has \
                  max target violation {:.3e}",

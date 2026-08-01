@@ -155,6 +155,58 @@ changes.
   Lagrangian Hessian), so the change is exposure plus the rule, not new
   computation. Items 1-4 build on these statuses.
 
+### Fixed — the QP homotopy stepped over crossings its own ratio test had found (#434)
+
+- The §4.2 parametric path's two ratio tests selected the next event with
+  `t + dt < t_next - T_EPS`. That margin reads as a don't-bother-for-a-hair
+  guard but is not one: it makes a crossing that happens *earlier* than the
+  incumbent, by less than `T_EPS = 1e-12`, lose to it, so the step knowingly
+  overshoots the earlier crossing. Measured on `QSHARE2B` in #413: row 132
+  crossed at `dt = 2.9e-16` and lost to a step of `1.1e-14`.
+- Overshooting is not a rounding-level mistake, because violation is
+  absorbing. The primal ratio test only ever *prevents* a violation and can
+  never repair one, so a row stepped over stays inactive and violated for the
+  rest of the path while the direction solve pushes it further out
+  (`QSHARE2B` row 7 went `8e-2 -> 0.4 -> 7.5 -> 11 -> 22`). The same
+  comparison also discarded crossings *tied* with the incumbent, leaving a row
+  sitting exactly on a bound it was not in the working set for — which the
+  next direction pushes it across.
+- Both ratio tests now feed one `RatioTest`, which compares crossings exactly
+  and fires the whole coincident set. It is a separate type because the rule
+  is pure arithmetic on two numbers while the loop around it needs a KKT
+  factorization per step to reach; `pounce-qp/src/tests/homotopy_unit.rs` pins
+  it directly, including the measured `2.9e-16`-vs-`1.1e-14` case.
+- The consequence was larger than a numerical detail. `AUG2DC`'s path used to
+  reach `t = 0.5` within 50 steps and then stop, spending thousands of KKT
+  factorizations without moving the parameter at all, until it hit the time
+  cap. It now completes in **104 steps** and the solve returns the published
+  optimum. Re-measured across all 138 Maros-Mészáros convex QPs at a fixed
+  cap, homotopy-on against the same run's homotopy-off: `AUG2D` and `AUG2DC`
+  recover with nothing regressing, cold paths reaching `t = 1` go 92 → 98,
+  paths killed mid-flight 37 → 31, and the median completed path halves
+  (216 → 102 steps). `QSHARE2B`, the seventh loss recorded on
+  `sqp_qp_use_homotopy`, also recovers.
+- Scope, because it is easy to overclaim: this fixes paths that *wedge*, not
+  the `O(|A|)` pivot cost in #434's title. The `benchmarks/warmstart` `-hom`
+  arms reproduce **identically** after it (727 → 1692 inner active-set changes,
+  0.43×, tracking the active-set fraction 82% → 0.63×, 5% → 1.00%,
+  99% → 0.32×), because the defect never fires on those small non-degenerate
+  QPs. That cost is real and remains. It is bounded, though: all arms return
+  correct answers with identical outer iteration counts, so it is overhead
+  rather than damage, and `use_homotopy` is `false` by default in `pounce-qp`,
+  so the SQP inner-QP path does not take it unless asked.
+- **No runtime guard is added**, which is what #434 was filed to ask for. The
+  losses that remain after this fix cannot be separated from the gains by any
+  threshold on (path steps, `t`): the only rule that catches all the reachable
+  ones sits 3% above `KSIP`'s completed path length, and firing it also
+  abandons `LASER`, which the homotopy solves in 16.3 s against 41.4 s on the
+  conventional route. Per the issue's own instruction, the measurement is the
+  deliverable rather than a fitted threshold. Recorded in
+  `dev-notes/issue-434-homotopy-cost.md`, with the harness kept as
+  `crates/pounce-convex/examples/homotopy_sweep.rs` and per-path telemetry
+  (steps, final `t`, longest run of steps that did not advance `t`) on the
+  existing `POUNCE_HOMOTOPY_DEBUG` trace.
+
 ### Fixed — active-set SQP: a warm start was discarded whenever the active set moved (#428)
 
 - `solve_with_working_set` pins the hinted active rows to their new
