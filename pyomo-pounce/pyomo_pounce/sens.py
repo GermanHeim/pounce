@@ -339,43 +339,75 @@ _STATUS_RESULT = {
 }
 
 
-def _warm_start_from_suffixes(model, var_names, con_names, nl, options):
+def _replaced_aliases(clone, si):
+    """Original constraint name -> clone constraint name, for rows the
+    declared-parameter surgery replaced. Built from the surgery block,
+    so it is available before the solve; the session stores the same
+    map afterwards."""
+    if si is None:
+        return {}
+    block = clone.component(SensitivityInterface.get_default_block_name())
+    if block is None or not getattr(block, "_has_replaced_expressions",
+                                    False):
+        return {}
+    out = {}
+    for new_comp, old_comp in block._replaced_map.items():
+        for nd, od in zip(_iter_data(new_comp), _iter_data(old_comp)):
+            out[od.name] = nd.name
+    return out
+
+
+def _warm_start_requested(options):
+    """`warm_start_init_point` truthiness, accepting what
+    `Problem.add_option` itself accepts: Python True maps to "yes"
+    there, so it (and "y") must enter warm-start mode here too, or the
+    Pyomo-natural spelling would warm-start with no seeds."""
+    v = (options or {}).get("warm_start_init_point", "no")
+    return v is True or str(v).strip().lower() in ("yes", "y")
+
+
+def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
     """Initial multipliers for `warm_start_init_point=yes`, read from
     the model's `dual` (equality multipliers) and `ipopt_zL_in` /
     `ipopt_zU_in` (bound multipliers) suffixes, matched to the solve's
-    rows by component name.
+    rows by component name; a constraint replaced by the
+    declared-parameter surgery is reached through its clone alias.
 
-    Entries the user did not supply fall back to the solver's own
-    defaults (`bound_mult_init_val` for bound multipliers, 0 for
-    equality duals) rather than zero. Through ASL an absent entry reads
-    as a zero multiplier, because a dense array cannot express
-    "unknown"; a zero bound multiplier on an active bound is a
-    contradictory KKT certificate the solver must first recover from.
-    A suffix knows which entries exist, so absence is representable:
-    an explicit zero stays zero, absence means "initialize as you
-    normally would". Suffix entries naming components the solve does
-    not carry (e.g. constraints replaced by the declared-parameter
-    surgery) are skipped.
+    Two sign conventions are crossed on the way in. `m.dual[c]` holds
+    the AMPL marginal `d obj / d b = -lambda` (gh #271), while the
+    session's `lagrange=` wants the internal `+lambda`, so dual entries
+    negate. `ipopt_zU_in` follows Ipopt's convention, negative at an
+    active upper bound (gh #296), while the session wants the internal
+    non-negative `z_u`, so it negates too; `zL` is positive in both.
+
+    Entries the user did not supply are seeded NaN, the session's
+    "unseeded" marker: the warm-start initializer substitutes its own
+    resolved defaults (`bound_mult_init_val` for bound multipliers, 0
+    for equality duals), so partial seeds never turn into the zero
+    certificate an ASL-style dense array forces, and the defaults live
+    in one place. An explicit zero is honored, then floored at
+    `warm_start_mult_bound_push` exactly as a round-tripped inactive
+    multiplier is.
     """
-    zdef = float((options or {}).get("bound_mult_init_val", 1.0))
-    y = np.zeros(int(nl.m))
-    zl = np.full(int(nl.n), zdef)
-    zu = np.full(int(nl.n), zdef)
+    y = np.full(int(nl.m), np.nan)
+    zl = np.full(int(nl.n), np.nan)
+    zu = np.full(int(nl.n), np.nan)
     var_row = _row_index(var_names)
     con_row = _row_index(con_names)
     dual = model.component("dual")
     if isinstance(dual, pyo.Suffix):
         for cd, val in dual.items():
-            r = con_row.get(cd.name)
+            r = con_row.get(con_alias.get(cd.name, cd.name))
             if r is not None:
-                y[r] = float(val)
-    for sfx_name, arr in (("ipopt_zL_in", zl), ("ipopt_zU_in", zu)):
+                y[r] = -float(val)      # AMPL marginal -> internal lambda
+    for sfx_name, arr, sign in (("ipopt_zL_in", zl, 1.0),
+                                ("ipopt_zU_in", zu, -1.0)):
         sfx = model.component(sfx_name)
         if isinstance(sfx, pyo.Suffix):
             for vd, val in sfx.items():
                 r = var_row.get(vd.name)
                 if r is not None:
-                    arr[r] = float(val)
+                    arr[r] = sign * float(val)
     return {"lagrange": y, "zl": zl, "zu": zu}
 
 
@@ -540,12 +572,13 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         prob.add_option("print_level", 0)
     # user options land after the tee default so an explicit
     # print_level (or anything else) wins
-    for _k, _v in (options or {}).items():
-        prob.add_option(_k, _v)
+    for key, val in (options or {}).items():
+        prob.add_option(key, val)
+    con_alias = _replaced_aliases(clone, si)
     warm = {}
-    if str((options or {}).get("warm_start_init_point", "no")).lower() == "yes":
+    if _warm_start_requested(options):
         warm = _warm_start_from_suffixes(
-            model, var_names, con_names, nl, options)
+            model, var_names, con_names, nl, con_alias)
     solver = pounce.Solver(prob)
     if tee:
         # At the default print_level the engine emits its own banner (via
@@ -625,7 +658,6 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     con_row = _row_index(con_names)
 
     pins = ComponentMap()
-    con_alias = {}
     if si is not None:
         block = clone.component(SensitivityInterface.get_default_block_name())
         for i, (var, clone_param, list_idx, comp_idx) in enumerate(
@@ -635,12 +667,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
             orig_data = (orig_comp if not orig_comp.is_indexed()
                          else orig_comp[comp_idx])
             pins[orig_data] = con_row[con.name]
-        # original-name -> clone-row-name aliases for replaced constraints
-        if getattr(block, "_has_replaced_expressions", False):
-            for new_comp, old_comp in block._replaced_map.items():
-                for nd, od in zip(_iter_data(new_comp),
-                                  _iter_data(old_comp)):
-                    con_alias[od.name] = nd.name
+    # con_alias was built before the solve (the warm-start reader needs
+    # it); the session stores the same map
 
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias, var_row=var_row, con_row=con_row)

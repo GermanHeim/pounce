@@ -353,6 +353,12 @@ pub struct WarmStartOptions {
     pub target_mu: Number,
     pub entire_iterate: bool,
     pub same_structure: bool,
+    /// The value a NaN-seeded bound multiplier takes: NaN in a
+    /// user-supplied `z`/`v` seed means "unseeded, use the default".
+    /// Threaded from `builder.init.bound_mult_init_val` at build time
+    /// so the Mehrotra override and any user setting stay the single
+    /// source of truth.
+    pub bound_mult_init_val: Number,
 }
 
 impl Default for WarmStartOptions {
@@ -367,6 +373,7 @@ impl Default for WarmStartOptions {
             target_mu: 0.0,
             entire_iterate: false,
             same_structure: false,
+            bound_mult_init_val: 1.0,
         }
     }
 }
@@ -1021,7 +1028,9 @@ impl AlgorithmBuilder {
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point
         {
-            Box::new(WarmStartIterateInitializer::with_options(self.warm.clone()))
+            let mut wopts = self.warm.clone();
+            wopts.bound_mult_init_val = self.init.bound_mult_init_val;
+            Box::new(WarmStartIterateInitializer::with_options(wopts))
         } else {
             let mut d = DefaultIterateInitializer::with_eq_mult_calculator(Box::new(
                 LeastSquareMults::new(),

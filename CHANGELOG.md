@@ -25,18 +25,27 @@ changes.
 
 ### Added — pyomo-pounce: in-process warm starts from the model's suffixes (#432)
 
-- With `warm_start_init_point=yes` among the options, the sens path
-  reads the model's `dual` / `ipopt_zL_in` / `ipopt_zU_in` suffixes
-  into the session's initial multipliers, matched by component name.
-- Entries the user did not supply fall back to the solver's own
-  defaults (`bound_mult_init_val` for bound multipliers, 0 for
-  equality duals), never zero. Through ASL an absent entry reads as a
-  zero multiplier because a dense array cannot say "unknown", and a
-  zero bound multiplier on an active bound is a contradictory
-  certificate the solver must first recover from. A suffix knows which
-  entries exist, so an explicit zero is honored and absence means
-  "initialize normally": a deliberate divergence from the ASL path's
-  accidental zero-fill.
+- With `warm_start_init_point=yes` (or `True`; `add_option` maps them
+  alike) among the options, the sens path reads the model's `dual` /
+  `ipopt_zL_in` / `ipopt_zU_in` suffixes into the session's initial
+  multipliers, matched by component name, with a constraint replaced
+  by the declared-parameter surgery reached through its clone alias.
+  Both external sign conventions are crossed on the way in: `dual`
+  holds the AMPL marginal `-λ` (#271) and `ipopt_zU_in` Ipopt's
+  negative-at-upper `z_u` (#296); the session wants the internal
+  `+λ` and non-negative `z_u`.
+- Entries the user did not supply are seeded NaN, a new "unseeded"
+  marker in the warm-start contract: the initializer substitutes its
+  own resolved defaults (`bound_mult_init_val`, including the
+  Mehrotra override, for bound multipliers; 0 for equality duals), so
+  the defaults live in one place. Through Ipopt's ASL interface an
+  absent entry reads as a zero multiplier because a dense array
+  cannot say "unknown", and a zero bound multiplier on an active
+  bound is a contradictory certificate the solver must first recover
+  from; a suffix knows which entries exist, so an explicit zero is
+  honored and absence means "initialize normally". (POUNCE's own CLI
+  reads no `ipopt_zL_in`/`ipopt_zU_in` at all today, so the
+  comparison is with Ipopt-via-ASL, not this project's binary.)
 - The sens path's results object now reports the iteration count
   (`statistics.black_box.number_of_iterations`).
 - Regression: a plain solve's exported multipliers, fed back as
