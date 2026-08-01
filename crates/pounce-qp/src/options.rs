@@ -105,6 +105,16 @@ pub struct QpOptions {
     /// completes its path but its corrector then exhausts its iterations.
     /// Set this to `false` to get the old behaviour on such a workload.
     ///
+    /// Most of that cost turned out to be a *defect* rather than the method:
+    /// the ratio test stepped over crossings it had found, and a stepped-over
+    /// row can never be recovered, so the path wedged. gh #434 fixed it (see
+    /// [`crate::homotopy::RatioTest`]) and re-measured — `AUG2D`, `AUG2DC` and
+    /// `QSHARE2B` recover outright, cold paths reaching `t = 1` go 92 → 98 of
+    /// 138, and the median completed path halves. `DTOC3` and the other long
+    /// paths remain, and #434 records why no runtime guard is shipped for them:
+    /// no threshold on (path steps, `t`) separates them from the gains.
+    /// Full measurement: `dev-notes/issue-434-homotopy-cost.md`.
+    ///
     /// See [`crate::homotopy`].
     pub use_homotopy: bool,
 

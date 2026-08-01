@@ -123,38 +123,119 @@ The repair (`RatioTest` in `homotopy.rs`): compare crossings exactly, and fire
 the whole coincident set rather than one member of it. `tests/homotopy_unit.rs`
 pins the rule directly, including the measured 2.9e-16-vs-1.1e-14 case.
 
-Spot-checked on the instances #434 names, each verified against the Ipopt
-reference objective:
+Re-running all 138 with only that change (the conventional arm is untouched by
+it, so it is reused from the same run):
+
+| arm | correct | solved-but-wrong | timeouts |
+|---|--:|--:|--:|
+| conventional | 52/138 | 4 | 58 |
+| homotopy, baseline | 46/138 | 1 | 72 |
+| homotopy, **fixed** | **48/138** | 3 | 69 |
+
+**Fixed against baseline homotopy: +2 / −0.** `AUG2D` and `AUG2DC` recover;
+nothing regresses. Both are correct to `1e-14` against the Ipopt reference:
 
 | instance | baseline homotopy | fixed homotopy |
 |---|---|---|
-| AUG2D | Timeout, path stuck at `t = 0.50` | **Optimal, 38.2 s** (`rel = 1.7e-14`) |
+| AUG2D | Timeout, path stuck at `t = 0.50` | **Optimal, 38.2 s** |
 | AUG2DC | Timeout, path stuck at `t = 0.50` | **Optimal, 17.0 s**, path completes in **104 steps** |
 | QSHARE2B | the #413 loss | **OptimalInaccurate**, matches the published `11703.69` |
 
-*(Full 138-problem re-run in progress; this section gets the complete table.)*
+The effect on paths generally is larger than the two status flips suggest —
+cold paths that reach `t = 1` go 92 → 98 of 138, those killed mid-flight
+37 → 31, and the median completed path halves:
+
+| | complete | killed mid-flight | median steps | max |
+|---|--:|--:|--:|--:|
+| baseline | 92 | 37 | 216 | 2725 |
+| fixed | 98 | 31 | **102** | 2725 |
+
+`QSHIP04L` is worth noting separately: its path went from *killed at 1050
+steps* to *complete in 615*, and it is **still a loss**. The fix moved it from
+the never-finishes mode into the bad-prediction mode. Path cost was not what
+was wrong with it.
 
 ---
 
-## Result 2 — the guard
+## Result 2 — the guard, declined
 
-*(Pending the full re-run. The question is whether any rule of the form
-"abandon after `K` steps with `t` still below `T`" fires on the losses that
-remain after the fix without firing on any gain.)*
+After the fix, six losses remain, and only three of them are even reachable by
+a guard on path cost — the other three (`DUALC1`, `QSHIP04L`, `STCQP2`)
+complete their paths and fail afterwards.
 
-One methodological point is already settled, and it is the reason this took a
-second sweep. A guard fires **during** a path, so a candidate rule must be
-replayed against the path's `(step, t)` **trajectory**, not against the
-`(steps, t)` it ended at. Scored on endpoints, "abandon at 50 steps with
-`t < 0.9999`" looks like it catches every reachable loss and harms no gain —
-but `KSIP`, a gain, reaches `t = 1` only after 1065 steps, and spends the
-early part of that path indistinguishable from one that never finishes. The
-endpoint score silently credits a rule that would have thrown `KSIP` away.
-The harness therefore records every `(step, t)` tick and replays rules against
-the whole path.
+A guard fires **during** a path, so each candidate rule was replayed against
+every path's recorded `(step, t)` trajectory rather than against the
+`(steps, t)` it ended at. That distinction is not pedantic: scored on
+endpoints, "abandon at 50 steps with `t < 0.9999`" looks like it catches every
+reachable loss and harms no gain — but `KSIP` reaches `t = 1` only after 1065
+steps and spends the early part of that path indistinguishable from one that
+never finishes, so the endpoint score silently credits a rule that would have
+thrown `KSIP` away.
+
+Replayed properly, exactly one rule shape catches all three reachable losses
+without firing on either gain:
+
+> abandon at `steps >= 1100` while `t < 0.99`
+
+**It should not be shipped.** Two independent reasons, both from the data:
+
+1. **It is fitted to one point, with a 3% margin.** `KSIP` — a genuine gain,
+   0.4 s with the homotopy against a 120 s timeout without it — completes its
+   path at **1065** steps. The threshold is **1100**. Nothing but that single
+   instance separates the rule from destroying a gain, and #434's own tables
+   list twenty gains on the machine it was filed from, none of whose path
+   lengths are known here.
+
+2. **It is not actually harmless.** The gain/loss framing hides the cost,
+   because a problem *both* arms solve cannot appear as a loss. Replaying the
+   rule against all 48 problems the fixed homotopy solves correctly, it fires
+   on `LASER` — path complete in 2725 steps, **Optimal in 16.3 s**, against
+   41.4 s on the conventional route. The guard would abandon a working fast
+   path there and hand the problem to a route 2.5× slower; at a tighter cap
+   that is a timeout it manufactured.
+
+So the answer to the issue's question 3 is **no**: no threshold on
+`(steps, t)` separates the losses from the gains. Per the issue's own
+instruction —
+
+> If none does, this issue should be closed rather than shipping a guess.
+
+— no guard is added. The measurement is the deliverable.
+
+This also matches the precedent in
+`dev-notes/issue-131-monotone-lbfgs-stall.md`, where an analogous stall
+detector was prototyped and discarded for the same reason: what looks like a
+hard stall in a trace is a decelerating crawl, and no fixed-window gate
+separates "slow but will finish" from "doomed".
 
 ---
 
 ## What is left
 
-*(Pending.)*
+* **The `DUALC1` / `QSHIP04L` / `STCQP2` mode is untouched and is the more
+  interesting one.** The path completes and the prediction is still bad —
+  `DUALC1` reaches `t = 1` in four steps and the corrector then spends 2457
+  iterations failing on a problem the conventional route solves in 20 ms. That
+  is a question about what the path predicts, not about what it costs, and it
+  wants its own issue rather than a line in this one.
+* **The rank-repair tabu**, the other and larger source of uncapped crossings
+  in #413's measurement (10 of 14, against the 4 fixed here). `tabu_cons`
+  hides a row from the *primal ratio test* rather than only from the add
+  decision, so the step is computed as if the row were absent and crosses it.
+  Repairing it properly needs an exchange pivot at the degenerate vertex.
+* **`DTOC3`, `STADAT2`, `UBH1`** remain genuinely long paths — `t` advancing
+  the whole way, no stall — which is the mechanism #434 describes and which
+  this note does not solve. What it establishes is that they cannot be
+  separated from the gains by a runtime threshold.
+
+## Reproducing
+
+The harness is `crates/pounce-convex/examples/homotopy_sweep.rs`; the sweep
+driver, the `.mat` → flat-text converter, and the analysis scripts are not
+committed (they depend on a downloaded copy of the Maros-Mészáros `.mat`
+mirror). To re-run:
+
+```
+cargo run -p pounce-convex --release --example homotopy_sweep -- <file.qp> on|off
+POUNCE_HOMOTOPY_DEBUG=1   # adds the [hom] summary / step trace on stderr
+```
