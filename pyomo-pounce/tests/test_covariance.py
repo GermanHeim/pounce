@@ -504,3 +504,107 @@ def test_bound_and_row_spellings_agree():
         covB = covariance(mB, sigma_sq=SIGMA_LIN**2)
     np.testing.assert_allclose(covB.matrix, covA.matrix,
                                rtol=1e-6, atol=1e-12)
+
+
+def test_weak_row_and_bound_spellings_agree():
+    # the weak regime through the row machinery: optimum exactly on the
+    # limit spelled as a constraint row. Kept, warned, value-corrected
+    # (the kept row's barrier weight is subtracted), and identical to
+    # the bound spelling and to the unconstrained analytic covariance.
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    y2 = y + (2.0 - beta[0])
+
+    mA = linear_model(x, y2, declare=False)
+    mA.a.setlb(2.0)
+    declare_fitted(mA.a)
+    declare_fitted(mA.b)
+    declare_residual(mA.r)
+    pyo.SolverFactory("pounce").solve(mA)
+
+    mB = linear_model(x, y2, declare=False)
+    mB.lim = pyo.Constraint(expr=mB.a >= 2.0)
+    declare_fitted(mB.a)
+    declare_fitted(mB.b)
+    declare_residual(mB.r)
+    pyo.SolverFactory("pounce").solve(mB)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        covA = covariance(mA, sigma_sq=SIGMA_LIN**2)
+        covB = covariance(mB, sigma_sq=SIGMA_LIN**2)
+    assert sum("weakly active" in str(wi.message) for wi in w) == 2
+    cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(covA.matrix, cov_true, rtol=1e-4)
+    np.testing.assert_allclose(covB.matrix, covA.matrix, rtol=1e-4)
+
+
+def test_objective_scaling_does_not_move_the_correction():
+    # data two orders larger, pushing the max gradient past
+    # nlp_scaling_max_gradient so gradient-based scaling engages
+    # (df != 1). The report's Sigma is scaled-space; unnormalized it
+    # would miscorrect the weakly active kept variance by exactly df.
+    scale = 400.0
+    rng = np.random.default_rng(7)
+    x = np.linspace(0.0, 4.0, N_LIN)
+    y = scale * (1.5 - 0.7 * x) + (scale * SIGMA_LIN) * rng.standard_normal(N_LIN)
+    X = np.column_stack([np.ones(N_LIN), x])
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    y2 = y + (2.0 - beta[0])
+    m = linear_model(x, y2, declare=False)
+    m.a.setlb(2.0)
+    # gradient-based scaling reads the STARTING point; residuals
+    # initialize to 0 there (gradient 2r = 0), so seed them large to
+    # push the max objective gradient past nlp_scaling_max_gradient
+    for i in m.I:
+        m.r[i].set_value(400.0)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    assert abs(float(session.solver.nlp_scaling["obj"]) - 1.0) > 1e-6
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=(scale * SIGMA_LIN) ** 2)
+    assert any("weakly active" in str(wi.message) for wi in w)
+    cov_true = (scale * SIGMA_LIN) ** 2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-4)
+
+
+def test_mixed_normal_binding_row_warns_not_projects():
+    # a + r[0] <= cap: after eliminating r[0] = y0 - a - b*x0 the row
+    # actually pins y0 - b*x0, a b-direction; the restricted normal
+    # reads e_a and would project the wrong direction. The honest
+    # v0.10 behavior: keep unprojected, warn explicitly.
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    k = 12                                   # x[k] != 0, so b survives
+    rk = float(y[k] - beta[0] - beta[1] * x[k])
+    cap = float(beta[0] + rk) - 0.5          # binds at the optimum
+    m = linear_model(x, y, declare=False)
+    m.capcon = pyo.Constraint(expr=m.a + m.r[k] <= cap)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    assert any("involves non-fitted variables" in str(wi.message)
+               for wi in w)
+    # unprojected: full rank, no zero direction
+    ev = np.linalg.eigvalsh(cov.matrix)
+    assert ev[0] > 1e-12 * ev[-1]
+
+
+def test_classify_ratio_covers_all_branches():
+    from pyomo_pounce.sens import _classify_ratio
+    assert _classify_ratio(1e-12, 1e-10) == "inactive"
+    assert _classify_ratio(1.0, 1e-10) == "weakly_active"
+    assert _classify_ratio(1e12, 1e-10) == "strongly_active"
+    assert _classify_ratio(1e-4, 1e-10) == "ambiguous"     # gap low
+    assert _classify_ratio(1e4, 1e-10) == "ambiguous"      # gap high
+    assert _classify_ratio(0.05, 1e-2) == "inactive"       # mu branch
+    assert _classify_ratio(1.0, 1e-2) == "ambiguous"
+    assert _classify_ratio(50.0, 1e-2) == "strongly_active"

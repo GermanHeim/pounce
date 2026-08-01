@@ -39,6 +39,21 @@ changes.
   (jkitchin/pounce#357) is the single-coordinate case and returns
   exactly the variable-bound disposition, so the two spellings of one
   limit agree in the matrices (#362), not only in the classification.
+- The restricted normal is honest only when the row's support outside
+  the fitted block is pinned (declared-parameter pin columns do not
+  count as outside: they cannot move). A binding row reaching the
+  fitted parameters through FREE eliminated variables pins a
+  direction the restricted normal cannot represent (`a + r_1 <= cap`
+  with `r_1 = y_1 - a - b x_1` pins a `b`-direction while the
+  restricted normal reads `e_a`), and the reduced-level ratio is
+  equally blind, so such a row takes item 0's raw classification, is
+  kept unprojected, and warns explicitly. The general treatment is
+  the row's reduced normal through the elimination, item 2 territory.
+- The report's `Σ` is the solver's scaled-space value while the
+  factor block is natural-units (kkt_solve, pounce#128): the value
+  correction normalizes by the objective scale (the per-row
+  constraint scale cancels algebraically), tested against a solve
+  with gradient-based scaling engaged.
 - Declaration-triggered solves set `bound_relax_factor=0`: the
   classifier reads slacks as distances to the user's own bounds.
 - `Solver.row_normal(j)`: a constraint row's gradient at the converged

@@ -1184,8 +1184,17 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     act = session.solver.classify_activity()
     mu = float(act["mu"])
     R_W = _minv(M)                # reduced Hessian off the factor, W-based
+    # M (and so R_W) is natural-units by the kkt_solve contract
+    # (pounce#128), while the report's Sigma is the solver's
+    # scaled-space value: with objective scaling active it carries the
+    # factor df, and subtracting it unnormalized would miscorrect by
+    # exactly that factor. The per-row constraint scale cancels
+    # algebraically in the row block below (Sigma gains dg^-2, the
+    # scaled normal's squared length gains dg^2), so df is the only
+    # factor to remove there too.
+    obj_scale = float(session.solver.nlp_scaling["obj"] or 1.0)
     sig_fit = np.array([float(act["var_sigma"][session.fit_rows[p]])
-                        for p in params])
+                        for p in params]) / obj_scale
     q_red = np.abs(np.diag(R_W) - sig_fit)
     floor = np.sqrt(np.finfo(float).eps) * max(
         1.0, float(np.abs(np.diag(R_W)).max()))
@@ -1242,19 +1251,72 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     # reformulation (jkitchin/pounce#357) is the single-coordinate case
     # and reproduces the variable disposition exactly.
     R_corr = R_W - np.diag(sig_fit)
+    # columns held constant by the declared-parameter pins: a row's
+    # support there contributes nothing through elimination (the pin
+    # variable cannot move), so it does not make the row "mixed". The
+    # pin constraint's normal is e_{pin var}, so its support IS the
+    # pin column.
+    pin_cols = set()
+    for _pr in session.pins.values():
+        _pn = np.asarray(session.solver.row_normal(int(_pr)), dtype=float)
+        pin_cols.update(int(i) for i in np.nonzero(_pn)[0])
+    fit_cols = set(int(r) for r in rows)
     bind_normals = []                  # unit normals over the fitted block
     for j, rst in enumerate(act["row_status"]):
         if rst in ("equality", "unbounded"):
             continue
-        a = np.asarray(session.solver.row_normal(j), dtype=float)[rows]
+        a_full = np.asarray(session.solver.row_normal(j), dtype=float)
+        a = a_full[rows]
         na = float(np.linalg.norm(a))
         if na == 0.0:
             continue                   # row does not touch the fitted block
+        # A row whose normal also touches NON-fitted variables pins a
+        # combination that reaches the fitted block through the
+        # eliminated variables, not along the restricted normal: e.g.
+        # a + r_1 <= cap with r_1 = y_1 - a - b*x_1 actually pins a
+        # b-direction, while the restricted normal reads e_a. The
+        # restricted projection would delete the wrong direction, so a
+        # mixed binding row is kept unprojected with an explicit
+        # warning instead. The general treatment needs the row's
+        # reduced normal through the elimination (roadmap item 2's
+        # machinery).
+        nf = float(np.linalg.norm(a_full))
+        outside = [i for i in np.nonzero(a_full)[0]
+                   if int(i) not in fit_cols and int(i) not in pin_cols]
+        mixed = bool(outside) and (
+            float(np.linalg.norm(a_full[outside])) > 1e-8 * max(1.0, nf))
+        cname = (session.con_names[j] if j < len(session.con_names)
+                 else f"row {j}")
+        if mixed:
+            # the reduced-level rule is also unreliable here: the row's
+            # barrier weight lands through elimination on a direction
+            # the restricted normal cannot see, so re-classifying
+            # against it manufactures a wrong ratio. Item 0's raw
+            # classification (scale-invariant along the full normal) is
+            # the honest status for a mixed row.
+            if rst == "strongly_active":
+                warnings.warn(
+                    f"covariance: constraint {cname} is strongly active "
+                    "and involves non-fitted variables; the direction "
+                    "it pins reaches the fitted parameters through the "
+                    "eliminated variables and cannot be represented by "
+                    "a restricted normal, so it is NOT projected. Treat "
+                    "the returned variances as not conditioned on this "
+                    "constraint.")
+            elif rst in ("weakly_active", "ambiguous", "unidentified"):
+                warnings.warn(
+                    f"covariance: constraint {cname} is {rst} and "
+                    "involves non-fitted variables; it is kept "
+                    "unprojected and its barrier weight is not "
+                    "corrected for (the restricted direction would be "
+                    "the wrong one). Boundary asymptotics are "
+                    "nonstandard.")
+            continue
         a = a / na
         # the row's slack elimination contributes Sigma_j * (raw normal
         # outer product) to the reduced block; in the unit-normal basis
-        # that coefficient is Sigma_j * ||raw normal||^2
-        sig_row = float(act["row_sigma"][j]) * na * na
+        # that coefficient is Sigma_j * ||raw normal||^2. df as above.
+        sig_row = float(act["row_sigma"][j]) * na * na / obj_scale
         q_w = float(a @ R_corr @ a)
         q_row = abs(q_w - sig_row)
         ri = sig_row / max(q_row, floor)
@@ -1262,8 +1324,6 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             status = "unidentified"
         else:
             status = _classify_ratio(ri, mu)
-        cname = (session.con_names[j] if j < len(session.con_names)
-                 else f"row {j}")
         combo = " + ".join(
             f"{a[k]:.3g}*{params[k].name}" for k in range(n_params)
             if abs(a[k]) > 1e-12)
