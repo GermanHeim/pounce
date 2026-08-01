@@ -79,23 +79,41 @@ pub enum RestoOrigVerdict {
 /// loop, which is why it is part of the port rather than an optimisation.
 pub fn resto_orig_verdict(
     orig_trial_inf_pr: f64,
+    orig_trial_rel_inf_pr: f64,
     tol: f64,
     orig_tol: f64,
     orig_constr_viol_tol: f64,
+    rel_viol_threshold: f64,
     is_square_problem: bool,
 ) -> RestoOrigVerdict {
+    // Every arm but the last asks "is this nearly feasible for the orig NLP?"
+    // and upstream asks it with an absolute threshold alone. That is not
+    // scale-invariant: `s*g(x) >= s*b` is the same constraint for every s > 0,
+    // but its residual carries s. Measured on `inf_372` (0 <= x <= 0.6 with
+    // s*x >= s*0.7, infeasible by 14% of the row at every s): the violation is
+    // 1.0e-1 at s = 1 and 1.0e-9 at s = 1e-8, so the same model clears
+    // `1e2 * tol` at small s and the arms read a decisively infeasible point as
+    // nearly feasible. gh #390 (residual of #387) settled this for the outer
+    // check; the same invariant is needed the moment layer 2 judges
+    // feasibility. Rows with no declared magnitude contribute 0 and fall back
+    // to the absolute test, which is already invariant for them.
+    let nearly_feasible =
+        orig_trial_inf_pr <= 1e2 * tol && orig_trial_rel_inf_pr <= rel_viol_threshold;
     // `IpRestoConvCheck.cpp:212` — nearly feasible for the orig NLP, and
     // there is tolerance budget left to spend chasing the rest.
-    if orig_trial_inf_pr <= 1e2 * tol && tol > 1e-1 * orig_tol {
+    if nearly_feasible && tol > 1e-1 * orig_tol {
         return RestoOrigVerdict::TightenAndContinue;
     }
     // `IpRestoConvCheck.cpp:222` — a square problem has nothing to
     // optimise, so any point feasible to `constr_viol_tol` is the answer.
-    if is_square_problem && orig_trial_inf_pr <= orig_constr_viol_tol {
+    if is_square_problem
+        && orig_trial_inf_pr <= orig_constr_viol_tol
+        && orig_trial_rel_inf_pr <= rel_viol_threshold
+    {
         return RestoOrigVerdict::ConvergedToAcceptable;
     }
     // `IpRestoConvCheck.cpp:227`.
-    if orig_trial_inf_pr <= 1e2 * tol {
+    if nearly_feasible {
         return RestoOrigVerdict::ConvergedToFeasiblePoint;
     }
     // `IpRestoConvCheck.cpp:240`.
@@ -115,6 +133,10 @@ pub struct RestoConvCheck {
     /// `constr_viol_tol` from the restoration sub-options; used in the
     /// square-problem fast path.
     pub orig_constr_viol_tol: f64,
+    /// Fraction of a row's own magnitude the violation must fall under before
+    /// layer 2 will call the orig NLP nearly feasible. `1e-2` matches the band
+    /// `OptErrorConvCheck::relative_viol_threshold` uses on the outer side.
+    pub rel_viol_threshold: f64,
     /// The restoration sub-problem's own tolerance (`IpData().tol()` of
     /// the resto algorithm). Layer 2's tightening arm shrinks it; see
     /// [`resto_orig_verdict`].
@@ -131,6 +153,7 @@ impl Default for RestoConvCheck {
             maximum_iters: 3000,
             maximum_resto_iters: 3000,
             orig_constr_viol_tol: 1e-4,
+            rel_viol_threshold: 1e-2,
             tol: 1e-8,
             first_resto_iter: true,
             successive_resto_iter: 0,
@@ -176,6 +199,7 @@ impl RestoConvCheck {
         is_square_problem: bool,
         orig_curr_inf_pr: f64,
         orig_trial_inf_pr: f64,
+        orig_trial_rel_inf_pr: f64,
         orig_tol: f64,
         acceptable_to_outer: impl FnOnce() -> bool,
         sub_problem_converged: impl FnOnce() -> bool,
@@ -231,9 +255,11 @@ impl RestoConvCheck {
         if sub_problem_converged() {
             match resto_orig_verdict(
                 orig_trial_inf_pr,
+                orig_trial_rel_inf_pr,
                 self.tol,
                 orig_tol,
                 self.orig_constr_viol_tol,
+                self.rel_viol_threshold,
                 is_square_problem,
             ) {
                 RestoOrigVerdict::TightenAndContinue => {
@@ -389,6 +415,8 @@ pub struct RestoConvCheckAdapter {
     /// (`IpRestoConvCheck::InitializeImpl` reads it with the *original*
     /// prefix). Consulted only on layer 2's square-problem arm.
     orig_constr_viol_tol: f64,
+    /// See [`RestoConvCheck::rel_viol_threshold`].
+    rel_viol_threshold: f64,
     /// Whether the original NLP is square (`IpCq().IsSquareProblem()`).
     is_square_problem: bool,
     /// Times layer 2's tightening arm has fired this restoration entry.
@@ -429,6 +457,7 @@ impl RestoConvCheckAdapter {
             // upstream arms unchanged.
             orig_tol: tol,
             orig_constr_viol_tol: 1e-4,
+            rel_viol_threshold: 1e-2,
             is_square_problem: false,
             resto_tol_tightenings: 0,
         }
@@ -530,18 +559,21 @@ impl RestoConvCheckAdapter {
         let tol = self.inner.tol;
         let verdict = resto_orig_verdict(
             m.inf_pr_unscaled,
+            m.inf_pr_relative,
             tol,
             self.orig_tol,
             self.orig_constr_viol_tol,
+            self.rel_viol_threshold,
             self.is_square_problem,
         );
 
         if std::env::var_os("POUNCE_DBG_RESTO_LAYER2").is_some() {
             tracing::debug!(target: "pounce::restoration",
-                "[PN_RESTO_LAYER2] verdict={:?} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} tol={:.6e} orig_tol={:.6e} orig_constr_viol_tol={:.6e} square={} tightenings={}",
+                "[PN_RESTO_LAYER2] verdict={:?} orig_inf_pr={:.6e} orig_inf_pr_scaled={:.6e} orig_inf_pr_rel={:.6e} tol={:.6e} orig_tol={:.6e} orig_constr_viol_tol={:.6e} square={} tightenings={}",
                 verdict,
                 m.inf_pr_unscaled,
                 m.inf_pr_scaled,
+                m.inf_pr_relative,
                 tol,
                 self.orig_tol,
                 self.orig_constr_viol_tol,
@@ -754,6 +786,20 @@ struct OrigTrialMeasures {
     /// row-scaled residual mixes two unit systems — the same mismatch
     /// documented at `resto_inner_solver::eval_orig_inf_pr_at_inner_curr`.
     inf_pr_unscaled: f64,
+    /// The orig NLP's constraint violation as a fraction of the violated
+    /// row's own magnitude, `max_i viol_i / max(|d_l_i|, |d_u_i|)`.
+    ///
+    /// Neither absolute measure above can be scale-invariant: a user may write
+    /// any row as `s*g(x) >= s*b` for `s > 0` without changing the feasible
+    /// set, and the residual then carries `s`. gh #390 (residual of #387)
+    /// settled this for the outer check; layer 2 needs the same invariant the
+    /// moment it makes a feasibility judgement of its own.
+    ///
+    /// Measured against the row's **bounds**, not against the restoration
+    /// slack: it is the orig row that has a declared magnitude. Rows with no
+    /// finite bound, or a declared magnitude of zero, contribute nothing — the
+    /// absolute measures are already invariant there.
+    inf_pr_relative: f64,
     /// Unscaled `f(x_orig)`.
     f: f64,
 }
@@ -815,11 +861,97 @@ fn eval_orig_trial_measures(
         (0.0, 0.0)
     };
 
+    // Scale-free companion, mirroring `IpoptCq::relative_d_infeasibility_max`.
+    // The bound vectors are **compressed** — one entry per row that has that
+    // side — so they must be expanded through `pd_l`/`pd_u` before they can be
+    // indexed against a row. Projecting an all-ones vector the same way gives
+    // the presence masks, without which a projected `0` is ambiguous between
+    // "no bound this side" and "a declared bound of zero".
+    let inf_pr_relative = if m_ineq > 0 {
+        let mut d_row = DenseVectorSpace::new(m_ineq).make_new_dense();
+        orig.eval_d(x_orig, &mut d_row);
+
+        // Prefer the declared bounds: on the live vectors a relaxed zero bound
+        // reads as ~1e-8 and would fabricate a magnitude for a row with none.
+        let (mut cl, mut cu) = (orig.d_l().make_new(), orig.d_u().make_new());
+        cl.copy(orig.d_l());
+        cu.copy(orig.d_u());
+        if let Some((dl, du)) = orig.declared_d_bounds() {
+            if let (Some(cld), Some(cud)) = (
+                cl.as_any_mut()
+                    .downcast_mut::<pounce_linalg::dense_vector::DenseVector>(),
+                cu.as_any_mut()
+                    .downcast_mut::<pounce_linalg::dense_vector::DenseVector>(),
+            ) {
+                cld.set_values(&dl);
+                cud.set_values(&du);
+            }
+        }
+
+        let mut lo = d_row.make_new();
+        lo.set(0.0);
+        orig.pd_l().mult_vector(1.0, &*cl, 0.0, &mut *lo);
+        let mut hi = d_row.make_new();
+        hi.set(0.0);
+        orig.pd_u().mult_vector(1.0, &*cu, 0.0, &mut *hi);
+
+        let mut ones_l = orig.d_l().make_new();
+        ones_l.set(1.0);
+        let mut mask_l = d_row.make_new();
+        mask_l.set(0.0);
+        orig.pd_l().mult_vector(1.0, &*ones_l, 0.0, &mut *mask_l);
+        let mut ones_u = orig.d_u().make_new();
+        ones_u.set(1.0);
+        let mut mask_u = d_row.make_new();
+        mask_u.set(0.0);
+        orig.pd_u().mult_vector(1.0, &*ones_u, 0.0, &mut *mask_u);
+
+        use pounce_linalg::dense_vector::DenseVector;
+        match (
+            d_row.as_any().downcast_ref::<DenseVector>(),
+            (&*lo).as_any().downcast_ref::<DenseVector>(),
+            (&*hi).as_any().downcast_ref::<DenseVector>(),
+            (&*mask_l).as_any().downcast_ref::<DenseVector>(),
+            (&*mask_u).as_any().downcast_ref::<DenseVector>(),
+        ) {
+            (Some(d), Some(lo), Some(hi), Some(ml), Some(mu)) => {
+                let (dv, lov, hiv, mlv, muv) = (
+                    d.expanded_values(),
+                    lo.expanded_values(),
+                    hi.expanded_values(),
+                    ml.expanded_values(),
+                    mu.expanded_values(),
+                );
+                let mut worst = 0.0_f64;
+                for i in 0..dv.len() {
+                    let (has_l, has_u) = (mlv[i] > 0.5, muv[i] > 0.5);
+                    let (mut viol, mut mag) = (0.0_f64, 0.0_f64);
+                    if has_l {
+                        viol = viol.max(lov[i] - dv[i]);
+                        mag = mag.max(lov[i].abs());
+                    }
+                    if has_u {
+                        viol = viol.max(dv[i] - hiv[i]);
+                        mag = mag.max(hiv[i].abs());
+                    }
+                    if mag > 0.0 && mag.is_finite() && viol.is_finite() && viol > 0.0 {
+                        worst = worst.max(viol / mag);
+                    }
+                }
+                worst
+            }
+            _ => 0.0,
+        }
+    } else {
+        0.0
+    };
+
     let f = orig.eval_f(x_orig);
 
     Some(OrigTrialMeasures {
         inf_pr_scaled: c_amax.1.max(d_minus_s_amax.1),
         inf_pr_unscaled: c_amax.0.max(d_minus_s_amax.0),
+        inf_pr_relative,
         f,
     })
 }
@@ -844,7 +976,7 @@ mod tests {
     #[test]
     fn first_iteration_always_continues() {
         let mut cc = RestoConvCheck::new();
-        let s = cc.check_convergence(0, false, 1.0, 0.5, 1e-8, || true, || false);
+        let s = cc.check_convergence(0, false, 1.0, 0.5, 0.0, 1e-8, || true, || false);
         assert_eq!(s, RestoConvergenceStatus::Continue);
     }
 
@@ -852,7 +984,7 @@ mod tests {
     fn outer_iter_cap_triggers_max() {
         let mut cc = RestoConvCheck::new();
         cc.maximum_iters = 5;
-        let s = cc.check_convergence(6, false, 1.0, 0.5, 1e-8, || true, || false);
+        let s = cc.check_convergence(6, false, 1.0, 0.5, 0.0, 1e-8, || true, || false);
         assert_eq!(s, RestoConvergenceStatus::MaxIterExceeded);
     }
 
@@ -861,10 +993,10 @@ mod tests {
         let mut cc = RestoConvCheck::new();
         cc.maximum_resto_iters = 2;
         // Burn through 3 calls — fourth should hit the cap.
-        cc.check_convergence(0, false, 1.0, 0.9, 1e-8, || false, || false);
-        cc.check_convergence(1, false, 1.0, 0.8, 1e-8, || false, || false);
-        cc.check_convergence(2, false, 1.0, 0.7, 1e-8, || false, || false);
-        let s = cc.check_convergence(3, false, 1.0, 0.6, 1e-8, || false, || false);
+        cc.check_convergence(0, false, 1.0, 0.9, 0.0, 1e-8, || false, || false);
+        cc.check_convergence(1, false, 1.0, 0.8, 0.0, 1e-8, || false, || false);
+        cc.check_convergence(2, false, 1.0, 0.7, 0.0, 1e-8, || false, || false);
+        let s = cc.check_convergence(3, false, 1.0, 0.6, 0.0, 1e-8, || false, || false);
         assert_eq!(s, RestoConvergenceStatus::MaxIterExceeded);
     }
 
@@ -873,9 +1005,9 @@ mod tests {
         let mut cc = RestoConvCheck::new();
         cc.orig_constr_viol_tol = 1e-4;
         // Burn the first-iter freebie.
-        cc.check_convergence(0, true, 1.0, 0.5, 1e-8, || false, || false);
+        cc.check_convergence(0, true, 1.0, 0.5, 0.0, 1e-8, || false, || false);
         // Now feed a feasible trial.
-        let s = cc.check_convergence(1, true, 0.5, 1e-10, 1e-8, || false, || false);
+        let s = cc.check_convergence(1, true, 0.5, 1e-10, 0.0, 1e-8, || false, || false);
         assert_eq!(s, RestoConvergenceStatus::Converged);
     }
 
@@ -883,9 +1015,9 @@ mod tests {
     fn insufficient_reduction_keeps_going() {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
-        cc.check_convergence(0, false, 1.0, 0.95, 1e-8, || true, || false);
+        cc.check_convergence(0, false, 1.0, 0.95, 0.0, 1e-8, || true, || false);
         // trial_inf_pr (0.95) > 0.9 * curr_inf_pr (1.0) — not enough.
-        let s = cc.check_convergence(1, false, 1.0, 0.95, 1e-8, || true, || false);
+        let s = cc.check_convergence(1, false, 1.0, 0.95, 0.0, 1e-8, || true, || false);
         assert_eq!(s, RestoConvergenceStatus::Continue);
     }
 
@@ -893,8 +1025,8 @@ mod tests {
     fn sufficient_reduction_plus_filter_accept_converges() {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
-        cc.check_convergence(0, false, 1.0, 0.5, 1e-8, || true, || false);
-        let s = cc.check_convergence(1, false, 1.0, 0.5, 1e-8, || true, || false);
+        cc.check_convergence(0, false, 1.0, 0.5, 0.0, 1e-8, || true, || false);
+        let s = cc.check_convergence(1, false, 1.0, 0.5, 0.0, 1e-8, || true, || false);
         assert_eq!(s, RestoConvergenceStatus::Converged);
     }
 
@@ -902,8 +1034,8 @@ mod tests {
     fn sufficient_reduction_but_filter_rejects_continues() {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
-        cc.check_convergence(0, false, 1.0, 0.5, 1e-8, || false, || false);
-        let s = cc.check_convergence(1, false, 1.0, 0.5, 1e-8, || false, || false);
+        cc.check_convergence(0, false, 1.0, 0.5, 0.0, 1e-8, || false, || false);
+        let s = cc.check_convergence(1, false, 1.0, 0.5, 0.0, 1e-8, || false, || false);
         assert_eq!(s, RestoConvergenceStatus::Continue);
     }
 
@@ -911,18 +1043,18 @@ mod tests {
     fn kappa_zero_disables_reduction_guard() {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.0;
-        cc.check_convergence(0, false, 1.0, 1.5, 1e-8, || true, || false);
+        cc.check_convergence(0, false, 1.0, 1.5, 0.0, 1e-8, || true, || false);
         // Even with trial > curr, the guard is bypassed and we go to
         // the outer-filter check, which accepts.
-        let s = cc.check_convergence(1, false, 1.0, 1.5, 1e-8, || true, || false);
+        let s = cc.check_convergence(1, false, 1.0, 1.5, 0.0, 1e-8, || true, || false);
         assert_eq!(s, RestoConvergenceStatus::Converged);
     }
 
     #[test]
     fn reset_clears_state() {
         let mut cc = RestoConvCheck::new();
-        cc.check_convergence(0, false, 1.0, 0.5, 1e-8, || true, || false);
-        cc.check_convergence(1, false, 1.0, 0.5, 1e-8, || true, || false);
+        cc.check_convergence(0, false, 1.0, 0.5, 0.0, 1e-8, || true, || false);
+        cc.check_convergence(1, false, 1.0, 0.5, 0.0, 1e-8, || true, || false);
         cc.reset();
         assert!(cc.first_resto_iter);
         assert_eq!(cc.successive_resto_iter, 0);
@@ -941,7 +1073,7 @@ mod tests {
         // Near-feasible for the orig NLP: `inf_pr` well inside `1e2 · tol`
         // at every tolerance the loop can reach.
         let inf_pr = 1e-12;
-        while resto_orig_verdict(inf_pr, tol, orig_tol, 1e-4, false)
+        while resto_orig_verdict(inf_pr, 0.0, tol, orig_tol, 1e-4, 1e-2, false)
             == RestoOrigVerdict::TightenAndContinue
         {
             tol *= 1e-2;
@@ -956,10 +1088,10 @@ mod tests {
     fn layer2_square_problem_feasible_within_constr_viol_tol_is_acceptable() {
         // Square, violation under `constr_viol_tol` but above `1e2 · tol`
         // so the tightening arm cannot claim it first.
-        let v = resto_orig_verdict(1e-5, 1e-10, 1e-8, 1e-4, true);
+        let v = resto_orig_verdict(1e-5, 0.0, 1e-10, 1e-8, 1e-4, 1e-2, true);
         assert_eq!(v, RestoOrigVerdict::ConvergedToAcceptable);
         // The same numbers on a non-square problem are a local infeasibility.
-        let v = resto_orig_verdict(1e-5, 1e-10, 1e-8, 1e-4, false);
+        let v = resto_orig_verdict(1e-5, 0.0, 1e-10, 1e-8, 1e-4, 1e-2, false);
         assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
     }
 
@@ -967,7 +1099,7 @@ mod tests {
     fn layer2_feasible_point_when_tolerance_budget_is_spent() {
         // `tol` already tightened past the guard, so the tightening arm is
         // closed; the violation is still inside `1e2 · tol`.
-        let v = resto_orig_verdict(1e-11, 1e-10, 1e-8, 1e-4, false);
+        let v = resto_orig_verdict(1e-11, 0.0, 1e-10, 1e-8, 1e-4, 1e-2, false);
         assert_eq!(v, RestoOrigVerdict::ConvergedToFeasiblePoint);
     }
 
@@ -979,11 +1111,87 @@ mod tests {
     fn layer2_locally_infeasible_when_violation_is_bounded_away_from_zero() {
         // qcqp1000-1nc's numbers: orig violation pinned at ~5e-3 with the
         // sub-problem at its own KKT point, default tolerances.
-        let v = resto_orig_verdict(5.05e-3, 1e-8, 1e-8, 1e-4, false);
+        let v = resto_orig_verdict(5.05e-3, 0.0, 1e-8, 1e-8, 1e-4, 1e-2, false);
         assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
         // Square problems reach the same verdict once the violation clears
         // `constr_viol_tol`; the caller applies pounce's square carve-out.
-        let v = resto_orig_verdict(5.05e-3, 1e-8, 1e-8, 1e-4, true);
+        let v = resto_orig_verdict(5.05e-3, 0.0, 1e-8, 1e-8, 1e-4, 1e-2, true);
+        assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
+    }
+
+    /// The property the whole relative measure exists for: multiplying a row
+    /// by a positive constant cannot change the verdict, because it cannot
+    /// change the feasible set.
+    ///
+    /// `inf_372` (`0 <= x <= 0.6` with `s*x >= s*0.7`) is infeasible by 14% of
+    /// the row at every `s`, but its *absolute* violation is `1.0e-1` at
+    /// `s = 1` and `1.0e-9` at `s = 1e-8`. On the absolute test alone the
+    /// second reads as nearly feasible and the arms mis-fire — the regression
+    /// `pyomo-pounce/tests/test_scale_invariance.py` caught.
+    #[test]
+    fn layer2_verdict_is_invariant_to_row_scaling() {
+        for (abs_viol, rel_viol) in [
+            (1.0e-1, 1.428571e-1),      // s = 1
+            (1.005193e-9, 1.432384e-1), // s = 1e-8, same model
+        ] {
+            let v = resto_orig_verdict(abs_viol, rel_viol, 1e-8, 1e-8, 1e-4, 1e-2, false);
+            assert_eq!(
+                v,
+                RestoOrigVerdict::LocallyInfeasible,
+                "abs={abs_viol:e} rel={rel_viol:e} must reach the same verdict at every row scaling"
+            );
+        }
+    }
+
+    /// The relative measure only ever *withholds* near-feasibility; it can
+    /// never manufacture it. A point tiny on both measures still tightens.
+    #[test]
+    fn layer2_relative_gate_blocks_but_never_creates_near_feasibility() {
+        // Tiny absolutely, but 14% of the row: not nearly feasible.
+        let v = resto_orig_verdict(1e-9, 1.4e-1, 1e-8, 1e-8, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
+        // Tiny on both: unchanged from the absolute-only behaviour.
+        let v = resto_orig_verdict(1e-9, 1e-6, 1e-8, 1e-8, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::TightenAndContinue);
+        // Large absolutely but small relatively is still not nearly feasible:
+        // both tests must pass, so neither can override the other.
+        let v = resto_orig_verdict(5.05e-3, 1e-6, 1e-8, 1e-8, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
+    }
+
+    /// A row with no declared magnitude — homogeneous, or an NLP that does not
+    /// track one — contributes `0` to the relative measure and must fall back
+    /// to the absolute test, which is already scale-invariant there
+    /// (`s*g(x) == 0` is the same row at every `s`).
+    ///
+    /// This also pins the meaning of the `0.0` the other unit tests pass: it
+    /// is the abstaining case, not a way of switching the gate off.
+    #[test]
+    fn layer2_abstains_when_the_row_has_no_declared_magnitude() {
+        // Same three inputs as the arms' own tests, with an abstaining
+        // relative measure: each must land exactly where it did before.
+        assert_eq!(
+            resto_orig_verdict(1e-11, 0.0, 1e-10, 1e-8, 1e-4, 1e-2, false),
+            RestoOrigVerdict::ConvergedToFeasiblePoint
+        );
+        assert_eq!(
+            resto_orig_verdict(1e-5, 0.0, 1e-10, 1e-8, 1e-4, 1e-2, true),
+            RestoOrigVerdict::ConvergedToAcceptable
+        );
+        assert_eq!(
+            resto_orig_verdict(5.05e-3, 0.0, 1e-8, 1e-8, 1e-4, 1e-2, false),
+            RestoOrigVerdict::LocallyInfeasible
+        );
+    }
+
+    /// The square-problem arm is gated too. It is a feasibility judgement like
+    /// the others (`orig_trial_inf_pr <= constr_viol_tol`), so leaving it on
+    /// the absolute test alone would reopen the same hole one arm along.
+    #[test]
+    fn layer2_square_arm_is_gated_on_the_relative_measure_too() {
+        // Absolutely inside `constr_viol_tol`, but 14% of the row.
+        let v = resto_orig_verdict(1e-5, 1.4e-1, 1e-10, 1e-8, 1e-4, 1e-2, true);
+        assert_ne!(v, RestoOrigVerdict::ConvergedToAcceptable);
         assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
     }
 
@@ -996,10 +1204,10 @@ mod tests {
         cc.kappa_resto = 0.9;
         cc.tol = 1e-8;
         // Burn the first-iter freebie.
-        cc.check_convergence(0, false, 5.96e-8, 5.05e-3, 1e-8, || false, || false);
+        cc.check_convergence(0, false, 5.96e-8, 5.05e-3, 0.0, 1e-8, || false, || false);
         // Reduction is five orders out of reach, so layer 1 is `Continue`
         // forever — but the sub-problem has converged.
-        let s = cc.check_convergence(1, false, 5.96e-8, 5.05e-3, 1e-8, || false, || true);
+        let s = cc.check_convergence(1, false, 5.96e-8, 5.05e-3, 0.0, 1e-8, || false, || true);
         assert_eq!(s, RestoConvergenceStatus::LocallyInfeasible);
     }
 
@@ -1010,8 +1218,8 @@ mod tests {
     fn unconverged_sub_problem_still_continues() {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
-        cc.check_convergence(0, false, 5.96e-8, 5.05e-3, 1e-8, || false, || false);
-        let s = cc.check_convergence(1, false, 5.96e-8, 5.05e-3, 1e-8, || false, || false);
+        cc.check_convergence(0, false, 5.96e-8, 5.05e-3, 0.0, 1e-8, || false, || false);
+        let s = cc.check_convergence(1, false, 5.96e-8, 5.05e-3, 0.0, 1e-8, || false, || false);
         assert_eq!(s, RestoConvergenceStatus::Continue);
     }
 
@@ -1022,8 +1230,8 @@ mod tests {
     fn layer1_acceptance_outranks_layer2() {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
-        cc.check_convergence(0, false, 1.0, 0.5, 1e-8, || true, || true);
-        let s = cc.check_convergence(1, false, 1.0, 0.5, 1e-8, || true, || true);
+        cc.check_convergence(0, false, 1.0, 0.5, 0.0, 1e-8, || true, || true);
+        let s = cc.check_convergence(1, false, 1.0, 0.5, 0.0, 1e-8, || true, || true);
         assert_eq!(s, RestoConvergenceStatus::Converged);
     }
 
@@ -1032,12 +1240,12 @@ mod tests {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
         cc.tol = 1e-8;
-        cc.check_convergence(0, false, 1.0, 1e-12, 1e-8, || false, || true);
-        let s = cc.check_convergence(1, false, 1.0, 1e-12, 1e-8, || false, || true);
+        cc.check_convergence(0, false, 1.0, 1e-12, 0.0, 1e-8, || false, || true);
+        let s = cc.check_convergence(1, false, 1.0, 1e-12, 0.0, 1e-8, || false, || true);
         assert_eq!(s, RestoConvergenceStatus::Continue);
         assert_eq!(cc.tol, 1e-10);
         // Second visit: budget spent, so the verdict is now terminal.
-        let s = cc.check_convergence(2, false, 1.0, 1e-12, 1e-8, || false, || true);
+        let s = cc.check_convergence(2, false, 1.0, 1e-12, 0.0, 1e-8, || false, || true);
         assert_eq!(s, RestoConvergenceStatus::Converged);
         assert_eq!(cc.tol, 1e-10, "no further tightening");
     }
