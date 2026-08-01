@@ -13,6 +13,7 @@
 mod analytical;
 mod api;
 mod elastic_unit;
+mod homotopy_unit;
 mod kkt_unit;
 mod qps_unit;
 mod refinement_unit;
