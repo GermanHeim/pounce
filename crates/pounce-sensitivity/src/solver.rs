@@ -64,6 +64,7 @@ use crate::vec_util::dense_to_vec;
 
 /// Errors returned by post-convergence operations on [`Solver`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SolverError {
     /// The solver has not yet converged, or the last solve failed
     /// before producing a usable KKT factor.

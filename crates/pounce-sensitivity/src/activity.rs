@@ -8,11 +8,27 @@
 //! ```text
 //! r = Σ / q,   Σ = z/s summed over the sides that exist,
 //!              q = |H_ii|                        (variable)
-//!                  |∇dⱼᵀ H ∇dⱼ| / ‖∇dⱼ‖²         (inequality row)
+//!                  |∇dⱼᵀ H ∇dⱼ| / ‖∇dⱼ‖⁴         (inequality row)
 //! ```
 //!
+//! The row denominator carries the fourth power so that `r` is
+//! invariant to rescaling the row: `d → c·d` sends `Σ → Σ/c²` while
+//! the curvature along the unit normal is unchanged, and `‖∇d‖⁴`
+//! restores the balance. Equivalently, the geometric barrier weight
+//! `Σ‖∇d‖²` (distance to the surface is `d/‖∇d‖`, its conjugate
+//! multiplier `v‖∇d‖`) is measured against the curvature along the
+//! unit normal. Variable bounds are invariant as written. This also
+//! absorbs the solver's own per-row `d_scale`.
+//!
 //! `H` is the exact Lagrangian Hessian, so constraint curvature
-//! contributes to `q` alongside the objective's.
+//! contributes to `q` alongside the objective's. For variables, `q`
+//! reads the Hessian DIAGONAL only, so purely off-diagonal coupling is
+//! invisible to it: `f = x₁x₂` with bounds on both variables reports
+//! `unidentified` on every bound even though the bound directions have
+//! well-defined curvature. Items 1-4 of the covariance roadmap inherit
+//! these semantics where they consume the per-coordinate statuses;
+//! their reduced-block classification is where coupling becomes
+//! visible, folded into the reduced diagonal by elimination.
 //!
 //! `r` is `O(μ)` when the bound is inactive, `O(1)` when weakly active
 //! (slack and multiplier vanish together), and `O(1/μ)` when strongly
@@ -40,7 +56,7 @@ use pounce_common::types::{Index, Number};
 use pounce_linalg::Matrix;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::expansion_matrix::ExpansionMatrix;
-use pounce_linalg::triplet::SymTMatrix;
+use pounce_linalg::triplet::{GenTMatrix, SymTMatrix};
 
 use crate::PdSensBacksolver;
 use crate::vec_util::dense_to_vec;
@@ -81,6 +97,9 @@ pub struct ActivityReport {
     /// Status per user variable (codes above).
     pub var_status: Vec<i8>,
     /// `Σ_i / q_i` per user variable; `NaN` where not classified.
+    /// For an [`UNIDENTIFIED`] entry the value is `Σ/floor`, a lower
+    /// bound on any honest ratio rather than the ratio itself, since
+    /// `q` is below the identification floor there.
     pub var_ratio: Vec<Number>,
     /// Sign of the signed curvature `H_ii` (−1, 0, +1); the absolute
     /// value goes into `q`, so an indefinite direction is reported
@@ -95,6 +114,7 @@ pub struct ActivityReport {
     /// Status per user constraint row.
     pub row_status: Vec<i8>,
     /// `Σ_j / q_j` per user row; `NaN` where not classified.
+    /// [`UNIDENTIFIED`] entries hold `Σ/floor` as for variables.
     pub row_ratio: Vec<Number>,
     /// Sign of the signed row curvature `∇dⱼᵀ H ∇dⱼ`.
     pub row_q_sign: Vec<i8>,
@@ -203,17 +223,34 @@ fn hessian_diagonal(hess: &Rc<dyn pounce_linalg::SymMatrix>, n: usize) -> Vec<Nu
     diag
 }
 
+/// A bounded row whose gradient vanishes at the iterate has no
+/// direction to measure curvature along: unidentified, exactly as a
+/// below-floor `q`, never `unbounded` (the bounds are real). The
+/// ratio is the raw `Σ/floor` lower bound; the geometric weight is
+/// degenerate at zero gradient.
+fn zero_gradient_row(sigma: Number, floor: Number) -> Entry {
+    Entry {
+        status: UNIDENTIFIED,
+        ratio: sigma / floor,
+        q_sign: 0,
+        off_path: false,
+        contaminated: false,
+    }
+}
+
 /// Central-path check for one side: `s·z` within a factor of ten of `μ`.
 fn off_path(s: Number, z: Number, mu: Number) -> bool {
     let comp = s * z;
     comp > 10.0 * mu || comp < 0.1 * mu
 }
 
-/// `r` above this while classified inactive flags contamination.
-const CONTAMINATION_FLOOR: Number = 1e-3;
-
-fn contaminated(status: i8, r: Number) -> bool {
-    status == INACTIVE && r > CONTAMINATION_FLOOR
+/// Classified inactive yet `r` well above the `O(μ)` an inactive
+/// bound should carry: barrier curvature where none should be. The
+/// threshold is μ-relative because `inactive` MEANS `r = O(μ)`; a
+/// fixed constant can never sit below the inactive edge `√μ` at any
+/// converged μ (second review).
+fn contaminated(status: i8, r: Number, mu: Number) -> bool {
+    status == INACTIVE && r > 100.0 * mu
 }
 
 /// One classified entry in internal space, before the user-space
@@ -257,7 +294,7 @@ fn classify_entry(sigma: Number, q_signed: Number, floor: Number, mu: Number) ->
         ratio: r,
         q_sign,
         off_path: false,
-        contaminated: contaminated(status, r),
+        contaminated: contaminated(status, r, mu),
     }
 }
 
@@ -324,53 +361,117 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let sigma_s = dense_to_vec(cq.curr_sigma_s().as_ref());
 
     let jac_d = cq.curr_jac_d();
-    let mspace = DenseVectorSpace::new(m_d as i32);
-    let mut e_row = DenseVector::new(mspace);
-    let nspace = DenseVectorSpace::new(n as i32);
-    let mut grad = DenseVector::new(nspace.clone());
-    let mut hgrad = DenseVector::new(nspace);
-
+    // One pass over the Jacobian triplets gathers every row's support
+    // and one pass over the Hessian triplets builds an adjacency view,
+    // so each row's curvature costs its own support times its
+    // neighbours instead of a full mat-vec pair per row (second
+    // review). The mat-vec loop below remains the fallback for any
+    // future non-triplet matrix types.
     let mut rows = vec![NOT_CLASSIFIED; m_d];
+    let fast = match (
+        jac_d.as_any().downcast_ref::<GenTMatrix>(),
+        hess.as_any().downcast_ref::<SymTMatrix>(),
+    ) {
+        (Some(jt), Some(ht)) => {
+            // gather and merge each row's entries (triplet duplicates
+            // sum, matching mult_vector; indices are 1-based)
+            let mut support: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m_d];
+            for ((&r, &c), &v) in jt.irows().iter().zip(jt.jcols()).zip(jt.values()) {
+                support[(r - 1) as usize].push(((c - 1) as usize, v));
+            }
+            for sup in &mut support {
+                sup.sort_unstable_by_key(|&(c, _)| c);
+                sup.dedup_by(|a, b| {
+                    if a.0 == b.0 {
+                        b.1 += a.1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            let mut adj: Vec<Vec<(usize, Number)>> = vec![Vec::new(); n];
+            for ((&i, &l), &v) in ht.irows().iter().zip(ht.jcols()).zip(ht.values()) {
+                let (a, b) = ((i - 1) as usize, (l - 1) as usize);
+                adj[a].push((b, v));
+                if a != b {
+                    adj[b].push((a, v));
+                }
+            }
+            let mut scratch = vec![0.0; n];
+            for j in 0..m_d {
+                if !(rhas_l[j] || rhas_u[j]) {
+                    continue;
+                }
+                let sup = &support[j];
+                let norm2: Number = sup.iter().map(|&(_, g)| g * g).sum();
+                rows[j] = if norm2 <= 0.0 {
+                    zero_gradient_row(sigma_s[j], floor)
+                } else {
+                    for &(k, g) in sup {
+                        scratch[k] = g;
+                    }
+                    let mut ghg = 0.0;
+                    for &(k, gk) in sup {
+                        let mut acc = 0.0;
+                        for &(l, v) in &adj[k] {
+                            acc += v * scratch[l];
+                        }
+                        ghg += gk * acc;
+                    }
+                    for &(k, _) in sup {
+                        scratch[k] = 0.0;
+                    }
+                    // Σ·‖∇d‖² against curvature along the unit
+                    // normal: invariant to rescaling the row
+                    classify_entry(sigma_s[j] * norm2, ghg / norm2, floor, mu)
+                };
+            }
+            true
+        }
+        _ => false,
+    };
+    if !fast {
+        let mspace = DenseVectorSpace::new(m_d as i32);
+        let mut e_row = DenseVector::new(mspace);
+        let nspace = DenseVectorSpace::new(n as i32);
+        let mut grad = DenseVector::new(nspace.clone());
+        let mut hgrad = DenseVector::new(nspace);
+        for j in 0..m_d {
+            if !(rhas_l[j] || rhas_u[j]) {
+                continue;
+            }
+            // ∇dⱼ = Jdᵀ eⱼ, then the curvature along the normal;
+            // values_mut throughout because a zero product may leave
+            // the output homogeneous (empty backing slice)
+            e_row.values_mut().fill(0.0);
+            e_row.values_mut()[j] = 1.0;
+            grad.values_mut().fill(0.0);
+            jac_d.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
+            let norm2: Number = grad.values_mut().iter().map(|g| *g * *g).sum();
+            rows[j] = if norm2 <= 0.0 {
+                zero_gradient_row(sigma_s[j], floor)
+            } else {
+                hgrad.values_mut().fill(0.0);
+                hess.mult_vector(1.0, &grad, 0.0, &mut hgrad);
+                let ghg: Number = {
+                    let h = hgrad.values_mut();
+                    grad.values_mut()
+                        .iter()
+                        .zip(h.iter())
+                        .map(|(g, h)| g * h)
+                        .sum()
+                };
+                classify_entry(sigma_s[j] * norm2, ghg / norm2, floor, mu)
+            };
+        }
+    }
     for j in 0..m_d {
         if !(rhas_l[j] || rhas_u[j]) {
             continue;
         }
-        // ∇dⱼ = Jdᵀ eⱼ, then the curvature along the normal;
-        // values_mut throughout because a zero product may leave the
-        // output homogeneous (empty backing slice behind values())
-        e_row.values_mut().fill(0.0);
-        e_row.values_mut()[j] = 1.0;
-        grad.values_mut().fill(0.0);
-        jac_d.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
-        let norm2: Number = grad.values_mut().iter().map(|g| *g * *g).sum();
-        let mut e = if norm2 <= 0.0 {
-            // a bounded row whose gradient vanishes at the iterate has
-            // no direction to measure curvature along: unidentified,
-            // exactly as a below-floor q, never `unbounded` (the
-            // bounds are real)
-            Entry {
-                status: UNIDENTIFIED,
-                ratio: sigma_s[j] / floor,
-                q_sign: 0,
-                off_path: false,
-                contaminated: false,
-            }
-        } else {
-            hgrad.values_mut().fill(0.0);
-            hess.mult_vector(1.0, &grad, 0.0, &mut hgrad);
-            let ghg: Number = {
-                let h = hgrad.values_mut();
-                grad.values_mut()
-                    .iter()
-                    .zip(h.iter())
-                    .map(|(g, h)| g * h)
-                    .sum()
-            };
-            classify_entry(sigma_s[j], ghg / norm2, floor, mu)
-        };
-        e.off_path = (rhas_l[j] && off_path(rs_l[j], v_l[j], mu))
+        rows[j].off_path = (rhas_l[j] && off_path(rs_l[j], v_l[j], mu))
             || (rhas_u[j] && off_path(rs_u[j], v_u[j], mu));
-        rows[j] = e;
     }
 
     // --- scatter to user space --------------------------------------------
@@ -470,11 +571,15 @@ mod tests {
     }
 
     #[test]
-    fn contamination_flags_inactive_only() {
-        assert!(contaminated(INACTIVE, 1e-2));
-        assert!(!contaminated(INACTIVE, 1e-4));
-        assert!(!contaminated(WEAKLY_ACTIVE, 1.0));
-        assert!(!contaminated(STRONGLY_ACTIVE, 1e5));
+    fn contamination_is_mu_relative_and_inactive_only() {
+        let mu = 1e-10; // inactive edge at 1e-5, threshold at 1e-8
+        assert!(contaminated(INACTIVE, 1e-6, mu));
+        assert!(!contaminated(INACTIVE, 5e-9, mu));
+        assert!(!contaminated(WEAKLY_ACTIVE, 1.0, mu));
+        assert!(!contaminated(STRONGLY_ACTIVE, 1e5, mu));
+        // the flag is reachable: 100μ sits below the inactive edge √μ
+        // whenever μ < 1e-4, so an inactive r can exceed it
+        assert!(100.0 * mu < mu.sqrt());
     }
 
     #[test]

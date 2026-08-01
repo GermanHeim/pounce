@@ -403,7 +403,11 @@ impl PySolver {
     ///   `"unbounded"` where there is no finite bound, plus the
     ///   `"fixed"` / `"equality"` placeholders above.
     /// - `"var_ratio"`, `"row_ratio"`: ndarray of the ratio `Σ/q`
-    ///   (NaN where nothing was classified).
+    ///   (NaN where nothing was classified). An `"unidentified"` entry
+    ///   holds `Σ/floor`, a lower bound on any honest ratio rather
+    ///   than the ratio itself. Rows classify on the scale-invariant
+    ///   form `Σ‖∇d‖⁴/|∇dᵀH∇d|`, so rescaling a constraint row
+    ///   does not change its status.
     /// - `"var_q_sign"`, `"row_q_sign"`: ndarray of the sign of the
     ///   signed curvature, so an indefinite direction is visible.
     /// - `"var_off_central_path"`, `"row_off_central_path"`: list of
@@ -497,5 +501,7 @@ fn solver_error_to_py(e: SolverError) -> PyErr {
             PyRuntimeError::new_err(format!("Solver: sensitivity computation failed: {msg}"))
         }
         SolverError::BadOptions(msg) => PyValueError::new_err(format!("Solver: {msg}")),
+        // SolverError is #[non_exhaustive]
+        other => PyRuntimeError::new_err(format!("Solver: {other:?}")),
     }
 }

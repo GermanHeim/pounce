@@ -47,11 +47,13 @@ class ScalarBound:
 
 
 class ScalarRow:
-    """min ½x² − p·x with the bound as an inequality row: g(x) = x ≥ 0,
-    the variable itself unbounded."""
+    """min ½x² − p·x with the bound as an inequality row: g(x) = c·x ≥ 0,
+    the variable itself unbounded. The coefficient c changes the row's
+    units, not its geometry, so classification must not move with it."""
 
-    def __init__(self, p):
+    def __init__(self, p, c=1.0):
         self.p = p
+        self.c = c
 
     def objective(self, x):
         return 0.5 * x[0] ** 2 - self.p * x[0]
@@ -60,14 +62,14 @@ class ScalarRow:
         return np.array([x[0] - self.p])
 
     def constraints(self, x):
-        return np.array([x[0]])
+        return np.array([self.c * x[0]])
 
     def jacobianstructure(self):
         zero = np.array([0], dtype=np.int64)
         return zero, zero
 
     def jacobian(self, x):
-        return np.array([1.0])
+        return np.array([self.c])
 
     def hessianstructure(self):
         return np.array([0], dtype=np.int64), np.array([0], dtype=np.int64)
@@ -123,9 +125,9 @@ def _solve_bound(p):
     return solver.classify_activity()
 
 
-def _solve_row(p):
+def _solve_row(p, c=1.0):
     prob = _options(pounce.Problem(
-        n=1, m=1, problem_obj=ScalarRow(p),
+        n=1, m=1, problem_obj=ScalarRow(p, c),
         lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
     ))
     solver = pounce.Solver(prob)
@@ -171,6 +173,60 @@ def test_row_agrees_with_bound(p, status):
     assert rep["row_q_sign"][0] == 1
     assert rep["var_status"] == ["unbounded"]
     assert np.isnan(rep["var_ratio"][0])
+
+
+@pytest.mark.parametrize("c", [1.0, 100.0, 1000.0])
+@pytest.mark.parametrize("p, status", [
+    (1.0, "inactive"),
+    (-1.0, "strongly_active"),
+    (0.0, "weakly_active"),
+])
+def test_row_classification_is_scale_invariant(c, p, status):
+    # d -> c*d sends Sigma -> Sigma/c^2 while the curvature along the
+    # unit normal is unchanged; the ||grad||^4 normalization restores
+    # the balance, so the status cannot move with the row's units
+    # (second review's blocking finding)
+    rep = _solve_row(p, c=c)
+    assert rep["row_status"] == [status]
+
+
+def test_row_scale_invariance_without_nlp_scaling():
+    # gradient-based scaling (the default) caps the distortion the old
+    # ratio suffered; with scaling off nothing does, so this is the
+    # sharp version: the weakly active ratio must sit at 1 exactly
+    prob = pounce.Problem(
+        n=1, m=1, problem_obj=ScalarRow(0.0, 1000.0),
+        lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+    )
+    prob.add_option("tol", 1e-10)
+    prob.add_option("bound_relax_factor", 0.0)
+    prob.add_option("nlp_scaling_method", "none")
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    rep = solver.classify_activity()
+    assert rep["row_status"] == ["weakly_active"]
+    assert rep["row_ratio"][0] == pytest.approx(1.0, rel=0.5)
+
+
+def test_near_bound_inactive_flags_contamination():
+    # lb at distance 0.01 from the optimum: genuinely inactive, but the
+    # barrier contributes r = mu/s^2, about 1e4 times the O(mu) an
+    # inactive bound should carry; the mu-relative rule flags it while
+    # the far-bound cases above stay clean
+    prob = _options(pounce.Problem(
+        n=1, m=0, problem_obj=ScalarBound(1.0),
+        lb=[0.99], ub=[1e19], cl=[], cu=[],
+    ))
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.995]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    rep = solver.classify_activity()
+    assert rep["var_status"] == ["inactive"]
+    assert rep["var_contaminated"][0]
+    assert not rep["var_off_central_path"][0]
 
 
 def test_zero_curvature_is_unidentified():

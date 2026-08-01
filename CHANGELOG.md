@@ -16,8 +16,11 @@ changes.
   of the held converged solve as `inactive`, `weakly_active`,
   `strongly_active`, `ambiguous`, or `unidentified`, from the ratio `r = Σ/q`
   of barrier curvature (`Σ = z/s`, summed over the sides that exist) to the
-  model's own curvature (`q = |H_ii|` for a variable, curvature along the
-  constraint normal for a row) at the converged iterate. `r` is O(μ)
+  model's own curvature (`q = |H_ii|` for a variable; for a row,
+  `|∇dᵀH∇d|/‖∇d‖⁴`, whose fourth power makes the ratio invariant to
+  rescaling the row and to the solver's per-row scaling, so both
+  spellings of one limit classify identically at any row coefficient)
+  at the converged iterate. `r` is O(μ)
   inactive, O(1) weakly active, O(1/μ) strongly active, so one ratio
   separates the regimes where no fixed threshold on a slack or multiplier
   alone can: both are O(√μ) at weak activity. Edges sit at √μ and 1/√μ with
@@ -35,7 +38,8 @@ changes.
   reports `equality`, so user indices never shift.
 - Per-entry honesty flags on variables and rows alike: `off_central_path`
   (`s·z` differs from `μ` by more than 10× on some side) and `contaminated`
-  (classified inactive yet carrying non-negligible barrier curvature).
+  (classified inactive yet `r > 100μ`: `inactive` means `r = O(μ)`, so
+  the threshold is μ-relative and reachable).
   `classify_activity` refuses to run with `bound_relax_factor != 0` (the
   Ipopt default is `1e-8`): relaxed bounds shift the slacks the classifier
   reads.
