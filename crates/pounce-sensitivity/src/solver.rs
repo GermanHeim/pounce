@@ -102,6 +102,14 @@ pub struct ConvergedState {
     pub x: Vec<Number>,
     /// Final objective value `f(x*)`.
     pub obj_val: Number,
+    /// `bound_relax_factor` **as the solve that produced this state
+    /// ran with it**, not as the application's options read today.
+    /// The bounds were relaxed (or not) once, during this solve; a
+    /// later `set_numeric_value` cannot change what the held slacks
+    /// were measured against, so post-solve calls whose validity
+    /// depends on unrelaxed bounds must guard on this value. See
+    /// [`Solver::classify_activity`].
+    pub bound_relax_factor: Number,
     /// Converged KKT-factor wrapper. Owns `Rc` handles to the
     /// `PdFullSpaceSolver`, the IpoptData / Cq, and the NLP, so it
     /// outlives the IPM call frame.
@@ -172,6 +180,20 @@ impl Solver {
         // a stale factor visible.
         self.state.borrow_mut().take();
 
+        // Snapshot the options this solve will run under, before it
+        // runs. `bound_relax_factor` is consumed once, when the NLP
+        // relaxes its bounds; reading it back at query time would
+        // describe the application's options rather than the state
+        // being queried. The registry supplies its own default when
+        // the option is unset, so no second copy of the default lives
+        // here.
+        let brf = self
+            .app
+            .options()
+            .get_numeric_value("bound_relax_factor", "")
+            .map(|(v, _)| v)
+            .expect("bound_relax_factor is a registered core option");
+
         let state_cb = Rc::clone(&self.state);
         self.app
             .set_on_converged(Box::new(move |data, cq, nlp, pd| {
@@ -197,6 +219,7 @@ impl Solver {
                     status: ApplicationReturnStatus::InternalError,
                     x,
                     obj_val,
+                    bound_relax_factor: brf,
                     backsolver,
                 });
             }));
@@ -238,28 +261,30 @@ impl Solver {
     /// [`crate::activity`] and
     /// `dev-notes/covariance-information-roadmap.md` item 0 (gh #362).
     ///
-    /// Requires `bound_relax_factor=0` (the Ipopt default is `1e-8`):
-    /// with relaxed bounds the solver's slacks are measured against
-    /// perturbed bounds, and the complementarity products the
-    /// classifier reads no longer track `μ`.
+    /// Requires the held solve to have run with `bound_relax_factor=0`
+    /// (the Ipopt default is `1e-8`): with relaxed bounds the solver's
+    /// slacks are measured against perturbed bounds, and the
+    /// complementarity products the classifier reads no longer track
+    /// `μ`.
+    ///
+    /// The guard reads
+    /// [`ConvergedState::bound_relax_factor`] — the value that solve
+    /// ran under — not the application's current options. Setting the
+    /// option after the fact neither unlocks a state whose bounds were
+    /// relaxed nor invalidates one whose bounds were not; re-solve to
+    /// change the answer.
     pub fn classify_activity(&self) -> Result<ActivityReport, SolverError> {
-        // the registry supplies its own default when the option is
-        // unset, so no second copy of the default lives here
-        let brf = self
-            .app
-            .options()
-            .get_numeric_value("bound_relax_factor", "")
-            .map(|(v, _)| v)
-            .expect("bound_relax_factor is a registered core option");
-        if brf != 0.0 {
-            return Err(SolverError::BadOptions(format!(
-                "classify_activity requires bound_relax_factor=0 \
-                 (currently {brf:e}): relaxed bounds shift the slacks \
-                 the classifier reads"
-            )));
-        }
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let brf = state.bound_relax_factor;
+        if brf != 0.0 {
+            return Err(SolverError::BadOptions(format!(
+                "classify_activity requires bound_relax_factor=0, but the \
+                 held solve ran with {brf:e}: relaxed bounds shift the \
+                 slacks the classifier reads. Set the option and solve() \
+                 again — changing it now does not re-measure the slacks."
+            )));
+        }
         Ok(crate::activity::compute(&state.backsolver))
     }
 
