@@ -36,6 +36,7 @@ use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
 use crate::kkt::aug_system_solver::AugSystemSolver;
 use pounce_linalg::Vector;
+use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -238,6 +239,44 @@ fn is_initialized(v: &Rc<dyn Vector>) -> bool {
         .unwrap_or(true)
 }
 
+/// Replace every NaN entry of `v` with `fill`, in place.
+///
+/// NaN in a user-supplied multiplier seed means "unseeded" (see the
+/// `Problem.solve` contract), and has to be resolved before the
+/// clamps: `element_wise_min`/`element_wise_max` would propagate it
+/// into the iterate, poisoning the solve.
+///
+/// Both `Vector` storage layouts are handled. A dense block is
+/// scanned directly; a compound block recurses into its components,
+/// so the contract holds wherever the iterate's multiplier blocks
+/// live — the seed path (`seed_from_nlp`) always builds dense
+/// vectors, but the re-optimize path reuses whatever the previous
+/// solve's spaces produced, and a debug-only guard would be compiled
+/// out of exactly the release builds that ship.
+fn resolve_nan_seeds(v: &mut dyn Vector, fill: f64) {
+    // Type-test before taking the mutable borrow: `if let Some(d) =
+    // v.as_any_mut()… else` would keep that borrow live across the
+    // else arm.
+    if v.as_any().is::<DenseVector>() {
+        let d = v.as_any_mut().downcast_mut::<DenseVector>().unwrap();
+        for e in d.values_mut() {
+            if e.is_nan() {
+                *e = fill;
+            }
+        }
+    } else if v.as_any().is::<CompoundVector>() {
+        let c = v.as_any_mut().downcast_mut::<CompoundVector>().unwrap();
+        for i in 0..c.n_comps() {
+            resolve_nan_seeds(c.comp_mut(i), fill);
+        }
+    } else {
+        // `DenseVector` and `CompoundVector` are the only `Vector`
+        // implementations; a third one must be handled here, or NaN
+        // rides the clamps into the iterate as a silent poison.
+        debug_assert!(false, "resolve_nan_seeds: unhandled Vector implementation");
+    }
+}
+
 /// Clone `v` into a fresh owned vector and clamp every entry to
 /// `[lo, hi]` componentwise. Empty vectors short-circuit. Vectors that
 /// were never written to (the application's placeholder seed iterates
@@ -260,24 +299,7 @@ fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64, nan_fill: f64) -> Rc<dyn 
         out.copy(&**v);
         // NaN marks an unseeded entry; resolve it before the clamps
         // (element-wise min/max would just propagate it)
-        if let Some(d) = out.as_any_mut().downcast_mut::<DenseVector>() {
-            for e in d.values_mut() {
-                if e.is_nan() {
-                    *e = nan_fill;
-                }
-            }
-        } else {
-            // Non-dense vectors (CompoundVector on the re-optimize
-            // path) skip NaN resolution: the user-seed path always
-            // builds DenseVectors, so NaN here is an upstream contract
-            // violation, not an unseeded entry. Fail loudly in debug
-            // rather than let NaN ride the clamps into the iterate.
-            debug_assert!(
-                !out.dot(&**v).is_nan(),
-                "clone_clamped: NaN in a non-dense multiplier vector; \
-                 NaN-as-unseeded requires DenseVector storage"
-            );
-        }
+        resolve_nan_seeds(&mut *out, nan_fill);
     } else {
         out.set(0.0);
     }
@@ -293,6 +315,7 @@ fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64, nan_fill: f64) -> Rc<dyn 
 #[cfg(test)]
 mod tests_nan_seed {
     use super::*;
+    use pounce_linalg::compound_vector::CompoundVectorSpace;
     use pounce_linalg::dense_vector::DenseVectorSpace;
 
     #[test]
@@ -306,6 +329,50 @@ mod tests_nan_seed {
         assert_eq!(out.values()[0], 0.5);
         assert_eq!(out.values()[1], 7.0); // unseeded -> fill
         assert_eq!(out.values()[2], 1e6); // then the cap applies
+    }
+
+    /// The re-optimize path reuses the previous solve's vector spaces,
+    /// which are compound for a blocked NLP. NaN has to resolve there
+    /// too: a debug-only guard is compiled out of the release builds
+    /// that ship, so an unresolved NaN would ride the clamps into the
+    /// iterate and poison the solve.
+    #[test]
+    fn nan_resolves_inside_a_compound_vector() {
+        let inner = DenseVectorSpace::new(2);
+        let space = CompoundVectorSpace::new(2, 4);
+        for icomp in 0..2 {
+            let inner = Rc::clone(&inner);
+            space.set_comp(icomp, 2, move || {
+                let mut d = inner.make_new_dense();
+                d.set(0.0);
+                Box::new(d)
+            });
+        }
+        let mut cv = CompoundVector::new(Rc::clone(&space));
+        for (icomp, vals) in [[0.5, f64::NAN], [f64::NAN, 2e7]].into_iter().enumerate() {
+            let c = cv.comp_mut(icomp as pounce_common::types::Index);
+            let d = c.as_any_mut().downcast_mut::<DenseVector>().unwrap();
+            d.values_mut().copy_from_slice(&vals);
+        }
+
+        let v: Rc<dyn Vector> = Rc::from(cv);
+        let out = clone_clamped(&v, 1e-3, 1e6, 7.0);
+
+        let out = out.as_any().downcast_ref::<CompoundVector>().unwrap();
+        let flat: Vec<f64> = (0..out.n_comps())
+            .flat_map(|i| {
+                out.comp(i)
+                    .as_any()
+                    .downcast_ref::<DenseVector>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(flat[0], 0.5);
+        assert_eq!(flat[1], 7.0); // unseeded -> fill, not NaN
+        assert_eq!(flat[2], 7.0);
+        assert_eq!(flat[3], 1e6); // then the cap applies
     }
 }
 

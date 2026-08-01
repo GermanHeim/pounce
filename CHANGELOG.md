@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: constraint-row lookups included a non-row name
+
+- Pyomo's `.row` file lists the `m` constraint rows and then appends
+  the objective's name, and the declared-parameter surgery aliases the
+  objective along with the constraints it rewrites. The name-to-row
+  index built from that file therefore mapped the objective to row
+  `m`, one past the last constraint — a name that indexes past the end
+  of every per-row array the index is used with. The warm-start suffix
+  reader got a bounds check for this in #432; the row names are now
+  trimmed where they are read instead, so the pin map and the
+  multiplier lookups hold the same invariant structurally rather than
+  one call site at a time.
+- No public API routed an objective into those lookups (`gradient()`
+  sends an objective target to the variable lookup, which rejects it
+  by name), so this is an invariant repair, not a user-visible
+  behavior change.
+
+### Fixed — warm start: NaN seeds resolved only in densely-stored multiplier blocks
+
+- `warm_start_init_point=yes` treats NaN in a `lagrange` / `zl` / `zu`
+  seed as "unseeded, use the solver's own default" (#432). That
+  substitution ran only for densely-stored multiplier blocks. A
+  compound block kept the NaN, which would then propagate through the
+  warm-start clamps into the iterate; the guard against it was a
+  `debug_assert!`, compiled out of the release builds that ship.
+- NaN resolution now recurses into compound blocks, so the documented
+  contract holds for every multiplier-block layout rather than only
+  the one the seeding path happens to build. The seeding path builds
+  dense blocks today, so no shipped configuration reached the gap —
+  it is the contract that is now true, not a solve that changed.
+
 ### Fixed — pyomo-pounce: the sens path dropped solver options (#432)
 
 - `SolverFactory("pounce").solve(m, options={...})` and factory-level
