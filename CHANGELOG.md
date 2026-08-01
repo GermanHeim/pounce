@@ -80,6 +80,15 @@ changes.
   paths killed mid-flight 37 → 31, and the median completed path halves
   (216 → 102 steps). `QSHARE2B`, the seventh loss recorded on
   `sqp_qp_use_homotopy`, also recovers.
+- Scope, because it is easy to overclaim: this fixes paths that *wedge*, not
+  the `O(|A|)` pivot cost in #434's title. The `benchmarks/warmstart` `-hom`
+  arms reproduce **identically** after it (727 → 1692 inner active-set changes,
+  0.43×, tracking the active-set fraction 82% → 0.63×, 5% → 1.00%,
+  99% → 0.32×), because the defect never fires on those small non-degenerate
+  QPs. That cost is real and remains. It is bounded, though: all arms return
+  correct answers with identical outer iteration counts, so it is overhead
+  rather than damage, and `use_homotopy` is `false` by default in `pounce-qp`,
+  so the SQP inner-QP path does not take it unless asked.
 - **No runtime guard is added**, which is what #434 was filed to ask for. The
   losses that remain after this fix cannot be separated from the gains by any
   threshold on (path steps, `t`): the only rule that catches all the reachable

@@ -16,10 +16,17 @@ order of work:
 > the failure mode of a bad threshold is giving back more than it recovers,
 > silently.
 
-This note records that measurement and what it turned up, which was not what
-the issue expected: **most of the cost was a numerical defect, not an
-algorithmic one.** #434's own "also open, and cheaper" item — crossings
-escaping the primal ratio test — was the cause of the expensive one.
+This note records that measurement. Two things came out of it, and they are
+about different phenomena that the issue treats as one:
+
+1. The instances where the homotopy **wedges** — burns the cap without
+   finishing — were mostly a numerical defect, #434's own "also open, and
+   cheaper" item. Fixing it recovers them.
+2. The **Ω(|A|) pivot cost** the issue's title describes is separate, real,
+   and untouched by that fix. The warm-start corroboration reproduces
+   *identically* after it.
+
+And the guard the issue asks for is **declined**, with the data for why.
 
 ---
 
@@ -154,6 +161,46 @@ cold paths that reach `t = 1` go 92 → 98 of 138, those killed mid-flight
 steps* to *complete in 615*, and it is **still a loss**. The fix moved it from
 the never-finishes mode into the bad-prediction mode. Path cost was not what
 was wrong with it.
+
+### The fix does **not** touch the warm-start corroboration — and that matters
+
+#434 corroborates its cost claim with the `benchmarks/warmstart` suite, whose
+`-hom` arms differ from their twins by exactly `use_homotopy`. Re-running that
+suite (`python -m warmstart.run --quick`, the three families in the issue's
+table) against the **fixed** build reproduces the issue's numbers *exactly*:
+
+| family | conventional | homotopy | ratio | mean \|A\|/n |
+|---|--:|--:|--:|--:|
+| `simplex_proj` | 328 | 523 | 0.63× | 16.4/20 = 82% |
+| `rosenbrock_ring` | 29 | 29 | 1.00× | 0.5/10 = 5% |
+| `nmpc_vanderpol` | 370 | 1140 | **0.32×** | 46.4/47 = 99% |
+| **total** | **727** | **1692** | **0.43×** | |
+
+Not close to the issue's figures — identical. These are deterministic counts,
+and the ratio-test defect never fires on these families: they are small,
+non-degenerate QPs where no two crossings land within `1e-12` of each other.
+
+So the two phenomena are **separate**, and this note's first result must not be
+read as covering both:
+
+* The **Ω(\|A\|) pivot cost** the issue describes is real, reproduced, tracks
+  the active-set fraction exactly as claimed (82% → 0.63×, 5% → 1.00×,
+  99% → 0.32×), and is **completely untouched** by the ratio-test fix.
+* The **Maros-Mészáros wedging** — `AUG2D`/`AUG2DC` stuck at `t = 0.5` and
+  burning the cap — was the defect, and is fixed.
+
+Worth stating plainly because it is easy to overclaim from the first result:
+the fix explains why some large cold solves *stopped*, not why the homotopy
+costs more pivots when the active set is a large fraction of `n`. #434's
+central mechanism claim survives the fix intact.
+
+Two things bound how much that costs in practice. All arms return correct
+answers with **identical outer iteration counts** (20/20, 301/301, 86/86), so
+the extra inner work buys nothing and loses nothing — it is overhead, not
+damage. And `use_homotopy` defaults to `false` in `pounce-qp`, so the SQP
+inner-QP path does not take it unless asked; these `-hom` arms are opt-in
+measurements, not shipped behaviour. The default that *is* on is the convex QP
+driver's, which is what the Maros-Mészáros sweep above measures.
 
 ---
 
