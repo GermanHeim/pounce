@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: the sens path dropped solver options (#432)
+
+- `SolverFactory("pounce").solve(m, options={...})` and factory-level
+  options were silently ignored the moment a model carried
+  declarations: the reroute to the in-process session forwarded
+  nothing. `max_iter`, tolerances, scaling, everything ran at defaults
+  with no signal, so a model stopped being tunable the day it gained a
+  declaration.
+- Options now flow: factory options first, per-call `options=` on top,
+  applied after the tee default so an explicit `print_level` wins. The
+  ASL layer's bookkeeping `solver` key is excluded.
+- Regression: `max_iter=1` must stop a declared model's solve, from
+  both option sources.
+
+### Added — pyomo-pounce: in-process warm starts from the model's suffixes (#432)
+
+- With `warm_start_init_point=yes` among the options, the sens path
+  reads the model's `dual` / `ipopt_zL_in` / `ipopt_zU_in` suffixes
+  into the session's initial multipliers, matched by component name.
+- Entries the user did not supply fall back to the solver's own
+  defaults (`bound_mult_init_val` for bound multipliers, 0 for
+  equality duals), never zero. Through ASL an absent entry reads as a
+  zero multiplier because a dense array cannot say "unknown", and a
+  zero bound multiplier on an active bound is a contradictory
+  certificate the solver must first recover from. A suffix knows which
+  entries exist, so an explicit zero is honored and absence means
+  "initialize normally": a deliberate divergence from the ASL path's
+  accidental zero-fill.
+- The sens path's results object now reports the iteration count
+  (`statistics.black_box.number_of_iterations`).
+- Regression: a plain solve's exported multipliers, fed back as
+  suffixes, make the declared warm re-solve beat the cold one; the
+  reader's fallback semantics are unit-tested (explicit zero kept,
+  absent entry defaulted).
+
 ### Added — post-solve activity classification on `Solver` (#362, covariance roadmap item 0)
 
 - `Solver.classify_activity()` (Rust: `pounce_sensitivity::activity`)

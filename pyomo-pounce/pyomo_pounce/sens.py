@@ -339,8 +339,48 @@ _STATUS_RESULT = {
 }
 
 
-def _stream_solve(solver, x0):
-    """Run ``solver.solve(x0)`` with the engine's log streamed to sys.stdout.
+def _warm_start_from_suffixes(model, var_names, con_names, nl, options):
+    """Initial multipliers for `warm_start_init_point=yes`, read from
+    the model's `dual` (equality multipliers) and `ipopt_zL_in` /
+    `ipopt_zU_in` (bound multipliers) suffixes, matched to the solve's
+    rows by component name.
+
+    Entries the user did not supply fall back to the solver's own
+    defaults (`bound_mult_init_val` for bound multipliers, 0 for
+    equality duals) rather than zero. Through ASL an absent entry reads
+    as a zero multiplier, because a dense array cannot express
+    "unknown"; a zero bound multiplier on an active bound is a
+    contradictory KKT certificate the solver must first recover from.
+    A suffix knows which entries exist, so absence is representable:
+    an explicit zero stays zero, absence means "initialize as you
+    normally would". Suffix entries naming components the solve does
+    not carry (e.g. constraints replaced by the declared-parameter
+    surgery) are skipped.
+    """
+    zdef = float((options or {}).get("bound_mult_init_val", 1.0))
+    y = np.zeros(int(nl.m))
+    zl = np.full(int(nl.n), zdef)
+    zu = np.full(int(nl.n), zdef)
+    var_row = _row_index(var_names)
+    con_row = _row_index(con_names)
+    dual = model.component("dual")
+    if isinstance(dual, pyo.Suffix):
+        for cd, val in dual.items():
+            r = con_row.get(cd.name)
+            if r is not None:
+                y[r] = float(val)
+    for sfx_name, arr in (("ipopt_zL_in", zl), ("ipopt_zU_in", zu)):
+        sfx = model.component(sfx_name)
+        if isinstance(sfx, pyo.Suffix):
+            for vd, val in sfx.items():
+                r = var_row.get(vd.name)
+                if r is not None:
+                    arr[r] = float(val)
+    return {"lagrange": y, "zl": zl, "zu": zu}
+
+
+def _stream_solve(solver, x0, **solve_kwargs):
+    """Run ``solver.solve(x0, **solve_kwargs)`` with the engine's log streamed to sys.stdout.
 
     The engine (and ``pounce.print_banner``) write straight to the process
     stdout, fd 1, bypassing ``sys.stdout``: visible in a terminal, invisible
@@ -360,7 +400,7 @@ def _stream_solve(solver, x0):
 
     def _timed():
         t0 = time.perf_counter()
-        out = solver.solve(x0)
+        out = solver.solve(x0, **solve_kwargs)
         return out, time.perf_counter() - t0
 
     try:
@@ -414,7 +454,7 @@ def _stream_solve(solver, x0):
         tailer.start()
         try:
             t0 = time.perf_counter()
-            out = solver.solve(x0)
+            out = solver.solve(x0, **solve_kwargs)
             solve_secs = time.perf_counter() - t0
         finally:
             # Stop the tailer and drain the tail even if the solve raised, so
@@ -438,13 +478,18 @@ def _stream_solve(solver, x0):
 
 
 def sens_solve(model, tee=False, sens_params=None, fitted=None,
-               residuals=None):
+               residuals=None, options=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
     for gradient()/estimate()/covariance(). Called automatically by
     SolverFactory('pounce').solve() when declarations are present; the
     keyword arguments are the explicit (call-time) form of the
     declarations and register the components exactly as the declare_*
-    functions do. Returns a Pyomo SolverResults, like an ordinary solve."""
+    functions do. `options` is a mapping of solver options applied to
+    the in-process session exactly as the ordinary path would apply
+    them; with `warm_start_init_point=yes` among them, the initial
+    multipliers come from the model's `dual` / `ipopt_zL_in` /
+    `ipopt_zU_in` suffixes (see `_warm_start_from_suffixes`). Returns a
+    Pyomo SolverResults, like an ordinary solve."""
     import pounce
 
     reg = _registry(model)
@@ -493,16 +538,25 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # Pyomo convention is silence unless tee=True; print_level 0 makes
         # the engine emit nothing at all.
         prob.add_option("print_level", 0)
+    # user options land after the tee default so an explicit
+    # print_level (or anything else) wins
+    for _k, _v in (options or {}).items():
+        prob.add_option(_k, _v)
+    warm = {}
+    if str((options or {}).get("warm_start_init_point", "no")).lower() == "yes":
+        warm = _warm_start_from_suffixes(
+            model, var_names, con_names, nl, options)
     solver = pounce.Solver(prob)
     if tee:
         # At the default print_level the engine emits its own banner (via
         # print_banner), problem statistics, iteration table, and summary;
         # _stream_solve tails them to sys.stdout live and times the solve
         # alone (excluding banner/stream overhead).
-        (x, info), solve_secs = _stream_solve(solver, np.asarray(nl.x0))
+        (x, info), solve_secs = _stream_solve(
+            solver, np.asarray(nl.x0), **warm)
     else:
         t_solve = time.perf_counter()
-        x, info = solver.solve(np.asarray(nl.x0))
+        x, info = solver.solve(np.asarray(nl.x0), **warm)
         solve_secs = time.perf_counter() - t_solve
 
     status_msg = str(info.get("status_msg", ""))
@@ -525,6 +579,10 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         results.solver.error_rc = 0
         # solve_secs is the solve alone (the tee stream/decode is excluded)
         results.solver.time = solve_secs
+        it = info.get("iter_count")
+        if it is not None:
+            stats = results.solver.statistics
+            stats.black_box.number_of_iterations = int(it)
         results.problem.number_of_objectives = 1
         results.problem.number_of_constraints = int(nl.m)
         results.problem.number_of_variables = int(nl.n)
