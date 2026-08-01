@@ -1,6 +1,8 @@
 """Tests for pyomo_pounce.sens: declared-parameter sensitivity."""
 import warnings
 
+import numpy as np
+
 import pytest
 import pyomo.environ as pyo
 
@@ -566,3 +568,194 @@ def test_inequality_multiplier_error_is_unchanged():
     s = _fake_session(["a"], ["c"], row_offset=None)
     with pytest.raises(ValueError, match="equality constraints"):
         s.mult_entry("c")
+
+
+def test_options_reach_the_sens_path():
+    """Solver options must survive the reroute to sens_solve: max_iter=1
+    has to stop the solve (gh #432: they were silently dropped)."""
+    from pyomo_pounce import declare_sens_param
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(initialize=10.0)
+    m.y = pyo.Var(initialize=10.0)
+    m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+    m.obj = pyo.Objective(expr=m.y + (m.x - 1) ** 4)
+    declare_sens_param(m.p)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = pyo.SolverFactory("pounce").solve(m, options={"max_iter": 1})
+    assert (res.solver.termination_condition
+            == pyo.TerminationCondition.maxIterations)
+
+
+def test_factory_options_reach_the_sens_path():
+    """Factory-level options (solver.options[...]) flow too, and the
+    per-call options= wins on conflict."""
+    from pyomo_pounce import declare_sens_param
+
+    def build():
+        m = pyo.ConcreteModel()
+        m.p = pyo.Param(initialize=2.0, mutable=True)
+        m.x = pyo.Var(initialize=10.0)
+        m.y = pyo.Var(initialize=10.0)
+        m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+        m.obj = pyo.Objective(expr=m.y + (m.x - 1) ** 4)
+        declare_sens_param(m.p)
+        return m
+
+    solver = pyo.SolverFactory("pounce")
+    solver.options["max_iter"] = 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = solver.solve(build())
+    assert (res.solver.termination_condition
+            == pyo.TerminationCondition.maxIterations)
+    # per-call wins over the factory's 1: the solve completes
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = solver.solve(build(), options={"max_iter": 500})
+    assert (res.solver.termination_condition
+            == pyo.TerminationCondition.optimal)
+
+
+def test_warm_start_reader_semantics():
+    """The reader crosses both sign conventions (dual is the AMPL
+    marginal -lambda, gh #271; ipopt_zU_in is Ipopt's negative-at-upper
+    convention, gh #296), honors an explicit zero, seeds absent entries
+    NaN (the session's unseeded marker, resolved by the initializer
+    against its own defaults), and reaches surgery-replaced constraints
+    through the clone alias (gh #432)."""
+    from pyomo_pounce.sens import _warm_start_from_suffixes
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var()
+    m.y = pyo.Var()
+    m.c1 = pyo.Constraint(expr=m.x + m.y == 1.0)
+    m.c2 = pyo.Constraint(expr=m.x - m.y == 0.0)
+    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT)
+    m.ipopt_zL_in = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    m.ipopt_zU_in = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    m.dual[m.c1] = 3.5                # -> -3.5 internal
+    m.dual[m.c2] = -1.25              # replaced row, reached via alias
+    m.ipopt_zL_in[m.x] = 0.0          # explicit zero: honored
+    m.ipopt_zU_in[m.x] = -2.0         # Ipopt sign -> +2.0 internal
+
+    class _NL:
+        n = 2
+        m = 2
+
+    warm = _warm_start_from_suffixes(
+        m, ["x", "y"], ["c1", "c2_replaced"], _NL(),
+        {"c2": "c2_replaced"})
+    np.testing.assert_allclose(warm["lagrange"], [-3.5, 1.25])
+    assert warm["zl"][0] == 0.0 and np.isnan(warm["zl"][1])
+    assert warm["zu"][0] == 2.0 and np.isnan(warm["zu"][1])
+
+
+def test_warm_start_request_accepts_bools():
+    """Problem.add_option maps Python True to "yes", so the reroute
+    must treat them alike, or True would warm-start with no seeds."""
+    from pyomo_pounce.sens import _warm_start_requested
+    assert _warm_start_requested({"warm_start_init_point": True})
+    assert _warm_start_requested({"warm_start_init_point": "yes"})
+    assert _warm_start_requested({"warm_start_init_point": "y"})
+    assert not _warm_start_requested({"warm_start_init_point": False})
+    assert not _warm_start_requested({"warm_start_init_point": "no"})
+    assert not _warm_start_requested({})
+    assert not _warm_start_requested(None)
+
+
+def test_warm_start_from_suffixes_reduces_iterations():
+    """The receding-horizon pattern end to end: an ASL solve exports
+    multipliers, the suffixes seed the declared re-solve, and the warm
+    solve beats the cold one (gh #432)."""
+    from pyomo_pounce import declare_sens_param
+
+    def build():
+        m = pyo.ConcreteModel()
+        m.p = pyo.Param(initialize=1.0, mutable=True)
+        m.x = pyo.Var(initialize=5.0, bounds=(0.0, None))
+        m.y = pyo.Var(initialize=5.0)
+        m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+        m.obj = pyo.Objective(expr=(m.x + 1) ** 2 + (m.y - 2) ** 2)
+        return m
+
+    # cold: declared solve from the initialization point
+    cold = build()
+    declare_sens_param(cold.p)
+    res_cold = pyo.SolverFactory("pounce").solve(cold)
+    its_cold = res_cold.solver.statistics.black_box.number_of_iterations
+
+    # warm: ASL solve exports multipliers, then the declared re-solve
+    # consumes them (x0 is the model state, multipliers the suffixes)
+    warm = build()
+    warm.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT)
+    warm.ipopt_zL_out = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+    warm.ipopt_zU_out = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+    pyo.SolverFactory("pounce").solve(warm)
+    warm.ipopt_zL_in = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    warm.ipopt_zU_in = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    for vd, val in warm.ipopt_zL_out.items():
+        warm.ipopt_zL_in[vd] = val
+    for vd, val in warm.ipopt_zU_out.items():
+        warm.ipopt_zU_in[vd] = val
+    declare_sens_param(warm.p)
+    res_warm = pyo.SolverFactory("pounce").solve(warm, options={
+        "warm_start_init_point": "yes",
+        "warm_start_bound_push": 1e-9,
+        "warm_start_mult_bound_push": 1e-9,
+        "warm_start_bound_frac": 1e-9,
+    })
+    its_warm = res_warm.solver.statistics.black_box.number_of_iterations
+    assert res_warm.solver.termination_condition == \
+        pyo.TerminationCondition.optimal
+    assert its_warm < its_cold
+
+
+def test_warm_start_partial_seed_solves_clean():
+    """Only the duals are seeded: every bound multiplier rides the NaN
+    channel and takes the solver's own default downstream. The solve
+    must come back optimal, with no poisoned certificate (gh #432)."""
+    from pyomo_pounce import declare_sens_param
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=1.0, mutable=True)
+    m.x = pyo.Var(initialize=5.0, bounds=(0.0, None))
+    m.y = pyo.Var(initialize=5.0)
+    m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+    m.obj = pyo.Objective(expr=(m.x + 1) ** 2 + (m.y - 2) ** 2)
+    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT)
+    pyo.SolverFactory("pounce").solve(m)
+    declare_sens_param(m.p)
+    res = pyo.SolverFactory("pounce").solve(m, options={
+        "warm_start_init_point": True,
+    })
+    assert (res.solver.termination_condition
+            == pyo.TerminationCondition.optimal)
+
+
+def test_warm_start_dual_lands_on_the_aliased_row():
+    """The alias path end to end, against a map a REAL surgery block
+    produced: a declared Param inside a constraint makes the surgery
+    replace it on the clone, and the dual must land on the replaced
+    row. The synthetic-map unit test cannot see a broken
+    _replaced_aliases, and the partial-seed test cannot tell a broken
+    alias from working defaults (both solve optimal)."""
+    from pyomo_pounce.sens import _warm_start_from_suffixes, _row_index
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=2.0, mutable=True)
+    m.x = pyo.Var(initialize=1.0)
+    m.y = pyo.Var(initialize=1.0)
+    m.c = pyo.Constraint(expr=m.y == (m.x - m.p) ** 2)
+    m.obj = pyo.Objective(expr=m.y + (m.x - 1) ** 4)
+    m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT_EXPORT)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    assert "c" in session.con_alias, "surgery should have replaced m.c"
+    clone_name = session.con_alias["c"]
+    m.dual[m.c] = 2.5
+    warm = _warm_start_from_suffixes(
+        m, session.var_names, session.con_names, session.nl,
+        session.con_alias)
+    row = _row_index(session.con_names)[clone_name]
+    assert warm["lagrange"][row] == -2.5
+    assert not np.isnan(warm["lagrange"][row])

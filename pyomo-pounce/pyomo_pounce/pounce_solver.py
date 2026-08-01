@@ -188,7 +188,17 @@ class POUNCE(ASL):
                     "if a continuous relaxation is what you intend, or use a "
                     "MINLP-capable solver.")
         if model is not None and (has_declarations(model) or explicit):
-            return sens_solve(model, tee=kwds.get("tee", False), **explicit)
+            # Solver options must survive the reroute: factory-level
+            # options (SolverFactory("pounce", options=...) or
+            # solver.options[...]) first, per-call options={...} on top.
+            # Dropping them here silently un-tuned every model the day
+            # it gained a declaration (gh #432).
+            # the ASL layer keeps its executable option prefix under
+            # the `solver` key; it is bookkeeping, not a solver option
+            opts = {k: v for k, v in self.options.items() if k != "solver"}
+            opts.update(kwds.get("options") or {})
+            return sens_solve(model, tee=kwds.get("tee", False),
+                              options=opts, **explicit)
         return super().solve(*args, **kwds)
 
     def _default_executable(self):

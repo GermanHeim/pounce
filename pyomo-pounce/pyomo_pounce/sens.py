@@ -339,8 +339,83 @@ _STATUS_RESULT = {
 }
 
 
-def _stream_solve(solver, x0):
-    """Run ``solver.solve(x0)`` with the engine's log streamed to sys.stdout.
+def _replaced_aliases(clone, si):
+    """Original constraint name -> clone constraint name, for rows the
+    declared-parameter surgery replaced. Built from the surgery block,
+    so it is available before the solve; the session stores the same
+    map afterwards."""
+    if si is None:
+        return {}
+    block = clone.component(SensitivityInterface.get_default_block_name())
+    if block is None or not getattr(block, "_has_replaced_expressions",
+                                    False):
+        return {}
+    out = {}
+    for new_comp, old_comp in block._replaced_map.items():
+        for nd, od in zip(_iter_data(new_comp), _iter_data(old_comp)):
+            out[od.name] = nd.name
+    return out
+
+
+def _warm_start_requested(options):
+    """`warm_start_init_point` truthiness, accepting what
+    `Problem.add_option` itself accepts: Python True maps to "yes"
+    there, so it (and "y") must enter warm-start mode here too, or the
+    Pyomo-natural spelling would warm-start with no seeds."""
+    v = (options or {}).get("warm_start_init_point", "no")
+    return v is True or str(v).strip().lower() in ("yes", "y")
+
+
+def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
+    """Initial multipliers for `warm_start_init_point=yes`, read from
+    the model's `dual` (equality multipliers) and `ipopt_zL_in` /
+    `ipopt_zU_in` (bound multipliers) suffixes, matched to the solve's
+    rows by component name; a constraint replaced by the
+    declared-parameter surgery is reached through its clone alias.
+
+    Two sign conventions are crossed on the way in. `m.dual[c]` holds
+    the AMPL marginal `d obj / d b = -lambda` (gh #271), while the
+    session's `lagrange=` wants the internal `+lambda`, so dual entries
+    negate. `ipopt_zU_in` follows Ipopt's convention, negative at an
+    active upper bound (gh #296), while the session wants the internal
+    non-negative `z_u`, so it negates too; `zL` is positive in both.
+
+    Entries the user did not supply are seeded NaN, the session's
+    "unseeded" marker: the warm-start initializer substitutes its own
+    resolved defaults (`bound_mult_init_val` for bound multipliers, 0
+    for equality duals), so partial seeds never turn into the zero
+    certificate an ASL-style dense array forces, and the defaults live
+    in one place. An explicit zero is honored, then floored at
+    `warm_start_mult_bound_push` exactly as a round-tripped inactive
+    multiplier is.
+    """
+    y = np.full(int(nl.m), np.nan)
+    zl = np.full(int(nl.n), np.nan)
+    zu = np.full(int(nl.n), np.nan)
+    var_row = _row_index(var_names)
+    con_row = _row_index(con_names)
+    dual = model.component("dual")
+    if isinstance(dual, pyo.Suffix):
+        for cd, val in dual.items():
+            r = con_row.get(con_alias.get(cd.name, cd.name))
+            # r < m guards the .row file's trailing objective name
+            # (and the surgery's objective alias): the objective is
+            # not a constraint row and carries no dual
+            if r is not None and r < int(nl.m):
+                y[r] = -float(val)      # AMPL marginal -> internal lambda
+    for sfx_name, arr, sign in (("ipopt_zL_in", zl, 1.0),
+                                ("ipopt_zU_in", zu, -1.0)):
+        sfx = model.component(sfx_name)
+        if isinstance(sfx, pyo.Suffix):
+            for vd, val in sfx.items():
+                r = var_row.get(vd.name)
+                if r is not None:
+                    arr[r] = sign * float(val)
+    return {"lagrange": y, "zl": zl, "zu": zu}
+
+
+def _stream_solve(solver, x0, **solve_kwargs):
+    """Run ``solver.solve(x0, **solve_kwargs)`` with the engine's log streamed to sys.stdout.
 
     The engine (and ``pounce.print_banner``) write straight to the process
     stdout, fd 1, bypassing ``sys.stdout``: visible in a terminal, invisible
@@ -360,7 +435,7 @@ def _stream_solve(solver, x0):
 
     def _timed():
         t0 = time.perf_counter()
-        out = solver.solve(x0)
+        out = solver.solve(x0, **solve_kwargs)
         return out, time.perf_counter() - t0
 
     try:
@@ -414,7 +489,7 @@ def _stream_solve(solver, x0):
         tailer.start()
         try:
             t0 = time.perf_counter()
-            out = solver.solve(x0)
+            out = solver.solve(x0, **solve_kwargs)
             solve_secs = time.perf_counter() - t0
         finally:
             # Stop the tailer and drain the tail even if the solve raised, so
@@ -438,13 +513,18 @@ def _stream_solve(solver, x0):
 
 
 def sens_solve(model, tee=False, sens_params=None, fitted=None,
-               residuals=None):
+               residuals=None, options=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
     for gradient()/estimate()/covariance(). Called automatically by
     SolverFactory('pounce').solve() when declarations are present; the
     keyword arguments are the explicit (call-time) form of the
     declarations and register the components exactly as the declare_*
-    functions do. Returns a Pyomo SolverResults, like an ordinary solve."""
+    functions do. `options` is a mapping of solver options applied to
+    the in-process session exactly as the ordinary path would apply
+    them; with `warm_start_init_point=yes` among them, the initial
+    multipliers come from the model's `dual` / `ipopt_zL_in` /
+    `ipopt_zU_in` suffixes (see `_warm_start_from_suffixes`). Returns a
+    Pyomo SolverResults, like an ordinary solve."""
     import pounce
 
     reg = _registry(model)
@@ -493,16 +573,26 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # Pyomo convention is silence unless tee=True; print_level 0 makes
         # the engine emit nothing at all.
         prob.add_option("print_level", 0)
+    # user options land after the tee default so an explicit
+    # print_level (or anything else) wins
+    for key, val in (options or {}).items():
+        prob.add_option(key, val)
+    con_alias = _replaced_aliases(clone, si)
+    warm = {}
+    if _warm_start_requested(options):
+        warm = _warm_start_from_suffixes(
+            model, var_names, con_names, nl, con_alias)
     solver = pounce.Solver(prob)
     if tee:
         # At the default print_level the engine emits its own banner (via
         # print_banner), problem statistics, iteration table, and summary;
         # _stream_solve tails them to sys.stdout live and times the solve
         # alone (excluding banner/stream overhead).
-        (x, info), solve_secs = _stream_solve(solver, np.asarray(nl.x0))
+        (x, info), solve_secs = _stream_solve(
+            solver, np.asarray(nl.x0), **warm)
     else:
         t_solve = time.perf_counter()
-        x, info = solver.solve(np.asarray(nl.x0))
+        x, info = solver.solve(np.asarray(nl.x0), **warm)
         solve_secs = time.perf_counter() - t_solve
 
     status_msg = str(info.get("status_msg", ""))
@@ -525,6 +615,10 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         results.solver.error_rc = 0
         # solve_secs is the solve alone (the tee stream/decode is excluded)
         results.solver.time = solve_secs
+        it = info.get("iter_count")
+        if it is not None:
+            stats = results.solver.statistics
+            stats.black_box.number_of_iterations = int(it)
         results.problem.number_of_objectives = 1
         results.problem.number_of_constraints = int(nl.m)
         results.problem.number_of_variables = int(nl.n)
@@ -567,7 +661,6 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     con_row = _row_index(con_names)
 
     pins = ComponentMap()
-    con_alias = {}
     if si is not None:
         block = clone.component(SensitivityInterface.get_default_block_name())
         for i, (var, clone_param, list_idx, comp_idx) in enumerate(
@@ -577,12 +670,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
             orig_data = (orig_comp if not orig_comp.is_indexed()
                          else orig_comp[comp_idx])
             pins[orig_data] = con_row[con.name]
-        # original-name -> clone-row-name aliases for replaced constraints
-        if getattr(block, "_has_replaced_expressions", False):
-            for new_comp, old_comp in block._replaced_map.items():
-                for nd, od in zip(_iter_data(new_comp),
-                                  _iter_data(old_comp)):
-                    con_alias[od.name] = nd.name
+    # con_alias was built before the solve (the warm-start reader needs
+    # it); the session stores the same map
 
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias, var_row=var_row, con_row=con_row)

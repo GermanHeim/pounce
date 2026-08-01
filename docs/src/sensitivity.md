@@ -161,6 +161,38 @@ still reports zero for the same model. Four things follow from it:
   many Param-dependent bounds trades roughly one row per bound. Only
   models that write a bound in terms of a declared Param pay this.
 
+### Solver options and warm starts
+
+Solver options reach the in-process path the same two ways they reach an
+ordinary solve: factory-level (`SolverFactory("pounce", options={...})`
+or `solver.options[...]`) and per-call (`solve(m, options={...})`), with
+the per-call mapping winning on conflict. Everything the CLI accepts
+works here: tolerances, `max_iter`, scaling, warm-start knobs.
+
+With `warm_start_init_point=yes` (Python `True` works too) among the
+options, the initial multipliers come from the model's suffixes, the
+same ones the ASL path uses: `dual` for equality multipliers,
+`ipopt_zL_in` / `ipopt_zU_in` for bound multipliers, matched by
+component name (a constraint rewritten by the declared-parameter
+surgery is reached through its internal alias). Sign conventions are
+handled: `dual` holds the AMPL marginal and `ipopt_zU_in` Ipopt's
+negative-at-upper value, and both are translated to the solver's
+internal conventions on the way in.
+
+One deliberate improvement over the ASL path: entries you do not
+supply take the solver's own default initialization rather than zero.
+Through a dense ASL array an absent entry is indistinguishable from a
+zero multiplier, and a zero bound multiplier on an active bound is a
+contradictory KKT certificate the solver must first recover from. A
+suffix knows which entries exist, so an explicit zero is honored
+(then floored at `warm_start_mult_bound_push`, exactly as a
+round-tripped inactive multiplier is) and absence means "initialize as
+you normally would": the solver's own `bound_mult_init_val` for bound
+multipliers, and for equality duals the warm path's 0, which is not
+the cold path's least-squares estimate. Seed everything from a prior
+solve and the two paths behave identically; seed partially and the
+in-process path degrades gracefully.
+
 ### Watching the solve (`tee=True`)
 
 `SolverFactory("pounce").solve(m, tee=True)` streams the solver's full

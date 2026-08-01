@@ -9,6 +9,55 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: the sens path dropped solver options (#432)
+
+- `SolverFactory("pounce").solve(m, options={...})` and factory-level
+  options were silently ignored the moment a model carried
+  declarations: the reroute to the in-process session forwarded
+  nothing. `max_iter`, tolerances, scaling, everything ran at defaults
+  with no signal, so a model stopped being tunable the day it gained a
+  declaration.
+- Options now flow: factory options first, per-call `options=` on top,
+  applied after the tee default so an explicit `print_level` wins. The
+  ASL layer's bookkeeping `solver` key is excluded.
+- Regression: `max_iter=1` must stop a declared model's solve, from
+  both option sources.
+
+### Added — pyomo-pounce: in-process warm starts from the model's suffixes (#432)
+
+- With `warm_start_init_point=yes` (or `True`; `add_option` maps them
+  alike) among the options, the sens path reads the model's `dual` /
+  `ipopt_zL_in` / `ipopt_zU_in` suffixes into the session's initial
+  multipliers, matched by component name, with a constraint replaced
+  by the declared-parameter surgery reached through its clone alias.
+  Both external sign conventions are crossed on the way in: `dual`
+  holds the AMPL marginal `-λ` (#271) and `ipopt_zU_in` Ipopt's
+  negative-at-upper `z_u` (#296); the session wants the internal
+  `+λ` and non-negative `z_u`.
+- Entries the user did not supply are seeded NaN, a new "unseeded"
+  marker in the warm-start contract of `Problem.solve` /
+  `Solver.solve`'s `lagrange`/`zl`/`zu` arguments: the warm-start
+  initializer substitutes its own resolved defaults
+  (`bound_mult_init_val`, including the Mehrotra override, for bound
+  multipliers; for equality duals the warm path's existing 0, which
+  is not the cold path's least-squares estimate), so the defaults
+  live in one place. The contract covers the warm-start initializer
+  only: the batched solver's multiplier seeds and the SQP
+  working-set arrays do not route through it and must not carry NaN. Through Ipopt's ASL interface an
+  absent entry reads as a zero multiplier because a dense array
+  cannot say "unknown", and a zero bound multiplier on an active
+  bound is a contradictory certificate the solver must first recover
+  from; a suffix knows which entries exist, so an explicit zero is
+  honored and absence means "initialize normally". (POUNCE's own CLI
+  reads no `ipopt_zL_in`/`ipopt_zU_in` at all today, so the
+  comparison is with Ipopt-via-ASL, not this project's binary.)
+- The sens path's results object now reports the iteration count
+  (`statistics.black_box.number_of_iterations`).
+- Regression: a plain solve's exported multipliers, fed back as
+  suffixes, make the declared warm re-solve beat the cold one; the
+  reader's fallback semantics are unit-tested (explicit zero kept,
+  absent entry defaulted).
+
 ### Added — post-solve activity classification on `Solver` (#362, covariance roadmap item 0)
 
 - `Solver.classify_activity()` (Rust: `pounce_sensitivity::activity`)

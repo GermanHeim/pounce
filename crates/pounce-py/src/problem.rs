@@ -212,6 +212,16 @@ impl PyProblem {
 
     /// Solve the problem. Returns `(x, info_dict)`.
     ///
+    /// `lagrange`, `zl`, `zu` seed the initial multipliers (internal
+    /// conventions: `+λ` with `L = f + λᵀg`, non-negative bound
+    /// multipliers). Under `warm_start_init_point=yes`, a NaN entry
+    /// means "unseeded": the warm-start initializer substitutes its
+    /// own resolved default (`bound_mult_init_val` for `zl`/`zu`, the
+    /// warm path's 0 for `lagrange`) before its clamps. NaN is part of
+    /// the warm-start contract ONLY: the batched solver's multiplier
+    /// seeds and the SQP `working_set` arrays do not route through the
+    /// warm-start initializer and must not contain NaN.
+    ///
     /// The optional `working_set` kwarg (Phase 5c §7.3) accepts a
     /// 2-tuple `(bounds, constraints)` of numpy int arrays
     /// (length `n` and `m` respectively, status codes 0..=3).

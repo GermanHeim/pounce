@@ -88,7 +88,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
             return false;
         }
 
-        if self.opts.mult_init_max > 0.0 || self.opts.mult_bound_push > 0.0 {
+        {
             // Rebuild `curr` with clamped multipliers. Components are
             // shared via `Rc` with previous solves, so we make fresh
             // copies before mutating to avoid clobbering downstream
@@ -96,7 +96,16 @@ impl IterateInitializer for WarmStartIterateInitializer {
             // `mult_bound_push` (upstream `warm_start_mult_bound_push`):
             // the barrier needs them strictly positive, and a carried-in
             // 0 (e.g. an inactive bound in the previous solution) would
-            // otherwise start on the boundary.
+            // otherwise start on the boundary. This block runs even
+            // with both clamps disabled (cap = inf, floor = 0; the
+            // floor still clamps a negative z/v to 0) because it also
+            // resolves NaN seeds: NaN in a user-supplied multiplier
+            // means "unseeded", and takes `bound_mult_init_val` for
+            // bound multipliers, or 0 for equality multipliers. That 0
+            // is the warm path's existing unseeded value (what
+            // `seed_from_nlp` produced already), NOT the cold path's
+            // least-squares estimate; routing NaN duals through the
+            // least-squares calculator is a possible refinement.
             let mut borrow = data.borrow_mut();
             let curr = borrow.curr.as_ref().unwrap();
             let cap = if self.opts.mult_init_max > 0.0 {
@@ -105,15 +114,16 @@ impl IterateInitializer for WarmStartIterateInitializer {
                 f64::INFINITY
             };
             let z_floor = self.opts.mult_bound_push.max(0.0);
+            let z_nan = self.opts.bound_mult_init_val;
             let new_curr = IteratesVector::new(
                 Rc::clone(&curr.x),
                 Rc::clone(&curr.s),
-                clone_clamped(&curr.y_c, -cap, cap),
-                clone_clamped(&curr.y_d, -cap, cap),
-                clone_clamped(&curr.z_l, z_floor, cap),
-                clone_clamped(&curr.z_u, z_floor, cap),
-                clone_clamped(&curr.v_l, z_floor, cap),
-                clone_clamped(&curr.v_u, z_floor, cap),
+                clone_clamped(&curr.y_c, -cap, cap, 0.0),
+                clone_clamped(&curr.y_d, -cap, cap, 0.0),
+                clone_clamped(&curr.z_l, z_floor, cap, z_nan),
+                clone_clamped(&curr.z_u, z_floor, cap, z_nan),
+                clone_clamped(&curr.v_l, z_floor, cap, z_nan),
+                clone_clamped(&curr.v_u, z_floor, cap, z_nan),
             );
             borrow.set_curr(new_curr);
         }
@@ -235,7 +245,7 @@ fn is_initialized(v: &Rc<dyn Vector>) -> bool {
 /// is inside every well-formed warm-start clamp range, so this matches
 /// upstream's behavior when a multiplier block has no carry-over
 /// value.
-fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64) -> Rc<dyn Vector> {
+fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64, nan_fill: f64) -> Rc<dyn Vector> {
     let n = v.dim();
     if n == 0 {
         return Rc::clone(v);
@@ -248,6 +258,26 @@ fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64) -> Rc<dyn Vector> {
         .unwrap_or(true);
     if initialized {
         out.copy(&**v);
+        // NaN marks an unseeded entry; resolve it before the clamps
+        // (element-wise min/max would just propagate it)
+        if let Some(d) = out.as_any_mut().downcast_mut::<DenseVector>() {
+            for e in d.values_mut() {
+                if e.is_nan() {
+                    *e = nan_fill;
+                }
+            }
+        } else {
+            // Non-dense vectors (CompoundVector on the re-optimize
+            // path) skip NaN resolution: the user-seed path always
+            // builds DenseVectors, so NaN here is an upstream contract
+            // violation, not an unseeded entry. Fail loudly in debug
+            // rather than let NaN ride the clamps into the iterate.
+            debug_assert!(
+                !out.dot(&**v).is_nan(),
+                "clone_clamped: NaN in a non-dense multiplier vector; \
+                 NaN-as-unseeded requires DenseVector storage"
+            );
+        }
     } else {
         out.set(0.0);
     }
@@ -258,6 +288,25 @@ fn clone_clamped(v: &Rc<dyn Vector>, lo: f64, hi: f64) -> Rc<dyn Vector> {
     cap_lo.set(lo);
     out.element_wise_max(&*cap_lo);
     Rc::from(out)
+}
+
+#[cfg(test)]
+mod tests_nan_seed {
+    use super::*;
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    #[test]
+    fn nan_entries_take_the_fill_before_clamping() {
+        let space = DenseVectorSpace::new(3);
+        let mut d = space.make_new_dense();
+        d.values_mut().copy_from_slice(&[0.5, f64::NAN, 2e7]);
+        let v: Rc<dyn Vector> = Rc::from(d);
+        let out = clone_clamped(&v, 1e-3, 1e6, 7.0);
+        let out = out.as_any().downcast_ref::<DenseVector>().unwrap();
+        assert_eq!(out.values()[0], 0.5);
+        assert_eq!(out.values()[1], 7.0); // unseeded -> fill
+        assert_eq!(out.values()[2], 1e6); // then the cap applies
+    }
 }
 
 #[cfg(test)]
@@ -275,31 +324,31 @@ mod tests {
     #[test]
     fn clamps_multipliers_to_cap() {
         let v = dense(3, 1e10);
-        let out = clone_clamped(&v, 0.0, 1e6);
+        let out = clone_clamped(&v, 0.0, 1e6, 0.0);
         assert_eq!(out.amax(), 1e6);
         let v2 = dense(3, -1e10);
-        let out2 = clone_clamped(&v2, -1e6, 1e6);
+        let out2 = clone_clamped(&v2, -1e6, 1e6, 0.0);
         assert_eq!(out2.amax(), 1e6);
     }
 
     #[test]
     fn clamps_bound_mults_nonneg() {
         let v = dense(3, -5.0);
-        let out = clone_clamped(&v, 0.0, 1e6);
+        let out = clone_clamped(&v, 0.0, 1e6, 0.0);
         assert_eq!(out.amax(), 0.0);
     }
 
     #[test]
     fn empty_vector_short_circuits() {
         let v = dense(0, 0.0);
-        let out = clone_clamped(&v, 0.0, 1.0);
+        let out = clone_clamped(&v, 0.0, 1.0, 0.0);
         assert_eq!(out.dim(), 0);
     }
 
     #[test]
     fn in_range_values_pass_through_untouched() {
         let v = dense(3, 0.5);
-        let out = clone_clamped(&v, 0.0, 1.0);
+        let out = clone_clamped(&v, 0.0, 1.0, 0.0);
         assert!((out.max() - 0.5).abs() < 1e-15);
         assert!((out.min() - 0.5).abs() < 1e-15);
     }
@@ -310,11 +359,11 @@ mod tests {
         // must be floored at warm_start_mult_bound_push, matching
         // upstream's ElementWiseMax — the barrier needs z > 0.
         let v = dense(3, 0.0);
-        let out = clone_clamped(&v, 1e-3, 1e6);
+        let out = clone_clamped(&v, 1e-3, 1e6, 0.0);
         assert!((out.min() - 1e-3).abs() < 1e-18);
         // Values already above the floor pass through.
         let v2 = dense(3, 0.7);
-        let out2 = clone_clamped(&v2, 1e-3, 1e6);
+        let out2 = clone_clamped(&v2, 1e-3, 1e6, 0.0);
         assert!((out2.max() - 0.7).abs() < 1e-15);
     }
 
@@ -325,7 +374,7 @@ mod tests {
         // of tripping the dense-vector "must be initialized" assert.
         let space = DenseVectorSpace::new(4);
         let v: Rc<dyn Vector> = Rc::new(space.make_new_dense());
-        let out = clone_clamped(&v, 0.0, 1e6);
+        let out = clone_clamped(&v, 0.0, 1e6, 0.0);
         assert_eq!(out.amax(), 0.0);
     }
 }
