@@ -88,6 +88,9 @@ pub struct BoundClassification {
     pub d_l_map: Vec<Index>,
     /// Subset of `[0, n_d)` with a finite upper bound.
     pub d_u_map: Vec<Index>,
+    /// Maps full-g index → c-block position, with `-1` for inequality
+    /// rows: the O(1) inverse of `c_map`, mirroring `full_to_var`.
+    pub full_to_c: Vec<Index>,
 }
 
 impl BoundClassification {
@@ -412,6 +415,7 @@ fn classify_bounds(
     let mut d_map: Vec<Index> = Vec::new();
     let mut d_l_map: Vec<Index> = Vec::new();
     let mut d_u_map: Vec<Index> = Vec::new();
+    let mut full_to_c: Vec<Index> = vec![-1; ng];
 
     for i in 0..ng {
         let lo = g_l[i];
@@ -435,6 +439,7 @@ fn classify_bounds(
                 ));
             }
             if lo == hi {
+                full_to_c[i] = c_map.len() as Index;
                 c_map.push(i as Index);
                 continue;
             }
@@ -468,6 +473,7 @@ fn classify_bounds(
         d_map,
         d_l_map,
         d_u_map,
+        full_to_c,
     })
 }
 

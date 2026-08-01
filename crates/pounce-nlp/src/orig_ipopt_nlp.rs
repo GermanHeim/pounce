@@ -2271,10 +2271,12 @@ impl IpoptNlp for OrigIpoptNlp {
     fn full_g_to_c_block(&self, full_idx: Index) -> Option<Index> {
         let cls = self.adapter.borrow();
         let cls = cls.classification();
-        cls.c_map
-            .iter()
-            .position(|&g_idx| g_idx == full_idx)
-            .map(|p| p as Index)
+        let f = full_idx as usize;
+        if f >= cls.full_to_c.len() {
+            return None;
+        }
+        let c = cls.full_to_c[f];
+        if c < 0 { None } else { Some(c) }
     }
 
     fn var_x_to_full_x(&self, var_idx: Index) -> Index {

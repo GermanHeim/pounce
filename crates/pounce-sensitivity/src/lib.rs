@@ -63,6 +63,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod activity;
 pub mod algorithm_backsolver;
 pub mod backsolver;
 pub mod boundcheck;
