@@ -252,6 +252,18 @@ counts, never solutions (re-solving the 24-instance gaslib sweep warm
 drops 482 total iterations to 120). A dimension-mismatched warm entry
 falls back to that instance's cold start.
 
+**Partial multiplier seeds (`Problem.solve` / `Solver.solve`).** The
+`lagrange=`, `zl=`, `zu=` arguments take the solver's internal
+conventions (`+λ` with `L = f + λᵀg`, non-negative bound multipliers).
+Under `warm_start_init_point=yes`, a NaN entry means "unseeded": the
+warm-start initializer substitutes its own resolved default
+(`bound_mult_init_val` for bound multipliers, the warm path's 0 for
+equality duals) before its clamps, so a partial seed never turns into
+a zero bound multiplier on an active bound, which is a contradictory
+KKT certificate. This contract belongs to the warm-start initializer
+only: the batch `warms=` hand-off above and the SQP `working_set`
+arrays do not route through it and must not carry NaN.
+
 **Identical-sparsity batches (`share_structure=True`).** When every
 instance shares its KKT sparsity (parametric sweeps, multi-start, B&B
 siblings), this opt-in keeps each worker's factorization backend alive
