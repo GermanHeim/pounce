@@ -2816,6 +2816,13 @@ impl IpoptApplication {
         if let Some(v) = read_num("resto_proximity_weight") {
             builder.resto.resto_proximity_weight = v;
         }
+        // `required_infeasibility_reduction` (#439) — the κ_resto guard the
+        // restoration sub-solve exits on. Registered since #191 but the
+        // value was hardcoded at the callsite, so setting it was a silent
+        // no-op.
+        if let Some(v) = read_num("required_infeasibility_reduction") {
+            builder.resto.required_infeasibility_reduction = v;
+        }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {

@@ -9,6 +9,24 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `required_infeasibility_reduction` was registered but never read
+
+- The option appeared in the options list with upstream's default and
+  help text, but nothing consumed it: the κ_resto the restoration
+  sub-solve's early-exit guard runs with was hardcoded to upstream's
+  `0.9` in `run_inner_resto`. Setting the option was a silent no-op —
+  no error, no warning, no effect (#439).
+- The value now flows from the options list through
+  `AlgorithmBuilder::resto` into `RestoAlgorithmBuilder` alongside the
+  other restoration knobs wired up in #191, and is read at the guard.
+  Upstream's square-problem override is preserved and keeps its
+  precedence: `IpRestoMinC_1Nrm.cpp:157-163` applies that case by
+  *overwriting* the sub-option with `0` before `IpRestoConvCheck` reads
+  it, so a square problem still disables the guard regardless of what
+  the user asked for.
+- Behavior is unchanged for anyone who leaves the option alone — the
+  new default equals the previously-hardcoded `0.9`.
+
 ### Fixed — pyomo-pounce: constraint-row lookups included a non-row name
 
 - Pyomo's `.row` file lists the `m` constraint rows and then appends

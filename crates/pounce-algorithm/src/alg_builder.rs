@@ -679,6 +679,12 @@ pub struct RestoOptions {
     /// `resto_proximity_weight` — proximity-term weight (`eta_factor`;
     /// `η = eta_factor · sqrt(μ)`).
     pub resto_proximity_weight: Number,
+    /// `required_infeasibility_reduction` — the restoration sub-solve
+    /// keeps iterating until the *original* NLP's infeasibility has been
+    /// reduced to at most this fraction of its value at restoration entry
+    /// (`κ_resto` in `IpRestoConvCheck.cpp:58`). `0` disables the guard,
+    /// i.e. restoration runs until the sub-NLP itself converges.
+    pub required_infeasibility_reduction: Number,
 }
 
 impl Default for RestoOptions {
@@ -688,6 +694,7 @@ impl Default for RestoOptions {
             constr_mult_reset_threshold: 0.0,
             resto_penalty_parameter: 1e3,
             resto_proximity_weight: 1.0,
+            required_infeasibility_reduction: 0.9,
         }
     }
 }

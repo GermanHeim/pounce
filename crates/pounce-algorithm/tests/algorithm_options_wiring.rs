@@ -297,6 +297,7 @@ fn resto_constants_default_match_registered() {
     assert_eq!(r.constr_mult_reset_threshold, 0.0);
     assert_eq!(r.resto_penalty_parameter, 1e3);
     assert_eq!(r.resto_proximity_weight, 1.0);
+    assert_eq!(r.required_infeasibility_reduction, 0.9);
 }
 
 #[test]
@@ -308,6 +309,7 @@ fn resto_constants_override_flows_through() {
             ("constr_mult_reset_threshold", 3.0),
             ("resto_penalty_parameter", 2e3),
             ("resto_proximity_weight", 2.0),
+            ("required_infeasibility_reduction", 0.25),
         ] {
             o.set_numeric_value(k, v, true, false).unwrap();
         }
@@ -317,4 +319,5 @@ fn resto_constants_override_flows_through() {
     assert_eq!(r.constr_mult_reset_threshold, 3.0);
     assert_eq!(r.resto_penalty_parameter, 2e3);
     assert_eq!(r.resto_proximity_weight, 2.0);
+    assert_eq!(r.required_infeasibility_reduction, 0.25);
 }
