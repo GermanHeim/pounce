@@ -640,3 +640,18 @@ def test_issue_362_row_pinned_variable_projects():
             cov = covariance(m, sigma_sq=0.05**2)
         assert cov.std_err[m.A] == 0.0, spelling
         assert any("strongly active" in str(x.message) for x in w), spelling
+
+
+def test_explicit_bound_relax_refuses_covariance():
+    """An explicit user bound_relax_factor wins over the sens solve's
+    forced 0 (options land after defaults), and covariance() then
+    refuses with the classifier's clean error instead of classifying
+    slacks measured against relaxed bounds."""
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_fitted(m.a, m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(
+        m, options={"bound_relax_factor": 1e-8})
+    with pytest.raises(ValueError, match="bound_relax_factor"):
+        covariance(m, sigma_sq=SIGMA_LIN**2)
