@@ -9,6 +9,95 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — port gap: no `ACCEPTABLE_POINT_REACHED` at the restoration doorway
+
+- **Upstream refuses to enter restoration from an acceptable point; pounce did
+  not.** `IpBacktrackingLineSearch.cpp:557-570`, in the `if (!accept)` arm that
+  hands the iterate to restoration:
+
+  ```cpp
+  if( CurrentIsAcceptable() )
+  {
+     THROW_EXCEPTION(ACCEPTABLE_POINT_REACHED,
+                     "Restoration phase called at acceptable point.");
+  }
+  ```
+
+  Restoration reduces the constraint violation, so from a point that already
+  passes the acceptable-level tolerances it has nothing to reduce and can only
+  put a reportable solution at risk. That check had no counterpart in
+  `invoke_restoration`, so pounce entered anyway.
+- **What the gap cost.** On Maros-Mészáros/mittelmann `qcqp1000-1nc` (n=1000)
+  the line search fails at iteration 187 holding the published optimum —
+  `-2.6628866e+07`, matching ipopt-ma57 to nine significant figures — with an
+  overall NLP error of `6.0e-8`, two orders inside `acceptable_tol`.
+  Restoration walked that iterate to `theta 5e-3` and ground out **2780 further
+  iterations** without recovering, so a solved problem reported
+  `Maximum_CpuTime_Exceeded` at the 300 s cap. With the check restored it stops
+  at iteration 187 and reports the optimum: **300 s → 22 s**, relative
+  objective difference against ipopt-ma57 `4.2e-12`.
+- **The predicate is upstream's, unmodified.** A strict `constr_viol_tol` gate
+  was tried on top: it deviates and does not discriminate — at their
+  restoration entries `qcqp1000-1nc` sits at `theta = 6.0e-8`, `csfi2` at
+  `1.5e-7`, `eigena2` at `2.1e-10`, all strictly feasible, one by six orders.
+  Nothing observable at the doorway separates a restoration that recovers from
+  one that does not, which is why upstream does not try to. A
+  bounded-restoration budget was also considered and rejected: it would invent
+  a mechanism upstream has no equivalent of (see #438 for what upstream uses
+  instead, and what pounce is still missing).
+- **Acceptability is the full triplet, never `theta` alone** — gh #274: a
+  perfectly feasible point can be arbitrarily far from stationary
+  (`min -exp(x) s.t. x >= 0` reaches this branch with `inf_pr = 1.7e-10` and
+  `inf_du = 8.8e+47`), and `current_is_acceptable_with_state` carries
+  `acceptable_dual_inf_tol` to reject it. The finiteness precondition is
+  upstream's too; CUTE `himmelbj` reaches a near-feasible point where `f` is
+  NaN and must stay `Invalid_Number_Detected`, which it does.
+- **One documented deviation.** Upstream runs `PrepareRestoPhaseStart()` before
+  the check; this sits ahead of pounce's own restoration cycle detectors, which
+  upstream has no equivalent of — an acceptable point should be reported
+  whatever the cycle state, and the skipped filter augmentation is immaterial
+  on a path that terminates.
+- **Measured** (60 s/300 s caps, ipopt-ma57 reference, same host): mittelmann
+  42/47 → **43/47**; vanderbei 702/733, unchanged. Three vanderbei problems move
+  `Solve_Succeeded` → `Solved_To_Acceptable_Level` with objectives unchanged to
+  `9.8e-15`, `2.9e-12` and `1.1e-14`, in fewer iterations. `csfi2` thereby
+  matches ipopt-ma57 exactly, which itself reports `Solved_To_Acceptable_Level`
+  at the same 35 iterations; `eigena2`/`eigenb2` are honest divergences, where
+  ipopt's line search never fails and so never reaches this branch at all.
+  All 16 problems the restoration code names as depending on productive
+  restoration (`bt8`, `odfits`, `linspanh`, `lsnnodoc`, `oet3`, `makela3`,
+  `haifam`, `haldmads`, `robot`, `polak6`, `s365mod`, `sipow2m`, `pfit4`,
+  `quartc`, `oet7`, `himmelbj`) are unchanged.
+
+### Fixed — the conic QCQP path had no fallback when it returned no verified KKT point
+
+- **A convex QCQP whose conic solve fails verification is now re-solved on the
+  general NLP path instead of being reported as a failure.** `solver_selection=
+  auto` routes a convex QCQP to the SOCP conic IPM, and `main.rs` returned that
+  result unconditionally — the status was never inspected. The dispatcher
+  already falls back to the NLP filter-IPM for *large* convex QCQPs before
+  solving, on the reasoning that "a convex QCQP is still a valid NLP, so the
+  fallback is sound"; this applies the same reasoning after the fact.
+- On Vanderbei `airport` (n=84) the conic solver **stalls** — identically at
+  `max_iter=200` and `max_iter=1000`, so a lack of progress rather than a
+  budget — at 31 iterations with a complementarity of `9.55e-4`, five orders
+  above tolerance, while dual infeasibility (`2.4e-10`), constraint violation
+  (`1.1e-8`) and bound violation (`0`) are all converged and the objective
+  agrees with ipopt-ma57 to nine significant figures. The post-solve
+  verification is right to refuse to certify it, but refusing was terminal: the
+  NLP path solves the same model in 15 iterations, matching ipopt exactly.
+  `Restoration_Failed` (`solve_result_num` 500) → `Solve_Succeeded`.
+- **Gated on `auto`, and only on `NumericalFailure`.** Under an explicit
+  `solver_selection` the named engine's verdict stands — silently answering
+  from a different solver would hide the stall. `PrimalInfeasible` /
+  `DualInfeasible` are verdicts the conic solver *did* verify, and
+  `IterationLimit` is the requested budget, which is also what `max_iter=0`
+  returns (the zero-iteration contract, pounce#186).
+- The decision is taken **before** the status line, the `.sol` write and the
+  JSON report, so a rerouted solve emits exactly one verdict and leaves no
+  stray conic result for a log scraper or the benchmark harness.
+- vanderbei 701/733 → **702/733**, no other problem changed.
+
 ### Fixed — `required_infeasibility_reduction` was registered but never read
 
 - The option appeared in the options list with upstream's default and

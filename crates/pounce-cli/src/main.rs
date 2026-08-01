@@ -647,6 +647,15 @@ pub fn main() -> ExitCode {
         let decline_convex_for_postopt =
             wants_nlp_postopt && matches!(selection, SolverSelection::Auto);
 
+        // Same bargain for a conic solve that finishes without a verified KKT
+        // point: under `auto` the class was our inference, not the user's
+        // instruction, so fall through to the NLP filter-IPM (a convex QCQP is
+        // also a valid NLP) rather than reporting a failure the general path
+        // can solve. Under an explicit `solver_selection` the forced choice is
+        // respected and the conic verdict stands — the user asked for that
+        // engine and silently answering from a different one would hide it.
+        let socp_nlp_fallback = matches!(selection, SolverSelection::Auto);
+
         // Banner-level routing line: report the detected problem class and
         // which of pounce's solvers was selected for it. Gated like the
         // banner (suppressed by `sb yes` and in JSON-debug protocol mode) so
@@ -750,7 +759,12 @@ pub fn main() -> ExitCode {
                 // Ipopt default, so it too is forwarded only when set.
                 let convex_opts = convex_cli_opts(&app);
                 if matches!(choice, SolverChoice::SocpIpm) {
-                    return run_convex_socp(
+                    // `None` means the conic solve came back without a verified
+                    // KKT point and declined the problem (only possible under
+                    // `auto` — see `socp_nlp_fallback`). It printed and wrote
+                    // nothing, so control falls out of this whole block to the
+                    // NLP solve below, which produces the one and only verdict.
+                    if let Some(code) = run_convex_socp(
                         &prob,
                         class,
                         sol_path.as_deref(),
@@ -758,47 +772,51 @@ pub fn main() -> ExitCode {
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
+                        socp_nlp_fallback,
+                    ) {
+                        return code;
+                    }
+                } else {
+                    // Resolve the convex-path presolve switch (#139). See
+                    // `resolve_convex_presolve` for the aliasing rationale.
+                    let opts = app.options();
+                    let presolve_on = resolve_convex_presolve(
+                        opts.get_string_value("qp_presolve", "").ok(),
+                        opts.get_string_value("presolve", "").ok(),
+                    );
+                    // The interactive debugger is a pdb-for-the-IPM: it pauses on
+                    // barrier-IPM iterations (mu, search direction, fraction-to-
+                    // the-boundary). The active-set engine is a different
+                    // algorithm with no such hook, so a `--debug*` request would
+                    // otherwise silently no-op. Say so explicitly.
+                    // Forward the `sqp_qp_*` family to the inner engine. These knobs
+                    // named the QP subproblem *of the SQP outer loop*, which this
+                    // path no longer goes through, so every one of them silently
+                    // became a no-op when the dispatch moved to the convex driver.
+                    // The names are kept because they are the documented, in-use
+                    // spelling; only the delivery route changed.
+                    let engine_overrides = active_set_overrides(&app);
+                    if matches!(choice, SolverChoice::QpActiveSet) && debug_hook.is_some() {
+                        eprintln!(
+                            "pounce: note: the interactive debugger is IPM-only and does \
+                             not engage on the active-set QP engine (solver_selection=\
+                             qp-active-set); the solve runs without pausing. Use \
+                             solver_selection=qp-ipm to debug a convex QP interactively."
+                        );
+                    }
+                    return run_convex_qp(
+                        &prob,
+                        class,
+                        sol_path.as_deref(),
+                        presolve_on,
+                        json_cfg,
+                        debug_hook.as_ref(),
+                        args.ampl,
+                        convex_opts,
+                        matches!(choice, SolverChoice::QpActiveSet),
+                        engine_overrides,
                     );
                 }
-                // Resolve the convex-path presolve switch (#139). See
-                // `resolve_convex_presolve` for the aliasing rationale.
-                let opts = app.options();
-                let presolve_on = resolve_convex_presolve(
-                    opts.get_string_value("qp_presolve", "").ok(),
-                    opts.get_string_value("presolve", "").ok(),
-                );
-                // The interactive debugger is a pdb-for-the-IPM: it pauses on
-                // barrier-IPM iterations (mu, search direction, fraction-to-
-                // the-boundary). The active-set engine is a different
-                // algorithm with no such hook, so a `--debug*` request would
-                // otherwise silently no-op. Say so explicitly.
-                // Forward the `sqp_qp_*` family to the inner engine. These knobs
-                // named the QP subproblem *of the SQP outer loop*, which this
-                // path no longer goes through, so every one of them silently
-                // became a no-op when the dispatch moved to the convex driver.
-                // The names are kept because they are the documented, in-use
-                // spelling; only the delivery route changed.
-                let engine_overrides = active_set_overrides(&app);
-                if matches!(choice, SolverChoice::QpActiveSet) && debug_hook.is_some() {
-                    eprintln!(
-                        "pounce: note: the interactive debugger is IPM-only and does \
-                         not engage on the active-set QP engine (solver_selection=\
-                         qp-active-set); the solve runs without pausing. Use \
-                         solver_selection=qp-ipm to debug a convex QP interactively."
-                    );
-                }
-                return run_convex_qp(
-                    &prob,
-                    class,
-                    sol_path.as_deref(),
-                    presolve_on,
-                    json_cfg,
-                    debug_hook.as_ref(),
-                    args.ampl,
-                    convex_opts,
-                    matches!(choice, SolverChoice::QpActiveSet),
-                    engine_overrides,
-                );
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -2056,6 +2074,13 @@ fn run_convex_qp(
 /// that become SOC blocks (see `qp_extract::extract_socp_with_map`). Presolve
 /// is skipped — it is the QP-path's nonnegative-orthant reducer and is not
 /// cone-aware.
+///
+/// Returns `None` when `allow_nlp_fallback` is set and the conic solve came
+/// back without a verified KKT point: the caller then falls through to the
+/// general NLP interior-point path. Nothing has been printed or written to
+/// the `.sol`/JSON in that case — the decision is taken before any output, so
+/// the fallback solve owns the whole report and a user never sees two verdicts
+/// for one solve. See the call site for why this exists.
 fn run_convex_socp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
@@ -2064,7 +2089,8 @@ fn run_convex_socp(
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
-) -> ExitCode {
+    allow_nlp_fallback: bool,
+) -> Option<ExitCode> {
     use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
@@ -2075,7 +2101,7 @@ fn run_convex_socp(
                     "pounce: internal error: {} not extractable as SOCP",
                     class.name()
                 );
-                return ExitCode::from(2);
+                return Some(ExitCode::from(2));
             }
         };
 
@@ -2115,6 +2141,34 @@ fn run_convex_socp(
         solve_socp_ipm(&qp, &cones, &qp_opts, backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
+
+    // The conic path returned no verified KKT point. A convex QCQP is still a
+    // valid NLP — the same reasoning `SOCP_SIZE_BUDGET` already uses to route
+    // large ones to the filter-IPM before solving — so hand it to the NLP path
+    // rather than reporting a failure with a working solver one branch away.
+    //
+    // `NumericalFailure` only. The other non-optimal statuses must NOT reroute:
+    // `PrimalInfeasible`/`DualInfeasible` are verdicts the conic solver *did*
+    // verify, and `IterationLimit` is the budget the caller asked for — it is
+    // also what `max_iter=0` returns, whose zero-iteration contract (pounce#186)
+    // requires stopping without a solve.
+    //
+    // Nothing has been printed yet: this sits above the status line, the `.sol`
+    // write and the JSON report, so a rerouted solve emits exactly one verdict.
+    if allow_nlp_fallback && matches!(sol.status, pounce_convex::QpStatus::NumericalFailure) {
+        let res = sol.kkt_residuals_conic(&qp, &cones);
+        eprintln!(
+            "pounce: note: the conic ({}) solve returned no verified KKT point \
+             after {} iterations (KKT error {:.2e}); a convex QCQP is also a \
+             valid NLP, so it is being re-solved on the general NLP \
+             interior-point path. Use solver_selection=socp to see the conic \
+             result instead.",
+            class.name(),
+            sol.iters,
+            res.kkt_error(),
+        );
+        return None;
+    }
 
     let reported_obj = sign * sol.obj + obj_const;
 
@@ -2233,7 +2287,7 @@ fn run_convex_socp(
         }
     }
 
-    convex_exit_code(ok, ampl)
+    Some(convex_exit_code(ok, ampl))
 }
 
 /// Process exit code for the convex (LP/QP/SOCP) solver paths, honoring the

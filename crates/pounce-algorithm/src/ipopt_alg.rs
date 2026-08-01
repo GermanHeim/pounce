@@ -2389,6 +2389,71 @@ impl IpoptAlgorithm {
             );
         }
 
+        // Port gap: upstream refuses to enter restoration from an acceptable
+        // point, and this was missing. `IpBacktrackingLineSearch.cpp:557-570`,
+        // in the `if (!accept)` arm that hands off to restoration:
+        //
+        //     if( CurrentIsAcceptable() )
+        //     {
+        //        THROW_EXCEPTION(ACCEPTABLE_POINT_REACHED,
+        //                        "Restoration phase called at acceptable point.");
+        //     }
+        //
+        // The rationale is the obvious one: restoration reduces the constraint
+        // violation, so from a point that already passes the acceptable-level
+        // tolerances it has nothing to reduce, and entering can only risk a
+        // reportable solution.
+        //
+        // What the gap cost, measured on mittelmann `qcqp1000-1nc` (n=1000):
+        // the line search fails at iteration 187 on a point carrying the
+        // published optimum (`-2.6628866e+07`, matching ipopt-ma57 to 9
+        // significant figures) with overall NLP error `6.0e-8` — two orders
+        // inside `acceptable_tol`. Restoration walked it to `theta 5e-3` and
+        // ground out 2780 further iterations without recovering, so a solved
+        // problem reported a failure.
+        //
+        // The predicate is upstream's, unmodified: acceptability alone. A
+        // strict `constr_viol_tol` gate was tried on top and is both a
+        // deviation and useless — at their restoration entries `qcqp1000-1nc`
+        // sits at `theta = 6.0e-8`, `csfi2` at `1.5e-7`, `eigena2` at
+        // `2.1e-10`, all strictly feasible, one by six orders. Nothing
+        // observable at the doorway separates a restoration that recovers from
+        // one that does not, which is why upstream does not try to.
+        //
+        // Placed ahead of the cycle detectors below rather than beside
+        // upstream's `PrepareRestoPhaseStart()`: those detectors are a
+        // pounce-side addition, and an acceptable point should be reported
+        // regardless of cycle state. Filter augmentation is skipped on this
+        // path, which is immaterial — the run stops here.
+        //
+        // `current_is_acceptable_with_state` is the full triplet, never
+        // `theta` alone: gh #274, a perfectly feasible point can be
+        // arbitrarily far from stationary (`min -exp(x) s.t. x >= 0` reaches
+        // here with `inf_pr = 1.7e-10` and `inf_du = 8.8e+47`), and the
+        // triplet carries `acceptable_dual_inf_tol` to reject it. The
+        // finiteness check mirrors the one below (CUTE `himmelbj` reaches a
+        // near-feasible point where `f` evaluates to NaN) and matches
+        // upstream's own `curr_f` precondition for acceptability.
+        let (entry_f_finite, entry_nlp_err) = {
+            let cq = self.cq.borrow();
+            (cq.curr_f().is_finite(), cq.curr_nlp_error())
+        };
+        if entry_f_finite
+            && self.bundle.conv_check.current_is_acceptable_with_state(
+                entry_nlp_err,
+                &self.data,
+                &self.cq,
+            )
+        {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] declining restoration at theta {:.3e}: the entry point already \
+                 passes the acceptable-level tolerances (nlp_err {:.3e}); reporting it \
+                 rather than risking it in restoration.",
+                reference_theta, entry_nlp_err,
+            );
+            return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
+        }
+
         // No-progress restoration cycle detector. Two layered checks
         // surface as `ErrorInStepComputation` instead of cycling to
         // `max_iter` exhaustion (mirrors the *intent* of upstream
