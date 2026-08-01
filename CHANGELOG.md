@@ -49,11 +49,13 @@ changes.
   equally blind, so such a row takes item 0's raw classification, is
   kept unprojected, and warns explicitly. The general treatment is
   the row's reduced normal through the elimination, item 2 territory.
-- The report's `Σ` is the solver's scaled-space value while the
-  factor block is natural-units (kkt_solve, pounce#128): the value
-  correction normalizes by the objective scale (the per-row
-  constraint scale cancels algebraically), tested against a solve
-  with gradient-based scaling engaged.
+- The report's `var_sigma`/`row_sigma` and `row_normal` follow the
+  documented natural-units contract like every other sensitivity
+  output: classification runs on the solver's scaled quantities (the
+  ratio is scale-invariant), the exported values are unscaled at the
+  boundary. Tested by pinning the weak scalar row's `Σ = 1/c²` under
+  both scaling modes and `row_normal` returning the user's own
+  coefficient.
 - Declaration-triggered solves set `bound_relax_factor=0`: the
   classifier reads slacks as distances to the user's own bounds.
 - `Solver.row_normal(j)`: a constraint row's gradient at the converged

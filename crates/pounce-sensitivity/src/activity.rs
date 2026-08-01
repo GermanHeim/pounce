@@ -112,9 +112,12 @@ pub struct ActivityReport {
     /// where none should be.
     pub var_contaminated: Vec<bool>,
     /// The barrier diagonal `Σ_i = z/s` itself per user variable, both
-    /// sides summed; 0 where not classified. The covariance roadmap's
-    /// item 1 subtracts exactly this from the factor's reduced
-    /// Hessian, so it is reported rather than only its ratio to `q`.
+    /// sides summed; 0 where not classified. In **natural (unscaled)
+    /// units**, the repo's sensitivity-output contract: classification
+    /// runs on the solver's scaled quantities (the ratio is
+    /// scale-invariant), the report does not. The covariance roadmap's
+    /// item 1 subtracts exactly this from the factor's natural-units
+    /// reduced Hessian.
     pub var_sigma: Vec<Number>,
     /// Status per user constraint row.
     pub row_status: Vec<i8>,
@@ -128,9 +131,10 @@ pub struct ActivityReport {
     /// Contamination check per row, as for variables.
     pub row_contaminated: Vec<bool>,
     /// The row barrier diagonal `Σ_j = v/s` per user row, both sides
-    /// summed; 0 where not classified. RAW, not the geometric weight
-    /// the classification uses: item 1 restricts the normal to its own
-    /// fitted block and applies its own `‖a‖²` factor there.
+    /// summed; 0 where not classified. In **natural (unscaled) units**
+    /// like [`Self::var_sigma`], and RAW rather than the geometric
+    /// weight the classification uses: item 1 restricts the normal to
+    /// its own fitted block and applies its own `‖a‖²` factor there.
     pub row_sigma: Vec<Number>,
 }
 
@@ -333,9 +337,16 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
             curr.s.dim() as usize,
         )
     };
-    let (px_l, px_u, pd_l, pd_u) = {
+    let (px_l, px_u, pd_l, pd_u, obj_scale, d_scale) = {
         let nl = nlp.borrow();
-        (nl.px_l(), nl.px_u(), nl.pd_l(), nl.pd_u())
+        (
+            nl.px_l(),
+            nl.px_u(),
+            nl.pd_l(),
+            nl.pd_u(),
+            nl.obj_scaling_factor(),
+            nl.d_scale_vec(),
+        )
     };
     let cq = cq.borrow();
 
@@ -364,6 +375,11 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         let mut e = classify_entry(sigma_x[i], diag[i], floor, mu);
         e.off_path = (has_l[i] && off_path(s_l[i], z_l[i], mu))
             || (has_u[i] && off_path(s_u[i], z_u[i], mu));
+        // the ratio is scale-invariant, so classification ran in the
+        // solver's scaled space; the REPORTED sigma follows the repo's
+        // natural-units contract: internal z carries the objective
+        // scale (x is never scaled), so Sigma_nat = Sigma / df
+        e.sigma /= obj_scale;
         vars[i] = e;
     }
 
@@ -493,6 +509,11 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         }
         rows[j].off_path = (rhas_l[j] && off_path(rs_l[j], v_l[j], mu))
             || (rhas_u[j] && off_path(rs_u[j], v_u[j], mu));
+        // natural-units report, as for variables: the scaled row
+        // multiplier carries df/dg and the scaled slack dg, so
+        // Sigma_nat = Sigma * dg^2 / df
+        let dg = d_scale.as_ref().map_or(1.0, |v| v[j]);
+        rows[j].sigma *= dg * dg / obj_scale;
     }
 
     // --- scatter to user space --------------------------------------------
@@ -545,9 +566,12 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
 }
 
 /// The gradient of one user constraint row at the converged iterate,
-/// in user variable order (length `n_full_x`). Works for equality and
-/// inequality rows alike; entries for `make_parameter`-removed fixed
-/// variables are 0 because the solve dropped their columns.
+/// in user variable order (length `n_full_x`) and **natural (unscaled)
+/// units**: the internal Jacobian row carries the solver's per-row
+/// scale, which is divided out here per the sensitivity-output
+/// contract. Works for equality and inequality rows alike; entries for
+/// `make_parameter`-removed fixed variables are 0 because the solve
+/// dropped their columns.
 pub(crate) fn row_normal(bs: &PdSensBacksolver, user_row: usize) -> Result<Vec<Number>, usize> {
     let (data, cq, nlp) = bs.activity_handles();
     let n = {
@@ -577,6 +601,15 @@ pub(crate) fn row_normal(bs: &PdSensBacksolver, user_row: usize) -> Result<Vec<N
         }
     };
 
+    let row_scale = {
+        let nl = nlp.borrow();
+        let sv = if c_pos.is_some() {
+            nl.c_scale_vec()
+        } else {
+            nl.d_scale_vec()
+        };
+        sv.map_or(1.0, |v| v[block_pos])
+    };
     let cq = cq.borrow();
     let jac = if c_pos.is_some() {
         cq.curr_jac_c()
@@ -598,7 +631,7 @@ pub(crate) fn row_normal(bs: &PdSensBacksolver, user_row: usize) -> Result<Vec<N
     let mut full = vec![0.0; n_full_x];
     let g = grad.values_mut();
     for (i, slot) in g.iter().enumerate() {
-        full[nl.var_x_to_full_x(i as Index) as usize] = *slot;
+        full[nl.var_x_to_full_x(i as Index) as usize] = *slot / row_scale;
     }
     Ok(full)
 }

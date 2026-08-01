@@ -358,6 +358,34 @@ def test_mixed_model_reports_in_user_space():
     assert not any(rep["var_contaminated"]) and not any(rep["row_contaminated"])
 
 
+def test_sigma_is_natural_units():
+    # the weak scalar row g = c*x >= 0 has natural geometric weight
+    # Sigma*||grad||^2 = q = 1, so Sigma_nat = 1/c^2 exactly. At
+    # c = 1000 the default gradient-based scaling engages a per-row
+    # d_scale, and a scaled-space report would differ by df/dg^2;
+    # asserting 1/c^2 under both scaling modes pins the natural-units
+    # contract at the boundary.
+    for scaling in ("gradient-based", "none"):
+        c = 1000.0
+        prob = pounce.Problem(
+            n=1, m=1, problem_obj=ScalarRow(0.0, c),
+            lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+        )
+        prob.add_option("tol", 1e-10)
+        prob.add_option("bound_relax_factor", 0.0)
+        prob.add_option("nlp_scaling_method", scaling)
+        prob.add_option("print_level", 0)
+        prob.add_option("sb", "yes")
+        solver = pounce.Solver(prob)
+        _, info = solver.solve(x0=np.array([0.5]))
+        assert info["status_msg"] == "Solve_Succeeded"
+        rep = solver.classify_activity()
+        assert rep["row_status"] == ["weakly_active"], scaling
+        assert rep["row_sigma"][0] == pytest.approx(1.0 / c**2, rel=0.5), scaling
+        # row_normal is natural too: the user's coefficient, not dg*c
+        np.testing.assert_allclose(solver.row_normal(0), [c], rtol=1e-9)
+
+
 def test_sigma_is_reported_raw():
     # with unit curvature the ratio IS Σ/1, so the reported sigma must
     # reproduce it; Σ ≈ 1 at weak activity and ≈ μ when inactive

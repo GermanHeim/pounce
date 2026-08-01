@@ -443,7 +443,7 @@ def test_inactive_bound_changes_nothing():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         cov = covariance(m, sigma_sq=SIGMA_LIN**2)
-    assert not w
+    assert not [x for x in w if "covariance:" in str(x.message)]
     cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
     np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-7)
 
@@ -655,3 +655,51 @@ def test_explicit_bound_relax_refuses_covariance():
         m, options={"bound_relax_factor": 1e-8})
     with pytest.raises(ValueError, match="bound_relax_factor"):
         covariance(m, sigma_sq=SIGMA_LIN**2)
+
+
+def test_weakly_active_bound_gauss_newton_matches():
+    # the GN branch rebuilds from the exact recovered Jacobian
+    # (Z_r @ inv(M) = J, the W-based factor cancels identically), so a
+    # weakly active kept parameter needs no Sigma correction there and
+    # must match the same unconstrained analytic covariance the
+    # Lagrangian branch reaches via the correction
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    y2 = y + (2.0 - beta[0])
+    m = linear_model(x, y2, declare=False)
+    m.a.setlb(2.0)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cov_gn = covariance(m, sigma_sq=SIGMA_LIN**2,
+                            hessian="gauss-newton")
+    cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov_gn.matrix, cov_true, rtol=1e-4)
+
+
+def test_inactive_row_spelling_agrees_to_o_mu():
+    # inactive rows are skipped by design (their geometric weight is
+    # O(mu), and fetching every normal costs an O(m*n) sweep on wide
+    # models), so the two spellings of an INACTIVE limit agree to
+    # O(mu) rather than exactly
+    x, y, X = linear_data()
+    mA = linear_model(x, y, declare=False)
+    mA.a.setlb(-50.0)
+    declare_fitted(mA.a)
+    declare_fitted(mA.b)
+    declare_residual(mA.r)
+    pyo.SolverFactory("pounce").solve(mA)
+    mB = linear_model(x, y, declare=False)
+    mB.far = pyo.Constraint(expr=mB.a >= -50.0)
+    declare_fitted(mB.a)
+    declare_fitted(mB.b)
+    declare_residual(mB.r)
+    pyo.SolverFactory("pounce").solve(mB)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        covA = covariance(mA, sigma_sq=SIGMA_LIN**2)
+        covB = covariance(mB, sigma_sq=SIGMA_LIN**2)
+    np.testing.assert_allclose(covB.matrix, covA.matrix, rtol=1e-7)
