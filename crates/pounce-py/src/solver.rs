@@ -422,7 +422,15 @@ impl PySolver {
     /// - `"var_sigma"`, `"row_sigma"`: ndarray of the barrier
     ///   diagonal `Σ` itself (both sides summed; 0 where nothing was
     ///   classified), the quantity item 1 of the covariance roadmap
-    ///   subtracts from the factor's reduced Hessian.
+    ///   subtracts from the factor's reduced Hessian. In **natural
+    ///   (unscaled) units** like every other sensitivity output:
+    ///   classification runs on the solver's scaled quantities (the
+    ///   ratios above are scale-invariant), and the exported `Σ` is
+    ///   unscaled at the boundary, so it composes directly with a
+    ///   natural-units reduced Hessian. `row_sigma` is additionally
+    ///   the RAW diagonal, not the geometric weight `Σ‖∇d‖²` the
+    ///   classification uses, so a consumer applies whichever `‖a‖²`
+    ///   its own restriction of the normal calls for.
     ///
     /// Requires the **held solve** to have run with
     /// `bound_relax_factor=0` (raises `ValueError` otherwise; the
@@ -484,7 +492,10 @@ impl PySolver {
     }
 
     /// The gradient of user constraint row `j` at the converged
-    /// iterate, as an ndarray in user variable order (length n).
+    /// iterate, as an ndarray in user variable order (length n), in
+    /// **natural (unscaled) units**: the solver's internal Jacobian
+    /// row carries its per-row `d_scale`/`c_scale`, which is divided
+    /// out here, so this is the gradient of the row the user wrote.
     /// Equality and inequality rows alike; entries for fixed
     /// (`lb == ub`) variables are 0 because the solve removed their
     /// columns. A binding row's normal restricted to the fitted

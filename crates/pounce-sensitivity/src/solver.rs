@@ -289,8 +289,11 @@ impl Solver {
     }
 
     /// The gradient of user constraint row `user_row` at the converged
-    /// iterate, in user variable order (length `n_full_x`). Equality
-    /// and inequality rows alike; entries for fixed
+    /// iterate, in user variable order (length `n_full_x`) and in
+    /// **natural (unscaled) units**: the internal Jacobian row carries
+    /// the solver's per-row `c_scale`/`d_scale`, which is divided out
+    /// here, so this is the gradient of the row as the user wrote it.
+    /// Equality and inequality rows alike; entries for fixed
     /// (`make_parameter`-removed) variables are 0 because the solve
     /// dropped their columns. Errors on an out-of-range row.
     ///

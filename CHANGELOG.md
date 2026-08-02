@@ -65,7 +65,10 @@ changes.
   restricted least squares with corr −1 and a rank drop; bound and row
   spellings agree to 1e-6; an inactive far bound changes nothing to
   1e-7; Gauss-Newton matches on the linear model, projection included.
-
+- `_classify_ratio` mirrors the Rust rule in Python, so a drift test
+  checks the two against each other on real solves: every classified
+  entry of a `classify_activity()` report must re-derive its own
+  status from the reported `(ratio, mu)` through the Python rule.
 
 ### Fixed — feasible convex QPs reported locally infeasible on the NLP path
 

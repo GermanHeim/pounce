@@ -703,3 +703,101 @@ def test_inactive_row_spelling_agrees_to_o_mu():
         covA = covariance(mA, sigma_sq=SIGMA_LIN**2)
         covB = covariance(mB, sigma_sq=SIGMA_LIN**2)
     np.testing.assert_allclose(covB.matrix, covA.matrix, rtol=1e-7)
+
+
+
+class _ScalarStudy:
+    """min ½x² − p·x, the activity-classification study model.
+
+    Moving the unconstrained minimizer `p` walks the three regimes the
+    Rust and Python rules share: p > 0 puts it strictly inside the
+    limit x ≥ 0 (inactive), p < 0 outside (strongly active), p = 0
+    exactly on it (weakly active). Curvature is 1 by construction, so
+    `q` never sinks under the identification floor and the Rust
+    classifier returns a real status instead of `unidentified` --
+    unlike a fitted parameter in the residual-variable idiom, whose
+    raw Lagrangian diagonal is zero. `row` spells the same limit as a
+    constraint row (x unbounded, row x ≥ 0) instead of a bound.
+    """
+
+    def __init__(self, p, row):
+        self.p, self.row = p, row
+
+    def objective(self, x):
+        return 0.5 * x[0] ** 2 - self.p * x[0]
+
+    def gradient(self, x):
+        return np.array([x[0] - self.p])
+
+    def constraints(self, x):
+        return np.array([x[0]]) if self.row else np.array([])
+
+    def jacobianstructure(self):
+        if not self.row:
+            e = np.array([], dtype=np.int64)
+            return e, e
+        return np.array([0]), np.array([0])
+
+    def jacobian(self, x):
+        return np.array([1.0]) if self.row else np.array([])
+
+    def hessianstructure(self):
+        z = np.array([0], dtype=np.int64)
+        return z, z
+
+    def hessian(self, x, lagrange, obj_factor):
+        return np.array([obj_factor])
+
+
+def _study_report(p, row):
+    import pounce
+
+    prob = pounce.Problem(
+        n=1, m=1 if row else 0, problem_obj=_ScalarStudy(p, row),
+        lb=[-1e19] if row else [0.0], ub=[1e19],
+        cl=[0.0] if row else [], cu=[1e19] if row else [],
+    )
+    for k, v in (("tol", 1e-10), ("bound_relax_factor", 0.0),
+                 ("print_level", 0), ("sb", "yes")):
+        prob.add_option(k, v)
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded", (p, row, info)
+    return solver.classify_activity()
+
+
+def test_classify_ratio_agrees_with_the_rust_classifier():
+    """Drift guard: `_classify_ratio` re-implements
+    pounce_sensitivity::activity's rule in Python, and today nothing
+    fails if only one of the two moves. Both are branch-tested in
+    isolation (`test_classify_ratio_covers_all_branches` here, the
+    `classify` tests in activity.rs), but neither pins them to EACH
+    OTHER. This drives real solves through the Rust classifier and
+    requires every classified entry to re-derive its own status from
+    the report's own `(ratio, mu)` through the Python rule.
+
+    `unidentified` is the one deliberate divergence and is exempt:
+    Rust maps `q` below the identification floor there unconditionally
+    and reports `Σ/floor` as a lower bound rather than the ratio, so
+    the Python rule -- which only ever sees a ratio -- neither can nor
+    should reproduce it.
+    """
+    from pyomo_pounce.sens import _classify_ratio
+
+    seen = set()
+    for p, expected in ((1.0, "inactive"), (0.0, "weakly_active"),
+                        (-1.0, "strongly_active")):
+        for row in (False, True):
+            rep = _study_report(p, row)
+            mu = float(rep["mu"])
+            key = "row" if row else "var"
+            st = rep[f"{key}_status"][0]
+            r = float(rep[f"{key}_ratio"][0])
+            assert st == expected, (p, row, st)      # fixture still valid
+            assert np.isfinite(r)
+            assert _classify_ratio(r, mu) == st, (
+                f"{key} spelling, p={p}: Rust says {st}, the Python rule "
+                f"says {_classify_ratio(r, mu)} for r={r:.6g}, mu={mu:.6g}")
+            seen.add(st)
+
+    assert seen == {"inactive", "weakly_active", "strongly_active"}, seen
