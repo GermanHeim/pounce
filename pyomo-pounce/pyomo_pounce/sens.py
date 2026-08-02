@@ -1073,9 +1073,14 @@ def _tangent_reduced_hessian(session, M, zcols):
     (covariance roadmap item 2). Requires the equalities to determine
     the non-fitted variables given the fitted block, the same square
     estimation structure covariance() already assumes."""
-    n = int(session.nl.n)
-    Zx = np.column_stack([z[:n] for z in zcols])
-    T = Zx @ _minv(M)
+    # the factor's x block is var-x (a fixed variable's column is
+    # removed under make_parameter, gh #450), so slice that block and
+    # scatter each tangent back to full-x for hessian_vec, whose
+    # contract is user-space with zeros on the removed columns
+    n_var = sum(1 for r in session._primal_row_map() if r is not None)
+    Zx = np.column_stack([z[:n_var] for z in zcols])
+    T = np.column_stack(
+        [session.scatter_x(col) for col in (Zx @ _minv(M)).T])
     HT = np.column_stack([
         np.asarray(session.solver.hessian_vec(T[:, j]))
         for j in range(T.shape[1])
@@ -1799,14 +1804,20 @@ def information(model, hessian="lagrangian"):
             "regularized rather than exact; the isotropic delta_w lands on "
             "the free block and survives the projection.")
 
+    # `rows` is full-x (the space _classify_fitted_block reads the
+    # activity report and row_normal in); `krows` is the same variables
+    # as factor rows (gh #450): they differ exactly when the model has
+    # a fixed variable, and agree everywhere else
     dim = session.solver.kkt_dim
     rows = [session.fit_rows[p] for p in params]
+    krows = [session.primal_row(r, f"information({p.name})")
+             for r, p in zip(rows, params)]
     zcols = []
-    for r in rows:
+    for r in krows:
         e = np.zeros(dim)
         e[r] = 1.0
         zcols.append(np.asarray(session.solver.kkt_solve(e)))
-    M = np.array([[zcols[j][rows[i]] for j in range(n_params)]
+    M = np.array([[zcols[j][krows[i]] for j in range(n_params)]
                   for i in range(n_params)])
     M = 0.5 * (M + M.T)
 
@@ -1825,8 +1836,10 @@ def information(model, hessian="lagrangian"):
         R = np.zeros((n_params, n_params))
         for g, rws in groups.items():
             # slice LAST: J over the whole fitted block, so the pinned
-            # rows exist for S below
-            Zr = np.array([[zcols[j][r] for j in range(n_params)]
+            # rows exist for S below; res_rows is full-x like fit_rows,
+            # zcols are factor rows (gh #450)
+            Zr = np.array([[zcols[j][session.primal_row(r, "information")]
+                            for j in range(n_params)]
                            for r in rws])
             Jg = Zr @ Mi
             R += 2.0 * (Jg.T @ Jg)

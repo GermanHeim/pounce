@@ -161,6 +161,30 @@ def test_information_exact_under_objective_scaling():
         information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
 
 
+def test_a_fixed_variable_does_not_shift_information():
+    """The factor's x block drops a variable whose bounds are equal
+    (gh #450), so full-x rows and factor rows differ exactly when a
+    fixed variable precedes the fitted block in .col order. Adding one
+    inert fixed variable must change nothing: both forms still return
+    2 X'X. `dead` enters a nonlinear slack constraint so the writer
+    keeps its column AND sorts it before the linear-only fitted
+    variables, which is what makes the shift engage."""
+    x, y, X = linear_data()
+    m = linear_model(x, y)
+    m.dead = pyo.Var(bounds=(2.0, 2.0), initialize=2.0)
+    m.deadcon = pyo.Constraint(expr=m.dead * m.dead <= 1e6)
+    pyo.SolverFactory("pounce").solve(m)
+    sess = m.__dict__["_pounce_sens"].session
+    rows = sess.solver.primal_rows(list(range(len(sess.var_names))))
+    assert rows.count(None) == 1, rows
+    assert sess.var_names.index("dead") < sess.var_names.index("a"), (
+        "the fixed column must precede the fitted block to shift it")
+    R = 2.0 * X.T @ X
+    np.testing.assert_allclose(information(m).matrix, R, rtol=1e-9)
+    np.testing.assert_allclose(
+        information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
+
+
 def test_information_error_paths():
     x, y, _ = linear_data()
     m = linear_model(x, y)

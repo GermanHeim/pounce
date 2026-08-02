@@ -43,6 +43,12 @@ changes.
 - Membership, row handling, and their warnings are shared with
   `covariance()` (`_classify_fitted_block`), so the two accessors
   cannot drift.
+- Factor indexing follows the full-x vs var-x discipline of gh #450
+  throughout: fitted and residual rows route through `primal_row`,
+  and the tangent recovery slices the factor's var-x block and
+  scatters back to full-x for `hessian_vec`. Regression: one inert
+  fixed variable ahead of the fitted block changes nothing, both
+  forms.
 ### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
 
 - A variable whose bounds are equal is removed from the solve
