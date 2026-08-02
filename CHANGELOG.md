@@ -34,12 +34,25 @@ changes.
   pre-filter that issued the verdict.
 - "Zero" is now read numerically. A row abstains once its declared
   magnitude sinks under its own noise floor, `κ · eps · max_j |∂g_i/∂x_j| ·
-  ‖x‖_∞` — the size of the rounding error the row's own arithmetic carries,
-  which is what makes a declared magnitude below it residue rather than
-  data. The comparison keeps the scale invariance that is the whole point
-  of the measure: under a row scaling both the floor and the magnitude
-  carry `dc_i`, so the verdict is the same however the row is written. An
+  ‖x‖_∞` — the finest residual the solver could drive that row to, which is
+  what makes a declared magnitude below it residue rather than data. The
+  comparison keeps the scale invariance that is the whole point of the
+  measure: under a row scaling both the floor and the magnitude carry
+  `dc_i`, so the verdict is the same however the row is written. An
   absolute cutoff on the magnitude would have thrown that away.
+- The floor models **how finely the solver can place `x`**, not how
+  accurately a row evaluates. A Newton step comes from a linear solve with
+  norm-wise backward error, so every component of `x` is positioned to
+  about `eps · ‖x‖_∞`: a variable at `1e-8` inside a vector of norm `2.7`
+  is still only resolved to `~6e-16`. The dependence on the *global*
+  `‖x‖_∞` is therefore deliberate — `x` is one vector solved for jointly.
+  The seemingly sharper per-row alternative, the exact term sum
+  `Σ_j |a_ij x_j|`, was implemented and measured: it models the row's
+  evaluation error, which is not what limits the residual, and it regressed
+  QETAMACR, QSCORPIO and QPILOTNO. QSCORPIO's row 93 parks its variables
+  near a zero bound at `~1e-8`, so the term sum drops its floor to `8.5e-22`
+  and `−5.6e-17` of rounding residue reads as real data again, at an iterate
+  resolved only to `~6e-16`. A unit test pins the `‖x‖_∞` dependence.
 - A row whose Jacobian is empty abstains outright. Every variable it
   mentions has been fixed and substituted out, leaving a constant `0 = b`
   that no iterate can move — a statement about the model, which presolve

@@ -30,12 +30,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Safety factor on the per-row noise floor of
-/// [`IpoptCalculatedQuantities::row_noise_floor`]. The floor bounds the
-/// largest single term of a row by `max_j |a_ij| · ‖x‖_∞`; the row's actual
-/// rounding error accumulates over all of its nonzeros, so the bound is short
-/// by up to a factor of the row count. `64` covers a typical sparse row
-/// without reaching far enough to swallow a declared magnitude a model could
-/// have meant: at the `‖x‖_∞ ~ 1` of a well-posed problem the floor sits near
+/// [`IpoptCalculatedQuantities::row_noise_floor`]. The floor prices one
+/// component of `x` at `eps · ‖x‖_∞` and passes it through the row at
+/// `max_j |a_ij|`; the row's residual accumulates that over all of its
+/// nonzeros, and the linear solve's conditioning widens it further, so the
+/// bare product is short by a problem-dependent factor. `64` covers a typical
+/// sparse row without reaching far enough to swallow a declared magnitude a
+/// model could have meant: at the `‖x‖_∞ ~ 1` of a well-posed problem the
+/// floor sits near
 /// `1.4e-14`, still nine orders under `constr_viol_tol`'s default. Rows it
 /// silences fall back on the absolute feasibility test, which is already
 /// scale-invariant on a row whose declared magnitude is numerically zero.
@@ -914,7 +916,8 @@ impl IpoptCalculatedQuantities {
     /// `2^-53` where the model says `0` (Maros-Mészáros `QSC*`/`QSCFXM*`, and
     /// every one of the 15 problems in gh #446, carry equality rows with an
     /// RHS at `1e-17`–`1e-16`) declares a magnitude that is pure rounding
-    /// residue. `|c_i|` cannot be driven below the noise floor either, so the
+    /// residue — a target no iterate could be positioned finely enough to hit.
+    /// `|c_i|` cannot be driven below the same floor either, so the
     /// ratio was noise over noise: QSCSD1 read 81× violated at a converged KKT
     /// point whose absolute violation was `9.2e-15`, which vetoed its success
     /// certificate and then armed the rapid-infeasibility pre-filter — a
@@ -955,30 +958,35 @@ impl IpoptCalculatedQuantities {
         worst
     }
 
-    /// Per-row floating-point noise floor of a constraint block: how large the
-    /// rounding error in the row's evaluated value can be, in the same
-    /// internally scaled units as the block's residual and declared bounds.
-    /// `jac` is the block's Jacobian and `template` any vector in the block's
-    /// space.
+    /// Per-row noise floor of a constraint block: the finest residual the
+    /// solver could drive that row to, in the same internally scaled units as
+    /// the block's residual and declared bounds. `jac` is the block's Jacobian
+    /// and `template` any vector in the block's space.
     ///
-    /// Evaluating a row accumulates a relative error of order `eps` against
-    /// the magnitude of the *terms* it sums, `Σ_j |∂g_i/∂x_j · x_j|` — not
-    /// against the magnitude of the result. A row whose terms cancel (a
-    /// staircase LP row, a mass balance) therefore has a value that bottoms
-    /// out well above zero in relative terms while the value itself is tiny,
-    /// so neither the residual nor the declared bound can serve as the
-    /// reference. The Jacobian row does: `max_j |∂g_i/∂x_j| · ‖x‖_∞` bounds
-    /// the largest single term, and [`ROW_NOISE_KAPPA`] covers the sum over
-    /// the row's nonzeros.
+    /// The quantity being modelled is **how finely the solver can place `x`**,
+    /// not how accurately a row evaluates. A Newton step comes from a linear
+    /// solve whose backward error is norm-wise, so every component of `x` is
+    /// positioned to roughly `eps · ‖x‖_∞` in absolute terms — a variable at
+    /// `1e-8` inside a vector of norm `2.7` is still only resolved to
+    /// `~6e-16`, not to `~2e-24`. A row responds to `x` at rate
+    /// `max_j |∂g_i/∂x_j|`, so the finest residual it can be driven to is
+    /// `max_j |∂g_i/∂x_j| · eps · ‖x‖_∞`, with [`ROW_NOISE_KAPPA`] covering
+    /// accumulation across the row's nonzeros and conditioning slop. A
+    /// declared magnitude under that is a target the solver could not hit even
+    /// in exact arithmetic on the model as written.
     ///
-    /// `‖x‖_∞` is a deliberately coarse stand-in for the row's *own*
-    /// variables — the exact `Σ_j |a_ij x_j|` would need `|J|·|x|`, which the
-    /// [`Matrix`] interface cannot express (`mult_vector` carries the signs
-    /// that are the whole problem). It over-estimates whenever the largest
-    /// variable is one the row does not mention, so the floor errs toward
-    /// abstaining. That is the safe direction: abstaining hands the row back
-    /// to the absolute `constr_viol_tol` test, whereas over-claiming is what
-    /// gh #446 was.
+    /// `‖x‖_∞` is global, and that is the point rather than a compromise: `x`
+    /// is one vector solved for jointly, so a large variable anywhere really
+    /// does coarsen the resolution of every other. The per-row alternative,
+    /// the exact term sum `Σ_j |a_ij x_j|` via `|J|·|x|`, was implemented and
+    /// measured, and it is strictly worse — it models the row's *evaluation*
+    /// error, which is not what limits the residual. It regressed QETAMACR,
+    /// QSCORPIO and QPILOTNO of gh #446's 15: QSCORPIO's row 93 has all its
+    /// variables parked near a zero bound at `~1e-8`, giving a term sum of
+    /// `6e-8` and a floor of `8.5e-22`, so its `−5.6e-17` of rounding residue
+    /// read as real data again — while the iterate it is judging is only
+    /// resolved to `~6e-16`. Do not "improve" this to the term sum without
+    /// re-running those three.
     ///
     /// Scale-invariant by construction. Under a row scaling `dc_i` the
     /// Jacobian row carries `dc_i` exactly as the residual and the declared
@@ -2456,13 +2464,17 @@ mod tests {
     }
 
     fn fixture_with(nlp: MockNlp) -> IpoptCalculatedQuantities {
+        fixture_with_x(nlp, &[2.0, 3.0])
+    }
+
+    fn fixture_with_x(nlp: MockNlp, x: &[Number]) -> IpoptCalculatedQuantities {
         let mut data = IpoptData::new();
         data.curr_mu = 0.1;
-        // Iterate: x = (2, 3); s = (4); y_c = (1); y_d = (1);
+        // Iterate: x as given (2, 3 by default); s = (4); y_c = (1); y_d = (1);
         // z_L = (0.5) [bound on x[0]], z_U = (0.7) [bound on x[1]],
         // v_L = (0.3), v_U = ().
         let iv = IteratesVector::new(
-            rcv(&[2.0, 3.0]),
+            rcv(x),
             rcv(&[4.0]),
             rcv(&[1.0]),
             rcv(&[1.0]),
@@ -2692,6 +2704,28 @@ mod tests {
         let bound = 2.0 * floor;
         let cq = fixture_with(MockNlp::new().with_d_box(bound));
         assert_eq!(cq.relative_d_infeasibility_max(), (2.0 - bound) / bound);
+    }
+
+    /// The floor tracks `‖x‖_∞` **deliberately**, and this pins it. `x` is one
+    /// vector produced by a linear solve with norm-wise backward error, so a
+    /// large variable anywhere really does coarsen how finely every other
+    /// component can be placed — and a declared magnitude finer than that is a
+    /// target no iterate could hit. The per-row alternative, `Σ_j |a_ij x_j|`
+    /// via `|J|·|x|`, looks more precise and measures the wrong thing (a row's
+    /// *evaluation* error, not what limits its residual); it was implemented
+    /// and it regressed QETAMACR, QSCORPIO and QPILOTNO of gh #446's 15. Re-run
+    /// those three before changing this.
+    #[test]
+    fn row_noise_floor_tracks_the_iterate_norm() {
+        // `d(x) = x0` against a declared box of ±1e-9.
+        let bound = 1e-9;
+        // At ‖x‖_∞ = 3 the floor is ~4.3e-14: the bound is real data, judged.
+        let cq = fixture_with(MockNlp::new().with_d_box(bound));
+        assert_eq!(cq.relative_d_infeasibility_max(), (2.0 - bound) / bound);
+        // At ‖x‖_∞ = 1e8 the floor is ~1.4e-6 and the same bound is finer than
+        // the iterate can be resolved, so the row abstains.
+        let cq = fixture_with_x(MockNlp::new().with_d_box(bound), &[2.0, 1e8]);
+        assert_eq!(cq.relative_d_infeasibility_max(), 0.0);
     }
 
     /// A row-count mismatch means the RHS does not describe this `c` block;
