@@ -29,6 +29,26 @@ use pounce_linalg::{Matrix, SymMatrix, Vector};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Safety factor on the per-row noise floor of
+/// [`IpoptCalculatedQuantities::row_noise_floor`]. The floor bounds the
+/// largest single term of a row by `max_j |a_ij| · ‖x‖_∞`; the row's actual
+/// rounding error accumulates over all of its nonzeros, so the bound is short
+/// by up to a factor of the row count. `64` covers a typical sparse row
+/// without reaching far enough to swallow a declared magnitude a model could
+/// have meant: at the `‖x‖_∞ ~ 1` of a well-posed problem the floor sits near
+/// `1.4e-14`, still nine orders under `constr_viol_tol`'s default. Rows it
+/// silences fall back on the absolute feasibility test, which is already
+/// scale-invariant on a row whose declared magnitude is numerically zero.
+///
+/// Measured, and not a knife edge: over gh #446's 15 problems plus the
+/// infeasibility-detection suites (`false_local_infeasibility`,
+/// `infeasible_status_tol_invariance`, `issue_390_nonlinear_equality_scale`),
+/// every value from `8` to `1024` gives the same verdicts. `1` is too small —
+/// QSCSD1's rows are wide enough that the missing nonzero-count factor still
+/// leaves its `2^-53` RHS above the bound — so `64` sits an order of magnitude
+/// inside the band from either edge.
+const ROW_NOISE_KAPPA: Number = 64.0;
+
 /// Calculated-quantities object. Holds shared handles on data and the
 /// NLP; per-quantity caches live in `RefCell`s here.
 pub struct IpoptCalculatedQuantities {
@@ -886,6 +906,23 @@ impl IpoptCalculatedQuantities {
     /// does not track the RHS at all (`declared_c_rhs` is `None` — e.g. the
     /// restoration NLP, whose `c` block is not the user's rows), the whole
     /// block abstains.
+    ///
+    /// "Homogeneous" is judged **numerically**, not by `b_i == 0` exactly: a
+    /// row abstains once `|b_i|` sinks under its own
+    /// [noise floor](`Self::row_noise_floor`). An exact-zero test is the
+    /// right idea measured with the wrong instrument — a converter that emits
+    /// `2^-53` where the model says `0` (Maros-Mészáros `QSC*`/`QSCFXM*`, and
+    /// every one of the 15 problems in gh #446, carry equality rows with an
+    /// RHS at `1e-17`–`1e-16`) declares a magnitude that is pure rounding
+    /// residue. `|c_i|` cannot be driven below the noise floor either, so the
+    /// ratio was noise over noise: QSCSD1 read 81× violated at a converged KKT
+    /// point whose absolute violation was `9.2e-15`, which vetoed its success
+    /// certificate and then armed the rapid-infeasibility pre-filter — a
+    /// feasible convex QP reported `Converged to a point of local
+    /// infeasibility`. Comparing against the row's own noise floor keeps the
+    /// scale invariance that is the whole point of the measure (both sides
+    /// carry `dc_i`), which an absolute cutoff on `|b_i|` would have thrown
+    /// away.
     pub fn relative_c_infeasibility_max(&self) -> Number {
         let c = self.curr_c();
         if c.dim() == 0 {
@@ -894,6 +931,7 @@ impl IpoptCalculatedQuantities {
         let Some(rhs) = self.nlp.borrow().declared_c_rhs() else {
             return 0.0;
         };
+        let noise = self.row_noise_floor(&*self.curr_jac_c(), &*c);
         let Some(c) = c.as_any().downcast_ref::<DenseVector>() else {
             return 0.0;
         };
@@ -905,13 +943,90 @@ impl IpoptCalculatedQuantities {
             return 0.0;
         }
         let mut worst = 0.0_f64;
-        for (&ci, &bi) in cv.iter().zip(rhs.iter()) {
+        for (i, (&ci, &bi)) in cv.iter().zip(rhs.iter()).enumerate() {
             let mag = bi.abs();
-            if mag > 0.0 && mag.is_finite() && ci.is_finite() {
+            // `0.0` when no floor could be computed, which reproduces the
+            // former `mag > 0.0` gate exactly.
+            let floor = noise.as_ref().map_or(0.0, |n| n[i]);
+            if mag > floor && mag.is_finite() && ci.is_finite() {
                 worst = worst.max(ci.abs() / mag);
             }
         }
         worst
+    }
+
+    /// Per-row floating-point noise floor of a constraint block: how large the
+    /// rounding error in the row's evaluated value can be, in the same
+    /// internally scaled units as the block's residual and declared bounds.
+    /// `jac` is the block's Jacobian and `template` any vector in the block's
+    /// space.
+    ///
+    /// Evaluating a row accumulates a relative error of order `eps` against
+    /// the magnitude of the *terms* it sums, `Σ_j |∂g_i/∂x_j · x_j|` — not
+    /// against the magnitude of the result. A row whose terms cancel (a
+    /// staircase LP row, a mass balance) therefore has a value that bottoms
+    /// out well above zero in relative terms while the value itself is tiny,
+    /// so neither the residual nor the declared bound can serve as the
+    /// reference. The Jacobian row does: `max_j |∂g_i/∂x_j| · ‖x‖_∞` bounds
+    /// the largest single term, and [`ROW_NOISE_KAPPA`] covers the sum over
+    /// the row's nonzeros.
+    ///
+    /// `‖x‖_∞` is a deliberately coarse stand-in for the row's *own*
+    /// variables — the exact `Σ_j |a_ij x_j|` would need `|J|·|x|`, which the
+    /// [`Matrix`] interface cannot express (`mult_vector` carries the signs
+    /// that are the whole problem). It over-estimates whenever the largest
+    /// variable is one the row does not mention, so the floor errs toward
+    /// abstaining. That is the safe direction: abstaining hands the row back
+    /// to the absolute `constr_viol_tol` test, whereas over-claiming is what
+    /// gh #446 was.
+    ///
+    /// Scale-invariant by construction. Under a row scaling `dc_i` the
+    /// Jacobian row carries `dc_i` exactly as the residual and the declared
+    /// bounds do (the scaling is applied in `eval_jac_c`/`eval_jac_d`), so the
+    /// floor moves with the quantities it gates and the abstention verdict is
+    /// the same at every `s`.
+    ///
+    /// A row with an **empty** Jacobian gets an infinite floor, so it always
+    /// abstains. Every variable it mentions has been fixed and substituted
+    /// out, which leaves a constant row `0 = b` that no iterate can move: it
+    /// is a statement about the *model*, and judging the *iterate* by it is a
+    /// category error. That is presolve's question, answered up front by
+    /// `presolve_infeasibility_proof` with a certificate, not a residual. The
+    /// runtime measure abstaining costs no detection that matters — the
+    /// absolute `constr_viol_tol` arm still sees the row, and an empty row
+    /// violated by anything a caller would recognise as infeasible is orders
+    /// above it. QPILOTNO is why: five variables fixed at `0` reduce row 150
+    /// to `0 = −2.22e-16`, its own rounding residue, and a measure that
+    /// insists the iterate is 100% in violation of it will never let any
+    /// iterate succeed (gh #446).
+    ///
+    /// `None` — meaning "no floor", i.e. only an exactly-zero magnitude
+    /// abstains — when the reference cannot be formed: `x = 0` (every term is
+    /// exactly zero, so the row carries no rounding error to speak of), a
+    /// non-finite iterate, or a vector type that is not dense.
+    fn row_noise_floor(&self, jac: &dyn Matrix, template: &dyn Vector) -> Option<Vec<Number>> {
+        let x_amax = self.curr_iv().x.amax();
+        if x_amax <= 0.0 || !x_amax.is_finite() {
+            return None;
+        }
+        let mut rows = template.make_new();
+        jac.compute_row_amax(&mut *rows, true);
+        let rows = rows.as_any().downcast_ref::<DenseVector>()?;
+        if !rows.is_initialized() {
+            return None;
+        }
+        Some(
+            rows.expanded_values()
+                .iter()
+                .map(|&a| {
+                    if a > 0.0 {
+                        ROW_NOISE_KAPPA * Number::EPSILON * a * x_amax
+                    } else {
+                        Number::INFINITY
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// The inequality-block half of
@@ -941,7 +1056,16 @@ impl IpoptCalculatedQuantities {
     /// first place: `s·g >= 0` is the same row at every `s`, so the absolute
     /// test is already invariant there. Rows whose bounds are all zero or
     /// non-finite therefore contribute nothing (the relative measure
-    /// abstains). Equality rows are judged by
+    /// abstains) — "zero" measured against the row's own
+    /// [noise floor](`Self::row_noise_floor`) rather than exactly, for the
+    /// reason spelled out on [`Self::relative_c_infeasibility_max`]: a
+    /// converter that writes `2^-53` where the model says `0` otherwise hands
+    /// a bound made of rounding residue to a measure that then reads the row
+    /// as 100% violated. QPILOTNO carries 43 such inequality bounds at
+    /// `1e-17`–`1e-15`, and one of them — a row sitting at exactly `d(x) = 0`
+    /// against a declared bound of `1.1e-16` — pinned `rel_viol` at `1.0` for
+    /// the whole run and drove the gh #446 local-infeasibility verdict from
+    /// this block. Equality rows are judged by
     /// [`Self::relative_c_infeasibility_max`], which plumbs the pre-fold RHS
     /// back to supply the magnitude the fold into `c(x) = 0` erased.
     ///
@@ -1006,6 +1130,7 @@ impl IpoptCalculatedQuantities {
             nlp.pd_u().mult_vector(1.0, &*ones_u, 0.0, &mut *mask_u);
             (lo, hi, mask_l, mask_u)
         };
+        let noise = self.row_noise_floor(&*self.curr_jac_d(), &*dms);
         let (Some(d), Some(lo), Some(hi), Some(mask_l), Some(mask_u)) = (
             d.as_any().downcast_ref::<DenseVector>(),
             lo.as_any().downcast_ref::<DenseVector>(),
@@ -1041,7 +1166,10 @@ impl IpoptCalculatedQuantities {
                 viol = viol.max(dv[i] - hiv[i]);
                 mag = mag.max(hiv[i].abs());
             }
-            if mag > 0.0 && mag.is_finite() && viol.is_finite() && viol > 0.0 {
+            // `0.0` when no floor could be computed, which reproduces the
+            // former `mag > 0.0` gate exactly.
+            let floor = noise.as_ref().map_or(0.0, |n| n[i]);
+            if mag > floor && mag.is_finite() && viol.is_finite() && viol > 0.0 {
                 worst = worst.max(viol / mag);
             }
         }
@@ -2120,6 +2248,7 @@ mod tests {
         // Jacobian to exercise the finiteness guard in `curr_nlp_error`.
         nan_grad: bool,
         nan_jac_c: bool,
+        empty_jac_c: bool,
         // gh#390: the declared equality RHS the c-block relative measure
         // divides by. `None` (the default) is the "not tracked" contract.
         c_rhs: Option<Vec<Number>>,
@@ -2138,6 +2267,31 @@ mod tests {
 
         fn with_nan_jac_c(mut self) -> Self {
             self.nan_jac_c = true;
+            self
+        }
+
+        /// Every variable of the equality row fixed and substituted out, so
+        /// the row reduces to the constant `0 = b` — what
+        /// `IpoptCalculatedQuantities::row_noise_floor` calls a row no iterate
+        /// can move.
+        fn with_empty_jac_c(mut self) -> Self {
+            self.empty_jac_c = true;
+            self
+        }
+
+        /// Re-declare the single `d` row as the box `[−mag, +mag]`, so every
+        /// bound it has is of the chosen magnitude — the default fixture's
+        /// lower bound of `1` would otherwise supply the magnitude by itself.
+        /// `d(x) = x0 = 2` sits outside it, violating by `2 − mag`.
+        fn with_d_box(mut self, mag: Number) -> Self {
+            self.d_l = dvec(&[-mag]);
+            self.d_u = dvec(&[mag]);
+            self.pd_u = StdRc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                1,
+                1,
+                &[0],
+                0,
+            )));
             self
         }
 
@@ -2181,6 +2335,7 @@ mod tests {
                 d_scale: None,
                 nan_grad: false,
                 nan_jac_c: false,
+                empty_jac_c: false,
                 c_rhs: None,
             }
         }
@@ -2222,6 +2377,13 @@ mod tests {
             dd.values_mut()[0] = xx.values()[0];
         }
         fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            if self.empty_jac_c {
+                // No entries at all: the row carries no variable.
+                let space = GenTMatrixSpace::new(1, 2, vec![], vec![]);
+                let mut jac = GenTMatrix::new(space);
+                jac.set_values(&[]);
+                return StdRc::new(jac);
+            }
             // c(x) = x0 + x1 - 1 → Jc = [1, 1] (1×2), nonzeros (1,1),(1,2).
             let space = GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]);
             let mut jac = GenTMatrix::new(space);
@@ -2476,6 +2638,60 @@ mod tests {
         assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
         let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![Number::NAN])));
         assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+    }
+
+    /// gh #446. "Homogeneous" has to be judged numerically. The fixture's row
+    /// is `x0 + x1 == b` at `x = (2, 3)`, so its noise floor is
+    /// `ROW_NOISE_KAPPA · eps · 1 · 3 ≈ 4.3e-14`: an RHS under that is
+    /// rounding residue — a converter writing `2^-53` where the model says
+    /// `0` — and the row must abstain exactly as a declared zero does. Above
+    /// the floor the RHS is real data and is judged, however small.
+    #[test]
+    fn relative_c_infeasibility_abstains_on_rhs_below_the_row_noise_floor() {
+        let floor = ROW_NOISE_KAPPA * Number::EPSILON * 3.0;
+        // The QSCSD1 value: an RHS of exactly one machine epsilon.
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![Number::EPSILON])));
+        assert!(Number::EPSILON < floor);
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+        // Just above the floor the row still carries a magnitude, and a
+        // residual of 4 against it is judged on its merits.
+        let rhs = 2.0 * floor;
+        let cq = fixture_with(MockNlp::new().with_c_rhs(Some(vec![rhs])));
+        assert_eq!(cq.relative_c_infeasibility_max(), 4.0 / rhs);
+    }
+
+    /// gh #446. Every variable of the row fixed and substituted out leaves
+    /// `0 = b`, which no iterate can move — a statement about the model, for
+    /// presolve to certify, not a residual to judge an iterate by. QPILOTNO's
+    /// row 150 reduces to `0 = −2.22e-16` this way and pinned the relative
+    /// measure at 100% for the entire run.
+    #[test]
+    fn relative_c_infeasibility_abstains_on_a_row_no_iterate_can_move() {
+        let cq = fixture_with(
+            MockNlp::new()
+                .with_empty_jac_c()
+                .with_c_rhs(Some(vec![Number::EPSILON])),
+        );
+        assert_eq!(cq.relative_c_infeasibility_max(), 0.0);
+        // Not a licence to ignore a real one: the absolute `constr_viol_tol`
+        // arm still sees the row, and it is what governs here.
+        assert_eq!(cq.curr_primal_infeasibility_max(), 4.0);
+    }
+
+    /// gh #446. The inequality block draws its magnitude from the declared
+    /// bounds, and needs the same numeric reading of "zero" — QPILOTNO carries
+    /// 43 bounds at `1e-17`–`1e-15`. `d(x) = x0 = 2` against an upper bound
+    /// under the row's noise floor is 2e14 times its magnitude by the old
+    /// arithmetic, and unjudgeable by the new.
+    #[test]
+    fn relative_d_infeasibility_abstains_on_bound_below_the_row_noise_floor() {
+        let floor = ROW_NOISE_KAPPA * Number::EPSILON * 3.0;
+        let cq = fixture_with(MockNlp::new().with_d_box(Number::EPSILON));
+        assert_eq!(cq.relative_d_infeasibility_max(), 0.0);
+        // A bound above the floor is real, and `d = 2` violates it hugely.
+        let bound = 2.0 * floor;
+        let cq = fixture_with(MockNlp::new().with_d_box(bound));
+        assert_eq!(cq.relative_d_infeasibility_max(), (2.0 - bound) / bound);
     }
 
     /// A row-count mismatch means the RHS does not describe this `c` block;
