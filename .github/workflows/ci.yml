@@ -73,10 +73,6 @@ jobs:
       - name: Compile-check pounce-hsl (publishable, link-excluded above)
         run: cargo check -p pounce-hsl --all-targets --verbose
 
-  # Exercise the Python surface (the `pounce.jax` differentiable /
-  # sensitivity / path-following APIs) on every PR. The Rust `test` job
-  # above covers the solver core, and `wheel-smoke` only imports the
-  # package — neither runs pytest, so without this job the entire
   # Guard the browser build (crates/pounce-wasm, docs/src/wasm.md). The
   # `test` job type-checks pounce-wasm on the host, which catches neither of
   # the two ways this surface breaks: a dependency that stops compiling for
@@ -101,6 +97,24 @@ jobs:
       - name: Solve a model in wasm
         run: node crates/pounce-wasm/tests/smoke.mjs
 
+      # The Pyodide app's Python layer (web-python/pounce_browser.py) maps
+      # the `.sol` blocks back onto Pyomo components by writer order. Getting
+      # that wrong puts plausible numbers on the wrong variables, which no
+      # Rust-side test can see — so drive the real round trip here, with Node
+      # standing in for the browser.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Pyomo round trip through wasm
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyomo
+          python crates/pounce-wasm/tests/pyomo_roundtrip.py
+
+  # Exercise the Python surface (the `pounce.jax` differentiable /
+  # sensitivity / path-following APIs) on every PR. The Rust `test` job
+  # above covers the solver core, and `wheel-smoke` only imports the
+  # package — neither runs pytest, so without this job the entire
   # Python feature surface lands untested in CI. Builds the wheel the
   # same way wheel-smoke does, then installs the jax + diffrax extras
   # and runs the test suite.

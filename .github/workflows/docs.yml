@@ -60,11 +60,13 @@ jobs:
       - name: Build versioned site
         run: scripts/build-versioned-docs.sh "$GITHUB_WORKSPACE/site"
 
-      # The in-browser solver (docs/src/wasm.md) rides the same Pages
-      # deployment, at <site>/demo/. It is version-independent — one live
-      # demo built from main, not one per archived tag — so it is staged
-      # here rather than inside build-versioned-docs.sh, which wipes and
-      # rebuilds its output directory per version.
+      # The in-browser solvers (docs/src/wasm.md) ride the same Pages
+      # deployment: the drag-and-drop `.nl` app at <site>/demo/ and the
+      # Pyodide + Pyomo scripting app at <site>/demo/python/. Both are
+      # version-independent — one live build from main, not one per archived
+      # tag — so they are staged here rather than inside
+      # build-versioned-docs.sh, which wipes and rebuilds its output
+      # directory per version.
       #
       # Nothing about it needs special Pages configuration: no threads, so
       # no SharedArrayBuffer and no COOP/COEP headers (which Pages cannot
@@ -76,12 +78,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the in-browser solver demo
         run: crates/pounce-wasm/build.sh
-      - name: Stage the demo into the site
+      - name: Stage the demos into the site
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/site/demo"
+          mkdir -p "$GITHUB_WORKSPACE/site/demo" "$GITHUB_WORKSPACE/site/demo/python"
           cp -a crates/pounce-wasm/web/. "$GITHUB_WORKSPACE/site/demo/"
-          rm -f "$GITHUB_WORKSPACE/site/demo/.gitignore"
+          cp -a crates/pounce-wasm/web-python/. "$GITHUB_WORKSPACE/site/demo/python/"
+          find "$GITHUB_WORKSPACE/site/demo" -name .gitignore -delete
+          rm -rf "$GITHUB_WORKSPACE/site/demo/python/__pycache__"
           test -s "$GITHUB_WORKSPACE/site/demo/pounce.wasm"
+          test -s "$GITHUB_WORKSPACE/site/demo/python/pounce.wasm"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

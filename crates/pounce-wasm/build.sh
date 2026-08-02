@@ -28,12 +28,23 @@ else
   cp "$out" "$here/web/pounce.wasm"
 fi
 
+# The Pyodide app runs the same module and the same WASI shim; each app
+# directory stays self-contained so either one can be copied to a host on
+# its own.
+cp "$here/web/pounce.wasm" "$here/web-python/pounce.wasm"
+cp "$here/web/wasi.js" "$here/web-python/wasi.js"
+
 size=$(wc -c < "$here/web/pounce.wasm")
 printf 'web/pounce.wasm  %s bytes (%.1f MB)\n' "$size" "$(echo "$size" | awk '{print $1/1048576}')"
 
 if [[ "${1:-}" == "--serve" ]]; then
-  echo "serving $here/web on http://localhost:8000"
+  echo "serving $here/web on http://localhost:8000 (Pyodide app: --serve-python)"
   # Any static server works; the page needs no headers beyond correct MIME
   # types for .wasm and .js.
   cd "$here/web" && python3 -m http.server 8000
+fi
+
+if [[ "${1:-}" == "--serve-python" ]]; then
+  echo "serving $here/web-python on http://localhost:8000"
+  cd "$here/web-python" && python3 -m http.server 8000
 fi

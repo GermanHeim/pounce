@@ -1,0 +1,3 @@
+# Build artifacts staged by build.sh — rebuild them, do not commit them.
+pounce.wasm
+wasi.js

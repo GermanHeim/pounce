@@ -44,7 +44,10 @@ behind the optional `ma57` feature for users who have `libcoinhsl` installed.
 Being pure Rust also means the whole solver compiles to WebAssembly:
 **[try it in your browser](https://jkitchin.github.io/pounce/demo/)** — drop
 an AMPL `.nl` file on the page to see the model's structure and solve it
-client-side, with nothing uploaded anywhere. See
+client-side, with nothing uploaded anywhere. There is also a
+**[Pyomo playground](https://jkitchin.github.io/pounce/demo/python/)**, where
+Pyodide runs CPython and Pyomo in the tab and POUNCE solves the model you
+write. See
 [POUNCE in the Browser](docs/src/wasm.md) — the docs site serves the same
 page at [`/dev/wasm.html`](https://jkitchin.github.io/pounce/dev/wasm.html)
 until the next release build picks it up at the site root.

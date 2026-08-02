@@ -26,10 +26,22 @@ changes.
   and Jacobian/Hessian sparsity, then solve it with the iteration table
   streaming into the page. It is static files plus a ~60-line WASI shim; no
   `wasm-bindgen`, no npm, no server. Nothing is uploaded.
-- The demo is published with the docs: `docs.yml` builds the module and
-  stages the page into the Pages site at
-  [`/demo/`](https://jkitchin.github.io/pounce/demo/) on every deployment
-  from `main`. It needs no Pages configuration — single-threaded, so no
+- A second page, `/demo/python/`, runs **Pyomo** in the browser: Pyodide
+  supplies CPython, `micropip` installs Pyomo's pure-Python wheel, you write
+  an ordinary model, and `pounce_browser.solve(m)` writes the `.nl`, solves
+  it with the same wasm module, and loads the `.sol` back so `x.value` and
+  `model.dual[c]` read as after any local solve. Variables and rows are
+  matched by Pyomo's own writer ordering, pinned by
+  `crates/pounce-wasm/tests/pyomo_roundtrip.py` — a model with a closed-form
+  optimum and multipliers, run in CI with Node standing in for the browser.
+  It is Pyomo's modelling layer rather than POUNCE's Python API: the model
+  crosses as a file, so there are no Python callbacks mid-solve.
+- The demos are published with the docs: `docs.yml` builds the module and
+  stages both pages into the Pages site
+  ([`/demo/`](https://jkitchin.github.io/pounce/demo/) and
+  [`/demo/python/`](https://jkitchin.github.io/pounce/demo/python/)) on
+  every deployment from `main`. Neither needs Pages configuration —
+  single-threaded, so no
   `SharedArrayBuffer` and no COOP/COEP headers (which Pages cannot set),
   and all URLs are relative so the `/pounce/` base path just works.
 - Numerics are unchanged. Over all 37 `.nl` fixtures in

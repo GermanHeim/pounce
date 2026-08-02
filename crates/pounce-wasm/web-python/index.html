@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POUNCE + Pyomo in the browser</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --ink: #1b1a18; --muted: #6b6660;
+    --line: #e3ded6; --accent: #b4530a; --accent-soft: #fdf1e5;
+    --ok: #1f7a4d; --bad: #a32020;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16150f; --panel: #1f1e18; --ink: #efe9df; --muted: #a29a8c;
+      --line: #35322a; --accent: #f0913f; --accent-soft: #2a2118;
+      --ok: #6ec894; --bad: #ef8080;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: 1rem; margin: 0 0 .75rem; text-transform: uppercase;
+       letter-spacing: .08em; color: var(--muted); }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 46rem; }
+  code { font-family: var(--mono); font-size: .9em; }
+  section { margin-top: 1.75rem; }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 1.25rem; }
+  .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+  textarea#code {
+    width: 100%; min-height: 22rem; resize: vertical; padding: .8rem .9rem;
+    font: 13px/1.6 var(--mono); color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; tab-size: 4;
+  }
+  select {
+    font: 14px system-ui, sans-serif; padding: .5rem .6rem; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  button {
+    font: 600 15px/1 system-ui, sans-serif; padding: .7rem 1.4rem;
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; color: var(--accent);
+                 border: 1px solid var(--accent); padding: .5rem 1rem; font-size: 14px; }
+  pre#out {
+    margin: 0; padding: .9rem 1rem; min-height: 8rem; max-height: 30rem; overflow: auto;
+    background: #14130f; color: #e6ded0; border-radius: 10px;
+    font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word;
+  }
+  .status { color: var(--muted); font-size: .9rem; }
+  .status.err { color: var(--bad); }
+  .note { color: var(--muted); font-size: .85rem; margin-top: .6rem; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .85rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>POUNCE + Pyomo in the browser</h1>
+  <p class="lede">
+    Write a Pyomo model in Python, solve it with POUNCE — both running in this tab.
+    <a href="https://pyodide.org">Pyodide</a> supplies CPython and Pyomo compiled to
+    WebAssembly; Pyomo writes the AMPL <code>.nl</code>, the POUNCE wasm module solves
+    it, and the <code>.sol</code> is loaded back so <code>x.value</code> and
+    <code>model.dual[c]</code> read as they would after any local solve. No server, no
+    install, nothing uploaded.
+  </p>
+
+  <div class="row">
+    <select id="example" aria-label="Example model"></select>
+    <button id="run" disabled>Run</button>
+    <button id="dl-code" class="ghost">Download script</button>
+    <span id="status" class="status">starting…</span>
+  </div>
+
+  <section>
+    <h2>Script</h2>
+    <textarea id="code" spellcheck="false"></textarea>
+    <p class="note">
+      <code>pounce_browser.solve(model, options=…)</code> takes <code>ipopt.opt</code>-format
+      options — the same names the POUNCE CLI and Python API use. Ctrl/⌘-Enter runs.
+    </p>
+  </section>
+
+  <section>
+    <h2>Output</h2>
+    <pre id="out"></pre>
+  </section>
+
+  <footer>
+    Also here: the <a href="../">drag-and-drop <code>.nl</code> solver</a>.
+    POUNCE is a pure-Rust nonlinear interior-point solver —
+    <a href="https://github.com/jkitchin/pounce">github.com/jkitchin/pounce</a>.
+  </footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
