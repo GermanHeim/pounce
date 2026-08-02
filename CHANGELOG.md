@@ -9,6 +9,31 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
+
+- A variable whose bounds are equal is removed from the solve
+  (`fixed_variable_treatment = make_parameter`), so the KKT factor's
+  `x` block is shorter than the user's variable list and every later
+  column moves. The `.col`-order rows the sensitivity session hands
+  around are user-space, and were used to index the factor directly:
+  one fixed variable anywhere made every later variable read its
+  NEIGHBOUR's row. `gradient()` returned a plausible wrong number with
+  no warning (`d(y)/dp` where `d(x)/dp` was asked for); `estimate()`
+  failed on a shape mismatch; `covariance()` raised a bogus
+  "structurally unidentifiable". Models with no fixed variable — every
+  model in the test suite — were never affected, since the two spaces
+  coincide exactly then.
+- `Solver.primal_rows(x_indices)`: the factor rows of user-space
+  variable indices, `None` for a removed fixed variable. The `x`
+  counterpart of the existing `multiplier_rows`, which had always done
+  this translation for the `y_c` block. Every index the session takes
+  into the factor now routes through it, and asking for a removed
+  variable's sensitivity is an explicit refusal rather than a
+  neighbouring column.
+- Regression tests add one inert fixed variable to an existing model
+  and require every answer to be unchanged, plus a finite-difference
+  check so they pin the right value and not merely a consistent one.
+
 ### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
 
 - Bound and constraint activity on the fitted parameters now classifies
