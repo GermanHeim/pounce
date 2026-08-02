@@ -155,6 +155,20 @@ This drops the `pounce` binary into `$PREFIX/bin` and the
 `libpounce_cinterface` shared library into `$PREFIX/lib`. Make sure
 `$HOME/.local/bin` is on your `PATH`.
 
+### Container image
+
+No toolchain, no `pip install` — useful on a cluster, where you often
+cannot install one anyway. The image carries the CLI, the Python API,
+and the Pyomo plugin:
+
+```sh
+docker run --rm -v "$PWD:/work" ghcr.io/jkitchin/pounce:latest problem.nl
+apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.9.0
+```
+
+`make docker` builds the same image from your working tree instead. See
+[docs/src/docker.md](docs/src/docker.md).
+
 ## Usage
 
 Solve an AMPL `.nl` file:

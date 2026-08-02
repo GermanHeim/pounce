@@ -5,6 +5,7 @@
 # Getting Started
 
 - [Installation](installation.md)
+- [Docker & Containers](docker.md)
 - [Quick Start](quick-start.md)
 - [Choosing a Solver](choosing-a-solver.md)
 

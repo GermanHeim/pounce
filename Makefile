@@ -16,6 +16,8 @@
 #   make wasm-serve       # ...and serve it on http://localhost:8000
 #   make install          # install pounce CLI + cinterface cdylib under $(PREFIX)
 #   make uninstall        # remove installed artifacts
+#   make docker           # container image compiled from the current tree
+#   make docker-release   # container image from the published PyPI wheels
 #   make install-mcp      # build studio/mcp + register with Claude Code
 #   make uninstall-mcp    # unregister + remove the studio/mcp venv
 #   make install-skill    # build pounce + pounce-studio, drop SKILL.md into ~/.claude/skills/
@@ -75,7 +77,8 @@ endif
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
         python-ext python-cli-bin python-test coverage coverage-quick \
-        benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve
+        benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve \
+        docker docker-release
 
 all: build
 
@@ -155,6 +158,42 @@ uninstall:
 clean:
 	$(CARGO) clean
 
+# ---- Container images ----------------------------------------------------
+# Both Dockerfiles must be built from the repository root, because the source
+# build's context has to contain Cargo.toml, crates/, python/ and
+# pyomo-pounce/. These targets exist mostly to supply the two build args that
+# are easy to forget by hand; see docker/README.md.
+#
+# The images run their own smoke test as the final build step (CLI solve,
+# import pounce, Pyomo plugin lookup), so a build that succeeds is an image
+# that works — there is no separate `docker-test`.
+DOCKER        ?= docker
+DOCKER_IMAGE  ?= pounce
+# Read straight out of Cargo.toml so the tag cannot drift from the release.
+# scripts/check-release-consistency.sh already guarantees the two PyPI
+# manifests agree with this value.
+POUNCE_VERSION := $(shell grep -m1 -E '^version[[:space:]]*=' Cargo.toml \
+                    | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+
+# Compile the current working tree. POUNCE_BUILD_GIT is passed in because
+# .git is deliberately kept out of the build context (see .dockerignore) —
+# without it the image cannot report which commit it came from. Falls back to
+# "unknown" outside a git checkout rather than failing the build.
+docker:
+	$(DOCKER) build -f docker/Dockerfile -t "$(DOCKER_IMAGE):dev" \
+	  --build-arg POUNCE_BUILD_GIT="$$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)" \
+	  --build-arg POUNCE_VERSION="$(POUNCE_VERSION)" \
+	  .
+
+# Install the published wheels. No Rust toolchain involved; builds in
+# seconds. Requires $(POUNCE_VERSION) to actually be on PyPI, which it is
+# only after the python-v$(POUNCE_VERSION) tag has been released.
+docker-release:
+	$(DOCKER) build -f docker/Dockerfile.release \
+	  -t "$(DOCKER_IMAGE):$(POUNCE_VERSION)" \
+	  --build-arg POUNCE_VERSION="$(POUNCE_VERSION)" \
+	  .
+
 # Build pounce-cli with the HSL MA57 backend enabled and emit the
 # binary as `pounce-ma57` so it sits alongside the default `pounce`.
 # Requires libcoinhsl discoverable to the linker.
@@ -169,7 +208,7 @@ pounce-ma57:
 	@echo "to invoke it as just 'pounce-ma57'."
 
 help:
-	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,45p'
+	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,48p'
 
 # ---- Python extension + tests -------------------------------------------
 # Rebuild the native extension in place, then run the Python test suite.

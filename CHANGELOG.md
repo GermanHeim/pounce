@@ -108,6 +108,42 @@ changes.
   pre-existing wheel smoke test could not have caught this: it ran on the
   same host that built the binary, the one platform where the floor is
   invisible.
+### Added — container images (#449)
+
+- Two Dockerfiles under `docker/`, both producing the same three
+  interfaces (the `pounce` CLI, `import pounce`, and Pyomo's
+  `SolverFactory('pounce')`) so a job script written against one runs
+  unchanged on the other. `Dockerfile.release` pip-installs the
+  published wheels for a pinned `X.Y.Z` and builds in seconds;
+  `Dockerfile` compiles the working tree you hand it, for testing an
+  unreleased commit. `make docker` / `make docker-release` build them
+  locally with the version and commit filled in.
+- Published to `ghcr.io/jkitchin/pounce` by
+  `.github/workflows/release-docker.yml`: `:X.Y.Z`, `:X.Y` and
+  `:latest` from the release image on a `v*` tag, `:edge` and
+  `:sha-<short>` from the source image on every push to `main`. Both
+  are multi-arch (linux/amd64 + linux/arm64, each built natively).
+  Primarily aimed at clusters, where Apptainer/Singularity can pull
+  them directly — see the new [Docker & Containers](docs/src/docker.md)
+  page.
+- Each image runs a smoke test as its final build step (a CLI solve,
+  `import pounce`, and a Pyomo plugin lookup), so a build that succeeds
+  is an image that works.
+- Neither image enables the `ma57` feature: CoinHSL is
+  license-restricted and not redistributable. The pure-Rust FERAL
+  backend is the default and needs nothing external.
+- Both images sit on Debian trixie rather than bookworm, which the
+  release image has no choice about *yet*: the wheels published through
+  0.9.0 are tagged `manylinux2014` but bundle a CLI needing glibc 2.39,
+  so `pounce --version` fails outright on bookworm. The build-time smoke
+  test is what surfaced that, and it is fixed in #452 / #456 — but this
+  image installs from PyPI, so the pin stays until a `python-v*` tag
+  rebuilds the wheels, after which it can drop to bookworm or lower.
+- `crates/pounce-cli/build.rs` now honors a `POUNCE_BUILD_GIT`
+  override for the SHA it stamps into `pounce --about`. The source
+  image keeps `.git` out of its build context (~90M the compile never
+  reads), which previously left every such image reporting `unknown`
+  with no way to tell which commit it contained.
 
 ### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
 
