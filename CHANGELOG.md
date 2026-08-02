@@ -24,10 +24,13 @@ changes.
   `IncidenceGraphInterface.subgraph`, which copies the stored graph
   without re-inspecting constraints. The plan filters pre-fixing and
   the analyze pass post-fixing. The shared view is structural where a
-  fresh build substitutes fixed values: the edge sets can differ only
-  when a fixed zero cancels a term, which is guarded (affected rows
-  re-derived; a genuine cancellation falls back to a fresh build for
-  that pass), while the variable order within rows may differ on
+  fresh build substitutes fixed values: the edge sets can differ when
+  that substitution cancels a term — a fixed zero is the obvious way
+  but not the only one, since values can cancel across terms with no
+  fixed variable being zero (`a*x - b*x` with `a` and `b` fixed
+  equal). Every row adjacent to a fixed variable is therefore
+  re-derived and compared, and a genuine cancellation falls back to a
+  fresh build for that pass; the variable order within rows may differ on
   models where fixed values change the linear/nonlinear split; order
   feeds tie-breaks, so equally-valid diagnostics (which variable is
   reported loose) may resolve differently between the two views.

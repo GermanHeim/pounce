@@ -290,3 +290,87 @@ def test_shared_graph_zero_decision_falls_back_to_fresh():
         [v.name for b in ana_shared.variable_blocks for v in b]
     assert [c.name for c in ana_fresh.underconstrained_variables] == \
         [c.name for c in ana_shared.underconstrained_variables]
+
+
+def _cancelling_model():
+    """`a*x - b*x` with `a` and `b` fixed EQUAL and NONZERO: the `x`
+    terms cancel under value substitution, so a fresh build drops `x`
+    from `c1` while the structural view keeps it -- and no fixed
+    variable is itself zero."""
+    m = pyo.ConcreteModel()
+    m.a = pyo.Var(initialize=2.0)
+    m.b = pyo.Var(initialize=2.0)
+    m.x = pyo.Var(initialize=1.0)
+    m.y = pyo.Var(initialize=1.0)
+    m.c1 = pyo.Constraint(expr=m.y == m.a * m.x - m.b * m.x)
+    m.c2 = pyo.Constraint(expr=m.y == 5.0)
+    m.obj = pyo.Objective(expr=m.y)
+    return m
+
+
+def test_shared_graph_cancelling_nonzero_pair_falls_back_to_fresh():
+    """A cancellation with no zero-valued variable in sight (gh #445
+    review). Keying the guard on `value == 0.0` misses this: `a` and
+    `b` are both 2.0, yet `a*x - b*x` drops `x` under substitution.
+
+    Unguarded, the shared view keeps the phantom `x` edge, finds a
+    perfect matching where a fresh build finds none, and reports a
+    SQUARE system -- then solves `c1` for `x` whose derivative is
+    `a - b = 0`. That is the same regression the zero-valued guard was
+    added to prevent, reached by a different route: strictly worse than
+    the fresh answer, which reports `c1`/`c2` overconstrained and
+    breaks nothing.
+    """
+    from pyomo_pounce.block_init import block_analyze, structural_incidence
+
+    m1 = _cancelling_model()
+    m1.a.fix(2.0)
+    m1.b.fix(2.0)
+    ana_fresh = block_analyze(m1)
+
+    m2 = _cancelling_model()
+    g = structural_incidence(m2)
+    m2.a.fix(2.0)
+    m2.b.fix(2.0)
+    ana_shared = block_analyze(m2, igraph=g)
+
+    # the fixture is only meaningful if the fresh build really does see
+    # a non-square system here
+    assert ana_fresh.square is False
+    assert ana_fresh.square == ana_shared.square
+    assert {c.name for c in ana_fresh.overconstrained_constraints} == \
+        {c.name for c in ana_shared.overconstrained_constraints}
+    assert [[v.name for v in b] for b in ana_fresh.variable_blocks] == \
+        [[v.name for v in b] for b in ana_shared.variable_blocks]
+
+
+def test_shared_graph_nonzero_fixed_without_cancellation_stays_shared():
+    """The widened guard must not send every fixed-variable model down
+    the fresh-build path: a fixed nonzero that cancels nothing keeps
+    the shared view, or the gh #444 speedup is gone."""
+    import pyomo.contrib.incidence_analysis.interface as _iface
+    from pyomo_pounce.block_init import _active_view, structural_incidence
+
+    m = _split_model()
+    g = structural_incidence(m)
+    m.split.fix(0.3)                     # nonzero, cancels nothing
+
+    walks = []
+    orig = _iface.IncidenceGraphInterface.__init__
+
+    def counting(self, model=None, *args, **kwargs):
+        import pyomo.core.base.block as _block
+        if isinstance(model, (_block.Block, _block.BlockData)):
+            walks.append(model)
+        return orig(self, model, *args, **kwargs)
+
+    _iface.IncidenceGraphInterface.__init__ = counting
+    try:
+        view = _active_view(g, m)
+    finally:
+        _iface.IncidenceGraphInterface.__init__ = orig
+
+    assert walks == [], "took the fresh-build fallback with no cancellation"
+    assert view is not g                 # filtered, not the raw shared graph
+    assert {v.name for v in view.variables} == {
+        v.name for v in g.variables if not v.fixed}

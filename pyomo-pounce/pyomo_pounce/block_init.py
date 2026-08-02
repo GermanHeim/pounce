@@ -480,10 +480,23 @@ def _active_view(igraph, model):
 
     STRUCTURAL, not value-substituted: a fresh construction substitutes
     fixed variables' values, so its edge set can differ from this view
-    exactly when a fixed value cancels a term, which requires the value
-    0. That one case is guarded below: rows adjacent to a fixed zero
-    are re-derived, and if any edge genuinely cancels, this pass falls
-    back to a fresh construction (correct diagnostics over speed).
+    whenever that substitution cancels a term. A fixed ZERO is the
+    obvious way (`a*x` with `a = 0` drops `x`), but not the only one:
+    values that cancel across terms do it too, with no fixed variable
+    being zero at all (`a*x - b*x` with `a` and `b` fixed equal drops
+    `x`, gh #445 review). Keying the guard on zero-valued variables
+    would therefore miss real cancellations, so every row adjacent to
+    ANY fixed variable is re-derived and compared; if an edge genuinely
+    cancels, this pass falls back to a fresh construction (correct
+    diagnostics over speed).
+
+    That check costs what a fresh build spends on the rows it examines,
+    and it examines a subset, so it is never more expensive than the
+    fallback it protects — but it does mean a pass with many fixed
+    variables pays most of a walk. Nothing is fixed when the plan pass
+    runs, so it returns above without reaching here; the analyze pass
+    is the one that pays.
+
     Away from cancellations the edge sets are identical; the variable
     ORDER within rows can still differ (value substitution changes the
     linear/nonlinear split). Order feeds tie-breaks, so where two
@@ -504,14 +517,14 @@ def _active_view(igraph, model):
     unfixed = [v for v in igraph.variables if not v.fixed]
     if len(unfixed) == len(igraph.variables):
         return igraph
-    fixed_zero = [
-        v for v in igraph.variables if v.fixed and v.value == 0.0
-    ]
-    if fixed_zero:
+    fixed = [v for v in igraph.variables if v.fixed]
+    if fixed:
         from pyomo.contrib.incidence_analysis import get_incident_variables
 
+        # any fixed variable can take part in a cancellation, not only
+        # a zero-valued one -- see the note above
         affected = set()
-        for v in fixed_zero:
+        for v in fixed:
             affected.update(id(c) for c in igraph.get_adjacent_to(v))
         for con in igraph.constraints:
             if id(con) not in affected:
@@ -522,6 +535,8 @@ def _active_view(igraph, model):
                 for vv in igraph.get_adjacent_to(con)
                 if not vv.fixed
             }
+            # substitution can only DROP unfixed variables from a row,
+            # never add one, so inequality means a genuine cancellation
             if substituted != structural:
                 return IncidenceGraphInterface(
                     model, include_inequality=False
@@ -561,8 +576,8 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     :func:`structural_incidence`, built over THIS model with fixed
     variables included; the pass filters it to the currently-unfixed
     variables instead of re-walking every constraint expression
-    (gh #444). The view is STRUCTURAL: away from zero-value
-    cancellations (guarded, with a fresh-build fallback) its edge sets
+    (gh #444). The view is STRUCTURAL: away from value cancellations
+    (guarded, with a fresh-build fallback) its edge sets
     match a fresh construction, but the variable order within rows may
     differ on models where fixed values change the linear/nonlinear
     split. Order feeds tie-breaks, so where two answers are equally
@@ -682,8 +697,8 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
     :func:`structural_incidence`, built over THIS model with fixed
     variables included; the pass filters it to the currently-unfixed
     variables instead of re-walking every constraint expression
-    (gh #444). The view is STRUCTURAL: away from zero-value
-    cancellations (guarded, with a fresh-build fallback) its edge sets
+    (gh #444). The view is STRUCTURAL: away from value cancellations
+    (guarded, with a fresh-build fallback) its edge sets
     match a fresh construction, but the variable order within rows may
     differ on models where fixed values change the linear/nonlinear
     split. Order feeds tie-breaks, so where two answers are equally
@@ -819,8 +834,8 @@ def block_initialize(
     :func:`structural_incidence`, built over THIS model with fixed
     variables included; the pass filters it to the currently-unfixed
     variables instead of re-walking every constraint expression
-    (gh #444). The view is STRUCTURAL: away from zero-value
-    cancellations (guarded, with a fresh-build fallback) its edge sets
+    (gh #444). The view is STRUCTURAL: away from value cancellations
+    (guarded, with a fresh-build fallback) its edge sets
     match a fresh construction, but the variable order within rows may
     differ on models where fixed values change the linear/nonlinear
     split. Order feeds tie-breaks, so where two answers are equally
