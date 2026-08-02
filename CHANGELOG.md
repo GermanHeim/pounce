@@ -41,6 +41,44 @@ changes.
   `resto_inner_solver` already made for them.
 - Set `POUNCE_DBG_RESTO_LAYER2=1` with `RUST_LOG=pounce::restoration=debug`
   to trace the verdict.
+
+### Fixed — layer 2 tightened at points that were already feasible
+
+- The layer-2 port above regressed four Vanderbei problems from `Optimal`:
+  `dallasm` and `dallasl` to `Error_In_Step_Computation`, `eigmaxa` and
+  `eigmina` to `Restoration_Failed`.
+- One cause for all four. Upstream states the tightening arm's premise in
+  its own comment — it tightens "in case the problem is only very
+  slightly infeasible" — and the arm exists to spend the tolerance budget
+  chasing a residual constraint violation down to zero. It was firing on
+  points that had no violation left to chase: `eigmaxa`/`eigmina` reach
+  `inf_pr = 7.5e-15` against an outer `tol` of `1e-8`, `dallasm` reaches
+  `1.5e-10`. Tightening there drives the restoration sub-solve *past* the
+  point the outer asked for, into a tiny-step or step-computation failure
+  where handing the point straight back solves the problem.
+- The arm now checks its own premise (`orig_trial_inf_pr > orig_tol`). A
+  point at or under the original NLP's `tol` falls through to the
+  converged-to-a-feasible-point arm, which is the verdict that describes
+  it. Restorations that are genuinely slightly infeasible — #438's own
+  case, `qcqp1000-1nc`, sits at ~5e-3, five orders above the gate — are
+  untouched.
+- Upstream never has to make this distinction, because it cannot reach
+  layer 2 at a feasible point: `IpBacktrackingLineSearch.cpp:578` refuses
+  to enter restoration once the violation is under `1e-2 · tol`, and
+  layer 1's reduction target is floored at `min(tol, constr_viol_tol)`
+  (`IpRestoConvCheck.cpp:162`) so a feasible trial is released before
+  layer 2 is consulted. Pounce has neither guard, so it arrives by both
+  routes and the premise has to be tested rather than assumed.
+- Adding upstream's layer-1 floor was tried and rejected: it is faithful,
+  but it releases the sub-solve earlier at points far from the
+  sub-problem's own KKT point (`dallasl` exits at `inner_kkt_err = 4.5e-1`
+  where it previously ran one iteration further to `4.2e-9`) and regresses
+  `dallasl` on its own. Left unfloored deliberately, with a note at the
+  call site; it is a separate question from #438.
+- Verified against a same-machine `8c81cf4a` baseline: Vanderbei returns
+  to 697 optimal with identical statuses on all 733 problems and no
+  objective changes.
+
 ### Fixed — port gap: no `ACCEPTABLE_POINT_REACHED` at the restoration doorway
 
 - **Upstream refuses to enter restoration from an acceptable point; pounce did
