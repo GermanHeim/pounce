@@ -12,6 +12,8 @@
 #   make fmt              # rustfmt the workspace
 #   make doc              # build rustdoc
 #   make book             # build the mdbook documentation (docs/)
+#   make wasm             # build the browser (WebAssembly) solver + demo page
+#   make wasm-serve       # ...and serve it on http://localhost:8000
 #   make install          # install pounce CLI + cinterface cdylib under $(PREFIX)
 #   make uninstall        # remove installed artifacts
 #   make install-mcp      # build studio/mcp + register with Claude Code
@@ -73,7 +75,7 @@ endif
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
         python-ext python-cli-bin python-test coverage coverage-quick \
-        benchmark benchmark-rerun benchmark-report benchmark-gams
+        benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve
 
 all: build
 
@@ -118,6 +120,17 @@ fmt-check:
 
 doc:
 	$(CARGO) doc --workspace --no-deps $(CARGO_PROFILE_FLAG)
+
+# ---- WebAssembly ---------------------------------------------------------
+# Build the solver for the browser and stage it into the demo page
+# (crates/pounce-wasm/web). Needs the target once:
+#   rustup target add wasm32-wasip1
+# See docs/src/wasm.md.
+wasm:
+	crates/pounce-wasm/build.sh
+
+wasm-serve:
+	crates/pounce-wasm/build.sh --serve
 
 book:
 	mdbook build docs

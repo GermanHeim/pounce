@@ -35,6 +35,7 @@
 - [ODE / DAE Initial Value Problems](ode.md)
 - [Implicit DAEs](dae.md)
 - [Glass Box / Black Box Optimization](trf.md)
+- [WebAssembly: POUNCE in the Browser](wasm.md)
 
 # Global Search
 

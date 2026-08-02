@@ -1143,6 +1143,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-wasm"
+version = "0.9.0"
+dependencies = [
+ "pounce-algorithm",
+ "pounce-common",
+ "pounce-nl",
+ "pounce-nlp",
+ "pounce-presolve",
+ "serde_json",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

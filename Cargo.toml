@@ -23,6 +23,7 @@ members = [
     "crates/pounce-rs",
     "crates/pounce-studio-core",
     "crates/pounce-studio-pyo3",
+    "crates/pounce-wasm",
     "tools/iter-diff",
 ]
 # Default `cargo build` / `cargo test` skip pounce-hsl so the pure-Rust

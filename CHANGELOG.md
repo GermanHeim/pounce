@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Added — POUNCE runs in the browser (WebAssembly)
+
+- The default build has no C or Fortran dependency, so the whole solver —
+  `.nl` reader, AD tape, sparse LDL^T, interior-point algorithm — compiles
+  to `wasm32-wasip1` and runs client-side. New crate `pounce-wasm`
+  (`publish = false`) exposes a four-function C ABI (allocate, load, solve,
+  free) that takes `.nl` bytes and `ipopt.opt`-format options and returns
+  JSON: a problem summary from `pounce_load`, a solution from
+  `pounce_solve`. Both catch panics, so a malformed model returns
+  `{"error": …}` instead of trapping the instance.
+- A demo page ships with it (`crates/pounce-wasm/web`, built by
+  `crates/pounce-wasm/build.sh` or `make wasm`): drop a `.nl` file — with
+  its `.col` / `.row` name files if you have them — to see the model's
+  size, degrees of freedom, equality/inequality split, nonlinear fraction,
+  and Jacobian/Hessian sparsity, then solve it with the iteration table
+  streaming into the page. It is static files plus a ~60-line WASI shim; no
+  `wasm-bindgen`, no npm, no server. Nothing is uploaded.
+- Numerics are unchanged: across the CLI's `.nl` fixture suite, the wasm
+  build matches the native build's exit status and iteration count on every
+  problem, and its objective to full double precision on all but one
+  degenerate case (last-bit difference). Documented in `docs/src/wasm.md`;
+  CI builds the module and solves a model under Node's WASI on every PR.
+- `pounce-nl` now builds for targets with no dynamic loader: `libloading`
+  became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
+  reports that AMPL imported functions are unavailable there rather than
+  failing to compile. No change on unix/windows.
+
 ### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
 
 - A variable whose bounds are equal is removed from the solve
