@@ -785,3 +785,73 @@ def test_row_file_objective_is_not_a_constraint_row():
     assert "obj" not in session.con_names
     with pytest.raises(ValueError, match="not a constraint"):
         session.mult_entry("obj")
+
+
+def _fixed_var_pair(with_fixed):
+    """`build()`'s model, optionally carrying an inert variable whose
+    bounds are equal. Pyomo prunes a fixed variable that appears only
+    with a zero coefficient, so `dead` is referenced by a real (slack,
+    never binding) constraint to force the writer to emit a column for
+    it."""
+    m = build()
+    if with_fixed:
+        m.dead = pyo.Var(bounds=(2.0, 2.0), initialize=2.0)
+        m.deadcon = pyo.Constraint(expr=m.dead * m.dead <= 1e6)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_a_fixed_variable_does_not_shift_the_factor_rows():
+    """A variable with equal bounds is removed from the solve
+    (`fixed_variable_treatment=make_parameter`), so the factor's `x`
+    block is SHORTER than the user's variable list and every later
+    column moves. The `.col`-order rows the session hands around are
+    user-space, so indexing the factor with one read a neighbouring
+    variable.
+
+    It was invisible because the two spaces coincide on any model
+    without a fixed variable -- which is every other model in this
+    suite. Adding one inert fixed variable must change nothing: it is
+    pinned by its own bounds and enters neither objective nor active
+    set.
+
+    Before the fix `gradient` returned d(y)/dp where d(x)/dp was asked
+    for -- a plausible number, silently wrong -- while `estimate` and
+    `covariance` failed loudly (a broadcast error and a bogus
+    "structurally unidentifiable" respectively).
+    """
+    base, fixed = _fixed_var_pair(False), _fixed_var_pair(True)
+
+    # the fixed variable really did reach the solve and really was
+    # removed from the factor, or the test proves nothing
+    sess = fixed.__dict__["_pounce_sens"].session
+    n_full = len(sess.var_names)
+    assert n_full == len(base.__dict__["_pounce_sens"].session.var_names) + 1
+    rows = sess.solver.primal_rows(list(range(n_full)))
+    assert rows.count(None) == 1, rows
+    assert sess.var_names.index("dead") < sess.var_names.index("x"), (
+        "the fixed column must precede a queried variable to shift it")
+
+    for m in (base, fixed):
+        assert gradient(m.x, wrt=m.p) == pytest.approx(
+            gradient(base.x, wrt=base.p), rel=1e-9)
+        assert gradient(m.y, wrt=m.p) == pytest.approx(
+            gradient(base.y, wrt=base.p), rel=1e-9)
+        est = estimate(m, [(m.p, 2.1)])
+        assert est[m.x] == pytest.approx(
+            estimate(base, [(base.p, 2.1)])[base.x], rel=1e-9)
+
+    # and the answer is right, not merely consistent: finite difference
+    g_fd = (estimate(fixed, [(fixed.p, 2.0 + FD_H)])[fixed.x]
+            - estimate(fixed, [(fixed.p, 2.0 - FD_H)])[fixed.x]) / (2 * FD_H)
+    assert gradient(fixed.x, wrt=fixed.p) == pytest.approx(g_fd, rel=1e-6)
+
+
+def test_a_removed_fixed_variable_is_refused_not_mis_read():
+    """Asking for the sensitivity OF the fixed variable itself has no
+    answer in the factor -- it has no row there. That must be an
+    explicit refusal, not the neighbouring column."""
+    m = _fixed_var_pair(True)
+    with pytest.raises(ValueError, match="removed from the solve"):
+        gradient(m.dead, wrt=m.p)

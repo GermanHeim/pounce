@@ -288,6 +288,36 @@ impl PySolver {
         Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
     }
 
+    /// Rows of the compound KKT vector holding the primal values for
+    /// the given 0-based **user-space** variable (`x`) indices; `None`
+    /// where the solve removed the column as a fixed variable
+    /// (`lb == ub` under `fixed_variable_treatment=make_parameter`).
+    ///
+    /// The `x` counterpart of `multiplier_rows`. User-space indices —
+    /// from the `.col` file, from `classify_activity()`, from
+    /// `row_normal()` — are NOT factor rows: one fixed variable
+    /// anywhere shifts every later column, and on a model without any
+    /// the two spaces coincide, so the mistake is invisible in testing.
+    /// Translate here before indexing `kkt_solve` / `parametric_step`
+    /// results.
+    fn primal_rows(&self, x_indices: Vec<i64>) -> PyResult<Vec<Option<i64>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("primal_rows: no converged factor (call solve() first)")
+        })?;
+        let n_full = s.inner.n_full_x().map_err(solver_error_to_py)?;
+        let mut xs = Vec::with_capacity(x_indices.len());
+        for &i in &x_indices {
+            if i < 0 || (i as usize) >= n_full {
+                return Err(PyValueError::new_err(format!(
+                    "primal_rows: variable index {i} out of range [0, n={n_full})"
+                )));
+            }
+            xs.push(i as Index);
+        }
+        let rows = s.inner.x_primal_rows(&xs).map_err(solver_error_to_py)?;
+        Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
+    }
+
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
     /// rows, in **natural (unscaled) units**: any NLP scaling baked
     /// into the converged factor is undone, so `-inv(H_R)` is directly

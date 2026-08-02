@@ -406,6 +406,30 @@ impl PdSensBacksolver {
         self.nlp.borrow().full_g_to_c_block(full_idx)
     }
 
+    /// Map a 0-based **full-x** index (user-TNLP variable order) to its
+    /// 0-based position in the algorithm-side `x` block, or `None` when
+    /// the solve removed the column because `x_l == x_u` under
+    /// `fixed_variable_treatment = make_parameter`. Delegates to the
+    /// held NLP's fixed-variable map.
+    ///
+    /// The `x` counterpart of [`Self::full_g_to_c_block`], and it must
+    /// be routed through for the same reason: the flat KKT row of a
+    /// user variable is `full_x_to_var_x(i)`, NOT `i` — those differ
+    /// whenever any fixed variable precedes it in the user's `x`.
+    /// Reports and iterates are in full-x, the factor is in var-x, and
+    /// nothing about the two spaces is distinguishable by length alone
+    /// on a model that happens to have no fixed variables.
+    pub fn full_x_to_var_x(&self, full_idx: Index) -> Option<Index> {
+        self.nlp.borrow().full_x_to_var_x(full_idx)
+    }
+
+    /// The user TNLP's variable count, the domain of
+    /// [`Self::full_x_to_var_x`]. Distinct from the `x` block width
+    /// whenever the solve removed a fixed variable.
+    pub fn n_full_x(&self) -> Index {
+        self.nlp.borrow().n_full_x()
+    }
+
     /// Cumulative block offsets: `offset(i)` is the start index of
     /// block `i` in the flat slice.
     fn offsets(&self) -> [usize; 9] {

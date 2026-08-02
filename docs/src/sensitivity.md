@@ -444,6 +444,19 @@ constraint gradient with the solver's per-row scale divided out;
 classification happens on the scaled quantities internally, the report
 never shows them.
 
+**Variable indices are user-space, factor rows are not.** Everything
+the sensitivity API reports or accepts — the `.col` file's order, the
+activity report's `var_*` arrays, `row_normal(j)`'s entries — indexes
+the variables you wrote. The converged factor does not: a variable
+whose bounds are equal is removed from the solve
+(`fixed_variable_treatment = make_parameter`, the default), so its
+column is absent and every later variable sits one row earlier. The
+two orders coincide exactly when the model has no fixed variable,
+which makes the difference easy to miss. Translate with
+`Solver.primal_rows(indices)` — `None` marks a removed variable —
+before indexing a `kkt_solve` or `parametric_step_full` result, just
+as `multiplier_rows` has always been required for the `y_c` block.
+
 In particular, for a parameter-estimation NLP with the parameters
 pinned by equality constraints, `-inv(info["reduced_hessian"])` is
 directly the parameter covariance — no per-problem scale factor, no

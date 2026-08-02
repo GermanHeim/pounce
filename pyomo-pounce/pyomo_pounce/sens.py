@@ -270,9 +270,56 @@ class _Session:
         self.base_obj = float("nan")
         self.moved_bounds = {}        # var name -> (lb, ub) moved to rows
         self._columns = {}            # pin row -> full KKT-space column
+        self._primal_rows = None      # full-x -> KKT row, lazily fetched
 
     def orig_var(self, name):
         return self.model.find_component(name)
+
+    def _primal_row_map(self):
+        if self._primal_rows is None:
+            self._primal_rows = self.solver.primal_rows(
+                list(range(len(self.var_names))))
+        return self._primal_rows
+
+    def primal_row(self, full_idx, what):
+        """The KKT-factor row of a user-space (`.col`) variable index.
+
+        `.col` order -- what `var_entry`, `fit_rows` and `res_rows` all
+        hold -- is the user's FULL-x space. The factor's `x` block is
+        the algorithm's var-x space, which drops every variable the
+        solve removed as fixed (`lb == ub` under the default
+        `fixed_variable_treatment=make_parameter`). The two spaces
+        coincide exactly when the model has no fixed variable, which is
+        every model in the test suite and most models anywhere, so
+        indexing the factor with a full-x row is invisible until it is
+        not: one fixed variable shifts every later column and the
+        back-solve quietly returns a NEIGHBOURING variable's
+        sensitivity, a plausible number with nothing wrong-looking
+        about it. Route every factor index through here.
+        """
+        row = self._primal_row_map()[full_idx]
+        if row is None:
+            raise ValueError(
+                f"{what}: {self.var_names[full_idx]} was removed from the "
+                "solve as a fixed variable (its bounds are equal), so it "
+                "has no row in the KKT factor and no sensitivity "
+                "information. Give it distinct bounds to keep it in the "
+                "solve.")
+        return row
+
+    def scatter_x(self, dx_var):
+        """Full-x vector from an algorithm-space (var-x) one.
+
+        `parametric_step` truncates its result to the factor's `x`
+        block, so it is var-x while `base_x`, `nl.x_l/x_u` and
+        `var_names` are all full-x. Variables the solve removed as
+        fixed get 0: a fixed variable does not move.
+        """
+        out = np.zeros(len(self.var_names))
+        for full_idx, row in enumerate(self._primal_row_map()):
+            if row is not None:
+                out[full_idx] = dx_var[row]
+        return out
 
     def column(self, pin_idx):
         """Full KKT-space derivative column for a unit perturbation."""
@@ -778,7 +825,11 @@ class Gradient:
     def _entry(self, td):
         if td.ctype is Constraint:
             return self._session.mult_entry(td.name)
-        return self._session.var_entry(td.name)
+        # var_entry is full-x; the column being indexed is the factor's
+        # KKT vector, so it needs the var-x row -- the same translation
+        # mult_entry already does for the y_c block
+        return self._session.primal_row(
+            self._session.var_entry(td.name), f"gradient({td.name})")
 
     @staticmethod
     def _convention_sign(td):
@@ -891,7 +942,10 @@ def estimate(model, perturb, clamp=True):
             # same estimate as one that has not
             deltas.append(float(nv) - float(session.nl.g_l[pin]))
 
-    dx = np.asarray(session.solver.parametric_step(pin_idx, deltas))
+    # parametric_step returns the factor's x block (var-x); base_x and
+    # everything below it (nl.x_l/x_u, var_names) are full-x
+    dx = session.scatter_x(
+        np.asarray(session.solver.parametric_step(pin_idx, deltas)))
     x_new = session.base_x + dx
 
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
@@ -1166,14 +1220,20 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             "regularized rather than exact. Linearly dependent (structurally"
             " unidentifiable) parameters are the usual cause.")
     # ── parameter block of the inverse KKT matrix ─────────────────────────
+    # `rows` is full-x (the space of the activity report and of
+    # row_normal, both read below); `krows` is the same variables as
+    # factor rows. Keep the two apart -- they differ exactly when the
+    # model has a fixed variable, and agree everywhere else.
     dim = session.solver.kkt_dim
     rows = [session.fit_rows[p] for p in params]
+    krows = [session.primal_row(r, f"covariance({p.name})")
+             for r, p in zip(rows, params)]
     zcols = []
-    for r in rows:
+    for r in krows:
         e = np.zeros(dim)
         e[r] = 1.0
         zcols.append(np.asarray(session.solver.kkt_solve(e)))
-    M = np.array([[zcols[j][rows[i]] for j in range(n_params)]
+    M = np.array([[zcols[j][krows[i]] for j in range(n_params)]
                   for i in range(n_params)])
     M = 0.5 * (M + M.T)
 
@@ -1474,7 +1534,9 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
         Mi = minv()
         out = {}
         for g, rws in groups.items():
-            Zr = np.array([[zcols[j][r] for j in range(n_params)]
+            # res_rows is full-x like fit_rows; zcols are factor rows
+            Zr = np.array([[zcols[j][session.primal_row(r, "covariance")]
+                            for j in range(n_params)]
                            for r in rws])
             out[g] = Zr @ Mi                  # d r_g / d p
         return out
