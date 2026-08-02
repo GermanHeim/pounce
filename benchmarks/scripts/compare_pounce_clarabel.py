@@ -298,8 +298,10 @@ def run_pounce(nl_path, selection, time_limit):
         out = tf.name
     t = time.perf_counter()
     try:
+        # `--no-sol`: the AMPL sibling `<stub>.sol` is never read (results come
+        # from `--json-output`), and the caller unlinks the `.nl` but not it.
         subprocess.run([POUNCE_BIN, nl_path, f"solver_selection={selection}",
-                        "--json-output", out],
+                        "--no-sol", "--json-output", out],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=time_limit)
     except subprocess.TimeoutExpired:

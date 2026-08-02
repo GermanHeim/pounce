@@ -185,16 +185,25 @@ run_one() {
   logtag="${POUNCE_SOLVER_LABEL:-$label}"
   log="${LOGDIR}/${problem}.${logtag}.log"
 
+  # `--no-sol` on the pounce arms: by AMPL convention a `.nl` input gets a
+  # sibling `<stub>.sol`, so a sweep rewrites one per problem *inside the
+  # data directory*. Nothing here reads them back — status, objective and
+  # iteration counts are all scraped from "$log" — and `make clean-bench-nl`
+  # exists purely to delete them again. When POUNCE_BENCH_DATA lives in a
+  # synced folder (Dropbox, iCloud) those writes also kick off a sync
+  # cascade mid-run, which contends for I/O with the very timings the sweep
+  # is measuring. Ipopt's `-AMPL` protocol has no equivalent opt-out, but
+  # that arm is the saved reference and reruns rarely.
   start=$(python3 -c 'import time; print(time.time())')
   if [ "$ampl_protocol" = "yes" ]; then
     timeout "$TIMELIMIT" "$bin" "$nl" -AMPL \
       linear_solver="$IPOPT_LINEAR_SOLVER" max_cpu_time="$TIMELIMIT" > "$log" 2>&1
     rc=$?
   elif [ ${#POUNCE_EXTRA_ARR[@]} -gt 0 ]; then
-    timeout "$TIMELIMIT" "$bin" "$nl" "${POUNCE_EXTRA_ARR[@]}" > "$log" 2>&1
+    timeout "$TIMELIMIT" "$bin" "$nl" --no-sol "${POUNCE_EXTRA_ARR[@]}" > "$log" 2>&1
     rc=$?
   else
-    timeout "$TIMELIMIT" "$bin" "$nl" > "$log" 2>&1
+    timeout "$TIMELIMIT" "$bin" "$nl" --no-sol > "$log" 2>&1
     rc=$?
   fi
   end=$(python3 -c 'import time; print(time.time())')
