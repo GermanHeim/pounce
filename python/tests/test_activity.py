@@ -432,8 +432,10 @@ def test_row_normal_before_solve_raises():
 
 def test_hessian_vec_natural_units():
     # the scalar study model has H = 1 exactly (natural units); the
-    # session's Hessian-vector product must return it regardless of
-    # scaling, and reject a wrong-length vector
+    # session's Hessian-vector product must return it, and reject a
+    # wrong-length vector. Scaling does not engage on this fixture;
+    # the df != 1 axis of the natural-units contract is pinned at the
+    # pyomo level (test_information_exact_under_objective_scaling)
     prob = _options(pounce.Problem(
         n=1, m=0, problem_obj=ScalarBound(1.0),
         lb=[0.0], ub=[1e19], cl=[], cu=[],

@@ -54,6 +54,10 @@ def test_information_is_the_reduced_hessian():
     info = information(m)
     np.testing.assert_allclose(info.matrix, 2.0 * X.T @ X, rtol=1e-9)
     assert info[m.a] == pytest.approx(2.0 * N_LIN, rel=1e-9)
+    ev, vecs = info.eigen()
+    np.testing.assert_allclose(ev, np.linalg.eigvalsh(2.0 * X.T @ X),
+                               rtol=1e-9)
+    assert ev[0] < ev[1]
 
 
 def test_information_inverts_covariance():
@@ -98,6 +102,15 @@ def test_pinned_parameter_returns_s_not_zeros():
     assert info[m.a] == pytest.approx(S_true, rel=1e-9)
     assert info[m.b] == pytest.approx(R[1, 1], rel=1e-9)
     assert info[m.a, m.b] == 0.0
+    # Gauss-Newton forms J over ALL fitted parameters and slices last;
+    # this is the test that the pinned rows actually exist to build S
+    # from (a slice-first implementation loses them)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gn = information(m, hessian="gauss-newton")
+    assert gn[m.a] == pytest.approx(S_true, rel=1e-9)
+    assert gn[m.b] == pytest.approx(R[1, 1], rel=1e-9)
+    assert gn[m.a, m.b] == 0.0
 
 
 def test_binding_row_projects_information():
@@ -122,6 +135,32 @@ def test_binding_row_projects_information():
     assert abs(u @ np.linalg.pinv(info.matrix) @ u) < 1e-9
 
 
+def test_information_exact_under_objective_scaling():
+    # data two orders larger and residuals seeded large at the start
+    # point, so gradient-based scaling engages (df != 1, asserted):
+    # information must still be 2 X'X in the model's own units, both
+    # forms. This is the df axis of hessian_vec's natural-units
+    # contract; every other fixture in this file runs at df = 1
+    # (residuals initialize 0, so the starting gradient never trips
+    # nlp_scaling_max_gradient)
+    scale = 400.0
+    rng = np.random.default_rng(7)
+    x = np.linspace(0.0, 4.0, N_LIN)
+    y = scale * (1.5 - 0.7 * x) \
+        + (scale * SIGMA_LIN) * rng.standard_normal(N_LIN)
+    X = np.column_stack([np.ones(N_LIN), x])
+    m = linear_model(x, y)
+    for i in m.I:
+        m.r[i].set_value(400.0)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    assert abs(float(session.solver.nlp_scaling["obj"]) - 1.0) > 1e-6
+    R = 2.0 * X.T @ X
+    np.testing.assert_allclose(information(m).matrix, R, rtol=1e-9)
+    np.testing.assert_allclose(
+        information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
+
+
 def test_information_error_paths():
     x, y, _ = linear_data()
     m = linear_model(x, y)
@@ -133,6 +172,26 @@ def test_information_error_paths():
     m2.obj = pyo.Objective(expr=(m2.x - 1) ** 2)
     with pytest.raises(RuntimeError, match="no sensitivity session"):
         information(m2)
+    # gauss-newton without declared residuals
+    m3 = pyo.ConcreteModel()
+    m3.k = pyo.Var(initialize=1.0)
+    m3.obj = pyo.Objective(expr=(m3.k - 2.0) ** 2)
+    declare_fitted(m3.k)
+    pyo.SolverFactory("pounce").solve(m3)
+    with pytest.raises(ValueError, match="residual"):
+        information(m3, hessian="gauss-newton")
+    # a session with residuals declared but nothing fitted (with no
+    # declarations at all there is no session and the error above
+    # fires first instead)
+    m4 = pyo.ConcreteModel()
+    m4.z = pyo.Var(initialize=0.0)
+    m4.r = pyo.Var(initialize=0.0)
+    m4.res = pyo.Constraint(expr=m4.r == 3.0 - m4.z)
+    m4.obj = pyo.Objective(expr=m4.r ** 2)
+    declare_residual(m4.r)
+    pyo.SolverFactory("pounce").solve(m4)
+    with pytest.raises(RuntimeError, match="no fitted parameters"):
+        information(m4)
 
 
 def test_indefinite_detector():
