@@ -43,6 +43,69 @@ changes.
 - Membership, row handling, and their warnings are shared with
   `covariance()` (`_classify_fitted_block`), so the two accessors
   cannot drift.
+### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
+
+- A variable whose bounds are equal is removed from the solve
+  (`fixed_variable_treatment = make_parameter`), so the KKT factor's
+  `x` block is shorter than the user's variable list and every later
+  column moves. The `.col`-order rows the sensitivity session hands
+  around are user-space, and were used to index the factor directly:
+  one fixed variable anywhere made every later variable read its
+  NEIGHBOUR's row. `gradient()` returned a plausible wrong number with
+  no warning (`d(y)/dp` where `d(x)/dp` was asked for); `estimate()`
+  failed on a shape mismatch; `covariance()` raised a bogus
+  "structurally unidentifiable". Models with no fixed variable — every
+  model in the test suite — were never affected, since the two spaces
+  coincide exactly then.
+- `Solver.primal_rows(x_indices)`: the factor rows of user-space
+  variable indices, `None` for a removed fixed variable. The `x`
+  counterpart of the existing `multiplier_rows`, which had always done
+  this translation for the `y_c` block. Every index the session takes
+  into the factor now routes through it, and asking for a removed
+  variable's sensitivity is an explicit refusal rather than a
+  neighbouring column.
+- Regression tests add one inert fixed variable to an existing model
+  and require every answer to be unchanged, plus a finite-difference
+  check so they pin the right value and not merely a consistent one.
+
+### Performance — pyomo-pounce: `initialize()` walked the same incidence three times per call (#444)
+
+- One `initialize()` call built whole-model incidence three times and
+  re-derived each constraint's incident variables six times over: the
+  plan pass, a re-plan inside `block_initialize(repair="auto")` that
+  was structurally a no-op (every candidate already fixed) yet paid a
+  full graph construction and denominator sweep, and the analyze
+  pass. On a 25,276-constraint collocation model that was 345.7 s of
+  almost purely symbolic work (fill and projection off).
+- The call now performs one structural incidence walk
+  (`structural_incidence`, fixed variables included) and each pass
+  filters it to the currently-unfixed variables through
+  `IncidenceGraphInterface.subgraph`, which copies the stored graph
+  without re-inspecting constraints. The plan filters pre-fixing and
+  the analyze pass post-fixing. The shared view is structural where a
+  fresh build substitutes fixed values: the edge sets can differ when
+  that substitution cancels a term — a fixed zero is the obvious way
+  but not the only one, since values can cancel across terms with no
+  fixed variable being zero (`a*x - b*x` with `a` and `b` fixed
+  equal). Every row adjacent to a fixed variable is therefore
+  re-derived and compared, and a genuine cancellation falls back to a
+  fresh build for that pass; the variable order within rows may differ on
+  models where fixed values change the linear/nonlinear split; order
+  feeds tie-breaks, so equally-valid diagnostics (which variable is
+  reported loose) may resolve differently between the two views.
+  `initialize` passes `repair="off"` downstream since its own plan
+  already ran. On pyomo older than 6.7.1 (no
+  `IncidenceGraphInterface.subgraph`) every pass falls back to the
+  fresh build: old speed, same behavior.
+  `block_repair_plan`, `block_analyze`, and `block_initialize` accept
+  the shared graph as an optional `igraph=` argument and behave as
+  before when it is omitted.
+- Regressions: a fresh-versus-shared analysis identity test (same
+  plan, same square decomposition, same block order), and a counter
+  test pinning exactly one model-walking incidence construction per
+  `initialize()` call so the redundancy cannot quietly return
+  (`subgraph` re-enters `__init__` with a prebuilt graph tuple and is
+  not counted).
 
 ### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
 

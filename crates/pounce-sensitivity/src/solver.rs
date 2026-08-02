@@ -567,6 +567,49 @@ impl Solver {
             .collect())
     }
 
+    /// Flat rows of the compound KKT vector holding the primal values
+    /// `x` for the given 0-based **full-x** variable indices. `None`
+    /// where the solve removed the column (`x_l == x_u` under
+    /// `fixed_variable_treatment = make_parameter`), which has no row
+    /// in the factor at all.
+    ///
+    /// The `x` counterpart of [`Self::g_multiplier_rows`], and needed
+    /// for the same reason: a caller holding user-space indices — from
+    /// the `.col` file, from [`Self::classify_activity`], from
+    /// [`Self::row_normal`] — cannot index the factor with them
+    /// directly. Row `r` of a [`Self::parametric_step_full`] result is
+    /// then `∂x/∂p · Δp` for that variable, and `e_r` is the unit
+    /// vector selecting its column in a [`Self::kkt_solve`].
+    pub fn x_primal_rows(&self, x_indices: &[Index]) -> Result<Vec<Option<Index>>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let n_full = state.backsolver.n_full_x();
+        // out of range must not masquerade as "removed as fixed": the
+        // NLP map returns None for both, and the caller's whole reason
+        // for asking is that it cannot tell the spaces apart itself
+        if let Some(&bad) = x_indices.iter().find(|&&i| i < 0 || i >= n_full) {
+            return Err(SolverError::BadShape {
+                what: "x_primal_rows variable index",
+                got: bad as usize,
+                expected: n_full as usize,
+            });
+        }
+        // the x block starts at flat index 0, so the var-x position IS
+        // the KKT row; the offset stays explicit for the day it is not
+        Ok(x_indices
+            .iter()
+            .map(|&i| state.backsolver.full_x_to_var_x(i))
+            .collect())
+    }
+
+    /// The user TNLP's variable count: the length of a full-x report
+    /// and the domain of [`Self::x_primal_rows`].
+    pub fn n_full_x(&self) -> Result<usize, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        Ok(state.backsolver.n_full_x() as usize)
+    }
+
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
     /// equality-constraint rows, where `B` selects the
     /// `pin_constraint_indices` rows of the y_c block and `K` is the

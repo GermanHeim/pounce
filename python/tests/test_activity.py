@@ -446,3 +446,29 @@ def test_hessian_vec_natural_units():
     np.testing.assert_allclose(solver.hessian_vec([1.0]), [1.0], rtol=1e-12)
     with pytest.raises(ValueError, match="length"):
         solver.hessian_vec([1.0, 2.0])
+
+
+def test_primal_rows_skips_the_fixed_column():
+    # MixedModel fixes x2 (lb == ub == 2.0), so make_parameter removes
+    # its column and every LATER user variable sits one row earlier in
+    # the factor than its user index. That shift is the whole reason
+    # this accessor exists: user-space indices (the .col file, the
+    # activity report, row_normal) are not factor rows.
+    solver = _mixed_solver()
+    assert solver.primal_rows([0, 1, 2, 3]) == [0, 1, None, 2]
+    # and the identity case, so a caller cannot conclude from one model
+    # that user index == factor row in general
+    assert solver.primal_rows([0]) == [0]
+    with pytest.raises(ValueError, match="out of range"):
+        solver.primal_rows([4])
+    with pytest.raises(ValueError, match="out of range"):
+        solver.primal_rows([-1])
+
+
+def test_primal_rows_before_solve_raises():
+    prob = _options(pounce.Problem(
+        n=1, m=1, problem_obj=ScalarRow(1.0),
+        lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+    ))
+    with pytest.raises(RuntimeError, match="no converged factor"):
+        pounce.Solver(prob).primal_rows([0])
