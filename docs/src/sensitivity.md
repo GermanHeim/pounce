@@ -470,10 +470,11 @@ them fixed. Writing a constraint as `1000·x ≥ 0` instead of `x ≥ 0`
 does not move a status, and neither does the solver's own per-row
 `d_scale`. The values the report exports follow the natural-units
 contract like everything else: `var_sigma` and `row_sigma` are the
-barrier diagonals in the model's own units, and `row_normal(j)` is the
-constraint gradient with the solver's per-row scale divided out;
-classification happens on the scaled quantities internally, the report
-never shows them.
+barrier diagonals in the model's own units, `row_normal(j)` is the
+constraint gradient with the solver's per-row scale divided out, and
+`hessian_vec(v)` is the exact Lagrangian Hessian times a user-space
+vector with the objective scale divided out; classification happens on
+the scaled quantities internally, the report never shows them.
 
 **Variable indices are user-space, factor rows are not.** Everything
 the sensitivity API reports or accepts — the `.col` file's order, the

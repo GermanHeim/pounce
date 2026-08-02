@@ -975,6 +975,8 @@ class _ParamKeyed:
     """Lookup from a declared Param's data object to its row index.
     Keyed by id() because Pyomo components are unhashable."""
 
+    _who = "covariance"          # accessor name used in diagnostics
+
     def __init__(self, params):
         self._params = list(params)
         self._pos = {id(p): i for i, p in enumerate(self._params)}
@@ -983,7 +985,7 @@ class _ParamKeyed:
         i = self._pos.get(id(pd))
         if i is None:
             raise KeyError(f"{getattr(pd, 'name', pd)}: not one of the "
-                           "covariance parameters")
+                           f"{self._who} parameters")
         return i
 
 
@@ -1061,18 +1063,36 @@ def _indefinite(block):
     return ev_min < -1e-10 * max(1.0, scale)
 
 
-def _tangent_reduced_hessian(session, M, zcols):
-    """The exact reduced Hessian over the fitted block, by tangent
-    recovery: the x-blocks of the K-inverse columns are T*M (each
-    satisfies the equalities and has the fitted block as its own
-    coordinates), so T = Zx inv(M) exactly, with the factor's barrier
-    weight cancelling multiplicatively rather than by subtraction. Then
-    R = T^T H T with the exact Lagrangian Hessian: full precision at
-    any mu, verified to machine precision against analytic ground
-    truth where the subtraction route loses log10(Sigma/q) digits
-    (covariance roadmap item 2). Requires the equalities to determine
-    the non-fitted variables given the fitted block, the same square
-    estimation structure covariance() already assumes."""
+def _estimation_counts(session):
+    """(#factor variables, #equality rows). The tangent recovery is
+    the constrained tangent map only when n_var - n_eq equals the
+    number of fitted parameters: the equalities then determine the
+    non-fitted variables given the fitted block. Callers guard on
+    this, because outside it T = Zx inv(M) is quietly not the tangent
+    map and R would be silently wrong."""
+    n_var = sum(1 for r in session._primal_row_map() if r is not None)
+    g_l = np.asarray(session.nl.g_l)
+    g_u = np.asarray(session.nl.g_u)
+    return n_var, int(np.count_nonzero(g_l == g_u))
+
+
+def _tangent_reduced_hessian(session, M, zcols, who="covariance"):
+    """The reduced Hessian over the fitted block, by tangent recovery:
+    the x-blocks of the K-inverse columns are T*M (each satisfies the
+    equalities and has the fitted block as its own coordinates), so
+    T = Zx inv(M) exactly, with the factor's barrier weight cancelling
+    multiplicatively rather than by subtraction. Then R = T^T H T with
+    the exact Lagrangian Hessian (covariance roadmap item 2).
+
+    Machine-exact when the active set couples through equalities only,
+    verified against analytic ground truth where the subtraction route
+    loses log10(Sigma/q) digits. A binding INEQUALITY row couples
+    through its slack barrier with large-but-finite weight, tilting
+    the recovered tangent along that row's normal: measured ~1e-6
+    relative at practical mu, degrading as mu tightens (the pinned
+    combination drives M toward singularity), still ~6 digits beyond
+    the subtraction it replaces. Requires the square estimation
+    structure of _estimation_counts(); callers guard."""
     # the factor's x block is var-x (a fixed variable's column is
     # removed under make_parameter, gh #450), so slice that block and
     # scatter each tangent back to full-x for hessian_vec, whose
@@ -1080,7 +1100,7 @@ def _tangent_reduced_hessian(session, M, zcols):
     n_var = sum(1 for r in session._primal_row_map() if r is not None)
     Zx = np.column_stack([z[:n_var] for z in zcols])
     T = np.column_stack(
-        [session.scatter_x(col) for col in (Zx @ _minv(M)).T])
+        [session.scatter_x(col) for col in (Zx @ _minv(M, who)).T])
     HT = np.column_stack([
         np.asarray(session.solver.hessian_vec(T[:, j]))
         for j in range(T.shape[1])
@@ -1089,7 +1109,8 @@ def _tangent_reduced_hessian(session, M, zcols):
     return 0.5 * (R + R.T)
 
 
-def _classify_fitted_block(session, params, rows, M, zcols):
+def _classify_fitted_block(session, params, rows, M, zcols,
+                           who="covariance"):
     """Membership and row handling shared by covariance() and
     information(): item 1's classification at the reduced fitted
     block, the value-correction bookkeeping, and the binding-row
@@ -1112,7 +1133,7 @@ def _classify_fitted_block(session, params, rows, M, zcols):
     R_exact = None
     act = session.solver.classify_activity()
     mu = float(act["mu"])
-    R_W = _minv(M)                # reduced Hessian off the factor, W-based
+    R_W = _minv(M, who)                # reduced Hessian off the factor, W-based
     # M (and so R_W) is natural-units by the kkt_solve contract
     # (pounce#128), and so are the report's sigmas and row_normal
     # (unscaled at the classifier boundary per the same contract), so
@@ -1140,25 +1161,25 @@ def _classify_fitted_block(session, params, rows, M, zcols):
         if status == "strongly_active":
             active.append(i)
             warnings.warn(
-                f"covariance: fitted parameter {p.name} is held by its "
+                f"{who}: fitted parameter {p.name} is held by its "
                 "bound at the optimum (strongly active); its direction is "
                 "projected out (zero variance, conditional on the active "
                 "bound) and the boundary asymptotics are nonstandard.")
         elif status == "weakly_active":
             warnings.warn(
-                f"covariance: fitted parameter {p.name} sits exactly on "
+                f"{who}: fitted parameter {p.name} sits exactly on "
                 "its bound with a vanishing multiplier (weakly active). "
                 "It is kept in the free block with finite variance; "
                 "boundary asymptotics are nonstandard.")
         elif status == "ambiguous":
             warnings.warn(
-                f"covariance: fitted parameter {p.name} has ambiguous "
+                f"{who}: fitted parameter {p.name} has ambiguous "
                 "bound activity at the solve's final barrier parameter; "
                 "re-solve with a tighter tol to settle it. It is kept in "
                 "the free block.")
         elif status == "unidentified":
             warnings.warn(
-                f"covariance: fitted parameter {p.name} has curvature "
+                f"{who}: fitted parameter {p.name} has curvature "
                 "below the model's own noise scale (unidentified); its "
                 "variance is large rather than small. It is kept in the "
                 "free block.")
@@ -1229,7 +1250,7 @@ def _classify_fitted_block(session, params, rows, M, zcols):
             # the honest status for a mixed row.
             if rst == "strongly_active":
                 warnings.warn(
-                    f"covariance: constraint {cname} is strongly active "
+                    f"{who}: constraint {cname} is strongly active "
                     "and involves non-fitted variables; the direction "
                     "it pins reaches the fitted parameters through the "
                     "eliminated variables and cannot be represented by "
@@ -1238,7 +1259,7 @@ def _classify_fitted_block(session, params, rows, M, zcols):
                     "constraint.")
             elif rst in ("weakly_active", "ambiguous", "unidentified"):
                 warnings.warn(
-                    f"covariance: constraint {cname} is {rst} and "
+                    f"{who}: constraint {cname} is {rst} and "
                     "involves non-fitted variables; it is kept "
                     "unprojected and its barrier weight is not "
                     "corrected for (the restricted direction would be "
@@ -1266,34 +1287,43 @@ def _classify_fitted_block(session, params, rows, M, zcols):
             if abs(a[k]) > 1e-12)
         if status == "strongly_active":
             bind_normals.append(a)
-            # conditional information along the pinned combination,
-            # EXACT via the tangent-recovered reduced Hessian (item 2
-            # machinery, replacing the digits-losing factor
-            # subtraction); built lazily, only solves with a binding
-            # row pay the Hessian products
+            # conditional information along the pinned combination via
+            # the tangent-recovered reduced Hessian (item 2 machinery;
+            # lazy, only solves with a binding row pay the Hessian
+            # products). Accurate to ~1e-6 at practical mu, the residue
+            # being this row's own finite slack-barrier weight in the
+            # recovery, where the factor subtraction lost ten digits.
+            # Outside the square estimation structure the recovery is
+            # undefined, so the subtraction value is kept there.
             if R_exact is None:
-                R_exact = _tangent_reduced_hessian(session, M, zcols)
-            s_a = float(a @ R_exact @ a)
+                n_var, n_eq = _estimation_counts(session)
+                if n_var - n_eq == n_params:
+                    R_exact = _tangent_reduced_hessian(
+                        session, M, zcols, who)
+            if R_exact is not None:
+                s_a = float(a @ R_exact @ a)
+            else:
+                s_a = max(q_w - sig_row, 0.0)
             warnings.warn(
-                f"covariance: constraint {cname} is strongly active and "
+                f"{who}: constraint {cname} is strongly active and "
                 f"pins the fitted combination {combo}; variance along it "
                 "is projected to zero (conditional on the constraint). "
                 f"Conditional information along the combination: {s_a:.6g}.")
         elif status == "weakly_active":
             warnings.warn(
-                f"covariance: constraint {cname} is weakly active on the "
+                f"{who}: constraint {cname} is weakly active on the "
                 f"fitted combination {combo} (multiplier and slack vanish "
                 "together). It is kept unprojected with finite variance; "
                 "boundary asymptotics are nonstandard.")
         elif status == "ambiguous":
             warnings.warn(
-                f"covariance: constraint {cname} has ambiguous activity "
+                f"{who}: constraint {cname} has ambiguous activity "
                 f"on the fitted combination {combo} at the solve's final "
                 "barrier parameter; re-solve with a tighter tol to "
                 "settle it. It is kept unprojected.")
         elif status == "unidentified":
             warnings.warn(
-                f"covariance: constraint {cname} has curvature below "
+                f"{who}: constraint {cname} has curvature below "
                 f"the fitted block's noise scale on {combo} "
                 "(unidentified); it is kept unprojected and its "
                 "variance is large rather than small.")
@@ -1331,6 +1361,8 @@ class Information(_ParamMatrix):
     block. eigen() supports identifiability diagnosis directly: a
     near-zero eigenvalue is a direction the data does not inform, and
     its eigenvector names the parameter combination."""
+
+    _who = "information"
 
     def __init__(self, params, matrix):
         super().__init__(params, matrix)
@@ -1397,12 +1429,12 @@ def _nullspace(A):
     return vh[rank:].T
 
 
-def _minv(M):
+def _minv(M, who="covariance"):
     try:
         return np.linalg.inv(M)
     except np.linalg.LinAlgError as e:
         raise RuntimeError(
-            "covariance: the parameter block of the inverse KKT matrix "
+            f"{who}: the parameter block of the inverse KKT matrix "
             "is singular; the fitted parameters are linearly "
             "dependent (structurally unidentifiable)") from e
 
@@ -1537,8 +1569,6 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     M = 0.5 * (M + M.T)
 
     cb = _classify_fitted_block(session, params, rows, M, zcols)
-    act = cb.act
-    active = cb.active
     sig_fit = cb.sig_fit
     floor = cb.floor
     R_corr = cb.R_corr
@@ -1821,7 +1851,8 @@ def information(model, hessian="lagrangian"):
                   for i in range(n_params)])
     M = 0.5 * (M + M.T)
 
-    cb = _classify_fitted_block(session, params, rows, M, zcols)
+    cb = _classify_fitted_block(session, params, rows, M, zcols,
+                                 who="information")
     free, active = cb.free, cb.active
 
     if hessian == "gauss-newton":
@@ -1832,7 +1863,7 @@ def information(model, hessian="lagrangian"):
                 "residuals (declare_residual()); the residual Jacobian is "
                 "recovered from their rows. Without residual variables "
                 "only the hessian='lagrangian' default is available.")
-        Mi = _minv(M)
+        Mi = _minv(M, "information")
         R = np.zeros((n_params, n_params))
         for g, rws in groups.items():
             # slice LAST: J over the whole fitted block, so the pinned
@@ -1846,7 +1877,19 @@ def information(model, hessian="lagrangian"):
     else:
         R = cb.R_exact
         if R is None:
-            R = _tangent_reduced_hessian(session, M, zcols)
+            n_var, n_eq = _estimation_counts(session)
+            if n_var - n_eq != n_params:
+                raise RuntimeError(
+                    "information: hessian='lagrangian' requires the "
+                    "square estimation structure (the equality "
+                    "constraints determine the non-fitted variables "
+                    "given the fitted block); this model has "
+                    f"{n_var} factor variables, {n_eq} equalities and "
+                    f"{n_params} fitted parameters, so "
+                    f"{n_var} - {n_eq} != {n_params} and the tangent "
+                    "recovery is not defined. hessian='gauss-newton' "
+                    "does not need it.")
+            R = _tangent_reduced_hessian(session, M, zcols, "information")
 
     info_mat = np.zeros((n_params, n_params))
     if free:
@@ -1874,8 +1917,10 @@ def information(model, hessian="lagrangian"):
         # the rest of the pinned set (item 1's caveat).
         if free:
             try:
-                S = R[np.ix_(active, active)] - R[np.ix_(active, free)] @                     np.linalg.solve(R[np.ix_(free, free)],
-                                    R[np.ix_(free, active)])
+                S = (R[np.ix_(active, active)]
+                     - R[np.ix_(active, free)]
+                     @ np.linalg.solve(R[np.ix_(free, free)],
+                                       R[np.ix_(free, active)]))
             except np.linalg.LinAlgError as e:
                 raise RuntimeError(
                     "information: the free block is singular, so the "

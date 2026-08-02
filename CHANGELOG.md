@@ -36,10 +36,12 @@ changes.
   build `S` from. An indefinite Lagrangian block returns as computed
   with a warning naming Gauss-Newton; the detector is unit-pinned
   since a genuine minimum is PSD by necessity.
-- `covariance()`'s binding-row conditional-information scalar is now
-  EXACT via the same tangent construction (lazily, only solves with a
-  binding row pay the Hessian products), replacing the documented
-  digits-losing factor subtraction.
+- `covariance()`'s binding-row conditional-information scalar now
+  comes from the same tangent construction (lazily, only solves with
+  a binding row pay the Hessian products): accurate to ~1e-6 where
+  the factor subtraction lost ten digits, the residue being the
+  binding row's own finite slack-barrier weight in the recovery.
+  Machine-exact when activity couples through equalities only.
 - Membership, row handling, and their warnings are shared with
   `covariance()` (`_classify_fitted_block`), so the two accessors
   cannot drift.
@@ -49,6 +51,7 @@ changes.
   scatters back to full-x for `hessian_vec`. Regression: one inert
   fixed variable ahead of the fitted block changes nothing, both
   forms.
+
 ### Added — POUNCE runs in the browser (WebAssembly)
 
 - The default build has no C or Fortran dependency, so the whole solver —

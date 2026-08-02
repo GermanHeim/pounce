@@ -297,19 +297,6 @@ impl Solver {
     /// (`make_parameter`-removed) variables are 0 because the solve
     /// dropped their columns. Errors on an out-of-range row.
     ///
-    /// The exact Lagrangian Hessian times a user-space vector, in
-    /// user variable order and natural units (see
-    /// [`crate::activity::hessian_vec`]). Errors on a length mismatch.
-    pub fn hessian_vec(&self, v: &[Number]) -> Result<Vec<Number>, SolverError> {
-        let state = self.state.borrow();
-        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        crate::activity::hessian_vec(&state.backsolver, v).map_err(|n| SolverError::BadShape {
-            what: "hessian_vec vector length",
-            got: v.len(),
-            expected: n,
-        })
-    }
-
     /// Serves the covariance roadmap's item 1: a binding row's normal
     /// restricted to the fitted block is the projection direction.
     pub fn row_normal(&self, user_row: usize) -> Result<Vec<Number>, SolverError> {
@@ -321,6 +308,19 @@ impl Solver {
                 got: user_row,
                 expected: m,
             }
+        })
+    }
+
+    /// The exact Lagrangian Hessian times a user-space vector, in
+    /// user variable order and natural units (see
+    /// [`crate::activity::hessian_vec`]). Errors on a length mismatch.
+    pub fn hessian_vec(&self, v: &[Number]) -> Result<Vec<Number>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        crate::activity::hessian_vec(&state.backsolver, v).map_err(|n| SolverError::BadShape {
+            what: "hessian_vec vector length",
+            got: v.len(),
+            expected: n,
         })
     }
 

@@ -185,6 +185,103 @@ def test_a_fixed_variable_does_not_shift_information():
         information(m, hessian="gauss-newton").matrix, R, rtol=1e-9)
 
 
+def test_all_pinned_returns_the_full_block_as_s():
+    # both parameters pinned by their own bounds: free is empty, so
+    # the S branch takes the whole reduced Hessian with nothing to
+    # reduce away, and the result is 2 X'X itself
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m = linear_model(x, y)
+    m.a.setlb(float(beta[0]) + 0.4)
+    m.b.setlb(float(beta[1]) + 0.3)
+    pyo.SolverFactory("pounce").solve(m)
+    R = 2.0 * X.T @ X
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        info = information(m)
+        gn = information(m, hessian="gauss-newton")
+    assert sum("strongly active" in str(x_.message) for x_ in w) >= 2
+    np.testing.assert_allclose(info.matrix, R, rtol=1e-9)
+    np.testing.assert_allclose(gn.matrix, R, rtol=1e-9)
+
+
+def test_singular_free_block_refuses_s():
+    # two collinear intercepts fitted alongside a pinned slope: the
+    # exact-Hessian free block is singular, so the pinned parameter's
+    # conditional information S is undefined and information() must
+    # refuse rather than return a garbage Schur complement. The flat
+    # direction also forces inertia corrections into the held factor,
+    # which is the honest trigger for the kkt_perturbations warning.
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(0, N_LIN - 1)
+    m.a1 = pyo.Var(initialize=0.0)
+    m.a2 = pyo.Var(initialize=0.0)
+    m.b = pyo.Var(initialize=0.0)
+    m.b.setlb(float(beta[1]) + 0.4)      # binds, strongly active
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(
+        m.I, rule=lambda mm, i: mm.r[i] == float(y[i]) - mm.a1 - mm.a2
+        - mm.b * float(x[i]))
+    m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+    declare_fitted(m.a1)
+    declare_fitted(m.a2)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        with pytest.raises(
+                RuntimeError,
+                match="conditional information S is not defined"):
+            information(m)
+    assert any("inertia-correction" in str(x_.message) for x_ in w)
+
+
+def _non_square_model(x, y, cap=None):
+    """linear_model() plus an extra variable living only in the
+    objective, which breaks the square estimation structure: the
+    equalities no longer determine the non-fitted variables given the
+    fitted block."""
+    m = linear_model(x, y)
+    m.w = pyo.Var(initialize=0.5)
+    m.obj.deactivate()
+    m.obj2 = pyo.Objective(
+        expr=sum(m.r[i] ** 2 for i in m.I) + (m.w - 1.0) ** 2)
+    if cap is not None:
+        m.capcon = pyo.Constraint(expr=m.a + m.b <= cap)
+    return m
+
+
+def test_non_square_structure_refuses_lagrangian():
+    # the tangent recovery is undefined outside the square structure:
+    # the Lagrangian form must refuse with the counts in the message,
+    # while Gauss-Newton does not need the structure and still returns
+    # 2 X'X (w decouples, so the fit itself is unchanged)
+    x, y, X = linear_data()
+    m = _non_square_model(x, y)
+    pyo.SolverFactory("pounce").solve(m)
+    with pytest.raises(RuntimeError, match="square estimation structure"):
+        information(m)
+    gn = information(m, hessian="gauss-newton")
+    np.testing.assert_allclose(gn.matrix, 2.0 * X.T @ X, rtol=1e-9)
+
+
+def test_non_square_structure_scalar_falls_back():
+    # covariance()'s binding-row scalar cannot use the tangent route
+    # here; it must fall back to the factor subtraction and still warn
+    # rather than crash or go silent
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m = _non_square_model(x, y, cap=float(beta[0] + beta[1]) - 0.5)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        covariance(m, sigma_sq=SIGMA_LIN**2)
+    assert any("Conditional information" in str(x_.message) for x_ in w)
+
+
 def test_information_error_paths():
     x, y, _ = linear_data()
     m = linear_model(x, y)
