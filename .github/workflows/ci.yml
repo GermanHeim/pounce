@@ -97,6 +97,13 @@ jobs:
       - name: Solve a model in wasm
         run: node crates/pounce-wasm/tests/smoke.mjs
 
+      # The Python-page highlighter is one regex with alternation — the kind
+      # of code that breaks quietly (a mis-numbered backreference once made
+      # every string containing an escape fall apart, and the page still
+      # rendered, just wrong).
+      - name: Highlighter tokens
+        run: node crates/pounce-wasm/tests/editor_tokens.mjs
+
       # The Pyodide app's Python layer (web-python/pounce_browser.py) maps
       # the `.sol` blocks back onto Pyomo components by writer order. Getting
       # that wrong puts plausible numbers on the wrong variables, which no
