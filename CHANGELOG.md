@@ -9,6 +9,67 @@ changes.
 
 ## [Unreleased]
 
+### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
+
+- Bound and constraint activity on the fitted parameters now classifies
+  through the item-0 rule applied at the reduced fitted block, where a
+  fitted parameter's curvature actually lives (its raw Lagrangian diagonal
+  is zero in the residual-variable idiom, so the per-coordinate report
+  alone cannot decide membership there). The slack-only test
+  (`tol = 1e-6 * (1 + |x|)`) and its moved-bounds re-injection are gone.
+- Dispositions per the item-1 table: strongly active projects (zero
+  variance, conditional, warned); weakly active is KEPT at its full
+  finite variance, where the slack test deleted it and the raw factor
+  would have halved it; ambiguous and unidentified are kept and warned.
+- The value correction subtracts the fitted rows' retained barrier
+  diagonal (`var_sigma`, new in the activity report along with
+  `row_sigma`) from the factor's reduced Hessian: a weakly active kept
+  parameter reports its true curvature `q`, not the factor's `2q`, and
+  inactive rows shed an O(μ) drift. On kept rows Σ is at most the
+  curvature's own size, so nothing cancels; pinned coordinates and
+  binding directions never enter (excluded by the free restriction and
+  annihilated by the projection, which also annihilates the binding
+  rows' huge barrier weight exactly).
+- A strongly active inequality row whose normal touches the fitted
+  block pins a combination, not a coordinate: both accessor paths
+  (Lagrangian and Gauss-Newton) project on the null space of the
+  binding normals, the matrix goes singular by one per binding row,
+  and the warning names the constraint, the pinned combination, and
+  its conditional information. A bound moved onto a row
+  (jkitchin/pounce#357) is the single-coordinate case and returns
+  exactly the variable-bound disposition, so the two spellings of one
+  limit agree in the matrices (#362), not only in the classification.
+- The restricted normal is honest only when the row's support outside
+  the fitted block is pinned (declared-parameter pin columns do not
+  count as outside: they cannot move). A binding row reaching the
+  fitted parameters through FREE eliminated variables pins a
+  direction the restricted normal cannot represent (`a + r_1 <= cap`
+  with `r_1 = y_1 - a - b x_1` pins a `b`-direction while the
+  restricted normal reads `e_a`), and the reduced-level ratio is
+  equally blind, so such a row takes item 0's raw classification, is
+  kept unprojected, and warns explicitly. The general treatment is
+  the row's reduced normal through the elimination, item 2 territory.
+- The report's `var_sigma`/`row_sigma` and `row_normal` follow the
+  documented natural-units contract like every other sensitivity
+  output: classification runs on the solver's scaled quantities (the
+  ratio is scale-invariant), the exported values are unscaled at the
+  boundary. Tested by pinning the weak scalar row's `Σ = 1/c²` under
+  both scaling modes and `row_normal` returning the user's own
+  coefficient.
+- Declaration-triggered solves set `bound_relax_factor=0`: the
+  classifier reads slacks as distances to the user's own bounds.
+- `Solver.row_normal(j)`: a constraint row's gradient at the converged
+  iterate in user variable order, serving the projection direction.
+- Tests pin the analytics: the weakly active kept variance equals the
+  unconstrained `σ²(XᵀX)⁻¹` entry; a binding `a + b <= cap` matches
+  restricted least squares with corr −1 and a rank drop; bound and row
+  spellings agree to 1e-6; an inactive far bound changes nothing to
+  1e-7; Gauss-Newton matches on the linear model, projection included.
+- `_classify_ratio` mirrors the Rust rule in Python, so a drift test
+  checks the two against each other on real solves: every classified
+  entry of a `classify_activity()` report must re-derive its own
+  status from the reported `(ratio, mu)` through the Python rule.
+
 ### Fixed — feasible convex QPs reported locally infeasible on the NLP path
 
 - With `solver_selection=nlp`, POUNCE reported `Converged to a point of
