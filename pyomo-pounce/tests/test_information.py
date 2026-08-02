@@ -1,7 +1,9 @@
 """information(): the un-inverted sibling of covariance() (covariance
 roadmap item 2). The Lagrangian form is built by tangent recovery
-(T = Zx inv(M), R = T'HT with the exact Hessian), full precision at
-any barrier parameter; pinned parameters return S rather than zeros;
+(T = Zx inv(M), R = T'HT with the exact Hessian): machine precision
+for bound and equality activity, ~1e-6 under a binding inequality row
+(it couples through its slack barrier); pinned parameters return S
+rather than zeros;
 binding rows project; Gauss-Newton slices last."""
 import warnings
 
@@ -127,7 +129,11 @@ def test_binding_row_projects_information():
         info = information(m)
         cov = covariance(m, sigma_sq=SIGMA_LIN**2)
     assert any("pins the fitted combination" in str(x_.message) for x_ in w)
-    # info = 2 sigma^2 * pinv(cov) on the projected free block
+    # info = 2 sigma^2 * pinv(cov) on the projected free block. The
+    # 1e-6 tolerance is load-bearing, not conservative: the binding
+    # row couples through its slack barrier and leaves ~1e-6 relative
+    # residue in the tangent recovery (see the scalar test in
+    # test_covariance.py)
     np.testing.assert_allclose(
         info.matrix, 2.0 * SIGMA_LIN**2 * np.linalg.pinv(cov.matrix),
         rtol=1e-6, atol=1e-9)

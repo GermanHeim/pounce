@@ -434,9 +434,12 @@ The Lagrangian form is built by tangent recovery against the held
 factorization rather than by inverting the covariance back: the
 K-inverse columns' x-blocks are `T*M`, so `T = Zx*inv(M)` exactly and
 `R = T'HT` with the exact Lagrangian Hessian. The barrier weight
-cancels multiplicatively, so the result carries full precision at any
-barrier parameter, including on pinned parameters where a
-subtract-the-barrier route loses `log10(Sigma/q)` digits.
+cancels multiplicatively, so equality and variable-bound activity
+carries machine precision at any barrier parameter, including on
+pinned parameters where a subtract-the-barrier route loses
+`log10(Sigma/q)` digits. A binding inequality row is the one
+exception: it couples through its slack barrier and leaves ~1e-6
+relative residue at practical barrier parameters.
 
 Membership and warnings follow `covariance()`. One disposition is
 opposite by design: a strongly active (pinned) parameter's entry is

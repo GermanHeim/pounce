@@ -1084,9 +1084,10 @@ def _tangent_reduced_hessian(session, M, zcols, who="covariance"):
     multiplicatively rather than by subtraction. Then R = T^T H T with
     the exact Lagrangian Hessian (covariance roadmap item 2).
 
-    Machine-exact when the active set couples through equalities only,
-    verified against analytic ground truth where the subtraction route
-    loses log10(Sigma/q) digits. A binding INEQUALITY row couples
+    Machine-exact for equality and variable-bound activity (everything
+    in W cancels multiplicatively, pinned variables included), verified
+    against analytic ground truth where the subtraction route loses
+    log10(Sigma/q) digits. A binding INEQUALITY row instead couples
     through its slack barrier with large-but-finite weight, tilting
     the recovered tangent along that row's normal: measured ~1e-6
     relative at practical mu, degrading as mu tightens (the pinned
@@ -1786,9 +1787,10 @@ def information(model, hessian="lagrangian"):
     covariance(): "lagrangian" (default) is the observed information,
     built by tangent recovery against the held factorization (the
     K-inverse columns' x-blocks are T*M, so T = Zx*inv(M) exactly and
-    R = T'HT with the exact Lagrangian Hessian: full precision at any
-    barrier parameter, no subtraction against the barrier-augmented
-    factor). "gauss-newton" is the expected information 2*J'J, with J
+    R = T'HT with the exact Lagrangian Hessian: machine precision for
+    equality and bound activity, no subtraction against the
+    barrier-augmented factor; a binding inequality row leaves ~1e-6
+    relative residue through its slack barrier). "gauss-newton" is the expected information 2*J'J, with J
     recovered over ALL fitted parameters and sliced afterwards, so the
     pinned rows exist to build their disposition from (requires
     declared residuals, as in covariance()).

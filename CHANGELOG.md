@@ -41,7 +41,9 @@ changes.
   a binding row pay the Hessian products): accurate to ~1e-6 where
   the factor subtraction lost ten digits, the residue being the
   binding row's own finite slack-barrier weight in the recovery.
-  Machine-exact when activity couples through equalities only.
+  Bound and equality activity stays machine-exact; the residue is
+  specific to binding inequality rows, which couple through the
+  slack block.
 - Membership, row handling, and their warnings are shared with
   `covariance()` (`_classify_fitted_block`), so the two accessors
   cannot drift.

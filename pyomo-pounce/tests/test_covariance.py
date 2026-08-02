@@ -803,11 +803,15 @@ def test_classify_ratio_agrees_with_the_rust_classifier():
     assert seen == {"inactive", "weakly_active", "strongly_active"}, seen
 
 
-def test_binding_row_scalar_is_exact():
+def test_binding_row_scalar_is_the_tangent_value():
     """The conditional-information number in the binding-row warning is
-    now the exact tangent-route value a'Ra (item 2 machinery), not the
+    the tangent-route value a'Ra (item 2 machinery), not the
     digits-losing factor subtraction: pinned against the analytic
-    reduced Hessian along the unit normal."""
+    reduced Hessian along the unit normal. The 1e-6 tolerance is
+    load-bearing twice over, not conservative: the warning prints 6
+    significant digits, and beneath the print the recovery carries
+    ~1e-6 relative residue from this row's own slack barrier (measured
+    8.7e-7 at default tol, degrading as mu tightens)."""
     x, y, X = linear_data()
     beta = np.linalg.solve(X.T @ X, X.T @ y)
     cap = float(beta[0] + beta[1]) - 0.5
