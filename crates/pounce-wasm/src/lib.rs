@@ -19,24 +19,29 @@
 //!   a JSON summary. Returns `{"error": …}` on a bad file.
 //! * [`pounce_solve`] — solve the loaded problem with an `ipopt.opt`-style
 //!   options string, returning a JSON result.
-//! * [`pounce_free_string`] — release a returned string.
+//! * [`pounce_solution_sol`] — format the last solve as an AMPL `.sol` file,
+//!   the same bytes `pounce model.nl` writes, so a browser result can be read
+//!   back by AMPL or Pyomo.
+//! * [`pounce_free_payload`] — release a returned payload.
 //!
-//! Returned strings are NUL-terminated so the caller can find their length
-//! without a second call. Every entry point catches panics, so a malformed
-//! model surfaces as a JSON error rather than a trapped instance the page
-//! would have to rebuild.
+//! Every returned payload is a little-endian `u32` byte count followed by
+//! that many UTF-8 bytes, so the caller never has to scan for a terminator.
+//! Every entry point catches panics, so a malformed model surfaces as a JSON
+//! error rather than a trapped instance the page would have to rebuild.
 //!
 //! The solver's own console output (banner, iteration table, exit line) is
 //! written to stdout as usual; under WASI the host shim receives it through
 //! `fd_write`, which is how the demo page streams the live iteration log.
 
 use std::cell::RefCell;
-use std::ffi::{CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_nl::nl_reader::{NlProblem, NlTnlp, parse_nl_text};
+use pounce_nl::sol_writer::{
+    SolSuffix, SolSuffixTarget, SolSuffixValues, SolutionFile, format_sol,
+};
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{Linearity, TNLP};
 
@@ -46,7 +51,25 @@ use pounce_nlp::tnlp::{Linearity, TNLP};
 /// display, and the summary reports the true counts separately.
 const PREVIEW_LIMIT: usize = 2000;
 
+/// What a `.sol` download needs from the last solve: the primal and dual
+/// blocks in original `.nl` order, and the status the file reports.
+struct SolveOutcome {
+    x: Vec<f64>,
+    g: Vec<f64>,
+    lambda: Vec<f64>,
+    /// Bound multipliers in Ipopt's internal convention (both `>= 0`); the
+    /// `.sol` writer applies the sign flip AMPL expects on the upper block.
+    z_l: Vec<f64>,
+    z_u: Vec<f64>,
+    status: pounce_nlp::return_codes::ApplicationReturnStatus,
+}
+
 thread_local! {
+    /// The last completed solve, kept for [`pounce_solution_sol`]. Cleared
+    /// whenever a new model is loaded, so a `.sol` can never describe a
+    /// different model than the one on screen.
+    static LAST_SOLVE: RefCell<Option<SolveOutcome>> = const { RefCell::new(None) };
+
     /// The currently loaded model. A wasm instance drives one model at a
     /// time (the demo runs one instance per worker), so a single slot is
     /// enough and keeps the ABI handle-free.
@@ -56,6 +79,27 @@ thread_local! {
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------
+//
+// Two allocation shapes cross the boundary, and both carry their length
+// explicitly rather than relying on a sentinel:
+//
+// * caller-owned input buffers — `pounce_alloc(len)` / `pounce_dealloc(ptr,
+//   len)`, allocated and freed with the same `Layout`;
+// * module-owned return payloads — a `u32` little-endian length followed by
+//   that many UTF-8 bytes, released with `pounce_free_payload`.
+//
+// The length prefix exists because scanning for a NUL terminator makes the
+// reader's correctness depend on the payload never containing a zero byte
+// and on the scan staying inside the buffer; a truncated read then surfaces
+// as an unrelated JSON parse error rather than as the memory bug it is.
+// Reading a length can't drift like that.
+
+/// Bytes of the little-endian `u32` length prefix on every returned payload.
+const PREFIX: usize = 4;
+
+fn layout_for(len: usize) -> Option<std::alloc::Layout> {
+    std::alloc::Layout::from_size_align(len, 1).ok()
+}
 
 /// Allocate `len` bytes in wasm linear memory for the caller to write into.
 /// Returns null when `len` is 0 or the allocation fails.
@@ -65,16 +109,12 @@ thread_local! {
 /// same `len`, or handed to [`pounce_load`], which takes no ownership.
 #[unsafe(no_mangle)]
 pub extern "C" fn pounce_alloc(len: usize) -> *mut u8 {
-    if len == 0 {
-        return std::ptr::null_mut();
+    match layout_for(len) {
+        // SAFETY: `layout_for` rejects a zero size, so the layout is valid
+        // for `alloc`. A null return is propagated to the caller as-is.
+        Some(layout) if len > 0 => unsafe { std::alloc::alloc(layout) },
+        _ => std::ptr::null_mut(),
     }
-    let mut buf = Vec::<u8>::new();
-    if buf.try_reserve_exact(len).is_err() {
-        return std::ptr::null_mut();
-    }
-    buf.resize(len, 0);
-    let mut buf = std::mem::ManuallyDrop::new(buf);
-    buf.as_mut_ptr()
 }
 
 /// Release a buffer obtained from [`pounce_alloc`].
@@ -84,43 +124,63 @@ pub extern "C" fn pounce_alloc(len: usize) -> *mut u8 {
 /// have been freed already.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pounce_dealloc(ptr: *mut u8, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    // SAFETY: the caller guarantees ptr/len came from `pounce_alloc`, which
-    // built the allocation with exactly this length and capacity.
-    drop(unsafe { Vec::from_raw_parts(ptr, len, len) });
-}
-
-/// Release a string returned by [`pounce_load`] / [`pounce_solve`].
-///
-/// # Safety
-/// `ptr` must be a pointer this module returned and not yet freed.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pounce_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: the caller guarantees this pointer came from `CString::into_raw`
-    // in `to_c_string` below.
-    drop(unsafe { CString::from_raw(ptr) });
-}
-
-/// Move a Rust string into a NUL-terminated allocation the caller owns.
-/// Interior NULs are impossible here (all payloads are `serde_json` output),
-/// but the fallback keeps the function total rather than panicking.
-fn to_c_string(s: String) -> *mut c_char {
-    match CString::new(s) {
-        Ok(c) => c.into_raw(),
-        Err(_) => match CString::new(r#"{"error":"internal: NUL in payload"}"#) {
-            Ok(c) => c.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        },
+    if let Some(layout) = layout_for(len) {
+        // SAFETY: the caller guarantees ptr came from `pounce_alloc` with
+        // this same `len`, hence this same layout.
+        unsafe { std::alloc::dealloc(ptr, layout) }
     }
 }
 
-fn error_json(msg: impl std::fmt::Display) -> *mut c_char {
-    to_c_string(serde_json::json!({ "error": msg.to_string() }).to_string())
+/// Release a payload returned by [`pounce_load`], [`pounce_solve`], or
+/// [`pounce_solution_sol`].
+///
+/// # Safety
+/// `ptr` must be a payload pointer this module returned and not yet freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pounce_free_payload(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: every payload starts with its own length prefix, written by
+    // `to_payload`, so the original allocation size is recoverable here.
+    let len = unsafe { std::ptr::read_unaligned(ptr.cast::<u32>()) } as usize;
+    if let Some(layout) = layout_for(PREFIX + len) {
+        // SAFETY: same allocation, same layout as `to_payload` used.
+        unsafe { std::alloc::dealloc(ptr, layout) }
+    }
+}
+
+/// Move `s` into a caller-owned `[u32 length][UTF-8 bytes]` allocation.
+/// Returns null only if the allocation fails.
+fn to_payload(s: &str) -> *mut u8 {
+    let bytes = s.as_bytes();
+    let Ok(len) = u32::try_from(bytes.len()) else {
+        // A payload larger than 4 GiB cannot be described by the prefix —
+        // and cannot exist in a 32-bit address space either.
+        return std::ptr::null_mut();
+    };
+    let Some(layout) = layout_for(PREFIX + bytes.len()) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `layout` has a non-zero size (PREFIX > 0).
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return ptr;
+    }
+    // SAFETY: `ptr` owns `PREFIX + bytes.len()` bytes; the prefix is written
+    // unaligned because the allocation has align 1, and the payload follows.
+    unsafe {
+        std::ptr::write_unaligned(ptr.cast::<u32>(), len);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(PREFIX), bytes.len());
+    }
+    ptr
+}
+
+fn error_json(msg: impl std::fmt::Display) -> *mut u8 {
+    to_payload(&serde_json::json!({ "error": msg.to_string() }).to_string())
 }
 
 /// Borrow `len` bytes at `ptr` as `&str`. Empty when `ptr` is null or `len`
@@ -141,7 +201,7 @@ unsafe fn str_from_parts<'a>(ptr: *const u8, len: usize) -> Result<&'a str, Stri
 /// Run `f`, converting a panic into a JSON error string. `.nl` input is
 /// arbitrary user data; a panic inside the parser or the solver must not
 /// poison the wasm instance for the rest of the page's lifetime.
-fn guarded(what: &str, f: impl FnOnce() -> *mut c_char) -> *mut c_char {
+fn guarded(what: &str, f: impl FnOnce() -> *mut u8) -> *mut u8 {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(p) => p,
         Err(_) => error_json(format!("{what} panicked (see the console log for details)")),
@@ -169,7 +229,7 @@ pub unsafe extern "C" fn pounce_load(
     col_len: usize,
     row_ptr: *const u8,
     row_len: usize,
-) -> *mut c_char {
+) -> *mut u8 {
     guarded("load", || {
         // SAFETY: forwarded from this function's own safety contract.
         let (nl, col, row) = unsafe {
@@ -199,8 +259,9 @@ pub unsafe extern "C" fn pounce_load(
         };
         let tnlp = Rc::new(RefCell::new(tnlp));
         let summary = summarize(&mut tnlp.borrow_mut());
+        LAST_SOLVE.with(|slot| *slot.borrow_mut() = None);
         LOADED.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&tnlp)));
-        to_c_string(summary.to_string())
+        to_payload(&summary.to_string())
     })
 }
 
@@ -356,7 +417,7 @@ fn summarize(tnlp: &mut NlTnlp) -> serde_json::Value {
 /// `opts_ptr`/`opts_len` must describe a readable region valid for the
 /// call, or be `(null, 0)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pounce_solve(opts_ptr: *const u8, opts_len: usize) -> *mut c_char {
+pub unsafe extern "C" fn pounce_solve(opts_ptr: *const u8, opts_len: usize) -> *mut u8 {
     guarded("solve", || {
         // SAFETY: forwarded from this function's own safety contract.
         let opts = match unsafe { str_from_parts(opts_ptr, opts_len) } {
@@ -366,7 +427,7 @@ pub unsafe extern "C" fn pounce_solve(opts_ptr: *const u8, opts_len: usize) -> *
         let Some(tnlp) = LOADED.with(|slot| slot.borrow().clone()) else {
             return error_json("no model loaded — call pounce_load first");
         };
-        to_c_string(solve_loaded(tnlp, opts).to_string())
+        to_payload(&solve_loaded(tnlp, opts).to_string())
     })
 }
 
@@ -413,6 +474,11 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
 
     let mut t = tnlp.borrow_mut();
     let x: Vec<f64> = t.final_x().map(<[f64]>::to_vec).unwrap_or_default();
+    let lambda: Vec<f64> = t.final_lambda().map(<[f64]>::to_vec).unwrap_or_default();
+    let (z_l, z_u) = t
+        .final_bound_multipliers()
+        .map(|(l, u)| (l.to_vec(), u.to_vec()))
+        .unwrap_or_default();
     let objective = t.final_obj();
     // Constraint values at the returned point, so the page can show which
     // rows are tight or violated without re-evaluating the model in JS.
@@ -423,10 +489,26 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
     }
     let (g_l, g_u) = (t.problem().g_l.clone(), t.problem().g_u.clone());
 
+    // Remember what a `.sol` download would need: AMPL's file carries the
+    // primal and dual blocks plus the solver's own status line, and the
+    // multipliers are not reconstructible from the JSON payload (which
+    // truncates long vectors for display).
+    LAST_SOLVE.with(|slot| {
+        *slot.borrow_mut() = Some(SolveOutcome {
+            x: x.clone(),
+            g: g.clone(),
+            lambda: lambda.clone(),
+            z_l,
+            z_u,
+            status,
+        })
+    });
+
     let (x_prev, x_truncated) = preview(&x);
     let (g_prev, g_truncated) = preview(&g);
     let (g_l_prev, _) = preview(&g_l);
     let (g_u_prev, _) = preview(&g_u);
+    let (lambda_prev, _) = preview(&lambda);
 
     serde_json::json!({
         "status": format!("{status:?}"),
@@ -449,11 +531,115 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
             "hessian": stats.num_hess_evals,
         },
         "x": x_prev,
+        // POUNCE's Lagrange multipliers (L = f + λ'g). AMPL's `.sol` dual
+        // block is the marginal value dobj/db = -λ, and `pounce_solution_sol`
+        // applies that negation; this field is the raw multiplier.
+        "lambda": lambda_prev,
         "g": g_prev,
         "g_l": g_l_prev,
         "g_u": g_u_prev,
         "truncated": x_truncated || g_truncated,
     })
+}
+
+// ---------------------------------------------------------------------------
+// AMPL .sol export
+// ---------------------------------------------------------------------------
+
+/// Format the last solve as an AMPL `.sol` file — the same writer, and so
+/// the same bytes, as `pounce model.nl` produces on disk. Lets a browser
+/// result be read back by AMPL (`solve_result_num`, `_var.X`, `_con.dual`)
+/// or by Pyomo's `.sol` reader.
+///
+/// Returns null when no solve has completed since the model was loaded.
+#[unsafe(no_mangle)]
+pub extern "C" fn pounce_solution_sol() -> *mut u8 {
+    guarded("sol export", || {
+        LAST_SOLVE.with(|slot| match &*slot.borrow() {
+            None => std::ptr::null_mut(),
+            Some(outcome) => {
+                let message = format!("POUNCE {}: {:?}", env!("CARGO_PKG_VERSION"), outcome.status);
+                // Reduced costs, exactly as the CLI writes them (gh #296):
+                // `ipopt_zL_out = +z_l`, `ipopt_zU_out = -z_u`, so Pyomo's
+                // `model.ipopt_zL_out` / AMPL's `.rc` read the same numbers
+                // from a browser solve as from a command-line one.
+                let suffixes = [
+                    SolSuffix {
+                        name: "ipopt_zL_out".to_string(),
+                        target: SolSuffixTarget::Var,
+                        values: SolSuffixValues::Real(outcome.z_l.clone()),
+                    },
+                    SolSuffix {
+                        name: "ipopt_zU_out".to_string(),
+                        target: SolSuffixTarget::Var,
+                        values: SolSuffixValues::Real(outcome.z_u.iter().map(|&z| -z).collect()),
+                    },
+                ];
+                to_payload(&format_sol(&SolutionFile {
+                    message: &message,
+                    x: &outcome.x,
+                    mult_g: &outcome.lambda,
+                    solve_result_num: pounce_solve_report::status_to_solve_result_num(
+                        outcome.status,
+                    ),
+                    suffixes: &suffixes,
+                }))
+            }
+        })
+    })
+}
+
+/// Format the last solve as CSV: one row per variable and per constraint,
+/// with the model's own names when a `.col` / `.row` file was supplied.
+///
+/// Unlike the JSON the page renders from — which truncates long vectors so a
+/// large model stays displayable — this carries every row.
+///
+/// Returns null when no solve has completed since the model was loaded.
+#[unsafe(no_mangle)]
+pub extern "C" fn pounce_solution_csv() -> *mut u8 {
+    guarded("csv export", || {
+        let Some(tnlp) = LOADED.with(|slot| slot.borrow().clone()) else {
+            return std::ptr::null_mut();
+        };
+        LAST_SOLVE.with(|slot| match &*slot.borrow() {
+            None => std::ptr::null_mut(),
+            Some(outcome) => {
+                let t = tnlp.borrow();
+                let prob = t.problem();
+                let mut out = String::from("kind,index,name,value,lower,upper,multiplier\n");
+                for (i, v) in outcome.x.iter().enumerate() {
+                    let name = prob.var_names.get(i).cloned().unwrap_or_default();
+                    let (lo, hi) = (prob.x_l[i], prob.x_u[i]);
+                    out.push_str(&format!(
+                        "variable,{i},{},{v:.17e},{lo:.17e},{hi:.17e},\n",
+                        csv_field(&name, i, "x")
+                    ));
+                }
+                for (i, v) in outcome.g.iter().enumerate() {
+                    let name = prob.con_names.get(i).cloned().unwrap_or_default();
+                    let (lo, hi) = (prob.g_l[i], prob.g_u[i]);
+                    let mult = outcome.lambda.get(i).copied().unwrap_or(0.0);
+                    out.push_str(&format!(
+                        "constraint,{i},{},{v:.17e},{lo:.17e},{hi:.17e},{mult:.17e}\n",
+                        csv_field(&name, i, "c")
+                    ));
+                }
+                to_payload(&out)
+            }
+        })
+    })
+}
+
+/// A quoted CSV name field, falling back to `x[i]` / `c[i]` when the model
+/// shipped no name files. Embedded quotes are doubled, per RFC 4180.
+fn csv_field(name: &str, index: usize, fallback: &str) -> String {
+    let text = if name.is_empty() {
+        format!("{fallback}[{index}]")
+    } else {
+        name.to_string()
+    };
+    format!("\"{}\"", text.replace('"', "\"\""))
 }
 
 #[cfg(test)]
@@ -464,6 +650,23 @@ mod tests {
     /// small enough to keep inline, big enough that every field of the
     /// summary has something to say.
     const SIMPLE_NL: &str = include_str!("../tests/simple.nl");
+
+    /// Read a returned payload the way the JS side does — length prefix
+    /// first, then that many bytes — and release it.
+    fn take_payload(ptr: *mut u8) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: `ptr` is a payload this module just returned, so the
+        // prefix and the bytes behind it are initialized and owned.
+        let text = unsafe {
+            let len = std::ptr::read_unaligned(ptr.cast::<u32>()) as usize;
+            let bytes = std::slice::from_raw_parts(ptr.add(PREFIX), len);
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        unsafe { pounce_free_payload(ptr) };
+        Some(text)
+    }
 
     /// Call the C ABI the way JS does — bytes in, JSON out — and hand back
     /// the parsed payload.
@@ -478,19 +681,13 @@ mod tests {
                 row.len(),
             )
         };
-        let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { pounce_free_string(ptr) };
+        let s = take_payload(ptr).expect("load must return a payload");
         serde_json::from_str(&s).expect("entry points must return JSON")
     }
 
     fn call_solve(opts: &str) -> serde_json::Value {
         let ptr = unsafe { pounce_solve(opts.as_ptr(), opts.len()) };
-        let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { pounce_free_string(ptr) };
+        let s = take_payload(ptr).expect("solve must return a payload");
         serde_json::from_str(&s).expect("entry points must return JSON")
     }
 
@@ -545,6 +742,101 @@ mod tests {
     fn solving_with_no_model_loaded_is_an_error() {
         LOADED.with(|slot| *slot.borrow_mut() = None);
         assert!(call_solve("")["error"].is_string());
+    }
+
+    #[test]
+    fn round_trips_a_payload_of_every_size_near_the_prefix() {
+        // The length prefix is the whole reason a payload is readable; an
+        // off-by-one there would corrupt short payloads first.
+        for len in [0usize, 1, 3, 4, 5, 4096] {
+            let text = "x".repeat(len);
+            let ptr = to_payload(&text);
+            assert!(!ptr.is_null(), "allocation failed at len {len}");
+            assert_eq!(take_payload(ptr).as_deref(), Some(text.as_str()));
+        }
+    }
+
+    #[test]
+    fn sol_export_matches_the_solve() {
+        call_load(SIMPLE_NL, "", "");
+        assert!(
+            pounce_solution_sol().is_null(),
+            "a .sol before any solve would describe nothing"
+        );
+        let r = call_solve("print_level 0\n");
+        let sol = take_payload(pounce_solution_sol()).expect("sol after a solve");
+
+        assert!(sol.starts_with("POUNCE "), "missing status line:\n{sol}");
+        assert!(sol.contains("SolveSucceeded"), "unexpected status:\n{sol}");
+        // Four-integer count block for m = 2, n = 2, then `objno 0 0`
+        // (SolveSucceeded). The dual block is written before the primal.
+        assert!(sol.contains("\n2\n2\n2\n2\n"), "count block wrong:\n{sol}");
+        assert!(sol.contains("\nobjno 0 0\n"), "objno wrong:\n{sol}");
+        // Reduced costs ride along in the same suffix blocks the CLI writes,
+        // so Pyomo's `ipopt_zL_out` / `ipopt_zU_out` are populated.
+        assert!(
+            sol.contains("\nipopt_zL_out\n"),
+            "missing zL suffix:\n{sol}"
+        );
+        assert!(
+            sol.contains("\nipopt_zU_out\n"),
+            "missing zU suffix:\n{sol}"
+        );
+        // The primal block must be the x the JSON reported.
+        let x0 = r["x"][0].as_f64().unwrap_or(f64::NAN);
+        assert!(
+            sol.contains(&format!("{x0:.17e}")),
+            "x[0] = {x0} missing from the primal block:\n{sol}"
+        );
+    }
+
+    #[test]
+    fn csv_export_covers_every_row() {
+        call_load(SIMPLE_NL, "alpha\nbeta\n", "ring\nline\n");
+        assert!(pounce_solution_csv().is_null(), "csv before a solve");
+        call_solve("print_level 0\n");
+        let csv = take_payload(pounce_solution_csv()).expect("csv after a solve");
+
+        let lines: Vec<&str> = csv.trim_end().split('\n').collect();
+        // Header + 2 variables + 2 constraints, with the model's own names.
+        assert_eq!(lines.len(), 5, "unexpected csv:\n{csv}");
+        assert!(lines[0].starts_with("kind,index,name,value"));
+        assert!(
+            lines[1].starts_with("variable,0,\"alpha\","),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[3].starts_with("constraint,0,\"ring\","),
+            "{}",
+            lines[3]
+        );
+        // Bounds ride along so a reader can see which rows are tight.
+        assert_eq!(lines[4].split(',').count(), 7);
+    }
+
+    #[test]
+    fn csv_falls_back_to_index_labels_without_name_files() {
+        call_load(SIMPLE_NL, "", "");
+        call_solve("print_level 0\n");
+        let csv = take_payload(pounce_solution_csv()).expect("csv");
+        assert!(csv.contains("variable,0,\"x[0]\","), "{csv}");
+        assert!(csv.contains("constraint,1,\"c[1]\","), "{csv}");
+    }
+
+    #[test]
+    fn loading_a_new_model_invalidates_the_previous_sol() {
+        call_load(SIMPLE_NL, "", "");
+        call_solve("print_level 0\n");
+        assert!(take_payload(pounce_solution_sol()).is_some());
+        // A fresh load must not leave the old solve downloadable — that .sol
+        // would carry the previous model's x against the new model's name
+        // files.
+        call_load(SIMPLE_NL, "", "");
+        assert!(
+            pounce_solution_sol().is_null(),
+            "stale .sol survived a reload"
+        );
     }
 
     #[test]

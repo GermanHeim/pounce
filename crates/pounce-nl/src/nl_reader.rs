@@ -1560,6 +1560,18 @@ pub struct NlTnlp {
     con_tape_colors: Vec<Vec<Vec<u32>>>,
     final_x: Option<Vec<Number>>,
     final_obj: Number,
+    /// Converged constraint multipliers (length `m`, original `.nl` row
+    /// order, user convention), captured from the same `finalize_solution`
+    /// call as `final_x`. Kept so a frontend can write the `.sol` dual
+    /// block without re-deriving it from the algorithm's internal `y_c` /
+    /// `y_d` split and scaling.
+    final_lambda: Option<Vec<Number>>,
+    /// Converged bound multipliers (length `n` each, Ipopt's internal
+    /// convention `z_l, z_u >= 0`), captured with `final_x`. Written as the
+    /// `ipopt_zL_out` / `ipopt_zU_out` `.sol` suffixes, which is what Pyomo
+    /// reads for reduced costs.
+    final_z_l: Option<Vec<Number>>,
+    final_z_u: Option<Vec<Number>>,
     /// Per-row Jacobian accumulator (length n).
     scratch_row_grad: Vec<f64>,
     /// Scratch buffers for `Tape::hessian_directional` (each sized
@@ -2261,6 +2273,9 @@ impl NlTnlp {
             con_tape_colors,
             final_x: None,
             final_obj: 0.0,
+            final_lambda: None,
+            final_z_l: None,
+            final_z_u: None,
             scratch_row_grad: Vec::new(),
             vals_scratch: vec![0.0; max_tape_n],
             dot_scratch: vec![0.0; max_tape_n],
@@ -2276,6 +2291,20 @@ impl NlTnlp {
 
     pub fn final_obj(&self) -> Number {
         self.final_obj
+    }
+
+    /// Converged constraint multipliers from the last solve, in original
+    /// `.nl` row order. `None` before a solve finishes. See
+    /// [`Self::final_x`] for the primal counterpart.
+    pub fn final_lambda(&self) -> Option<&[Number]> {
+        self.final_lambda.as_deref()
+    }
+
+    /// Converged lower / upper bound multipliers from the last solve, in
+    /// original `.nl` variable order and Ipopt's internal convention (both
+    /// `>= 0`). `None` before a solve finishes.
+    pub fn final_bound_multipliers(&self) -> Option<(&[Number], &[Number])> {
+        Some((self.final_z_l.as_deref()?, self.final_z_u.as_deref()?))
     }
 
     /// The parsed problem this TNLP evaluates (bounds, starting point,
@@ -2309,6 +2338,9 @@ impl NlTnlp {
         let mut out = self.clone();
         out.final_x = None;
         out.final_obj = 0.0;
+        out.final_lambda = None;
+        out.final_z_l = None;
+        out.final_z_u = None;
         if let Some(x0) = &v.x0 {
             check("x0", x0.len(), self.prob.n)?;
             out.prob.x0.clone_from(x0);
@@ -2614,6 +2646,9 @@ impl TNLP for NlTnlp {
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
         self.final_x = Some(sol.x.to_vec());
         self.final_obj = sol.obj_value;
+        self.final_lambda = Some(sol.lambda.to_vec());
+        self.final_z_l = Some(sol.z_l.to_vec());
+        self.final_z_u = Some(sol.z_u.to_vec());
     }
 
     /// Publish the `.col` / `.row` names (captured at load time) under the

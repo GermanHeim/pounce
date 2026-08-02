@@ -12,6 +12,11 @@
 //!   `funcadd_ASL` ABI.
 //! - [`nl_fbbt_translate`] lowers an `Expr` to an `FbbtTape` for
 //!   feasibility-based bound tightening.
+//! - [`sol_writer`] is the reader's inverse: it formats a solve's primals,
+//!   duals, and suffixes as an AMPL `.sol` file. It lives here (rather than
+//!   in the CLI, which owned it until the browser frontend needed it too) so
+//!   every frontend emits the same file — same dual sign convention, same
+//!   suffix headers.
 //!
 //! It is a leaf crate (depends only on `pounce-common` and `pounce-nlp`) so
 //! both the CLI and the Python bindings can read and evaluate `.nl` models
@@ -21,3 +26,4 @@ pub mod nl_external;
 pub mod nl_fbbt_translate;
 pub mod nl_reader;
 pub mod nl_tape;
+pub mod sol_writer;

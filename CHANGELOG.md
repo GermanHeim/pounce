@@ -38,6 +38,25 @@ changes.
   34 of the 36 that return one; the two exceptions differ by one ulp, at
   objectives of 1e-10 and 1e-11. Documented in `docs/src/wasm.md`; CI builds the module and solves
   a model under Node's WASI on every PR.
+- Downloads off a finished solve: an AMPL `.sol` (byte-identical to the one
+  `pounce model.nl` writes, reduced-cost suffixes included, so AMPL and
+  Pyomo read a browser solve back unchanged), a CSV of every variable and
+  constraint with names, bounds, and multipliers, and the solver log. Both
+  solution files are formatted in wasm from the full solution rather than
+  from the on-screen tables, which truncate at 2,000 rows.
+- The AMPL `.sol` writer moved from `pounce-cli` to `pounce-nl`
+  (`sol_writer`, re-exported under its old name) so every frontend emits the
+  same file — same dual sign convention, same suffix headers. `NlTnlp` now
+  keeps the converged multipliers (`final_lambda`, `final_bound_multipliers`)
+  alongside `final_x`, so writing that file needs no second derivation of
+  the duals.
+- Dropping a file resets the page: it discards the worker and starts a fresh
+  wasm instance, so no parsed model, solver state, or grown heap survives
+  into the next model.
+- Payloads returned from wasm are length-prefixed rather than
+  NUL-terminated. The reader no longer scans for a terminator, so a bad
+  pointer or length is reported as itself instead of surfacing later as an
+  unrelated JSON parse error.
 - `pounce-nl` now builds for targets with no dynamic loader: `libloading`
   became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
   reports that AMPL imported functions are unavailable there rather than

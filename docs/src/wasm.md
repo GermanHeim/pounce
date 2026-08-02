@@ -50,6 +50,22 @@ the `.col` / `.row` names when you drop those alongside the `.nl`.
 Solve options are `ipopt.opt`-format text — the same option names the CLI
 and the Python API take.
 
+Three downloads come off a finished solve:
+
+| Download | What it is |
+| --- | --- |
+| `.sol` | An AMPL solution file — byte-identical to what `pounce model.nl` writes, including the `ipopt_zL_out` / `ipopt_zU_out` reduced-cost suffixes. AMPL and Pyomo read it back. |
+| CSV | One row per variable and per constraint: name, value, bounds, multiplier. |
+| log | The solver output, as printed. |
+
+The `.sol` and CSV are formatted inside wasm from the full solution, not
+from the table on screen — the page truncates long vectors at 2,000 rows to
+stay renderable, and a download that stopped there would be worse than none.
+
+Dropping a new file resets everything: the page throws away its worker and
+starts a fresh wasm instance, so no parsed model, solver state, or grown
+heap carries from one file into the next.
+
 ## Numerical parity with the native build
 
 The wasm build runs the same code, so it produces the same answers. Over
@@ -101,6 +117,12 @@ build step beyond `cargo build`.
 A solve is one synchronous call into wasm that can run for seconds, so the
 module lives in a web worker and the page stays responsive.
 
+Payloads cross the boundary as a little-endian `u32` byte count followed by
+that many UTF-8 bytes. Reading a length rather than scanning for a NUL
+terminator keeps the reader's correctness independent of what is *in* the
+payload, and lets a bad pointer or length be reported as exactly that
+instead of surfacing later as an unrelated parse error.
+
 ## Limitations
 
 - **Single-threaded.** No threads are spawned; rayon-parallel paths run
@@ -121,6 +143,8 @@ exports — allocate, load, solve, free — and every payload is JSON:
 ```js
 const summary = fromWasm(wasm.pounce_load(nlPtr, nlLen, 0, 0, 0, 0));
 const result  = fromWasm(wasm.pounce_solve(optsPtr, optsLen));
+const solFile = fromWasm(wasm.pounce_solution_sol());   // AMPL .sol text
+const csv     = fromWasm(wasm.pounce_solution_csv());   // every row
 ```
 
 Both entry points catch panics and return `{"error": …}`, so a malformed

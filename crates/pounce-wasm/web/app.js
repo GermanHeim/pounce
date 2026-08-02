@@ -1,7 +1,5 @@
 // Page logic: take dropped files, ask the worker to load and solve, render.
 
-const worker = new Worker('./worker.js', { type: 'module' });
-
 const $ = (id) => document.getElementById(id);
 const drop = $('drop');
 const fileInput = $('files');
@@ -10,7 +8,36 @@ const solveButton = $('solve');
 const solveStatus = $('solve-status');
 const log = $('log');
 
+let worker = null;
 let summary = null;
+let result = null;
+let modelName = 'model';
+
+// --- worker lifecycle ------------------------------------------------------
+
+// Every load gets a brand-new worker, and with it a brand-new wasm instance.
+// Reusing one would carry the previous model's parse, the previous solve, and
+// a linear memory already grown to fit them into the next file — so dropping
+// a second model would be solved by an instance whose state you cannot see.
+// Recreating costs one module compile (~100 ms) and makes "drag a file in"
+// mean exactly what it looks like: start over.
+function restartWorker() {
+  if (worker) worker.terminate();
+  worker = new Worker('./worker.js', { type: 'module' });
+  worker.onmessage = onWorkerMessage;
+}
+
+function resetUi() {
+  summary = null;
+  result = null;
+  for (const id of ['summary-section', 'solve-section', 'result-section', 'log-section']) {
+    $(id).hidden = true;
+  }
+  log.textContent = '';
+  solveStatus.textContent = '';
+  solveButton.disabled = false;
+  showLoadError(null);
+}
 
 // --- file intake -----------------------------------------------------------
 
@@ -31,15 +58,20 @@ fileInput.addEventListener('change', () => takeFiles(fileInput.files));
 
 async function takeFiles(fileList) {
   const files = [...fileList];
+  if (!files.length) return;
   const pick = (ext) => files.find((f) => f.name.toLowerCase().endsWith(ext));
   // Anything that is not a .col/.row is treated as the model, so a file
   // named `stub` or `model.nl.txt` still works.
   const nl = pick('.nl') ?? files.find((f) => !/\.(col|row)$/i.test(f.name));
+
+  resetUi();
+  restartWorker();
+
   if (!nl) {
     showLoadError('Drop an .nl file (optionally with its .col / .row name files).');
     return;
   }
-  showLoadError(null);
+  modelName = nl.name.replace(/\.nl$/i, '') || 'model';
   $('filename').textContent = `— ${nl.name} (${formatBytes(nl.size)})`;
   const [nlText, colText, rowText] = await Promise.all([
     nl.text(),
@@ -56,20 +88,14 @@ function showLoadError(message) {
 
 // --- worker plumbing -------------------------------------------------------
 
-worker.onmessage = ({ data }) => {
+function onWorkerMessage({ data }) {
   if (data.type === 'summary') {
     if (data.summary.error) {
-      summary = null;
-      $('summary-section').hidden = true;
-      $('solve-section').hidden = true;
       showLoadError(data.summary.error);
       return;
     }
     summary = data.summary;
     renderSummary(summary);
-    $('result-section').hidden = true;
-    $('log-section').hidden = true;
-    log.textContent = '';
   } else if (data.type === 'log') {
     log.textContent += data.text;
     log.scrollTop = log.scrollHeight;
@@ -80,13 +106,20 @@ worker.onmessage = ({ data }) => {
       return;
     }
     solveStatus.textContent = '';
-    renderResult(data.result);
+    result = data.result;
+    renderResult(result);
+  } else if (data.type === 'export') {
+    if (data.text === null) {
+      solveStatus.textContent = 'nothing to export yet — solve first';
+      return;
+    }
+    download(data.filename, data.text, data.mime);
   } else if (data.type === 'fatal') {
     solveButton.disabled = false;
-    showLoadError(data.message);
-    solveStatus.textContent = data.message;
+    if (data.request === 'load') showLoadError(data.message);
+    else solveStatus.textContent = data.message;
   }
-};
+}
 
 solveButton.addEventListener('click', () => {
   solveButton.disabled = true;
@@ -94,8 +127,49 @@ solveButton.addEventListener('click', () => {
   log.textContent = '';
   $('log-section').hidden = false;
   $('result-section').hidden = true;
+  result = null;
   worker.postMessage({ type: 'solve', options: $('options').value });
 });
+
+// --- downloads -------------------------------------------------------------
+
+function download(filename, text, mime) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  // Revoke on the next turn: Safari needs the object URL to outlive the
+  // synchronous click handler.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+// The solution downloads are formatted in wasm, not assembled here: the
+// result JSON this page renders truncates long vectors so a large model stays
+// displayable, and a download that silently stopped at 2,000 rows would be
+// worse than no download at all.
+$('dl-sol').addEventListener('click', () =>
+  worker.postMessage({
+    type: 'export',
+    format: 'sol',
+    filename: `${modelName}.sol`,
+    mime: 'text/plain',
+  }),
+);
+
+$('dl-csv').addEventListener('click', () =>
+  worker.postMessage({
+    type: 'export',
+    format: 'csv',
+    filename: `${modelName}-solution.csv`,
+    mime: 'text/csv',
+  }),
+);
+
+// The log is already whole on this side — it is what the solver printed.
+$('dl-log').addEventListener('click', () =>
+  download(`${modelName}-solve.log`, log.textContent, 'text/plain'),
+);
 
 // --- rendering -------------------------------------------------------------
 
@@ -187,14 +261,19 @@ function renderResult(r) {
     r.x.map((v, i) => [names[i] ?? `x[${i}]`, sci(v)]));
 
   const conNames = summary?.con_names ?? [];
-  table($('cons'), ['Constraint', 'Lower', 'Value', 'Upper'],
+  table($('cons'), ['Constraint', 'Lower', 'Value', 'Upper', 'Multiplier'],
     r.g.map((v, i) => [
       conNames[i] ?? `c[${i}]`,
       finite(r.g_l[i]) ? sci(r.g_l[i]) : '−∞',
       sci(v),
       finite(r.g_u[i]) ? sci(r.g_u[i]) : '∞',
+      sci(r.lambda?.[i]),
     ]));
 
+  $('result-note').textContent = r.truncated
+    ? `Tables show the first ${num(summary?.preview_limit ?? 0)} rows. The .sol and CSV ` +
+      `downloads carry every row.`
+    : '';
   $('result-section').hidden = false;
 }
 

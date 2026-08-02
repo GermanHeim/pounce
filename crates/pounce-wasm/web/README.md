@@ -58,11 +58,22 @@ filesystem on this path.
 const [ptr, len] = intoWasm(nlFileText);
 const summary = fromWasm(wasm.pounce_load(ptr, len, 0, 0, 0, 0));
 const result  = fromWasm(wasm.pounce_solve(...intoWasm('max_iter 500\n')));
+const solFile = fromWasm(wasm.pounce_solution_sol());   // AMPL .sol text
+const csv     = fromWasm(wasm.pounce_solution_csv());   // every row, named
 ```
 
 Options are `ipopt.opt`-format text, exactly as the CLI and the Python API
-take them. Both entry points catch panics and report `{"error": …}`, so a
+take them. Every entry point catches panics and reports `{"error": …}`, so a
 malformed model does not trap the instance.
+
+Each returned payload is a little-endian `u32` byte count followed by that
+many UTF-8 bytes — no terminator to scan for, so a bad pointer or length is
+reported as itself rather than as a downstream parse error. Release it with
+`pounce_free_payload`.
+
+The page throws its worker away and builds a fresh instance on every file
+drop, which is what makes "drag a new model in" a real reset rather than a
+re-render.
 
 ## Limitations
 
