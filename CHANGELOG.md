@@ -9,6 +9,45 @@ changes.
 
 ## [Unreleased]
 
+### Performance — pyomo-pounce: `initialize()` walked the same incidence three times per call (#444)
+
+- One `initialize()` call built whole-model incidence three times and
+  re-derived each constraint's incident variables six times over: the
+  plan pass, a re-plan inside `block_initialize(repair="auto")` that
+  was structurally a no-op (every candidate already fixed) yet paid a
+  full graph construction and denominator sweep, and the analyze
+  pass. On a 25,276-constraint collocation model that was 345.7 s of
+  almost purely symbolic work (fill and projection off).
+- The call now performs one structural incidence walk
+  (`structural_incidence`, fixed variables included) and each pass
+  filters it to the currently-unfixed variables through
+  `IncidenceGraphInterface.subgraph`, which copies the stored graph
+  without re-inspecting constraints. The plan filters pre-fixing and
+  the analyze pass post-fixing. The shared view is structural where a
+  fresh build substitutes fixed values: the edge sets can differ when
+  that substitution cancels a term — a fixed zero is the obvious way
+  but not the only one, since values can cancel across terms with no
+  fixed variable being zero (`a*x - b*x` with `a` and `b` fixed
+  equal). Every row adjacent to a fixed variable is therefore
+  re-derived and compared, and a genuine cancellation falls back to a
+  fresh build for that pass; the variable order within rows may differ on
+  models where fixed values change the linear/nonlinear split; order
+  feeds tie-breaks, so equally-valid diagnostics (which variable is
+  reported loose) may resolve differently between the two views.
+  `initialize` passes `repair="off"` downstream since its own plan
+  already ran. On pyomo older than 6.7.1 (no
+  `IncidenceGraphInterface.subgraph`) every pass falls back to the
+  fresh build: old speed, same behavior.
+  `block_repair_plan`, `block_analyze`, and `block_initialize` accept
+  the shared graph as an optional `igraph=` argument and behave as
+  before when it is omitted.
+- Regressions: a fresh-versus-shared analysis identity test (same
+  plan, same square decomposition, same block order), and a counter
+  test pinning exactly one model-walking incidence construction per
+  `initialize()` call so the redundancy cannot quietly return
+  (`subgraph` re-enters `__init__` with a prebuilt graph tuple and is
+  not counted).
+
 ### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
 
 - Bound and constraint activity on the fitted parameters now classifies

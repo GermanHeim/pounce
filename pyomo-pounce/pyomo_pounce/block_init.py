@@ -67,6 +67,7 @@ __all__ = [
     "block_analyze",
     "block_initialize",
     "block_repair_plan",
+    "structural_incidence",
     "BlockAnalysisReport",
     "BlockInitReport",
     "BlockRepairPlan",
@@ -441,7 +442,109 @@ def _tiered_matching(var_adj, tiers):
     return eq_match, var_match
 
 
-def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
+def structural_incidence(model):
+    """One whole-model incidence walk, shareable across the analyze,
+    repair-plan, and block-solve passes of a single initialize() call.
+
+    Built over the active equalities with FIXED VARIABLES INCLUDED, so
+    it is independent of fix-state; each pass filters it down to the
+    currently-unfixed variables (`_active_view`), which reuses the
+    stored graph instead of re-walking every constraint expression.
+    Within-call sharing only: the graph reflects the model's structure
+    at construction, so it must not outlive structural edits.
+    """
+    try:
+        # Probe networkx explicitly: pyomo defers its optional imports,
+        # so `pyomo.contrib.incidence_analysis` imports fine without it
+        # and would only blow up (DeferredImportError) at first use.
+        # This runs before the block_* probes in the initialize()
+        # pipeline, so it must carry the same actionable message.
+        import networkx  # noqa: F401
+
+        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+    except ImportError as e:  # pragma: no cover - environment-dependent
+        raise ImportError(
+            "structural_incidence requires pyomo.contrib."
+            "incidence_analysis and its optional dependencies "
+            "(pip install networkx scipy)"
+        ) from e
+
+    return IncidenceGraphInterface(
+        model, include_inequality=False, include_fixed=True
+    )
+
+
+def _active_view(igraph, model):
+    """The shared structural graph filtered to currently-unfixed
+    variables, without re-walking constraint expressions.
+
+    STRUCTURAL, not value-substituted: a fresh construction substitutes
+    fixed variables' values, so its edge set can differ from this view
+    whenever that substitution cancels a term. A fixed ZERO is the
+    obvious way (`a*x` with `a = 0` drops `x`), but not the only one:
+    values that cancel across terms do it too, with no fixed variable
+    being zero at all (`a*x - b*x` with `a` and `b` fixed equal drops
+    `x`, gh #445 review). Keying the guard on zero-valued variables
+    would therefore miss real cancellations, so every row adjacent to
+    ANY fixed variable is re-derived and compared; if an edge genuinely
+    cancels, this pass falls back to a fresh construction (correct
+    diagnostics over speed).
+
+    That check costs what a fresh build spends on the rows it examines,
+    and it examines a subset, so it is never more expensive than the
+    fallback it protects — but it does mean a pass with many fixed
+    variables pays most of a walk. Nothing is fixed when the plan pass
+    runs, so it returns above without reaching here; the analyze pass
+    is the one that pays.
+
+    Away from cancellations the edge sets are identical; the variable
+    ORDER within rows can still differ (value substitution changes the
+    linear/nonlinear split). Order feeds tie-breaks, so where two
+    answers are equally valid the two views may pick different ones,
+    not merely list the same ones differently.
+
+    On pyomo without `IncidenceGraphInterface.subgraph` (< 6.7.1) this
+    falls back to a fresh construction: old speed, same behavior.
+
+    May return the shared graph itself when nothing is fixed, so
+    callers can alias it; safe while no pass mutates the graph — keep
+    it that way.
+    """
+    from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+
+    if not hasattr(igraph, "subgraph"):  # pyomo < 6.7.1
+        return IncidenceGraphInterface(model, include_inequality=False)
+    unfixed = [v for v in igraph.variables if not v.fixed]
+    if len(unfixed) == len(igraph.variables):
+        return igraph
+    fixed = [v for v in igraph.variables if v.fixed]
+    if fixed:
+        from pyomo.contrib.incidence_analysis import get_incident_variables
+
+        # any fixed variable can take part in a cancellation, not only
+        # a zero-valued one -- see the note above
+        affected = set()
+        for v in fixed:
+            affected.update(id(c) for c in igraph.get_adjacent_to(v))
+        for con in igraph.constraints:
+            if id(con) not in affected:
+                continue
+            substituted = {id(vv) for vv in get_incident_variables(con.body)}
+            structural = {
+                id(vv)
+                for vv in igraph.get_adjacent_to(con)
+                if not vv.fixed
+            }
+            # substitution can only DROP unfixed variables from a row,
+            # never add one, so inequality means a genuine cancellation
+            if substituted != structural:
+                return IncidenceGraphInterface(
+                    model, include_inequality=False
+                )
+    return igraph.subgraph(unfixed, list(igraph.constraints))
+
+
+def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepairPlan:
     """Plan a valid specification; touch nothing, solve nothing.
 
     ``decision_candidates`` are the variables you would like to hold
@@ -468,6 +571,23 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
     Returns a :class:`BlockRepairPlan`; fix ``plan.decisions`` and
     ``plan.pinned`` (and leave ``plan.pruned`` free) to define a square
     system.
+
+    ``igraph``, when given, is the structural incidence graph from
+    :func:`structural_incidence`, built over THIS model with fixed
+    variables included; the pass filters it to the currently-unfixed
+    variables instead of re-walking every constraint expression
+    (gh #444). The view is STRUCTURAL: away from value cancellations
+    (guarded, with a fresh-build fallback) its edge sets
+    match a fresh construction, but the variable order within rows may
+    differ on models where fixed values change the linear/nonlinear
+    split. Order feeds tie-breaks, so where two answers are equally
+    valid (which of two variables is reported loose, which member of a
+    degenerate block leads) the shared and fresh views may pick
+    different ones, not merely list the same ones differently.
+    It must belong to the model being passed: a graph from another
+    model, or from before a structural edit, produces wrong answers
+    rather than an error. Omitted, the incidence is built locally
+    exactly as before.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -491,10 +611,14 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
             candidate_ids.add(id(vd))
             candidates.append(vd)
 
-    # TODO: block_repair_plan, block_analyze, and the initialize pipeline
-    # each build their own IncidenceGraphInterface; on very large models
-    # a single shared graph would remove the repeated structural pass.
-    igraph = IncidenceGraphInterface(model, include_inequality=False)
+    # A supplied igraph is the structural graph of
+    # `structural_incidence` (fixed variables included), filtered here
+    # to the current fix-state; omitted, the walk happens locally as
+    # before (gh #444).
+    if igraph is not None:
+        igraph = _active_view(igraph, model)
+    else:
+        igraph = IncidenceGraphInterface(model, include_inequality=False)
     eqs = list(igraph.constraints)
     gvars = list(igraph.variables)
     plan.n_constraints = len(eqs)
@@ -548,7 +672,7 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
     return plan
 
 
-def block_analyze(model, decisions=None) -> BlockAnalysisReport:
+def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
     """Partition the equality system; touch nothing, solve nothing.
 
     The analysis half of :func:`block_initialize` on its own: hold the
@@ -568,6 +692,23 @@ def block_analyze(model, decisions=None) -> BlockAnalysisReport:
             fixed.
 
     Returns a :class:`BlockAnalysisReport`.
+
+    ``igraph``, when given, is the structural incidence graph from
+    :func:`structural_incidence`, built over THIS model with fixed
+    variables included; the pass filters it to the currently-unfixed
+    variables instead of re-walking every constraint expression
+    (gh #444). The view is STRUCTURAL: away from value cancellations
+    (guarded, with a fresh-build fallback) its edge sets
+    match a fresh construction, but the variable order within rows may
+    differ on models where fixed values change the linear/nonlinear
+    split. Order feeds tie-breaks, so where two answers are equally
+    valid (which of two variables is reported loose, which member of a
+    degenerate block leads) the shared and fresh views may pick
+    different ones, not merely list the same ones differently.
+    It must belong to the model being passed: a graph from another
+    model, or from before a structural edit, produces wrong answers
+    rather than an error. Omitted, the incidence is built locally
+    exactly as before.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -594,7 +735,12 @@ def block_analyze(model, decisions=None) -> BlockAnalysisReport:
     report.n_decisions_fixed = len(fixed_by_us)
 
     try:
-        igraph = IncidenceGraphInterface(model, include_inequality=False)
+        # decisions were fixed above, so the filtered view (or the
+        # fresh walk) sees them excluded exactly as before (gh #444)
+        if igraph is not None:
+            igraph = _active_view(igraph, model)
+        else:
+            igraph = IncidenceGraphInterface(model, include_inequality=False)
         if not igraph.constraints:
             return report
         report.n_constraints = len(igraph.constraints)
@@ -638,6 +784,7 @@ def block_initialize(
     repair: str = "auto",
     max_list: int = 10,
     tee: bool = False,
+    igraph=None,
 ) -> BlockInitReport:
     """Fill ``Var.value`` by solving equality blocks in calculation order.
 
@@ -682,6 +829,23 @@ def block_initialize(
     are restored to their seed values, the loop stops there, and the
     downstream blocks keep their seeds — a failed solve never writes
     its values into the model.
+
+    ``igraph``, when given, is the structural incidence graph from
+    :func:`structural_incidence`, built over THIS model with fixed
+    variables included; the pass filters it to the currently-unfixed
+    variables instead of re-walking every constraint expression
+    (gh #444). The view is STRUCTURAL: away from value cancellations
+    (guarded, with a fresh-build fallback) its edge sets
+    match a fresh construction, but the variable order within rows may
+    differ on models where fixed values change the linear/nonlinear
+    split. Order feeds tie-breaks, so where two answers are equally
+    valid (which of two variables is reported loose, which member of a
+    degenerate block leads) the shared and fresh views may pick
+    different ones, not merely list the same ones differently.
+    It must belong to the model being passed: a graph from another
+    model, or from before a structural edit, produces wrong answers
+    rather than an error. Omitted, the incidence is built locally
+    exactly as before.
     """
     import pyomo.environ as pyo
 
@@ -717,7 +881,9 @@ def block_initialize(
     # decisions exactly as given and reports instead of repairing.
     plan = None
     if repair == "auto":
-        plan = block_repair_plan(model, decision_candidates=decisions)
+        plan = block_repair_plan(
+            model, decision_candidates=decisions, igraph=igraph
+        )
         if plan.pruned or plan.pinned:
             report.repair = plan
     fixed_by_us = []
@@ -751,7 +917,7 @@ def block_initialize(
         # DM decomposition separates it from remaining degrees of
         # freedom and redundant specifications — and names them. The
         # decisions are already fixed above, so none are passed on.
-        analysis = block_analyze(model)
+        analysis = block_analyze(model, igraph=igraph)
         under_vars = analysis.underconstrained_variables
         over_cons = analysis.overconstrained_constraints
         report.skipped_underdetermined = len(under_vars)
