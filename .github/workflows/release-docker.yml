@@ -1,0 +1,391 @@
+# Publish the POUNCE container images to the GitHub Container Registry.
+#
+# One package, ghcr.io/<owner>/pounce, holding two kinds of image built from
+# the two Dockerfiles in docker/ (see docker/README.md):
+#
+#   docker/Dockerfile.release -> :X.Y.Z, :X.Y, :latest
+#       pip-installs the published pounce-solver / pyomo-pounce wheels. This
+#       is what a user gets from `docker pull ghcr.io/<owner>/pounce`.
+#   docker/Dockerfile         -> :edge, :sha-<short>
+#       compiles the tree at that commit. For reproducing a bug on an
+#       unreleased fix; :edge always means "tip of main", never a release.
+#
+# Triggers:
+#   - push of a `v*` tag -> both images, linux/amd64 + linux/arm64. This is
+#     the same marker tag release-crates keys off, so cutting a release ships
+#     crates.io, PyPI, and the images together.
+#   - push to main -> the source image only, as :edge and :sha-<short>. The
+#     release image is unchanged between releases, so rebuilding it here
+#     would only churn the registry.
+#   - pull_request touching docker/** -> build both, push neither. A
+#     Dockerfile that no longer builds is the failure mode this guards; it
+#     is invisible until the next release otherwise.
+#   - workflow_dispatch -> manual run, DEFAULTS TO A DRY RUN (builds, pushes
+#     nothing). Set dry_run=false to publish. Use this to re-cut the release
+#     image if the PyPI wait below timed out on the tag push.
+#
+# ORDERING GOTCHA: the release image installs from PyPI, but a `v*` tag does
+# not itself publish to PyPI — `python-v*` does (release-pounce.yml). Push
+# `python-v*` first, or accept that this workflow waits. The
+# "Wait for PyPI" step below polls for up to ~20 minutes so the usual
+# push-both-tags-together flow just works; if it times out, nothing is
+# half-published — re-run via workflow_dispatch once the wheels are live.
+#
+# AUTH: GITHUB_TOKEN with packages:write. No secrets to configure.
+#
+# FIRST PUBLISH: a new GHCR package is created PRIVATE. After the first
+# successful push, make it public once by hand under
+# github.com/users/<owner>/packages/container/pounce/settings — otherwise
+# `docker pull` and `apptainer pull docker://...` fail with an auth error
+# for everyone but you, which reads like the image is missing.
+name: release-docker
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".dockerignore"
+      - ".github/workflows/release-docker.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build only, no push)"
+        type: boolean
+        default: true
+      variant:
+        description: "Which image(s) to build"
+        type: choice
+        options: [both, release, source]
+        default: both
+      version:
+        description: "Version for the release image (default: Cargo.toml)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Serialize per ref. Superseded PR builds are worth cancelling; a tag push
+# that is mid-publish is not.
+concurrency:
+  group: release-docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/pounce
+
+jobs:
+  # Resolve once, in one place, what the rest of the run does: which images,
+  # which version, and whether anything gets pushed. Every downstream `if:`
+  # reads these outputs rather than re-deriving the same event logic.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      push: ${{ steps.plan.outputs.push }}
+      build_release: ${{ steps.plan.outputs.build_release }}
+      build_source: ${{ steps.plan.outputs.build_source }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Tag-vs-manifest guard (M38), same as release-crates. A `v0.10.0` tag
+      # with the workspace still at 0.9.0 would build and publish an image
+      # labelled 0.10.0 containing 0.9.0 wheels.
+      - name: Verify tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: python3 scripts/check_tag_version.py "$GITHUB_REF"
+
+      - name: Resolve build plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          VARIANT_INPUT: ${{ inputs.variant }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # The workspace version is the single source of truth for the image
+          # tag; scripts/check-release-consistency.sh already guarantees the
+          # two PyPI manifests agree with it.
+          version="${VERSION_INPUT:-}"
+          if [ -z "$version" ]; then
+            version="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml \
+              | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+          fi
+
+          is_tag=false
+          case "$REF" in refs/tags/v*) is_tag=true ;; esac
+
+          push=true
+          build_release=true
+          build_source=true
+
+          case "$EVENT_NAME" in
+            pull_request)
+              # Rot guard only — prove both still build, publish nothing.
+              push=false
+              ;;
+            push)
+              if [ "$is_tag" = true ]; then
+                : # release: both images, both pushed
+              else
+                # main: :edge tracks the tip; the release image is unchanged.
+                build_release=false
+              fi
+              ;;
+            workflow_dispatch)
+              # Full `if`, not `[ ... ] && push=false`: under `set -e` the
+              # && list returns 1 when the test is false and kills the step.
+              if [ "$DRY_RUN_INPUT" = "true" ]; then push=false; fi
+              case "$VARIANT_INPUT" in
+                release) build_source=false ;;
+                source)  build_release=false ;;
+              esac
+              ;;
+          esac
+
+          {
+            echo "version=$version"
+            echo "push=$push"
+            echo "build_release=$build_release"
+            echo "build_source=$build_source"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice::version=$version push=$push release=$build_release source=$build_source"
+
+  # One job per (image, architecture). Both arches build natively — arm64 on
+  # a real arm runner rather than QEMU, which for the source image is the
+  # difference between minutes and most of an hour of emulated rustc.
+  #
+  # Each pushes an untagged, by-digest image; the merge job below assembles
+  # the digests into one multi-arch tag. Tagging here instead would have the
+  # two arches race to overwrite each other's tag.
+  build:
+    name: build ${{ matrix.image }} (${{ matrix.platform }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      # Enumerated rather than image × arch with `include:` overlays. The
+      # overlay form silently mis-expands here: an include entry naming only
+      # keys absent from the base matrix is merged into EVERY combination, so
+      # the two platform overlays would fight and every job would end up on
+      # whichever arch was listed last.
+      matrix:
+        include:
+          - image: release
+            dockerfile: docker/Dockerfile.release
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - image: release
+            dockerfile: docker/Dockerfile.release
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - image: source
+            dockerfile: docker/Dockerfile
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - image: source
+            dockerfile: docker/Dockerfile
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      # Skipping via `if:` on every step rather than on the job: a matrix
+      # cannot be filtered by a needs output, and a skipped job would still
+      # need its own merge-side special casing.
+      - name: Should this combination run?
+        id: gate
+        env:
+          BUILD_RELEASE: ${{ needs.plan.outputs.build_release }}
+          BUILD_SOURCE: ${{ needs.plan.outputs.build_source }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          if [ "$IMAGE" = "release" ]; then run="$BUILD_RELEASE"; else run="$BUILD_SOURCE"; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: steps.gate.outputs.run == 'true' && needs.plan.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The release image pip-installs from PyPI, so it cannot be built until
+      # release-pounce.yml has actually uploaded the wheels for this version.
+      # Poll rather than fail: on a normal release both tags are pushed within
+      # seconds of each other and the wheel build takes a while.
+      - name: Wait for PyPI
+        if: steps.gate.outputs.run == 'true' && matrix.image == 'release'
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          for pkg in pounce-solver pyomo-pounce; do
+            echo "Waiting for ${pkg}==${VERSION} on PyPI..."
+            for attempt in $(seq 1 40); do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' \
+                "https://pypi.org/pypi/${pkg}/${VERSION}/json" || echo 000)"
+              if [ "$code" = "200" ]; then
+                echo "  found after ${attempt} attempt(s)"
+                break
+              fi
+              if [ "$attempt" = "40" ]; then
+                echo "::error::${pkg}==${VERSION} is not on PyPI after ~20 min. Push the python-v${VERSION} / pyomo-pounce-v${VERSION} tags, then re-run this workflow via workflow_dispatch with dry_run=false." >&2
+                exit 1
+              fi
+              sleep 30
+            done
+          done
+
+      - name: Build${{ needs.plan.outputs.push == 'true' && ' and push' || '' }}
+        id: build
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            POUNCE_VERSION=${{ needs.plan.outputs.version }}
+            POUNCE_BUILD_GIT=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+          # push-by-digest leaves the image untagged; the merge job names it.
+          # On a dry run this whole expression collapses to a plain local
+          # build with no registry write.
+          outputs: ${{ needs.plan.outputs.push == 'true' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_NAME) || 'type=cacheonly' }}
+
+      - name: Export digest
+        if: steps.gate.outputs.run == 'true' && needs.plan.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          # Filename is the digest hex; contents are irrelevant. The merge job
+          # reconstructs `image@sha256:<name>` from the filenames alone.
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: steps.gate.outputs.run == 'true' && needs.plan.outputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble each image's per-arch digests into one multi-arch manifest list
+  # and attach the human-facing tags. This is the step that makes
+  # `docker pull ghcr.io/<owner>/pounce` resolve to the right architecture.
+  merge:
+    name: tag ${{ matrix.image }}
+    needs: [plan, build]
+    if: needs.plan.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [release, source]
+    steps:
+      - name: Should this image be tagged?
+        id: gate
+        env:
+          BUILD_RELEASE: ${{ needs.plan.outputs.build_release }}
+          BUILD_SOURCE: ${{ needs.plan.outputs.build_source }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          if [ "$IMAGE" = "release" ]; then run="$BUILD_RELEASE"; else run="$BUILD_SOURCE"; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Download digests
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+          path: /tmp/digests
+
+      - name: Log in to ghcr.io
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create manifest list and tag
+        if: steps.gate.outputs.run == 'true'
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          tags=()
+          if [ "$IMAGE" = "release" ]; then
+            # X.Y.Z is immutable; X.Y and latest float forward. No `X` tag —
+            # pre-1.0, a bare `0` would span breaking changes.
+            tags+=("$VERSION" "${VERSION%.*}" "latest")
+          else
+            # sha-<short> pins an exact commit for a bug report; edge floats
+            # with main. Never `latest` — that must mean "released".
+            tags+=("edge" "sha-${SHA:0:8}")
+          fi
+
+          args=()
+          for t in "${tags[@]}"; do
+            args+=(--tag "${REPO}:${t}")
+          done
+
+          # Rebuild `repo@sha256:...` from the uploaded digest filenames.
+          srcs=()
+          for f in /tmp/digests/*; do
+            srcs+=("${REPO}@sha256:$(basename "$f")")
+          done
+          if [ "${#srcs[@]}" -eq 0 ]; then
+            echo "::error::no digests found for the ${IMAGE} image" >&2
+            exit 1
+          fi
+
+          docker buildx imagetools create "${args[@]}" "${srcs[@]}"
+
+          for t in "${tags[@]}"; do
+            echo "::notice::published ${REPO}:${t}"
+            docker buildx imagetools inspect "${REPO}:${t}" | head -20
+          done

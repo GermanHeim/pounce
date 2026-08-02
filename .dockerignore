@@ -1,0 +1,63 @@
+# Docker build context filter for docker/Dockerfile (the source build).
+#
+# ALLOWLIST, not a deny-list, and deliberately so: a full POUNCE working tree
+# is tens of gigabytes (target/ alone is ~40G after a few builds, plus
+# benchmarks/ problem corpora and local research scratch). A deny-list would
+# ship all of that to the daemon the first time someone added a directory
+# without updating this file. Excluding everything and naming what the build
+# actually needs fails safe — a new directory is ignored until someone opts
+# it in here.
+#
+# Two entries are load-bearing beyond mere size:
+#
+#   .cargo/config.toml — gitignored and machine-specific: it hard-codes a
+#     local COINHSL_DIR and a macOS rpath. If it reached the build context,
+#     pounce-hsl/build.rs would assert on a $COINHSL_DIR/lib that does not
+#     exist in the image and the build would fail. The leading `*` covers it
+#     (dotfiles included) and nothing re-adds it.
+#
+#   .git — excluded for size (~90M). crates/pounce-cli/build.rs stamps the
+#     commit SHA into `pounce --about` by shelling out to git, so without
+#     .git it would read "unknown". The Dockerfile passes the SHA in as a
+#     POUNCE_BUILD_GIT build arg instead; see docker/README.md.
+
+# Ignore everything, then re-add what the build reads.
+*
+
+# --- Rust workspace -------------------------------------------------------
+!Cargo.toml
+!Cargo.lock
+!crates
+!tools
+
+# --- Python packages (wheel built by maturin in the builder stage) --------
+!python
+!pyomo-pounce
+
+# --- Referenced by the manifests -----------------------------------------
+# python/pyproject.toml and pyomo-pounce/pyproject.toml both set
+# `readme = "README.md"`; those live inside the directories above. LICENSE is
+# copied into the runtime image so the shipped image carries its own terms.
+!LICENSE
+!README.md
+
+# --- Re-exclude build output that lives under the paths re-added above ----
+# `cargo build` in a checkout leaves target/ inside the workspace, and a local
+# `maturin develop` leaves an in-place extension module plus a staged CLI
+# binary under python/pounce/. All are host artifacts: shipping them into the
+# context is wasted transfer at best, and a stale host-arch .so shadowing the
+# freshly built one at worst.
+**/target
+python/.venv
+python/build
+python/dist
+python/.pytest_cache
+python/pounce/bin
+python/pounce/_pounce*.so
+python/pounce/_pounce*.pyd
+pyomo-pounce/build
+pyomo-pounce/*.egg-info
+python/*.egg-info
+**/__pycache__
+**/*.pyc
+**/.DS_Store

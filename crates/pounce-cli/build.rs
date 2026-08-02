@@ -11,17 +11,30 @@ fn main() {
     // The .git/HEAD path is relative to this crate's manifest dir.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
+    println!("cargo:rerun-if-env-changed=POUNCE_BUILD_GIT");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
-    let git_sha =
-        run("git", &["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let dirty = run("git", &["status", "--porcelain"])
-        .map(|s| if s.is_empty() { "" } else { "+dirty" })
-        .unwrap_or("");
-    let git = format!("{git_sha}{dirty}");
+    // POUNCE_BUILD_GIT lets a caller supply the revision when git itself is
+    // not reachable from the build. The Docker source build is the motivating
+    // case: .git is kept out of the build context (~90M of history the
+    // compile does not need), so without the override every image would
+    // report "unknown" and you could not tell which commit you were running.
+    // Same escape hatch as SOURCE_DATE_EPOCH below — an explicit value wins,
+    // otherwise fall back to interrogating git.
+    let git = std::env::var("POUNCE_BUILD_GIT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            let git_sha =
+                run("git", &["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| "unknown".into());
+            let dirty = run("git", &["status", "--porcelain"])
+                .map(|s| if s.is_empty() { "" } else { "+dirty" })
+                .unwrap_or("");
+            format!("{git_sha}{dirty}")
+        });
 
     // UTC ISO-8601 timestamp. Honor SOURCE_DATE_EPOCH for reproducible
     // builds; otherwise fall back to `date -u` at compile time.
