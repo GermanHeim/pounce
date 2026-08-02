@@ -57,9 +57,21 @@ the CLI's `.nl` fixture suite, wasm and native agree on exit status and
 iteration count on every problem, with objectives matching to full double
 precision on all but one degenerate case (which differs in the last bit).
 
-Speed is what you would expect from wasm: a few tens of milliseconds for
-small models, roughly half a second for an 813-variable / 897-constraint
-model — within about 2× of the native build.
+Speed is what you would expect from wasm. Solver-internal wall time, same
+build, same code path, native `x86_64` vs `wasm32-wasip1` under Node:
+
+| model | n × m | native | wasm | ratio |
+| --- | --- | --- | --- | --- |
+| `pooling_rt2stp` | 46 × 72 | 9.9 ms | 40 ms | 4.0× |
+| `jit1` | 25 × 32 | 8.1 ms | 43 ms | 5.3× |
+| `airport` | 84 × 42 | 20 ms | 80 ms | 4.1× |
+| `autocorr_bern55-06` | 56 × 1 | 50 ms | 101 ms | 2.0× |
+| `deb7` | 813 × 897 | 461 ms | 556 ms | 1.2× |
+
+The larger the model, the closer wasm gets: small solves are dominated by
+per-call overhead, while big ones spend their time in the sparse
+factorization, where the gap narrows. Nothing here is tuned — no SIMD, no
+`wasm-opt`.
 
 ## How it is put together
 
