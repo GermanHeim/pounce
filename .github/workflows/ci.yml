@@ -209,7 +209,7 @@ jobs:
             d="$PWD"
             while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
             cd "$d"
-            ldd --version | head -1
+            ldd --version
             cargo build --release --locked --bin pounce
             mkdir -p python/pounce/bin
             cp target/release/pounce python/pounce/bin/pounce
@@ -236,7 +236,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD:/w" -w /w quay.io/pypa/manylinux2014_x86_64 bash -euxc '
-            ldd --version | head -1
+            ldd --version
             PY=/opt/python/cp39-cp39/bin/python
             "$PY" -m pip install -q /w/python/dist/*.whl
             BIN=$("$PY" -c "import pounce,os;print(os.path.join(os.path.dirname(pounce.__file__),\"bin\",\"pounce\"))")

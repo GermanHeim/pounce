@@ -161,7 +161,7 @@ jobs:
             d="$PWD"
             while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
             cd "$d"
-            ldd --version | head -1
+            ldd --version
             cargo build --release --locked --bin pounce
             mkdir -p python/pounce/bin
             cp target/release/pounce python/pounce/bin/pounce
