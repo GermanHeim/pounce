@@ -156,6 +156,13 @@ jobs:
           # for this matrix entry (x86_64 or aarch64 manylinux2014).
           before-script-linux: |
             set -eux
+            # sccache: "true" exports RUSTC_WRAPPER=sccache and the action
+            # forwards it into the container, but sccache is installed on the
+            # HOST — inside here cargo would try to exec a wrapper that does
+            # not exist ("could not execute process `sccache ...`"). maturin's
+            # own build later gets a container-local sccache; this pre-step
+            # does not need one.
+            unset RUSTC_WRAPPER
             # The action's working directory is python/; walk up to the
             # workspace root rather than assuming a fixed mount path.
             d="$PWD"
