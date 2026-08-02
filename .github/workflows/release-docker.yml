@@ -33,11 +33,12 @@
 #
 # AUTH: GITHUB_TOKEN with packages:write. No secrets to configure.
 #
-# FIRST PUBLISH: a new GHCR package is created PRIVATE. After the first
-# successful push, make it public once by hand under
-# github.com/users/<owner>/packages/container/pounce/settings — otherwise
-# `docker pull` and `apptainer pull docker://...` fail with an auth error
-# for everyone but you, which reads like the image is missing.
+# FIRST PUBLISH: the package inherits the repository's visibility, so on a
+# public repo it comes out public and anonymous pulls work straight away
+# (verified on the first real publish). If it ever lands private instead,
+# `docker pull` and `apptainer pull docker://...` fail for everyone but you
+# with an auth error that reads like the image is missing — flip it under
+# github.com/users/<owner>/packages/container/pounce/settings.
 name: release-docker
 
 on:

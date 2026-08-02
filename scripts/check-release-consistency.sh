@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Release consistency guard — run in CI before tagging, and locally before a
-# release. POUNCE ships to three registries (PyPI pounce-solver, PyPI
-# pyomo-pounce, and 19 crates.io workspace crates); this script fails loudly
-# if any of the facts a release depends on have drifted apart:
+# release. POUNCE ships to four surfaces (PyPI pounce-solver, PyPI
+# pyomo-pounce, 20 crates.io workspace crates, and the ghcr.io container
+# images); this script fails loudly if any of the facts a release depends on
+# have drifted apart:
 #
 #   1. VERSIONS AGREE. The Rust [workspace.package] version, the
 #      pounce-solver wheel version, and the pyomo-pounce version must be the
@@ -28,6 +29,13 @@
 #      tag would publish the leading crates and hard-fail mid-batch at the first
 #      crate carrying such a dep — an irreversible partial release. See
 #      scripts/check_dep_publishability.py (e.g. the `feral` git pin).
+#
+#   5. THE RELEASE IMAGE INSTALLS THIS VERSION. docker/Dockerfile.release
+#      pip-installs a pinned X.Y.Z. Forgetting to bump it builds an image
+#      TAGGED with the new version but CONTAINING the old one — silently,
+#      because the build succeeds and the smoke test passes against a
+#      perfectly good older wheel. Stale version references in the docs are
+#      reported too, but only as advisory.
 #
 # `cargo metadata` is the single source of truth: it is the real workspace and
 # cannot drift. The explicit list in publish-crates.sh stays because it makes
@@ -144,6 +152,44 @@ if cargo metadata --format-version 1 2>/dev/null \
   :
 else
   fail=1
+fi
+echo
+
+# --- 5. The release container image installs the version we are releasing ---
+# docker/Dockerfile.release pins the wheels it pip-installs. If that ARG is not
+# bumped with everything else, `make docker-release` on a 0.10.0 tree builds an
+# image tagged 0.10.0 that contains 0.9.0 — wrong, and silent: the build
+# succeeds and the smoke test passes, because 0.9.0 is a perfectly good wheel.
+# Nothing else catches this, so it is checked rather than left to a checklist.
+echo "== docker release image version =="
+docker_ver="$(grep -m1 -E '^ARG POUNCE_VERSION=' docker/Dockerfile.release \
+  | sed -E 's/^ARG POUNCE_VERSION=([^[:space:]]+).*/\1/')"
+note "docker/Dockerfile.release ARG   : ${docker_ver:-<not found>}"
+if [[ "$docker_ver" == "$cargo_ver" ]]; then
+  note "OK — matches the workspace version"
+else
+  note "DRIFT — the release image would install ${docker_ver:-?}, not ${cargo_ver}."
+  note "Bump ARG POUNCE_VERSION in docker/Dockerfile.release."
+  fail=1
+fi
+echo
+
+# Documentation examples pin a version too. Cosmetic rather than load-bearing —
+# a stale `pounce:0.9.0` in a doc still works, it just tells a new reader to
+# pull an old image — so this warns and does not fail.
+echo "== docker version references in docs (advisory) =="
+stale=0
+while IFS= read -r hit; do
+  [[ -z "$hit" ]] && continue
+  note "stale: $hit"
+  stale=1
+done < <(grep -rn -E "pounce:[0-9]+\.[0-9]+\.[0-9]+" \
+           README.md docs/src/docker.md docker/README.md docker/Dockerfile.release 2>/dev/null \
+         | grep -v "pounce:${cargo_ver}" || true)
+if [[ $stale -eq 0 ]]; then
+  note "OK — no stale version references"
+else
+  note "(advisory only — update these when convenient)"
 fi
 echo
 
