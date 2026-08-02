@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POUNCE in the browser</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1b1a18;
+    --muted: #6b6660;
+    --line: #e3ded6;
+    --accent: #b4530a;
+    --accent-soft: #fdf1e5;
+    --ok: #1f7a4d;
+    --bad: #a32020;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16150f;
+      --panel: #1f1e18;
+      --ink: #efe9df;
+      --muted: #a29a8c;
+      --line: #35322a;
+      --accent: #f0913f;
+      --accent-soft: #2a2118;
+      --ok: #6ec894;
+      --bad: #ef8080;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: 1rem; margin: 0 0 .75rem; text-transform: uppercase;
+       letter-spacing: .08em; color: var(--muted); }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 46rem; }
+  .lede code { font-family: var(--mono); font-size: .9em; }
+
+  #drop {
+    display: block;
+    border: 2px dashed var(--line); border-radius: 12px;
+    padding: 2.5rem 1.5rem; text-align: center; cursor: pointer;
+    background: var(--panel); transition: border-color .15s, background .15s;
+  }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #drop strong { display: block; font-size: 1.05rem; margin-bottom: .3rem; }
+  #drop span { color: var(--muted); font-size: .9rem; }
+  #drop input { display: none; }
+
+  section { margin-top: 1.75rem; }
+  section[hidden] { display: none; }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 1.25rem; }
+
+  .stats { display: grid; gap: .75rem 1.5rem;
+           grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); margin: 0; }
+  .stats div { border-left: 3px solid var(--line); padding-left: .7rem; }
+  .stats dt { color: var(--muted); font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .06em; }
+  .stats dd { margin: .1rem 0 0; font: 600 1.15rem/1.2 var(--mono); }
+
+  .row { display: flex; gap: .75rem; align-items: flex-end; flex-wrap: wrap; }
+  textarea {
+    width: 100%; min-height: 5.5rem; resize: vertical; padding: .6rem .7rem;
+    font: 13px/1.5 var(--mono); color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  button {
+    font: 600 15px/1 system-ui, sans-serif; padding: .7rem 1.4rem;
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+
+  pre#log {
+    margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto;
+    background: #14130f; color: #e6ded0; border-radius: 10px;
+    font: 12px/1.45 var(--mono); white-space: pre; tab-size: 4;
+  }
+
+  table { width: 100%; border-collapse: collapse; font: 13px/1.45 var(--mono); }
+  th, td { text-align: right; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font: 600 11px/1.4 system-ui, sans-serif;
+       text-transform: uppercase; letter-spacing: .06em; }
+  .tables { display: grid; gap: 1.25rem; grid-template-columns: 1fr; }
+  @media (min-width: 52rem) { .tables { grid-template-columns: 1fr 1fr; } }
+  .scroll { max-height: 20rem; overflow: auto; }
+  .tag { display: inline-block; padding: .15rem .5rem; border-radius: 999px;
+         font: 600 12px/1.5 system-ui, sans-serif; }
+  .tag.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .tag.bad { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+  .err { color: var(--bad); }
+  .note { color: var(--muted); font-size: .85rem; margin-top: .6rem; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .85rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>POUNCE in the browser</h1>
+  <p class="lede">
+    The whole solver — the AMPL <code>.nl</code> reader, the reverse-mode AD tape, the
+    sparse linear algebra, and the interior-point algorithm — compiled to WebAssembly and
+    running locally in this tab. Drop a model in; nothing is uploaded anywhere.
+  </p>
+
+  <label id="drop" for="files">
+    <input id="files" type="file" multiple accept=".nl,.col,.row">
+    <strong>Drop an <code>.nl</code> file here</strong>
+    <span>or click to choose &mdash; optionally include the sibling <code>.col</code> / <code>.row</code> name files</span>
+  </label>
+  <p id="loaderr" class="err" hidden></p>
+
+  <section id="summary-section" hidden>
+    <h2>Problem summary <span id="filename" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="panel">
+      <dl class="stats" id="stats"></dl>
+      <p class="note" id="summary-note"></p>
+    </div>
+  </section>
+
+  <section id="solve-section" hidden>
+    <h2>Solve</h2>
+    <div class="panel">
+      <label for="options" class="note" style="margin:0 0 .4rem;display:block">
+        Solver options, <code>ipopt.opt</code> format (one <code>name value</code> per line)
+      </label>
+      <textarea id="options" spellcheck="false">print_level 5
+max_iter 3000
+tol 1e-8</textarea>
+      <div class="row" style="margin-top:.75rem">
+        <button id="solve">Solve</button>
+        <span id="solve-status" class="note"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="result-section" hidden>
+    <h2>Result</h2>
+    <div class="panel">
+      <dl class="stats" id="result-stats"></dl>
+      <div class="tables" style="margin-top:1.25rem">
+        <div>
+          <h2>Variables</h2>
+          <div class="scroll"><table id="vars"></table></div>
+        </div>
+        <div>
+          <h2>Constraints</h2>
+          <div class="scroll"><table id="cons"></table></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="log-section" hidden>
+    <h2>Solver output</h2>
+    <pre id="log"></pre>
+  </section>
+
+  <footer>
+    POUNCE is a pure-Rust nonlinear interior-point solver.
+    <a href="https://github.com/jkitchin/pounce">github.com/jkitchin/pounce</a>
+  </footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

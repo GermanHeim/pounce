@@ -23,6 +23,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(any(unix, windows))]
 use libloading::{Library, Symbol};
 
 use crate::nl_reader::{Expr, FuncallArg, ImportedFunc};
@@ -309,7 +310,10 @@ impl std::fmt::Debug for ExternalLibrary {
 /// A loaded external-function library plus its registered functions.
 pub struct ExternalLibrary {
     /// Keep the library alive — it owns the code pages the function pointers
-    /// reference. Arc so `LoadedExternals` can share it.
+    /// reference. Arc so `LoadedExternals` can share it. Absent on targets
+    /// with no dynamic loader, where [`ExternalLibrary::load`] always fails
+    /// and no instance is ever built.
+    #[cfg(any(unix, windows))]
     _lib: Arc<Library>,
     /// The AmplExports we handed to `funcadd_ASL`. Must be kept alive (pinned
     /// in a Box) because some libraries may capture its address for later
@@ -320,8 +324,23 @@ pub struct ExternalLibrary {
 }
 
 impl ExternalLibrary {
+    /// Stub for targets with no dynamic loader (`wasm32-*`). A `.nl` model
+    /// that actually references an imported function cannot be evaluated
+    /// there, so report that instead of pretending the library loaded.
+    /// Models with no external functions never reach this path —
+    /// `NlTnlp::try_new` skips resolution when nothing is referenced.
+    #[cfg(not(any(unix, windows)))]
+    pub fn load(path: &Path) -> Result<Self, String> {
+        Err(format!(
+            "cannot load '{}': AMPL imported (external) functions need a \
+             dynamic library loader, which this target does not have",
+            path.display()
+        ))
+    }
+
     /// Open a shared library at `path` and invoke its `funcadd_ASL` entry
     /// point, collecting all functions it registers.
+    #[cfg(any(unix, windows))]
     pub fn load(path: &Path) -> Result<Self, String> {
         // Serialise all ABI crossings: library init code and registration
         // may touch global state that isn't safe under concurrent entry.
@@ -703,6 +722,7 @@ thread_local! {
 }
 
 /// C-callable trampoline that receives Addfunc calls from the shared library.
+#[cfg(any(unix, windows))]
 unsafe extern "C" fn trampoline_addfunc(
     name: *const c_char,
     f: Rfunc,
@@ -738,12 +758,14 @@ unsafe extern "C" fn trampoline_addfunc(
 
 /// Stub — some libraries ask us to register an AtReset callback. Pyomo logs a
 /// warning and does nothing. We do the same.
+#[cfg(any(unix, windows))]
 unsafe extern "C" fn trampoline_atreset(_ae: *mut AmplExports, _f: *mut c_void, _v: *mut c_void) {
     tracing::debug!("external library registered an AtReset callback; ignoring");
 }
 
 /// Stub — invoked by libraries that use random-valued externals. We just
 /// seed with 1 (matches Pyomo's default; no randomness in KKT paths).
+#[cfg(any(unix, windows))]
 unsafe extern "C" fn trampoline_addrandinit(
     _ae: *mut AmplExports,
     setter: RandSeedSetter,
