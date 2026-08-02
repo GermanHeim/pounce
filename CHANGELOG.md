@@ -36,6 +36,12 @@ changes.
   optimum and multipliers, run in CI with Node standing in for the browser.
   It is Pyomo's modelling layer rather than POUNCE's Python API: the model
   crosses as a file, so there are no Python callbacks mid-solve.
+- The Python page's script box is an editor rather than a bare textarea:
+  syntax highlighting, line numbers, Tab / Shift-Tab block indent, and
+  indentation carried across Enter (one level deeper after a colon). No
+  editor library — a highlighted `<pre>` under a transparent `<textarea>`,
+  so the caret, selection, and undo stay the browser's, and the page keeps
+  working offline where a CDN-loaded editor would not.
 - The demos are published with the docs: `docs.yml` builds the module and
   stages both pages into the Pages site
   ([`/demo/`](https://jkitchin.github.io/pounce/demo/) and

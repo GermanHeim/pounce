@@ -101,6 +101,12 @@ from the file it just wrote — `crates/pounce-wasm/tests/pyomo_roundtrip.py`
 pins that with a model whose optimum and multipliers are known in closed
 form, and CI runs it on every PR with Node standing in for the browser.
 
+The script box is a small editor — Python highlighting, line numbers,
+Tab/Shift-Tab indent, indentation carried across Enter — built from a
+highlighted `<pre>` behind a transparent `<textarea>` so the caret and undo
+stay native. No editor library: a CDN dependency would be absent in exactly
+the offline setup `?pyodide=` exists for.
+
 Two wasm runtimes are in play — Pyodide's CPython and POUNCE — with separate
 memories; all that crosses between them is `.nl` text one way and JSON plus
 `.sol` text the other.

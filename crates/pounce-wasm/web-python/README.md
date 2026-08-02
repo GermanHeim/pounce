@@ -36,6 +36,26 @@ That round trip is tested off-browser, with Node standing in for the page:
 active set, and multipliers are known in closed form and checks the values
 landed on the right components. CI runs it on every PR.
 
+## The editor
+
+`editor.js` is a ~150-line Python editor: highlighting, line numbers,
+Tab / Shift-Tab block indent, and indentation carried across Enter (a level
+deeper after a colon). A highlighted `<pre>` sits under a transparent
+`<textarea>`, so the caret, selection, undo, IME, and screen-reader
+behaviour stay the browser's rather than being re-implemented on a
+`contenteditable`.
+
+It is written rather than imported on purpose. CodeMirror or Ace from a CDN
+would add bracket matching and autocomplete, at the cost of a second
+version-pinned network dependency — one that would be missing in exactly the
+offline / self-hosted setup `?pyodide=` exists to serve. If the page ever
+wants an IDE, this is the one file to replace.
+
+The tokenizer has its own tests (`crates/pounce-wasm/tests/editor_tokens.mjs`,
+run in CI): escaped quotes, triple-quoted strings, f-strings, `#` inside a
+string versus a comment, and HTML in the source never reaching the DOM as
+markup.
+
 ## What it loads, and from where
 
 | Piece | Source | Size |

@@ -1,6 +1,8 @@
 // Page logic: pick an example, run it in the Pyodide worker, show what it
 // printed. The worker owns both wasm instances; this side is a console.
 
+import { attachEditor } from './editor.js';
+
 const $ = (id) => document.getElementById(id);
 const codeBox = $('code');
 const outBox = $('out');
@@ -98,10 +100,12 @@ for (const name of Object.keys(EXAMPLES)) {
   option.textContent = name;
   select.append(option);
 }
-select.addEventListener('change', () => {
-  codeBox.value = EXAMPLES[select.value];
-});
-codeBox.value = EXAMPLES[select.value];
+// The editor wraps the textarea rather than replacing it, so `codeBox.value`
+// stays the single source of truth and the page still works if this module
+// fails to load.
+const editor = attachEditor(codeBox);
+select.addEventListener('change', () => editor.set(EXAMPLES[select.value]));
+editor.set(EXAMPLES[select.value]);
 
 // --- worker ----------------------------------------------------------------
 

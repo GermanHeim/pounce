@@ -33,10 +33,53 @@
   .panel { background: var(--panel); border: 1px solid var(--line);
            border-radius: 12px; padding: 1.25rem; }
   .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+  /* The editor: a highlighted <pre> under a transparent <textarea>. Every
+     metric below (font, line-height, padding, tab-size, wrapping) must match
+     between the two layers or the caret drifts from the glyphs. */
+  .editor {
+    position: relative; display: grid; grid-template-columns: auto 1fr;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    overflow: hidden;
+  }
+  .editor:focus-within { border-color: var(--accent); }
+  .editor-gutter, .editor-highlight, textarea#code {
+    font: 13px/1.6 var(--mono); tab-size: 4;
+    padding: .8rem 0; margin: 0; border: 0;
+  }
+  .editor-gutter {
+    padding-left: .8rem; padding-right: .6rem; text-align: right;
+    color: var(--muted); opacity: .55; user-select: none;
+    white-space: pre; overflow: hidden;
+  }
+  .editor-highlight, textarea#code {
+    grid-column: 2; grid-row: 1;
+    padding-right: .9rem; padding-left: .3rem;
+    white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
+    min-height: 22rem; max-height: 40rem; overflow: auto;
+  }
+  .editor-highlight { pointer-events: none; color: var(--ink); }
   textarea#code {
-    width: 100%; min-height: 22rem; resize: vertical; padding: .8rem .9rem;
-    font: 13px/1.6 var(--mono); color: var(--ink); background: var(--bg);
-    border: 1px solid var(--line); border-radius: 8px; tab-size: 4;
+    resize: vertical; background: transparent; color: transparent;
+    caret-color: var(--accent); outline: none;
+  }
+  textarea#code::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+  .tok-keyword  { color: #a031a8; font-weight: 600; }
+  .tok-builtin  { color: #1a6fa8; }
+  .tok-string   { color: #1f7a4d; }
+  .tok-comment  { color: var(--muted); font-style: italic; }
+  .tok-number   { color: #b4530a; }
+  .tok-def      { color: #1a6fa8; font-weight: 600; }
+  .tok-decorator{ color: #8a6a12; }
+  .tok-op       { color: #7a736a; }
+  @media (prefers-color-scheme: dark) {
+    .tok-keyword  { color: #e08ae8; }
+    .tok-builtin  { color: #7cc4f0; }
+    .tok-string   { color: #8fd6a8; }
+    .tok-number   { color: #f0913f; }
+    .tok-def      { color: #7cc4f0; }
+    .tok-decorator{ color: #d8bf6a; }
+    .tok-op       { color: #9a9188; }
   }
   select {
     font: 14px system-ui, sans-serif; padding: .5rem .6rem; color: var(--ink);
