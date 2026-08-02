@@ -52,10 +52,18 @@ and the Python API take.
 
 ## Numerical parity with the native build
 
-The wasm build runs the same code, so it produces the same answers. Across
-the CLI's `.nl` fixture suite, wasm and native agree on exit status and
-iteration count on every problem, with objectives matching to full double
-precision on all but one degenerate case (which differs in the last bit).
+The wasm build runs the same code, so it produces the same answers. Over
+all 37 `.nl` fixtures in `crates/pounce-cli/tests/fixtures`, driven through
+the same entry points on both sides:
+
+- exit status: identical on 37 of 37
+- iteration count: identical on 37 of 37
+- objective: bit-identical on 34 of the 36 that return one; the two
+  exceptions (`scaled_feasible_a`, `feasible_x0_sentinel_bound`) differ by
+  one ulp, at objectives of 4.5e-10 and 7.1e-11
+
+The 37th (`presolve_overflow_feasible`) returns `InvalidNumberDetected`
+with no objective on either side — that is the fixture's job.
 
 Speed is what you would expect from wasm. Solver-internal wall time, same
 build, same code path, native `x86_64` vs `wasm32-wasip1` under Node:

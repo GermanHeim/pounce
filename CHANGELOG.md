@@ -32,11 +32,12 @@ changes.
   from `main`. It needs no Pages configuration — single-threaded, so no
   `SharedArrayBuffer` and no COOP/COEP headers (which Pages cannot set),
   and all URLs are relative so the `/pounce/` base path just works.
-- Numerics are unchanged: across the CLI's `.nl` fixture suite, the wasm
-  build matches the native build's exit status and iteration count on every
-  problem, and its objective to full double precision on all but one
-  degenerate case (last-bit difference). Documented in `docs/src/wasm.md`;
-  CI builds the module and solves a model under Node's WASI on every PR.
+- Numerics are unchanged. Over all 37 `.nl` fixtures in
+  `crates/pounce-cli/tests/fixtures`, wasm and native agree on exit status
+  and iteration count on every one, and the objective is bit-identical on
+  34 of the 36 that return one; the two exceptions differ by one ulp, at
+  objectives of 1e-10 and 1e-11. Documented in `docs/src/wasm.md`; CI builds the module and solves
+  a model under Node's WASI on every PR.
 - `pounce-nl` now builds for targets with no dynamic loader: `libloading`
   became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
   reports that AMPL imported functions are unavailable there rather than
