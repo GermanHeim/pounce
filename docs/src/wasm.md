@@ -6,24 +6,30 @@ the AMPL `.nl` reader, the reverse-mode AD tape, the sparse LDL^T
 factorization, and the interior-point algorithm. Nothing is sent to a
 server.
 
-**[Try it: jkitchin.github.io/pounce/demo](https://jkitchin.github.io/pounce/demo/)**
-— drop a `.nl` file on the page, see what is in the model, and solve it. The
-demo is published from this repository's `main` branch alongside these docs,
-and it runs it locally in your tab.
+Two pages ship with the docs, both published from `main` and both running
+the solver locally in your tab:
 
-To run the same page from a checkout:
+- **[/demo](https://jkitchin.github.io/pounce/demo/)** — drop a `.nl` file
+  on the page, see what is in the model, solve it, download the solution.
+- **[/demo/python](https://jkitchin.github.io/pounce/demo/python/)** — write
+  a **Pyomo** model in Python and solve it, via
+  [Pyodide](https://pyodide.org).
+
+To run them from a checkout:
 
 ```sh
-rustup target add wasm32-wasip1        # once
-crates/pounce-wasm/build.sh --serve    # http://localhost:8000
+rustup target add wasm32-wasip1               # once
+crates/pounce-wasm/build.sh --serve           # the .nl page,   :8000
+crates/pounce-wasm/build.sh --serve-python    # the Python page, :8000
 ```
 
-Or `make wasm` to build the module without serving it.
+Or `make wasm` to build the module without serving anything.
 
 ## Hosting it
 
-The page is a static directory (`crates/pounce-wasm/web/`) — deploying it
-anywhere is a copy. It needs no special server: no threads means no
+Each page is a static directory (`crates/pounce-wasm/web/` and
+`crates/pounce-wasm/web-python/`) — deploying either is a copy. Neither
+needs a special server: no threads means no
 `SharedArrayBuffer`, so none of the `Cross-Origin-Opener-Policy` /
 `Cross-Origin-Embedder-Policy` headers that thread-enabled wasm requires,
 and every URL the page fetches is relative, so it works under any base
@@ -32,10 +38,10 @@ the page falls back from streaming compilation to a buffered
 `WebAssembly.instantiate` on its own.
 
 GitHub Pages is what this repository uses: `.github/workflows/docs.yml`
-builds the module and stages `crates/pounce-wasm/web/` into the docs site
-at `/demo/`, so the live demo ships with every docs deployment from `main`.
-The demo is version-independent — one live build, not one per archived
-release tag.
+builds the module and stages the two directories into the docs site at
+`/demo/` and `/demo/python/`, so both ship with every docs deployment from
+`main`. They are version-independent — one live build each, not one per
+archived release tag.
 
 ## What you get
 
@@ -49,6 +55,66 @@ the `.col` / `.row` names when you drop those alongside the `.nl`.
 
 Solve options are `ipopt.opt`-format text — the same option names the CLI
 and the Python API take.
+
+Three downloads come off a finished solve:
+
+| Download | What it is |
+| --- | --- |
+| `.sol` | An AMPL solution file — byte-identical to what `pounce model.nl` writes, including the `ipopt_zL_out` / `ipopt_zU_out` reduced-cost suffixes. AMPL and Pyomo read it back. |
+| CSV | One row per variable and per constraint: name, value, bounds, multiplier. |
+| log | The solver output, as printed. |
+
+The `.sol` and CSV are formatted inside wasm from the full solution, not
+from the table on screen — the page truncates long vectors at 2,000 rows to
+stay renderable, and a download that stopped there would be worse than none.
+
+Dropping a new file resets everything: the page throws away its worker and
+starts a fresh wasm instance, so no parsed model, solver state, or grown
+heap carries from one file into the next.
+
+## The Python page
+
+Pyodide supplies CPython compiled to WebAssembly; `micropip` installs Pyomo
+(a `py3-none-any` wheel — nothing to build). You write an ordinary Pyomo
+model, and:
+
+```python
+from pyomo.environ import *
+import pounce_browser
+
+m = ConcreteModel()
+m.x = Var([1, 2], initialize=0.5, bounds=(-10, 10))
+m.circle = Constraint(expr=m.x[1]**2 + m.x[2]**2 == 1)
+m.obj = Objective(expr=m.x[1])
+m.dual = Suffix(direction=Suffix.IMPORT)
+
+res = pounce_browser.solve(m, options="print_level 5")
+print(res.status, value(m.x[1]), m.dual[m.circle])
+```
+
+`solve()` writes the model with Pyomo's own NL writer, hands the `.nl` text
+to the POUNCE wasm module, and loads the returned `.sol` back onto the
+model, so `x.value` and `model.dual[c]` read exactly as after a local solve.
+Variables and rows are matched by the writer's own ordering
+(`NLWriterInfo.variables` / `.constraints`), so the mapping cannot drift
+from the file it just wrote — `crates/pounce-wasm/tests/pyomo_roundtrip.py`
+pins that with a model whose optimum and multipliers are known in closed
+form, and CI runs it on every PR with Node standing in for the browser.
+
+Two wasm runtimes are in play — Pyodide's CPython and POUNCE — with separate
+memories; all that crosses between them is `.nl` text one way and JSON plus
+`.sol` text the other.
+
+This is Pyomo's modelling layer, not POUNCE's own Python API: the model
+reaches the solver as a file, so there are no Python callbacks mid-solve.
+Running the real `pounce-solver` package in a browser would mean building
+the compiled extension for Pyodide (emscripten), which this does not do.
+
+The page needs the network for its first load — Pyodide from a CDN, Pyomo
+from PyPI, about 15 MB, cached afterwards. Self-host both and pass
+`?pyodide=…&pyomo=…` to avoid it entirely; see
+`crates/pounce-wasm/web-python/README.md`. The solve itself is local either
+way.
 
 ## Numerical parity with the native build
 
@@ -85,9 +151,10 @@ factorization, where the gap narrows. Nothing here is tuned — no SIMD, no
 
 | Piece | What it is |
 | --- | --- |
-| `crates/pounce-wasm` | C-ABI entry points (`pounce_load`, `pounce_solve`), bytes in / JSON out |
-| `crates/pounce-wasm/web` | the demo page: `index.html`, `app.js`, `worker.js`, `wasi.js` |
-| `crates/pounce-wasm/build.sh` | builds the module and stages it into `web/` |
+| `crates/pounce-wasm` | C-ABI entry points (`pounce_load`, `pounce_solve`, the exporters), bytes in / JSON out |
+| `crates/pounce-wasm/web` | the `.nl` page: `index.html`, `app.js`, `worker.js`, `wasi.js` |
+| `crates/pounce-wasm/web-python` | the Pyodide page, plus `pounce_browser.py` — the Pyomo ↔ POUNCE shim |
+| `crates/pounce-wasm/build.sh` | builds the module and stages it into both pages |
 
 The target is `wasm32-wasip1`, not `wasm32-unknown-unknown`. WASI gives the
 solver a clock (`std::time::Instant::now()` panics on
@@ -100,6 +167,12 @@ build step beyond `cargo build`.
 
 A solve is one synchronous call into wasm that can run for seconds, so the
 module lives in a web worker and the page stays responsive.
+
+Payloads cross the boundary as a little-endian `u32` byte count followed by
+that many UTF-8 bytes. Reading a length rather than scanning for a NUL
+terminator keeps the reader's correctness independent of what is *in* the
+payload, and lets a bad pointer or length be reported as exactly that
+instead of surfacing later as an unrelated parse error.
 
 ## Limitations
 
@@ -121,6 +194,8 @@ exports — allocate, load, solve, free — and every payload is JSON:
 ```js
 const summary = fromWasm(wasm.pounce_load(nlPtr, nlLen, 0, 0, 0, 0));
 const result  = fromWasm(wasm.pounce_solve(optsPtr, optsLen));
+const solFile = fromWasm(wasm.pounce_solution_sol());   // AMPL .sol text
+const csv     = fromWasm(wasm.pounce_solution_csv());   // every row
 ```
 
 Both entry points catch panics and return `{"error": …}`, so a malformed

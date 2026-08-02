@@ -15,10 +15,13 @@ pub mod debug_repl;
 // it. Re-export the modules so existing `crate::nl_reader::…` /
 // `pounce_cli::nl_reader::…` paths keep resolving unchanged.
 pub use pounce_nl::{nl_external, nl_fbbt_translate, nl_reader, nl_tape};
+// The AMPL `.sol` writer moved to `pounce-nl` alongside the `.nl` reader it
+// inverts, so the wasm frontend can emit the same file. Re-exported under its
+// historical name to keep `nl_writer::…` call sites resolving.
+pub use pounce_nl::sol_writer as nl_writer;
 pub mod dispatch;
 pub mod minima;
 pub mod nl_hessian_program;
-pub mod nl_writer;
 pub mod print;
 pub mod qp_extract;
 pub mod seeded_tnlp;

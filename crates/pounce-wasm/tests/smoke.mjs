@@ -39,19 +39,22 @@ function intoWasm(str) {
   return [ptr, bytes.length];
 }
 
+/** Read a payload: little-endian u32 length, then that many UTF-8 bytes. */
 function fromWasm(ptr) {
-  const mem = new Uint8Array(wasm.memory.buffer);
-  let end = ptr;
-  while (mem[end] !== 0) end++;
-  const json = JSON.parse(decoder.decode(mem.subarray(ptr, end)));
-  wasm.pounce_free_string(ptr);
-  return json;
+  if (!ptr) return null;
+  const len = new DataView(wasm.memory.buffer).getUint32(ptr, true);
+  const bytes = new Uint8Array(wasm.memory.buffer, ptr + 4, len);
+  const text = decoder.decode(bytes);
+  wasm.pounce_free_payload(ptr);
+  return text;
 }
+
+const fromWasmJson = (ptr) => JSON.parse(fromWasm(ptr));
 
 function load(nl, col = '', row = '') {
   const args = [nl, col, row].map(intoWasm);
   try {
-    return fromWasm(wasm.pounce_load(...args.flat()));
+    return fromWasmJson(wasm.pounce_load(...args.flat()));
   } finally {
     for (const [ptr, len] of args) if (ptr) wasm.pounce_dealloc(ptr, len);
   }
@@ -60,7 +63,7 @@ function load(nl, col = '', row = '') {
 function solve(options = '') {
   const [ptr, len] = intoWasm(options);
   try {
-    return fromWasm(wasm.pounce_solve(ptr, len));
+    return fromWasmJson(wasm.pounce_solve(ptr, len));
   } finally {
     if (ptr) wasm.pounce_dealloc(ptr, len);
   }
@@ -83,6 +86,16 @@ assert.ok(
   `objective ${result.objective} != ${-Math.SQRT1_2}`,
 );
 assert.equal(result.x.length, 2);
+
+// The exports the download buttons use must produce the whole solution, not
+// the display-truncated view the result JSON carries.
+const sol = fromWasm(wasm.pounce_solution_sol());
+assert.ok(sol.startsWith('POUNCE '), `unexpected .sol header: ${sol.slice(0, 40)}`);
+assert.ok(sol.includes('\nobjno 0 0\n'), '.sol must carry an objno line');
+assert.ok(sol.includes('\nipopt_zL_out\n'), '.sol must carry the reduced-cost suffixes');
+const csv = fromWasm(wasm.pounce_solution_csv());
+assert.equal(csv.trimEnd().split('\n').length, 1 + 2 + 2, 'csv must cover every row');
+assert.ok(csv.includes('"alpha"'), 'csv must use the .col names');
 
 // A malformed model must come back as JSON, not a trapped instance.
 assert.equal(typeof load('this is not an .nl file').error, 'string');

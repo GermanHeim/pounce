@@ -78,6 +78,10 @@
     cursor: pointer;
   }
   button:disabled { opacity: .5; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--accent); padding: .5rem 1rem; font-size: 14px;
+  }
 
   pre#log {
     margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto;
@@ -147,6 +151,12 @@ tol 1e-8</textarea>
     <h2>Result</h2>
     <div class="panel">
       <dl class="stats" id="result-stats"></dl>
+      <div class="row" style="margin-top:1.25rem">
+        <button id="dl-sol" class="ghost">Download .sol</button>
+        <button id="dl-csv" class="ghost">Download CSV</button>
+        <button id="dl-log" class="ghost">Download log</button>
+      </div>
+      <p class="note" id="result-note"></p>
       <div class="tables" style="margin-top:1.25rem">
         <div>
           <h2>Variables</h2>

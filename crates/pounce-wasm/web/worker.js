@@ -3,6 +3,11 @@
 // A solve is a single synchronous call into wasm that can run for seconds,
 // so it lives off the main thread; the page stays responsive and the
 // solver's console output is streamed back as it is produced.
+//
+// One worker holds one model. The page creates a fresh worker for every
+// file it loads, which is also how it resets: a new instance starts with a
+// new linear memory, so nothing — parsed model, solver state, heap grown by
+// the last solve — can survive into the next file.
 
 import { createWasi } from './wasi.js';
 
@@ -13,10 +18,9 @@ const decoder = new TextDecoder();
 const wasi = createWasi((text) => self.postMessage({ type: 'log', text }));
 
 const ready = (async () => {
-  const response = fetch('./pounce.wasm');
   let instance;
   try {
-    ({ instance } = await WebAssembly.instantiateStreaming(response, wasi.imports));
+    ({ instance } = await WebAssembly.instantiateStreaming(fetch('./pounce.wasm'), wasi.imports));
   } catch {
     // Streaming compilation needs `Content-Type: application/wasm`; not
     // every static server sets it, so fall back to buffering the module.
@@ -37,15 +41,46 @@ function intoWasm(str) {
   return [ptr, bytes.length];
 }
 
-/** Read a NUL-terminated string the module returned, then free it. */
+/**
+ * Read a returned payload: a little-endian u32 byte count followed by that
+ * many UTF-8 bytes. Returns null for a null pointer, which entry points use
+ * to mean "nothing to give you" (e.g. a .sol before any solve).
+ *
+ * The length is read rather than found by scanning for a terminator, so a
+ * pointer or a length that does not describe live memory is reported as
+ * exactly that instead of surfacing later as a mangled parse error.
+ */
 function fromWasm(ptr) {
-  if (!ptr) throw new Error('wasm returned a null string');
-  const mem = new Uint8Array(exports.memory.buffer);
-  let end = ptr;
-  while (mem[end] !== 0) end++;
-  const text = decoder.decode(mem.subarray(ptr, end));
-  exports.pounce_free_string(ptr);
-  return JSON.parse(text);
+  if (!ptr) return null;
+  const memory = new Uint8Array(exports.memory.buffer);
+  if (ptr < 0 || ptr + 4 > memory.length) {
+    throw new Error(`wasm returned pointer ${ptr}, outside its ${memory.length}-byte memory`);
+  }
+  const len = new DataView(exports.memory.buffer).getUint32(ptr, true);
+  if (ptr + 4 + len > memory.length) {
+    throw new Error(
+      `wasm payload at ${ptr} claims ${len} bytes, past the end of its ` +
+        `${memory.length}-byte memory`,
+    );
+  }
+  const text = decoder.decode(memory.subarray(ptr + 4, ptr + 4 + len));
+  exports.pounce_free_payload(ptr);
+  return text;
+}
+
+/** Same, parsed as JSON, with the raw text quoted if it will not parse. */
+function fromWasmJson(ptr) {
+  const text = fromWasm(ptr);
+  if (text === null) throw new Error('wasm returned no payload');
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    const head = text.slice(0, 200);
+    const tail = text.length > 200 ? ` … ${text.slice(-80)}` : '';
+    throw new Error(
+      `wasm returned ${text.length} bytes that are not JSON (${err.message}): ${head}${tail}`,
+    );
+  }
 }
 
 self.onmessage = async (event) => {
@@ -55,7 +90,7 @@ self.onmessage = async (event) => {
     if (msg.type === 'load') {
       const args = [msg.nl, msg.col ?? '', msg.row ?? ''].map(intoWasm);
       try {
-        const summary = fromWasm(exports.pounce_load(...args.flat()));
+        const summary = fromWasmJson(exports.pounce_load(...args.flat()));
         self.postMessage({ type: 'summary', summary });
       } finally {
         for (const [ptr, len] of args) if (ptr) exports.pounce_dealloc(ptr, len);
@@ -64,14 +99,25 @@ self.onmessage = async (event) => {
       const [ptr, len] = intoWasm(msg.options ?? '');
       const started = performance.now();
       try {
-        const result = fromWasm(exports.pounce_solve(ptr, len));
+        const result = fromWasmJson(exports.pounce_solve(ptr, len));
         result.browser_ms = performance.now() - started;
         self.postMessage({ type: 'result', result });
       } finally {
         if (ptr) exports.pounce_dealloc(ptr, len);
       }
+    } else if (msg.type === 'export') {
+      // Formatted on demand: a .sol or CSV for a large model is megabytes
+      // that most solves never download.
+      const text = fromWasm(
+        msg.format === 'sol' ? exports.pounce_solution_sol() : exports.pounce_solution_csv(),
+      );
+      self.postMessage({ type: 'export', text, filename: msg.filename, mime: msg.mime });
     }
   } catch (err) {
-    self.postMessage({ type: 'fatal', message: String(err && err.message ? err.message : err) });
+    self.postMessage({
+      type: 'fatal',
+      request: msg.type,
+      message: String(err && err.message ? err.message : err),
+    });
   }
 };
