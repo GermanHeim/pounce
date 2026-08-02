@@ -45,7 +45,9 @@ Being pure Rust also means the whole solver compiles to WebAssembly:
 **[try it in your browser](https://jkitchin.github.io/pounce/demo/)** — drop
 an AMPL `.nl` file on the page to see the model's structure and solve it
 client-side, with nothing uploaded anywhere. See
-[POUNCE in the Browser](https://jkitchin.github.io/pounce/wasm.html).
+[POUNCE in the Browser](docs/src/wasm.md) — the docs site serves the same
+page at [`/dev/wasm.html`](https://jkitchin.github.io/pounce/dev/wasm.html)
+until the next release build picks it up at the site root.
 
 License: EPL-2.0 (same as upstream Ipopt).
 
