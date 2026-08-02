@@ -1,0 +1,28 @@
+[package]
+name = "pounce-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "WebAssembly entry points for POUNCE: read an AMPL .nl file and solve it in the browser"
+
+# Demo/embedding surface, not a library anyone depends on from crates.io.
+publish = false
+
+[lib]
+# `cdylib` for the wasm build; `rlib` so the host-side unit tests (which
+# exercise the same JSON entry points through a normal `cargo test`) can
+# link it like any other crate.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pounce-common.workspace = true
+pounce-nlp.workspace = true
+pounce-nl.workspace = true
+pounce-algorithm.workspace = true
+pounce-presolve.workspace = true
+serde_json = "1"
+
+[lints]
+workspace = true

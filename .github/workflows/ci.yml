@@ -77,6 +77,30 @@ jobs:
   # sensitivity / path-following APIs) on every PR. The Rust `test` job
   # above covers the solver core, and `wheel-smoke` only imports the
   # package — neither runs pytest, so without this job the entire
+  # Guard the browser build (crates/pounce-wasm, docs/src/wasm.md). The
+  # `test` job type-checks pounce-wasm on the host, which catches neither of
+  # the two ways this surface breaks: a dependency that stops compiling for
+  # wasm32 (a new `libc`/`dlopen`/thread call somewhere in the tree), and one
+  # that compiles but traps at run time on a syscall WASI does not have. The
+  # smoke test drives the same C ABI the page uses — load a `.nl`, solve it,
+  # check the objective — under Node's WASI.
+  wasm:
+    name: WebAssembly build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the wasm module
+        run: crates/pounce-wasm/build.sh
+      - name: Solve a model in wasm
+        run: node crates/pounce-wasm/tests/smoke.mjs
+
   # Python feature surface lands untested in CI. Builds the wheel the
   # same way wheel-smoke does, then installs the jax + diffrax extras
   # and runs the test suite.

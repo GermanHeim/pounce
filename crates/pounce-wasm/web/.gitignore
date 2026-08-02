@@ -1,0 +1,2 @@
+# Build artifact staged by build.sh — rebuild it, do not commit it.
+pounce.wasm

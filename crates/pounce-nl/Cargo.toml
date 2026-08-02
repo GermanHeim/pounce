@@ -14,8 +14,16 @@ description = "AMPL .nl reader, reverse-mode AD tape, and TNLP evaluator for pou
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
-libloading = "0.8"
 tracing.workspace = true
+
+# AMPL imported (external) functions are `dlopen`ed at solve time, which
+# only exists on unix/windows. Targets without a dynamic loader — notably
+# `wasm32-*`, where the whole `.nl` pipeline still has to build for the
+# browser demo (`crates/pounce-wasm`) — get the stub `ExternalLibrary::load`
+# in `nl_external.rs`, which reports that such models can't be evaluated
+# there rather than failing to compile.
+[target.'cfg(any(unix, windows))'.dependencies]
+libloading = "0.8"
 
 [lints]
 workspace = true

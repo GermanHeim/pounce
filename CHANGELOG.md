@@ -9,6 +9,40 @@ changes.
 
 ## [Unreleased]
 
+### Added — POUNCE runs in the browser (WebAssembly)
+
+- The default build has no C or Fortran dependency, so the whole solver —
+  `.nl` reader, AD tape, sparse LDL^T, interior-point algorithm — compiles
+  to `wasm32-wasip1` and runs client-side. New crate `pounce-wasm`
+  (`publish = false`) exposes a four-function C ABI (allocate, load, solve,
+  free) that takes `.nl` bytes and `ipopt.opt`-format options and returns
+  JSON: a problem summary from `pounce_load`, a solution from
+  `pounce_solve`. Both catch panics, so a malformed model returns
+  `{"error": …}` instead of trapping the instance.
+- A demo page ships with it (`crates/pounce-wasm/web`, built by
+  `crates/pounce-wasm/build.sh` or `make wasm`): drop a `.nl` file — with
+  its `.col` / `.row` name files if you have them — to see the model's
+  size, degrees of freedom, equality/inequality split, nonlinear fraction,
+  and Jacobian/Hessian sparsity, then solve it with the iteration table
+  streaming into the page. It is static files plus a ~60-line WASI shim; no
+  `wasm-bindgen`, no npm, no server. Nothing is uploaded.
+- The demo is published with the docs: `docs.yml` builds the module and
+  stages the page into the Pages site at
+  [`/demo/`](https://jkitchin.github.io/pounce/demo/) on every deployment
+  from `main`. It needs no Pages configuration — single-threaded, so no
+  `SharedArrayBuffer` and no COOP/COEP headers (which Pages cannot set),
+  and all URLs are relative so the `/pounce/` base path just works.
+- Numerics are unchanged. Over all 37 `.nl` fixtures in
+  `crates/pounce-cli/tests/fixtures`, wasm and native agree on exit status
+  and iteration count on every one, and the objective is bit-identical on
+  34 of the 36 that return one; the two exceptions differ by one ulp, at
+  objectives of 1e-10 and 1e-11. Documented in `docs/src/wasm.md`; CI builds the module and solves
+  a model under Node's WASI on every PR.
+- `pounce-nl` now builds for targets with no dynamic loader: `libloading`
+  became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
+  reports that AMPL imported functions are unavailable there rather than
+  failing to compile. No change on unix/windows.
+
 ### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
 
 - A variable whose bounds are equal is removed from the solve
