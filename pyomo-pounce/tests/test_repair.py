@@ -233,3 +233,60 @@ def test_shared_graph_matches_fresh_analysis():
         [names(b) for b in ana_shared.variable_blocks]
     assert [names(b) for b in ana_fresh.constraint_blocks] == \
         [names(b) for b in ana_shared.constraint_blocks]
+
+
+def test_shared_graph_one_factor_fixed_matches_as_sets():
+    """Only one factor of the bilinear terms fixed — the arrangement
+    where value substitution can reorder the linear/nonlinear split.
+    The corrected contract (gh #445 review): edge sets and the square
+    decomposition match a fresh build; within-row variable ORDER may
+    differ, so the comparison is set-level."""
+    from pyomo_pounce.block_init import (
+        block_analyze,
+        block_repair_plan,
+        structural_incidence,
+    )
+
+    def name_set(comps):
+        return {c.name for c in comps}
+
+    m1 = _split_model()
+    plan_fresh = block_repair_plan(m1, decision_candidates=[m1.split])
+    ana_fresh = block_analyze(m1, decisions=[m1.split])
+
+    m2 = _split_model()
+    g = structural_incidence(m2)
+    plan_shared = block_repair_plan(
+        m2, decision_candidates=[m2.split], igraph=g)
+    ana_shared = block_analyze(m2, decisions=[m2.split], igraph=g)
+
+    assert name_set(plan_fresh.decisions) == name_set(plan_shared.decisions)
+    assert name_set(plan_fresh.pinned) == name_set(plan_shared.pinned)
+    assert name_set(plan_fresh.pruned) == name_set(plan_shared.pruned)
+    assert ana_fresh.square == ana_shared.square
+    assert {frozenset(name_set(b)) for b in ana_fresh.variable_blocks} == \
+        {frozenset(name_set(b)) for b in ana_shared.variable_blocks}
+
+
+def test_shared_graph_zero_decision_falls_back_to_fresh():
+    """A decision fixed at exactly 0 cancels its bilinear partner's
+    edge under value substitution; the shared view must detect the
+    cancellation and fall back to a fresh build, reproducing the
+    fresh diagnostics exactly rather than claiming a square system
+    and failing a block (gh #445 review, finding 2a)."""
+    from pyomo_pounce.block_init import block_analyze, structural_incidence
+
+    m1 = _split_model()
+    m1.split.fix(0.0)
+    ana_fresh = block_analyze(m1)
+
+    m2 = _split_model()
+    g = structural_incidence(m2)
+    m2.split.fix(0.0)
+    ana_shared = block_analyze(m2, igraph=g)
+
+    assert ana_fresh.square == ana_shared.square
+    assert [v.name for b in ana_fresh.variable_blocks for v in b] == \
+        [v.name for b in ana_shared.variable_blocks for v in b]
+    assert [c.name for c in ana_fresh.underconstrained_variables] == \
+        [c.name for c in ana_shared.underconstrained_variables]

@@ -453,20 +453,79 @@ def structural_incidence(model):
     Within-call sharing only: the graph reflects the model's structure
     at construction, so it must not outlive structural edits.
     """
-    from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+    try:
+        # Probe networkx explicitly: pyomo defers its optional imports,
+        # so `pyomo.contrib.incidence_analysis` imports fine without it
+        # and would only blow up (DeferredImportError) at first use.
+        # This runs before the block_* probes in the initialize()
+        # pipeline, so it must carry the same actionable message.
+        import networkx  # noqa: F401
+
+        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+    except ImportError as e:  # pragma: no cover - environment-dependent
+        raise ImportError(
+            "structural_incidence requires pyomo.contrib."
+            "incidence_analysis and its optional dependencies "
+            "(pip install networkx scipy)"
+        ) from e
 
     return IncidenceGraphInterface(
         model, include_inequality=False, include_fixed=True
     )
 
 
-def _active_view(igraph):
+def _active_view(igraph, model):
     """The shared structural graph filtered to currently-unfixed
-    variables: the same node sets, in the same order, as a fresh
-    construction at this fix-state, without the expression walk."""
+    variables, without re-walking constraint expressions.
+
+    STRUCTURAL, not value-substituted: a fresh construction substitutes
+    fixed variables' values, so its edge set can differ from this view
+    exactly when a fixed value cancels a term, which requires the value
+    0. That one case is guarded below: rows adjacent to a fixed zero
+    are re-derived, and if any edge genuinely cancels, this pass falls
+    back to a fresh construction (correct diagnostics over speed).
+    Away from cancellations the edge sets are identical; the variable
+    ORDER within rows can still differ (value substitution changes the
+    linear/nonlinear split), so order-derived tie-breaks and
+    diagnostics listings may come out in a different order than a
+    fresh build's.
+
+    On pyomo without `IncidenceGraphInterface.subgraph` (< 6.7.1) this
+    falls back to a fresh construction: old speed, same behavior.
+
+    May return the shared graph itself when nothing is fixed, so
+    callers can alias it; safe while no pass mutates the graph — keep
+    it that way.
+    """
+    from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+
+    if not hasattr(igraph, "subgraph"):  # pyomo < 6.7.1
+        return IncidenceGraphInterface(model, include_inequality=False)
     unfixed = [v for v in igraph.variables if not v.fixed]
     if len(unfixed) == len(igraph.variables):
         return igraph
+    fixed_zero = [
+        v for v in igraph.variables if v.fixed and v.value == 0.0
+    ]
+    if fixed_zero:
+        from pyomo.contrib.incidence_analysis import get_incident_variables
+
+        affected = set()
+        for v in fixed_zero:
+            affected.update(id(c) for c in igraph.get_adjacent_to(v))
+        for con in igraph.constraints:
+            if id(con) not in affected:
+                continue
+            substituted = {id(vv) for vv in get_incident_variables(con.body)}
+            structural = {
+                id(vv)
+                for vv in igraph.get_adjacent_to(con)
+                if not vv.fixed
+            }
+            if substituted != structural:
+                return IncidenceGraphInterface(
+                    model, include_inequality=False
+                )
     return igraph.subgraph(unfixed, list(igraph.constraints))
 
 
@@ -502,10 +561,15 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     :func:`structural_incidence`, built over THIS model with fixed
     variables included; the pass filters it to the currently-unfixed
     variables instead of re-walking every constraint expression
-    (gh #444). It must belong to the model being passed: a graph from
-    another model, or from before a structural edit, produces wrong
-    answers rather than an error. Omitted, the incidence is built
-    locally exactly as before.
+    (gh #444). The view is STRUCTURAL: away from zero-value
+    cancellations (guarded, with a fresh-build fallback) its edge sets
+    match a fresh construction, but the variable order within rows may
+    differ on models where fixed values change the linear/nonlinear
+    split, so order-derived diagnostics can list in a different order.
+    It must belong to the model being passed: a graph from another
+    model, or from before a structural edit, produces wrong answers
+    rather than an error. Omitted, the incidence is built locally
+    exactly as before.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -534,7 +598,7 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     # to the current fix-state; omitted, the walk happens locally as
     # before (gh #444).
     if igraph is not None:
-        igraph = _active_view(igraph)
+        igraph = _active_view(igraph, model)
     else:
         igraph = IncidenceGraphInterface(model, include_inequality=False)
     eqs = list(igraph.constraints)
@@ -615,10 +679,15 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
     :func:`structural_incidence`, built over THIS model with fixed
     variables included; the pass filters it to the currently-unfixed
     variables instead of re-walking every constraint expression
-    (gh #444). It must belong to the model being passed: a graph from
-    another model, or from before a structural edit, produces wrong
-    answers rather than an error. Omitted, the incidence is built
-    locally exactly as before.
+    (gh #444). The view is STRUCTURAL: away from zero-value
+    cancellations (guarded, with a fresh-build fallback) its edge sets
+    match a fresh construction, but the variable order within rows may
+    differ on models where fixed values change the linear/nonlinear
+    split, so order-derived diagnostics can list in a different order.
+    It must belong to the model being passed: a graph from another
+    model, or from before a structural edit, produces wrong answers
+    rather than an error. Omitted, the incidence is built locally
+    exactly as before.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -648,7 +717,7 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
         # decisions were fixed above, so the filtered view (or the
         # fresh walk) sees them excluded exactly as before (gh #444)
         if igraph is not None:
-            igraph = _active_view(igraph)
+            igraph = _active_view(igraph, model)
         else:
             igraph = IncidenceGraphInterface(model, include_inequality=False)
         if not igraph.constraints:
@@ -744,10 +813,15 @@ def block_initialize(
     :func:`structural_incidence`, built over THIS model with fixed
     variables included; the pass filters it to the currently-unfixed
     variables instead of re-walking every constraint expression
-    (gh #444). It must belong to the model being passed: a graph from
-    another model, or from before a structural edit, produces wrong
-    answers rather than an error. Omitted, the incidence is built
-    locally exactly as before.
+    (gh #444). The view is STRUCTURAL: away from zero-value
+    cancellations (guarded, with a fresh-build fallback) its edge sets
+    match a fresh construction, but the variable order within rows may
+    differ on models where fixed values change the linear/nonlinear
+    split, so order-derived diagnostics can list in a different order.
+    It must belong to the model being passed: a graph from another
+    model, or from before a structural edit, produces wrong answers
+    rather than an error. Omitted, the incidence is built locally
+    exactly as before.
     """
     import pyomo.environ as pyo
 
