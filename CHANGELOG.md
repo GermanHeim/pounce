@@ -73,6 +73,41 @@ changes.
   became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
   reports that AMPL imported functions are unavailable there rather than
   failing to compile. No change on unix/windows.
+### Fixed — Linux wheels shipped a CLI that could not start on most clusters (#452)
+
+- The published Linux wheels were tagged `manylinux2014` (glibc 2.17) but
+  bundled a `pounce` CLI requiring **glibc 2.39**. On anything older the
+  binary refused to exec:
+
+      pounce/bin/pounce: /lib/x86_64-linux-gnu/libc.so.6:
+        version `GLIBC_2.39' not found
+
+  `import pounce` was unaffected, but everything driving the CLI —
+  the `pounce` console script and all of pyomo-pounce, which shells out
+  to it — failed on Debian 12, Ubuntu 22.04, RHEL/Rocky/Alma 8 and 9, and
+  most HPC images. `pip install` reported success; the failure came at
+  exec time.
+- Cause: `release-pounce.yml` built the CLI on the runner host (Ubuntu
+  24.04, glibc 2.39) and only then handed the tree to maturin, which built
+  the extension module inside the manylinux container and labelled the
+  wheel accordingly. auditwheel never inspects `pounce/bin/pounce` — to the
+  wheel format it is opaque data, not a linked object — so the mismatch
+  shipped silently. Exactly two symbols set the floor, `pidfd_spawnp` and
+  `pidfd_getpid`, from Rust std's process-spawn path; everything else the
+  binary needed topped out at glibc 2.34.
+- Fix: build the CLI **inside** the manylinux container, via maturin's
+  `before-script-linux`, so the artifact and the compatibility promise come
+  from the same place. No source change — POUNCE is pure Rust, so the
+  container only has to supply a linker. The resulting floor is glibc 2.16,
+  and wall-clock on the large_scale `sparseqp` / `optcontrol` / `rosenbrock`
+  problems is unchanged (same allocator, same codegen).
+- Guard: `scripts/check-cli-portability.sh` asserts the bundled binary's
+  highest referenced glibc symbol version stays within the wheel's
+  manylinux floor, and CI now installs the built wheel in a glibc-2.17
+  container and solves with it. Neither check existed before, and the
+  pre-existing wheel smoke test could not have caught this: it ran on the
+  same host that built the binary, the one platform where the floor is
+  invisible.
 
 ### Fixed — pyomo-pounce: a fixed variable shifted every sensitivity result
 

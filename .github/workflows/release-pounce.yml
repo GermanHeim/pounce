@@ -107,10 +107,16 @@ jobs:
       # Build the standalone pounce CLI binary and stage it inside the
       # Python package source tree. `[tool.maturin] include` in
       # pyproject.toml then pulls it into the wheel under pounce/bin/.
+      #
+      # macOS / Windows ONLY. On Linux this moved into the manylinux
+      # container — see `before-script-linux` on the maturin step below and
+      # the explanation there (#452).
       - name: Build pounce CLI binary
+        if: runner.os != 'Linux'
         run: cargo build --release --bin pounce --target ${{ matrix.rust_target }}
 
       - name: Stage CLI binary into the wheel
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           mkdir -p python/pounce/bin
@@ -127,6 +133,70 @@ jobs:
           # abi3-py39 means one wheel per platform covers py39+.
           args: --release --out dist
           sccache: "true"
+          # THE FIX FOR #452. On Linux the bundled CLI is built HERE, inside
+          # the manylinux container, rather than on the runner beforehand.
+          #
+          # The old arrangement built it on the host and only then handed the
+          # tree to maturin. maturin then built the extension module inside
+          # manylinux2014 (glibc 2.17) and labelled the wheel to match — but
+          # the CLI sitting next to it had been linked against the runner's
+          # glibc (Ubuntu 24.04 = 2.39). auditwheel does not inspect
+          # pounce/bin/pounce; to the wheel format it is opaque data, not a
+          # linked object. So the wheel promised 2.17 and shipped a binary
+          # needing 2.39, and `pounce` could not start on Debian 12, RHEL
+          # 8/9, or most cluster images — while every CI check passed,
+          # because they all ran on the same 2.39 host that built it.
+          #
+          # Building in the container makes the promise and the artifact come
+          # from the same place, which is the only arrangement that cannot
+          # drift. Nothing about the source changes: POUNCE is pure Rust, so
+          # the container only has to supply a linker.
+          #
+          # No --target: the container's host triple is already the right one
+          # for this matrix entry (x86_64 or aarch64 manylinux2014).
+          before-script-linux: |
+            set -eux
+            # sccache: "true" exports RUSTC_WRAPPER=sccache and the action
+            # forwards it into the container, but sccache is installed on the
+            # HOST — inside here cargo would try to exec a wrapper that does
+            # not exist ("could not execute process `sccache ...`"). maturin's
+            # own build later gets a container-local sccache; this pre-step
+            # does not need one.
+            unset RUSTC_WRAPPER
+            # The action's working directory is python/; walk up to the
+            # workspace root rather than assuming a fixed mount path.
+            d="$PWD"
+            while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
+            # Subshell, deliberately. maturin runs from this SAME script
+            # afterwards and expects to still be in python/. A bare `cd` here
+            # leaked the workspace root into that invocation, where maturin
+            # parsed the workspace Cargo.toml and died with
+            # "missing field `package`".
+            (
+              cd "$d"
+              # actions/checkout marks the repo safe in the RUNNER's git
+              # config, but this container has its own HOME (/root), so git
+              # here sees a mounted tree owned by another uid and refuses it
+              # as dubiously-owned. crates/pounce-cli/build.rs shells out to
+              # git for the commit it stamps into `pounce --about`; without
+              # this the binary reports "unknown" and pyomo-pounce's
+              # build-id checks fail against it.
+              git config --global --add safe.directory "$d" || true
+              ldd --version
+              cargo build --release --locked --bin pounce
+              mkdir -p python/pounce/bin
+              cp target/release/pounce python/pounce/bin/pounce
+              ls -l python/pounce/bin/
+            )
+
+      # The guard that was missing (#452). Every pre-existing check ran on
+      # the host that built the binary — the one platform where a glibc floor
+      # cannot show up. Assert the property on the artifact instead. Runs on
+      # the host after the container build; the staged binary persists there
+      # because the workspace is mounted into the container.
+      - name: Verify bundled CLI honors the manylinux2014 floor
+        if: runner.os == 'Linux'
+        run: scripts/check-cli-portability.sh python/pounce/bin/pounce 2.17
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

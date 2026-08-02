@@ -191,12 +191,11 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build pounce CLI binary
-        run: cargo build --release --bin pounce
-      - name: Stage CLI binary into wheel
-        run: |
-          mkdir -p python/pounce/bin
-          cp target/release/pounce python/pounce/bin/pounce
+      # Mirrors release-pounce.yml: the bundled CLI is built INSIDE the
+      # manylinux container, not on this runner (#452). Building it here with
+      # a plain `cargo build` is precisely what let a glibc-2.39 binary ship
+      # inside a manylinux2014-tagged wheel — and nothing downstream could
+      # notice, because every check ran on the same host that built it.
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -205,6 +204,39 @@ jobs:
           manylinux: manylinux2014
           args: --release --out dist
           sccache: "true"
+          before-script-linux: |
+            set -eux
+            # sccache: "true" exports RUSTC_WRAPPER=sccache and the action
+            # forwards it into the container, but sccache is installed on the
+            # HOST — inside here cargo would try to exec a wrapper that does
+            # not exist ("could not execute process `sccache ...`"). maturin's
+            # own build later gets a container-local sccache; this pre-step
+            # does not need one.
+            unset RUSTC_WRAPPER
+            d="$PWD"
+            while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
+            # Subshell, deliberately. maturin runs from this SAME script
+            # afterwards and expects to still be in python/. A bare `cd` here
+            # leaked the workspace root into that invocation, where maturin
+            # parsed the workspace Cargo.toml and died with
+            # "missing field `package`".
+            (
+              cd "$d"
+              # actions/checkout marks the repo safe in the RUNNER's git
+              # config, but this container has its own HOME (/root), so git
+              # here sees a mounted tree owned by another uid and refuses it
+              # as dubiously-owned. crates/pounce-cli/build.rs shells out to
+              # git for the commit it stamps into `pounce --about`; without
+              # this the binary reports "unknown" and pyomo-pounce's
+              # build-id checks fail against it.
+              git config --global --add safe.directory "$d" || true
+              ldd --version
+              cargo build --release --locked --bin pounce
+              mkdir -p python/pounce/bin
+              cp target/release/pounce python/pounce/bin/pounce
+            )
+      - name: Verify bundled CLI honors the manylinux2014 floor
+        run: scripts/check-cli-portability.sh python/pounce/bin/pounce 2.17
       - name: Install + smoke (Python API + CLI)
         run: |
           ls -l python/dist/
@@ -216,6 +248,24 @@ jobs:
           # round-trip without needing an actual .nl input file.
           which pounce
           pounce --help | head -5
+      # The check the previous arrangement could not make. Everything above
+      # runs on the host that built the binary, where a glibc floor is
+      # invisible by construction (#452). Install the same wheel on a distro
+      # far older than the runner and actually solve a problem on it.
+      # manylinux2014 is glibc 2.17 — the floor the wheel advertises, and
+      # older than any machine we care about.
+      - name: Solve with the wheel on old glibc (glibc 2.17)
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/w" -w /w quay.io/pypa/manylinux2014_x86_64 bash -euxc '
+            ldd --version
+            PY=/opt/python/cp39-cp39/bin/python
+            "$PY" -m pip install -q /w/python/dist/*.whl
+            BIN=$("$PY" -c "import pounce,os;print(os.path.join(os.path.dirname(pounce.__file__),\"bin\",\"pounce\"))")
+            "$BIN" --version
+            "$BIN" --problem rosenbrock --no-sol
+            "$PY" -c "import pounce; print(\"import ok on glibc 2.17:\", pounce.__version__)"
+          '
 
   # Smoke-build the pyomo-pounce wheel and run its test suite. Pure-Python
   # now: the `pounce` binary comes from the `pounce-solver` dep, not bundled
@@ -247,12 +297,7 @@ jobs:
       # the CLI. The wheel bundles the CLI, so its console script also satisfies
       # the SolverFactory plugin's `.solve()` path. The pyomo-pounce sensitivity
       # tests exercise both.
-      - name: Build pounce CLI binary
-        run: cargo build --release --bin pounce
-      - name: Stage CLI binary into pounce-solver wheel
-        run: |
-          mkdir -p python/pounce/bin
-          cp target/release/pounce python/pounce/bin/pounce
+      # As in wheel-smoke: CLI built inside the manylinux container (#452).
       - name: Build pounce-solver wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -261,6 +306,36 @@ jobs:
           manylinux: manylinux2014
           args: --release --out dist
           sccache: "true"
+          before-script-linux: |
+            set -eux
+            # sccache: "true" exports RUSTC_WRAPPER=sccache and the action
+            # forwards it into the container, but sccache is installed on the
+            # HOST — inside here cargo would try to exec a wrapper that does
+            # not exist ("could not execute process `sccache ...`"). maturin's
+            # own build later gets a container-local sccache; this pre-step
+            # does not need one.
+            unset RUSTC_WRAPPER
+            d="$PWD"
+            while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
+            # Subshell, deliberately. maturin runs from this SAME script
+            # afterwards and expects to still be in python/. A bare `cd` here
+            # leaked the workspace root into that invocation, where maturin
+            # parsed the workspace Cargo.toml and died with
+            # "missing field `package`".
+            (
+              cd "$d"
+              # actions/checkout marks the repo safe in the RUNNER's git
+              # config, but this container has its own HOME (/root), so git
+              # here sees a mounted tree owned by another uid and refuses it
+              # as dubiously-owned. crates/pounce-cli/build.rs shells out to
+              # git for the commit it stamps into `pounce --about`; without
+              # this the binary reports "unknown" and pyomo-pounce's
+              # build-id checks fail against it.
+              git config --global --add safe.directory "$d" || true
+              cargo build --release --locked --bin pounce
+              mkdir -p python/pounce/bin
+              cp target/release/pounce python/pounce/bin/pounce
+            )
       - name: Install + smoke
         run: |
           # pyomo + numpy (sensitivity needs numpy); networkx + scipy so
