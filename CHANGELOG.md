@@ -26,6 +26,12 @@ changes.
   and Jacobian/Hessian sparsity, then solve it with the iteration table
   streaming into the page. It is static files plus a ~60-line WASI shim; no
   `wasm-bindgen`, no npm, no server. Nothing is uploaded.
+- The demo is published with the docs: `docs.yml` builds the module and
+  stages the page into the Pages site at
+  [`/demo/`](https://jkitchin.github.io/pounce/demo/) on every deployment
+  from `main`. It needs no Pages configuration — single-threaded, so no
+  `SharedArrayBuffer` and no COOP/COEP headers (which Pages cannot set),
+  and all URLs are relative so the `/pounce/` base path just works.
 - Numerics are unchanged: across the CLI's `.nl` fixture suite, the wasm
   build matches the native build's exit status and iteration count on every
   problem, and its objective to full double precision on all but one

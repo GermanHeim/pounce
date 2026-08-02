@@ -6,16 +6,36 @@ the AMPL `.nl` reader, the reverse-mode AD tape, the sparse LDL^T
 factorization, and the interior-point algorithm. Nothing is sent to a
 server.
 
-The repository ships a working demo: drop a `.nl` file on a page, see what
-is in the model, and solve it.
+**[Try it: jkitchin.github.io/pounce/demo](https://jkitchin.github.io/pounce/demo/)**
+— drop a `.nl` file on the page, see what is in the model, and solve it. The
+demo is published from this repository's `main` branch alongside these docs,
+and it runs it locally in your tab.
+
+To run the same page from a checkout:
 
 ```sh
 rustup target add wasm32-wasip1        # once
 crates/pounce-wasm/build.sh --serve    # http://localhost:8000
 ```
 
-Or `make wasm` to build the module without serving it. The page is a
-static directory (`crates/pounce-wasm/web/`); deploying it is a copy.
+Or `make wasm` to build the module without serving it.
+
+## Hosting it
+
+The page is a static directory (`crates/pounce-wasm/web/`) — deploying it
+anywhere is a copy. It needs no special server: no threads means no
+`SharedArrayBuffer`, so none of the `Cross-Origin-Opener-Policy` /
+`Cross-Origin-Embedder-Policy` headers that thread-enabled wasm requires,
+and every URL the page fetches is relative, so it works under any base
+path. If a host serves `.wasm` as something other than `application/wasm`,
+the page falls back from streaming compilation to a buffered
+`WebAssembly.instantiate` on its own.
+
+GitHub Pages is what this repository uses: `.github/workflows/docs.yml`
+builds the module and stages `crates/pounce-wasm/web/` into the docs site
+at `/demo/`, so the live demo ships with every docs deployment from `main`.
+The demo is version-independent — one live build, not one per archived
+release tag.
 
 ## What you get
 

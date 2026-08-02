@@ -10,9 +10,14 @@ crates/pounce-wasm/build.sh --serve # build + serve on http://localhost:8000
 ```
 
 Drag a `.nl` file onto the page (optionally with its sibling `.col` / `.row`
-name files, which AMPL writes under `option auxfiles rc;`). Deploying is a
-matter of copying this directory — after `build.sh` has staged
-`pounce.wasm` into it — to any static host.
+name files, which AMPL writes under `option auxfiles rc;`).
+
+Deploying is a matter of copying this directory — after `build.sh` has
+staged `pounce.wasm` into it — to any static host. No headers to configure:
+no threads means no `SharedArrayBuffer`, hence no COOP/COEP requirement, and
+every fetch is relative so any base path works. This repository publishes it
+to GitHub Pages at [`/pounce/demo/`](https://jkitchin.github.io/pounce/demo/)
+from `.github/workflows/docs.yml`.
 
 ## What is here
 
