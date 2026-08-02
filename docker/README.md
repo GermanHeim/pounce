@@ -106,8 +106,21 @@ matrix; two points matter when cutting a release:
    out, nothing is half-published — re-run it from the Actions tab with
    `dry_run=false` once the wheels are live.
 
-2. **First publish is private.** A newly created GHCR package defaults to
-   private. After the first successful push, make it public once by hand
-   under *Packages → pounce → Package settings*. Until then every
-   `docker pull` and `apptainer pull` from anyone but you fails with an auth
-   error that reads like the image does not exist.
+2. **Check the package visibility once, after the first publish.** For this
+   repo the package inherited the repository's public visibility and
+   anonymous pulls worked immediately — no manual step was needed. That is
+   worth verifying rather than assuming, because if a package ever does come
+   out private, `docker pull` and `apptainer pull` fail for everyone but you
+   with an auth error that reads like the image does not exist. The honest
+   check is an unauthenticated one:
+
+   ```sh
+   docker logout ghcr.io
+   curl -s "https://ghcr.io/token?scope=repository:<owner>/pounce:pull" \
+     | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' \
+     | xargs -I{} curl -so /dev/null -w '%{http_code}\n' -H "Authorization: Bearer {}" \
+         https://ghcr.io/v2/<owner>/pounce/manifests/edge
+   ```
+
+   `200` means public. If it is not, flip it under *Packages → pounce →
+   Package settings → Change visibility*.

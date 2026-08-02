@@ -106,10 +106,16 @@ note they all share the `pounce-` prefix under account `jkitchin`.
    X.Y.Z. `scripts/check-release-consistency.sh` verifies all three agree; run
    it before tagging. If the version bump is non-trivial, do it as its own
    commit.
-3. Bump `CITATION.cff` to match: set `version:` to the new release version and
+3. Bump `ARG POUNCE_VERSION` in `docker/Dockerfile.release` to the same
+   X.Y.Z. `scripts/check-release-consistency.sh` fails if you forget — and
+   it is worth knowing why it is checked rather than trusted: the release
+   image *pip-installs* that pinned version, so a stale ARG produces an
+   image **tagged** X.Y.Z that **contains** the previous release. The build
+   succeeds and the smoke test passes, because the old wheel works fine.
+4. Bump `CITATION.cff` to match: set `version:` to the new release version and
    `date-released:` to the release date. GitHub's "Cite this repository"
    widget reads these. (The `doi:` is the Zenodo *concept* DOI and stays put.)
-4. Run `scripts/publish-crates.sh --dry-run` to catch missing metadata, broken
+5. Run `scripts/publish-crates.sh --dry-run` to catch missing metadata, broken
    links, or dirty-tree errors. This dry-runs every crate end-to-end, so any
    breakage appears here, not three crates into the real release.
 
@@ -157,10 +163,63 @@ crates and drives `release-crates.yml`.)
 | crates.io (20 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
 | PyPI `pounce-solver`    | `release-pounce.yml`                  | `python-v*` tag          |
 | PyPI `pyomo-pounce`     | `release-pyomo-pounce.yml`            | `pyomo-pounce-v*` tag    |
+| ghcr.io container images| `release-docker.yml`                  | `v*` tag / push to main  |
+| wasm demo pages         | `docs.yml`                            | push to main             |
 
 `release-crates.yml` needs the `CARGO_REGISTRY_TOKEN` secret and runs in the
 `crates-io` environment. The GitHub Release itself is still created by hand
 (`gh release create vX.Y.Z --notes-file <file>`); no workflow makes it.
+
+## Container images and the wasm demos
+
+Two surfaces ship on every release but are **not** covered by bumping a
+version number, so they need their own attention.
+
+### Container images (`release-docker.yml` -> `ghcr.io/<owner>/pounce`)
+
+- **Tag ordering matters.** The release image pip-installs from PyPI, but
+  the `v*` tag it fires on does not publish to PyPI — `python-v*` does. Push
+  `python-v*` and `pyomo-pounce-v*` **at or before** `v*`. The workflow polls
+  PyPI for ~20 minutes to absorb the normal lag; if it times out nothing is
+  half-published, so re-run it from the Actions tab with `dry_run=false` once
+  the wheels are live.
+- **What each tag means.** `v*` publishes `:X.Y.Z`, `:X.Y`, `:latest` from
+  the PyPI-based image. A push to `main` publishes `:edge` and
+  `:sha-<short>` from the source-built image. `:latest` therefore always
+  means "released", never "tip of main".
+- **After the release, check the base image pin.** `docker/Dockerfile.release`
+  is pinned to Debian trixie because the wheels published through 0.9.0
+  bundled a CLI needing glibc 2.39 (#452, fixed in #456). Once a release
+  after 0.9.0 is on PyPI, drop that pin to bookworm or lower and delete the
+  note — `scripts/check-cli-portability.sh` in CI is what makes lowering it
+  safe. This is the one item here with an expiry date.
+- **Verify the published image, do not assume.** The images smoke-test
+  themselves at build time, but that proves the build, not the publish:
+
+  ```sh
+  docker run --rm ghcr.io/<owner>/pounce:X.Y.Z --version
+  docker run --rm --entrypoint python ghcr.io/<owner>/pounce:X.Y.Z \
+    -c "import pounce; print(pounce.__version__)"
+  ```
+
+### wasm demos (`docs.yml` -> GitHub Pages)
+
+The `pounce-wasm` crate is `publish = false` and inherits
+`version.workspace`, so it cannot drift on version — the risk is different:
+the demo pages are rebuilt and deployed from `main` on every docs
+deployment, so a change that breaks the wasm build breaks the *published
+demo*, not a release artifact you can yank.
+
+- CI runs `WebAssembly build + smoke` on every PR, and the wasm/native
+  parity check covers the whole `crates/pounce-cli/tests/fixtures` set. If
+  you add a solver feature reachable from a `.nl` file, that check is what
+  tells you whether it survives the wasm boundary.
+- A feature that needs threads, the filesystem, or process spawning will
+  **not** work in the browser build (single-threaded, no
+  `SharedArrayBuffer`, WASI shim only). Better to find that in the parity
+  check than in a demo page.
+- After a docs deployment, the pages are live immediately at `/demo/` and
+  `/demo/python/` — there is no release gate in front of them.
 
 ## Yanking
 
