@@ -215,11 +215,18 @@ jobs:
             unset RUSTC_WRAPPER
             d="$PWD"
             while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
-            cd "$d"
-            ldd --version
-            cargo build --release --locked --bin pounce
-            mkdir -p python/pounce/bin
-            cp target/release/pounce python/pounce/bin/pounce
+            # Subshell, deliberately. maturin runs from this SAME script
+            # afterwards and expects to still be in python/. A bare `cd` here
+            # leaked the workspace root into that invocation, where maturin
+            # parsed the workspace Cargo.toml and died with
+            # "missing field `package`".
+            (
+              cd "$d"
+              ldd --version
+              cargo build --release --locked --bin pounce
+              mkdir -p python/pounce/bin
+              cp target/release/pounce python/pounce/bin/pounce
+            )
       - name: Verify bundled CLI honors the manylinux2014 floor
         run: scripts/check-cli-portability.sh python/pounce/bin/pounce 2.17
       - name: Install + smoke (Python API + CLI)
@@ -302,10 +309,17 @@ jobs:
             unset RUSTC_WRAPPER
             d="$PWD"
             while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
-            cd "$d"
-            cargo build --release --locked --bin pounce
-            mkdir -p python/pounce/bin
-            cp target/release/pounce python/pounce/bin/pounce
+            # Subshell, deliberately. maturin runs from this SAME script
+            # afterwards and expects to still be in python/. A bare `cd` here
+            # leaked the workspace root into that invocation, where maturin
+            # parsed the workspace Cargo.toml and died with
+            # "missing field `package`".
+            (
+              cd "$d"
+              cargo build --release --locked --bin pounce
+              mkdir -p python/pounce/bin
+              cp target/release/pounce python/pounce/bin/pounce
+            )
       - name: Install + smoke
         run: |
           # pyomo + numpy (sensitivity needs numpy); networkx + scipy so

@@ -167,12 +167,19 @@ jobs:
             # workspace root rather than assuming a fixed mount path.
             d="$PWD"
             while [ "$d" != "/" ] && [ ! -f "$d/Cargo.toml" ]; do d="$(dirname "$d")"; done
-            cd "$d"
-            ldd --version
-            cargo build --release --locked --bin pounce
-            mkdir -p python/pounce/bin
-            cp target/release/pounce python/pounce/bin/pounce
-            ls -l python/pounce/bin/
+            # Subshell, deliberately. maturin runs from this SAME script
+            # afterwards and expects to still be in python/. A bare `cd` here
+            # leaked the workspace root into that invocation, where maturin
+            # parsed the workspace Cargo.toml and died with
+            # "missing field `package`".
+            (
+              cd "$d"
+              ldd --version
+              cargo build --release --locked --bin pounce
+              mkdir -p python/pounce/bin
+              cp target/release/pounce python/pounce/bin/pounce
+              ls -l python/pounce/bin/
+            )
 
       # The guard that was missing (#452). Every pre-existing check ran on
       # the host that built the binary — the one platform where a glibc floor
