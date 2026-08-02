@@ -491,6 +491,25 @@ impl PySolver {
         Ok(out)
     }
 
+    /// The exact Lagrangian Hessian times a user-space vector, as an
+    /// ndarray in user variable order and natural units (the internal
+    /// Hessian's objective scale is divided out, matching the
+    /// sensitivity-output contract). Entries for fixed (`lb == ub`)
+    /// variables are 0 in and out. One product per call; the
+    /// covariance roadmap's item 2 builds the tangent-recovered
+    /// reduced Hessian from these.
+    fn hessian_vec<'py>(
+        &self,
+        py: Python<'py>,
+        v: Vec<Number>,
+    ) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("hessian_vec: no converged factor (call solve() first)")
+        })?;
+        let out = s.inner.hessian_vec(&v).map_err(solver_error_to_py)?;
+        Ok(out.into_pyarray_bound(py))
+    }
+
     /// The gradient of user constraint row `j` at the converged
     /// iterate, as an ndarray in user variable order (length n), in
     /// **natural (unscaled) units**: the solver's internal Jacobian

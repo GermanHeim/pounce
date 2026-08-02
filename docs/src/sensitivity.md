@@ -420,6 +420,37 @@ tests the value that solve ran under, so setting the option after the
 fact does not change the answer — set it on the `Problem` and solve
 again.
 
+## The information matrix
+
+`information(model)` is the un-inverted sibling of `covariance()`: the
+reduced Hessian over the declared fitted block, from the same single
+solve, in natural units with no `sigma^2` anywhere. For a homoscedastic
+Lagrangian fit, `covariance()` equals `2*sigma^2*inv(information())` on
+the free block. `hessian=` selects the observed (`"lagrangian"`,
+default) or expected (`"gauss-newton"`) form exactly as in
+`covariance()`.
+
+The Lagrangian form is built by tangent recovery against the held
+factorization rather than by inverting the covariance back: the
+K-inverse columns' x-blocks are `T*M`, so `T = Zx*inv(M)` exactly and
+`R = T'HT` with the exact Lagrangian Hessian. The barrier weight
+cancels multiplicatively, so the result carries full precision at any
+barrier parameter, including on pinned parameters where a
+subtract-the-barrier route loses `log10(Sigma/q)` digits.
+
+Membership and warnings follow `covariance()`. One disposition is
+opposite by design: a strongly active (pinned) parameter's entry is
+`S`, the reduction onto the pinned set, NOT a zero row — zero
+information is the opposite of what a pinned parameter carries —
+conditional on the rest of the pinned set, with zero cross blocks to
+the free parameters. Binding constraint rows project the free block on
+both sides (the pseudo-inverse of the projected covariance). An
+indefinite Lagrangian block is returned as computed with a warning
+naming Gauss-Newton as the PSD alternative: refusing would withhold
+the finding that the point is not a minimum or the model is
+over-parameterized. `eigen()` reads identifiability directly: a
+near-zero eigenvalue is a direction the data does not inform.
+
 ## Units and NLP scaling
 
 All sensitivity outputs are in **natural (unscaled) units**. The IPM

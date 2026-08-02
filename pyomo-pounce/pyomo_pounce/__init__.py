@@ -43,6 +43,8 @@ from pyomo_pounce.sens import (
     declare_sens_param,
     estimate,
     gradient,
+    information,
+    Information,
 )
 from pyomo_pounce.preflight import (
     PyomoPreflightReport,
@@ -74,4 +76,6 @@ __all__ = [
     "BlockAnalysisReport",
     "block_repair_plan",
     "BlockRepairPlan",
+    "information",
+    "Information",
 ]

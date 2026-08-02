@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Added — pyomo-pounce: `information()`, the un-inverted sibling of `covariance()` (covariance roadmap item 2, #262)
+
+- The reduced Hessian over the declared fitted block from the same
+  single solve, natural units, no `sigma^2`: for a homoscedastic
+  Lagrangian fit, `covariance()` equals `2*sigma^2*inv(information())`
+  on the free block (tested). Same `hessian=` selector as
+  `covariance()`.
+- The Lagrangian form is built by TANGENT RECOVERY, not by inverting
+  the covariance back or subtracting the barrier off the factor: the
+  K-inverse columns' x-blocks are `T*M`, so `T = Zx*inv(M)` exactly
+  and `R = T'HT` with the exact Lagrangian Hessian. The barrier
+  weight cancels multiplicatively; measured on a pinned model with
+  `Sigma/q ~ 3e10`, the route is exact to machine precision where the
+  subtraction route loses ten digits. A new session primitive,
+  `Solver.hessian_vec(v)` (user-space, natural units), supplies the
+  products.
+- Dispositions per item 1's table, with the sign of one flipped by
+  design: a strongly active parameter returns `S`, the reduction onto
+  the pinned set, NOT a zero row (zero information is the opposite of
+  what a pinned parameter carries), conditional on the rest of the
+  pinned set, zero cross blocks. Binding rows project the free block
+  on both sides, the pseudo-inverse of the projected covariance
+  (tested against `pinv`). The Gauss-Newton product is formed over
+  ALL fitted parameters and sliced last, so the pinned rows exist to
+  build `S` from. An indefinite Lagrangian block returns as computed
+  with a warning naming Gauss-Newton; the detector is unit-pinned
+  since a genuine minimum is PSD by necessity.
+- `covariance()`'s binding-row conditional-information scalar is now
+  EXACT via the same tangent construction (lazily, only solves with a
+  binding row pay the Hessian products), replacing the documented
+  digits-losing factor subtraction.
+- Membership, row handling, and their warnings are shared with
+  `covariance()` (`_classify_fitted_block`), so the two accessors
+  cannot drift.
+
 ### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
 
 - Bound and constraint activity on the fitted parameters now classifies
