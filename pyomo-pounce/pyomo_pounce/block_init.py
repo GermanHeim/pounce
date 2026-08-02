@@ -486,9 +486,9 @@ def _active_view(igraph, model):
     back to a fresh construction (correct diagnostics over speed).
     Away from cancellations the edge sets are identical; the variable
     ORDER within rows can still differ (value substitution changes the
-    linear/nonlinear split), so order-derived tie-breaks and
-    diagnostics listings may come out in a different order than a
-    fresh build's.
+    linear/nonlinear split). Order feeds tie-breaks, so where two
+    answers are equally valid the two views may pick different ones,
+    not merely list the same ones differently.
 
     On pyomo without `IncidenceGraphInterface.subgraph` (< 6.7.1) this
     falls back to a fresh construction: old speed, same behavior.
@@ -565,7 +565,10 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     cancellations (guarded, with a fresh-build fallback) its edge sets
     match a fresh construction, but the variable order within rows may
     differ on models where fixed values change the linear/nonlinear
-    split, so order-derived diagnostics can list in a different order.
+    split. Order feeds tie-breaks, so where two answers are equally
+    valid (which of two variables is reported loose, which member of a
+    degenerate block leads) the shared and fresh views may pick
+    different ones, not merely list the same ones differently.
     It must belong to the model being passed: a graph from another
     model, or from before a structural edit, produces wrong answers
     rather than an error. Omitted, the incidence is built locally
@@ -683,7 +686,10 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
     cancellations (guarded, with a fresh-build fallback) its edge sets
     match a fresh construction, but the variable order within rows may
     differ on models where fixed values change the linear/nonlinear
-    split, so order-derived diagnostics can list in a different order.
+    split. Order feeds tie-breaks, so where two answers are equally
+    valid (which of two variables is reported loose, which member of a
+    degenerate block leads) the shared and fresh views may pick
+    different ones, not merely list the same ones differently.
     It must belong to the model being passed: a graph from another
     model, or from before a structural edit, produces wrong answers
     rather than an error. Omitted, the incidence is built locally
@@ -817,7 +823,10 @@ def block_initialize(
     cancellations (guarded, with a fresh-build fallback) its edge sets
     match a fresh construction, but the variable order within rows may
     differ on models where fixed values change the linear/nonlinear
-    split, so order-derived diagnostics can list in a different order.
+    split. Order feeds tie-breaks, so where two answers are equally
+    valid (which of two variables is reported loose, which member of a
+    degenerate block leads) the shared and fresh views may pick
+    different ones, not merely list the same ones differently.
     It must belong to the model being passed: a graph from another
     model, or from before a structural edit, produces wrong answers
     rather than an error. Omitted, the incidence is built locally

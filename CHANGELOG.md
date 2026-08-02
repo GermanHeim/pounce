@@ -28,7 +28,9 @@ changes.
   when a fixed zero cancels a term, which is guarded (affected rows
   re-derived; a genuine cancellation falls back to a fresh build for
   that pass), while the variable order within rows may differ on
-  models where fixed values change the linear/nonlinear split.
+  models where fixed values change the linear/nonlinear split; order
+  feeds tie-breaks, so equally-valid diagnostics (which variable is
+  reported loose) may resolve differently between the two views.
   `initialize` passes `repair="off"` downstream since its own plan
   already ran. On pyomo older than 6.7.1 (no
   `IncidenceGraphInterface.subgraph`) every pass falls back to the
