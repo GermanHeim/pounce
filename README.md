@@ -125,49 +125,89 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-studio-core`](crates/pounce-studio-core) | Solve-report / iter-dump parsers and diagnostic analysis (foundation for the `pounce-studio` GUI / MCP server).               |
 | [`pounce-studio-pyo3`](crates/pounce-studio-pyo3) | PyO3 `_native` extension exposing `pounce-studio-core` to the `pounce-studio-mcp` Python MCP server.                          |
 
-## Build
+## Install
+
+### With pip (most users)
+
+```sh
+pip install pounce-solver
+```
+
+That is everything: the `pounce` command-line solver, the `pounce` Python
+package, and no toolchain to install — the wheels are prebuilt for Linux,
+macOS, and Windows.
+
+```sh
+pounce problem.nl                       # solve an AMPL .nl file
+python -c "import pounce; print(pounce.__version__)"
+```
+
+For Pyomo models, add the solver plugin:
+
+```sh
+pip install pyomo-pounce
+```
+
+```python
+import pyomo.environ as pyo
+results = pyo.SolverFactory("pounce").solve(model)
+```
+
+Optional extras, none of them required for a normal solve:
+
+| Extra | Install | For |
+|---|---|---|
+| JAX autodiff | `pip install "pounce-solver[jax]"` | `pounce.jax` frontend |
+| PyTorch autodiff | `pip install "pounce-solver[torch]"` | `pounce.torch` frontend |
+| Plots | `pip install "pounce-solver[viz]"` | debugger `viz` / `pounce-dbg-viz` |
+| GAMS link | `pip install "pounce-solver[gams]"` | `option nlp = pounce;` — see [GAMS](docs/src/gams.md) |
+
+### With a container (clusters, or no install at all)
+
+No toolchain, no `pip`, nothing on the host — useful on a cluster, where
+you often cannot install either. The image carries the CLI, the Python API,
+and the Pyomo plugin:
+
+```sh
+docker run --rm -v "$PWD:/work" ghcr.io/jkitchin/pounce:latest problem.nl
+```
+
+Most HPC sites run Apptainer/Singularity rather than Docker; it pulls the
+same image and runs it as your own user:
+
+```sh
+apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.9.0
+apptainer run pounce.sif problem.nl
+```
+
+Pin `X.Y.Z` for anything you need to reproduce later — `latest` moves.
+`make docker` builds the same image from your working tree instead. Full
+details, including a Slurm example: [Docker & Containers](docs/src/docker.md).
+
+### From source
 
 Prerequisites: a stable Rust toolchain. Nothing else for the default
-build.
+build — no Fortran, no HSL, no system BLAS.
 
 ```sh
 make            # release build of the workspace
 make test       # run all tests
 make clippy     # lint
 make doc        # rustdoc
+make install    # installs to $HOME/.local
 ```
 
-To build with the HSL MA57 backend (requires `libcoinhsl` discoverable
-by the linker):
+`make install` drops the `pounce` binary into `$PREFIX/bin` and the
+`libpounce_cinterface` shared library into `$PREFIX/lib` (override with
+`sudo make install PREFIX=/usr/local`). Make sure `$HOME/.local/bin` is on
+your `PATH`.
+
+To build with the HSL MA57 backend instead of the default pure-Rust FERAL
+one (requires `libcoinhsl` discoverable by the linker):
 
 ```sh
 cargo build -p pounce-cli --release --features ma57
 ```
-
-## Install
-
-```sh
-make install                # installs to $HOME/.local
-sudo make install PREFIX=/usr/local   # or system-wide
-```
-
-This drops the `pounce` binary into `$PREFIX/bin` and the
-`libpounce_cinterface` shared library into `$PREFIX/lib`. Make sure
-`$HOME/.local/bin` is on your `PATH`.
-
-### Container image
-
-No toolchain, no `pip install` — useful on a cluster, where you often
-cannot install one anyway. The image carries the CLI, the Python API,
-and the Pyomo plugin:
-
-```sh
-docker run --rm -v "$PWD:/work" ghcr.io/jkitchin/pounce:latest problem.nl
-apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.9.0
-```
-
-`make docker` builds the same image from your working tree instead. See
-[docs/src/docker.md](docs/src/docker.md).
 
 ## Usage
 
