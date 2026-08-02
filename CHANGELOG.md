@@ -9,6 +9,74 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — feasible convex QPs reported locally infeasible on the NLP path
+
+- With `solver_selection=nlp`, POUNCE reported `Converged to a point of
+  local infeasibility` on 15 Maros-Mészáros convex QPs that are feasible
+  and that POUNCE's own `qp-ipm` path solves to optimality (#446). A
+  confident wrong answer, not a failure: Pyomo maps
+  `Infeasible_Problem_Detected` into the infeasible family, so a caller
+  reads it as a modelling error. QSCSD1 is the clearest case — the verdict
+  was rendered at a converged KKT point whose constraint violation was
+  `9.2e-15` and dual infeasibility `2.8e-14`, with an objective agreeing
+  with the `qp-ipm` optimum to six figures.
+- One cause for all 15, in the scale-relative feasibility measure added by
+  #385 and extended to equality rows by #390. It divides a row's violation
+  by that row's *declared* magnitude — the pre-fold RHS, or the declared
+  bounds — and abstained only when that magnitude was **exactly** zero.
+  Every one of the 15 carries rows whose declared magnitude is `1e-17` to
+  `1e-16`: rounding residue from the netlib→`.nl` conversion, `2^-53`
+  written where the model says `0`. The row's residual cannot be driven
+  below its own floating-point noise floor either, so the ratio was noise
+  over noise. QSCSD1 read 81× violated, which vetoed its success
+  certificate at iteration 15, kept the solver grinding to iteration 77
+  past a solution it already had, and then armed the rapid-infeasibility
+  pre-filter that issued the verdict.
+- "Zero" is now read numerically. A row abstains once its declared
+  magnitude sinks under its own noise floor, `κ · eps · max_j |∂g_i/∂x_j| ·
+  ‖x‖_∞` — the finest residual the solver could drive that row to, which is
+  what makes a declared magnitude below it residue rather than data. The
+  comparison keeps the scale invariance that is the whole point of the
+  measure: under a row scaling both the floor and the magnitude carry
+  `dc_i`, so the verdict is the same however the row is written. An
+  absolute cutoff on the magnitude would have thrown that away.
+- The floor models **how finely the solver can place `x`**, not how
+  accurately a row evaluates. A Newton step comes from a linear solve with
+  norm-wise backward error, so every component of `x` is positioned to
+  about `eps · ‖x‖_∞`: a variable at `1e-8` inside a vector of norm `2.7`
+  is still only resolved to `~6e-16`. The dependence on the *global*
+  `‖x‖_∞` is therefore deliberate — `x` is one vector solved for jointly.
+  The seemingly sharper per-row alternative, the exact term sum
+  `Σ_j |a_ij x_j|`, was implemented and measured: it models the row's
+  evaluation error, which is not what limits the residual, and it regressed
+  QETAMACR, QSCORPIO and QPILOTNO. QSCORPIO's row 93 parks its variables
+  near a zero bound at `~1e-8`, so the term sum drops its floor to `8.5e-22`
+  and `−5.6e-17` of rounding residue reads as real data again, at an iterate
+  resolved only to `~6e-16`. A unit test pins the `‖x‖_∞` dependence.
+- A row whose Jacobian is empty abstains outright. Every variable it
+  mentions has been fixed and substituted out, leaving a constant `0 = b`
+  that no iterate can move — a statement about the model, which presolve
+  certifies up front, rather than a residual to judge an iterate by.
+  QPILOTNO's row 150 reduces to `0 = −2.22e-16` this way and pinned the
+  relative measure at 100% for all 375 iterations.
+- Both blocks are fixed, not just the equality one: QPILOTNO also carries
+  43 inequality bounds at `1e-17`–`1e-15`, and one of them — a row sitting
+  at exactly `d(x) = 0` against a declared bound of `1.1e-16` — drove the
+  verdict from the inequality side.
+- Measured on the `qp_convex` head-to-head (`make benchmark-qp-convex`),
+  the NLP arm goes from **113/138 solved in 525.7 s to 137/138 in 504.4 s**
+  — more problems solved, in less total time. All 15 wrong
+  infeasibility verdicts are gone, and so are nine further failures with
+  the same origin — five `Search_Direction_Becomes_Too_Small` and four
+  `Solver_Error`, all cases of the veto pushing the solver past a solution
+  it had already reached until the step computation broke down. No problem
+  regressed, and the iteration counts of the newly-solved problems mostly
+  fall (QSCSD1 77→15, QSCSD8 121→20). The one remaining failure, BOYD2's
+  300 s CPU-limit timeout, is pre-existing and unrelated.
+- Masked in default use, because `solver_selection=auto` routes convex QPs
+  to `qp-ipm`. Anyone driving POUNCE as a general NLP solver on a convex QP
+  hit it.
+
 ### Fixed — restoration had no verdict when its sub-problem converged
 
 - `IpRestoConvCheck::CheckConvergence` is two layers, and pounce ported
