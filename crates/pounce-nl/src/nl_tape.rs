@@ -58,6 +58,14 @@ pub enum TapeOp {
     Acosh(usize),
     Asinh(usize),
     Atanh(usize),
+    /// Gauss error function `erf(vals[a])` (issue #469). Unlike the other
+    /// transcendentals here it has no AMPL `.nl` opcode — AMPL has no `erf`
+    /// — so it is reachable only through the in-memory `Expr` path
+    /// (`UnaryOp::Erf`), which is exactly the case it was added for:
+    /// modeling frontends that build a tape directly instead of round-
+    /// tripping through `.nl`. Smooth everywhere, with closed-form
+    /// derivatives `erf'(u) = 2/√π·exp(-u²)` and `erf''(u) = -2u·erf'(u)`.
+    Erf(usize),
     /// Two-argument arctangent `atan2(vals[a], vals[b])` (operands are
     /// `(y, x)`, matching AMPL's `atan2(y, x)` / `.nl` opcode o48).
     Atan2(usize, usize),
@@ -113,6 +121,32 @@ pub struct FuncallData {
 pub enum TapeFuncallArg {
     Tape(usize),
     Str(String),
+}
+
+/// Gauss error function, the value arm of [`TapeOp::Erf`].
+///
+/// Delegates to `libm` (the rust-lang port of musl's libm) rather than a
+/// series approximation: `erf` shows up inside residuals, so a 1e-7-accurate
+/// Abramowitz–Stegun fit would cap the achievable KKT error well above what
+/// the IPM asks for.
+#[inline]
+pub(crate) fn erf(u: f64) -> f64 {
+    libm::erf(u)
+}
+
+/// `erf'(u) = 2/√π · exp(-u²)`.
+///
+/// The AD sweeps all call this (rather than each inlining the constant) so
+/// the tangent and adjoint arms of [`TapeOp::Erf`] cannot drift apart.
+#[inline]
+pub(crate) fn erf_d1(u: f64) -> f64 {
+    std::f64::consts::FRAC_2_SQRT_PI * (-u * u).exp()
+}
+
+/// `erf''(u) = -2u · erf'(u)`.
+#[inline]
+pub(crate) fn erf_d2(u: f64) -> f64 {
+    -2.0 * u * erf_d1(u)
 }
 
 /// Evaluate a relational opcode on two scalar values, returning the
@@ -223,6 +257,7 @@ impl Tape {
                 TapeOp::Acosh(a) => vals[*a].acosh(),
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Erf(a) => erf(vals[*a]),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
                 TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
                 TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
@@ -415,6 +450,9 @@ impl Tape {
                     let u = vals[*j];
                     adj[*j] += a / (1.0 - u * u);
                 }
+                TapeOp::Erf(j) => {
+                    adj[*j] += a * erf_d1(vals[*j]);
+                }
                 TapeOp::Atan2(l, r) => {
                     let y = vals[*l];
                     let x = vals[*r];
@@ -572,6 +610,7 @@ impl Tape {
                     let u = vals[*a];
                     dot[*a] / (1.0 - u * u)
                 }
+                TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -653,6 +692,7 @@ impl Tape {
                 TapeOp::Acosh(a) => vals[*a].acosh(),
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Erf(a) => erf(vals[*a]),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
                 TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
                 TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
@@ -795,6 +835,7 @@ impl Tape {
                     let u = vals[*a];
                     dot[*a] / (1.0 - u * u)
                 }
+                TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -1053,6 +1094,13 @@ impl Tape {
                     let d = 1.0 - u * u;
                     let gp = 1.0 / d;
                     let gpp = 2.0 * u / (d * d);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Erf(a) => {
+                    let u = vals[*a];
+                    let gp = erf_d1(u);
+                    let gpp = erf_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
@@ -1367,6 +1415,13 @@ impl Tape {
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
+                    TapeOp::Erf(a) => {
+                        let u = v[*a];
+                        let gp = erf_d1(u);
+                        let gpp = erf_d2(u);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
                     TapeOp::Atan2(a, b) => {
                         let y = v[*a];
                         let x = v[*b];
@@ -1506,6 +1561,7 @@ impl Tape {
                 | TapeOp::Asin(a)
                 | TapeOp::Acosh(a)
                 | TapeOp::Asinh(a)
+                | TapeOp::Erf(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], &mut pairs);
                     var_sets[*a].clone()
@@ -1630,6 +1686,7 @@ fn build_recursive(
                 UnaryOp::Acosh => TapeOp::Acosh(v),
                 UnaryOp::Asinh => TapeOp::Asinh(v),
                 UnaryOp::Atanh => TapeOp::Atanh(v),
+                UnaryOp::Erf => TapeOp::Erf(v),
             });
             idx
         }
@@ -2358,6 +2415,7 @@ fn build_into_summand(
                 UnaryOp::Acosh => TapeOp::Acosh(v),
                 UnaryOp::Asinh => TapeOp::Asinh(v),
                 UnaryOp::Atanh => TapeOp::Atanh(v),
+                UnaryOp::Erf => TapeOp::Erf(v),
             }));
             i
         }
@@ -2640,6 +2698,7 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => out[*a].clone(),
             TapeOp::Cmp(_, _, _)
             | TapeOp::And(_, _)
@@ -2733,6 +2792,7 @@ fn summand_sparsity(
                 | TapeOp::Asin(a)
                 | TapeOp::Acosh(a)
                 | TapeOp::Asinh(a)
+                | TapeOp::Erf(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], pairs);
                     var_sets[*a].clone()
@@ -2786,6 +2846,7 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Asin(a)
         | TapeOp::Acosh(a)
         | TapeOp::Asinh(a)
+        | TapeOp::Erf(a)
         | TapeOp::Atanh(a) => (Some(*a), None),
         // Conditional / logical TapeOps never reach the HybridTape
         // operand-walk (build_into_summand rejects them). Cmp/And/Or
@@ -2846,6 +2907,7 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         TapeOp::Acosh(a) => vals[*a].acosh(),
         TapeOp::Asinh(a) => vals[*a].asinh(),
         TapeOp::Atanh(a) => vals[*a].atanh(),
+        TapeOp::Erf(a) => erf(vals[*a]),
         TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -2972,6 +3034,9 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             let u = vals[*j];
             adj[*j] += a / (1.0 - u * u);
         }
+        TapeOp::Erf(j) => {
+            adj[*j] += a * erf_d1(vals[*j]);
+        }
         TapeOp::Atan2(l, r) => {
             let y = vals[*l];
             let x = vals[*r];
@@ -3097,6 +3162,7 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
             let u = vals[*a];
             dot[*a] / (1.0 - u * u)
         }
+        TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
@@ -3350,6 +3416,13 @@ fn ror_step(
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
+        TapeOp::Erf(a) => {
+            let u = vals[*a];
+            let gp = erf_d1(u);
+            let gpp = erf_d2(u);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
@@ -3479,6 +3552,7 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => {
                 emit_self(&var_sets[*a], &mut pairs);
                 var_sets[*a].clone()
@@ -3770,6 +3844,96 @@ mod tests {
             mul(var(0), var(2)),
         ]);
         grad_and_hess_match_fd(&e, &[0.4, 1.8, 0.3], 1e-5);
+    }
+
+    #[test]
+    fn erf_value_matches_reference() {
+        // Reference values from the standard erf (musl / C99), to full
+        // double precision. Pinning these guards the `libm` delegation:
+        // a swap to a series approximation would fail here long before it
+        // showed up as a mysteriously loose KKT residual.
+        let t = Tape::build(&unary(UnaryOp::Erf, var(0)));
+        for (x, want) in [
+            (0.0, 0.0),
+            (0.5, 0.520_499_877_813_046_5),
+            (1.0, 0.842_700_792_949_714_9),
+            (-1.0, -0.842_700_792_949_714_9),
+            (2.0, 0.995_322_265_018_952_7),
+            (3.0, 0.999_977_909_503_001_4),
+        ] {
+            let got = t.eval(&[x]);
+            assert!(
+                (got - want).abs() < 1e-15,
+                "erf({x}): got {got:.17e}, want {want:.17e}"
+            );
+        }
+        // Odd and saturating: the two properties a wrong implementation
+        // most often breaks.
+        assert!((t.eval(&[-0.3]) + t.eval(&[0.3])).abs() < 1e-16);
+        assert!((t.eval(&[10.0]) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn erf_grad_and_hessian_match_fd() {
+        // f = erf(x0) + erf(2*x1) + x0*x1. The inner `2*x1` makes the
+        // chain rule non-trivial, so a missing factor in the tangent or
+        // adjoint arm shows up rather than cancelling.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Erf, var(0)),
+            unary(UnaryOp::Erf, mul(cnst(2.0), var(1))),
+            mul(var(0), var(1)),
+        ]);
+        grad_and_hess_match_fd(&e, &[0.4, -0.7], 1e-5);
+    }
+
+    #[test]
+    fn erf_directional_hessian_matches_accumulated() {
+        // `hessian_directional` (the HVP / coloring sweep) and
+        // `hessian_accumulate` (the sparse-entry sweep) are separate
+        // match arms over the same op — the easiest place for an erf
+        // second derivative to be right in one and wrong in the other.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Erf, var(0)),
+            unary(UnaryOp::Erf, mul(var(0), var(1))),
+        ]);
+        let tape = Tape::build(&e);
+        let x = [0.6, -0.9];
+        let n = x.len();
+
+        let pairs: Vec<(usize, usize)> = tape.hessian_sparsity().into_iter().collect();
+        let hess_map: HashMap<(usize, usize), usize> =
+            pairs.iter().enumerate().map(|(k, p)| (*p, k)).collect();
+        let mut acc = vec![0.0; pairs.len()];
+        tape.hessian_accumulate(&x, 1.0, &hess_map, &mut acc);
+
+        // One directional product per unit seed reproduces column j.
+        let ops = tape.ops.len();
+        let mut vals = vec![0.0; ops];
+        tape.forward_into(&x, &mut vals);
+        for j in 0..n {
+            let mut seed = vec![0.0; n];
+            seed[j] = 1.0;
+            let mut col = vec![0.0; n];
+            let (mut dot, mut adj, mut adj_dot) = (vec![0.0; ops], vec![0.0; ops], vec![0.0; ops]);
+            tape.hessian_directional(
+                &vals,
+                &seed,
+                1.0,
+                &mut col,
+                &mut dot,
+                &mut adj,
+                &mut adj_dot,
+            );
+            for i in 0..n {
+                let (r, c) = if i >= j { (i, j) } else { (j, i) };
+                let want = hess_map.get(&(r, c)).map_or(0.0, |&k| acc[k]);
+                assert!(
+                    (col[i] - want).abs() < 1e-12,
+                    "H[{i},{j}]: directional={:.6e} accumulated={want:.6e}",
+                    col[i]
+                );
+            }
+        }
     }
 
     #[test]

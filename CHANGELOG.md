@@ -9,6 +9,53 @@ changes.
 
 ## [Unreleased]
 
+### Added — Python: in-memory model construction, Hessian-vector products, and an `erf` tape op (#469)
+
+Everything below already existed in the Rust core; the gap was that none
+of it was reachable from Python, which forced a frontend with its own
+expression DAG (discopt) to round-trip through a temporary `.nl` file.
+
+- **`pounce.build_nl_problem(...)` + `pounce.NlExpr`** — build the
+  expression DAG directly and hand it to the AD tape, with no `.nl` file
+  anywhere in the loop. `NlExpr` supports the Python arithmetic operators
+  (numbers accepted on either side) plus method-form transcendentals
+  (`sqrt exp log log10 sin cos tan asin acos atan sinh cosh tanh asinh
+  acosh atanh erf`) and static-method nodes for the multi-argument /
+  control-flow cases (`sum`, `atan2`, `min`, `max`, `compare`, `select`,
+  `logical_and` / `logical_or` / `logical_not`). The result is the same
+  `NlProblem` class `read_nl` returns, with the same evaluator surface,
+  and it feeds `solve_nlp_batch`.
+  The round trip this replaces was not just slower but *lossy*: `.nl`
+  writers commonly refuse `atan2` (no two-argument funcall path) and
+  `min`/`max` (they force a DNLP model type), and AMPL has no `erf`
+  opcode at all — yet the tape differentiates all three natively.
+- **`pounce.parse_nl_text(text, var_names=None, con_names=None)`** — the
+  same parser `read_nl` uses, fed a string instead of a path, for a
+  frontend that generates `.nl` in memory. Names are passed explicitly
+  since there are no sibling `.col` / `.row` files to read.
+- **`NlProblem.hessian_vector_product(x, v, lam=None, obj_factor=1.0)`**
+  — matrix-free `(obj_factor·∇²f + Σᵢ lamᵢ·∇²gᵢ)·v`, one
+  forward-over-reverse AD pass per tape seeded with `v` directly.
+  `hessian(...)` runs one such pass *per Hessian color* and decodes the
+  compressed columns, so the matrix-free call is cheaper by roughly the
+  chromatic number of the coloring — the operator a Newton–Krylov /
+  truncated-CG step wants on a model where `∇²L` is impractical to form.
+  Available on every `NlProblem` regardless of how it was built.
+- **`Erf` tape op** (`TapeOp::Erf` / `UnaryOp::Erf`), the one operator in
+  the gap analysis that is not decomposable into ops pounce already had.
+  Value via `libm` (the rust-lang port of musl's libm — the classic
+  Abramowitz–Stegun series is only ~1e-7 accurate, which would cap the
+  achievable KKT residual), derivatives closed-form:
+  `erf'(u) = 2/√π·exp(-u²)`, `erf''(u) = -2u·erf'(u)`. Reachable only
+  through the in-memory path, since no `.nl` opcode maps to it. The
+  CLI's `HessianProgram` fast path does not lower it, so an `erf` model
+  transparently uses the tape interpreter, as it already does for the
+  other transcendentals.
+
+New Rust API alongside the bindings: `NlProblem::from_expressions` /
+`NlProblemParts`, `NlTnlp::hessian_vector_product`, and
+`nl_reader::render_expression`. No existing API changed behavior.
+
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 
 - `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto

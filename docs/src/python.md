@@ -184,6 +184,99 @@ back to the standard full-space path transparently**, so the hook can never
 break a solve; it only changes *how* the identical system is factored, never
 the solution. Honored on the default feral + exact-Hessian path.
 
+## Building a model in memory (`NlExpr` / `build_nl_problem`)
+
+`pounce.read_nl("model.nl")` gives you pounce's native reverse-mode-AD
+evaluators for an AMPL `.nl` file on disk. Two sibling entry points reach
+the same machinery without a file:
+
+* **`pounce.parse_nl_text(text, var_names=None, con_names=None)`** — the
+  same parser, fed a string. For a frontend that already generates `.nl`,
+  this drops the temp file and its cleanup. There are no sibling
+  `.col` / `.row` files to read, so names are passed explicitly.
+* **`pounce.build_nl_problem(...)`** — skip `.nl` entirely and hand over
+  expression trees built from `pounce.NlExpr`.
+
+Both return the same `NlProblem` class `read_nl` does, with the same
+surface: `objective`, `gradient`, `constraints`, `jacobian` /
+`jacobian_structure`, `hessian` / `hessian_structure`,
+`hessian_vector_product`, and `variant`. They also feed `solve_nlp_batch`.
+
+```python
+import pounce
+
+x = pounce.NlExpr.vars(2)                      # [Var(0), Var(1)]
+rosen = (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
+
+p = pounce.build_nl_problem(
+    n=2,
+    objective=rosen,
+    constraints=[x[0] ** 2 + x[1] ** 2],
+    g_l=[0.0], g_u=[2.0],
+    x0=[-1.2, 1.0],
+)
+
+p.objective(p.x0)          # float
+p.gradient(p.x0)           # ndarray[n]
+(x_star, info), = pounce.solve_nlp_batch([p])
+```
+
+Bounds default to unbounded (`±1e19`, the `.nl` sentinel) and `x0` to
+zeros. `minimize=False` maximizes; as with a parsed `maximize` model, the
+returned objective/gradient/Hessian are negated so that minimizing them
+solves the model, and `p.minimize` records the original sense.
+
+`NlExpr` supports the Python arithmetic operators (`+ - * / ** -`, `abs`,
+with plain numbers accepted on either side) plus method-form
+transcendentals: `sqrt exp log log10 sin cos tan asin acos atan sinh cosh
+tanh asinh acosh atanh erf`. Multi-argument and control-flow nodes are
+static methods: `NlExpr.sum(iterable)`, `NlExpr.atan2(y, x)`,
+`NlExpr.min(*args)`, `NlExpr.max(*args)`, `NlExpr.compare(op, a, b)`,
+`NlExpr.select(cond, then_, else_)`, and `NlExpr.logical_and` /
+`logical_or` / `logical_not`.
+
+Comparison is spelled `NlExpr.compare("<", a, b)` rather than `a < b`:
+overloading Python's comparison operators would break every ordinary use
+of an expression in a container. The result is piecewise constant (zero
+derivative), and pairs with `NlExpr.select`.
+
+**Why not just write `.nl`?** Because the round trip is lossy. `.nl`
+writers commonly refuse `atan2` (no two-argument funcall path) and
+`min`/`max` (they force a DNLP model type), and AMPL has no `erf` opcode
+at all — yet pounce's tape differentiates all three natively. Built here,
+they survive:
+
+```python
+x = pounce.NlExpr.vars(2)
+p = pounce.build_nl_problem(n=2, objective=pounce.NlExpr.sum([
+    pounce.NlExpr.atan2(x[0], x[1]),
+    pounce.NlExpr.min(x[0], x[1]),
+    x[0].erf(),
+]))
+```
+
+For checking a subexpression before wiring it into a model, `NlExpr` has
+`.eval(x)`, `.gradient(x)`, and `.variables()`, which build a one-off tape
+for that expression alone.
+
+### Hessian-vector products
+
+`NlProblem.hessian_vector_product(x, v, lam=None, obj_factor=1.0)` returns
+`(obj_factor·∇²f + Σᵢ lamᵢ·∇²gᵢ) · v` without ever forming the Hessian —
+one forward-over-reverse AD pass per tape, seeded with `v` directly.
+`hessian(...)` instead runs one such pass *per Hessian color* and decodes
+the compressed columns into the sparse lower triangle, so on a large model
+the matrix-free call is cheaper by roughly the chromatic number of the
+coloring. It is the operator a Newton–Krylov / truncated-CG step wants.
+
+```python
+Hv = p.hessian_vector_product(x, v)                 # objective block only
+Hv = p.hessian_vector_product(x, v, lam, 1.0)       # full Lagrangian
+```
+
+Available on every `NlProblem`, however it was built — `read_nl`,
+`parse_nl_text`, `build_nl_problem`, or `variant`.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

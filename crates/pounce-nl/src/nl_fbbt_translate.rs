@@ -129,7 +129,13 @@ impl Builder {
                     | UnaryOp::Asin
                     | UnaryOp::Acosh
                     | UnaryOp::Asinh
-                    | UnaryOp::Atanh => {
+                    | UnaryOp::Atanh
+                    // `erf` is monotone and bounded in (-1, 1), so it *could*
+                    // propagate intervals exactly — but FbbtOp has no `Erf`
+                    // kernel, and adding one is a separate concern from
+                    // making the tape differentiate it (issue #469). Opaque
+                    // is the conservative answer: no tightening, never wrong.
+                    | UnaryOp::Erf => {
                         let _ = a;
                         self.emit(FbbtOp::Opaque)
                     }

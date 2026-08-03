@@ -33,7 +33,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use pounce_common::types::{Index, Number};
-use pounce_nl::nl_reader::{NlTnlp, NlVariation, read_nl_file};
+use pounce_nl::nl_reader::{NlTnlp, NlVariation, parse_nl_text as parse_nl_text_rs, read_nl_file};
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 
 /// A `.nl` model loaded through pounce's reader, exposing its evaluators.
@@ -311,6 +311,42 @@ impl PyNlProblem {
         Ok(values.into_pyarray_bound(py))
     }
 
+    /// Hessian-vector product of the Lagrangian:
+    /// `(obj_factor·∇²f + Σ_i lam_i·∇²g_i) · v`, length `n`.
+    ///
+    /// Matrix-free: one forward-over-reverse AD pass per tape, seeded with
+    /// `v` directly. [`Self::hessian`] instead runs one such pass *per
+    /// Hessian color* and decodes the compressed columns into the sparse
+    /// lower triangle, so on a model where materializing `∇²L` is
+    /// impractical — the case a Newton–Krylov / truncated-CG step is built
+    /// for — this is the cheaper call by the chromatic number of the
+    /// coloring.
+    ///
+    /// `lam` defaults to zeros (the objective Hessian alone); `obj_factor`
+    /// defaults to 1.0. Sign convention matches [`Self::hessian`].
+    #[pyo3(signature = (x, v, lam=None, obj_factor=1.0))]
+    fn hessian_vector_product<'py>(
+        &self,
+        py: Python<'py>,
+        x: &Bound<'_, PyAny>,
+        v: &Bound<'_, PyAny>,
+        lam: Option<&Bound<'_, PyAny>>,
+        obj_factor: Number,
+    ) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let xv = decode_vec(x, self.n, "hessian_vector_product: x")?;
+        let vv = decode_vec(v, self.n, "hessian_vector_product: v")?;
+        let lamv = match lam {
+            Some(l) => Some(decode_vec(l, self.m, "hessian_vector_product: lam")?),
+            None => None,
+        };
+        let mut out = vec![0.0; self.n];
+        self.tnlp
+            .borrow_mut()
+            .hessian_vector_product(&xv, &vv, obj_factor, lamv.as_deref(), &mut out)
+            .map_err(PyValueError::new_err)?;
+        Ok(out.into_pyarray_bound(py))
+    }
+
     /// Clone this model with per-instance overrides applied — the
     /// "one structure, many bound / starting-point variations" case of
     /// batched solving (pounce#126): parametric sweeps, multi-start,
@@ -427,4 +463,52 @@ pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
     // not panic across the pyo3 boundary as an uncatchable PanicException.
     let tnlp = NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
     PyNlProblem::from_tnlp(tnlp, "read_nl")
+}
+
+/// Parse `.nl` *text* — the same content [`read_nl`] would read off disk —
+/// and return its evaluable [`PyNlProblem`] (issue #469).
+///
+/// This is the no-filesystem route for a frontend that generates `.nl`
+/// in memory: no temp file, no cleanup, no `.nl`-writer-dialect surprises
+/// from a path that never existed. There are no sibling `.col` / `.row`
+/// files to read, so pass `var_names` / `con_names` explicitly if the
+/// model has names worth reporting in diagnostics.
+///
+/// For a frontend that has its own expression DAG, `build_nl_problem` is
+/// the better door still: `.nl` cannot spell `atan2`, `min`/`max`, or
+/// `erf`, all of which the tape evaluates natively.
+#[pyfunction]
+#[pyo3(signature = (text, var_names=None, con_names=None))]
+pub fn parse_nl_text(
+    text: &str,
+    var_names: Option<Vec<String>>,
+    con_names: Option<Vec<String>>,
+) -> PyResult<PyNlProblem> {
+    let mut prob =
+        parse_nl_text_rs(text).map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
+
+    let check = |what: &str, names: &[String], want: usize| -> PyResult<()> {
+        if names.len() == want {
+            Ok(())
+        } else {
+            Err(PyValueError::new_err(format!(
+                "parse_nl_text: {what} has length {}, expected {want}",
+                names.len()
+            )))
+        }
+    };
+    if let Some(names) = var_names {
+        check("var_names", &names, prob.n)?;
+        prob.var_names = names;
+    }
+    if let Some(names) = con_names {
+        check("con_names", &names, prob.m)?;
+        prob.con_names = names;
+    }
+
+    // `try_new` for the same reason `read_nl` uses it: an unresolvable
+    // AMPL imported function must be a catchable Python error, not a panic.
+    let tnlp =
+        NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
+    PyNlProblem::from_tnlp(tnlp, "parse_nl_text")
 }
