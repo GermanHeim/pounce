@@ -2301,17 +2301,27 @@ def information(model, hessian="lagrangian", wrt=None):
         # opposite of what a pinned parameter carries. Conditional on
         # the rest of the pinned set (item 1's caveat).
         if free:
-            try:
-                S = (R[np.ix_(active, active)]
-                     - R[np.ix_(active, free)]
-                     @ np.linalg.solve(R[np.ix_(free, free)],
-                                       R[np.ix_(free, active)]))
-            except np.linalg.LinAlgError as e:
+            # rank-gate the free block before the solve: whether LAPACK
+            # raises on a singular system is BLAS-dependent (the CI
+            # wheel job's fresh numpy returned garbage where the local
+            # build raised), the same non-determinism the wrt gates
+            # exist for; the exception clause stays as the last resort
+            R_FF = R[np.ix_(free, free)]
+            singular = np.linalg.matrix_rank(R_FF) < len(free)
+            if not singular:
+                try:
+                    S = (R[np.ix_(active, active)]
+                         - R[np.ix_(active, free)]
+                         @ np.linalg.solve(R_FF,
+                                           R[np.ix_(free, active)]))
+                except np.linalg.LinAlgError:
+                    singular = True
+            if singular:
                 raise RuntimeError(
                     "information: the free block is singular, so the "
                     "pinned parameters' conditional information S is not "
                     "defined; the free block members are linearly "
-                    "dependent") from e
+                    "dependent")
         else:
             S = R[np.ix_(active, active)]
         info_mat[np.ix_(active, active)] = S
