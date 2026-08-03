@@ -500,6 +500,38 @@ same classification the block members get, applied per candidate as a
 singleton block, so it is scale-invariant; only near-bound variables
 pay the extra backsolve.
 
+## Keeping the factor: retain_kkt()
+
+The solve factors the KKT matrix to solve the NLP; the only question is
+whether that factor is kept for post-solve queries. Any declaration
+keeps it. `retain_kkt(model)` keeps it with no declaration at all,
+which is what the declaration-free `wrt=` flow needs: the MHE case,
+where the arrival state and the parameters are each queried by `wrt=`
+and neither is THE fitted set. It defaults off, so a solve with no
+sensitivity pays nothing.
+
+```python
+retain_kkt(m)
+SolverFactory("pounce").solve(m)
+arrival = covariance(m, sigma_sq=s2, wrt=m.x[:, t0])
+params = information(m, wrt=[m.k1, m.k2])
+```
+
+| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+|---|---|---|---|
+| nothing | no | error | error |
+| `declare_fitted(S)` | yes | over S | over T |
+| `retain_kkt()` only | yes | error, no default | over T |
+| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+
+The retention policy in one place: the factor is kept if anything is
+declared or `retain_kkt()` was called, and a `Covariance` or
+`Information` result whose lazy `conditioned_on` has not been read
+keeps the session alive through its pending computation until first
+access. Noise is a separate question: `retain_kkt()` keeps the factor,
+not a noise model, so `covariance()` still needs `sigma_sq=`,
+`n_data=`, or declared residuals.
+
 ## Units and NLP scaling
 
 All sensitivity outputs are in **natural (unscaled) units**. The IPM

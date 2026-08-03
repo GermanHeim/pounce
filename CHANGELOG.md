@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+### Added — pyomo-pounce: `retain_kkt()`, factor retention without declarations (covariance roadmap item 4, #262)
+
+- `retain_kkt(model)` keeps the solve's KKT factorization with nothing
+  declared, so `covariance(model, wrt=block)` and
+  `information(model, wrt=block)` work on any block without a declared
+  default: the MHE case, where the arrival state and the parameters
+  are each queried by `wrt=` and neither is THE fitted set.
+  `covariance(model)` with no block stays an error (no default to
+  reduce onto), an undeclared solve without the call pays nothing
+  exactly as before, and retain beside declarations changes nothing
+  (all four rows of the roadmap's table are tested). The retain intent
+  follows `model.clone()` through the registry's deepcopy.
+- The retention policy is now stated in one place (docs and the
+  `retain_kkt` docstring): declarations keep the factor, `retain_kkt()`
+  keeps it without them, and a result object's unread lazy
+  `conditioned_on` keeps the session alive until first access.
+- The no-session errors from both accessors name `retain_kkt()` as the
+  declaration-free route.
+
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 
 - `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto

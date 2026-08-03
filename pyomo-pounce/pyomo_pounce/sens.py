@@ -79,6 +79,7 @@ class _Registry:
         self.params = []          # pinned inputs: gradient()/estimate()
         self.fitted = []       # free fitted variables: covariance()
         self.residuals = []       # (container, group) pairs: sigma^2
+        self.retain = False       # keep the factor with no declaration
         self.session = None
 
     def __deepcopy__(self, memo):
@@ -89,6 +90,7 @@ class _Registry:
         new.fitted = [copy.deepcopy(p, memo) for p in self.fitted]
         new.residuals = [(copy.deepcopy(r, memo), g)
                          for r, g in self.residuals]
+        new.retain = self.retain
         return new
 
 
@@ -125,6 +127,26 @@ def declare_residual(*containers, group=None):
     to the heteroscedastic sandwich form."""
     for container in containers:
         _registry(container.model()).residuals.append((container, group))
+
+
+def retain_kkt(model):
+    """Keep the KKT factorization after the next solve with NOTHING
+    declared (covariance roadmap item 4). The factor the solve computes
+    anyway is retained for post-solve queries, so `covariance(model,
+    wrt=block)` and `information(model, wrt=block)` work on any block
+    without a declared default: the MHE case, where the arrival state
+    and the parameters are each queried by wrt= and neither is THE
+    fitted set. `covariance(model)` with no block stays an error (there
+    is no default to reduce onto), and a solve without this call and
+    without declarations pays nothing, exactly as before.
+
+    The retention policy in one place: the factor is kept if anything
+    is declared (declare_sens_param / declare_fitted /
+    declare_residual), or if retain_kkt() was called; and a
+    Covariance/Information result whose lazy conditioned_on has not
+    been read keeps the session alive through its pending computation
+    until first access."""
+    _registry(model).retain = True
 
 
 def _reformulate_param_bounds(clone):
@@ -196,7 +218,8 @@ def _reformulate_param_bounds(clone):
 
 def has_declarations(model):
     reg = getattr(model, "__dict__", {}).get(_REG)
-    return bool(reg and (reg.params or reg.fitted or reg.residuals))
+    return bool(reg and (reg.params or reg.fitted or reg.residuals
+                         or reg.retain))
 
 
 # ── the read_nl -> callback-Problem bridge ────────────────────────────────────
@@ -1840,8 +1863,9 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()) then solve with SolverFactory('pounce') "
-            "first")
+            "declare_residual()), or retain_kkt() for the "
+            "declaration-free wrt= flow, then solve with "
+            "SolverFactory('pounce') first")
     # the block: the declared fitted parameters by default, or any
     # block of the solve's variables via wrt= (each call re-reduces
     # onto its own argument, so one solve serves as many blocks as are
@@ -2208,8 +2232,9 @@ def information(model, hessian="lagrangian", wrt=None):
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()) then solve with SolverFactory('pounce') "
-            "first")
+            "declare_residual()), or retain_kkt() for the "
+            "declaration-free wrt= flow, then solve with "
+            "SolverFactory('pounce') first")
     params, rows = _resolve_wrt(session, wrt, "information")
     n_params = len(params)
     wording = "fitted" if wrt is None else "block"
