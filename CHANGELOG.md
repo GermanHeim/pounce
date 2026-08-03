@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `sparse=True` no longer materializes a dense Jacobian/Hessian to detect the pattern (#464)
+
+- Sparsity detection ran *before* the `if sparse:` branch and evaluated
+  the dense `(m, n)` Jacobian and `(n, n)` Lagrangian Hessian at each
+  probe point, so building a sparse problem was `O(n²)` in memory no
+  matter what `sparse` was set to — and `n_probes` defaults to 3 under
+  `sparse=True`, so the sparse path allocated *more* dense matrices than
+  the dense one. A collocation system at `n = 18144` was killed at ten
+  minutes and 5.5 GB; the pattern for the size actually wanted
+  (`n = 91584`) would have been a 67 TB matrix.
+- Detection now sweeps a *block* of rows (VJPs) or columns (JVPs/HVPs)
+  at a time under a fixed byte budget, reducing each block to index
+  pairs before allocating the next. The AD pass count is unchanged —
+  `jacfwd`/`jacrev` are themselves vmapped JVPs/VJPs over the identity
+  basis — but peak memory drops from `O(n²)` to `O(block·n + nnz)`. The
+  detected pattern is bit-identical to the dense probe's, including
+  row-major ordering. On the banded family above: `n = 18144` now builds
+  in 3.3 s at flat RSS, and every size from 2268 up holds the same peak.
+- **New: `jac_pattern=(rows, cols)` / `hess_pattern=(rows, cols)`** on
+  `from_jax`, `JaxProblem`, `from_torch`, and `TorchProblem`. Supplying
+  either skips detection for that matrix entirely — no probe
+  evaluations, and no probabilistic-detection risk. For a
+  full-discretization method the structure is known in closed form
+  before any numbers exist, so rediscovering it by probing inverts the
+  method's main structural advantage. `n = 91584` with supplied patterns
+  builds in 0.9 s and 0.21 GB. Either may be given alone; the other is
+  still probed. The pattern must be a superset of the true structure —
+  extra entries only report zeros, but a missing entry is silently
+  wrong, and nothing evaluates the model to check. Upper-triangle
+  entries in `hess_pattern` are folded onto their mirror, since `H` is
+  symmetric.
+- The CPR column coloring (`_color_columns`), the other half of the
+  build cost, is now vectorized over CSR/CSC gathers instead of
+  per-column Python dict/set loops: 52 s → 2.5 s on a banded `n = 9072`
+  pattern, with entry-for-entry identical output (tested against the
+  previous implementation as an oracle).
+
 ### Added — pyomo-pounce: `information()`, the un-inverted sibling of `covariance()` (covariance roadmap item 2, #262)
 
 - The reduced Hessian over the declared fitted block from the same
