@@ -564,13 +564,46 @@ on a banded family (`python/benchmarks/bench_sparse_ad_83.py`):
 The color count stays constant in `n` while the dense path grows
 linearly, so the gap widens without bound as the problem scales.
 
-**Pattern detection.** Sparsity is found by probing the dense derivative
-at random points and recording where entries are nonzero. Under
+**Pattern detection.** Sparsity is found by probing the derivative at
+random points and recording where entries are nonzero. Under
 `sparse=True` a mis-probe is costlier — it corrupts the compression
 seed, not just a reported nonzero — so detection unions **3 probes** by
-default (vs 1 for the dense path). Override with `n_probes=`. Truly
-value-dependent structure (branchy `where`/`abs`) should still be
-hand-rolled via the `Problem` API.
+default (vs 1 for the dense path). Override with `n_probes=`.
+
+The probe never materializes the full matrix. It sweeps a *block* of
+rows (VJPs) or columns (JVPs/HVPs) at a time under a fixed byte budget
+and reduces each block to index pairs before allocating the next, so
+build memory is bounded by that budget plus the nonzeros found —
+not `O(n²)` (pounce#464). The AD pass count is unchanged: it is still
+`O(n)` passes, which is what `jacfwd`/`jacrev` would have cost anyway.
+
+**Supplying a known pattern.** For a full-discretization method the
+structure is known in closed form before any numbers exist — element `i`
+couples only to element `i-1`, so the Jacobian is block-banded by
+construction. Rediscovering that by probing is `O(n)` AD passes you
+don't need. Hand it over instead:
+
+```python
+prob = from_jax(
+    f, g, n=n, m=m, cl=cl, cu=cu, sparse=True,
+    jac_pattern=(jac_rows, jac_cols),    # (m, n), cyipopt convention
+    hess_pattern=(hess_rows, hess_cols), # lower triangle of the (n, n) Hessian
+)
+```
+
+Detection is skipped entirely for whichever of the two you supply — the
+other is still probed. `JaxProblem`, `from_torch`, and `TorchProblem`
+take the same two arguments. Upper-triangle entries in `hess_pattern`
+are folded onto their mirror, since `H` is symmetric.
+
+The pattern must be a **superset** of the true structure. Extra entries
+are harmless — they report a zero and may cost an extra color. A
+*missing* entry is silently wrong: the dense path drops that derivative,
+and `sparse=True` aliases it into a same-colored reported entry,
+corrupting the others. Nothing validates this against the model, so the
+contract is yours to keep. This is also the only reliable route for
+truly value-dependent structure (branchy `where`/`abs`), which no random
+probe can detect.
 
 ### Differentiable solve
 
