@@ -128,6 +128,19 @@ def test_wrt_conditioned_on_reports_the_outside_active_set():
         warnings.simplefilter("ignore")
         cov_full = covariance(m, sigma_sq=SIGMA**2)
     assert cov_full.conditioned_on == ()
+    # the rank-deficient bypass reports the same conditioning
+    band = covariance(m, sigma_sq=SIGMA**2, wrt=m.r)
+    assert band.conditioned_on == (m.a,)
+    # a wrt block that is ENTIRELY pinned: information is the Schur
+    # onto it (S with nothing free), covariance is the zero row
+    R = 2.0 * X.T @ X
+    S_a = R[0, 0] - R[0, 1] ** 2 / R[1, 1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        info_pin = information(m, wrt=[m.a])
+        cov_pin = covariance(m, sigma_sq=SIGMA**2, wrt=[m.a])
+    assert info_pin[m.a] == pytest.approx(S_a, rel=1e-9)
+    assert cov_pin[m.a] == 0.0
 
 
 def test_wrt_accepted_forms():
@@ -225,6 +238,130 @@ def test_wrt_subblock_schur_is_exact_with_a_pinned_member():
     assert info[m.c] == pytest.approx(S_c, rel=1e-9)
     assert info[m.a, m.c] == 0.0
     assert info.conditioned_on == ()     # c is inside the block
+    # Gauss-Newton profiles through the K-inverse chain and must land
+    # on the same marginal, pinned member included
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gn = information(m, hessian="gauss-newton", wrt=[m.a, m.c])
+    assert gn[m.a] == pytest.approx(R_B[0, 0], rel=1e-9)
+    assert gn[m.c] == pytest.approx(S_c, rel=1e-9)
+
+
+def test_wrt_exact_under_objective_scaling():
+    # gradient-based scaling engaged (df != 1, asserted): the wrt
+    # marginal, the prediction band, the information marginal, and
+    # conditioned_on must all be unchanged in the model's own units.
+    # Every other fixture in this file runs at df = 1, the axis that
+    # bit items 0 through 2
+    scale = 400.0
+    rng = np.random.default_rng(7)
+    x = np.linspace(0.0, 4.0, N)
+    y = scale * (1.5 - 0.7 * x)         + (scale * SIGMA) * rng.standard_normal(N)
+    X = np.column_stack([np.ones(N), x])
+    C = np.linalg.inv(X.T @ X)
+    sig2 = (scale * SIGMA) ** 2
+    m = linear_model(x, y)
+    for i in m.I:
+        m.r[i].set_value(400.0)
+    pyo.SolverFactory("pounce").solve(m)
+    session = m.__dict__["_pounce_sens"].session
+    assert abs(float(session.solver.nlp_scaling["obj"]) - 1.0) > 1e-6
+    assert covariance(m, sigma_sq=sig2, wrt=[m.a])[m.a] == pytest.approx(
+        sig2 * C[0, 0], rel=1e-9)
+    band = covariance(m, sigma_sq=sig2, wrt=m.r)
+    np.testing.assert_allclose(band.matrix, sig2 * (X @ C @ X.T),
+                               rtol=1e-8, atol=1e-12)
+    assert information(m, wrt=[m.a])[m.a] == pytest.approx(
+        2.0 / C[0, 0], rel=1e-9)
+    # and the singleton conditioned_on call under the same scaling
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m2 = linear_model(x, y)
+    for i in m2.I:
+        m2.r[i].set_value(400.0)
+    m2.a.setlb(float(beta[0]) + 0.4 * scale)
+    pyo.SolverFactory("pounce").solve(m2)
+    assert covariance(m2, sigma_sq=sig2,
+                      wrt=[m2.b]).conditioned_on == (m2.a,)
+
+
+def test_wrt_with_a_fixed_variable():
+    # one inert fixed variable ahead of the block in .col order (gh
+    # #450): the three new factor-indexing paths (the marginal slice,
+    # the Schur route's fitted-level columns, the band) must all be
+    # unchanged
+    x, y, X = linear_data()
+    C = np.linalg.inv(X.T @ X)
+    m = linear_model(x, y)
+    m.dead = pyo.Var(bounds=(2.0, 2.0), initialize=2.0)
+    m.deadcon = pyo.Constraint(expr=m.dead * m.dead <= 1e6)
+    pyo.SolverFactory("pounce").solve(m)
+    sess = m.__dict__["_pounce_sens"].session
+    rows = sess.solver.primal_rows(list(range(len(sess.var_names))))
+    assert rows.count(None) == 1, rows
+    assert sess.var_names.index("dead") < sess.var_names.index("a")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert covariance(m, sigma_sq=SIGMA**2,
+                          wrt=[m.a])[m.a] == pytest.approx(
+            SIGMA**2 * C[0, 0], rel=1e-9)
+        assert information(m, wrt=[m.a])[m.a] == pytest.approx(
+            2.0 / C[0, 0], rel=1e-9)
+        band = covariance(m, sigma_sq=SIGMA**2, wrt=m.r)
+    np.testing.assert_allclose(band.matrix, SIGMA**2 * (X @ C @ X.T),
+                               rtol=1e-8, atol=1e-12)
+
+
+def test_wrt_grouped_band_refuses():
+    # per-group noise profiles Jacobians through inv(M), which a
+    # rank-deficient block does not have: the refusal must fire
+    # rather than a silent wrong sandwich
+    x, y, _ = linear_data()
+    n1 = 12
+    m = pyo.ConcreteModel()
+    m.I1 = pyo.RangeSet(0, n1 - 1)
+    m.I2 = pyo.RangeSet(n1, N - 1)
+    m.a = pyo.Var(initialize=0.0)
+    m.b = pyo.Var(initialize=0.0)
+    m.r1 = pyo.Var(m.I1, initialize=0.0)
+    m.r2 = pyo.Var(m.I2, initialize=0.0)
+    m.res1 = pyo.Constraint(
+        m.I1, rule=lambda mm, i: mm.r1[i] == float(y[i]) - mm.a
+        - mm.b * float(x[i]))
+    m.res2 = pyo.Constraint(
+        m.I2, rule=lambda mm, i: mm.r2[i] == float(y[i]) - mm.a
+        - mm.b * float(x[i]))
+    m.obj = pyo.Objective(
+        expr=sum(m.r1[i] ** 2 for i in m.I1)
+        + sum(m.r2[i] ** 2 for i in m.I2))
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r1, group="lo")
+    declare_residual(m.r2, group="hi")
+    pyo.SolverFactory("pounce").solve(m)
+    block = list(m.r1.values()) + list(m.r2.values())
+    with pytest.raises(RuntimeError, match="rank-deficient"):
+        covariance(m, wrt=block)
+
+
+def test_wrt_binding_row_falls_back_smoothly():
+    # a binding general row whose support leaves the block: the Schur
+    # route declines (its projection does not compose simply with
+    # marginalization), the corrected reduction runs instead, the
+    # mixed-row warning fires, and the sibling identity still holds
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m = linear_model(x, y)
+    m.capcon = pyo.Constraint(
+        expr=m.a + m.b <= float(beta[0] + beta[1]) - 0.5)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov_a = covariance(m, sigma_sq=SIGMA**2, wrt=[m.a])
+        info_a = information(m, wrt=[m.a])
+    assert any("capcon" in str(wi.message) for wi in w)
+    assert np.isfinite(cov_a[m.a]) and np.isfinite(info_a[m.a])
+    assert cov_a[m.a] * info_a[m.a] == pytest.approx(
+        2.0 * SIGMA**2, rel=1e-6)
 
 
 def test_wrt_error_paths():
