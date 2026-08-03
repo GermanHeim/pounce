@@ -156,6 +156,13 @@ def test_wrt_accepted_forms():
     assert mixed.matrix.shape == (2, 2)
     assert mixed[m.a] == pytest.approx(
         SIGMA**2 * np.linalg.inv(X.T @ X)[0, 0], rel=1e-9)
+    # a tuple of two Vars is a block of two, not a (Var, iterable)
+    # pair that eats the second Var as an index set (gh #466 review,
+    # blocking): must equal the list form exactly
+    tup = covariance(m, sigma_sq=SIGMA**2, wrt=(m.a, m.b))
+    lst = covariance(m, sigma_sq=SIGMA**2, wrt=[m.a, m.b])
+    assert tup.matrix.shape == (2, 2)
+    np.testing.assert_array_equal(tup.matrix, lst.matrix)
 
 
 def test_wrt_derived_sigma_uses_the_fits_degrees_of_freedom():
@@ -359,9 +366,40 @@ def test_wrt_binding_row_falls_back_smoothly():
         cov_a = covariance(m, sigma_sq=SIGMA**2, wrt=[m.a])
         info_a = information(m, wrt=[m.a])
     assert any("capcon" in str(wi.message) for wi in w)
+    # with wrt= given, the shared diagnostics speak block-relative
+    assert any("variables outside the block" in str(wi.message)
+               for wi in w)
     assert np.isfinite(cov_a[m.a]) and np.isfinite(info_a[m.a])
     assert cov_a[m.a] * info_a[m.a] == pytest.approx(
         2.0 * SIGMA**2, rel=1e-6)
+
+
+def test_wrt_within_count_dependent_block():
+    # two residual coordinates at a DUPLICATED data point are
+    # bit-identical rows of the K-inverse, so the 2-coordinate block
+    # is dependent while sitting below the count gate: the rank gate
+    # must route covariance to the marginal bypass (the rank-1
+    # marginal is legitimate) and information to the refusal, with
+    # the dependence-specific message, not the count claim
+    x, y, X = linear_data()
+    x = x.copy()
+    x[1] = x[0]                          # duplicate the design point
+    y = y.copy()
+    y[1] = y[0]
+    X = np.column_stack([np.ones(N), x])
+    m = linear_model(x, y)
+    pyo.SolverFactory("pounce").solve(m)
+    H = X @ np.linalg.solve(X.T @ X, X.T)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cov = covariance(m, sigma_sq=SIGMA**2, wrt=[m.r[0], m.r[1]])
+    np.testing.assert_allclose(
+        cov.matrix,
+        SIGMA**2 * H[np.ix_([0, 1], [0, 1])], rtol=1e-8)
+    assert cov[m.r[0]] == pytest.approx(cov[m.r[0], m.r[1]], rel=1e-12)
+    with pytest.raises(RuntimeError,
+                       match="linearly dependent coordinates"):
+        information(m, wrt=[m.r[0], m.r[1]])
 
 
 def test_wrt_error_paths():
@@ -370,6 +408,8 @@ def test_wrt_error_paths():
         covariance(m, sigma_sq=SIGMA**2, wrt=[m.a, m.a])
     with pytest.raises(TypeError, match="not names"):
         covariance(m, sigma_sq=SIGMA**2, wrt="a")
+    with pytest.raises(TypeError, match="covariance: wrt element 5"):
+        covariance(m, sigma_sq=SIGMA**2, wrt=5)
     with pytest.raises(ValueError, match="empty block"):
         covariance(m, sigma_sq=SIGMA**2, wrt=[])
     m2 = pyo.ConcreteModel()

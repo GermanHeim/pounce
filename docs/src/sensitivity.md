@@ -478,7 +478,8 @@ not of the question being asked), so a sub-block's numbers agree
 exactly with the corresponding entries of the default answer.
 
 A rank-deficient block, one with more coordinates than the fit has
-degrees of freedom, is the prediction-band case: `covariance()` returns
+degrees of freedom or with linearly dependent coordinates (a
+duplicated design point), is the prediction-band case: `covariance()` returns
 its (rank-deficient) marginal, `2 sigma^2 M`, with the membership
 handling bypassed, and `information()` refuses toward `covariance()`,
 since such a block carries no information matrix. For `information()`,

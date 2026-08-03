@@ -25,8 +25,12 @@ changes.
   freedom: the prediction-band case, e.g. `wrt=m.r` giving
   `sigma^2 X(X'X)^-1 X'`) returns the homoscedastic Lagrangian
   marginal with membership handling bypassed; `information()` refuses
-  it toward `covariance()`. Gated by the count, not by LAPACK, which
-  does not reliably raise on structurally singular blocks.
+  it toward `covariance()`. Gated by the count plus a rank test on the
+  block (a within-count but linearly dependent block, e.g. a
+  duplicated design point, takes the same routes with its own
+  message), not by LAPACK, which does not reliably raise on
+  structurally singular blocks; a dedicated `_SingularBlock` exception
+  stands as the last resort.
 - `information()` routes: a manifold-parameterizing block (size equal
   to the degrees of freedom) gets the exact tangent construction; a
   sub-block of the fitted set gets its marginal by Schur complement
@@ -41,7 +45,10 @@ changes.
   backsolve gives `(K^-1)_ii`, effective curvature
   `|1/(K^-1)_ii - Sigma|`, the shipped ratio edges call it):
   scale-invariant, same theory as the block members, after a cheap
-  `Sigma > sqrt(mu)` prefilter only near-bound variables pay.
+  `Sigma > sqrt(mu)` prefilter only near-bound variables pay. Computed
+  lazily on first access, so calls that never read it cost nothing
+  extra. Diagnostics stay "fitted parameter"-worded on the default
+  path and speak block-relative only under an explicit wrt=.
 
 ### Fixed — `sparse=True` no longer materializes a dense Jacobian/Hessian to detect the pattern (#464)
 

@@ -128,7 +128,7 @@ def test_binding_row_projects_information():
         warnings.simplefilter("always")
         info = information(m)
         cov = covariance(m, sigma_sq=SIGMA_LIN**2)
-    assert any("pins the block combination" in str(x_.message) for x_ in w)
+    assert any("pins the fitted combination" in str(x_.message) for x_ in w)
     # info = 2 sigma^2 * pinv(cov) on the projected free block. The
     # 1e-6 tolerance is load-bearing, not conservative: the binding
     # row couples through its slack barrier and leaves ~1e-6 relative
