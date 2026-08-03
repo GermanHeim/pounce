@@ -1164,25 +1164,25 @@ def _classify_fitted_block(session, params, rows, M, zcols,
         if status == "strongly_active":
             active.append(i)
             warnings.warn(
-                f"{who}: fitted parameter {p.name} is held by its "
+                f"{who}: block member {p.name} is held by its "
                 "bound at the optimum (strongly active); its direction is "
                 "projected out (zero variance, conditional on the active "
                 "bound) and the boundary asymptotics are nonstandard.")
         elif status == "weakly_active":
             warnings.warn(
-                f"{who}: fitted parameter {p.name} sits exactly on "
+                f"{who}: block member {p.name} sits exactly on "
                 "its bound with a vanishing multiplier (weakly active). "
                 "It is kept in the free block with finite variance; "
                 "boundary asymptotics are nonstandard.")
         elif status == "ambiguous":
             warnings.warn(
-                f"{who}: fitted parameter {p.name} has ambiguous "
+                f"{who}: block member {p.name} has ambiguous "
                 "bound activity at the solve's final barrier parameter; "
                 "re-solve with a tighter tol to settle it. It is kept in "
                 "the free block.")
         elif status == "unidentified":
             warnings.warn(
-                f"{who}: fitted parameter {p.name} has curvature "
+                f"{who}: block member {p.name} has curvature "
                 "below the model's own noise scale (unidentified); its "
                 "variance is large rather than small. It is kept in the "
                 "free block.")
@@ -1254,8 +1254,8 @@ def _classify_fitted_block(session, params, rows, M, zcols,
             if rst == "strongly_active":
                 warnings.warn(
                     f"{who}: constraint {cname} is strongly active "
-                    "and involves non-fitted variables; the direction "
-                    "it pins reaches the fitted parameters through the "
+                    "and involves variables outside the block; the "
+                    "direction it pins reaches the block through the "
                     "eliminated variables and cannot be represented by "
                     "a restricted normal, so it is NOT projected. Treat "
                     "the returned variances as not conditioned on this "
@@ -1263,7 +1263,7 @@ def _classify_fitted_block(session, params, rows, M, zcols,
             elif rst in ("weakly_active", "ambiguous", "unidentified"):
                 warnings.warn(
                     f"{who}: constraint {cname} is {rst} and "
-                    "involves non-fitted variables; it is kept "
+                    "involves variables outside the block; it is kept "
                     "unprojected and its barrier weight is not "
                     "corrected for (the restricted direction would be "
                     "the wrong one). Boundary asymptotics are "
@@ -1309,25 +1309,25 @@ def _classify_fitted_block(session, params, rows, M, zcols,
                 s_a = max(q_w - sig_row, 0.0)
             warnings.warn(
                 f"{who}: constraint {cname} is strongly active and "
-                f"pins the fitted combination {combo}; variance along it "
+                f"pins the block combination {combo}; variance along it "
                 "is projected to zero (conditional on the constraint). "
                 f"Conditional information along the combination: {s_a:.6g}.")
         elif status == "weakly_active":
             warnings.warn(
                 f"{who}: constraint {cname} is weakly active on the "
-                f"fitted combination {combo} (multiplier and slack vanish "
+                f"block combination {combo} (multiplier and slack vanish "
                 "together). It is kept unprojected with finite variance; "
                 "boundary asymptotics are nonstandard.")
         elif status == "ambiguous":
             warnings.warn(
                 f"{who}: constraint {cname} has ambiguous activity "
-                f"on the fitted combination {combo} at the solve's final "
+                f"on the block combination {combo} at the solve's final "
                 "barrier parameter; re-solve with a tighter tol to "
                 "settle it. It is kept unprojected.")
         elif status == "unidentified":
             warnings.warn(
                 f"{who}: constraint {cname} has curvature below "
-                f"the fitted block's noise scale on {combo} "
+                f"the block's noise scale on {combo} "
                 "(unidentified); it is kept unprojected and its "
                 "variance is large rather than small.")
         if status in ("weakly_active", "ambiguous"):
@@ -1629,8 +1629,8 @@ def _minv(M, who="covariance"):
         return np.linalg.inv(M)
     except np.linalg.LinAlgError as e:
         raise RuntimeError(
-            f"{who}: the parameter block of the inverse KKT matrix "
-            "is singular; the fitted parameters are linearly "
+            f"{who}: the requested block of the inverse KKT matrix "
+            "is singular; the block members are linearly "
             "dependent (structurally unidentifiable)") from e
 
 
@@ -1972,7 +1972,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
         except np.linalg.LinAlgError as e:
             raise RuntimeError(
                 "covariance: the Gauss-Newton matrix J^T J is singular; "
-                "the fitted parameters are linearly dependent in the "
+                "the block members are linearly dependent in the "
                 "residual Jacobian") from e
         if homoscedastic:
             cov = embed(sig_vals[0] * Ginv)
@@ -2009,8 +2009,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
             except np.linalg.LinAlgError as e:
                 raise RuntimeError(
                     "covariance: the reduced Hessian restricted to the "
-                    "free (off-bound, off-constraint) parameters is "
-                    "singular; the remaining fitted parameters are "
+                    "free (off-bound, off-constraint) members is "
+                    "singular; the remaining free block members are "
                     "linearly dependent"
                 ) from e
         if homoscedastic:
@@ -2222,7 +2222,7 @@ def information(model, hessian="lagrangian", wrt=None):
                 raise RuntimeError(
                     "information: the free block is singular, so the "
                     "pinned parameters' conditional information S is not "
-                    "defined; the free fitted parameters are linearly "
+                    "defined; the free block members are linearly "
                     "dependent") from e
         else:
             S = R[np.ix_(active, active)]

@@ -465,7 +465,7 @@ def test_binding_row_projects_the_combination():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         cov = covariance(m, sigma_sq=SIGMA_LIN**2)
-    assert any("pins the fitted combination" in str(wi.message) for wi in w)
+    assert any("pins the block combination" in str(wi.message) for wi in w)
     C = cov.matrix
     u = np.array([1.0, 1.0])
     assert abs(u @ C @ u) < 1e-9 * max(1.0, float(np.abs(C).max()))
@@ -591,7 +591,7 @@ def test_mixed_normal_binding_row_warns_not_projects():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         cov = covariance(m, sigma_sq=SIGMA_LIN**2)
-    assert any("involves non-fitted variables" in str(wi.message)
+    assert any("involves variables outside the block" in str(wi.message)
                for wi in w)
     # unprojected: full rank, no zero direction
     ev = np.linalg.eigvalsh(cov.matrix)
