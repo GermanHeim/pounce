@@ -279,9 +279,11 @@ build-dependent, so no structural condition is guarded by catching
   has degrees of freedom) and then by a rank test on M
   (dependence detectable in floating point; a duplicated design
   point is the canonical case), each path with its own message.
-- A rank-deficient block is the prediction-band case:
-  `covariance()` returns the homoscedastic Lagrangian marginal
-  `2 sigma^2 M` with membership handling bypassed; `information()`,
+- A rank-deficient block is the trajectory-band case: `covariance()`
+  returns the homoscedastic Lagrangian marginal `2 sigma^2 M`, the
+  confidence band on the fitted trajectory (observation noise added
+  on top makes it a prediction band), with membership handling
+  bypassed; `information()`,
   per-group noise, and Gauss-Newton raise, since the latter two
   profile Jacobians through `inv(M)`.
 - The singular free block inside the S computation is rank-gated the
@@ -313,7 +315,7 @@ build-dependent, so no structural condition is guarded by catching
 - Suites anchor to closed-form values, not the implementation:
   `2 X^T X` for the linear model's information, restricted least
   squares for the pinned dispositions, the hat matrix for the
-  prediction band, the inverse identity between the accessors.
+  trajectory's confidence band, the inverse identity between the accessors.
 - Load-bearing constructions are mutation-verified: a broken
   tangent, a slice-first Gauss-Newton, a block-sized degrees of
   freedom, and a re-widened tuple guard each fail a named test.
