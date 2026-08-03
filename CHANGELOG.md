@@ -31,8 +31,9 @@ changes.
   NLP: 31 (information and identifiability: the poorly identified
   fit, `eigen()` naming the combination the data cannot determine,
   and zero variance versus finite information at a bound) and 32 (one
-  solve, many questions: `wrt=` marginals, the prediction band on
-  undeclared variables, `conditioned_on`, and `retain_kkt()` with
+  solve, many questions: `wrt=` marginals, confidence and prediction
+  bands on undeclared prediction variables, `conditioned_on`, and
+  `retain_kkt()` with
   nothing declared), both committed executed.
 
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
