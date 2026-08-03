@@ -19,6 +19,7 @@ from pyomo_pounce import (
     declare_residual,
     information,
 )
+from pyomo_pounce.sens import _rank_deficient
 
 N = 25
 SIGMA = 0.3
@@ -372,6 +373,31 @@ def test_wrt_binding_row_falls_back_smoothly():
     assert np.isfinite(cov_a[m.a]) and np.isfinite(info_a[m.a])
     assert cov_a[m.a] * info_a[m.a] == pytest.approx(
         2.0 * SIGMA**2, rel=1e-6)
+
+
+def test_rank_gate_is_scale_invariant():
+    # the rank gates decide collinearity, not units. numpy's default
+    # tolerance is relative to the largest singular value, and a
+    # covariance block carries the SQUARE of any unit spread between
+    # its members, so a well-determined block whose coordinates differ
+    # by ~1e9 in magnitude reads as rank-deficient to the raw test and
+    # would be refused for its units alone. Unit-level, because the
+    # spread needed to trip it is past what a fixture can solve
+    # cleanly -- the matrices are exactly what the gates see.
+    C = np.array([[1.0, 0.5], [0.5, 1.0]])       # full rank, cond 3
+    D = np.diag([1e9, 1.0])
+    M = D @ C @ D                                # cond ~1e18, by units
+    assert np.linalg.matrix_rank(M) < 2          # the raw test is fooled
+    assert not _rank_deficient(M)                # the scaled one is not
+    # and genuine dependence is still caught at any scale
+    dep = np.array([[1.0, 1.0], [1.0, 1.0]])
+    assert _rank_deficient(D @ dep @ D)
+    assert _rank_deficient(dep)
+    # an indefinite block (the information side, where the diagonal
+    # can be negative) and a zero diagonal are both handled
+    indef = np.array([[-4.0, 1.0], [1.0, 9.0]])
+    assert not _rank_deficient(indef)
+    assert _rank_deficient(np.zeros((2, 2)))
 
 
 def test_wrt_within_count_dependent_block():
