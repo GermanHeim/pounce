@@ -1047,7 +1047,9 @@ class Covariance(_ParamMatrix):
         conditional on those bounds (roadmap item 3); empty when none.
         Computed on first access (one backsolve per near-bound
         candidate) and cached, so calls that never read it pay
-        nothing."""
+        nothing. Until first access the pending computation keeps the
+        sensitivity session, and so the held KKT factor, alive; read
+        it (or discard the result) to release them."""
         if callable(self._conditioned):
             self._conditioned = self._conditioned()
         return self._conditioned
@@ -1405,7 +1407,9 @@ class Information(_ParamMatrix):
         conditional on those bounds (roadmap item 3); empty when none.
         Computed on first access (one backsolve per near-bound
         candidate) and cached, so calls that never read it pay
-        nothing."""
+        nothing. Until first access the pending computation keeps the
+        sensitivity session, and so the held KKT factor, alive; read
+        it (or discard the result) to release them."""
         if callable(self._conditioned):
             self._conditioned = self._conditioned()
         return self._conditioned
