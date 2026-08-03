@@ -37,12 +37,15 @@ not know about in advance.
 
 ## Where we are
 
-Items 0 and 1 are MERGED (jkitchin/pounce#371 and #436): the activity
-classifier ships in the Rust core as `Solver.classify_activity()` plus
-`Solver.row_normal()`, and `covariance()` takes its membership from it,
-keeps a weakly active parameter at its true variance, and projects
-binding rows. The paragraphs below describe v0.9 as the baseline the
-roadmap was written against; items 2 to 4 remain.
+Items 0, 1 and 2 are MERGED (jkitchin/pounce#371, #436 and #454): the
+activity classifier ships in the Rust core as `Solver.classify_activity()`
+plus `Solver.row_normal()` and `Solver.hessian_vec()`; `covariance()`
+takes its membership from it, keeps a weakly active parameter at its true
+variance, and projects binding rows; and `information()` ships as the
+un-inverted sibling, built by tangent recovery rather than the Schur
+construction sketched below (see item 2 for what the implementation
+settled). The paragraphs below describe v0.9 as the baseline the roadmap
+was written against; items 3 and 4 remain.
 
 v0.9 shipped `covariance()` (in `pyomo-pounce/pyomo_pounce/sens.py`). You
 `declare_fitted` a set of free variables, solve, and `covariance(model)`
@@ -211,9 +214,12 @@ most the curvature's own scale, so the correction is a benign subtraction
 off the factor's reduced Hessian; on the pinned rows `Σ` is `z²/μ` and the
 subtraction cancels, which is what reserves the dense exact-Hessian
 construction for $S$. A binding row's barrier weight needs no removal on
-the projected directions at all: $Z^T a = 0$ annihilates it exactly. Until
-item 2 lands, the per-row conditional-information scalar comes off the
-factor by subtraction and carries `log10(Σ/q)` fewer digits.
+the projected directions at all: $Z^T a = 0$ annihilates it exactly. Since
+item 2 landed, the per-row conditional-information scalar comes from the
+tangent-recovered reduced Hessian (accurate to ~1e-6 where the factor
+subtraction lost `log10(Σ/q)` digits; the residue is the binding row's own
+slack-barrier weight in the recovery), with the subtraction kept as the
+fallback outside the square estimation structure.
 
 Two mechanism facts the implementation settled (merged in #436). The
 subtraction composes without scale factors because the classifier's
@@ -270,30 +276,45 @@ elimination away from the restricted direction. Such a row takes item
 general treatment is the reduced normal through the elimination, which
 belongs with item 2's machinery.
 
-**2. `information()`, the un-inverted sibling of `covariance()`.** Returns the
-reduced Hessian over the block, formed as the Schur complement onto the
-block's rows off the held factor rather than by inverting the covariance.
-Natural units, the core's convention; pyomo `covariance()` carries the `2σ²`
-on top. Same `hessian=` selector, Lagrangian (default) or Gauss-Newton.
-Binding rows follow item 1's projection rule, identically in both accessors.
+**2. `information()`, the un-inverted sibling of `covariance()`.** MERGED
+(#454). Natural units, the core's convention; pyomo `covariance()` carries
+the `2σ²` on top. Same `hessian=` selector, Lagrangian (default) or
+Gauss-Newton. Binding rows follow item 1's projection rule, identically in
+both accessors, and membership is literally shared: the item-1
+classification block is extracted into `_classify_fitted_block(who=)` and
+consumed by both, so the accessors cannot drift.
 
-Three things it has to do that `covariance()` does not:
+The construction changed from the sketch above. Instead of a Schur
+complement off the held factor (which would inherit the factor's barrier
+weight by subtraction), the Lagrangian form is built by TANGENT RECOVERY:
+the x-blocks of the K-inverse columns are `T·M`, so `T = Zx·inv(M)`
+exactly, and `R = TᵀHT` with the exact Lagrangian Hessian through a new
+core primitive, `Solver.hessian_vec(v)` (user-space, natural units). The
+factor's barrier weight cancels multiplicatively. Accuracy boundary,
+measured: machine-exact for equality and variable-bound activity
+(everything in `W` cancels, pinned variables included; 1.9e-16 at
+`Σ/q ≈ 3e10` where subtraction loses ten digits), but a binding
+INEQUALITY row couples through its slack barrier and leaves ~1e-6
+relative residue at practical `μ`, degrading as `μ` tightens. The
+recovery requires the square estimation structure (equalities determine
+the non-fitted variables given the block): guarded by
+`_estimation_counts()`, refusing in `information()` and falling back to
+the subtraction in `covariance()`'s binding-row scalar.
 
-- **Slice the Gauss-Newton product last.** `JᵀJ` is formed over all fitted
-  variables and restricted to $F$ afterwards. It slices first today, so the
-  pinned rows are gone before the matrix exists and item 1's $S$ has nothing
-  to build from.
-- **Return the pinned set as $S$, not as zeros.** `covariance()` embeds a
-  pinned variable as a zero row, which reads as zero variance; the same zeros
-  in an information matrix read as zero information. Item 1 gives membership
-  and the expression.
-- **Return an indefinite Lagrangian block as computed**, warning and naming
-  Gauss-Newton as the PSD alternative. Refusing would withhold a finding: the
-  point is not a minimum, or the model is over-parameterized.
+The three dispositions shipped as designed: Gauss-Newton sliced last (the
+`JᵀJ` product is formed over all fitted variables, `J = Z_r·inv(M)`
+exactly, no `Σ` correction needed); the pinned set returned as $S$, not
+zeros; an indefinite Lagrangian block returned as computed with a warning
+naming Gauss-Newton. The inertia-correction guardrail carries over and
+its warning is honestly testable: two interchangeable fitted variables
+beside a pinned one force real `δ_w` into the held factor and an exact
+zero pivot in the free block, exercising both the guardrail and the
+singular-$S$ refusal in one fixture.
 
-It carries `covariance()`'s inertia-correction guardrail (`sens.py:814-820`),
-which bites here because `δ_w I` is isotropic and so, unlike `Σ`, lands on the
-free block and survives the projection.
+One discipline item 3 inherits: every index into the factor must route
+through `Solver.primal_rows` (gh #450, landed mid-implementation): the
+`.col`-order rows the session holds are full-x, the factor's x block is
+var-x, and they diverge exactly when the model carries a fixed variable.
 
 **3. `wrt=` block selection.** `covariance(model, wrt=block)` and
 `information(model, wrt=block)` reduce onto any block of free variables off
@@ -311,6 +332,13 @@ and drives the coupling through it to zero as `μ` falls, so the block
 converges to the value conditional on that bound rather than the marginal
 over it, and its numbers move with `μ` on the way. The active set comes back
 with the matrix.
+
+Item 2's machinery sets the constructions here. A block that parameterizes
+the constraint manifold (block size equals `n_var - n_eq`, the same square
+structure `_estimation_counts()` checks) gets the exact tangent-recovered
+Lagrangian; any other block reduces off the held factor with the item-1
+corrections and that route's documented precision. Gauss-Newton profiles
+through the K-inverse chain (`J_B = Z_r·inv(M_B)`) for any block.
 
 **4. `retain_kkt()`, a factor-retention switch decoupled from
 declarations.** The solve factors the KKT to solve the NLP; the only question
