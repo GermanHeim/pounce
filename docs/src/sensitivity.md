@@ -479,10 +479,12 @@ exactly with the corresponding entries of the default answer.
 
 A rank-deficient block, one with more coordinates than the fit has
 degrees of freedom or with linearly dependent coordinates (a
-duplicated design point), is the prediction-band case: `covariance()` returns
-its (rank-deficient) marginal, `2 sigma^2 M`, with the membership
-handling bypassed, and `information()` refuses toward `covariance()`,
-since such a block carries no information matrix. For `information()`,
+duplicated design point), is the trajectory-band case: `covariance()`
+returns its (rank-deficient) marginal, `2 sigma^2 M`, the confidence
+band on the fitted trajectory (add the observation noise for a
+prediction band), with the membership handling bypassed, and
+`information()` raises an error pointing to `covariance()`, since such
+a block carries no information matrix. For `information()`,
 a block that parameterizes the constraint manifold (size equal to the
 degrees of freedom) gets the exact tangent construction; a sub-block of
 the fitted set gets its marginal as a Schur complement of the exact
