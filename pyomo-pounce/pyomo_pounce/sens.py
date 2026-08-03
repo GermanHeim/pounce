@@ -1027,10 +1027,13 @@ class Covariance(_ParamMatrix):
     ordered like `params`; `sigma_sq` is the residual variance that was
     used. eigen() supports identifiability diagnosis."""
 
-    def __init__(self, params, matrix, sigma_sq):
+    def __init__(self, params, matrix, sigma_sq, conditioned_on=()):
         super().__init__(params, matrix)
         self.params = self._params
         self.sigma_sq = sigma_sq          # float, or {group: float}
+        # strongly active variables OUTSIDE the block: the matrix is
+        # conditional on those bounds (roadmap item 3); empty when none
+        self.conditioned_on = tuple(conditioned_on)
         with np.errstate(invalid="ignore", divide="ignore"):
             se = np.sqrt(np.diag(self.matrix))
             corr = self.matrix / np.outer(se, se)
@@ -1139,14 +1142,13 @@ def _classify_fitted_block(session, params, rows, M, zcols,
     # (pounce#128), and so are the report's sigmas and row_normal
     # (unscaled at the classifier boundary per the same contract), so
     # everything here composes without scale factors.
-    sig_fit = np.array([float(act["var_sigma"][session.fit_rows[p]])
-                        for p in params])
+    sig_fit = np.array([float(act["var_sigma"][r]) for r in rows])
     q_red = np.abs(np.diag(R_W) - sig_fit)
     floor = np.sqrt(np.finfo(float).eps) * max(
         1.0, float(np.abs(np.diag(R_W)).max()))
     active = []
     for i, p in enumerate(params):
-        st = act["var_status"][session.fit_rows[p]]
+        st = act["var_status"][rows[i]]
         if st in ("unbounded", "fixed"):
             continue                       # no variable bound to classify
         ri = float(sig_fit[i]) / max(float(q_red[i]), floor)
@@ -1365,9 +1367,12 @@ class Information(_ParamMatrix):
 
     _who = "information"
 
-    def __init__(self, params, matrix):
+    def __init__(self, params, matrix, conditioned_on=()):
         super().__init__(params, matrix)
         self.params = self._params
+        # strongly active variables OUTSIDE the block: the matrix is
+        # conditional on those bounds (roadmap item 3); empty when none
+        self.conditioned_on = tuple(conditioned_on)
 
     def eigen(self):
         """(eigenvalues, eigenvectors) of the information matrix,
@@ -1430,6 +1435,113 @@ def _nullspace(A):
     return vh[rank:].T
 
 
+def _resolve_wrt(session, wrt, who):
+    """Normalize wrt= into the block: an ordered list of variable data
+    objects with their full-x (.col) rows. Accepted forms: None (the
+    declared fitted block, exactly the prior behavior), a Var component
+    (scalar or indexed: every member), an indexed slice (m.x[2, :]), a
+    (Var, iterable) pair (var[t] for t in the iterable), a single
+    VarData, or an iterable mixing any of these. Duplicates are an
+    error: a repeated coordinate makes the block singular by
+    construction."""
+    if wrt is None:
+        params = list(session.fit_rows.keys())
+        if not params:
+            raise RuntimeError(
+                f"{who}: no fitted parameters were declared; flag the "
+                "fitted variables with declare_fitted() before the "
+                "solve, or select a block explicitly with wrt=")
+        return params, [session.fit_rows[p] for p in params]
+
+    try:
+        from pyomo.core.base.indexed_component_slice import (
+            IndexedComponent_slice,
+        )
+    except ImportError:                    # pragma: no cover
+        IndexedComponent_slice = ()
+
+    def leaves(obj):
+        if (isinstance(obj, tuple) and len(obj) == 2
+                and hasattr(obj[0], "ctype")):
+            comp, idx = obj
+            for t in idx:
+                yield comp[t]
+            return
+        if isinstance(obj, IndexedComponent_slice):
+            # a slice PROXIES attribute access to its members, so the
+            # duck-typing below would misfire; iterate it directly
+            for v in obj:
+                yield v
+            return
+        if hasattr(obj, "ctype"):
+            values = getattr(obj, "values", None)
+            if callable(values):           # a component: every member
+                for v in values():
+                    yield v
+            else:                          # a data object
+                yield obj
+            return
+        if isinstance(obj, str):
+            raise TypeError(
+                f"{who}: wrt takes variables, not names; got {obj!r}")
+        for el in obj:                     # slice or plain iterable
+            yield from leaves(el)
+
+    params, rows, seen = [], [], set()
+    for v in leaves(wrt):
+        name = getattr(v, "name", None)
+        if name is None:
+            raise TypeError(
+                f"{who}: wrt element {v!r} is not a Pyomo variable")
+        try:
+            r = session.var_entry(name)
+        except ValueError as e:
+            raise ValueError(f"{who}: wrt member {e}") from None
+        if id(v) in seen:
+            raise ValueError(
+                f"{who}: wrt lists {name} twice; a repeated coordinate "
+                "makes the block singular by construction")
+        seen.add(id(v))
+        params.append(v)
+        rows.append(r)
+    if not params:
+        raise ValueError(f"{who}: wrt resolved to an empty block")
+    return params, rows
+
+
+def _conditioned_on(session, act, rows):
+    """Strongly active variables outside the block. Their Sigma stays
+    in the held factor and drives the coupling through them to zero as
+    mu falls, so the block's numbers are the values conditional on
+    those bounds, not the marginal over them. Returned with the matrix
+    rather than warned: it is a property of the answer, not a defect.
+
+    Identification: the report's raw status where curvature identifies
+    it, plus the barrier weight alone (Sigma > 1/sqrt(mu), the
+    classifier's strong edge at unit curvature) where the raw call is
+    `unidentified`. In the residual idiom a pinned variable has zero
+    raw Lagrangian curvature, which is exactly why item 1 classifies
+    block members at the reduced level; outside the block there is no
+    reduced level, and the barrier weight is the thing doing the
+    conditioning. The Sigma test is not scale-invariant (no curvature
+    to normalize against); a wildly rescaled variable can evade or
+    overtrip it."""
+    inside = set(int(r) for r in rows)
+    mu = float(act["mu"])
+    edge = 1.0 / np.sqrt(mu) if mu > 0 else np.inf
+    out = []
+    for idx, st in enumerate(act["var_status"]):
+        if idx in inside or st in ("unbounded", "fixed", "equality"):
+            continue
+        pinned = st == "strongly_active" or (
+            st == "unidentified"
+            and float(act["var_sigma"][idx]) > edge)
+        if pinned:
+            v = session.orig_var(session.var_names[idx])
+            out.append(v if v is not None else session.var_names[idx])
+    return tuple(out)
+
+
 def _minv(M, who="covariance"):
     try:
         return np.linalg.inv(M)
@@ -1440,7 +1552,8 @@ def _minv(M, who="covariance"):
             "dependent (structurally unidentifiable)") from e
 
 
-def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
+def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
+               wrt=None):
     """Asymptotic covariance of the fitted parameters of a
     least-squares problem, from ONE ordinary solve.
 
@@ -1483,6 +1596,23 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     semidefinite, which makes it the safe choice when the covariance
     must stay PSD, e.g. feeding an arrival-cost update in moving
     horizon estimation.
+
+    wrt= selects the block (covariance roadmap item 3): any of the
+    solve's variables, not only the declared fitted ones, given as a
+    Var (scalar or indexed), an indexed slice (m.x[2, :]), a
+    (Var, iterable) pair, data objects, or a list mixing these; None
+    (default) is the declared fitted block, exactly the prior
+    behavior. Each call re-reduces onto its own argument, so one solve
+    serves as many blocks as are asked about, each getting that
+    block's MARGINAL (everything else profiled out). Sigma estimation
+    always divides by the fit's own degrees of freedom, a property of
+    the solve, not the block. A rank-deficient block (more
+    coordinates than the fit has degrees of freedom, e.g. a predicted
+    trajectory: the prediction-band case) gets the homoscedastic
+    Lagrangian marginal, with membership handling bypassed. Strongly
+    active variables OUTSIDE the block come back on the result as
+    .conditioned_on: the matrix is conditional on those bounds, not
+    marginal over them.
 
     Returns a Covariance object keyed by the declared variables'
     data objects: cov[m.A, m.k], cov.std_err[m.A],
@@ -1536,12 +1666,15 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
             "no sensitivity session: declare_fitted() (and optionally "
             "declare_residual()) then solve with SolverFactory('pounce') "
             "first")
-    params = list(session.fit_rows.keys())
+    # the block: the declared fitted parameters by default, or any
+    # block of the solve's variables via wrt= (each call re-reduces
+    # onto its own argument, so one solve serves as many blocks as are
+    # asked about, each getting that block's marginal)
+    params, rows = _resolve_wrt(session, wrt, "covariance")
     n_params = len(params)
-    if n_params == 0:
-        raise RuntimeError(
-            "covariance: no fitted parameters were declared; flag the "
-            "fitted variables with declare_fitted() before the solve")
+    # sigma estimation divides by the FIT's degrees of freedom, a
+    # property of the solve, not of the block being asked about
+    n_fit = len(session.fit_rows)
 
     # ── guardrails ────────────────────────────────────────────────────────
     pert = np.asarray(session.solver.kkt_perturbations)
@@ -1557,7 +1690,6 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     # factor rows. Keep the two apart -- they differ exactly when the
     # model has a fixed variable, and agree everywhere else.
     dim = session.solver.kkt_dim
-    rows = [session.fit_rows[p] for p in params]
     krows = [session.primal_row(r, f"covariance({p.name})")
              for r, p in zip(rows, params)]
     zcols = []
@@ -1569,12 +1701,30 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
                   for i in range(n_params)])
     M = 0.5 * (M + M.T)
 
-    cb = _classify_fitted_block(session, params, rows, M, zcols)
-    sig_fit = cb.sig_fit
-    floor = cb.floor
-    R_corr = cb.R_corr
-    bind_normals = cb.bind_normals
-    row_corrections = cb.row_corrections
+    # a rank-deficient EXPLICIT block (more coordinates than the fit
+    # has degrees of freedom, e.g. a predicted trajectory) has a
+    # perfectly well-defined marginal covariance, 2 sigma^2 M; what it
+    # does not have is inv(M), which the membership classification
+    # needs. Gate on the count: LAPACK does not reliably raise on a
+    # structurally singular M (tiny nonzero pivots slip through and
+    # give garbage, not an error).
+    n_var, n_eq = _estimation_counts(session)
+    if wrt is not None and n_params > n_var - n_eq:
+        cb = None
+    else:
+        try:
+            cb = _classify_fitted_block(session, params, rows, M, zcols)
+        except RuntimeError as e:
+            # backup for a within-count but still dependent block
+            if wrt is None or "inverse KKT matrix" not in str(e):
+                raise
+            cb = None
+    if cb is not None:
+        sig_fit = cb.sig_fit
+        floor = cb.floor
+        R_corr = cb.R_corr
+        bind_normals = cb.bind_normals
+        row_corrections = cb.row_corrections
 
     # ── noise variance per group ──────────────────────────────────────────
     groups = dict(session.res_rows)
@@ -1609,18 +1759,18 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
         group_sigma = {}
         for g, rws in groups.items():
             n_g = len(rws)
-            if n_g <= n_params:
+            if n_g <= n_fit:
                 raise ValueError(
                     f"covariance: residual group {g!r} has {n_g} members, "
-                    f"not more than the {n_params} fitted parameters; "
+                    f"not more than the {n_fit} fitted parameters; "
                     "cannot estimate its noise variance")
             ssr_g = float(np.sum(session.base_x[rws] ** 2))
-            group_sigma[g] = ssr_g / (n_g - n_params)
+            group_sigma[g] = ssr_g / (n_g - n_fit)
     elif n_data is not None:
-        if n_data <= n_params:
+        if n_data <= n_fit:
             raise ValueError(
                 f"covariance: n_data ({n_data}) must exceed the number of "
-                f"fitted parameters ({n_params})")
+                f"fitted parameters ({n_fit})")
         # the objective value AT THE SOLVE, not evaluated on the live
         # model: pyo.value(objective) reads the model's current variable
         # and Param values, so anything written after the solve (a
@@ -1633,7 +1783,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
                 "noise variance. Pass sigma_sq= (known variance), or "
                 "declare the residual container with declare_residual().")
         ssr = session.base_obj
-        group_sigma = {None: ssr / (n_data - n_params)}
+        group_sigma = {None: ssr / (n_data - n_fit)}
     else:
         raise ValueError(
             "covariance: the noise variance is unknown; declare the "
@@ -1674,6 +1824,37 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
                            for r in rws])
             out[g] = Zr @ Mi                  # d r_g / d p
         return out
+
+    if cb is None:
+        # marginal-only path for a rank-deficient explicit block. The
+        # Gauss-Newton and heteroscedastic routes profile Jacobians
+        # through inv(M), so only the homoscedastic Lagrangian marginal
+        # exists here.
+        if hessian == "gauss-newton" or not homoscedastic:
+            raise RuntimeError(
+                "covariance: the wrt block is rank-deficient (more "
+                "coordinates than the fit has degrees of freedom), so "
+                "the profiled Jacobians behind hessian='gauss-newton' "
+                "and per-group noise are not defined; only the "
+                "homoscedastic hessian='lagrangian' marginal is "
+                "available for this block")
+        act = session.solver.classify_activity()
+        flagged = [p.name for i, p in enumerate(params)
+                   if act["var_status"][rows[i]] not in
+                   ("inactive", "unbounded", "fixed", "equality")]
+        if flagged:
+            warnings.warn(
+                f"covariance: block members {flagged} have bound "
+                "activity, but the block is rank-deficient, so the "
+                "membership handling (pinned parameters, binding rows) "
+                "is unavailable; the marginal is returned without it.")
+        cov = 2.0 * sig_vals[0] * M
+        cov = 0.5 * (cov + cov.T)
+        sig_out = (next(iter(group_sigma.values()))
+                   if len(group_sigma) == 1 and None in group_sigma
+                   else group_sigma)
+        return Covariance(params, cov, sig_out,
+                          _conditioned_on(session, act, rows))
 
     # Active-bound projection: the covariance is computed in the free
     # (off-bound) directions and embedded with zero rows/cols for the
@@ -1772,10 +1953,11 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     sig_out = (next(iter(group_sigma.values()))
                if len(group_sigma) == 1 and None in group_sigma
                else group_sigma)
-    return Covariance(params, cov, sig_out)
+    return Covariance(params, cov, sig_out,
+                      _conditioned_on(session, cb.act, rows))
 
 
-def information(model, hessian="lagrangian"):
+def information(model, hessian="lagrangian", wrt=None):
     """The information matrix of the fitted parameters: the reduced
     Hessian over the declared block, the un-inverted sibling of
     covariance(), from the same single solve.
@@ -1807,6 +1989,17 @@ def information(model, hessian="lagrangian"):
     finding that the point is not a minimum or the model is
     over-parameterized.
 
+    wrt= selects the block exactly as in covariance() (roadmap item
+    3): the declared fitted block by default, or any block of the
+    solve's variables. A block that parameterizes the constraint
+    manifold (size equal to the fit's degrees of freedom, the square
+    structure above) gets the exact tangent construction; a smaller
+    block reduces off the held factor with the item-1 corrections
+    (that route's documented precision); a rank-deficient block
+    carries no information matrix and is refused toward covariance().
+    Strongly active variables outside the block come back as
+    .conditioned_on.
+
     Returns an Information object keyed by the declared variables'
     data objects: info[m.A, m.k], info.matrix, info.eigen().
     """
@@ -1821,12 +2014,8 @@ def information(model, hessian="lagrangian"):
             "no sensitivity session: declare_fitted() (and optionally "
             "declare_residual()) then solve with SolverFactory('pounce') "
             "first")
-    params = list(session.fit_rows.keys())
+    params, rows = _resolve_wrt(session, wrt, "information")
     n_params = len(params)
-    if n_params == 0:
-        raise RuntimeError(
-            "information: no fitted parameters were declared; flag the "
-            "fitted variables with declare_fitted() before the solve")
 
     pert = np.asarray(session.solver.kkt_perturbations)
     if pert.any():
@@ -1841,7 +2030,6 @@ def information(model, hessian="lagrangian"):
     # as factor rows (gh #450): they differ exactly when the model has
     # a fixed variable, and agree everywhere else
     dim = session.solver.kkt_dim
-    rows = [session.fit_rows[p] for p in params]
     krows = [session.primal_row(r, f"information({p.name})")
              for r, p in zip(rows, params)]
     zcols = []
@@ -1853,8 +2041,18 @@ def information(model, hessian="lagrangian"):
                   for i in range(n_params)])
     M = 0.5 * (M + M.T)
 
+    n_var, n_eq = _estimation_counts(session)
+    if wrt is not None and n_params > n_var - n_eq:
+        # same count gate as covariance(): LAPACK does not reliably
+        # raise on a structurally singular M
+        raise RuntimeError(
+            "information: the wrt block is rank-deficient (more "
+            "coordinates than the fit has degrees of freedom), so it "
+            "carries no information matrix; its covariance "
+            "(covariance(model, wrt=...)) is the meaningful object "
+            "for such a block")
     cb = _classify_fitted_block(session, params, rows, M, zcols,
-                                 who="information")
+                                who="information")
     free, active = cb.free, cb.active
 
     if hessian == "gauss-newton":
@@ -1880,7 +2078,17 @@ def information(model, hessian="lagrangian"):
         R = cb.R_exact
         if R is None:
             n_var, n_eq = _estimation_counts(session)
-            if n_var - n_eq != n_params:
+            if n_var - n_eq == n_params:
+                R = _tangent_reduced_hessian(session, M, zcols,
+                                             "information")
+            elif wrt is not None:
+                # an explicit block need not parameterize the manifold;
+                # reduce off the held factor with the item-1 corrections
+                # (that route's documented precision) instead of the
+                # tangent map, which only exists for a parameterizing
+                # block
+                R = cb.R_corr
+            else:
                 raise RuntimeError(
                     "information: hessian='lagrangian' requires the "
                     "square estimation structure (the equality "
@@ -1891,7 +2099,6 @@ def information(model, hessian="lagrangian"):
                     f"{n_var} - {n_eq} != {n_params} and the tangent "
                     "recovery is not defined. hessian='gauss-newton' "
                     "does not need it.")
-            R = _tangent_reduced_hessian(session, M, zcols, "information")
 
     info_mat = np.zeros((n_params, n_params))
     if free:
@@ -1933,4 +2140,5 @@ def information(model, hessian="lagrangian"):
             S = R[np.ix_(active, active)]
         info_mat[np.ix_(active, active)] = S
 
-    return Information(params, info_mat)
+    return Information(params, info_mat,
+                       _conditioned_on(session, cb.act, rows))

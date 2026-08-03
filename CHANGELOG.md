@@ -9,6 +9,35 @@ changes.
 
 ## [Unreleased]
 
+### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
+
+- `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto
+  any block of the solve's variables off the held factor, post-solve:
+  a Var, an indexed slice, a `(Var, iterable)` pair, data objects, or
+  a mixed list. The declared fitted block is the default, so the
+  no-wrt behavior is untouched (existing suites pass unchanged). Each
+  call re-reduces onto its own argument: one solve, many blocks, each
+  getting that block's marginal.
+- Sigma estimation divides by the FIT's degrees of freedom, a
+  property of the solve, not the block, so sub-block marginals agree
+  exactly with the corresponding entries of the default answer.
+- A rank-deficient block (more coordinates than the fit's degrees of
+  freedom: the prediction-band case, e.g. `wrt=m.r` giving
+  `sigma^2 X(X'X)^-1 X'`) returns the homoscedastic Lagrangian
+  marginal with membership handling bypassed; `information()` refuses
+  it toward `covariance()`. Gated by the count, not by LAPACK, which
+  does not reliably raise on structurally singular blocks.
+- `information()` gives a manifold-parameterizing block (size equal
+  to the degrees of freedom) the exact tangent construction and a
+  smaller block the item-1 corrected reduction off the factor.
+- Strongly active variables OUTSIDE the block come back on the result
+  as `.conditioned_on` (both accessors): the matrix is conditional on
+  those bounds, not marginal over them. Identified from the raw
+  status where curvature identifies it, plus the barrier weight
+  against the classifier's strong edge where the raw call is
+  `unidentified` (a pinned variable in the residual idiom has zero
+  raw curvature; the Sigma test is documented as not scale-invariant).
+
 ### Added — pyomo-pounce: `information()`, the un-inverted sibling of `covariance()` (covariance roadmap item 2, #262)
 
 - The reduced Hessian over the declared fitted block from the same
