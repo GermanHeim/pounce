@@ -1509,33 +1509,115 @@ def _resolve_wrt(session, wrt, who):
     return params, rows
 
 
-def _conditioned_on(session, act, rows):
+def _subblock_information(session, rows, dof, who):
+    """Marginal information of a proper sub-block of the fitted set,
+    by Schur complement of the EXACT tangent R over the fitted block:
+    never inverts a covariance, so a pinned member costs no digits.
+    Pinned fitted variables OUTSIDE the block are conditioned on
+    (their rows and columns are dropped: they are pinned, not
+    profiled); free ones are profiled out (the Schur step). The
+    matrix identity behind it: the inverse of a submatrix of an
+    inverse IS the Schur complement, so away from barrier
+    contamination this equals inv(M_B) exactly; the point is the
+    construction, not the value. Returns None when not applicable
+    (the block is not inside a square fitted set, or the fitted level
+    carries binding rows, whose projection does not compose simply
+    with marginalization) and the caller falls back to the corrected
+    reduction off the factor."""
+    fit_params = list(session.fit_rows.keys())
+    if len(fit_params) != dof:
+        return None
+    fit_rows_ = [session.fit_rows[fp] for fp in fit_params]
+    pos = {r: i for i, r in enumerate(fit_rows_)}
+    if any(r not in pos for r in rows):
+        return None
+    dim = session.solver.kkt_dim
+    fkrows = [session.primal_row(r, f"{who}(fitted)") for r in fit_rows_]
+    zcols_f = []
+    for kr in fkrows:
+        e = np.zeros(dim)
+        e[kr] = 1.0
+        zcols_f.append(np.asarray(session.solver.kkt_solve(e)))
+    M_f = np.array([[zcols_f[j][fkrows[i]] for j in range(dof)]
+                    for i in range(dof)])
+    M_f = 0.5 * (M_f + M_f.T)
+    with warnings.catch_warnings():
+        # the fitted-level classification is scaffolding here; its
+        # warnings belong to the block-level pass the caller runs
+        warnings.simplefilter("ignore")
+        cb_f = _classify_fitted_block(session, fit_params, fit_rows_,
+                                      M_f, zcols_f, who=who)
+    if cb_f.bind_normals:
+        return None
+    R_f = cb_f.R_exact
+    if R_f is None:
+        R_f = _tangent_reduced_hessian(session, M_f, zcols_f, who)
+    keep = [pos[r] for r in rows]
+    kept = set(keep)
+    pinned_f = set(cb_f.active)
+    o_free = [i for i in range(dof)
+              if i not in kept and i not in pinned_f]
+    sel = keep + o_free
+    Rs = R_f[np.ix_(sel, sel)]
+    nb = len(keep)
+    if o_free:
+        A_ = Rs[:nb, :nb]
+        B_ = Rs[:nb, nb:]
+        D_ = Rs[nb:, nb:]
+        try:
+            R_B = A_ - B_ @ np.linalg.solve(D_, B_.T)
+        except np.linalg.LinAlgError:
+            return None
+    else:
+        R_B = Rs[:nb, :nb]
+    return 0.5 * (R_B + R_B.T)
+
+
+def _conditioned_on(session, act, rows, who):
     """Strongly active variables outside the block. Their Sigma stays
     in the held factor and drives the coupling through them to zero as
     mu falls, so the block's numbers are the values conditional on
     those bounds, not the marginal over them. Returned with the matrix
     rather than warned: it is a property of the answer, not a defect.
 
-    Identification: the report's raw status where curvature identifies
-    it, plus the barrier weight alone (Sigma > 1/sqrt(mu), the
-    classifier's strong edge at unit curvature) where the raw call is
-    `unidentified`. In the residual idiom a pinned variable has zero
-    raw Lagrangian curvature, which is exactly why item 1 classifies
-    block members at the reduced level; outside the block there is no
-    reduced level, and the barrier weight is the thing doing the
-    conditioning. The Sigma test is not scale-invariant (no curvature
-    to normalize against); a wildly rescaled variable can evade or
-    overtrip it."""
+    Identification is item 1's reduced-level rule applied to each
+    candidate as a singleton block: one backsolve gives (K^-1)_ii, the
+    effective reduced curvature is |1/(K^-1)_ii - Sigma_i| (a pinned
+    variable in the residual idiom has zero RAW curvature, which is
+    why the raw report calls it unidentified), and the shipped ratio
+    edges make the call. Scale-invariant, same theory as the block
+    members. Candidates pass a cheap Sigma > sqrt(mu) prefilter first,
+    so only near-bound variables pay the backsolve; below the
+    cancellation floor q_red is clamped to it, exactly as the
+    block-level rule does."""
     inside = set(int(r) for r in rows)
     mu = float(act["mu"])
-    edge = 1.0 / np.sqrt(mu) if mu > 0 else np.inf
+    pre = np.sqrt(mu) if mu > 0 else 0.0
+    dim = session.solver.kkt_dim
     out = []
     for idx, st in enumerate(act["var_status"]):
-        if idx in inside or st in ("unbounded", "fixed", "equality"):
+        if idx in inside or st in ("unbounded", "fixed", "equality",
+                                   "inactive"):
             continue
-        pinned = st == "strongly_active" or (
-            st == "unidentified"
-            and float(act["var_sigma"][idx]) > edge)
+        sig = float(act["var_sigma"][idx])
+        if st == "strongly_active":
+            pinned = True
+        elif sig <= pre:
+            continue
+        else:
+            krow = session.primal_row(idx, f"{who} conditioned_on")
+            e = np.zeros(dim)
+            e[krow] = 1.0
+            kii = float(np.asarray(session.solver.kkt_solve(e))[krow])
+            if kii == 0.0:
+                continue
+            q_red = abs(1.0 / kii - sig)
+            # clamp to the floor rather than refuse, exactly as the
+            # block-level rule does: a huge Sigma cancelling inside
+            # q_red would otherwise misfile a strongly active variable
+            floor = np.sqrt(np.finfo(float).eps) * max(1.0, abs(1.0 / kii))
+            pinned = (_classify_ratio(sig / max(q_red, floor), mu)
+                      == "strongly_active")
         if pinned:
             v = session.orig_var(session.var_names[idx])
             out.append(v if v is not None else session.var_names[idx])
@@ -1854,7 +1936,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                    if len(group_sigma) == 1 and None in group_sigma
                    else group_sigma)
         return Covariance(params, cov, sig_out,
-                          _conditioned_on(session, act, rows))
+                          _conditioned_on(session, act, rows,
+                                          "covariance"))
 
     # Active-bound projection: the covariance is computed in the free
     # (off-bound) directions and embedded with zero rows/cols for the
@@ -1954,7 +2037,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
                if len(group_sigma) == 1 and None in group_sigma
                else group_sigma)
     return Covariance(params, cov, sig_out,
-                      _conditioned_on(session, cb.act, rows))
+                      _conditioned_on(session, cb.act, rows, "covariance"))
 
 
 def information(model, hessian="lagrangian", wrt=None):
@@ -2082,12 +2165,17 @@ def information(model, hessian="lagrangian", wrt=None):
                 R = _tangent_reduced_hessian(session, M, zcols,
                                              "information")
             elif wrt is not None:
-                # an explicit block need not parameterize the manifold;
-                # reduce off the held factor with the item-1 corrections
-                # (that route's documented precision) instead of the
-                # tangent map, which only exists for a parameterizing
-                # block
-                R = cb.R_corr
+                # a sub-block of the fitted set gets its marginal by
+                # Schur complement of the exact tangent R over the
+                # fitted block (never inverts a covariance, exact even
+                # with pinned members); any other explicit block
+                # reduces off the held factor with the item-1
+                # corrections, which is benign for free coordinates
+                # (no barrier term in the slice)
+                R = _subblock_information(session, rows,
+                                          n_var - n_eq, "information")
+                if R is None:
+                    R = cb.R_corr
             else:
                 raise RuntimeError(
                     "information: hessian='lagrangian' requires the "
@@ -2141,4 +2229,5 @@ def information(model, hessian="lagrangian", wrt=None):
         info_mat[np.ix_(active, active)] = S
 
     return Information(params, info_mat,
-                       _conditioned_on(session, cb.act, rows))
+                       _conditioned_on(session, cb.act, rows,
+                                       "information"))

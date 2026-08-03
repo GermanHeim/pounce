@@ -27,16 +27,21 @@ changes.
   marginal with membership handling bypassed; `information()` refuses
   it toward `covariance()`. Gated by the count, not by LAPACK, which
   does not reliably raise on structurally singular blocks.
-- `information()` gives a manifold-parameterizing block (size equal
-  to the degrees of freedom) the exact tangent construction and a
-  smaller block the item-1 corrected reduction off the factor.
+- `information()` routes: a manifold-parameterizing block (size equal
+  to the degrees of freedom) gets the exact tangent construction; a
+  sub-block of the fitted set gets its marginal by Schur complement
+  of the exact tangent R over the fitted block, never inverting a
+  covariance, so a pinned member costs no digits; any other block
+  reduces off the held factor with the item-1 corrections, benign for
+  free coordinates (no barrier term in the slice).
 - Strongly active variables OUTSIDE the block come back on the result
   as `.conditioned_on` (both accessors): the matrix is conditional on
-  those bounds, not marginal over them. Identified from the raw
-  status where curvature identifies it, plus the barrier weight
-  against the classifier's strong edge where the raw call is
-  `unidentified` (a pinned variable in the residual idiom has zero
-  raw curvature; the Sigma test is documented as not scale-invariant).
+  those bounds, not marginal over them. Identification is item 1's
+  reduced-level rule applied per candidate as a singleton block (one
+  backsolve gives `(K^-1)_ii`, effective curvature
+  `|1/(K^-1)_ii - Sigma|`, the shipped ratio edges call it):
+  scale-invariant, same theory as the block members, after a cheap
+  `Sigma > sqrt(mu)` prefilter only near-bound variables pay.
 
 ### Added — pyomo-pounce: `information()`, the un-inverted sibling of `covariance()` (covariance roadmap item 2, #262)
 

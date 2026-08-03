@@ -157,6 +157,76 @@ def test_wrt_derived_sigma_uses_the_fits_degrees_of_freedom():
     assert cov_a.sigma_sq == cov_full.sigma_sq
 
 
+def test_wrt_conditioned_on_is_scale_invariant():
+    # the pinned outside variable enters the model at scale 1e-3, so
+    # its barrier weight Sigma is ~1e6 smaller than in the plain
+    # fixture and sits BELOW the strong mu-edge in absolute terms: a
+    # Sigma-threshold heuristic misses it, while the singleton
+    # reduced-level rule is a ratio of two quantities that scale
+    # together and still calls it
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(0, N - 1)
+    m.A = pyo.Var(initialize=0.0)        # A = 1000 * intercept
+    m.b = pyo.Var(initialize=0.0)
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(
+        m.I, rule=lambda mm, i: mm.r[i] == float(y[i])
+        - 1e-3 * mm.A - mm.b * float(x[i]))
+    m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+    m.A.setlb(1e3 * (float(beta[0]) + 0.4))   # binds, strongly active
+    declare_fitted(m.A)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    cov_b = covariance(m, sigma_sq=SIGMA**2, wrt=[m.b])
+    assert cov_b.conditioned_on == (m.A,)
+
+
+def test_wrt_subblock_schur_is_exact_with_a_pinned_member():
+    # quadratic fit (a, b, c), c pinned by its bound, block = [a, c]:
+    # the marginal comes from the Schur route off the exact tangent R
+    # over the fitted block (b, free outside, is profiled out; c,
+    # pinned INSIDE, is kept and handled by membership), so every
+    # entry is exact at 1e-9 where a corrected inv(M_B) would carry
+    # the pinned member's barrier residue. Expected values follow the
+    # stated rule directly from R = 2 X'X.
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.0, 4.0, N)
+    y = 1.5 - 0.7 * x + 0.2 * x**2 + SIGMA * rng.standard_normal(N)
+    X = np.column_stack([np.ones(N), x, x**2])
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(0, N - 1)
+    m.a = pyo.Var(initialize=0.0)
+    m.b = pyo.Var(initialize=0.0)
+    m.c = pyo.Var(initialize=0.0)
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(
+        m.I, rule=lambda mm, i: mm.r[i] == float(y[i]) - mm.a
+        - mm.b * float(x[i]) - mm.c * float(x[i] ** 2))
+    m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+    m.c.setlb(float(beta[2]) + 0.3)      # binds, strongly active
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_fitted(m.c)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    R = 2.0 * X.T @ X                    # order (a, b, c)
+    sel = [0, 2]                         # the block (a, c)
+    R_B = (R[np.ix_(sel, sel)]
+           - np.outer(R[sel, 1], R[1, sel]) / R[1, 1])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        info = information(m, wrt=[m.a, m.c])
+    assert info[m.a] == pytest.approx(R_B[0, 0], rel=1e-9)
+    S_c = R_B[1, 1] - R_B[0, 1] ** 2 / R_B[0, 0]
+    assert info[m.c] == pytest.approx(S_c, rel=1e-9)
+    assert info[m.a, m.c] == 0.0
+    assert info.conditioned_on == ()     # c is inside the block
+
+
 def test_wrt_error_paths():
     m, X = solved()
     with pytest.raises(ValueError, match="twice"):
