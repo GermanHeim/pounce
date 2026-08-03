@@ -28,7 +28,8 @@ changes.
 - The no-session errors from both accessors name `retain_kkt()` as the
   declaration-free route.
 - Demo notebooks for the whole roadmap: 31 (information and
-  identifiability: the sloppy-fit eigen() story and the
+  identifiability: the poorly-identified-fit eigen() story, the
+  shown-not-told absorbed pin, and the
   zero-variance-is-not-zero-information story at a bound) and 32 (one
   solve, many questions: wrt= marginals, the prediction band,
   conditioned_on, and the declaration-free retain_kkt() flow), both
