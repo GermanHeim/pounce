@@ -1682,6 +1682,35 @@ def _conditioned_on(session, act, rows, who):
     return tuple(out)
 
 
+def _rank_deficient(A):
+    """True when the symmetric block `A` is rank-deficient, tested on
+    its diagonally scaled form so the verdict is a statement about
+    COLLINEARITY and not about units.
+
+    `np.linalg.matrix_rank` thresholds the singular values at
+    `sigma_max * n * eps`, which is relative to the largest singular
+    value and so is not invariant under rescaling the coordinates
+    against each other: a covariance block carries the SQUARE of any
+    unit spread between its members, so two perfectly well-determined
+    parameters ~1e8 apart in magnitude (a rate prefactor against a
+    reaction order) push `cond(M)` past the default tolerance and read
+    as dependent on unit spread alone. Scaling by `sqrt(|diag|)` first
+    — the correlation form — makes the test the same kind of
+    scale-invariant ratio as the block-membership rule (roadmap item 1)
+    and the conditioned_on rule, rather than a threshold that tracks
+    the user's choice of units. Second review of gh #466.
+
+    A zero diagonal leaves its own row and column unscaled: there is no
+    scale to divide by, and a genuinely zero row is rank-deficient
+    either way."""
+    n = A.shape[0]
+    if n == 0:
+        return False
+    d = np.sqrt(np.abs(np.diag(A)))
+    d = np.where(d > 0.0, d, 1.0)
+    return int(np.linalg.matrix_rank(A / np.outer(d, d))) < n
+
+
 class _SingularBlock(RuntimeError):
     """The requested block of the inverse KKT matrix is singular.
     A dedicated type so callers that rescue this case (the wrt
@@ -1861,12 +1890,14 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     if wrt is not None:
         if n_params > n_var - n_eq:
             deficient = "count"
-        elif np.linalg.matrix_rank(M) < n_params:
+        elif _rank_deficient(M):
             # the count gate's own justification, one step to its
             # left: LAPACK does not reliably raise on a structurally
             # singular M, so a within-count dependent block needs its
             # own gate (fp-detectable dependence; anything softer is
-            # caught by _SingularBlock below as a last resort)
+            # caught by _SingularBlock below as a last resort).
+            # Diagonally scaled, so a badly-scaled but well-determined
+            # block is not refused for its units (second review)
             deficient = "dependent"
     if deficient is not None:
         cb = None
@@ -2218,9 +2249,11 @@ def information(model, hessian="lagrangian", wrt=None):
         if n_params > n_var - n_eq:
             _refuse_rank("more coordinates than the fit has degrees "
                          "of freedom")
-        if np.linalg.matrix_rank(M) < n_params:
+        if _rank_deficient(M):
             # the count gate one step to its left: LAPACK does not
-            # reliably raise on a structurally singular M
+            # reliably raise on a structurally singular M. Diagonally
+            # scaled, so the refusal tracks collinearity and not the
+            # user's units (second review)
             _refuse_rank("linearly dependent coordinates")
     try:
         cb = _classify_fitted_block(session, params, rows, M, zcols,
@@ -2309,9 +2342,15 @@ def information(model, hessian="lagrangian", wrt=None):
             # raises on a singular system is BLAS-dependent (the CI
             # wheel job's fresh numpy returned garbage where the local
             # build raised), the same non-determinism the wrt gates
-            # exist for; the exception clause stays as the last resort
+            # exist for; the exception clause stays as the last resort.
+            # Applies on the DEFAULT path too, not only under wrt=: a
+            # numerically dependent free block now refuses where it
+            # could previously return a large-but-meaningless S
+            # (CHANGELOG "Changed"). Diagonally scaled like the wrt
+            # gates, so an ill-scaled but well-determined free block
+            # keeps its answer (second review)
             R_FF = R[np.ix_(free, free)]
-            singular = np.linalg.matrix_rank(R_FF) < len(free)
+            singular = _rank_deficient(R_FF)
             if not singular:
                 try:
                     S = (R[np.ix_(active, active)]

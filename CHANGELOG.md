@@ -30,7 +30,12 @@ changes.
   duplicated design point, takes the same routes with its own
   message), not by LAPACK, which does not reliably raise on
   structurally singular blocks; a dedicated `_SingularBlock` exception
-  stands as the last resort.
+  stands as the last resort. The rank test runs on the diagonally
+  scaled block, so the verdict tracks collinearity and not the unit
+  spread between coordinates: a covariance block carries the square
+  of that spread, and numpy's default tolerance is relative to the
+  largest singular value, so two well-determined parameters far apart
+  in magnitude would otherwise be refused for their units alone.
 - `information()` routes: a manifold-parameterizing block (size equal
   to the degrees of freedom) gets the exact tangent construction; a
   sub-block of the fitted set gets its marginal by Schur complement
@@ -49,6 +54,24 @@ changes.
   lazily on first access, so calls that never read it cost nothing
   extra. Diagnostics stay "fitted parameter"-worded on the default
   path and speak block-relative only under an explicit wrt=.
+
+### Changed — pyomo-pounce: `information()` rank-gates the free block before the conditional-information solve
+
+- Computing `S`, the information a bound-pinned parameter carries
+  conditional on the rest of the pinned set, takes a Schur complement
+  through the free block. That step previously relied on
+  `np.linalg.solve` raising on a singular free block, which is
+  BLAS- and machine-dependent: the same refusal test flipped
+  pass/fail across adjacent CI runs on the same numpy with no numeric
+  change, because whether the pivot lands on exact zero varies by
+  build. The free block is now rank-tested first (diagonally scaled,
+  as the `wrt=` gates are), so the verdict is deterministic; the
+  exception clause stays as the last resort.
+- This applies on the DEFAULT path, not only under `wrt=`: a
+  numerically dependent free block now raises where it could
+  previously return a large-but-meaningless `S`. Well-conditioned and
+  merely ill-scaled blocks are unaffected — that is what the diagonal
+  scaling buys.
 
 ### Fixed — `sparse=True` no longer materializes a dense Jacobian/Hessian to detect the pattern (#464)
 
