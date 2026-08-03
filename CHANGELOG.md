@@ -79,6 +79,30 @@ changes.
   became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
   reports that AMPL imported functions are unavailable there rather than
   failing to compile. No change on unix/windows.
+### Fixed — debugger: convex backend answered `print kkt` with a self-referential hint (#462)
+
+- On the convex / conic IPM, `print kkt` replied *"no KKT factorization yet —
+  stop at `after_search_dir`"* — and repeated it verbatim once you were
+  stopped at `after_search_dir`. The advice could never pay off: that backend
+  has no augmented system to report inertia for at any checkpoint, so the
+  suggestion sent a user (or an agent driving `--debug-json`) round a loop
+  with no exit. Diagnostics only; no numerical result was affected.
+- The backend-conditional commands now reject on a **capability** basis
+  before any timing check, matching the documented contract and their
+  siblings (`print rank`, `diagnose`, `resolve`): `print kkt`, `print
+  residuals`, `print active` / `inactive`, `viz kkt`, and `viz L` answer
+  *"only available for the NLP solver (not the convex/conic solver)"*.
+  `print active` previously reported "no bounded variables or inequality
+  slacks" there — a silent no-op the docs explicitly rule out. The NLP
+  filter-IPM is unchanged, including the genuine "not factored yet" hint at
+  a pre-factorization checkpoint.
+- The `hello` handshake is now answered for the backend that is running, so
+  a JSON client feature-detecting off `capabilities` is told the truth:
+  `kkt_inspect`, `diagnose`, `mutate_mu`, `resolve`, `sweep`, `load`, and
+  `structural_diagnose` are `false` on the convex path, `viz` drops to
+  `["block","delta"]`, and `blocks` lists that solver's own iterate blocks
+  (`x`/`s`/`y`/`z`, plus `tau`/`kappa` on HSDE) instead of the NLP names.
+
 ### Fixed — Linux wheels shipped a CLI that could not start on most clusters (#452)
 
 - The published Linux wheels were tagged `manylinux2014` (glibc 2.17) but
