@@ -9,6 +9,47 @@ changes.
 
 ## [Unreleased]
 
+### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
+
+- `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto
+  any block of the solve's variables off the held factor, post-solve:
+  a Var, an indexed slice, a `(Var, iterable)` pair, data objects, or
+  a mixed list. The declared fitted block is the default, so the
+  no-wrt behavior is untouched (existing suites pass unchanged). Each
+  call re-reduces onto its own argument: one solve, many blocks, each
+  getting that block's marginal.
+- Sigma estimation divides by the FIT's degrees of freedom, a
+  property of the solve, not the block, so sub-block marginals agree
+  exactly with the corresponding entries of the default answer.
+- A rank-deficient block (more coordinates than the fit's degrees of
+  freedom: the prediction-band case, e.g. `wrt=m.r` giving
+  `sigma^2 X(X'X)^-1 X'`) returns the homoscedastic Lagrangian
+  marginal with membership handling bypassed; `information()` refuses
+  it toward `covariance()`. Gated by the count plus a rank test on the
+  block (a within-count but linearly dependent block, e.g. a
+  duplicated design point, takes the same routes with its own
+  message), not by LAPACK, which does not reliably raise on
+  structurally singular blocks; a dedicated `_SingularBlock` exception
+  stands as the last resort.
+- `information()` routes: a manifold-parameterizing block (size equal
+  to the degrees of freedom) gets the exact tangent construction; a
+  sub-block of the fitted set gets its marginal by Schur complement
+  of the exact tangent R over the fitted block, never inverting a
+  covariance, so a pinned member costs no digits; any other block
+  reduces off the held factor with the item-1 corrections, benign for
+  free coordinates (no barrier term in the slice).
+- Strongly active variables OUTSIDE the block come back on the result
+  as `.conditioned_on` (both accessors): the matrix is conditional on
+  those bounds, not marginal over them. Identification is item 1's
+  reduced-level rule applied per candidate as a singleton block (one
+  backsolve gives `(K^-1)_ii`, effective curvature
+  `|1/(K^-1)_ii - Sigma|`, the shipped ratio edges call it):
+  scale-invariant, same theory as the block members, after a cheap
+  `Sigma > sqrt(mu)` prefilter only near-bound variables pay. Computed
+  lazily on first access, so calls that never read it cost nothing
+  extra. Diagnostics stay "fitted parameter"-worded on the default
+  path and speak block-relative only under an explicit wrt=.
+
 ### Fixed — `sparse=True` no longer materializes a dense Jacobian/Hessian to detect the pattern (#464)
 
 - Sparsity detection ran *before* the `if sparse:` branch and evaluated

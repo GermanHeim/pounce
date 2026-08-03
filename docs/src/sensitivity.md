@@ -454,6 +454,52 @@ the finding that the point is not a minimum or the model is
 over-parameterized. `eigen()` reads identifiability directly: a
 near-zero eigenvalue is a direction the data does not inform.
 
+## Choosing the block: wrt=
+
+Both accessors take `wrt=` to reduce onto any block of the solve's
+variables off the held factor, post-solve; the declared fitted block is
+the default, so omitting it is exactly the prior behavior. Accepted
+forms: a Var (scalar or indexed, every member), an indexed slice
+(`m.x[2, :]`), a `(Var, iterable)` pair, data objects, or a list mixing
+these.
+
+```python
+cov = covariance(m)                      # the fitted block, as before
+cov_a = covariance(m, wrt=[m.a])         # one parameter's marginal
+band = covariance(m, wrt=m.r)            # a predicted trajectory
+info_a = information(m, wrt=[m.a])
+```
+
+Each call re-reduces onto its own argument, so one solve serves as many
+blocks as are asked about, and each block gets its MARGINAL: everything
+outside it is profiled out, not held fixed. Sigma estimation always
+divides by the fit's own degrees of freedom (a property of the solve,
+not of the question being asked), so a sub-block's numbers agree
+exactly with the corresponding entries of the default answer.
+
+A rank-deficient block, one with more coordinates than the fit has
+degrees of freedom or with linearly dependent coordinates (a
+duplicated design point), is the prediction-band case: `covariance()` returns
+its (rank-deficient) marginal, `2 sigma^2 M`, with the membership
+handling bypassed, and `information()` refuses toward `covariance()`,
+since such a block carries no information matrix. For `information()`,
+a block that parameterizes the constraint manifold (size equal to the
+degrees of freedom) gets the exact tangent construction; a sub-block of
+the fitted set gets its marginal as a Schur complement of the exact
+tangent R over the fitted block (never inverting a covariance, so a
+pinned member costs no digits); other blocks reduce off the held factor
+with the item-1 corrections, which is benign for free coordinates.
+
+One exception is returned rather than hidden: a strongly active
+variable OUTSIDE the block is not deleted from the factor, so the
+block's numbers are the values conditional on that bound, not the
+marginal over it. The result carries the list as `.conditioned_on`
+(empty when there is none); inside-block activity is membership, not
+conditioning, and is handled as before. The list is decided by the
+same classification the block members get, applied per candidate as a
+singleton block, so it is scale-invariant; only near-bound variables
+pay the extra backsolve.
+
 ## Units and NLP scaling
 
 All sensitivity outputs are in **natural (unscaled) units**. The IPM
