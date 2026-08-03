@@ -801,3 +801,32 @@ def test_classify_ratio_agrees_with_the_rust_classifier():
             seen.add(st)
 
     assert seen == {"inactive", "weakly_active", "strongly_active"}, seen
+
+
+def test_binding_row_scalar_is_the_tangent_value():
+    """The conditional-information number in the binding-row warning is
+    the tangent-route value a'Ra (item 2 machinery), not the
+    digits-losing factor subtraction: pinned against the analytic
+    reduced Hessian along the unit normal. The 1e-6 tolerance is
+    load-bearing twice over, not conservative: the warning prints 6
+    significant digits, and beneath the print the recovery carries
+    ~1e-6 relative residue from this row's own slack barrier (measured
+    8.7e-7 at default tol, degrading as mu tightens)."""
+    x, y, X = linear_data()
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    cap = float(beta[0] + beta[1]) - 0.5
+    m = linear_model(x, y, declare=False)
+    m.capcon = pyo.Constraint(expr=m.a + m.b <= cap)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        covariance(m, sigma_sq=SIGMA_LIN**2)
+    msg = next(str(x_.message) for x_ in w
+               if "Conditional information" in str(x_.message))
+    s_a = float(msg.rstrip(".").rsplit("combination: ", 1)[1])
+    R = 2.0 * X.T @ X
+    u = np.array([1.0, 1.0]) / np.sqrt(2.0)
+    assert s_a == pytest.approx(float(u @ R @ u), rel=1e-6)

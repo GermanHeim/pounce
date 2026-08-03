@@ -975,6 +975,8 @@ class _ParamKeyed:
     """Lookup from a declared Param's data object to its row index.
     Keyed by id() because Pyomo components are unhashable."""
 
+    _who = "covariance"          # accessor name used in diagnostics
+
     def __init__(self, params):
         self._params = list(params)
         self._pos = {id(p): i for i, p in enumerate(self._params)}
@@ -983,7 +985,7 @@ class _ParamKeyed:
         i = self._pos.get(id(pd))
         if i is None:
             raise KeyError(f"{getattr(pd, 'name', pd)}: not one of the "
-                           "covariance parameters")
+                           f"{self._who} parameters")
         return i
 
 
@@ -1047,6 +1049,336 @@ class Covariance(_ParamMatrix):
         return np.linalg.eigh(self.matrix)
 
 
+def _indefinite(block):
+    """A symmetric block with a genuinely negative eigenvalue, at a
+    tolerance relative to the block's own scale. At a strict local
+    minimum with LICQ the reduced Hessian is PSD, so this fires only
+    on non-minimum stationary points or regularized (inertia-
+    corrected) convergence: exactly the finding worth returning
+    rather than refusing."""
+    if block.size == 0:
+        return False
+    ev_min = float(np.linalg.eigvalsh(block).min())
+    scale = float(np.abs(block).max())
+    return ev_min < -1e-10 * max(1.0, scale)
+
+
+def _estimation_counts(session):
+    """(#factor variables, #equality rows). The tangent recovery is
+    the constrained tangent map only when n_var - n_eq equals the
+    number of fitted parameters: the equalities then determine the
+    non-fitted variables given the fitted block. Callers guard on
+    this, because outside it T = Zx inv(M) is quietly not the tangent
+    map and R would be silently wrong."""
+    n_var = sum(1 for r in session._primal_row_map() if r is not None)
+    g_l = np.asarray(session.nl.g_l)
+    g_u = np.asarray(session.nl.g_u)
+    return n_var, int(np.count_nonzero(g_l == g_u))
+
+
+def _tangent_reduced_hessian(session, M, zcols, who="covariance"):
+    """The reduced Hessian over the fitted block, by tangent recovery:
+    the x-blocks of the K-inverse columns are T*M (each satisfies the
+    equalities and has the fitted block as its own coordinates), so
+    T = Zx inv(M) exactly, with the factor's barrier weight cancelling
+    multiplicatively rather than by subtraction. Then R = T^T H T with
+    the exact Lagrangian Hessian (covariance roadmap item 2).
+
+    Machine-exact for equality and variable-bound activity (everything
+    in W cancels multiplicatively, pinned variables included), verified
+    against analytic ground truth where the subtraction route loses
+    log10(Sigma/q) digits. A binding INEQUALITY row instead couples
+    through its slack barrier with large-but-finite weight, tilting
+    the recovered tangent along that row's normal: measured ~1e-6
+    relative at practical mu, degrading as mu tightens (the pinned
+    combination drives M toward singularity), still ~6 digits beyond
+    the subtraction it replaces. Requires the square estimation
+    structure of _estimation_counts(); callers guard."""
+    # the factor's x block is var-x (a fixed variable's column is
+    # removed under make_parameter, gh #450), so slice that block and
+    # scatter each tangent back to full-x for hessian_vec, whose
+    # contract is user-space with zeros on the removed columns
+    n_var = sum(1 for r in session._primal_row_map() if r is not None)
+    Zx = np.column_stack([z[:n_var] for z in zcols])
+    T = np.column_stack(
+        [session.scatter_x(col) for col in (Zx @ _minv(M, who)).T])
+    HT = np.column_stack([
+        np.asarray(session.solver.hessian_vec(T[:, j]))
+        for j in range(T.shape[1])
+    ])
+    R = T.T @ HT
+    return 0.5 * (R + R.T)
+
+
+def _classify_fitted_block(session, params, rows, M, zcols,
+                           who="covariance"):
+    """Membership and row handling shared by covariance() and
+    information(): item 1's classification at the reduced fitted
+    block, the value-correction bookkeeping, and the binding-row
+    normals, with the warnings both accessors owe their callers.
+    Returns a namespace consumed by each accessor's own assembly."""
+    from types import SimpleNamespace
+
+    n_params = len(params)
+    # ── membership from the barrier activity classification ──────────────
+    # (covariance roadmap item 1). The classifier's per-coordinate rule
+    # scales Sigma by the coordinate's own Lagrangian curvature, which is
+    # zero for a fitted parameter in the residual-variable idiom (the
+    # curvature lives on the residuals), so the same rule runs HERE on
+    # the reduced fitted block, where the parameter's curvature actually
+    # is: q = the reduced Hessian diagonal with the parameter's own
+    # barrier term removed, Sigma retained by the solve. A weakly active
+    # parameter is KEPT and warned rather than silently pinned; no slack
+    # threshold can make that distinction, because slack and multiplier
+    # are both O(sqrt(mu)) at weak activity.
+    R_exact = None
+    act = session.solver.classify_activity()
+    mu = float(act["mu"])
+    R_W = _minv(M, who)                # reduced Hessian off the factor, W-based
+    # M (and so R_W) is natural-units by the kkt_solve contract
+    # (pounce#128), and so are the report's sigmas and row_normal
+    # (unscaled at the classifier boundary per the same contract), so
+    # everything here composes without scale factors.
+    sig_fit = np.array([float(act["var_sigma"][session.fit_rows[p]])
+                        for p in params])
+    q_red = np.abs(np.diag(R_W) - sig_fit)
+    floor = np.sqrt(np.finfo(float).eps) * max(
+        1.0, float(np.abs(np.diag(R_W)).max()))
+    active = []
+    for i, p in enumerate(params):
+        st = act["var_status"][session.fit_rows[p]]
+        if st in ("unbounded", "fixed"):
+            continue                       # no variable bound to classify
+        ri = float(sig_fit[i]) / max(float(q_red[i]), floor)
+        if q_red[i] < floor and ri <= 1e1:
+            # curvature AND barrier weight both below scale: the bound
+            # question does not arise, but the direction is poorly
+            # identified (a dominant Sigma cancelling inside q_red
+            # instead lands ri astronomically high and classifies
+            # strongly active)
+            status = "unidentified"
+        else:
+            status = _classify_ratio(ri, mu)
+        if status == "strongly_active":
+            active.append(i)
+            warnings.warn(
+                f"{who}: fitted parameter {p.name} is held by its "
+                "bound at the optimum (strongly active); its direction is "
+                "projected out (zero variance, conditional on the active "
+                "bound) and the boundary asymptotics are nonstandard.")
+        elif status == "weakly_active":
+            warnings.warn(
+                f"{who}: fitted parameter {p.name} sits exactly on "
+                "its bound with a vanishing multiplier (weakly active). "
+                "It is kept in the free block with finite variance; "
+                "boundary asymptotics are nonstandard.")
+        elif status == "ambiguous":
+            warnings.warn(
+                f"{who}: fitted parameter {p.name} has ambiguous "
+                "bound activity at the solve's final barrier parameter; "
+                "re-solve with a tighter tol to settle it. It is kept in "
+                "the free block.")
+        elif status == "unidentified":
+            warnings.warn(
+                f"{who}: fitted parameter {p.name} has curvature "
+                "below the model's own noise scale (unidentified); its "
+                "variance is large rather than small. It is kept in the "
+                "free block.")
+
+    # ── binding general rows on the fitted block ──────────────────────────
+    # (item 1 row projection, jkitchin/pounce#362). A strongly active
+    # inequality row whose normal touches the fitted parameters pins a
+    # DIRECTION of the fitted block: no per-parameter disposition can
+    # state that, so the free block is reduced on the null space of the
+    # binding normals and pushed back, singular by the number of binding
+    # rows. Rows classify at the reduced level exactly as the variable
+    # bounds above: the row's barrier weight against the curvature along
+    # its own normal. A bound moved onto a row by declared-parameter
+    # reformulation (jkitchin/pounce#357) is the single-coordinate case
+    # and reproduces the variable disposition exactly.
+    R_corr = R_W - np.diag(sig_fit)
+    # columns held constant by the declared-parameter pins: a row's
+    # support there contributes nothing through elimination (the pin
+    # variable cannot move), so it does not make the row "mixed". The
+    # pin constraint's normal is e_{pin var}, so its support IS the
+    # pin column.
+    pin_cols = set()
+    for _pr in session.pins.values():
+        _pn = np.asarray(session.solver.row_normal(int(_pr)), dtype=float)
+        pin_cols.update(int(i) for i in np.nonzero(_pn)[0])
+    fit_cols = set(int(r) for r in rows)
+    bind_normals = []                  # unit normals over the fitted block
+    row_corrections = []               # (weight, unit normal), applied after
+    for j, rst in enumerate(act["row_status"]):
+        if rst in ("equality", "unbounded", "inactive"):
+            # inactive rows carry O(mu) geometric weight (the invariant
+            # form), the same order as every other accepted O(mu) term;
+            # skipping them also avoids fetching every row normal on
+            # wide models (an O(m*n) sweep). The bound and row
+            # spellings of an INACTIVE limit therefore agree to O(mu)
+            # rather than exactly, tested at that tolerance.
+            continue
+        a_full = np.asarray(session.solver.row_normal(j), dtype=float)
+        a = a_full[rows]
+        na = float(np.linalg.norm(a))
+        # A row whose normal also touches NON-fitted variables pins a
+        # combination that reaches the fitted block through the
+        # eliminated variables, not along the restricted normal: e.g.
+        # a + r_1 <= cap with r_1 = y_1 - a - b*x_1 actually pins a
+        # b-direction, while the restricted normal reads e_a. The
+        # restricted projection would delete the wrong direction, so a
+        # mixed binding row is kept unprojected with an explicit
+        # warning instead. The general treatment needs the row's
+        # reduced normal through the elimination (roadmap item 2's
+        # machinery).
+        nf = float(np.linalg.norm(a_full))
+        outside = [i for i in np.nonzero(a_full)[0]
+                   if int(i) not in fit_cols and int(i) not in pin_cols]
+        mixed = bool(outside) and (
+            float(np.linalg.norm(a_full[outside])) > 1e-8 * max(1.0, nf))
+        if na <= 1e-12 * max(1.0, nf):
+            # entirely outside the fitted block: the extreme mixed case
+            # (relative tolerance, matching the mixed test above)
+            mixed = True
+        cname = (session.con_names[j] if j < len(session.con_names)
+                 else f"row {j}")
+        if mixed:
+            # the reduced-level rule is also unreliable here: the row's
+            # barrier weight lands through elimination on a direction
+            # the restricted normal cannot see, so re-classifying
+            # against it manufactures a wrong ratio. Item 0's raw
+            # classification (scale-invariant along the full normal) is
+            # the honest status for a mixed row.
+            if rst == "strongly_active":
+                warnings.warn(
+                    f"{who}: constraint {cname} is strongly active "
+                    "and involves non-fitted variables; the direction "
+                    "it pins reaches the fitted parameters through the "
+                    "eliminated variables and cannot be represented by "
+                    "a restricted normal, so it is NOT projected. Treat "
+                    "the returned variances as not conditioned on this "
+                    "constraint.")
+            elif rst in ("weakly_active", "ambiguous", "unidentified"):
+                warnings.warn(
+                    f"{who}: constraint {cname} is {rst} and "
+                    "involves non-fitted variables; it is kept "
+                    "unprojected and its barrier weight is not "
+                    "corrected for (the restricted direction would be "
+                    "the wrong one). Boundary asymptotics are "
+                    "nonstandard.")
+            continue
+        a = a / na
+        # the row's slack elimination contributes Sigma_j * (raw normal
+        # outer product) to the reduced block; in the unit-normal basis
+        # that coefficient is Sigma_j * ||raw normal||^2 (all natural
+        # units: the report unscales at the classifier boundary)
+        sig_row = float(act["row_sigma"][j]) * na * na
+        q_w = float(a @ R_corr @ a)
+        # |q|, matching the Rust classifier: indefinite curvature
+        # classifies on magnitude, and indefiniteness still surfaces
+        # through the negative-variance warning downstream
+        q_row = abs(q_w - sig_row)
+        ri = sig_row / max(q_row, floor)
+        if q_row < floor and ri <= 1e1:
+            status = "unidentified"
+        else:
+            status = _classify_ratio(ri, mu)
+        combo = " + ".join(
+            f"{a[k]:.3g}*{params[k].name}" for k in range(n_params)
+            if abs(a[k]) > 1e-12)
+        if status == "strongly_active":
+            bind_normals.append(a)
+            # conditional information along the pinned combination via
+            # the tangent-recovered reduced Hessian (item 2 machinery;
+            # lazy, only solves with a binding row pay the Hessian
+            # products). Accurate to ~1e-6 at practical mu, the residue
+            # being this row's own finite slack-barrier weight in the
+            # recovery, where the factor subtraction lost ten digits.
+            # Outside the square estimation structure the recovery is
+            # undefined, so the subtraction value is kept there.
+            if R_exact is None:
+                n_var, n_eq = _estimation_counts(session)
+                if n_var - n_eq == n_params:
+                    R_exact = _tangent_reduced_hessian(
+                        session, M, zcols, who)
+            if R_exact is not None:
+                s_a = float(a @ R_exact @ a)
+            else:
+                s_a = max(q_w - sig_row, 0.0)
+            warnings.warn(
+                f"{who}: constraint {cname} is strongly active and "
+                f"pins the fitted combination {combo}; variance along it "
+                "is projected to zero (conditional on the constraint). "
+                f"Conditional information along the combination: {s_a:.6g}.")
+        elif status == "weakly_active":
+            warnings.warn(
+                f"{who}: constraint {cname} is weakly active on the "
+                f"fitted combination {combo} (multiplier and slack vanish "
+                "together). It is kept unprojected with finite variance; "
+                "boundary asymptotics are nonstandard.")
+        elif status == "ambiguous":
+            warnings.warn(
+                f"{who}: constraint {cname} has ambiguous activity "
+                f"on the fitted combination {combo} at the solve's final "
+                "barrier parameter; re-solve with a tighter tol to "
+                "settle it. It is kept unprojected.")
+        elif status == "unidentified":
+            warnings.warn(
+                f"{who}: constraint {cname} has curvature below "
+                f"the fitted block's noise scale on {combo} "
+                "(unidentified); it is kept unprojected and its "
+                "variance is large rather than small.")
+        if status in ("weakly_active", "ambiguous"):
+            # collected, applied after the loop: every row classifies
+            # against the same snapshot, so results do not depend on
+            # the order rows happen to be visited in
+            row_corrections.append((sig_row, a))
+    for _w, _a in row_corrections:
+        # the row analog of the variable value correction: remove a
+        # kept row's own barrier weight from the reduced block
+        R_corr = R_corr - _w * np.outer(_a, _a)
+    ns = SimpleNamespace()
+    ns.act = act
+    ns.mu = mu
+    ns.R_W = R_W
+    ns.sig_fit = sig_fit
+    ns.floor = floor
+    ns.active = active
+    ns.free = [i for i in range(n_params) if i not in active]
+    ns.R_corr = R_corr
+    ns.bind_normals = bind_normals
+    ns.row_corrections = row_corrections
+    ns.R_exact = R_exact
+    return ns
+
+
+class Information(_ParamMatrix):
+    """Observed or expected information over the fitted block, from
+    information(). Keyed like Covariance: info[m.k1, m.k2] (either
+    order), info[m.k1] for a diagonal entry; `matrix` is the dense
+    numpy array in `params` (declaration) order. Natural units, no
+    sigma^2 anywhere: for the homoscedastic Lagrangian case,
+    covariance() equals 2*sigma^2 * inv(information()) on the free
+    block. eigen() supports identifiability diagnosis directly: a
+    near-zero eigenvalue is a direction the data does not inform, and
+    its eigenvector names the parameter combination."""
+
+    _who = "information"
+
+    def __init__(self, params, matrix):
+        super().__init__(params, matrix)
+        self.params = self._params
+
+    def eigen(self):
+        """(eigenvalues, eigenvectors) of the information matrix,
+        eigenvalues ascending, eigenvectors[:, i] in `params` order.
+        Small eigenvalues flag poorly informed directions; a negative
+        one means the point is not a least-squares minimum along that
+        direction (Lagrangian form only; Gauss-Newton is PSD by
+        construction)."""
+        return np.linalg.eigh(self.matrix)
+
+
 def _classify_ratio(r, mu):
     """The activity rule of covariance roadmap item 0, applied at the
     reduced fitted block. Mirrors pounce_sensitivity::activity with one
@@ -1098,12 +1430,12 @@ def _nullspace(A):
     return vh[rank:].T
 
 
-def _minv(M):
+def _minv(M, who="covariance"):
     try:
         return np.linalg.inv(M)
     except np.linalg.LinAlgError as e:
         raise RuntimeError(
-            "covariance: the parameter block of the inverse KKT matrix "
+            f"{who}: the parameter block of the inverse KKT matrix "
             "is singular; the fitted parameters are linearly "
             "dependent (structurally unidentifiable)") from e
 
@@ -1237,210 +1569,12 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
                   for i in range(n_params)])
     M = 0.5 * (M + M.T)
 
-    # ── membership from the barrier activity classification ──────────────
-    # (covariance roadmap item 1). The classifier's per-coordinate rule
-    # scales Sigma by the coordinate's own Lagrangian curvature, which is
-    # zero for a fitted parameter in the residual-variable idiom (the
-    # curvature lives on the residuals), so the same rule runs HERE on
-    # the reduced fitted block, where the parameter's curvature actually
-    # is: q = the reduced Hessian diagonal with the parameter's own
-    # barrier term removed, Sigma retained by the solve. A weakly active
-    # parameter is KEPT and warned rather than silently pinned; no slack
-    # threshold can make that distinction, because slack and multiplier
-    # are both O(sqrt(mu)) at weak activity.
-    act = session.solver.classify_activity()
-    mu = float(act["mu"])
-    R_W = _minv(M)                # reduced Hessian off the factor, W-based
-    # M (and so R_W) is natural-units by the kkt_solve contract
-    # (pounce#128), and so are the report's sigmas and row_normal
-    # (unscaled at the classifier boundary per the same contract), so
-    # everything here composes without scale factors.
-    sig_fit = np.array([float(act["var_sigma"][session.fit_rows[p]])
-                        for p in params])
-    q_red = np.abs(np.diag(R_W) - sig_fit)
-    floor = np.sqrt(np.finfo(float).eps) * max(
-        1.0, float(np.abs(np.diag(R_W)).max()))
-    active = []
-    for i, p in enumerate(params):
-        st = act["var_status"][session.fit_rows[p]]
-        if st in ("unbounded", "fixed"):
-            continue                       # no variable bound to classify
-        ri = float(sig_fit[i]) / max(float(q_red[i]), floor)
-        if q_red[i] < floor and ri <= 1e1:
-            # curvature AND barrier weight both below scale: the bound
-            # question does not arise, but the direction is poorly
-            # identified (a dominant Sigma cancelling inside q_red
-            # instead lands ri astronomically high and classifies
-            # strongly active)
-            status = "unidentified"
-        else:
-            status = _classify_ratio(ri, mu)
-        if status == "strongly_active":
-            active.append(i)
-            warnings.warn(
-                f"covariance: fitted parameter {p.name} is held by its "
-                "bound at the optimum (strongly active); its direction is "
-                "projected out (zero variance, conditional on the active "
-                "bound) and the boundary asymptotics are nonstandard.")
-        elif status == "weakly_active":
-            warnings.warn(
-                f"covariance: fitted parameter {p.name} sits exactly on "
-                "its bound with a vanishing multiplier (weakly active). "
-                "It is kept in the free block with finite variance; "
-                "boundary asymptotics are nonstandard.")
-        elif status == "ambiguous":
-            warnings.warn(
-                f"covariance: fitted parameter {p.name} has ambiguous "
-                "bound activity at the solve's final barrier parameter; "
-                "re-solve with a tighter tol to settle it. It is kept in "
-                "the free block.")
-        elif status == "unidentified":
-            warnings.warn(
-                f"covariance: fitted parameter {p.name} has curvature "
-                "below the model's own noise scale (unidentified); its "
-                "variance is large rather than small. It is kept in the "
-                "free block.")
-
-    # ── binding general rows on the fitted block ──────────────────────────
-    # (item 1 row projection, jkitchin/pounce#362). A strongly active
-    # inequality row whose normal touches the fitted parameters pins a
-    # DIRECTION of the fitted block: no per-parameter disposition can
-    # state that, so the free block is reduced on the null space of the
-    # binding normals and pushed back, singular by the number of binding
-    # rows. Rows classify at the reduced level exactly as the variable
-    # bounds above: the row's barrier weight against the curvature along
-    # its own normal. A bound moved onto a row by declared-parameter
-    # reformulation (jkitchin/pounce#357) is the single-coordinate case
-    # and reproduces the variable disposition exactly.
-    R_corr = R_W - np.diag(sig_fit)
-    # columns held constant by the declared-parameter pins: a row's
-    # support there contributes nothing through elimination (the pin
-    # variable cannot move), so it does not make the row "mixed". The
-    # pin constraint's normal is e_{pin var}, so its support IS the
-    # pin column.
-    pin_cols = set()
-    for _pr in session.pins.values():
-        _pn = np.asarray(session.solver.row_normal(int(_pr)), dtype=float)
-        pin_cols.update(int(i) for i in np.nonzero(_pn)[0])
-    fit_cols = set(int(r) for r in rows)
-    bind_normals = []                  # unit normals over the fitted block
-    row_corrections = []               # (weight, unit normal), applied after
-    for j, rst in enumerate(act["row_status"]):
-        if rst in ("equality", "unbounded", "inactive"):
-            # inactive rows carry O(mu) geometric weight (the invariant
-            # form), the same order as every other accepted O(mu) term;
-            # skipping them also avoids fetching every row normal on
-            # wide models (an O(m*n) sweep). The bound and row
-            # spellings of an INACTIVE limit therefore agree to O(mu)
-            # rather than exactly, tested at that tolerance.
-            continue
-        a_full = np.asarray(session.solver.row_normal(j), dtype=float)
-        a = a_full[rows]
-        na = float(np.linalg.norm(a))
-        # A row whose normal also touches NON-fitted variables pins a
-        # combination that reaches the fitted block through the
-        # eliminated variables, not along the restricted normal: e.g.
-        # a + r_1 <= cap with r_1 = y_1 - a - b*x_1 actually pins a
-        # b-direction, while the restricted normal reads e_a. The
-        # restricted projection would delete the wrong direction, so a
-        # mixed binding row is kept unprojected with an explicit
-        # warning instead. The general treatment needs the row's
-        # reduced normal through the elimination (roadmap item 2's
-        # machinery).
-        nf = float(np.linalg.norm(a_full))
-        outside = [i for i in np.nonzero(a_full)[0]
-                   if int(i) not in fit_cols and int(i) not in pin_cols]
-        mixed = bool(outside) and (
-            float(np.linalg.norm(a_full[outside])) > 1e-8 * max(1.0, nf))
-        if na <= 1e-12 * max(1.0, nf):
-            # entirely outside the fitted block: the extreme mixed case
-            # (relative tolerance, matching the mixed test above)
-            mixed = True
-        cname = (session.con_names[j] if j < len(session.con_names)
-                 else f"row {j}")
-        if mixed:
-            # the reduced-level rule is also unreliable here: the row's
-            # barrier weight lands through elimination on a direction
-            # the restricted normal cannot see, so re-classifying
-            # against it manufactures a wrong ratio. Item 0's raw
-            # classification (scale-invariant along the full normal) is
-            # the honest status for a mixed row.
-            if rst == "strongly_active":
-                warnings.warn(
-                    f"covariance: constraint {cname} is strongly active "
-                    "and involves non-fitted variables; the direction "
-                    "it pins reaches the fitted parameters through the "
-                    "eliminated variables and cannot be represented by "
-                    "a restricted normal, so it is NOT projected. Treat "
-                    "the returned variances as not conditioned on this "
-                    "constraint.")
-            elif rst in ("weakly_active", "ambiguous", "unidentified"):
-                warnings.warn(
-                    f"covariance: constraint {cname} is {rst} and "
-                    "involves non-fitted variables; it is kept "
-                    "unprojected and its barrier weight is not "
-                    "corrected for (the restricted direction would be "
-                    "the wrong one). Boundary asymptotics are "
-                    "nonstandard.")
-            continue
-        a = a / na
-        # the row's slack elimination contributes Sigma_j * (raw normal
-        # outer product) to the reduced block; in the unit-normal basis
-        # that coefficient is Sigma_j * ||raw normal||^2 (all natural
-        # units: the report unscales at the classifier boundary)
-        sig_row = float(act["row_sigma"][j]) * na * na
-        q_w = float(a @ R_corr @ a)
-        # |q|, matching the Rust classifier: indefinite curvature
-        # classifies on magnitude, and indefiniteness still surfaces
-        # through the negative-variance warning downstream
-        q_row = abs(q_w - sig_row)
-        ri = sig_row / max(q_row, floor)
-        if q_row < floor and ri <= 1e1:
-            status = "unidentified"
-        else:
-            status = _classify_ratio(ri, mu)
-        combo = " + ".join(
-            f"{a[k]:.3g}*{params[k].name}" for k in range(n_params)
-            if abs(a[k]) > 1e-12)
-        if status == "strongly_active":
-            bind_normals.append(a)
-            # conditional information along the pinned combination: the
-            # factor's curvature along the normal with the row's own
-            # barrier weight removed. Loses log10(Sigma/q) digits at
-            # tight mu; item 2's exact-Hessian construction replaces it.
-            s_a = max(q_w - sig_row, 0.0)
-            warnings.warn(
-                f"covariance: constraint {cname} is strongly active and "
-                f"pins the fitted combination {combo}; variance along it "
-                "is projected to zero (conditional on the constraint). "
-                f"Conditional information along the combination: {s_a:.6g}.")
-        elif status == "weakly_active":
-            warnings.warn(
-                f"covariance: constraint {cname} is weakly active on the "
-                f"fitted combination {combo} (multiplier and slack vanish "
-                "together). It is kept unprojected with finite variance; "
-                "boundary asymptotics are nonstandard.")
-        elif status == "ambiguous":
-            warnings.warn(
-                f"covariance: constraint {cname} has ambiguous activity "
-                f"on the fitted combination {combo} at the solve's final "
-                "barrier parameter; re-solve with a tighter tol to "
-                "settle it. It is kept unprojected.")
-        elif status == "unidentified":
-            warnings.warn(
-                f"covariance: constraint {cname} has curvature below "
-                f"the fitted block's noise scale on {combo} "
-                "(unidentified); it is kept unprojected and its "
-                "variance is large rather than small.")
-        if status in ("weakly_active", "ambiguous"):
-            # collected, applied after the loop: every row classifies
-            # against the same snapshot, so results do not depend on
-            # the order rows happen to be visited in
-            row_corrections.append((sig_row, a))
-    for _w, _a in row_corrections:
-        # the row analog of the variable value correction: remove a
-        # kept row's own barrier weight from the reduced block
-        R_corr = R_corr - _w * np.outer(_a, _a)
+    cb = _classify_fitted_block(session, params, rows, M, zcols)
+    sig_fit = cb.sig_fit
+    floor = cb.floor
+    R_corr = cb.R_corr
+    bind_normals = cb.bind_normals
+    row_corrections = cb.row_corrections
 
     # ── noise variance per group ──────────────────────────────────────────
     groups = dict(session.res_rows)
@@ -1547,7 +1681,7 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     # set. Restricting the INFORMATION matrix to the free block and
     # inverting (not restricting the inverse) is the curve_fit
     # _projected_covariance construction.
-    free = [i for i in range(n_params) if i not in active]
+    free = cb.free
 
     def embed(cov_ff):
         if len(free) == n_params:
@@ -1639,3 +1773,164 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
                if len(group_sigma) == 1 and None in group_sigma
                else group_sigma)
     return Covariance(params, cov, sig_out)
+
+
+def information(model, hessian="lagrangian"):
+    """The information matrix of the fitted parameters: the reduced
+    Hessian over the declared block, the un-inverted sibling of
+    covariance(), from the same single solve.
+
+    Natural units and no sigma^2 anywhere (the core's convention;
+    covariance() carries the 2*sigma^2 on top): for a homoscedastic
+    Lagrangian fit, covariance() equals 2*sigma^2*inv(information())
+    on the free block. hessian= selects the form exactly as in
+    covariance(): "lagrangian" (default) is the observed information,
+    built by tangent recovery against the held factorization (the
+    K-inverse columns' x-blocks are T*M, so T = Zx*inv(M) exactly and
+    R = T'HT with the exact Lagrangian Hessian: machine precision for
+    equality and bound activity, no subtraction against the
+    barrier-augmented factor; a binding inequality row leaves ~1e-6
+    relative residue through its slack barrier). "gauss-newton" is the expected information 2*J'J, with J
+    recovered over ALL fitted parameters and sliced afterwards, so the
+    pinned rows exist to build their disposition from (requires
+    declared residuals, as in covariance()).
+
+    Membership and warnings follow covariance() exactly (item 1's
+    table): a free parameter's row is the reduced Hessian; a strongly
+    active parameter's block is S, the reduction onto the pinned set,
+    NOT a zero row, because zero information is the opposite of what a
+    pinned parameter carries; cross blocks between free and pinned are
+    zero. Binding constraint rows project the free block on both sides
+    (the pseudo-inverse of the projected covariance). An indefinite
+    Lagrangian block is returned as computed with a warning naming
+    Gauss-Newton as the PSD alternative: refusing would withhold the
+    finding that the point is not a minimum or the model is
+    over-parameterized.
+
+    Returns an Information object keyed by the declared variables'
+    data objects: info[m.A, m.k], info.matrix, info.eigen().
+    """
+    if hessian not in ("lagrangian", "gauss-newton"):
+        raise ValueError(
+            "information: hessian must be 'lagrangian' or 'gauss-newton', "
+            f"got {hessian!r}")
+    reg = model.__dict__.get(_REG)
+    session = reg.session if reg else None
+    if session is None:
+        raise RuntimeError(
+            "no sensitivity session: declare_fitted() (and optionally "
+            "declare_residual()) then solve with SolverFactory('pounce') "
+            "first")
+    params = list(session.fit_rows.keys())
+    n_params = len(params)
+    if n_params == 0:
+        raise RuntimeError(
+            "information: no fitted parameters were declared; flag the "
+            "fitted variables with declare_fitted() before the solve")
+
+    pert = np.asarray(session.solver.kkt_perturbations)
+    if pert.any():
+        warnings.warn(
+            "information: the held KKT factor carries inertia-correction "
+            f"perturbations {pert.tolist()}, so the information is "
+            "regularized rather than exact; the isotropic delta_w lands on "
+            "the free block and survives the projection.")
+
+    # `rows` is full-x (the space _classify_fitted_block reads the
+    # activity report and row_normal in); `krows` is the same variables
+    # as factor rows (gh #450): they differ exactly when the model has
+    # a fixed variable, and agree everywhere else
+    dim = session.solver.kkt_dim
+    rows = [session.fit_rows[p] for p in params]
+    krows = [session.primal_row(r, f"information({p.name})")
+             for r, p in zip(rows, params)]
+    zcols = []
+    for r in krows:
+        e = np.zeros(dim)
+        e[r] = 1.0
+        zcols.append(np.asarray(session.solver.kkt_solve(e)))
+    M = np.array([[zcols[j][krows[i]] for j in range(n_params)]
+                  for i in range(n_params)])
+    M = 0.5 * (M + M.T)
+
+    cb = _classify_fitted_block(session, params, rows, M, zcols,
+                                 who="information")
+    free, active = cb.free, cb.active
+
+    if hessian == "gauss-newton":
+        groups = dict(session.res_rows)
+        if not groups:
+            raise ValueError(
+                "information: hessian='gauss-newton' needs declared "
+                "residuals (declare_residual()); the residual Jacobian is "
+                "recovered from their rows. Without residual variables "
+                "only the hessian='lagrangian' default is available.")
+        Mi = _minv(M, "information")
+        R = np.zeros((n_params, n_params))
+        for g, rws in groups.items():
+            # slice LAST: J over the whole fitted block, so the pinned
+            # rows exist for S below; res_rows is full-x like fit_rows,
+            # zcols are factor rows (gh #450)
+            Zr = np.array([[zcols[j][session.primal_row(r, "information")]
+                            for j in range(n_params)]
+                           for r in rws])
+            Jg = Zr @ Mi
+            R += 2.0 * (Jg.T @ Jg)
+    else:
+        R = cb.R_exact
+        if R is None:
+            n_var, n_eq = _estimation_counts(session)
+            if n_var - n_eq != n_params:
+                raise RuntimeError(
+                    "information: hessian='lagrangian' requires the "
+                    "square estimation structure (the equality "
+                    "constraints determine the non-fitted variables "
+                    "given the fitted block); this model has "
+                    f"{n_var} factor variables, {n_eq} equalities and "
+                    f"{n_params} fitted parameters, so "
+                    f"{n_var} - {n_eq} != {n_params} and the tangent "
+                    "recovery is not defined. hessian='gauss-newton' "
+                    "does not need it.")
+            R = _tangent_reduced_hessian(session, M, zcols, "information")
+
+    info_mat = np.zeros((n_params, n_params))
+    if free:
+        Rff = R[np.ix_(free, free)]
+        Zb = _free_nullspace(cb.bind_normals, free)
+        if Zb.shape[1] == Rff.shape[0]:
+            info_ff = Rff
+        else:
+            # projected on both sides: the pseudo-inverse of the
+            # projected covariance (item 1's rule, identical in both
+            # accessors)
+            info_ff = Zb @ (Zb.T @ Rff @ Zb) @ Zb.T
+        info_mat[np.ix_(free, free)] = info_ff
+        if hessian == "lagrangian" and _indefinite(info_ff):
+            warnings.warn(
+                "information: the Lagrangian free block is indefinite "
+                "(returned as computed): the point is not a "
+                "least-squares minimum along some direction, or the "
+                "model is over-parameterized. "
+                "hessian='gauss-newton' is the PSD alternative.")
+    if active:
+        # the pinned set's disposition is S, the reduction onto the
+        # pinned block, not a zero row: zero information is the
+        # opposite of what a pinned parameter carries. Conditional on
+        # the rest of the pinned set (item 1's caveat).
+        if free:
+            try:
+                S = (R[np.ix_(active, active)]
+                     - R[np.ix_(active, free)]
+                     @ np.linalg.solve(R[np.ix_(free, free)],
+                                       R[np.ix_(free, active)]))
+            except np.linalg.LinAlgError as e:
+                raise RuntimeError(
+                    "information: the free block is singular, so the "
+                    "pinned parameters' conditional information S is not "
+                    "defined; the free fitted parameters are linearly "
+                    "dependent") from e
+        else:
+            S = R[np.ix_(active, active)]
+        info_mat[np.ix_(active, active)] = S
+
+    return Information(params, info_mat)
