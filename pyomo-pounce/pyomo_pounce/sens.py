@@ -145,7 +145,14 @@ def retain_kkt(model):
     declare_residual), or if retain_kkt() was called; and a
     Covariance/Information result whose lazy conditioned_on has not
     been read keeps the session alive through its pending computation
-    until first access."""
+    until first access.
+
+    Like any declaration, this routes the solve through the
+    in-process sensitivity path, whose solve() surface is not
+    keyword-identical to the ordinary subprocess path (for example,
+    load_solutions=False is not honored there): adding it to an
+    existing script changes how the solve runs, not just what is
+    kept."""
     _registry(model).retain = True
 
 
@@ -1971,6 +1978,13 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
         else:
             group_sigma = {g: float(sigma_sq) for g in (groups or {None: []})}
     elif groups:
+        if n_fit == 0:
+            raise ValueError(
+                "covariance: the noise variance must be estimated from "
+                "the declared residuals, but no fitted parameters were "
+                "declared, so the degrees of freedom for the estimate "
+                "are unknown; pass sigma_sq= (known variance) or flag "
+                "the fitted parameters with declare_fitted()")
         group_sigma = {}
         for g, rws in groups.items():
             n_g = len(rws)
@@ -1982,6 +1996,13 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
             ssr_g = float(np.sum(session.base_x[rws] ** 2))
             group_sigma[g] = ssr_g / (n_g - n_fit)
     elif n_data is not None:
+        if n_fit == 0:
+            raise ValueError(
+                "covariance: n_data= estimates the noise variance, but "
+                "no fitted parameters were declared, so the degrees of "
+                "freedom for the estimate are unknown; pass sigma_sq= "
+                "(known variance) or flag the fitted parameters with "
+                "declare_fitted()")
         if n_data <= n_fit:
             raise ValueError(
                 f"covariance: n_data ({n_data}) must exceed the number of "

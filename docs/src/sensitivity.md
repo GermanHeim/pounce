@@ -528,9 +528,17 @@ The retention policy in one place: the factor is kept if anything is
 declared or `retain_kkt()` was called, and a `Covariance` or
 `Information` result whose lazy `conditioned_on` has not been read
 keeps the session alive through its pending computation until first
-access. Noise is a separate question: `retain_kkt()` keeps the factor,
-not a noise model, so `covariance()` still needs `sigma_sq=`,
-`n_data=`, or declared residuals.
+access. Noise is a separate question: `retain_kkt()` keeps the
+factor, not a noise model, and with nothing declared fitted the
+degrees of freedom for a noise ESTIMATE are unknown, so
+`covariance()` under retain-only needs `sigma_sq=`; the estimation
+routes (declared residuals, `n_data=`) raise an error saying so.
+
+Like any declaration, `retain_kkt()` routes the solve through the
+in-process sensitivity path, whose `solve()` surface is not
+keyword-identical to the ordinary subprocess path (for example,
+`load_solutions=False` is not honored there). Adding it to an
+existing script changes how the solve runs, not just what is kept.
 
 ## Units and NLP scaling
 

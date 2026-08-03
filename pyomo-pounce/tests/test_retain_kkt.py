@@ -4,8 +4,6 @@ work on any block without a declared default. The roadmap's truth
 table: no declarations and no retain means no factor and the no-session
 error; retain alone keeps the factor but covariance(m) has no default
 and stays an error; retain plus declarations changes nothing."""
-import warnings
-
 import numpy as np
 import pytest
 import pyomo.environ as pyo
@@ -119,6 +117,25 @@ def test_retain_survives_clone():
     pyo.SolverFactory("pounce").solve(c)
     info = information(c, wrt=[c.a])
     assert np.isfinite(info[c.a])
+
+
+def test_retain_only_estimated_sigma_refuses():
+    # with nothing declared fitted the degrees of freedom for a noise
+    # ESTIMATE are unknown: silently dividing by n would bias every
+    # variance low by n/(n-p), so both estimation routes raise and
+    # point at sigma_sq= or declare_fitted()
+    x, y, _ = linear_data()
+    m = linear_model(x, y, declare=False)
+    retain_kkt(m)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with pytest.raises(ValueError, match="degrees of freedom"):
+        covariance(m, wrt=[m.a])
+    m2 = linear_model(x, y, declare=False)
+    retain_kkt(m2)
+    pyo.SolverFactory("pounce").solve(m2)
+    with pytest.raises(ValueError, match="degrees of freedom"):
+        covariance(m2, n_data=N, wrt=[m2.a])
 
 
 def test_retain_only_sigma_still_required():
