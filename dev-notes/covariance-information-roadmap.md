@@ -37,15 +37,17 @@ not know about in advance.
 
 ## Where we are
 
-Items 0, 1 and 2 are MERGED (jkitchin/pounce#371, #436 and #454): the
+Items 0 through 3 are MERGED (jkitchin/pounce#371, #436, #454 and
+#466): the
 activity classifier ships in the Rust core as `Solver.classify_activity()`
 plus `Solver.row_normal()` and `Solver.hessian_vec()`; `covariance()`
 takes its membership from it, keeps a weakly active parameter at its true
 variance, and projects binding rows; and `information()` ships as the
 un-inverted sibling, built by tangent recovery rather than the Schur
 construction sketched below (see item 2 for what the implementation
-settled). The paragraphs below describe v0.9 as the baseline the roadmap
-was written against; items 3 and 4 remain.
+settled); `wrt=` block selection ships on both accessors (see item 3).
+The paragraphs below describe v0.9 as the baseline the roadmap was
+written against; item 4 remains.
 
 v0.9 shipped `covariance()` (in `pyomo-pounce/pyomo_pounce/sens.py`). You
 `declare_fitted` a set of free variables, solve, and `covariance(model)`
@@ -316,29 +318,54 @@ through `Solver.primal_rows` (gh #450, landed mid-implementation): the
 `.col`-order rows the session holds are full-x, the factor's x block is
 var-x, and they diverge exactly when the model carries a fixed variable.
 
-**3. `wrt=` block selection.** `covariance(model, wrt=block)` and
-`information(model, wrt=block)` reduce onto any block of free variables off
-the held factor, post-solve, since the factor covers every free variable.
-`declare_fitted` is the default block when `wrt=` is omitted, so
-`covariance(model)` behaves exactly as in v0.9. The block accepts a slice
-(`m.x[t, :]`) or a `(Var, time)` pair, not only a hand-listed VarData set.
+**3. `wrt=` block selection.** MERGED (#466). `covariance(model,
+wrt=block)` and `information(model, wrt=block)` reduce onto any block of
+the solve's variables off the held factor, post-solve. The declared
+fitted set is the default, so `covariance(model)` is untouched. Accepted
+forms: a Var, an indexed slice, a `(Var, iterable)` pair (a tuple of two
+Vars is a two-member block, not a pair; the review caught the second Var
+being silently eaten as an index set), data objects, or a mixed list.
+Each call re-reduces onto its own argument: one solve, many blocks, each
+getting its marginal, with sigma always on the fit's own degrees of
+freedom so sub-block entries equal the default answer's exactly.
 
-Each call re-reduces onto its own argument, so one solve serves as many
-blocks as you ask about, and each gets that block's marginal.
+What the implementation settled beyond the sketch:
 
-With one exception, which is returned rather than hidden. A strongly active
-variable outside the block is not deleted: its `Σ` stays in the held factor
-and drives the coupling through it to zero as `μ` falls, so the block
-converges to the value conditional on that bound rather than the marginal
-over it, and its numbers move with `μ` on the way. The active set comes back
-with the matrix.
-
-Item 2's machinery sets the constructions here. A block that parameterizes
-the constraint manifold (block size equals `n_var - n_eq`, the same square
-structure `_estimation_counts()` checks) gets the exact tangent-recovered
-Lagrangian; any other block reduces off the held factor with the item-1
-corrections and that route's documented precision. Gauss-Newton profiles
-through the K-inverse chain (`J_B = Z_r·inv(M_B)`) for any block.
+- A RANK-DEFICIENT block (more coordinates than the fit's degrees of
+  freedom, or linearly dependent coordinates below that count) is the
+  prediction-band case: `covariance()` returns the homoscedastic
+  Lagrangian marginal `2σ²M` with membership handling bypassed (the
+  residual block reproduces `σ²X(XᵀX)⁻¹Xᵀ`), and `information()`
+  refuses toward `covariance()`. Deficiency is gated by the count plus
+  a rank test, with a dedicated `_SingularBlock` exception as the last
+  resort, because whether LAPACK raises on a structurally singular
+  system is RUNNER-DEPENDENT: the same refusal test flipped
+  pass-fail-pass across adjacent CI runs on identical numpy. Every
+  place the code once relied on `LinAlgError` for a structural
+  condition now rank-gates first (including item 2's singular-S
+  refusal).
+- `information()` on a proper sub-block of the fitted set builds the
+  marginal by Schur complement of the exact tangent `R` over the
+  fitted block (never inverts a covariance; a pinned member costs no
+  digits; free fitted variables outside the block are profiled out,
+  pinned ones conditioned on). Other free blocks reduce off the held
+  factor with the item-1 corrections, benign there (no barrier term in
+  the slice). A parameterizing block keeps the direct tangent.
+  Gauss-Newton profiles through the K-inverse chain (`J_B =
+  Z_r·inv(M_B)`) for any block at or below the count.
+- The outside active set comes back as `.conditioned_on` on both
+  result types: the block's numbers are conditional on those bounds,
+  not marginal over them. Identification is item 1's reduced-level
+  rule applied per candidate as a singleton block (one backsolve gives
+  `(K⁻¹)ᵢᵢ`, effective curvature `|1/(K⁻¹)ᵢᵢ − Σ|` clamped to the
+  cancellation floor, the shipped ratio edges call it): scale-invariant
+  where any absolute Σ threshold is not. Computed LAZILY on first
+  access; until then the pending computation keeps the session and the
+  held factor alive, which is item 4's territory arriving early.
+- The shared membership diagnostics keep their exact v0.9 "fitted
+  parameter" wording on the default path and speak block-relative
+  ("block member", "variables outside the block") only under an
+  explicit `wrt=`.
 
 **4. `retain_kkt()`, a factor-retention switch decoupled from
 declarations.** The solve factors the KKT to solve the NLP; the only question
@@ -355,6 +382,14 @@ off, so a solve with no sensitivity pays nothing.
 | `declare_fitted(S)` | yes | over S | over T |
 | `retain_kkt()` only | yes | error, no default | over T |
 | `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+
+Item 3 left a first instance of result-driven retention on the table:
+a `Covariance`/`Information` whose lazy `conditioned_on` has not been
+read holds the session, and so the factor, alive through its pending
+thunk (disclosed in the property docstring). `retain_kkt()` should
+state the retention story once, so that result-object pinning, the
+declaration-driven keep, and the explicit switch read as one policy
+rather than three accidents.
 
 The columns show `covariance()`; `information()` follows the same rows, since
 factor retention and the default block are accessor-agnostic. `gradient()` and
