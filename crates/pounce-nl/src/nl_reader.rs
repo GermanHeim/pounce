@@ -2549,6 +2549,37 @@ impl NlTnlp {
         lambda: Option<&[Number]>,
         out: &mut [Number],
     ) -> Result<(), String> {
+        self.hessian_vector_products(x, v, 1, obj_factor, lambda, out)
+    }
+
+    /// Block form of [`Self::hessian_vector_product`]: `k` directions at
+    /// once, `out[:, c] = ∇²L · v[:, c]`.
+    ///
+    /// `v` and `out` are `n × k` in **column-major** order — direction `c`
+    /// occupies `v[c*n .. (c+1)*n]`. `out` is overwritten.
+    ///
+    /// Worth having as its own entry point rather than a loop over the
+    /// single-vector call: the forward sweep depends only on `x`, so a block
+    /// runs it *once per tape* and reuses `vals` across all `k` directions,
+    /// where `k` separate calls would redo it `k` times. Only the
+    /// forward-tangent + reverse-over-tangent passes are per-direction. That
+    /// is the shape a block-Krylov solve, a directional-derivative probe, or
+    /// a densify-the-Hessian loop wants.
+    ///
+    /// An all-zero direction is skipped, so passing a sparse block whose
+    /// columns are mostly empty costs only the columns that carry signal.
+    /// (The sparsity that dominates is the model's own: each tape touches
+    /// only its own variables, and `hessian_directional` is O(tape ops), not
+    /// O(n).)
+    pub fn hessian_vector_products(
+        &mut self,
+        x: &[Number],
+        v: &[Number],
+        k: usize,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        out: &mut [Number],
+    ) -> Result<(), String> {
         let (n, m) = (self.prob.n, self.prob.m);
         let check = |name: &str, got: usize, want: usize| -> Result<(), String> {
             if got == want {
@@ -2560,13 +2591,26 @@ impl NlTnlp {
             }
         };
         check("x", x.len(), n)?;
-        check("v", v.len(), n)?;
-        check("out", out.len(), n)?;
+        check("v", v.len(), n * k)?;
+        check("out", out.len(), n * k)?;
         if let Some(lam) = lambda {
             check("lambda", lam.len(), m)?;
         }
 
         out.fill(0.0);
+        if k == 0 || n == 0 {
+            return Ok(());
+        }
+
+        // Which directions carry signal. Computed once, not per (tape,
+        // direction) pair — with many small summand tapes the scan would
+        // otherwise dominate the work it is meant to save.
+        let live: Vec<bool> = (0..k)
+            .map(|c| v[c * n..(c + 1) * n].iter().any(|&s| s != 0.0))
+            .collect();
+        if !live.iter().any(|&l| l) {
+            return Ok(());
+        }
 
         let obj_seed = if self.prob.minimize {
             obj_factor
@@ -2578,40 +2622,52 @@ impl NlTnlp {
                 if t.ops.is_empty() {
                     continue;
                 }
+                // Once per tape, not once per direction — the whole point
+                // of the block form.
                 t.forward_into(x, &mut self.vals_scratch);
-                t.hessian_directional(
-                    &self.vals_scratch,
-                    v,
-                    obj_seed,
-                    out,
-                    &mut self.dot_scratch,
-                    &mut self.adj_scratch,
-                    &mut self.adj_dot_scratch,
-                );
+                for (c, out_col) in out.chunks_mut(n).enumerate() {
+                    if !live[c] {
+                        continue;
+                    }
+                    t.hessian_directional(
+                        &self.vals_scratch,
+                        &v[c * n..(c + 1) * n],
+                        obj_seed,
+                        out_col,
+                        &mut self.dot_scratch,
+                        &mut self.adj_scratch,
+                        &mut self.adj_dot_scratch,
+                    );
+                }
             }
         }
 
         if let Some(lam) = lambda {
             // `lam.len() == m` was checked above, so `con_tapes[k]` is in
             // range for every k.
-            for (k, &w) in lam.iter().enumerate() {
+            for (i, &w) in lam.iter().enumerate() {
                 if w == 0.0 {
                     continue;
                 }
-                for t in &self.con_tapes[k] {
+                for t in &self.con_tapes[i] {
                     if t.ops.is_empty() {
                         continue;
                     }
                     t.forward_into(x, &mut self.vals_scratch);
-                    t.hessian_directional(
-                        &self.vals_scratch,
-                        v,
-                        w,
-                        out,
-                        &mut self.dot_scratch,
-                        &mut self.adj_scratch,
-                        &mut self.adj_dot_scratch,
-                    );
+                    for (c, out_col) in out.chunks_mut(n).enumerate() {
+                        if !live[c] {
+                            continue;
+                        }
+                        t.hessian_directional(
+                            &self.vals_scratch,
+                            &v[c * n..(c + 1) * n],
+                            w,
+                            out_col,
+                            &mut self.dot_scratch,
+                            &mut self.adj_scratch,
+                            &mut self.adj_dot_scratch,
+                        );
+                    }
                 }
             }
         }
@@ -4422,6 +4478,164 @@ S1 2 sens_init_constr
         );
         assert!(
             t.hessian_vector_product(&[0.5, 2.0], &[1.0], 1.0, None, &mut out)
+                .is_err()
+        );
+    }
+
+    /// A chain objective `Σ (x_i·x_{i+1})² + exp(x_i)` has a tridiagonal
+    /// Hessian — the sparse shape an IPM actually meets. The block HVP has
+    /// to reproduce it column for column, including the structural zeros:
+    /// a bug that leaked coupling between non-adjacent variables would
+    /// show up here and nowhere in a small dense test.
+    #[test]
+    fn hessian_vector_products_on_a_sparse_hessian() {
+        const N: usize = 8;
+        let mut terms = Vec::new();
+        for i in 0..N - 1 {
+            terms.push(bin(BinOp::Pow, bin(BinOp::Mul, v(i), v(i + 1)), c(2.0)));
+        }
+        for i in 0..N {
+            terms.push(un(UnaryOp::Exp, v(i)));
+        }
+        let prob =
+            NlProblem::from_expressions(parts(N, Expr::Sum(terms), Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        let info = t.get_nlp_info().unwrap();
+
+        // Tridiagonal lower triangle: N diagonal + (N-1) sub-diagonal.
+        assert_eq!(
+            info.nnz_h_lag as usize,
+            2 * N - 1,
+            "chain objective should give a tridiagonal Hessian, not a dense one"
+        );
+
+        let x: Vec<Number> = (0..N).map(|i| 0.2 + 0.1 * i as Number).collect();
+
+        // Densify the sparse triangle for the reference.
+        let nnz = info.nnz_h_lag as usize;
+        let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+        assert!(t.eval_h(
+            None,
+            false,
+            1.0,
+            None,
+            false,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+        let mut hvals = vec![0.0; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Values { values: &mut hvals }
+        ));
+        let mut dense = vec![vec![0.0; N]; N];
+        for k in 0..nnz {
+            let (i, j) = (irow[k] as usize, jcol[k] as usize);
+            dense[i][j] += hvals[k];
+            if i != j {
+                dense[j][i] += hvals[k];
+            }
+        }
+
+        // One block of N unit seeds recovers the whole matrix — the
+        // "densify via HVPs" path, in one call.
+        let mut seeds = vec![0.0; N * N];
+        for cc in 0..N {
+            seeds[cc * N + cc] = 1.0;
+        }
+        let mut out = vec![0.0; N * N];
+        t.hessian_vector_products(&x, &seeds, N, 1.0, None, &mut out)
+            .expect("block hvp");
+        for cc in 0..N {
+            for i in 0..N {
+                assert!(
+                    (out[cc * N + i] - dense[i][cc]).abs() < 1e-9,
+                    "H[{i},{cc}]: block={:.9e} sparse={:.9e}",
+                    out[cc * N + i],
+                    dense[i][cc]
+                );
+            }
+        }
+    }
+
+    /// The block form must agree with `k` separate single-vector calls
+    /// (it shares one forward sweep across directions, so a bug there
+    /// would show as a per-direction discrepancy), and must skip an
+    /// all-zero direction without disturbing its neighbours.
+    #[test]
+    fn hessian_vector_products_match_repeated_single_calls() {
+        let obj = Expr::Sum(vec![
+            un(UnaryOp::Exp, bin(BinOp::Mul, v(0), v(1))),
+            bin(BinOp::Pow, v(2), c(4.0)),
+            bin(BinOp::Mul, v(0), v(2)),
+        ]);
+        let cons = vec![bin(BinOp::Mul, v(1), v(2))];
+        let prob = NlProblem::from_expressions(parts(3, obj, cons)).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        let x = [0.4, -0.6, 1.3];
+        let lam = [0.75];
+        let cols: [[Number; 3]; 4] = [
+            [1.0, 2.0, -3.0],
+            [0.0, 0.0, 0.0], // the skipped direction
+            [0.5, 0.0, 0.0],
+            [-1.0, 1.0, 1.0],
+        ];
+
+        let mut block = vec![0.0; 3 * cols.len()];
+        let flat: Vec<Number> = cols.iter().flat_map(|c| c.iter().copied()).collect();
+        t.hessian_vector_products(&x, &flat, cols.len(), 1.0, Some(&lam), &mut block)
+            .expect("block hvp");
+
+        for (c, col) in cols.iter().enumerate() {
+            let mut single = vec![0.0; 3];
+            t.hessian_vector_product(&x, col, 1.0, Some(&lam), &mut single)
+                .expect("single hvp");
+            for i in 0..3 {
+                assert!(
+                    (block[c * 3 + i] - single[i]).abs() < 1e-12,
+                    "direction {c} row {i}: block={:.12e} single={:.12e}",
+                    block[c * 3 + i],
+                    single[i]
+                );
+            }
+        }
+        // The zero direction really is zero, not stale scratch.
+        assert!(block[3..6].iter().all(|&z| z == 0.0), "{block:?}");
+    }
+
+    /// `k = 0` is a legal empty block, and the length checks scale with
+    /// `k` rather than assuming a single direction.
+    #[test]
+    fn hessian_vector_products_validate_block_shape() {
+        let prob = NlProblem::from_expressions(parts(2, bin(BinOp::Pow, v(0), c(2.0)), Vec::new()))
+            .expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        let mut empty: Vec<Number> = Vec::new();
+        assert!(
+            t.hessian_vector_products(&[1.0, 1.0], &[], 0, 1.0, None, &mut empty)
+                .is_ok()
+        );
+
+        // v sized for one direction while k says two.
+        let mut out = vec![0.0; 4];
+        assert!(
+            t.hessian_vector_products(&[1.0, 1.0], &[1.0, 1.0], 2, 1.0, None, &mut out)
+                .is_err()
+        );
+        // out sized for one direction while k says two.
+        let mut short = vec![0.0; 2];
+        assert!(
+            t.hessian_vector_products(&[1.0, 1.0], &[1.0; 4], 2, 1.0, None, &mut short)
                 .is_err()
         );
     }

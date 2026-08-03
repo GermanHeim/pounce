@@ -15,6 +15,7 @@ import math
 
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
 import pounce
 
@@ -400,3 +401,234 @@ def test_hessian_vector_product_on_read_nl_model(tmp_path):
     # min (x0-1)^2 + (x1-2)^2  ->  H = 2I
     got = p.hessian_vector_product([0.0, 0.0], [1.5, -2.5])
     np.testing.assert_allclose(got, [3.0, -5.0], atol=1e-12)
+
+
+# ---- HVP against sparse and dense Hessians ----------------------------
+#
+# Two model shapes, because they stress different things. The chain
+# objective's Hessian is tridiagonal — the sparse shape an IPM actually
+# meets, where most of the matrix is structural zero and a bug that leaked
+# coupling between distant variables would hide in a 3x3 test. The coupled
+# objective's Hessian is completely full, so nothing is masked by a zero.
+
+
+def _chain_problem(n=10):
+    """Sum of (x_i * x_{i+1})^2 + exp(x_i): tridiagonal Hessian."""
+    x = pounce.NlExpr.vars(n)
+    terms = [(x[i] * x[i + 1]) ** 2 for i in range(n - 1)]
+    terms += [x[i].exp() for i in range(n)]
+    return pounce.build_nl_problem(n=n, objective=pounce.NlExpr.sum(terms))
+
+
+def _coupled_problem(n=6):
+    """exp(sum x_i) + (sum x_i)^3: every variable pair couples."""
+    x = pounce.NlExpr.vars(n)
+    s = pounce.NlExpr.sum(list(x))
+    return pounce.build_nl_problem(n=n, objective=s.exp() + s**3)
+
+
+def test_sparse_hessian_model_structure_is_actually_sparse():
+    n = 10
+    p = _chain_problem(n)
+    # Tridiagonal lower triangle: n diagonal + (n-1) sub-diagonal entries,
+    # far short of the n(n+1)/2 a dense Hessian would store.
+    assert p.nnz_hess == 2 * n - 1 < n * (n + 1) // 2
+
+    hr, hc = p.hessian_structure()
+    assert set(zip(hr.tolist(), hc.tolist())) == (
+        {(i, i) for i in range(n)} | {(i + 1, i) for i in range(n - 1)}
+    )
+
+
+def test_dense_hessian_model_structure_is_actually_dense():
+    n = 6
+    p = _coupled_problem(n)
+    assert p.nnz_hess == n * (n + 1) // 2
+
+
+@pytest.mark.parametrize("make", [_chain_problem, _coupled_problem])
+def test_hvp_matches_both_sparse_and_dense_hessian_forms(make):
+    """The HVP must agree with the sparse COO Hessian *and* with its dense
+    expansion, on a sparse-Hessian and a dense-Hessian model alike."""
+    p = make()
+    n = p.n
+    rng = np.random.default_rng(0)
+    pt = rng.normal(0.0, 0.3, n)
+
+    # Reference 1: the sparse triangle, applied as a sparse matrix.
+    hr, hc = p.hessian_structure()
+    hv = p.hessian(pt)
+    lower = sp.coo_matrix((hv, (hr, hc)), shape=(n, n)).tocsr()
+    diag = sp.diags(lower.diagonal())
+    sparse_H = lower + lower.T - diag
+
+    # Reference 2: the same thing densified.
+    dense_H = sparse_H.toarray()
+    np.testing.assert_allclose(dense_H, dense_H.T, atol=1e-12)
+
+    for v in (
+        np.ones(n),
+        rng.normal(0.0, 1.0, n),
+        np.eye(n)[0],
+        np.zeros(n),
+    ):
+        got = p.hessian_vector_product(pt, v)
+        assert got.shape == (n,)
+        np.testing.assert_allclose(got, sparse_H @ v, rtol=1e-9, atol=1e-11)
+        np.testing.assert_allclose(got, dense_H @ v, rtol=1e-9, atol=1e-11)
+
+
+@pytest.mark.parametrize("make", [_chain_problem, _coupled_problem])
+def test_hvp_accepts_scipy_sparse_directions(make):
+    """A SciPy sparse ``v`` gives the same answer as its dense twin.
+
+    The result is dense either way: ``H @ v`` is dense in general even when
+    both factors are sparse, so a sparse return type would promise an
+    economy this product does not have.
+    """
+    p = make()
+    n = p.n
+    pt = np.linspace(-0.4, 0.4, n)
+
+    dense_v = np.zeros(n)
+    dense_v[0] = 1.5
+    dense_v[n // 2] = -2.0
+    want = p.hessian_vector_product(pt, dense_v)
+
+    for sparse_v in (
+        sp.csr_array(dense_v),          # 1-D sparse array (n,)
+        sp.coo_array(dense_v),
+        sp.csc_matrix(dense_v[:, None]),  # (n, 1) column
+        sp.csr_matrix(dense_v[:, None]),
+    ):
+        got = p.hessian_vector_product(pt, sparse_v)
+        assert isinstance(got, np.ndarray), "the result must be dense"
+        np.testing.assert_allclose(np.asarray(got).ravel(), want, rtol=1e-10)
+
+    # An all-zero sparse direction is a legal (and cheap) input.
+    zero = sp.csr_matrix((n, 1))
+    np.testing.assert_allclose(
+        np.asarray(p.hessian_vector_product(pt, zero)).ravel(), np.zeros(n), atol=0.0
+    )
+
+
+@pytest.mark.parametrize("make", [_chain_problem, _coupled_problem])
+def test_hvp_block_form_dense_and_sparse(make):
+    """A block of directions returns (n, k) and matches column-by-column
+    single calls, whether the block arrives dense or sparse."""
+    p = make()
+    n = p.n
+    rng = np.random.default_rng(7)
+    pt = rng.normal(0.0, 0.3, n)
+
+    V = rng.normal(0.0, 1.0, (n, 4))
+    V[:, 1] = 0.0  # a skipped direction, in the middle of live ones
+
+    block = p.hessian_vector_product(pt, V)
+    assert block.shape == (n, 4)
+    for c in range(4):
+        single = p.hessian_vector_product(pt, V[:, c])
+        np.testing.assert_allclose(block[:, c], single, rtol=1e-11, atol=1e-13)
+    np.testing.assert_allclose(block[:, 1], np.zeros(n), atol=0.0)
+
+    # Same block, arriving sparse.
+    sparse_block = p.hessian_vector_product(pt, sp.csc_matrix(V))
+    np.testing.assert_allclose(sparse_block, block, rtol=1e-11, atol=1e-13)
+
+    # And against the assembled Hessian.
+    hr, hc = p.hessian_structure()
+    lower = sp.coo_matrix((p.hessian(pt), (hr, hc)), shape=(n, n)).tocsr()
+    H = lower + lower.T - sp.diags(lower.diagonal())
+    np.testing.assert_allclose(block, H @ V, rtol=1e-9, atol=1e-11)
+
+
+@pytest.mark.parametrize("make", [_chain_problem, _coupled_problem])
+def test_hvp_block_of_unit_seeds_reconstructs_the_hessian(make):
+    """Densify-via-HVP: one call with the identity recovers the whole
+    matrix, and it matches the sparse triangle entry for entry."""
+    p = make()
+    n = p.n
+    pt = np.linspace(-0.3, 0.5, n)
+
+    dense_from_hvp = p.hessian_vector_product(pt, np.eye(n))
+    assert dense_from_hvp.shape == (n, n)
+    np.testing.assert_allclose(dense_from_hvp, dense_from_hvp.T, rtol=1e-9, atol=1e-11)
+
+    hr, hc = p.hessian_structure()
+    hv = p.hessian(pt)
+    for i, j, val in zip(hr, hc, hv):
+        assert dense_from_hvp[i, j] == pytest.approx(val, rel=1e-9, abs=1e-11)
+        assert dense_from_hvp[j, i] == pytest.approx(val, rel=1e-9, abs=1e-11)
+
+    # Every entry outside the stored sparsity must be a structural zero —
+    # this is the half of the check a sparse-only comparison cannot make.
+    stored = set(zip(hr.tolist(), hc.tolist()))
+    for i in range(n):
+        for j in range(n):
+            if (max(i, j), min(i, j)) not in stored:
+                assert dense_from_hvp[i, j] == 0.0, f"leak at ({i}, {j})"
+
+
+def test_hvp_block_with_lagrangian_multipliers():
+    """Constraint blocks come along for the ride in the block form."""
+    x = pounce.NlExpr.vars(3)
+    p = pounce.build_nl_problem(
+        n=3,
+        objective=(x[0] * x[1]).exp() + x[2] ** 4,
+        constraints=[x[0] * x[2], x[1] ** 3],
+        g_l=[0.0, 0.0],
+        g_u=[1.0, 1.0],
+    )
+    pt = np.array([0.4, -0.6, 1.3])
+    lam = np.array([0.75, -1.5])
+    V = np.array([[1.0, 0.0], [2.0, 1.0], [-3.0, 0.5]])
+
+    block = p.hessian_vector_product(pt, V, lam, 2.0)
+    dense = _dense_hessian(p, pt, lam, 2.0)
+    np.testing.assert_allclose(block, dense @ V, rtol=1e-9, atol=1e-11)
+
+    # Sparse multipliers-free call on the same block, for contrast.
+    obj_only = p.hessian_vector_product(pt, sp.csc_matrix(V))
+    np.testing.assert_allclose(
+        obj_only, _dense_hessian(p, pt, None, 1.0) @ V, rtol=1e-9, atol=1e-11
+    )
+
+
+def test_hvp_rejects_wrong_shapes():
+    p = _chain_problem(5)
+    with pytest.raises(ValueError, match="expected length 5"):
+        p.hessian_vector_product(np.zeros(5), np.ones(4))
+    # A row vector is not a direction — the message says so.
+    with pytest.raises(ValueError, match=r"expected shape \(5,\) or \(5, k\)"):
+        p.hessian_vector_product(np.zeros(5), np.ones((1, 5)))
+    with pytest.raises(ValueError, match=r"expected shape \(5,\) or \(5, k\)"):
+        p.hessian_vector_product(np.zeros(5), sp.csr_matrix(np.ones((1, 5))))
+    with pytest.raises(ValueError, match="1-D or 2-D"):
+        p.hessian_vector_product(np.zeros(5), np.ones((5, 2, 2)))
+
+
+def test_hvp_accepts_awkward_dense_inputs():
+    """Lists, integer arrays, and non-contiguous views are all directions."""
+    p = _chain_problem(4)
+    pt = np.array([0.1, 0.2, 0.3, 0.4])
+    want = p.hessian_vector_product(pt, np.array([1.0, 0.0, 1.0, 0.0]))
+
+    np.testing.assert_allclose(p.hessian_vector_product(pt, [1, 0, 1, 0]), want)
+    np.testing.assert_allclose(
+        p.hessian_vector_product(pt, np.array([1, 0, 1, 0], dtype=np.int64)), want
+    )
+    # A strided view: every other entry of an 8-long array.
+    strided = np.array([1.0, 9.0, 0.0, 9.0, 1.0, 9.0, 0.0, 9.0])[::2]
+    assert not strided.flags["C_CONTIGUOUS"]
+    np.testing.assert_allclose(p.hessian_vector_product(pt, strided), want)
+    # A column of a Fortran-ordered 2-D array.
+    col = np.asfortranarray(np.array([[1.0, 5.0], [0.0, 5.0], [1.0, 5.0], [0.0, 5.0]]))[
+        :, 0
+    ]
+    np.testing.assert_allclose(p.hessian_vector_product(pt, col), want)
+
+
+def test_hvp_empty_block_is_legal():
+    p = _chain_problem(4)
+    got = p.hessian_vector_product(np.zeros(4), np.zeros((4, 0)))
+    assert got.shape == (4, 0)

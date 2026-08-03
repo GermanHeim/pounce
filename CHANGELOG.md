@@ -41,6 +41,19 @@ expression DAG (discopt) to round-trip through a temporary `.nl` file.
   chromatic number of the coloring — the operator a Newton–Krylov /
   truncated-CG step wants on a model where `∇²L` is impractical to form.
   Available on every `NlProblem` regardless of how it was built.
+  `v` may be a dense length-`n` vector (ndarray of any dtype or stride,
+  list, sequence), a dense `(n, k)` block of directions, or any SciPy
+  sparse vector / `(n, k)` matrix; the result matches the input's shape.
+  A sparse `v` is densified on the way in and all-zero directions are
+  skipped, so a mostly-empty block costs only the live columns — the
+  sparsity that pays is the model's, and every pass is O(tape ops), never
+  O(n²), whichever way `v` arrives. The block form shares one forward
+  sweep per tape across all `k` directions rather than repeating it, which
+  is what makes `p.hessian_vector_product(x, np.eye(n))` a reasonable way
+  to densify the Hessian. The result is always dense: `∇²L·v` is dense in
+  general even when both factors are sparse, and the sparse Hessian itself
+  is already available as `hessian_structure()` + `hessian(x)`.
+  Backed by `NlTnlp::hessian_vector_products` on the Rust side.
 - **`Erf` tape op** (`TapeOp::Erf` / `UnaryOp::Erf`), the one operator in
   the gap analysis that is not decomposable into ops pounce already had.
   Value via `libm` (the rust-lang port of musl's libm — the classic
@@ -53,8 +66,10 @@ expression DAG (discopt) to round-trip through a temporary `.nl` file.
   other transcendentals.
 
 New Rust API alongside the bindings: `NlProblem::from_expressions` /
-`NlProblemParts`, `NlTnlp::hessian_vector_product`, and
-`nl_reader::render_expression`. No existing API changed behavior.
+`NlProblemParts`, `NlTnlp::hessian_vector_product` /
+`hessian_vector_products`, and `nl_reader::render_expression`. No existing
+API changed behavior. `TapeOp` / `UnaryOp` gained a variant, which is
+breaking only for an out-of-workspace crate matching on them exhaustively.
 
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 

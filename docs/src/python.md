@@ -277,6 +277,49 @@ Hv = p.hessian_vector_product(x, v, lam, 1.0)       # full Lagrangian
 Available on every `NlProblem`, however it was built — `read_nl`,
 `parse_nl_text`, `build_nl_problem`, or `variant`.
 
+**Dense and sparse directions.** `v` may be any of:
+
+| `v` | result |
+|---|---|
+| dense length-`n` vector (ndarray of any dtype or stride, list, sequence) | `(n,)` |
+| dense `(n, k)` array of `k` directions | `(n, k)` |
+| SciPy sparse vector, `(n, 1)` column, or `(n, k)` matrix | matching its shape |
+
+```python
+import scipy.sparse as sp
+
+p.hessian_vector_product(x, sp.csc_matrix(V))   # sparse block of directions
+p.hessian_vector_product(x, np.eye(n))          # densify: H, in one call
+```
+
+A sparse `v` is densified on the way in, and an all-zero direction is
+skipped, so a mostly-empty block costs only the columns that carry signal.
+The sparsity that actually pays here is the *model's*, not `v`'s: every
+pass is `O(tape ops)`, never `O(n²)`, whichever way `v` arrives. On a
+model with a tridiagonal Hessian — the usual IPM shape — that is the whole
+game.
+
+The block form is not just a loop: the forward sweep depends only on `x`,
+so `k` directions share one sweep per tape where `k` separate calls would
+repeat it. Only the forward-tangent and reverse-over-tangent passes are
+per-direction.
+
+**The result is always dense**, including for sparse input. `∇²L · v` is
+dense in general even when both `∇²L` and `v` are sparse, so a sparse
+return type would advertise an economy the product does not have. When you
+want the sparse Hessian itself, `hessian_structure()` + `hessian(x)` give
+it directly as a COO lower triangle:
+
+```python
+hr, hc = p.hessian_structure()
+lower = sp.coo_matrix((p.hessian(x), (hr, hc)), shape=(p.n, p.n)).tocsr()
+H = lower + lower.T - sp.diags(lower.diagonal())    # full symmetric matrix
+```
+
+The one shape not accepted is a `(1, n)` row vector: for a square-ish
+block it is indistinguishable from `k` directions of the wrong length, so
+it raises rather than guessing. Transpose it, or pass a 1-D array.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one
