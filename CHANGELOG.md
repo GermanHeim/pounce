@@ -9,6 +9,31 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
+
+- The `inf_pr` iteration column printed `max(‖c‖∞, ‖d − s‖∞)` — the
+  violation of Ipopt's internal *slack* reformulation — in **both**
+  `inf_pr_output` modes. Upstream's default, `original`, prints the true
+  violation of the user's own rows. POUNCE registered the option and then
+  ignored it.
+- The two diverge exactly when the slack drifts from `d(x)`: `s` is
+  confined to `[d_l, d_u]`, so `d = s + (d − s)` clears a lower bound
+  however large the gap grows. On a model that is all inequalities the gap
+  *is* the whole number. On Mittelmann's `robot_a` POUNCE reported a
+  constraint violation of `2.79e+04` at iterates where every original row
+  was satisfied and Ipopt printed `0.00e+00` — a feasible point that read
+  as badly infeasible.
+- The column now matches `ipopt` 3.14.19 digit for digit on `robot_a`,
+  including the two spikes (`7.15e+04`, `2.40e+04`) where the rows really
+  are violated. `inf_pr_output=internal` still selects the old quantity.
+- Display only. The filter's `theta`, the barrier-parameter strategies and
+  the convergence test keep the internal measure — that split is upstream's.
+  The end-of-run "Constraint violation" summary line is **deliberately not
+  changed**: it is bound to "Overall NLP error", which *is* the convergence
+  gate, so reconciling it means deciding whether convergence should be
+  judged on the original NLP — a behaviour change for every model rather
+  than a reporting fix. Tracked in #476.
+
 ### Added — pyomo-pounce: `release_kkt()`, the exit of the retention story (#475)
 
 - The held KKT factorization can now be dropped on demand:
