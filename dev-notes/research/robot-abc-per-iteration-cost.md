@@ -253,21 +253,61 @@ the barrier has to walk from -1 to about -9:
 
 So this is a research question, not an option-tuning exercise.
 
-**Lead hypothesis for whoever picks this up.** With 52013 inequalities and *no*
-equalities, the slacks track `c(x)` exactly and the filter's `theta` is
-structurally ~0 (that is precisely why Ipopt prints `inf_pr = 0.00e+00`
-throughout — see §6). A filter whose `theta` is always zero degenerates into a
-pure Armijo test on the barrier objective `phi_mu = f - mu * sum(ln s_i)`. On
-this shape that sum has 52013 terms against a 1001-variable `f`, so the barrier
-utterly dominates the objective and the predicted decrease is a poor model of
-the actual one — which is exactly the regime where Armijo drives `alpha` to
-1e-4. That would explain all three observations at once: the stall, its being
-shared with Ipopt, and its being specific to m >> n.
+**Mechanism: characterized, not yet diagnosed.** An earlier draft of this note
+proposed that with no equality constraints the filter's `theta` is structurally
+~0, degenerating the filter into a pure Armijo test. **That is wrong** —
+`POUNCE_DBG_LS=1 RUST_LOG=pounce::linesearch=debug` dumps the acceptor's own
+`theta`/`phi` per accepted step, and `theta` is ~1e4, not 0:
 
-Check first, because it is cheap and would change the diagnosis: confirm
-POUNCE's filter really is using Ipopt's `theta` and not the different quantity
-it *reports* as `inf_pr` (§6). The identical 71-iteration trajectory says it is,
-but that assumption is load-bearing for the hypothesis above.
+```
+iter=14 mu=1.0e-1 alpha=2.062e-5 mode=f theta=9.820150e3 phi=-1.447839e4 n_steps=6
+iter=17 mu=1.0e-1 alpha=4.883e-4 mode=f theta=9.935307e3 phi=-1.464936e4 n_steps=11
+iter=25 mu=1.0e-1 alpha=1.562e-2 mode=f theta=9.716279e3 phi=-1.574878e4 n_steps=6
+```
+
+What is actually established:
+
+- `theta` climbs from 0 to ~9.9e3 in the first 14 iterations and then **pins
+  there** — the iterates are not converging to feasibility at all.
+- `phi` decreases steadily and monotonically the whole time.
+- `alpha` is 1e-5 to 1e-2 with 5–11 backtracks per iteration.
+- Every accepted step in POUNCE's first 200 iterations is **f-type** (`f`=155,
+  `w`=36, `F`=9) — Armijo-governed, filter not consulted. POUNCE and IPOPT have
+  *identical* accept-character sequences over those 200, another confirmation of
+  §1.
+- Over IPOPT's full 3000 the profile inverts: `h`=2014, `w`=679, `f`=294. So the
+  governing test **changes character** across the run — Armijo early,
+  filter-dominated late, with 2014 entries accumulating in the filter.
+
+So the honest state is: we know the barrier subproblem at `mu = 1e-1` is never
+solved, that `theta` stalls at ~1e4 while `phi` falls, and that bypassing the
+acceptance test entirely reaches a verified solution. We do **not** yet know
+which of the two regimes above is causal. Nobody should design a fix before
+running the `POUNCE_DBG_LS` trace out to several hundred iterations and through
+the f-type-to-h-type transition — that trace is cheap and is the obvious next
+step.
+
+**A caution on the "better objective".** `robot_a` is nonconvex (the constraint
+bodies carry `S^3` and `S^5`), so `accept_every_trial_step` landing at 1.0432
+against 8.17 may simply be a different basin rather than evidence the filter
+steers wrong. The 80x — converges at all, versus does not — is solid. "Finds a
+better optimum" is weaker evidence than it first looks.
+
+**Sizing a safe fix.** Three tiers, in increasing risk:
+
+1. *Detect and report* (low risk, useful regardless). `mu` failing to move for N
+   iterations while steps are still being accepted is a crisp, cheap signal.
+   POUNCE already has the machinery — `DiagnosticsState`, and a `find_stalls`
+   tool in the studio MCP server. Turning a silent 2140 s grind into "barrier
+   stalled at mu=1e-1 since iteration 14" is worth doing on its own.
+2. *Escalate on detection* (medium). There is in-repo precedent: the
+   `mu_strategy_fallback` option is a POUNCE addition with no Ipopt counterpart,
+   so "strategy X stalled, switch to Y" is an established pattern here. Safety
+   depends entirely on the escalation being bounded and revertible.
+3. *Change the acceptance test* (high — a research project, not a patch). It
+   touches every model, it forfeits the digit-for-digit Ipopt equivalence that
+   made this whole investigation tractable (§1), and it needs its own global
+   convergence argument. Gate on the full benchmark suite, not on `robot_a`.
 
 ## 4c. POUNCE's own active-set SQP is much worse here, not better
 
