@@ -489,10 +489,12 @@ exactly with the corresponding entries of the default answer.
 
 A rank-deficient block, one with more coordinates than the fit has
 degrees of freedom or with linearly dependent coordinates (a
-duplicated design point), is the prediction-band case: `covariance()` returns
-its (rank-deficient) marginal, `2 sigma^2 M`, with the membership
-handling bypassed, and `information()` refuses toward `covariance()`,
-since such a block carries no information matrix. For `information()`,
+duplicated design point), is the trajectory-band case: `covariance()`
+returns its (rank-deficient) marginal, `2 sigma^2 M`, the confidence
+band on the fitted trajectory (add the observation noise for a
+prediction band), with the membership handling bypassed, and
+`information()` raises an error pointing to `covariance()`, since such
+a block carries no information matrix. For `information()`,
 a block that parameterizes the constraint manifold (size equal to the
 degrees of freedom) gets the exact tangent construction; a sub-block of
 the fitted set gets its marginal as a Schur complement of the exact
@@ -509,6 +511,46 @@ conditioning, and is handled as before. The list is decided by the
 same classification the block members get, applied per candidate as a
 singleton block, so it is scale-invariant; only near-bound variables
 pay the extra backsolve.
+
+## Keeping the factor: retain_kkt()
+
+The solve factors the KKT matrix to solve the NLP; the only question is
+whether that factor is kept for post-solve queries. Any declaration
+keeps it. `retain_kkt(model)` keeps it with no declaration at all,
+which is what the declaration-free `wrt=` flow needs: the MHE case,
+where the arrival state and the parameters are each queried by `wrt=`
+and neither is THE fitted set. It defaults off, so a solve with no
+sensitivity pays nothing.
+
+```python
+retain_kkt(m)
+SolverFactory("pounce").solve(m)
+arrival = covariance(m, sigma_sq=s2, wrt=m.x[:, t0])
+params = information(m, wrt=[m.k1, m.k2])
+```
+
+| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+|---|---|---|---|
+| nothing | no | error | error |
+| `declare_fitted(S)` | yes | over S | over T |
+| `retain_kkt()` only | yes | error, no default | over T |
+| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+
+The retention policy in one place: the factor is kept if anything is
+declared or `retain_kkt()` was called, and a `Covariance` or
+`Information` result whose lazy `conditioned_on` has not been read
+keeps the session alive through its pending computation until first
+access. Noise is a separate question: `retain_kkt()` keeps the
+factor, not a noise model, and with nothing declared fitted the
+degrees of freedom for a noise ESTIMATE are unknown, so
+`covariance()` under retain-only needs `sigma_sq=`; the estimation
+routes (declared residuals, `n_data=`) raise an error saying so.
+
+Like any declaration, `retain_kkt()` routes the solve through the
+in-process sensitivity path, whose `solve()` surface is not
+keyword-identical to the ordinary subprocess path (for example,
+`load_solutions=False` is not honored there). Adding it to an
+existing script changes how the solve runs, not just what is kept.
 
 ## Units and NLP scaling
 

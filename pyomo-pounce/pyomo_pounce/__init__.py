@@ -46,6 +46,7 @@ from pyomo_pounce.sens import (
     gradient,
     information,
     Information,
+    retain_kkt,
 )
 from pyomo_pounce.preflight import (
     PyomoPreflightReport,
@@ -60,6 +61,7 @@ __all__ = [
     "declare_sens_param",
     "declare_fitted",
     "declare_residual",
+    "retain_kkt",
     "covariance",
     "Covariance",
     "gradient",
