@@ -33,6 +33,9 @@ $S = H_{AA} - H_{AF} H_{FF}^{-1} H_{FA}$ the reduction onto $A$.
   `gradient()`/`estimate()`; shares the session, out of scope here.
 - `retain_kkt(model)`: keep the factorization with nothing declared,
   for problems where every question arrives as an explicit `wrt=`.
+- `release_kkt(model)`: drop the held factorization now, freeing its
+  memory; declarations and the retain flag still apply to the next
+  solve.
 
 | setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
 |---|---|---|---|
@@ -43,7 +46,9 @@ $S = H_{AA} - H_{AF} H_{FF}^{-1} H_{FA}$ the reduction onto $A$.
 
 One more rule completes retention: a `Covariance` or `Information` result whose
 `conditioned_on` has not been read keeps the session, and with it the
-factor, alive until first access.
+factor, alive until first access, as does a live `Gradient` (it reads
+the factor on every lookup); `release_kkt` drops the model's hold, not
+an outstanding result's.
 
 Explicit call-time forms (`solve(m, fitted=..., residuals=...)`) are
 deliberately solve-local, so repeated solves of one model do not
