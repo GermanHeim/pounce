@@ -1846,6 +1846,13 @@ impl IpoptApplication {
         // per-problem `.opt` files can flip backend knobs without
         // rebuilding pounce.
         let mut feral_cfg = feral_config_from_options(&self.options);
+        // wasm32-wasip1 browser and Node hosts used by pounce-wasm have no
+        // native threads. FERAL's Rayon-backed factor driver can block while
+        // creating its pool, so make the backend explicitly serial.
+        #[cfg(target_arch = "wasm32")]
+        {
+            feral_cfg.parallel = Some(false);
+        }
         // Block-triangular / Schur KKT partition (pounce#180 item 2). Configure
         // the Schur block solvers from the *base* feral cfg: a full-KKT external
         // ordering (item 1) is sized for the whole system and cannot apply to
