@@ -145,7 +145,8 @@ def retain_kkt(model):
     declare_residual), or if retain_kkt() was called; and a
     Covariance/Information result whose lazy conditioned_on has not
     been read keeps the session alive through its pending computation
-    until first access.
+    until first access. release_kkt(model) drops the held factor on
+    demand.
 
     Like any declaration, this routes the solve through the
     in-process sensitivity path, whose solve() surface is not
@@ -154,6 +155,27 @@ def retain_kkt(model):
     existing script changes how the solve runs, not just what is
     kept."""
     _registry(model).retain = True
+
+
+def release_kkt(model):
+    """Drop the held KKT factorization now, freeing its memory.
+
+    The exit of the retention story, for the current factor only:
+    declarations and a prior retain_kkt() are untouched and apply to
+    the NEXT solve, which keeps its factor again. After release the
+    accessors raise their no-session error until another solve. A
+    Covariance or Information result whose conditioned_on is still
+    pending holds its own reference to the session, so such a result
+    keeps the factor alive until the attribute is read or the result
+    is discarded; release drops the model's hold, not theirs.
+
+    Returns True if a factorization was held and is now released,
+    False if there was nothing to release."""
+    reg = model.__dict__.get(_REG)
+    if reg is None or reg.session is None:
+        return False
+    reg.session = None
+    return True
 
 
 def _reformulate_param_bounds(clone):
