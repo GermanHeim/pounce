@@ -51,6 +51,23 @@ let result = SensSolve::new(vec![2, 3])
 `with_reduced_hessian_eigen()` adds the eigendecomposition;
 `with_boundcheck(eps)` enables the bound projection.
 
+### Eigenvector sign convention
+
+Every eigendecomposition POUNCE hands back — the reduced Hessian's
+here and through the CLI and Python wrappers, the QP one from
+`QpSensitivity.reduced_hessian`, and `covariance().eigen()` /
+`information().eigen()` in `pyomo-pounce` — returns **sign-pinned**
+eigenvectors: the largest-magnitude component of each column is
+positive, ties broken by the earliest row. `v` and `-v` are equally
+valid eigenvectors, so without a convention the direction you read
+back depends on the arithmetic that produced it and is not
+reproducible across builds or machines.
+
+The sign is all that is pinned. A repeated eigenvalue leaves the basis
+*within* its eigenspace arbitrary — any rotation of those columns
+diagonalizes equally well — so read a degenerate block as a subspace,
+not column by column.
+
 ## Python
 
 `solve_with_sens` exposes the same capability from the
@@ -267,7 +284,13 @@ the sandwich is the truthful report on the unweighted fit.
 An eigenvalue much larger than the rest flags a poorly identified
 problem: its eigenvector is the parameter combination the data cannot
 pin down, and the corresponding `cov.correlation` entries approach
-+/-1. `covariance` warns when the held factor carries
++/-1. The returned signs follow the project-wide
+[eigenvector sign convention](#eigenvector-sign-convention) —
+**the largest-magnitude component of each eigenvector is positive**,
+ties broken by the earliest position in `cov.params` — so the
+direction reproduces across machines instead of coming back as
+whatever LAPACK's build chose. `information().eigen()` is the same.
+`covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
 parameterization) and when the covariance diagonal comes out negative
 (not a least-squares minimum).
@@ -452,7 +475,9 @@ indefinite Lagrangian block is returned as computed with a warning
 naming Gauss-Newton as the PSD alternative: refusing would withhold
 the finding that the point is not a minimum or the model is
 over-parameterized. `eigen()` reads identifiability directly: a
-near-zero eigenvalue is a direction the data does not inform.
+near-zero eigenvalue is a direction the data does not inform; its
+eigenvector's sign follows the project-wide
+[convention](#eigenvector-sign-convention).
 
 ## Choosing the block: wrt=
 
@@ -479,10 +504,12 @@ exactly with the corresponding entries of the default answer.
 
 A rank-deficient block, one with more coordinates than the fit has
 degrees of freedom or with linearly dependent coordinates (a
-duplicated design point), is the prediction-band case: `covariance()` returns
-its (rank-deficient) marginal, `2 sigma^2 M`, with the membership
-handling bypassed, and `information()` refuses toward `covariance()`,
-since such a block carries no information matrix. For `information()`,
+duplicated design point), is the trajectory-band case: `covariance()`
+returns its (rank-deficient) marginal, `2 sigma^2 M`, the confidence
+band on the fitted trajectory (add the observation noise for a
+prediction band), with the membership handling bypassed, and
+`information()` raises an error pointing to `covariance()`, since such
+a block carries no information matrix. For `information()`,
 a block that parameterizes the constraint manifold (size equal to the
 degrees of freedom) gets the exact tangent construction; a sub-block of
 the fitted set gets its marginal as a Schur complement of the exact
@@ -499,6 +526,46 @@ conditioning, and is handled as before. The list is decided by the
 same classification the block members get, applied per candidate as a
 singleton block, so it is scale-invariant; only near-bound variables
 pay the extra backsolve.
+
+## Keeping the factor: retain_kkt()
+
+The solve factors the KKT matrix to solve the NLP; the only question is
+whether that factor is kept for post-solve queries. Any declaration
+keeps it. `retain_kkt(model)` keeps it with no declaration at all,
+which is what the declaration-free `wrt=` flow needs: the MHE case,
+where the arrival state and the parameters are each queried by `wrt=`
+and neither is THE fitted set. It defaults off, so a solve with no
+sensitivity pays nothing.
+
+```python
+retain_kkt(m)
+SolverFactory("pounce").solve(m)
+arrival = covariance(m, sigma_sq=s2, wrt=m.x[:, t0])
+params = information(m, wrt=[m.k1, m.k2])
+```
+
+| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+|---|---|---|---|
+| nothing | no | error | error |
+| `declare_fitted(S)` | yes | over S | over T |
+| `retain_kkt()` only | yes | error, no default | over T |
+| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+
+The retention policy in one place: the factor is kept if anything is
+declared or `retain_kkt()` was called, and a `Covariance` or
+`Information` result whose lazy `conditioned_on` has not been read
+keeps the session alive through its pending computation until first
+access. Noise is a separate question: `retain_kkt()` keeps the
+factor, not a noise model, and with nothing declared fitted the
+degrees of freedom for a noise ESTIMATE are unknown, so
+`covariance()` under retain-only needs `sigma_sq=`; the estimation
+routes (declared residuals, `n_data=`) raise an error saying so.
+
+Like any declaration, `retain_kkt()` routes the solve through the
+in-process sensitivity path, whose `solve()` surface is not
+keyword-identical to the ordinary subprocess path (for example,
+`load_solutions=False` is not honored there). Adding it to an
+existing script changes how the solve runs, not just what is kept.
 
 ## Units and NLP scaling
 

@@ -79,6 +79,7 @@ class _Registry:
         self.params = []          # pinned inputs: gradient()/estimate()
         self.fitted = []       # free fitted variables: covariance()
         self.residuals = []       # (container, group) pairs: sigma^2
+        self.retain = False       # keep the factor with no declaration
         self.session = None
 
     def __deepcopy__(self, memo):
@@ -89,6 +90,7 @@ class _Registry:
         new.fitted = [copy.deepcopy(p, memo) for p in self.fitted]
         new.residuals = [(copy.deepcopy(r, memo), g)
                          for r, g in self.residuals]
+        new.retain = self.retain
         return new
 
 
@@ -125,6 +127,33 @@ def declare_residual(*containers, group=None):
     to the heteroscedastic sandwich form."""
     for container in containers:
         _registry(container.model()).residuals.append((container, group))
+
+
+def retain_kkt(model):
+    """Keep the KKT factorization after the next solve with NOTHING
+    declared (covariance roadmap item 4). The factor the solve computes
+    anyway is retained for post-solve queries, so `covariance(model,
+    wrt=block)` and `information(model, wrt=block)` work on any block
+    without a declared default: the MHE case, where the arrival state
+    and the parameters are each queried by wrt= and neither is THE
+    fitted set. `covariance(model)` with no block stays an error (there
+    is no default to reduce onto), and a solve without this call and
+    without declarations pays nothing, exactly as before.
+
+    The retention policy in one place: the factor is kept if anything
+    is declared (declare_sens_param / declare_fitted /
+    declare_residual), or if retain_kkt() was called; and a
+    Covariance/Information result whose lazy conditioned_on has not
+    been read keeps the session alive through its pending computation
+    until first access.
+
+    Like any declaration, this routes the solve through the
+    in-process sensitivity path, whose solve() surface is not
+    keyword-identical to the ordinary subprocess path (for example,
+    load_solutions=False is not honored there): adding it to an
+    existing script changes how the solve runs, not just what is
+    kept."""
+    _registry(model).retain = True
 
 
 def _reformulate_param_bounds(clone):
@@ -196,7 +225,8 @@ def _reformulate_param_bounds(clone):
 
 def has_declarations(model):
     reg = getattr(model, "__dict__", {}).get(_REG)
-    return bool(reg and (reg.params or reg.fitted or reg.residuals))
+    return bool(reg and (reg.params or reg.fitted or reg.residuals
+                         or reg.retain))
 
 
 # ── the read_nl -> callback-Problem bridge ────────────────────────────────────
@@ -1016,6 +1046,32 @@ class _ParamMatrix(_ParamKeyed):
         return float(self.matrix[i, j])
 
 
+def _pin_eigenvector_signs(vecs):
+    """Fix the arbitrary sign LAPACK gives each eigenvector column, so
+    the direction an eigen() call reports is reproducible.
+
+    `v` and `-v` are equally valid eigenvectors, and which one `eigh`
+    returns is a convention of the LAPACK build, not a property of the
+    matrix: the same model and data can report opposite directions on
+    two machines. The convention here is the largest-magnitude
+    component positive, ties broken by the earliest `params` position
+    (argmax takes the first maximum). It is scale-invariant and
+    independent of parameter ordering except through that tie-break.
+
+    This pins the sign only. A repeated eigenvalue leaves the basis
+    WITHIN its eigenspace arbitrary — any rotation of those columns
+    diagonalizes just as well — so the individual eigenvectors of a
+    degenerate block are still not reproducible; only the subspace
+    they span is."""
+    vecs = np.asarray(vecs, dtype=float)
+    if vecs.size == 0:
+        return vecs
+    lead = np.abs(vecs).argmax(axis=0)
+    signs = np.sign(vecs[lead, np.arange(vecs.shape[1])])
+    signs[signs == 0.0] = 1.0        # an all-zero column, if one ever
+    return vecs * signs              # reaches here, is left alone
+
+
 class Covariance(_ParamMatrix):
     """Asymptotic parameter covariance, from covariance().
 
@@ -1059,8 +1115,13 @@ class Covariance(_ParamMatrix):
         eigenvalues ascending, eigenvectors[:, i] in `params` order.
         An eigenvalue much larger than the rest flags a poorly
         identified direction: its eigenvector gives the parameter
-        combination the data cannot pin down."""
-        return np.linalg.eigh(self.matrix)
+        combination the data cannot pin down.
+
+        Each eigenvector's sign is pinned so the direction it names
+        reproduces across machines: its largest-magnitude component
+        is positive (see _pin_eigenvector_signs)."""
+        w, v = np.linalg.eigh(self.matrix)
+        return w, _pin_eigenvector_signs(v)
 
 
 def _indefinite(block):
@@ -1420,8 +1481,13 @@ class Information(_ParamMatrix):
         Small eigenvalues flag poorly informed directions; a negative
         one means the point is not a least-squares minimum along that
         direction (Lagrangian form only; Gauss-Newton is PSD by
-        construction)."""
-        return np.linalg.eigh(self.matrix)
+        construction).
+
+        Each eigenvector's sign is pinned so the direction it names
+        reproduces across machines: its largest-magnitude component
+        is positive (see _pin_eigenvector_signs)."""
+        w, v = np.linalg.eigh(self.matrix)
+        return w, _pin_eigenvector_signs(v)
 
 
 def _classify_ratio(r, mu):
@@ -1840,8 +1906,9 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()) then solve with SolverFactory('pounce') "
-            "first")
+            "declare_residual()), or retain_kkt() for the "
+            "declaration-free wrt= flow, then solve with "
+            "SolverFactory('pounce') first")
     # the block: the declared fitted parameters by default, or any
     # block of the solve's variables via wrt= (each call re-reduces
     # onto its own argument, so one solve serves as many blocks as are
@@ -1947,6 +2014,13 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
         else:
             group_sigma = {g: float(sigma_sq) for g in (groups or {None: []})}
     elif groups:
+        if n_fit == 0:
+            raise ValueError(
+                "covariance: the noise variance must be estimated from "
+                "the declared residuals, but no fitted parameters were "
+                "declared, so the degrees of freedom for the estimate "
+                "are unknown; pass sigma_sq= (known variance) or flag "
+                "the fitted parameters with declare_fitted()")
         group_sigma = {}
         for g, rws in groups.items():
             n_g = len(rws)
@@ -1958,6 +2032,13 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
             ssr_g = float(np.sum(session.base_x[rws] ** 2))
             group_sigma[g] = ssr_g / (n_g - n_fit)
     elif n_data is not None:
+        if n_fit == 0:
+            raise ValueError(
+                "covariance: n_data= estimates the noise variance, but "
+                "no fitted parameters were declared, so the degrees of "
+                "freedom for the estimate are unknown; pass sigma_sq= "
+                "(known variance) or flag the fitted parameters with "
+                "declare_fitted()")
         if n_data <= n_fit:
             raise ValueError(
                 f"covariance: n_data ({n_data}) must exceed the number of "
@@ -2208,8 +2289,9 @@ def information(model, hessian="lagrangian", wrt=None):
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()) then solve with SolverFactory('pounce') "
-            "first")
+            "declare_residual()), or retain_kkt() for the "
+            "declaration-free wrt= flow, then solve with "
+            "SolverFactory('pounce') first")
     params, rows = _resolve_wrt(session, wrt, "information")
     n_params = len(params)
     wording = "fitted" if wrt is None else "block"

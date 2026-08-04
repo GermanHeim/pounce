@@ -9,6 +9,62 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — every eigendecomposition now returns sign-pinned eigenvectors (#471)
+
+- An eigenvector's sign is arbitrary: `v` and `-v` are equally valid,
+  and which one came back was decided by the arithmetic that produced
+  it — LAPACK's build convention in `pyomo-pounce`, the Jacobi rotation
+  order in the Rust kernel. The same model, data, and POUNCE version
+  could report `v` on one machine and `-v` on another. Since the
+  documented use is reading the eigenvector as a *direction* ("the
+  parameter combination the data cannot pin down"), the reported
+  direction — and anything that steps along it on a nonlinear model —
+  was not reproducible.
+- One convention now holds everywhere: **the largest-magnitude
+  component of each eigenvector is positive**, ties broken by the
+  earliest row. Applied at both sources — `pounce_linalg::symmetric_eigen`
+  (the single Rust eigensolver, so every surface fed by it inherits it:
+  `SensResult::reduced_hessian_eigenvectors`,
+  `info["reduced_hessian_eigenvectors"]`, the CLI's
+  `_red_hessian_eigenvectors` JSON block, `ReducedHessian.eigenvectors`
+  from both the Rust and Python QP sensitivity APIs) and
+  `pyomo-pounce`'s `Covariance.eigen()` / `Information.eigen()`.
+- Eigenvalues, spans, and any use of the eigenvectors as a subspace are
+  unchanged; internal uses (matrix reconstruction, projectors, Rayleigh
+  quotients, null-space bases) were already sign-invariant. The sign is
+  all this fixes — a repeated eigenvalue still leaves the basis within
+  its eigenspace arbitrary, which the API docs and
+  `docs/src/sensitivity.md` now say.
+- Notebook 31 pinned the sign by hand to keep its committed output
+  stable; that workaround is gone, since the library now guarantees it.
+
+### Added — pyomo-pounce: `retain_kkt()`, factor retention without declarations (covariance roadmap item 4, #262)
+
+- `retain_kkt(model)` keeps the solve's KKT factorization with nothing
+  declared, so `covariance(model, wrt=block)` and
+  `information(model, wrt=block)` work on any block without a declared
+  default: the MHE case, where the arrival state and the parameters
+  are each queried by `wrt=` and neither is THE fitted set.
+  `covariance(model)` with no block stays an error (no default to
+  reduce onto), an undeclared solve without the call pays nothing
+  exactly as before, and retain beside declarations changes nothing
+  (all four rows of the roadmap's table are tested). The retain intent
+  follows `model.clone()` through the registry's deepcopy.
+- The retention policy is now stated in one place (docs and the
+  `retain_kkt` docstring): declarations keep the factor, `retain_kkt()`
+  keeps it without them, and a result object's unread lazy
+  `conditioned_on` keeps the session alive until first access.
+- The no-session errors from both accessors name `retain_kkt()` as the
+  declaration-free route.
+- Demo notebooks for the whole roadmap, written for a reader new to
+  NLP: 31 (information and identifiability: the poorly identified
+  fit, `eigen()` naming the combination the data cannot determine,
+  and zero variance versus finite information at a bound) and 32 (one
+  solve, many questions: `wrt=` marginals, confidence and prediction
+  bands on undeclared prediction variables, `conditioned_on`, and
+  `retain_kkt()` with
+  nothing declared), both committed executed.
+
 ### Added — Python: in-memory model construction, Hessian-vector products, and an `erf` tape op (#469)
 
 Everything below already existed in the Rust core; the gap was that none
