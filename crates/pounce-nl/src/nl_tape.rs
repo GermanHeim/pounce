@@ -144,9 +144,18 @@ pub(crate) fn erf_d1(u: f64) -> f64 {
 }
 
 /// `erf''(u) = -2u · erf'(u)`.
+///
+/// Parenthesized as `-2·(u·erf'(u))`, not `(-2·u)·erf'(u)`. The two differ
+/// at the top of the range: `erf_d1` underflows to `0.0` around `|u| > 27`,
+/// while `-2.0 * u` overflows to `±inf` for `|u| > f64::MAX/2`, and
+/// `inf * 0.0` is `NaN` where the true limit is `0`. Multiplying `u` into
+/// the already-underflowed derivative first keeps every finite magnitude
+/// finite. (`u = ±inf` is `NaN` either way, correctly — the model has
+/// already left the reals by then.) Only the Hessian arms read this; the
+/// value and gradient arms are unaffected.
 #[inline]
 pub(crate) fn erf_d2(u: f64) -> f64 {
-    -2.0 * u * erf_d1(u)
+    -2.0 * (u * erf_d1(u))
 }
 
 /// Evaluate a relational opcode on two scalar values, returning the
@@ -3871,6 +3880,30 @@ mod tests {
         // most often breaks.
         assert!((t.eval(&[-0.3]) + t.eval(&[0.3])).abs() < 1e-16);
         assert!((t.eval(&[10.0]) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn erf_second_derivative_stays_finite_at_extreme_magnitudes() {
+        // `erf_d1` underflows to 0 around |u| > 27, and `-2.0 * u`
+        // overflows to ±inf past f64::MAX/2. Written as `(-2u)·erf'(u)`
+        // the two meet as `inf * 0.0 = NaN`, where the true limit is 0.
+        // Parenthesizing as `-2·(u·erf'(u))` keeps every finite input
+        // finite. Nothing in a well-posed model reaches 1e308 — `.nl`'s
+        // unbounded sentinel is 1e19 — but the Python binding now takes an
+        // unguarded `x`, and a NaN Hessian entry poisons a whole factorization.
+        for u in [1e19, 1e150, 1e300, f64::MAX, f64::MAX / 2.0] {
+            for signed in [u, -u] {
+                let d2 = erf_d2(signed);
+                assert!(
+                    d2.is_finite(),
+                    "erf_d2({signed:e}) = {d2} — must be finite (the limit is 0)"
+                );
+            }
+        }
+        // Still correct where it matters: -2u·erf'(u) at a normal point.
+        let u = 0.7;
+        let want = -2.0 * u * (2.0 / std::f64::consts::PI.sqrt()) * (-u * u).exp();
+        assert!((erf_d2(u) - want).abs() < 1e-15, "{}", erf_d2(u));
     }
 
     #[test]

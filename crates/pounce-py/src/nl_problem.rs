@@ -73,7 +73,17 @@ fn decode_vec(val: &Bound<'_, PyAny>, expected: usize, what: &str) -> PyResult<V
                 "{what}: expected length {expected}, got {len}"
             )));
         }
-        return Ok(unsafe { arr.as_slice()? }.to_vec());
+        // `as_slice` requires C-contiguity, but a strided view (`x[::2]`,
+        // a column of a 2-D array) is still a `PyArray1<f64>` and reaches
+        // this branch. Falling back to the strided view keeps such an `x`
+        // working, and — more to the point — keeps the failure mode of a
+        // bad input a named `{what}` error rather than numpy's bare
+        // "The given array is not contiguous", which says nothing about
+        // which argument was at fault.
+        return Ok(match unsafe { arr.as_slice() } {
+            Ok(s) => s.to_vec(),
+            Err(_) => arr.readonly().as_array().iter().copied().collect(),
+        });
     }
     let mut out = Vec::with_capacity(expected);
     for item in val.iter()? {
@@ -430,7 +440,15 @@ impl PyNlProblem {
     ///   list, or other sequence — giving a length-`n` result;
     /// * a dense `(n, k)` array of `k` directions, giving an `(n, k)`
     ///   result;
-    /// * any SciPy sparse vector or `(n, k)` matrix, in either shape.
+    /// * a SciPy sparse `(n,)` vector, `(n, 1)` column, or `(n, k)` matrix.
+    ///
+    /// The shape rule is the same for dense and sparse: `(n,)` or
+    /// `(n, k)`. A `(1, n)` *row* raises — for a square-ish block it is
+    /// indistinguishable from `k` directions of the wrong length, so it is
+    /// reported rather than guessed at. Note this catches
+    /// `csr_matrix(v_1d)`, which SciPy shapes as `(1, n)`; pass
+    /// `v_1d[:, None]`, or use the 1-D sparse *array* API
+    /// (`coo_array(v_1d)`, SciPy >= 1.14), which is genuinely `(n,)`.
     ///
     /// A sparse `v` is densified on the way in and an all-zero direction is
     /// skipped, so a mostly-empty block costs only the columns that carry

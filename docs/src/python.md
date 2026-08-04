@@ -255,9 +255,40 @@ p = pounce.build_nl_problem(n=2, objective=pounce.NlExpr.sum([
 ]))
 ```
 
+**Use `NlExpr.sum` for accumulation — `+` chains are quadratic.** Each
+operator deep-copies its operands, so building a sum with `e = e + t` in a
+loop copies everything built so far on every iteration: O(N²) in time and
+memory. `NlExpr.sum` builds one n-ary node instead.
+
+```python
+e = pounce.NlExpr.const_(0.0)
+for t in terms:                    # O(N^2) — avoid
+    e = e + t
+
+e = pounce.NlExpr.sum(terms)       # O(N), one node
+```
+
+The difference is not marginal: 200 000 terms through `sum` is instant,
+while a `+` chain is measured in tens of seconds by 20 000 terms.
+
+Relatedly, nesting is capped at `NlExpr.max_depth` (1000), and exceeding
+it raises `ValueError`. Every consumer of an expression — the tape
+builder, copying, and freeing — recurses once per level, so a deep enough
+tree overflows the stack, which is a hard crash rather than an exception.
+The cap is enforced at construction so an expression that cannot be built
+can never be cloned or dropped into one. It bounds *nesting*, not size:
+`NlExpr.sum` is one level regardless of how many terms it holds, so wide
+models are unaffected. Each expression's `.depth` is readable.
+
 For checking a subexpression before wiring it into a model, `NlExpr` has
 `.eval(x)`, `.gradient(x)`, and `.variables()`, which build a one-off tape
 for that expression alone.
+
+Two things `NlExpr` does not do: it cannot carry AMPL imported (external)
+functions — `build_nl_problem` has nowhere to put the `F`-segment
+declarations that bind them, so use `read_nl` / `parse_nl_text` for a
+model that needs them — and it cannot be pickled. `copy.copy` and
+`copy.deepcopy` do work.
 
 ### Hessian-vector products
 
@@ -283,7 +314,15 @@ Available on every `NlProblem`, however it was built — `read_nl`,
 |---|---|
 | dense length-`n` vector (ndarray of any dtype or stride, list, sequence) | `(n,)` |
 | dense `(n, k)` array of `k` directions | `(n, k)` |
-| SciPy sparse vector, `(n, 1)` column, or `(n, k)` matrix | matching its shape |
+| SciPy sparse `(n,)` vector, `(n, 1)` column, or `(n, k)` matrix | matching its shape |
+
+The shape rule is the same dense or sparse: `(n,)` or `(n, k)`. A `(1, n)`
+**row** vector raises rather than being guessed at — for a square-ish
+block it is indistinguishable from `k` directions of the wrong length.
+Watch for this with SciPy sparse *matrices*, which shape a 1-D input as a
+row: `csr_matrix(v)` on a length-`n` `v` is `(1, n)` and will be refused.
+Pass `v[:, None]`, or use the 1-D sparse *array* API — `coo_array(v)` is
+genuinely `(n,)`, on SciPy >= 1.14.
 
 ```python
 import scipy.sparse as sp
@@ -316,9 +355,14 @@ lower = sp.coo_matrix((p.hessian(x), (hr, hc)), shape=(p.n, p.n)).tocsr()
 H = lower + lower.T - sp.diags(lower.diagonal())    # full symmetric matrix
 ```
 
-The one shape not accepted is a `(1, n)` row vector: for a square-ish
-block it is indistinguishable from `k` directions of the wrong length, so
-it raises rather than guessing. Transpose it, or pass a 1-D array.
+**NaN and Inf do not spread through structural zeros.** AD never
+multiplies by an entry that is not in the tape, so a NaN in one component
+of `v` stays confined to the variables actually coupled to it. A dense
+`H @ v` computes `0 * nan` and smears NaN across every row. On a
+block-diagonal Hessian with `v = [nan, 0, 1, 0]`, the dense product is
+`[nan nan nan nan]` while the HVP is `[nan nan 2.42 3.08]`. Arguably the
+better semantics, but it does mean the HVP is not bit-equivalent to a
+dense product on non-finite input.
 
 ## Batched NLP solving (`solve_nlp_batch`)
 

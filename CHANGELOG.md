@@ -59,17 +59,35 @@ expression DAG (discopt) to round-trip through a temporary `.nl` file.
   Value via `libm` (the rust-lang port of musl's libm — the classic
   Abramowitz–Stegun series is only ~1e-7 accurate, which would cap the
   achievable KKT residual), derivatives closed-form:
-  `erf'(u) = 2/√π·exp(-u²)`, `erf''(u) = -2u·erf'(u)`. Reachable only
-  through the in-memory path, since no `.nl` opcode maps to it. The
-  CLI's `HessianProgram` fast path does not lower it, so an `erf` model
-  transparently uses the tape interpreter, as it already does for the
-  other transcendentals.
+  `erf'(u) = 2/√π·exp(-u²)`, `erf''(u) = -2u·erf'(u)`, evaluated as
+  `-2·(u·erf'(u))` so the Hessian arms stay finite at magnitudes where
+  `-2u` would overflow while `erf'` has already underflowed. Reachable
+  only through the in-memory path, since no `.nl` opcode maps to it.
+  `HessianProgram`'s `program_supports_op` allowlist does not include it,
+  as it does not include the other transcendentals.
 
 New Rust API alongside the bindings: `NlProblem::from_expressions` /
 `NlProblemParts`, `NlTnlp::hessian_vector_product` /
-`hessian_vector_products`, and `nl_reader::render_expression`. No existing
-API changed behavior. `TapeOp` / `UnaryOp` gained a variant, which is
-breaking only for an out-of-workspace crate matching on them exhaustively.
+`hessian_vector_products`, and `nl_reader::render_expression`.
+
+### Changed — `TapeOp` / `UnaryOp` gained an `Erf` variant (#469)
+
+Source-breaking for any crate outside this workspace that matches on
+either enum exhaustively; nothing in-repo is affected, and no existing
+API changed behavior. Called out under its own heading because a reader
+scanning for breakage should not have to find it inside an `Added` entry.
+
+### Fixed — expression-DAG walks that were exponential in sharing depth (#469)
+
+`collect_vars` and `collect_funcall_ids` re-entered a shared `Expr::Cse`
+body once per reference rather than once per body, making them Θ(2^depth)
+on a subexpression-sharing DAG. Both now memoize on `Arc` pointer
+identity, which cannot change the answer (each collects into a set). This
+was reachable before — `get_variables_linearity` calls `collect_vars`, and
+presolve calls that on every solve — but `build_nl_problem` is a new door
+that makes such a DAG trivially constructible from a frontend. Measured
+on a balanced share-DAG: depth 26 took 3.0 s through
+`get_variables_linearity` and now completes at depth 30 instantly.
 
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 

@@ -15,9 +15,16 @@ import math
 
 import numpy as np
 import pytest
+import scipy
 import scipy.sparse as sp
 
 import pounce
+
+# scipy shaped 1-D sparse *arrays* inconsistently before 1.14
+# (`csr_array(v_1d)` was (1, n) on 1.11 and raised on 1.13), and the
+# package floor is scipy>=1.11 — so the 1-D-array cases below are gated
+# rather than left to whatever CI happens to install.
+_SCIPY = tuple(int(p) for p in scipy.__version__.split(".")[:2])
 
 # A complete `.nl` body: min (x0-1)^2 + (x1-2)^2, no constraints. Same
 # fixture shape the Rust reader's unit tests use, kept here as text so the
@@ -495,12 +502,23 @@ def test_hvp_accepts_scipy_sparse_directions(make):
     dense_v[n // 2] = -2.0
     want = p.hessian_vector_product(pt, dense_v)
 
-    for sparse_v in (
-        sp.csr_array(dense_v),          # 1-D sparse array (n,)
-        sp.coo_array(dense_v),
+    # Version-proof forms: an explicit (n, 1) column is (n, 1) on every
+    # scipy that has ever shipped these classes.
+    candidates = [
         sp.csc_matrix(dense_v[:, None]),  # (n, 1) column
         sp.csr_matrix(dense_v[:, None]),
-    ):
+        sp.coo_matrix(dense_v[:, None]),
+    ]
+    # The 1-D sparse *array* API only became genuinely 1-D in scipy 1.14;
+    # 1.11 shapes `csr_array(v_1d)` as (1, n) (which this API rejects as a
+    # row vector) and 1.13 raises inside scipy. The package floor is
+    # scipy>=1.11, so this half of the coverage is version-gated rather
+    # than silently depending on CI installing the latest.
+    if _SCIPY >= (1, 14):
+        candidates += [sp.csr_array(dense_v), sp.coo_array(dense_v)]
+        assert sp.coo_array(dense_v).shape == (n,), "expected a genuinely 1-D sparse array"
+
+    for sparse_v in candidates:
         got = p.hessian_vector_product(pt, sparse_v)
         assert isinstance(got, np.ndarray), "the result must be dense"
         np.testing.assert_allclose(np.asarray(got).ravel(), want, rtol=1e-10)
@@ -632,3 +650,179 @@ def test_hvp_empty_block_is_legal():
     p = _chain_problem(4)
     got = p.hessian_vector_product(np.zeros(4), np.zeros((4, 0)))
     assert got.shape == (4, 0)
+
+
+# ---- Expression depth guard -------------------------------------------
+#
+# Every consumer of an `Expr` recurses once per nesting level — the tape
+# builder, the derived Clone, and the derived Drop — so a deep enough tree
+# overflows the stack. That is a SIGSEGV, not an exception: the interpreter
+# dies with no traceback and nothing to catch. Measured on Linux with an
+# 8 MB stack, taping survives ~32k levels in a release build but only ~4k
+# in a debug build. The cap is enforced at construction, which is what
+# makes the guarantee cover cloning and freeing too.
+
+
+def test_deep_chain_raises_instead_of_crashing():
+    e = pounce.NlExpr.var(0)
+    with pytest.raises(ValueError, match="nesting would reach depth"):
+        for _ in range(pounce.NlExpr.max_depth + 10):
+            e = e + 1.0
+
+
+def test_depth_error_points_at_the_cheap_alternative():
+    """The error has to teach, because `e = e + t` in a loop is the first
+    thing a modeler writes and it is also O(N^2)."""
+    e = pounce.NlExpr.var(0)
+    with pytest.raises(ValueError) as excinfo:
+        for _ in range(pounce.NlExpr.max_depth + 10):
+            e = e * 2.0
+    assert "NlExpr.sum" in str(excinfo.value)
+
+
+def test_depth_is_tracked_across_every_node_kind():
+    x = pounce.NlExpr.vars(2)
+    assert pounce.NlExpr.var(0).depth == 1
+    assert pounce.NlExpr.const_(1.0).depth == 1
+    assert (x[0] + x[1]).depth == 2
+    assert (-x[0]).depth == 2
+    assert x[0].sin().depth == 2
+    assert (x[0] + x[1]).sin().depth == 3
+    # n-ary nodes are ONE level regardless of width — the whole reason
+    # `sum` is the answer to the depth cap.
+    wide = pounce.NlExpr.sum([x[0]] * 10_000)
+    assert wide.depth == 2
+    assert pounce.NlExpr.min(*([x[0]] * 500)).depth == 2
+    # Depth follows the deepest operand, not the first.
+    deep = x[0].sin().cos().exp()
+    assert deep.depth == 4
+    assert (x[1] + deep).depth == 5
+    assert pounce.NlExpr.select(x[0], deep, x[1]).depth == 5
+
+
+def test_wide_model_is_unaffected_by_the_depth_cap():
+    """200k terms through `sum` is fine; the cap only bounds nesting."""
+    n = 50
+    x = pounce.NlExpr.vars(n)
+    p = pounce.build_nl_problem(
+        n=n, objective=pounce.NlExpr.sum([xi**2 for xi in x] * 4000)
+    )
+    assert p.objective(np.ones(n)) == pytest.approx(n * 4000)
+
+
+def test_expression_just_under_the_cap_still_tapes_and_evaluates():
+    """The cap must leave a usable expression usable — build to one level
+    below it and run the whole pipeline."""
+    # `var(0)` is depth 1 and each `+` adds one level, so this lands
+    # exactly on the cap — the deepest expression the class will build.
+    adds = pounce.NlExpr.max_depth - 1
+    e = pounce.NlExpr.var(0)
+    for _ in range(adds):
+        e = e + 1.0
+    assert e.depth == pounce.NlExpr.max_depth
+    assert e.eval([0.0]) == pytest.approx(adds)
+    np.testing.assert_allclose(e.gradient([0.0]), [1.0])
+    p = pounce.build_nl_problem(n=1, objective=e)
+    assert p.objective([0.0]) == pytest.approx(adds)
+    # And one more level is refused.
+    with pytest.raises(ValueError, match="nesting would reach depth"):
+        _ = e + 1.0
+
+
+# ---- Other NlExpr surface details -------------------------------------
+
+
+def test_numpy_array_times_expr_raises_in_both_directions():
+    """Without `__array_ufunc__ = None`, the reflected form silently
+    returns a dtype=object ndarray of NlExpr instead of raising."""
+    x = pounce.NlExpr.var(0)
+    with pytest.raises(TypeError):
+        x * np.array([1.0, 2.0])
+    with pytest.raises(TypeError):
+        np.array([1.0, 2.0]) * x
+    with pytest.raises(TypeError):
+        np.array([1.0, 2.0]) + x
+
+
+def test_expr_supports_copy_and_deepcopy():
+    import copy
+
+    x = pounce.NlExpr.vars(2)
+    e = x[0] * x[1] + 3.0
+    for clone in (copy.copy(e), copy.deepcopy(e)):
+        assert clone is not e
+        assert clone.depth == e.depth
+        assert clone.eval([2.0, 5.0]) == pytest.approx(e.eval([2.0, 5.0]))
+
+
+def test_expr_is_not_picklable_and_says_so():
+    """Not supported — pinned so it stays a clean TypeError rather than
+    silently producing a broken object."""
+    import pickle
+
+    with pytest.raises((TypeError, NotImplementedError, pickle.PicklingError)):
+        pickle.dumps(pounce.NlExpr.var(0))
+
+
+def test_build_nl_problem_rejects_imported_function_expressions():
+    """There is no way to construct an `Expr::Funcall` from Python today,
+    so this pins the *reachable* surface: nothing in the builder produces
+    one, and the Rust-side guard covers the path that could."""
+    x = pounce.NlExpr.vars(2)
+    p = pounce.build_nl_problem(n=2, objective=x[0] * x[1])
+    assert p.objective([2.0, 3.0]) == pytest.approx(6.0)
+
+
+# ---- Strided / awkward x and lam --------------------------------------
+
+
+def test_evaluators_accept_strided_x():
+    """`x` gets the same treatment the docstring promises for `v` — a
+    non-contiguous view must not produce a bare numpy contiguity error."""
+    p = _chain_problem(4)
+    want_pt = np.array([0.1, 0.2, 0.3, 0.4])
+    strided = np.array([0.1, 9.0, 0.2, 9.0, 0.3, 9.0, 0.4, 9.0])[::2]
+    assert not strided.flags["C_CONTIGUOUS"]
+
+    assert p.objective(strided) == pytest.approx(p.objective(want_pt))
+    np.testing.assert_allclose(p.gradient(strided), p.gradient(want_pt))
+    np.testing.assert_allclose(p.hessian(strided), p.hessian(want_pt))
+    np.testing.assert_allclose(
+        p.hessian_vector_product(strided, np.ones(4)),
+        p.hessian_vector_product(want_pt, np.ones(4)),
+    )
+
+
+def test_wrong_length_x_names_the_argument():
+    p = _chain_problem(4)
+    with pytest.raises(ValueError, match="objective: x"):
+        p.objective(np.zeros(3))
+
+
+# ---- Documented HVP semantics -----------------------------------------
+
+
+def test_hvp_does_not_propagate_nan_through_structural_zeros():
+    """Deliberate, and worth pinning so no future change claims exact
+    `H @ v` equivalence.
+
+    AD never multiplies by a structural zero — the term is not in the tape
+    at all — so a NaN in one component of `v` stays confined to the
+    variables actually coupled to it. A dense `H @ v` computes `0 * nan`
+    and smears NaN across every row.
+    """
+    x = pounce.NlExpr.vars(4)
+    # Block diagonal: {x0, x1} and {x2, x3} never interact.
+    p = pounce.build_nl_problem(
+        n=4, objective=(x[0] * x[1]).exp() + (x[2] * x[3]).exp()
+    )
+    pt = np.array([0.1, 0.2, 0.3, 0.4])
+    v = np.array([np.nan, 0.0, 1.0, 0.0])
+
+    got = p.hessian_vector_product(pt, v)
+    assert np.isnan(got[0]) and np.isnan(got[1]), "the coupled block sees the NaN"
+    assert np.all(np.isfinite(got[2:])), "the uncoupled block must stay clean"
+
+    # The dense product, for contrast: 0 * nan = nan, everywhere.
+    dense = _dense_hessian(p, pt)
+    assert np.all(np.isnan(dense @ v))

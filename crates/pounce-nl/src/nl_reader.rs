@@ -237,6 +237,15 @@ pub struct NlProblem {
 /// any other subexpression (`.nl`'s `J`/`G` segments are a file-format
 /// optimization, not an evaluator requirement). `n` is taken from the length
 /// of `x_l`; `m` from the length of `constraints`.
+///
+/// One cost to that simplification, in *metadata* rather than values: with
+/// `con_linear` empty, `get_constraints_linearity` tags a row `Linear` only
+/// when its expression is literally `Const(0.0)`, so a genuinely linear row
+/// built here reports `NonLinear`. Presolve consumes that tag, and the
+/// direction is the safe one — it loses tightening it could have done, and
+/// never asserts linearity that does not hold — but a frontend that cares
+/// about presolve strength on linear rows should know the tag is
+/// pessimistic on this path.
 #[derive(Debug, Clone)]
 pub struct NlProblemParts {
     /// `true` to minimize `objective`, `false` to maximize it. Matches
@@ -322,23 +331,12 @@ impl NlProblem {
             check("con_names", con_names.len(), m)?;
         }
 
-        // Var-index bounds check. Memoized on `Cse` pointer identity so a
-        // heavily-shared DAG costs O(nodes) rather than O(inlined tree) —
-        // `collect_vars` re-walks each `Cse` body per occurrence, which is
-        // fine for its callers but can blow up exponentially on a DAG a
-        // frontend built by sharing subexpressions.
+        // Structural validation. Memoized on `Cse` pointer identity so a
+        // heavily-shared DAG costs O(nodes) rather than O(inlined tree).
         let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
-        if let Some(bad) = max_var_index(&objective, &mut seen).filter(|&v| v >= n) {
-            return Err(format!(
-                "from_expressions: objective references Var({bad}) but n = {n}"
-            ));
-        }
+        validate_expr(&objective, n, &mut seen).map_err(|e| format!("objective {e}"))?;
         for (i, c) in constraints.iter().enumerate() {
-            if let Some(bad) = max_var_index(c, &mut seen).filter(|&v| v >= n) {
-                return Err(format!(
-                    "from_expressions: constraint {i} references Var({bad}) but n = {n}"
-                ));
-            }
+            validate_expr(c, n, &mut seen).map_err(|e| format!("constraint {i} {e}"))?;
         }
 
         Ok(NlProblem {
@@ -365,50 +363,69 @@ impl NlProblem {
     }
 }
 
-/// Largest `Var(i)` index in `e`, or `None` when it references no
-/// variables. `seen` memoizes `Cse` bodies by pointer identity across
-/// calls, so passing one set through a whole problem keeps the walk
-/// linear in distinct DAG nodes.
+/// Structural check on an expression bound for [`NlProblem::from_expressions`]:
+/// every `Var(i)` must satisfy `i < n`, and no `Expr::Funcall` may appear.
 ///
-/// Returning only the maximum (rather than the full set) is deliberate:
-/// the caller only needs to know whether any index escapes `[0, n)`, and
-/// the max is the single number that decides it.
-fn max_var_index(e: &Expr, seen: &mut std::collections::HashSet<*const Expr>) -> Option<usize> {
-    let fold = |acc: Option<usize>, v: Option<usize>| match (acc, v) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, None) => a,
-        (None, b) => b,
-    };
+/// Both are things the tape cannot recover from later. An out-of-range
+/// `Var` is an out-of-bounds read in the forward sweep. A `Funcall` is
+/// worse-looking than it is fatal: `from_expressions` has nowhere to put
+/// the `F`-segment declarations an AMPL imported function needs
+/// (`NlProblemParts` has no field for them, and the built problem's
+/// `imported_funcs` is necessarily empty), so *any* funcall on this path is
+/// unresolvable. Accepting it would surface as "AMPLFUNC is not set" —
+/// advice the user cannot act on, because setting `AMPLFUNC` just moves the
+/// failure to "funcall id N has no F<N> declaration". Rejecting it here
+/// says the true thing: this door does not carry external functions; go
+/// through `read_nl` / `parse_nl_text` for a model that needs them.
+///
+/// `seen` memoizes `Cse` bodies by pointer identity across calls, so
+/// passing one set through a whole problem keeps the walk linear in
+/// distinct DAG nodes rather than exponential in sharing depth. Skipping a
+/// repeat visit is sound because the caller aborts on the first violation:
+/// reaching a body a second time proves the first visit found none.
+fn validate_expr(
+    e: &Expr,
+    n: usize,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) -> Result<(), String> {
     match e {
-        Expr::Const(_) => None,
-        Expr::Var(i) => Some(*i),
-        Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
-            fold(max_var_index(a, seen), max_var_index(b, seen))
-        }
-        Expr::Unary(_, a) | Expr::Not(a) => max_var_index(a, seen),
-        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => args
-            .iter()
-            .fold(None, |acc, a| fold(acc, max_var_index(a, seen))),
-        Expr::Cond { cond, then_, else_ } => {
-            let a = fold(max_var_index(cond, seen), max_var_index(then_, seen));
-            fold(a, max_var_index(else_, seen))
-        }
-        Expr::Cse(body) => {
-            // A body seen before contributes nothing new *for this
-            // question*: the caller errors out the moment a walk yields an
-            // index >= n, so reaching a second occurrence at all proves the
-            // first visit's maximum was in range. (The true maximum would
-            // need re-folding; nobody asks for it.)
-            if seen.insert(Arc::as_ptr(body)) {
-                max_var_index(body, seen)
+        Expr::Const(_) => Ok(()),
+        Expr::Var(i) => {
+            if *i < n {
+                Ok(())
             } else {
-                None
+                Err(format!("references Var({i}) but n = {n}"))
             }
         }
-        Expr::Funcall { args, .. } => args.iter().fold(None, |acc, a| match a {
-            FuncallArg::Real(inner) => fold(acc, max_var_index(inner, seen)),
-            FuncallArg::Str(_) => acc,
-        }),
+        Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            validate_expr(a, n, seen)?;
+            validate_expr(b, n, seen)
+        }
+        Expr::Unary(_, a) | Expr::Not(a) => validate_expr(a, n, seen),
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
+            for a in args {
+                validate_expr(a, n, seen)?;
+            }
+            Ok(())
+        }
+        Expr::Cond { cond, then_, else_ } => {
+            validate_expr(cond, n, seen)?;
+            validate_expr(then_, n, seen)?;
+            validate_expr(else_, n, seen)
+        }
+        Expr::Cse(body) => {
+            if seen.insert(Arc::as_ptr(body)) {
+                validate_expr(body, n, seen)
+            } else {
+                Ok(())
+            }
+        }
+        Expr::Funcall { id, .. } => Err(format!(
+            "references AMPL imported function id {id}, which this path cannot \
+             resolve: a problem built from expressions has no F-segment \
+             declarations to bind it to. Load such a model with read_nl or \
+             parse_nl_text instead."
+        )),
     }
 }
 
@@ -1652,20 +1669,38 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
 }
 
 /// Walk `e` and insert every `Var(i)` index into `out`.
+///
+/// Shared `Cse` bodies are visited once per call, memoized on `Arc` pointer
+/// identity. Without that this is Θ(2^depth) on a DAG that shares
+/// subexpressions — each reference re-walks the whole body — and presolve
+/// calls this on every solve (`get_variables_linearity`). Skipping a
+/// repeat visit cannot change the answer: `out` is a set, and a second
+/// walk of the same body inserts exactly the indices the first already did.
 pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
+    // `HashSet::new` does not allocate until the first insert, so an
+    // expression with no CSEs pays nothing for the memo.
+    let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+    collect_vars_memo(e, out, &mut seen);
+}
+
+fn collect_vars_memo(
+    e: &Expr,
+    out: &mut BTreeSet<usize>,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) {
     match e {
         Expr::Const(_) => {}
         Expr::Var(i) => {
             out.insert(*i);
         }
         Expr::Binary(_, a, b) => {
-            collect_vars(a, out);
-            collect_vars(b, out);
+            collect_vars_memo(a, out, seen);
+            collect_vars_memo(b, out, seen);
         }
-        Expr::Unary(_, a) => collect_vars(a, out),
+        Expr::Unary(_, a) => collect_vars_memo(a, out, seen),
         Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
-                collect_vars(a, out);
+                collect_vars_memo(a, out, seen);
             }
         }
         // Collect from every child, including the condition: even
@@ -1674,20 +1709,24 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
         // and being conservative here only ever adds structural zeros
         // to the Jacobian/Hessian (never drops a real nonzero).
         Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
-            collect_vars(a, out);
-            collect_vars(b, out);
+            collect_vars_memo(a, out, seen);
+            collect_vars_memo(b, out, seen);
         }
-        Expr::Not(a) => collect_vars(a, out),
+        Expr::Not(a) => collect_vars_memo(a, out, seen),
         Expr::Cond { cond, then_, else_ } => {
-            collect_vars(cond, out);
-            collect_vars(then_, out);
-            collect_vars(else_, out);
+            collect_vars_memo(cond, out, seen);
+            collect_vars_memo(then_, out, seen);
+            collect_vars_memo(else_, out, seen);
         }
-        Expr::Cse(body) => collect_vars(body, out),
+        Expr::Cse(body) => {
+            if seen.insert(Arc::as_ptr(body)) {
+                collect_vars_memo(body, out, seen);
+            }
+        }
         Expr::Funcall { args, .. } => {
             for a in args {
                 if let FuncallArg::Real(e) = a {
-                    collect_vars(e, out);
+                    collect_vars_memo(e, out, seen);
                 }
             }
         }
@@ -1773,6 +1812,13 @@ pub struct NlTnlp {
     /// Per-color compressed Hessian-vector results, sized to
     /// `prob.n`. Reused across `eval_h` calls but allocated once.
     compressed: Vec<Vec<f64>>,
+    /// Per-direction "carries signal" mask for `hessian_vector_products`,
+    /// kept here rather than allocated per call. This crate holds an
+    /// explicit no-per-call-allocation line on the tape sweeps (see
+    /// `tests/tape_gradient_no_alloc.rs`), and the headline Newton-Krylov
+    /// use is `k = 1`, where a fresh `Vec` would be pure overhead on every
+    /// Krylov iteration.
+    hvp_live: Vec<bool>,
 }
 
 // ---------------------------------------------------------------------
@@ -2489,6 +2535,7 @@ impl NlTnlp {
             adj_scratch: vec![0.0; max_tape_n],
             adj_dot_scratch: vec![0.0; max_tape_n],
             compressed,
+            hvp_live: Vec::new(),
         })
     }
 
@@ -2604,11 +2651,12 @@ impl NlTnlp {
 
         // Which directions carry signal. Computed once, not per (tape,
         // direction) pair — with many small summand tapes the scan would
-        // otherwise dominate the work it is meant to save.
-        let live: Vec<bool> = (0..k)
-            .map(|c| v[c * n..(c + 1) * n].iter().any(|&s| s != 0.0))
-            .collect();
-        if !live.iter().any(|&l| l) {
+        // otherwise dominate the work it is meant to save. Reuses the
+        // persistent mask so a Krylov loop allocates nothing per iteration.
+        self.hvp_live.clear();
+        self.hvp_live
+            .extend((0..k).map(|c| v[c * n..(c + 1) * n].iter().any(|&s| s != 0.0)));
+        if !self.hvp_live.iter().any(|&l| l) {
             return Ok(());
         }
 
@@ -2626,7 +2674,7 @@ impl NlTnlp {
                 // of the block form.
                 t.forward_into(x, &mut self.vals_scratch);
                 for (c, out_col) in out.chunks_mut(n).enumerate() {
-                    if !live[c] {
+                    if !self.hvp_live[c] {
                         continue;
                     }
                     t.hessian_directional(
@@ -2655,7 +2703,7 @@ impl NlTnlp {
                     }
                     t.forward_into(x, &mut self.vals_scratch);
                     for (c, out_col) in out.chunks_mut(n).enumerate() {
-                        if !live[c] {
+                        if !self.hvp_live[c] {
                             continue;
                         }
                         t.hessian_directional(
@@ -4357,6 +4405,112 @@ S1 2 sens_init_constr
         p.x0 = vec![0.0; 3];
         let err = NlProblem::from_expressions(p).expect_err("x0 length must be checked");
         assert!(err.contains("x0"), "{err}");
+    }
+
+    /// An out-of-range `Var` must be caught wherever it hides, not just at
+    /// the top level — inside a `Cse` body, a nested `Cse`, a `Cond`
+    /// branch, and a funcall argument all reach the same forward sweep.
+    #[test]
+    fn from_expressions_finds_out_of_range_vars_in_every_position() {
+        let inner_cse = Arc::new(v(7));
+        let cases: Vec<(&str, Expr)> = vec![
+            ("bare", v(7)),
+            ("cse", Expr::Cse(Arc::new(v(7)))),
+            ("nested cse", Expr::Cse(Arc::new(Expr::Cse(inner_cse)))),
+            (
+                "cond branch",
+                Expr::Cond {
+                    cond: Box::new(c(1.0)),
+                    then_: Box::new(v(7)),
+                    else_: Box::new(c(0.0)),
+                },
+            ),
+            ("min list", Expr::MinList(vec![c(0.0), v(7)])),
+            (
+                "sum",
+                Expr::Sum(vec![c(0.0), bin(BinOp::Mul, c(2.0), v(7))]),
+            ),
+        ];
+        for (label, e) in cases {
+            let err = NlProblem::from_expressions(parts(2, e, Vec::new()))
+                .err()
+                .unwrap_or_else(|| panic!("{label}: Var(7) with n = 2 should be rejected"));
+            assert!(err.contains("Var(7)"), "{label}: {err}");
+        }
+    }
+
+    /// A balanced share-DAG: each level is one `Cse` whose body
+    /// references the level below twice. Depth `d` is `d` distinct nodes
+    /// but `2^d` paths, so any walk that re-enters a shared body per
+    /// occurrence is Θ(2^d).
+    fn share_dag(depth: usize) -> Expr {
+        let mut e = v(0);
+        for _ in 0..depth {
+            let shared = Arc::new(e);
+            e = bin(
+                BinOp::Add,
+                Expr::Cse(Arc::clone(&shared)),
+                Expr::Cse(shared),
+            );
+        }
+        e
+    }
+
+    /// The walks over a shared DAG must be memoized, not exponential.
+    ///
+    /// At depth 30 an unmemoized walk is ~10^9 node visits — this test
+    /// does not "fail" so much as never finish, which is exactly the
+    /// signal. `from_expressions` is the door that makes such a DAG
+    /// trivially constructible, but the blowup was reachable through
+    /// `collect_vars` (which presolve calls on every solve, via
+    /// `get_variables_linearity`) and `collect_funcall_ids` (which
+    /// `NlTnlp::try_new` runs over every row).
+    #[test]
+    fn shared_dag_walks_are_memoized_not_exponential() {
+        const DEPTH: usize = 30;
+        let e = share_dag(DEPTH);
+
+        let mut vars = BTreeSet::new();
+        collect_vars(&e, &mut vars);
+        assert_eq!(vars.iter().copied().collect::<Vec<_>>(), vec![0]);
+
+        let mut ids = BTreeSet::new();
+        super::super::nl_external::collect_funcall_ids(&e, &mut ids);
+        assert!(ids.is_empty());
+
+        // The whole build path, end to end: validation, tape construction,
+        // and the linearity metadata presolve consumes.
+        let prob = NlProblem::from_expressions(parts(1, e, Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+        let mut lin = vec![Linearity::Linear; 1];
+        assert!(t.get_variables_linearity(&mut lin));
+    }
+
+    /// `from_expressions` cannot carry AMPL imported functions — there is
+    /// nowhere to put the `F`-segment declarations that bind a funcall id
+    /// to a library — so a `Funcall` must be refused up front. Accepting it
+    /// produces "AMPLFUNC is not set", which the user cannot act on:
+    /// setting `AMPLFUNC` only moves the failure to "no F<id> declaration".
+    #[test]
+    fn from_expressions_rejects_imported_function_calls() {
+        let call = Expr::Funcall {
+            id: 0,
+            args: vec![FuncallArg::Real(v(0))],
+        };
+        let err = NlProblem::from_expressions(parts(1, call.clone(), Vec::new()))
+            .expect_err("a Funcall must be rejected, not deferred to AMPLFUNC");
+        assert!(err.contains("imported function"), "{err}");
+        assert!(
+            err.contains("read_nl") || err.contains("parse_nl_text"),
+            "the error must point at the paths that do support externals: {err}"
+        );
+
+        // Also when buried in a constraint, behind a Cse.
+        let buried = Expr::Cse(Arc::new(Expr::Sum(vec![c(1.0), call])));
+        let err = NlProblem::from_expressions(parts(1, c(0.0), vec![buried]))
+            .expect_err("a buried Funcall must be rejected too");
+        assert!(err.contains("constraint 0"), "{err}");
     }
 
     /// The matrix-free HVP must reproduce `eval_h`'s Hessian exactly —

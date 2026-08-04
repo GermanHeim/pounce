@@ -48,32 +48,96 @@ use crate::nl_problem::PyNlProblem;
 /// default for an omitted bound vector.
 const INF: Number = 1e19;
 
+/// Deepest expression this module will build.
+///
+/// Everything that consumes an `Expr` — `Tape::build`, the derived
+/// `Clone`, and the derived `Drop` — recurses once per level, so a
+/// sufficiently deep tree overflows the stack. That is a hard crash, not a
+/// Python exception: the interpreter dies with SIGSEGV and no traceback.
+/// Measured on Linux with the default 8 MB stack, `Tape::build` survives
+/// ~32k levels in a release build but only ~4k in a debug build, and a
+/// Python thread with a smaller stack is worse still. Capping at
+/// construction is what makes the guarantee hold for all three consumers
+/// at once: an expression that cannot be built cannot later be cloned or
+/// dropped into a crash.
+///
+/// 1000 is far below the smallest observed failure and far above anything
+/// reachable in practice, because building depth `D` through the operators
+/// costs O(D²) anyway (see [`PyNlExpr`]) — a chain long enough to approach
+/// the real stack limit takes tens of seconds to build. Wide models are
+/// unaffected: [`PyNlExpr::sum`] is one level regardless of term count.
+const MAX_DEPTH: u32 = 1000;
+
 /// A node in an expression DAG, and the building block of
 /// [`build_nl_problem`].
 ///
-/// Cheap to clone: the payload is the same `Expr` tree the `.nl` parser
-/// builds, and Python-level sharing (`t = x[0] * x[1]` used twice) deep-
-/// copies the subtree rather than aliasing it. That keeps the semantics
-/// obvious — every occurrence is an independent occurrence in the chain
-/// rule, which is exactly how the tape treats a shared `Cse` body anyway —
-/// at the cost of a larger tape for heavily-reused subexpressions.
+/// **Operands are deep-copied, so `+` chains are quadratic.** Each
+/// operator clones its operand subtrees rather than aliasing them, which
+/// keeps the semantics obvious — every occurrence is an independent
+/// occurrence in the chain rule — but means accumulating in a Python loop
+/// is O(N²) in both time and memory:
+///
+/// ```python
+/// e = pounce.NlExpr.const_(0.0)
+/// for t in terms:          # O(N^2): each += copies everything built so far
+///     e = e + t
+///
+/// e = pounce.NlExpr.sum(terms)     # O(N), one n-ary node
+/// ```
+///
+/// The difference is not marginal — 200 000 terms through `sum` is
+/// instant, while a `+` chain is measured in tens of seconds by 20 000 and
+/// hits [`MAX_DEPTH`] long before that. Reach for `sum` whenever the term
+/// count is data-driven.
 #[pyclass(module = "pounce", name = "NlExpr")]
 #[derive(Clone)]
 pub struct PyNlExpr {
     pub(crate) inner: Expr,
+    /// Nesting depth of `inner`, maintained incrementally (O(1) per
+    /// operation) so the [`MAX_DEPTH`] check never has to walk the tree.
+    depth: u32,
+}
+
+/// An operand decoded from Python: the expression plus its depth, so the
+/// consumer can compute its own depth without a walk.
+struct Operand {
+    expr: Expr,
+    depth: u32,
 }
 
 impl PyNlExpr {
-    fn wrap(inner: Expr) -> PyNlExpr {
-        PyNlExpr { inner }
+    /// Wrap an expression whose depth is already known to be in range.
+    /// Only for leaves (`Var` / `Const`), where depth is 1 by definition.
+    fn leaf(inner: Expr) -> PyNlExpr {
+        PyNlExpr { inner, depth: 1 }
+    }
+
+    /// Wrap a node built over operands of depth `child_depth`, rejecting
+    /// it if that puts the result past [`MAX_DEPTH`].
+    fn nested(inner: Expr, child_depth: u32) -> PyResult<PyNlExpr> {
+        let depth = child_depth.saturating_add(1);
+        if depth > MAX_DEPTH {
+            return Err(PyValueError::new_err(format!(
+                "NlExpr: expression nesting would reach depth {depth}, past the \
+                 limit of {MAX_DEPTH}. Deeper trees overflow the stack when the \
+                 expression is taped, copied, or freed — a hard crash rather than \
+                 an exception — so they are refused here. If you are accumulating \
+                 terms in a loop (`e = e + t`), use NlExpr.sum([...]) instead: it \
+                 builds one n-ary node of depth 1 and is O(N) rather than O(N^2)."
+            )));
+        }
+        Ok(PyNlExpr { inner, depth })
     }
 }
 
 /// Accept an `NlExpr` or any Python float/int as an expression operand, so
 /// `2 * x[0]` and `x[0] ** 2` read the way a modeler expects.
-fn coerce(v: &Bound<'_, PyAny>, what: &str) -> PyResult<Expr> {
+fn coerce(v: &Bound<'_, PyAny>, what: &str) -> PyResult<Operand> {
     if let Ok(e) = v.extract::<PyRef<'_, PyNlExpr>>() {
-        return Ok(e.inner.clone());
+        return Ok(Operand {
+            expr: e.inner.clone(),
+            depth: e.depth,
+        });
     }
     // Reject strings explicitly: Python would happily `float("nan")` some
     // of them via `extract`, and silently turning "1e-3" into a constant
@@ -84,7 +148,10 @@ fn coerce(v: &Bound<'_, PyAny>, what: &str) -> PyResult<Expr> {
         )));
     }
     match v.extract::<Number>() {
-        Ok(c) => Ok(Expr::Const(c)),
+        Ok(c) => Ok(Operand {
+            expr: Expr::Const(c),
+            depth: 1,
+        }),
         Err(_) => Err(PyTypeError::new_err(format!(
             "{what}: expected NlExpr or a number, got {}",
             v.get_type().name()?
@@ -92,21 +159,28 @@ fn coerce(v: &Bound<'_, PyAny>, what: &str) -> PyResult<Expr> {
     }
 }
 
-fn binary(op: BinOp, a: Expr, b: Expr) -> PyNlExpr {
-    PyNlExpr::wrap(Expr::Binary(op, Box::new(a), Box::new(b)))
+fn binary(op: BinOp, a: Operand, b: Operand) -> PyResult<PyNlExpr> {
+    PyNlExpr::nested(
+        Expr::Binary(op, Box::new(a.expr), Box::new(b.expr)),
+        a.depth.max(b.depth),
+    )
 }
 
-fn unary(op: UnaryOp, a: Expr) -> PyNlExpr {
-    PyNlExpr::wrap(Expr::Unary(op, Box::new(a)))
+fn unary(op: UnaryOp, a: Operand) -> PyResult<PyNlExpr> {
+    PyNlExpr::nested(Expr::Unary(op, Box::new(a.expr)), a.depth)
 }
 
-/// Collect a Python iterable of operands into expressions.
-fn coerce_all(items: &Bound<'_, PyAny>, what: &str) -> PyResult<Vec<Expr>> {
+/// Collect a Python iterable of operands, returning them with the deepest
+/// operand's depth.
+fn coerce_all(items: &Bound<'_, PyAny>, what: &str) -> PyResult<(Vec<Expr>, u32)> {
     let mut out = Vec::new();
+    let mut depth = 0;
     for item in items.iter()? {
-        out.push(coerce(&item?, what)?);
+        let o = coerce(&item?, what)?;
+        depth = depth.max(o.depth);
+        out.push(o.expr);
     }
-    Ok(out)
+    Ok((out, depth))
 }
 
 /// Number of distinct DAG nodes in `e`, stopping as soon as the count
@@ -169,7 +243,7 @@ impl PyNlExpr {
     /// Reference to problem variable `index` (0-based).
     #[staticmethod]
     fn var(index: usize) -> PyNlExpr {
-        PyNlExpr::wrap(Expr::Var(index))
+        PyNlExpr::leaf(Expr::Var(index))
     }
 
     /// `[var(0), var(1), ..., var(n-1)]` — the usual first line of a model.
@@ -182,14 +256,15 @@ impl PyNlExpr {
     /// are accepted anywhere an `NlExpr` is.
     #[staticmethod]
     fn const_(value: Number) -> PyNlExpr {
-        PyNlExpr::wrap(Expr::Const(value))
+        PyNlExpr::leaf(Expr::Const(value))
     }
 
     /// `sum(args)` as a single n-ary node — cheaper to build and to tape
     /// than a left-leaning chain of `+`.
     #[staticmethod]
     fn sum(args: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(PyNlExpr::wrap(Expr::Sum(coerce_all(args, "sum")?)))
+        let (items, depth) = coerce_all(args, "sum")?;
+        PyNlExpr::nested(Expr::Sum(items), depth)
     }
 
     /// `atan2(y, x)`, the two-argument arctangent. Has no `.nl` writer
@@ -197,11 +272,7 @@ impl PyNlExpr {
     /// exists.
     #[staticmethod]
     fn atan2(y: &Bound<'_, PyAny>, x: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(
-            BinOp::Atan2,
-            coerce(y, "atan2: y")?,
-            coerce(x, "atan2: x")?,
-        ))
+        binary(BinOp::Atan2, coerce(y, "atan2: y")?, coerce(x, "atan2: x")?)
     }
 
     /// n-ary minimum. Piecewise linear: the derivative follows whichever
@@ -210,22 +281,22 @@ impl PyNlExpr {
     #[staticmethod]
     #[pyo3(signature = (*args))]
     fn min(args: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        let items = coerce_all(args, "min")?;
+        let (items, depth) = coerce_all(args, "min")?;
         if items.is_empty() {
             return Err(PyValueError::new_err("min: needs at least one operand"));
         }
-        Ok(PyNlExpr::wrap(Expr::MinList(items)))
+        PyNlExpr::nested(Expr::MinList(items), depth)
     }
 
     /// n-ary maximum; mirrors [`PyNlExpr::min`].
     #[staticmethod]
     #[pyo3(signature = (*args))]
     fn max(args: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        let items = coerce_all(args, "max")?;
+        let (items, depth) = coerce_all(args, "max")?;
         if items.is_empty() {
             return Err(PyValueError::new_err("max: needs at least one operand"));
         }
-        Ok(PyNlExpr::wrap(Expr::MaxList(items)))
+        PyNlExpr::nested(Expr::MaxList(items), depth)
     }
 
     /// Relational test `a <op> b`, evaluating to `1.0` or `0.0`. `op` is
@@ -237,11 +308,10 @@ impl PyNlExpr {
     /// zero-derivative; pair it with [`PyNlExpr::select`].
     #[staticmethod]
     fn compare(op: &str, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(PyNlExpr::wrap(Expr::Compare(
-            parse_cmp(op)?,
-            Box::new(coerce(a, "compare: a")?),
-            Box::new(coerce(b, "compare: b")?),
-        )))
+        let op = parse_cmp(op)?;
+        let (a, b) = (coerce(a, "compare: a")?, coerce(b, "compare: b")?);
+        let depth = a.depth.max(b.depth);
+        PyNlExpr::nested(Expr::Compare(op, Box::new(a.expr), Box::new(b.expr)), depth)
     }
 
     /// `then_ if cond else else_`. The value and all derivatives flow
@@ -253,70 +323,130 @@ impl PyNlExpr {
         then_: &Bound<'_, PyAny>,
         else_: &Bound<'_, PyAny>,
     ) -> PyResult<PyNlExpr> {
-        Ok(PyNlExpr::wrap(Expr::Cond {
-            cond: Box::new(coerce(cond, "select: cond")?),
-            then_: Box::new(coerce(then_, "select: then_")?),
-            else_: Box::new(coerce(else_, "select: else_")?),
-        }))
+        let cond = coerce(cond, "select: cond")?;
+        let then_ = coerce(then_, "select: then_")?;
+        let else_ = coerce(else_, "select: else_")?;
+        let depth = cond.depth.max(then_.depth).max(else_.depth);
+        PyNlExpr::nested(
+            Expr::Cond {
+                cond: Box::new(cond.expr),
+                then_: Box::new(then_.expr),
+                else_: Box::new(else_.expr),
+            },
+            depth,
+        )
     }
 
     /// Logical AND: `1.0` iff both operands are nonzero. Zero derivative.
     #[staticmethod]
     fn logical_and(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(PyNlExpr::wrap(Expr::And(
-            Box::new(coerce(a, "logical_and: a")?),
-            Box::new(coerce(b, "logical_and: b")?),
-        )))
+        let (a, b) = (coerce(a, "logical_and: a")?, coerce(b, "logical_and: b")?);
+        let depth = a.depth.max(b.depth);
+        PyNlExpr::nested(Expr::And(Box::new(a.expr), Box::new(b.expr)), depth)
     }
 
     /// Logical OR: `1.0` iff either operand is nonzero. Zero derivative.
     #[staticmethod]
     fn logical_or(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(PyNlExpr::wrap(Expr::Or(
-            Box::new(coerce(a, "logical_or: a")?),
-            Box::new(coerce(b, "logical_or: b")?),
-        )))
+        let (a, b) = (coerce(a, "logical_or: a")?, coerce(b, "logical_or: b")?);
+        let depth = a.depth.max(b.depth);
+        PyNlExpr::nested(Expr::Or(Box::new(a.expr), Box::new(b.expr)), depth)
     }
 
     /// Logical NOT: `1.0` iff the operand is zero. Zero derivative.
     #[staticmethod]
     fn logical_not(a: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(PyNlExpr::wrap(Expr::Not(Box::new(coerce(
-            a,
-            "logical_not: a",
-        )?))))
+        let a = coerce(a, "logical_not: a")?;
+        let depth = a.depth;
+        PyNlExpr::nested(Expr::Not(Box::new(a.expr)), depth)
     }
 
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Add, self.inner.clone(), coerce(other, "+")?))
+        binary(
+            BinOp::Add,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+            coerce(other, "+")?,
+        )
     }
 
     fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Add, coerce(other, "+")?, self.inner.clone()))
+        binary(
+            BinOp::Add,
+            coerce(other, "+")?,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Sub, self.inner.clone(), coerce(other, "-")?))
+        binary(
+            BinOp::Sub,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+            coerce(other, "-")?,
+        )
     }
 
     fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Sub, coerce(other, "-")?, self.inner.clone()))
+        binary(
+            BinOp::Sub,
+            coerce(other, "-")?,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Mul, self.inner.clone(), coerce(other, "*")?))
+        binary(
+            BinOp::Mul,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+            coerce(other, "*")?,
+        )
     }
 
     fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Mul, coerce(other, "*")?, self.inner.clone()))
+        binary(
+            BinOp::Mul,
+            coerce(other, "*")?,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Div, self.inner.clone(), coerce(other, "/")?))
+        binary(
+            BinOp::Div,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+            coerce(other, "/")?,
+        )
     }
 
     fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
-        Ok(binary(BinOp::Div, coerce(other, "/")?, self.inner.clone()))
+        binary(
+            BinOp::Div,
+            coerce(other, "/")?,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     fn __pow__(
@@ -329,7 +459,14 @@ impl PyNlExpr {
                 "NlExpr ** exp % mod: three-argument pow is not supported",
             ));
         }
-        Ok(binary(BinOp::Pow, self.inner.clone(), coerce(other, "**")?))
+        binary(
+            BinOp::Pow,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+            coerce(other, "**")?,
+        )
     }
 
     fn __rpow__(
@@ -342,90 +479,257 @@ impl PyNlExpr {
                 "base ** NlExpr % mod: three-argument pow is not supported",
             ));
         }
-        Ok(binary(BinOp::Pow, coerce(other, "**")?, self.inner.clone()))
+        binary(
+            BinOp::Pow,
+            coerce(other, "**")?,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn __neg__(&self) -> PyNlExpr {
-        unary(UnaryOp::Neg, self.inner.clone())
+    fn __neg__(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Neg,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     fn __pos__(&self) -> PyNlExpr {
         self.clone()
     }
 
-    fn __abs__(&self) -> PyNlExpr {
-        unary(UnaryOp::Abs, self.inner.clone())
+    /// Copy support. `Expr` is a plain tree, so a copy is a deep copy
+    /// either way — `__copy__` and `__deepcopy__` are the same operation,
+    /// and both are what a frontend cloning its own DAG reaches for.
+    /// (Pickling is *not* supported: an `NlExpr` has no serialized form,
+    /// and pickling one raises `TypeError`. Rebuild from the model source
+    /// instead.)
+    fn __copy__(&self) -> PyNlExpr {
+        self.clone()
     }
 
-    fn sqrt(&self) -> PyNlExpr {
-        unary(UnaryOp::Sqrt, self.inner.clone())
+    #[pyo3(signature = (_memo=None))]
+    fn __deepcopy__(&self, _memo: Option<&Bound<'_, PyAny>>) -> PyNlExpr {
+        self.clone()
     }
 
-    fn exp(&self) -> PyNlExpr {
-        unary(UnaryOp::Exp, self.inner.clone())
+    /// Nesting depth of this expression. Bounded by `NlExpr.max_depth`;
+    /// exposed because it is the number in the error you get when a `+`
+    /// chain runs away.
+    #[getter]
+    fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// The deepest expression this class will build. See the class
+    /// docstring for why deep trees are refused rather than allowed to
+    /// crash the interpreter.
+    #[classattr]
+    fn max_depth() -> u32 {
+        MAX_DEPTH
+    }
+
+    /// Opt out of NumPy's ufunc protocol.
+    ///
+    /// Without this, `np.array([1.0, 2.0]) * x[0]` silently produces a
+    /// `dtype=object` ndarray of `NlExpr` — NumPy broadcasts elementwise
+    /// and calls `float.__mul__` per cell — while the forward form
+    /// `x[0] * np.array(...)` correctly raises. Setting it to `None`
+    /// makes the reflected form raise too, so the two directions agree
+    /// and a vectorized expression has to be spelled explicitly
+    /// (`NlExpr.sum(c * x[i] for ...)`).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn __array_ufunc__() -> Option<()> {
+        None
+    }
+
+    fn __abs__(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Abs,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
+    }
+
+    fn sqrt(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Sqrt,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
+    }
+
+    fn exp(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Exp,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     /// Natural logarithm.
-    fn log(&self) -> PyNlExpr {
-        unary(UnaryOp::Log, self.inner.clone())
+    fn log(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Log,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn log10(&self) -> PyNlExpr {
-        unary(UnaryOp::Log10, self.inner.clone())
+    fn log10(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Log10,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn sin(&self) -> PyNlExpr {
-        unary(UnaryOp::Sin, self.inner.clone())
+    fn sin(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Sin,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn cos(&self) -> PyNlExpr {
-        unary(UnaryOp::Cos, self.inner.clone())
+    fn cos(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Cos,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn tan(&self) -> PyNlExpr {
-        unary(UnaryOp::Tan, self.inner.clone())
+    fn tan(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Tan,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn asin(&self) -> PyNlExpr {
-        unary(UnaryOp::Asin, self.inner.clone())
+    fn asin(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Asin,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn acos(&self) -> PyNlExpr {
-        unary(UnaryOp::Acos, self.inner.clone())
+    fn acos(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Acos,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn atan(&self) -> PyNlExpr {
-        unary(UnaryOp::Atan, self.inner.clone())
+    fn atan(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Atan,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn sinh(&self) -> PyNlExpr {
-        unary(UnaryOp::Sinh, self.inner.clone())
+    fn sinh(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Sinh,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn cosh(&self) -> PyNlExpr {
-        unary(UnaryOp::Cosh, self.inner.clone())
+    fn cosh(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Cosh,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn tanh(&self) -> PyNlExpr {
-        unary(UnaryOp::Tanh, self.inner.clone())
+    fn tanh(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Tanh,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn asinh(&self) -> PyNlExpr {
-        unary(UnaryOp::Asinh, self.inner.clone())
+    fn asinh(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Asinh,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn acosh(&self) -> PyNlExpr {
-        unary(UnaryOp::Acosh, self.inner.clone())
+    fn acosh(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Acosh,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
-    fn atanh(&self) -> PyNlExpr {
-        unary(UnaryOp::Atanh, self.inner.clone())
+    fn atanh(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Atanh,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     /// Gauss error function. Reachable only from here — AMPL has no `erf`
     /// opcode, so no `.nl` round trip can carry it (issue #469).
-    fn erf(&self) -> PyNlExpr {
-        unary(UnaryOp::Erf, self.inner.clone())
+    fn erf(&self) -> PyResult<PyNlExpr> {
+        unary(
+            UnaryOp::Erf,
+            Operand {
+                expr: self.inner.clone(),
+                depth: self.depth,
+            },
+        )
     }
 
     /// Value of this expression alone at `x`, through the same AD tape a
@@ -472,14 +776,12 @@ impl PyNlExpr {
     /// catchable Python error.
     fn checked_tape(&self, x_len: usize, what: &str) -> PyResult<Tape> {
         let tape = Tape::build(&self.inner);
-        if let Some(&max) = tape.variables().iter().max() {
-            if max >= x_len {
-                return Err(PyValueError::new_err(format!(
-                    "{what}: expression references variable {max} but x has length {x_len}"
-                )));
-            }
+        match tape.variables().iter().max() {
+            Some(&max) if max >= x_len => Err(PyValueError::new_err(format!(
+                "{what}: expression references variable {max} but x has length {x_len}"
+            ))),
+            _ => Ok(tape),
         }
-        Ok(tape)
     }
 }
 
@@ -549,10 +851,10 @@ pub fn build_nl_problem(
     var_names: Option<Vec<String>>,
     con_names: Option<Vec<String>>,
 ) -> PyResult<PyNlProblem> {
-    let objective = coerce(objective, "build_nl_problem: objective")?;
+    let objective = coerce(objective, "build_nl_problem: objective")?.expr;
     let constraints = match constraints {
         None => Vec::new(),
-        Some(c) => coerce_all(c, "build_nl_problem: constraints")?,
+        Some(c) => coerce_all(c, "build_nl_problem: constraints")?.0,
     };
     let m = constraints.len();
 
