@@ -527,12 +527,12 @@ same classification the block members get, applied per candidate as a
 singleton block, so it is scale-invariant; only near-bound variables
 pay the extra backsolve.
 
-## Keeping the factor: retain_kkt()
+## Keeping and releasing the factor: retain_kkt(), release_kkt()
 
 The solve factors the KKT matrix to solve the NLP; the only question is
 whether that factor is kept for post-solve queries. Any declaration
 keeps it. `retain_kkt(model)` keeps it with no declaration at all,
-which is what the declaration-free `wrt=` flow needs: the MHE case,
+which is what `wrt=` queries with nothing declared need: the MHE case,
 where the arrival state and the parameters are each queried by `wrt=`
 and neither is THE fitted set. It defaults off, so a solve with no
 sensitivity pays nothing.
@@ -542,6 +542,7 @@ retain_kkt(m)
 SolverFactory("pounce").solve(m)
 arrival = covariance(m, sigma_sq=s2, wrt=m.x[:, t0])
 params = information(m, wrt=[m.k1, m.k2])
+release_kkt(m)          # done asking: give the memory back now
 ```
 
 | setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
@@ -557,10 +558,12 @@ declared or `retain_kkt()` was called, and a `Covariance` or
 keeps the session alive through its pending computation until first
 access. `release_kkt(model)` is the exit: it drops the model's hold
 on the factor immediately, freeing the memory, while declarations and
-the retain flag still apply to the next solve. A result created
-before the release holds its own reference through its pending
-`conditioned_on`, so it keeps working; release drops the model's
-hold, not the result's. Noise is a separate question: `retain_kkt()` keeps the
+the retain flag still apply to the next solve. Release drops the
+model's hold, not a result's: a `Covariance` or `Information` with a
+pending `conditioned_on`, and a `Gradient` (which reads the factor on
+every lookup), each hold their own reference, so they keep working
+across the release and keep the factor in memory until they are
+discarded. Noise is a separate question: `retain_kkt()` keeps the
 factor, not a noise model, and with nothing declared fitted the
 degrees of freedom for a noise ESTIMATE are unknown, so
 `covariance()` under retain-only needs `sigma_sq=`; the estimation

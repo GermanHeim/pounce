@@ -4,6 +4,9 @@ work on any block without a declared default. The roadmap's truth
 table: no declarations and no retain means no factor and the no-session
 error; retain alone keeps the factor but covariance(m) has no default
 and stays an error; retain plus declarations changes nothing."""
+import gc
+import weakref
+
 import numpy as np
 import pytest
 import pyomo.environ as pyo
@@ -13,6 +16,8 @@ from pyomo_pounce import (
     covariance,
     declare_fitted,
     declare_residual,
+    declare_sens_param,
+    gradient,
     information,
     release_kkt,
     retain_kkt,
@@ -170,10 +175,22 @@ def test_release_kkt_with_nothing_held():
     assert release_kkt(m) is False
 
 
-def test_release_kkt_keeps_intent_for_the_next_solve():
-    # declarations and the retain flag survive release: the next solve
-    # keeps its factor again, on both the declared and retain-only
-    # paths
+def test_release_kkt_frees_the_session():
+    # the point of the call: with no result outstanding, nothing else
+    # holds the session, so the factor is collected at the release and
+    # not merely hidden from the accessors
+    x, y, X = linear_data()
+    m = linear_model(x, y)
+    pyo.SolverFactory("pounce").solve(m)
+    held = weakref.ref(m.__dict__["_pounce_sens"].session)
+    assert held() is not None
+    assert release_kkt(m) is True
+    assert held() is None
+
+
+def test_release_kkt_keeps_declarations_for_the_next_solve():
+    # the declarations survive release: the next solve keeps its
+    # factor again and covariance(m) still has its default block
     x, y, X = linear_data()
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)
@@ -182,14 +199,20 @@ def test_release_kkt_keeps_intent_for_the_next_solve():
     C = np.linalg.inv(X.T @ X)
     assert covariance(m, sigma_sq=SIGMA**2)[m.a] == pytest.approx(
         SIGMA**2 * C[0, 0], rel=1e-9)
-    m2 = linear_model(x, y, declare=False)
-    retain_kkt(m2)
-    pyo.SolverFactory("pounce").solve(m2)
-    release_kkt(m2)
-    pyo.SolverFactory("pounce").solve(m2)
-    assert covariance(m2, sigma_sq=SIGMA**2,
-                      wrt=[m2.a])[m2.a] == pytest.approx(
-        SIGMA**2 * np.linalg.inv(X.T @ X)[0, 0], rel=1e-9)
+
+
+def test_release_kkt_keeps_the_retain_flag_for_the_next_solve():
+    # same on the retain-only path: release does not undo retain_kkt()
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    retain_kkt(m)
+    pyo.SolverFactory("pounce").solve(m)
+    release_kkt(m)
+    pyo.SolverFactory("pounce").solve(m)
+    C = np.linalg.inv(X.T @ X)
+    assert covariance(m, sigma_sq=SIGMA**2,
+                      wrt=[m.a])[m.a] == pytest.approx(
+        SIGMA**2 * C[0, 0], rel=1e-9)
 
 
 def test_release_kkt_pending_conditioned_on_survives():
@@ -202,5 +225,26 @@ def test_release_kkt_pending_conditioned_on_survives():
     cov = covariance(m, sigma_sq=SIGMA**2)
     assert release_kkt(m) is True
     assert cov.conditioned_on == ()
-    assert cov[m.a] == pytest.approx(
-        SIGMA**2 * np.linalg.inv(X.T @ X)[0, 0], rel=1e-9)
+    C = np.linalg.inv(X.T @ X)
+    assert cov[m.a] == pytest.approx(SIGMA**2 * C[0, 0], rel=1e-9)
+
+
+def test_release_kkt_leaves_a_gradient_working():
+    # the other result that holds the session: a Gradient reads the
+    # factor on every lookup, so it too keeps working -- and keeps the
+    # factor alive -- across a release
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=3.0, mutable=True)
+    m.x = pyo.Var(initialize=0.0)
+    m.con = pyo.Constraint(expr=m.x == 2.0 * m.p)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    g = gradient(wrt=m.p)
+    held = weakref.ref(m.__dict__["_pounce_sens"].session)
+    assert release_kkt(m) is True
+    assert held() is not None                 # the Gradient still holds it
+    assert g[m.x, m.p] == pytest.approx(2.0, rel=1e-9)
+    del g
+    gc.collect()
+    assert held() is None

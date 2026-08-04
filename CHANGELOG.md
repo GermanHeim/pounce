@@ -9,16 +9,16 @@ changes.
 
 ## [Unreleased]
 
-### Added — pyomo-pounce: `release_kkt()`, the exit of the retention story
+### Added — pyomo-pounce: `release_kkt()`, the exit of the retention story (#475)
 
 - The held KKT factorization can now be dropped on demand:
   `release_kkt(model)` frees the factor's memory immediately and
   returns whether anything was held. Declarations and a prior
   `retain_kkt()` are untouched, so the next solve keeps its factor
-  again; after release the accessors raise their no-session error. A
-  `Covariance` or `Information` result created before the release
-  holds its own reference through its pending `conditioned_on`, so it
-  keeps working: release drops the model's hold, not the result's.
+  again; after release the accessors raise their no-session error.
+  Release drops the model's hold, not a result's: a `Covariance` or
+  `Information` with a pending `conditioned_on`, and a `Gradient`,
+  each hold their own reference and keep working across the release.
   The retention policy (three ways to keep, one way to release) is
   stated in one place in the docs.
 
