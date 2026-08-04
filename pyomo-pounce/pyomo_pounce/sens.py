@@ -1928,8 +1928,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()), or retain_kkt() for the "
-            "declaration-free wrt= flow, then solve with "
+            "declare_residual()), or retain_kkt() for "
+            "wrt= queries with nothing declared, then solve with "
             "SolverFactory('pounce') first")
     # the block: the declared fitted parameters by default, or any
     # block of the solve's variables via wrt= (each call re-reduces
@@ -2311,8 +2311,8 @@ def information(model, hessian="lagrangian", wrt=None):
     if session is None:
         raise RuntimeError(
             "no sensitivity session: declare_fitted() (and optionally "
-            "declare_residual()), or retain_kkt() for the "
-            "declaration-free wrt= flow, then solve with "
+            "declare_residual()), or retain_kkt() for "
+            "wrt= queries with nothing declared, then solve with "
             "SolverFactory('pounce') first")
     params, rows = _resolve_wrt(session, wrt, "information")
     n_params = len(params)
