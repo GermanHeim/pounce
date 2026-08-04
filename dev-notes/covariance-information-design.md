@@ -106,6 +106,12 @@ Sigma is a property of the fit, never of the block:
   at the solve so later writes into the model cannot silently
   rescale the covariance.
 
+Both ESTIMATION routes divide by `n - n_fit`, so under `retain_kkt()`
+alone there is no fit to take degrees of freedom from: with nothing
+declared fitted they raise rather than divide by `n`, which would
+bias every variance low by `n/(n - p)`. Retain-only therefore needs
+`sigma_sq=`.
+
 A sub-block's marginal therefore equals the corresponding entries of
 the default answer exactly.
 
