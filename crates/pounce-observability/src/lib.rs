@@ -38,6 +38,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 
 use pounce_common::types::{Index, Number};
@@ -58,6 +59,7 @@ pub const RESTORATION_SPAN: &str = "restoration";
 
 // ---- Per-solve capture slot ----
 
+#[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// Active capture buffer for the current solve, or `None` when no
     /// solve on this thread is recording its iteration history.
@@ -88,6 +90,15 @@ pub fn iteration_event_wanted() -> bool {
     if JSON_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
         return true;
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // CAPTURE is a destructor-bearing TLS slot. Accessing it under the
+        // single-threaded wasm32-wasip1 hosts used by pounce-wasm can block
+        // indefinitely before iteration zero. Wasm still gets the normal
+        // console stream; in-process iteration-history capture is disabled.
+        return false;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     CAPTURE.with(|c| c.borrow().is_some())
 }
 
@@ -108,35 +119,60 @@ pub struct IterCaptureGuard {
 impl IterCaptureGuard {
     /// Begin capturing iteration records on this thread.
     pub fn start() -> Self {
-        let prev = CAPTURE.with(|c| c.borrow_mut().replace(Vec::new()));
-        Self { prev }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Destructor-bearing TLS can block in the single-threaded WASI
+            // hosts supported by pounce-wasm. Iteration history is optional,
+            // so leave capture disabled while retaining the same API.
+            Self { prev: None }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let prev = CAPTURE.with(|c| c.borrow_mut().replace(Vec::new()));
+            Self { prev }
+        }
     }
 
     /// End capture and return the records collected since [`start`].
     ///
     /// [`start`]: IterCaptureGuard::start
     pub fn finish(mut self) -> Vec<IterRecord> {
-        let prev = self.prev.take();
-        let captured = CAPTURE
-            .with(|c| std::mem::replace(&mut *c.borrow_mut(), prev))
-            .unwrap_or_default();
-        // Skip `Drop`: it would re-restore `self.prev` (now `None`) and
-        // clobber the buffer we just put back for an enclosing guard.
-        std::mem::forget(self);
-        captured
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.prev.take();
+            std::mem::forget(self);
+            Vec::new()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let prev = self.prev.take();
+            let captured = CAPTURE
+                .with(|c| std::mem::replace(&mut *c.borrow_mut(), prev))
+                .unwrap_or_default();
+            // Skip `Drop`: it would re-restore `self.prev` (now `None`) and
+            // clobber the buffer we just put back for an enclosing guard.
+            std::mem::forget(self);
+            captured
+        }
     }
 }
 
 impl Drop for IterCaptureGuard {
     fn drop(&mut self) {
-        // Restore the previous buffer if `finish` wasn't called.
-        let prev = self.prev.take();
-        CAPTURE.with(|c| *c.borrow_mut() = prev);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Restore the previous buffer if `finish` wasn't called.
+            let prev = self.prev.take();
+            CAPTURE.with(|c| *c.borrow_mut() = prev);
+        }
     }
 }
 
 /// Append a record to the active capture slot, if any.
 fn push_record(rec: IterRecord) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = rec;
+    #[cfg(not(target_arch = "wasm32"))]
     CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push(rec);
@@ -154,11 +190,14 @@ pub fn extend_active_capture(records: &[IterRecord]) {
     if records.is_empty() {
         return;
     }
-    CAPTURE.with(|c| {
-        if let Some(buf) = c.borrow_mut().as_mut() {
-            buf.extend_from_slice(records);
-        }
-    });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        CAPTURE.with(|c| {
+            if let Some(buf) = c.borrow_mut().as_mut() {
+                buf.extend_from_slice(records);
+            }
+        });
+    }
 }
 
 // ---- Event → IterRecord visitor ----
