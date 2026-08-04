@@ -163,11 +163,15 @@ def release_kkt(model):
     The exit of the retention story, for the current factor only:
     declarations and a prior retain_kkt() are untouched and apply to
     the NEXT solve, which keeps its factor again. After release the
-    accessors raise their no-session error until another solve. A
-    Covariance or Information result whose conditioned_on is still
-    pending holds its own reference to the session, so such a result
-    keeps the factor alive until the attribute is read or the result
-    is discarded; release drops the model's hold, not theirs.
+    accessors raise their no-session error until another solve.
+
+    Release drops the MODEL's hold, not a result's, and two kinds of
+    result hold their own reference to the session: a Covariance or
+    Information whose conditioned_on is still pending (until the
+    attribute is read), and a Gradient handed back by gradient()
+    (which uses the session on every lookup). Such a result keeps
+    working after the release, and keeps the factor in memory until
+    it too is discarded.
 
     Returns True if a factorization was held and is now released,
     False if there was nothing to release."""

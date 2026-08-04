@@ -46,8 +46,9 @@ $S = H_{AA} - H_{AF} H_{FF}^{-1} H_{FA}$ the reduction onto $A$.
 
 One more rule completes retention: a `Covariance` or `Information` result whose
 `conditioned_on` has not been read keeps the session, and with it the
-factor, alive until first access; `release_kkt` drops the model's
-hold, not a pending result's.
+factor, alive until first access, as does a live `Gradient` (it reads
+the factor on every lookup); `release_kkt` drops the model's hold, not
+an outstanding result's.
 
 Explicit call-time forms (`solve(m, fitted=..., residuals=...)`) are
 deliberately solve-local, so repeated solves of one model do not
