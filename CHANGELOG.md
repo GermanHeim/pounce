@@ -22,6 +22,31 @@ changes.
   The retention policy (three ways to keep, one way to release) is
   stated in one place in the docs.
 
+### Performance — shared `.nl` subexpressions are evaluated once per sweep (#476)
+
+- Constraint values (`eval_g`) now go through a problem-wide tape with a
+  **shared prelude**: every `.nl` defined variable (`V` segment) referenced
+  by two or more summands is evaluated once per sweep instead of once per
+  reference. Previously each summand got an independent flat tape, so a
+  defined variable feeding many rows was re-evaluated for each of them.
+- Invisible on most models, dominant on constraint-heavy ones. Mittelmann's
+  `robot_a` (n = 1001, m = 52013, 12003 defined variables each feeding 13
+  rows) went from 3.6M to 894k tape ops per constraint sweep — 4.0x less
+  arithmetic, on the line search's inner loop. End to end: **22 % faster**
+  on `robot_a`/`robot_c`, with a bit-identical iteration trajectory.
+- `eval_g` / `eval_f` also stopped allocating a `Vec` per summand (~148k
+  allocations per call on `robot_a`, ~20 % of `eval_g`); they reuse the
+  scratch arena `eval_jac_g` / `eval_grad_f` already used.
+- Both are transparent: models using opcodes the shared-prelude path does
+  not support (comparisons, AND/OR/NOT, if-then-else, min/max lists,
+  external functions), and models with nothing shared to hoist, keep the
+  previous path. All 42 `.nl` fixtures in the tree produce identical
+  status, objective and iteration counts.
+- `benchmarks/mittelmann/gen_robot_nl.py` reproduces `robot_a`/`b`/`c` as
+  `.nl` without an AMPL licence. Full investigation, including why the
+  iteration count is inherited from Ipopt rather than a POUNCE weakness:
+  `dev-notes/research/robot-abc-per-iteration-cost.md`.
+
 ### Fixed — `NlProblem` can be shared across threads (#477)
 
 - `NlProblem`, `DenseLU` and `SparseLU` were `#[pyclass(unsendable)]`,
