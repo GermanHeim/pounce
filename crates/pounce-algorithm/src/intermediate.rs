@@ -42,13 +42,21 @@ pub struct CtxGuard {
 
 impl CtxGuard {
     pub fn install(ctx: IntermediateContext) -> Self {
+        // wasm32-wasip1 browser/Node hosts are single-threaded here, and
+        // touching this destructor-bearing TLS slot can block indefinitely.
+        // The context only serves optional C-API inspector calls during the
+        // callback.
+        #[cfg(not(target_arch = "wasm32"))]
         CURRENT_CTX.with(|c| *c.borrow_mut() = Some(ctx));
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
         Self { _private: () }
     }
 }
 
 impl Drop for CtxGuard {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         CURRENT_CTX.with(|c| *c.borrow_mut() = None);
     }
 }
@@ -59,10 +67,23 @@ pub fn with_current<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&IntermediateContext) -> R,
 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Live-iterate inspection is unavailable on the Wasm build because
+        // its callback context is deliberately not installed above.
+        let _ = f;
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     CURRENT_CTX.with(|c| c.borrow().as_ref().map(f))
 }
 
 /// Whether a context is currently installed.
 pub fn is_active() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     CURRENT_CTX.with(|c| c.borrow().is_some())
 }
