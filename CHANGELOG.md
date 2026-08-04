@@ -145,6 +145,58 @@ that makes such a DAG trivially constructible from a frontend. Measured
 on a balanced share-DAG: depth 26 took 3.0 s through
 `get_variables_linearity` and now completes at depth 30 instantly.
 
+### Fixed — a deeply nested expression no longer kills the interpreter (#472)
+
+Every consumer of an `Expr` recurses once per level of nesting — the tape
+builder, the problem assembler, freeing one, and the `.nl` parser that
+produces one — so a deep enough model overran the thread's stack. The
+result was a SIGSEGV rather than an exception: no traceback, nothing to
+catch, and an interactive session lost with it. Both doors reached it, and
+one of them predates the `NlExpr` surface entirely: `read_nl` on a
+generated `.nl` file whose objective is a long `o0` chain died at ~4 000
+levels, inside the parser, before any tape existed.
+
+- **The walks now run on a worker thread with a 64 MB stack**, so what is
+  survivable no longer depends on the calling thread — 8 MB on a
+  macOS/Linux main thread, 1 MB on Windows, less on a `threading.Thread`.
+  That covers the tape build, the assembly, the parse, and the teardown of
+  a problem that holds deep trees.
+- **One depth limit, enforced at both doors.** `NlExpr.max_depth` is now
+  10 000 and `read_nl` / `parse_nl_text` enforce the same number on what
+  they parsed — a model that arrives already built cannot be capped as it
+  is constructed. Past it, a `ValueError` naming the flat alternative
+  (`NlExpr.sum`, or `.nl`'s `o54`). Previously `NlExpr` refused depth
+  1 001 while the parser accepted 3 000 and crashed on 4 000; the limit is
+  now a property of the machinery rather than of the door, and it sits
+  ~3x inside what the worker stack holds even in a debug build.
+- Wide models are unaffected either way: an n-ary sum is one level however
+  many terms it has.
+
+**Building an expression is no longer quadratic.** Every operator used to
+deep-copy both operands, so accumulating in a Python loop copied the whole
+chain on every iteration: 5 000 terms took over five seconds, 40 000 over
+forty. Operands are now *referenced* rather than copied, making an
+operator O(1) whatever it is applied to — that same 5 000-term loop is
+about three milliseconds.
+
+- Reusing a Python name now reuses the subexpression rather than
+  duplicating it. `t = x[0] * x[1]` used ten times is one shared body on
+  the tape — evaluated once per sweep, with its adjoint summing the ten
+  contributions, which is the same value and the same derivatives off a
+  tape a tenth the size. Expressions that are only tractable *because* of
+  the sharing now work at all: `for _ in range(40): e = e * e` describes
+  `x ** 2**40` in 40 nodes and builds, tapes, and differentiates in under
+  a millisecond, where copying would have needed a trillion nodes.
+- What reaches the solver is unchanged for anything not genuinely shared.
+  References that exist only to hand an operand to an operator are inlined
+  when the model is assembled, so `from_expressions` sees the same plain
+  tree it always did — which is what keeps each term of a sum its own
+  tape, and each tape its own small set of Hessian colors.
+
+New Rust API: `NlTnlp::problem_mut`, which is how the Python binding takes
+the expression trees out of a problem to tear them down on a stack sized
+for them.
+
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 
 - `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto
