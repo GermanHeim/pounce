@@ -267,7 +267,15 @@ the sandwich is the truthful report on the unweighted fit.
 An eigenvalue much larger than the rest flags a poorly identified
 problem: its eigenvector is the parameter combination the data cannot
 pin down, and the corresponding `cov.correlation` entries approach
-+/-1. `covariance` warns when the held factor carries
++/-1. Because `v` and `-v` are equally valid eigenvectors and LAPACK
+picks between them by build convention — the same fit could report
+opposite directions on two machines — the returned signs are pinned:
+**the largest-magnitude component of each eigenvector is positive**
+(ties broken by the earliest position in `cov.params`). That fixes the
+sign only; a repeated eigenvalue still leaves the basis within its
+eigenspace arbitrary, so read a degenerate block as a subspace, not as
+individual directions. `information().eigen()` uses the same
+convention. `covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
 parameterization) and when the covariance diagonal comes out negative
 (not a least-squares minimum).
@@ -452,7 +460,9 @@ indefinite Lagrangian block is returned as computed with a warning
 naming Gauss-Newton as the PSD alternative: refusing would withhold
 the finding that the point is not a minimum or the model is
 over-parameterized. `eigen()` reads identifiability directly: a
-near-zero eigenvalue is a direction the data does not inform.
+near-zero eigenvalue is a direction the data does not inform; its
+eigenvector's sign is pinned by the same convention as
+`covariance().eigen()` (largest-magnitude component positive).
 
 ## Choosing the block: wrt=
 

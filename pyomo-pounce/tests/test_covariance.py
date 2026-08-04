@@ -89,6 +89,46 @@ def test_keyed_access_and_eigen(linear):
     evals, evecs = cov.eigen()
     rebuilt = evecs @ np.diag(evals) @ evecs.T
     np.testing.assert_allclose(rebuilt, cov.matrix, atol=1e-14)
+    for i in range(evecs.shape[1]):                 # pinned sign (#471)
+        col = evecs[:, i]
+        assert col[np.abs(col).argmax()] > 0
+
+
+def test_eigen_sign_convention_is_deterministic():
+    """LAPACK's choice between `v` and `-v` is a build convention, not
+    a property of the matrix, so the same fit could report opposite
+    directions on two machines (issue #471). eigen() pins it: the
+    largest-magnitude component of each eigenvector is positive, ties
+    broken by the earliest `params` position."""
+    from pyomo_pounce.sens import _pin_eigenvector_signs
+    rng = np.random.default_rng(7)
+    A = rng.standard_normal((4, 4))
+    A = A + A.T
+    evals, evecs = np.linalg.eigh(A)
+    pinned = _pin_eigenvector_signs(evecs)
+    for i in range(4):
+        col = pinned[:, i]
+        assert col[np.abs(col).argmax()] > 0
+        # still an eigenvector, and still one of LAPACK's two choices
+        np.testing.assert_allclose(A @ col, evals[i] * col, atol=1e-12)
+        assert (np.allclose(col, evecs[:, i])
+                or np.allclose(col, -evecs[:, i]))
+    # whichever signs LAPACK happened to hand back, the pinned columns
+    # are bit-identical -- that is the whole point
+    for _ in range(16):
+        flipped = evecs * rng.choice([-1.0, 1.0], size=4)
+        np.testing.assert_array_equal(_pin_eigenvector_signs(flipped),
+                                      pinned)
+    np.testing.assert_array_equal(_pin_eigenvector_signs(pinned), pinned)
+    # exact magnitude tie: the earliest position decides
+    tie = np.array([[-0.5], [0.5]])
+    np.testing.assert_allclose(_pin_eigenvector_signs(tie),
+                               [[0.5], [-0.5]])
+    # degenerate shapes are handled rather than indexed into
+    assert _pin_eigenvector_signs(np.zeros((0, 0))).shape == (0, 0)
+    zero_col = np.zeros((3, 1))
+    np.testing.assert_array_equal(_pin_eigenvector_signs(zero_col),
+                                  zero_col)
 
 
 def test_explicit_form_equals_declared(linear):

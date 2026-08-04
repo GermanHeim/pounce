@@ -9,6 +9,24 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — pyomo-pounce: `eigen()` eigenvector signs are now reproducible (#471)
+
+- `Covariance.eigen()` and `Information.eigen()` returned `np.linalg.eigh`
+  output unmodified, so each eigenvector's sign was whatever the local
+  LAPACK build chose: the same model, data, and POUNCE version could
+  report `v` on one machine and `-v` on another. Since the documented
+  use is reading the eigenvector as a direction ("the parameter
+  combination the data cannot pin down"), the reported direction — and
+  anything that steps along it on a nonlinear model — was not
+  reproducible.
+- Both accessors now pin the sign before returning: the
+  largest-magnitude component of each eigenvector is positive, ties
+  broken by the earliest position in `params`. Eigenvalues, spans, and
+  any use of the eigenvectors as a subspace are unchanged. The sign is
+  all this fixes — a repeated eigenvalue still leaves the basis within
+  its eigenspace arbitrary, which the docstrings and
+  `docs/src/sensitivity.md` now say.
+
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 
 - `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto
