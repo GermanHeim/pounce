@@ -9,23 +9,34 @@ changes.
 
 ## [Unreleased]
 
-### Fixed — pyomo-pounce: `eigen()` eigenvector signs are now reproducible (#471)
+### Fixed — every eigendecomposition now returns sign-pinned eigenvectors (#471)
 
-- `Covariance.eigen()` and `Information.eigen()` returned `np.linalg.eigh`
-  output unmodified, so each eigenvector's sign was whatever the local
-  LAPACK build chose: the same model, data, and POUNCE version could
-  report `v` on one machine and `-v` on another. Since the documented
-  use is reading the eigenvector as a direction ("the parameter
-  combination the data cannot pin down"), the reported direction — and
-  anything that steps along it on a nonlinear model — was not
-  reproducible.
-- Both accessors now pin the sign before returning: the
-  largest-magnitude component of each eigenvector is positive, ties
-  broken by the earliest position in `params`. Eigenvalues, spans, and
-  any use of the eigenvectors as a subspace are unchanged. The sign is
+- An eigenvector's sign is arbitrary: `v` and `-v` are equally valid,
+  and which one came back was decided by the arithmetic that produced
+  it — LAPACK's build convention in `pyomo-pounce`, the Jacobi rotation
+  order in the Rust kernel. The same model, data, and POUNCE version
+  could report `v` on one machine and `-v` on another. Since the
+  documented use is reading the eigenvector as a *direction* ("the
+  parameter combination the data cannot pin down"), the reported
+  direction — and anything that steps along it on a nonlinear model —
+  was not reproducible.
+- One convention now holds everywhere: **the largest-magnitude
+  component of each eigenvector is positive**, ties broken by the
+  earliest row. Applied at both sources — `pounce_linalg::symmetric_eigen`
+  (the single Rust eigensolver, so every surface fed by it inherits it:
+  `SensResult::reduced_hessian_eigenvectors`,
+  `info["reduced_hessian_eigenvectors"]`, the CLI's
+  `_red_hessian_eigenvectors` JSON block, `ReducedHessian.eigenvectors`
+  from both the Rust and Python QP sensitivity APIs) and
+  `pyomo-pounce`'s `Covariance.eigen()` / `Information.eigen()`.
+- Eigenvalues, spans, and any use of the eigenvectors as a subspace are
+  unchanged; internal uses (matrix reconstruction, projectors, Rayleigh
+  quotients, null-space bases) were already sign-invariant. The sign is
   all this fixes — a repeated eigenvalue still leaves the basis within
-  its eigenspace arbitrary, which the docstrings and
+  its eigenspace arbitrary, which the API docs and
   `docs/src/sensitivity.md` now say.
+- Notebook 31 pinned the sign by hand to keep its committed output
+  stable; that workaround is gone, since the library now guarantees it.
 
 ### Added — pyomo-pounce: `retain_kkt()`, factor retention without declarations (covariance roadmap item 4, #262)
 
