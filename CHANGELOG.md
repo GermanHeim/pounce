@@ -65,6 +65,86 @@ changes.
   `retain_kkt()` with
   nothing declared), both committed executed.
 
+### Added — Python: in-memory model construction, Hessian-vector products, and an `erf` tape op (#469)
+
+Everything below already existed in the Rust core; the gap was that none
+of it was reachable from Python, which forced a frontend with its own
+expression DAG (discopt) to round-trip through a temporary `.nl` file.
+
+- **`pounce.build_nl_problem(...)` + `pounce.NlExpr`** — build the
+  expression DAG directly and hand it to the AD tape, with no `.nl` file
+  anywhere in the loop. `NlExpr` supports the Python arithmetic operators
+  (numbers accepted on either side) plus method-form transcendentals
+  (`sqrt exp log log10 sin cos tan asin acos atan sinh cosh tanh asinh
+  acosh atanh erf`) and static-method nodes for the multi-argument /
+  control-flow cases (`sum`, `atan2`, `min`, `max`, `compare`, `select`,
+  `logical_and` / `logical_or` / `logical_not`). The result is the same
+  `NlProblem` class `read_nl` returns, with the same evaluator surface,
+  and it feeds `solve_nlp_batch`.
+  The round trip this replaces was not just slower but *lossy*: `.nl`
+  writers commonly refuse `atan2` (no two-argument funcall path) and
+  `min`/`max` (they force a DNLP model type), and AMPL has no `erf`
+  opcode at all — yet the tape differentiates all three natively.
+- **`pounce.parse_nl_text(text, var_names=None, con_names=None)`** — the
+  same parser `read_nl` uses, fed a string instead of a path, for a
+  frontend that generates `.nl` in memory. Names are passed explicitly
+  since there are no sibling `.col` / `.row` files to read.
+- **`NlProblem.hessian_vector_product(x, v, lam=None, obj_factor=1.0)`**
+  — matrix-free `(obj_factor·∇²f + Σᵢ lamᵢ·∇²gᵢ)·v`, one
+  forward-over-reverse AD pass per tape seeded with `v` directly.
+  `hessian(...)` runs one such pass *per Hessian color* and decodes the
+  compressed columns, so the matrix-free call is cheaper by roughly the
+  chromatic number of the coloring — the operator a Newton–Krylov /
+  truncated-CG step wants on a model where `∇²L` is impractical to form.
+  Available on every `NlProblem` regardless of how it was built.
+  `v` may be a dense length-`n` vector (ndarray of any dtype or stride,
+  list, sequence), a dense `(n, k)` block of directions, or any SciPy
+  sparse vector / `(n, k)` matrix; the result matches the input's shape.
+  A sparse `v` is densified on the way in and all-zero directions are
+  skipped, so a mostly-empty block costs only the live columns — the
+  sparsity that pays is the model's, and every pass is O(tape ops), never
+  O(n²), whichever way `v` arrives. The block form shares one forward
+  sweep per tape across all `k` directions rather than repeating it, which
+  is what makes `p.hessian_vector_product(x, np.eye(n))` a reasonable way
+  to densify the Hessian. The result is always dense: `∇²L·v` is dense in
+  general even when both factors are sparse, and the sparse Hessian itself
+  is already available as `hessian_structure()` + `hessian(x)`.
+  Backed by `NlTnlp::hessian_vector_products` on the Rust side.
+- **`Erf` tape op** (`TapeOp::Erf` / `UnaryOp::Erf`), the one operator in
+  the gap analysis that is not decomposable into ops pounce already had.
+  Value via `libm` (the rust-lang port of musl's libm — the classic
+  Abramowitz–Stegun series is only ~1e-7 accurate, which would cap the
+  achievable KKT residual), derivatives closed-form:
+  `erf'(u) = 2/√π·exp(-u²)`, `erf''(u) = -2u·erf'(u)`, evaluated as
+  `-2·(u·erf'(u))` so the Hessian arms stay finite at magnitudes where
+  `-2u` would overflow while `erf'` has already underflowed. Reachable
+  only through the in-memory path, since no `.nl` opcode maps to it.
+  `HessianProgram`'s `program_supports_op` allowlist does not include it,
+  as it does not include the other transcendentals.
+
+New Rust API alongside the bindings: `NlProblem::from_expressions` /
+`NlProblemParts`, `NlTnlp::hessian_vector_product` /
+`hessian_vector_products`, and `nl_reader::render_expression`.
+
+### Changed — `TapeOp` / `UnaryOp` gained an `Erf` variant (#469)
+
+Source-breaking for any crate outside this workspace that matches on
+either enum exhaustively; nothing in-repo is affected, and no existing
+API changed behavior. Called out under its own heading because a reader
+scanning for breakage should not have to find it inside an `Added` entry.
+
+### Fixed — expression-DAG walks that were exponential in sharing depth (#469)
+
+`collect_vars` and `collect_funcall_ids` re-entered a shared `Expr::Cse`
+body once per reference rather than once per body, making them Θ(2^depth)
+on a subexpression-sharing DAG. Both now memoize on `Arc` pointer
+identity, which cannot change the answer (each collects into a set). This
+was reachable before — `get_variables_linearity` calls `collect_vars`, and
+presolve calls that on every solve — but `build_nl_problem` is a new door
+that makes such a DAG trivially constructible from a frontend. Measured
+on a balanced share-DAG: depth 26 took 3.0 s through
+`get_variables_linearity` and now completes at depth 30 instantly.
+
 ### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
 
 - `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto
