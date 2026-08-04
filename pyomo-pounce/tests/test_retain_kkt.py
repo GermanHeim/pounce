@@ -14,6 +14,7 @@ from pyomo_pounce import (
     declare_fitted,
     declare_residual,
     information,
+    release_kkt,
     retain_kkt,
 )
 
@@ -147,3 +148,59 @@ def test_retain_only_sigma_still_required():
     pyo.SolverFactory("pounce").solve(m)
     with pytest.raises(ValueError, match="noise variance is unknown"):
         covariance(m, wrt=[m.a])
+
+
+def test_release_kkt_drops_the_factor():
+    # release frees the model's hold; the accessors then raise their
+    # no-session error, and a second release reports nothing to do
+    x, y, X = linear_data()
+    m = linear_model(x, y)
+    pyo.SolverFactory("pounce").solve(m)
+    assert release_kkt(m) is True
+    with pytest.raises(RuntimeError, match="no sensitivity session"):
+        covariance(m, sigma_sq=SIGMA**2)
+    assert release_kkt(m) is False
+
+
+def test_release_kkt_with_nothing_held():
+    # no registry at all: a clean False, no error
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(initialize=1.0)
+    m.obj = pyo.Objective(expr=(m.x - 1.0) ** 2)
+    assert release_kkt(m) is False
+
+
+def test_release_kkt_keeps_intent_for_the_next_solve():
+    # declarations and the retain flag survive release: the next solve
+    # keeps its factor again, on both the declared and retain-only
+    # paths
+    x, y, X = linear_data()
+    m = linear_model(x, y)
+    pyo.SolverFactory("pounce").solve(m)
+    release_kkt(m)
+    pyo.SolverFactory("pounce").solve(m)
+    C = np.linalg.inv(X.T @ X)
+    assert covariance(m, sigma_sq=SIGMA**2)[m.a] == pytest.approx(
+        SIGMA**2 * C[0, 0], rel=1e-9)
+    m2 = linear_model(x, y, declare=False)
+    retain_kkt(m2)
+    pyo.SolverFactory("pounce").solve(m2)
+    release_kkt(m2)
+    pyo.SolverFactory("pounce").solve(m2)
+    assert covariance(m2, sigma_sq=SIGMA**2,
+                      wrt=[m2.a])[m2.a] == pytest.approx(
+        SIGMA**2 * np.linalg.inv(X.T @ X)[0, 0], rel=1e-9)
+
+
+def test_release_kkt_pending_conditioned_on_survives():
+    # a result created before release holds its own reference through
+    # the pending conditioned_on computation, so reading it afterwards
+    # still works: release drops the model's hold, not the result's
+    x, y, X = linear_data()
+    m = linear_model(x, y)
+    pyo.SolverFactory("pounce").solve(m)
+    cov = covariance(m, sigma_sq=SIGMA**2)
+    assert release_kkt(m) is True
+    assert cov.conditioned_on == ()
+    assert cov[m.a] == pytest.approx(
+        SIGMA**2 * np.linalg.inv(X.T @ X)[0, 0], rel=1e-9)

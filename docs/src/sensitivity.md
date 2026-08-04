@@ -555,7 +555,12 @@ The retention policy in one place: the factor is kept if anything is
 declared or `retain_kkt()` was called, and a `Covariance` or
 `Information` result whose lazy `conditioned_on` has not been read
 keeps the session alive through its pending computation until first
-access. Noise is a separate question: `retain_kkt()` keeps the
+access. `release_kkt(model)` is the exit: it drops the model's hold
+on the factor immediately, freeing the memory, while declarations and
+the retain flag still apply to the next solve. A result created
+before the release holds its own reference through its pending
+`conditioned_on`, so it keeps working; release drops the model's
+hold, not the result's. Noise is a separate question: `retain_kkt()` keeps the
 factor, not a noise model, and with nothing declared fitted the
 degrees of freedom for a noise ESTIMATE are unknown, so
 `covariance()` under retain-only needs `sigma_sq=`; the estimation
