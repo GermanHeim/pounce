@@ -51,6 +51,23 @@ let result = SensSolve::new(vec![2, 3])
 `with_reduced_hessian_eigen()` adds the eigendecomposition;
 `with_boundcheck(eps)` enables the bound projection.
 
+### Eigenvector sign convention
+
+Every eigendecomposition POUNCE hands back — the reduced Hessian's
+here and through the CLI and Python wrappers, the QP one from
+`QpSensitivity.reduced_hessian`, and `covariance().eigen()` /
+`information().eigen()` in `pyomo-pounce` — returns **sign-pinned**
+eigenvectors: the largest-magnitude component of each column is
+positive, ties broken by the earliest row. `v` and `-v` are equally
+valid eigenvectors, so without a convention the direction you read
+back depends on the arithmetic that produced it and is not
+reproducible across builds or machines.
+
+The sign is all that is pinned. A repeated eigenvalue leaves the basis
+*within* its eigenspace arbitrary — any rotation of those columns
+diagonalizes equally well — so read a degenerate block as a subspace,
+not column by column.
+
 ## Python
 
 `solve_with_sens` exposes the same capability from the
@@ -267,7 +284,13 @@ the sandwich is the truthful report on the unweighted fit.
 An eigenvalue much larger than the rest flags a poorly identified
 problem: its eigenvector is the parameter combination the data cannot
 pin down, and the corresponding `cov.correlation` entries approach
-+/-1. `covariance` warns when the held factor carries
++/-1. The returned signs follow the project-wide
+[eigenvector sign convention](#eigenvector-sign-convention) —
+**the largest-magnitude component of each eigenvector is positive**,
+ties broken by the earliest position in `cov.params` — so the
+direction reproduces across machines instead of coming back as
+whatever LAPACK's build chose. `information().eigen()` is the same.
+`covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
 parameterization) and when the covariance diagonal comes out negative
 (not a least-squares minimum).
@@ -452,7 +475,9 @@ indefinite Lagrangian block is returned as computed with a warning
 naming Gauss-Newton as the PSD alternative: refusing would withhold
 the finding that the point is not a minimum or the model is
 over-parameterized. `eigen()` reads identifiability directly: a
-near-zero eigenvalue is a direction the data does not inform.
+near-zero eigenvalue is a direction the data does not inform; its
+eigenvector's sign follows the project-wide
+[convention](#eigenvector-sign-convention).
 
 ## Choosing the block: wrt=
 

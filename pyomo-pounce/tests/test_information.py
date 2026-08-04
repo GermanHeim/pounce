@@ -60,6 +60,11 @@ def test_information_is_the_reduced_hessian():
     np.testing.assert_allclose(ev, np.linalg.eigvalsh(2.0 * X.T @ X),
                                rtol=1e-9)
     assert ev[0] < ev[1]
+    np.testing.assert_allclose(vecs @ np.diag(ev) @ vecs.T, info.matrix,
+                               rtol=1e-9, atol=1e-9)
+    for i in range(vecs.shape[1]):                  # pinned sign (#471)
+        col = vecs[:, i]
+        assert col[np.abs(col).argmax()] > 0
 
 
 def test_information_inverts_covariance():

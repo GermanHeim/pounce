@@ -1046,6 +1046,32 @@ class _ParamMatrix(_ParamKeyed):
         return float(self.matrix[i, j])
 
 
+def _pin_eigenvector_signs(vecs):
+    """Fix the arbitrary sign LAPACK gives each eigenvector column, so
+    the direction an eigen() call reports is reproducible.
+
+    `v` and `-v` are equally valid eigenvectors, and which one `eigh`
+    returns is a convention of the LAPACK build, not a property of the
+    matrix: the same model and data can report opposite directions on
+    two machines. The convention here is the largest-magnitude
+    component positive, ties broken by the earliest `params` position
+    (argmax takes the first maximum). It is scale-invariant and
+    independent of parameter ordering except through that tie-break.
+
+    This pins the sign only. A repeated eigenvalue leaves the basis
+    WITHIN its eigenspace arbitrary — any rotation of those columns
+    diagonalizes just as well — so the individual eigenvectors of a
+    degenerate block are still not reproducible; only the subspace
+    they span is."""
+    vecs = np.asarray(vecs, dtype=float)
+    if vecs.size == 0:
+        return vecs
+    lead = np.abs(vecs).argmax(axis=0)
+    signs = np.sign(vecs[lead, np.arange(vecs.shape[1])])
+    signs[signs == 0.0] = 1.0        # an all-zero column, if one ever
+    return vecs * signs              # reaches here, is left alone
+
+
 class Covariance(_ParamMatrix):
     """Asymptotic parameter covariance, from covariance().
 
@@ -1089,8 +1115,13 @@ class Covariance(_ParamMatrix):
         eigenvalues ascending, eigenvectors[:, i] in `params` order.
         An eigenvalue much larger than the rest flags a poorly
         identified direction: its eigenvector gives the parameter
-        combination the data cannot pin down."""
-        return np.linalg.eigh(self.matrix)
+        combination the data cannot pin down.
+
+        Each eigenvector's sign is pinned so the direction it names
+        reproduces across machines: its largest-magnitude component
+        is positive (see _pin_eigenvector_signs)."""
+        w, v = np.linalg.eigh(self.matrix)
+        return w, _pin_eigenvector_signs(v)
 
 
 def _indefinite(block):
@@ -1450,8 +1481,13 @@ class Information(_ParamMatrix):
         Small eigenvalues flag poorly informed directions; a negative
         one means the point is not a least-squares minimum along that
         direction (Lagrangian form only; Gauss-Newton is PSD by
-        construction)."""
-        return np.linalg.eigh(self.matrix)
+        construction).
+
+        Each eigenvector's sign is pinned so the direction it names
+        reproduces across machines: its largest-magnitude component
+        is positive (see _pin_eigenvector_signs)."""
+        w, v = np.linalg.eigh(self.matrix)
+        return w, _pin_eigenvector_signs(v)
 
 
 def _classify_ratio(r, mu):
