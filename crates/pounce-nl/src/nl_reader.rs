@@ -2568,6 +2568,19 @@ impl NlTnlp {
         &self.prob
     }
 
+    /// Mutable access to that same problem, for a caller that owns this
+    /// TNLP outright.
+    ///
+    /// The tapes were built from the expressions in [`Self::problem`] and
+    /// are not rebuilt, so editing an expression here does **not** change
+    /// what this TNLP evaluates. It exists for teardown: the Python
+    /// binding takes the expression trees out through here so a deeply
+    /// nested one is dropped on a stack chosen for it rather than
+    /// recursively on whatever thread collected the object (pounce#472).
+    pub fn problem_mut(&mut self) -> &mut NlProblem {
+        &mut self.prob
+    }
+
     /// Hessian-vector product of the Lagrangian:
     /// `out = (obj_factor·∇²f(x) + Σ_i λ_i·∇²g_i(x)) · v`.
     ///

@@ -12,6 +12,9 @@ Three surfaces, all of which used to be Rust-only:
 """
 
 import math
+import subprocess
+import sys
+import time
 
 import numpy as np
 import pytest
@@ -655,12 +658,19 @@ def test_hvp_empty_block_is_legal():
 # ---- Expression depth guard -------------------------------------------
 #
 # Every consumer of an `Expr` recurses once per nesting level — the tape
-# builder, the derived Clone, and the derived Drop — so a deep enough tree
-# overflows the stack. That is a SIGSEGV, not an exception: the interpreter
-# dies with no traceback and nothing to catch. Measured on Linux with an
-# 8 MB stack, taping survives ~32k levels in a release build but only ~4k
-# in a debug build. The cap is enforced at construction, which is what
-# makes the guarantee cover cloning and freeing too.
+# builder, the problem assembler, the teardown when the last handle goes,
+# and the `.nl` parser that produces one in the first place — so a deep
+# enough tree overflows the stack. That is a SIGSEGV, not an exception: the
+# interpreter dies with no traceback and nothing to catch.
+#
+# Two things together make it unreachable. Those walks run on a worker
+# thread with a 64 MB stack, so what is survivable stops depending on the
+# calling thread (8 MB on a macOS/Linux main thread, 1 MB on Windows, less
+# on a `threading.Thread`); and a limit then keeps the depth well inside
+# what that stack holds. Both doors share the limit: `NlExpr` enforces it
+# as it builds, and `read_nl` / `parse_nl_text` enforce it on what they
+# parsed, since a model that arrives already built cannot be capped as it
+# is constructed.
 
 
 def test_deep_chain_raises_instead_of_crashing():
@@ -671,8 +681,8 @@ def test_deep_chain_raises_instead_of_crashing():
 
 
 def test_depth_error_points_at_the_cheap_alternative():
-    """The error has to teach, because `e = e + t` in a loop is the first
-    thing a modeler writes and it is also O(N^2)."""
+    """The error has to teach: `e = e + t` in a loop is the first thing a
+    modeler writes, and one flat `sum` node is the fix."""
     e = pounce.NlExpr.var(0)
     with pytest.raises(ValueError) as excinfo:
         for _ in range(pounce.NlExpr.max_depth + 10):
@@ -727,6 +737,213 @@ def test_expression_just_under_the_cap_still_tapes_and_evaluates():
     # And one more level is refused.
     with pytest.raises(ValueError, match="nesting would reach depth"):
         _ = e + 1.0
+
+
+# ---- Operands are shared, not copied ----------------------------------
+
+
+def test_building_an_expression_does_not_copy_its_operands():
+    """A regression guard on the O(N^2) build, not a benchmark.
+
+    Each operator used to deep-copy both operands, so accumulating in a
+    loop copied the whole chain every iteration: 5 000 terms took over five
+    seconds. Referencing the operands instead makes it a few milliseconds,
+    so the budget can be loose enough that machine speed does not matter
+    and still catch a return to copying.
+    """
+    started = time.perf_counter()
+    e = pounce.NlExpr.var(0)
+    for _ in range(5_000):
+        e = e + 1.0
+    p = pounce.build_nl_problem(n=1, objective=e)
+    elapsed = time.perf_counter() - started
+    assert p.objective([1.0]) == pytest.approx(5_001.0)
+    assert elapsed < 1.0, f"building 5 000 terms took {elapsed:.2f}s"
+
+
+def test_a_reused_subexpression_evaluates_like_a_written_out_copy():
+    """Reusing a Python name shares the subtree now rather than copying it.
+    The tape emits a shared body once and sums the adjoint contributions
+    from every reference, which is the same function and the same
+    derivatives.
+
+    Values match exactly — the forward sweep does the identical arithmetic,
+    just once. Derivatives are compared to rounding: the reverse sweep sums
+    one slot's contributions where the copy sums two, and floating-point
+    addition does not promise the same order gives the same last bit."""
+
+    def model(reuse):
+        x = pounce.NlExpr.vars(2)
+        if reuse:
+            t = x[0] * x[1] + x[0].sin()
+            obj, con = t * t + t, t.exp()
+        else:
+            # The same thing with nothing shared: a fresh `t` per use.
+            def t():
+                return x[0] * x[1] + x[0].sin()
+
+            obj, con = t() * t() + t(), t().exp()
+        return pounce.build_nl_problem(n=2, objective=obj, constraints=[con])
+
+    shared, copied = model(True), model(False)
+    pt = [0.7, -1.3]
+    assert shared.objective(pt) == copied.objective(pt)
+    np.testing.assert_array_equal(shared.constraints(pt), copied.constraints(pt))
+    np.testing.assert_allclose(shared.gradient(pt), copied.gradient(pt), rtol=1e-14)
+    np.testing.assert_allclose(shared.jacobian(pt), copied.jacobian(pt), rtol=1e-14)
+
+    rows, cols = shared.hessian_structure()
+    np.testing.assert_array_equal(rows, copied.hessian_structure()[0])
+    np.testing.assert_array_equal(cols, copied.hessian_structure()[1])
+    lam = np.array([0.6])
+    np.testing.assert_allclose(
+        shared.hessian(pt, lam), copied.hessian(pt, lam), rtol=1e-14
+    )
+
+
+def test_a_shared_subexpression_is_not_expanded():
+    """`e = e * e` doubles the *size* of a copied expression every step, so
+    40 steps is a trillion nodes and no machine builds it. Referencing the
+    operand keeps it 40 nodes, and every walk over the result — the tape
+    build, the variable scan, the assembly — visits a shared body once
+    rather than following each of the 2^40 paths to it."""
+    e = pounce.NlExpr.var(0)
+    for _ in range(40):
+        e = e * e
+    # x ** (2 ** 40), whose derivative at 1 is 2 ** 40.
+    assert e.eval([1.0]) == 1.0
+    np.testing.assert_allclose(e.gradient([1.0]), [2.0**40])
+    p = pounce.build_nl_problem(n=1, objective=e)
+    assert p.objective([1.0]) == 1.0
+    np.testing.assert_allclose(p.gradient([1.0]), [2.0**40])
+    np.testing.assert_allclose(p.hessian([1.0]), [2.0**40 * (2.0**40 - 1)])
+
+
+def test_a_loop_built_objective_still_tapes_per_term():
+    """Sharing must not cost the summand split. Operand references are
+    inlined when the model is assembled, so `from_expressions` sees the
+    plain `+` chain and gives each term its own tape — the same problem the
+    flat `sum` spelling produces, entry for entry."""
+    n = 60
+    x = pounce.NlExpr.vars(n)
+    terms = [(x[i] * x[i + 1]) ** 2 for i in range(n - 1)]
+    looped = terms[0]
+    for t in terms[1:]:
+        looped = looped + t
+    by_loop = pounce.build_nl_problem(n=n, objective=looped)
+    by_sum = pounce.build_nl_problem(n=n, objective=pounce.NlExpr.sum(terms))
+
+    pt = np.linspace(0.1, 1.0, n)
+    assert by_loop.objective(pt) == pytest.approx(by_sum.objective(pt))
+    for got, want in zip(by_loop.hessian_structure(), by_sum.hessian_structure()):
+        np.testing.assert_array_equal(got, want)
+    np.testing.assert_allclose(by_loop.hessian(pt), by_sum.hessian(pt), rtol=1e-14)
+
+
+# ---- Depth reached through the parser, not the builder -----------------
+
+
+def _deep_nl(depth):
+    """`.nl` text whose objective is `((v0 + 1) + 1) ...`, `depth` deep."""
+    body = "o0\n" * depth + "v0\n" + "n1\n" * depth
+    return (
+        "g3 0 1 0\n1 0 1 0 0\n0 1\n0 0\n0 1 0\n0 0 0 1\n0 0 0 0 0\n"
+        f"0 0\n0 0\n0 0 0 0 0\nO0 0\n{body}x0\nr\nb\n3\nk0\n"
+    )
+
+
+def test_parsed_nl_deeper_than_the_caller_stack_would_take():
+    """A `.nl` file arrives already built, so the construction-time cap
+    cannot see it — this used to segfault at depth 4 000, and predates the
+    `NlExpr` surface entirely."""
+    for depth in (3_000, 5_000, pounce.NlExpr.max_depth - 1):
+        p = pounce.parse_nl_text(_deep_nl(depth))
+        assert p.objective([0.0]) == pytest.approx(float(depth))
+
+
+def test_read_nl_takes_the_same_depth_from_a_file(tmp_path):
+    path = tmp_path / "deep.nl"
+    path.write_text(_deep_nl(5_000))
+    p = pounce.read_nl(str(path))
+    assert p.objective([0.0]) == pytest.approx(5_000.0)
+
+
+def test_both_doors_enforce_the_same_depth_limit():
+    """The inconsistency the issue called out: `NlExpr` refused depth 1 001
+    while the parser accepted 3 000 and crashed on 4 000. One limit now,
+    enforced wherever an expression can enter."""
+    limit = pounce.NlExpr.max_depth
+
+    with pytest.raises(ValueError) as parsed:
+        pounce.parse_nl_text(_deep_nl(limit + 1))
+    assert str(limit) in str(parsed.value)
+    assert "o54" in str(parsed.value), "the parser's error names the flat form"
+
+    e = pounce.NlExpr.var(0)
+    with pytest.raises(ValueError) as built:
+        for _ in range(limit + 10):
+            e = e + 1.0
+    assert str(limit) in str(built.value)
+
+
+# Deep enough that the walks need more stack than the thread below has.
+_SMALL_STACK_SCRIPT = """
+import threading
+import pounce
+
+threading.stack_size(256 * 1024)
+out = []
+
+
+def deep_nl(depth):
+    body = "o0\\n" * depth + "v0\\n" + "n1\\n" * depth
+    return (
+        "g3 0 1 0\\n1 0 1 0 0\\n0 1\\n0 0\\n0 1 0\\n0 0 0 1\\n0 0 0 0 0\\n"
+        "0 0\\n0 0\\n0 0 0 0 0\\nO0 0\\n" + body + "x0\\nr\\nb\\n3\\nk0\\n"
+    )
+
+
+def work():
+    e = pounce.NlExpr.var(0)
+    for _ in range(1999):
+        e = e + 1.0
+    assert e.variables() == [0]
+    assert e.eval([1.0]) == 2000.0
+    p = pounce.build_nl_problem(n=1, objective=e)
+    assert p.objective([1.0]) == 2000.0
+    assert p.variant(x0=[2.0]).objective([1.0]) == 2000.0
+    del p, e
+
+    # The parser reaches the same recursion from the other side.
+    q = pounce.parse_nl_text(deep_nl(2000))
+    assert q.objective([0.0]) == 2000.0
+    del q
+    out.append(True)
+
+
+t = threading.Thread(target=work)
+t.start()
+t.join()
+assert out == [True]
+"""
+
+
+def test_deep_work_survives_a_small_caller_stack():
+    """The limit is only half the fix: the walks whose frames are too big
+    to fit run on a worker thread with a stack sized for them, so what is
+    safe does not depend on the caller's stack. 256 KB is well under any
+    platform's main thread, and a 2 000-deep tape build wants roughly twice
+    that on its own.
+
+    Out-of-process because the failure being guarded is a SIGSEGV, which
+    would take the test session down with it rather than fail a test.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _SMALL_STACK_SCRIPT],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
 
 
 # ---- Other NlExpr surface details -------------------------------------

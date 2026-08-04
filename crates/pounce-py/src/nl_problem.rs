@@ -34,8 +34,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use pounce_common::types::{Index, Number};
-use pounce_nl::nl_reader::{NlTnlp, NlVariation, parse_nl_text as parse_nl_text_rs, read_nl_file};
+use pounce_nl::nl_reader::{
+    Expr, NlProblem, NlTnlp, NlVariation, parse_nl_text as parse_nl_text_rs, read_nl_file,
+};
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
+
+use crate::nl_expr::{INLINE_DEPTH, MAX_DEPTH, expr_depth, on_deep_stack, on_worker_stack};
 
 /// A `.nl` model loaded through pounce's reader, exposing its evaluators.
 // `NlTnlp` itself is `Send` (its CSE nodes went `Arc` for pounce#126's
@@ -51,6 +55,11 @@ pub struct PyNlProblem {
     m: usize,
     nnz_jac: usize,
     nnz_h: usize,
+    /// Nesting depth of the expressions inside `tnlp`. `NlTnlp` keeps the
+    /// `Expr` trees it taped, so copying or dropping this pyclass recurses
+    /// once per level — the same hazard `NlExpr` guards, reached through
+    /// the problem instead (pounce#472).
+    expr_depth: u32,
     // Metadata captured before `prob` was moved into `NlTnlp`.
     minimize: bool,
     obj_constant: Number,
@@ -529,12 +538,15 @@ impl PyNlProblem {
             g_l: dec(g_l, self.m, "variant: g_l")?,
             g_u: dec(g_u, self.m, "variant: g_u")?,
         };
-        let tnlp = self
-            .tnlp
-            .borrow()
-            .variant(&variation)
-            .map_err(PyValueError::new_err)?;
-        PyNlProblem::from_tnlp(tnlp, "variant")
+        // `variant` copies the model, expressions included, so it carries
+        // the same recursion depth (pounce#472).
+        let tnlp = {
+            let held = self.tnlp.borrow();
+            let src: &NlTnlp = &held;
+            on_deep_stack(self.expr_depth, move || src.variant(&variation))
+                .map_err(PyValueError::new_err)?
+        };
+        PyNlProblem::from_tnlp(tnlp, "variant", self.expr_depth)
     }
 
     fn __repr__(&self) -> String {
@@ -548,7 +560,11 @@ impl PyNlProblem {
 impl PyNlProblem {
     /// Build the pyclass around an owned `NlTnlp`, capturing the
     /// metadata the getters serve. `what` labels error messages.
-    pub(crate) fn from_tnlp(mut tnlp: NlTnlp, what: &str) -> PyResult<PyNlProblem> {
+    pub(crate) fn from_tnlp(
+        mut tnlp: NlTnlp,
+        what: &str,
+        expr_depth: u32,
+    ) -> PyResult<PyNlProblem> {
         let info = tnlp
             .get_nlp_info()
             .ok_or_else(|| PyValueError::new_err(format!("{what}: get_nlp_info returned None")))?;
@@ -569,6 +585,7 @@ impl PyNlProblem {
             m,
             nnz_jac: info.nnz_jac_g as usize,
             nnz_h: info.nnz_h_lag as usize,
+            expr_depth,
             minimize,
             obj_constant,
             x0,
@@ -585,7 +602,11 @@ impl PyNlProblem {
     /// the pyclass) moves to a rayon worker. Cheap relative to a
     /// solve — tapes are flat `Vec`s of ops.
     pub(crate) fn clone_tnlp(&self) -> NlTnlp {
-        self.tnlp.borrow().clone()
+        let held = self.tnlp.borrow();
+        let tnlp: &NlTnlp = &held;
+        // The clone copies the `Expr` trees along with the tapes, so it
+        // recurses once per level of nesting (pounce#472).
+        on_deep_stack(self.expr_depth, move || tnlp.clone())
     }
 
     pub(crate) fn dims(&self) -> (usize, usize) {
@@ -604,6 +625,53 @@ impl PyNlProblem {
     }
 }
 
+/// Tear the expression trees down on a stack sized for them, for a
+/// problem deep enough that the recursive drop could overrun the
+/// collecting thread's (pounce#472). The tapes the evaluators actually
+/// use are flat `Vec`s and drop normally.
+impl Drop for PyNlProblem {
+    fn drop(&mut self) {
+        if self.expr_depth <= INLINE_DEPTH {
+            return;
+        }
+        let prob = self.tnlp.get_mut().problem_mut();
+        let mut doomed = Vec::with_capacity(prob.con_nonlinear.len() + 1);
+        doomed.push(std::mem::replace(&mut prob.obj_nonlinear, Expr::Const(0.0)));
+        for c in &mut prob.con_nonlinear {
+            doomed.push(std::mem::replace(c, Expr::Const(0.0)));
+        }
+        on_deep_stack(self.expr_depth, move || drop(doomed));
+    }
+}
+
+/// Depth of the deepest expression in `prob`, and a `ValueError`-shaped
+/// message when that is past what the machinery will carry.
+///
+/// A parsed model arrives already built, so the construction-time cap
+/// `NlExpr` enforces cannot cover it — this is the same limit applied at
+/// the only point on this path where it can be: after the parse, before
+/// anything else walks the result (pounce#472).
+fn checked_depth(prob: &NlProblem) -> Result<u32, String> {
+    let mut memo = std::collections::HashMap::new();
+    let depth = prob
+        .con_nonlinear
+        .iter()
+        .fold(expr_depth(&prob.obj_nonlinear, &mut memo), |acc, c| {
+            acc.max(expr_depth(c, &mut memo))
+        });
+    if depth > MAX_DEPTH {
+        return Err(format!(
+            "the model nests an expression {depth} levels deep, past the \
+             limit of {MAX_DEPTH}. Deeper trees overflow the stack when the model \
+             is taped, walked, or freed — a hard crash rather than an exception — \
+             so they are refused here. A `.nl` writer that emits `o0` (binary +) \
+             chains for a long sum will do this; `o54` (n-ary sum) is one level \
+             whatever the term count."
+        ));
+    }
+    Ok(depth)
+}
+
 /// Parse an AMPL `.nl` file and return its evaluable [`PyNlProblem`].
 ///
 /// Sibling `.col` / `.row` files (if present) supply variable / constraint
@@ -611,14 +679,23 @@ impl PyNlProblem {
 /// as the CLI does.
 #[pyfunction]
 pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
-    let prob = read_nl_file(std::path::Path::new(path))
-        .map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
-
-    // `try_new` (not `new`): a model that names an AMPL imported function with
-    // no resolvable `$AMPLFUNC` library must raise a catchable Python error,
-    // not panic across the pyo3 boundary as an uncatchable PanicException.
-    let tnlp = NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
-    PyNlProblem::from_tnlp(tnlp, "read_nl")
+    // The parser recurses once per level of nesting in the file, and so
+    // does everything downstream of it, so the whole load runs on a stack
+    // sized for that rather than on whatever the caller has — the depth is
+    // whatever the file says, and there is no way to know it beforehand
+    // (pounce#472).
+    let path = std::path::Path::new(path);
+    let (tnlp, depth) = on_worker_stack(move || {
+        let prob = read_nl_file(path)?;
+        let depth = checked_depth(&prob)?;
+        // `try_new` (not `new`): a model that names an AMPL imported function
+        // with no resolvable `$AMPLFUNC` library must raise a catchable Python
+        // error, not panic across the pyo3 boundary as an uncatchable
+        // PanicException.
+        Ok::<_, String>((NlTnlp::try_new(prob)?, depth))
+    })
+    .map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
+    PyNlProblem::from_tnlp(tnlp, "read_nl", depth)
 }
 
 /// Parse `.nl` *text* — the same content [`read_nl`] would read off disk —
@@ -640,31 +717,35 @@ pub fn parse_nl_text(
     var_names: Option<Vec<String>>,
     con_names: Option<Vec<String>>,
 ) -> PyResult<PyNlProblem> {
-    let mut prob =
-        parse_nl_text_rs(text).map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
+    // On a stack sized for the parse, for the reason `read_nl` gives:
+    // the text says how deep the recursion goes (pounce#472).
+    let (tnlp, depth) = on_worker_stack(move || {
+        let mut prob = parse_nl_text_rs(text)?;
+        let depth = checked_depth(&prob)?;
 
-    let check = |what: &str, names: &[String], want: usize| -> PyResult<()> {
-        if names.len() == want {
-            Ok(())
-        } else {
-            Err(PyValueError::new_err(format!(
-                "parse_nl_text: {what} has length {}, expected {want}",
-                names.len()
-            )))
+        let check = |what: &str, names: &[String], want: usize| -> Result<(), String> {
+            if names.len() == want {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{what} has length {}, expected {want}",
+                    names.len()
+                ))
+            }
+        };
+        if let Some(names) = var_names {
+            check("var_names", &names, prob.n)?;
+            prob.var_names = names;
         }
-    };
-    if let Some(names) = var_names {
-        check("var_names", &names, prob.n)?;
-        prob.var_names = names;
-    }
-    if let Some(names) = con_names {
-        check("con_names", &names, prob.m)?;
-        prob.con_names = names;
-    }
+        if let Some(names) = con_names {
+            check("con_names", &names, prob.m)?;
+            prob.con_names = names;
+        }
 
-    // `try_new` for the same reason `read_nl` uses it: an unresolvable
-    // AMPL imported function must be a catchable Python error, not a panic.
-    let tnlp =
-        NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
-    PyNlProblem::from_tnlp(tnlp, "parse_nl_text")
+        // `try_new` for the same reason `read_nl` uses it: an unresolvable
+        // AMPL imported function must be a catchable Python error, not a panic.
+        Ok::<_, String>((NlTnlp::try_new(prob)?, depth))
+    })
+    .map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
+    PyNlProblem::from_tnlp(tnlp, "parse_nl_text", depth)
 }

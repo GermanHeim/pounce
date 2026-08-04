@@ -255,30 +255,49 @@ p = pounce.build_nl_problem(n=2, objective=pounce.NlExpr.sum([
 ]))
 ```
 
-**Use `NlExpr.sum` for accumulation — `+` chains are quadratic.** Each
-operator deep-copies its operands, so building a sum with `e = e + t` in a
-loop copies everything built so far on every iteration: O(N²) in time and
-memory. `NlExpr.sum` builds one n-ary node instead.
+**Operands are shared, not copied.** `a * b` references its operands
+rather than deep-copying them, so building an expression costs the same
+whether the pieces are two variables or two half-million-node models. Two
+consequences worth knowing:
+
+* Accumulating in a Python loop is linear in the number of terms. It still
+  nests one level deeper per term, though, and nesting is capped (below) —
+  so a many-term sum still belongs in one flat `NlExpr.sum(terms)` node,
+  which tapes better and is one level whatever its length. The same goes
+  for `min` / `max`, flat in their argument count too.
+* Reusing a Python name reuses the subexpression. `t = x[0] * x[1]` used
+  in ten places is one shared body on the tape, evaluated once per sweep,
+  with its adjoint summing the ten contributions — the same value and the
+  same derivatives as writing it out ten times, off a tape a tenth the
+  size. Expressions that are *only* tractable as a DAG work too: `for _ in
+  range(40): e = e * e` is 40 nodes describing `x ** 2**40`, and it builds,
+  tapes, and differentiates in under a millisecond.
 
 ```python
 e = pounce.NlExpr.const_(0.0)
-for t in terms:                    # O(N^2) — avoid
+for t in terms:                    # linear, but len(terms) levels deep
     e = e + t
 
-e = pounce.NlExpr.sum(terms)       # O(N), one node
+e = pounce.NlExpr.sum(terms)       # linear and one level — prefer this
 ```
 
-The difference is not marginal: 200 000 terms through `sum` is instant,
-while a `+` chain is measured in tens of seconds by 20 000 terms.
+**Nesting is capped at `NlExpr.max_depth` (10 000)**, and exceeding it
+raises `ValueError`. Every consumer of an expression — the tape builder,
+the problem assembler, freeing it, and the `.nl` parser that produces one
+— recurses once per level, so a deep enough tree overflows the stack,
+which is a hard crash rather than an exception. Two things keep that
+unreachable: those walks run on a worker thread with a 64 MB stack, so
+what is survivable does not depend on the calling thread (8 MB on a
+macOS/Linux main thread, 1 MB on Windows, less on a `threading.Thread`),
+and the cap then keeps the depth well inside it.
 
-Relatedly, nesting is capped at `NlExpr.max_depth` (1000), and exceeding
-it raises `ValueError`. Every consumer of an expression — the tape
-builder, copying, and freeing — recurses once per level, so a deep enough
-tree overflows the stack, which is a hard crash rather than an exception.
-The cap is enforced at construction so an expression that cannot be built
-can never be cloned or dropped into one. It bounds *nesting*, not size:
-`NlExpr.sum` is one level regardless of how many terms it holds, so wide
-models are unaffected. Each expression's `.depth` is readable.
+**The same limit applies to `read_nl` and `parse_nl_text`,** which enforce
+it on what they parsed rather than as it is built — a model that arrives
+already built cannot be capped during construction. A `.nl` file that
+spells a long sum as an `o0` (binary `+`) chain rather than `o54` (n-ary
+sum) is the way to hit it. The cap bounds *nesting*, not size: `NlExpr.sum`
+and `o54` are one level regardless of term count, so wide models are
+unaffected. Each expression's `.depth` is readable.
 
 For checking a subexpression before wiring it into a model, `NlExpr` has
 `.eval(x)`, `.gradient(x)`, and `.variables()`, which build a one-off tape
