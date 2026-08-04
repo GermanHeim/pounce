@@ -726,6 +726,25 @@ impl Tape {
         }
     }
 
+    /// Scalar tape value, reusing a caller-supplied scratch buffer
+    /// (`vals.len() >= self.ops.len()`) instead of allocating a fresh
+    /// forward-value `Vec` per call like [`eval`]. The `.nl` design emits
+    /// one tiny tape per summand — 10⁵–10⁶ on large models — so a single
+    /// `eval_f` / `eval_g` drives this once per summand and the per-call
+    /// allocation dominated the sweep itself (same motivation as
+    /// [`gradient_seed_into`], M18).
+    ///
+    /// [`eval`]: Tape::eval
+    /// [`gradient_seed_into`]: Tape::gradient_seed_into
+    pub fn eval_into(&self, x: &[f64], vals: &mut [f64]) -> f64 {
+        let n = self.ops.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.forward_into(x, vals);
+        vals[n - 1]
+    }
+
     /// Directional Hessian-vector product: emits
     /// `weight * (∇²f · seed)[k]` into `out[k]` for every problem
     /// variable `k` the tape references. Caller supplies the
@@ -1960,7 +1979,7 @@ pub struct Summand {
     pub all_vars: Vec<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HybridTape {
     /// Shared CSE bodies. Slot indices in `SummandOp::Shared`
     /// point here; this Vec is built bottom-up by `build_recursive`,
@@ -2285,6 +2304,46 @@ impl HybridTape {
 /// summand path raises. Pre-scanning makes both paths report the same
 /// reason. (Funcalls are unsupported on the hybrid path regardless of
 /// whether the id would resolve, so this never rejects a buildable tape.)
+/// Whether [`HybridTape::build_multi`] can build `exprs`, i.e. none of
+/// them uses an opcode the hybrid (partial-separability) path rejects:
+/// comparisons, AND/OR/NOT, if-then-else, min/max lists, or AMPL external
+/// function calls. `build_into_summand` *panics* on those, so a caller
+/// choosing between the hybrid path and the flat [`Tape`] path has to ask
+/// first — there is nothing to catch.
+///
+/// Walks with an explicit stack (expression DAGs from `.nl` files can be
+/// deeper than the default thread stack) and visits each shared CSE body
+/// once, so the cost is linear in the DAG rather than in its unfolding.
+pub fn hybrid_supported(exprs: &[Expr]) -> bool {
+    let mut stack: Vec<&Expr> = exprs.iter().collect();
+    let mut seen_cse: HashSet<*const Expr> = HashSet::new();
+    while let Some(e) = stack.pop() {
+        match e {
+            Expr::Const(_) | Expr::Var(_) => {}
+            Expr::Binary(_, a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            Expr::Unary(_, a) => stack.push(a),
+            Expr::Sum(args) => stack.extend(args.iter()),
+            Expr::Cse(body) => {
+                if seen_cse.insert(Arc::as_ptr(body)) {
+                    stack.push(body);
+                }
+            }
+            Expr::Compare(..)
+            | Expr::And(..)
+            | Expr::Or(..)
+            | Expr::Not(_)
+            | Expr::Cond { .. }
+            | Expr::MinList(_)
+            | Expr::MaxList(_)
+            | Expr::Funcall { .. } => return false,
+        }
+    }
+    true
+}
+
 fn cse_contains_funcall(expr: &Expr) -> bool {
     match expr {
         Expr::Funcall { .. } => true,

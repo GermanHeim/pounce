@@ -32,7 +32,7 @@
 //! * `ref/Ipopt/test/mytoy.nl` — annotated example used for the unit
 //!   tests in this module.
 
-use crate::nl_tape::Tape;
+use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
     BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
@@ -1750,6 +1750,35 @@ struct ColorWrite {
     hess_idx: u32,
 }
 
+/// Constraint-block [`HybridTape`]: one local op list per summand plus a
+/// **shared prelude** holding every CSE body referenced by two or more
+/// summands, evaluated once per sweep.
+///
+/// `con_tapes` builds an independent flat `Tape` per summand, so a `.nl`
+/// defined variable (`V` segment) referenced from many rows is re-emitted —
+/// and re-evaluated — once per reference. That is invisible on most models
+/// but quadratic-ish in the wrong shape: on Mittelmann's `robot_a`
+/// (n = 1001, m = 52013, 12003 defined variables each feeding 13 rows) the
+/// flat tapes total 3.6M ops per `eval_g` against 894k for the shared
+/// prelude — 4.0x the arithmetic, paid ~10x per iteration inside the line
+/// search. See pounce#476.
+///
+/// Only `eval_g` reads this; `eval_jac_g` / `eval_h` stay on `con_tapes`
+/// (their reverse / forward-over-reverse sweeps run once per iteration, not
+/// once per line-search trial, and `HybridTape`'s Hessian entry point uses a
+/// different seeding strategy than the coloring machinery here).
+#[derive(Debug, Clone)]
+struct ConHybrid {
+    tape: HybridTape,
+    /// `row_start[i]..row_start[i + 1]` are the summands of constraint `i`.
+    /// Length `m + 1`.
+    row_start: Vec<usize>,
+    /// Prelude forward values, sized to `tape.n_prelude_ops()`.
+    prelude_vals: Vec<f64>,
+    /// Per-summand local forward values, sized to `tape.max_summand_ops()`.
+    local_vals: Vec<f64>,
+}
+
 // `Clone` supports the batched-solve path (pounce#126): one parsed
 // model is cloned per batch instance (tapes are flat `Vec`s of ops, so
 // the clone is cheap relative to a solve) and each clone gets its own
@@ -1763,6 +1792,10 @@ pub struct NlTnlp {
     /// Per-constraint, per-summand tapes. Length `m`; row `i` holds
     /// one `Tape` per summand of constraint `i`.
     con_tapes: Vec<Vec<Tape>>,
+    /// Constraint-block tape with a **shared** CSE prelude, used by
+    /// `eval_g` when the model benefits (see [`ConHybrid`]). `None` keeps
+    /// `eval_g` on the per-summand `con_tapes` above.
+    con_hybrid: Option<ConHybrid>,
     /// Lower-triangle Hessian sparsity (row >= col), one entry per
     /// structurally nonzero second derivative in the Lagrangian.
     h_irow: Vec<i32>,
@@ -2373,15 +2406,42 @@ impl NlTnlp {
             .collect();
 
         let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
+        let mut con_roots: Vec<Expr> = Vec::new();
+        let mut row_start: Vec<usize> = Vec::with_capacity(prob.m + 1);
         for k in 0..prob.m {
             let summands = split_top_sums(&prob.con_nonlinear[k]);
+            row_start.push(con_roots.len());
             con_tapes.push(
                 summands
                     .iter()
                     .map(|e| Tape::build_with_externals(e, &resolver))
                     .collect(),
             );
+            // Move (not clone) the split summands into the root list: their
+            // `Expr::Cse` payloads are `Arc`s, and `build_multi` keys CSE
+            // sharing on `Arc` pointer identity, so the roots must be the
+            // same allocations the parse produced.
+            con_roots.extend(summands);
         }
+        row_start.push(con_roots.len());
+
+        // Shared-CSE constraint tape for `eval_g` (pounce#476). Worth
+        // building only when some CSE body is actually referenced from two
+        // or more summands — otherwise the prelude comes out empty and the
+        // hybrid tape is the flat tape plus an indirection. `hybrid_supported`
+        // gates the opcodes `build_multi` would panic on.
+        let con_hybrid = if hybrid_supported(&con_roots) {
+            let tape = HybridTape::build_multi(&con_roots);
+            (tape.n_prelude_ops() > 0).then(|| ConHybrid {
+                prelude_vals: vec![0.0; tape.n_prelude_ops()],
+                local_vals: vec![0.0; tape.max_summand_ops()],
+                row_start,
+                tape,
+            })
+        } else {
+            None
+        };
+        drop(con_roots);
 
         // Hessian-of-Lagrangian sparsity: union of each tape's own
         // structural Hessian sparsity.
@@ -2516,6 +2576,7 @@ impl NlTnlp {
             prob,
             obj_tapes,
             con_tapes,
+            con_hybrid,
             h_irow,
             h_jcol,
             jac_cols,
@@ -2876,9 +2937,12 @@ impl TNLP for NlTnlp {
     }
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        // Reuse the shared forward-value arena (sized to `max_tape_n`) so
+        // each summand sweep allocates nothing — see `Tape::eval_into`.
+        let (obj_tapes, vals) = (&self.obj_tapes, &mut self.vals_scratch);
         let mut nl: Number = 0.0;
-        for t in &self.obj_tapes {
-            nl += t.eval(x);
+        for t in obj_tapes {
+            nl += t.eval_into(x, vals);
         }
         let lin: Number = self.prob.obj_linear.iter().map(|(i, c)| c * x[*i]).sum();
         let v = self.prob.obj_constant + nl + lin;
@@ -2906,12 +2970,43 @@ impl TNLP for NlTnlp {
     }
 
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-        for i in 0..self.prob.m {
-            let mut nl: Number = 0.0;
-            for t in &self.con_tapes[i] {
-                nl += t.eval(x);
+        // Constraint values are the line search's inner loop: on a
+        // constraint-heavy model (m >> n) this runs ~10x per iteration over
+        // every summand tape in the problem. Reuse the shared forward-value
+        // arena so the sweep allocates nothing — the per-summand `Vec` the
+        // allocating `Tape::eval` used to build was ~20% of `eval_g` on
+        // Mittelmann's `robot_a` (52013 rows / 148037 summands). See
+        // `Tape::eval_into`.
+        let m = self.prob.m;
+        let con_linear = &self.prob.con_linear;
+        if let Some(h) = &mut self.con_hybrid {
+            // Shared CSE bodies once for the whole constraint block, then one
+            // local sweep per summand (pounce#476).
+            let ConHybrid {
+                tape,
+                row_start,
+                prelude_vals,
+                local_vals,
+            } = h;
+            tape.forward_prelude(x, prelude_vals);
+            for i in 0..m {
+                let mut nl: Number = 0.0;
+                for s in &tape.summands[row_start[i]..row_start[i + 1]] {
+                    tape.forward_summand(s, x, prelude_vals, local_vals);
+                    nl += tape.root_value(s, local_vals);
+                }
+                let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+                g[i] = nl + lin;
             }
-            let lin: Number = self.prob.con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+            return true;
+        }
+        let (con_tapes, vals) = (&self.con_tapes, &mut self.vals_scratch);
+        for i in 0..m {
+            let mut nl: Number = 0.0;
+            for t in &con_tapes[i] {
+                nl += t.eval_into(x, vals);
+            }
+            let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
             g[i] = nl + lin;
         }
         true
@@ -4275,6 +4370,139 @@ S1 2 sens_init_constr
         assert!(tnlp.eval_grad_f(&[-2.0, 1.0], true, &mut g));
         assert!((g[0] - 12.0).abs() < 1e-9, "df/dx0 = {}", g[0]);
         assert!((g[1] - 3.0).abs() < 1e-9, "df/dx1 = {}", g[1]);
+    }
+
+    // ---- Shared-CSE constraint tape (issue #476) ----------------------
+
+    /// Three constraints over one `V` segment (a `.nl` *defined variable*),
+    /// `V3 = 2*x0 + 3*x1`, referenced by all three:
+    ///   C0: V3^2        C1: V3^3 + x2        C2: V3*x2
+    /// `{BODY2}` is a substitution point so a variant can drop an opcode the
+    /// hybrid path rejects into C2.
+    const SHARED_CSE: &str = "g3 1 1 0
+ 3 3 1 0 0
+ 3 0
+ 0 0
+ 3 0 0
+ 0 0 0 1
+ 0 0 0 0 0
+ 8 3
+ 0 0
+ 0 1 0 0 0
+V3 2 0
+0 2.0
+1 3.0
+n0
+C0
+o5
+v3
+n2
+C1
+o0
+o5
+v3
+n3
+v2
+C2
+{BODY2}
+O0 0
+n0
+r
+2 0
+2 0
+2 0
+b
+3
+3
+3
+k2
+3
+6
+J0 2
+0 0
+1 0
+J1 3
+0 0
+1 0
+2 0
+J2 3
+0 0
+1 0
+2 0
+G0 3
+0 1.0
+1 1.0
+2 1.0
+";
+
+    fn shared_cse_nl(body2: &str) -> String {
+        SHARED_CSE.replace("{BODY2}", body2)
+    }
+
+    /// A CSE referenced from several constraints is evaluated once per
+    /// `eval_g` via the shared prelude instead of once per reference. The
+    /// values must be bit-identical to the flat per-summand `Tape` path,
+    /// which is what makes the optimization safe to apply unconditionally.
+    #[test]
+    fn shared_cse_constraint_tape_matches_flat_tape_bit_for_bit() {
+        let nl = shared_cse_nl("o2\nv3\nv2");
+        let p = parse_nl_text(&nl).expect("parse shared-CSE model");
+        let mut hybrid = NlTnlp::new(p.clone());
+        hybrid.get_nlp_info().unwrap();
+        let h = hybrid
+            .con_hybrid
+            .as_ref()
+            .expect("CSE shared by 3 constraints must take the hybrid path");
+        assert!(
+            h.tape.n_prelude_ops() > 0,
+            "shared CSE body must land in the prelude"
+        );
+
+        // Same model with the hybrid path switched off: the reference.
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        for x in [[1.0, 1.0, 1.0], [-2.0, 0.5, 3.0], [0.0, -1.5, -0.25]] {
+            let mut gh = [0.0_f64; 3];
+            let mut gf = [0.0_f64; 3];
+            assert!(hybrid.eval_g(&x, true, &mut gh));
+            assert!(flat.eval_g(&x, true, &mut gf));
+            // V3 = 2 x0 + 3 x1.
+            let s = 2.0 * x[0] + 3.0 * x[1];
+            let want = [s * s, s * s * s + x[2], s * x[2]];
+            for i in 0..3 {
+                assert_eq!(gh[i], gf[i], "row {i} differs from the flat tape at {x:?}");
+                assert!(
+                    (gh[i] - want[i]).abs() < 1e-9,
+                    "row {i}: got {}, want {}",
+                    gh[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    /// `HybridTape::build_multi` *panics* on comparisons, AND/OR/NOT,
+    /// if-then-else, min/max lists and external funcalls, so `eval_g` may only
+    /// take that path after `hybrid_supported` clears the model. Here a
+    /// min-list in one constraint has to disable it for the whole block —
+    /// falling back, not panicking.
+    #[test]
+    fn unsupported_opcode_falls_back_to_the_flat_tape() {
+        let nl = shared_cse_nl("o11\n2\nv3\nv2");
+        let p = parse_nl_text(&nl).expect("parse min-list model");
+        let mut tnlp = NlTnlp::new(p);
+        tnlp.get_nlp_info().unwrap();
+        assert!(
+            tnlp.con_hybrid.is_none(),
+            "a min-list anywhere in the constraint block must disable the hybrid path"
+        );
+        let mut g = [0.0_f64; 3];
+        assert!(tnlp.eval_g(&[-2.0, 0.5, 3.0], true, &mut g));
+        let s = 2.0 * -2.0 + 3.0 * 0.5; // -2.5
+        assert!((g[0] - s * s).abs() < 1e-9);
+        assert!((g[2] - s.min(3.0)).abs() < 1e-9, "min(V3, x2) = {}", g[2]);
     }
 
     // ---- In-memory construction + HVP (issue #469) --------------------
