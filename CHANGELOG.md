@@ -22,6 +22,38 @@ changes.
   The retention policy (three ways to keep, one way to release) is
   stated in one place in the docs.
 
+### Fixed — `NlProblem` can be shared across threads (#477)
+
+- `NlProblem`, `DenseLU` and `SparseLU` were `#[pyclass(unsendable)]`,
+  which gave each instance pyo3's per-object thread affinity. Touching
+  one from a thread other than its creator raised a Rust
+  `PanicException`, and merely *collecting* one on another thread wrote
+  an unraisable `RuntimeError` and leaked the payload — the latter fires
+  for code that never used an instance cross-thread at all, since
+  whichever thread runs the GC inherits every object it frees.
+- `PanicException` derives from `BaseException`, not `Exception`, so it
+  slipped past every ordinary `except Exception` in a host application.
+  In a threaded branch-and-bound host this did not surface as an error:
+  it surfaced as a **wrong answer** — a shared `NlProblem`-backed
+  evaluator reported `infeasible` on a model the reference evaluator
+  solved to optimality, and a false `infeasible` from a global optimizer
+  is a wrong certificate.
+- The marker was a conservative default, not a physical constraint:
+  `NlTnlp` is `Send` (its CSE nodes went `Arc` for #126's batched
+  solving) and the LU factors are owned matrix data. All three classes
+  are now sendable, so one evaluator can be built on one thread and used
+  or dropped on any other. Concurrency is still the GIL's — these calls
+  serialize rather than overlap — so the win is one shared tape instead
+  of one per worker, and the end of the `threading.local` ceremony hosts
+  needed to work around it. `#[test]`s pin `Send` on all three, and the
+  Python suite covers cross-thread evaluation, `variant`, batch solving,
+  and foreign-thread collection.
+- `Solver`, `QpFactorization` and `QpSensitivity` stay `unsendable`:
+  those hold `Rc`-based Ipopt state and non-`Send` linear-solver trait
+  objects, so their affinity is real rather than defensive. Each class
+  now says so at its definition, and `docs/src/python.md` documents which
+  objects cross threads and which do not.
+
 ### Fixed — every eigendecomposition now returns sign-pinned eigenvectors (#471)
 
 - An eigenvector's sign is arbitrary: `v` and `-v` are equally valid,
