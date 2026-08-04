@@ -383,6 +383,40 @@ block-diagonal Hessian with `v = [nan, 0, 1, 0]`, the dense product is
 better semantics, but it does mean the HVP is not bit-equivalent to a
 dense product on non-finite input.
 
+### Sharing one `NlProblem` across threads
+
+An `NlProblem` may be built on one thread and evaluated — or garbage
+collected — on any other. Threaded hosts (a branch-and-bound worker pool,
+a `ThreadPoolExecutor`) can hold **one** shared evaluator rather than one
+tape per worker:
+
+```python
+p = pounce.read_nl("model.nl")
+
+with ThreadPoolExecutor(max_workers=8) as pool:
+    values = list(pool.map(p.objective, points))   # one tape, N workers
+```
+
+The evaluators do not release the GIL, so concurrent calls serialize
+rather than overlap — the win is memory (one copy of the tapes) and the
+absence of thread-affinity ceremony, not parallel throughput. For actual
+parallelism across instances, use
+[`solve_nlp_batch`](#batched-nlp-solving-solve_nlp_batch), which releases
+the GIL and runs the whole batch on a Rayon pool.
+
+`DenseLU` and `SparseLU` carry the same guarantee: factor on one thread,
+back-solve on another.
+
+`Solver`, `QpFactorization` and `QpSensitivity` are the exceptions —
+their held Ipopt / KKT factorizations are genuinely thread-affine, so
+each must be used and released on the thread that created it. Keep them
+in a `threading.local` (not a dict keyed by thread id: CPython clears a
+`threading.local` on the owning thread as it exits, so the object is both
+built and dropped where it belongs), which is what `pounce.jax`'s
+`JaxProblem` does internally. Using one from another thread raises a
+`PanicException` — note that this derives from `BaseException`, so an
+`except Exception` will *not* catch it.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

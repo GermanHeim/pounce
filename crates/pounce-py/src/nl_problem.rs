@@ -42,13 +42,29 @@ use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 use crate::nl_expr::{INLINE_DEPTH, MAX_DEPTH, expr_depth, on_deep_stack, on_worker_stack};
 
 /// A `.nl` model loaded through pounce's reader, exposing its evaluators.
-// `NlTnlp` itself is `Send` (its CSE nodes went `Arc` for pounce#126's
-// batched solving), but the pyclass stays `unsendable`: per-object
-// thread affinity is the conservative default under the GIL, and the
-// batch path never moves the pyclass — `solve_nlp_batch` clones the
-// owned `NlTnlp` out (see `clone_tnlp`) and moves the clone to the
-// rayon worker.
-#[pyclass(unsendable, module = "pounce", name = "NlProblem")]
+//
+// **Sendable.** `NlTnlp` is `Send` (its CSE nodes went `Arc` for
+// pounce#126's batched solving) and nothing else here is thread-affine,
+// so this pyclass carries no `unsendable` marker: one `NlProblem` can be
+// built on one thread and evaluated — or dropped — on another, which is
+// what a threaded host (a branch-and-bound worker pool) needs of a shared
+// evaluator.
+//
+// It stayed `unsendable` for a while as a conservative default, and that
+// default was actively harmful (pounce#477): pyo3's thread check raises
+// `PanicException`, which derives from `BaseException` and so slips past
+// every `except Exception` in the host — a cross-thread call surfaced not
+// as an error but as a wrong answer, and the *drop* path tripped it even
+// for code that never used an instance cross-thread (whichever thread
+// runs the GC inherits the object).
+//
+// Concurrency is still the GIL's: every `&self` method below borrows
+// `tnlp` and evaluates without releasing the GIL, so the `RefCell`
+// borrows of two threads can never overlap. Any future method that wants
+// to release the GIL around an evaluation must first take the `NlTnlp`
+// out of the `RefCell` (as `clone_tnlp` does for the batch path) rather
+// than hold a borrow across the release.
+#[pyclass(module = "pounce", name = "NlProblem")]
 pub struct PyNlProblem {
     tnlp: RefCell<NlTnlp>,
     n: usize,
@@ -748,4 +764,21 @@ pub fn parse_nl_text(
     })
     .map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
     PyNlProblem::from_tnlp(tnlp, "parse_nl_text", depth)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `NlProblem` must stay movable across threads (pounce#477): a
+    /// threaded host shares one evaluator across a worker pool, and the
+    /// alternative — pyo3's `unsendable` marker — reports a violation as
+    /// a `PanicException`, which derives from `BaseException` and so
+    /// escapes the host's `except Exception`. A cross-thread call then
+    /// reads as a wrong answer rather than an error. Regresses the
+    /// moment a `!Send` field (an `Rc`, a non-`Send` trait object)
+    /// lands in `PyNlProblem` or in `NlTnlp` beneath it.
+    #[test]
+    fn py_nl_problem_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::PyNlProblem>();
+    }
 }

@@ -33,6 +33,22 @@ use std::rc::Rc;
 use crate::problem::{PyProblem, build_info_dict};
 
 /// Session-style wrapper around [`pounce_sensitivity::Solver`].
+//
+// Still `unsendable`, unlike `NlProblem` / `DenseLU` / `SparseLU`
+// (pounce#477). This one is not a policy default: `RustSolver` is
+// genuinely `!Send` — the ported Ipopt object graph is `Rc`-based
+// (`Rc<RefCell<dyn TNLP>>`, `Rc<RegisteredOptions>`, `Rc<Journalist>`,
+// …) and holds non-`Send` linear-solver and restoration trait objects,
+// so there is nothing to drop the marker in favor of.
+//
+// The cost is the one #477 describes: a cross-thread call raises
+// `PanicException` (a `BaseException`, so `except Exception` misses it)
+// and a foreign-thread collection writes an unraisable and leaks. The
+// Python layer keeps `Solver` instances on their creating thread via
+// `threading.local` for exactly this reason — see
+// `pounce/jax/_problem.py`. Trading the panic for a catchable error
+// would mean an `unsafe impl Send` wrapper doing the affinity check by
+// hand; not worth it while the callers are already thread-pinned.
 #[pyclass(name = "Solver", module = "pounce._pounce", unsendable)]
 pub struct PySolver {
     /// Reference to the owning Python `Problem`. Used to re-prepare an
