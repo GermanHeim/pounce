@@ -53,7 +53,8 @@ today. `estimate()` (in `pyomo-pounce/pyomo_pounce/sens.py`) computes the
 first-order parametric step and returns the updated solution:
 
 ```
-dx    = session.solver.parametric_step(pin_idx, deltas)   # Schur backsolve
+dx    = session.scatter_x(                                # Schur backsolve;
+    session.solver.parametric_step(pin_idx, deltas))      # factor rows to full-x
 x_new = session.base_x + dx                               # linear predictor
 ...
 x_new = np.clip(x_new, lo, hi)                            # clamp; warns first
@@ -166,20 +167,25 @@ what happened" (sIPOPT exposes no such report).
 The classification is which regime each bounded variable is in, inactive,
 weakly active or strongly active, read off the ratio of its barrier curvature
 to the objective's own curvature there. That ratio is `O(μ)`, `O(1)` and
-`O(1/μ)` across the three, so it separates them at any `μ`. The cutoffs, the
-degenerate cases and the core work are specified as item 0 of the covariance
-roadmap (`covariance-information-roadmap.md`), which is the same classifier
-rather than a second one. That is Rust core work, since the multipliers, `μ`
-and the barrier diagonal all have to be exposed through `crates/pounce-py`
-first, and it gates this item and item 3. The breakpoint half has no such
-dependency.
+`O(1/μ)` across the three, so it separates them at any `μ`. That
+classifier shipped with the covariance/information work:
+`Solver.classify_activity()` in the core, with the user-space report and
+the natural-units exports (`var_sigma`, `row_sigma`, `row_normal(j)`,
+`hessian_vec(v)`, `primal_rows`), recorded in
+`covariance-information-design.md`. It is the same classifier rather
+than a second one, and the exposure gate this item and item 3 once
+waited on is cleared; what remains of this item is the breakpoint half
+and the report assembly.
 
 The report also carries the provenance of the number it returns: the `μ` it
 was evaluated at, whether the solver relaxed the bounds, and whether
 `kkt_perturbations` is non-zero. Those are the three things that separate the
 predictor from the exact active-set value, they are all cheap, and without
 them a caller comparing against a re-solve cannot tell which one explains the
-gap.
+gap. All three are already exposed: the merged classifier checks
+`bound_relax_factor` and the central path on every call, and the
+covariance/information accessors read (and warn on) `kkt_perturbations`,
+so the report only passes them through.
 
 **1. Fix-relax + `μ`-correction → sIPOPT parity.** Two changes together
 constitute full parity. **(a) Fix-relax** (the substantial one): upgrade
@@ -281,7 +287,7 @@ step, because only the caller knows the deadline.
 - **diagnostics** — breakpoint detection (which variable crosses first,
   and the step fraction) against a brute-force ratio-test scan; the report
   fields (crossed set, residual, `μ`, classification) against ground truth.
-  The classifier itself is validated in the covariance roadmap.
+  The classifier is already validated by its merged suites.
 - **fix-relax** against sIPOPT's own worked example (the paper's §2.8
   parametric QP with a documented active-set change) and against a full
   re-solve.
