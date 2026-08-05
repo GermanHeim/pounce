@@ -323,7 +323,18 @@ pub fn run(tnlp: &mut dyn TNLP, opts: &DerivativeTestOptions) -> Option<Derivati
         check_second_order(tnlp, &fx, opts, &mut report);
     }
 
-    let summary = if report.clean() {
+    let summary = if report.checked == 0 {
+        // "No suspicious derivatives found" would be true and useless
+        // here: nothing was compared. Every variable is fixed (or the
+        // requested `derivative_test_first_index` is past the last one),
+        // so there was no direction to difference along. Saying "clean"
+        // would be this checker committing the defect it exists to
+        // remove — silence reading as a pass.
+        "No derivatives could be checked: every variable in range is fixed \
+         (or derivative_test_first_index is past the last one), so there is \
+         no direction to take a finite difference along."
+            .to_string()
+    } else if report.clean() {
         format!(
             "No suspicious derivatives found ({} entries checked, \
              {} evaluations).",
@@ -711,6 +722,82 @@ mod tests {
             tol: 1e-4,
             ..Default::default()
         }
+    }
+
+    /// A model whose variables are all fixed gives the checker nothing
+    /// to difference. Reporting "no suspicious derivatives found" there
+    /// would be the checker committing the defect it exists to remove:
+    /// a clean bill of health for a check that never ran.
+    #[test]
+    fn checking_nothing_does_not_report_clean() {
+        #[derive(Default)]
+        struct AllFixed;
+        impl TNLP for AllFixed {
+            fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+                Some(NlpInfo {
+                    n: 1,
+                    m: 0,
+                    nnz_jac_g: 0,
+                    nnz_h_lag: 1,
+                    index_style: IndexStyle::C,
+                })
+            }
+            fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+                b.x_l[0] = 3.0;
+                b.x_u[0] = 3.0;
+                true
+            }
+            fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+                sp.x[0] = 3.0;
+                true
+            }
+            fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+                Some(x[0] * x[0])
+            }
+            fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+                g[0] = 2.0 * x[0];
+                true
+            }
+            fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+                true
+            }
+            fn eval_jac_g(
+                &mut self,
+                _x: Option<&[Number]>,
+                _n: bool,
+                _m: SparsityRequest<'_>,
+            ) -> bool {
+                true
+            }
+            fn eval_h(
+                &mut self,
+                _x: Option<&[Number]>,
+                _n: bool,
+                _o: Number,
+                _l: Option<&[Number]>,
+                _nl: bool,
+                mode: SparsityRequest<'_>,
+            ) -> bool {
+                if let SparsityRequest::Structure { irow, jcol } = mode {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                true
+            }
+            fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+        }
+        let mut t = AllFixed;
+        let r = run(&mut t, &opts(DerivativeTest::FirstOrder)).expect("ran");
+        assert_eq!(r.checked, 0);
+        let summary = r.lines.last().expect("a summary line");
+        assert!(
+            summary.contains("No derivatives could be checked"),
+            "must not read as a pass; got: {summary}"
+        );
+        assert!(
+            !summary.contains("No suspicious derivatives found"),
+            "got: {summary}"
+        );
     }
 
     #[test]

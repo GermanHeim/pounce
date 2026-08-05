@@ -19,6 +19,16 @@
 //! warned about — for #196 the fast path merely skipped extra work, but
 //! here it would answer the wrong question.
 //!
+//! The sign flip has **two** channels, and adversarial testing of the
+//! first fix found the guard watching only one. `scale_user_supplied`
+//! installs the `.nl`'s objective `scaling_factor` suffix as `df` with
+//! no sign guard, so under `nlp_scaling_method=user-scaling` a negative
+//! suffix entry maximizes exactly as the option does. With the guard
+//! reading only the option, `scaling_factor[obj] = -1` plus a forced
+//! convex solver returned the minimizer, exit 0, under a warning that
+//! said only "the requested scaling will be skipped" — understating it,
+//! since what was skipped was the objective *sense*.
+//!
 //! A **positive** factor is a different case and deliberately untouched:
 //! it only rescales conditioning, and the convex path already reports
 //! natural units, so both paths agree. Pinned below so the guard cannot
@@ -35,12 +45,17 @@ fn pounce_exe() -> PathBuf {
 /// file has a constraint). Classifies as a convex QP, so `auto` routes
 /// it to `pounce-convex` by default. Minimizer `x = 1`; maximizer over
 /// the same box `x = 0`.
-fn run(tag: &str, opts: &[&str]) -> (Option<i32>, String, String, Option<f64>) {
+fn run_on(
+    fixture_name: &str,
+    tag: &str,
+    opts: &[&str],
+) -> (Option<i32>, String, String, Option<f64>) {
     let dir = std::env::temp_dir().join(format!("pounce_objsense_{tag}"));
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let nl = dir.join("boxed_qp_min.nl");
+    let nl = dir.join(fixture_name);
     let mut fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    fixture.push("tests/fixtures/boxed_qp_min.nl");
+    fixture.push("tests/fixtures");
+    fixture.push(fixture_name);
     std::fs::copy(&fixture, &nl).expect("copy fixture");
 
     let out = Command::new(pounce_exe())
@@ -66,6 +81,16 @@ fn run(tag: &str, opts: &[&str]) -> (Option<i32>, String, String, Option<f64>) {
         String::from_utf8_lossy(&out.stderr).into_owned(),
         x,
     )
+}
+
+/// The plain `min (x-3)^2 s.t. x in [0,1]` fixture.
+fn run(tag: &str, opts: &[&str]) -> (Option<i32>, String, String, Option<f64>) {
+    run_on("boxed_qp_min.nl", tag, opts)
+}
+
+/// The same problem carrying `scaling_factor[obj] = -1`.
+fn run_neg_suffix(tag: &str, opts: &[&str]) -> (Option<i32>, String, String, Option<f64>) {
+    run_on("boxed_qp_neg_obj_suffix.nl", tag, opts)
 }
 
 /// Baseline: no option, convex route, the minimizer.
@@ -145,4 +170,61 @@ fn positive_obj_scaling_keeps_the_convex_route() {
     );
     let x = x.expect("no solution in .sol");
     assert!((x - 1.0).abs() < 1e-6, "expected x=1, got {x}");
+}
+
+/// The suffix channel into the same sign flip. Under `auto` the
+/// user-scaling reroute already carries this case to the NLP path; the
+/// gap was the forced-convex branch, which warned and returned the
+/// minimizer. Pinned per forced selection, since each reaches the
+/// convex dispatch by its own route.
+#[test]
+fn a_negative_objective_suffix_is_refused_on_a_forced_convex_solver() {
+    for sel in ["qp-ipm", "socp", "qp-active-set"] {
+        let (code, out, err, _x) = run_neg_suffix(
+            &format!("sfx_{sel}"),
+            &[
+                "nlp_scaling_method=user-scaling",
+                &format!("solver_selection={sel}"),
+            ],
+        );
+        assert_eq!(code, Some(2), "{sel}: stdout:\n{out}\nstderr:\n{err}");
+        assert!(
+            err.contains("objective scaling is negative"),
+            "{sel}: the refusal must name the sense flip; stderr:\n{err}",
+        );
+    }
+}
+
+/// …and under `auto` it still reaches the NLP path and maximizes.
+/// `min (x-3)^2` over `[0,1]` has minimizer 1 and maximizer 0, so the
+/// two outcomes are unmistakable.
+#[test]
+fn a_negative_objective_suffix_maximizes_under_auto() {
+    let (code, out, err, x) = run_neg_suffix("sfx_auto", &["nlp_scaling_method=user-scaling"]);
+    assert_eq!(code, Some(0), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains("NLP filter line-search"), "stdout:\n{out}");
+    let x = x.expect("no solution in .sol");
+    assert!(
+        x.abs() < 1e-6,
+        "expected the maximizer x=0, got {x} (x=1 means the suffix's sign was dropped)",
+    );
+}
+
+/// Control: the same suffix without `user-scaling` is inert, so both
+/// routes minimize. This is what makes the two tests above about the
+/// *sign* rather than about the suffix merely being present.
+#[test]
+fn the_negative_suffix_is_inert_without_user_scaling() {
+    for (i, sel) in ["auto", "nlp"].into_iter().enumerate() {
+        let (code, _out, err, x) = run_neg_suffix(
+            &format!("sfx_inert{i}"),
+            &[&format!("solver_selection={sel}")],
+        );
+        assert_eq!(code, Some(0), "stderr:\n{err}");
+        let x = x.expect("no solution in .sol");
+        assert!(
+            (x - 1.0).abs() < 1e-6,
+            "{sel}: expected the minimizer x=1, got {x}"
+        );
+    }
 }

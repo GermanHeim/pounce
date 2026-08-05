@@ -614,12 +614,30 @@ pub fn main() -> ExitCode {
     // `x = 0`.) A *positive* factor is genuinely inert on that path — it
     // reports natural units already, so both paths give the same answer — and
     // is deliberately not treated as a conflict.
-    let maximize_via_obj_scaling = app
+    //
+    // There are *two* channels into the same sign flip, and the guard has to
+    // watch both. The option is one. The other is the `.nl`'s objective
+    // `scaling_factor` suffix under `nlp_scaling_method=user-scaling`:
+    // `scale_user_supplied` installs it as `df` with no sign guard, so a
+    // negative entry maximizes exactly as the option does. Watching only the
+    // option left `scaling_factor[obj] = -1` plus a forced convex solver
+    // returning the minimizer with an "the requested scaling will be skipped"
+    // warning — which understates it, since what is skipped is the objective
+    // sense, not conditioning. Found by adversarial testing of this guard.
+    let negative_obj_scaling_option = app
         .options()
         .get_numeric_value("obj_scaling_factor", "")
         .ok()
         .and_then(|(v, set)| set.then_some(v))
         .is_some_and(|v| v < 0.0);
+    let negative_obj_scaling_suffix = wants_user_scaling
+        && nl_suffixes.as_ref().is_some_and(|s| {
+            s.obj_real
+                .get("scaling_factor")
+                .and_then(|v| v.first())
+                .is_some_and(|&f| f < 0.0)
+        });
+    let maximize_via_obj_scaling = negative_obj_scaling_option || negative_obj_scaling_suffix;
     // Human-readable description of the requested post-optimal work, reused in
     // the "not available on this path" messages below.
     let postopt_what = match (wants_sens, args.compute_red_hessian) {
@@ -790,8 +808,9 @@ pub fn main() -> ExitCode {
             // returning a wrong answer.
             if maximize_via_obj_scaling && !decline_convex_for_obj_scaling {
                 eprintln!(
-                    "pounce: obj_scaling_factor is negative (maximize), but \
-                     solver_selection={sel_str} forces the convex solver \
+                    "pounce: the objective scaling is negative (maximize) — via \
+                     obj_scaling_factor or the .nl's `scaling_factor` suffix — \
+                     but solver_selection={sel_str} forces the convex solver \
                      (pounce-convex), which minimizes and does not read that \
                      option — it would report the minimizer of the objective \
                      you asked to maximize. Use solver_selection=nlp or auto \

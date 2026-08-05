@@ -119,3 +119,68 @@ fn an_interior_solution_is_unmoved() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(plain, honored);
 }
+
+/// Composition with `fixed_variable_treatment=relax_bounds`, where fixed
+/// variables stay in the algorithm's free block with tight bounds rather
+/// than being spliced back at their value. That is the path where the
+/// projection's `x_l_map` / `x_u_map` indexing could go wrong, and it is
+/// also where the relaxation does visible damage: the *fixed* variable
+/// drifts off its own fixed value by the relaxation width. Projecting
+/// repairs it.
+///
+/// Under the default `make_parameter` the fixed value is spliced back
+/// untouched, so both settings agree there — asserted too, so the test
+/// says which treatment is doing the work.
+#[test]
+fn a_fixed_variable_is_restored_under_relax_bounds() {
+    let read = |treatment: &str, honor: &str, tag: &str| -> Vec<f64> {
+        let dir = std::env::temp_dir().join(format!("pounce_honorbounds_{tag}"));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let nl = dir.join("boxed_qp_fixed_var.nl");
+        let mut fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fixture.push("tests/fixtures/boxed_qp_fixed_var.nl");
+        std::fs::copy(&fixture, &nl).expect("copy fixture");
+        let out = Command::new(pounce_exe())
+            .arg(&nl)
+            .arg("solver_selection=nlp")
+            .arg("print_level=0")
+            .arg(format!("fixed_variable_treatment={treatment}"))
+            .arg(format!("honor_original_bounds={honor}"))
+            .output()
+            .expect("run pounce");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let sol = std::fs::read_to_string(nl.with_extension("sol")).expect("read .sol");
+        let _ = std::fs::remove_dir_all(&dir);
+        let v: Vec<f64> = sol
+            .lines()
+            .filter_map(|l| l.trim().parse::<f64>().ok())
+            .collect();
+        // n = 2: `x` (bounded [0,1], pins at 1) then `f` (fixed at 2).
+        v[v.len() - 2..].to_vec()
+    };
+
+    // `relax_bounds`: the fixed variable drifts off 2.0 without the
+    // projection, and lands exactly on it with.
+    let drifted = read("relax_bounds", "no", "relax_no");
+    assert!(
+        (drifted[1] - 2.0).abs() > 1e-12,
+        "expected the fixed variable to drift under relax_bounds, got {drifted:?}",
+    );
+    let projected = read("relax_bounds", "yes", "relax_yes");
+    assert_eq!(
+        projected[1], 2.0,
+        "the fixed value must be restored exactly"
+    );
+    assert_eq!(projected[0], 1.0, "…and the bound-active variable too");
+
+    // `make_parameter` (the default) splices the fixed value back, so it
+    // is exact either way — the projection has nothing to repair there.
+    for honor in ["no", "yes"] {
+        let v = read("make_parameter", honor, &format!("param_{honor}"));
+        assert_eq!(v[1], 2.0, "make_parameter splices the fixed value exactly");
+    }
+}
