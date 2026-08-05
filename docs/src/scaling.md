@@ -45,27 +45,60 @@ Use this when you know the natural units of your problem (e.g. mass in
 kg vs. distance in mm) and can supply better scales than the
 gradient-based heuristic.
 
-> **Note**: pounce's `OrigIpoptNlp` currently honors `obj_scaling` and
-> per-constraint `g_scaling`. The `x_scaling` request channel is
-> accepted but not yet acted on. Mirrors the design in
-> [issue #61](https://github.com/jkitchin/pounce/issues/61).
-
 If the TNLP's `get_scaling_parameters` returns false (the default),
 pounce falls back to no automatic scaling.
 
+> **Per-variable factors are refused, not ignored.** pounce's
+> `OrigIpoptNlp` models `obj_scaling` and per-constraint `g_scaling`
+> (the design in [issue #61](https://github.com/jkitchin/pounce/issues/61));
+> it does not rescale variables. A request that sets any `x_scaling`
+> entry away from `1.0` therefore **fails the solve** with
+> `Invalid_Option` and an explanatory message, rather than applying the
+> other two axes and dropping this one — which used to hand back a
+> converged answer to a differently-conditioned problem with nothing
+> said about it ([issue #483](https://github.com/jkitchin/pounce/issues/483)).
+> Rescale those variables in the model itself (substitute `x = z / s`
+> and give the solver `z`). Modelling variable scaling in the core is
+> staged work tracked on #483.
+
 #### Setting user scaling
 
+* **From an `.nl` file (AMPL, Pyomo, any NL-writing frontend)** — attach
+  a `scaling_factor` suffix to the objective, to constraints, or to
+  both, and pass `nlp_scaling_method=user-scaling`. This is the same
+  channel Ipopt reads through ASL. In Pyomo:
+
+  ```python
+  m.scaling_factor = Suffix(direction=Suffix.EXPORT)
+  m.scaling_factor[m.obj] = 1e-3
+  m.scaling_factor[m.mass_balance] = 1e2
+  SolverFactory('pounce').solve(m, options={'nlp_scaling_method': 'user-scaling'})
+  ```
+
+  Components the suffix does not list are unscaled, as are components
+  listed with a factor of `0` (AMPL's suffix default). With no
+  `scaling_factor` suffix at all the option falls back to no scaling.
+  See [Pyomo](pyomo.md) for the pyomo-pounce specifics.
 * **From C** — call `SetIpoptProblemScaling(problem, obj, x_scaling,
   g_scaling)` then `AddIpoptStrOption("nlp_scaling_method",
   "user-scaling")`. See `crates/pounce-cinterface/include/pounce.h`.
+  Pass `NULL` (or an all-ones array) for `x_scaling`.
 * **From Rust** — implement
   [`TNLP::get_scaling_parameters`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-nlp/src/tnlp.rs)
   on your problem type.
 * **From Python** — `pounce.Problem.set_problem_scaling(obj_scaling,
-  x_scaling=None, g_scaling=None)`, followed by
-  `add_option("nlp_scaling_method", "user-scaling")`. Walked through
-  end-to-end in
+  g_scaling=...)`, followed by
+  `add_option("nlp_scaling_method", "user-scaling")`. A non-unit
+  `x_scaling=` raises. Walked through end-to-end in
   [`python/notebooks/07_scaling.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/07_scaling.ipynb).
+
+> **Specialized solvers.** A model that classifies as an LP, convex QP,
+> or SOCP normally routes to `pounce-convex`, which equilibrates
+> internally and never reads the TNLP scaling callback. When
+> `nlp_scaling_method=user-scaling` is set and the `.nl` carries
+> `scaling_factor` suffixes, `solver_selection=auto` declines that fast
+> path and uses the general NLP interior-point solver so the scaling is
+> honored; an explicit `solver_selection` is respected and warns.
 
 ### Target-gradient overrides
 

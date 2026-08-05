@@ -62,6 +62,13 @@ from pyomo.core.expr import identify_mutable_parameters
 from pyomo.core.expr.visitor import replace_expressions
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
+from pyomo_pounce.scaling import (
+    check_no_variable_scaling,
+    problem_scaling,
+    user_scaling_requested,
+    warn_if_no_suffix,
+)
+
 _REG = "_pounce_sens"
 
 
@@ -699,6 +706,23 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     for key, val in (options or {}).items():
         prob.add_option(key, val)
     con_alias = _replaced_aliases(clone, si)
+    # gh #483: user scaling from the model's `scaling_factor` Suffix. The
+    # ASL path gets this for free -- the writer emits the suffix as `.nl`
+    # `S4`/`S5`/`S6` segments and the solver reads them -- but this path
+    # hands pounce evaluator callbacks, with no `.nl` in between, so the
+    # Suffix has to be translated into `set_problem_scaling` vectors here.
+    # Read from `model` (not the surgery clone) and mapped through
+    # `con_alias`, exactly as the warm-start suffixes are. Installing it
+    # unconditionally is safe: `nlp_scaling_method` decides whether the
+    # engine looks, so a tagged model solved without `user-scaling`
+    # behaves as before.
+    if user_scaling_requested(options):
+        check_no_variable_scaling(model)
+        warn_if_no_suffix(model)
+    scaling = problem_scaling(model, con_names, con_alias)
+    if scaling is not None:
+        obj_scale, g_scale = scaling
+        prob.set_problem_scaling(obj_scale, g_scaling=g_scale)
     warm = {}
     if _warm_start_requested(options):
         warm = _warm_start_from_suffixes(

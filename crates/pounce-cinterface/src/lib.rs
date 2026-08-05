@@ -491,7 +491,11 @@ pub unsafe extern "C" fn OpenIpoptOutputFile(
 /// `nlp_scaling_method=user-scaling` is set. Passing NULL for
 /// `x_scaling` / `g_scaling` disables scaling on that axis.
 ///
-/// Always returns `TRUE`.
+/// Always returns `TRUE` (the upstream contract). pounce models only
+/// objective and constraint scaling: a non-trivial `x_scaling` is not
+/// dropped here but refused at solve time, where [`IpoptSolve`] returns
+/// `Invalid_Option` and the journalist explains why (gh#483). Store-time
+/// validation is not an option — the C signature has no way to report it.
 ///
 /// # Safety
 ///

@@ -9,6 +9,45 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — user scaling was a silent no-op from Pyomo, and the core silently discarded `x_scaling` (#483)
+
+- **The `scaling_factor` Suffix now reaches the solver.** Tagging the
+  standard Pyomo Suffix and setting `nlp_scaling_method=user-scaling` —
+  the workflow that works with Ipopt through ASL — produced *no scaling
+  at all* and no message saying so. `NlTnlp` never implemented
+  `get_scaling_parameters`, so the `.nl`'s `scaling_factor` suffix
+  segments were parsed and then ignored, and pyomo-pounce had no scaling
+  code of its own. The option was accepted and meant "none". Objective
+  and constraint factors now apply on both paths: the ASL/subprocess
+  solve reads the suffix segments, and pyomo-pounce's in-process
+  sensitivity path installs them via `Problem.set_problem_scaling`.
+  Untagged components, and components tagged `0` (AMPL's suffix
+  default), are unscaled; entries on inactive constraints and fixed
+  variables are skipped; a container entry expands to its members.
+- **Per-variable factors are refused instead of dropped.** POUNCE models
+  objective and constraint scaling only, and `scale_user_supplied` ended
+  in `let _ = use_x_scaling;` — so a caller who supplied variable factors
+  got a converged answer to a differently-conditioned problem than the
+  one described, with the objective and constraint factors applied and
+  the variable ones gone. A non-unit `x_scaling` now fails the solve with
+  `Invalid_Option` and an explanation, `pounce.Problem.set_problem_scaling`
+  raises, and pyomo-pounce raises naming the variables. An all-ones
+  request asks for nothing and still solves. Modelling variable scaling
+  in the core is staged work tracked on #483.
+- **No silence anywhere else on the path.** `nlp_scaling_method=user-scaling`
+  on a model that classifies as LP/QP/SOCP used to route to
+  `pounce-convex`, which equilibrates internally and never reads the
+  scaling callback; `solver_selection=auto` now declines that fast path
+  so the scaling is honored, and an explicit `solver_selection` warns.
+  pyomo-pounce warns when `user-scaling` is requested with no
+  export-enabled `scaling_factor` Suffix to apply.
+- The sensitivity accessors needed no code: `natural_units_conj` already
+  translates `df`/`dc`/`dd` for any scaling method. That is now proven
+  rather than assumed — `covariance`, `information`, `gradient`,
+  `estimate`, `wrt=` blocks, the retain-only path, the classifier's
+  statuses, and the fixed-variable composition are each checked against
+  unscaled ground truth with user scaling engaged.
+
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 
 - The `inf_pr` iteration column printed `max(‖c‖∞, ‖d − s‖∞)` — the

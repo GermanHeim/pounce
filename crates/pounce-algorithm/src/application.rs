@@ -1829,6 +1829,32 @@ impl IpoptApplication {
             constr_target_gradient,
         );
 
+        // `user-scaling` with per-variable factors: pounce models
+        // objective and constraint scaling only. Applying the rest and
+        // dropping the variable factors would solve a problem
+        // conditioned differently from the one described, with nothing
+        // said about it — so refuse instead (gh#483).
+        if orig_nlp.user_x_scaling_rejected() {
+            use pounce_common::journalist::JournalCategory;
+            const MSG: &str = "pounce: nlp_scaling_method=user-scaling supplied \
+                 per-variable scaling factors, but pounce models only objective \
+                 and constraint scaling. Applying the objective/constraint \
+                 factors alone would change the problem's conditioning in a way \
+                 you did not ask for, so the solve is refused rather than run. \
+                 Leave the variable factors at 1.0 (rescaling those variables in \
+                 the model itself), or drop nlp_scaling_method=user-scaling. \
+                 Tracking issue: https://github.com/jkitchin/pounce/issues/483\n";
+            // stderr, not stdout: this must reach the user even under
+            // `print_level=0` / `--json-output`, where stdout is reserved
+            // for machine-readable output. The journalist copy lands in
+            // any attached `output_file`.
+            eprint!("{MSG}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, MSG);
+            timing.overall_alg.end();
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
         let nlp_handle: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
         // Build the algorithm strategy bundle. Read coarse knobs from

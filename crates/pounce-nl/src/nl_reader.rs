@@ -35,8 +35,8 @@
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
-    SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo,
+    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -2936,6 +2936,60 @@ impl TNLP for NlTnlp {
         true
     }
 
+    /// Hand the `.nl` file's `scaling_factor` suffixes to the engine's
+    /// `nlp_scaling_method=user-scaling` pathway — the AMPL/ASL channel
+    /// Ipopt reads in `AmplTNLP::GetScalingParameters`, and the one a
+    /// Pyomo `Suffix(direction=Suffix.EXPORT)` named `scaling_factor`
+    /// writes into. Before gh#483 nothing implemented this callback for
+    /// `.nl` input, so a tagged model reached the solver with the option
+    /// accepted and *no* scaling applied, silently.
+    ///
+    /// Returns `false` (engine falls back to no scaling) when the file
+    /// declares no `scaling_factor` suffix at all — the same "user
+    /// supplied nothing" answer as the default `TNLP` impl.
+    ///
+    /// AMPL suffix vectors default to **0** for components the model did
+    /// not tag, and 0 is not a usable scale factor. A zero entry is
+    /// therefore read as "not tagged" and becomes 1.0, which is what
+    /// "unlisted components are unscaled" means. Per-variable factors
+    /// are passed straight through: `OrigIpoptNlp` does not model them
+    /// and refuses the solve with a message rather than dropping them.
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        const NAME: &str = "scaling_factor";
+        let sfx = &self.prob.suffixes;
+        let obj = sfx.obj_real.get(NAME);
+        let var = sfx.var_real.get(NAME);
+        let con = sfx.con_real.get(NAME);
+        if obj.is_none() && var.is_none() && con.is_none() {
+            return false;
+        }
+        // Objective 0 is the one `NlTnlp` evaluates (extra `O` segments
+        // are parsed and ignored), so its entry is the objective scale.
+        *req.obj_scaling = obj
+            .and_then(|v| v.first().copied())
+            .filter(|&s| s != 0.0)
+            .unwrap_or(1.0);
+        *req.use_x_scaling = match var {
+            Some(v) if v.len() == req.x_scaling.len() => {
+                for (slot, &s) in req.x_scaling.iter_mut().zip(v) {
+                    *slot = if s == 0.0 { 1.0 } else { s };
+                }
+                true
+            }
+            _ => false,
+        };
+        *req.use_g_scaling = match con {
+            Some(g) if g.len() == req.g_scaling.len() => {
+                for (slot, &s) in req.g_scaling.iter_mut().zip(g) {
+                    *slot = if s == 0.0 { 1.0 } else { s };
+                }
+                true
+            }
+            _ => false,
+        };
+        true
+    }
+
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
         // Reuse the shared forward-value arena (sized to `max_tape_n`) so
         // each summand sweep allocates nothing — see `Tape::eval_into`.
@@ -3882,6 +3936,68 @@ S1 2 sens_init_constr
         let s = p.suffixes.con_int.get("sens_init_constr").expect("con_int");
         // Sparse {0:1, 1:2} → dense [1, 2] at length m=2.
         assert_eq!(s.as_slice(), &[1, 2]);
+    }
+
+    /// Fill a `ScalingRequest` from `tnlp` sized for this fixture
+    /// (n = m = 2) and hand back everything the engine would see.
+    fn scaling_of(tnlp: &mut NlTnlp) -> (bool, Number, bool, Vec<Number>, bool, Vec<Number>) {
+        let mut obj = 1.0;
+        let mut use_x = false;
+        let mut x = vec![0.0; 2];
+        let mut use_g = false;
+        let mut g = vec![0.0; 2];
+        let ok = tnlp.get_scaling_parameters(ScalingRequest {
+            obj_scaling: &mut obj,
+            use_x_scaling: &mut use_x,
+            x_scaling: &mut x,
+            use_g_scaling: &mut use_g,
+            g_scaling: &mut g,
+        });
+        (ok, obj, use_x, x, use_g, g)
+    }
+
+    /// gh#483: a `.nl` carrying Pyomo/AMPL `scaling_factor` suffixes on
+    /// the objective (`S6`) and one constraint (`S5`) reaches the
+    /// engine's `user-scaling` pathway. The untagged second row is
+    /// unscaled — its AMPL suffix default is 0, which is not a usable
+    /// scale factor and reads as "not tagged".
+    #[test]
+    fn scaling_factor_suffix_feeds_obj_and_constraint_scaling() {
+        let nl = WITH_CON_SUFFIX.to_string()
+            + "S5 1 scaling_factor\n0 10.0\nS6 1 scaling_factor\n0 100.0\n";
+        let p = parse_nl_text(&nl).expect("parse");
+        let mut tnlp = NlTnlp::new(p);
+        let (ok, obj, use_x, _x, use_g, g) = scaling_of(&mut tnlp);
+        assert!(ok, "a tagged model must supply scaling");
+        assert!((obj - 100.0).abs() < 1e-12, "obj_scaling={obj}");
+        assert!(use_g);
+        assert_eq!(g, vec![10.0, 1.0]);
+        assert!(!use_x, "no variable suffix was declared");
+    }
+
+    /// Variable-level `scaling_factor` entries are passed through, not
+    /// dropped on the floor: `OrigIpoptNlp` does not model them and
+    /// refuses the solve, which is the whole point of gh#483.
+    #[test]
+    fn scaling_factor_suffix_forwards_variable_factors() {
+        let nl = WITH_CON_SUFFIX.to_string() + "S4 1 scaling_factor\n1 3.0\n";
+        let p = parse_nl_text(&nl).expect("parse");
+        let mut tnlp = NlTnlp::new(p);
+        let (ok, _obj, use_x, x, _use_g, _g) = scaling_of(&mut tnlp);
+        assert!(ok);
+        assert!(use_x, "variable factors must reach the engine");
+        assert_eq!(x, vec![1.0, 3.0]);
+    }
+
+    /// No `scaling_factor` suffix ⇒ "the user supplied nothing", the
+    /// same answer the default `TNLP` impl gives, so `user-scaling`
+    /// falls back to no scaling instead of a bogus all-zero vector.
+    #[test]
+    fn no_scaling_factor_suffix_declines() {
+        let p = parse_nl_text(WITH_CON_SUFFIX).expect("parse");
+        let mut tnlp = NlTnlp::new(p);
+        let (ok, ..) = scaling_of(&mut tnlp);
+        assert!(!ok);
     }
 
     #[test]

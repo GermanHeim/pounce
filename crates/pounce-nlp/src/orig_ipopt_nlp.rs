@@ -119,10 +119,10 @@ pub enum ScalingMethod {
     GradientBased,
     /// User-supplied scaling via [`crate::tnlp::TNLP::get_scaling_parameters`].
     /// Port of upstream's `nlp_scaling_method=user-scaling`. The TNLP
-    /// fills `obj_scaling` and the per-constraint `g_scaling`; the
-    /// per-variable `x_scaling` request is honored only insofar as
-    /// `OrigIpoptNlp` currently models constraint+objective scaling
-    /// (no variable-side rescale, matching the issue #61 design).
+    /// fills `obj_scaling` and the per-constraint `g_scaling`;
+    /// `OrigIpoptNlp` models no variable-side rescale (the issue #61
+    /// design), so a non-trivial per-variable `x_scaling` request is
+    /// **refused** — see [`OrigIpoptNlp::user_x_scaling_rejected`].
     UserScaling,
 }
 
@@ -159,6 +159,15 @@ pub struct OrigIpoptNlp {
     /// live bounds).
     declared_d_l: RefCell<Option<Vec<Number>>>,
     declared_d_u: RefCell<Option<Vec<Number>>>,
+    /// Set by [`Self::scale_user_supplied`] when the TNLP asked for
+    /// **non-trivial** per-variable scaling (`use_x_scaling` with at
+    /// least one factor `!= 1.0`). pounce models objective and
+    /// constraint scaling only, so honoring the request is impossible
+    /// and *ignoring* it silently hands back a differently-conditioned
+    /// problem than the one the caller asked for (gh#483). The driver
+    /// reads this via [`Self::user_x_scaling_rejected`] and fails the
+    /// solve with `InvalidOption` instead.
+    x_scaling_rejected: Cell<bool>,
 
     // ----- vector / matrix spaces (shared via Rc) -----
     x_space: Rc<DenseVectorSpace>,
@@ -545,6 +554,7 @@ impl OrigIpoptNlp {
             d_scale: RefCell::new(None),
             declared_d_l: RefCell::new(None),
             declared_d_u: RefCell::new(None),
+            x_scaling_rejected: Cell::new(false),
             x_space,
             c_space,
             d_space,
@@ -1053,11 +1063,16 @@ impl OrigIpoptNlp {
     /// Returns `true` if the TNLP supplied scaling (matches upstream's
     /// `GetScalingParameters` return-value contract).
     ///
-    /// The `x_scaling` request channel is ignored: `OrigIpoptNlp` does
-    /// not currently model per-variable rescaling (would require
-    /// transforming `eval_grad_f`, `eval_jac_*`, and `eval_h` in
-    /// concert), and issue #61's `nlp_scaling=user` design explicitly
-    /// covers only `obj_scale` and `con_scale`.
+    /// `OrigIpoptNlp` does not model per-variable rescaling (that would
+    /// require transforming `eval_grad_f`, `eval_jac_*`, and `eval_h` in
+    /// concert); issue #61's `nlp_scaling=user` design covers only
+    /// `obj_scale` and `con_scale`. A **non-trivial** `x_scaling`
+    /// request is therefore *rejected*, not dropped: it sets
+    /// [`Self::x_scaling_rejected`] so the driver can fail the solve
+    /// with a message. Quietly discarding it used to hand back a
+    /// problem conditioned differently from the one the caller
+    /// described, with nothing in the log to say so (gh#483). An
+    /// all-ones request is a genuine no-op and passes through.
     fn scale_user_supplied(
         &self,
         cls: &BoundClassification,
@@ -1129,9 +1144,22 @@ impl OrigIpoptNlp {
             *self.c_scale.borrow_mut() = None;
             *self.d_scale.borrow_mut() = None;
         }
-        // `use_x_scaling`: silently ignored (not modeled — see doc).
-        let _ = use_x_scaling;
+        // Per-variable factors are not modeled. Flag a request that
+        // would actually change the problem so the driver can refuse
+        // loudly; an all-ones vector asks for nothing and is accepted.
+        if use_x_scaling && x_scaling.iter().any(|&s| s != 1.0) {
+            self.x_scaling_rejected.set(true);
+        }
         true
+    }
+
+    /// `true` when the last [`Self::determine_scaling_from_starting_point`]
+    /// ran `user-scaling` and the TNLP asked for per-variable scaling
+    /// factors that pounce cannot honor (see [`Self::scale_user_supplied`]).
+    /// Drivers must turn this into a hard error rather than solve a
+    /// problem the caller did not describe (gh#483).
+    pub fn user_x_scaling_rejected(&self) -> bool {
+        self.x_scaling_rejected.get()
     }
 
     /// Bring `d_l` / `d_u` into the scaled space so feasibility checks
@@ -3535,6 +3563,95 @@ mod tests {
         let mut c = nlp.c_space().make_new_dense();
         nlp.eval_c(&x, &mut c);
         assert_eq!(c.values(), &[12.0], "unscaled equality residual");
+    }
+
+    /// HS071 whose `get_scaling_parameters` asks for per-variable
+    /// factors — the channel `OrigIpoptNlp` cannot model (gh#483).
+    struct Hs071XScaled(Vec<Number>);
+    impl TNLP for Hs071XScaled {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Hs071::default().get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            Hs071::default().get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            Hs071::default().get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+            Hs071::default().eval_f(x, new_x)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            Hs071::default().eval_grad_f(x, new_x, g)
+        }
+        fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            Hs071::default().eval_g(x, new_x, g)
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            Hs071::default().eval_jac_g(x, new_x, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            obj_factor: Number,
+            lambda: Option<&[Number]>,
+            new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            Hs071::default().eval_h(x, new_x, obj_factor, lambda, new_lambda, mode)
+        }
+        fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+            *req.obj_scaling = 2.0;
+            *req.use_x_scaling = true;
+            req.x_scaling.copy_from_slice(&self.0);
+            *req.use_g_scaling = false;
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    fn user_x_scaling_run(factors: &[Number]) -> OrigIpoptNlp {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071XScaled(factors.to_vec())));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let mut nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+        nlp.determine_scaling_from_starting_point(
+            ScalingMethod::UserScaling,
+            100.0,
+            1e-8,
+            0.0,
+            0.0,
+        );
+        nlp
+    }
+
+    /// gh#483: a per-variable scaling request pounce cannot honor is
+    /// flagged for the driver instead of being discarded. Before this,
+    /// `scale_user_supplied` ended in `let _ = use_x_scaling;` and the
+    /// solve ran with the caller's variable scaling silently gone.
+    #[test]
+    fn user_x_scaling_request_is_flagged_not_discarded() {
+        let nlp = user_x_scaling_run(&[1.0, 1e3, 1.0, 1.0]);
+        assert!(
+            nlp.user_x_scaling_rejected(),
+            "a non-unit x_scaling must be refused, not dropped"
+        );
+        // The objective factor is still installed — the flag is the
+        // driver's cue to abort, not a reason to skip the other axes.
+        assert!((nlp.obj_scale_factor() - 2.0).abs() < 1e-12);
+    }
+
+    /// An all-ones request asks for nothing, so it is a genuine no-op
+    /// and must not fail a solve that would otherwise run.
+    #[test]
+    fn unit_x_scaling_request_is_not_rejected() {
+        let nlp = user_x_scaling_run(&[1.0, 1.0, 1.0, 1.0]);
+        assert!(!nlp.user_x_scaling_rejected());
     }
 
     #[test]
