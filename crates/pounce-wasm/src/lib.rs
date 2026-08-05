@@ -671,6 +671,7 @@ pub extern "C" fn pounce_builder_regression() -> *mut u8 {
             .var_bounds(&[-3.0, -3.0], &[3.0, 3.0])
             .constraint_bounds(&[-2.0e19, 0.5], &[4.0, 2.0e19])
             .x0(&[-1.2, 1.0])
+            .capture_iterations()
             .option_num("tol", 1.0e-3)
             .option_int("print_level", 0)
             .solve();
@@ -681,6 +682,7 @@ pub extern "C" fn pounce_builder_regression() -> *mut u8 {
                 "objective": solution.objective,
                 "x": solution.x,
                 "iterations": solution.stats.iteration_count,
+                "captured_iterations": solution.stats.iterations.len(),
             })
             .to_string(),
         )

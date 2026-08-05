@@ -81,6 +81,11 @@ assert.equal(
   `unexpected builder status ${builderResult.status}`,
 );
 assert.equal(builderResult.x.length, 2);
+assert.equal(
+  builderResult.captured_iterations,
+  0,
+  'WASI iteration capture is intentionally unavailable',
+);
 assert.ok(
   builderResult.objective < 1e-2,
   `builder objective ${builderResult.objective} did not converge`,

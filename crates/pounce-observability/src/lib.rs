@@ -325,7 +325,17 @@ pub struct CollectorScope {
 /// collector already covers this thread and the scope is a no-op.
 /// Otherwise a collector-only registry is installed as the thread-default
 /// subscriber, which shadows the host's own subscriber (its log output
-/// from this thread is dropped) for the scope's lifetime.
+/// from this thread is dropped) for the scope's lifetime. On WASI this is a
+/// deliberate no-op; the platform exposes no in-process iteration collector.
+#[cfg(target_os = "wasi")]
+pub fn collector_scope() -> CollectorScope {
+    // WASI's browser/Node shim has no supported thread-scoped subscriber
+    // installation. Keep the public API usable, but make iteration capture
+    // explicitly empty rather than entering a host TLS path that can stall.
+    CollectorScope { _default: None }
+}
+
+#[cfg(not(target_os = "wasi"))]
 pub fn collector_scope() -> CollectorScope {
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::prelude::*;
