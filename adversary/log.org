@@ -13,7 +13,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | nlp             |     11 | 2026-08-05 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
-| qp-active-set   |     14 | 2026-08-05 | residual false-Infeasible on >=2 equality rows (narrowed by f5b1fbc, not eliminated); IpoptSetWarmStartWorkingSet accepts POUNCE_WS_FIXED_OR_EQ for non-fixed vars / non-equality rows — both unfiled |
+| qp-active-set   |     14 | 2026-08-05 | false-Infeasible FIXED this run (14 -> 0 over 400 fuzz instances); still open, both pre-existing and unfiled: `Optimal` at a violating point on a provably infeasible QP, and IpoptSetWarmStartWorkingSet accepting POUNCE_WS_FIXED_OR_EQ for non-fixed vars / non-equality rows |
 | socp            |     11 | 2026-08-05 | —             |
 | exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
@@ -36,17 +36,32 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 :ORACLE: scipy.optimize.linprog (HiGHS) — confirmed the generator on 400/400
 :ORACLE_OBJECTIVE: n/a
 :ORACLE_TIME: ~3s / 400 instances
-:VERDICT: SOLVER_BUG (residual, pre-existing, narrowed by f5b1fbc)
+:VERDICT: SOLVER_BUG — found, root-caused and FIXED in this run
 :REPORT: [[file:runs/2026-08-05_qp-active-set_elastic_certificate_fuzz.org]]
 :COVERAGE_TARGET: -
 :END:
 
-Feasible QPs with >=2 equality rows can still be certified infeasible, at
-tolerances five orders of magnitude looser than default — so not numerical
-noise. 6/43 such instances fail; 0/214 with <=1 equality row. The f5b1fbc fix
-(gh#484 follow-up) cut the overall rate 13 -> 6 with no loss of certification
-power: 133/143 genuine infeasibilities certified, identical before and after.
-Not filed pending maintainer review.
+The probe found that the first gh#484 follow-up fix was incomplete, and that
+the residual cases were caused by the new code rather than left over from the
+old. Its convex feasibility phase-1 minimizes `½‖x − r‖² + γ‖v‖₁`, whose
+proximal term competes with the penalty and leaves a residual up to
+`‖x̂ − r‖²/(2γ)` — ~1e-5 at the default γ, four orders above feas_tol — on
+instances that are feasible. That artefact was being judged against feas_tol
+and read as a Farkas certificate.
+
+Fixed by computing the bias bound instead of tripping over it: a residual may
+certify only once it exceeds both `D²/(2γ)` and a scale-relative noise floor,
+γ is escalated at the measured shortfall until one of those holds, and
+certification requires the convex phase-1 to have converged.
+
+Over 400 instances (generator verified 400/400 by direct arithmetic and
+400/400 by scipy/HiGHS): feasible QPs certified infeasible 14 -> 9 -> *0*;
+genuine infeasibilities certified 118/143 -> 118/143 -> 108/143. The ten lost
+certifications are the price of a sound proof and are not tunable.
+
+Still open, and NOT regressions (identical on pre-gh#484 code): one
+`Optimal` returned at a point violating a provably infeasible instance
+(seed 36795918414), and three `Err` returns on rank-deficient KKT blocks.
 
 ** [2026-08-05] C warm-start working-set answer transparency (qp-active-set/c-abi-metamorphic) - FAIL
 :PROPERTIES:

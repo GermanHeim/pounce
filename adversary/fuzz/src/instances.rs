@@ -126,6 +126,30 @@ impl Instance {
     }
 }
 
+
+/// A finite, sane point inside the box.
+///
+/// `0.5·(xl + xu)` is the obvious choice and is wrong the moment a bound
+/// is infinite: with `xl = -1e19` it returns `-5e18`, and every row bound
+/// derived from it lands at ~1e19. The instance is then nominally valid
+/// and numerically absurd — scipy disagreed with the constructive verdict
+/// on three of them, which is precisely what the adjudicator is for.
+fn box_interior_point(xl: &[f64], xu: &[f64]) -> Vec<f64> {
+    xl.iter()
+        .zip(xu.iter())
+        .map(|(&l, &u)| {
+            let lo_fin = l > NLP_LOWER_BOUND_INF;
+            let hi_fin = u < NLP_UPPER_BOUND_INF;
+            match (lo_fin, hi_fin) {
+                (true, true) => 0.5 * (l + u),
+                (true, false) => l + 1.0,
+                (false, true) => u - 1.0,
+                (false, false) => 0.0,
+            }
+        })
+        .collect()
+}
+
 /// Symmetric `H` that is deliberately indefinite, with zero diagonal
 /// entries — the exact-∇²L shape. Stored as a full lower triangle so the
 /// pattern includes the structural zeros too, exactly as HS071's does.
@@ -166,8 +190,29 @@ fn random_box(rng: &mut Rng, n: usize) -> (Vec<f64>, Vec<f64>) {
     for _ in 0..n {
         let c = shift + rng.range(-3.0, 3.0);
         let w = rng.range(0.2, 4.0);
-        xl.push(c - w);
-        xu.push(c + w);
+        // A quarter of the coordinates are free on one side or both.
+        // Unbounded variables are ordinary — an SQP step QP inherits one
+        // from every unbounded NLP variable — and they are the case where
+        // the box gives no bound on how far a feasible point can sit, so
+        // any reasoning that leans on the box has to cope without it.
+        match rng.int(0, 7) {
+            0 => {
+                xl.push(NLP_LOWER_BOUND_INF);
+                xu.push(c + w);
+            }
+            1 => {
+                xl.push(c - w);
+                xu.push(NLP_UPPER_BOUND_INF);
+            }
+            2 => {
+                xl.push(NLP_LOWER_BOUND_INF);
+                xu.push(NLP_UPPER_BOUND_INF);
+            }
+            _ => {
+                xl.push(c - w);
+                xu.push(c + w);
+            }
+        }
     }
     (xl, xu)
 }
@@ -216,10 +261,19 @@ pub fn feasible(rng: &mut Rng, seed: u64) -> Instance {
         // 40% of coordinates snap exactly onto a bound: degenerate
         // active sets, where "on the boundary" and "just outside" are a
         // rounding apart.
-        w.push(if rng.chance(0.4) {
-            if rng.chance(0.5) { xl[j] } else { xu[j] }
-        } else {
-            rng.range(xl[j], xu[j])
+        let lo_fin = xl[j] > NLP_LOWER_BOUND_INF;
+        let hi_fin = xu[j] < NLP_UPPER_BOUND_INF;
+        w.push(match (lo_fin, hi_fin) {
+            // 40% of bounded coordinates snap exactly onto a bound:
+            // degenerate active sets, where "on the boundary" and "just
+            // outside" are a rounding apart.
+            (true, true) if rng.chance(0.4) => {
+                if rng.chance(0.5) { xl[j] } else { xu[j] }
+            }
+            (true, true) => rng.range(xl[j], xu[j]),
+            (true, false) => xl[j] + rng.range(0.0, 4.0),
+            (false, true) => xu[j] - rng.range(0.0, 4.0),
+            (false, false) => rng.range(-4.0, 4.0),
         });
     }
 
@@ -278,8 +332,16 @@ pub fn feasible(rng: &mut Rng, seed: u64) -> Instance {
 pub fn infeasible(rng: &mut Rng, seed: u64) -> Instance {
     let n = rng.int(2, 6);
     let (xl, xu) = random_box(rng, n);
+    // `max_box aᵀx` is only a *proof* when the box is finite; with a free
+    // coordinate the row can be driven anywhere and the construction
+    // proves nothing. Contradictory equalities are unaffected — they are
+    // infeasible whatever the box — so route unbounded boxes there.
+    let box_finite = xl
+        .iter()
+        .zip(xu.iter())
+        .all(|(l, u)| *l > NLP_LOWER_BOUND_INF && *u < NLP_UPPER_BOUND_INF);
 
-    if rng.chance(0.5) {
+    if rng.chance(0.5) || !box_finite {
         // (a) Contradictory equalities: the same row `a` required to
         // equal two different values. `aᵀx` is a function, so no x can
         // satisfy both, whatever the box.
@@ -308,7 +370,7 @@ pub fn infeasible(rng: &mut Rng, seed: u64) -> Instance {
         };
         // Give the other rows an achievable value so the *only* source of
         // infeasibility is the contradiction we planted.
-        let mid: Vec<f64> = (0..n).map(|j| 0.5 * (inst.xl[j] + inst.xu[j])).collect();
+        let mid = box_interior_point(&inst.xl, &inst.xu);
         for i in 0..m {
             let r = inst.dot_row(i, &mid);
             inst.bl[i] = r;
@@ -342,7 +404,7 @@ pub fn infeasible(rng: &mut Rng, seed: u64) -> Instance {
             xu,
             witness: None,
         };
-        let mid: Vec<f64> = (0..n).map(|j| 0.5 * (inst.xl[j] + inst.xu[j])).collect();
+        let mid = box_interior_point(&inst.xl, &inst.xu);
         for i in 0..m {
             let r = inst.dot_row(i, &mid);
             inst.bl[i] = r - r.abs().max(1.0);

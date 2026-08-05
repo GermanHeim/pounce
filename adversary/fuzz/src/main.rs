@@ -74,6 +74,27 @@ fn qp_fuzz(count: usize, seed: u64) {
         writeln!(jsonl, "{}", inst.to_json()).expect("write instance");
 
         let out = qp_probe::run(&inst);
+        if let Ok(path) = std::env::var("ADV_DUMP") {
+            use std::io::Write as _;
+            let free = (0..inst.n)
+                .filter(|&j| {
+                    inst.xl[j] <= pounce_common::types::NLP_LOWER_BOUND_INF
+                        || inst.xu[j] >= pounce_common::types::NLP_UPPER_BOUND_INF
+                })
+                .count();
+            let neq = (0..inst.m).filter(|&i| inst.bl[i] == inst.bu[i]).count();
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .expect("dump");
+            writeln!(
+                f,
+                "{s}\t{:?}\t{}\t{}\t{}\t{}",
+                inst.truth, out.status, inst.kind, free, neq
+            )
+            .ok();
+        }
         *counts.entry(format!("{:?}/{}", inst.truth, out.status)).or_default() += 1;
         match inst.truth {
             Truth::Feasible => n_feasible += 1,

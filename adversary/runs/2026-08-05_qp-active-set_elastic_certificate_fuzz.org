@@ -49,44 +49,75 @@ projected into the box).
 
 * Results
 :PROPERTIES:
-:STATUS: FAIL
+:STATUS: PASS (for the property under test)
 :END:
 
-400 instances, seed 20260805 (257 feasible / 143 infeasible).
+400 instances, seed 20260805 (257 feasible / 143 infeasible). The
+generator was extended after the first run to emit *unbounded* boxes —
+a free variable is ordinary in an SQP step QP, and it is exactly the case
+where the box gives no bound on how far a feasible point can sit — so the
+numbers below are on a harder distribution than the first draft's.
 
-| Metric                                    | pre-fix (d352838) | post-fix (f5b1fbc) |
-|-------------------------------------------+-------------------+--------------------|
-| false `Infeasible` on feasible instances  | 13 / 257 (5.1%)   | *6 / 257 (2.3%)*   |
-| `Optimal` at an infeasible point          | 0                 | 0                  |
-| `Optimal` on a provably infeasible one    | 0                 | 0                  |
-| genuine infeasibility certified           | 133 / 143 (93.0%) | *133 / 143 (93.0%)* |
-| non-committal on infeasible               | 10 / 143          | 10 / 143           |
-| solver `Err`                              | 1                 | 1                  |
+| Metric                                    | before #484 | round 1 | round 2 (now) |
+|-------------------------------------------+-------------+---------+---------------|
+| false `Infeasible` on feasible instances  | 14          | 9       | *0*           |
+| `Optimal` at an infeasible point          | 0           | 0       | 0             |
+| `Optimal` on a provably infeasible one    | 1           | 1       | 1             |
+| genuine infeasibility certified           | 118/143     | 118/143 | 108/143       |
+| solver `Err`                              | 3           | 3       | 3             |
 
-Two things worth stating plainly. The fix cut false certificates by 54%, and
-it cost *nothing* in certification power — the worry that a harder-to-issue
-certificate would blunt genuine infeasibility detection is measurably
-unfounded on this distribution, to the instance. But it did not eliminate the
-defect: six feasible instances are still certified infeasible.
+The false-certificate defect is gone. The `Optimal`-on-infeasible case
+(seed 36795918414) and the three `Err` cases are *pre-existing* — present
+identically in all three columns — and are not touched by this work.
 
-** The residual class
+** What round 1 got wrong
 
-All six have *two or more equality rows*. Among the 257 feasible instances,
-43 have ≥2 equality rows, so the residual failure rate is 6/43 = 14% there and
-0/214 elsewhere — the split is total.
+Round 1 added a convex feasibility phase-1 so the certificate would rest
+on a globally-solved subproblem. That reasoning was right and the fix was
+a real improvement, but it left a flaw of its own, which is why 9 cases
+survived it.
 
-| seed         | n | m | #eq | cond(A)  | cond(A_eq) | max abs cos between eq rows |
-|--------------+---+---+-----+----------+------------+-----------------------------|
-| 20260805     | 6 | 4 |   2 | 1.83e+09 |   2.45e+05 | 1.0000000000                |
-| 1899309004   | 4 | 5 |   2 | 8.42e+05 |   4.06e+00 | 0.3123569059                |
-| 9415501800   | 4 | 5 |   2 | 7.32e+06 |   3.26e+00 | 0.7487310268                |
-| 20421355537  | 5 | 4 |   3 | 3.31e+11 |   3.30e+11 | 1.0000000000                |
-| 66860689598  | 5 | 4 |   2 | 6.19e+12 |   1.96e+07 | 1.0000000000                |
-| 68471302340  | 3 | 3 |   2 | 2.30e+06 |   2.10e+01 | 0.8123632127                |
+The phase-1 minimizes `½‖x − r‖² + γ‖v‖₁`. Its proximal term *competes*
+with the penalty, so a feasible instance still leaves a residual: `(x̂, 0)`
+costs `½‖x̂ − r‖²`, hence
 
-Near-parallelism is *not* the discriminator: seed 1899309004 has
-`cond(A_eq) = 4.06` and a cosine of 0.31 between its two equality rows — a
-perfectly ordinary pair. Having more than one equality row is what matters.
+: s* ≤ ‖x̂ − r‖² / (2γ)
+
+With `γ = 1e6` and an ordinary box that ceiling is ~1e-5 — four orders
+above `feas_tol`. Instrumenting one failing instance showed the phase-1
+returning `status=Optimal` with a residual of `3.45e-6` against a computed
+bias ceiling of `2.16e-5`: converging correctly, and stopping exactly where
+the model says it must. Round 1 then judged that point against `feas_tol`,
+found it wanting, and issued the certificate — reading a penalty artefact
+as a Farkas proof.
+
+Two intermediate attempts are worth recording because they *look* right
+and are not:
+
+- *Re-centring `r` on the previous iterate.* The bound is quadratic in
+  `‖x̂ − r‖`, so this collapses the residual only if the iterate stops
+  moving. It does not: successive passes travelled ~1.5 along a
+  near-feasible manifold, holding `‖x̂ − r‖` roughly constant. Measured
+  3.2e-6 → 1.8e-6 → 3.1e-7, linear at best. Fixed 1 case of 6.
+- *Raising the phase-1 iteration budget.* `MaxIter` dominated the residual
+  failures, so more iterations looked like the answer. Removing the bump
+  entirely changes neither the false-certificate count (0) nor the
+  certification rate (108/143) — the γ schedule does all the work. Worse,
+  overriding the caller's budget broke a real contract:
+  `sqp_qp_max_iter=3` asks for a bounded solve, and a phase-1 quietly
+  spending 2000 is not that. The pounce-cli test
+  `sqp_qp_options_reach_the_active_set_engine` caught it.
+
+** The cost
+
+108/143 against 118/143. Ten genuine infeasibilities now return a
+non-committal status instead of a confident one. That is the price of
+demanding a sound proof, and it is the right direction — a false
+certificate is a *wrong answer*, a non-committal status is a *weaker* one
+— but it is a real cost and it is not tunable: raising the phase-1 budget
+5× recovers one of the ten at 3× the wall time, and the free-variable
+headroom constant makes no difference at all across three orders of
+magnitude (1e1/1e2/1e3 all give 108/143 with 0 false certificates).
 
 * Cross-check / Verification
 
@@ -120,22 +151,20 @@ argument survives that.
 
 * Verdict
 
-*SOLVER_BUG (residual, pre-existing, narrowed by f5b1fbc).*
+*PASS* for the property under test: no feasible instance in 400 is
+certified infeasible, on a distribution deliberately built around the
+geometry that broke it.
 
-The fix in f5b1fbc is a real and measurable improvement — 13 → 6 false
-certificates with no loss of certification power — but it is incomplete. A
-feasible QP with two or more equality rows can still be certified infeasible,
-and at tolerances loose enough to rule out numerical noise as the cause.
+Two findings remain open and are *not* regressions — they reproduce
+identically on the pre-#484 code:
 
-The mechanism is consistent with what the fix addressed. `convex_feasibility_seed`
-only refutes a certificate when its own phase-1 both converges *and* lands
-inside `feas_tol` of the original rows. With several equality rows the
-augmented KKT block is close to rank-deficient, that phase-1 does not reach a
-qualifying point, no witness is produced, and the certificate is issued
-exactly as before. The fix removed the cases where a witness was findable; it
-did not make the witness always findable.
+- `OptimalOnInfeasible` (seed 36795918414): `Optimal` returned at a point
+  violating a contradictory-equality instance by 2.9. A wrong answer, in
+  the same family as the defects fixed here but on a different path.
+- Three instances where the solver returns `Err`
+  (`pinned KKT constraint block is rank-deficient`).
 
-Not filed as an issue pending the maintainer's call — see the session summary.
+Neither is filed pending the maintainer's call.
 
 * Coverage effect
 

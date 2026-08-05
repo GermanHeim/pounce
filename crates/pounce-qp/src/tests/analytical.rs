@@ -2449,3 +2449,119 @@ fn nonconvex_step_qp_near_nlp_solution_not_false_infeasible() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Penalty bias read as an infeasibility certificate (gh#484 follow-up,
+// round 2). Found by the property-based probe in `adversary/fuzz/`.
+//
+// A feasible QP — the witness below satisfies every row and bound in
+// exact float arithmetic — with an indefinite `H`, two free variables,
+// and a near-parallel row pair. The first fix for the false-certificate
+// defect refuted a certificate only when its convex feasibility phase-1
+// landed within `feas_tol` of the rows, and here it cannot: the phase-1
+// minimizes `½‖x − r‖² + γ‖v‖₁`, whose proximal term competes with the
+// penalty, so its optimum carries a residual up to `‖x̂ − r‖²/(2γ)`.
+// With `γ = 1e6` and a box of this size that ceiling is ~1e-5 — four
+// orders above `feas_tol`. The phase-1 stopped a few 1e-6 short, was
+// judged "not feasible", and the certificate went out.
+//
+// The bias is now computed rather than tripped over: a residual is only
+// allowed to certify once it exceeds `D²/(2γ)`, and γ is escalated until
+// either the residual clears that bar or the point clears `feas_tol`.
+#[rustfmt::skip]
+const BIAS_QP_G: [f64; 3] = [
+    -0.7213796209979861, -7.231392669305645, 4.234973671720205,
+];
+#[rustfmt::skip]
+const BIAS_QP_A: [f64; 9] = [
+    -0.7911384941828317, 0.03702927627662023, 2.095070462604718,
+     1.934754937738557,  2.8782196768168857,  0.7027825799349712,
+     1.9935114267903111, 2.9656260009633773,  0.7241229757025899,
+];
+/// Feasibility witness. Satisfies every row and bound exactly.
+#[rustfmt::skip]
+const BIAS_QP_WITNESS: [f64; 3] = [
+    1.1096278255655565, 0.09990985992069845, -2.530165115509102,
+];
+
+#[test]
+fn penalty_bias_is_not_an_infeasibility_certificate() {
+    let n = 3usize;
+    let m = 3usize;
+
+    // Indefinite H with a zero diagonal — the exact-∇²L shape.
+    let mut h_irows = Vec::new();
+    let mut h_jcols = Vec::new();
+    for i in 0..n {
+        for j in 0..=i {
+            h_irows.push(i as i32 + 1);
+            h_jcols.push(j as i32 + 1);
+        }
+    }
+    let h_space = SymTMatrixSpace::new(n as i32, h_irows, h_jcols);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[-1.7, 2.4, 0.0, -0.9, 1.3, 3.1]);
+
+    let mut a_irows = Vec::new();
+    let mut a_jcols = Vec::new();
+    for i in 0..m {
+        for j in 0..n {
+            a_irows.push(i as i32 + 1);
+            a_jcols.push(j as i32 + 1);
+        }
+    }
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, a_irows, a_jcols);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&BIAS_QP_A);
+
+    let g = BIAS_QP_G.to_vec();
+    // Row 1 is an equality; rows 0 and 2 are one- and two-sided. Two of
+    // the three variables are free — the case where the box gives no
+    // bound on how far a feasible point can sit.
+    let bl = vec![-8.239786780104733, 0.6562644717578805, 0.6762003356215169];
+    let bu = vec![-4.110301012358298, 0.6562644717578805, NLP_UPPER_BOUND_INF];
+    let xl = vec![-5.64448797643853, -1.7243973211195898, NLP_LOWER_BOUND_INF];
+    let xu = vec![1.1096278255655565, NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF];
+
+    // The instance's feasibility is arithmetic, not an assumption.
+    for i in 0..m {
+        let ax: f64 = (0..n)
+            .map(|j| BIAS_QP_A[i * n + j] * BIAS_QP_WITNESS[j])
+            .sum();
+        assert!(
+            ax >= bl[i] - 1e-12 && (bu[i] >= NLP_UPPER_BOUND_INF || ax <= bu[i] + 1e-12),
+            "witness must satisfy row {i}: {ax} not in [{}, {}]",
+            bl[i],
+            bu[i]
+        );
+    }
+    for j in 0..n {
+        assert!(
+            BIAS_QP_WITNESS[j] >= xl[j] && BIAS_QP_WITNESS[j] <= xu[j],
+            "witness must be in the box at {j}"
+        );
+    }
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+
+    assert_ne!(
+        sol.status,
+        QpStatus::Infeasible,
+        "feasible QP certified Infeasible — a phase-1 residual bounded by \
+         the penalty bias is not a Farkas certificate"
+    );
+}

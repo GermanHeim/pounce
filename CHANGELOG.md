@@ -9,6 +9,60 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — penalty bias was read as an infeasibility certificate (#484 follow-up, round 2)
+
+- The previous round stopped the l1-elastic path certifying infeasibility
+  off a *nonconvex* phase-1, by adding a convex feasibility phase-1 whose
+  verdict is sound. Property-based probing (`adversary/fuzz/`) showed that
+  fix was incomplete — 6/257 feasible instances were still certified
+  infeasible — and that the reason was a flaw in the new code, not a
+  leftover of the old one.
+- The convex phase-1 minimizes `½‖x − r‖² + γ‖v‖₁`. The proximal term
+  competes with the penalty, so a *feasible* instance still leaves a
+  residual: `(x̂, 0)` costs `½‖x̂ − r‖²`, hence `s* ≤ ‖x̂ − r‖²/(2γ)`. With
+  `γ = 1e6` and an ordinary box that ceiling is ~1e-5 — four orders above
+  `feas_tol`. The phase-1 was converging correctly and stopping a few 1e-6
+  short; the code then judged it against `feas_tol`, found it wanting, and
+  issued the certificate. A penalty artefact was being read as a Farkas
+  proof.
+- The bias is now computed rather than tripped over. `penalty_bias_bound`
+  evaluates `D²/(2γ)` from the box, and a residual may only certify once
+  it exceeds *both* that bound and a scale-relative noise floor
+  (one part per million of `max(‖A‖∞, ‖b‖∞)` — below which "infeasible"
+  and "feasible up to roundoff" are not distinguishable). Where the
+  residual sits under the bound, γ is escalated — aimed at the measured
+  shortfall rather than cranked, since overshoot leaves the subproblem too
+  hard to converge and throws the certificate away — and the phase-1
+  re-solves from the previous iterate.
+- Certifying now also *requires* the convex phase-1 to have converged.
+  Nonconvex residual slacks and "phase-2 failed to improve" are both
+  ignorance, not proof; neither may speak to infeasibility.
+- Free variables are handled explicitly. An unbounded box gives no `D`, and
+  returning infinity there would mean never certifying a QP with a free
+  variable — trading one wrong answer for another. Those coordinates take a
+  surrogate from the distance the solve actually travelled. That much is
+  judgment rather than theorem, and it is confined to the coordinates where
+  the theorem has nothing to say; the fuzz shows the answer is insensitive
+  to it across three orders of magnitude.
+- Measured over 400 generated instances (65% feasible-by-construction with
+  an attached witness, 35% infeasible by exact arithmetic; every instance
+  independently re-decided by `scipy.optimize.linprog`/HiGHS):
+
+  | | before #484 | round 1 | now |
+  |---|---|---|---|
+  | feasible QPs certified infeasible | 14 | 9 | **0** |
+  | genuine infeasibilities certified | 118/143 | 118/143 | 108/143 |
+
+  The 10 lost certifications are the price of demanding a sound proof: they
+  become a non-committal status rather than a confident one. That is the
+  right direction — a false certificate is a wrong answer, a non-committal
+  status is a weaker one — but it is a real cost, and it is not tunable:
+  raising the phase-1 iteration budget 5× recovers one of them at 3× the
+  wall time.
+- Regression test: `penalty_bias_is_not_an_infeasibility_certificate`, built
+  from an instance the probe found, with its feasibility witness checked
+  arithmetically in the test rather than assumed.
+
 ### Fixed — active-set SQP declared feasible problems infeasible when started near a solution (#484 follow-up)
 
 - HS071 cold-starts fine from `(1,5,5,1)`, but nudge the start to
