@@ -18,6 +18,7 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use std::cell::RefCell;
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 /// Snapshot stashed in TLS for the duration of one
@@ -29,8 +30,44 @@ pub struct IntermediateContext {
     pub nlp: Rc<RefCell<dyn IpoptNlp>>,
 }
 
+/// TLS storage without compiler-registered destructor glue.
+/// Keeping the slot non-`Drop` also makes it safe for wasm32-wasip1 hosts.
+struct ContextSlot {
+    value: MaybeUninit<Option<IntermediateContext>>,
+    initialized: bool,
+}
+
+impl ContextSlot {
+    const fn new() -> Self {
+        Self {
+            value: MaybeUninit::uninit(),
+            initialized: false,
+        }
+    }
+
+    fn get(&self) -> Option<&Option<IntermediateContext>> {
+        self.initialized.then(|| {
+            // SAFETY: `initialized` is set only after `value` is initialized.
+            unsafe { self.value.assume_init_ref() }
+        })
+    }
+
+    fn get_mut(&mut self) -> &mut Option<IntermediateContext> {
+        if !self.initialized {
+            self.value.write(None);
+            self.initialized = true;
+        }
+        // SAFETY: the branch above initializes `value` before this access.
+        unsafe { self.value.assume_init_mut() }
+    }
+
+    fn replace(&mut self, value: Option<IntermediateContext>) -> Option<IntermediateContext> {
+        std::mem::replace(self.get_mut(), value)
+    }
+}
+
 thread_local! {
-    static CURRENT_CTX: RefCell<Option<IntermediateContext>> = const { RefCell::new(None) };
+    static CURRENT_CTX: RefCell<ContextSlot> = const { RefCell::new(ContextSlot::new()) };
 }
 
 /// RAII guard — installs `ctx` on construction, clears on drop. Used
@@ -42,22 +79,18 @@ pub struct CtxGuard {
 
 impl CtxGuard {
     pub fn install(ctx: IntermediateContext) -> Self {
-        // wasm32-wasip1 browser/Node hosts are single-threaded here, and
-        // touching this destructor-bearing TLS slot can block indefinitely.
-        // The context only serves optional C-API inspector calls during the
-        // callback.
-        #[cfg(not(target_arch = "wasm32"))]
-        CURRENT_CTX.with(|c| *c.borrow_mut() = Some(ctx));
-        #[cfg(target_arch = "wasm32")]
-        let _ = ctx;
+        CURRENT_CTX.with(|c| {
+            c.borrow_mut().replace(Some(ctx));
+        });
         Self { _private: () }
     }
 }
 
 impl Drop for CtxGuard {
     fn drop(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        CURRENT_CTX.with(|c| *c.borrow_mut() = None);
+        CURRENT_CTX.with(|c| {
+            c.borrow_mut().replace(None);
+        });
     }
 }
 
@@ -67,23 +100,20 @@ pub fn with_current<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&IntermediateContext) -> R,
 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        // Live-iterate inspection is unavailable on the Wasm build because
-        // its callback context is deliberately not installed above.
-        let _ = f;
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    CURRENT_CTX.with(|c| c.borrow().as_ref().map(f))
+    CURRENT_CTX.with(|c| c.borrow().get().and_then(|ctx| ctx.as_ref().map(f)))
 }
 
 /// Whether a context is currently installed.
 pub fn is_active() -> bool {
-    #[cfg(target_arch = "wasm32")]
-    {
-        false
+    CURRENT_CTX.with(|c| c.borrow().get().is_some_and(Option::is_some))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContextSlot;
+
+    #[test]
+    fn context_slot_has_no_thread_local_drop_glue() {
+        assert!(!std::mem::needs_drop::<ContextSlot>());
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    CURRENT_CTX.with(|c| c.borrow().is_some())
 }

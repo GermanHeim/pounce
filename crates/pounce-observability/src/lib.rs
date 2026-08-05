@@ -38,8 +38,8 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
+use std::mem::MaybeUninit;
 
 use pounce_common::types::{Index, Number};
 use pounce_nlp::solve_statistics::IterRecord;
@@ -59,11 +59,45 @@ pub const RESTORATION_SPAN: &str = "restoration";
 
 // ---- Per-solve capture slot ----
 
-#[cfg(not(target_arch = "wasm32"))]
+/// A TLS cell whose storage does not register a thread-local destructor.
+struct CaptureSlot {
+    value: MaybeUninit<Option<Vec<IterRecord>>>,
+    initialized: bool,
+}
+
+impl CaptureSlot {
+    const fn new() -> Self {
+        Self {
+            value: MaybeUninit::uninit(),
+            initialized: false,
+        }
+    }
+
+    fn get(&self) -> Option<&Option<Vec<IterRecord>>> {
+        self.initialized.then(|| {
+            // SAFETY: `initialized` is set only after `value` is initialized.
+            unsafe { self.value.assume_init_ref() }
+        })
+    }
+
+    fn get_mut(&mut self) -> &mut Option<Vec<IterRecord>> {
+        if !self.initialized {
+            self.value.write(None);
+            self.initialized = true;
+        }
+        // SAFETY: the branch above initializes `value` before this access.
+        unsafe { self.value.assume_init_mut() }
+    }
+
+    fn replace(&mut self, value: Option<Vec<IterRecord>>) -> Option<Vec<IterRecord>> {
+        std::mem::replace(self.get_mut(), value)
+    }
+}
+
 thread_local! {
     /// Active capture buffer for the current solve, or `None` when no
     /// solve on this thread is recording its iteration history.
-    static CAPTURE: RefCell<Option<Vec<IterRecord>>> = const { RefCell::new(None) };
+    static CAPTURE: RefCell<CaptureSlot> = const { RefCell::new(CaptureSlot::new()) };
 }
 
 /// Set once at subscriber install when `POUNCE_LOG_FORMAT=json`, so the
@@ -90,16 +124,7 @@ pub fn iteration_event_wanted() -> bool {
     if JSON_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
         return true;
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // CAPTURE is a destructor-bearing TLS slot. Accessing it under the
-        // single-threaded wasm32-wasip1 hosts used by pounce-wasm can block
-        // indefinitely before iteration zero. Wasm still gets the normal
-        // console stream; in-process iteration-history capture is disabled.
-        return false;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    CAPTURE.with(|c| c.borrow().is_some())
+    CAPTURE.with(|c| c.borrow().get().is_some_and(Option::is_some))
 }
 
 /// RAII activation of per-iteration capture for one solve.
@@ -119,62 +144,38 @@ pub struct IterCaptureGuard {
 impl IterCaptureGuard {
     /// Begin capturing iteration records on this thread.
     pub fn start() -> Self {
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Destructor-bearing TLS can block in the single-threaded WASI
-            // hosts supported by pounce-wasm. Iteration history is optional,
-            // so leave capture disabled while retaining the same API.
-            Self { prev: None }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let prev = CAPTURE.with(|c| c.borrow_mut().replace(Vec::new()));
-            Self { prev }
-        }
+        let prev = CAPTURE.with(|c| c.borrow_mut().replace(Some(Vec::new())));
+        Self { prev }
     }
 
     /// End capture and return the records collected since [`start`].
     ///
     /// [`start`]: IterCaptureGuard::start
     pub fn finish(mut self) -> Vec<IterRecord> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.prev.take();
-            std::mem::forget(self);
-            Vec::new()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let prev = self.prev.take();
-            let captured = CAPTURE
-                .with(|c| std::mem::replace(&mut *c.borrow_mut(), prev))
-                .unwrap_or_default();
-            // Skip `Drop`: it would re-restore `self.prev` (now `None`) and
-            // clobber the buffer we just put back for an enclosing guard.
-            std::mem::forget(self);
-            captured
-        }
+        let prev = self.prev.take();
+        let captured = CAPTURE
+            .with(|c| c.borrow_mut().replace(prev))
+            .unwrap_or_default();
+        // `Drop`would re-restore `self.prev`
+        std::mem::forget(self);
+        captured
     }
 }
 
 impl Drop for IterCaptureGuard {
     fn drop(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // Restore the previous buffer if `finish` wasn't called.
-            let prev = self.prev.take();
-            CAPTURE.with(|c| *c.borrow_mut() = prev);
-        }
+        // Restore the previous buffer if `finish` wasn't called.
+        let prev = self.prev.take();
+        CAPTURE.with(|c| {
+            c.borrow_mut().replace(prev);
+        });
     }
 }
 
 /// Append a record to the active capture slot, if any.
 fn push_record(rec: IterRecord) {
-    #[cfg(target_arch = "wasm32")]
-    let _ = rec;
-    #[cfg(not(target_arch = "wasm32"))]
     CAPTURE.with(|c| {
-        if let Some(buf) = c.borrow_mut().as_mut() {
+        if let Some(buf) = c.borrow_mut().get_mut().as_mut() {
             buf.push(rec);
         }
     });
@@ -190,14 +191,11 @@ pub fn extend_active_capture(records: &[IterRecord]) {
     if records.is_empty() {
         return;
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        CAPTURE.with(|c| {
-            if let Some(buf) = c.borrow_mut().as_mut() {
-                buf.extend_from_slice(records);
-            }
-        });
-    }
+    CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().get_mut().as_mut() {
+            buf.extend_from_slice(records);
+        }
+    });
 }
 
 // ---- Event → IterRecord visitor ----
@@ -584,6 +582,11 @@ mod tests {
             !iteration_event_wanted(),
             "capture ended → event suppressed"
         );
+    }
+
+    #[test]
+    fn capture_slot_has_no_thread_local_drop_glue() {
+        assert!(!std::mem::needs_drop::<CaptureSlot>());
     }
 
     #[test]
