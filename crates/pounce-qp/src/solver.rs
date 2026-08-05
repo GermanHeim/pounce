@@ -17,10 +17,11 @@ use crate::kkt::{
     is_pure_equality_no_bounds, rhs_equality_only,
 };
 use crate::options::{AntiCyclingChoice, QpOptions};
-use crate::problem::{QpProblem, QpSolution, QpStats, QpWarmStart};
+use crate::problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::{Index, Number};
+use pounce_linalg::triplet::{SymTMatrix, SymTMatrixSpace};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::status::ESymSolverStatus;
 
@@ -1844,19 +1845,57 @@ impl ParametricActiveSetSolver {
         // feasible optimum, return it — this turns the #282 family from a
         // false `Infeasible` into the correct `x* = 0` solution.
         //
-        // Candidate seeds, cheapest-first: the recovered `x`, and the
+        // Candidate seeds, cheapest-first: the recovered `x`, the
         // elastic seed `x_orig` (0 projected into the box — feasible
-        // whenever the origin is, which is the exact #282 optimum).
-        let candidates = [x.clone(), x_orig.clone()];
+        // whenever the origin is, which is the exact #282 optimum), and
+        // — last, because it costs a third solve — the minimum-norm
+        // feasible point from a CONVEX feasibility-only phase-1.
+        //
+        // That third seed is what makes the certificate below sound on
+        // a nonconvex QP. The elastic solve above minimizes
+        // `½pᵀHp + gᵀp + γ‖v‖₁`; when `H` is indefinite — which is the
+        // default for the SQP's step QP, whose `H` is the exact ∇²L —
+        // an active-set method returns a *local* KKT point, so its
+        // residual slacks are not the global minimal-l1 violation and
+        // prove nothing. Worse, γ = 1e6 turns a slack of ~1e-7 into
+        // ~0.1 of apparent objective, so the solve settles at a far box
+        // vertex carrying a cancelling `(v_l, v_u)` pair rather than at
+        // the small feasible step. HS071 warm-started near its own
+        // solution hit exactly this: the recovered point missed
+        // `feas_tol` by a factor of two (1.95e-9 against 1e-9) on a QP
+        // with points feasible to slack 1.66, and the SQP reported
+        // `Infeasible_Problem_Detected` at iteration 0 (gh#484 follow-up).
+        let mut candidates = vec![x.clone(), x_orig.clone()];
+        if let Some(seed) = self.convex_feasibility_seed(qp, opts) {
+            candidates.push(seed);
+        }
+        // A feasibility witness anywhere in this list refutes the
+        // certificate outright, whatever phase-2 then makes of it.
+        let mut have_feasible_witness = false;
         for seed in candidates {
             if !self.recovery_seed_usable(qp, &seed) {
                 continue;
             }
+            if self.original_qp_feasible(qp, &seed, opts.feas_tol) {
+                have_feasible_witness = true;
+            }
+            // Classify the seed rather than handing the inner solve a
+            // cold working set. A cold set marks every row `Inactive`,
+            // *including equalities* — and the warm inner loop steps
+            // with a zero-RHS active-set system, so an equality left
+            // Inactive can never enter the working set and is simply
+            // never enforced. That is the same M5 failure the `solve`
+            // audit exists to catch, and seeding it here made this
+            // recovery useless on any QP with an equality row: phase-2
+            // reliably converged to `Optimal` at a point violating the
+            // equality (by 7.8 on HS071's step QP, against a seed that
+            // satisfied it to 1e-12), failed the feasibility check
+            // below, and fell through to the certificate.
             let ws_rec = QpWarmStart {
-                x: seed,
+                x: seed.clone(),
                 lambda_g: vec![0.0; m],
                 lambda_x: vec![0.0; n],
-                working: WorkingSet::cold(n, m),
+                working: self.working_set_at(qp, &seed, opts.feas_tol),
             };
             // A recovery re-solve that itself fails (a warm-started active-
             // set solve on this degenerate geometry can hit a non-recoverable
@@ -1884,15 +1923,25 @@ impl ParametricActiveSetSolver {
             }
         }
 
-        // Recovery found no feasible point. Only now may we speak to
-        // infeasibility — and only when phase-1 actually CONVERGED to its
-        // minimal-l1 optimum (a genuine certificate). If phase-1 itself
-        // stalled (MaxIter / numerical breakdown) we have no certificate;
-        // report that honest, non-committal status instead of asserting a
-        // confident `Infeasible` we cannot back up.
+        // Recovery found no feasible *optimum*. Only now may we speak to
+        // infeasibility, and only when both premises of the certificate
+        // hold:
+        //
+        // 1. Phase-1 actually CONVERGED to its minimal-l1 optimum. If it
+        //    stalled (MaxIter / numerical breakdown) we have no
+        //    certificate; report that honest, non-committal status
+        //    instead of asserting a confident `Infeasible` we cannot
+        //    back up.
+        // 2. No seed above was itself feasible for the original rows.
+        //    Holding a feasible point while announcing infeasibility is
+        //    a contradiction in terms — phase-2 failing to *optimize*
+        //    from it says nothing about feasibility. Downgrade to the
+        //    same non-committal status rather than certify against a
+        //    witness we are carrying.
         let obj = quad_objective(qp, &x);
         let status = match sol_aug.status {
-            QpStatus::Optimal => QpStatus::Infeasible,
+            QpStatus::Optimal if !have_feasible_witness => QpStatus::Infeasible,
+            QpStatus::Optimal => QpStatus::MaxIter,
             other => other,
         };
 
@@ -1917,6 +1966,130 @@ impl ParametricActiveSetSolver {
             // witness and must not claim unboundedness.
             unbounded_ray: None,
         })
+    }
+
+    /// Working set describing which rows and bounds `x` sits on:
+    /// equality rows are unconditionally `Equality`, and any inequality
+    /// row or variable bound within `feas_tol` of its boundary value is
+    /// snapped to the side it touches.
+    ///
+    /// Mirrors the classification `cold_general_initial` performs on its
+    /// own starting point. Marking equalities matters most: the warm
+    /// inner loop cannot pull an `Inactive` equality into the working
+    /// set, so a warm start that leaves one Inactive is a warm start
+    /// whose equality is unenforced for the whole solve.
+    fn working_set_at(&self, qp: &QpProblem, x: &[Number], feas_tol: Number) -> WorkingSet {
+        let mut working = WorkingSet::cold(qp.n, qp.m);
+        let ax = a_times_x(qp.a, x, qp.m);
+        for (i, c) in working.constraints.iter_mut().enumerate() {
+            if qp.bl[i] == qp.bu[i] {
+                *c = ConsStatus::Equality;
+            } else if qp.bl[i] > NLP_LOWER_BOUND_INF && (ax[i] - qp.bl[i]).abs() <= feas_tol {
+                *c = ConsStatus::AtLower;
+            } else if qp.bu[i] < NLP_UPPER_BOUND_INF && (ax[i] - qp.bu[i]).abs() <= feas_tol {
+                *c = ConsStatus::AtUpper;
+            }
+        }
+        for (i, status) in working.bounds.iter_mut().enumerate() {
+            let l = qp.xl[i];
+            let u = qp.xu[i];
+            let l_finite = l > NLP_LOWER_BOUND_INF;
+            let u_finite = u < NLP_UPPER_BOUND_INF;
+            if l_finite && u_finite && (l - u).abs() <= feas_tol {
+                *status = BoundStatus::Fixed;
+            } else if l_finite && (x[i] - l).abs() <= feas_tol {
+                *status = BoundStatus::AtLower;
+            } else if u_finite && (x[i] - u).abs() <= feas_tol {
+                *status = BoundStatus::AtUpper;
+            }
+        }
+        working
+    }
+
+    /// Minimum-norm feasible point of `qp`'s constraints, or `None`.
+    ///
+    /// Solves the *feasibility-only* phase-1
+    ///
+    /// ```text
+    ///     min  ½‖x‖² + γ·Σ(v_l + v_u)
+    ///     s.t.  bl ≤ A x + v_l − v_u ≤ bu,   xl ≤ x ≤ xu,   v ≥ 0
+    /// ```
+    ///
+    /// — the same elastic reformulation [`Self::solve_elastic`] already
+    /// uses, but with the caller's objective replaced by `½‖x‖²`. That
+    /// substitution is the whole point: it drops `H` and `g`, so the
+    /// subproblem is *strictly convex* no matter how indefinite the
+    /// caller's `H` is, and an active-set solve of a strictly convex QP
+    /// reaches the global minimum. Feasibility is a property of `A`,
+    /// `bl`, `bu` and the box alone, so nothing about the question being
+    /// asked is lost by discarding the objective.
+    ///
+    /// Returns the recovered `x` only when it is genuinely feasible for
+    /// the original rows — the caller uses it both as a phase-2 seed and
+    /// as a witness that refutes an infeasibility certificate. Any
+    /// failure (solver error, residual slacks, a point that misses
+    /// `feas_tol`) yields `None`, which leaves the caller exactly where
+    /// it was: this is a best-effort refutation attempt, never a source
+    /// of new errors.
+    fn convex_feasibility_seed(&mut self, qp: &QpProblem, opts: &QpOptions) -> Option<Vec<Number>> {
+        let n = qp.n;
+        // H := I, g := 0. Identity rather than zero keeps the reduced
+        // Hessian positive definite on every working set, so the KKT
+        // factorization stays well conditioned; a pure LP (H = 0) would
+        // hand the degenerate-vertex problem straight back.
+        let idx: Vec<Index> = (1..=n as Index).collect();
+        let h_space = SymTMatrixSpace::new(n as Index, idx.clone(), idx);
+        let mut h_id = SymTMatrix::new(h_space);
+        h_id.set_values(&vec![1.0; n]);
+        let g_zero = vec![0.0; n];
+        let qp_feas = QpProblem {
+            n,
+            m: qp.m,
+            h: &h_id,
+            g: &g_zero,
+            a: qp.a,
+            bl: qp.bl,
+            bu: qp.bu,
+            xl: qp.xl,
+            xu: qp.xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+
+        let reform = crate::elastic::ElasticReformulation::build(&qp_feas, opts.elastic_gamma);
+        let qp_aug = reform.as_qp();
+        let mut x_orig = vec![0.0; n];
+        for (xi, (&l, &u)) in x_orig.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
+            if l > NLP_LOWER_BOUND_INF && *xi < l {
+                *xi = l;
+            }
+            if u < NLP_UPPER_BOUND_INF && *xi > u {
+                *xi = u;
+            }
+        }
+        let (x_aug, working_aug) = reform.initial_seed(&qp_feas, &x_orig, opts.feas_tol);
+        let ws = QpWarmStart {
+            x: x_aug,
+            lambda_g: vec![0.0; reform.m_aug],
+            lambda_x: vec![0.0; reform.n_aug],
+            working: working_aug,
+        };
+        // Bland's rule for the same reason the caller uses it: a
+        // feasibility hunt is inherently degenerate, and Bland's is the
+        // rule that provably terminates.
+        let mut opts_p1 = opts.clone();
+        opts_p1.anti_cycling = AntiCyclingChoice::Bland;
+        // Direct inner call, as elsewhere in this function: bypasses the
+        // `solve` feasibility audit so this can never re-enter elastic.
+        let sol = if opts_p1.use_schur_updates {
+            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)
+        } else {
+            self.solve_general(&qp_aug, Some(&ws), &opts_p1)
+        }
+        .ok()?;
+
+        let x = sol.x[..n].to_vec();
+        self.original_qp_feasible(qp, &x, opts.feas_tol)
+            .then_some(x)
     }
 
     /// True when `seed` is a sane warm-start point for the phase-2

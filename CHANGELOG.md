@@ -9,6 +9,53 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — active-set SQP declared feasible problems infeasible when started near a solution (#484 follow-up)
+
+- HS071 cold-starts fine from `(1,5,5,1)`, but nudge the start to
+  `x* + 1e-6·e₁` and the SQP died at iteration 0 with
+  `Infeasible_Problem_Detected` — on a problem whose feasible set had
+  not moved. Starting near a solution is the entire premise of warm
+  starting, so this stood directly behind the C-API defect above: fixing
+  the discarded iterate let callers reach the solution's neighbourhood,
+  which is where this waited.
+- The verdict came from the step QP's l1-elastic phase-1 in
+  `pounce_qp::solver::solve_elastic`, and two independent defects had to
+  line up to produce it.
+- **The residual-slack certificate was applied to nonconvex problems.**
+  It is a *global* claim — that the minimal l1 infeasibility is positive
+  — but an active-set solve of a nonconvex elastic problem returns a
+  local KKT point. The SQP's default Hessian is the exact ∇²L, indefinite
+  here (three zeros on its diagonal), and γ = 1e6 amplifies a ~1e-7 slack
+  into ~0.1 of apparent objective, so phase-1 settled at a far box vertex
+  carrying a cancelling `(v_l, v_u)` pair and missed `feas_tol` by a
+  factor of two — 1.95e-9 against 1e-9 — on a QP with points feasible to
+  slack 1.66. Before certifying, `solve_elastic` now runs a
+  feasibility-only phase-1 with the caller's objective replaced by
+  `½‖x‖²`. That subproblem is strictly convex however indefinite `H` is,
+  so its verdict is sound, and feasibility depends only on `A`, the row
+  bounds and the box, so nothing about the question is lost. A feasible
+  point it finds serves as both a phase-2 seed and a witness; the solver
+  no longer announces infeasibility while holding one.
+- **The phase-2 recovery seeded a cold working set.** A cold set marks
+  every row `Inactive`, equalities included, and the warm inner loop
+  cannot pull an Inactive equality into the working set — so the row was
+  never enforced. The recovery that exists to prevent false certificates
+  was therefore inert on any QP with an equality row: it converged to
+  `Optimal` at a point violating HS071's equality by 7.8, failed its own
+  feasibility check, and fell through to the certificate. Recovery seeds
+  are now classified (equalities active, rows and bounds at their
+  boundary snapped) instead of handed a cold set.
+- Genuine infeasibility is still certified — the existing certificate
+  tests are unchanged — and truly infeasible QPs now pay one extra convex
+  phase-1 before the verdict.
+- Regression tests: `crates/pounce-algorithm/tests/sqp_near_solution_start.rs`
+  sweeps 8 perturbation sizes × 4 coordinates around HS071's solution
+  (a single size is not enough — `1e-6` and `1e-3` failed while `1e-8`
+  and `1e-1` happened to survive), and
+  `nonconvex_step_qp_near_nlp_solution_not_false_infeasible` in
+  `pounce-qp` pins the exact step QP with an arithmetically verified
+  feasibility witness.
+
 ### Fixed — `IpoptSetWarmStartWorkingSet` discarded the caller's iterate (#484)
 
 - `IpoptSetWarmStartWorkingSet` eagerly built a full `SqpIterates` and
