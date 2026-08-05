@@ -127,18 +127,28 @@ can change SQP behaviour. Concretely:
   validation regardless of `algorithm`), but the IPM driver never
   reads the resolved values.
 - **IPM warm-start options are silently ignored on the SQP path.**
-  `warm_start_init_point`, `bound_push`, `bound_frac`,
-  `slack_bound_push`, `mult_init_max`, `mu_init`, `mu_target` and
-  the rest of the IPM-side initializer knobs sit on the
-  `AlgorithmBuilder` but are not consulted when the SQP outer
-  loop runs.
+  `bound_push`, `bound_frac`, `slack_bound_push`, `mult_init_max`,
+  `mu_init`, `mu_target` and the rest of the IPM-side initializer
+  knobs sit on the `AlgorithmBuilder` but are not consulted when
+  the SQP outer loop runs. The one exception is
+  `warm_start_init_point`, which the **C ABI** also reads — see the
+  next bullet.
 - **Warm-start payloads are path-local.**
   `IpoptApplication::set_sqp_warm_start(SqpIterates)` /
   `Problem.solve(working_set=…)` / `IpoptSetWarmStartWorkingSet`
   feed the SQP loop only — the IPM never reads `sqp_warm_start`.
-  Symmetrically, `lagrange=` / `zl=` / `zu=` on
-  `Problem.solve` (paired with `warm_start_init_point=yes`) feed
-  the IPM only — the SQP loop never consults them.
+  The *primal* start is not path-local, though: every frontend
+  warm-starts the SQP from the same `x0` it would have cold-started
+  from (`Problem.solve(x0=…)`, the `x` buffer handed to
+  `IpoptSolve`), so supplying a working set never displaces the
+  caller's iterate.
+  Initial multipliers reach the SQP whenever the caller supplied
+  both a working set and duals: `zl=` / `zu=` / `lagrange=` on
+  `Problem.solve`, and — under `warm_start_init_point=yes`, which
+  is what makes them inputs at all in upstream Ipopt —
+  `mult_x_L` / `mult_x_U` / `mult_g` on `IpoptSolve`. Without a
+  working set they feed the IPM only. The SQP packs them signed as
+  `lambda_x = z_l − z_u`.
 - **You can flip between paths across solves on the same
   `Problem` handle.** The application's per-solve setup
   (restoration factory, options snapshot, statistics reset) is

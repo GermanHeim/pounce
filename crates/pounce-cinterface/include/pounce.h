@@ -352,6 +352,18 @@ Bool IpoptGetWorkingSet(
  * codes (or NULL to cold-start constraints). Returns 1 on success,
  * 0 on a NULL problem handle, an out-of-range status code, or
  * both inputs NULL.
+ *
+ * Only the working set is supplied here. The starting iterate stays
+ * the caller's: the next IpoptSolve warm-starts from the `x` buffer
+ * it is passed, exactly as it would without this call. Under
+ * `warm_start_init_point=yes` that solve also seeds the SQP's
+ * multipliers from its `mult_g` / `mult_x_L` / `mult_x_U` buffers
+ * (upstream Ipopt's in/out contract for those arguments); with the
+ * option off — the default — they stay strictly outputs and the
+ * multipliers start at zero.
+ *
+ * The staged working set is consumed by one solve. A following
+ * IpoptSolve without a fresh call here cold-starts its working set.
  */
 Bool IpoptSetWarmStartWorkingSet(
     IpoptProblem            ipopt_problem,

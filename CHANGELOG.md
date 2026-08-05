@@ -9,6 +9,40 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `IpoptSetWarmStartWorkingSet` discarded the caller's iterate (#484)
+
+- `IpoptSetWarmStartWorkingSet` eagerly built a full `SqpIterates` and
+  hard-coded its primal to `x = 0`. `SqpAlgorithm::optimize_with_warm_start`
+  treats a supplied iterate as *the* starting point — it only consults the
+  NLP's `get_starting_x` on the cold branch — so those zeros silently
+  replaced the `x` buffer passed to `IpoptSolve`. The one call documented as
+  "supply a warm-start working set" was also, invisibly, resetting the
+  iterate to the origin.
+- The effect is not a slower warm start, it is a wrong answer: on any
+  problem whose bounds exclude the origin the warm solve returned
+  `Infeasible_Problem_Detected` at iteration 0 and wrote zeros back into
+  `x`. On HS071 (`1 ≤ x ≤ 5`), warm-starting *at the solution with the
+  exact active set* failed where the same solve without the call converged
+  in one iteration. An all-inactive working set — semantically a cold start
+  — failed identically, so the working set's contents never mattered;
+  making the call at all was the defect.
+- The C layer now stages the working set alone and merges it with the real
+  starting point inside `IpoptSolve`, which is the first moment the iterate
+  is known. This is what `pounce.h` already claimed, so no new symbols and
+  no API change. `IpoptSolveWarmStart`, which delegates to the same path,
+  is fixed with it — as is the native GAMS link's state-file warm start.
+- Initial multipliers now reach the SQP too, under
+  `warm_start_init_point=yes` — upstream Ipopt's contract for `mult_g` /
+  `mult_x_L` / `mult_x_U` being inputs rather than pure outputs. With the
+  option off (the default) they stay strictly outputs, so callers passing
+  uninitialized buffers cannot seed the solver with garbage. The SQP packs
+  them signed as `lambda_x = z_l − z_u`, matching the Python path.
+- Regression tests in `crates/pounce-cinterface/tests/warm_start_iterate.rs`
+  reproduce the reporter's four-case HS071 driver (cold / control / warm /
+  warm-with-inactive-set) and assert the converged iterate, not merely a
+  status code. The Rust and Python APIs were never affected — Rust callers
+  populate `SqpIterates.x` themselves, and the Python path was corrected in
+  gh#57.
 ### Changed — options naming unimplemented features are refused, not ignored (#483 follow-up, continuing #191)
 
 - The option registry is a faithful port of Ipopt's, so an `ipopt.opt`

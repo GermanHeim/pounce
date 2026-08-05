@@ -121,6 +121,20 @@ pub struct IpoptProblemInfo {
     /// Used by `GetIpopt{IterCount,SolveTime,...}` accessors. Reset
     /// (cleared) by the next `IpoptSolve` call.
     pub(crate) last_solve: Option<LastSolve>,
+    /// Working set staged by [`IpoptSetWarmStartWorkingSet`], pending
+    /// until the next [`IpoptSolve`].
+    ///
+    /// Only the working set is stored here — deliberately *not* a full
+    /// `SqpIterates`. The primal/dual iterate is not knowable at set
+    /// time; it arrives with the `x` (and, under
+    /// `warm_start_init_point=yes`, `mult_g`/`mult_x_L`/`mult_x_U`)
+    /// buffers passed to `IpoptSolve`. Building the `SqpIterates`
+    /// eagerly here forced the primal to a placeholder — zeros — which
+    /// then *became* the starting iterate, because
+    /// `SqpAlgorithm::optimize_with_warm_start` uses a supplied warm
+    /// iterate instead of querying the NLP for a starting point. The
+    /// merge therefore has to happen inside `IpoptSolve` (gh#484).
+    pub(crate) pending_working_set: Option<pounce_qp::WorkingSet>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -324,6 +338,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             intermediate_cb: None,
             user_scaling: None,
             last_solve: None,
+            pending_working_set: None,
         });
         Box::into_raw(info)
     }
@@ -593,6 +608,47 @@ pub unsafe extern "C" fn IpoptSolve(
             } else {
                 Vec::new()
             };
+
+            // Merge any working set staged by
+            // `IpoptSetWarmStartWorkingSet` with the iterate the caller
+            // actually supplied. This is the point at which the primal
+            // starting point is known, so it is the only correct place
+            // to build the `SqpIterates` (gh#484).
+            //
+            // Duals follow upstream Ipopt's `IpoptSolve` contract:
+            // `mult_g` / `mult_x_L` / `mult_x_U` are inputs only when
+            // `warm_start_init_point=yes`, and out-only otherwise. A
+            // caller who has not opted in may pass uninitialized
+            // buffers, so reading them unconditionally would seed the
+            // SQP with garbage multipliers.
+            if let Some(working) = info.pending_working_set.take() {
+                let seed_duals = matches!(
+                    info.app
+                        .options()
+                        .get_bool_value("warm_start_init_point", ""),
+                    Ok((true, true))
+                );
+                let read_in = |p: *const Number, len: usize| -> Vec<Number> {
+                    if seed_duals && !p.is_null() && len > 0 {
+                        std::slice::from_raw_parts(p, len).to_vec()
+                    } else {
+                        vec![0.0; len]
+                    }
+                };
+                let lambda_g = read_in(mult_g as *const Number, m_us);
+                let z_l = read_in(mult_x_L as *const Number, n_us);
+                let z_u = read_in(mult_x_U as *const Number, n_us);
+                // SQP packs the bound multipliers signed, as
+                // `lambda_x = z_l − z_u` (see `sqp::warm_start`).
+                let lambda_x = z_l.iter().zip(&z_u).map(|(l, u)| l - u).collect();
+                info.app
+                    .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
+                        x: initial_x.clone(),
+                        lambda_g,
+                        lambda_x,
+                        working: Some(working),
+                    });
+            }
 
             let bridge = Rc::new(RefCell::new(CCallbackTnlp {
                 n: info.n,
@@ -1182,23 +1238,21 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                 }
             }
         }
-        // We do *not* know the primal/dual iterate here — the caller
-        // either left them at default zeros (cold) or already wrote
-        // them into `x` before calling `IpoptSolve`. We seed
-        // `SqpIterates` with zeros; `IpoptSolve` will use its `x`
-        // argument as the starting point (the SqpProblemSpec adapter
-        // wraps `IpoptNlp::get_starting_x`, which the C path
-        // initializes from the user-supplied `x` buffer).
-        info.app
-            .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
-                x: vec![0.0; n],
-                lambda_g: vec![0.0; m],
-                lambda_x: vec![0.0; n],
-                working: Some(pounce_qp::WorkingSet {
-                    bounds,
-                    constraints,
-                }),
-            });
+        // Stage the working set only. We do *not* know the
+        // primal/dual iterate here, and we must not invent one:
+        // `SqpAlgorithm::optimize_with_warm_start` treats a supplied
+        // `SqpIterates` as *the* starting iterate and never consults
+        // `get_starting_x` on that branch, so a placeholder `x` would
+        // silently override the `x` buffer the caller hands to
+        // `IpoptSolve`. Zeros here restarted every warm solve from
+        // the origin — outside the bounds on any problem with
+        // `x_l > 0` — and returned `Infeasible_Problem_Detected` at
+        // iteration 0 (gh#484). `IpoptSolve` merges this working set
+        // with the real starting point instead.
+        info.pending_working_set = Some(pounce_qp::WorkingSet {
+            bounds,
+            constraints,
+        });
         TRUE
     }
 }
@@ -1215,6 +1269,7 @@ pub unsafe extern "C" fn IpoptClearWarmStartWorkingSet(ipopt_problem: IpoptProbl
         if ipopt_problem.is_null() {
             return FALSE;
         }
+        (*ipopt_problem).pending_working_set = None;
         (*ipopt_problem).app.clear_sqp_warm_start();
         TRUE
     }
