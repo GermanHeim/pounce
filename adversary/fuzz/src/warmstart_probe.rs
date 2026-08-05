@@ -264,15 +264,17 @@ pub struct SolveOut {
     pub status: Index,
     pub x: Vec<f64>,
     pub obj: f64,
+    /// Whether `IpoptSetWarmStartWorkingSet` accepted the staged set.
+    pub accepted: bool,
 }
 
 /// Solve from `x0`, optionally staging `ws` first.
 pub fn solve(p: &Params, x0: &[f64], ws: Option<(&[i32], &[i32])>) -> SolveOut {
     PARAMS.with(|c| *c.borrow_mut() = p.clone());
     let prob = make_problem(p);
+    let mut accepted = true;
     if let Some((b, c)) = ws {
-        let rc = unsafe { IpoptSetWarmStartWorkingSet(prob, b.as_ptr(), c.as_ptr()) };
-        assert_eq!(rc, 1, "IpoptSetWarmStartWorkingSet rejected a valid set");
+        accepted = unsafe { IpoptSetWarmStartWorkingSet(prob, b.as_ptr(), c.as_ptr()) } == 1;
     }
     let mut x = x0.to_vec();
     let mut g = [0.0; 2];
@@ -293,7 +295,33 @@ pub fn solve(p: &Params, x0: &[f64], ws: Option<(&[i32], &[i32])>) -> SolveOut {
         )
     };
     unsafe { FreeIpoptProblem(prob) };
-    SolveOut { status, x, obj }
+    SolveOut {
+        status,
+        x,
+        obj,
+        accepted,
+    }
+}
+
+/// Whether a status code is a *structurally* valid claim about this
+/// problem, as opposed to merely in range.
+///
+/// `Fixed` / `Equality` assert `x_l == x_u` / `b_l == b_u`, and
+/// `AtLower` / `AtUpper` assert the bound being sat on exists. Those are
+/// claims about the model, not guesses about the active set, and the
+/// model can be consulted. `IpoptSetWarmStartWorkingSet` must reject a
+/// false one rather than silently over-constrain the solve.
+pub fn set_is_structurally_valid(p: &Params, bounds: &[i32], cons: &[i32]) -> bool {
+    // Box: both sides finite, and lo < hi by construction, so nothing is
+    // Fixed and both AtLower and AtUpper exist.
+    if bounds.iter().any(|&c| c == 3) {
+        return false;
+    }
+    // Row 0 `Σx = s` is an equality: every code is structurally fine.
+    // Row 1 `q(x) >= p` has no upper bound, so AtUpper (2) and Equality
+    // (3) are both false claims about it.
+    let _ = p;
+    !(cons[1] == 2 || cons[1] == 3)
 }
 
 /// Working set read back from a converged solve, or `None`.

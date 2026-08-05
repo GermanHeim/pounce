@@ -13,7 +13,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | nlp             |     11 | 2026-08-05 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
-| qp-active-set   |     14 | 2026-08-05 | QP probe now CLEAN (18 -> 0 invariant violations over 400 instances): false-Infeasible, `Optimal` at violating points, and rank-deficiency hard errors all fixed. Still open and unfiled: IpoptSetWarmStartWorkingSet accepts POUNCE_WS_FIXED_OR_EQ for non-fixed vars / non-equality rows |
+| qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     11 | 2026-08-05 | —             |
 | exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
@@ -76,28 +76,42 @@ the pre-gh#484 code.
   Now iterates while the subset shrinks, and falls through to elastic
   rather than surfacing a linear-algebra failure.
 
-** [2026-08-05] C warm-start working-set answer transparency (qp-active-set/c-abi-metamorphic) - FAIL
+** [2026-08-05] C warm-start working-set answer transparency (qp-active-set/c-abi-metamorphic) - PASS (after fixes)
 :PROPERTIES:
 :FAMILY: qp-active-set
 :SOURCE: property-based; the contract stated in crates/pounce-cinterface/include/pounce.h
 :KNOWN_OPTIMAL: n/a — metamorphic, no reference optimum needed
 :POUNCE_OBJECTIVE: n/a
-:POUNCE_STATUS: 1393/1398 comparisons transparent; 5 violations, all from the POUNCE_WS_FIXED_OR_EQ code
+:POUNCE_STATUS: all 1398 comparisons transparent after the fixes; 510 structurally-invalid sets correctly rejected
 :POUNCE_TIME: ~50s / 300 problems
 :ORACLE: metamorphic self-comparison (staged vs unstaged working set), isolated by working-set family
 :ORACLE_OBJECTIVE: n/a
 :ORACLE_TIME: n/a
-:VERDICT: SOLVER_LIMITATION (incomplete input validation; distinct from gh#484)
+:VERDICT: SOLVER_BUG — found and FIXED in this run (validation gap, then a row-order defect underneath it)
 :REPORT: [[file:runs/2026-08-05_qp-active-set_warmstart_transparency.org]]
 :COVERAGE_TARGET: -
 :END:
 
 The gh#484 property (staging a working set must not move the answer) holds
-across all 1398 comparisons. Separately, IpoptSetWarmStartWorkingSet accepts
-POUNCE_WS_FIXED_OR_EQ for a variable whose bounds differ, or a row that is not
-an equality — a false statement about the problem, not a bad guess about the
-active set — returns TRUE, and the solve then silently returns a wrong answer
-on a convex program. Not filed pending maintainer review.
+across all 1398 comparisons. The probe additionally found — and this run
+fixed — two defects in the C working-set API:
+
+- =IpoptSetWarmStartWorkingSet= accepted =POUNCE_WS_FIXED_OR_EQ= for a
+  variable whose bounds differ. A status code that asserts something about
+  the *problem* rather than the active set can be checked against the model,
+  and this one was not: it returned =TRUE=, the solve over-constrained
+  itself, and a *convex* program came back with the wrong optimum.
+- Adding that validation immediately rejected pounce's own
+  =IpoptGetWorkingSet= output, which is how the larger defect surfaced:
+  statuses were indexed by the SQP's internal equalities-first row order,
+  not the caller's. HS071 read back =[Equality, AtLower]= for rows that are
+  =[inequality, equality]= — exactly reversed — so the documented get/set
+  round-trip had been warm-starting every solve with its rows swapped.
+  Silently, because a wrong working set is a wrong *hint*, and hints are
+  answer-preserving.
+
+Probe now PASSes: 510 structurally-invalid sets correctly rejected, answer
+transparency holding on every accepted one.
 
 ** [2026-08-04] Shared-CSE (.nl V-segment) constraint evaluation (nlp/defined-variables) - PASS
 :PROPERTIES:

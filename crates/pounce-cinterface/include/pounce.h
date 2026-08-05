@@ -335,6 +335,14 @@ typedef int IpoptConsStatus;
  * `bound_status_out` must hold at least `n` ints and
  * `cons_status_out` at least `m` ints.
  *
+ * Statuses are indexed by YOUR row and variable numbering. (The SQP
+ * works on a reordered constraint vector internally — equalities
+ * first — and both entry points used to expose that ordering, so a
+ * problem whose first row was an inequality and whose second was an
+ * equality reported the two statuses swapped.) A fixed variable
+ * (x_L == x_U) is absent from the internal problem and is reported as
+ * POUNCE_WS_FIXED_OR_EQ.
+ *
  * Returns 1 (TRUE) on success, 0 (FALSE) when no working set is
  * available — e.g. no SQP solve has been run, the IPM path was
  * used, or the SQP solve converged at iter 0 (no QP solved).
@@ -352,6 +360,19 @@ Bool IpoptGetWorkingSet(
  * codes (or NULL to cold-start constraints). Returns 1 on success,
  * 0 on a NULL problem handle, an out-of-range status code, or
  * both inputs NULL.
+ *
+ * Status codes are validated against the problem, not merely against
+ * the enum's range. POUNCE_WS_FIXED_OR_EQ asserts x_L == x_U for a
+ * variable, or g_L == g_U for a row; POUNCE_WS_AT_LOWER / _AT_UPPER
+ * assert that the bound being sat on is finite. Those are claims about
+ * the model rather than guesses about the active set, so a false one
+ * returns 0 (FALSE) instead of being accepted and acted on. (Accepting
+ * them silently over-constrained the solve and returned a wrong optimum
+ * on a convex program, with this function having returned TRUE.)
+ *
+ * Buffers are indexed by YOUR row and variable numbering, matching what
+ * IpoptGetWorkingSet hands back, so the documented round-trip through
+ * the two is order-preserving.
  *
  * Only the working set is supplied here. The starting iterate stays
  * the caller's: the next IpoptSolve warm-starts from the `x` buffer

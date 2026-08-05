@@ -165,6 +165,7 @@ fn warmstart_fuzz(count: usize, seed: u64) {
     let mut compared = 0usize;
     let mut skipped_baseline = 0usize;
     let mut nonconvex_skipped = 0usize;
+    let mut rejected = 0usize;
 
     for k in 0..count {
         let s = seed.wrapping_add(k as u64 * 0x2000_0003);
@@ -232,6 +233,30 @@ fn warmstart_fuzz(count: usize, seed: u64) {
             let warm = warmstart_probe::solve(&p, &x0, Some((b, c)));
             compared += 1;
 
+            // Property 0: the setter's verdict must match the model. A
+            // code that asserts something false about the problem —
+            // `Fixed` on a variable whose bounds differ, `AtUpper` on a
+            // row with no upper bound — has to be rejected, not accepted
+            // and silently acted on. This is the defect the first run of
+            // this probe found: accepted, TRUE returned, and a *convex*
+            // program came back with the wrong optimum.
+            let should_accept = warmstart_probe::set_is_structurally_valid(&p, b, c);
+            if warm.accepted != should_accept {
+                failures.push(format!(
+                    "seed={s} ws={tag}: IpoptSetWarmStartWorkingSet returned {} \
+                     for a set that is structurally {}",
+                    if warm.accepted { "TRUE" } else { "FALSE" },
+                    if should_accept { "valid" } else { "INVALID" },
+                ));
+                continue;
+            }
+            if !warm.accepted {
+                // Rejected, so no working set was staged: the solve is the
+                // baseline by construction and there is nothing to compare.
+                rejected += 1;
+                continue;
+            }
+
             if warm.status != base.status {
                 failures.push(format!(
                     "seed={s} ws={tag}: status {} without the call, {} with it \
@@ -287,6 +312,7 @@ fn warmstart_fuzz(count: usize, seed: u64) {
     println!("problems={count} seed={seed}");
     println!("comparisons={compared} (skipped {skipped_baseline} whose baseline did not converge)");
     println!("  strict answer-transparency checked on the convex half; {nonconvex_skipped} nonconvex comparisons got the feasibility invariant only");
+    println!("  {rejected} structurally-invalid sets correctly rejected by the setter");
     println!("--- property violations ---");
     if failures.is_empty() {
         println!("  none");

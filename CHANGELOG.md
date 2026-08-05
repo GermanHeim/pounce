@@ -9,6 +9,42 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the C working-set API validated nothing structural, and reported the wrong row order (#484 follow-up, round 4)
+
+- `IpoptSetWarmStartWorkingSet` range-checked its status codes and stopped
+  there. `POUNCE_WS_FIXED_OR_EQ` asserts `x_L == x_U` for a variable, or
+  `g_L == g_U` for a row; `POUNCE_WS_AT_LOWER` / `_AT_UPPER` assert the
+  bound being sat on is finite. Those are claims about the *model*, not
+  guesses about the active set, and the model is right there to check them
+  against. Passing a false one — `FIXED` for a variable whose bounds differ
+  — was accepted, `TRUE` was returned, the solve over-constrained itself,
+  and a **convex** program came back with the wrong optimum. Found by the
+  property-based probe in `adversary/fuzz/`; such codes are now rejected
+  with `FALSE`, which callers already handle.
+- Adding that validation immediately rejected pounce's *own*
+  `IpoptGetWorkingSet` output, which exposed the larger defect underneath:
+  **the statuses were reported in the SQP's internal row order, not the
+  caller's.** The SQP works on a reordered constraint vector — equalities
+  first, inequalities after — and both entry points copied that vector
+  positionally against the caller's indices. On HS071, whose rows are
+  `[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, `IpoptGetWorkingSet` returned
+  `[Equality, AtLower]`: exactly reversed. The documented
+  get → set round-trip was therefore feeding every warm start a working set
+  with its rows swapped. (Silently: a wrong working set is a wrong *hint*,
+  and hints are answer-preserving, so nothing downstream ever complained.)
+- Both entry points now translate between the caller's indexing and the
+  internal one. The permutation is a pure function of the bounds — a row is
+  an equality iff both sides are finite and equal, a variable is dropped iff
+  `x_L == x_U` — so it is reconstructed in the C layer with no plumbing of
+  `BoundClassification` out of `pounce-nlp`. Fixed variables, absent from
+  the internal problem, are reported as `POUNCE_WS_FIXED_OR_EQ`.
+- The GAMS link's state-file warm start (`gams/gams_pounce.c`) goes through
+  these two calls and was reading back mis-ordered statuses; it is fixed by
+  the same change, with no edit on its side.
+- Regression coverage asserts the *values*, not just that the codes are in
+  range: HS071's converged set must read `bounds = [1,0,0,0]`,
+  `constraints = [1,3]`. Confirmed to fail (`[3,1]`) without the change.
+
 ### Fixed — `Optimal` at infeasible points, and a hard error, on the QP cold paths (#484 follow-up, round 3)
 
 - Two defects the property-based probe (`adversary/fuzz/`) had flagged as

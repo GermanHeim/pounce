@@ -292,6 +292,26 @@ fn cold_solve_and_working_set() -> ([Number; N], [IpoptBoundStatus; N], [IpoptCo
         got, 1,
         "IpoptGetWorkingSet returned FALSE after a cold solve"
     );
+    // The statuses must be indexed by the *caller's* rows and variables,
+    // not by the SQP's internal equalities-first ordering. HS071's rows
+    // are `[x₀x₁x₂x₃ >= 25, Σxᵢ² = 40]`, so at the solution row 0 is an
+    // inequality sitting on its lower bound and row 1 is the equality:
+    // `[AtLower, Equality]`. Reported the other way round — `[3, 1]`, as
+    // in the gh#484 reproducer's output — the documented get/set
+    // round-trip feeds the next solve a working set with the two rows'
+    // statuses swapped.
+    assert_eq!(
+        cons,
+        [1, 3],
+        "constraint statuses must be in the caller's row order: row 0 is \
+         the `>= 25` inequality (AtLower = 1), row 1 the equality (3)"
+    );
+    // x₀ = 1 sits on its lower bound; the rest are interior.
+    assert_eq!(
+        bounds,
+        [1, 0, 0, 0],
+        "bound statuses must be in the caller's variable order"
+    );
     unsafe { FreeIpoptProblem(p) };
     for s in bounds.iter().chain(cons.iter()) {
         assert!((0..=3).contains(s), "status code {s} out of range");

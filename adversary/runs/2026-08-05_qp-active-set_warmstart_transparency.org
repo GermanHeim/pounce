@@ -67,7 +67,7 @@ from a converged solve.
 
 * Results
 :PROPERTIES:
-:STATUS: FAIL (one finding, unrelated to gh#484)
+:STATUS: PASS (after the two fixes below)
 :END:
 
 300 problems, seed 20260805 → 1398 comparisons (67 skipped: baseline did not
@@ -105,26 +105,33 @@ feasible set is a polytope and the minimizer is unique.
 
 * Verdict
 
-*SOLVER_LIMITATION — incomplete input validation in `IpoptSetWarmStartWorkingSet`.*
-Distinct from gh#484; not a regression from d352838.
+*SOLVER_BUG — found and fixed in this run.* Two defects, the second only
+visible because the first was fixed.
 
-`POUNCE_WS_FIXED_OR_EQ` (3) does not describe an active set. It asserts
-something about the *problem*: that a variable is fixed (`xl == xu`) or a row
-is an equality (`bl == bu`). Passing it for a variable whose bounds differ is
-not a bad guess, it is a false statement about the problem — and pounce
-accepts it. `IpoptSetWarmStartWorkingSet` returns `TRUE`, the solve
-over-constrains itself, and the caller gets a silently wrong answer on a
-convex program.
+*Unvalidated status codes.* `POUNCE_WS_FIXED_OR_EQ` does not describe an
+active set; it asserts something about the *problem* — that a variable is
+fixed (`x_l == x_u`) or a row is an equality (`b_l == b_u`). `AtLower` /
+`AtUpper` likewise assert the bound being sat on exists. Passing a false one
+was accepted, `TRUE` was returned, the solve over-constrained itself, and a
+*convex* program — unique minimizer — came back with the wrong optimum.
+Codes are now checked against the model, and a false claim returns `FALSE`,
+which callers already handle.
 
-What makes this worth reporting rather than shrugging at as garbage-in: the
-function *does* validate — it returns `FALSE` for an out-of-range code — so a
-caller reasonably reads `TRUE` as "your working set was accepted". The
-validation is one check short of matching that promise. Rejecting code 3 for a
-variable with `xl != xu`, and for a row with `bl != bu`, would convert a silent
-wrong answer into the `FALSE` return the caller is already prepared to handle.
+*Wrong row order.* Adding that validation immediately rejected pounce's own
+`IpoptGetWorkingSet` output, which is how the real defect surfaced: the
+statuses were indexed by the SQP's *internal* constraint ordering —
+equalities first — not the caller's. HS071's rows are
+`[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, and `IpoptGetWorkingSet` returned
+`[Equality, AtLower]`: exactly reversed. The documented get → set round-trip
+had therefore been feeding every warm start a working set with its rows
+swapped, and nothing complained, because a wrong working set is a wrong
+*hint* and hints are answer-preserving. Both entry points now translate
+between the two indexings; the permutation is a pure function of the bounds,
+so it is reconstructed in the C layer and no plumbing crosses a crate
+boundary.
 
-The gh#484 property itself — the one the fix was for — holds across all 1398
-comparisons.
+The probe now passes: 510 structurally-invalid sets correctly rejected, and
+answer transparency holds on every accepted one.
 
 * Coverage effect
 
