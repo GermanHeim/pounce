@@ -3105,7 +3105,7 @@ pub fn feral_config_from_options(
     // wasm32-wasip1 browser and Node hosts used by pounce-wasm have no
     // native threads. FERAL's Rayon-backed factor driver can block while
     // creating its pool, so make the backend explicitly serial.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(target_os = "wasi")]
     {
         cfg.parallel = Some(false);
     }
