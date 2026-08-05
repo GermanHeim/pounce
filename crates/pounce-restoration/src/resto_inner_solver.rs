@@ -155,6 +155,9 @@ fn apply_outer_resto_options(rb: &mut RestoAlgorithmBuilder, ab: &AlgorithmBuild
     rb.bound_mult_reset_threshold = ab.resto.bound_mult_reset_threshold;
     rb.constr_mult_reset_threshold = ab.resto.constr_mult_reset_threshold;
     rb.required_infeasibility_reduction = ab.resto.required_infeasibility_reduction;
+    rb.evaluate_orig_obj_at_resto_trial = ab.resto.evaluate_orig_obj_at_resto_trial;
+    rb.expect_infeasible_problem = ab.resto.expect_infeasible_problem;
+    rb.start_with_resto = ab.resto.start_with_resto;
 }
 
 /// Resolve the κ_resto the restoration sub-solve's early-exit guard runs

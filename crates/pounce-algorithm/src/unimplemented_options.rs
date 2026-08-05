@@ -26,10 +26,18 @@
 //! 2. the *feature* it configures is absent too.
 //!
 //! Both are needed. An option whose name is unread but whose feature
-//! runs — `max_resto_iter`, the `limited_memory_*` tail, the corrector
-//! knobs — is a missing read site, not a missing feature; refusing those
-//! would fail solves whose current answers are already correct. They are
+//! runs — the `limited_memory_*` tail, the corrector knobs — is a
+//! missing read site, not a missing feature; refusing those would fail
+//! solves whose current answers are already correct. They are
 //! deliberately **not** here; wiring them is the other half of the work.
+//!
+//! A third shape turned up while wiring that half and belongs to
+//! neither: an option for a *sub-capability* of a feature that does run.
+//! `max_resto_iter` and `resto_failure_feasibility_threshold` are the
+//! examples — restoration runs, but there is no iteration cap or failure
+//! threshold to point a read site at, so honouring them means building
+//! the capability, not adding a line. They are left out of this table
+//! until that call is made, and so remain silent for now.
 //!
 //! The clearest case is the penalty line search. pounce implements
 //! `IpPenaltyLSAcceptor` (`line_search_method=penalty`), so its knobs
@@ -400,6 +408,48 @@ mod tests {
         let mut app = crate::application::IpoptApplication::new();
         app.initialize().unwrap();
         assert!(!app.algorithm_builder_from_options().fast_step_computation);
+    }
+
+    /// The restoration switches wired in gh#483 / #191 round 2. Each
+    /// field was already consumed by `RestoAlgorithmBuilder`; only the
+    /// read site was missing, so setting the option did nothing. The
+    /// assertion that matters is that the value *reaches the builder* —
+    /// a read site populating a field nobody consumes would be a fresh
+    /// silent no-op, the very defect this work removes.
+    #[test]
+    fn the_restoration_switches_reach_the_builder() {
+        for (key, default_on) in [
+            ("evaluate_orig_obj_at_resto_trial", true),
+            ("expect_infeasible_problem", false),
+            ("start_with_resto", false),
+        ] {
+            let mut app = crate::application::IpoptApplication::new();
+            app.initialize().unwrap();
+            let resto = app.algorithm_builder_from_options().resto;
+            let got = match key {
+                "evaluate_orig_obj_at_resto_trial" => resto.evaluate_orig_obj_at_resto_trial,
+                "expect_infeasible_problem" => resto.expect_infeasible_problem,
+                _ => resto.start_with_resto,
+            };
+            assert_eq!(got, default_on, "{key}: default changed");
+
+            // Flip it and check the flip lands.
+            let flipped = if default_on { "no" } else { "yes" };
+            let mut app = crate::application::IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!("{key} {flipped}\n"))
+                .unwrap();
+            let resto = app.algorithm_builder_from_options().resto;
+            let got = match key {
+                "evaluate_orig_obj_at_resto_trial" => resto.evaluate_orig_obj_at_resto_trial,
+                "expect_infeasible_problem" => resto.expect_infeasible_problem,
+                _ => resto.start_with_resto,
+            };
+            assert_eq!(
+                got, !default_on,
+                "{key}={flipped} never reached the builder"
+            );
+        }
     }
 
     /// Options whose *feature* runs and only whose read site is missing

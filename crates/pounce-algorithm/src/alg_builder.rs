@@ -693,6 +693,20 @@ pub struct RestoOptions {
     /// (`κ_resto` in `IpRestoConvCheck.cpp:58`). `0` disables the guard,
     /// i.e. restoration runs until the sub-NLP itself converges.
     pub required_infeasibility_reduction: Number,
+    /// `evaluate_orig_obj_at_resto_trial` — evaluate the *original*
+    /// objective at every restoration trial point, so an iterate the
+    /// restoration problem likes but the original cannot evaluate is
+    /// rejected there rather than after the phase exits. Upstream default
+    /// `yes`. `RestoAlgorithmBuilder` has consumed this since it landed;
+    /// only the read site was missing (gh#483, #191 round 2).
+    pub evaluate_orig_obj_at_resto_trial: bool,
+    /// `expect_infeasible_problem` — enter restoration sooner and demand
+    /// more infeasibility reduction before leaving it. Upstream default
+    /// `no`. Same story: consumed, never read.
+    pub expect_infeasible_problem: bool,
+    /// `start_with_resto` — switch to restoration in the first iteration.
+    /// Upstream default `no`. Same story.
+    pub start_with_resto: bool,
 }
 
 impl Default for RestoOptions {
@@ -703,6 +717,9 @@ impl Default for RestoOptions {
             resto_penalty_parameter: 1e3,
             resto_proximity_weight: 1.0,
             required_infeasibility_reduction: 0.9,
+            evaluate_orig_obj_at_resto_trial: true,
+            expect_infeasible_problem: false,
+            start_with_resto: false,
         }
     }
 }

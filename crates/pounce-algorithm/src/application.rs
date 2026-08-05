@@ -3062,6 +3062,24 @@ impl IpoptApplication {
         if let Some(v) = read_num("required_infeasibility_reduction") {
             builder.resto.required_infeasibility_reduction = v;
         }
+        // gh#483 / #191 round 2: three restoration switches whose fields
+        // `RestoAlgorithmBuilder` has consumed all along — the read site
+        // was the only missing piece, so setting them did nothing.
+        let read_yes = |key: &str| -> Option<bool> {
+            match self.options.get_string_value(key, "") {
+                Ok((v, true)) => Some(v.eq_ignore_ascii_case("yes")),
+                _ => None,
+            }
+        };
+        if let Some(v) = read_yes("evaluate_orig_obj_at_resto_trial") {
+            builder.resto.evaluate_orig_obj_at_resto_trial = v;
+        }
+        if let Some(v) = read_yes("expect_infeasible_problem") {
+            builder.resto.expect_infeasible_problem = v;
+        }
+        if let Some(v) = read_yes("start_with_resto") {
+            builder.resto.start_with_resto = v;
+        }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {
