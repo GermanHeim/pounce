@@ -1,0 +1,145 @@
+#+TITLE: Adversary Run: l1-elastic infeasibility certificate under nonconvex step QPs
+#+DATE: <2026-08-05>
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: randomized nonconvex QP, feasibility-certificate soundness
+:SOURCE: property-based; instances generated with a constructive verdict, adjudicated by scipy.optimize.linprog (HiGHS)
+:KNOWN_OPTIMAL: n/a — the property under test is the *status*, not the optimum
+:N_VARIABLES: 2-6
+:N_CONSTRAINTS: 1-5 general rows + box
+:SELECTED_BY: topic-guidance (adversarial review of the gh#484 fixes)
+:COVERAGE_TARGET: crates/pounce-qp/src/solver.rs (solve_elastic) — the code changed in f5b1fbc
+:END:
+
+Not a single named problem but a generator. Each instance is a QP
+
+\[
+\min_x\ \tfrac12 x^\top H x + g^\top x \quad\text{s.t.}\quad b_l \le A x \le b_u,\ x_l \le x \le x_u
+\]
+
+built to carry its own verdict, so no solver is needed to know the answer:
+
+- *Feasible instances* fix a witness \(x_w\) in the box and *derive* the row
+  bounds from \(A x_w\). Feasibility is then a matter of construction.
+- *Infeasible instances* are infeasible by exact arithmetic: either two
+  identical rows required to equal different values, or a row required to
+  exceed \(\max_{\text{box}} a^\top x\), which for a linear function over a box
+  is attained at a corner and so is computable exactly.
+
+`H` is deliberately indefinite with zero diagonal entries — the exact-∇²L
+shape that makes the elastic subproblem nonconvex, which is the premise the
+certificate needs and does not have. The other knobs reproduce the geometry
+that broke it: near-parallel rows (tangency), row scaling by \(10^{\pm6}\)
+(γ = 1e6 is the amplifier), witnesses snapped onto bounds (degenerate active
+sets), and boxes translated far from the origin (the elastic seed is 0
+projected into the box).
+
+** Invariants asserted
+
+1. *Soundness.* `Infeasible` is a Farkas claim. On an instance carrying a
+   witness it is false, whatever the numerics did.
+2. *Consistency.* `Optimal` at a point violating the problem is a wrong
+   answer even when the problem is feasible.
+3. *Completeness* (quality, not correctness). On provably infeasible
+   instances, `Optimal` is wrong; a non-committal status is merely weaker.
+   Tracked separately so that making certification harder shows up as a
+   measured cost rather than a silent one.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+400 instances, seed 20260805 (257 feasible / 143 infeasible).
+
+| Metric                                    | pre-fix (d352838) | post-fix (f5b1fbc) |
+|-------------------------------------------+-------------------+--------------------|
+| false `Infeasible` on feasible instances  | 13 / 257 (5.1%)   | *6 / 257 (2.3%)*   |
+| `Optimal` at an infeasible point          | 0                 | 0                  |
+| `Optimal` on a provably infeasible one    | 0                 | 0                  |
+| genuine infeasibility certified           | 133 / 143 (93.0%) | *133 / 143 (93.0%)* |
+| non-committal on infeasible               | 10 / 143          | 10 / 143           |
+| solver `Err`                              | 1                 | 1                  |
+
+Two things worth stating plainly. The fix cut false certificates by 54%, and
+it cost *nothing* in certification power — the worry that a harder-to-issue
+certificate would blunt genuine infeasibility detection is measurably
+unfounded on this distribution, to the instance. But it did not eliminate the
+defect: six feasible instances are still certified infeasible.
+
+** The residual class
+
+All six have *two or more equality rows*. Among the 257 feasible instances,
+43 have ≥2 equality rows, so the residual failure rate is 6/43 = 14% there and
+0/214 elsewhere — the split is total.
+
+| seed         | n | m | #eq | cond(A)  | cond(A_eq) | max abs cos between eq rows |
+|--------------+---+---+-----+----------+------------+-----------------------------|
+| 20260805     | 6 | 4 |   2 | 1.83e+09 |   2.45e+05 | 1.0000000000                |
+| 1899309004   | 4 | 5 |   2 | 8.42e+05 |   4.06e+00 | 0.3123569059                |
+| 9415501800   | 4 | 5 |   2 | 7.32e+06 |   3.26e+00 | 0.7487310268                |
+| 20421355537  | 5 | 4 |   3 | 3.31e+11 |   3.30e+11 | 1.0000000000                |
+| 66860689598  | 5 | 4 |   2 | 6.19e+12 |   1.96e+07 | 1.0000000000                |
+| 68471302340  | 3 | 3 |   2 | 2.30e+06 |   2.10e+01 | 0.8123632127                |
+
+Near-parallelism is *not* the discriminator: seed 1899309004 has
+`cond(A_eq) = 4.06` and a cosine of 0.31 between its two equality rows — a
+perfectly ordinary pair. Having more than one equality row is what matters.
+
+* Cross-check / Verification
+
+*The generator was adjudicated before the solver was accused.* Every one of
+the 400 instances was re-decided by `scipy.optimize.linprog` (HiGHS) as a pure
+LP feasibility question — the objective plays no part in feasibility, so this
+is an exact reformulation, not an approximation:
+
+: instances adjudicated: 400
+: generator confirmed by scipy: 400
+: generator contradicted by scipy: 0
+: VERDICT: GENERATOR SOUND
+
+HiGHS agrees with the constructive verdict on all 400, including all six that
+pounce certifies infeasible. The generator additionally self-checks each
+witness against its own instance before the instance is used.
+
+*Tolerance was ruled out as the explanation.* If the six were merely at the
+f64 noise floor, loosening `feas_tol` would clear them. Sweeping it:
+
+| seed        | 1e-9        | 1e-8       | 1e-7       | 1e-6       | 1e-4    |
+|-------------+-------------+------------+------------+------------+---------|
+| 1899309004  | Infeasible  | Optimal    | Optimal    | Optimal    | Optimal |
+| 68471302340 | Infeasible  | Infeasible | Infeasible | Infeasible | Optimal |
+
+Seed 1899309004 is a genuine tolerance-boundary case: one notch looser and it
+is fine. Seed 68471302340 is not — it still certifies infeasibility at
+`feas_tol = 1e-6`, five orders of magnitude looser than default, on data whose
+largest coefficient is 2.73 and largest right-hand side 0.91. No tolerance
+argument survives that.
+
+* Verdict
+
+*SOLVER_BUG (residual, pre-existing, narrowed by f5b1fbc).*
+
+The fix in f5b1fbc is a real and measurable improvement — 13 → 6 false
+certificates with no loss of certification power — but it is incomplete. A
+feasible QP with two or more equality rows can still be certified infeasible,
+and at tolerances loose enough to rule out numerical noise as the cause.
+
+The mechanism is consistent with what the fix addressed. `convex_feasibility_seed`
+only refutes a certificate when its own phase-1 both converges *and* lands
+inside `feas_tol` of the original rows. With several equality rows the
+augmented KKT block is close to rank-deficient, that phase-1 does not reach a
+qualifying point, no witness is produced, and the certificate is issued
+exactly as before. The fix removed the cases where a witness was findable; it
+did not make the witness always findable.
+
+Not filed as an issue pending the maintainer's call — see the session summary.
+
+* Coverage effect
+
+Not a coverage-driven run; no coverage report exists in this environment
+(fresh clone, no instrumented build). The probe does exercise the
+`solve_elastic` recovery path on 400 randomized instances, which is the code
+f5b1fbc changed.
