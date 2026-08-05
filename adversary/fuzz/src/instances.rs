@@ -108,13 +108,21 @@ impl Instance {
             None => "null".to_string(),
         };
         format!(
-            r#"{{"seed":{},"kind":"{}","truth":"{:?}","proof":{:?},"n":{},"m":{},"g":{},"a":{},"bl":{},"bu":{},"xl":{},"xu":{},"witness":{}}}"#,
+            r#"{{"seed":{},"kind":"{}","truth":"{:?}","proof":{:?},"n":{},"m":{},"h":{},"g":{},"a":{},"bl":{},"bu":{},"xl":{},"xu":{},"witness":{}}}"#,
             self.seed,
             self.kind,
             self.truth,
             self.proof,
             self.n,
             self.m,
+            {
+                let t: Vec<String> = self
+                    .h
+                    .iter()
+                    .map(|(i, j, v)| format!("[{i},{j},{v:.17e}]"))
+                    .collect();
+                format!("[{}]", t.join(","))
+            },
             arr(&self.g),
             arr(&self.a),
             arr(&self.bl),

@@ -2565,3 +2565,202 @@ fn penalty_bias_is_not_an_infeasibility_certificate() {
          the penalty bias is not a Farkas certificate"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// The cold fast paths returned `Optimal` at infeasible points.
+//
+// `solve` has a feasibility audit (M5) for solves that converge to a
+// constraint-violating point and label it `Optimal` — but it guarded only
+// the `solve_general` branch. The three cold fast paths at the bottom
+// (`solve_equality_only`, `solve_box_constrained`,
+// `solve_equality_plus_bounds`) returned straight to the caller, and
+// nothing else checked them.
+//
+// The smallest possible infeasible QP falls into exactly that gap:
+// `aᵀx = c₁` and `aᵀx = c₂` with `c₁ ≠ c₂` is all-equality, so it has no
+// general inequality and takes no warm start, and `solve` routes it to
+// `solve_equality_plus_bounds` — which came back `Optimal` at a point
+// violating both rows by 2.9, at every tolerance from 1e-9 to 1e-2.
+//
+// Data is the exact instance the property-based probe in `adversary/fuzz/`
+// found. Hand-built equivalents do *not* reproduce it: the free variable
+// (`x₀` unbounded below) and the indefinite `H` are both load-bearing, and
+// a tidy bounded version with a PSD Hessian passes on the unfixed solver.
+#[test]
+fn inconsistent_equalities_are_not_reported_optimal() {
+    let n = 2usize;
+    let m = 2usize;
+
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2, 2], vec![1, 1, 2]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[-2.7913153552489676, -0.9863948932143245, 0.0]);
+    let g = vec![-5.466878209095613, 8.48954475911776];
+
+    // Both rows are the same functional. It cannot take two values.
+    let row = [-2.5934781082241516_f64, 1.957129692504897];
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1, 2, 2], vec![1, 2, 1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[row[0], row[1], row[0], row[1]]);
+
+    let bl = vec![-5.590699548529652_f64, 0.20152723379558513];
+    let bu = bl.clone();
+    let xl = vec![NLP_LOWER_BOUND_INF, -2.3141811629330657];
+    let xu = vec![3.5443427682446997_f64, 3.3442587552272114];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+
+    // The point is that `Optimal` must not be claimed at a point that
+    // violates the problem. A non-committal status is honest here;
+    // certifying `Infeasible` would be better still. Claiming a solution
+    // is the one thing that is wrong.
+    if sol.status == QpStatus::Optimal {
+        let res: Vec<f64> = (0..m)
+            .map(|i| row[0] * sol.x[0] + row[1] * sol.x[1] - bl[i])
+            .collect();
+        panic!(
+            "returned Optimal on an inconsistent equality system; \
+             row residuals {res:?} at x = {:?}",
+            sol.x
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// A rank-deficient equality block escaped as a hard error.
+//
+// `cold_general_initial` prunes a rank-deficient equality set to an
+// independent subset and retries. The prune was single-shot, and
+// `independent_active_subset` is a *numerical* rank test whose answer
+// depends on the shift the factorization settled at — so the pruned subset
+// could itself be rejected at the next δ. Here it was: four equality rows
+// pruned to two, and the retry's own masked-deficiency guard then found
+// only one of those two independent. The retry's `?` propagated
+// `LinearSolverFailure("pinned KKT constraint block is rank-deficient …")`
+// to the caller — a hard error where the elastic path had a perfectly good
+// answer to give.
+//
+// Again the probe's exact instance. The 1e6 row scaling and the free `x₀`
+// are what push the rank test into disagreeing with itself; a uniformly
+// scaled, fully bounded version does not reproduce it.
+#[test]
+fn repeatedly_rank_deficient_equalities_do_not_error() {
+    let n = 5usize;
+    let m = 4usize;
+
+    let mut h_irows = Vec::new();
+    let mut h_jcols = Vec::new();
+    for i in 0..n {
+        for j in 0..=i {
+            h_irows.push(i as i32 + 1);
+            h_jcols.push(j as i32 + 1);
+        }
+    }
+    let h_space = SymTMatrixSpace::new(n as i32, h_irows, h_jcols);
+    let mut h = SymTMatrix::new(h_space);
+    #[rustfmt::skip]
+    h.set_values(&[
+        -1.6548767961092978,
+         2.064557047637633,  -3.650251250460926,
+         0.0,                -2.55214992299658,   0.0,
+         0.0,                -2.6125066492612103, 0.0, 2.686020283211974,
+        -2.702216601033217,  -0.3677125985327869, 2.1594310219402475,
+         1.1562910960930806,  0.0,
+    ]);
+
+    // Rows 0 and 2 are identical; row 1 is scaled ~1e6 against the rest.
+    #[rustfmt::skip]
+    let vals: [f64; 20] = [
+         2.4098251714297536, 1.4030741454122708, 1.2932054542069062,
+        -2.6693323747422992, 0.19214071677022115,
+        -1772507.6707250883, 952702.1423816633,  2701610.653564656,
+         2181005.4733584146, 957385.1779632831,
+         2.4098251714297536, 1.4030741454122708, 1.2932054542069062,
+        -2.6693323747422992, 0.19214071677022115,
+        -2.5443770494332574, -1.8411314201953106, -1.4152153780449328,
+         2.3312007522090887, -2.6027526355747406,
+    ];
+    let mut a_irows = Vec::new();
+    let mut a_jcols = Vec::new();
+    for i in 0..m {
+        for j in 0..n {
+            a_irows.push(i as i32 + 1);
+            a_jcols.push(j as i32 + 1);
+        }
+    }
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, a_irows, a_jcols);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&vals);
+
+    let bl = vec![
+        84.05103893366257_f64,
+        2663155354.6247716,
+        433.9344680755099,
+        -1383.6721463359931,
+    ];
+    let bu = bl.clone();
+    let xl = vec![
+        NLP_LOWER_BOUND_INF,
+        388.1155777186471,
+        389.1225518670195,
+        389.0009787098146,
+        392.18204924864364,
+    ];
+    let xu = vec![
+        NLP_UPPER_BOUND_INF,
+        395.0630589179779,
+        394.1037660233893,
+        395.7242293003824,
+        394.0346410306801,
+    ];
+    let g = vec![
+        -5.805815991484248_f64,
+        -3.5780398581700146,
+        2.9453592415953995,
+        5.212960644579471,
+        9.266168148934472,
+    ];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    // The contract is that it returns *an answer*. A rank-deficient active
+    // set is the solver's to prune, not the caller's to receive as a
+    // linear-algebra failure.
+    let sol = solver
+        .solve(&qp, None, &QpOptions::default())
+        .expect("rank-deficient equalities must not surface as a hard error");
+
+    // And whatever it says, `Optimal` has to mean feasible. (Rows 0 and 2
+    // are identical with different right-hand sides, so nothing can be.)
+    assert_ne!(
+        sol.status,
+        QpStatus::Optimal,
+        "returned Optimal on an inconsistent equality system at x = {:?}",
+        sol.x
+    );
+}

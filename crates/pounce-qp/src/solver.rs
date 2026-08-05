@@ -1609,22 +1609,41 @@ impl ParametricActiveSetSolver {
         // combination of the kept ones, so at the constraint-consistent
         // cold point it is automatically satisfied — the feasible set is
         // unchanged, only the rank deficiency is removed.
-        let (x, kept_eq): (Vec<Number>, Vec<usize>) =
-            match self.factor_pinned_primal(qp, &eq_rows, &eq_targets, &[], &[], opts) {
-                Ok(x) => (x, eq_rows.clone()),
+        // The prune is a *loop*, not a single retry. `independent_active_subset`
+        // is a numerical rank test, and its answer depends on the shift the
+        // factorization settled at — so a subset it called independent at one δ
+        // can be rejected at the next. Pruning 4 equality rows to 2 and
+        // factoring those 2 hit exactly that: the retry's own masked-deficiency
+        // guard found only 1 of them independent, and the single-shot `?`
+        // turned a solvable QP into a hard `LinearSolverFailure` for the user.
+        //
+        // Iterate while the subset keeps shrinking (so termination is
+        // guaranteed — it is a strictly decreasing set), and if it still will
+        // not factor, return `Ok(None)`. That is this function's existing
+        // "fall through to elastic mode" signal, and elastic is precisely the
+        // general recovery for a cold start that cannot be formed. An `Err`
+        // here is the one outcome that helps nobody: the caller has a
+        // perfectly good next thing to try.
+        let mut rows: Vec<usize> = eq_rows.clone();
+        let mut targets: Vec<Number> = eq_targets.clone();
+        let (x, kept_eq): (Vec<Number>, Vec<usize>) = loop {
+            match self.factor_pinned_primal(qp, &rows, &targets, &[], &[], opts) {
+                Ok(x) => break (x, rows),
                 Err(e) if e.is_recoverable_factorization_failure() => {
-                    let (kept, _) = independent_active_subset(&mut self.linsol, qp, &eq_rows, &[]);
-                    if kept.len() == eq_rows.len() {
-                        // Full row rank already — the failure is not a
-                        // rank deficiency this guard can repair.
-                        return Err(e);
+                    let (kept, _) = independent_active_subset(&mut self.linsol, qp, &rows, &[]);
+                    if kept.len() >= rows.len() {
+                        // Not shrinking: either genuinely full rank (so the
+                        // failure is something this guard cannot repair) or the
+                        // rank test disagrees with the factorization. Either
+                        // way, hand it to elastic rather than to the user.
+                        return Ok(None);
                     }
-                    let kept_targets: Vec<Number> = kept.iter().map(|&r| qp.bl[r]).collect();
-                    let x = self.factor_pinned_primal(qp, &kept, &kept_targets, &[], &[], opts)?;
-                    (x, kept)
+                    targets = kept.iter().map(|&r| qp.bl[r]).collect();
+                    rows = kept;
                 }
                 Err(e) => return Err(e),
-            };
+            }
+        };
         *n_refactor += 1;
 
         // Row feasibility check — any violation routes the caller to
@@ -1719,6 +1738,60 @@ impl ParametricActiveSetSolver {
         }
 
         Ok(Some((x, working)))
+    }
+
+    /// Feasibility audit (M5) + elastic repair, applied to whatever a
+    /// solve path produced.
+    ///
+    /// A solve that converged to a constraint-violating point and labelled
+    /// it `Optimal` is a wrong answer, however it got there. Two routes
+    /// reach that state: the warm-start inner loop steps with a zero-RHS
+    /// active-set system, so caller-marked-active residuals are frozen and
+    /// an `Inactive` equality can never enter the working set; and the
+    /// cold fast paths never run that loop at all, so an inconsistent
+    /// equality system passes straight through them.
+    ///
+    /// On violation, recover through elastic mode. `solve_elastic`
+    /// recurses through `solve_general` / `solve_general_schur` *directly*,
+    /// bypassing `solve`, and seeds a slack-feasible augmented problem —
+    /// so the recursive solve is never re-audited and the recovery cannot
+    /// loop.
+    fn audit_and_repair(
+        &mut self,
+        qp: &QpProblem,
+        sol: QpSolution,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        if !matches!(sol.status, QpStatus::Optimal) || point_is_feasible(qp, &sol.x, opts.feas_tol)
+        {
+            return Ok(sol);
+        }
+        // Never-regress on the recovery. Elastic phase-1 is a *repair* for a
+        // solve that converged to a constraint-violating point, but it is not
+        // guaranteed to land somewhere better, and when it does not the
+        // substitution is destructive: on Maros-Meszaros `QADLITTL` (optimum
+        // 480319) the audited iterate sits at 500918 with a small violation,
+        // and the elastic result that replaced it was 8.07 — the elastic seed
+        // (origin projected into the box), essentially no answer at all. The
+        // symptom from outside was a *larger* `max_iter` producing a far worse
+        // objective, because only the bigger budget got far enough to reach
+        // `Optimal` and trip this audit.
+        //
+        // Keep whichever point is less infeasible. Elastic still wins whenever
+        // it does its job — driving the slacks out — which is the case this
+        // path exists for.
+        let before = max_violation(qp, &sol.x);
+        let repaired = self.solve_elastic(qp, opts)?;
+        let after = max_violation(qp, &repaired.x);
+        if after <= before {
+            return Ok(repaired);
+        }
+        // Repair regressed feasibility: keep the audited point, but do not
+        // dress it up as `Optimal` — it violates constraints, which is exactly
+        // what the audit established.
+        let mut kept = sol;
+        kept.status = QpStatus::MaxIter;
+        Ok(kept)
     }
 
     /// l1-elastic mode — §4.3. Builds an
@@ -3542,49 +3615,27 @@ impl QpSolver for ParametricActiveSetSolver {
             // a slack-feasible augmented problem — so the recursive solve
             // is never re-audited and the recovery cannot loop. Feasible
             // warm/cold results pass untouched.
-            if matches!(sol.status, QpStatus::Optimal)
-                && !point_is_feasible(qp, &sol.x, opts.feas_tol)
-            {
-                // Never-regress on the recovery. Elastic phase-1 is a *repair*
-                // for a solve that converged to a constraint-violating point,
-                // but it is not guaranteed to land somewhere better, and when it
-                // does not the substitution is destructive: on Maros-Meszaros
-                // `QADLITTL` (optimum 480319) the audited iterate sits at
-                // 500918 with a small violation, and the elastic result that
-                // replaced it was 8.07 — the elastic seed (origin projected
-                // into the box), essentially no answer at all. The symptom from
-                // outside was a *larger* `max_iter` producing a far worse
-                // objective, because only the bigger budget got far enough to
-                // reach `Optimal` and trip this audit.
-                //
-                // Keep whichever point is less infeasible. Elastic still wins
-                // whenever it does its job — driving the slacks out — which is
-                // the case this path exists for.
-                let before = max_violation(qp, &sol.x);
-                let repaired = self.solve_elastic(qp, opts)?;
-                let after = max_violation(qp, &repaired.x);
-                if after <= before {
-                    return Ok(repaired);
-                }
-                // Repair regressed feasibility: keep the audited point, but do
-                // not dress it up as `Optimal` — it violates constraints, which
-                // is exactly what the audit established.
-                let mut kept = sol;
-                kept.status = QpStatus::MaxIter;
-                return Ok(kept);
-            }
-            return Ok(sol);
+            return self.audit_and_repair(qp, sol, opts);
         }
 
         // Cold-start fast paths for problems with no general
         // inequalities and no warm-start.
-        if is_pure_equality_no_bounds(qp) {
-            return self.solve_equality_only(qp, opts);
-        }
-        if is_pure_box(qp) {
-            return self.solve_box_constrained(qp, opts);
-        }
-        self.solve_equality_plus_bounds(qp, opts)
+        //
+        // Audited too. These return a point without ever consulting the
+        // active-set loop, so nothing else checks them — and an
+        // inconsistent equality system is exactly what they cannot see:
+        // the smallest possible infeasible QP, `aᵀx = c₁` and `aᵀx = c₂`
+        // with `c₁ ≠ c₂` and a box, is all-equality with bounds, lands in
+        // `solve_equality_plus_bounds`, and came back `Optimal` at a point
+        // violating both rows by 2.9. Every tolerance, every version.
+        let sol = if is_pure_equality_no_bounds(qp) {
+            self.solve_equality_only(qp, opts)?
+        } else if is_pure_box(qp) {
+            self.solve_box_constrained(qp, opts)?
+        } else {
+            self.solve_equality_plus_bounds(qp, opts)?
+        };
+        self.audit_and_repair(qp, sol, opts)
     }
 
     fn solve_parametric(

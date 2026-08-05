@@ -62,13 +62,13 @@ numbers below are on a harder distribution than the first draft's.
 |-------------------------------------------+-------------+---------+---------------|
 | false `Infeasible` on feasible instances  | 14          | 9       | *0*           |
 | `Optimal` at an infeasible point          | 0           | 0       | 0             |
-| `Optimal` on a provably infeasible one    | 1           | 1       | 1             |
+| `Optimal` on a provably infeasible one    | 1           | 1       | *0*           |
 | genuine infeasibility certified           | 118/143     | 118/143 | 108/143       |
-| solver `Err`                              | 3           | 3       | 3             |
+| solver `Err`                              | 3           | 3       | *0*           |
 
-The false-certificate defect is gone. The `Optimal`-on-infeasible case
-(seed 36795918414) and the three `Err` cases are *pre-existing* — present
-identically in all three columns — and are not touched by this work.
+All three defects are gone. The `Optimal`-on-infeasible case and the three
+`Err` cases are *pre-existing* — identical in the first two columns — and
+were fixed in the same session; see the Verdict below.
 
 ** What round 1 got wrong
 
@@ -155,16 +155,18 @@ argument survives that.
 certified infeasible, on a distribution deliberately built around the
 geometry that broke it.
 
-Two findings remain open and are *not* regressions — they reproduce
-identically on the pre-#484 code:
+The two findings this report originally left open were then fixed as well,
+taking the probe to a clean sweep: *zero* invariant violations over 400
+instances, against 18 when the series began. Neither was a #484 regression
+— both reproduce on the pre-#484 code.
 
-- `OptimalOnInfeasible` (seed 36795918414): `Optimal` returned at a point
-  violating a contradictory-equality instance by 2.9. A wrong answer, in
-  the same family as the defects fixed here but on a different path.
-- Three instances where the solver returns `Err`
-  (`pinned KKT constraint block is rank-deficient`).
-
-Neither is filed pending the maintainer's call.
+- `OptimalOnInfeasible` (seed 36795918414): `solve`'s M5 feasibility audit
+  guarded only the `solve_general` branch, so the three cold fast paths
+  returned unaudited. Fixed by applying the audit to every path.
+- Three `Err` returns: the rank-deficiency prune in
+  `cold_general_initial` was single-shot, and the numerical rank test can
+  reject its own pruned subset at the next shift. Fixed by iterating the
+  prune and falling through to elastic instead of erroring.
 
 * Coverage effect
 

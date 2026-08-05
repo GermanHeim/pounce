@@ -13,7 +13,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | nlp             |     11 | 2026-08-05 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
-| qp-active-set   |     14 | 2026-08-05 | false-Infeasible FIXED this run (14 -> 0 over 400 fuzz instances); still open, both pre-existing and unfiled: `Optimal` at a violating point on a provably infeasible QP, and IpoptSetWarmStartWorkingSet accepting POUNCE_WS_FIXED_OR_EQ for non-fixed vars / non-equality rows |
+| qp-active-set   |     14 | 2026-08-05 | QP probe now CLEAN (18 -> 0 invariant violations over 400 instances): false-Infeasible, `Optimal` at violating points, and rank-deficiency hard errors all fixed. Still open and unfiled: IpoptSetWarmStartWorkingSet accepts POUNCE_WS_FIXED_OR_EQ for non-fixed vars / non-equality rows |
 | socp            |     11 | 2026-08-05 | —             |
 | exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
@@ -59,9 +59,22 @@ Over 400 instances (generator verified 400/400 by direct arithmetic and
 genuine infeasibilities certified 118/143 -> 118/143 -> 108/143. The ten lost
 certifications are the price of a sound proof and are not tunable.
 
-Still open, and NOT regressions (identical on pre-gh#484 code): one
-`Optimal` returned at a point violating a provably infeasible instance
-(seed 36795918414), and three `Err` returns on rank-deficient KKT blocks.
+Both remaining findings were then fixed in the same run, taking the probe to
+a clean sweep — *zero* invariant violations over 400 instances, against 18
+when the series began. Neither was a gh#484 regression; both reproduce on
+the pre-gh#484 code.
+
+- `Optimal` at a point violating a provably infeasible instance (seed
+  36795918414): `solve`'s M5 feasibility audit guarded only the
+  `solve_general` branch, so the three cold fast paths returned unaudited.
+  The smallest infeasible QP — two identical equality rows with different
+  right-hand sides — routes to `solve_equality_plus_bounds` and came back
+  `Optimal` violating both rows by 2.9, at every tolerance tried.
+- Three `Err` returns (seeds 8341759972, 51291433092, 99072944438):
+  `cold_general_initial`'s rank-deficiency prune was single-shot, and the
+  numerical rank test can reject its own pruned subset at the next shift.
+  Now iterates while the subset shrinks, and falls through to elastic
+  rather than surfacing a linear-algebra failure.
 
 ** [2026-08-05] C warm-start working-set answer transparency (qp-active-set/c-abi-metamorphic) - FAIL
 :PROPERTIES:

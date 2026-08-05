@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `Optimal` at infeasible points, and a hard error, on the QP cold paths (#484 follow-up, round 3)
+
+- Two defects the property-based probe (`adversary/fuzz/`) had flagged as
+  open. Both predate #484 — they reproduce identically on the pre-#484
+  code — and both are now closed, taking the probe to a clean run: **zero
+  invariant violations over 400 generated instances**, against 18 before
+  this series began.
+- **The cold fast paths were never audited.** `solve` runs a feasibility
+  audit (M5) on solves that converge to a constraint-violating point and
+  label it `Optimal`, but the audit guarded only the `solve_general`
+  branch. `solve_equality_only`, `solve_box_constrained` and
+  `solve_equality_plus_bounds` returned straight to the caller. The
+  smallest possible infeasible QP falls in that gap: `aᵀx = c₁` and
+  `aᵀx = c₂` with `c₁ ≠ c₂` is all-equality with a box, so it routes to
+  `solve_equality_plus_bounds` — and came back `Optimal` at a point
+  violating both rows by 2.9, at every tolerance from 1e-9 to 1e-2. The
+  audit is now a helper (`audit_and_repair`) applied to every path.
+- **The rank-deficiency prune was single-shot.** `cold_general_initial`
+  prunes a rank-deficient equality set to an independent subset and
+  retries, but `independent_active_subset` is a *numerical* rank test
+  whose answer depends on the shift the factorization settled at, so the
+  pruned subset can itself be rejected at the next δ. It was: four
+  equality rows pruned to two, and the retry's own masked-deficiency guard
+  then found only one of those two independent. The retry's `?` propagated
+  `LinearSolverFailure("pinned KKT constraint block is rank-deficient …")`
+  to the caller — a hard error on a QP the elastic path handles. The prune
+  now iterates while the subset strictly shrinks (so it terminates), and
+  on persistent failure returns the function's existing "fall through to
+  elastic" signal instead of an error. A caller with a good next thing to
+  try should not be handed a linear-algebra failure.
+- Regression tests use the probe's *exact* instances, not tidied-up
+  equivalents. Hand-built versions of both do not reproduce: the free
+  variables, the indefinite Hessian and (for the rank case) the 1e6 row
+  scaling are all load-bearing, and a uniformly-scaled bounded version with
+  a PSD Hessian passes on the unfixed solver. Both were confirmed to fail
+  without the change.
+
 ### Fixed — penalty bias was read as an infeasibility certificate (#484 follow-up, round 2)
 
 - The previous round stopped the l1-elastic path certifying infeasibility

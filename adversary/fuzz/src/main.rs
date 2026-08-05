@@ -108,6 +108,9 @@ fn qp_fuzz(count: usize, seed: u64) {
             }
         }
 
+        if out.verdict == Verdict::Errored {
+            println!("  ERR seed={s}: {}", out.detail);
+        }
         match out.verdict {
             Verdict::Ok | Verdict::Weak => {}
             v => failures.push((s, v, out.detail.clone(), inst.proof.clone())),
@@ -313,14 +316,22 @@ fn warmstart_fuzz(count: usize, seed: u64) {
 /// survives.
 fn qp_one(seed: u64) {
     let mut r = Rng::new(seed);
-    let inst = instances::feasible(&mut r, seed);
+    // Replay whichever generator produced this seed. `qp_fuzz` decides
+    // via a separate stream, so try feasible first and fall back to
+    // infeasible when `ADV_KIND=infeasible` says so.
+    let infeasible = std::env::var("ADV_KIND").as_deref() == Ok("infeasible");
+    let inst = if infeasible {
+        instances::infeasible(&mut r, seed)
+    } else {
+        instances::feasible(&mut r, seed)
+    };
+    println!("kind={} truth={:?} proof={}", inst.kind, inst.truth, inst.proof);
     println!("seed={seed} n={} m={}", inst.n, inst.m);
     let eq: Vec<usize> = (0..inst.m).filter(|&i| inst.bl[i] == inst.bu[i]).collect();
     println!("equality rows: {eq:?}");
-    println!(
-        "witness violation (my arithmetic): {:.3e}",
-        inst.violation(inst.witness.as_ref().unwrap())
-    );
+    if let Some(w) = inst.witness.as_ref() {
+        println!("witness violation (my arithmetic): {:.3e}", inst.violation(w));
+    }
     for ft in [1e-9, 1e-8, 1e-7, 1e-6, 1e-4, 1e-2] {
         let out = qp_probe::run_with(&inst, ft);
         println!("  feas_tol={ft:.0e} -> status={:12} verdict={:?}", out.status, out.verdict);
