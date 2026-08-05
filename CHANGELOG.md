@@ -9,6 +9,61 @@ changes.
 
 ## [Unreleased]
 
+### Added — the derivative checker (`derivative_test`) now exists (#483 follow-up)
+
+- All five `derivative_test*` options were registered and none was ever
+  read, so `derivative_test=first-order` ran no test and printed nothing.
+  That is the worst shape an unimplemented option can take: a *checker*
+  that silently checks nothing reports success by omission — a user with
+  a hand-written `eval_grad_f` turns it on, sees no complaints, and
+  concludes the gradient is right.
+- Implemented as a port of upstream's `TNLPAdapter::CheckDerivatives`:
+  `first-order` compares `eval_grad_f` / `eval_jac_g` against finite
+  differences at the bound-projected starting point, `second-order` adds
+  `eval_h` (checked one multiplier block at a time), `only-second-order`
+  does the Hessian alone. `derivative_test_perturbation`,
+  `derivative_test_tol`, `derivative_test_first_index` and
+  `derivative_test_print_all` are all honored.
+- Two checks upstream does not make, because neither is reachable by a
+  value-by-value comparison: an entry whose finite difference is nonzero
+  but which the **sparsity structure omits** (a derivative the solver can
+  never see), and taking the perturbation **downward** when stepping up
+  would leave a variable's box, so a model using `sqrt`/`log`/`1/x` is
+  not evaluated outside its own domain by its own checker.
+- Advisory, like upstream: suspicious entries are reported and the solve
+  continues. The report goes to stderr, so it survives `print_level=0`
+  and stays out of `--json-output`'s stdout. It runs on both solver
+  routes — the convex dispatch never reaches the NLP path's copy, and the
+  check is about the model, not the engine.
+- `check_derivatives_for_naninf` (a per-iteration NaN/Inf guard) remains
+  unimplemented and is documented as such.
+
+### Fixed — `linear_solver` accepted every backend name and silently ran FERAL (#483 follow-up)
+
+- The option's registered value list is a faithful port of upstream
+  Ipopt's — `ma27`, `ma57`, `ma77`, `ma86`, `ma97`, `mumps`, `pardiso`,
+  `pardisomkl`, `spral`, `wsmp`, `custom`, `feral` — so an `ipopt.opt`
+  written for Ipopt parses unchanged. POUNCE implements two of them, and
+  the resolver mapped everything else through a `_ =>` arm to FERAL. So
+  `linear_solver=ma97` "worked": a successful run using a backend the
+  binary does not contain, and a benchmark comparing linear solvers that
+  compared FERAL against itself.
+- Selecting an unimplemented backend is now refused — exit 2 from the CLI,
+  `Invalid_Option` for library callers — with a message naming the backend
+  and what to use instead. The names stay registered, so an Ipopt
+  `ipopt.opt` still parses and gets a precise complaint rather than
+  "invalid value". Their per-backend tuning knobs (`ma97_scaling`,
+  `mumps_pivtolmax`, `pardiso_*`, …) are registered for the same reason
+  and are now unreachable.
+- Two cases deliberately still pass: the **registered default** is
+  upstream's `ma57`, which is not a user request and resolves to FERAL on
+  the pure-Rust build as it always has; and **explicit `ma57` without the
+  feature** falls back to FERAL with the banner saying so
+  (`FERAL (ma57 requested but not compiled)`) — a reported substitution,
+  not a hidden one.
+- The check runs before solver routing, so it does not depend on whether
+  the model classifies into the NLP path or the convex one.
+
 ### Fixed — a maximize request was silently dropped on the convex LP/QP route (#483 follow-up)
 
 - `obj_scaling_factor` is upstream's spelling for maximization (the IPM

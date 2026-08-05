@@ -384,6 +384,19 @@ pub fn main() -> ExitCode {
     );
     app.set_restoration_factory_provider(resto_provider);
 
+    // gh#483 follow-up: refuse a `linear_solver` pounce does not
+    // implement. Checked here — before the banner, and before the routing
+    // that would send an LP/QP to `pounce-convex` without ever reaching
+    // `optimize_tnlp`'s copy of this guard — so the verdict does not
+    // depend on which engine the problem happens to classify into.
+    if let Some(value) = app.unimplemented_linear_solver() {
+        eprintln!(
+            "{}",
+            IpoptApplication::unimplemented_linear_solver_message(&value)
+        );
+        return ExitCode::from(2);
+    }
+
     // Branded logo + copyright banner, printed up-front — before the
     // problem is even read — so they head the output. The registered
     // default for `linear_solver` mirrors upstream IPOPT (`"ma57"`), but
@@ -751,6 +764,13 @@ pub fn main() -> ExitCode {
                 | SolverChoice::SocpIpm
                 | SolverChoice::QpActiveSet
         ) {
+            // gh#483 follow-up: `derivative_test` is about the *model*,
+            // not the engine, so on the convex route it is run here rather
+            // than declined — this dispatch never reaches `optimize_tnlp`,
+            // where the NLP path's copy lives. Checking the raw
+            // `inner_tnlp` keeps the report in the user's own indices, and
+            // running it here (not there) means it cannot fire twice.
+            app.run_derivative_test(&inner_tnlp);
             // gh#483 follow-up: a forced convex solver plus a negative
             // `obj_scaling_factor` has no honest outcome — the engine cannot
             // maximize, and running it anyway hands back the minimizer of the

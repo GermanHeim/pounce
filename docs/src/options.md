@@ -28,7 +28,7 @@ file.
 | `tol`           | Overall convergence tolerance on the KKT error.                      |
 | `max_iter`      | Maximum number of outer iterations.                                  |
 | `print_level`   | Console verbosity, 0 (silent) – 12 (maximum debug).                  |
-| `linear_solver` | KKT linear-solver backend. `ma57` requires the `ma57` feature build. |
+| `linear_solver` | KKT linear-solver backend: `feral` (default) or `ma57` (needs a `--features ma57` build). Any other registered name is **refused**. See below. |
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
 | `qp_presolve`   | Presolve on the convex LP/QP path (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
@@ -45,6 +45,91 @@ overrides, `linear_system_scaling`), see the [Scaling](scaling.md)
 reference page. For nonlinear bound tightening (`presolve_fbbt`,
 `fbbt_tol`, `fbbt_max_iter`, `fbbt_max_constraints`), see the
 [FBBT](fbbt.md) reference page.
+
+## Derivative checker
+
+Wrong analytic derivatives are the most common cause of an NLP that
+stalls, cycles, or converges to something that is not a solution — and
+they are invisible from the iteration log. `derivative_test` compares
+what your TNLP returns against finite differences at the (bound-projected)
+starting point, before the solve:
+
+```
+pounce problem.nl derivative_test=first-order
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `derivative_test` | `none` | `none` / `first-order` / `second-order` / `only-second-order`. |
+| `derivative_test_perturbation` | `1e-8` | Relative finite-difference step: `perturbation · max(1, |xᵢ|)`. |
+| `derivative_test_tol` | `1e-4` | Flag an entry when `\|analytic − fd\| > tol · max(1, \|fd\|)`. |
+| `derivative_test_first_index` | `-2` (all) | First **variable** for the first-order test; first **constraint** for the second-order one, where `-1` is the objective's Hessian. |
+| `derivative_test_print_all` | `no` | List every entry, not just the suspicious ones. |
+
+`first-order` checks `eval_grad_f` and `eval_jac_g`; `second-order` adds
+`eval_h`; `only-second-order` checks the Hessian alone. The Hessian is
+checked one multiplier block at a time — `obj_factor = 1, λ = 0` against
+differences of `eval_grad_f`, then `obj_factor = 0, λ = eⱼ` against
+differences of row `j` of `eval_jac_g`.
+
+Entries that look wrong are marked `*`:
+
+```
+Derivative checker: first derivatives at the starting point (perturbation 1.0e-8, tolerance 1.0e-4).
+* grad_f[    1]       =    3.5000000000000000e0    ~    3.0000000119209290e0  [  1.667e-1]
+1 suspicious derivative(s) and 0 missing sparsity entrie(s) out of 6 checked (8 evaluations).
+```
+
+Two checks beyond upstream Ipopt's, because both catch a class of bug no
+value-by-value comparison can:
+
+* A Jacobian or Hessian entry whose finite difference is nonzero but
+  which the **sparsity structure omits** (`!` in the report). A missing
+  structural entry is not a wrong number — it is a derivative the solver
+  can never see.
+* The perturbation is taken **downward** when stepping up would leave a
+  variable's box, so a model using `sqrt`, `log`, or `1/x` is not
+  evaluated outside its own domain by the checker.
+
+The test is advisory: it reports and the solve continues. It is written
+to **stderr**, so it survives `print_level=0` and never mixes into
+`--json-output`'s stdout. It is slow — the second-order test costs
+roughly `(m+1)·n` evaluations — so leave it off for production runs.
+
+> `check_derivatives_for_naninf` is a separate upstream option, for a
+> per-iteration NaN/Inf guard, and is **not implemented**.
+
+## Choosing a linear solver
+
+POUNCE implements two KKT backends:
+
+* **`feral`** — pure-Rust sparse symmetric indefinite solver. The
+  effective default; no Fortran toolchain, no HSL licence.
+* **`ma57`** — HSL MA57, available only in a `cargo build --features
+  ma57` build.
+
+The option's *registered* value list is a faithful port of upstream
+Ipopt's (`ma27`, `ma77`, `ma86`, `ma97`, `mumps`, `pardiso`,
+`pardisomkl`, `spral`, `wsmp`, `custom`), so an `ipopt.opt` written for
+Ipopt parses here unchanged. Selecting one of those **fails the solve**
+with a message naming it. They used to fall through to FERAL silently,
+which meant `linear_solver=ma97` "worked" and a benchmark comparing
+backends compared FERAL with itself.
+
+Two things deliberately do *not* fail:
+
+* The **registered default** is upstream's `ma57`. It is not a user
+  request, and on the pure-Rust build it resolves to FERAL as it always
+  has, so a plain run is unaffected.
+* **Explicit `ma57` on a build without the feature** falls back to FERAL
+  and says so in the banner (`FERAL (ma57 requested but not compiled)`).
+  That substitution is reported rather than hidden, and failing a
+  portable `ipopt.opt` over a build flag would cost more than it buys.
+
+The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
+`pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same
+`ipopt.opt`-compatibility reason. They are unreachable now that their
+backend cannot be selected.
 
 ## Bound relaxation and `honor_original_bounds`
 

@@ -83,6 +83,7 @@ use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::derivative_test::{DerivativeTest, DerivativeTestOptions};
 use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
@@ -544,6 +545,25 @@ impl IpoptApplication {
             return ApplicationReturnStatus::InvalidOption;
         }
 
+        // A `linear_solver` pounce does not implement is refused rather
+        // than quietly served by FERAL (gh#483 follow-up). Checked here,
+        // before any work, so a library consumer gets the same verdict the
+        // CLI gives before its banner.
+        if let Some(value) = self.unimplemented_linear_solver() {
+            use pounce_common::journalist::JournalCategory;
+            let msg = format!("{}\n", Self::unimplemented_linear_solver_message(&value));
+            eprint!("{msg}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
+        // `derivative_test`: check the caller's analytic derivatives
+        // against finite differences before anything else runs — on the
+        // raw TNLP, before the presolve wrapper below changes its
+        // coordinates.
+        self.run_derivative_test(&tnlp);
+
         // Top-level algorithm dispatch (Phase 5b §7.1). When the
         // `algorithm` option resolves to "active-set-sqp", route
         // to the Phase 5b SQP path; otherwise fall through to the
@@ -845,6 +865,126 @@ impl IpoptApplication {
         ["lp-ipm", "qp-ipm", "socp"]
             .into_iter()
             .find(|c| v.eq_ignore_ascii_case(c))
+    }
+
+    /// The `linear_solver` value when the caller explicitly asked for a
+    /// backend pounce does not implement; `None` when the request can be
+    /// served (or was never made).
+    ///
+    /// pounce ships two: **FERAL** (pure Rust, the effective default) and
+    /// **MA57** (HSL, behind the `ma57` feature). The option's valid-value
+    /// list is a faithful port of upstream Ipopt's — `ma27`, `ma77`,
+    /// `ma86`, `ma97`, `mumps`, `pardiso`, `pardisomkl`, `spral`, `wsmp`,
+    /// `custom` — so an `ipopt.opt` written for Ipopt parses here, and
+    /// every one of those names used to fall through a `_ =>` arm to
+    /// FERAL. A run "using MUMPS" was a FERAL run; a benchmark comparing
+    /// backends compared FERAL with itself (gh#483 follow-up).
+    ///
+    /// The registered default is upstream's `"ma57"`, which is *not* a
+    /// user request — on a build without the `ma57` feature it resolves to
+    /// FERAL and always has. Hence the `found` gate: only an explicit
+    /// selection is judged. Explicit `ma57` on a build that lacks the
+    /// feature is left alone too; that fallback is already reported in the
+    /// banner ("ma57 requested but not compiled"), so it is visible rather
+    /// than silent, and failing a portable `ipopt.opt` over a build flag
+    /// would cost more than it buys.
+    pub fn unimplemented_linear_solver(&self) -> Option<String> {
+        let (v, found) = self.options.get_string_value("linear_solver", "").ok()?;
+        if !found {
+            return None;
+        }
+        ["feral", "ma57"]
+            .iter()
+            .all(|ok| !v.eq_ignore_ascii_case(ok))
+            .then_some(v)
+    }
+
+    /// Resolve the five registered `derivative_test*` knobs. Every one
+    /// of them was registered and never read, so `derivative_test=
+    /// first-order` ran no test and printed nothing — a checker that
+    /// silently checks nothing reports success by omission (gh#483
+    /// follow-up).
+    fn derivative_test_options(&self) -> DerivativeTestOptions {
+        let num = |key: &str, default: Number| -> Number {
+            self.options
+                .get_numeric_value(key, "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(default)
+        };
+        DerivativeTestOptions {
+            mode: self
+                .options
+                .get_string_value("derivative_test", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .map(|v| DerivativeTest::from_option(&v))
+                .unwrap_or_default(),
+            perturbation: num("derivative_test_perturbation", 1e-8),
+            tol: num("derivative_test_tol", 1e-4),
+            first_index: self
+                .options
+                .get_integer_value("derivative_test_first_index", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(-2),
+            print_all: self
+                .options
+                .get_bool_value("derivative_test_print_all", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Run the derivative checker, if asked, against the **user's own**
+    /// TNLP — before presolve wraps it and before any scaling — so the
+    /// report is about the derivatives the caller wrote, in the caller's
+    /// own indices.
+    ///
+    /// Advisory, like upstream: a suspicious entry is reported and the
+    /// solve continues. The report goes to stderr so it survives
+    /// `print_level=0` and leaves `--json-output`'s stdout clean.
+    pub fn run_derivative_test(&self, tnlp: &Rc<RefCell<dyn TNLP>>) {
+        let opts = self.derivative_test_options();
+        if matches!(opts.mode, DerivativeTest::None) {
+            return;
+        }
+        let report = {
+            let mut borrowed = tnlp.borrow_mut();
+            pounce_nlp::derivative_test::run(&mut *borrowed, &opts)
+        };
+        let Some(report) = report else {
+            eprintln!(
+                "pounce: derivative_test was requested but the TNLP declined to \
+                 supply the information the check needs (dimensions, bounds, or \
+                 a starting point); no test was run."
+            );
+            return;
+        };
+        use pounce_common::journalist::JournalCategory;
+        for line in &report.lines {
+            eprintln!("{line}");
+            self.journalist.print(
+                JournalLevel::J_SUMMARY,
+                JournalCategory::J_MAIN,
+                &format!("{line}\n"),
+            );
+        }
+    }
+
+    /// The message [`Self::unimplemented_linear_solver`] earns, shared by
+    /// every frontend so they cannot drift apart.
+    pub fn unimplemented_linear_solver_message(value: &str) -> String {
+        format!(
+            "pounce: linear_solver={value} is not implemented. pounce provides \
+             `feral` (pure-Rust sparse symmetric, the default) and `ma57` (HSL, \
+             in a `--features ma57` build); the other names in the option's \
+             list come from the upstream Ipopt registry so an ipopt.opt written \
+             for Ipopt still parses. Selecting one used to run FERAL silently, \
+             which makes a backend comparison measure nothing — so it is \
+             refused instead. Use linear_solver=feral or linear_solver=ma57."
+        )
     }
 
     fn is_sqp_algorithm_selected(&self) -> bool {
