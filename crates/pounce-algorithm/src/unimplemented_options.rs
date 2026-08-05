@@ -452,6 +452,37 @@ mod tests {
         }
     }
 
+    /// The L-BFGS σ clamp, wired in gh#483 / #191 round 2.
+    /// `LimMemQuasiNewtonUpdater` consumes both bounds in
+    /// `initial_hessian_scalar`; only the read sites were missing. Note
+    /// the fields are named `init_val_{max,min}`, not after the options —
+    /// which is why a grep for the option name found nothing and the
+    /// consumer had to be located by hand.
+    #[test]
+    fn the_lbfgs_sigma_clamp_reaches_the_builder() {
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        let b = app.algorithm_builder_from_options();
+        assert_eq!(b.limited_memory_init_val_max, 1e8, "default changed");
+        assert_eq!(b.limited_memory_init_val_min, 1e-8, "default changed");
+
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "limited_memory_init_val_max 5e5\nlimited_memory_init_val_min 1e-3\n",
+        )
+        .unwrap();
+        let b = app.algorithm_builder_from_options();
+        assert_eq!(
+            b.limited_memory_init_val_max, 5e5,
+            "never reached the builder"
+        );
+        assert_eq!(
+            b.limited_memory_init_val_min, 1e-3,
+            "never reached the builder"
+        );
+    }
+
     /// Options whose *feature* runs and only whose read site is missing
     /// must stay out of the table — refusing them would fail solves that
     /// are correct today. This pins the boundary the triage drew.

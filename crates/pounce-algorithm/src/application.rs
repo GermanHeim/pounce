@@ -2623,6 +2623,22 @@ impl IpoptApplication {
         // `OrigIpoptNlp::determine_scaling_from_starting_point` (see the
         // `determine_scaling_from_starting_point` call earlier in this
         // method); there is no algorithm-side scaling strategy to wire.
+        // `limited_memory_init_val_max` / `_min` — the clamp on the
+        // initial Hessian scalar. `LimMemQuasiNewtonUpdater` consumes
+        // both in `initial_hessian_scalar`; only the read sites were
+        // missing, so setting either did nothing (gh#483, #191 round 2).
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("limited_memory_init_val_max", "")
+        {
+            builder.limited_memory_init_val_max = v;
+        }
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("limited_memory_init_val_min", "")
+        {
+            builder.limited_memory_init_val_min = v;
+        }
 
         // Unlike the other options here, we always honor the registry
         // value (not just when the user set it explicitly): the option

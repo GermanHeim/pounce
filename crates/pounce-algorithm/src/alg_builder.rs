@@ -207,6 +207,13 @@ pub struct AlgorithmBuilder {
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
     pub limited_memory_max_history: i32,
+    /// `limited_memory_init_val_max` / `_min` — the clamp on the initial
+    /// Hessian scalar σ before the rank-2 updates. Upstream defaults 1e8
+    /// / 1e-8, which `LimMemQuasiNewtonUpdater` has carried as hard-coded
+    /// fields and consumed in `initial_hessian_scalar` all along; only
+    /// the read sites were missing (gh#483, #191 round 2).
+    pub limited_memory_init_val_max: Number,
+    pub limited_memory_init_val_min: Number,
     pub line_search_method: LineSearchChoice,
     pub warm_start_init_point: bool,
     /// `mehrotra_algorithm` — when true, [`PdSearchDirCalc`] folds
@@ -799,6 +806,8 @@ impl Default for AlgorithmBuilder {
             hessian_approximation: HessianApproxChoice::Exact,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
+            limited_memory_init_val_max: 1e8,
+            limited_memory_init_val_min: 1e-8,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
@@ -1104,6 +1113,8 @@ impl AlgorithmBuilder {
             HessianApproxChoice::LimitedMemory => Box::new(LimMemQuasiNewtonUpdater {
                 update_type: self.limited_memory_update_type,
                 max_history: self.limited_memory_max_history,
+                init_val_max: self.limited_memory_init_val_max,
+                init_val_min: self.limited_memory_init_val_min,
                 ..LimMemQuasiNewtonUpdater::default()
             }),
         };
@@ -1214,6 +1225,8 @@ mod tests {
                             hessian_approximation,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
+                            limited_memory_init_val_max: 1e8,
+                            limited_memory_init_val_min: 1e-8,
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
