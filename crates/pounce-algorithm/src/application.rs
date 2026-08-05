@@ -1778,6 +1778,21 @@ impl IpoptApplication {
             .unwrap_or(1e-4);
         orig_nlp.relax_bounds(bound_relax_factor, constr_viol_tol);
 
+        // `honor_original_bounds` (default `no`, matching upstream):
+        // project the reported point back into the un-relaxed box. Must
+        // follow `relax_bounds`, which snapshots the bounds to project
+        // onto. Registered but never read before, so a user asking for
+        // it still got a bound-pinned solution sitting up to
+        // `min(bound_relax_factor·max(1,|b|), constr_viol_tol)` outside
+        // its own bounds (gh#483 follow-up).
+        let honor_original_bounds = self
+            .options
+            .get_bool_value("honor_original_bounds", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(false);
+        orig_nlp.set_honor_original_bounds(honor_original_bounds);
+
         // Apply automatic NLP scaling per `nlp_scaling_method` option
         // (port of `OrigIpoptNLP::InitializeStructures` →
         // `NLPScalingObject::DetermineScaling`). Default is
@@ -3265,7 +3280,11 @@ fn finalize_via_orig_nlp(
     // TNLP receives the same shape it provided. With `make_parameter`
     // the fixed components are spliced back in by the IpoptNlp.
     let nlp_borrow = nlp.borrow();
-    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&*curr.x);
+    // `finalize_solution_x`, not `lift_x_to_full`: the reported point also
+    // owes the user the `honor_original_bounds` projection. `f` and `g`
+    // below are then evaluated at the point actually reported, so x/f/g
+    // agree with each other.
+    let x_vec: Vec<Number> = nlp_borrow.finalize_solution_x(&*curr.x);
     let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
     let n = info.n as usize;
     let m = info.m as usize;
@@ -3508,7 +3527,7 @@ fn finalize_via_sqp(
 
     let mut x_dv = x_space.make_new_dense();
     x_dv.set_values(&res.x);
-    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&x_dv);
+    let x_vec: Vec<Number> = nlp_borrow.finalize_solution_x(&x_dv);
     debug_assert_eq!(x_vec.len(), n);
 
     // λ_x is packed signed (z_l − z_u). Split for lift.

@@ -209,6 +209,17 @@ pub trait IpoptNlp: Nlp {
         dx.expanded_values().to_vec()
     }
 
+    /// The full-x to hand `TNLP::finalize_solution`: [`Self::lift_x_to_full`],
+    /// plus whatever the reported point owes the user that the working
+    /// iterate does not — today, the `honor_original_bounds` projection
+    /// back into the declared box (the `bound_relax_factor` widening
+    /// otherwise reports a bound-pinned solution just outside its own
+    /// bounds). Default impl is `lift_x_to_full`; `OrigIpoptNlp`
+    /// overrides.
+    fn finalize_solution_x(&self, x: &dyn Vector) -> Vec<Number> {
+        self.lift_x_to_full(x)
+    }
+
     /// Pack the algorithm-side `(y_c, y_d)` constraint multipliers into
     /// the user TNLP's `lambda` array (length `n_full_g`, ordered by
     /// the original `g` index). Used by `GetIpoptCurrentIterate` and

@@ -32,6 +32,9 @@ file.
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
 | `qp_presolve`   | Presolve on the convex LP/QP path (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
+| `obj_scaling_factor` | Constant multiplier on the objective; **negative maximizes**. See below. |
+| `bound_relax_factor` | Relaxation applied to variable/constraint bounds before the solve (default `1e-8`). |
+| `honor_original_bounds` | Project the reported point back into the un-relaxed bounds (`yes` / `no`, default `no`). See below. |
 
 For the full upstream option catalogue, see the
 [Ipopt options reference](https://coin-or.github.io/Ipopt/OPTIONS.html);
@@ -42,6 +45,45 @@ overrides, `linear_system_scaling`), see the [Scaling](scaling.md)
 reference page. For nonlinear bound tightening (`presolve_fbbt`,
 `fbbt_tol`, `fbbt_max_iter`, `fbbt_max_constraints`), see the
 [FBBT](fbbt.md) reference page.
+
+## Bound relaxation and `honor_original_bounds`
+
+Before the solve, POUNCE widens every variable and constraint bound by
+`bound_relax_factor` (default `1e-8`, capped by `constr_viol_tol`),
+exactly as upstream Ipopt does — it keeps the interior-point iterates
+strictly feasible without the user's bounds becoming numerically
+degenerate. The consequence is that a solution *pinned to a bound* is
+reported just past it:
+
+```
+min (x − 3)²  s.t.  0 ≤ x ≤ 1     →     x = 1.00000000937
+```
+
+`honor_original_bounds=yes` projects the reported point back into the
+bounds you declared, so that solve returns exactly `x = 1`. Reach for it
+whenever the value flows somewhere that cares about the domain — a
+`sqrt(1 − x)`, a domain assertion, or a Pyomo `Var` the value is loaded
+back into.
+
+The default is `no`, matching upstream. As upstream also documents, the
+constraint-violation and complementarity figures in the end-of-run
+summary are for the **non-projected** point; only the reported `x` (and
+the objective and constraint values evaluated at it) move.
+
+## Objective sense and `obj_scaling_factor`
+
+`obj_scaling_factor` multiplies the objective the IPM minimizes, so a
+**negative** value maximizes — upstream's documented spelling for a
+maximization problem stated as a minimization. Because it changes what is
+being optimized rather than just its conditioning, it is honored only by
+the general NLP interior-point path: a model that would otherwise route
+to the specialized convex solvers (LP / convex QP / SOCP, see
+[LP/QP Routing](lp-qp-routing.md)) is re-routed under
+`solver_selection=auto`, and an explicit convex `solver_selection` is
+**refused** rather than silently answering with the minimizer.
+
+A positive factor is a pure conditioning knob; the convex path reports
+natural units either way, so it keeps the fast path.
 
 ## Barrier-parameter (μ) strategy
 

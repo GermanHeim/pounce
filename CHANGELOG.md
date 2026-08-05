@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a maximize request was silently dropped on the convex LP/QP route (#483 follow-up)
+
+- `obj_scaling_factor` is upstream's spelling for maximization (the IPM
+  minimizes `factor·f`, so a negative factor maximizes `f`). The convex
+  solvers in `pounce-convex` equilibrate internally and never read the
+  option — and every LP / convex-QP model routes to them by default. So
+  `min (x−3)²` over `x ∈ [0,1]` with `obj_scaling_factor=-1` returned
+  `x = 1`, the **minimizer** of the objective the user asked to maximize,
+  reported as `Optimal Solution Found`. The same file under
+  `solver_selection=nlp` answered correctly with `x = 0`.
+- A negative factor now declines the convex fast path under
+  `solver_selection=auto` (routing to the NLP path, which honors it) and
+  is **refused** — exit 2, with an explanation — under an explicit convex
+  `solver_selection`, where the alternative is not a skipped extra but a
+  wrong answer.
+- A *positive* factor is unaffected: it only rescales conditioning, the
+  convex path reports natural units either way, and both paths agree.
+
+### Fixed — `honor_original_bounds` was registered but never read (#483 follow-up)
+
+- `bound_relax_factor` (default `1e-8`) widens the variable box before the
+  solve, so a solution pinned to a bound is reported just outside it:
+  `min (x−3)² + (y+2)²` over `x ∈ [0,1]`, `y ∈ [−1,1]` returned
+  `x = 1.00000000937`, `y = −1.00000000875`. Upstream registers
+  `honor_original_bounds` to project that back; pounce registered it and
+  never read it, so there was no way to get a point inside the declared
+  box — and the value flows on into a downstream `sqrt(1−x)`, a domain
+  assertion, or a Pyomo `Var` whose bounds it is loaded back into.
+- The option is now honored on both routes a caller can read the solution
+  from: the `.sol` / JSON primal (via the CLI's converged-iterate hook)
+  and `TNLP::finalize_solution` (pounce-py, the C interface, any Rust
+  TNLP). The default stays `no`, matching upstream, and — as upstream
+  documents — the summary's constraint-violation and complementarity
+  figures remain those of the non-projected point.
+
 ### Fixed — user scaling was a silent no-op from Pyomo, and the core silently discarded `x_scaling` (#483)
 
 - **The `scaling_factor` Suffix now reaches the solver.** Tagging the

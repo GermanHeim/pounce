@@ -159,6 +159,21 @@ pub struct OrigIpoptNlp {
     /// live bounds).
     declared_d_l: RefCell<Option<Vec<Number>>>,
     declared_d_u: RefCell<Option<Vec<Number>>>,
+    /// The *declared* compressed `x_L / x_U`, snapshotted (unrelaxed) at
+    /// [`Self::relax_bounds`] time for the same reason as
+    /// [`Self::declared_d_l`] — and used by
+    /// [`Self::finalize_solution_x`] to project the final iterate back
+    /// into the user's own box under `honor_original_bounds`.
+    declared_x_l: RefCell<Option<Vec<Number>>>,
+    declared_x_u: RefCell<Option<Vec<Number>>>,
+    /// `honor_original_bounds` (upstream default `no`). When set, the
+    /// final iterate handed to `TNLP::finalize_solution` is projected
+    /// back into the declared bounds, undoing the `bound_relax_factor`
+    /// widening. Registered but never read before gh#483's follow-up, so
+    /// `honor_original_bounds=yes` was accepted and the reported solution
+    /// still sat up to `min(bound_relax_factor·max(1,|b|), constr_viol_tol)`
+    /// outside the box the user declared.
+    honor_original_bounds: Cell<bool>,
     /// Set by [`Self::scale_user_supplied`] when the TNLP asked for
     /// **non-trivial** per-variable scaling (`use_x_scaling` with at
     /// least one factor `!= 1.0`). pounce models objective and
@@ -554,6 +569,9 @@ impl OrigIpoptNlp {
             d_scale: RefCell::new(None),
             declared_d_l: RefCell::new(None),
             declared_d_u: RefCell::new(None),
+            declared_x_l: RefCell::new(None),
+            declared_x_u: RefCell::new(None),
+            honor_original_bounds: Cell::new(false),
             x_scaling_rejected: Cell::new(false),
             x_space,
             c_space,
@@ -715,6 +733,11 @@ impl OrigIpoptNlp {
         // and only touch the live vectors.
         *self.declared_d_l.borrow_mut() = Some(self.d_l.expanded_values());
         *self.declared_d_u.borrow_mut() = Some(self.d_u.expanded_values());
+        // Same snapshot for the variable box, so `honor_original_bounds`
+        // has the user's own bounds to project back onto after the
+        // widening below.
+        *self.declared_x_l.borrow_mut() = Some(self.x_l.expanded_values());
+        *self.declared_x_u.borrow_mut() = Some(self.x_u.expanded_values());
         if bound_relax_factor <= 0.0 {
             return;
         }
@@ -1236,6 +1259,57 @@ impl OrigIpoptNlp {
         }
         for (i, &full_idx) in cls.x_fixed_map.iter().enumerate() {
             full[full_idx as usize] = cls.x_fixed_vals[i];
+        }
+        full
+    }
+
+    /// Select `honor_original_bounds`. Called once from the driver
+    /// after [`Self::relax_bounds`], which is what captures the bounds
+    /// to project back onto.
+    pub fn set_honor_original_bounds(&self, on: bool) {
+        self.honor_original_bounds.set(on);
+    }
+
+    /// The full-x handed to `TNLP::finalize_solution`: [`Self::lift_x_to_full`],
+    /// then — under `honor_original_bounds` — clamped back into the
+    /// bounds the user declared.
+    ///
+    /// `bound_relax_factor` (default `1e-8`) widens the box before the
+    /// solve, so a solution pinned to a bound comes back *outside* it:
+    /// `min (x−3)²` over `x ∈ [0, 1]` reports `x = 1.0000000094`. That
+    /// is upstream's behavior too and is why upstream registers this
+    /// option — but pounce registered it and never read it, so there was
+    /// no way to turn the projection on (gh#483 follow-up). A value
+    /// outside its declared domain is not a cosmetic difference: it
+    /// breaks a downstream `sqrt(1 − x)`, a domain assertion, or a Pyomo
+    /// `Var` whose bounds the value is loaded back into.
+    ///
+    /// Only the reported point moves. As upstream documents, the
+    /// constraint-violation and complementarity numbers in the summary
+    /// are for the **non-projected** point and are left alone.
+    pub fn finalize_solution_x(&self, x: &dyn Vector) -> Vec<Number> {
+        let mut full = self.lift_x_to_full(x);
+        if !self.honor_original_bounds.get() {
+            return full;
+        }
+        let cls = self.adapter.borrow().classification().clone();
+        // Fixed variables are spliced in at their exact fixed value, so
+        // only the free block can have drifted past a bound.
+        if let Some(x_l) = self.declared_x_l.borrow().as_ref() {
+            for (i, &var_idx) in cls.x_l_map.iter().enumerate() {
+                let full_idx = cls.x_not_fixed_map[var_idx as usize] as usize;
+                if full[full_idx] < x_l[i] {
+                    full[full_idx] = x_l[i];
+                }
+            }
+        }
+        if let Some(x_u) = self.declared_x_u.borrow().as_ref() {
+            for (i, &var_idx) in cls.x_u_map.iter().enumerate() {
+                let full_idx = cls.x_not_fixed_map[var_idx as usize] as usize;
+                if full[full_idx] > x_u[i] {
+                    full[full_idx] = x_u[i];
+                }
+            }
         }
         full
     }
@@ -2192,6 +2266,10 @@ impl IpoptNlp for OrigIpoptNlp {
 
     fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
         OrigIpoptNlp::lift_x_to_full(self, x)
+    }
+
+    fn finalize_solution_x(&self, x: &dyn Vector) -> Vec<Number> {
+        OrigIpoptNlp::finalize_solution_x(self, x)
     }
 
     fn n_full_x(&self) -> Index {
