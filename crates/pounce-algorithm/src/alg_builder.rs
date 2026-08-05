@@ -218,6 +218,14 @@ pub struct AlgorithmBuilder {
     /// option-parser in `application.rs` is responsible for the
     /// cascading defaults (`mu_oracle = probing` etc.).
     pub mehrotra_algorithm: bool,
+    /// `fast_step_computation` — when true, [`PdSearchDirCalc`] accepts
+    /// the search direction without the residual check and allows an
+    /// inexact linear solve. Mirrors upstream's flag of the same name,
+    /// default `no`. The field existed and was consumed from the day the
+    /// search-direction calculator landed, hard-coded to `false`; only
+    /// the option's read site was missing, so setting it did nothing
+    /// (gh#483 follow-up, #191 round 2).
+    pub fast_step_computation: bool,
     /// `kappa_sigma` — factor bounding how far the bound multipliers may
     /// deviate from their primal estimates. The clamp
     /// (`kappa_sigma_clamp`) runs after every accepted step; `< 1`
@@ -777,6 +785,7 @@ impl Default for AlgorithmBuilder {
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
+            fast_step_computation: false,
             kappa_sigma: 1e10,
             kappa_d: 1e-5,
             tiny_step_tol: 10.0 * Number::EPSILON,
@@ -896,6 +905,7 @@ impl AlgorithmBuilder {
         pd_solver.residual_improvement_factor = self.refinement.residual_improvement_factor;
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
+        search_dir.fast_step_computation = self.fast_step_computation;
         self.build_inner(Some(search_dir))
     }
 
@@ -1190,6 +1200,7 @@ mod tests {
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
+                            fast_step_computation: false,
                             kappa_sigma: 1e10,
                             kappa_d: 1e-5,
                             tiny_step_tol: 10.0 * Number::EPSILON,

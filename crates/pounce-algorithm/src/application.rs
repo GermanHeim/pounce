@@ -2456,6 +2456,15 @@ impl IpoptApplication {
         // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
         // overridden by an explicit user setting of those keys
         // below. Mirrors `IpAlgBuilder.cpp:Mehrotra`.
+        // `fast_step_computation` — skip the search-direction residual
+        // check and allow an inexact linear solve. `PdSearchDirCalc` has
+        // consumed this flag since it landed, hard-coded to `false`; the
+        // option's read site was simply missing, so setting it did
+        // nothing at all (gh#483 follow-up, #191 round 2).
+        if let Ok((v, true)) = self.options.get_string_value("fast_step_computation", "") {
+            builder.fast_step_computation = v.eq_ignore_ascii_case("yes");
+        }
+
         let mut mehrotra_on = false;
         if let Ok((v, found)) = self.options.get_string_value("mehrotra_algorithm", "") {
             if found && v == "yes" {

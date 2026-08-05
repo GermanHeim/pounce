@@ -96,7 +96,6 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
             "piecewisepenalty_gamma_obj",
             "vartheta",
             "inexact_algorithm",
-            "fast_step_computation",
         ],
     },
     UnimplementedFeature {
@@ -377,6 +376,32 @@ mod tests {
         assert!(warnings[0].contains("hessian_constant"));
     }
 
+    /// `fast_step_computation` was in the refusal table for one commit,
+    /// added by hand against the membership rule above. It fails here if
+    /// it ever comes back: `PdSearchDirCalc` owns the flag and consumes
+    /// it at two sites, so refusing it would fail a solve pounce can
+    /// serve. Its read site is wired in `algorithm_builder_from_options`.
+    #[test]
+    fn fast_step_computation_is_wired_not_refused() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("fast_step_computation", "yes", true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
+
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("fast_step_computation yes\n")
+            .unwrap();
+        assert!(
+            app.algorithm_builder_from_options().fast_step_computation,
+            "the option must reach the builder, or wiring it changed nothing",
+        );
+        // …and the default is still off.
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        assert!(!app.algorithm_builder_from_options().fast_step_computation);
+    }
+
     /// Options whose *feature* runs and only whose read site is missing
     /// must stay out of the table — refusing them would fail solves that
     /// are correct today. This pins the boundary the triage drew.
@@ -391,6 +416,10 @@ mod tests {
             ("limited_memory_max_skipping", "4"),
             // the Mehrotra corrector runs
             ("corrector_type", "affine"),
+            // `PdSearchDirCalc` has the flag and consumes it; it was
+            // briefly in the refusal table by hand, against the rule
+            // above, which would have failed a solve it can serve.
+            ("fast_step_computation", "yes"),
         ] {
             let (mut opts, reg) = fixture();
             // The table mixes string, integer and numeric options; try

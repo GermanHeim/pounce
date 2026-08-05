@@ -46,6 +46,18 @@ changes.
 - The check runs before solver routing, so a model that classifies as a
   convex QP gets the same verdict.
 
+### Fixed — `fast_step_computation` is wired, not refused (#483 follow-up, #191 round 2)
+
+- `PdSearchDirCalc` has owned this flag — skip the search-direction
+  residual check, allow an inexact linear solve — since it landed, and
+  consumes it at two sites; only the option's read site was missing, so
+  setting it did nothing. It now reaches the builder, default unchanged
+  (`no`).
+- It briefly sat in the refusal table above, added by hand against that
+  table's own membership rule (its name *does* appear in the sources), so
+  it would have failed a solve POUNCE can serve. The boundary test now
+  pins it.
+
 ### Added — the derivative checker (`derivative_test`) now exists (#483 follow-up)
 
 - All five `derivative_test*` options were registered and none was ever
