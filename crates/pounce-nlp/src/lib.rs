@@ -22,6 +22,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod alg_types;
+pub mod derivative_test;
 pub mod expression_provider;
 pub mod ipopt_nlp;
 pub mod orig_ipopt_nlp;

@@ -197,7 +197,12 @@ bool OpenIpoptOutputFile(
 /** Install user-provided NLP scaling. Pass NULL for `x_scaling` or
  *  `g_scaling` to leave that axis unscaled. Set option
  *  `nlp_scaling_method = user-scaling` for the scaling to take
- *  effect. */
+ *  effect.
+ *
+ *  pounce models objective and constraint scaling only. A non-trivial
+ *  `x_scaling` is stored here (this call still returns true) and then
+ *  refused by IpoptSolve, which returns Invalid_Option and prints why,
+ *  rather than silently solving an unscaled-in-x problem. */
 bool SetIpoptProblemScaling(
     IpoptProblem ipopt_problem,
     ipnumber     obj_scaling,

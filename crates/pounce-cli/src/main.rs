@@ -384,31 +384,55 @@ pub fn main() -> ExitCode {
     );
     app.set_restoration_factory_provider(resto_provider);
 
+    // gh#483 follow-up: refuse a `linear_solver` pounce does not
+    // implement. Checked here — before the banner, and before the routing
+    // that would send an LP/QP to `pounce-convex` without ever reaching
+    // `optimize_tnlp`'s copy of this guard — so the verdict does not
+    // depend on which engine the problem happens to classify into.
+    if let Some(value) = app.unimplemented_linear_solver() {
+        eprintln!(
+            "{}",
+            IpoptApplication::unimplemented_linear_solver_message(&value)
+        );
+        return ExitCode::from(2);
+    }
+    // Same treatment for every other option naming a feature pounce does
+    // not implement, and the same reason for checking here: a model that
+    // routes to `pounce-convex` never reaches `optimize_tnlp`, where the
+    // library-side copy of this guard lives.
+    if let Some(msg) = app.unimplemented_option_refusal() {
+        eprintln!("{msg}");
+        return ExitCode::from(2);
+    }
+    for warning in app.unexploited_hint_warnings() {
+        eprintln!("{warning}");
+    }
+
     // Branded logo + copyright banner, printed up-front — before the
-    // problem is even read — so they head the output. The registered
-    // default for `linear_solver` mirrors upstream IPOPT (`"ma57"`), but
-    // pounce's actual backend is FERAL; only treat `"ma57"` as user
-    // intent when explicitly set, else the banner would always claim
-    // "ma57 requested". `sb yes` suppresses both (mirrors upstream
-    // `IpoptApplication::Initialize`).
+    // problem is even read — so they head the output. `sb yes` suppresses
+    // both (mirrors upstream `IpoptApplication::Initialize`).
+    //
+    // The registered default is `feral`, so the option's resolved value is
+    // the whole story and the "was it explicitly set?" flag this used to
+    // consult is no longer needed: `ma57` here always means someone asked
+    // for it. (Under upstream's `ma57` default it did not, and the banner
+    // would otherwise have claimed "ma57 requested" on every run.)
     let backend_tag = {
-        let (v, explicit) = app
+        let (v, _) = app
             .options()
             .get_string_value("linear_solver", "")
             .unwrap_or_else(|_| ("feral".to_string(), false));
-        match (v.as_str(), explicit) {
-            ("ma57", true) => {
-                #[cfg(feature = "ma57")]
-                {
-                    "MA57 (HSL)"
-                }
-                #[cfg(not(feature = "ma57"))]
-                {
-                    "FERAL (ma57 requested but not compiled)"
-                }
+        if v.eq_ignore_ascii_case("ma57") {
+            #[cfg(feature = "ma57")]
+            {
+                "MA57 (HSL)"
             }
-            ("ma57", false) => "FERAL",
-            _ => "FERAL",
+            #[cfg(not(feature = "ma57"))]
+            {
+                "FERAL (ma57 requested but not compiled)"
+            }
+        } else {
+            "FERAL"
         }
     };
     let suppress_banner = app
@@ -563,6 +587,57 @@ pub fn main() -> ExitCode {
         .map(sens::is_sensitivity_input)
         .unwrap_or(false);
     let wants_nlp_postopt = wants_sens || args.compute_red_hessian;
+    // gh#483: does the run ask for user NLP scaling — `nlp_scaling_method=
+    // user-scaling` together with at least one `scaling_factor` suffix in the
+    // `.nl` for the solver to read? Only the general NLP path implements the
+    // scaling callback, so this gates the same "reroute or warn" treatment
+    // the post-optimal request gets, rather than the option quietly meaning
+    // "no scaling" on a specialized path.
+    let wants_user_scaling = app
+        .options()
+        .get_string_value("nlp_scaling_method", "")
+        .ok()
+        .and_then(|(v, set)| set.then_some(v))
+        .is_some_and(|v| v == "user-scaling")
+        && nl_suffixes.as_ref().is_some_and(|s| {
+            s.obj_real.contains_key("scaling_factor")
+                || s.con_real.contains_key("scaling_factor")
+                || s.var_real.contains_key("scaling_factor")
+        });
+    // gh#483 follow-up: `obj_scaling_factor` is an NLP-path knob — the convex
+    // solvers run their own equilibration and never read it. A *negative*
+    // factor is upstream's documented spelling for "maximize", so dropping it
+    // does not merely leave the conditioning alone: the convex path minimizes
+    // an objective the user asked to maximize and reports the wrong optimum
+    // with no complaint. (`min (x−3)²` over `x ∈ [0,1]` with
+    // `obj_scaling_factor=-1` returned `x = 1`, the minimizer, instead of
+    // `x = 0`.) A *positive* factor is genuinely inert on that path — it
+    // reports natural units already, so both paths give the same answer — and
+    // is deliberately not treated as a conflict.
+    //
+    // There are *two* channels into the same sign flip, and the guard has to
+    // watch both. The option is one. The other is the `.nl`'s objective
+    // `scaling_factor` suffix under `nlp_scaling_method=user-scaling`:
+    // `scale_user_supplied` installs it as `df` with no sign guard, so a
+    // negative entry maximizes exactly as the option does. Watching only the
+    // option left `scaling_factor[obj] = -1` plus a forced convex solver
+    // returning the minimizer with an "the requested scaling will be skipped"
+    // warning — which understates it, since what is skipped is the objective
+    // sense, not conditioning. Found by adversarial testing of this guard.
+    let negative_obj_scaling_option = app
+        .options()
+        .get_numeric_value("obj_scaling_factor", "")
+        .ok()
+        .and_then(|(v, set)| set.then_some(v))
+        .is_some_and(|v| v < 0.0);
+    let negative_obj_scaling_suffix = wants_user_scaling
+        && nl_suffixes.as_ref().is_some_and(|s| {
+            s.obj_real
+                .get("scaling_factor")
+                .and_then(|v| v.first())
+                .is_some_and(|&f| f < 0.0)
+        });
+    let maximize_via_obj_scaling = negative_obj_scaling_option || negative_obj_scaling_suffix;
     // Human-readable description of the requested post-optimal work, reused in
     // the "not available on this path" messages below.
     let postopt_what = match (wants_sens, args.compute_red_hessian) {
@@ -647,6 +722,26 @@ pub fn main() -> ExitCode {
         let decline_convex_for_postopt =
             wants_nlp_postopt && matches!(selection, SolverSelection::Auto);
 
+        // gh#483: same bargain for user NLP scaling. `nlp_scaling_method=
+        // user-scaling` plus the `.nl`'s `scaling_factor` suffixes is honored
+        // by the general NLP interior-point path only — the convex solvers run
+        // their own internal equilibration and never see the TNLP's scaling
+        // callback, so routing there would accept the option and mean "none".
+        let decline_convex_for_user_scaling =
+            wants_user_scaling && matches!(selection, SolverSelection::Auto);
+
+        // gh#483 follow-up: a negative `obj_scaling_factor` means maximize,
+        // which the convex path cannot express. Unlike the two requests above
+        // — where the fast path merely skips *extra* work — taking it here
+        // returns the wrong optimum, so under an explicit `solver_selection`
+        // this is refused outright below rather than warned about.
+        let decline_convex_for_obj_scaling =
+            maximize_via_obj_scaling && matches!(selection, SolverSelection::Auto);
+        // Any of these declines the fast path; the messages below say which.
+        let decline_convex = decline_convex_for_postopt
+            || decline_convex_for_user_scaling
+            || decline_convex_for_obj_scaling;
+
         // Same bargain for a conic solve that finishes without a verified KKT
         // point: under `auto` the class was our inference, not the user's
         // instruction, so fall through to the NLP filter-IPM (a convex QCQP is
@@ -663,7 +758,7 @@ pub fn main() -> ExitCode {
         // fast-path for a post-optimal request (#196), report the NLP path that
         // actually runs, not the convex one `resolve_solver` picked.
         if !suppress_banner && !json_dbg {
-            let described = if decline_convex_for_postopt {
+            let described = if decline_convex {
                 SolverChoice::Nlp.describe()
             } else {
                 choice.describe()
@@ -698,6 +793,32 @@ pub fn main() -> ExitCode {
                 | SolverChoice::SocpIpm
                 | SolverChoice::QpActiveSet
         ) {
+            // gh#483 follow-up: `derivative_test` is about the *model*,
+            // not the engine, so on the convex route it is run here rather
+            // than declined — this dispatch never reaches `optimize_tnlp`,
+            // where the NLP path's copy lives. Checking the raw
+            // `inner_tnlp` keeps the report in the user's own indices, and
+            // running it here (not there) means it cannot fire twice.
+            app.run_derivative_test(&inner_tnlp);
+            // gh#483 follow-up: a forced convex solver plus a negative
+            // `obj_scaling_factor` has no honest outcome — the engine cannot
+            // maximize, and running it anyway hands back the minimizer of the
+            // problem the user asked to maximize. Refuse, the way a
+            // class/solver mismatch is refused, instead of warning and
+            // returning a wrong answer.
+            if maximize_via_obj_scaling && !decline_convex_for_obj_scaling {
+                eprintln!(
+                    "pounce: the objective scaling is negative (maximize) — via \
+                     obj_scaling_factor or the .nl's `scaling_factor` suffix — \
+                     but solver_selection={sel_str} forces the convex solver \
+                     (pounce-convex), which minimizes and does not read that \
+                     option — it would report the minimizer of the objective \
+                     you asked to maximize. Use solver_selection=nlp or auto \
+                     (which routes here automatically), or negate the \
+                     objective in the model and drop obj_scaling_factor."
+                );
+                return ExitCode::from(2);
+            }
             // issue #196: if the .nl requested a sensitivity / reduced-Hessian
             // step, either reroute (auto) or warn (explicit convex force) so
             // the fast path never silently drops it.
@@ -720,16 +841,53 @@ pub fn main() -> ExitCode {
                     );
                 }
             }
+            // gh#483: same treatment for `nlp_scaling_method=user-scaling`.
+            if wants_user_scaling {
+                if decline_convex_for_user_scaling {
+                    eprintln!(
+                        "pounce: note: this problem classifies as {} but \
+                         nlp_scaling_method=user-scaling asks for the .nl's \
+                         `scaling_factor` suffixes to be applied, which the \
+                         convex solver (pounce-convex) does not do; routing to \
+                         the general NLP interior-point path so the scaling is \
+                         honored.",
+                        class.name()
+                    );
+                } else {
+                    eprintln!(
+                        "pounce: warning: nlp_scaling_method=user-scaling asks \
+                         for the .nl's `scaling_factor` suffixes to be applied, \
+                         but solver_selection={sel_str} forces the convex solver \
+                         (pounce-convex), which equilibrates internally and does \
+                         not read them; the requested scaling will be skipped. \
+                         Use solver_selection=nlp or auto to apply it."
+                    );
+                }
+            }
+            // gh#483 follow-up: the auto-reroute half of the negative
+            // `obj_scaling_factor` case (the forced half exited above).
+            if decline_convex_for_obj_scaling {
+                eprintln!(
+                    "pounce: note: this problem classifies as {} but \
+                     obj_scaling_factor is negative (maximize), which the \
+                     convex solver (pounce-convex) cannot express; routing to \
+                     the general NLP interior-point path so the objective \
+                     sense is honored.",
+                    class.name()
+                );
+            }
             // The convex solvers need the parsed `NlProblem`, but the initial
             // parse moved it into `NlTnlp`. Re-parse the file here — only on
             // the convex dispatch path (LP / convex-QP / SOCP), never for a
             // general NLP solve. Only `.nl` inputs ever classify as convex, so
             // the builtin arm falls through to NLP. A parse failure surfaces
             // and exits rather than silently mis-routing to NLP (L24).
-            if decline_convex_for_postopt {
-                // Declined for #196: fall through to the NLP solve below, which
-                // runs the sensitivity / reduced-Hessian step in `on_converged`
-                // and writes `sens_sol_state_1` to the `.sol`.
+            if decline_convex {
+                // Declined for #196 / gh#483: fall through to the NLP solve
+                // below, which runs the sensitivity / reduced-Hessian step in
+                // `on_converged` (writing `sens_sol_state_1` to the `.sol`) and
+                // reads the `scaling_factor` suffixes through the TNLP scaling
+                // callback.
             } else if let ProblemSource::NlFile(path) = &args.problem {
                 let prob = match nl_reader::read_nl_file(path) {
                     Ok(p) => p,
@@ -892,7 +1050,20 @@ pub fn main() -> ExitCode {
             // Lift to full length so a fixed / eliminated variable
             // still occupies its slot — AMPL's `.sol` reader matches
             // the x block against the originating `.nl`'s var count.
-            let x = nlp.borrow().lift_x_to_full(&*curr.x);
+            let x_iterate = nlp.borrow().lift_x_to_full(&*curr.x);
+            // The `.sol` / JSON `solution.x` is the point the user is
+            // *told* is the solution, so it goes through
+            // `finalize_solution_x` — which adds the
+            // `honor_original_bounds` projection undoing the
+            // `bound_relax_factor` widening. Without it a bound-pinned
+            // solution is reported just outside its own declared bounds
+            // even with the option on, because this hook reads the raw
+            // iterate rather than the `finalize_solution` payload.
+            // `x_iterate` stays unprojected for the sensitivity /
+            // reduced-Hessian steps below: those expand around the point
+            // the KKT factorization was built at, and must not be handed
+            // a base shifted out from under it.
+            let x = nlp.borrow().finalize_solution_x(&*curr.x);
             // Reassemble the user-facing `lambda` (length `n_full_g`, in
             // original `.nl` g-row order) via `finalize_solution_lambda`, which
             // inverts the c/d split through `c_map`/`d_map`, unwinds the
@@ -963,7 +1134,7 @@ pub fn main() -> ExitCode {
                         suffixes,
                         n_full,
                         m_full,
-                        &x,
+                        &x_iterate,
                         boundcheck_eps,
                     ) {
                         *sens_cap.borrow_mut() = Some(xp);

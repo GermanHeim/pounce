@@ -83,6 +83,7 @@ use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::derivative_test::{DerivativeTest, DerivativeTestOptions};
 use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
@@ -544,6 +545,43 @@ impl IpoptApplication {
             return ApplicationReturnStatus::InvalidOption;
         }
 
+        // A `linear_solver` pounce does not implement is refused rather
+        // than quietly served by FERAL (gh#483 follow-up). Checked here,
+        // before any work, so a library consumer gets the same verdict the
+        // CLI gives before its banner.
+        if let Some(value) = self.unimplemented_linear_solver() {
+            use pounce_common::journalist::JournalCategory;
+            let msg = format!("{}\n", Self::unimplemented_linear_solver_message(&value));
+            eprint!("{msg}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
+        // gh#483 follow-up: an option naming a feature pounce does not
+        // implement is refused, not shrugged off. See
+        // `unimplemented_options` for how membership was established and
+        // why an explicitly-set *default* is deliberately still allowed.
+        if let Some(msg) = self.unimplemented_option_refusal() {
+            use pounce_common::journalist::JournalCategory;
+            eprintln!("{msg}");
+            self.journalist.print(
+                JournalLevel::J_ERROR,
+                JournalCategory::J_MAIN,
+                &format!("{msg}\n"),
+            );
+            return ApplicationReturnStatus::InvalidOption;
+        }
+        for warning in self.unexploited_hint_warnings() {
+            eprintln!("{warning}");
+        }
+
+        // `derivative_test`: check the caller's analytic derivatives
+        // against finite differences before anything else runs — on the
+        // raw TNLP, before the presolve wrapper below changes its
+        // coordinates.
+        self.run_derivative_test(&tnlp);
+
         // Top-level algorithm dispatch (Phase 5b §7.1). When the
         // `algorithm` option resolves to "active-set-sqp", route
         // to the Phase 5b SQP path; otherwise fall through to the
@@ -845,6 +883,140 @@ impl IpoptApplication {
         ["lp-ipm", "qp-ipm", "socp"]
             .into_iter()
             .find(|c| v.eq_ignore_ascii_case(c))
+    }
+
+    /// The `linear_solver` value when the caller explicitly asked for a
+    /// backend pounce does not implement; `None` when the request can be
+    /// served (or was never made).
+    ///
+    /// pounce ships two: **FERAL** (pure Rust, the effective default) and
+    /// **MA57** (HSL, behind the `ma57` feature). The option's valid-value
+    /// list is a faithful port of upstream Ipopt's — `ma27`, `ma77`,
+    /// `ma86`, `ma97`, `mumps`, `pardiso`, `pardisomkl`, `spral`, `wsmp`,
+    /// `custom` — so an `ipopt.opt` written for Ipopt parses here, and
+    /// every one of those names used to fall through a `_ =>` arm to
+    /// FERAL. A run "using MUMPS" was a FERAL run; a benchmark comparing
+    /// backends compared FERAL with itself (gh#483 follow-up).
+    ///
+    /// The registered default is `feral`, which pounce implements, so no
+    /// explicit-vs-default distinction is needed: whatever the option
+    /// resolves to must be a backend that exists. (It is checked
+    /// unconditionally on purpose — a future default naming something
+    /// unimplemented should trip this, not slip past it.)
+    ///
+    /// Explicit `ma57` on a build that lacks the feature is *not* refused;
+    /// that fallback is reported in the banner ("ma57 requested but not
+    /// compiled"), so it is visible rather than silent, and failing a
+    /// portable `ipopt.opt` over a build flag would cost more than it buys.
+    pub fn unimplemented_linear_solver(&self) -> Option<String> {
+        let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
+        ["feral", "ma57"]
+            .iter()
+            .all(|ok| !v.eq_ignore_ascii_case(ok))
+            .then_some(v)
+    }
+
+    /// The message for the first option the caller set that names a
+    /// feature pounce does not implement, or `None`. Public so the CLI
+    /// can refuse before routing — the convex dispatch never reaches
+    /// `optimize_tnlp`. See [`crate::unimplemented_options`].
+    pub fn unimplemented_option_refusal(&self) -> Option<String> {
+        crate::unimplemented_options::refusal(&self.options, &self.reg_options)
+    }
+
+    /// Warnings for caching hints pounce does not exploit. These never
+    /// block a solve: the answer is identical either way, so refusing
+    /// would cost the caller more than the silence did.
+    pub fn unexploited_hint_warnings(&self) -> Vec<String> {
+        crate::unimplemented_options::hint_warnings(&self.options, &self.reg_options)
+    }
+
+    /// Resolve the five registered `derivative_test*` knobs. Every one
+    /// of them was registered and never read, so `derivative_test=
+    /// first-order` ran no test and printed nothing — a checker that
+    /// silently checks nothing reports success by omission (gh#483
+    /// follow-up).
+    fn derivative_test_options(&self) -> DerivativeTestOptions {
+        let num = |key: &str, default: Number| -> Number {
+            self.options
+                .get_numeric_value(key, "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(default)
+        };
+        DerivativeTestOptions {
+            mode: self
+                .options
+                .get_string_value("derivative_test", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .map(|v| DerivativeTest::from_option(&v))
+                .unwrap_or_default(),
+            perturbation: num("derivative_test_perturbation", 1e-8),
+            tol: num("derivative_test_tol", 1e-4),
+            first_index: self
+                .options
+                .get_integer_value("derivative_test_first_index", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(-2),
+            print_all: self
+                .options
+                .get_bool_value("derivative_test_print_all", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Run the derivative checker, if asked, against the **user's own**
+    /// TNLP — before presolve wraps it and before any scaling — so the
+    /// report is about the derivatives the caller wrote, in the caller's
+    /// own indices.
+    ///
+    /// Advisory, like upstream: a suspicious entry is reported and the
+    /// solve continues. The report goes to stderr so it survives
+    /// `print_level=0` and leaves `--json-output`'s stdout clean.
+    pub fn run_derivative_test(&self, tnlp: &Rc<RefCell<dyn TNLP>>) {
+        let opts = self.derivative_test_options();
+        if matches!(opts.mode, DerivativeTest::None) {
+            return;
+        }
+        let report = {
+            let mut borrowed = tnlp.borrow_mut();
+            pounce_nlp::derivative_test::run(&mut *borrowed, &opts)
+        };
+        let Some(report) = report else {
+            eprintln!(
+                "pounce: derivative_test was requested but the TNLP declined to \
+                 supply the information the check needs (dimensions, bounds, or \
+                 a starting point); no test was run."
+            );
+            return;
+        };
+        use pounce_common::journalist::JournalCategory;
+        for line in &report.lines {
+            eprintln!("{line}");
+            self.journalist.print(
+                JournalLevel::J_SUMMARY,
+                JournalCategory::J_MAIN,
+                &format!("{line}\n"),
+            );
+        }
+    }
+
+    /// The message [`Self::unimplemented_linear_solver`] earns, shared by
+    /// every frontend so they cannot drift apart.
+    pub fn unimplemented_linear_solver_message(value: &str) -> String {
+        format!(
+            "pounce: linear_solver={value} is not implemented. pounce provides \
+             `feral` (pure-Rust sparse symmetric, the default) and `ma57` (HSL, \
+             in a `--features ma57` build); the other names in the option's \
+             list come from the upstream Ipopt registry so an ipopt.opt written \
+             for Ipopt still parses. Selecting one used to run FERAL silently, \
+             which makes a backend comparison measure nothing — so it is \
+             refused instead. Use linear_solver=feral or linear_solver=ma57."
+        )
     }
 
     fn is_sqp_algorithm_selected(&self) -> bool {
@@ -1778,6 +1950,21 @@ impl IpoptApplication {
             .unwrap_or(1e-4);
         orig_nlp.relax_bounds(bound_relax_factor, constr_viol_tol);
 
+        // `honor_original_bounds` (default `no`, matching upstream):
+        // project the reported point back into the un-relaxed box. Must
+        // follow `relax_bounds`, which snapshots the bounds to project
+        // onto. Registered but never read before, so a user asking for
+        // it still got a bound-pinned solution sitting up to
+        // `min(bound_relax_factor·max(1,|b|), constr_viol_tol)` outside
+        // its own bounds (gh#483 follow-up).
+        let honor_original_bounds = self
+            .options
+            .get_bool_value("honor_original_bounds", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(false);
+        orig_nlp.set_honor_original_bounds(honor_original_bounds);
+
         // Apply automatic NLP scaling per `nlp_scaling_method` option
         // (port of `OrigIpoptNLP::InitializeStructures` →
         // `NLPScalingObject::DetermineScaling`). Default is
@@ -1828,6 +2015,32 @@ impl IpoptApplication {
             obj_target_gradient,
             constr_target_gradient,
         );
+
+        // `user-scaling` with per-variable factors: pounce models
+        // objective and constraint scaling only. Applying the rest and
+        // dropping the variable factors would solve a problem
+        // conditioned differently from the one described, with nothing
+        // said about it — so refuse instead (gh#483).
+        if orig_nlp.user_x_scaling_rejected() {
+            use pounce_common::journalist::JournalCategory;
+            const MSG: &str = "pounce: nlp_scaling_method=user-scaling supplied \
+                 per-variable scaling factors, but pounce models only objective \
+                 and constraint scaling. Applying the objective/constraint \
+                 factors alone would change the problem's conditioning in a way \
+                 you did not ask for, so the solve is refused rather than run. \
+                 Leave the variable factors at 1.0 (rescaling those variables in \
+                 the model itself), or drop nlp_scaling_method=user-scaling. \
+                 Tracking issue: https://github.com/jkitchin/pounce/issues/483\n";
+            // stderr, not stdout: this must reach the user even under
+            // `print_level=0` / `--json-output`, where stdout is reserved
+            // for machine-readable output. The journalist copy lands in
+            // any attached `output_file`.
+            eprint!("{MSG}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, MSG);
+            timing.overall_alg.end();
+            return ApplicationReturnStatus::InvalidOption;
+        }
 
         let nlp_handle: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
@@ -2243,6 +2456,15 @@ impl IpoptApplication {
         // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
         // overridden by an explicit user setting of those keys
         // below. Mirrors `IpAlgBuilder.cpp:Mehrotra`.
+        // `fast_step_computation` — skip the search-direction residual
+        // check and allow an inexact linear solve. `PdSearchDirCalc` has
+        // consumed this flag since it landed, hard-coded to `false`; the
+        // option's read site was simply missing, so setting it did
+        // nothing at all (gh#483 follow-up, #191 round 2).
+        if let Ok((v, true)) = self.options.get_string_value("fast_step_computation", "") {
+            builder.fast_step_computation = v.eq_ignore_ascii_case("yes");
+        }
+
         let mut mehrotra_on = false;
         if let Ok((v, found)) = self.options.get_string_value("mehrotra_algorithm", "") {
             if found && v == "yes" {
@@ -2401,6 +2623,22 @@ impl IpoptApplication {
         // `OrigIpoptNlp::determine_scaling_from_starting_point` (see the
         // `determine_scaling_from_starting_point` call earlier in this
         // method); there is no algorithm-side scaling strategy to wire.
+        // `limited_memory_init_val_max` / `_min` — the clamp on the
+        // initial Hessian scalar. `LimMemQuasiNewtonUpdater` consumes
+        // both in `initial_hessian_scalar`; only the read sites were
+        // missing, so setting either did nothing (gh#483, #191 round 2).
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("limited_memory_init_val_max", "")
+        {
+            builder.limited_memory_init_val_max = v;
+        }
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("limited_memory_init_val_min", "")
+        {
+            builder.limited_memory_init_val_min = v;
+        }
 
         // Unlike the other options here, we always honor the registry
         // value (not just when the user set it explicitly): the option
@@ -2416,13 +2654,19 @@ impl IpoptApplication {
         // `builder.linear_solver` disagree with the backend actually built, and
         // consumers acted on the lie: the Schur KKT gate in
         // `alg_builder::build_with_backend` tests `== Feral`, so on the
-        // pure-Rust default build — where the registry default "ma57" resolves
-        // to FERAL anyway — `set_kkt_schur_block()` silently never engaged for
-        // ANY user. Resolving here keeps the field truthful for every consumer.
+        // pure-Rust default build — where the registry default (then upstream's
+        // "ma57") resolved to FERAL anyway — `set_kkt_schur_block()` silently
+        // never engaged for ANY user. Resolving here keeps the field truthful
+        // for every consumer.
+        //
+        // The `_ =>` arm is now only reachable for `feral`: every other name
+        // is refused up front by `unimplemented_linear_solver`. It used to
+        // swallow `mumps`, `pardiso`, `ma97`, … and run FERAL instead.
         if let Ok((v, _found)) = self.options.get_string_value("linear_solver", "") {
-            let requested = match v.as_str() {
-                "ma57" => LinearSolverChoice::Ma57,
-                _ => LinearSolverChoice::Feral,
+            let requested = if v.eq_ignore_ascii_case("ma57") {
+                LinearSolverChoice::Ma57
+            } else {
+                LinearSolverChoice::Feral
             };
             builder.linear_solver =
                 if matches!(requested, LinearSolverChoice::Ma57) && !cfg!(feature = "ma57") {
@@ -2834,6 +3078,24 @@ impl IpoptApplication {
         if let Some(v) = read_num("required_infeasibility_reduction") {
             builder.resto.required_infeasibility_reduction = v;
         }
+        // gh#483 / #191 round 2: three restoration switches whose fields
+        // `RestoAlgorithmBuilder` has consumed all along — the read site
+        // was the only missing piece, so setting them did nothing.
+        let read_yes = |key: &str| -> Option<bool> {
+            match self.options.get_string_value(key, "") {
+                Ok((v, true)) => Some(v.eq_ignore_ascii_case("yes")),
+                _ => None,
+            }
+        };
+        if let Some(v) = read_yes("evaluate_orig_obj_at_resto_trial") {
+            builder.resto.evaluate_orig_obj_at_resto_trial = v;
+        }
+        if let Some(v) = read_yes("expect_infeasible_problem") {
+            builder.resto.expect_infeasible_problem = v;
+        }
+        if let Some(v) = read_yes("start_with_resto") {
+            builder.resto.start_with_resto = v;
+        }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {
@@ -3239,7 +3501,11 @@ fn finalize_via_orig_nlp(
     // TNLP receives the same shape it provided. With `make_parameter`
     // the fixed components are spliced back in by the IpoptNlp.
     let nlp_borrow = nlp.borrow();
-    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&*curr.x);
+    // `finalize_solution_x`, not `lift_x_to_full`: the reported point also
+    // owes the user the `honor_original_bounds` projection. `f` and `g`
+    // below are then evaluated at the point actually reported, so x/f/g
+    // agree with each other.
+    let x_vec: Vec<Number> = nlp_borrow.finalize_solution_x(&*curr.x);
     let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
     let n = info.n as usize;
     let m = info.m as usize;
@@ -3482,7 +3748,7 @@ fn finalize_via_sqp(
 
     let mut x_dv = x_space.make_new_dense();
     x_dv.set_values(&res.x);
-    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&x_dv);
+    let x_vec: Vec<Number> = nlp_borrow.finalize_solution_x(&x_dv);
     debug_assert_eq!(x_vec.len(), n);
 
     // λ_x is packed signed (z_l − z_u). Split for lift.
@@ -4011,8 +4277,7 @@ mod tests {
     /// `builder.linear_solver` must name the backend that will actually be
     /// built, not the one the option string asked for.
     ///
-    /// The option registry defaults `linear_solver` to "ma57", but MA57 is
-    /// behind the optional `ma57` cargo feature; without it
+    /// MA57 is behind the optional `ma57` cargo feature; without it
     /// `default_backend_factory` silently substitutes FERAL. Recording `Ma57`
     /// anyway made the field disagree with reality, and the Schur KKT gate in
     /// `alg_builder::build_with_backend` (which tests `== Feral`) consumed that
@@ -4021,20 +4286,18 @@ mod tests {
     /// answer correct and every test green.
     #[test]
     fn application_linear_solver_records_the_effective_backend() {
-        // Default options: registry says "ma57"; a build without the feature
-        // must still report FERAL, because FERAL is what gets constructed.
+        // Default options resolve to FERAL in *every* build. The registry
+        // used to default to upstream's "ma57", which meant an HSL build
+        // silently ran MA57 without being asked and a pure-Rust build
+        // advertised a backend it did not contain; the default now names
+        // pounce's own solver and HSL is opt-in (gh#483 follow-up).
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
-        let got = app.algorithm_builder_from_options().linear_solver;
-        if cfg!(feature = "ma57") {
-            assert_eq!(got, LinearSolverChoice::Ma57);
-        } else {
-            assert_eq!(
-                got,
-                LinearSolverChoice::Feral,
-                "default build has no MA57; the effective backend is FERAL"
-            );
-        }
+        assert_eq!(
+            app.algorithm_builder_from_options().linear_solver,
+            LinearSolverChoice::Feral,
+            "the registered default is `feral`, in an ma57 build too"
+        );
 
         // An explicit ma57 request resolves the same way.
         let mut app = IpoptApplication::new();

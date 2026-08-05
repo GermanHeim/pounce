@@ -9,6 +9,190 @@ changes.
 
 ## [Unreleased]
 
+### Changed — options naming unimplemented features are refused, not ignored (#483 follow-up, continuing #191)
+
+- The option registry is a faithful port of Ipopt's, so an `ipopt.opt`
+  written for Ipopt parses unchanged — and ~200 of the registered knobs
+  were silent no-ops, because registering an option says nothing about
+  implementing it. #191 fixed the half where the *feature* runs and only
+  the read site was missing; it explicitly scoped out "feature genuinely
+  unimplemented — expected no-ops". This closes that half.
+- Setting an option that configures a feature POUNCE does not have now
+  fails the solve — exit 2 from the CLI, `Invalid_Option` for library
+  callers — naming the option, the feature, and the alternative. Covered:
+  the Chen-Goldfarb (CG-penalty) / inexact-Newton line search, derivative
+  approximation by finite differences, linear-dependency detection, the
+  per-iteration NaN/Inf derivative check, multiplier recalculation,
+  a selectable constraint-violation norm, magic steps, bound replacement,
+  the L-BFGS augmented-system variants, the linear-variable hint, reading
+  options from a file, skipping the finalize callback, the dynamic HSL
+  loader, `suppress_all_output` and `debug_print_level`.
+- **An explicitly-set default is still allowed.** A generated `ipopt.opt`
+  spells out defaults and `dependency_detector=none` asks for nothing;
+  only a value differing from the registered default is refused. Without
+  this the change would break the compatibility the registry provides.
+- **Caching hints warn instead of failing.** `grad_f_constant`,
+  `hessian_constant`, `jac_c_constant`, `jac_d_constant` are hints POUNCE
+  does not exploit; ignoring them costs evaluations, never correctness, so
+  blocking the solve would be the worse trade.
+- Membership was established per option, not inferred: the name must
+  appear in no crate source outside the registry (whole-word — so
+  `penalty_max` is not counted present because `l1_penalty_max` exists)
+  *and* the feature itself must be absent. Options whose feature runs and
+  whose read site is merely missing — the restoration knobs, the
+  `limited_memory_*` tail, the corrector selectors — are deliberately
+  excluded and still solve; refusing them would fail solves whose answers
+  are correct today. A unit test pins that boundary.
+- The check runs before solver routing, so a model that classifies as a
+  convex QP gets the same verdict.
+
+### Fixed — `fast_step_computation` is wired, not refused (#483 follow-up, #191 round 2)
+
+- `PdSearchDirCalc` has owned this flag — skip the search-direction
+  residual check, allow an inexact linear solve — since it landed, and
+  consumes it at two sites; only the option's read site was missing, so
+  setting it did nothing. It now reaches the builder, default unchanged
+  (`no`).
+- It briefly sat in the refusal table above, added by hand against that
+  table's own membership rule (its name *does* appear in the sources), so
+  it would have failed a solve POUNCE can serve. The boundary test now
+  pins it.
+
+### Added — the derivative checker (`derivative_test`) now exists (#483 follow-up)
+
+- All five `derivative_test*` options were registered and none was ever
+  read, so `derivative_test=first-order` ran no test and printed nothing.
+  That is the worst shape an unimplemented option can take: a *checker*
+  that silently checks nothing reports success by omission — a user with
+  a hand-written `eval_grad_f` turns it on, sees no complaints, and
+  concludes the gradient is right.
+- Implemented as a port of upstream's `TNLPAdapter::CheckDerivatives`:
+  `first-order` compares `eval_grad_f` / `eval_jac_g` against finite
+  differences at the bound-projected starting point, `second-order` adds
+  `eval_h` (checked one multiplier block at a time), `only-second-order`
+  does the Hessian alone. `derivative_test_perturbation`,
+  `derivative_test_tol`, `derivative_test_first_index` and
+  `derivative_test_print_all` are all honored.
+- Two checks upstream does not make, because neither is reachable by a
+  value-by-value comparison: an entry whose finite difference is nonzero
+  but which the **sparsity structure omits** (a derivative the solver can
+  never see), and taking the perturbation **downward** when stepping up
+  would leave a variable's box, so a model using `sqrt`/`log`/`1/x` is
+  not evaluated outside its own domain by its own checker.
+- Advisory, like upstream: suspicious entries are reported and the solve
+  continues. The report goes to stderr, so it survives `print_level=0`
+  and stays out of `--json-output`'s stdout. It runs on both solver
+  routes — the convex dispatch never reaches the NLP path's copy, and the
+  check is about the model, not the engine.
+- `check_derivatives_for_naninf` (a per-iteration NaN/Inf guard) remains
+  unimplemented and is documented as such.
+
+### Fixed — `linear_solver` accepted every backend name and silently ran FERAL (#483 follow-up)
+
+- The option's registered value list is a faithful port of upstream
+  Ipopt's — `ma27`, `ma57`, `ma77`, `ma86`, `ma97`, `mumps`, `pardiso`,
+  `pardisomkl`, `spral`, `wsmp`, `custom`, `feral` — so an `ipopt.opt`
+  written for Ipopt parses unchanged. POUNCE implements two of them, and
+  the resolver mapped everything else through a `_ =>` arm to FERAL. So
+  `linear_solver=ma97` "worked": a successful run using a backend the
+  binary does not contain, and a benchmark comparing linear solvers that
+  compared FERAL against itself.
+- Selecting an unimplemented backend is now refused — exit 2 from the CLI,
+  `Invalid_Option` for library callers — with a message naming the backend
+  and what to use instead. The names stay registered, so an Ipopt
+  `ipopt.opt` still parses and gets a precise complaint rather than
+  "invalid value". Their per-backend tuning knobs (`ma97_scaling`,
+  `mumps_pivtolmax`, `pardiso_*`, …) are registered for the same reason
+  and are now unreachable.
+- **The registered default is now `feral`**, diverging from upstream's
+  `ma57` on purpose: a default has to name a solver the binary actually
+  contains. Under the old default a pure-Rust build advertised MA57 to
+  every `print_user_options` dump and banner-adjacent consumer while
+  running FERAL, and — the behavioural half — an **HSL-enabled build used
+  MA57 without being asked**. If you build `--features ma57` and want it,
+  select it explicitly with `linear_solver=ma57`. This also removes the
+  explicit-vs-default special case the banner, the wheel's banner, and
+  the refusal guard each had to carry.
+- Not a failure: **explicit `ma57` without the feature** falls back to
+  FERAL with the banner saying so (`FERAL (ma57 requested but not
+  compiled)`) — a reported substitution, not a hidden one.
+- The check runs before solver routing, so it does not depend on whether
+  the model classifies into the NLP path or the convex one.
+
+### Fixed — a maximize request was silently dropped on the convex LP/QP route (#483 follow-up)
+
+- `obj_scaling_factor` is upstream's spelling for maximization (the IPM
+  minimizes `factor·f`, so a negative factor maximizes `f`). The convex
+  solvers in `pounce-convex` equilibrate internally and never read the
+  option — and every LP / convex-QP model routes to them by default. So
+  `min (x−3)²` over `x ∈ [0,1]` with `obj_scaling_factor=-1` returned
+  `x = 1`, the **minimizer** of the objective the user asked to maximize,
+  reported as `Optimal Solution Found`. The same file under
+  `solver_selection=nlp` answered correctly with `x = 0`.
+- A negative factor now declines the convex fast path under
+  `solver_selection=auto` (routing to the NLP path, which honors it) and
+  is **refused** — exit 2, with an explanation — under an explicit convex
+  `solver_selection`, where the alternative is not a skipped extra but a
+  wrong answer.
+- A *positive* factor is unaffected: it only rescales conditioning, the
+  convex path reports natural units either way, and both paths agree.
+
+### Fixed — `honor_original_bounds` was registered but never read (#483 follow-up)
+
+- `bound_relax_factor` (default `1e-8`) widens the variable box before the
+  solve, so a solution pinned to a bound is reported just outside it:
+  `min (x−3)² + (y+2)²` over `x ∈ [0,1]`, `y ∈ [−1,1]` returned
+  `x = 1.00000000937`, `y = −1.00000000875`. Upstream registers
+  `honor_original_bounds` to project that back; pounce registered it and
+  never read it, so there was no way to get a point inside the declared
+  box — and the value flows on into a downstream `sqrt(1−x)`, a domain
+  assertion, or a Pyomo `Var` whose bounds it is loaded back into.
+- The option is now honored on both routes a caller can read the solution
+  from: the `.sol` / JSON primal (via the CLI's converged-iterate hook)
+  and `TNLP::finalize_solution` (pounce-py, the C interface, any Rust
+  TNLP). The default stays `no`, matching upstream, and — as upstream
+  documents — the summary's constraint-violation and complementarity
+  figures remain those of the non-projected point.
+
+### Fixed — user scaling was a silent no-op from Pyomo, and the core silently discarded `x_scaling` (#483)
+
+- **The `scaling_factor` Suffix now reaches the solver.** Tagging the
+  standard Pyomo Suffix and setting `nlp_scaling_method=user-scaling` —
+  the workflow that works with Ipopt through ASL — produced *no scaling
+  at all* and no message saying so. `NlTnlp` never implemented
+  `get_scaling_parameters`, so the `.nl`'s `scaling_factor` suffix
+  segments were parsed and then ignored, and pyomo-pounce had no scaling
+  code of its own. The option was accepted and meant "none". Objective
+  and constraint factors now apply on both paths: the ASL/subprocess
+  solve reads the suffix segments, and pyomo-pounce's in-process
+  sensitivity path installs them via `Problem.set_problem_scaling`.
+  Untagged components, and components tagged `0` (AMPL's suffix
+  default), are unscaled; entries on inactive constraints and fixed
+  variables are skipped; a container entry expands to its members.
+- **Per-variable factors are refused instead of dropped.** POUNCE models
+  objective and constraint scaling only, and `scale_user_supplied` ended
+  in `let _ = use_x_scaling;` — so a caller who supplied variable factors
+  got a converged answer to a differently-conditioned problem than the
+  one described, with the objective and constraint factors applied and
+  the variable ones gone. A non-unit `x_scaling` now fails the solve with
+  `Invalid_Option` and an explanation, `pounce.Problem.set_problem_scaling`
+  raises, and pyomo-pounce raises naming the variables. An all-ones
+  request asks for nothing and still solves. Modelling variable scaling
+  in the core is staged work tracked on #483.
+- **No silence anywhere else on the path.** `nlp_scaling_method=user-scaling`
+  on a model that classifies as LP/QP/SOCP used to route to
+  `pounce-convex`, which equilibrates internally and never reads the
+  scaling callback; `solver_selection=auto` now declines that fast path
+  so the scaling is honored, and an explicit `solver_selection` warns.
+  pyomo-pounce warns when `user-scaling` is requested with no
+  export-enabled `scaling_factor` Suffix to apply.
+- The sensitivity accessors needed no code: `natural_units_conj` already
+  translates `df`/`dc`/`dd` for any scaling method. That is now proven
+  rather than assumed — `covariance`, `information`, `gradient`,
+  `estimate`, `wrt=` blocks, the retain-only path, the classifier's
+  statuses, and the fixed-variable composition are each checked against
+  unscaled ground truth with user scaling engaged.
+
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 
 - The `inf_pr` iteration column printed `max(‖c‖∞, ‖d − s‖∞)` — the

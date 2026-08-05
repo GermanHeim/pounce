@@ -28,10 +28,13 @@ file.
 | `tol`           | Overall convergence tolerance on the KKT error.                      |
 | `max_iter`      | Maximum number of outer iterations.                                  |
 | `print_level`   | Console verbosity, 0 (silent) – 12 (maximum debug).                  |
-| `linear_solver` | KKT linear-solver backend. `ma57` requires the `ma57` feature build. |
+| `linear_solver` | KKT linear-solver backend: `feral` (default) or `ma57` (needs a `--features ma57` build). Any other registered name is **refused**. See below. |
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
 | `qp_presolve`   | Presolve on the convex LP/QP path (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
+| `obj_scaling_factor` | Constant multiplier on the objective; **negative maximizes**. See below. |
+| `bound_relax_factor` | Relaxation applied to variable/constraint bounds before the solve (default `1e-8`). |
+| `honor_original_bounds` | Project the reported point back into the un-relaxed bounds (`yes` / `no`, default `no`). See below. |
 
 For the full upstream option catalogue, see the
 [Ipopt options reference](https://coin-or.github.io/Ipopt/OPTIONS.html);
@@ -42,6 +45,181 @@ overrides, `linear_system_scaling`), see the [Scaling](scaling.md)
 reference page. For nonlinear bound tightening (`presolve_fbbt`,
 `fbbt_tol`, `fbbt_max_iter`, `fbbt_max_constraints`), see the
 [FBBT](fbbt.md) reference page.
+
+## Options POUNCE does not implement
+
+POUNCE's option registry is a faithful port of Ipopt's: every name Ipopt
+registers is registered here, so an `ipopt.opt` written for Ipopt parses
+unchanged. Registering an option is not the same as implementing it,
+though — and for a long time setting an unimplemented one did nothing at
+all, silently.
+
+Options naming a feature POUNCE does not have now **fail the solve**,
+naming the option, the feature, and what to use instead:
+
+```
+$ pounce model.nl dependency_detector=mumps
+pounce: `dependency_detector` configures linear-dependency detection on the
+equality constraints, which pounce does not implement. It is registered so an
+ipopt.opt written for Ipopt still parses, but setting it used to do nothing at
+all — silently — so it is refused instead. Instead: pounce's presolve removes
+structurally redundant rows; see `presolve`. Remove it to run.
+```
+
+The features in question: the Chen-Goldfarb (CG-penalty) / inexact-Newton
+line search, derivative approximation by finite differences,
+linear-dependency detection, the per-iteration NaN/Inf derivative check,
+multiplier recalculation by least squares, a selectable
+constraint-violation norm, magic steps, bound replacement, the L-BFGS
+augmented-system variants, reading options from a file, skipping the
+finalize callback, the dynamic HSL loader, and `suppress_all_output` /
+`debug_print_level`.
+
+Two deliberate exceptions:
+
+* **Setting an option to its registered default is allowed.** A generated
+  `ipopt.opt` spells out defaults, and `dependency_detector=none` asks for
+  nothing. Only a value that differs from the default is a request POUNCE
+  cannot honour.
+* **Caching hints warn instead of failing.** `grad_f_constant`,
+  `hessian_constant`, `jac_c_constant` and `jac_d_constant` tell the
+  solver a quantity does not change between iterations. POUNCE
+  re-evaluates regardless, so ignoring them costs evaluations and never
+  correctness — failing the solve would be a worse trade.
+
+Options whose *feature* runs and whose value simply is not read yet are
+**not** in this category; they still solve, with the default in effect.
+Wiring those is tracked on
+[#191](https://github.com/jkitchin/pounce/issues/191) and
+[#483](https://github.com/jkitchin/pounce/issues/483).
+
+## Derivative checker
+
+Wrong analytic derivatives are the most common cause of an NLP that
+stalls, cycles, or converges to something that is not a solution — and
+they are invisible from the iteration log. `derivative_test` compares
+what your TNLP returns against finite differences at the (bound-projected)
+starting point, before the solve:
+
+```
+pounce problem.nl derivative_test=first-order
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `derivative_test` | `none` | `none` / `first-order` / `second-order` / `only-second-order`. |
+| `derivative_test_perturbation` | `1e-8` | Relative finite-difference step: `perturbation · max(1, |xᵢ|)`. |
+| `derivative_test_tol` | `1e-4` | Flag an entry when `\|analytic − fd\| > tol · max(1, \|fd\|)`. |
+| `derivative_test_first_index` | `-2` (all) | First **variable** for the first-order test; first **constraint** for the second-order one, where `-1` is the objective's Hessian. |
+| `derivative_test_print_all` | `no` | List every entry, not just the suspicious ones. |
+
+`first-order` checks `eval_grad_f` and `eval_jac_g`; `second-order` adds
+`eval_h`; `only-second-order` checks the Hessian alone. The Hessian is
+checked one multiplier block at a time — `obj_factor = 1, λ = 0` against
+differences of `eval_grad_f`, then `obj_factor = 0, λ = eⱼ` against
+differences of row `j` of `eval_jac_g`.
+
+Entries that look wrong are marked `*`:
+
+```
+Derivative checker: first derivatives at the starting point (perturbation 1.0e-8, tolerance 1.0e-4).
+* grad_f[    1]       =    3.5000000000000000e0    ~    3.0000000119209290e0  [  1.667e-1]
+1 suspicious derivative(s) and 0 missing sparsity entrie(s) out of 6 checked (8 evaluations).
+```
+
+Two checks beyond upstream Ipopt's, because both catch a class of bug no
+value-by-value comparison can:
+
+* A Jacobian or Hessian entry whose finite difference is nonzero but
+  which the **sparsity structure omits** (`!` in the report). A missing
+  structural entry is not a wrong number — it is a derivative the solver
+  can never see.
+* The perturbation is taken **downward** when stepping up would leave a
+  variable's box, so a model using `sqrt`, `log`, or `1/x` is not
+  evaluated outside its own domain by the checker.
+
+The test is advisory: it reports and the solve continues. It is written
+to **stderr**, so it survives `print_level=0` and never mixes into
+`--json-output`'s stdout. It is slow — the second-order test costs
+roughly `(m+1)·n` evaluations — so leave it off for production runs.
+
+> `check_derivatives_for_naninf` is a separate upstream option, for a
+> per-iteration NaN/Inf guard, and is **not implemented**.
+
+## Choosing a linear solver
+
+POUNCE implements two KKT backends:
+
+* **`feral`** — pure-Rust sparse symmetric indefinite solver. The
+  effective default; no Fortran toolchain, no HSL licence.
+* **`ma57`** — HSL MA57, available only in a `cargo build --features
+  ma57` build.
+
+The option's *registered* value list is a faithful port of upstream
+Ipopt's (`ma27`, `ma77`, `ma86`, `ma97`, `mumps`, `pardiso`,
+`pardisomkl`, `spral`, `wsmp`, `custom`), so an `ipopt.opt` written for
+Ipopt parses here unchanged. Selecting one of those **fails the solve**
+with a message naming it. They used to fall through to FERAL silently,
+which meant `linear_solver=ma97` "worked" and a benchmark comparing
+backends compared FERAL with itself.
+
+The **registered default is `feral`**, which diverges from upstream's
+`ma57` on purpose: a default has to name a solver the binary actually
+contains. Under the upstream default a pure-Rust build advertised MA57 to
+every `print_user_options` dump while running FERAL, and an
+HSL-enabled build used MA57 without being asked. **If you build
+`--features ma57` and want it, select it explicitly** — that is the one
+behavioural change here.
+
+Not a failure: **explicit `ma57` on a build without the feature** falls
+back to FERAL and says so in the banner (`FERAL (ma57 requested but not
+compiled)`). That substitution is reported rather than hidden, and
+failing a portable `ipopt.opt` over a build flag would cost more than it
+buys.
+
+The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
+`pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same
+`ipopt.opt`-compatibility reason. They are unreachable now that their
+backend cannot be selected.
+
+## Bound relaxation and `honor_original_bounds`
+
+Before the solve, POUNCE widens every variable and constraint bound by
+`bound_relax_factor` (default `1e-8`, capped by `constr_viol_tol`),
+exactly as upstream Ipopt does — it keeps the interior-point iterates
+strictly feasible without the user's bounds becoming numerically
+degenerate. The consequence is that a solution *pinned to a bound* is
+reported just past it:
+
+```
+min (x − 3)²  s.t.  0 ≤ x ≤ 1     →     x = 1.00000000937
+```
+
+`honor_original_bounds=yes` projects the reported point back into the
+bounds you declared, so that solve returns exactly `x = 1`. Reach for it
+whenever the value flows somewhere that cares about the domain — a
+`sqrt(1 − x)`, a domain assertion, or a Pyomo `Var` the value is loaded
+back into.
+
+The default is `no`, matching upstream. As upstream also documents, the
+constraint-violation and complementarity figures in the end-of-run
+summary are for the **non-projected** point; only the reported `x` (and
+the objective and constraint values evaluated at it) move.
+
+## Objective sense and `obj_scaling_factor`
+
+`obj_scaling_factor` multiplies the objective the IPM minimizes, so a
+**negative** value maximizes — upstream's documented spelling for a
+maximization problem stated as a minimization. Because it changes what is
+being optimized rather than just its conditioning, it is honored only by
+the general NLP interior-point path: a model that would otherwise route
+to the specialized convex solvers (LP / convex QP / SOCP, see
+[LP/QP Routing](lp-qp-routing.md)) is re-routed under
+`solver_selection=auto`, and an explicit convex `solver_selection` is
+**refused** rather than silently answering with the minimizer.
+
+A positive factor is a pure conditioning knob; the convex path reports
+natural units either way, so it keeps the fast path.
 
 ## Barrier-parameter (μ) strategy
 

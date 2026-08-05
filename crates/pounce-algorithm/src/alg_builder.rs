@@ -207,6 +207,13 @@ pub struct AlgorithmBuilder {
     /// History length for the limited-memory quasi-Newton approximation
     /// (`limited_memory_max_history`). Defaults to upstream's 6.
     pub limited_memory_max_history: i32,
+    /// `limited_memory_init_val_max` / `_min` — the clamp on the initial
+    /// Hessian scalar σ before the rank-2 updates. Upstream defaults 1e8
+    /// / 1e-8, which `LimMemQuasiNewtonUpdater` has carried as hard-coded
+    /// fields and consumed in `initial_hessian_scalar` all along; only
+    /// the read sites were missing (gh#483, #191 round 2).
+    pub limited_memory_init_val_max: Number,
+    pub limited_memory_init_val_min: Number,
     pub line_search_method: LineSearchChoice,
     pub warm_start_init_point: bool,
     /// `mehrotra_algorithm` — when true, [`PdSearchDirCalc`] folds
@@ -218,6 +225,14 @@ pub struct AlgorithmBuilder {
     /// option-parser in `application.rs` is responsible for the
     /// cascading defaults (`mu_oracle = probing` etc.).
     pub mehrotra_algorithm: bool,
+    /// `fast_step_computation` — when true, [`PdSearchDirCalc`] accepts
+    /// the search direction without the residual check and allows an
+    /// inexact linear solve. Mirrors upstream's flag of the same name,
+    /// default `no`. The field existed and was consumed from the day the
+    /// search-direction calculator landed, hard-coded to `false`; only
+    /// the option's read site was missing, so setting it did nothing
+    /// (gh#483 follow-up, #191 round 2).
+    pub fast_step_computation: bool,
     /// `kappa_sigma` — factor bounding how far the bound multipliers may
     /// deviate from their primal estimates. The clamp
     /// (`kappa_sigma_clamp`) runs after every accepted step; `< 1`
@@ -685,6 +700,20 @@ pub struct RestoOptions {
     /// (`κ_resto` in `IpRestoConvCheck.cpp:58`). `0` disables the guard,
     /// i.e. restoration runs until the sub-NLP itself converges.
     pub required_infeasibility_reduction: Number,
+    /// `evaluate_orig_obj_at_resto_trial` — evaluate the *original*
+    /// objective at every restoration trial point, so an iterate the
+    /// restoration problem likes but the original cannot evaluate is
+    /// rejected there rather than after the phase exits. Upstream default
+    /// `yes`. `RestoAlgorithmBuilder` has consumed this since it landed;
+    /// only the read site was missing (gh#483, #191 round 2).
+    pub evaluate_orig_obj_at_resto_trial: bool,
+    /// `expect_infeasible_problem` — enter restoration sooner and demand
+    /// more infeasibility reduction before leaving it. Upstream default
+    /// `no`. Same story: consumed, never read.
+    pub expect_infeasible_problem: bool,
+    /// `start_with_resto` — switch to restoration in the first iteration.
+    /// Upstream default `no`. Same story.
+    pub start_with_resto: bool,
 }
 
 impl Default for RestoOptions {
@@ -695,6 +724,9 @@ impl Default for RestoOptions {
             resto_penalty_parameter: 1e3,
             resto_proximity_weight: 1.0,
             required_infeasibility_reduction: 0.9,
+            evaluate_orig_obj_at_resto_trial: true,
+            expect_infeasible_problem: false,
+            start_with_resto: false,
         }
     }
 }
@@ -774,9 +806,12 @@ impl Default for AlgorithmBuilder {
             hessian_approximation: HessianApproxChoice::Exact,
             limited_memory_update_type: UpdateType::Bfgs,
             limited_memory_max_history: 6,
+            limited_memory_init_val_max: 1e8,
+            limited_memory_init_val_min: 1e-8,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
+            fast_step_computation: false,
             kappa_sigma: 1e10,
             kappa_d: 1e-5,
             tiny_step_tol: 10.0 * Number::EPSILON,
@@ -896,6 +931,7 @@ impl AlgorithmBuilder {
         pd_solver.residual_improvement_factor = self.refinement.residual_improvement_factor;
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
+        search_dir.fast_step_computation = self.fast_step_computation;
         self.build_inner(Some(search_dir))
     }
 
@@ -1077,6 +1113,8 @@ impl AlgorithmBuilder {
             HessianApproxChoice::LimitedMemory => Box::new(LimMemQuasiNewtonUpdater {
                 update_type: self.limited_memory_update_type,
                 max_history: self.limited_memory_max_history,
+                init_val_max: self.limited_memory_init_val_max,
+                init_val_min: self.limited_memory_init_val_min,
                 ..LimMemQuasiNewtonUpdater::default()
             }),
         };
@@ -1187,9 +1225,12 @@ mod tests {
                             hessian_approximation,
                             limited_memory_update_type: UpdateType::Bfgs,
                             limited_memory_max_history: 6,
+                            limited_memory_init_val_max: 1e8,
+                            limited_memory_init_val_min: 1e-8,
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
+                            fast_step_computation: false,
                             kappa_sigma: 1e10,
                             kappa_d: 1e-5,
                             tiny_step_tol: 10.0 * Number::EPSILON,

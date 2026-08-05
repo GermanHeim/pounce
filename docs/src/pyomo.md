@@ -50,6 +50,56 @@ import pyomo_pounce
 pyomo_pounce.check_binary()   # prints a report; returns a dict
 ```
 
+## User scaling with the `scaling_factor` Suffix
+
+A badly conditioned model converges poorly, and often you know its
+natural units better than the solver can infer from gradients at `x0`.
+The standard Pyomo channel for saying so is the `scaling_factor`
+Suffix, read exactly as Ipopt reads it:
+
+```python
+model.scaling_factor = Suffix(direction=Suffix.EXPORT)
+model.scaling_factor[model.obj] = 1e-3           # objective in MW, not W
+model.scaling_factor[model.mass_balance] = 1e2   # one constraint
+model.scaling_factor[model.energy_balance] = 1e2 # or a whole container
+
+solver.solve(model, options={'nlp_scaling_method': 'user-scaling'})
+```
+
+Both halves are required: without `nlp_scaling_method=user-scaling` the
+Suffix is inert (a `scaling_factor` Suffix also drives Pyomo's own
+`core.scale_model` transformation, which never involves the solver), and
+without the Suffix the option has nothing to apply — pyomo-pounce warns
+in that case rather than leaving you to wonder.
+
+Rules, matching AMPL/Ipopt:
+
+* Only an **export-enabled** Suffix counts (`Suffix.EXPORT` or
+  `Suffix.IMPORT_EXPORT`).
+* Components you do not list are unscaled, as are components listed with
+  a factor of `0`.
+* An entry on a container applies to every member.
+* Entries on **inactive** constraints/objectives and on **fixed**
+  variables are skipped — none is a row or column of the problem the
+  solver is handed.
+* Scaling changes conditioning, never the answer: solutions, duals, and
+  everything the [sensitivity](sensitivity.md) accessors report come back
+  in your model's units.
+
+**Variables cannot be scaled.** POUNCE models objective and constraint
+scaling only, so a `scaling_factor` on a `Var` raises with a message
+naming the variables. It is a hard error on purpose: applying the
+objective and constraint factors while dropping the variable ones would
+solve a problem your Suffix does not describe, and say nothing about it
+([issue #483](https://github.com/jkitchin/pounce/issues/483)). Rescale
+those variables in the model itself — substitute `x = z / s`, declare
+`z`, and the change is explicit in the model rather than implicit in a
+suffix.
+
+This works on both solve paths: the ordinary ASL/subprocess solve and
+the in-process path taken when the model carries [sensitivity
+declarations](sensitivity.md).
+
 ## Preflight and initialization
 
 A `Var` whose `.value` was never set is written as **0** into the

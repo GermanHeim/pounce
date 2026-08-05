@@ -64,6 +64,28 @@ solver.options['print_level'] = 5
 Options are forwarded to POUNCE's `OptionsList` (ipopt.opt-compatible
 keys).
 
+## User scaling
+
+The standard `scaling_factor` Suffix works as it does with IPOPT:
+
+```python
+model.scaling_factor = Suffix(direction=Suffix.EXPORT)
+model.scaling_factor[model.obj] = 1e-3
+model.scaling_factor[model.mass_balance] = 1e2
+
+solver.solve(model, options={'nlp_scaling_method': 'user-scaling'})
+```
+
+Both halves are needed — the Suffix alone is inert (it also drives
+Pyomo's own `core.scale_model`), and the option alone has nothing to
+apply, which pyomo-pounce warns about. Untagged components are
+unscaled; inactive constraints and fixed variables are skipped.
+
+POUNCE models objective and constraint scaling only, so a
+`scaling_factor` on a `Var` **raises** rather than being silently
+dropped ([#483](https://github.com/jkitchin/pounce/issues/483)) —
+rescale those variables in the model instead.
+
 ## Local development / unsupported platforms
 
 If `pounce-solver` does not ship a wheel for your platform, the pip

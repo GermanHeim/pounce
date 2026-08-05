@@ -148,6 +148,11 @@ class POUNCE(ASL):
         # available for gradient()/estimate(). Otherwise the ordinary
         # ASL/CLI path runs. The model may arrive positionally or as the
         # `model` keyword.
+        from pyomo_pounce.scaling import (
+            check_no_variable_scaling,
+            user_scaling_requested,
+            warn_if_no_suffix,
+        )
         from pyomo_pounce.sens import has_declarations, sens_solve
 
         model = args[0] if args else kwds.get("model")
@@ -187,16 +192,27 @@ class POUNCE(ASL):
                     "var.domain = pyomo.environ.Reals / relax it explicitly) "
                     "if a continuous relaxation is what you intend, or use a "
                     "MINLP-capable solver.")
+        # Solver options as the solve will actually see them: factory-level
+        # options (SolverFactory("pounce", options=...) or
+        # solver.options[...]) first, per-call options={...} on top.
+        # Dropping them here silently un-tuned every model the day it gained
+        # a declaration (gh #432).
+        # the ASL layer keeps its executable option prefix under the
+        # `solver` key; it is bookkeeping, not a solver option
+        opts = {k: v for k, v in self.options.items() if k != "solver"}
+        opts.update(kwds.get("options") or {})
+        if model is not None and user_scaling_requested(opts):
+            # gh #483: the `scaling_factor` Suffix is the standard Pyomo
+            # channel for user scaling, and it used to reach pyomo-pounce
+            # and stop -- the option was accepted and meant "none". The
+            # objective/constraint factors now flow through (the writer's
+            # `.nl` suffix segments on this path, `set_problem_scaling` on
+            # the in-process one); a variable factor POUNCE cannot model is
+            # refused here rather than discarded, and a request with nothing
+            # to apply says so.
+            check_no_variable_scaling(model)
+            warn_if_no_suffix(model)
         if model is not None and (has_declarations(model) or explicit):
-            # Solver options must survive the reroute: factory-level
-            # options (SolverFactory("pounce", options=...) or
-            # solver.options[...]) first, per-call options={...} on top.
-            # Dropping them here silently un-tuned every model the day
-            # it gained a declaration (gh #432).
-            # the ASL layer keeps its executable option prefix under
-            # the `solver` key; it is bookkeeping, not a solver option
-            opts = {k: v for k, v in self.options.items() if k != "solver"}
-            opts.update(kwds.get("options") or {})
             return sens_solve(model, tee=kwds.get("tee", False),
                               options=opts, **explicit)
         return super().solve(*args, **kwds)

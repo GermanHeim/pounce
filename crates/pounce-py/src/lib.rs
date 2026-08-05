@@ -55,16 +55,15 @@ pub use sparse_lu::PySparseLu;
 fn print_banner() {
     // Derive the backend tag the same way the CLI's banner does
     // (main.rs `backend_tag`) so the two frontends never disagree. The
-    // registered `linear_solver` default mirrors upstream Ipopt ("ma57"),
-    // but this wheel's actual backend is FERAL, so "ma57" counts as the
-    // backend only when a caller explicitly set it -- which a fresh
-    // application never does. The default wheel therefore banners "FERAL"
-    // rather than the registered-default "ma57".
-    let (solver, explicit) = pounce_algorithm::application::IpoptApplication::new()
+    // registered `linear_solver` default is "feral", which is this
+    // wheel's actual backend, so the resolved value is the whole story --
+    // no "was it explicitly set?" flag needed, unlike under upstream's
+    // "ma57" default.
+    let (solver, _) = pounce_algorithm::application::IpoptApplication::new()
         .options()
         .get_string_value("linear_solver", "")
         .unwrap_or_else(|_| ("feral".to_string(), false));
-    let tag = if explicit && solver == "ma57" {
+    let tag = if solver.eq_ignore_ascii_case("ma57") {
         "MA57 (HSL)"
     } else {
         "FERAL"

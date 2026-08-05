@@ -57,17 +57,22 @@ print(info['status_msg'], info['obj_val'], x)
 
 ## Problem scaling
 
-For problems whose natural variable and constraint magnitudes differ
+For problems whose natural objective and constraint magnitudes differ
 by orders of magnitude, attach explicit scaling factors:
 
 ```python
 prob.set_problem_scaling(
-    obj_scaling=1.0,
-    x_scaling=np.array([1e-3, 1.0, 1.0, 1e3]),  # optional
+    obj_scaling=1e-3,
     g_scaling=np.array([1.0, 1e-2]),            # optional
 )
 prob.add_option('nlp_scaling_method', 'user-scaling')
 ```
+
+`x_scaling=` is accepted only as all-ones: POUNCE models objective and
+constraint scaling, not per-variable rescaling, and a non-unit
+`x_scaling` raises rather than being discarded ([issue
+#483](https://github.com/jkitchin/pounce/issues/483)). Rescale those
+variables in the model itself.
 
 See [`docs/src/scaling.md`](../docs/src/scaling.md) for the
 gradient-based vs. user-scaling tradeoff.

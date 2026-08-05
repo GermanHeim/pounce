@@ -178,6 +178,23 @@ Both the primal solution and the constraint duals are written to the
 `.sol` file, in the same sign convention as POUNCE's NLP path (so Pyomo
 and AMPL read them identically regardless of which solver ran).
 
+### Requests the convex path does not implement
+
+The convex solvers are a specialized fast path, not a drop-in for every
+option the NLP path honors. Where a request would be *dropped* rather
+than merely unused, routing gives way rather than answering a different
+question:
+
+| Request | Under `auto` | Under an explicit `solver_selection` |
+|---|---|---|
+| `obj_scaling_factor < 0` (maximize) | re-routes to the NLP path | **refused** (exit 2) — running would report the minimizer |
+| `nlp_scaling_method=user-scaling` with `scaling_factor` suffixes | re-routes to the NLP path | warns; the scaling is skipped |
+| sIPOPT `sens_*` suffixes, `--compute-red-hessian` | re-routes to the NLP path | warns; the step is skipped |
+
+A *positive* `obj_scaling_factor` is not in this table: it only rescales
+conditioning, and the convex path reports natural units either way, so
+both paths give the same answer.
+
 ### Infeasible and unbounded problems
 
 The convex solver detects infeasibility and unboundedness directly,
