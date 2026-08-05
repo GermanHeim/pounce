@@ -46,6 +46,53 @@ reference page. For nonlinear bound tightening (`presolve_fbbt`,
 `fbbt_tol`, `fbbt_max_iter`, `fbbt_max_constraints`), see the
 [FBBT](fbbt.md) reference page.
 
+## Options POUNCE does not implement
+
+POUNCE's option registry is a faithful port of Ipopt's: every name Ipopt
+registers is registered here, so an `ipopt.opt` written for Ipopt parses
+unchanged. Registering an option is not the same as implementing it,
+though — and for a long time setting an unimplemented one did nothing at
+all, silently.
+
+Options naming a feature POUNCE does not have now **fail the solve**,
+naming the option, the feature, and what to use instead:
+
+```
+$ pounce model.nl dependency_detector=mumps
+pounce: `dependency_detector` configures linear-dependency detection on the
+equality constraints, which pounce does not implement. It is registered so an
+ipopt.opt written for Ipopt still parses, but setting it used to do nothing at
+all — silently — so it is refused instead. Instead: pounce's presolve removes
+structurally redundant rows; see `presolve`. Remove it to run.
+```
+
+The features in question: the Chen-Goldfarb (CG-penalty) / inexact-Newton
+line search, derivative approximation by finite differences,
+linear-dependency detection, the per-iteration NaN/Inf derivative check,
+multiplier recalculation by least squares, a selectable
+constraint-violation norm, magic steps, bound replacement, the L-BFGS
+augmented-system variants, reading options from a file, skipping the
+finalize callback, the dynamic HSL loader, and `suppress_all_output` /
+`debug_print_level`.
+
+Two deliberate exceptions:
+
+* **Setting an option to its registered default is allowed.** A generated
+  `ipopt.opt` spells out defaults, and `dependency_detector=none` asks for
+  nothing. Only a value that differs from the default is a request POUNCE
+  cannot honour.
+* **Caching hints warn instead of failing.** `grad_f_constant`,
+  `hessian_constant`, `jac_c_constant` and `jac_d_constant` tell the
+  solver a quantity does not change between iterations. POUNCE
+  re-evaluates regardless, so ignoring them costs evaluations and never
+  correctness — failing the solve would be a worse trade.
+
+Options whose *feature* runs and whose value simply is not read yet are
+**not** in this category; they still solve, with the default in effect.
+Wiring those is tracked on
+[#191](https://github.com/jkitchin/pounce/issues/191) and
+[#483](https://github.com/jkitchin/pounce/issues/483).
+
 ## Derivative checker
 
 Wrong analytic derivatives are the most common cause of an NLP that

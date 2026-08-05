@@ -396,6 +396,17 @@ pub fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // Same treatment for every other option naming a feature pounce does
+    // not implement, and the same reason for checking here: a model that
+    // routes to `pounce-convex` never reaches `optimize_tnlp`, where the
+    // library-side copy of this guard lives.
+    if let Some(msg) = app.unimplemented_option_refusal() {
+        eprintln!("{msg}");
+        return ExitCode::from(2);
+    }
+    for warning in app.unexploited_hint_warnings() {
+        eprintln!("{warning}");
+    }
 
     // Branded logo + copyright banner, printed up-front — before the
     // problem is even read — so they head the output. `sb yes` suppresses

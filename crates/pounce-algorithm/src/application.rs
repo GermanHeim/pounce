@@ -558,6 +558,24 @@ impl IpoptApplication {
             return ApplicationReturnStatus::InvalidOption;
         }
 
+        // gh#483 follow-up: an option naming a feature pounce does not
+        // implement is refused, not shrugged off. See
+        // `unimplemented_options` for how membership was established and
+        // why an explicitly-set *default* is deliberately still allowed.
+        if let Some(msg) = self.unimplemented_option_refusal() {
+            use pounce_common::journalist::JournalCategory;
+            eprintln!("{msg}");
+            self.journalist.print(
+                JournalLevel::J_ERROR,
+                JournalCategory::J_MAIN,
+                &format!("{msg}\n"),
+            );
+            return ApplicationReturnStatus::InvalidOption;
+        }
+        for warning in self.unexploited_hint_warnings() {
+            eprintln!("{warning}");
+        }
+
         // `derivative_test`: check the caller's analytic derivatives
         // against finite differences before anything else runs — on the
         // raw TNLP, before the presolve wrapper below changes its
@@ -896,6 +914,21 @@ impl IpoptApplication {
             .iter()
             .all(|ok| !v.eq_ignore_ascii_case(ok))
             .then_some(v)
+    }
+
+    /// The message for the first option the caller set that names a
+    /// feature pounce does not implement, or `None`. Public so the CLI
+    /// can refuse before routing — the convex dispatch never reaches
+    /// `optimize_tnlp`. See [`crate::unimplemented_options`].
+    pub fn unimplemented_option_refusal(&self) -> Option<String> {
+        crate::unimplemented_options::refusal(&self.options, &self.reg_options)
+    }
+
+    /// Warnings for caching hints pounce does not exploit. These never
+    /// block a solve: the answer is identical either way, so refusing
+    /// would cost the caller more than the silence did.
+    pub fn unexploited_hint_warnings(&self) -> Vec<String> {
+        crate::unimplemented_options::hint_warnings(&self.options, &self.reg_options)
     }
 
     /// Resolve the five registered `derivative_test*` knobs. Every one

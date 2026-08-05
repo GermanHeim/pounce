@@ -46,6 +46,7 @@ pub mod restoration;
 pub mod sqp;
 pub mod strategy;
 pub mod timing_stats;
+pub mod unimplemented_options;
 pub mod upstream_options;
 
 pub use application::IpoptApplication;

@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+### Changed — options naming unimplemented features are refused, not ignored (#483 follow-up, continuing #191)
+
+- The option registry is a faithful port of Ipopt's, so an `ipopt.opt`
+  written for Ipopt parses unchanged — and ~200 of the registered knobs
+  were silent no-ops, because registering an option says nothing about
+  implementing it. #191 fixed the half where the *feature* runs and only
+  the read site was missing; it explicitly scoped out "feature genuinely
+  unimplemented — expected no-ops". This closes that half.
+- Setting an option that configures a feature POUNCE does not have now
+  fails the solve — exit 2 from the CLI, `Invalid_Option` for library
+  callers — naming the option, the feature, and the alternative. Covered:
+  the Chen-Goldfarb (CG-penalty) / inexact-Newton line search, derivative
+  approximation by finite differences, linear-dependency detection, the
+  per-iteration NaN/Inf derivative check, multiplier recalculation,
+  a selectable constraint-violation norm, magic steps, bound replacement,
+  the L-BFGS augmented-system variants, the linear-variable hint, reading
+  options from a file, skipping the finalize callback, the dynamic HSL
+  loader, `suppress_all_output` and `debug_print_level`.
+- **An explicitly-set default is still allowed.** A generated `ipopt.opt`
+  spells out defaults and `dependency_detector=none` asks for nothing;
+  only a value differing from the registered default is refused. Without
+  this the change would break the compatibility the registry provides.
+- **Caching hints warn instead of failing.** `grad_f_constant`,
+  `hessian_constant`, `jac_c_constant`, `jac_d_constant` are hints POUNCE
+  does not exploit; ignoring them costs evaluations, never correctness, so
+  blocking the solve would be the worse trade.
+- Membership was established per option, not inferred: the name must
+  appear in no crate source outside the registry (whole-word — so
+  `penalty_max` is not counted present because `l1_penalty_max` exists)
+  *and* the feature itself must be absent. Options whose feature runs and
+  whose read site is merely missing — the restoration knobs, the
+  `limited_memory_*` tail, the corrector selectors — are deliberately
+  excluded and still solve; refusing them would fail solves whose answers
+  are correct today. A unit test pins that boundary.
+- The check runs before solver routing, so a model that classifies as a
+  convex QP gets the same verdict.
+
 ### Added — the derivative checker (`derivative_test`) now exists (#483 follow-up)
 
 - All five `derivative_test*` options were registered and none was ever
