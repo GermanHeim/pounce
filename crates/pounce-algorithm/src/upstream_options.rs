@@ -211,7 +211,14 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         false,
         "EXPERIMENTAL!",
     )?;
-    r.add_string_option("linear_solver", "Linear solver used for step computations.", "ma57", &[("ma27", "use the Harwell routine MA27"), ("ma57", "use the Harwell routine MA57"), ("ma77", "use the Harwell routine HSL_MA77"), ("ma86", "use the Harwell routine HSL_MA86"), ("ma97", "use the Harwell routine HSL_MA97"), ("pardiso", "use the Pardiso package from pardiso-project.org"), ("pardisomkl", "use the Pardiso package from Intel MKL"), ("spral", "use the SPRAL package"), ("wsmp", "use WSMP package"), ("mumps", "use MUMPS package"), ("custom", "use custom linear solver (expert use)"), ("feral", "use FERAL pure-Rust sparse symmetric solver (pounce extension)")], "Determines which linear algebra package is to be used for the solution of the augmented linear system (for obtaining the search directions).")?;
+    // DELIBERATE DIVERGENCE from upstream, which defaults to "ma57".
+    // pounce's own backend is FERAL, and the default must name a solver
+    // this binary actually contains: the upstream default advertised
+    // MA57 to every `print_user_options` dump and every banner while a
+    // pure-Rust build ran FERAL, and an HSL build silently used MA57
+    // without being asked. Opting into HSL is now explicit. Do not
+    // "restore" this to match upstream (gh#483 follow-up).
+    r.add_string_option("linear_solver", "Linear solver used for step computations.", "feral", &[("ma27", "use the Harwell routine MA27"), ("ma57", "use the Harwell routine MA57"), ("ma77", "use the Harwell routine HSL_MA77"), ("ma86", "use the Harwell routine HSL_MA86"), ("ma97", "use the Harwell routine HSL_MA97"), ("pardiso", "use the Pardiso package from pardiso-project.org"), ("pardisomkl", "use the Pardiso package from Intel MKL"), ("spral", "use the SPRAL package"), ("wsmp", "use WSMP package"), ("mumps", "use MUMPS package"), ("custom", "use custom linear solver (expert use)"), ("feral", "use FERAL pure-Rust sparse symmetric solver (pounce extension)")], "Determines which linear algebra package is to be used for the solution of the augmented linear system (for obtaining the search directions).")?;
 
     // Pounce-extension: top-level algorithm selector (Phase 5b
     // §7.1). The default `interior-point` runs the IPOPT-lineage

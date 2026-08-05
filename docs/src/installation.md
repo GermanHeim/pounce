@@ -126,6 +126,13 @@ export COINHSL_DIR=/path/to/CoinHSL
 cargo build -p pounce-cli --release --features ma57
 ```
 
+The feature makes MA57 *available*; selecting it is a separate step,
+because `linear_solver` defaults to `feral` in every build:
+
+```sh
+pounce problem.nl linear_solver=ma57
+```
+
 Build CoinHSL from <https://www.hsl.rl.ac.uk/ipopt/>. MA57 is
 primarily useful for benchmarking against upstream Ipopt; the FERAL
 backend is the supported default for everyday use, and a build without

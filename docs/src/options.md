@@ -116,15 +116,19 @@ with a message naming it. They used to fall through to FERAL silently,
 which meant `linear_solver=ma97` "worked" and a benchmark comparing
 backends compared FERAL with itself.
 
-Two things deliberately do *not* fail:
+The **registered default is `feral`**, which diverges from upstream's
+`ma57` on purpose: a default has to name a solver the binary actually
+contains. Under the upstream default a pure-Rust build advertised MA57 to
+every `print_user_options` dump while running FERAL, and an
+HSL-enabled build used MA57 without being asked. **If you build
+`--features ma57` and want it, select it explicitly** — that is the one
+behavioural change here.
 
-* The **registered default** is upstream's `ma57`. It is not a user
-  request, and on the pure-Rust build it resolves to FERAL as it always
-  has, so a plain run is unaffected.
-* **Explicit `ma57` on a build without the feature** falls back to FERAL
-  and says so in the banner (`FERAL (ma57 requested but not compiled)`).
-  That substitution is reported rather than hidden, and failing a
-  portable `ipopt.opt` over a build flag would cost more than it buys.
+Not a failure: **explicit `ma57` on a build without the feature** falls
+back to FERAL and says so in the banner (`FERAL (ma57 requested but not
+compiled)`). That substitution is reported rather than hidden, and
+failing a portable `ipopt.opt` over a build flag would cost more than it
+buys.
 
 The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
 `pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same

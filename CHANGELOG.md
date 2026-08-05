@@ -55,12 +55,18 @@ changes.
   "invalid value". Their per-backend tuning knobs (`ma97_scaling`,
   `mumps_pivtolmax`, `pardiso_*`, …) are registered for the same reason
   and are now unreachable.
-- Two cases deliberately still pass: the **registered default** is
-  upstream's `ma57`, which is not a user request and resolves to FERAL on
-  the pure-Rust build as it always has; and **explicit `ma57` without the
-  feature** falls back to FERAL with the banner saying so
-  (`FERAL (ma57 requested but not compiled)`) — a reported substitution,
-  not a hidden one.
+- **The registered default is now `feral`**, diverging from upstream's
+  `ma57` on purpose: a default has to name a solver the binary actually
+  contains. Under the old default a pure-Rust build advertised MA57 to
+  every `print_user_options` dump and banner-adjacent consumer while
+  running FERAL, and — the behavioural half — an **HSL-enabled build used
+  MA57 without being asked**. If you build `--features ma57` and want it,
+  select it explicitly with `linear_solver=ma57`. This also removes the
+  explicit-vs-default special case the banner, the wheel's banner, and
+  the refusal guard each had to carry.
+- Not a failure: **explicit `ma57` without the feature** falls back to
+  FERAL with the banner saying so (`FERAL (ma57 requested but not
+  compiled)`) — a reported substitution, not a hidden one.
 - The check runs before solver routing, so it does not depend on whether
   the model classifies into the NLP path or the convex one.
 

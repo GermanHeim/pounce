@@ -12,10 +12,11 @@
 //!
 //! Two boundaries this pins, because both are load-bearing:
 //!
-//! * The **registered default is `ma57`** (upstream's), not a user
-//!   request. On the pure-Rust build it resolves to FERAL and always
-//!   has, so a default run must stay silent — erroring on it would fail
-//!   every solve.
+//! * The **registered default is `feral`** — pounce's own backend, and
+//!   one this binary always contains. It diverges from upstream's
+//!   `ma57` deliberately: that default advertised a solver a pure-Rust
+//!   build does not have, and made an HSL build run MA57 without being
+//!   asked. A default run must therefore solve, not be refused.
 //! * **Explicit `ma57` on a build without the feature** still falls back.
 //!   That fallback is reported in the banner rather than hidden, and
 //!   failing a portable `ipopt.opt` over a build flag would cost more
@@ -120,17 +121,38 @@ fn implemented_backends_are_accepted() {
     }
 }
 
-/// The registered default is upstream's `ma57`, which is not a user
-/// request — a plain run must be unaffected. This is the assertion that
-/// would have caught a guard written without the `found` gate, which
-/// would fail every default solve on the pure-Rust build.
+/// The registered default must name a backend this binary contains, or
+/// the guard refuses every solve that does not set the option. That is
+/// the invariant the `feral` default buys: no explicit-vs-default
+/// special case is needed anywhere, because the default is legal.
 #[test]
-fn the_registered_default_is_not_treated_as_a_request() {
+fn the_registered_default_solves() {
     let (code, err) = run("user_scaling_suffix.nl", "default", &[]);
     assert_eq!(code, Some(0), "a default run must not be refused; {err}");
     assert!(
         !err.contains("not implemented"),
         "a default run must not warn either; stderr:\n{err}",
+    );
+}
+
+/// …and it is FERAL, in every build. Under upstream's `ma57` default an
+/// HSL build silently ran MA57 without being asked, and a pure-Rust one
+/// banners a solver the option string did not name.
+#[test]
+fn the_registered_default_is_feral() {
+    let dir = std::env::temp_dir().join("pounce_linsolsel_bannerdefault");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let nl = dir.join("user_scaling_suffix.nl");
+    std::fs::copy(fixture("user_scaling_suffix.nl"), &nl).expect("copy fixture");
+    let out = Command::new(pounce_exe())
+        .arg(&nl)
+        .output()
+        .expect("run pounce");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("running with linear solver FERAL"),
+        "default banner should name FERAL; stdout:\n{stdout}",
     );
 }
 

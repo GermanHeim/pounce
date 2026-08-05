@@ -398,30 +398,30 @@ pub fn main() -> ExitCode {
     }
 
     // Branded logo + copyright banner, printed up-front — before the
-    // problem is even read — so they head the output. The registered
-    // default for `linear_solver` mirrors upstream IPOPT (`"ma57"`), but
-    // pounce's actual backend is FERAL; only treat `"ma57"` as user
-    // intent when explicitly set, else the banner would always claim
-    // "ma57 requested". `sb yes` suppresses both (mirrors upstream
-    // `IpoptApplication::Initialize`).
+    // problem is even read — so they head the output. `sb yes` suppresses
+    // both (mirrors upstream `IpoptApplication::Initialize`).
+    //
+    // The registered default is `feral`, so the option's resolved value is
+    // the whole story and the "was it explicitly set?" flag this used to
+    // consult is no longer needed: `ma57` here always means someone asked
+    // for it. (Under upstream's `ma57` default it did not, and the banner
+    // would otherwise have claimed "ma57 requested" on every run.)
     let backend_tag = {
-        let (v, explicit) = app
+        let (v, _) = app
             .options()
             .get_string_value("linear_solver", "")
             .unwrap_or_else(|_| ("feral".to_string(), false));
-        match (v.as_str(), explicit) {
-            ("ma57", true) => {
-                #[cfg(feature = "ma57")]
-                {
-                    "MA57 (HSL)"
-                }
-                #[cfg(not(feature = "ma57"))]
-                {
-                    "FERAL (ma57 requested but not compiled)"
-                }
+        if v.eq_ignore_ascii_case("ma57") {
+            #[cfg(feature = "ma57")]
+            {
+                "MA57 (HSL)"
             }
-            ("ma57", false) => "FERAL",
-            _ => "FERAL",
+            #[cfg(not(feature = "ma57"))]
+            {
+                "FERAL (ma57 requested but not compiled)"
+            }
+        } else {
+            "FERAL"
         }
     };
     let suppress_banner = app

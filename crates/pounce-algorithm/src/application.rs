@@ -880,19 +880,18 @@ impl IpoptApplication {
     /// FERAL. A run "using MUMPS" was a FERAL run; a benchmark comparing
     /// backends compared FERAL with itself (gh#483 follow-up).
     ///
-    /// The registered default is upstream's `"ma57"`, which is *not* a
-    /// user request — on a build without the `ma57` feature it resolves to
-    /// FERAL and always has. Hence the `found` gate: only an explicit
-    /// selection is judged. Explicit `ma57` on a build that lacks the
-    /// feature is left alone too; that fallback is already reported in the
-    /// banner ("ma57 requested but not compiled"), so it is visible rather
-    /// than silent, and failing a portable `ipopt.opt` over a build flag
-    /// would cost more than it buys.
+    /// The registered default is `feral`, which pounce implements, so no
+    /// explicit-vs-default distinction is needed: whatever the option
+    /// resolves to must be a backend that exists. (It is checked
+    /// unconditionally on purpose — a future default naming something
+    /// unimplemented should trip this, not slip past it.)
+    ///
+    /// Explicit `ma57` on a build that lacks the feature is *not* refused;
+    /// that fallback is reported in the banner ("ma57 requested but not
+    /// compiled"), so it is visible rather than silent, and failing a
+    /// portable `ipopt.opt` over a build flag would cost more than it buys.
     pub fn unimplemented_linear_solver(&self) -> Option<String> {
-        let (v, found) = self.options.get_string_value("linear_solver", "").ok()?;
-        if !found {
-            return None;
-        }
+        let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
         ["feral", "ma57"]
             .iter()
             .all(|ok| !v.eq_ignore_ascii_case(ok))
@@ -2597,13 +2596,19 @@ impl IpoptApplication {
         // `builder.linear_solver` disagree with the backend actually built, and
         // consumers acted on the lie: the Schur KKT gate in
         // `alg_builder::build_with_backend` tests `== Feral`, so on the
-        // pure-Rust default build — where the registry default "ma57" resolves
-        // to FERAL anyway — `set_kkt_schur_block()` silently never engaged for
-        // ANY user. Resolving here keeps the field truthful for every consumer.
+        // pure-Rust default build — where the registry default (then upstream's
+        // "ma57") resolved to FERAL anyway — `set_kkt_schur_block()` silently
+        // never engaged for ANY user. Resolving here keeps the field truthful
+        // for every consumer.
+        //
+        // The `_ =>` arm is now only reachable for `feral`: every other name
+        // is refused up front by `unimplemented_linear_solver`. It used to
+        // swallow `mumps`, `pardiso`, `ma97`, … and run FERAL instead.
         if let Ok((v, _found)) = self.options.get_string_value("linear_solver", "") {
-            let requested = match v.as_str() {
-                "ma57" => LinearSolverChoice::Ma57,
-                _ => LinearSolverChoice::Feral,
+            let requested = if v.eq_ignore_ascii_case("ma57") {
+                LinearSolverChoice::Ma57
+            } else {
+                LinearSolverChoice::Feral
             };
             builder.linear_solver =
                 if matches!(requested, LinearSolverChoice::Ma57) && !cfg!(feature = "ma57") {
@@ -4196,8 +4201,7 @@ mod tests {
     /// `builder.linear_solver` must name the backend that will actually be
     /// built, not the one the option string asked for.
     ///
-    /// The option registry defaults `linear_solver` to "ma57", but MA57 is
-    /// behind the optional `ma57` cargo feature; without it
+    /// MA57 is behind the optional `ma57` cargo feature; without it
     /// `default_backend_factory` silently substitutes FERAL. Recording `Ma57`
     /// anyway made the field disagree with reality, and the Schur KKT gate in
     /// `alg_builder::build_with_backend` (which tests `== Feral`) consumed that
@@ -4206,20 +4210,18 @@ mod tests {
     /// answer correct and every test green.
     #[test]
     fn application_linear_solver_records_the_effective_backend() {
-        // Default options: registry says "ma57"; a build without the feature
-        // must still report FERAL, because FERAL is what gets constructed.
+        // Default options resolve to FERAL in *every* build. The registry
+        // used to default to upstream's "ma57", which meant an HSL build
+        // silently ran MA57 without being asked and a pure-Rust build
+        // advertised a backend it did not contain; the default now names
+        // pounce's own solver and HSL is opt-in (gh#483 follow-up).
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
-        let got = app.algorithm_builder_from_options().linear_solver;
-        if cfg!(feature = "ma57") {
-            assert_eq!(got, LinearSolverChoice::Ma57);
-        } else {
-            assert_eq!(
-                got,
-                LinearSolverChoice::Feral,
-                "default build has no MA57; the effective backend is FERAL"
-            );
-        }
+        assert_eq!(
+            app.algorithm_builder_from_options().linear_solver,
+            LinearSolverChoice::Feral,
+            "the registered default is `feral`, in an ma57 build too"
+        );
 
         // An explicit ma57 request resolves the same way.
         let mut app = IpoptApplication::new();
