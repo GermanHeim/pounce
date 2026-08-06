@@ -181,15 +181,23 @@ def gen(rng):
         body = lin + k  # the row's value at the known feasible point
         kind = rng.choice([EQ, UPPER, LOWER, RANGE, FREE])
         lo, hi = -math.inf, math.inf
+        # Bounds are NOT rounded. Rounding them to 9 places was this probe's
+        # own bug: the generator happily draws several singleton equality rows
+        # on one column, and independently-rounded right-hand sides then pin
+        # that column to values ~3e-10 apart. The system is genuinely
+        # inconsistent at that point — HiGHS absorbs it inside its feasibility
+        # tolerance, pounce-convex calls it primal infeasible, and neither is
+        # wrong about a model the probe should not have written. Deriving the
+        # bounds straight from `body` keeps every row exactly satisfied at x*.
         if kind == EQ:
-            lo = hi = round(body, 9)
+            lo = hi = body
         elif kind == UPPER:
-            hi = round(body + rng.uniform(0.0, 2.0), 9)
+            hi = body + rng.uniform(0.0, 2.0)
         elif kind == LOWER:
-            lo = round(body - rng.uniform(0.0, 2.0), 9)
+            lo = body - rng.uniform(0.0, 2.0)
         elif kind == RANGE:
-            lo = round(body - rng.uniform(0.1, 2.0), 9)
-            hi = round(body + rng.uniform(0.1, 2.0), 9)
+            lo = body - rng.uniform(0.1, 2.0)
+            hi = body + rng.uniform(0.1, 2.0)
         rows.append(row)
         kinds.append(kind)
         los.append(lo)
@@ -272,11 +280,18 @@ def stationarity(inst, x, lam, tol=1e-5):
     `.sol` reports. The sign convention is fixed by trying both and demanding
     that one of them hold — AMPL's is `∇f + Jᵀλ`, but the point of the check
     is that the fold does not perturb it, not which sign it is.
+
+    The interior margin is 1e-4, not the 1e-6 this probe first used. An IPM
+    settles a *bound-active* column a small distance off that bound, and at
+    1e-6 such a column read as interior — so the check demanded that the row
+    duals alone cancel a gradient that a bound multiplier was in fact
+    carrying, and reported a false positive on a solve that matched HiGHS to
+    6e-10. Only columns clearly off both bounds are testable this way.
     """
     n = inst["n"]
     interior = [
         j for j in range(n)
-        if inst["x_l"][j] + 1e-6 < x[j] < inst["x_u"][j] - 1e-6
+        if inst["x_l"][j] + 1e-4 < x[j] < inst["x_u"][j] - 1e-4
     ]
     if not interior:
         return None
