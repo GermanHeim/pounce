@@ -882,21 +882,60 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     let mut lb_src: Vec<Option<(usize, f64, bool)>> = vec![None; n];
 
     // Re-attributing an active tightened bound's multiplier to its source
-    // row is only *independent* when source rows share no columns (and
-    // touch no already-reduced column); otherwise the re-attributions
-    // couple. So a row may serve as a tightening source only if all its
-    // columns are kept (not fixed/substituted) and disjoint from every
-    // other accepted source row — a conservative but always-correct
-    // restriction, exactly like forcing's disjoint-column rule.
+    // row is only *independent* when no two source rows can claim the same
+    // bound; otherwise the re-attributions couple. So a row may serve as a
+    // tightening source only if all its columns are kept (not
+    // fixed/substituted) and none of the bounds it would claim has already
+    // been taken — the same disjointness rule forcing uses.
+    //
+    // The claim is per **column** for a row with more than one column, and
+    // per `(column, side)` for a **singleton** row. The split matters because
+    // a variable bound written as a pair of rows — `x ≤ u` and `−x ≤ −l`,
+    // which is how a model reaches here whenever its bounds were not carried
+    // in the box — puts both rows on the same single column. Under a
+    // whole-column rule the first row claimed the column and the second was
+    // skipped, so only one side of that box was ever derived and a
+    // *contradictory* pair (`u < l`) could not be seen at all. It reached the
+    // solver as two rows whose infeasibility had to be certified numerically,
+    // which the interior-point method managed at most widths but not around
+    // `1e-8`, where it returned `NumericalFailure` at a `NaN` iterate.
+    //
+    // For a singleton the relaxation is sound, and only for a singleton:
+    // postsolve credits the source row with `z_ub[col]` or `z_lb[col]`, at
+    // most one of which complementarity allows to be nonzero, and the
+    // credited row has no *other* column whose stationarity that credit could
+    // disturb. A multi-column row does — its `Gᵀz` contribution lands in
+    // every column it touches — so it keeps the conservative whole-column
+    // claim. (Measured: relaxing it there breaks
+    // `randomized_overlapping_tightening_roundtrip`, which chains two-column
+    // rows and finds a postsolved point with a nonzero reduced cost at an
+    // interior variable.)
     let reduction_touched: Vec<bool> = (0..n)
         .map(|c| fixed[c].is_some() || substituted[c])
         .collect();
-    let mut bt_col_used = vec![false; n];
-    let row_is_clean = |entries: &[(usize, f64)], used: &[bool]| {
+    let mut bt_used_upper = vec![false; n];
+    let mut bt_used_lower = vec![false; n];
+    // Which `(column, side)` bounds a row claims. A singleton inequality
+    // `a·x_c ≤ h` implies one bound, and which side is fixed by the sign of
+    // `a` (`a > 0` bounds `x_c` above, `a < 0` below); everything else claims
+    // both sides of every column it touches.
+    let row_claims = |entries: &[(usize, f64)], is_eq: bool| -> Vec<(usize, bool)> {
+        if !is_eq && entries.len() == 1 {
+            let (c, a) = entries[0];
+            return vec![(c, a > 0.0)];
+        }
         entries
             .iter()
-            .all(|&(c, _)| !reduction_touched[c] && !used[c])
+            .flat_map(|&(c, _)| [(c, true), (c, false)])
+            .collect()
     };
+    let row_is_clean =
+        |entries: &[(usize, f64)], is_eq: bool, used_upper: &[bool], used_lower: &[bool]| {
+            entries.iter().all(|&(c, _)| !reduction_touched[c])
+                && row_claims(entries, is_eq)
+                    .into_iter()
+                    .all(|(c, up)| !if up { used_upper[c] } else { used_lower[c] })
+        };
 
     // Tighten variable boxes from one row whose activity lies in `[lo, hi]`
     // (inequality `≤ h`: `lo = −∞, hi = h`; equality: `lo = hi = b`).
@@ -912,7 +951,44 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
                             ub_src: &mut [Option<(usize, f64, bool)>],
                             lb_src: &mut [Option<(usize, f64, bool)>]|
      -> Option<usize> {
-        let (amin, amax) = activity(entries, &|c| tlb[c], &|c| tub[c]);
+        // Row activity as a *finite part plus a count of infinite terms*,
+        // rather than the plain sum [`activity`] returns.
+        //
+        // The implied bound on column `k` needs the activity of the row
+        // **without** `k`, and subtracting `k`'s own contribution from a total
+        // is wrong the moment that contribution is the infinite one: `−∞ −
+        // (−∞)` is `NaN`, `val` came out `NaN`, `val.is_finite()` was false,
+        // and the tightening silently did nothing. That is not a rare corner —
+        // it fired for *every* column of any row holding a variable unbounded
+        // on the relevant side, including the singleton row `x ≤ u`, which is
+        // nothing but a bound and should always imply one. Counting instead
+        // makes the leave-one-out exact: drop `k`'s term from whichever
+        // accumulator held it, and the rest is infinite only if some *other*
+        // column is.
+        let (mut min_finite, mut max_finite) = (0.0_f64, 0.0_f64);
+        let (mut min_infs, mut max_infs) = (0usize, 0usize);
+        let contrib = |k: usize, a: f64, tlb: &[f64], tub: &[f64]| -> (f64, f64) {
+            if a == 0.0 {
+                (0.0, 0.0)
+            } else if a > 0.0 {
+                (a * tlb[k], a * tub[k])
+            } else {
+                (a * tub[k], a * tlb[k])
+            }
+        };
+        for &(c, a) in entries {
+            let (cmin, cmax) = contrib(c, a, tlb, tub);
+            if cmin.is_finite() {
+                min_finite += cmin;
+            } else {
+                min_infs += 1;
+            }
+            if cmax.is_finite() {
+                max_finite += cmax;
+            } else {
+                max_infs += 1;
+            }
+        }
         // Compute all implied bounds against the row-start state, then
         // apply (so within-row order doesn't matter).
         let mut updates: Vec<(usize, bool, f64, f64)> = Vec::new(); // (col,is_upper,val,coef)
@@ -920,10 +996,29 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
             if fixed[k].is_some() || a == 0.0 {
                 continue;
             }
-            let contrib_min = if a > 0.0 { a * tlb[k] } else { a * tub[k] };
-            let contrib_max = if a > 0.0 { a * tub[k] } else { a * tlb[k] };
-            let amin_mk = amin - contrib_min;
-            let amax_mk = amax - contrib_max;
+            let (contrib_min, contrib_max) = contrib(k, a, tlb, tub);
+            // An infinite *min* contribution is `−∞` and an infinite *max* one
+            // is `+∞`, so a leftover infinity has a known sign.
+            let amin_mk = if min_infs > usize::from(!contrib_min.is_finite()) {
+                f64::NEG_INFINITY
+            } else {
+                min_finite
+                    - if contrib_min.is_finite() {
+                        contrib_min
+                    } else {
+                        0.0
+                    }
+            };
+            let amax_mk = if max_infs > usize::from(!contrib_max.is_finite()) {
+                f64::INFINITY
+            } else {
+                max_finite
+                    - if contrib_max.is_finite() {
+                        contrib_max
+                    } else {
+                        0.0
+                    }
+            };
             if hi.is_finite() {
                 let val = (hi - amin_mk) / a;
                 if val.is_finite() {
@@ -980,7 +1075,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         if ineq_dropped[row]
             || is_soc_row(row)
             || g_by_row[row].is_empty()
-            || !row_is_clean(&g_by_row[row], &bt_col_used)
+            || !row_is_clean(&g_by_row[row], false, &bt_used_upper, &bt_used_lower)
         {
             continue;
         }
@@ -998,8 +1093,12 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
             None => return PresolveOutcome::Infeasible,
             Some(0) => {}
             Some(_) => {
-                for &(c, _) in &g_by_row[row] {
-                    bt_col_used[c] = true;
+                for (c, up) in row_claims(&g_by_row[row], false) {
+                    if up {
+                        bt_used_upper[c] = true;
+                    } else {
+                        bt_used_lower[c] = true;
+                    }
                 }
             }
         }
@@ -1007,7 +1106,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     for row in 0..m_eq {
         if eq_dropped[row]
             || a_by_row[row].is_empty()
-            || !row_is_clean(&a_by_row[row], &bt_col_used)
+            || !row_is_clean(&a_by_row[row], true, &bt_used_upper, &bt_used_lower)
         {
             continue;
         }
@@ -1026,8 +1125,12 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
             None => return PresolveOutcome::Infeasible,
             Some(0) => {}
             Some(_) => {
-                for &(c, _) in &a_by_row[row] {
-                    bt_col_used[c] = true;
+                for (c, up) in row_claims(&a_by_row[row], true) {
+                    if up {
+                        bt_used_upper[c] = true;
+                    } else {
+                        bt_used_lower[c] = true;
+                    }
                 }
             }
         }

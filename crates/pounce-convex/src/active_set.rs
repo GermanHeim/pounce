@@ -70,7 +70,7 @@ use pounce_qp::{
     QpStatus as ActiveSetStatus, QpWarmStart, WorkingSet,
 };
 
-use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, inf_norm};
+use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, finite_or_failed, inf_norm};
 use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
 
 /// Caller-supplied overrides for the inner `pounce-qp` engine.
@@ -179,6 +179,22 @@ fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpS
 /// `make_backend` factory (the active-set engine may need more than one
 /// backend instance over a solve).
 pub fn solve_qp_active_set<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // One gate over every exit of the body below — see [`finite_or_failed`].
+    finite_or_failed(
+        prob,
+        solve_qp_active_set_inner(prob, opts, engine, make_backend),
+    )
+}
+
+fn solve_qp_active_set_inner<F>(
     prob: &QpProblem,
     opts: &QpOptions,
     engine: &ActiveSetOverrides,

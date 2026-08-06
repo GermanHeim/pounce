@@ -455,9 +455,17 @@ fn parallel_inequality_keeps_tightest() {
 }
 
 /// Opposite-direction inequalities are *not* merged: `x0 ≤ 3` and
-/// `−x0 ≤ −1` (i.e. x0 ≥ 1) form a range, not a duplicate — both kept.
+/// `−x0 ≤ −1` (i.e. `x0 ≥ 1`) form a range, not a duplicate. Treating them
+/// as duplicates would drop one side and enlarge the feasible set.
+///
+/// They used to be kept as two rows — the only representation available when
+/// a singleton row could not imply a bound (`−∞ − (−∞) = NaN` in the
+/// leave-one-out activity). Now the pair is recognized for what it is and
+/// becomes the box `1 ≤ x0 ≤ 3`, with both rows then redundant. Merging is
+/// still exactly what must not happen, so the assertion is on the *range*:
+/// both sides survive, and the optimum sits on the lower one.
 #[test]
-fn antiparallel_inequalities_not_merged() {
+fn antiparallel_inequalities_become_a_range_not_a_duplicate() {
     let prob = QpProblem {
         n: 1,
         p_lower: vec![Triplet::new(0, 0, 2.0)],
@@ -470,11 +478,17 @@ fn antiparallel_inequalities_not_merged() {
         ub: vec![],
     };
     match presolve(&prob) {
-        PresolveOutcome::Reduced(ps) => assert_eq!(ps.reduced.m_ineq(), 2, "both kept"),
+        PresolveOutcome::Reduced(ps) => {
+            assert_eq!(ps.reduced.lb_of(0), 1.0, "the `x0 >= 1` side survives");
+            assert_eq!(ps.reduced.ub_of(0), 3.0, "and so does `x0 <= 3`");
+        }
         other => panic!("expected Reduced, got {}", status_of(&other)),
     }
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
+    // `min x0²` over `[1, 3]` is at the lower end. Losing the `x0 >= 1` side
+    // to a duplicate-merge would put it at 0.
+    assert!((sol.x[0] - 1.0).abs() < 1e-5, "x0={}", sol.x[0]);
     assert_kkt(&prob, &sol, 1e-5);
 }
 
@@ -725,11 +739,18 @@ fn redundant_inequality_negative_coeffs() {
     assert_kkt(&prob, &sol, 1e-5);
 }
 
-/// Unbounded variables must *not* make a row look redundant: with x0
-/// free (no upper bound), `x0 ≤ 1` has max activity +∞, so the row is
-/// kept and genuinely binds the solution.
+/// Unbounded variables must *not* make a row's content vanish: with x0
+/// free, `x0 ≤ 1` genuinely binds the solution and has to keep doing so
+/// however presolve chooses to represent it.
+///
+/// It used to be kept as a row, because the leave-one-out activity for its
+/// only column computed `−∞ − (−∞) = NaN` and no bound could be derived. That
+/// was a defect, not a policy: a singleton row *is* a bound, and it now
+/// becomes one — `ub = 1` — after which the row is redundant and dropped. So
+/// this asserts what the name always meant: the constraint is still there,
+/// enforced, and binding at the optimum.
 #[test]
-fn unbounded_variable_row_not_dropped() {
+fn unbounded_variable_row_becomes_the_bound_it_is() {
     let prob = QpProblem {
         n: 1,
         p_lower: vec![Triplet::new(0, 0, 2.0)],
@@ -743,13 +764,17 @@ fn unbounded_variable_row_not_dropped() {
     };
     match presolve(&prob) {
         PresolveOutcome::Reduced(ps) => {
-            assert_eq!(ps.reduced.m_ineq(), 1, "row must be kept (activity +∞)");
+            assert_eq!(ps.reduced.ub_of(0), 1.0, "the row became the bound");
+            assert_eq!(ps.reduced.m_ineq(), 0, "and is then redundant as a row");
         }
         other => panic!("expected Reduced, got {:?}", status_of(&other)),
     }
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
+    // The point of the test: the constraint still binds. Without it the
+    // unconstrained optimum of `x0² − 10x0` is 5.
     assert!((sol.x[0] - 1.0).abs() < 1e-5, "x0={}", sol.x[0]);
+    assert_kkt(&prob, &sol, 1e-5);
 }
 
 /// Helper for panic messages: name the non-Reduced outcome.
@@ -1017,5 +1042,85 @@ fn presolve_stats_noop() {
             assert_eq!(s.reduced_rows, s.orig_rows);
         }
         other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+}
+
+// --- contradictory bound rows (gh #491) ---------------------------------
+
+/// A variable box written as a **pair of singleton rows** must be read as a
+/// box, including when the two sides contradict each other.
+///
+/// `x ≤ −gap` with `−x ≤ 0` is the shape any model reaches here with when its
+/// variable bounds were not carried in the box — `.nl` extraction used to emit
+/// exactly this. The pair is empty for any `gap > 0`, and presolve is where
+/// that has to be seen: as two rows it is an infeasibility that must be
+/// *certified* numerically, which the interior-point method did at most widths
+/// but not around `1e-8`, where it returned `NumericalFailure` at a `NaN`
+/// iterate.
+///
+/// Two separate defects kept presolve from seeing it, and both had to go:
+/// the leave-one-out activity for a singleton's own column was `−∞ − (−∞)` =
+/// `NaN`, so no bound was implied at all; and the tightening's disjointness
+/// rule let only the *first* of the two rows be a source, so even with that
+/// fixed only one side of the box would have been derived.
+#[test]
+fn contradictory_singleton_rows_are_seen_as_an_empty_box() {
+    let boxed_by_rows = |gap: f64| QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 2.0)],
+        c: vec![-6.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 0, -1.0)],
+        h: vec![-gap, 0.0], // x ≤ −gap and x ≥ 0
+        lb: vec![],
+        ub: vec![],
+    };
+
+    // Wider than the tolerance presolve absorbs ⇒ infeasible, and seen
+    // without any arithmetic on the solver's part.
+    for gap in [1e-8, 1e-7, 1e-6, 1.0] {
+        assert!(
+            matches!(presolve(&boxed_by_rows(gap)), PresolveOutcome::Infeasible),
+            "gap={gap:e} must presolve to Infeasible"
+        );
+    }
+
+    // At or below it, the pair still becomes the box — presolve tolerates the
+    // hairline crossing exactly as it does one of its own making, and leaves
+    // the verdict to the solver's box screen.
+    for gap in [1e-12, 1e-9] {
+        match presolve(&boxed_by_rows(gap)) {
+            PresolveOutcome::Reduced(ps) => {
+                assert_eq!(ps.reduced.m_ineq(), 0, "gap={gap:e}: rows became the box");
+                assert_eq!(ps.reduced.ub_of(0), -gap);
+                assert_eq!(ps.reduced.lb_of(0), 0.0);
+            }
+            other => panic!("gap={gap:e}: expected Reduced, got {}", status_of(&other)),
+        }
+    }
+}
+
+/// The same pair with a **consistent** box must not be called infeasible, and
+/// must still bind: `1 ≤ x ≤ 3` written as rows, against an objective whose
+/// unconstrained optimum is outside it on both ends.
+#[test]
+fn consistent_bound_rows_still_bind_after_becoming_a_box() {
+    for (c0, want) in [(-100.0, 3.0), (100.0, 1.0)] {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, 2.0)],
+            c: vec![c0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 0, -1.0)],
+            h: vec![3.0, -1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = with_presolve(&prob);
+        assert_eq!(sol.status, QpStatus::Optimal, "c0={c0}");
+        assert!((sol.x[0] - want).abs() < 1e-5, "c0={c0}: x0={}", sol.x[0]);
+        assert_kkt(&prob, &sol, 1e-5);
     }
 }
