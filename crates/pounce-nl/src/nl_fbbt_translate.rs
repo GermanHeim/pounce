@@ -95,6 +95,16 @@ impl Builder {
                         let _ = (a, b);
                         self.emit(FbbtOp::Opaque)
                     }
+                    // `centropy(a, b) = a·ln(a/b)`. The op is fused in the tape
+                    // because the *derivatives* of the decomposition overflow;
+                    // FBBT is interval arithmetic on values only, where the
+                    // decomposition is exact and — unlike `Opaque` — actually
+                    // tightens. Re-expand rather than give up the propagation.
+                    BinOp::CEntropy => {
+                        let q = self.emit(FbbtOp::Div(a, b));
+                        let ln = self.emit(FbbtOp::Ln(q));
+                        self.emit(FbbtOp::Mul(a, ln))
+                    }
                 }
             }
             Expr::Unary(op, x) => {
@@ -138,6 +148,13 @@ impl Builder {
                     | UnaryOp::Erf => {
                         let _ = a;
                         self.emit(FbbtOp::Opaque)
+                    }
+                    // `xlogx(a) = a·ln a` — see the `BinOp::CEntropy` arm: the
+                    // fusion exists for the derivatives, and expanding here
+                    // keeps interval propagation that `Opaque` would forfeit.
+                    UnaryOp::XLogX => {
+                        let ln = self.emit(FbbtOp::Ln(a));
+                        self.emit(FbbtOp::Mul(a, ln))
                     }
                 }
             }

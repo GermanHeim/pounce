@@ -151,6 +151,13 @@ pub enum BinOp {
     Pow,
     /// Two-argument arctangent `atan2(a, b)` with operands `(y, x)`.
     Atan2,
+    /// `a·ln(a/b)` — GAMS `centropy`. No `.nl` opcode; in-memory `Expr` only.
+    ///
+    /// Fused for the same reason as [`UnaryOp::XLogX`], plus one of its own:
+    /// `∂²/∂b²` is `a/b²`, and `b²` overflows for `|b| > 1.3e154` while
+    /// `a/b²` itself stays comfortably in range. The fused rule evaluates it
+    /// as `q/b` with `q = a/b` and never squares anything.
+    CEntropy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +185,17 @@ pub enum UnaryOp {
     /// does, which is the whole point: a frontend that constructs an `Expr`
     /// directly is not limited to what `.nl` can spell.
     Erf,
+    /// `a·ln(a)` — GAMS `entropy`. Like [`UnaryOp::Erf`], no `.nl` opcode maps
+    /// here; it is reachable only from an in-memory `Expr`.
+    ///
+    /// Fused rather than lowered to `Mul(a, Log(a))` because the chain rule
+    /// *cannot* produce its second derivative. `(a·ln a)'' = 1/a` is finite
+    /// wherever `a > 0` — at `a = 1e-299` it is `1e299` — but every
+    /// decomposition routes through `ln''(a) = -1/a² = -1e598`, which exceeds
+    /// `f64::MAX`. A composite that is in range, built from a factor that is
+    /// not, is unreachable by any chain rule however carefully written, so the
+    /// fusion is a correctness requirement rather than an optimization.
+    XLogX,
 }
 
 /// Parsed `.nl` problem in the form needed by `NlTnlp`.
@@ -1441,6 +1459,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 BinOp::Div => va / vb,
                 BinOp::Pow => va.powf(vb),
                 BinOp::Atan2 => va.atan2(vb),
+                BinOp::CEntropy => crate::nl_tape::centropy(va, vb),
             }
         }
         Expr::Unary(op, a) => {
@@ -1465,6 +1484,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 UnaryOp::Asinh => va.asinh(),
                 UnaryOp::Atanh => va.atanh(),
                 UnaryOp::Erf => crate::nl_tape::erf(va),
+                UnaryOp::XLogX => crate::nl_tape::xlogx(va),
             }
         }
         Expr::Sum(args) => args.iter().map(|a| eval_expr(a, x)).sum(),
@@ -1589,6 +1609,10 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                     grad_expr(a, x, seed * vb / d, grad);
                     grad_expr(b, x, -seed * va / d, grad);
                 }
+                BinOp::CEntropy => {
+                    grad_expr(a, x, seed * crate::nl_tape::centropy_da(va, vb), grad);
+                    grad_expr(b, x, seed * crate::nl_tape::centropy_db(va, vb), grad);
+                }
             }
         }
         Expr::Unary(op, a) => {
@@ -1627,6 +1651,7 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 UnaryOp::Asinh => 1.0 / (va * va + 1.0).sqrt(),
                 UnaryOp::Atanh => 1.0 / (1.0 - va * va),
                 UnaryOp::Erf => crate::nl_tape::erf_d1(va),
+                UnaryOp::XLogX => crate::nl_tape::xlogx_d1(va),
             };
             grad_expr(a, x, seed * d, grad);
         }
@@ -1956,6 +1981,10 @@ fn unary_name(op: UnaryOp) -> &'static str {
         UnaryOp::Asinh => "asinh",
         UnaryOp::Atanh => "atanh",
         UnaryOp::Erf => "erf",
+        // Spelled as the operation, not as GAMS `entropy` (which is -x·ln x):
+        // the rendered text is read by humans debugging a model and must not
+        // imply a sign the op does not have.
+        UnaryOp::XLogX => "xlogx",
     }
 }
 
@@ -2021,6 +2050,11 @@ fn render_expr(e: &Expr, vn: &[String], funcs: &[ImportedFunc]) -> String {
             ),
             BinOp::Atan2 => format!(
                 "atan2({}, {})",
+                render_expr(l, vn, funcs),
+                render_expr(r, vn, funcs)
+            ),
+            BinOp::CEntropy => format!(
+                "centropy({}, {})",
                 render_expr(l, vn, funcs),
                 render_expr(r, vn, funcs)
             ),

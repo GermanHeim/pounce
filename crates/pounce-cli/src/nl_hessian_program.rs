@@ -482,6 +482,8 @@ impl HessianProgram {
                 | TapeOp::Acosh(_)
                 | TapeOp::Asinh(_)
                 | TapeOp::Erf(_)
+                | TapeOp::XLogX(_)
+                | TapeOp::CEntropy(_, _)
                 | TapeOp::Atanh(_)
                 | TapeOp::Atan2(_, _)
                 | TapeOp::Cmp(_, _, _)
@@ -621,6 +623,8 @@ impl HessianProgram {
                     | TapeOp::Acosh(_)
                     | TapeOp::Asinh(_)
                     | TapeOp::Erf(_)
+                    | TapeOp::XLogX(_)
+                    | TapeOp::CEntropy(_, _)
                     | TapeOp::Atanh(_)
                     | TapeOp::Atan2(_, _)
                     | TapeOp::Cmp(_, _, _)
@@ -794,6 +798,8 @@ impl HessianProgram {
                     | TapeOp::Acosh(_)
                     | TapeOp::Asinh(_)
                     | TapeOp::Erf(_)
+                    | TapeOp::XLogX(_)
+                    | TapeOp::CEntropy(_, _)
                     | TapeOp::Atanh(_)
                     | TapeOp::Atan2(_, _)
                     | TapeOp::Cmp(_, _, _)
@@ -1298,7 +1304,8 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
             | TapeOp::Pow(a, b)
-            | TapeOp::Atan2(a, b) => {
+            | TapeOp::Atan2(a, b)
+            | TapeOp::CEntropy(a, b) => {
                 r[a] = true;
                 r[b] = true;
             }
@@ -1320,6 +1327,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
             | TapeOp::Erf(a)
+            | TapeOp::XLogX(a)
             | TapeOp::Atanh(a) => {
                 r[a] = true;
             }
@@ -1358,6 +1366,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
             | TapeOp::Pow(a, b)
+            | TapeOp::CEntropy(a, b)
             | TapeOp::Atan2(a, b) => d[a] || d[b],
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
@@ -1376,6 +1385,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::XLogX(a)
             | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => d[a],
             TapeOp::Funcall(_) => unreachable!(

@@ -444,6 +444,21 @@ impl PyNlExpr {
         binary(BinOp::Atan2, coerce(y, "atan2: y")?, coerce(x, "atan2: x")?)
     }
 
+    /// `centropy(a, b) = a·ln(a/b)`, with the `a = 0` limit `0`.
+    ///
+    /// A fused op, not sugar for `a * log(a / b)`: the composed form's second
+    /// derivatives route through `ln''(a) = -1/a²` and `a/b²`, both of which
+    /// leave `f64` range long before `a·ln(a/b)` and its own derivatives do.
+    /// Prefer this over hand-expanding it in a model.
+    #[staticmethod]
+    fn centropy(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyNlExpr> {
+        binary(
+            BinOp::CEntropy,
+            coerce(a, "centropy: a")?,
+            coerce(b, "centropy: b")?,
+        )
+    }
+
     /// n-ary minimum. Piecewise linear: the derivative follows whichever
     /// operand is currently smallest (ties pick the first) and the second
     /// derivative is identically zero — the standard AD treatment.
@@ -715,6 +730,16 @@ impl PyNlExpr {
     /// opcode, so no `.nl` round trip can carry it (issue #469).
     fn erf(&self) -> PyResult<PyNlExpr> {
         unary(UnaryOp::Erf, self.operand())
+    }
+
+    /// `x·ln(x)`, with the `x = 0` limit `0`. GAMS `entropy` is `-xlogx`.
+    ///
+    /// Fused rather than written as `x * log(x)` because the composed second
+    /// derivative goes through `ln''(x) = -1/x²`, which overflows below
+    /// `x ≈ 1e-154` even though the true `(x ln x)'' = 1/x` is representable
+    /// all the way down to `1e-308`.
+    fn xlogx(&self) -> PyResult<PyNlExpr> {
+        unary(UnaryOp::XLogX, self.operand())
     }
 
     /// Value of this expression alone at `x`, through the same AD tape a
