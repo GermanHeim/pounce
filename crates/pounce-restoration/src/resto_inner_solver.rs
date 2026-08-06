@@ -344,6 +344,23 @@ pub fn run_inner_resto(
     // sub-solve instead of hardcoded `(1e-8, 1e-6, 15)`. See
     // `build_resto_conv_check_adapter`.
     let outer_tol = outer_data.borrow().tol;
+    // The user's `constr_viol_tol`, carried on the same inner conv-check
+    // options (upstream reads it with the *original* prefix). It is the
+    // violation floor for all five locally-infeasible gates below, scaled by
+    // the violated row's own magnitude (`is_significant` — see
+    // `pounce_common::tolerance` for why the rejecting direction must be
+    // purely relative).
+    //
+    // That floor used to be `100·outer_tol`: a KKT-error tolerance standing in
+    // for a constraint-violation one (gh #508). Sweeping `constr_viol_tol`
+    // could not move any of these verdicts, and loosening `tol` — the standard
+    // reaction to a struggling solve — raised the floor a hundredfold and
+    // withdrew the diagnosis. On `min (x-5)² s.t. x²+δ = 0` at `tol=1e-3` that
+    // turned a model infeasible by a full percent into `Restoration_Failed`
+    // (AMPL 500, Pyomo `internalSolverError`) while the same model at the
+    // default `tol` was correctly diagnosed. Same defect, and the same repair,
+    // as the outer cycle exit in `ipopt_alg`.
+    let outer_constr_viol_tol = inner_alg_builder.conv_check.constr_viol_tol;
     let mut adapter = build_resto_conv_check_adapter(&inner_alg_builder.conv_check)
         .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto)
         // Layer 2 of `IpRestoConvCheck::CheckConvergence` (pounce#438).
@@ -587,16 +604,17 @@ pub fn run_inner_resto(
     // `resto_no_outer_progress_count` cycle detector (5 consecutive
     // null-progress entries) bounds the worst case if the outer truly
     // can't escape; the cycle exit now surfaces `LocalInfeasibility`
-    // when the outer cv at re-entry is bounded above `max(100*tol, 1e-4)`
-    // and `ErrorInStepComputation` otherwise.
+    // when the outer cv at re-entry is at or above `constr_viol_tol`
+    // (gh #508 — "is this violation real" is a question about the
+    // constraint violation, so it is asked with the constraint-violation
+    // tolerance, not with `tol`) and `ErrorInStepComputation` otherwise.
     let strict_locally_infeasible = !is_square_problem
         && matches!(
             status,
             SolverReturn::Success | SolverReturn::StopAtAcceptablePoint
         )
         && inner_stationarity_converged
-        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol);
-
+        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol);
     // Alt locally-infeasible gate. PFIT2/PFIT3-style: the inner
     // resto NLP is at (or near) a stationary point — `inner_kkt_err`
     // has dropped to a small value — but the inner's own line search
@@ -615,10 +633,10 @@ pub fn run_inner_resto(
     //     of similar magnitude after compl/scaling), tight enough to
     //     reject genuinely-stuck inners that haven't approached
     //     stationarity at all.
-    //   * `orig_inf_pr_at_final > max(100*outer_tol, 1e-3)` — the
-    //     orig-NLP `inf_pr` floor is non-trivial (i.e. NOT just a
-    //     little above outer tol — distinguish from the kappa-guard
-    //     near-feasible exit).
+    //   * the shared `constr_viol_tol` violation floor — the orig-NLP
+    //     `inf_pr` is a violation the user calls a violation (i.e. NOT just a
+    //     little above zero — distinguish from the kappa-guard near-feasible
+    //     exit).
     //   * `inner_iter_count >= 30` — not a premature failure on the
     //     first few inner iters.
     //
@@ -635,7 +653,7 @@ pub fn run_inner_resto(
             | SolverReturn::MaxiterExceeded
             | SolverReturn::ErrorInStepComputation
     ) && inner_kkt_err <= 1e-2
-        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
+        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && inner_iter_count >= 30;
 
     // Cycle locally-infeasible gate (CRESC100-style). The inner has run
@@ -652,7 +670,7 @@ pub fn run_inner_resto(
     // misclassifying genuinely under-resourced solves.
     let cycle_locally_infeasible = matches!(status, SolverReturn::MaxiterExceeded)
         && inner_iter_count >= 1000
-        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
+        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && orig_inf_pr_at_final.is_finite();
 
     // Step-failure locally-infeasible gate (qcqp750-2nc-style). The
@@ -671,7 +689,7 @@ pub fn run_inner_resto(
     // gate's "not a premature failure".
     let step_failure_locally_infeasible = matches!(status, SolverReturn::ErrorInStepComputation)
         && inner_iter_count >= 30
-        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
+        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && orig_inf_pr_at_final.is_finite();
 
     // Tiny-step locally-infeasible gate (gh #372). At a tight user `tol`
@@ -692,11 +710,11 @@ pub fn run_inner_resto(
     // which is exactly how the case arises); it uses the `alt` gate's
     // looser `1e-2` KKT ceiling to reject inners that stalled without
     // ever approaching stationarity. `!is_square_problem` and the
-    // `max(100*outer_tol, 1e-4)` violation floor mirror `strict`.
+    // `constr_viol_tol` violation floor mirror `strict`.
     let tiny_step_locally_infeasible = !is_square_problem
         && matches!(status, SolverReturn::StopAtTinyStep)
         && inner_kkt_err <= 1e-2
-        && is_significant(orig_inf_pr_at_final, violation_scale, 100.0 * outer_tol)
+        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && orig_inf_pr_at_final.is_finite();
 
     // Layer-2 verdict, rendered from *inside* the sub-solve (pounce#438).
@@ -799,10 +817,9 @@ pub fn run_inner_resto(
 ///
 /// The unscaling is load-bearing, not cosmetic. `eval_c` / `eval_d` return the
 /// row-scaled residual (`c_scaled = dc ⊙ c_user`), while every gate above
-/// compares this value against an *absolute* floor — `max(100·outer_tol, 1e-4)`
-/// or `1e-3`. Those floors are user-facing magnitudes meaning "the constraint
-/// violation is meaningfully nonzero", so mixing them with a scaled residual
-/// compares two different unit systems.
+/// compares this value against `constr_viol_tol`, a user-facing magnitude
+/// meaning "the constraint violation is meaningfully nonzero", so feeding it a
+/// scaled residual would compare two different unit systems.
 ///
 /// On a problem whose constraint scaling is small the mismatch silently
 /// disables the gates. `infeasible_equalities.nl` is the worked example: NLP

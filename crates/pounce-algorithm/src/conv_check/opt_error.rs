@@ -658,6 +658,10 @@ impl ConvCheck for OptErrorConvCheck {
         self.tol
     }
 
+    fn constr_viol_tol_or_default(&self) -> Number {
+        self.constr_viol_tol
+    }
+
     fn acceptable_constr_viol_tol_or_default(&self) -> Number {
         self.acceptable_constr_viol_tol
     }
@@ -1106,6 +1110,27 @@ mod tests {
         // Gradient flat but violation below threshold → nearly
         // feasible, does not count.
         assert!(!c.is_infeasible_stationary(1e-3, 0.0, 1e-9));
+    }
+
+    /// gh #508: the status-decision sites that ask "is this violation real"
+    /// read `constr_viol_tol` off the policy, so a user setting has to reach
+    /// them — the defect was a threshold built from `tol` that no
+    /// `constr_viol_tol` value could move. `set_tolerance` is the debugger's
+    /// live hot-swap path and must be visible through the accessor too.
+    #[test]
+    fn constr_viol_tol_accessor_tracks_the_option() {
+        let mut c = OptErrorConvCheck {
+            tol: 1e-6,
+            constr_viol_tol: 1e-3,
+            ..Default::default()
+        };
+        assert_eq!(c.constr_viol_tol_or_default(), 1e-3);
+        // Independent of `tol` — retuning convergence must not retune what
+        // counts as a violated constraint.
+        c.tol = 1e-10;
+        assert_eq!(c.constr_viol_tol_or_default(), 1e-3);
+        assert!(c.set_tolerance("constr_viol_tol", 1e-7));
+        assert_eq!(c.constr_viol_tol_or_default(), 1e-7);
     }
 
     #[test]
