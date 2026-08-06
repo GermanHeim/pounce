@@ -1799,10 +1799,21 @@ impl IpoptAlgorithm {
         // tiny-step branch) and the entry mu — if μ can't reduce while
         // the flag is on, upstream `IpMonotoneMuUpdate.cpp:158-161`
         // throws TINY_STEP_DETECTED → STOP_AT_TINY_STEP, which we
-        // realise as a clean termination here. Only the monotone update
-        // throws: `IpAdaptiveMuUpdate.cpp` consumes the tiny-step flag
-        // via its `force_no_progress` path (fix μ, keep iterating), so
-        // the termination is gated on `terminates_on_tiny_step()`.
+        // realise as a clean termination here.
+        //
+        // Both updates terminate, by different routes (pounce#512).
+        // Monotone has one throw site covering its whole update, so the
+        // μ-unchanged comparison below reconstructs it exactly, gated on
+        // `terminates_on_tiny_step()`. `IpAdaptiveMuUpdate.cpp` throws at
+        // two specific sites (`:330-333`, `:377-380`) and merely fixes μ
+        // and keeps iterating elsewhere, so the comparison would over-fire
+        // there — on the no-bounds short-circuit, which returns before
+        // upstream even reads the flag, and on a free-mode oracle that
+        // re-picks the current μ. The adaptive update therefore raises
+        // `request_tiny_step_stop` at its own two sites and opts out of
+        // the comparison. (An earlier comment here claimed the adaptive
+        // update never self-terminates; it does — `force_no_progress` is
+        // what happens on the iterations that do *not* throw.)
         timing.update_barrier_parameter.start();
         let tiny_at_entry = self.data.borrow().tiny_step_flag;
         let mu_before = self.data.borrow().curr_mu;
@@ -1815,7 +1826,17 @@ impl IpoptAlgorithm {
         );
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
-        if tiny_at_entry && mu_terminates_on_tiny && (next_mu - mu_before).abs() < Number::EPSILON {
+        let tiny_step_stop_requested = {
+            let mut d = self.data.borrow_mut();
+            let f = d.request_tiny_step_stop;
+            d.request_tiny_step_stop = false;
+            f
+        };
+        if tiny_step_stop_requested
+            || (tiny_at_entry
+                && mu_terminates_on_tiny
+                && (next_mu - mu_before).abs() < Number::EPSILON)
+        {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 
