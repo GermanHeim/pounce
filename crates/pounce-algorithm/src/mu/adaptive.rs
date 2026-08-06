@@ -422,6 +422,44 @@ impl AdaptiveMuUpdate {
         )
     }
 
+    /// Floor for the **fixed-mode** (monotone-mode) μ decrease — port of
+    /// `IpAdaptiveMuUpdate.cpp:328-329`:
+    ///
+    /// ```cpp
+    /// new_mu = Max(new_mu,
+    ///     Min(compl_inf_tol_scaled, IpData().tol()) / (barrier_tol_factor_ + 1.));
+    /// ```
+    ///
+    /// pounce#511: this branch used to floor at `mu_min` instead — `1e-11`
+    /// against upstream's `9.09e-10` at default `tol = 1e-8`, ~91× lower,
+    /// and further with a looser `tol` (at `tol = 1e-6` upstream's floor is
+    /// `9.09e-8`, four orders up). `mu_min` is the *free*-mode clamp; once the
+    /// strategy has switched to fixed mode upstream deliberately uses the
+    /// looser, tolerance-derived floor — that is the point of the switch.
+    /// Driving the Newton system down to `1e-11` past the accuracy the
+    /// termination test asks for buys nothing and invites degenerate search
+    /// directions on an ill-conditioned Jacobian.
+    ///
+    /// Two details mirror the monotone floor
+    /// (`MonotoneMuUpdate::update_barrier_parameter`):
+    ///
+    /// * `compl_inf_tol` is converted into μ's scaled space first
+    ///   (pounce#257 — upstream's `apply_obj_scaling`), since it is enforced
+    ///   on the *unscaled* complementarity while μ and `tol` are scaled;
+    /// * the result is additionally `max`ed with the certificate-safe
+    ///   `mu_min` (pounce#266) so the restoration sub-builder's
+    ///   `100 · outer_mu_min` safeguard still applies. Capped that way,
+    ///   `mu_min` can only raise the floor, never push it under the
+    ///   certificate.
+    pub fn fixed_mode_mu_floor(&self, tol: Number, obj_scaling_factor: Number) -> Number {
+        let dynamic_floor = tol.min(crate::mu::scaled_compl_inf_tol(
+            self.compl_inf_tol,
+            obj_scaling_factor,
+        )) / (self.barrier_tol_factor + 1.0);
+        self.certificate_safe_mu_min(obj_scaling_factor)
+            .max(dynamic_floor)
+    }
+
     /// Port of `AdaptiveMuUpdate::NewFixedMu`
     /// (`IpAdaptiveMuUpdate.cpp:583-627`). Selects μ when the state
     /// machine drops out of free mode. v1.0 always uses the
@@ -582,7 +620,8 @@ impl MuUpdate for AdaptiveMuUpdate {
         // `Solved_To_Acceptable_Level` on an iterate at the optimum. The
         // `no_bounds` short-circuit above keeps the raw `mu_min`: with no
         // bound multipliers there is no complementarity to certify.
-        let mu_min = self.certificate_safe_mu_min(cq.borrow().obj_scaling_factor());
+        let obj_scaling_factor = cq.borrow().obj_scaling_factor();
+        let mu_min = self.certificate_safe_mu_min(obj_scaling_factor);
 
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
@@ -610,7 +649,11 @@ impl MuUpdate for AdaptiveMuUpdate {
                 if sub_problem_error <= self.barrier_tol_factor * curr_mu || tiny_step_flag {
                     let lin = self.mu_linear_decrease_factor * curr_mu;
                     let sup = curr_mu.powf(self.mu_superlinear_decrease_power);
-                    let new_mu = lin.min(sup).max(mu_min).min(self.mu_max);
+                    // Fixed-mode floor is NOT `mu_min` — see
+                    // [`Self::fixed_mode_mu_floor`] (pounce#511).
+                    let tol = data.borrow().tol;
+                    let floor = self.fixed_mode_mu_floor(tol, obj_scaling_factor);
+                    let new_mu = lin.min(sup).max(floor).min(self.mu_max);
                     let new_tau = self.tau_min.max(1.0 - new_mu);
                     data.borrow_mut().curr_tau = new_tau;
                     return new_mu;
@@ -827,6 +870,60 @@ mod tests {
         let mut resto = AdaptiveMuUpdate::new();
         resto.mu_min = 100.0 * a.mu_min;
         assert_eq!(resto.certificate_safe_mu_min(1.0), resto.mu_min);
+    }
+
+    /// pounce#511: the fixed-mode decrease must floor at upstream's
+    /// `Min(compl_inf_tol_scaled, tol)/(barrier_tol_factor+1)`, not at
+    /// `mu_min`. At default `tol=1e-8`, `compl_inf_tol=1e-4`,
+    /// `barrier_tol_factor=10` that is `1e-8/11 ≈ 9.09e-10` — ~91× above
+    /// `mu_min = 1e-11`, and further still at a looser `tol`.
+    #[test]
+    fn fixed_mode_floor_matches_upstream_not_mu_min() {
+        let a = AdaptiveMuUpdate::new();
+        let floor = a.fixed_mode_mu_floor(1e-8, 1.0);
+        assert!((floor - 1e-8 / 11.0).abs() < 1e-20, "floor was {floor}");
+        // ~91× above `mu_min` — the old floor — i.e. nearly two orders.
+        assert!(floor / a.mu_min > 90.0, "floor was {floor}");
+        // Looser `tol` raises the floor with it (upstream takes the min of
+        // `tol` and `compl_inf_tol`, so `tol` binds until it exceeds 1e-4).
+        assert!((a.fixed_mode_mu_floor(1e-6, 1.0) - 1e-6 / 11.0).abs() < 1e-18);
+        // Beyond that `compl_inf_tol` binds.
+        assert!((a.fixed_mode_mu_floor(1e-2, 1.0) - 1e-4 / 11.0).abs() < 1e-18);
+    }
+
+    /// The `compl_inf_tol` half of the floor is converted into μ's scaled
+    /// space before the `Min` (upstream's `apply_obj_scaling`, pounce#257),
+    /// so the two disagree whenever objective scaling is active.
+    #[test]
+    fn fixed_mode_floor_scales_compl_inf_tol() {
+        let a = AdaptiveMuUpdate::new();
+        // df = 1e-6 puts scaled compl_inf_tol at 1e-10, under `tol=1e-8`,
+        // so it is the binding half: 1e-10/11 ≈ 9.09e-12.
+        let df = 1e-6;
+        let floor = a.fixed_mode_mu_floor(1e-8, df);
+        assert!(
+            (floor - 1e-4 * df / 11.0).abs() < 1e-24,
+            "floor was {floor}"
+        );
+        // Sign of the scaling factor (maximization poses df < 0) is
+        // irrelevant — the magnitude is what converts spaces.
+        assert_eq!(a.fixed_mode_mu_floor(1e-8, -df), floor);
+        // Degenerate factors fall back to the unconverted tolerance.
+        for df in [0.0, Number::NAN, Number::INFINITY] {
+            assert!((a.fixed_mode_mu_floor(1e-8, df) - 1e-8 / 11.0).abs() < 1e-20);
+        }
+    }
+
+    /// The restoration sub-builder's `mu_min = 100 · outer_mu_min`
+    /// safeguard still binds when it sits above the tolerance floor: the
+    /// certificate-safe `mu_min` is `max`ed in, mirroring monotone mode.
+    #[test]
+    fn fixed_mode_floor_keeps_resto_mu_min_safeguard() {
+        let mut resto = AdaptiveMuUpdate::new();
+        resto.mu_min = 1e-6; // well above tol/(barrier_tol_factor+1) = 9.09e-10
+        // `RestoIpoptNlp` does not override obj scaling — the resto inner
+        // IPM sees df = 1, so the cap leaves `mu_min` alone and it wins.
+        assert_eq!(resto.fixed_mode_mu_floor(1e-8, 1.0), 1e-6);
     }
 
     #[test]
