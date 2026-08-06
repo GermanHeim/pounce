@@ -175,7 +175,14 @@ fn alias_chain_lp_columns_drop() {
 
     let (red_n, red_rows) = reduced_size(&prob);
     assert_eq!(red_n, BLOCKS, "one survivor per chain, got {red_n}");
-    assert_eq!(red_rows, BLOCKS, "every alias row consumed, got {red_rows}");
+    // Zero, not `BLOCKS`: the per-block "real inequality" `-x_head <= -1` is
+    // itself a *singleton* row, and a singleton row is a bound — it folds into
+    // the box as `x_head >= 1` and is then redundant as a row (gh #491). So the
+    // alias rows this test is named for are all consumed, and so is every row
+    // that survived them. The column count above is the aggregation's own
+    // claim and is unchanged; the KKT and objective checks below are what
+    // prove nothing was lost with them.
+    assert_eq!(red_rows, 0, "every row consumed, got {red_rows}");
 
     let sol = with_presolve(&prob);
     assert_eq!(sol.status, QpStatus::Optimal);
