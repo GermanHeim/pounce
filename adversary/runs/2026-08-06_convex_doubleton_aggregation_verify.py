@@ -67,14 +67,23 @@ from pathlib import Path
 POUNCE = Path("/home/user/pounce/target/release/pounce")
 
 
-def write_nl(path, n, rows, rhs, lin, x_l, x_u, x0):
-    """`min Σ xⱼ² + Σ linⱼ·xⱼ  s.t.  Σ aᵢⱼ xⱼ = rhsᵢ`, boxed.
+def write_nl(path, n, rows, rhs, lin, x_l, x_u, x0, consts=None):
+    """`min Σ xⱼ² + Σ linⱼ·xⱼ  s.t.  Σ aᵢⱼ xⱼ + cᵢ = rhsᵢ + cᵢ`, boxed.
 
     A separable convex quadratic objective and linear equality rows, which is
     what the classifier needs to route the model to `pounce-convex` rather
     than the NLP path.
+
+    `consts[i]` is written into row `i`'s *expression* segment rather than
+    folded into its bound, with the bound raised to match. Before gh#492
+    that made the row read as nonlinear and the whole model as an NLP; the
+    reader now folds it at parse, so such a row reaches this pass like any
+    other. That composition is new, so the family exercises both spellings
+    — the rows are the same constraints either way, and the reduction and
+    the recovered duals must not be able to tell.
     """
     m = len(rows)
+    consts = consts or [0.0] * m
     jnnz = sum(len(r) for r in rows)
     L = [
         "g3 1 1 0\t# adversary convex doubleton aggregation",
@@ -89,7 +98,7 @@ def write_nl(path, n, rows, rhs, lin, x_l, x_u, x0):
         " 0 0 0 0 0\t# common exprs",
     ]
     for r in range(m):
-        L += [f"C{r}", "n0"]
+        L += [f"C{r}", f"n{consts[r]!r}"]
     L += ["O0 0", "o54", str(n)]
     for j in range(n):
         L += ["o5", f"v{j}", "n2"]
@@ -98,7 +107,7 @@ def write_nl(path, n, rows, rhs, lin, x_l, x_u, x0):
         L.append(f"{j} {x0[j]!r}")
     L.append("r")
     for i in range(m):
-        L.append(f"4 {rhs[i]!r}")
+        L.append(f"4 {rhs[i] + consts[i]!r}")
     L.append("b")
     for j in range(n):
         lo, hi = x_l[j], x_u[j]
@@ -216,7 +225,13 @@ def gen(rng):
         else:
             x_l.append(None), x_u.append(None)
     x0 = [round(x_star[j] + rng.uniform(-0.2, 0.2), 6) for j in range(n)]
-    return n, rows, rhs, lin, x_l, x_u, x0
+    # Most rows carry a constant in their expression segment; some carry none,
+    # so both the gh#492 fold and the plain path stay live in every run.
+    consts = [
+        0.0 if rng.random() < 0.4 else round(rng.uniform(-3, 3), 6)
+        for _ in rows
+    ]
+    return n, rows, rhs, lin, x_l, x_u, x0, consts
 
 
 def run(nl_dir, opts):
@@ -298,11 +313,11 @@ def main():
         inst = gen(rng)
         if inst is None:
             continue
-        n, rows, rhs, lin, x_l, x_u, x0 = inst
+        n, rows, rhs, lin, x_l, x_u, x0, consts = inst
         m = len(rows)
         d = Path(tempfile.mkdtemp(prefix="adv_agg_"))
         try:
-            write_nl(d / "m.nl", n, rows, rhs, lin, x_l, x_u, x0)
+            write_nl(d / "m.nl", n, rows, rhs, lin, x_l, x_u, x0, consts)
 
             off = run(d, ["qp_presolve=no"])
             if "Optimal Solution Found" not in off.stdout:

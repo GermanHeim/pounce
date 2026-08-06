@@ -31,7 +31,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 :SOURCE: randomized alias-linked convex QPs built around a known feasible point x*; no published instance
 :KNOWN_OPTIMAL: n/a (property-based)
 :POUNCE_OBJECTIVE: n/a
-:POUNCE_STATUS: 441 end-to-end .nl solves across 3 seeds, 0 failures
+:POUNCE_STATUS: 438 end-to-end .nl solves across 3 seeds, 0 failures
 :POUNCE_TIME: ~3 min total
 :ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); in-script row re-evaluation; in-script bound-aware stationarity of the reported duals; qp_presolve=no objective agreement
 :ORACLE_OBJECTIVE: n/a
@@ -46,6 +46,13 @@ gradient the dual sweep is handed, and dropping the substitution offset from a
 surviving row's right-hand side, were each caught (13 and 31 failures in 40
 instances). The =Gᵀz= defect is caught only by the bound-aware stationarity
 oracle — =pounce verify= alone passes it — which is why that oracle exists.
+
+Re-run after merging gh#492 (#498), which folds a constant row body into the
+row bounds at parse. Most generated rows now carry their constant in the C
+segment rather than pre-folded: 10 of 12 sampled models, all still classified
+LP/convex-QP where before #498 they would have been NLP and never reached this
+pass. Same reduction counts, same objectives, same verdicts as the pre-folded
+spelling — which is the claim, since they are the same constraints.
 
 Measured limit, stated because it changes what this run does and does not
 cover: the CLI's QP extractor lowers every variable bound to a row of =G=, so
