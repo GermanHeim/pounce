@@ -10,7 +10,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     11 | 2026-08-05 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
+| nlp             |     12 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
@@ -25,6 +25,33 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: randomized families built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 12000 fuzz instances + 120 end-to-end .nl solves, 0 failures
+:POUNCE_TIME: ~4 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); central finite differences of the wrapper's own reduced eval_f/eval_g; in-script row re-evaluation
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_nlp_linear-eq-reduction.org]]
+:COVERAGE_TARGET: linear_eq_plan.rs / linear_eq_elim.rs — new files, no prior adversarial coverage
+:END:
+
+Probes validated by mutation testing: five injected defects (Hessian
+symmetric-pair x2 factor, bound-transfer sign, row constant, lift offset, dual
+recovery) were each caught. The row-constant defect initially escaped every
+probe — derivatives are blind to an affine offset — which is why the probe now
+carries a primal-fidelity check through =finalize_solution=.
+
+Recorded non-defect: a row whose constant lives in its =.nl= expression segment
+is tagged NonLinear by the reader, so the elimination declines it. The
+row-constant branch is therefore reachable only on the general TNLP path (C
+interface, GAMS, callbacks), not via =.nl=.
+
 ** [2026-08-05] l1-elastic infeasibility certificate under nonconvex step QPs (qp-active-set/certificate-soundness) - FAIL
 :PROPERTIES:
 :FAMILY: qp-active-set

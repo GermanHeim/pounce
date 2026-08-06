@@ -34,6 +34,15 @@
 //!   user-supplied constraint metadata and scaling through the row
 //!   reduction on the way in, and expands outer→inner on the way out
 //!   in `finalize_metadata`.
+//! * **Phase 6** — linear-equality variable elimination
+//!   (`presolve_linear_eq_reduction`, issue #487). The only phase that
+//!   removes *columns*: singleton and two-variable linear equality rows
+//!   determine variables, which are substituted away and recovered at
+//!   `finalize_solution`. It lives in its own wrapper
+//!   ([`linear_eq_elim::LinearEqElimTnlp`]) stacked **outside**
+//!   [`PresolveTnlp`], so Phases 0–5 keep working in the variable space
+//!   they were written against, and it is the outer layer that
+//!   re-presents the reduced one. Off by default.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -63,6 +72,8 @@ pub mod fbbt;
 pub mod incidence;
 pub mod inequality_projection;
 pub mod licq;
+pub mod linear_eq_elim;
+pub mod linear_eq_plan;
 pub mod matching;
 pub mod options;
 pub mod reduction_frame;
@@ -81,6 +92,10 @@ pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReaso
 pub use dulmage_mendelsohn::{DMPart, DulmageMendelsohnPartition};
 pub use incidence::{EqualityIncidence, InequalityIncidence, ProbeView};
 pub use licq::{EqRow, LicqVerdict, licq_check};
+pub use linear_eq_elim::{FullSolution, LinearEqElimTnlp};
+pub use linear_eq_plan::{
+    ElimStep, EliminationPlan, LinearEqElimReport, PlanConfig, PlanInput, VarRecovery, build_plan,
+};
 pub use options::{AuxiliaryCouplingPolicy, LicqAction, PresolveOptions, register_options};
 pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
@@ -107,6 +122,25 @@ impl From<SolverException> for PresolveError {
     }
 }
 
+/// Stack Phase 6 on top of an already-built presolve wrapper, when the
+/// option asks for it.
+///
+/// Phase 6 goes *outside*, not inside: it is the one pass that changes the
+/// variable count, and Phases 0–5 are written against a fixed column
+/// space. Putting it on top also means it sees the row set Phase 2 already
+/// reduced, and its `finalize_solution` hands a full-length `x` back down
+/// before `PresolveTnlp` lifts the row duals — so each layer only has to
+/// undo its own reduction.
+fn stack_linear_eq_elim(
+    wrapped: Rc<RefCell<dyn TNLP>>,
+    opts: PresolveOptions,
+) -> Rc<RefCell<dyn TNLP>> {
+    if !opts.linear_eq_reduction {
+        return wrapped;
+    }
+    Rc::new(RefCell::new(LinearEqElimTnlp::new(wrapped, opts)))
+}
+
 /// Top-level entry: returns a TNLP wrapping `inner` with whatever
 /// presolve passes the option table has enabled. When the master
 /// switch is off, returns `inner` unchanged.
@@ -117,7 +151,8 @@ pub fn wrap_with_presolve(
     if !opts.enabled || inner.borrow().is_presolve_wrapper() {
         return Ok(inner);
     }
-    Ok(Rc::new(RefCell::new(PresolveTnlp::new(inner, opts))))
+    let wrapped: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(PresolveTnlp::new(inner, opts)));
+    Ok(stack_linear_eq_elim(wrapped, opts))
 }
 
 /// Same as [`wrap_with_presolve`] but also installs an
@@ -134,9 +169,10 @@ pub fn wrap_with_presolve_provider(
     if !opts.enabled || inner.borrow().is_presolve_wrapper() {
         return Ok(inner);
     }
-    Ok(Rc::new(RefCell::new(
+    let wrapped: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(
         PresolveTnlp::with_expression_provider(inner, expr_provider, opts),
-    )))
+    ));
+    Ok(stack_linear_eq_elim(wrapped, opts))
 }
 
 /// Convenience: read the `presolve_*` keys out of an `OptionsList`

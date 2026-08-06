@@ -257,9 +257,19 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
         "presolve_linear_eq_reduction",
         "Eliminate variables via linear-equality rows.",
         false,
-        "Reduces problem dimension by Gauss-eliminating against \
-         linear equality rows. Off by default because it changes \
-         the variable count and complicates sensitivity integration.",
+        "Phase 6: eliminates the variables the linear equality rows \
+         determine, iterated to a fixed point so chains propagate. Three \
+         shapes — a variable fixed by equal bounds, a singleton row \
+         `a*x = b`, and a two-variable row `a1*x + a2*y = b`, the last with \
+         no anchoring requirement, so free/free pairs (arc equalities, \
+         aliases, unit-conversion links) aggregate away. Rows reduced to \
+         `0 = 0` are dropped as redundant. Bounds are transferred onto the \
+         surviving variable, and the primal and every row multiplier are \
+         recovered in the original space at finalize_solution. Off by \
+         default because it changes the variable count, which the \
+         sensitivity and reduced-Hessian paths index against the original \
+         model. An eliminated variable's *bound* multiplier is reported on \
+         the survivor that inherited the bound.",
     )?;
 
     reg.add_bool_option(

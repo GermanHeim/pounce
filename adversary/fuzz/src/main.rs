@@ -11,6 +11,7 @@
 //! heard of pounce.
 
 mod instances;
+mod linelim_probe;
 mod qp_probe;
 mod rng;
 mod warmstart_probe;
@@ -30,8 +31,9 @@ fn main() {
         "qp" => qp_fuzz(count, seed),
         "warmstart" => warmstart_fuzz(count, seed),
         "qp-one" => qp_one(count as u64),
+        "linelim" => linelim_fuzz(count, seed),
         other => {
-            eprintln!("unknown probe {other:?}; expected `qp` or `warmstart`");
+            eprintln!("unknown probe {other:?}; expected `qp`, `warmstart`, or `linelim`");
             std::process::exit(2);
         }
     }
@@ -361,5 +363,68 @@ fn qp_one(seed: u64) {
     for ft in [1e-9, 1e-8, 1e-7, 1e-6, 1e-4, 1e-2] {
         let out = qp_probe::run_with(&inst, ft);
         println!("  feas_tol={ft:.0e} -> status={:12} verdict={:?}", out.status, out.verdict);
+    }
+}
+
+/// gh#487 Phase 6 probe: plan invariants against a known feasible point, then
+/// the derivative transforms against a dense second implementation.
+fn linelim_fuzz(count: usize, seed: u64) {
+    let mut plan_failures: Vec<(u64, String)> = Vec::new();
+    let mut deriv_failures: Vec<(u64, String)> = Vec::new();
+    let mut n_reduced = 0usize;
+    let mut n_identity = 0usize;
+    let mut total_cols = 0usize;
+    let mut total_rows = 0usize;
+
+    for k in 0..count {
+        let s = seed.wrapping_add(k as u64 * 0x1000_0001);
+        let mut r = Rng::new(s);
+        let inst = linelim_probe::generate(&mut r, s);
+
+        match linelim_probe::check_plan(&inst) {
+            linelim_probe::PlanVerdict::Ok {
+                elim_vars,
+                elim_rows,
+            } => {
+                if elim_vars == 0 {
+                    n_identity += 1;
+                } else {
+                    n_reduced += 1;
+                    total_cols += elim_vars;
+                    total_rows += elim_rows;
+                }
+            }
+            linelim_probe::PlanVerdict::Failed(why) => plan_failures.push((s, why)),
+        }
+
+        if let Err(why) = linelim_probe::check_derivatives(&inst, &mut r) {
+            deriv_failures.push((s, why));
+        }
+    }
+
+    println!("instances            : {count}");
+    println!("  reduced            : {n_reduced}");
+    println!("  nothing to do      : {n_identity}");
+    println!("  columns eliminated : {total_cols}");
+    println!("  rows dropped       : {total_rows}");
+    println!("plan invariant failures      : {}", plan_failures.len());
+    for (s, why) in plan_failures.iter().take(10) {
+        println!("  seed {s}: {why}");
+    }
+    println!("derivative transform failures: {}", deriv_failures.len());
+    for (s, why) in deriv_failures.iter().take(10) {
+        println!("  seed {s}: {why}");
+    }
+    let bad = plan_failures.len() + deriv_failures.len();
+    println!(
+        "VERDICT: {}",
+        if bad == 0 {
+            "PASS".to_string()
+        } else {
+            format!("FAIL ({bad} failing instances)")
+        }
+    );
+    if bad > 0 {
+        std::process::exit(1);
     }
 }
