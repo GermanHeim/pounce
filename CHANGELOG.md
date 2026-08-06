@@ -9,6 +9,54 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — infeasible models reported `internalSolverError` because the infeasibility threshold was built from `tol` (#508)
+
+- On a model with no solution, POUNCE chooses between *converged to a point
+  of local infeasibility* (AMPL 200 — "your model has no solution") and
+  *error in step computation* / *restoration failed* (AMPL 500, Pyomo
+  `internalSolverError` — "your solver broke"). That choice was made against
+  a threshold built from `tol`, a tolerance on the **KKT error**, and never
+  consulted `constr_viol_tol`, the option that declares what a violated
+  constraint is. Different quantity, different units.
+- Two measured consequences, on `min (x−5)² s.t. x²+δ = 0` — infeasible for
+  every `δ > 0`, with the reported violation exactly `δ`, so the threshold is
+  visible to the digit. Sweeping `constr_viol_tol` across four orders of
+  magnitude moved the boundary **not at all**: at `constr_viol_tol=1e-3` a
+  violation of `1e-4`, comfortably inside the user's own declared feasibility
+  tolerance, still came back 500. And sweeping `tol` moved it a great deal,
+  in the wrong direction — the failure band tracked `max(100·tol, 1e-4)`, so
+  at `tol=1e-4` every gap from `3e-4` to `1e-2` answered "internal error",
+  including a model infeasible by a full percent. Loosening `tol` is the
+  standard reaction to a struggling solve, so the failure widened exactly
+  when the user tried to help.
+- Every one of these sites now tests the constraint violation against
+  `constr_viol_tol`, and at the boundary with `>=` rather than `>` — a
+  violation *at* the tolerance the user declared too large is a violation.
+  Six thresholds changed: the restoration-cycle exit in `ipopt_alg`, which is
+  the only locally-infeasible safety net square problems have, and the five
+  locally-infeasible gates in `resto_inner_solver` that shared the same
+  `100·tol` floor. The invariant now holds across the whole sweep: a
+  violation at or above the user's declared feasibility tolerance lands in
+  the AMPL infeasible range at every `tol`, and `constr_viol_tol` is what
+  moves it.
+- Where the remaining violation is *below* `constr_viol_tol`, POUNCE still
+  declines to certify infeasibility — the iterate is primal-feasible by the
+  user's own declaration, and claiming otherwise is the false-infeasibility
+  failure from the opposite direction.
+- Also fixed alongside: after a non-promoted MC64 hypersensitivity re-solve,
+  the terminal's last `EXIT:` banner was the retry's while the `.sol`, the
+  summary and the JSON report all carried the kept first-solve verdict. Two
+  banners is expected and announced; the two disagreeing is not, and
+  `validation/p3_control.py` reads the log exactly that way. The CLI now
+  re-emits the verdict that actually shipped as the final banner.
+- Reported by the adversary agent. Regression coverage in
+  `crates/pounce-cli/tests/issue_508_infeasibility_gap_status.rs`. The banner
+  ordering is covered by an invariant guard rather than a bite-on-parent pin:
+  every non-promoted MC64 retry reachable from the fixture corpus happens to
+  return the same verdict the `.sol` keeps, so the two banners agree there by
+  luck; the mismatch is still a reachable state of the code. Noted in the test
+  so the gap is a known one.
+
 ### Fixed — false primal-infeasible certificate on redundant equality rows that disagree by one ULP (#496)
 
 - The convex presolve fixes a variable from a singleton equality row and

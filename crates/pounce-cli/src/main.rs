@@ -1444,6 +1444,39 @@ pub fn main() -> ExitCode {
         // statistics. See `resolve_scaling_retry_outcome` (code review L23).
         (status, solve_stats) =
             resolve_scaling_retry_outcome(retry_status, solve_stats, retry_stats);
+        // …and keep the *console* in lockstep with them too (gh #508). Both
+        // solves print their own end-of-run summary, which is expected and
+        // announced — but when the retry is not promoted the last banner on the
+        // terminal is the retry's, while the `.sol`, the summary and the JSON
+        // report all carry the original verdict. Two banners disagreeing about
+        // one solve misleads a human reading the tail of the log and a machine
+        // reading it the same way: `validation/p3_control.py` keeps the last
+        // `EXIT:` line it sees and pairs it with the `.sol`, so it recorded a
+        // status the `.sol` never held. Measured on `min (x-5)² s.t. x²+δ = 0`
+        // at `tol=1e-4`: the console ended `Error in step computation.`
+        // (δ=1e-9) and `Maximum Number of Iterations Exceeded.` (δ=1e-1) over a
+        // `.sol` that said locally infeasible in both. Re-emitting the verdict
+        // that actually shipped makes the terminal's final word the true one.
+        //
+        // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
+        // which is what printed the two banners this one arbitrates; at
+        // `print_level 0` there are none to disagree.
+        if !scaling_retry_promoted(retry_status)
+            && app
+                .options()
+                .get_integer_value("print_level", "")
+                .map(|(v, _found)| v >= 1)
+                .unwrap_or(true)
+        {
+            println!();
+            println!("EXIT: {}", print::status_message(status));
+            println!();
+            println!(
+                "POUNCE {}: {}",
+                env!("CARGO_PKG_VERSION"),
+                print::status_message(status)
+            );
+        }
     }
 
     // `solve_stats` was snapshotted right after the solve loop and updated

@@ -143,6 +143,22 @@ pub trait ConvCheck {
         1e-8
     }
 
+    /// Primal-feasibility tolerance `constr_viol_tol`, in the unscaled max-norm
+    /// space `curr_unscaled_primal_infeasibility_max` reports — the option that
+    /// declares what a *violated* constraint is.
+    ///
+    /// Read by the status-decision sites that have to answer "is this violation
+    /// real" (gh #508). That question is about the constraint violation, so it
+    /// must be asked with the constraint-violation tolerance; asking it with
+    /// `tol` — a tolerance on the **KKT error**, a different quantity in
+    /// different units — makes the answer move when the user retunes
+    /// convergence and stand still when they retune feasibility. Default `1e-4`
+    /// matches upstream's default `constr_viol_tol`; policies that track no such
+    /// tolerance keep it.
+    fn constr_viol_tol_or_default(&self) -> Number {
+        1e-4
+    }
+
     /// Acceptable-level primal-feasibility band `acceptable_constr_viol_tol`, in
     /// the unscaled max-norm space `curr_unscaled_primal_infeasibility_max`
     /// reports. Read by the best-acceptable fallback's feasibility-aware ranking

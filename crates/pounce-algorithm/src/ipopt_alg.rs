@@ -2488,12 +2488,49 @@ impl IpoptAlgorithm {
             .as_ref()
             .expect("curr set before invoke_restoration")
             .clone();
-        // Helper: when the cycle detector fires and the orig cv is
-        // bounded away from outer tol (e.g. PFIT1's 2.73e-2), the
-        // outer is stuck at a feasibility-stationary point and the
-        // honest exit is `LocalInfeasibility`. Below that threshold
-        // the failure is numerical, not algorithmic, so retain
-        // `ErrorInStepComputation`.
+        // Helper: when the cycle detector fires and the orig cv is a
+        // violation the *user* calls a violation (e.g. PFIT1's 2.73e-2),
+        // the outer is stuck at a feasibility-stationary point and the
+        // honest exit is `LocalInfeasibility`. Below that threshold the
+        // iterate is primal-feasible by the user's own declaration, so there
+        // is no infeasibility to certify — the failure is numerical, not
+        // algorithmic, and `ErrorInStepComputation` is retained.
+        //
+        // The threshold is `constr_viol_tol`, and *only* `constr_viol_tol`
+        // (gh #508). The question this ternary asks — "is this violation
+        // real?" — is a question about the constraint violation, so it has to
+        // be asked with the option that declares what a violated constraint
+        // is. The previous form, `max(100·tol, 1e-4)`, was built from `tol`, a
+        // tolerance on the **KKT error**: different quantity, different units,
+        // and it never consulted `constr_viol_tol` at all. Two consequences,
+        // both measured on `min (x-5)² s.t. x²+δ = 0` (infeasible for every
+        // δ>0, reported violation exactly δ):
+        //
+        //   * sweeping `constr_viol_tol` over four orders moved the boundary
+        //     not at all — at `constr_viol_tol = 1e-3` a violation of `1e-4`,
+        //     comfortably inside the user's declared feasibility tolerance,
+        //     still exited 500;
+        //   * sweeping `tol` moved it a great deal, and in the wrong
+        //     direction: at `tol = 1e-4` the `1e-2` threshold swallowed every
+        //     δ from `3e-4` to `1e-2` — a model infeasible by a full percent
+        //     answered "your solver broke". Loosening `tol` is the standard
+        //     user reaction to a struggling solve, so the failure widened
+        //     exactly when the user tried to help.
+        //
+        // No `infeas_viol_kappa` margin on top, unlike the rapid-infeasibility
+        // pre-filter in `conv_check`. That detector fires *during* the solve
+        // off a streak heuristic and needs the margin to avoid convicting an
+        // iterate that is still converging; here restoration has already
+        // demonstrably cycled, so the certainty comes from the cycle evidence
+        // rather than from extra violation headroom. Widening to
+        // `kappa·constr_viol_tol` would move the default threshold from `1e-4`
+        // to `1e-2` and hand back 500 on the whole band in between.
+        //
+        // The comparison is `>=`, not `>`. A violation landing exactly on the
+        // threshold is a violation at the user's declared tolerance, and the
+        // reproducer above hits the boundary to the digit (`δ = 1e-4` at the
+        // default `constr_viol_tol`), where `>` returned 500 for a model
+        // infeasible by precisely the amount the user said was too much.
         //
         // The violation is measured **unscaled**. `reference_theta` is the
         // row-scaled residual, but the floor below is an absolute, user-facing
@@ -2512,13 +2549,20 @@ impl IpoptAlgorithm {
         // max-norm. Max-norm <= 1-norm, so the test is marginally stricter
         // about declaring infeasibility on an unscaled problem — the safe
         // direction for a verdict this consequential.
-        let outer_tol_for_cycle = self.bundle.conv_check.tol_or_default();
+        //
+        // `theta > 0` in front of the `>=` is not redundant: the options layer
+        // registers `constr_viol_tol` with a *strict* lower bound of zero, but
+        // a library embedder setting `ConvCheckOptions` directly is not bound
+        // by that, and `0 >= 0` would turn an exactly-feasible iterate into an
+        // infeasibility certificate. A zero violation never proves anything.
+        let cycle_viol_tol = self.bundle.conv_check.constr_viol_tol_or_default();
         let reference_theta_unscaled = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
-        let cycle_exit = if reference_theta_unscaled > (100.0 * outer_tol_for_cycle).max(1e-4) {
-            SolverReturn::LocalInfeasibility
-        } else {
-            SolverReturn::ErrorInStepComputation
-        };
+        let cycle_exit =
+            if reference_theta_unscaled > 0.0 && reference_theta_unscaled >= cycle_viol_tol {
+                SolverReturn::LocalInfeasibility
+            } else {
+                SolverReturn::ErrorInStepComputation
+            };
         let static_cycle = if let (Some(prev_x), Some(prev_s)) = (
             self.last_resto_entry_x.as_ref(),
             self.last_resto_entry_s.as_ref(),
