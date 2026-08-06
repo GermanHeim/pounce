@@ -42,6 +42,14 @@ always produces a correct (locally optimal) answer. You never get a wrong
 > nonlinear expression tree. POUNCE walks that tree to recover the
 > Hessian and test convexity, the same way QP-capable AMPL solvers do.
 
+> **Note on row constants.** A `.nl` writer may leave a constant on the
+> left of a constraint — `x0 + x1 + 3 <= 6` rather than `x0 + x1 <= 3` —
+> and it too lands in the nonlinear expression tree. The reader folds such
+> a constant into the row's bounds when the file is read, so a model that
+> is otherwise an LP still classifies as one. The shift is exact: body and
+> bound move together, so the solution and every multiplier are the same
+> as for the hand-folded model.
+
 ## Choosing the solver explicitly
 
 The `solver_selection` option overrides the automatic choice. It is a

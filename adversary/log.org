@@ -10,7 +10,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     12 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
+| nlp             |     13 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #496 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP) |
 | lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
@@ -25,6 +25,34 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-06] Constant row bodies folded into row bounds (nlp/.nl parse boundary, gh#492) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: no published instance; randomized LP family around a KNOWN feasible point, five constant spellings x five r-segment bound kinds
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: agrees with HiGHS to <1e-6 relative on all 999 instances
+:POUNCE_STATUS: Optimal Solution Found (999/999; 1 instance skipped, gh#496)
+:POUNCE_TIME: ~0.01s per instance
+:ORACLE: scipy HiGHS (linprog); rows re-evaluated in-script against the file's declared bounds; hand-folded twin model (primal + duals); interior-column stationarity
+:ORACLE_OBJECTIVE: matches
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_nlp_row_constant_fold.org]]
+:COVERAGE_TARGET: crates/pounce-nl/src/nl_reader.rs (parse_nl_text fold) - new code, no prior adversarial coverage
+:END:
+999 randomized LPs over 4 seeds, every row carrying a constant in its C<i>
+segment, plus 60 sentinel cases at |k| up to 1e18 and 8 decline cases. All
+999 classified LP and were accepted by pounce verify. The probe was
+mutation-tested: five of six injected defects caught, the sixth (no fold at
+all) is not a correctness defect and moved only the classified-LP counter
+(60 -> 33). Two defects in the probe itself were found and fixed en route
+(bounds rounded to 9 places made redundant equality systems inconsistent; a
+1e-6 interior margin called bound-active columns interior). One unrelated
+pre-existing pounce bug was found and filed: gh#496, a false
+primal-infeasible certificate at iteration 0 when two rank-deficient
+equality rows disagree by one ULP -- reproduced on origin/main at cad2b13
+with no C-segment content, so not reachable from gh#492.
+
 ** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
 :PROPERTIES:
 :FAMILY: nlp
