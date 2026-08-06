@@ -215,6 +215,15 @@ impl MuUpdate for MonotoneMuUpdate {
     /// `barrier_tol_factor · μ` (or a tiny step was just detected).
     /// Each successful reduction also refreshes `curr_tau` and the new
     /// μ in `data`. Returns the post-update μ.
+    ///
+    /// A reduction also raises [`IpoptData::request_ls_reset`], which the
+    /// main loop turns into the `linesearch_->Reset()` upstream issues at
+    /// `IpMonotoneMuUpdate.cpp:165`. This is the same behaviour the
+    /// caller previously inferred from "μ changed" — the loop below only
+    /// ever exits with a strictly smaller μ — but the flag is now the
+    /// single source of truth for both μ strategies (pounce#510).
+    ///
+    /// [`IpoptData::request_ls_reset`]: crate::ipopt_data::IpoptData::request_ls_reset
     fn update_barrier_parameter(
         &mut self,
         data: &IpoptDataHandle,
@@ -225,6 +234,7 @@ impl MuUpdate for MonotoneMuUpdate {
         let mut mu = data.borrow().curr_mu;
         let mut tau = data.borrow().curr_tau;
         let tiny_step = data.borrow().tiny_step_flag;
+        let mu_at_entry = mu;
 
         // `first_iter_resto_` (upstream `IpMonotoneMuUpdate.cpp:144`):
         // on the first inner iteration of restoration, skip the μ
@@ -313,6 +323,11 @@ impl MuUpdate for MonotoneMuUpdate {
         let mut d = data.borrow_mut();
         d.curr_mu = mu;
         d.curr_tau = tau;
+        // Upstream `IpMonotoneMuUpdate.cpp:165` resets the line search
+        // once the reduction loop has moved μ, and not otherwise.
+        if mu < mu_at_entry {
+            d.request_ls_reset = true;
+        }
         mu
     }
 }
@@ -320,6 +335,35 @@ impl MuUpdate for MonotoneMuUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mu::test_fixture;
+
+    /// pounce#510: the monotone update raises `request_ls_reset` at
+    /// upstream's `IpMonotoneMuUpdate.cpp:165` — after the reduction
+    /// loop moved μ, and only then. This is the behaviour the caller
+    /// used to infer from `next_mu != mu_before`, so monotone runs are
+    /// unaffected by moving the decision onto the flag.
+    #[test]
+    fn requests_ls_reset_on_a_reduction() {
+        let mut m = MonotoneMuUpdate::new();
+        // A barrier tolerance loose enough that the far-from-optimal
+        // fixture counts as "subproblem solved" and μ is reduced.
+        m.barrier_tol_factor = 1e6;
+        let (data, cq) = test_fixture::fixture(0.1);
+        let mu = m.update_barrier_parameter(&data, &cq, None, None);
+        assert!(mu < 0.1, "fixture must reduce μ for this test");
+        assert!(data.borrow().request_ls_reset);
+    }
+
+    #[test]
+    fn no_ls_reset_when_mu_stands_still() {
+        let mut m = MonotoneMuUpdate::new();
+        let (data, cq) = test_fixture::fixture(0.1);
+        // Default `barrier_tol_factor`: the fixture's barrier error is
+        // far above `10 · μ`, so the loop never runs.
+        let mu = m.update_barrier_parameter(&data, &cq, None, None);
+        assert_eq!(mu, 0.1);
+        assert!(!data.borrow().request_ls_reset);
+    }
 
     #[test]
     fn picks_smaller_of_linear_and_superlinear() {

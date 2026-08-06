@@ -1815,6 +1815,40 @@ impl IpoptAlgorithm {
         );
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
+
+        // pounce#510 — line-search reset. Upstream's μ updates own a
+        // `linesearch_` handle and call `linesearch_->Reset()` (which
+        // clears the filter via `FilterLSAcceptor::Reset`,
+        // `IpFilterLSAcceptor.cpp:524-532`) at four fixed points:
+        // `IpAdaptiveMuUpdate.cpp:339` (fixed-mode decrease), `:386`
+        // (free→fixed switch), `:431` (**unconditionally** on every
+        // free-mode iteration, μ moved or not), and
+        // `IpMonotoneMuUpdate.cpp:165` (after a monotone reduction).
+        // Pounce's `MuUpdate` trait has no line-search handle, so each
+        // update raises `request_ls_reset` at exactly those points and
+        // we honour it here — the same plumbing `request_resto` uses
+        // below.
+        //
+        // This used to be inferred from `next_mu != mu_before`. That
+        // proxy is right for the monotone update but wrong for the
+        // adaptive one, which resets every free-mode iteration
+        // regardless of μ: whenever μ stayed numerically put (the
+        // free-mode endgame, and any iteration after a restoration that
+        // returns at the same μ) the filter kept entries computed
+        // against a barrier parameter and an iterate the algorithm had
+        // already left. On #505's reproducer that rejected every trial
+        // step from α=2.4e-6 down to 1e-12 on the filter alone and
+        // forced a spurious restoration.
+        let ls_reset = {
+            let mut d = self.data.borrow_mut();
+            let f = d.request_ls_reset;
+            d.request_ls_reset = false;
+            f
+        };
+        if ls_reset {
+            self.bundle.line_search.reset();
+        }
+
         if tiny_at_entry && mu_terminates_on_tiny && (next_mu - mu_before).abs() < Number::EPSILON {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
@@ -1846,20 +1880,6 @@ impl IpoptAlgorithm {
                     next_mu,
                 );
             }
-        }
-
-        // Mirror upstream `IpAdaptiveMuUpdate.cpp:339, 386, 431` and
-        // `IpMonotoneMuUpdate.cpp:165`: every code path that *changes*
-        // μ calls `linesearch_->Reset()`, which clears the filter via
-        // `FilterLSAcceptor::Reset` (`IpFilterLSAcceptor.cpp:524-532`).
-        // Rationale: filter entries are computed against the current
-        // barrier — when μ changes, prior entries no longer apply and
-        // would over-constrain acceptance. The two upstream paths that
-        // do NOT reset (stay-fixed-no-decrease and fixed→free transition)
-        // both keep μ at curr_mu, so the `mu_changed` check captures
-        // the intended distinction.
-        if next_mu != mu_before {
-            self.bundle.line_search.reset();
         }
 
         // Sub-iteration checkpoint: μ has been updated for this iteration.
