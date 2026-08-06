@@ -15,6 +15,8 @@ pounce-feral = { path = "../../crates/pounce-feral" }
 pounce-common = { path = "../../crates/pounce-common" }
 pounce-linalg = { path = "../../crates/pounce-linalg" }
 pounce-cinterface = { path = "../../crates/pounce-cinterface" }
+pounce-presolve = { path = "../../crates/pounce-presolve" }
+pounce-nlp = { path = "../../crates/pounce-nlp" }
 
 [profile.release]
 debug = true
