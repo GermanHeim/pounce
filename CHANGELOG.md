@@ -9,6 +9,46 @@ changes.
 
 ## [Unreleased]
 
+### Added — LP and convex-QP presolve folds away two-variable equality rows (#494)
+
+- A row `a₁·x + a₂·y = b` linking two variables says one of them *is* the
+  other, up to a scale and a shift — an arc equality, a `Reference` alias,
+  a unit conversion. Neither variable is determined by it, so the convex
+  presolve's catalog had nothing that could act on it, even though it
+  already had singleton-row fixing and free-column-singleton substitution.
+  On a flowsheet those rows are most of the model. LP and convex QP now
+  substitute one variable for the other and drop the row, iterating to a
+  fixed point so **chains** of aliases collapse to a single column.
+- This is the reduction #490 added for the general NLP path, reaching the
+  models that path never sees: the CLI dispatches LP and convex QP to
+  `pounce-convex` several hundred lines before any presolve wrapper is
+  built. Both now share one planner, so they agree on what can go.
+- On by default, as the rest of the convex presolve is. `qp_presolve=no`
+  (or `presolve=no`) turns the whole pass off. The one-line presolve
+  summary gained an `aggregated` count.
+- Any bound on an eliminated variable is carried onto the survivor, so the
+  reduced problem describes the same feasible set — and the postsolved
+  duals still describe the *original* one. Where a reduced solve reports a
+  bound force on a variable that has no such bound of its own (it inherited
+  one), the force is re-attributed to the variable that actually declares
+  it. Convexity is preserved by construction: the substitution is a
+  congruence `P' = MᵀPM`.
+- Fails closed, like Phase 6: a contradictory alias system, or one that
+  would remove every column, stands the pass down and hands the model over
+  untouched rather than being the first and only voice calling it
+  infeasible. The conic path (SOCP, exponential/power cones, SDP, SOS) opts
+  out entirely — those rows are coupled in fixed-size blocks.
+
+### Fixed — the convex presolve's iteration trace reported a reduced-problem objective
+
+- `QpIterate::objective` is documented to be in the original problem's
+  coordinates, but the trace comes back from a solve of the *reduced*
+  problem, and presolve never added back the constant its substitutions
+  moved into the objective. Any `--json-detail full` report on a model
+  where presolve fixed or substituted a variable carried an `iterations`
+  array offset by that constant. The final objective, the solution, and
+  the duals were always right; only the trace was affected.
+
 ### Added — presolve eliminates variables determined by linear equality rows (#487)
 
 - `presolve_linear_eq_reduction` was a registered option with no

@@ -614,8 +614,16 @@ fn decode(irow: Index, jcol: Index, one_based: bool) -> (usize, usize) {
 ///
 /// Signs follow the convention `finalize_solution` uses, `∇f + Jᵀλ − z_l +
 /// z_u = 0`, so `resid` accumulates `+Jᵀλ` and each pivot solve carries the
-/// matching negation.
-fn recover_dropped_multipliers(
+/// matching negation. `grad_f` is the objective gradient **plus** every
+/// force the sweep is not itself resolving (bound multipliers, and the
+/// transpose products of any row block the plan never looks at), so a
+/// caller with more row blocks than the plan's own — `pounce-convex`, whose
+/// aggregation plans over the equalities while `Gᵀz` also acts on the same
+/// columns (gh #494) — folds those in here.
+///
+/// Public because the convex QP presolve shares this recovery rather than
+/// restating it in `(y, z)` conventions; see `pounce_convex::aggregate`.
+pub fn recover_dropped_multipliers(
     plan: &EliminationPlan,
     grad_f: &[Number],
     jac_irow: &[Index],

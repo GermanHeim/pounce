@@ -11,8 +11,8 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |     12 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
-| lp              |     10 | 2026-08-04 | —             |
-| qp              |     10 | 2026-08-03 | —             |
+| lp              |     11 | 2026-08-06 | —             |
+| qp              |     11 | 2026-08-06 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     11 | 2026-08-05 | —             |
 | exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
@@ -25,6 +25,38 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-06] Doubleton-equality aggregation in the convex presolve (qp/lp, gh#494) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: randomized alias-linked convex QPs built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 441 end-to-end .nl solves across 3 seeds, 0 failures
+:POUNCE_TIME: ~3 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); in-script row re-evaluation; in-script bound-aware stationarity of the reported duals; qp_presolve=no objective agreement
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_convex_doubleton_aggregation_verify.py]]
+:COVERAGE_TARGET: crates/pounce-convex/src/aggregate.rs — new file, no prior adversarial coverage
+:END:
+
+Probe validated by mutation testing rather than asserted: dropping =Gᵀz= from the
+gradient the dual sweep is handed, and dropping the substitution offset from a
+surviving row's right-hand side, were each caught (13 and 31 failures in 40
+instances). The =Gᵀz= defect is caught only by the bound-aware stationarity
+oracle — =pounce verify= alone passes it — which is why that oracle exists.
+
+Measured limit, stated because it changes what this run does and does not
+cover: the CLI's QP extractor lowers every variable bound to a row of =G=, so
+the =QpProblem= the convex presolve sees from a =.nl= has an empty box.
+Instrumenting the branch shows the transferred-bound multiplier
+re-attribution firing in 0 of 114 instances here — there is no box to
+transfer. That path is reached only by callers who build a =QpProblem= with
+=lb=/=ub= directly, and is covered at the library level by
+=crates/pounce-convex/tests/presolve_aggregation.rs= (a targeted fixture plus a
+randomized probe reaching it in 19 of 400 draws), where five injected defects
+in the recovery were each caught.
 ** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
 :PROPERTIES:
 :FAMILY: nlp
