@@ -4538,6 +4538,65 @@ mod tests {
     }
 
     #[test]
+    fn cond_does_not_leak_a_non_finite_from_its_inactive_branch() {
+        // Frontends clamp `entropy`/`centropy` with a Cond so the x -> 0+ limit
+        // stays finite: `select(x < 1e-300, x*ln(1e-300), xlogx(x))`. The tape's
+        // forward sweep evaluates EVERY slot, so at x = -1 the inactive
+        // `xlogx(-1)` arm is NaN and its derivative arms are NaN too. Whether
+        // that NaN reaches the caller is the difference between a usable clamp
+        // and a poisoned Hessian row, and it is decided independently in three
+        // sweeps — so check all three, not just the gradient.
+        let cond = Expr::Compare(CmpOp::Lt, Box::new(var(0)), Box::new(cnst(1e-300)));
+        let e = Expr::Cond {
+            cond: Box::new(cond),
+            then_: Box::new(mul(var(0), cnst(1e-300f64.ln()))),
+            else_: Box::new(unary(UnaryOp::XLogX, var(0))),
+        };
+        let t = Tape::build(&e);
+        let x = [-1.0_f64];
+
+        // Premise: the inactive arm really is NaN at this point, so the test is
+        // exercising the leak it claims to rule out.
+        assert!(
+            Tape::build(&unary(UnaryOp::XLogX, var(0)))
+                .eval(&x)
+                .is_nan(),
+            "test premise: xlogx(-1) must be NaN"
+        );
+
+        assert_eq!(t.eval(&x), -1e-300_f64.ln());
+
+        let mut g = vec![0.0; 1];
+        t.gradient_seed(&x, 1.0, &mut g);
+        assert_eq!(g[0], 1e-300_f64.ln(), "gradient leaked the inactive branch");
+
+        let mut hess_map: HashMap<(usize, usize), usize> = HashMap::new();
+        hess_map.insert((0, 0), 0);
+        let mut acc = vec![0.0; 1];
+        t.hessian_accumulate(&x, 1.0, &hess_map, &mut acc);
+        assert_eq!(acc[0], 0.0, "hessian_accumulate leaked the inactive branch");
+
+        let ops = t.ops.len();
+        let mut vals = vec![0.0; ops];
+        t.forward_into(&x, &mut vals);
+        let mut col = vec![0.0; 1];
+        let (mut dot, mut adj, mut adj_dot) = (vec![0.0; ops], vec![0.0; ops], vec![0.0; ops]);
+        t.hessian_directional(
+            &vals,
+            &[1.0],
+            1.0,
+            &mut col,
+            &mut dot,
+            &mut adj,
+            &mut adj_dot,
+        );
+        assert_eq!(
+            col[0], 0.0,
+            "hessian_directional leaked the inactive branch"
+        );
+    }
+
+    #[test]
     fn atan2_grad_and_hessian_match_fd() {
         // f = atan2(x0, x1) + x0*x1, away from the origin.
         let atan2 = |a: Expr, b: Expr| Expr::Binary(BinOp::Atan2, Box::new(a), Box::new(b));
