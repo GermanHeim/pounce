@@ -49,7 +49,7 @@
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
 use crate::debug::{ConvexDebugState, fire};
-use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
+use crate::qp::{BoxScreen, QpIterate, QpProblem, QpSolution, QpStatus, screen_variable_box};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -282,13 +282,23 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     let mut make_backend = make_backend;
-    // gh #295: reject a box that admits no finite point (a *present* `+∞`
-    // lower / `−∞` upper bound) before bound expansion — `expand_bounds` is
-    // sign-agnostic and would otherwise mishandle it and report a violating
-    // point `Optimal`.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before bound expansion (gh #295, gh #491):
+    // `expand_bounds` is sign-agnostic, so a *present* `+∞` lower / `−∞` upper
+    // bound would be mishandled as an *absent* one and a violating point
+    // reported `Optimal`; and a box crossed by more than a tolerance is empty,
+    // which the iteration resolved only for wide crossings — in between it
+    // returned `NumericalFailure` at a `NaN` iterate. A hairline crossing is
+    // repaired to the midpoint the iteration converged to anyway. See
+    // [`screen_variable_box`].
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
     let sol = solve_qp_ipm_core(prob, opts, &mut make_backend);
@@ -297,7 +307,8 @@ where
     // never-regressing — a no-op for QPs and whenever the vertex is not a
     // strict improvement. Runs against the same un-equilibrated `prob` so the
     // `z`/`s` conventions line up. See [`crate::crossover`].
-    crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend)
+    let sol = crate::crossover::maybe_crossover(prob, sol, opts, &mut make_backend);
+    finite_or_failed(prob, sol)
 }
 
 /// The interior-point solve (the historical [`solve_qp_ipm`] body): bounds-aware
@@ -693,11 +704,17 @@ pub fn solve_qp_ipm_debug<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
-    // bound) before bound expansion, as the non-debug path does.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before bound expansion, as the non-debug path
+    // does (gh #295, gh #491).
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     // Build the factorization and run the core loop directly with the hook
     // (mirrors `solve_qp_core`'s non-HSDE path; `solve_qp_core` itself can't
     // carry the borrowed hook through its generic plumbing). When the HSDE
@@ -745,17 +762,42 @@ pub fn solve_qp_ipm_warm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // One gate over every exit of the body below — see [`finite_or_failed`].
+    finite_or_failed(
+        prob,
+        solve_qp_ipm_warm_inner(prob, opts, warm, make_backend),
+    )
+}
+
+fn solve_qp_ipm_warm_inner<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    warm: &QpWarmStart,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
     // Warm-starting requires the direct infeasible-start solver: HSDE
     // self-starts and ignores a warm point (see `QpOptions::use_hsde`). So this
     // path always runs the direct method, independent of the (HSDE) default —
     // otherwise the warm start would silently do nothing. A caller that
     // warm-starts is doing nearby reoptimization (a known-solvable
     // neighborhood), where the direct path's fragility is not a concern.
-    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
-    // bound) before equilibration and bound expansion.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before equilibration and bound expansion
+    // (gh #295, gh #491). Equilibration is a diagonal congruence and scales
+    // the bounds with the variables, so a crossing survives it — but only the
+    // *unscaled* widths are comparable to `CROSSED_BOX_TOL`, which is why the
+    // screen runs here and not after.
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     let direct = QpOptions {
         use_hsde: false,
         equilibrate: false,
@@ -767,7 +809,7 @@ where
     if opts.equilibrate {
         let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
         let scaled_warm = scaling.scale_warm_start(warm);
-        let mut sol = solve_qp_ipm_warm(&scaled, &direct, &scaled_warm, make_backend);
+        let mut sol = solve_qp_ipm_warm_inner(&scaled, &direct, &scaled_warm, make_backend);
         scaling.unscale_solution(prob, &mut sol);
         return sol;
     }
@@ -806,11 +848,32 @@ pub fn solve_socp_ipm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
-    // bound) before bound expansion; `expand_bounds` is sign-agnostic.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // One gate over every exit of the body below — see [`finite_or_failed`].
+    finite_or_failed(prob, solve_socp_ipm_inner(prob, cones, opts, make_backend))
+}
+
+fn solve_socp_ipm_inner<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    opts: &QpOptions,
+    make_backend: F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // Screen the variable box before bound expansion (gh #295, gh #491);
+    // `expand_bounds` is sign-agnostic. The screen reads only `lb`/`ub`, which
+    // this path appends as a trailing nonnegative block exactly as the QP path
+    // does, so the cones are unaffected by it either way.
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     // The cones must partition the inequality rows exactly; otherwise the
     // cone vectors and the `m_ineq` slack disagree and the driver would read
     // out of bounds (an exp/power cone is always 3 rows). Fail cleanly here.
@@ -2462,6 +2525,48 @@ fn cone_dims_cover(cones: &[ConeSpec], m_ineq: usize) -> bool {
 /// even a member (e.g. `(1,…,1)` violates an SOC of dimension ≥ 3). This
 /// keeps the reported dual cone-feasible and consistent across all drivers
 /// (cf. `hsde::failed`, `hsde_nonsym::failed`).
+/// Last gate before a solution leaves the crate: a non-finite entry anywhere
+/// in it is replaced by an honest zero-filled `NumericalFailure`.
+///
+/// A `NaN` in the returned iterate is never information. It cannot be checked
+/// against a bound, printed into a `.sol`, or fed to a warm start, and every
+/// arithmetic it touches downstream returns `NaN` in turn — so it converts one
+/// solver's failure into the caller's, several steps removed from the cause.
+/// The status was already `NumericalFailure` in the case this was written for
+/// (a `Gx ≤ h` system infeasible by about `1e-8`, where the iteration neither
+/// converged nor certified), and `obj = NaN` still reached the CLI's own
+/// summary line.
+///
+/// Deliberately a *guard*, not a repair: it does not attempt to salvage a
+/// point, and it fires only on data no consumer could have used. A solve that
+/// returns finite numbers passes through untouched, including one that failed.
+///
+/// Applied at the entry points a caller reaches — [`solve_qp_ipm`],
+/// [`solve_qp_ipm_warm`], [`solve_socp_ipm`], and the active-set driver — and
+/// deliberately **not** on the `*_debug` ones, where the raw iterate is the
+/// thing being inspected and replacing it would hide what the hook was
+/// attached to see.
+pub(crate) fn finite_or_failed(prob: &QpProblem, sol: QpSolution) -> QpSolution {
+    let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
+    if finite(&sol.x)
+        && finite(&sol.y)
+        && finite(&sol.z)
+        && finite(&sol.z_lb)
+        && finite(&sol.z_ub)
+        && sol.obj.is_finite()
+    {
+        return sol;
+    }
+    let iters = sol.iters;
+    failed_solution(
+        prob,
+        vec![0.0; prob.n],
+        vec![0.0; prob.m_eq()],
+        vec![0.0; prob.m_ineq()],
+        iters,
+    )
+}
+
 fn failed_solution(
     prob: &QpProblem,
     x: Vec<f64>,
@@ -3770,5 +3875,87 @@ mod false_optimum_metric_tests {
         let out = verify_or_repair_optimum(&prob, &opts, sol, &mut mb);
         assert_eq!(out.status, QpStatus::Optimal);
         assert_eq!(out.x, x, "a genuine optimum must be returned unchanged");
+    }
+}
+
+#[cfg(test)]
+mod finite_guard_tests {
+    //! gh #491: a non-finite entry never leaves the crate.
+
+    use super::finite_or_failed;
+    use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet};
+
+    fn prob() -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-1.0, -1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    fn sol(status: QpStatus, x: Vec<f64>, obj: f64) -> QpSolution {
+        QpSolution {
+            status,
+            x,
+            y: vec![],
+            z: vec![0.0],
+            z_lb: vec![0.0; 2],
+            z_ub: vec![0.0; 2],
+            obj,
+            iters: 7,
+            iterates: Vec::new(),
+        }
+    }
+
+    /// A finite solution passes through untouched — *including* a failed one,
+    /// whose iterate a caller may still want to look at.
+    #[test]
+    fn finite_solutions_are_returned_unchanged() {
+        for status in [QpStatus::Optimal, QpStatus::NumericalFailure] {
+            let s = sol(status, vec![0.25, 0.75], -0.5);
+            let out = finite_or_failed(&prob(), s.clone());
+            assert_eq!(out.status, status);
+            assert_eq!(out.x, s.x);
+            assert_eq!(out.obj, s.obj);
+            assert_eq!(out.iters, 7, "the iteration count is not a casualty");
+        }
+    }
+
+    /// A `NaN` anywhere — the iterate, a multiplier, or the objective — is
+    /// replaced by a zero-filled `NumericalFailure`. `NaN` is never
+    /// information: it cannot be checked against a bound, printed into a
+    /// `.sol`, or warm-started from, and it turns every arithmetic downstream
+    /// into another `NaN`.
+    #[test]
+    fn non_finite_solutions_become_an_honest_failure() {
+        let cases = [
+            sol(QpStatus::NumericalFailure, vec![f64::NAN, 0.0], f64::NAN),
+            sol(QpStatus::Optimal, vec![f64::INFINITY, 0.0], 1.0),
+            sol(QpStatus::Optimal, vec![0.0, 0.0], f64::NAN),
+            QpSolution {
+                z: vec![f64::NAN],
+                ..sol(QpStatus::Optimal, vec![0.0, 0.0], 0.0)
+            },
+            QpSolution {
+                z_ub: vec![0.0, f64::NAN],
+                ..sol(QpStatus::Optimal, vec![0.0, 0.0], 0.0)
+            },
+        ];
+        for (i, s) in cases.into_iter().enumerate() {
+            let out = finite_or_failed(&prob(), s);
+            assert_eq!(out.status, QpStatus::NumericalFailure, "case {i}");
+            assert!(
+                out.x.iter().chain(&out.z).all(|v| v.is_finite()) && out.obj.is_finite(),
+                "case {i}: still non-finite"
+            );
+            assert_eq!(out.x, vec![0.0, 0.0], "case {i}");
+            assert_eq!(out.iters, 7, "case {i}: the iteration count is kept");
+        }
     }
 }

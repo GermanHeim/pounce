@@ -8,7 +8,8 @@
 //! ```text
 //! minimize    ½ xᵀP x + cᵀx
 //! subject to  A x = b          (equalities)
-//!             G x ≤ h          (inequalities, incl. finite var bounds)
+//!             G x ≤ h          (inequalities)
+//!             lb ≤ x ≤ ub      (the variable box)
 //! ```
 //!
 //! Mapping from the `.nl` representation:
@@ -21,11 +22,12 @@
 //!   g_u`. An equality (`g_l == g_u`) becomes a row of `A`; a one- or
 //!   two-sided inequality becomes one or two rows of `G` (`row ≤ g_u`
 //!   and/or `−row ≤ −g_l`).
-//! - **Variable bounds.** Present `x_l`/`x_u` become `G` rows
-//!   (`−x_i ≤ −x_l`, `x_i ≤ x_u`). The `.nl` "infinity" sentinel is
-//!   read directionally: `x_l ≤ -1e19` is no lower bound, `x_u ≥ 1e19`
-//!   is no upper bound. A bound past the *opposite* sentinel (an upper
-//!   bound of `-5e20`) is an ordinary bound and is kept.
+//! - **Variable bounds.** Present `x_l`/`x_u` become the solver's explicit
+//!   box (see [`extract_box`] for why they are no longer emitted as `G`
+//!   rows). The `.nl` "infinity" sentinel is read directionally: `x_l ≤
+//!   -1e19` is no lower bound, `x_u ≥ 1e19` is no upper bound. A bound past
+//!   the *opposite* sentinel (an upper bound of `-5e20`) is an ordinary
+//!   bound and is kept.
 
 use crate::dispatch::analyze_quadratic_full;
 use crate::nl_reader::NlProblem;
@@ -35,7 +37,7 @@ use crate::nl_reader::NlProblem;
 // it and was dropped from `G` entirely, so the QP was solved over a strictly
 // larger box and reported `Optimal` at a point the model excludes.
 use pounce_common::types::{lower_bound_present, upper_bound_present};
-use pounce_convex::{ConeSpec, QpProblem, Triplet};
+use pounce_convex::{ConeSpec, QpProblem, QpSolution, Triplet};
 
 /// Convert a classified LP/convex-QP `NlProblem` into `QpProblem`
 /// standard form. Returns `None` if the objective is not actually a
@@ -166,21 +168,8 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
         }
     }
 
-    // --- variable bounds as G rows (not part of the constraint map) ---
-    for i in 0..n {
-        let xl = prob.x_l[i];
-        let xu = prob.x_u[i];
-        if upper_bound_present(xu) {
-            let gr = next_row(&h);
-            g.push(Triplet::new(gr, i, 1.0)); // x_i ≤ xu
-            h.push(xu);
-        }
-        if lower_bound_present(xl) {
-            let gr = next_row(&h);
-            g.push(Triplet::new(gr, i, -1.0)); // −x_i ≤ −xl
-            h.push(-xl);
-        }
-    }
+    // --- variable bounds as the explicit box (not as `G` rows) ---
+    let (lb, ub) = extract_box(prob);
 
     Some((
         QpProblem {
@@ -191,14 +180,61 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
             b,
             g,
             h,
-            // Variable bounds are currently emitted as `G` rows (see the
-            // bound-handling above), so the explicit box is left empty.
-            lb: Vec::new(),
-            ub: Vec::new(),
+            lb,
+            ub,
         },
         con_map,
         obj_nl_constant,
     ))
+}
+
+/// The `.nl` variable bounds as `pounce-convex`'s explicit box, with an
+/// absent bound spelled `∓∞`.
+///
+/// Both extractors used to emit each finite bound as a `G` row (`x_i ≤ x_u`,
+/// `−x_i ≤ −x_l`) and leave `lb`/`ub` empty. That was never wrong — the IPM
+/// re-expands finite bounds into exactly those rows internally — but it threw
+/// away the one thing the solvers can only get from the box: **that these
+/// rows are a box**. Three consequences, all real:
+///
+/// * The empty-box screen ([`pounce_convex`]'s `screen_variable_box`, gh #491)
+///   reads `lb`/`ub`, so a model with a reversed bound arrived as a pair of
+///   contradictory rows instead — an infeasibility that has to be *certified*
+///   numerically rather than seen. The interior-point method managed that at
+///   most widths but returned `NumericalFailure` at a `NaN` iterate for
+///   crossings around `1e-8`.
+/// * The active-set engine handles a box with bound *statuses*, not with
+///   constraint rows; feeding it `2n` extra rows made every `.nl` QP that much
+///   larger in the one dimension an active-set method pays combinatorially
+///   for.
+/// * Presolve reasons about `tlb`/`tub` directly, so bounds hidden in rows had
+///   to be rediscovered by activity-based tightening before any box reduction
+///   could fire.
+///
+/// The bound *multipliers* now come back in the solution's `z_lb`/`z_ub`
+/// rather than being decoded out of `z` by row position.
+fn extract_box(prob: &NlProblem) -> (Vec<f64>, Vec<f64>) {
+    let lb = (0..prob.n)
+        .map(|i| {
+            let v = prob.x_l[i];
+            if lower_bound_present(v) {
+                v
+            } else {
+                f64::NEG_INFINITY
+            }
+        })
+        .collect();
+    let ub = (0..prob.n)
+        .map(|i| {
+            let v = prob.x_u[i];
+            if upper_bound_present(v) {
+                v
+            } else {
+                f64::INFINITY
+            }
+        })
+        .collect();
+    (lb, ub)
 }
 
 /// Map the QP solver's multipliers `(y, z)` back to a per-`.nl`-
@@ -239,74 +275,26 @@ fn next_row(rhs: &[f64]) -> usize {
     rhs.len()
 }
 
-/// Count the nonnegative (`G`) rows the *constraints* contributed, so the
-/// appended variable-bound rows can be located. Both extractors emit each
-/// linear inequality / range constraint as up to two `G` rows (an upper
-/// `row ≤ g_u` and/or a lower `−row ≤ −g_l`) and place the per-variable
-/// bound rows immediately after them (equalities go to `A`, and the SOCP
-/// cones are appended *after* the bound rows). This count is that offset.
-pub fn count_constraint_ineq_rows(con_map: &[ConRowMap]) -> usize {
-    con_map
-        .iter()
-        .map(|m| match m {
-            ConRowMap::Eq { .. } => 0,
-            ConRowMap::Ineq { upper, lower } => upper.is_some() as usize + lower.is_some() as usize,
-        })
-        .sum()
-}
-
-/// SOCP analogue of [`count_constraint_ineq_rows`]: only the linear
-/// inequality rows land in the nonnegative block *before* the variable
-/// bounds (equalities → `A`; quadratics → cones appended afterwards).
-pub fn count_socp_constraint_ineq_rows(con_map: &[ConSocpMap]) -> usize {
-    con_map
-        .iter()
-        .map(|m| match m {
-            ConSocpMap::Ineq { upper, lower } => {
-                upper.is_some() as usize + lower.is_some() as usize
-            }
-            ConSocpMap::Eq { .. } | ConSocpMap::Quad { .. } => 0,
-        })
-        .sum()
-}
-
-/// Recover the per-variable **bound multipliers** from the inequality
-/// multiplier vector `z`. Both extractors fold each finite variable bound
-/// into a nonnegative `G` row (`x_i ≤ x_u` and/or `−x_i ≤ −x_l`), appended
-/// right after the `n_con_ineq_rows` constraint-derived rows, in variable
-/// order with the upper row before the lower row. The `G`-row multiplier of
-/// `x_i ≤ x_u` is the (non-negative) upper-bound multiplier `z_ub[i]`; that
-/// of `−x_i ≤ −x_l` is the lower-bound multiplier `z_lb[i]`. Slots without a
-/// finite bound stay `0.0`.
+/// Recover the per-variable **bound multipliers** from a solved QP or SOCP.
+///
+/// Both extractors put the `.nl` variable bounds in the explicit box
+/// ([`extract_box`]), so the solver returns their multipliers directly in
+/// `z_lb`/`z_ub` and this is a length-normalizing read rather than the
+/// row-position decode it used to be. Variables are 1:1 with the `.nl`
+/// variables in both extractors, so no index remap is needed; a slot without
+/// a finite bound stays `0.0` because no bound was active there.
 ///
 /// The returned `z_lb` / `z_ub` are the raw non-negative multipliers of the
 /// *internal minimize* problem (a maximize objective was negated during
 /// extraction); the caller applies the maximize `sign` and the Ipopt
 /// `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` output convention.
-pub fn recover_bound_mults(
-    prob: &NlProblem,
-    n_con_ineq_rows: usize,
-    z: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
-    let n = prob.n;
-    let mut z_lb = vec![0.0; n];
-    let mut z_ub = vec![0.0; n];
-    let mut row = n_con_ineq_rows;
-    for i in 0..n {
-        if upper_bound_present(prob.x_u[i]) {
-            if let Some(&zv) = z.get(row) {
-                z_ub[i] = zv;
-            }
-            row += 1;
-        }
-        if lower_bound_present(prob.x_l[i]) {
-            if let Some(&zv) = z.get(row) {
-                z_lb[i] = zv;
-            }
-            row += 1;
-        }
-    }
-    (z_lb, z_ub)
+pub fn recover_bound_mults(prob: &NlProblem, sol: &QpSolution) -> (Vec<f64>, Vec<f64>) {
+    let read = |v: &[f64]| -> Vec<f64> {
+        (0..prob.n)
+            .map(|i| v.get(i).copied().unwrap_or(0.0))
+            .collect()
+    };
+    (read(&sol.z_lb), read(&sol.z_ub))
 }
 
 // ===========================================================================
@@ -488,21 +476,11 @@ pub fn extract_socp_with_map(
         }
     }
 
-    // --- variable bounds as nonnegative G rows (not in the constraint map) ---
-    for i in 0..n {
-        let xl = prob.x_l[i];
-        let xu = prob.x_u[i];
-        if upper_bound_present(xu) {
-            let gr = next_row(&h);
-            g.push(Triplet::new(gr, i, 1.0));
-            h.push(xu);
-        }
-        if lower_bound_present(xl) {
-            let gr = next_row(&h);
-            g.push(Triplet::new(gr, i, -1.0));
-            h.push(-xl);
-        }
-    }
+    // Variable bounds go in the explicit box, not into this orthant block —
+    // see [`extract_box`]. `solve_socp_ipm` appends them as a trailing
+    // nonnegative block of its own, *after* the cones, so they stay outside
+    // the partition `cones` has to cover.
+    let (lb, ub) = extract_box(prob);
 
     // The nonnegative block is every G row built so far. The cones list must
     // cover G in row order: this orthant block, then one SOC per quadratic.
@@ -559,8 +537,8 @@ pub fn extract_socp_with_map(
             b,
             g,
             h,
-            lb: Vec::new(),
-            ub: Vec::new(),
+            lb,
+            ub,
         },
         con_map,
         obj_nl_constant,
@@ -1086,8 +1064,9 @@ mod tests {
             con_names: Vec::new(),
         };
         let qp = extract_qp(&prob).expect("extract");
-        // Two var-bound rows (x0 ≤ 1, −x0 ≤ 0).
-        assert_eq!(qp.m_ineq(), 2);
+        // The bounds are the box, not `G` rows.
+        assert_eq!(qp.m_ineq(), 0);
+        assert_eq!((qp.lb[0], qp.ub[0]), (0.0, 1.0));
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         assert!((sol.x[0] - 1.0).abs() < 1e-6, "x0={}", sol.x[0]);
@@ -1119,7 +1098,9 @@ mod tests {
         };
         let qp = extract_qp(&prob).expect("extract");
         assert!(qp.p_lower.is_empty(), "LP has no Hessian");
-        assert_eq!(qp.m_ineq(), 4); // 2 vars × (upper + lower)
+        assert_eq!(qp.m_ineq(), 0, "bounds are the box, not `G` rows");
+        assert_eq!(qp.lb, vec![0.0, 0.0]);
+        assert_eq!(qp.ub, vec![1.0, 1.0]);
         let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         assert!((sol.x[0] - 1.0).abs() < 1e-6);
@@ -1193,13 +1174,11 @@ mod tests {
         };
         let qp = extract_qp(&prob).expect("extract");
         assert_eq!(
-            qp.m_ineq(),
-            1,
-            "`x0 <= -5e20` is a real bound and must become a G row; the \
-             symmetric |v| < 1e19 test dropped it, leaving 0 rows and an \
+            qp.ub[0], -5e20,
+            "`x0 <= -5e20` is a real bound and must reach the box; the \
+             symmetric |v| < 1e19 test dropped it, leaving an \
              unbounded-above box the model does not declare"
         );
-        assert_eq!(qp.h[0], -5e20, "the upper bound's RHS");
     }
 
     /// **gh #401.** A row with equal bounds past the sentinel used to vanish
@@ -1255,12 +1234,17 @@ mod tests {
         assert_eq!(qp.h[0], -5e20);
     }
 
-    /// **gh #401.** `recover_bound_mults` walks the G-row layout with the same
-    /// predicate the builder uses, so the two must agree or the returned
-    /// `z_lb` / `z_ub` shift by a row. Pins them together on a box that only
-    /// the directional reading admits.
+    /// **gh #401.** The box is built with the *directional* presence test, so
+    /// a bound past the opposite sentinel survives while a genuinely absent
+    /// one becomes `∓∞`. Pins the case only the directional reading admits.
+    ///
+    /// This used to assert instead that `recover_bound_mults` walked the same
+    /// `G`-row layout the builder emitted — a real hazard when the two agreed
+    /// only by construction, and one that no longer exists: bounds are the
+    /// box, and their multipliers come back in `z_lb`/`z_ub` with no layout
+    /// to keep in step.
     #[test]
-    fn bound_multipliers_stay_aligned_with_the_built_rows() {
+    fn the_box_is_built_with_the_directional_bound_test() {
         let prob = NlProblem {
             n: 2,
             m: 0,
@@ -1285,14 +1269,64 @@ mod tests {
             con_names: Vec::new(),
         };
         let qp = extract_qp(&prob).expect("extract");
-        // x0 contributes 1 row (upper only); x1 contributes 2 (upper, lower).
-        assert_eq!(qp.m_ineq(), 3);
-        // Tag each G row with its index so a misalignment is visible.
-        let z = vec![10.0, 20.0, 30.0];
-        let (z_lb, z_ub) = recover_bound_mults(&prob, 0, &z);
-        assert_eq!(z_ub[0], 10.0, "row 0 is x0's upper bound");
-        assert_eq!(z_lb[0], 0.0, "x0 has no lower bound");
-        assert_eq!(z_ub[1], 20.0, "row 1 is x1's upper bound");
-        assert_eq!(z_lb[1], 30.0, "row 2 is x1's lower bound");
+        assert_eq!(qp.m_ineq(), 0, "bounds are the box, not `G` rows");
+        // x0: no lower bound; a real upper bound past the *lower* sentinel.
+        assert_eq!(qp.lb[0], f64::NEG_INFINITY);
+        assert_eq!(qp.ub[0], -5e20);
+        // x1: an ordinary two-sided box, carried through unchanged.
+        assert_eq!(qp.lb[1], 0.0);
+        assert_eq!(qp.ub[1], 1.0);
+    }
+
+    /// The bound multipliers a solve produces are handed back per variable,
+    /// not decoded from a row layout. A short `z_lb`/`z_ub` (a driver that
+    /// returned early without them) reads as "no bound active" rather than
+    /// panicking on the index.
+    #[test]
+    fn bound_multipliers_come_back_per_variable() {
+        let prob = NlProblem {
+            n: 2,
+            m: 0,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0), (1, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            x_l: vec![0.0, 0.0],
+            x_u: vec![1.0, 1.0],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![0.5, 0.5],
+            lambda0: vec![],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        };
+        let sol = QpSolution {
+            status: pounce_convex::QpStatus::Optimal,
+            x: vec![0.0, 1.0],
+            y: vec![],
+            z: vec![],
+            z_lb: vec![7.0, 0.0],
+            z_ub: vec![0.0, 9.0],
+            obj: 0.0,
+            iters: 0,
+            iterates: Vec::new(),
+        };
+        let (z_lb, z_ub) = recover_bound_mults(&prob, &sol);
+        assert_eq!(z_lb, vec![7.0, 0.0]);
+        assert_eq!(z_ub, vec![0.0, 9.0]);
+
+        let empty = QpSolution {
+            z_lb: Vec::new(),
+            z_ub: Vec::new(),
+            ..sol
+        };
+        let (z_lb, z_ub) = recover_bound_mults(&prob, &empty);
+        assert_eq!(z_lb, vec![0.0, 0.0]);
+        assert_eq!(z_ub, vec![0.0, 0.0]);
     }
 }

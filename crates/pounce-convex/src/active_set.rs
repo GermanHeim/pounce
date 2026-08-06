@@ -70,8 +70,8 @@ use pounce_qp::{
     QpStatus as ActiveSetStatus, QpWarmStart, WorkingSet,
 };
 
-use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, inf_norm};
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, finite_or_failed, inf_norm};
+use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
 
 /// Caller-supplied overrides for the inner `pounce-qp` engine.
 ///
@@ -187,6 +187,45 @@ pub fn solve_qp_active_set<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // One gate over every exit of the body below — see [`finite_or_failed`].
+    finite_or_failed(
+        prob,
+        solve_qp_active_set_inner(prob, opts, engine, make_backend),
+    )
+}
+
+fn solve_qp_active_set_inner<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    engine: &ActiveSetOverrides,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // ---- Screen the variable box before anything else (gh #295, gh #491) ----
+    //
+    // Peer to the screen [`crate::ipm`] runs at each of its own entry points;
+    // see [`screen_variable_box`] for why an empty box must not be left to the
+    // engine (on this path it panicked) and why a hairline crossing is repaired
+    // rather than rejected.
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => {
+            return empty_solution(
+                prob.n,
+                prob.m_eq(),
+                prob.m_ineq(),
+                QpStatus::PrimalInfeasible,
+            );
+        }
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
+
     // Ruiz equilibration is applied as a **retry after failure**, not
     // unconditionally, because for this engine it is a genuine trade rather
     // than an improvement. Measured on Maros-Mészáros:
@@ -1064,6 +1103,7 @@ fn active_set_iter_budget(opts: &QpOptions, n: usize, m: usize) -> u32 {
 mod tests {
     use super::*;
     use crate::ipm::solve_qp_ipm;
+    use crate::qp::CROSSED_BOX_TOL;
     use crate::qp::Triplet;
     use pounce_feral::FeralSolverInterface;
 
@@ -1410,5 +1450,151 @@ mod tests {
             sol.obj,
             isol.obj
         );
+    }
+
+    /// `min ½x² s.t. lb ≤ x ≤ ub`, solved by both engines. Returns
+    /// `(active-set, ipm)` so the two can be held to the same answer.
+    fn boxed_scalar(lb: f64, ub: f64) -> (QpSolution, QpSolution) {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![Triplet::new(0, 0, 1.0)],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![lb],
+            ub: vec![ub],
+        };
+        let mut mk = backend;
+        let asol = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk,
+        );
+        let isol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        (asol, isol)
+    }
+
+    /// gh #491: a **reversed** box (`lb > ub`) is `PrimalInfeasible`, not a
+    /// panic — and the two engines must agree on it.
+    ///
+    /// Before the fix the engine's `validate` rejected `xl > xu` outright, so
+    /// both the first attempt and the Ruiz retry returned `NumericalFailure`
+    /// and the last-resort simplex-seeded attempt ran — where the seed was
+    /// clamped into the inverted interval and `f64::clamp` panicked with
+    /// `min > max`. Through the Python bindings that became an uncatchable
+    /// `pyo3_runtime.PanicException`, so this test would have *aborted* the
+    /// test binary rather than failed an assertion.
+    #[test]
+    fn reversed_box_is_primal_infeasible_not_a_panic() {
+        for (lb, ub) in [
+            (1.0, 0.0),
+            (5.0, 3.0),
+            (0.0, -1e-6),
+            (-1.0, -1e3),
+            // The band the IPM used to resolve neither way, returning
+            // `NumericalFailure` at a `NaN` iterate: wider than the tolerated
+            // crossing, narrower than what its arithmetic could certify.
+            (0.0, -1e-8),
+            (0.0, -1e-7),
+        ] {
+            let (asol, isol) = boxed_scalar(lb, ub);
+            assert_eq!(
+                asol.status,
+                QpStatus::PrimalInfeasible,
+                "active-set on lb={lb} ub={ub}"
+            );
+            assert_eq!(
+                isol.status,
+                QpStatus::PrimalInfeasible,
+                "ipm on lb={lb} ub={ub}"
+            );
+        }
+    }
+
+    /// The screen must not swallow the adjacent well-formed boxes: `lb == ub`
+    /// is a fixed variable, and `±∞` on the absent side is the ordinary
+    /// one-sided encoding. Both are feasible and must still solve.
+    #[test]
+    fn well_formed_boxes_are_untouched_by_the_screen() {
+        let (asol, isol) = boxed_scalar(2.0, 2.0);
+        assert_eq!(asol.status, QpStatus::Optimal, "active-set on lb == ub");
+        assert_eq!(isol.status, QpStatus::Optimal, "ipm on lb == ub");
+        assert!((asol.x[0] - 2.0).abs() < 1e-8, "x = {}", asol.x[0]);
+
+        let (asol, isol) = boxed_scalar(f64::NEG_INFINITY, f64::INFINITY);
+        assert_eq!(asol.status, QpStatus::Optimal, "active-set on a free var");
+        assert_eq!(isol.status, QpStatus::Optimal, "ipm on a free var");
+        assert!(asol.x[0].abs() < 1e-8, "x = {}", asol.x[0]);
+    }
+
+    /// A crossing no wider than [`crate::qp::CROSSED_BOX_TOL`] is a tolerance
+    /// artifact — presolve's bound tightening can hand a driver a reduced
+    /// problem carrying one, having already ruled it tolerable — so it is
+    /// repaired to a fixed variable at the box midpoint rather than called
+    /// infeasible.
+    ///
+    /// That is also where the IPM's own iteration landed on this input before
+    /// the screen existed (it converged to the midpoint and reported
+    /// `Optimal`), so the repair preserves its answer rather than replacing
+    /// it. Both engines are checked: the property a user comparing `method=`
+    /// observes is that they agree.
+    #[test]
+    fn hairline_crossing_is_repaired_not_rejected() {
+        for gap in [1e-14, 1e-12, 1e-10, CROSSED_BOX_TOL] {
+            let (asol, isol) = boxed_scalar(0.0, -gap);
+            assert_eq!(asol.status, QpStatus::Optimal, "active-set on gap={gap:e}");
+            assert_eq!(isol.status, QpStatus::Optimal, "ipm on gap={gap:e}");
+            // Midpoint of the crossed box, to well inside the crossing itself.
+            assert!(
+                (asol.x[0] + 0.5 * gap).abs() <= gap,
+                "x = {} for gap={gap:e}",
+                asol.x[0]
+            );
+        }
+    }
+
+    /// The reversed box reached through an `n > 1` problem with real
+    /// constraints, so the screen is exercised where the engine would otherwise
+    /// have work to do. Only one variable is reversed; the rest of the box is
+    /// ordinary.
+    #[test]
+    fn reversed_box_on_one_variable_of_many() {
+        let prob = QpProblem {
+            lb: vec![0.0, 1.0],
+            ub: vec![10.0, 0.0], // variable 1 is reversed
+            ..projection_qp()
+        };
+        let mut mk = backend;
+        let sol = solve_qp_active_set(
+            &prob,
+            &QpOptions::default(),
+            &ActiveSetOverrides::default(),
+            &mut mk,
+        );
+        assert_eq!(sol.status, QpStatus::PrimalInfeasible);
+        assert_eq!(sol.x.len(), prob.n, "x is returned at full length");
+    }
+
+    /// The impossible-bound class (gh #295) reaches the same verdict on this
+    /// path. The IPM screens it at every entry point; before this the
+    /// active-set driver screened it nowhere, so the raw Rust caller and the
+    /// CLI's `qp-active-set` route got whatever the engine happened to do.
+    #[test]
+    fn impossible_bounds_are_primal_infeasible_on_the_active_set_path() {
+        for (lb, ub) in [
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ] {
+            let (asol, isol) = boxed_scalar(lb, ub);
+            assert_eq!(
+                asol.status,
+                QpStatus::PrimalInfeasible,
+                "active-set on lb={lb} ub={ub}"
+            );
+            assert_eq!(isol.status, QpStatus::PrimalInfeasible, "ipm");
+        }
     }
 }

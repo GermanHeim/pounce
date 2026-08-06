@@ -9,6 +9,113 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `solve_qp(method="active-set")` panicked across the FFI on a reversed box (#491)
+
+- `pounce.solve_qp(..., method="active-set")` with a crossed bound
+  (`lb > ub`) **panicked out of Rust into Python** — `pyo3_runtime.
+  PanicException: min > max, or either was NaN` — instead of returning
+  `primal_infeasible` the way `method="ipm"` does on the identical input.
+  Because `PanicException` derives from `BaseException`, a caller that had
+  defensively wrapped the solve in `except Exception` still lost its loop.
+  Found by the nightly adversary run.
+- The path: the engine's own `validate` rejects `xl > xu`, so the driver's
+  first two attempts returned `NumericalFailure` and it fell through to the
+  last-resort simplex-seeded attempt — where the seed was clamped into the
+  inverted interval and `f64::clamp` panicked. `clamp` panics on
+  `min > max`; the seed builder now uses `max`-then-`min`, so it can no
+  longer be the thing that takes the process down.
+- The real fix is a single screen on the variable box, `screen_variable_box`,
+  run at **every** convex solve entry point — both engines' alike. Whether a
+  box is empty is an input-domain question, and the answer must not depend on
+  which engine the caller selected. It lives in the Rust core rather than in
+  `qp.py`'s validation pass, so it holds for the raw `_pounce` bindings, the
+  CLI, and direct Rust callers too. A reversed box is `PrimalInfeasible` by
+  inspection — `x_i ≥ lb_i > ub_i ≥ x_i` has no solution — which is the one
+  infeasibility claim the active-set driver may make without re-deriving a
+  certificate. The gh #295 impossible-bound class (a *present* `+∞` lower /
+  `−∞` upper) now runs through the same screen; the active-set path had no
+  check for it at all.
+- A crossing of `1e-9` or less is repaired rather than rejected: presolve's
+  bound tightening tolerates exactly that much and can hand a driver a
+  reduced problem carrying one, so the variable is fixed at its box midpoint
+  and solved.
+- **The IPM's own answer on a reversed box was not uniform either**, which
+  the same screen fixes. Measured on `min ½x² s.t. 0 ≤ x ≤ −gap` before the
+  change: crossings up to `1e-9` converged to the box midpoint and reported
+  `Optimal`, crossings of `1e-6` and wider reported `PrimalInfeasible`, and
+  the band between them — `1e-8`, `1e-7` — reported `NumericalFailure` at a
+  `NaN` iterate. The screen keeps the two outer bands (the snap-to-midpoint
+  repair *is* the answer the iteration was already reaching) and replaces the
+  `NaN` band with the verdict the bands on both sides of it imply. Both
+  methods now agree at every crossing width.
+- Well-formed boxes are untouched: the screen returns the caller's problem by
+  reference and every solve downstream of it is bit-identical.
+- The comment at `python/pounce/qp.py:397` claimed the finite reversed case
+  "is correctly reported `primal_infeasible` by the solver". That was true of
+  the IPM only — and only outside its `NaN` band — and is what left this gap
+  unexamined; it now says what each path does.
+
+### Changed — `.nl` variable bounds reach the convex solvers as a box, not as rows (#491)
+
+- `qp_extract` emitted each finite `.nl` variable bound as a `G` row
+  (`x ≤ x_u`, `−x ≤ −x_l`) and left the solver's `lb`/`ub` empty. That was
+  never *wrong* — the IPM re-expands finite bounds into exactly those rows
+  internally — but it discarded the one thing only the box can carry: that
+  these rows **are** a box. Bounds now go in the box on both the QP and SOCP
+  extraction paths, and their multipliers come back in `z_lb`/`z_ub` instead
+  of being decoded out of `z` by row position.
+- Three consequences, all real. The empty-box screen above reads `lb`/`ub`, so
+  a reversed bound in a model arrived as a pair of contradictory *rows* — an
+  infeasibility that has to be certified numerically rather than seen. The
+  active-set engine handles a box with bound statuses rather than constraint
+  rows, so every `.nl` QP carried up to `2n` rows it did not need, in the one
+  dimension an active-set method pays combinatorially for. And presolve
+  reasons over `tlb`/`tub`, so bounds hidden in rows had to be rediscovered
+  before any box reduction could fire.
+
+### Fixed — presolve could not read a singleton row as the bound it is (#491)
+
+- Two defects, both of which had to go before a variable box written as a pair
+  of rows could be recognized as one:
+  - **`−∞ − (−∞) = NaN`.** The implied bound on a column needs the row's
+    activity *without* that column, and it was computed by subtracting the
+    column's own contribution from the total. The moment that contribution was
+    the infinite one the result was `NaN`, `val.is_finite()` was false, and the
+    tightening silently did nothing — for *every* column of any row holding a
+    variable unbounded on the relevant side, the singleton row `x ≤ u`
+    included. Activity is now accumulated as a finite part plus a count of
+    infinite terms, so the leave-one-out is exact and the rest is infinite only
+    if some *other* column is.
+  - **Whole-column source disjointness.** A tightening source row claimed its
+    entire column, so of the pair `x ≤ u` / `−x ≤ −l` only the first was ever
+    used and only one side of the box was derived. A **singleton** row now
+    claims just the `(column, side)` it implies. Multi-column rows keep the
+    conservative whole-column claim: their `Gᵀz` credit lands in every column
+    they touch, and relaxing it there produces a postsolved point with a
+    nonzero reduced cost at an interior variable (caught by
+    `randomized_overlapping_tightening_roundtrip`).
+- Net effect: a contradictory pair is now presolved to `Infeasible` — the
+  `1e-8` case reported `Numerical failure … obj=NaN` after 169 iterations and
+  now reports `Problem is primal infeasible` in 0 — and a consistent pair
+  becomes the box it describes, which also drops both rows as redundant.
+  Two reduction tests asserted the *old mechanism* ("the row is kept") for
+  cases that now become bounds; they assert the invariant they were named for
+  instead (the constraint still binds; both sides of a range survive).
+
+### Fixed — a `NaN` iterate could leave the convex solvers (#491)
+
+- `finite_or_failed` gates every caller-facing convex entry point
+  (`solve_qp_ipm`, `solve_qp_ipm_warm`, `solve_socp_ipm`,
+  `solve_qp_active_set`): a non-finite entry in `x`, `y`, `z`, `z_lb`, `z_ub`,
+  or `obj` is replaced by a zero-filled `NumericalFailure`. A `NaN` in a
+  returned iterate is never information — it cannot be checked against a bound,
+  printed into a `.sol`, or warm-started from, and it turns every arithmetic
+  downstream into another `NaN`, converting one solver's failure into the
+  caller's several steps removed from the cause. The status was already
+  `NumericalFailure` in the case this was written for; `obj=NaN` still reached
+  the CLI's summary line. The `*_debug` entry points deliberately pass the raw
+  iterate through — it is what the hook was attached to see.
+
 ### Added — LP and convex-QP presolve folds away two-variable equality rows (#494)
 
 - A row `a₁·x + a₂·y = b` linking two variables says one of them *is* the
@@ -48,6 +155,7 @@ changes.
   where presolve fixed or substituted a variable carried an `iterations`
   array offset by that constant. The final objective, the solution, and
   the duals were always right; only the trace was affected.
+
 
 ### Fixed — a constant left in a `.nl` row body made an affine row look nonlinear (#492)
 
@@ -122,6 +230,7 @@ changes.
 - One documented caveat remains, in `docs/src/options.md`: a contradictory
   equality system makes the pass stand down entirely rather than be the
   first and only voice calling a model infeasible.
+
 
 ### Fixed — the C working-set API validated nothing structural, and reported the wrong row order (#484 follow-up, round 4)
 

@@ -366,6 +366,72 @@ def test_solve_qp_finite_reversed_bounds_still_report_infeasible():
     assert r.status == "primal_infeasible"
 
 
+@pytest.mark.parametrize("method", ["ipm", "active-set"])
+def test_solve_qp_reversed_bounds_never_panic_across_the_ffi(method):
+    """gh #491: a reversed box is ``primal_infeasible`` on *both* methods.
+
+    ``method="active-set"`` used to reach an ``f64::clamp`` on the inverted
+    interval and panic. A Rust panic crosses PyO3 as ``PanicException``, which
+    derives from ``BaseException`` — so it is not caught by ``except
+    Exception`` and tears down a caller's loop even when the caller wrapped
+    the solve defensively. That is what the bare ``except Exception`` below
+    asserts: if the panic came back, this test errors rather than failing.
+    """
+    try:
+        r = solve_qp(
+            P=np.array([[1.0]]),
+            c=np.zeros(1),
+            lb=np.array([1.0]),
+            ub=np.array([0.0]),
+            method=method,
+        )
+    except Exception as exc:  # a panic would NOT be caught here
+        pytest.fail(f"solve_qp(method={method!r}) raised {type(exc).__name__}: {exc}")
+    assert r.status == "primal_infeasible"
+
+
+@pytest.mark.parametrize("gap", [1e-8, 1e-7, 1e-6, 1.0])
+@pytest.mark.parametrize("method", ["ipm", "active-set"])
+def test_solve_qp_reversed_bounds_agree_across_methods(method, gap):
+    """gh #491: whether a box is empty is an input-domain question, so the two
+    methods must not split on it at any crossing width.
+
+    ``ipm`` used to return ``numerical_failure`` with ``x = [nan]`` for
+    crossings in a band around ``1e-8`` — wider than the tolerance it silently
+    absorbed, narrower than what its arithmetic could certify — while
+    reporting ``primal_infeasible`` on either side of that band.
+    """
+    r = solve_qp(
+        P=np.array([[1.0]]),
+        c=np.zeros(1),
+        lb=np.array([0.0]),
+        ub=np.array([-gap]),
+        method=method,
+    )
+    assert r.status == "primal_infeasible"
+    assert np.isfinite(r.x).all(), "an infeasible verdict must not carry a NaN"
+
+
+@pytest.mark.parametrize("method", ["ipm", "active-set"])
+def test_solve_qp_hairline_reversed_bounds_agree_across_methods(method):
+    """A crossing below the solvers' feasibility tolerance is a numerical
+    artifact, not an empty feasible set, and the two methods must not split on
+    it: both fix the variable at the box midpoint and report ``optimal``.
+
+    ``lb=0, ub=-1e-12`` panicked on ``active-set`` too (gh #491) — the trigger
+    was strictly ``ub < lb``, at any width.
+    """
+    r = solve_qp(
+        P=np.array([[1.0]]),
+        c=np.zeros(1),
+        lb=np.array([0.0]),
+        ub=np.array([-1e-12]),
+        method=method,
+    )
+    assert r.status == "optimal"
+    assert abs(r.x[0]) <= 1e-11
+
+
 def test_solve_qp_batch_inherits_the_bound_guard():
     with pytest.raises(ValueError, match=r"`lb\[0\]` is inf"):
         solve_qp_batch(

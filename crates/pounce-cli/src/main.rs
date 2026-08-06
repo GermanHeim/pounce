@@ -2195,20 +2195,16 @@ fn run_convex_qp(
     // report.
     let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
 
-    // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). The QP extractor
-    // folds each finite variable bound into a nonnegative `G` row (so
-    // `sol.z_lb`/`z_ub` stay empty); `recover_bound_mults` reads the raw
-    // non-negative multipliers back out of `sol.z`. They are for the
-    // *internal* minimize form (`½xᵀPx + cᵀx`, a maximize objective
-    // negated), so `sign` restores the user's objective sense — the same
-    // conversion `recover_duals` applies to the constraint duals. The
-    // Ipopt output convention (verified numerically, gh #296) is
-    // `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u`, both equal to the
-    // objective-gradient component at the bound. QP variables are 1:1 with
-    // the `.nl` variables, so no remap is needed.
-    let n_con_ineq = pounce_cli::qp_extract::count_constraint_ineq_rows(&con_map);
-    let (z_lb_raw, z_ub_raw) =
-        pounce_cli::qp_extract::recover_bound_mults(prob, n_con_ineq, &sol.z);
+    // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). The QP extractor puts
+    // the `.nl` variable bounds in the solver's explicit box, so these come
+    // back directly in `sol.z_lb`/`z_ub`. They are for the *internal* minimize
+    // form (`½xᵀPx + cᵀx`, a maximize objective negated), so `sign` restores
+    // the user's objective sense — the same conversion `recover_duals` applies
+    // to the constraint duals. The Ipopt output convention (verified
+    // numerically, gh #296) is `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u`,
+    // both equal to the objective-gradient component at the bound. QP
+    // variables are 1:1 with the `.nl` variables, so no remap is needed.
+    let (z_lb_raw, z_ub_raw) = pounce_cli::qp_extract::recover_bound_mults(prob, &sol);
     let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
     let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
     let qp_bound_suffixes = [
@@ -2435,15 +2431,13 @@ fn run_convex_socp(
     // `recover_socp_duals`).
     let lambda = pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z);
 
-    // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`), recovered from the
-    // nonnegative-block multipliers `sol.z` (variable bounds are `G` rows
-    // appended right after the linear-inequality rows and before the SOC
-    // cones). `sign` restores the user objective sense and the Ipopt output
-    // convention is `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` — same
-    // treatment as the QP path (gh #296).
-    let n_con_ineq = pounce_cli::qp_extract::count_socp_constraint_ineq_rows(&con_map);
-    let (z_lb_raw, z_ub_raw) =
-        pounce_cli::qp_extract::recover_bound_mults(prob, n_con_ineq, &sol.z);
+    // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). As on the QP path the
+    // variable bounds live in the solver's explicit box — outside the cone
+    // partition, which covers only the linear-inequality rows and the SOC
+    // blocks — so they come back in `sol.z_lb`/`z_ub`. `sign` restores the
+    // user objective sense and the Ipopt output convention is
+    // `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` (gh #296).
+    let (z_lb_raw, z_ub_raw) = pounce_cli::qp_extract::recover_bound_mults(prob, &sol);
     let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
     let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
     let socp_bound_suffixes = [
