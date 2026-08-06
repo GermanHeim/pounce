@@ -317,3 +317,28 @@ fn duals_match_the_bare_solve() {
         );
     }
 }
+
+/// The composition path every *library* caller takes — and with it the C
+/// interface and the GAMS link, which both drive `IpoptApplication` — is
+/// `wrap_with_presolve`, not the hand-stacked pair the tests above build.
+/// It has to reach the same reduced problem, or the "one implementation
+/// serves every frontend" claim in #487's option (b) is only true of the
+/// CLI.
+#[test]
+fn the_public_wrapper_stacks_the_reduction_too() {
+    use pounce_presolve::wrap_with_presolve;
+
+    let concrete = Rc::new(RefCell::new(Fixture::default()));
+    let wrapped =
+        wrap_with_presolve(Rc::clone(&concrete) as Rc<RefCell<dyn TNLP>>, opts(true)).unwrap();
+    let info = wrapped.borrow_mut().get_nlp_info().expect("dims");
+    assert_eq!(info.n, 2, "wrap_with_presolve did not reduce the columns");
+    assert_eq!(info.m, 1);
+
+    // And leaves the problem alone when the option is off.
+    let bare = Rc::new(RefCell::new(Fixture::default()));
+    let plain = wrap_with_presolve(Rc::clone(&bare) as Rc<RefCell<dyn TNLP>>, opts(false)).unwrap();
+    let info = plain.borrow_mut().get_nlp_info().expect("dims");
+    assert_eq!(info.n, 4);
+    assert_eq!(info.m, 3);
+}

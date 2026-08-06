@@ -349,10 +349,18 @@ Two things to know before turning it on:
 * **Dual attribution.** The recovery assumes an eliminated variable is
   interior to its own bounds at the optimum. When one of those bounds is
   active, the dual is reported on the *survivor's* bound multiplier (which
-  carries the transferred bound) and the eliminated variable's `ipopt_zL_out`
-  / `ipopt_zU_out` entry is zero. The primal point, the objective, and KKT
-  stationarity are unaffected — only the attribution differs, the same way
-  Phase 2's dropped rows behave.
+  carries the transferred bound) and the eliminated variable's bound
+  multiplier is zero. The primal point, the objective, and KKT stationarity
+  are unaffected — only the attribution differs, the same way Phase 2's
+  dropped rows behave.
+
+  A practical consequence for `.sol` readers: the writer omits exact zeros
+  from suffix blocks (it always has), so an eliminated variable gets **no**
+  `ipopt_zL_out` / `ipopt_zU_out` entry at all rather than an entry of zero.
+  Code that indexes those suffixes must treat a missing index as zero — as
+  it already must for any variable whose bound multiplier lands exactly on
+  zero. Row multipliers are unaffected: the dual block is dense and comes
+  back at the original row count.
 * **Failing closed.** If the equality system is contradictory, the pass
   stands down entirely and hands the model to the solver untouched, rather
   than being the first and only voice to call a model infeasible. The same
