@@ -417,7 +417,16 @@ impl Simplex {
     fn warm_start(&mut self, sol: &QpSolution) {
         for j in 0..self.n {
             let (lo, hi) = (self.lo[j], self.hi[j]);
-            let xj = sol.x.get(j).copied().unwrap_or(0.0).clamp(lo, hi);
+            // Written as max-then-min rather than `clamp`, which *panics* on an
+            // inverted interval (`min > max`). Callers are expected to have
+            // screened an empty box out before reaching here — both convex
+            // drivers do — but this is a seed builder, not a feasibility
+            // verdict, and it must not be the thing that takes the process down
+            // if one ever does not: the panic crossed the PyO3 boundary as an
+            // uncatchable `PanicException` (gh #491). On a reversed box this
+            // parks the variable at `hi`; the solve that follows is answering a
+            // problem with no feasible point either way.
+            let xj = sol.x.get(j).copied().unwrap_or(0.0).max(lo).min(hi);
             let (status, val) = if lo.is_finite() && (xj - lo).abs() <= BOUND_SNAP {
                 (NbStatus::AtLower, lo)
             } else if hi.is_finite() && (hi - xj).abs() <= BOUND_SNAP {

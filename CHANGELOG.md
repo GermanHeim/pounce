@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `solve_qp(method="active-set")` panicked across the FFI on a reversed box (#491)
+
+- `pounce.solve_qp(..., method="active-set")` with a crossed bound
+  (`lb > ub`) **panicked out of Rust into Python** — `pyo3_runtime.
+  PanicException: min > max, or either was NaN` — instead of returning
+  `primal_infeasible` the way `method="ipm"` does on the identical input.
+  Because `PanicException` derives from `BaseException`, a caller that had
+  defensively wrapped the solve in `except Exception` still lost its loop.
+  Found by the nightly adversary run.
+- The path: the engine's own `validate` rejects `xl > xu`, so the driver's
+  first two attempts returned `NumericalFailure` and it fell through to the
+  last-resort simplex-seeded attempt — where the seed was clamped into the
+  inverted interval and `f64::clamp` panicked. `clamp` panics on
+  `min > max`; the seed builder now uses `max`-then-`min`, so it can no
+  longer be the thing that takes the process down.
+- The real fix is a screen on the variable box at the active-set driver's
+  entry, peer to the one the IPM already runs at each of its own. It is in
+  the Rust core rather than in `qp.py`'s validation pass, so it holds for
+  the raw `_pounce` bindings, the CLI's `qp-active-set` route, and direct
+  Rust callers too. A reversed box is `PrimalInfeasible` by inspection —
+  `x_i ≥ lb_i > ub_i ≥ x_i` has no solution — which is the one
+  infeasibility claim this driver may make without re-deriving a
+  certificate. The gh #295 impossible-bound class (a *present* `+∞` lower /
+  `−∞` upper) is screened here as well; the active-set path had no check
+  for it at all.
+- A crossing of `1e-9` or less is repaired rather than rejected: presolve's
+  bound tightening tolerates exactly that much and can hand this driver a
+  reduced problem carrying one, so the variable is fixed at its box
+  midpoint and solved. That is also where the IPM draws the line — measured
+  on `min ½x² s.t. 0 ≤ x ≤ −gap`, crossings up to `1e-9` converge to the
+  midpoint and report `Optimal` — so the two methods now agree across the
+  whole range rather than splitting on it.
+- The comment at `python/pounce/qp.py:397` claimed the finite reversed case
+  "is correctly reported `primal_infeasible` by the solver". That was true
+  of the IPM only, and is what left this gap unexamined; it now says which
+  path it is describing.
+
 ### Added — LP and convex-QP presolve folds away two-variable equality rows (#494)
 
 - A row `a₁·x + a₂·y = b` linking two variables says one of them *is* the
@@ -48,6 +85,7 @@ changes.
   where presolve fixed or substituted a variable carried an `iterations`
   array offset by that constant. The final objective, the solution, and
   the duals were always right; only the trace was affected.
+
 
 ### Fixed — a constant left in a `.nl` row body made an affine row look nonlinear (#492)
 
@@ -122,6 +160,7 @@ changes.
 - One documented caveat remains, in `docs/src/options.md`: a contradictory
   equality system makes the pass stand down entirely rather than be the
   first and only voice calling a model infeasible.
+
 
 ### Fixed — the C working-set API validated nothing structural, and reported the wrong row order (#484 follow-up, round 4)
 

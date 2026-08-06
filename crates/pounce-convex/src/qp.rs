@@ -108,6 +108,26 @@ impl QpProblem {
         (0..self.n).any(|i| self.lb_of(i) >= BOUND_INF || self.ub_of(i) <= -BOUND_INF)
     }
 
+    /// True when some variable's box is **reversed** (`lb > ub`), so the
+    /// feasible set is empty for a reason that needs no arithmetic to see.
+    ///
+    /// Kept separate from [`Self::bounds_admit_no_point`] on purpose, and the
+    /// comparison is deliberately *exact* rather than tolerance-banded:
+    /// presolve's bound tightening legitimately produces a box crossed by up
+    /// to `BOUND_FEAS_TOL` and has its own toleranced test for it, so folding
+    /// this into the screen every presolve pass runs would turn a tolerated
+    /// near-crossing into a false infeasibility claim. This one is for the
+    /// *user-supplied* box, at a solve entry point.
+    ///
+    /// The interior-point path reaches `PrimalInfeasible` on such a box by
+    /// solving; the active-set path did not — its simplex seed clamped a
+    /// starting point into the inverted interval and `f64::clamp` panics on
+    /// `min > max`, which crossed the PyO3 boundary as an uncatchable
+    /// `PanicException` (gh #491). See [`crate::active_set`].
+    pub(crate) fn bounds_are_reversed(&self) -> bool {
+        (0..self.n).any(|i| self.lb_of(i) > self.ub_of(i))
+    }
+
     /// A copy of this problem with the **objective** data scaled by `factor`
     /// (`P ← factor·P`, `c ← factor·c`); constraints, bounds, and the feasible
     /// set are untouched. Scaling the objective by a positive constant leaves
