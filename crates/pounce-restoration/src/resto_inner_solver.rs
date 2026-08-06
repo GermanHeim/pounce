@@ -709,10 +709,30 @@ pub fn run_inner_resto(
     // 10*outer_tol` (a threshold the inner cannot reach at tight `tol`,
     // which is exactly how the case arises); it uses the `alt` gate's
     // looser `1e-2` KKT ceiling to reject inners that stalled without
-    // ever approaching stationarity. `!is_square_problem` and the
-    // `constr_viol_tol` violation floor mirror `strict`.
-    let tiny_step_locally_infeasible = !is_square_problem
-        && matches!(status, SolverReturn::StopAtTinyStep)
+    // ever approaching stationarity. The `constr_viol_tol` violation floor
+    // mirrors `strict`.
+    //
+    // Unlike `strict`, this gate is NOT carved out for square problems
+    // (pounce#512). The two carve-outs looked alike but rest on different
+    // upstream branches. `strict`'s case is `resto_status == SUCCESS`
+    // (`IpRestoMinC_1Nrm.cpp:249-268`), which sets `retval = 0` — return
+    // the recovered point, render no verdict — so declaring infeasibility
+    // there is pounce-specific and rightly withheld on square problems.
+    // A tiny-step exit is upstream's *other* branch, `:278-291`:
+    //
+    //     else if( resto_status == STOP_AT_TINY_STEP || ... )
+    //        ... THROW_EXCEPTION(LOCALLY_INFEASIBLE, ...)
+    //
+    // which throws on any problem shape; the only square-specific test
+    // upstream has in this region (`:269`) is the *feasible* case, a
+    // `STOP_AT_ACCEPTABLE_POINT` below `constr_viol_tol`, and the
+    // violation floor below already excludes that. Carrying the exclusion
+    // here cost the #508 probe model — square, and infeasible by a full
+    // percent — its `LocalInfeasibility` verdict whenever the inner
+    // reached its stationary point by tiny step rather than by a
+    // certified convergence, which is what `tol=1e-12` produces: the
+    // honest AMPL 200 degraded to `Restoration_Failed`, AMPL 500.
+    let tiny_step_locally_infeasible = matches!(status, SolverReturn::StopAtTinyStep)
         && inner_kkt_err <= 1e-2
         && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol)
         && orig_inf_pr_at_final.is_finite();
