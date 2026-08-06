@@ -40,19 +40,25 @@
 //! block differs: the plan consumes *equality* rows, so `Gᵀz` is folded
 //! into the gradient the sweep is handed rather than resolved by it.
 //!
-//! Bound multipliers need one step the NLP path skips. Planning transfers
-//! an eliminated variable's box onto its survivor, so a reduced solve
-//! reports the *survivor* carrying a bound force that, in the original
-//! problem, belongs to the eliminated variable — and may name a bound the
-//! survivor does not even have (gh #493 documents this attribution for the
-//! NLP path, where full-space stationarity still holds because the
-//! survivor's own bound multiplier absorbs it). That is not available
-//! here: [`crate::presolve`]'s contract is a valid KKT point of the
-//! *original* problem, and a multiplier on a bound the original does not
-//! declare is not one. So the leftover reduced cost at each survivor is
-//! re-attributed to whichever cluster member is actually sitting on its
-//! own declared bound, and the sweep is re-run with that force in place.
-//! See [`postsolve`].
+//! Bound multipliers take a step of their own. Planning transfers an
+//! eliminated variable's box onto its survivor, so a reduced solve reports
+//! the *survivor* carrying a bound force that, in the original problem,
+//! belongs to the eliminated variable — and may name a bound the survivor
+//! does not even have. [`crate::presolve`]'s contract is a valid KKT point
+//! of the *original* problem, and a multiplier on a bound the original does
+//! not declare is not one. So the leftover reduced cost at each survivor is
+//! re-attributed to whichever cluster member is actually sitting on its own
+//! declared bound, and the sweep is re-run with that force in place. See
+//! [`postsolve`].
+//!
+//! The NLP path reaches the same answer by a different route (gh #493,
+//! fixed by #503): it records during *planning* where each reduced bound
+//! came from and rescales by `α` at postsolve. Reading it back off the
+//! leftover instead is what suits this side, where the same columns also
+//! carry inequality rows and a bound-tightening layer whose own
+//! re-attribution has to compose with this one. Where the survivor's own
+//! bound is active too, both paths leave the multiplier there — the split
+//! is non-unique and either is a valid KKT point.
 //!
 //! That step is for **library callers**, and it is worth saying which,
 //! because the answer is not the obvious one. The CLI's `.nl` extractor
@@ -420,7 +426,10 @@ pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSoluti
 
     let jac = EqTriplets::of(orig);
     let mut y = y_kept.clone();
-    recover_dropped_multipliers(plan, &base, &jac.irow, &jac.jcol, &jac.vals, false, &mut y);
+    let none: [f64; 0] = [];
+    recover_dropped_multipliers(
+        plan, &base, &none, &none, &jac.irow, &jac.jcol, &jac.vals, false, &mut y,
+    );
 
     let mut grad = base.clone();
     orig.at_mul(&y, &mut grad);
@@ -462,13 +471,9 @@ pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSoluti
     }
 
     if moved {
-        let mut shifted = base.clone();
-        for i in 0..n {
-            shifted[i] += z_ub[i] - z_lb[i];
-        }
         y = y_kept;
         recover_dropped_multipliers(
-            plan, &shifted, &jac.irow, &jac.jcol, &jac.vals, false, &mut y,
+            plan, &base, &z_lb, &z_ub, &jac.irow, &jac.jcol, &jac.vals, false, &mut y,
         );
         grad = base.clone();
         orig.at_mul(&y, &mut grad);
