@@ -111,19 +111,14 @@ impl QpProblem {
     /// True when some variable's box is **reversed** (`lb > ub`), so the
     /// feasible set is empty for a reason that needs no arithmetic to see.
     ///
-    /// Kept separate from [`Self::bounds_admit_no_point`] on purpose, and the
-    /// comparison is deliberately *exact* rather than tolerance-banded:
-    /// presolve's bound tightening legitimately produces a box crossed by up
-    /// to `BOUND_FEAS_TOL` and has its own toleranced test for it, so folding
-    /// this into the screen every presolve pass runs would turn a tolerated
-    /// near-crossing into a false infeasibility claim. This one is for the
-    /// *user-supplied* box, at a solve entry point.
-    ///
-    /// The interior-point path reaches `PrimalInfeasible` on such a box by
-    /// solving; the active-set path did not — its simplex seed clamped a
-    /// starting point into the inverted interval and `f64::clamp` panics on
-    /// `min > max`, which crossed the PyO3 boundary as an uncatchable
-    /// `PanicException` (gh #491). See [`crate::active_set`].
+    /// Kept separate from [`Self::bounds_admit_no_point`] on purpose: this is
+    /// the cheap *exact* test, and what a crossing of a given width should
+    /// mean is [`screen_variable_box`]'s decision, not this predicate's. Do
+    /// not fold the two together — presolve consults
+    /// `bounds_admit_no_point` on every pass, and its own bound tightening
+    /// legitimately leaves a box crossed by up to `BOUND_FEAS_TOL`, so an
+    /// exact reversal test there would turn a tolerated near-crossing into a
+    /// false infeasibility claim.
     pub(crate) fn bounds_are_reversed(&self) -> bool {
         (0..self.n).any(|i| self.lb_of(i) > self.ub_of(i))
     }
@@ -230,6 +225,109 @@ impl QpProblem {
     pub fn p_mul(&self, x: &[f64], y: &mut [f64]) {
         self.p_mul_add(x, y);
     }
+}
+
+/// Verdict on the variable box, decided before any solve is attempted.
+pub(crate) enum BoxScreen {
+    /// Every `[lb, ub]` is a non-empty interval; solve the problem as posed.
+    Feasible,
+    /// Some variable's box is empty by inspection — report `PrimalInfeasible`.
+    Empty,
+    /// Some box was crossed by no more than [`CROSSED_BOX_TOL`]; solve this
+    /// repaired copy, in which each such variable is fixed at its midpoint.
+    Snapped(QpProblem),
+}
+
+/// Widest box crossing (`lb − ub`) treated as a numerical artifact rather than
+/// an empty feasible set.
+///
+/// Matched to presolve's own `BOUND_FEAS_TOL`, which is the number that decides
+/// what can reach a solve entry point: bound tightening applies an update only
+/// when it improves a bound by more than that tolerance and declares
+/// infeasibility only when `tlb > tub + BOUND_FEAS_TOL`, so a *reduced* problem
+/// handed on from presolve can carry a box crossed by up to exactly this much —
+/// with presolve having already ruled that crossing tolerable. Calling it
+/// infeasible downstream would overturn that ruling on the strength of
+/// arithmetic presolve had already discounted.
+///
+/// It is also where the interior-point method drew this line of its own accord,
+/// which is why snapping here is a repair rather than a change of answer.
+/// Measured on `min ½x² s.t. 0 ≤ x ≤ −gap`, before this screen existed:
+///
+/// | crossing        | IPM verdict                       |
+/// |-----------------|-----------------------------------|
+/// | `1e-14 … 1e-9`  | `Optimal`, at the box midpoint    |
+/// | `1e-8 … 1e-7`   | `NumericalFailure`, `x = NaN`     |
+/// | `1e-6 … 1e0`    | `PrimalInfeasible`                |
+///
+/// So the screen preserves the top row (that midpoint is exactly what
+/// [`BoxScreen::Snapped`] hands back) and the bottom row, and replaces the
+/// middle one — a `NaN` iterate from a box the IPM's own arithmetic could not
+/// resolve either way — with the verdict the rows on both sides of it imply.
+pub(crate) const CROSSED_BOX_TOL: f64 = 1e-9;
+
+/// Decide what an ill-formed variable box means before a solver sees it.
+///
+/// Two classes of box admit no point, and neither survives contact with a
+/// solver intact:
+///
+/// * **Impossible** — a *present* `+∞` lower or `−∞` upper bound (gh #295).
+///   The bound-presence tests are sign-agnostic, so such a bound was dropped as
+///   if *absent* and a point violating it came back `Optimal`.
+/// * **Reversed** — `lb > ub` (gh #491). On the active-set path this **aborted
+///   the process**: the engine's `validate` rejects `xl > xu` with
+///   `QpError::InvertedBounds`, so the driver's first attempts failed and it
+///   fell through to its simplex-seeded last resort, where the seed was clamped
+///   into the inverted interval and `f64::clamp` panicked (`min > max`). Across
+///   the PyO3 boundary that surfaced as a `pyo3_runtime.PanicException`, which
+///   derives from `BaseException` and so tore down callers that had defensively
+///   wrapped the solve in `except Exception`.
+///
+/// A wide crossing is [`BoxScreen::Empty`], and saying so needs no arithmetic —
+/// which matters because the active-set driver otherwise refuses to report
+/// `PrimalInfeasible` without a certificate it re-derived itself. The
+/// certificate for this class *is* the bound pair: `x_i ≥ lb_i > ub_i ≥ x_i`
+/// has no solution, so there is nothing numerical to prove or to demote.
+///
+/// A hairline crossing is repaired instead, for the reason given on
+/// [`CROSSED_BOX_TOL`]: it is the residue of a tolerance decision made upstream,
+/// not a statement that the problem is infeasible.
+///
+/// **Every solve entry point runs this**, both engines' alike — which is the
+/// point. The two methods are alternatives for the same problem, so an
+/// input-domain question like "is this box empty?" must not be answered by
+/// whichever engine happens to be selected. Screening in the core rather than in
+/// the Python `_validate` pass also keeps the answer the same on the raw
+/// `_pounce` bindings, the CLI, and direct Rust callers.
+pub(crate) fn screen_variable_box(prob: &QpProblem) -> BoxScreen {
+    if prob.bounds_admit_no_point() {
+        return BoxScreen::Empty;
+    }
+    if !prob.bounds_are_reversed() {
+        return BoxScreen::Feasible;
+    }
+    if (0..prob.n).any(|i| prob.lb_of(i) > prob.ub_of(i) + CROSSED_BOX_TOL) {
+        return BoxScreen::Empty;
+    }
+    // Hairline: fix each crossed variable at its midpoint. Both bound vectors
+    // are necessarily length `n` here — an absent bound reads as `∓∞` and
+    // cannot be the crossed side — but index defensively anyway, since a
+    // partially-filled vector must not silently drop the repair and hand the
+    // solver the inverted box after all.
+    let mut repaired = prob.clone();
+    for i in 0..prob.n {
+        let (l, u) = (prob.lb_of(i), prob.ub_of(i));
+        if l > u {
+            let mid = 0.5 * (l + u);
+            if let (Some(lo), Some(hi)) = (repaired.lb.get_mut(i), repaired.ub.get_mut(i)) {
+                *lo = mid;
+                *hi = mid;
+            } else {
+                return BoxScreen::Empty;
+            }
+        }
+    }
+    BoxScreen::Snapped(repaired)
 }
 
 /// Termination status of an IPM solve.

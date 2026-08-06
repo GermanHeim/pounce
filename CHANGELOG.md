@@ -24,27 +24,44 @@ changes.
   inverted interval and `f64::clamp` panicked. `clamp` panics on
   `min > max`; the seed builder now uses `max`-then-`min`, so it can no
   longer be the thing that takes the process down.
-- The real fix is a screen on the variable box at the active-set driver's
-  entry, peer to the one the IPM already runs at each of its own. It is in
-  the Rust core rather than in `qp.py`'s validation pass, so it holds for
-  the raw `_pounce` bindings, the CLI's `qp-active-set` route, and direct
-  Rust callers too. A reversed box is `PrimalInfeasible` by inspection —
-  `x_i ≥ lb_i > ub_i ≥ x_i` has no solution — which is the one
-  infeasibility claim this driver may make without re-deriving a
+- The real fix is a single screen on the variable box, `screen_variable_box`,
+  run at **every** convex solve entry point — both engines' alike. Whether a
+  box is empty is an input-domain question, and the answer must not depend on
+  which engine the caller selected. It lives in the Rust core rather than in
+  `qp.py`'s validation pass, so it holds for the raw `_pounce` bindings, the
+  CLI, and direct Rust callers too. A reversed box is `PrimalInfeasible` by
+  inspection — `x_i ≥ lb_i > ub_i ≥ x_i` has no solution — which is the one
+  infeasibility claim the active-set driver may make without re-deriving a
   certificate. The gh #295 impossible-bound class (a *present* `+∞` lower /
-  `−∞` upper) is screened here as well; the active-set path had no check
-  for it at all.
+  `−∞` upper) now runs through the same screen; the active-set path had no
+  check for it at all.
 - A crossing of `1e-9` or less is repaired rather than rejected: presolve's
-  bound tightening tolerates exactly that much and can hand this driver a
-  reduced problem carrying one, so the variable is fixed at its box
-  midpoint and solved. That is also where the IPM draws the line — measured
-  on `min ½x² s.t. 0 ≤ x ≤ −gap`, crossings up to `1e-9` converge to the
-  midpoint and report `Optimal` — so the two methods now agree across the
-  whole range rather than splitting on it.
+  bound tightening tolerates exactly that much and can hand a driver a
+  reduced problem carrying one, so the variable is fixed at its box midpoint
+  and solved.
+- **The IPM's own answer on a reversed box was not uniform either**, which
+  the same screen fixes. Measured on `min ½x² s.t. 0 ≤ x ≤ −gap` before the
+  change: crossings up to `1e-9` converged to the box midpoint and reported
+  `Optimal`, crossings of `1e-6` and wider reported `PrimalInfeasible`, and
+  the band between them — `1e-8`, `1e-7` — reported `NumericalFailure` at a
+  `NaN` iterate. The screen keeps the two outer bands (the snap-to-midpoint
+  repair *is* the answer the iteration was already reaching) and replaces the
+  `NaN` band with the verdict the bands on both sides of it imply. Both
+  methods now agree at every crossing width.
+- Well-formed boxes are untouched: the screen returns the caller's problem by
+  reference and every solve downstream of it is bit-identical.
+- Scope, stated precisely: this is about the `lb`/`ub` **box**, so it covers
+  `solve_qp`, the raw `_pounce` bindings, and direct `pounce-convex` callers.
+  The CLI's `.nl` route expands variable bounds into explicit `Gx ≤ h` rows
+  (`qp_extract` leaves `lb`/`ub` empty) and so never showed this defect — but
+  presolve's bound tightening writes its tightened `tlb`/`tub` back into the
+  reduced problem's box, which is the route by which a crossed box can reach a
+  solver from a model that did not have one, and is why the hairline repair
+  exists rather than a flat rejection.
 - The comment at `python/pounce/qp.py:397` claimed the finite reversed case
-  "is correctly reported `primal_infeasible` by the solver". That was true
-  of the IPM only, and is what left this gap unexamined; it now says which
-  path it is describing.
+  "is correctly reported `primal_infeasible` by the solver". That was true of
+  the IPM only — and only outside its `NaN` band — and is what left this gap
+  unexamined; it now says what each path does.
 
 ### Added — LP and convex-QP presolve folds away two-variable equality rows (#494)
 

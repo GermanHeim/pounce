@@ -390,6 +390,28 @@ def test_solve_qp_reversed_bounds_never_panic_across_the_ffi(method):
     assert r.status == "primal_infeasible"
 
 
+@pytest.mark.parametrize("gap", [1e-8, 1e-7, 1e-6, 1.0])
+@pytest.mark.parametrize("method", ["ipm", "active-set"])
+def test_solve_qp_reversed_bounds_agree_across_methods(method, gap):
+    """gh #491: whether a box is empty is an input-domain question, so the two
+    methods must not split on it at any crossing width.
+
+    ``ipm`` used to return ``numerical_failure`` with ``x = [nan]`` for
+    crossings in a band around ``1e-8`` — wider than the tolerance it silently
+    absorbed, narrower than what its arithmetic could certify — while
+    reporting ``primal_infeasible`` on either side of that band.
+    """
+    r = solve_qp(
+        P=np.array([[1.0]]),
+        c=np.zeros(1),
+        lb=np.array([0.0]),
+        ub=np.array([-gap]),
+        method=method,
+    )
+    assert r.status == "primal_infeasible"
+    assert np.isfinite(r.x).all(), "an infeasible verdict must not carry a NaN"
+
+
 @pytest.mark.parametrize("method", ["ipm", "active-set"])
 def test_solve_qp_hairline_reversed_bounds_agree_across_methods(method):
     """A crossing below the solvers' feasibility tolerance is a numerical

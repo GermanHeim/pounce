@@ -49,7 +49,7 @@
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
 use crate::debug::{ConvexDebugState, fire};
-use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
+use crate::qp::{BoxScreen, QpIterate, QpProblem, QpSolution, QpStatus, screen_variable_box};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -282,13 +282,23 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     let mut make_backend = make_backend;
-    // gh #295: reject a box that admits no finite point (a *present* `+∞`
-    // lower / `−∞` upper bound) before bound expansion — `expand_bounds` is
-    // sign-agnostic and would otherwise mishandle it and report a violating
-    // point `Optimal`.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before bound expansion (gh #295, gh #491):
+    // `expand_bounds` is sign-agnostic, so a *present* `+∞` lower / `−∞` upper
+    // bound would be mishandled as an *absent* one and a violating point
+    // reported `Optimal`; and a box crossed by more than a tolerance is empty,
+    // which the iteration resolved only for wide crossings — in between it
+    // returned `NumericalFailure` at a `NaN` iterate. A hairline crossing is
+    // repaired to the midpoint the iteration converged to anyway. See
+    // [`screen_variable_box`].
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
     let sol = solve_qp_ipm_core(prob, opts, &mut make_backend);
@@ -693,11 +703,17 @@ pub fn solve_qp_ipm_debug<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
-    // bound) before bound expansion, as the non-debug path does.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before bound expansion, as the non-debug path
+    // does (gh #295, gh #491).
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     // Build the factorization and run the core loop directly with the hook
     // (mirrors `solve_qp_core`'s non-HSDE path; `solve_qp_core` itself can't
     // carry the borrowed hook through its generic plumbing). When the HSDE
@@ -751,11 +767,20 @@ where
     // otherwise the warm start would silently do nothing. A caller that
     // warm-starts is doing nearby reoptimization (a known-solvable
     // neighborhood), where the direct path's fragility is not a concern.
-    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
-    // bound) before equilibration and bound expansion.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before equilibration and bound expansion
+    // (gh #295, gh #491). Equilibration is a diagonal congruence and scales
+    // the bounds with the variables, so a crossing survives it — but only the
+    // *unscaled* widths are comparable to `CROSSED_BOX_TOL`, which is why the
+    // screen runs here and not after.
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     let direct = QpOptions {
         use_hsde: false,
         equilibrate: false,
@@ -806,11 +831,19 @@ pub fn solve_socp_ipm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
-    // bound) before bound expansion; `expand_bounds` is sign-agnostic.
-    if prob.bounds_admit_no_point() {
-        return trivial_primal_infeasible_solution(prob);
-    }
+    // Screen the variable box before bound expansion (gh #295, gh #491);
+    // `expand_bounds` is sign-agnostic. The screen reads only `lb`/`ub`, which
+    // this path appends as a trailing nonnegative block exactly as the QP path
+    // does, so the cones are unaffected by it either way.
+    let snapped;
+    let prob = match screen_variable_box(prob) {
+        BoxScreen::Feasible => prob,
+        BoxScreen::Empty => return trivial_primal_infeasible_solution(prob),
+        BoxScreen::Snapped(p) => {
+            snapped = p;
+            &snapped
+        }
+    };
     // The cones must partition the inequality rows exactly; otherwise the
     // cone vectors and the `m_ineq` slack disagree and the driver would read
     // out of bounds (an exp/power cone is always 3 rows). Fail cleanly here.

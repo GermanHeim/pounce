@@ -399,14 +399,15 @@ def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
     #
     # The *finite* analogue (`lb=1 > ub=0`) is deliberately NOT rejected here:
     # an empty box is a legitimate problem with a status, and both engines
-    # report `primal_infeasible` for it. That claim used to hold only for
-    # `method="ipm"` — the active-set path reached a `f64::clamp` on the
-    # inverted interval and *panicked* across the FFI boundary, which arrives
-    # in Python as a `pyo3_runtime.PanicException` (a `BaseException`, so not
-    # caught by a caller's `except Exception`). Fixed in the core rather than
-    # by widening this guard, since the Rust entry point is reachable from the
-    # other bindings too — see `pounce-convex`'s `screen_variable_box` and
-    # gh #491.
+    # report `primal_infeasible` for it. Neither did reliably. `method=
+    # "active-set"` reached a `f64::clamp` on the inverted interval and
+    # *panicked* across the FFI boundary — which arrives in Python as a
+    # `pyo3_runtime.PanicException`, a `BaseException`, so not caught by a
+    # caller's `except Exception`. `method="ipm"` was right at most crossing
+    # widths but returned `numerical_failure` with `x = nan` in a band around
+    # `1e-8`. Both are fixed in the core rather than by widening this guard,
+    # since those entry points are reachable from the other bindings too —
+    # see `pounce-convex`'s `screen_variable_box` and gh #491.
     for name, vec, bad_val, cmp_txt in (
         ("lb", lb, np.inf, ">= +inf"),
         ("ub", ub, -np.inf, "<= -inf"),

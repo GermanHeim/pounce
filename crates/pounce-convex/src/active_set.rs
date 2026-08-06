@@ -71,7 +71,7 @@ use pounce_qp::{
 };
 
 use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, inf_norm};
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
 
 /// Caller-supplied overrides for the inner `pounce-qp` engine.
 ///
@@ -172,95 +172,6 @@ fn empty_solution(n: usize, m_eq: usize, m_ineq: usize, status: QpStatus) -> QpS
     }
 }
 
-/// Verdict on the variable box, decided before any solve is attempted.
-enum BoxScreen {
-    /// Every `[lb, ub]` is a non-empty interval; solve the problem as posed.
-    Feasible,
-    /// Some variable's box is empty by inspection — report `PrimalInfeasible`.
-    Empty,
-    /// Some box was crossed by no more than [`CROSSED_BOX_TOL`]; solve this
-    /// repaired copy, in which each such variable is fixed at its midpoint.
-    Snapped(QpProblem),
-}
-
-/// Widest box crossing (`lb − ub`) treated as a numerical artifact rather than
-/// an empty feasible set.
-///
-/// Matched to presolve's own `BOUND_FEAS_TOL`, which is the number that decides
-/// what can reach this driver: bound tightening applies an update only when it
-/// improves a bound by more than that tolerance and declares infeasibility only
-/// when `tlb > tub + BOUND_FEAS_TOL`, so a *reduced* problem handed on from
-/// presolve can carry a box crossed by up to exactly this much — with presolve
-/// having already ruled that crossing tolerable. Calling it infeasible here
-/// would overturn that ruling on the strength of arithmetic presolve had
-/// already discounted.
-///
-/// It also happens to be where the IPM draws the same line, which is the
-/// property that matters for a user comparing `method=`. Measured on
-/// `min ½x² s.t. 0 ≤ x ≤ −gap`: crossings of `1e-9` and below return `Optimal`
-/// at the box midpoint, `1e-6` and above return `PrimalInfeasible`.
-const CROSSED_BOX_TOL: f64 = 1e-9;
-
-/// Decide what an ill-formed variable box means before the engine sees it.
-///
-/// Two classes of box admit no point, and both need catching here because
-/// neither survives contact with the engine intact:
-///
-/// * **Impossible** — a *present* `+∞` lower or `−∞` upper bound (gh #295).
-/// * **Reversed** — `lb > ub` (gh #491).
-///
-/// A wide crossing is `PrimalInfeasible`, and saying so needs no arithmetic —
-/// which matters, because this driver otherwise refuses to report
-/// `PrimalInfeasible` without a certificate it re-derived itself. The
-/// certificate for this class *is* the bound pair: `x_i ≥ lb_i > ub_i ≥ x_i`
-/// has no solution, so there is nothing numerical to prove or to demote.
-///
-/// A hairline crossing is repaired instead of rejected, for the reason given on
-/// [`CROSSED_BOX_TOL`]: it is the residue of a tolerance decision made upstream,
-/// not a statement that the problem is infeasible.
-///
-/// Screening up front is not merely a shortcut — without it the reversed case
-/// **aborted the process**. The engine's own `validate` rejects `xl > xu` with
-/// `QpError::InvertedBounds`, so the first two attempts below came back
-/// `NumericalFailure` and fell through to the last-resort simplex-seeded
-/// attempt, where `simplex::Simplex::warm_start` clamped the seed into the
-/// inverted interval and `f64::clamp` panicked (`min > max`). Across the PyO3
-/// boundary that surfaced as a `pyo3_runtime.PanicException`, which derives from
-/// `BaseException` and so tore down callers that had defensively wrapped the
-/// solve in `except Exception` (gh #491). The IPM screens the impossible class
-/// at each of its own entry points; this is the peer screen for the active-set
-/// path, so the two methods agree on the same input.
-fn screen_variable_box(prob: &QpProblem) -> BoxScreen {
-    if prob.bounds_admit_no_point() {
-        return BoxScreen::Empty;
-    }
-    if !prob.bounds_are_reversed() {
-        return BoxScreen::Feasible;
-    }
-    if (0..prob.n).any(|i| prob.lb_of(i) > prob.ub_of(i) + CROSSED_BOX_TOL) {
-        return BoxScreen::Empty;
-    }
-    // Hairline: fix each crossed variable at its midpoint. Both bound vectors
-    // are necessarily length `n` here — an absent bound reads as `∓∞` and
-    // cannot be the crossed side — but index defensively anyway, since a
-    // partially-filled vector must not silently drop the repair and hand the
-    // engine the inverted box after all.
-    let mut repaired = prob.clone();
-    for i in 0..prob.n {
-        let (l, u) = (prob.lb_of(i), prob.ub_of(i));
-        if l > u {
-            let mid = 0.5 * (l + u);
-            if let (Some(lo), Some(hi)) = (repaired.lb.get_mut(i), repaired.ub.get_mut(i)) {
-                *lo = mid;
-                *hi = mid;
-            } else {
-                return BoxScreen::Empty;
-            }
-        }
-    }
-    BoxScreen::Snapped(repaired)
-}
-
 /// Solve a convex QP with the [`pounce_qp`] parametric active-set engine.
 ///
 /// Signature-compatible with [`crate::ipm::solve_qp_ipm`] so the CLI driver
@@ -277,6 +188,11 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     // ---- Screen the variable box before anything else (gh #295, gh #491) ----
+    //
+    // Peer to the screen [`crate::ipm`] runs at each of its own entry points;
+    // see [`screen_variable_box`] for why an empty box must not be left to the
+    // engine (on this path it panicked) and why a hairline crossing is repaired
+    // rather than rejected.
     let snapped;
     let prob = match screen_variable_box(prob) {
         BoxScreen::Feasible => prob,
@@ -1171,6 +1087,7 @@ fn active_set_iter_budget(opts: &QpOptions, n: usize, m: usize) -> u32 {
 mod tests {
     use super::*;
     use crate::ipm::solve_qp_ipm;
+    use crate::qp::CROSSED_BOX_TOL;
     use crate::qp::Triplet;
     use pounce_feral::FeralSolverInterface;
 
@@ -1556,7 +1473,17 @@ mod tests {
     /// test binary rather than failed an assertion.
     #[test]
     fn reversed_box_is_primal_infeasible_not_a_panic() {
-        for (lb, ub) in [(1.0, 0.0), (5.0, 3.0), (0.0, -1e-6), (-1.0, -1e3)] {
+        for (lb, ub) in [
+            (1.0, 0.0),
+            (5.0, 3.0),
+            (0.0, -1e-6),
+            (-1.0, -1e3),
+            // The band the IPM used to resolve neither way, returning
+            // `NumericalFailure` at a `NaN` iterate: wider than the tolerated
+            // crossing, narrower than what its arithmetic could certify.
+            (0.0, -1e-8),
+            (0.0, -1e-7),
+        ] {
             let (asol, isol) = boxed_scalar(lb, ub);
             assert_eq!(
                 asol.status,
@@ -1587,14 +1514,17 @@ mod tests {
         assert!(asol.x[0].abs() < 1e-8, "x = {}", asol.x[0]);
     }
 
-    /// A crossing no wider than [`CROSSED_BOX_TOL`] is a tolerance artifact —
-    /// presolve's bound tightening can hand this driver a reduced problem
-    /// carrying one, having already ruled it tolerable — so it is repaired to a
-    /// fixed variable at the box midpoint rather than called infeasible.
+    /// A crossing no wider than [`crate::qp::CROSSED_BOX_TOL`] is a tolerance
+    /// artifact — presolve's bound tightening can hand a driver a reduced
+    /// problem carrying one, having already ruled it tolerable — so it is
+    /// repaired to a fixed variable at the box midpoint rather than called
+    /// infeasible.
     ///
-    /// That is also what the IPM does with the same input (it converges to the
-    /// midpoint and reports `Optimal`), which is the property a user comparing
-    /// `method=` actually observes, so both engines are checked here.
+    /// That is also where the IPM's own iteration landed on this input before
+    /// the screen existed (it converged to the midpoint and reported
+    /// `Optimal`), so the repair preserves its answer rather than replacing
+    /// it. Both engines are checked: the property a user comparing `method=`
+    /// observes is that they agree.
     #[test]
     fn hairline_crossing_is_repaired_not_rejected() {
         for gap in [1e-14, 1e-12, 1e-10, CROSSED_BOX_TOL] {
