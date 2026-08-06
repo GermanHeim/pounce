@@ -386,6 +386,27 @@ It is off by default because it changes the variable count, which the
 sensitivity and reduced-Hessian paths index against the original `.nl`.
 (The CLI already disables presolve entirely when those are requested.)
 
+**LP and convex QP take a different route to the same reduction.** Those
+models never reach Phase 6 — the CLI dispatches them to `pounce-convex`
+before any presolve wrapper is built — but they are not left unreduced.
+`pounce-convex` has its own presolve, on by default, and it now performs
+the two-variable aggregation as part of that catalog, sharing this
+planner rather than restating it. So the reduction is the same; only the
+switch differs (`qp_presolve=no` / `presolve=no` turns it off there, and
+`presolve_linear_eq_reduction` does not apply). See
+[LP/QP routing](lp-qp-routing.md#two-variable-equality-rows-aggregation).
+
+The two agree on dual attribution as well: a transferred bound's
+multiplier is reported on the column that *declared* the bound, not on the
+survivor that inherited it. They get there differently — Phase 6 records
+during planning where each reduced bound came from, while the convex path
+reads the leftover reduced cost at postsolve and hands it to whichever
+column is sitting on its own bound, because it also has inequality rows
+and its own bound-tightening layer to account for. Where the survivor's
+own bound is active as well, both leave the multiplier on the survivor;
+the split is genuinely non-unique there and either answer is a valid KKT
+point.
+
 ### Feasibility-based bound tightening (Phase 1b)
 
 Interval-arithmetic propagation through nonlinear constraint

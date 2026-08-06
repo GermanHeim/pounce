@@ -19,6 +19,11 @@ pounce-linalg.workspace = true
 # Active-set QP engine, retained for the legacy crossover bridge and its
 # tests. Acyclic: pounce-qp depends only on pounce-linalg/linsol/common/feral.
 pounce-qp.workspace = true
+# The linear-equality elimination planner and its reverse-sweep dual
+# recovery, shared with the NLP presolve rather than restated here for the
+# convex path (gh #494). Acyclic: pounce-presolve depends only on
+# pounce-nlp / pounce-common, neither of which reaches pounce-convex.
+pounce-presolve.workspace = true
 # feral's unsymmetric sparse LU (factor / ftran / btran / column update) is the
 # basis engine for the revised-simplex LP crossover (`simplex.rs`). Already a
 # transitive workspace dependency via pounce-qp, so no new external crate.

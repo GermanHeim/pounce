@@ -240,6 +240,23 @@ enum Reduction {
         /// Tightened the upper bound? (else lower.)
         is_upper: bool,
     },
+    /// **Doubleton-equality aggregation** (gh #494): a batch of two-variable
+    /// equality rows `a₁·x + a₂·y = b`, each folding one of its columns onto
+    /// the other as `x = α·y + β` with no anchoring requirement, iterated to
+    /// a fixed point so alias chains collapse. Planned by
+    /// [`pounce_presolve::linear_eq_plan`] — shared with the general NLP
+    /// path rather than restated — and applied to `P`, `c`, `A`, `G` by
+    /// `crate::aggregate::reduce`.
+    ///
+    /// Unlike every other variant this one is a whole pass, not a single
+    /// elimination: the plan's chains and its reverse-sweep dual recovery
+    /// are only meaningful together. So an aggregation always forms a
+    /// **layer of its own** in `Presolve::chain` whose stack is exactly
+    /// this one entry, and `Presolve::postsolve_once` hands that layer
+    /// straight to `crate::aggregate::postsolve`.
+    Aggregate {
+        plan: Box<pounce_presolve::linear_eq_plan::EliminationPlan>,
+    },
 }
 
 /// Captured presolve state: the reduced problem plus the transaction
@@ -282,10 +299,10 @@ const ACTIVITY_TOL: f64 = 1e-9;
 /// recovering bound multipliers. Looser than [`BOUND_FEAS_TOL`] because an
 /// interior-point solve only drives a variable to within ~1e-8 of a bound,
 /// not to machine zero; interior variables sit far further away.
-const ACTIVE_BOUND_TOL: f64 = 1e-6;
+pub(crate) const ACTIVE_BOUND_TOL: f64 = 1e-6;
 
 /// Group nonzero entries by row index: `out[row] = [(col, val), …]`.
-fn group_by_row(triplets: &[Triplet], m: usize) -> Vec<Vec<(usize, f64)>> {
+pub(crate) fn group_by_row(triplets: &[Triplet], m: usize) -> Vec<Vec<(usize, f64)>> {
     let mut out = vec![Vec::new(); m];
     for t in triplets {
         if t.val != ZERO_TOL {
@@ -333,33 +350,63 @@ struct Row {
 /// transform, so the iterate is the composition of the per-pass transforms
 /// — postsolve folds them back in reverse — and inherits each pass's proven
 /// dual recovery with no new dual math.
+///
+/// Each round is the single-pass catalog ([`presolve_once`]) followed by a
+/// doubleton-equality aggregation ([`aggregate_once`], gh #494), which is
+/// its own layer because its plan and dual recovery are only meaningful as
+/// a unit. Both feed the same fixpoint: an aggregation can expose a
+/// singleton the catalog then fixes, and a fixing can turn a three-term row
+/// into a doubleton the next aggregation folds away.
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
-    // Cap rounds defensively; in practice it converges in a few.
+    // Cap layers defensively; in practice it converges in a few. A round
+    // can contribute two (the catalog pass and an aggregation), so this is
+    // a bound on layers, not on rounds.
     const MAX_ROUNDS: usize = 32;
     let mut chain: Vec<Presolve> = Vec::new();
     let mut current = prob.clone();
+    // The passthrough layer from a first round that changed nothing, kept
+    // so a no-op presolve still returns a usable handle.
+    let mut passthrough: Option<Presolve> = None;
     loop {
-        match presolve_once(&current, &[]) {
+        let ps = match presolve_once(&current, &[]) {
             PresolveOutcome::Infeasible => return PresolveOutcome::Infeasible,
             PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
-            PresolveOutcome::Reduced(ps) => {
-                if !ps.changed() {
-                    // Fixpoint: this round did nothing.
-                    if chain.is_empty() {
-                        return PresolveOutcome::Reduced(ps); // plain single pass
-                    }
-                    break;
-                }
+            PresolveOutcome::Reduced(ps) => ps,
+        };
+        let catalog_changed = ps.changed();
+        if catalog_changed {
+            current = ps.reduced.clone();
+            chain.push(ps);
+        } else if passthrough.is_none() {
+            passthrough = Some(ps);
+        }
+        // Doubleton-equality aggregation (gh #494). It runs *after* the
+        // catalog each round, so the cheap single-column reductions have
+        // already shrunk the rows it plans over, and the round that follows
+        // gets a crack at whatever the aggregation exposes.
+        let aggregated = match aggregate_once(&current) {
+            Some(ps) => {
                 current = ps.reduced.clone();
                 chain.push(ps);
-                if chain.len() >= MAX_ROUNDS {
-                    break;
-                }
+                true
             }
+            None => false,
+        };
+        if !catalog_changed && !aggregated {
+            break; // fixpoint: neither half found anything
+        }
+        if chain.len() >= MAX_ROUNDS {
+            break;
         }
     }
+    if chain.is_empty() {
+        // Nothing to do at all; hand back the verbatim-forwarding layer.
+        return PresolveOutcome::Reduced(
+            passthrough.expect("a round that changed nothing yields a passthrough layer"),
+        );
+    }
     if chain.len() == 1 {
-        return PresolveOutcome::Reduced(chain.pop().unwrap());
+        return PresolveOutcome::Reduced(chain.pop().expect("chain has one layer"));
     }
     let reduced = chain.last().expect("chain non-empty").reduced.clone();
     PresolveOutcome::Reduced(Presolve {
@@ -374,6 +421,35 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         orig: prob.clone(),
         stack: Vec::new(),
         chain,
+    })
+}
+
+/// One doubleton-equality aggregation layer over `prob`, or `None` when
+/// there is nothing to aggregate (gh #494).
+///
+/// Deliberately reached only from [`presolve`], never from
+/// [`presolve_conic`]: a non-orthant cone block is a coupled, fixed-layout
+/// set of rows over columns the substitution would rewrite, and
+/// [`Presolve::reduced_cones`] reads the surviving partition off the kept
+/// rows. The conic path therefore opts out of this reduction entirely, as
+/// it already does of the fixpoint iteration.
+fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
+    let plan = crate::aggregate::plan(prob)?;
+    let (reduced, obj_offset) = crate::aggregate::reduce(prob, &plan)?;
+    Some(Presolve {
+        reduced,
+        obj_offset,
+        orig_n: prob.n,
+        orig_m_eq: prob.m_eq(),
+        orig_m_ineq: prob.m_ineq(),
+        kept_cols: plan.vars_kept.clone(),
+        kept_eq: plan.rows_kept.clone(),
+        kept_ineq: (0..prob.m_ineq()).collect(),
+        orig: prob.clone(),
+        stack: vec![Reduction::Aggregate {
+            plan: Box::new(plan),
+        }],
+        chain: Vec::new(),
     })
 }
 
@@ -1247,7 +1323,7 @@ fn build_rows(
 
 /// Sort coefficients by column and merge any duplicate columns (a
 /// variable appearing twice in one row). Drops entries that cancel to 0.
-fn merge_sort_coeffs(coeffs: &mut Vec<(usize, f64)>) {
+pub(crate) fn merge_sort_coeffs(coeffs: &mut Vec<(usize, f64)>) {
     coeffs.sort_by_key(|&(c, _)| c);
     let mut merged: Vec<(usize, f64)> = Vec::with_capacity(coeffs.len());
     for &(c, v) in coeffs.iter() {
@@ -1434,6 +1510,9 @@ pub struct PresolveStats {
     pub dominated_cols: usize,
     /// Variable bounds tightened by domain propagation.
     pub tightened_bounds: usize,
+    /// Variables folded onto another by a two-variable equality row
+    /// (doubleton aggregation). Each also consumes its row.
+    pub aggregated_vars: usize,
 }
 
 impl PresolveStats {
@@ -1516,6 +1595,7 @@ impl Presolve {
             s.forcing_rows += ls.forcing_rows;
             s.dominated_cols += ls.dominated_cols;
             s.tightened_bounds += ls.tightened_bounds;
+            s.aggregated_vars += ls.aggregated_vars;
         }
         s
     }
@@ -1536,6 +1616,14 @@ impl Presolve {
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
                 Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
                 Reduction::BoundTightening { .. } => s.tightened_bounds += 1,
+                // A whole pass in one entry: report what its plan achieved.
+                Reduction::Aggregate { plan } => {
+                    s.aggregated_vars += plan.report.n_aggregated_vars;
+                    // A singleton row the aggregation's fixed point reached
+                    // is the same reduction `FixedVar` performs, so it is
+                    // counted in the same column.
+                    s.fixed_vars += plan.report.n_constant_vars;
+                }
             }
         }
         s
@@ -1557,6 +1645,31 @@ impl Presolve {
 
     /// Expand a single pass's reduced solution back to its original space.
     fn postsolve_once(&self, red: &QpSolution) -> QpSolution {
+        // An aggregation layer is a whole pass in one entry, with its own
+        // primal lift and dual sweep; it never shares a layer with the
+        // single-elimination catalog.
+        let mut out = if let [Reduction::Aggregate { plan }] = self.stack.as_slice() {
+            crate::aggregate::postsolve(&self.orig, plan, red)
+        } else {
+            self.postsolve_catalog(red)
+        };
+        // [`QpIterate::objective`] is documented to be in the original
+        // problem's coordinates, but the trace comes back from a solve of
+        // the *reduced* problem — which differs by exactly the constant any
+        // substitution moved into the objective. Put it back, per layer, so
+        // the chain composes to the user's objective.
+        if self.obj_offset != 0.0 {
+            for it in &mut out.iterates {
+                it.objective += self.obj_offset;
+            }
+        }
+        out
+    }
+
+    /// [`Self::postsolve_once`] for a layer built by [`presolve_once`] —
+    /// every reduction in the catalog except the aggregation, which has its
+    /// own recovery.
+    fn postsolve_catalog(&self, red: &QpSolution) -> QpSolution {
         let mut x = vec![0.0; self.orig_n];
         let mut y = vec![0.0; self.orig_m_eq];
         let mut z = vec![0.0; self.orig_m_ineq];
@@ -1608,6 +1721,10 @@ impl Presolve {
                 // The variable is kept; only its box changed, so its primal
                 // comes from the reduced solution (already mapped above).
                 Reduction::BoundTightening { .. } => {}
+                // Unreachable: an aggregation layer returned above, before
+                // any of this. Left as a no-op rather than a panic so the
+                // arm can never be the thing that fails a solve.
+                Reduction::Aggregate { .. } => {}
             }
         }
         for r in &self.stack {

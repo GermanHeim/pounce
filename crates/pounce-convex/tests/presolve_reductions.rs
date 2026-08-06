@@ -317,21 +317,34 @@ fn fixpoint_cascades_chain_of_fixings() {
 
 // --- parallel rows (scalar multiples, not just exact duplicates) ---
 
-/// Parallel equality rows: `x0 + x1 = 2` and `3x0 + 3x1 = 6` are the same
-/// constraint scaled by 3. One is dropped; the recovered point is valid.
+/// Parallel equality rows: `x0 + x1 + x2 = 3` and `3x0 + 3x1 + 3x2 = 9`
+/// are the same constraint scaled by 3. One is dropped; the recovered
+/// point is valid.
+///
+/// Three columns, not two: a *doubleton* row is consumed by aggregation
+/// (gh #494) before parallel detection ever sees it, so a two-column
+/// fixture would no longer be testing this reduction at all. The
+/// duplicate-row logic is arity-agnostic; the two-column case is covered
+/// by `presolve_aggregation.rs`'s `redundant_rows_collapse`.
 #[test]
 fn parallel_equality_rows_redundant() {
     let prob = QpProblem {
-        n: 2,
-        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
-        c: vec![0.0, 0.0],
+        n: 3,
+        p_lower: vec![
+            Triplet::new(0, 0, 2.0),
+            Triplet::new(1, 1, 2.0),
+            Triplet::new(2, 2, 2.0),
+        ],
+        c: vec![0.0, 0.0, 0.0],
         a: vec![
             Triplet::new(0, 0, 1.0),
-            Triplet::new(0, 1, 1.0), // x0 + x1 = 2
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0), // x0 + x1 + x2 = 3
             Triplet::new(1, 0, 3.0),
-            Triplet::new(1, 1, 3.0), // 3x0 + 3x1 = 6  (= 3×row0)
+            Triplet::new(1, 1, 3.0),
+            Triplet::new(1, 2, 3.0), // = 3×row0
         ],
-        b: vec![2.0, 6.0],
+        b: vec![3.0, 9.0],
         g: vec![],
         h: vec![],
         lb: vec![],
@@ -348,21 +361,28 @@ fn parallel_equality_rows_redundant() {
     assert_kkt(&prob, &sol, 1e-5);
 }
 
-/// Negatively-scaled parallel equalities: `x0 + x1 = 2` and
-/// `−2x0 − 2x1 = −4` are the same constraint. Detected and merged.
+/// Negatively-scaled parallel equalities: `x0 + x1 + x2 = 3` and
+/// `−2x0 − 2x1 − 2x2 = −6` are the same constraint. Detected and merged.
+/// Three columns for the same reason as the test above.
 #[test]
 fn parallel_equality_negative_scale() {
     let prob = QpProblem {
-        n: 2,
-        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
-        c: vec![0.0, 0.0],
+        n: 3,
+        p_lower: vec![
+            Triplet::new(0, 0, 2.0),
+            Triplet::new(1, 1, 2.0),
+            Triplet::new(2, 2, 2.0),
+        ],
+        c: vec![0.0, 0.0, 0.0],
         a: vec![
             Triplet::new(0, 0, 1.0),
             Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0),
             Triplet::new(1, 0, -2.0),
-            Triplet::new(1, 1, -2.0), // −2×row0
+            Triplet::new(1, 1, -2.0),
+            Triplet::new(1, 2, -2.0), // −2×row0
         ],
-        b: vec![2.0, -4.0],
+        b: vec![3.0, -6.0],
         g: vec![],
         h: vec![],
         lb: vec![],
@@ -900,7 +920,12 @@ fn free_singleton_depends_on_fixed_var_postsolve_order() {
 }
 
 /// A bounded variable in one row is *not* a free column singleton (its
-/// box can bind), so it must not be substituted.
+/// box can bind), so *that* reduction must not fire on it.
+///
+/// The row does go — doubleton aggregation (gh #494) consumes it and
+/// transfers the box onto the survivor, which is sound precisely because
+/// it carries the bound across instead of dropping it. So the guard here
+/// is on the reduction under test, not on the surviving row count.
 #[test]
 fn bounded_variable_not_substituted() {
     let prob = QpProblem {
@@ -916,8 +941,11 @@ fn bounded_variable_not_substituted() {
     };
     match presolve(&prob) {
         PresolveOutcome::Reduced(ps) => {
-            // Neither var is substituted; the equality row survives.
-            assert_eq!(ps.reduced.m_eq(), 1, "bounded var must keep its row");
+            assert_eq!(
+                ps.stats().free_col_singletons,
+                0,
+                "a bounded variable is not a free column singleton"
+            );
         }
         other => panic!("expected Reduced, got {:?}", status_of(&other)),
     }

@@ -25,6 +25,46 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | sensitivity     |     11 | 2026-08-06 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-06] Doubleton-equality aggregation in the convex presolve (qp/lp, gh#494) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: randomized alias-linked convex QPs built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 438 end-to-end .nl solves across 3 seeds, 0 failures
+:POUNCE_TIME: ~3 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); in-script row re-evaluation; in-script bound-aware stationarity of the reported duals; qp_presolve=no objective agreement
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_convex_doubleton_aggregation_verify.py]]
+:COVERAGE_TARGET: crates/pounce-convex/src/aggregate.rs — new file, no prior adversarial coverage
+:END:
+
+Probe validated by mutation testing rather than asserted: dropping =Gᵀz= from the
+gradient the dual sweep is handed, and dropping the substitution offset from a
+surviving row's right-hand side, were each caught (13 and 31 failures in 40
+instances). The =Gᵀz= defect is caught only by the bound-aware stationarity
+oracle — =pounce verify= alone passes it — which is why that oracle exists.
+
+Re-run after merging gh#492 (#498), which folds a constant row body into the
+row bounds at parse. Most generated rows now carry their constant in the C
+segment rather than pre-folded: 10 of 12 sampled models, all still classified
+LP/convex-QP where before #498 they would have been NLP and never reached this
+pass. Same reduction counts, same objectives, same verdicts as the pre-folded
+spelling — which is the claim, since they are the same constraints.
+
+Measured limit, stated because it changes what this run does and does not
+cover: the CLI's QP extractor lowers every variable bound to a row of =G=, so
+the =QpProblem= the convex presolve sees from a =.nl= has an empty box.
+Instrumenting the branch shows the transferred-bound multiplier
+re-attribution firing in 0 of 114 instances here — there is no box to
+transfer. That path is reached only by callers who build a =QpProblem= with
+=lb=/=ub= directly, and is covered at the library level by
+=crates/pounce-convex/tests/presolve_aggregation.rs= (a targeted fixture plus a
+randomized probe reaching it in 19 of 400 draws), where five injected defects
+in the recovery were each caught.
+
 ** [2026-08-06] Constant row bodies folded into row bounds (nlp/.nl parse boundary, gh#492) - PASS
 :PROPERTIES:
 :FAMILY: nlp
@@ -52,7 +92,6 @@ pre-existing pounce bug was found and filed: gh#496, a false
 primal-infeasible certificate at iteration 0 when two rank-deficient
 equality rows disagree by one ULP -- reproduced on origin/main at cad2b13
 with no C-segment content, so not reachable from gh#492.
-
 ** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
 :PROPERTIES:
 :FAMILY: nlp

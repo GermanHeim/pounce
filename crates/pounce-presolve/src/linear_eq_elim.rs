@@ -711,7 +711,16 @@ fn attribute_bound_multiplier(
 /// attribution (gh#493). They belong in the residual the sweep cancels: an
 /// eliminated column that carries an attributed multiplier needs a
 /// correspondingly smaller row multiplier for stationarity to close there.
-fn recover_dropped_multipliers(
+///
+/// `grad_f` must also carry the transpose product of any row block the plan
+/// never looks at, since the sweep resolves only the rows it consumed. A
+/// caller with more blocks than the plan's own — `pounce-convex`, whose
+/// aggregation plans over the equalities while `Gᵀz` acts on the same
+/// columns (gh#494) — folds that in there.
+///
+/// Public because the convex QP presolve shares this recovery rather than
+/// restating it in `(y, z)` conventions; see `pounce_convex::aggregate`.
+pub fn recover_dropped_multipliers(
     plan: &EliminationPlan,
     grad_f: &[Number],
     z_l_full: &[Number],

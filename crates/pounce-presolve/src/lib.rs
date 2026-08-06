@@ -92,7 +92,7 @@ pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReaso
 pub use dulmage_mendelsohn::{DMPart, DulmageMendelsohnPartition};
 pub use incidence::{EqualityIncidence, InequalityIncidence, ProbeView};
 pub use licq::{EqRow, LicqVerdict, licq_check};
-pub use linear_eq_elim::{FullSolution, LinearEqElimTnlp};
+pub use linear_eq_elim::{FullSolution, LinearEqElimTnlp, recover_dropped_multipliers};
 pub use linear_eq_plan::{
     ElimStep, EliminationPlan, LinearEqElimReport, PlanConfig, PlanInput, VarRecovery, build_plan,
 };

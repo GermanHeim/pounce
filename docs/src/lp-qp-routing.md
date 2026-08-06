@@ -155,14 +155,38 @@ Before the convex interior-point solve, POUNCE runs a **presolve** pass
 that shrinks the problem and can detect trivial infeasibility or
 unboundedness without solving. It removes empty, duplicate, and
 activity-redundant rows; fixes and substitutes structural columns
-(singleton-row fixings, free columns, free column singletons); and
-recovers both the primal and dual of the eliminated pieces so the
-reported solution is for your original problem. When it reduces the
-model, it logs a one-line summary:
+(singleton-row fixings, free columns, free column singletons); **folds
+away two-variable equality rows** (below); and recovers both the primal
+and dual of the eliminated pieces so the reported solution is for your
+original problem. When it reduces the model, it logs a one-line summary:
 
 ```text
-Presolve: 40 → 32 vars, 12 → 8 rows (fixed 3, free-fixed 2, substituted 3)
+Presolve: 40 → 24 vars, 12 → 4 rows (fixed 3, free-fixed 2, substituted 3, aggregated 8, ...)
 ```
+
+### Two-variable equality rows (aggregation)
+
+A row `a₁·x + a₂·y = b` linking two variables says one of them *is* the
+other, up to a scale and a shift — an arc equality between two units, a
+`Reference` alias, a unit conversion. Neither variable is determined by
+it, so nothing in the older catalog could act on it, and on a flowsheet
+these rows are most of the model. POUNCE now substitutes one variable
+for the other and drops the row, iterating to a fixed point so *chains*
+of aliases collapse to a single column. Any bound on the eliminated
+variable is carried across onto the one that survives, so the reduced
+problem describes exactly the same feasible set.
+
+Two things this deliberately does **not** do:
+
+- It never calls your model infeasible. A contradictory alias system —
+  `x = y` and `x = y + 1` — makes the pass stand down and hand the model
+  over untouched, for the rest of presolve or the solver itself to judge.
+- It does not run on the conic path (SOCP, exponential/power cones, SDP,
+  SOS). Those rows are structurally coupled in fixed-size blocks that a
+  substitution would rewrite.
+
+The aggregation shares its planner with the NLP path's Phase 6, so the
+two agree on what can be eliminated (see [NLP Presolve](./options.md)).
 
 Presolve is on by default. Turn it off with `qp_presolve=no` (e.g. to
 compare timings or isolate a solver issue):
