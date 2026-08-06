@@ -49,6 +49,36 @@ changes.
   array offset by that constant. The final objective, the solution, and
   the duals were always right; only the trace was affected.
 
+### Fixed — a constant left in a `.nl` row body made an affine row look nonlinear (#492)
+
+- A `.nl` writer may leave a constant on the left of a constraint —
+  `x0 + x1 + 3 <= 6` rather than `x0 + x1 <= 3` — and that constant arrives
+  in the row's *nonlinear-part* expression segment. POUNCE read any
+  non-empty expression segment as "this row is nonlinear", which is an
+  identity check, not a linearity test: the row is affine.
+- The reader now folds a constant row body into the row bounds at parse.
+  The body drops by `c` and each bound drops by `c` with it, so the
+  feasible set, the active set, the objective, and every multiplier are
+  unchanged — nothing reports a raw row body to the user, and both AMPL and
+  `pounce verify` re-derive bodies from the `.nl`. The fold is by
+  *evaluation*, not syntax, so a computed constant (`sqrt(9)`, `1 + 2`) is
+  caught too.
+- Two things this unblocks:
+  - **Presolve.** The new linear-equality reduction (Phase 6, #487) only
+    consumes rows tagged linear, so it declined every row with a constant
+    body. A model whose equalities carry offsets now reduces like the same
+    model written with the offsets in the bounds.
+  - **Routing.** A model that is a plain LP apart from a *computed* row
+    constant classified NLP and never reached `pounce-convex`; forcing
+    `solver_selection=lp-ipm` on it was a hard error. It now classifies LP.
+    (A bare literal already classified LP — the classifier's polynomial
+    walk absorbed it — so only the computed form was misrouted.)
+- Absent-bound sentinels are left alone. Presence is directional (#401), so
+  shifting a ±1e19 sentinel would turn "no bound" into a real one; the fold
+  moves a bound only when that side is actually bounded. A non-finite
+  constant, or one inside an imported-function call, is left in the
+  expression rather than pushed into a bound.
+
 ### Added — presolve eliminates variables determined by linear equality rows (#487)
 
 - `presolve_linear_eq_reduction` was a registered option with no

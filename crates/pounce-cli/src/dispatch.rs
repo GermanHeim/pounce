@@ -1543,4 +1543,74 @@ mod tests {
     fn _parse(txt: &str) -> NlProblem {
         parse_nl_text(txt).expect("valid .nl")
     }
+
+    /// **gh #492.** `min −x0 − 2·x1  s.t.  x0 + x1 + 3 <= 6, x ∈ [0,3]²`,
+    /// with the `3` written into the row's expression segment. `body` is
+    /// the `C0` token stream for that constant.
+    fn lp_with_row_constant(body: &str) -> NlProblem {
+        let nl = format!(
+            "g3 1 1 0
+ 2 1 1 0 0
+ 1 0 0 0 0 0
+ 0 0
+ 1 0 0
+ 0 0 0 1
+ 0 0 0 0 0
+ 2 2
+ 0 0
+ 0 0 0 0 0
+C0
+{body}
+O0 0
+n0
+r
+1 6.0
+b
+0 0 3
+0 0 3
+k1
+1
+J0 2
+0 1
+1 1
+G0 2
+0 -1
+1 -2
+"
+        );
+        parse_nl_text(&nl).expect("valid .nl")
+    }
+
+    /// The classifier's fast path asks `is_trivially_zero` of every
+    /// `con_nonlinear` entry, which is an *identity* test — it cannot tell
+    /// "this row has a nonlinear part" from "this row's part is the
+    /// constant 3". A bare literal survived that anyway, because the
+    /// fallback polynomial walk lowers `Const` and finds no quadratic
+    /// term; what it does not do is keep the constant, so the row's `+3`
+    /// lived on only as `qp_extract`'s `const_shift`. After the parse-time
+    /// fold the bound carries it and the fast path is exact.
+    #[test]
+    fn a_literal_row_constant_classifies_lp_and_moves_the_bound() {
+        let prob = lp_with_row_constant("n3");
+        assert_eq!(classify_problem(&prob), ProblemClass::Lp);
+        // `x0 + x1 + 3 <= 6` is `x0 + x1 <= 3`.
+        assert!((prob.g_u[0] - 3.0).abs() < 1e-12, "g_u = {}", prob.g_u[0]);
+        assert!(
+            matches!(prob.con_nonlinear[0], Expr::Const(c) if c == 0.0),
+            "the row body should be the identity zero: {:?}",
+            prob.con_nonlinear[0]
+        );
+    }
+
+    /// The case the polynomial walk cannot rescue: a constant it has to
+    /// *compute*. `sqrt(9)` is not a degree-≤2 polynomial in any variable,
+    /// so `analyze_quadratic` returns `None` and the row made the whole
+    /// model NLP — an LP that never reached the convex route. The fold
+    /// settles it at parse, where the value is known.
+    #[test]
+    fn a_computed_row_constant_does_not_make_an_lp_classify_nlp() {
+        let prob = lp_with_row_constant("o39\nn9");
+        assert_eq!(classify_problem(&prob), ProblemClass::Lp);
+        assert!((prob.g_u[0] - 3.0).abs() < 1e-12, "g_u = {}", prob.g_u[0]);
+    }
 }

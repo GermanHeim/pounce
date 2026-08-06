@@ -33,7 +33,7 @@
 //!   tests in this module.
 
 use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
-use pounce_common::types::{Index, Number};
+use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::tnlp::{
     BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
@@ -541,6 +541,44 @@ fn read_name_file(path: &Path, expected: usize) -> Vec<String> {
     }
 }
 
+/// The value of a constraint's nonlinear part when that part is a
+/// constant, else `None`. Drives the constant-row-body fold in
+/// [`parse_nl_text`].
+///
+/// "Constant" is decided by *evaluation*, not by syntax: a literal
+/// `Expr::Const` is the common case, but `o0 n1 n2` is just as constant
+/// and is folded too.
+///
+/// Declines in two cases, both of which would make the fold unsound:
+/// * The expression calls an AMPL imported function. Its value depends on
+///   a shared library resolved much later (`nl_external::ExternalResolver`),
+///   so it is not a parse-time constant even with constant arguments — and
+///   [`eval_expr`] panics on `Funcall` rather than guess.
+/// * The value is not finite (`n0 / n0`, `log(-1)`, an overflow). Pushing
+///   a NaN or infinity into a bound would corrupt a row that is merely
+///   infeasible; leaving the expression in place keeps it a solver-time
+///   fact.
+fn row_constant_value(e: &Expr) -> Option<Number> {
+    // The identity zero the parser preallocates for every untouched row is
+    // by far the most common input; settle it without walking anything.
+    if let Expr::Const(c) = e {
+        return c.is_finite().then_some(*c);
+    }
+    let mut vars: BTreeSet<usize> = BTreeSet::new();
+    collect_vars(e, &mut vars);
+    if !vars.is_empty() {
+        return None;
+    }
+    let mut funcs: BTreeSet<usize> = BTreeSet::new();
+    crate::nl_external::collect_funcall_ids(e, &mut funcs);
+    if !funcs.is_empty() {
+        return None;
+    }
+    // Variable-free, so no `Expr::Var` can index into the (empty) point.
+    let v = eval_expr(e, &[]);
+    v.is_finite().then_some(v)
+}
+
 /// Parse `.nl` text content. Public so tests can use string literals.
 pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
     let mut p = Parser::new(txt);
@@ -757,6 +795,44 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
             }
             other => return Err(format!("unknown .nl segment tag '{other}'")),
         }
+    }
+
+    // Normalize constant row bodies into the row bounds, so that
+    // "the nonlinear part is the identity zero" and "this row's body is
+    // Σaⱼxⱼ" mean the same thing for every downstream consumer.
+    //
+    // A `C<i>` segment holding a variable-free expression (`n3.0`, or
+    // anything that evaluates to a constant such as `o0 n1 n2`) is an
+    // affine row — but it arrives with a non-zero `con_nonlinear[i]`,
+    // which every consumer reads as "nonlinear": the linearity predicate
+    // (`get_constraints_linearity`), which is what makes presolve's
+    // linear-equality reduction decline the row; the CLI problem
+    // classifier (`is_trivially_zero` in `dispatch.rs`, whose fallback
+    // polynomial walk absorbs a bare literal but not a constant it has to
+    // compute — so an otherwise plain LP carrying a `sqrt(9)` classified
+    // NLP and never reached the convex path); and the FBBT translator.
+    // Folding here fixes all of them at once, with no per-consumer audit.
+    //
+    // The shift is exact and invisible from outside: the body drops by `c`
+    // and each bound drops by `c` with it, so the feasible set, the active
+    // set, and the duals are unchanged (`gh #492`). This is the same
+    // normalization `qp_extract::analyze_quadratic_full` already performs
+    // ad hoc via `const_shift`, promoted to the parse boundary.
+    for i in 0..m {
+        let Some(c) = row_constant_value(&con_nonlinear[i]) else {
+            continue;
+        };
+        // Presence is directional (gh #401): shifting an *absent* bound
+        // would turn the ±1e19 sentinel into a real bound for `c < 0`
+        // (lower) or `c > 0` (upper), inventing a constraint. Leave the
+        // sentinels alone.
+        if lower_bound_present(g_l[i]) {
+            g_l[i] -= c;
+        }
+        if upper_bound_present(g_u[i]) {
+            g_u[i] -= c;
+        }
+        con_nonlinear[i] = Expr::Const(0.0);
     }
 
     Ok(NlProblem {
@@ -3282,8 +3358,12 @@ impl TNLP for NlTnlp {
 
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
         // A row is linear iff its nonlinear-part expression is the
-        // identity zero left over from initial allocation (post-parse
-        // identity for "no `C<idx>` segment touched this row").
+        // identity zero — either left over from initial allocation ("no
+        // `C<idx>` segment touched this row") or installed by the
+        // constant-row-body fold in `parse_nl_text`, which shifts a
+        // variable-free `C<idx>` body into the row bounds precisely so
+        // that this test is a genuine linearity test and not just an
+        // identity check (`gh #492`).
         for (i, t) in types.iter_mut().enumerate() {
             *t = match &self.prob.con_nonlinear[i] {
                 Expr::Const(c) if *c == 0.0 => Linearity::Linear,
@@ -3684,6 +3764,171 @@ J0 2
         let bad = format!("{EQ_LIN}x1\n5 0.5\n");
         let err = parse_nl_text(&bad).expect_err("out-of-range x index must error");
         assert!(err.contains("out of range"), "unexpected error: {err}");
+    }
+
+    // ---------------------------------------------------------------
+    // gh #492 — a constant `C<i>` body folds into the row bounds.
+    //
+    // `EQ_LIN` is `x0 + x1 = 1` with an empty `C0` (`n0`) and the row
+    // bound in the `r` segment (`4 1`). Rewriting `C0` gives a family of
+    // constant-body rows to fold.
+    // ---------------------------------------------------------------
+
+    /// Linearity is a *linearity* test, not "did a `C` segment touch this
+    /// row". A row whose body is the bare constant `3` is affine.
+    #[test]
+    fn a_constant_row_body_folds_into_both_bounds_and_reads_linear() {
+        // `x0 + x1 + 3 = 1`  ⇔  `x0 + x1 = -2`.
+        let nl = EQ_LIN.replace("C0\nn0\n", "C0\nn3\n");
+        assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse");
+
+        assert!(
+            matches!(p.con_nonlinear[0], Expr::Const(c) if c == 0.0),
+            "the constant body must be replaced by the identity zero, got {:?}",
+            p.con_nonlinear[0]
+        );
+        assert!((p.g_l[0] - (-2.0)).abs() < 1e-12, "g_l = {}", p.g_l[0]);
+        assert!((p.g_u[0] - (-2.0)).abs() < 1e-12, "g_u = {}", p.g_u[0]);
+
+        let mut lin = [Linearity::NonLinear];
+        let mut t = NlTnlp::new(p);
+        assert!(t.get_constraints_linearity(&mut lin));
+        assert_eq!(lin[0], Linearity::Linear);
+    }
+
+    /// The shift must be exact, not merely "linear now": the folded model
+    /// and the hand-folded one must be the same problem, row body for row
+    /// body and bound for bound. That is what keeps feasibility, the
+    /// active set, and the duals unchanged.
+    #[test]
+    fn folding_a_row_constant_gives_the_hand_folded_problem() {
+        // `x0 + x1 + 3 = 1` against `x0 + x1 = -2`, written directly.
+        let offset = EQ_LIN.replace("C0\nn0\n", "C0\nn3\n");
+        let folded = EQ_LIN.replace("r\n4 1\n", "r\n4 -2\n");
+        assert_ne!(offset, EQ_LIN);
+        assert_ne!(folded, EQ_LIN);
+
+        let a = parse_nl_text(&offset).expect("parse offset form");
+        let b = parse_nl_text(&folded).expect("parse folded form");
+        assert_eq!(a.g_l, b.g_l);
+        assert_eq!(a.g_u, b.g_u);
+        assert_eq!(a.con_linear, b.con_linear);
+
+        // And the row *values* agree pointwise, which is the property the
+        // duals ride on: `g(x) - g_l` is the same residual either way.
+        let mut ga = [0.0];
+        let mut gb = [0.0];
+        let x = [0.75, -1.25];
+        assert!(NlTnlp::new(a).eval_g(&x, true, &mut ga));
+        assert!(NlTnlp::new(b).eval_g(&x, true, &mut gb));
+        assert!((ga[0] - gb[0]).abs() < 1e-12, "{ga:?} vs {gb:?}");
+    }
+
+    /// The fold is by *evaluation*, not by syntax: `o0 n1 n2` is as
+    /// constant as `n3`, and AMPL emits such trees when a expression
+    /// collapses without being re-simplified.
+    #[test]
+    fn a_row_body_that_evaluates_to_a_constant_folds_too() {
+        // `C0` = `1 + 2`.
+        let nl = EQ_LIN.replace("C0\nn0\n", "C0\no0\nn1\nn2\n");
+        assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert!(matches!(p.con_nonlinear[0], Expr::Const(c) if c == 0.0));
+        assert!((p.g_l[0] - (-2.0)).abs() < 1e-12, "g_l = {}", p.g_l[0]);
+        assert!((p.g_u[0] - (-2.0)).abs() < 1e-12, "g_u = {}", p.g_u[0]);
+    }
+
+    /// Bound presence is directional (gh #401): the ±1e19 sentinels mean
+    /// "absent", not "a very large number". Shifting one turns it into a
+    /// real bound and invents a constraint that is not in the model.
+    ///
+    /// The constants here are deliberately huge. An everyday `3` is
+    /// absorbed by the sentinel's own ULP (2048 at 1e19), so a missing
+    /// presence guard would go unnoticed at ordinary magnitudes and then
+    /// bite on a model that scales its rows. The guard is what makes the
+    /// sentinel untouchable at *any* magnitude.
+    #[test]
+    fn folding_a_row_constant_leaves_the_absent_bound_sentinel_alone() {
+        // `x0 + x1 - 1e18 <= 1`: upper-bounded row (`r` kind 1), no lower
+        // bound. Shifting the lower sentinel would leave `-9e18`, a real
+        // bound, so the row would gain a floor the model never stated.
+        let nl = EQ_LIN
+            .replace("C0\nn0\n", "C0\nn-1e18\n")
+            .replace("r\n4 1\n", "r\n1 1\n");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert!((p.g_u[0] - 1.0e18).abs() < 1024.0, "g_u = {}", p.g_u[0]);
+        assert!(
+            !lower_bound_present(p.g_l[0]),
+            "the absent-lower sentinel became a real bound: {}",
+            p.g_l[0]
+        );
+
+        // The mirror case: a positive constant on a lower-bounded row is
+        // the one that would pull the *upper* sentinel below 1e19.
+        let nl = EQ_LIN
+            .replace("C0\nn0\n", "C0\nn1e18\n")
+            .replace("r\n4 1\n", "r\n2 1\n");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert!((p.g_l[0] + 1.0e18).abs() < 1024.0, "g_l = {}", p.g_l[0]);
+        assert!(
+            !upper_bound_present(p.g_u[0]),
+            "the absent-upper sentinel became a real bound: {}",
+            p.g_u[0]
+        );
+    }
+
+    /// A row body that mentions a variable is not a constant, however
+    /// simple it looks. Folding it would delete the term.
+    #[test]
+    fn a_row_body_with_a_variable_is_not_folded() {
+        let nl = EQ_LIN.replace("C0\nn0\n", "C0\no5\nv0\nn2\n"); // x0²
+        assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert!(
+            !matches!(p.con_nonlinear[0], Expr::Const(_)),
+            "a row in x0 was folded away: {:?}",
+            p.con_nonlinear[0]
+        );
+        assert!((p.g_l[0] - 1.0).abs() < 1e-12, "bounds moved: {}", p.g_l[0]);
+        assert!((p.g_u[0] - 1.0).abs() < 1e-12, "bounds moved: {}", p.g_u[0]);
+    }
+
+    /// A variable-free body whose value is not finite is left in place. It
+    /// makes the row infeasible (or ill-posed) and that is the solver's
+    /// verdict to report; pushing a NaN into `g_l`/`g_u` would instead
+    /// corrupt the bound pair and take every downstream presence test with
+    /// it.
+    #[test]
+    fn a_non_finite_constant_row_body_is_not_folded() {
+        // `C0` = `log(-1)` = NaN.
+        let nl = EQ_LIN.replace("C0\nn0\n", "C0\no43\nn-1\n");
+        assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert!(
+            !matches!(p.con_nonlinear[0], Expr::Const(c) if c == 0.0),
+            "a NaN body was folded into the bounds"
+        );
+        assert!(p.g_l[0].is_finite() && p.g_u[0].is_finite());
+        assert!((p.g_l[0] - 1.0).abs() < 1e-12);
+    }
+
+    /// An imported-function call is not a parse-time constant even with
+    /// constant arguments — it is resolved to a shared library much later
+    /// (`nl_external::ExternalResolver`), and `eval_expr` panics on it
+    /// rather than guess. The fold must decline before it evaluates.
+    #[test]
+    fn a_constant_argument_funcall_row_body_is_not_folded() {
+        // Declare one imported function and call it with a literal.
+        let nl = EQ_LIN.replace("C0\nn0\n", "F0 1 1 myfunc\nC0\nf0 1\nn2.0\n");
+        assert_ne!(nl, EQ_LIN, "fixture substitution must apply");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert!(
+            matches!(p.con_nonlinear[0], Expr::Funcall { .. }),
+            "expected the funcall to survive the fold, got {:?}",
+            p.con_nonlinear[0]
+        );
+        assert!((p.g_l[0] - 1.0).abs() < 1e-12, "bounds moved: {}", p.g_l[0]);
     }
 
     #[test]

@@ -338,6 +338,11 @@ variables they determine, iterating to a fixed point so chains propagate:
 Rows that collapse to `0 = 0` under the accumulated substitutions are
 dropped as structurally redundant.
 
+A row written with a constant on the left — `x0 − 2·x1 + 3 = 3` — is
+eligible on the same terms as `x0 − 2·x1 = 0`. The `.nl` reader folds a
+constant row body into the row's bounds when the file is read, so the pass
+sees an ordinary linear equality.
+
 Every eliminated variable's bounds are transferred onto its survivor, so
 the reduced box is never looser than the original. `finalize_solution`
 lifts the primal back to the original variable order and recovers a
