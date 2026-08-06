@@ -1222,9 +1222,38 @@ pub fn main() -> ExitCode {
     } else {
         None
     };
-    let post_presolve: Rc<RefCell<dyn TNLP>> = match &presolve_handle {
-        Some(p) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
-        None => Rc::clone(&inner_tnlp),
+    // Phase 6 (#487) stacks on top: it is the one pass that removes
+    // *columns*, so it must be the outermost layer, and it is the layer the
+    // `.sol` / JSON writers below read the full-space solution back out of.
+    let elim_handle = match (&presolve_handle, presolve_opts.linear_eq_reduction) {
+        (Some(p), true) => {
+            let e = Rc::new(RefCell::new(pounce_presolve::LinearEqElimTnlp::new(
+                Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
+                presolve_opts,
+            )));
+            // Force the lazy init so the summary below reports real numbers.
+            let _ = e.borrow_mut().get_nlp_info();
+            if !json_dbg {
+                let h = e.borrow();
+                let r = h.report();
+                println!(
+                    "Presolve linear-equality reduction: eliminated {} columns \
+                     ({} pinned, {} aggregated), dropped {} rows ({} redundant)",
+                    h.n_eliminated_vars(),
+                    r.n_constant_vars,
+                    r.n_aggregated_vars,
+                    h.n_eliminated_rows(),
+                    r.n_redundant_rows,
+                );
+            }
+            Some(e)
+        }
+        _ => None,
+    };
+    let post_presolve: Rc<RefCell<dyn TNLP>> = match (&elim_handle, &presolve_handle) {
+        (Some(e), _) => Rc::clone(e) as Rc<RefCell<dyn TNLP>>,
+        (None, Some(p)) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
+        (None, None) => Rc::clone(&inner_tnlp),
     };
 
     // The CLI owns its explicit wrapper so `.nl` input can supply an
@@ -1465,15 +1494,46 @@ pub fn main() -> ExitCode {
     // mis-aligns or is rejected. `PresolveTnlp::finalize_solution` already
     // lifted the duals back to the original row order *and* recovered
     // multipliers for the dropped rows; swap that full-length vector in.
+    // Phase 6 (#487) removes columns too, so with it active every capture
+    // taken outside the wrappers — `on_converged`, the `CountingTnlp`
+    // fallback, the bound-multiplier suffixes — is in the reduced variable
+    // space as well, and short in both directions.
+    let elim_reduced = elim_handle
+        .as_ref()
+        .map(|e| {
+            let h = e.borrow();
+            h.n_eliminated_vars() > 0 || h.n_eliminated_rows() > 0
+        })
+        .unwrap_or(false);
     if let Some(p) = &presolve_handle {
-        let lifted = if p.borrow().n_dropped_rows() > 0 {
-            p.borrow().finalized_full_solution().map(|(_x, lam)| lam)
+        let lifted = if p.borrow().n_dropped_rows() > 0 || elim_reduced {
+            p.borrow().finalized_full_solution()
         } else {
             None
         };
-        if let Some(lam_full) = lifted {
-            if let Some((_x, lambda)) = nominal_capture.borrow_mut().as_mut() {
+        if let Some((x_full, lam_full)) = lifted {
+            if let Some((x, lambda)) = nominal_capture.borrow_mut().as_mut() {
                 *lambda = lam_full;
+                if elim_reduced {
+                    *x = x_full;
+                }
+            }
+        }
+    }
+    // Bound multipliers are per *variable*, so only the column reduction can
+    // shorten them. Swap in the wrapper's full-space pair when — and only
+    // when — the captured one is the wrong length; leaving a correctly-sized
+    // capture alone keeps the scaling path that produced it untouched.
+    if elim_reduced {
+        if let Some(full) = elim_handle
+            .as_ref()
+            .and_then(|e| e.borrow().finalized_full_solution().cloned())
+        {
+            if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+                if z_l.len() != full.z_l.len() {
+                    *z_l = full.z_l;
+                    *z_u = full.z_u;
+                }
             }
         }
     }

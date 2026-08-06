@@ -312,13 +312,56 @@ no-op for this library entry point.
 | `presolve`                              | `no`    | Master switch for the whole presolve layer. Off → wrapper is a no-op.          |
 | `presolve_bound_tightening`             | `yes`   | Phase 1 — Andersen-style bound propagation from linear rows.                   |
 | `presolve_redundant_constraint_removal` | `yes`   | Phase 2 — drop linear constraints already implied by current bounds.           |
-| `presolve_linear_eq_reduction`          | `no`    | Phase ≥2 — eliminate fixed singleton variables exposed by linear equalities.   |
+| `presolve_linear_eq_reduction`          | `no`    | Phase 6 — eliminate variables determined by linear equality rows (see below).   |
 | `presolve_licq_check`                   | `yes`   | Phase 3 — detect rank-deficient equality blocks before the IPM starts.         |
 | `presolve_licq_action`                  | `warn`  | What to do on degeneracy: `warn` (just report) or `auto_l1` (turn on ℓ₁).      |
 | `presolve_warm_z_bounds`                | `yes`   | Phase 4 — warm-start bound multipliers when bounds get tightened by Phase 1.   |
 | `presolve_bound_mult_init_val`          | `1.0`   | Value used by Phase 4 for those warm-start hints.                              |
 | `presolve_max_passes`                   | `3`     | Fixed-point iteration cap across the bound-tightening passes.                  |
 | `presolve_print_level`                  | `0`     | Per-pass verbosity (0 silent, 5 per-pass, 8 per-transformation).               |
+
+### Linear-equality variable elimination (Phase 6)
+
+`presolve_linear_eq_reduction=yes` is the only pass that removes
+**columns**. It reads the model's linear equality rows and eliminates the
+variables they determine, iterating to a fixed point so chains propagate:
+
+* a variable whose declared bounds are equal becomes a constant;
+* a singleton row `a·x = b` pins its variable at `b/a`;
+* a two-variable row `a₁·x + a₂·y = b` substitutes one variable for the
+  other, `x := α·y + β`. There is **no anchoring requirement**: a row
+  linking two otherwise-free interior variables — an arc equality, a
+  `Reference` alias, a unit-conversion link — aggregates away, which is
+  the case the [auxiliary-equality pass](auxiliary-presolve.md) cannot
+  reach because it only solves *determined* square blocks.
+
+Rows that collapse to `0 = 0` under the accumulated substitutions are
+dropped as structurally redundant.
+
+Every eliminated variable's bounds are transferred onto its survivor, so
+the reduced box is never looser than the original. `finalize_solution`
+lifts the primal back to the original variable order and recovers a
+multiplier for each consumed row, so `.sol` / JSON solution blocks keep the
+original model's shape and can still be read positionally by AMPL or Pyomo.
+
+Two things to know before turning it on:
+
+* **Dual attribution.** The recovery assumes an eliminated variable is
+  interior to its own bounds at the optimum. When one of those bounds is
+  active, the dual is reported on the *survivor's* bound multiplier (which
+  carries the transferred bound) and the eliminated variable's `ipopt_zL_out`
+  / `ipopt_zU_out` entry is zero. The primal point, the objective, and KKT
+  stationarity are unaffected — only the attribution differs, the same way
+  Phase 2's dropped rows behave.
+* **Failing closed.** If the equality system is contradictory, the pass
+  stands down entirely and hands the model to the solver untouched, rather
+  than being the first and only voice to call a model infeasible. The same
+  goes for a model whose every column is determined: a zero-variable problem
+  is not a shape worth handing the IPM.
+
+It is off by default because it changes the variable count, which the
+sensitivity and reduced-Hessian paths index against the original `.nl`.
+(The CLI already disables presolve entirely when those are requested.)
 
 ### Feasibility-based bound tightening (Phase 1b)
 

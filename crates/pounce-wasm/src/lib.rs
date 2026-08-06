@@ -455,9 +455,24 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
             ),
         ))
     });
-    let target: Rc<RefCell<dyn TNLP>> = match &presolve {
-        Some(p) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
-        None => Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>,
+    // Phase 6 (#487) stacks on top of the rest of presolve: it is the one
+    // pass that removes columns, so it has to be the outermost layer. The
+    // browser reads its results off `NlTnlp` below, which receives the
+    // full-space solution from `finalize_solution`, so nothing else here
+    // needs to know the reduced problem existed.
+    let elim = match (&presolve, presolve_opts.linear_eq_reduction) {
+        (Some(p), true) => Some(Rc::new(RefCell::new(
+            pounce_presolve::LinearEqElimTnlp::new(
+                Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
+                presolve_opts,
+            ),
+        ))),
+        _ => None,
+    };
+    let target: Rc<RefCell<dyn TNLP>> = match (&elim, &presolve) {
+        (Some(e), _) => Rc::clone(e) as Rc<RefCell<dyn TNLP>>,
+        (None, Some(p)) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
+        (None, None) => Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>,
     };
 
     let status = app.optimize_tnlp(target);
@@ -469,6 +484,14 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
             "tightened_bounds": tr.n_tightened,
             "newly_finite_bounds": tr.n_new_finite,
             "dropped_rows": h.n_dropped_rows(),
+            "eliminated_columns": elim
+                .as_ref()
+                .map(|e| e.borrow().n_eliminated_vars())
+                .unwrap_or(0),
+            "eliminated_rows": elim
+                .as_ref()
+                .map(|e| e.borrow().n_eliminated_rows())
+                .unwrap_or(0),
         })
     });
 

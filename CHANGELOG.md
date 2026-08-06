@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+### Added — presolve eliminates variables determined by linear equality rows (#487)
+
+- `presolve_linear_eq_reduction` was a registered option with no
+  implementation behind it. It now runs a **variable-elimination phase**
+  (Phase 6) in `pounce-presolve`, the first pass in the layer that removes
+  *columns* rather than only rows. Off by default; requires `presolve=yes`.
+- The measurement in #487: a solvent-extraction NMPC flowsheet declares
+  23,681 variables and 23,138 equality rows, and Pyomo's NL-v2 writer — with
+  the linear presolve its `ipopt_v2` interface turns on by default — hands
+  the solver 10,284 columns and 9,741 rows. POUNCE reached the solver at
+  full size on every path. It now recognises the same three shapes, iterated
+  to a fixed point so chains propagate: variables fixed by equal bounds,
+  singleton rows `a·x = b`, and two-variable rows `a₁·x + a₂·y = b`.
+- The two-variable shape is the one that mattered and the one nothing in
+  POUNCE could reach. The auxiliary-equality pipeline (#53) eliminates
+  *determined* square blocks; a row linking two otherwise-free interior
+  variables — an arc equality, a `Reference` alias, a unit-conversion link —
+  determines neither of them and so survived. Phase 6 substitutes one for
+  the other with no anchoring requirement.
+- Implemented in `pounce-presolve` (option (b) of #487's two candidate
+  homes) rather than by switching the Pyomo path onto NL-v2's presolve, so
+  the CLI, GAMS, the C interface, and Pyomo all get the same reduction from
+  one implementation — and so the sensitivity session is not asked to
+  thread a third variable space through index maps whose correctness rests
+  on there being exactly two (the #450 hazard).
+- Duals for the consumed rows are **recovered, not zeroed**. Taken as a
+  whole the recovery is a square sparse solve; taken one elimination at a
+  time in reverse order it is triangular, because every other row of the
+  problem-as-it-stood-then survives that step. So it is a linear sweep over
+  the elimination forest, not a factorization. `.sol` and JSON solution
+  blocks come back at the original model's length, in the original order,
+  and can still be read positionally by AMPL and Pyomo.
+- Two documented caveats, both in `docs/src/options.md`: an eliminated
+  variable's *bound* multiplier is reported on the survivor that inherited
+  the bound (the same attribution trade the Phase-2 row drop makes), and a
+  contradictory equality system makes the pass stand down entirely rather
+  than be the first and only voice calling a model infeasible.
+
 ### Fixed — the C working-set API validated nothing structural, and reported the wrong row order (#484 follow-up, round 4)
 
 - `IpoptSetWarmStartWorkingSet` range-checked its status codes and stopped
