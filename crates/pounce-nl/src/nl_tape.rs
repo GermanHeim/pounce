@@ -66,6 +66,27 @@ pub enum TapeOp {
     /// tripping through `.nl`. Smooth everywhere, with closed-form
     /// derivatives `erf'(u) = 2/√π·exp(-u²)` and `erf''(u) = -2u·erf'(u)`.
     Erf(usize),
+    /// `a·ln(a)` with the `a = 0` limit `0` (GAMS `entropy` up to sign).
+    ///
+    /// Like [`TapeOp::Erf`] it has no AMPL `.nl` opcode and is reachable only
+    /// through the in-memory `Expr` path (`UnaryOp::XLogX`). Unlike `Erf` it is
+    /// fused for **correctness**, not convenience: the second derivative is
+    /// `1/a`, which is finite for every positive `a` down to `1e-308`, but
+    /// *every* chain-rule decomposition routes through `ln''(a) = -1/a²`. At
+    /// `a = 1e-299` that intermediate is `-1e598` — past `f64::MAX` — so the
+    /// composed Hessian is `inf`/`nan` while the answer it is computing,
+    /// `1e299`, is an ordinary number. No amount of care in the `Mul`/`Log`
+    /// rules reaches it; only an op that never forms `1/a²` does.
+    XLogX(usize),
+    /// `a·ln(a/b)` with the `a = 0` limit `0` — GAMS `centropy`. Operands
+    /// `(a, b)`; `b > 0` is the caller's responsibility, as for `Log`.
+    ///
+    /// Fused for [`TapeOp::XLogX`]'s reason (`∂²/∂a² = 1/a` is unreachable
+    /// through `ln''`) plus one of its own: `∂²/∂b² = a/b²` squares the
+    /// denominator, which overflows for `|b| > 1.3e154` even when `a/b²` is
+    /// itself in range. The fused rule computes `q = a/b` once and expresses
+    /// every second-order term as a division by `b`, never by `b²`.
+    CEntropy(usize, usize),
     /// Two-argument arctangent `atan2(vals[a], vals[b])` (operands are
     /// `(y, x)`, matching AMPL's `atan2(y, x)` / `.nl` opcode o48).
     Atan2(usize, usize),
@@ -121,6 +142,108 @@ pub struct FuncallData {
 pub enum TapeFuncallArg {
     Tape(usize),
     Str(String),
+}
+
+/// `ln(a/b)`, computed without ever materializing an out-of-range `a/b`.
+///
+/// Shared by every arm of [`TapeOp::CEntropy`] so the value and the derivatives
+/// cannot drift apart. Three regimes:
+///
+///   * `a ≈ b` — the ratio is near 1, where `ln` loses digits to cancellation.
+///     `(a - b)` is exact by Sterbenz whenever `b/2 ≤ a ≤ 2b`, so `ln_1p` of
+///     `(a - b)/b` keeps full precision where `q.ln()` would not.
+///   * `a/b` finite and positive — plain `q.ln()`.
+///   * `a/b` overflowed, underflowed to zero, or went non-finite — fall back to
+///     `ln(a) - ln(b)`. At `a = 1e300, b = 1e-300` the ratio is `1e600` (inf)
+///     but `ln` of it is a perfectly ordinary `1381.55`; the difference form
+///     reaches it. This is the only regime where cancellation is a risk, and
+///     it cannot bite here because the ratio being out of range means the two
+///     logs are far apart.
+#[inline]
+pub(crate) fn ln_ratio(a: f64, b: f64) -> f64 {
+    let q = a / b;
+    if q.is_finite() && q > 0.0 {
+        let t = (a - b) / b;
+        if t.abs() < 0.5 { t.ln_1p() } else { q.ln() }
+    } else {
+        a.ln() - b.ln()
+    }
+}
+
+/// `a·ln(a)`, the value arm of [`TapeOp::XLogX`] — GAMS `entropy`.
+///
+/// Exists as a FUSED op because the chain rule provably cannot evaluate its
+/// second derivative. `(a·ln a)'' = 1/a`, which at `a = 1e-299` is `1e299` and
+/// perfectly representable — but any decomposition routes through
+/// `ln''(a) = -1/a² = -1e598`, which exceeds `f64::MAX`. The composite is in
+/// range while the factor it is built from is not, so no rule for `Mul` and
+/// `Log` can recover it, however carefully written. Only a fused op that never
+/// forms `1/a²` gets there.
+///
+/// `0·ln 0` is `0` by the limit, not `NaN`.
+#[inline]
+pub(crate) fn xlogx(a: f64) -> f64 {
+    if a == 0.0 { 0.0 } else { a * a.ln() }
+}
+
+/// `a·ln(a/b)`, the value arm of [`TapeOp::CEntropy`] — GAMS `centropy`.
+///
+/// Fused for the same reason as [`xlogx`], plus one of its own: `∂²/∂b²` is
+/// `a/b²`, and `b²` overflows for `|b| > 1.3e154` while `a/b²` itself stays in
+/// range. The fused rule computes it as `q/b` and never squares anything.
+///
+/// `0·ln(0/b)` is `0` by the limit.
+#[inline]
+pub(crate) fn centropy(a: f64, b: f64) -> f64 {
+    if a == 0.0 { 0.0 } else { a * ln_ratio(a, b) }
+}
+
+/// `(a·ln a)' = ln(a) + 1`. `-inf` at `a = 0`, which is the true one-sided limit.
+#[inline]
+pub(crate) fn xlogx_d1(a: f64) -> f64 {
+    a.ln() + 1.0
+}
+
+/// `(a·ln a)'' = 1/a`.
+///
+/// The entire reason [`TapeOp::XLogX`] exists: this is finite for every positive
+/// `a`, while the `ln''` any decomposition would go through is not.
+#[inline]
+pub(crate) fn xlogx_d2(a: f64) -> f64 {
+    1.0 / a
+}
+
+/// `∂/∂a [a·ln(a/b)] = ln(a/b) + 1`.
+#[inline]
+pub(crate) fn centropy_da(a: f64, b: f64) -> f64 {
+    ln_ratio(a, b) + 1.0
+}
+
+/// `∂/∂b [a·ln(a/b)] = -a/b`.
+#[inline]
+pub(crate) fn centropy_db(a: f64, b: f64) -> f64 {
+    -(a / b)
+}
+
+/// `∂²/∂a² [a·ln(a/b)] = 1/a` — independent of `b`; see [`xlogx_d2`].
+#[inline]
+pub(crate) fn centropy_daa(a: f64) -> f64 {
+    1.0 / a
+}
+
+/// `∂²/∂a∂b [a·ln(a/b)] = -1/b` — independent of `a`.
+#[inline]
+pub(crate) fn centropy_dab(b: f64) -> f64 {
+    -1.0 / b
+}
+
+/// `∂²/∂b² [a·ln(a/b)] = a/b²`, evaluated as `(a/b)/b`.
+///
+/// Never as `a/(b*b)`: at `a = 1e300, b = 1e200` the true value is `1e-100`, but
+/// `b*b` is `inf` and the squared form returns `0.0`. Dividing twice keeps it.
+#[inline]
+pub(crate) fn centropy_dbb(a: f64, b: f64) -> f64 {
+    (a / b) / b
 }
 
 /// Gauss error function, the value arm of [`TapeOp::Erf`].
@@ -267,6 +390,8 @@ impl Tape {
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
                 TapeOp::Erf(a) => erf(vals[*a]),
+                TapeOp::XLogX(a) => xlogx(vals[*a]),
+                TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
                 TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
                 TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
@@ -376,9 +501,12 @@ impl Tape {
                     adj[*r] += a * vals[*l];
                 }
                 TapeOp::Div(l, r) => {
+                    // ∂(l/r)/∂r = -q/r, NOT -l/r²: r*r overflows for |r| > 1.3e154
+                    // and underflows for |r| < 1.5e-154, zeroing an adjoint that is
+                    // itself representable. `vals[i]` is q = l/r, already computed.
                     let rv = vals[*r];
                     adj[*l] += a / rv;
-                    adj[*r] -= a * vals[*l] / (rv * rv);
+                    adj[*r] -= a * vals[i] / rv;
                 }
                 TapeOp::Pow(l, r) => {
                     let lv = vals[*l];
@@ -461,6 +589,13 @@ impl Tape {
                 }
                 TapeOp::Erf(j) => {
                     adj[*j] += a * erf_d1(vals[*j]);
+                }
+                TapeOp::XLogX(j) => {
+                    adj[*j] += a * xlogx_d1(vals[*j]);
+                }
+                TapeOp::CEntropy(l, r) => {
+                    adj[*l] += a * centropy_da(vals[*l], vals[*r]);
+                    adj[*r] += a * centropy_db(vals[*l], vals[*r]);
                 }
                 TapeOp::Atan2(l, r) => {
                     let y = vals[*l];
@@ -547,8 +682,14 @@ impl Tape {
                 TapeOp::Sub(a, b) => dot[*a] - dot[*b],
                 TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
                 TapeOp::Div(a, b) => {
-                    let vb = vals[*b];
-                    (dot[*a] * vb - vals[*a] * dot[*b]) / (vb * vb)
+                    // (ȧ - q·ḃ)/b, NOT (ȧ·b - a·ḃ)/b². Squaring the denominator
+                    // overflows for |b| > 1.3e154 and underflows for |b| < 1.5e-154,
+                    // destroying a tangent that is itself perfectly representable:
+                    // at a = b = 1e300 with ḃ = 1 the true -a/b² is -1e-300, but
+                    // b*b is inf so the squared form returns -0.0. Dividing by b
+                    // twice instead of by b² once is the standard Kahan form, and
+                    // costs nothing -- q is this node's own value, already computed.
+                    (dot[*a] - vals[i] * dot[*b]) / vals[*b]
                 }
                 TapeOp::Pow(a, b) => {
                     let u = vals[*a];
@@ -620,6 +761,11 @@ impl Tape {
                     dot[*a] / (1.0 - u * u)
                 }
                 TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
+                TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
+                TapeOp::CEntropy(a, b) => {
+                    centropy_da(vals[*a], vals[*b]) * dot[*a]
+                        + centropy_db(vals[*a], vals[*b]) * dot[*b]
+                }
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -702,6 +848,8 @@ impl Tape {
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
                 TapeOp::Erf(a) => erf(vals[*a]),
+                TapeOp::XLogX(a) => xlogx(vals[*a]),
+                TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
                 TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
                 TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
@@ -791,8 +939,14 @@ impl Tape {
                 TapeOp::Sub(a, b) => dot[*a] - dot[*b],
                 TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
                 TapeOp::Div(a, b) => {
-                    let vb = vals[*b];
-                    (dot[*a] * vb - vals[*a] * dot[*b]) / (vb * vb)
+                    // (ȧ - q·ḃ)/b, NOT (ȧ·b - a·ḃ)/b². Squaring the denominator
+                    // overflows for |b| > 1.3e154 and underflows for |b| < 1.5e-154,
+                    // destroying a tangent that is itself perfectly representable:
+                    // at a = b = 1e300 with ḃ = 1 the true -a/b² is -1e-300, but
+                    // b*b is inf so the squared form returns -0.0. Dividing by b
+                    // twice instead of by b² once is the standard Kahan form, and
+                    // costs nothing -- q is this node's own value, already computed.
+                    (dot[*a] - vals[i] * dot[*b]) / vals[*b]
                 }
                 TapeOp::Pow(a, b) => {
                     let u = vals[*a];
@@ -864,6 +1018,11 @@ impl Tape {
                     dot[*a] / (1.0 - u * u)
                 }
                 TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
+                TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
+                TapeOp::CEntropy(a, b) => {
+                    centropy_da(vals[*a], vals[*b]) * dot[*a]
+                        + centropy_db(vals[*a], vals[*b]) * dot[*b]
+                }
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -954,14 +1113,19 @@ impl Tape {
                     adj_dot[*b] += wd * vals[*a] + w * dot[*a];
                 }
                 TapeOp::Div(a, b) => {
+                    // Kahan form, second order. `vb2`/`vb3` overflow for
+                    // |b| > 1.3e154 (and vb2 underflows below 1.5e-154), which
+                    // silently zeroed second-order terms that are representable.
+                    // Every 1/b² here is regrouped as (·/b)/b, and the
+                    // 2a·ḃ/b³ term folds into q̇ = dot[i], already computed:
+                    //   -ȧ/b² + 2q·ḃ/b² == (-q̇ + q·(ḃ/b)) / b.
                     let vb = vals[*b];
-                    let vb2 = vb * vb;
-                    let vb3 = vb2 * vb;
+                    let q = vals[i];
+                    let qd = dot[i];
                     adj[*a] += w / vb;
-                    adj_dot[*a] += wd / vb + w * (-dot[*b] / vb2);
-                    adj[*b] += w * (-vals[*a] / vb2);
-                    adj_dot[*b] += wd * (-vals[*a] / vb2)
-                        + w * (-dot[*a] / vb2 + 2.0 * vals[*a] * dot[*b] / vb3);
+                    adj_dot[*a] += wd / vb - w * (dot[*b] / vb) / vb;
+                    adj[*b] -= w * q / vb;
+                    adj_dot[*b] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b] / vb));
                 }
                 TapeOp::Pow(a, b) => {
                     let u = vals[*a];
@@ -1132,6 +1296,28 @@ impl Tape {
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
+                TapeOp::XLogX(a) => {
+                    // gpp is 1/u, NOT the -1/u² any decomposition through
+                    // `ln''` would produce. That is the whole point of the op.
+                    let u = vals[*a];
+                    let gp = xlogx_d1(u);
+                    let gpp = xlogx_d2(u);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::CEntropy(a, b) => {
+                    let ua = vals[*a];
+                    let ub = vals[*b];
+                    let fa = centropy_da(ua, ub);
+                    let fb = centropy_db(ua, ub);
+                    let faa = centropy_daa(ua);
+                    let fab = centropy_dab(ub);
+                    let fbb = centropy_dbb(ua, ub);
+                    adj[*a] += w * fa;
+                    adj[*b] += w * fb;
+                    adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
+                    adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                }
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -1271,14 +1457,15 @@ impl Tape {
                         adj_dot[*b] += wd * v[*a] + w * dot[*a];
                     }
                     TapeOp::Div(a, b) => {
+                        // Kahan form -- see the identical arm in the dense
+                        // reverse-over-forward sweep for the derivation.
                         let vb = v[*b];
-                        let vb2 = vb * vb;
-                        let vb3 = vb2 * vb;
+                        let q = v[i];
+                        let qd = dot[i];
                         adj[*a] += w / vb;
-                        adj_dot[*a] += wd / vb + w * (-dot[*b] / vb2);
-                        adj[*b] += w * (-v[*a] / vb2);
-                        adj_dot[*b] += wd * (-v[*a] / vb2)
-                            + w * (-dot[*a] / vb2 + 2.0 * v[*a] * dot[*b] / vb3);
+                        adj_dot[*a] += wd / vb - w * (dot[*b] / vb) / vb;
+                        adj[*b] -= w * q / vb;
+                        adj_dot[*b] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b] / vb));
                     }
                     TapeOp::Pow(a, b) => {
                         let u = v[*a];
@@ -1450,6 +1637,28 @@ impl Tape {
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
+                    TapeOp::XLogX(a) => {
+                        // See the identical arm in `hessian_accumulate`: gpp is
+                        // 1/u, never the unrepresentable -1/u² of `ln''`.
+                        let u = v[*a];
+                        let gp = xlogx_d1(u);
+                        let gpp = xlogx_d2(u);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::CEntropy(a, b) => {
+                        let ua = v[*a];
+                        let ub = v[*b];
+                        let fa = centropy_da(ua, ub);
+                        let fb = centropy_db(ua, ub);
+                        let faa = centropy_daa(ua);
+                        let fab = centropy_dab(ub);
+                        let fbb = centropy_dbb(ua, ub);
+                        adj[*a] += w * fa;
+                        adj[*b] += w * fb;
+                        adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
+                        adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                    }
                     TapeOp::Atan2(a, b) => {
                         let y = v[*a];
                         let x = v[*b];
@@ -1590,14 +1799,16 @@ impl Tape {
                 | TapeOp::Acosh(a)
                 | TapeOp::Asinh(a)
                 | TapeOp::Erf(a)
+                | TapeOp::XLogX(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], &mut pairs);
                     var_sets[*a].clone()
                 }
-                // atan2(y, x) is nonlinear in both operands with a full
-                // 2×2 second-derivative block; the structural superset is
-                // every self/cross pair within the combined operand set.
-                TapeOp::Atan2(a, b) => {
+                // atan2(y, x) and centropy(a, b) are nonlinear in both
+                // operands with a full 2×2 second-derivative block; the
+                // structural superset is every self/cross pair within the
+                // combined operand set.
+                TapeOp::Atan2(a, b) | TapeOp::CEntropy(a, b) => {
                     let combined: BTreeSet<usize> =
                         var_sets[*a].union(&var_sets[*b]).copied().collect();
                     emit_self(&combined, &mut pairs);
@@ -1689,6 +1900,7 @@ fn build_recursive(
                 BinOp::Div => TapeOp::Div(l, r),
                 BinOp::Pow => TapeOp::Pow(l, r),
                 BinOp::Atan2 => TapeOp::Atan2(l, r),
+                BinOp::CEntropy => TapeOp::CEntropy(l, r),
             });
             idx
         }
@@ -1715,6 +1927,7 @@ fn build_recursive(
                 UnaryOp::Asinh => TapeOp::Asinh(v),
                 UnaryOp::Atanh => TapeOp::Atanh(v),
                 UnaryOp::Erf => TapeOp::Erf(v),
+                UnaryOp::XLogX => TapeOp::XLogX(v),
             });
             idx
         }
@@ -2458,6 +2671,7 @@ fn build_into_summand(
                 BinOp::Div => TapeOp::Div(l, r),
                 BinOp::Pow => TapeOp::Pow(l, r),
                 BinOp::Atan2 => TapeOp::Atan2(l, r),
+                BinOp::CEntropy => TapeOp::CEntropy(l, r),
             }));
             i
         }
@@ -2484,6 +2698,7 @@ fn build_into_summand(
                 UnaryOp::Asinh => TapeOp::Asinh(v),
                 UnaryOp::Atanh => TapeOp::Atanh(v),
                 UnaryOp::Erf => TapeOp::Erf(v),
+                UnaryOp::XLogX => TapeOp::XLogX(v),
             }));
             i
         }
@@ -2748,7 +2963,8 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
             | TapeOp::Pow(a, b)
-            | TapeOp::Atan2(a, b) => out[*a].union(&out[*b]).copied().collect(),
+            | TapeOp::Atan2(a, b)
+            | TapeOp::CEntropy(a, b) => out[*a].union(&out[*b]).copied().collect(),
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
             | TapeOp::Sqrt(a)
@@ -2767,6 +2983,7 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
             | TapeOp::Erf(a)
+            | TapeOp::XLogX(a)
             | TapeOp::Atanh(a) => out[*a].clone(),
             TapeOp::Cmp(_, _, _)
             | TapeOp::And(_, _)
@@ -2839,7 +3056,7 @@ fn summand_sparsity(
                     emit_self(&var_sets[*b], pairs);
                     var_sets[*a].union(&var_sets[*b]).copied().collect()
                 }
-                TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) => {
+                TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) | TapeOp::CEntropy(a, b) => {
                     let combined: BTreeSet<usize> =
                         var_sets[*a].union(&var_sets[*b]).copied().collect();
                     emit_self(&combined, pairs);
@@ -2861,6 +3078,7 @@ fn summand_sparsity(
                 | TapeOp::Acosh(a)
                 | TapeOp::Asinh(a)
                 | TapeOp::Erf(a)
+                | TapeOp::XLogX(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], pairs);
                     var_sets[*a].clone()
@@ -2896,7 +3114,8 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Mul(a, b)
         | TapeOp::Div(a, b)
         | TapeOp::Pow(a, b)
-        | TapeOp::Atan2(a, b) => (Some(*a), Some(*b)),
+        | TapeOp::Atan2(a, b)
+        | TapeOp::CEntropy(a, b) => (Some(*a), Some(*b)),
         TapeOp::Neg(a)
         | TapeOp::Abs(a)
         | TapeOp::Sqrt(a)
@@ -2915,6 +3134,7 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Acosh(a)
         | TapeOp::Asinh(a)
         | TapeOp::Erf(a)
+        | TapeOp::XLogX(a)
         | TapeOp::Atanh(a) => (Some(*a), None),
         // Conditional / logical TapeOps never reach the HybridTape
         // operand-walk (build_into_summand rejects them). Cmp/And/Or
@@ -2976,6 +3196,8 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         TapeOp::Asinh(a) => vals[*a].asinh(),
         TapeOp::Atanh(a) => vals[*a].atanh(),
         TapeOp::Erf(a) => erf(vals[*a]),
+        TapeOp::XLogX(a) => xlogx(vals[*a]),
+        TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
         TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -3019,9 +3241,10 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             adj[*r] += a * vals[*l];
         }
         TapeOp::Div(l, r) => {
+            // Kahan form -- see the identical arm in the reverse sweep above.
             let rv = vals[*r];
             adj[*l] += a / rv;
-            adj[*r] -= a * vals[*l] / (rv * rv);
+            adj[*r] -= a * vals[i] / rv;
         }
         TapeOp::Pow(l, r) => {
             let lv = vals[*l];
@@ -3105,6 +3328,13 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
         TapeOp::Erf(j) => {
             adj[*j] += a * erf_d1(vals[*j]);
         }
+        TapeOp::XLogX(j) => {
+            adj[*j] += a * xlogx_d1(vals[*j]);
+        }
+        TapeOp::CEntropy(l, r) => {
+            adj[*l] += a * centropy_da(vals[*l], vals[*r]);
+            adj[*r] += a * centropy_db(vals[*l], vals[*r]);
+        }
         TapeOp::Atan2(l, r) => {
             let y = vals[*l];
             let x = vals[*r];
@@ -3158,8 +3388,9 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         TapeOp::Sub(a, b) => dot[*a] - dot[*b],
         TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
         TapeOp::Div(a, b) => {
-            let vb = vals[*b];
-            (dot[*a] * vb - vals[*a] * dot[*b]) / (vb * vb)
+            // Kahan form -- see the identical arm in `forward_tangent` for why the
+            // squared denominator loses representable tangents at extreme |b|.
+            (dot[*a] - vals[i] * dot[*b]) / vals[*b]
         }
         TapeOp::Pow(a, b) => {
             let u = vals[*a];
@@ -3231,6 +3462,10 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
             dot[*a] / (1.0 - u * u)
         }
         TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
+        TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
+        TapeOp::CEntropy(a, b) => {
+            centropy_da(vals[*a], vals[*b]) * dot[*a] + centropy_db(vals[*a], vals[*b]) * dot[*b]
+        }
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
@@ -3313,14 +3548,15 @@ fn ror_step(
             adj_dot[*b] += wd * vals[*a] + w * dot[*a];
         }
         TapeOp::Div(a, b) => {
+            // Kahan form -- see the identical arm in the dense
+            // reverse-over-forward sweep for the derivation.
             let vb = vals[*b];
-            let vb2 = vb * vb;
-            let vb3 = vb2 * vb;
+            let q = vals[i];
+            let qd = dot[i];
             adj[*a] += w / vb;
-            adj_dot[*a] += wd / vb + w * (-dot[*b] / vb2);
-            adj[*b] += w * (-vals[*a] / vb2);
-            adj_dot[*b] +=
-                wd * (-vals[*a] / vb2) + w * (-dot[*a] / vb2 + 2.0 * vals[*a] * dot[*b] / vb3);
+            adj_dot[*a] += wd / vb - w * (dot[*b] / vb) / vb;
+            adj[*b] -= w * q / vb;
+            adj_dot[*b] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b] / vb));
         }
         TapeOp::Pow(a, b) => {
             let u = vals[*a];
@@ -3491,6 +3727,28 @@ fn ror_step(
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
+        TapeOp::XLogX(a) => {
+            // See the identical arm in `hessian_accumulate`: gpp is 1/u, never
+            // the unrepresentable -1/u² of `ln''`.
+            let u = vals[*a];
+            let gp = xlogx_d1(u);
+            let gpp = xlogx_d2(u);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::CEntropy(a, b) => {
+            let ua = vals[*a];
+            let ub = vals[*b];
+            let fa = centropy_da(ua, ub);
+            let fb = centropy_db(ua, ub);
+            let faa = centropy_daa(ua);
+            let fab = centropy_dab(ub);
+            let fbb = centropy_dbb(ua, ub);
+            adj[*a] += w * fa;
+            adj[*b] += w * fb;
+            adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
+            adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+        }
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
@@ -3599,7 +3857,7 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
                 emit_self(&var_sets[*b], &mut pairs);
                 var_sets[*a].union(&var_sets[*b]).copied().collect()
             }
-            TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) => {
+            TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) | TapeOp::CEntropy(a, b) => {
                 let combined: BTreeSet<usize> =
                     var_sets[*a].union(&var_sets[*b]).copied().collect();
                 emit_self(&combined, &mut pairs);
@@ -3621,6 +3879,7 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
             | TapeOp::Erf(a)
+            | TapeOp::XLogX(a)
             | TapeOp::Atanh(a) => {
                 emit_self(&var_sets[*a], &mut pairs);
                 var_sets[*a].clone()
@@ -3966,6 +4225,61 @@ mod tests {
     }
 
     #[test]
+    fn quotient_rule_keeps_representable_derivatives_at_extreme_denominators() {
+        // The quotient rule used to form `b*b` explicitly. That overflows for
+        // |b| > 1.3e154 and underflows below 1.5e-154, and what it destroys is a
+        // derivative that is itself perfectly representable: at a = b = 1e300,
+        // ∂(a/b)/∂b = -a/b² = -1e-300, but `b*b` is inf so the squared form
+        // returned -0.0. A silently ZEROED gradient entry, not a NaN anyone
+        // would catch downstream.
+        //
+        // Reachable in practice: discopt lowers GAMS `centropy(x, y)` to
+        // `x·log(x/y)`, and a 600-digit audit measured a wrong y-derivative at
+        // (1e300, 1e300) through exactly this path.
+        let t = Tape::build(&div(var(0), var(1)));
+        let mut g = vec![0.0; 2];
+        for b in [1e300_f64, 1e200, 1e160, -1e300, 1e-160, 1e-300] {
+            // At a = b: ∂/∂a = 1/b and ∂/∂b = -a/b² = -1/b, both representable
+            // for every b here even though b² is not.
+            // `gradient_seed` ACCUMULATES; without this reset the previous
+            // iteration's entry survives and the assert compares against stale
+            // data (it did, and caught itself: 1e-160 leaked into the b=-1e300 row).
+            g.iter_mut().for_each(|v| *v = 0.0);
+            t.gradient_seed(&[b, b], 1.0, &mut g);
+            assert_eq!(g[0], 1.0 / b, "d(a/b)/da at a=b={b:e}");
+            assert_eq!(
+                g[1],
+                -1.0 / b,
+                "d(a/b)/db at a=b={b:e} — b² is not representable"
+            );
+        }
+
+        // Second order, where the rule squared and CUBED the denominator.
+        // b = 1e155 makes b² = 1e310 overflow while the cross partial
+        // ∂²(a/b)/∂a∂b = -1/b² = -1e-310 is still (subnormally) representable.
+        let b = 1e155_f64;
+        let mut hess_map: HashMap<(usize, usize), usize> = HashMap::new();
+        hess_map.insert((0, 0), 0);
+        hess_map.insert((1, 0), 1);
+        hess_map.insert((1, 1), 2);
+        let mut ad = vec![0.0; 3];
+        t.hessian_accumulate(&[b, b], 1.0, &hess_map, &mut ad);
+        // Compute the truth as -(1/b)/b, NOT -1/(b*b) -- the latter is the very
+        // expression under test and evaluates to -0.0 here, which would have made
+        // this assertion compare the bug against itself and pass vacuously.
+        let want = -(1.0 / b) / b;
+        assert!(
+            want != 0.0 && want.is_finite(),
+            "test premise: -1/b² must be representable, got {want:e}"
+        );
+        assert!(
+            (ad[1] - want).abs() <= 1e-10 * want.abs(),
+            "d²(a/b)/da db at a=b={b:e}: got {:e}, want {want:e}",
+            ad[1]
+        );
+    }
+
+    #[test]
     fn erf_grad_and_hessian_match_fd() {
         // f = erf(x0) + erf(2*x1) + x0*x1. The inner `2*x1` makes the
         // chain rule non-trivial, so a missing factor in the tangent or
@@ -4026,6 +4340,201 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn centropy_expr(a: Expr, b: Expr) -> Expr {
+        Expr::Binary(BinOp::CEntropy, Box::new(a), Box::new(b))
+    }
+
+    /// Dense 2×2 Hessian via `hessian_accumulate`, as `(h00, h10, h11)`.
+    fn hess2(e: &Expr, x: &[f64; 2]) -> (f64, f64, f64) {
+        let tape = Tape::build(e);
+        let mut hess_map: HashMap<(usize, usize), usize> = HashMap::new();
+        hess_map.insert((0, 0), 0);
+        hess_map.insert((1, 0), 1);
+        hess_map.insert((1, 1), 2);
+        let mut ad = vec![0.0; 3];
+        tape.hessian_accumulate(x, 1.0, &hess_map, &mut ad);
+        (ad[0], ad[1], ad[2])
+    }
+
+    #[test]
+    fn xlogx_and_centropy_grad_and_hessian_match_fd() {
+        // f = xlogx(x0) + centropy(x0, x1) + x0*x1. The trailing product
+        // makes the cross partial nonzero, so a dropped ∂²/∂a∂b term shows
+        // up instead of hiding in an all-zero off-diagonal.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::XLogX, var(0)),
+            centropy_expr(var(0), var(1)),
+            mul(var(0), var(1)),
+        ]);
+        grad_and_hess_match_fd(&e, &[1.7, 0.6], 1e-5);
+    }
+
+    #[test]
+    fn centropy_directional_hessian_matches_accumulated() {
+        // `hessian_directional` and `hessian_accumulate` are separate match
+        // arms over the same op — the easiest place for a second derivative
+        // to be right in one sweep and wrong in the other.
+        let e = Expr::Sum(vec![
+            centropy_expr(var(0), var(1)),
+            unary(UnaryOp::XLogX, mul(var(0), var(1))),
+        ]);
+        let tape = Tape::build(&e);
+        let x = [1.3, 0.8];
+        let n = x.len();
+
+        let pairs: Vec<(usize, usize)> = tape.hessian_sparsity().into_iter().collect();
+        let hess_map: HashMap<(usize, usize), usize> =
+            pairs.iter().enumerate().map(|(k, p)| (*p, k)).collect();
+        let mut acc = vec![0.0; pairs.len()];
+        tape.hessian_accumulate(&x, 1.0, &hess_map, &mut acc);
+
+        let ops = tape.ops.len();
+        let mut vals = vec![0.0; ops];
+        tape.forward_into(&x, &mut vals);
+        let mut compared = 0usize;
+        for j in 0..n {
+            let mut seed = vec![0.0; n];
+            seed[j] = 1.0;
+            let mut col = vec![0.0; n];
+            let (mut dot, mut adj, mut adj_dot) = (vec![0.0; ops], vec![0.0; ops], vec![0.0; ops]);
+            tape.hessian_directional(
+                &vals,
+                &seed,
+                1.0,
+                &mut col,
+                &mut dot,
+                &mut adj,
+                &mut adj_dot,
+            );
+            for i in 0..n {
+                let (r, c) = if i >= j { (i, j) } else { (j, i) };
+                let want = hess_map.get(&(r, c)).map_or(0.0, |&k| acc[k]);
+                assert!(
+                    (col[i] - want).abs() < 1e-12,
+                    "H[{i},{j}]: directional={:.6e} accumulated={want:.6e}",
+                    col[i]
+                );
+                compared += 1;
+            }
+        }
+        // §6: prove the probe fired. A tape whose sparsity came back empty
+        // would sail through the loop above comparing 0.0 against 0.0.
+        assert_eq!(compared, 4, "expected a full 2x2 comparison");
+        assert!(
+            acc.iter().any(|v| v.abs() > 1e-12),
+            "every accumulated Hessian entry was zero — the arms under test never ran"
+        );
+    }
+
+    #[test]
+    fn fused_entropy_ops_reach_derivatives_the_chain_rule_cannot() {
+        // The reason these ops exist. `(a·ln a)'' = 1/a` is finite for every
+        // positive a down to 1e-308, but EVERY decomposition of it routes
+        // through `ln''(a) = -1/a²`, which leaves f64 range below a ≈ 1e-154.
+        // The composite is in range while the factor it is built from is not,
+        // so this is a structural limit of the chain rule, not a sloppy rule.
+        let a = 1e-299_f64;
+        let want = 1.0 / a; // 1e299 — an ordinary number.
+        assert!(want.is_finite(), "test premise: 1/a must be representable");
+
+        let (fused, _, _) = hess2(&unary(UnaryOp::XLogX, var(0)), &[a, 0.0]);
+        assert!(
+            (fused - want).abs() <= 1e-12 * want,
+            "xlogx''({a:e}): got {fused:e}, want {want:e}"
+        );
+
+        // The control: the same function written as `a * log(a)`. Asserting it
+        // is BROKEN is what proves the test is in the regime the fusion exists
+        // for — without this, a passing `fused` assertion could just mean the
+        // point was never extreme enough to matter.
+        let (decomposed, _, _) = hess2(&mul(var(0), unary(UnaryOp::Log, var(0))), &[a, 0.0]);
+        assert!(
+            !decomposed.is_finite(),
+            "test premise: a*log(a) is supposed to lose this second derivative, \
+             but it returned {decomposed:e} — if the Log/Mul arms now reach it, \
+             re-derive whether the fused op is still needed"
+        );
+
+        // Same story for centropy's ∂²/∂a², which is also 1/a.
+        let (fused_aa, _, _) = hess2(&centropy_expr(var(0), var(1)), &[a, 1.0]);
+        assert!(
+            (fused_aa - want).abs() <= 1e-12 * want,
+            "centropy ∂²/∂a² at a={a:e}: got {fused_aa:e}, want {want:e}"
+        );
+    }
+
+    #[test]
+    fn centropy_second_derivative_in_b_survives_a_squared_denominator() {
+        // ∂²/∂b² = a/b². At (1e300, 1e200) the answer is 1e-100 while b² is
+        // 1e400 — out of range. Evaluating it as (a/b)/b keeps it.
+        let (a, b) = (1e300_f64, 1e200_f64);
+        let want = (a / b) / b;
+        // The squared form does not blow up loudly — `b*b` is inf and
+        // `a/inf` is a silent 0.0, i.e. a ZEROED second derivative. Assert
+        // that shape explicitly so the premise says what actually goes wrong.
+        assert!(
+            want.is_finite() && want != 0.0 && a / (b * b) == 0.0,
+            "test premise: a/b² representable ({want:e}) but a/(b*b) collapses"
+        );
+        let (_, _, h11) = hess2(&centropy_expr(var(0), var(1)), &[a, b]);
+        assert!(
+            (h11 - want).abs() <= 1e-12 * want,
+            "centropy ∂²/∂b² at ({a:e}, {b:e}): got {h11:e}, want {want:e}"
+        );
+    }
+
+    #[test]
+    fn centropy_value_survives_an_out_of_range_ratio_and_the_zero_limit() {
+        let t = |e: &Expr, x: &[f64]| Tape::build(e).eval(x);
+        let ce = centropy_expr(var(0), var(1));
+
+        // a/b = 1e600 overflows, but ln of it is an ordinary 1381.55, so the
+        // product is a perfectly representable 1.38e303. `ln_ratio` falls back
+        // to ln(a) - ln(b) exactly here.
+        let want = 1e300 * (1e300_f64.ln() - 1e-300_f64.ln());
+        let got = t(&ce, &[1e300, 1e-300]);
+        assert!(
+            got.is_finite() && (got - want).abs() <= 1e-12 * want,
+            "centropy(1e300, 1e-300): got {got:e}, want {want:e}"
+        );
+        // The naive form is what this replaces.
+        assert!(
+            !t(
+                &mul(var(0), unary(UnaryOp::Log, div(var(0), var(1)))),
+                &[1e300, 1e-300]
+            )
+            .is_finite(),
+            "test premise: a*log(a/b) is supposed to overflow here"
+        );
+
+        // Near a = b, where forming the ratio first throws away the digits
+        // that carry the answer. At a = 1e10+1, b = 1e10 the quotient rounds
+        // to 1 + 1e-10 with ~1e-16 absolute slop — 1e-6 RELATIVE slop in the
+        // part that survives ln — while (a - b) is exactly 1.0 by Sterbenz.
+        // Taylor: a·ln(1+1e-10) = 1 + 5e-11 - 1.7e-21, so 1.00000000005 is
+        // the correctly-rounded f64 (the neglected term is ~1e-5 ulp).
+        let (a, b) = (1e10 + 1.0, 1e10_f64);
+        assert_eq!(a - b, 1.0, "test premise: a - b must be exact here");
+        let got = t(&ce, &[a, b]);
+        assert!(
+            (got - 1.00000000005).abs() <= 2.3e-16,
+            "centropy(1e10+1, 1e10): got {got:.17e}, want 1.00000000005"
+        );
+        // The naive form is off by 8e-8 here — eight digits, not one ulp.
+        let naive = t(
+            &mul(var(0), unary(UnaryOp::Log, div(var(0), var(1)))),
+            &[a, b],
+        );
+        assert!(
+            (naive - 1.00000000005).abs() > 1e-9,
+            "test premise: a*log(a/b) is supposed to lose digits here, got {naive:.17e}"
+        );
+
+        // 0·ln(0/b) = 0 by the limit, not NaN.
+        assert_eq!(t(&ce, &[0.0, 2.0]), 0.0);
+        assert_eq!(t(&unary(UnaryOp::XLogX, var(0)), &[0.0]), 0.0);
     }
 
     #[test]
