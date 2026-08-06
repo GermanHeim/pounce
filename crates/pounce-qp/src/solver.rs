@@ -17,10 +17,11 @@ use crate::kkt::{
     is_pure_equality_no_bounds, rhs_equality_only,
 };
 use crate::options::{AntiCyclingChoice, QpOptions};
-use crate::problem::{QpProblem, QpSolution, QpStats, QpWarmStart};
+use crate::problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::{Index, Number};
+use pounce_linalg::triplet::{SymTMatrix, SymTMatrixSpace};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::status::ESymSolverStatus;
 
@@ -1608,22 +1609,41 @@ impl ParametricActiveSetSolver {
         // combination of the kept ones, so at the constraint-consistent
         // cold point it is automatically satisfied — the feasible set is
         // unchanged, only the rank deficiency is removed.
-        let (x, kept_eq): (Vec<Number>, Vec<usize>) =
-            match self.factor_pinned_primal(qp, &eq_rows, &eq_targets, &[], &[], opts) {
-                Ok(x) => (x, eq_rows.clone()),
+        // The prune is a *loop*, not a single retry. `independent_active_subset`
+        // is a numerical rank test, and its answer depends on the shift the
+        // factorization settled at — so a subset it called independent at one δ
+        // can be rejected at the next. Pruning 4 equality rows to 2 and
+        // factoring those 2 hit exactly that: the retry's own masked-deficiency
+        // guard found only 1 of them independent, and the single-shot `?`
+        // turned a solvable QP into a hard `LinearSolverFailure` for the user.
+        //
+        // Iterate while the subset keeps shrinking (so termination is
+        // guaranteed — it is a strictly decreasing set), and if it still will
+        // not factor, return `Ok(None)`. That is this function's existing
+        // "fall through to elastic mode" signal, and elastic is precisely the
+        // general recovery for a cold start that cannot be formed. An `Err`
+        // here is the one outcome that helps nobody: the caller has a
+        // perfectly good next thing to try.
+        let mut rows: Vec<usize> = eq_rows.clone();
+        let mut targets: Vec<Number> = eq_targets.clone();
+        let (x, kept_eq): (Vec<Number>, Vec<usize>) = loop {
+            match self.factor_pinned_primal(qp, &rows, &targets, &[], &[], opts) {
+                Ok(x) => break (x, rows),
                 Err(e) if e.is_recoverable_factorization_failure() => {
-                    let (kept, _) = independent_active_subset(&mut self.linsol, qp, &eq_rows, &[]);
-                    if kept.len() == eq_rows.len() {
-                        // Full row rank already — the failure is not a
-                        // rank deficiency this guard can repair.
-                        return Err(e);
+                    let (kept, _) = independent_active_subset(&mut self.linsol, qp, &rows, &[]);
+                    if kept.len() >= rows.len() {
+                        // Not shrinking: either genuinely full rank (so the
+                        // failure is something this guard cannot repair) or the
+                        // rank test disagrees with the factorization. Either
+                        // way, hand it to elastic rather than to the user.
+                        return Ok(None);
                     }
-                    let kept_targets: Vec<Number> = kept.iter().map(|&r| qp.bl[r]).collect();
-                    let x = self.factor_pinned_primal(qp, &kept, &kept_targets, &[], &[], opts)?;
-                    (x, kept)
+                    targets = kept.iter().map(|&r| qp.bl[r]).collect();
+                    rows = kept;
                 }
                 Err(e) => return Err(e),
-            };
+            }
+        };
         *n_refactor += 1;
 
         // Row feasibility check — any violation routes the caller to
@@ -1720,6 +1740,60 @@ impl ParametricActiveSetSolver {
         Ok(Some((x, working)))
     }
 
+    /// Feasibility audit (M5) + elastic repair, applied to whatever a
+    /// solve path produced.
+    ///
+    /// A solve that converged to a constraint-violating point and labelled
+    /// it `Optimal` is a wrong answer, however it got there. Two routes
+    /// reach that state: the warm-start inner loop steps with a zero-RHS
+    /// active-set system, so caller-marked-active residuals are frozen and
+    /// an `Inactive` equality can never enter the working set; and the
+    /// cold fast paths never run that loop at all, so an inconsistent
+    /// equality system passes straight through them.
+    ///
+    /// On violation, recover through elastic mode. `solve_elastic`
+    /// recurses through `solve_general` / `solve_general_schur` *directly*,
+    /// bypassing `solve`, and seeds a slack-feasible augmented problem —
+    /// so the recursive solve is never re-audited and the recovery cannot
+    /// loop.
+    fn audit_and_repair(
+        &mut self,
+        qp: &QpProblem,
+        sol: QpSolution,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        if !matches!(sol.status, QpStatus::Optimal) || point_is_feasible(qp, &sol.x, opts.feas_tol)
+        {
+            return Ok(sol);
+        }
+        // Never-regress on the recovery. Elastic phase-1 is a *repair* for a
+        // solve that converged to a constraint-violating point, but it is not
+        // guaranteed to land somewhere better, and when it does not the
+        // substitution is destructive: on Maros-Meszaros `QADLITTL` (optimum
+        // 480319) the audited iterate sits at 500918 with a small violation,
+        // and the elastic result that replaced it was 8.07 — the elastic seed
+        // (origin projected into the box), essentially no answer at all. The
+        // symptom from outside was a *larger* `max_iter` producing a far worse
+        // objective, because only the bigger budget got far enough to reach
+        // `Optimal` and trip this audit.
+        //
+        // Keep whichever point is less infeasible. Elastic still wins whenever
+        // it does its job — driving the slacks out — which is the case this
+        // path exists for.
+        let before = max_violation(qp, &sol.x);
+        let repaired = self.solve_elastic(qp, opts)?;
+        let after = max_violation(qp, &repaired.x);
+        if after <= before {
+            return Ok(repaired);
+        }
+        // Repair regressed feasibility: keep the audited point, but do not
+        // dress it up as `Optimal` — it violates constraints, which is exactly
+        // what the audit established.
+        let mut kept = sol;
+        kept.status = QpStatus::MaxIter;
+        Ok(kept)
+    }
+
     /// l1-elastic mode — §4.3. Builds an
     /// [`ElasticReformulation`], seeds the augmented problem so
     /// the elastic slacks absorb any infeasibility at the initial
@@ -1771,6 +1845,15 @@ impl ParametricActiveSetSolver {
         // rule is provably finite; use it for the recovery solve.
         let mut opts_p1 = opts.clone();
         opts_p1.anti_cycling = AntiCyclingChoice::Bland;
+        // The caller's iteration budget is left alone. An earlier draft
+        // raised it here, on the theory that passes exiting at `MaxIter`
+        // near-feasible were short of iterations — the fuzz says
+        // otherwise: dropping the bump changes neither the false-
+        // certificate count (0) nor the certification rate (108/143). The
+        // γ schedule below is what does the work. Overriding the budget
+        // was also actively wrong: `sqp_qp_max_iter = 3` asks for a
+        // bounded solve, and a phase-1 quietly spending 2000 is not that
+        // (`sqp_qp_options_reach_the_active_set_engine` caught it).
         let sol_aug = if opts_p1.use_schur_updates {
             self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)?
         } else {
@@ -1844,19 +1927,62 @@ impl ParametricActiveSetSolver {
         // feasible optimum, return it — this turns the #282 family from a
         // false `Infeasible` into the correct `x* = 0` solution.
         //
-        // Candidate seeds, cheapest-first: the recovered `x`, and the
+        // Candidate seeds, cheapest-first: the recovered `x`, the
         // elastic seed `x_orig` (0 projected into the box — feasible
-        // whenever the origin is, which is the exact #282 optimum).
-        let candidates = [x.clone(), x_orig.clone()];
+        // whenever the origin is, which is the exact #282 optimum), and
+        // — last, because it costs a third solve — the minimum-norm
+        // feasible point from a CONVEX feasibility-only phase-1.
+        //
+        // That third seed is what makes the certificate below sound on
+        // a nonconvex QP. The elastic solve above minimizes
+        // `½pᵀHp + gᵀp + γ‖v‖₁`; when `H` is indefinite — which is the
+        // default for the SQP's step QP, whose `H` is the exact ∇²L —
+        // an active-set method returns a *local* KKT point, so its
+        // residual slacks are not the global minimal-l1 violation and
+        // prove nothing. Worse, γ = 1e6 turns a slack of ~1e-7 into
+        // ~0.1 of apparent objective, so the solve settles at a far box
+        // vertex carrying a cancelling `(v_l, v_u)` pair rather than at
+        // the small feasible step. HS071 warm-started near its own
+        // solution hit exactly this: the recovered point missed
+        // `feas_tol` by a factor of two (1.95e-9 against 1e-9) on a QP
+        // with points feasible to slack 1.66, and the SQP reported
+        // `Infeasible_Problem_Detected` at iteration 0 (gh#484 follow-up).
+        let mut candidates = vec![x.clone(), x_orig.clone()];
+        // The convex phase-1's point earns a place in the seed list
+        // whether or not it cleared `feas_tol`: it is the closest thing
+        // to a feasible point anyone here has, and phase-2 warm-started
+        // from it routinely polishes the last few ulps that the proximal
+        // term's bias left behind. Only `witness` — its *verified*
+        // feasibility — is allowed to speak to the certificate.
+        let (p1_point, p1_verdict) = self.convex_feasibility_seed(qp, opts);
+        if let Some(seed) = p1_point {
+            candidates.push(seed);
+        }
+        let mut have_feasible_witness = p1_verdict == Some(true);
         for seed in candidates {
             if !self.recovery_seed_usable(qp, &seed) {
                 continue;
             }
+            if self.original_qp_feasible(qp, &seed, opts.feas_tol) {
+                have_feasible_witness = true;
+            }
+            // Classify the seed rather than handing the inner solve a
+            // cold working set. A cold set marks every row `Inactive`,
+            // *including equalities* — and the warm inner loop steps
+            // with a zero-RHS active-set system, so an equality left
+            // Inactive can never enter the working set and is simply
+            // never enforced. That is the same M5 failure the `solve`
+            // audit exists to catch, and seeding it here made this
+            // recovery useless on any QP with an equality row: phase-2
+            // reliably converged to `Optimal` at a point violating the
+            // equality (by 7.8 on HS071's step QP, against a seed that
+            // satisfied it to 1e-12), failed the feasibility check
+            // below, and fell through to the certificate.
             let ws_rec = QpWarmStart {
-                x: seed,
+                x: seed.clone(),
                 lambda_g: vec![0.0; m],
                 lambda_x: vec![0.0; n],
-                working: WorkingSet::cold(n, m),
+                working: self.working_set_at(qp, &seed, opts.feas_tol),
             };
             // A recovery re-solve that itself fails (a warm-started active-
             // set solve on this degenerate geometry can hit a non-recoverable
@@ -1884,15 +2010,33 @@ impl ParametricActiveSetSolver {
             }
         }
 
-        // Recovery found no feasible point. Only now may we speak to
-        // infeasibility — and only when phase-1 actually CONVERGED to its
-        // minimal-l1 optimum (a genuine certificate). If phase-1 itself
-        // stalled (MaxIter / numerical breakdown) we have no certificate;
-        // report that honest, non-committal status instead of asserting a
-        // confident `Infeasible` we cannot back up.
+        // Recovery found no feasible *optimum*. Only now may we speak to
+        // infeasibility, and only when both premises of the certificate
+        // hold:
+        //
+        // 1. Phase-1 actually CONVERGED to its minimal-l1 optimum. If it
+        //    stalled (MaxIter / numerical breakdown) we have no
+        //    certificate; report that honest, non-committal status
+        //    instead of asserting a confident `Infeasible` we cannot
+        //    back up.
+        // 2. No seed above was itself feasible for the original rows.
+        //    Holding a feasible point while announcing infeasibility is
+        //    a contradiction in terms — phase-2 failing to *optimize*
+        //    from it says nothing about feasibility. Downgrade to the
+        //    same non-committal status rather than certify against a
+        //    witness we are carrying.
         let obj = quad_objective(qp, &x);
         let status = match sol_aug.status {
-            QpStatus::Optimal => QpStatus::Infeasible,
+            // `p1_verdict == Some(false)` is the only thing here that can
+            // carry an infeasibility claim: a *convex* phase-1 that
+            // converged to a minimal infeasibility real on this data's
+            // scale. The nonconvex elastic solve above cannot — its
+            // residual slacks are a local artefact — and neither can
+            // "phase-2 failed to improve", which is ignorance.
+            QpStatus::Optimal if p1_verdict == Some(false) && !have_feasible_witness => {
+                QpStatus::Infeasible
+            }
+            QpStatus::Optimal => QpStatus::MaxIter,
             other => other,
         };
 
@@ -1917,6 +2061,373 @@ impl ParametricActiveSetSolver {
             // witness and must not claim unboundedness.
             unbounded_ray: None,
         })
+    }
+
+    /// Working set describing which rows and bounds `x` sits on:
+    /// equality rows are unconditionally `Equality`, and any inequality
+    /// row or variable bound within `feas_tol` of its boundary value is
+    /// snapped to the side it touches.
+    ///
+    /// Mirrors the classification `cold_general_initial` performs on its
+    /// own starting point. Marking equalities matters most: the warm
+    /// inner loop cannot pull an `Inactive` equality into the working
+    /// set, so a warm start that leaves one Inactive is a warm start
+    /// whose equality is unenforced for the whole solve.
+    fn working_set_at(&self, qp: &QpProblem, x: &[Number], feas_tol: Number) -> WorkingSet {
+        let mut working = WorkingSet::cold(qp.n, qp.m);
+        let ax = a_times_x(qp.a, x, qp.m);
+        for (i, c) in working.constraints.iter_mut().enumerate() {
+            if qp.bl[i] == qp.bu[i] {
+                *c = ConsStatus::Equality;
+            } else if qp.bl[i] > NLP_LOWER_BOUND_INF && (ax[i] - qp.bl[i]).abs() <= feas_tol {
+                *c = ConsStatus::AtLower;
+            } else if qp.bu[i] < NLP_UPPER_BOUND_INF && (ax[i] - qp.bu[i]).abs() <= feas_tol {
+                *c = ConsStatus::AtUpper;
+            }
+        }
+        for (i, status) in working.bounds.iter_mut().enumerate() {
+            let l = qp.xl[i];
+            let u = qp.xu[i];
+            let l_finite = l > NLP_LOWER_BOUND_INF;
+            let u_finite = u < NLP_UPPER_BOUND_INF;
+            if l_finite && u_finite && (l - u).abs() <= feas_tol {
+                *status = BoundStatus::Fixed;
+            } else if l_finite && (x[i] - l).abs() <= feas_tol {
+                *status = BoundStatus::AtLower;
+            } else if u_finite && (x[i] - u).abs() <= feas_tol {
+                *status = BoundStatus::AtUpper;
+            }
+        }
+        working
+    }
+
+    /// What the convex feasibility phase-1 was able to establish.
+    ///
+    /// The distinction that matters is between "I found no feasible
+    /// point" and "I proved there is none". Only the latter licenses a
+    /// Farkas certificate, and it takes two things the first does not:
+    /// a *converged* subproblem, and a residual large enough to mean
+    /// something on this data.
+    fn certify_threshold(qp: &QpProblem, feas_tol: Number) -> Number {
+        // Scale-relative. An absolute residual is meaningless without the
+        // magnitudes it came from: 8e-8 is enormous on data of order 1
+        // and pure rounding on data of order 1e6 — and both occur here.
+        let a_inf =
+            qp.a.values()
+                .iter()
+                .map(|v| v.abs())
+                .fold(1.0_f64, f64::max);
+        let b_inf = qp
+            .bl
+            .iter()
+            .chain(qp.bu.iter())
+            .filter(|v| v.abs() < NLP_UPPER_BOUND_INF)
+            .map(|v| v.abs())
+            .fold(1.0_f64, f64::max);
+        let scale = a_inf.max(b_inf);
+        // One part per million of the data scale. Below that, "infeasible"
+        // and "feasible up to roundoff" are not distinguishable, so the
+        // honest verdict is the non-committal one. Genuinely infeasible
+        // problems are not close: their minimal infeasibility sits at the
+        // scale of the right-hand side that created it.
+        (1e-6 * scale).max(feas_tol)
+    }
+
+    /// Largest residual a *feasible* instance can leave behind, given the
+    /// proximal centre `r` and penalty `γ`.
+    ///
+    /// If any feasible `x̂` exists then `(x̂, 0)` is admissible for the
+    /// phase-1 and costs `½‖x̂ − r‖²` with no penalty, so the optimum's
+    /// residual `s*` obeys `γ·s* ≤ ½‖x̂ − r‖²`. Bounding `‖x̂ − r‖` by the
+    /// box gives a number that needs no knowledge of `x̂`:
+    ///
+    /// ```text
+    ///     s* ≤ D² / (2γ),    D² = Σ_j max(|xl_j − r_j|, |xu_j − r_j|)²
+    /// ```
+    ///
+    /// A residual *above* this cannot be penalty bias — no feasible point
+    /// exists that would have produced it — so it certifies infeasibility.
+    /// A residual below it proves nothing either way, which is why the
+    /// caller escalates γ (shrinking this bound) rather than concluding.
+    ///
+    /// A coordinate with an infinite bound has no `D` from the box. Free
+    /// variables are ordinary — an SQP step QP inherits them from every
+    /// unbounded NLP variable — so returning `INFINITY` there would mean
+    /// *never* certifying such a QP infeasible, trading one wrong answer
+    /// for a different one. Those coordinates instead take a surrogate
+    /// from where the solve actually went, `max(|x_j − r_j|, 1)` with
+    /// three orders of headroom. That much is engineering judgment rather
+    /// than a theorem, and it is confined to exactly the coordinates
+    /// where the theorem has nothing to say.
+    fn penalty_bias_bound(qp: &QpProblem, x: &[Number], r: &[Number], gamma: Number) -> Number {
+        if gamma <= 0.0 {
+            return Number::INFINITY;
+        }
+        const FREE_HEADROOM: Number = 1e3;
+        let mut d_sq = 0.0;
+        for j in 0..qp.n {
+            let (l, u) = (qp.xl[j], qp.xu[j]);
+            let d = if l <= NLP_LOWER_BOUND_INF || u >= NLP_UPPER_BOUND_INF {
+                (x[j] - r[j]).abs().max(1.0) * FREE_HEADROOM
+            } else {
+                (l - r[j]).abs().max((u - r[j]).abs())
+            };
+            d_sq += d * d;
+            if !d_sq.is_finite() {
+                return Number::INFINITY;
+            }
+        }
+        d_sq / (2.0 * gamma)
+    }
+
+    /// Best point the *feasibility* question alone can produce, and
+    /// whether it is actually feasible.
+    ///
+    /// Solves a convexified elastic phase-1
+    ///
+    /// ```text
+    ///     min  ½‖x − r‖² + γ·Σ(v_l + v_u)
+    ///     s.t.  bl ≤ A x + v_l − v_u ≤ bu,   xl ≤ x ≤ xu,   v ≥ 0
+    /// ```
+    ///
+    /// — the same elastic reformulation [`Self::solve_elastic`] uses, with
+    /// the caller's objective replaced by a proximal term. That
+    /// substitution is the point: it drops `H` and `g`, so the subproblem
+    /// is strictly convex however indefinite the caller's `H` is, and an
+    /// active-set solve of a strictly convex QP reaches the global
+    /// minimum. Feasibility is a property of `A`, `bl`, `bu` and the box
+    /// alone, so nothing about the question being asked is lost.
+    ///
+    /// # Why γ is escalated
+    ///
+    /// The proximal term is not free: it competes with the penalty. If a
+    /// feasible `x̂` exists then `(x̂, 0)` costs `½‖x̂ − r‖²`, so the
+    /// optimum's residual `s*` obeys `γ·s* ≤ ½‖x̂ − r‖²`, i.e.
+    ///
+    /// ```text
+    ///     s* ≤ ‖x̂ − r‖² / (2γ)
+    /// ```
+    ///
+    /// With `r = 0`, the default `γ = 1e6` and a box of radius ~6, that
+    /// ceiling is ~2e-5 — four orders *above* `feas_tol`. A single solve
+    /// can therefore stop several 1e-6 short of feasible while being the
+    /// exact optimum of what it was asked. Judging that point against
+    /// `feas_tol` and concluding "infeasible" reads a penalty artefact as
+    /// a Farkas certificate, which is the defect this function exists to
+    /// prevent and, at a fixed γ, quietly reproduced.
+    ///
+    /// Re-centring `r` alone does not rescue it. The bound is quadratic
+    /// in `‖x̂ − r‖`, so it collapses only if the iterate stops moving —
+    /// and in the geometry that lands here it does not: successive passes
+    /// travel ~1.5 along a near-feasible manifold, holding `‖x̂ − r‖`
+    /// roughly constant and the residual with it (measured: 3.2e-6 →
+    /// 1.8e-6 → 3.1e-7, linear at best).
+    ///
+    /// What does work is making γ big enough for the bound to bite, and
+    /// the residual itself says how big: a residual `s` at the ceiling
+    /// means `γ` is short by about `s / feas_tol`, so scaling γ by that
+    /// ratio (with margin) drives the next pass under tolerance. From
+    /// `s = 3.2e-6` against `feas_tol = 1e-9` that is a single step.
+    ///
+    /// γ is escalated rather than the proximal term shrunk, though only
+    /// their ratio matters to the bound, because γ is a *linear*
+    /// coefficient: it never enters the KKT factorization, only the
+    /// right-hand side and the optimality test. Shrinking `H` toward zero
+    /// instead would degrade the factorization and hand back the
+    /// degenerate-vertex geometry this whole path exists to escape —
+    /// which is also why `H = I` and not a pure LP.
+    ///
+    /// Returns `(x, verdict)`:
+    ///
+    /// * `Some(true)`  — `x` is feasible for the original rows. A witness;
+    ///   it refutes any infeasibility certificate outright.
+    /// * `Some(false)` — the phase-1 converged *and* its minimal
+    ///   infeasibility is large on this data's scale. That is a real
+    ///   certificate: the subproblem is convex, so its optimum is global.
+    /// * `None`        — nothing was established. Either the phase-1 did
+    ///   not converge, or it did but stopped at a residual too small to
+    ///   distinguish from roundoff. Both are ignorance, not proof.
+    ///
+    /// The point comes back in every case and is worth having even when
+    /// the verdict is `None`: it is the closest thing to a feasible point
+    /// anyone here has, and it makes a good phase-2 seed.
+    fn convex_feasibility_seed(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+    ) -> (Option<Vec<Number>>, Option<bool>) {
+        let n = qp.n;
+        let idx: Vec<Index> = (1..=n as Index).collect();
+        let h_space = SymTMatrixSpace::new(n as Index, idx.clone(), idx);
+        let mut h_id = SymTMatrix::new(h_space);
+        h_id.set_values(&vec![1.0; n]);
+
+        // Proximal centre, starting at 0 projected into the box.
+        let mut r = vec![0.0; n];
+        for (xi, (&l, &u)) in r.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
+            if l > NLP_LOWER_BOUND_INF && *xi < l {
+                *xi = l;
+            }
+            if u < NLP_UPPER_BOUND_INF && *xi > u {
+                *xi = u;
+            }
+        }
+
+        // Bland's rule for the reason the caller uses it: a feasibility
+        // hunt is inherently degenerate, and Bland's is the pivot rule
+        // that provably terminates.
+        let mut opts_p1 = opts.clone();
+        opts_p1.anti_cycling = AntiCyclingChoice::Bland;
+
+        // Four passes: one to measure the residual, one to act on it,
+        // and two of slack for geometries where the first escalation
+        // overshoots into a different active set. The loop exits the
+        // moment a point clears `feas_tol`, and bails when a pass stops
+        // improving — a residual that will not shrink under a γ two
+        // orders larger is not penalty bias, and more passes cannot help.
+        const MAX_PASSES: usize = 4;
+        // γ enters the objective linearly, so a large value costs the
+        // factorization nothing — but it still has to be a subproblem the
+        // active-set solve can finish, and past ~1e10 it increasingly is
+        // not. The cap is that practical ceiling, not an arithmetic one.
+        const GAMMA_MAX: Number = 1e10;
+        let mut gamma = opts.elastic_gamma;
+        let threshold = Self::certify_threshold(qp, opts.feas_tol);
+        // Best pass so far: (point, residual, did-it-converge).
+        let mut best: Option<(Vec<Number>, Number, bool)> = None;
+        for _ in 0..MAX_PASSES {
+            // ½‖x − r‖² = ½xᵀx − rᵀx + const, so g = −r.
+            let g_prox: Vec<Number> = r.iter().map(|v| -v).collect();
+            let qp_feas = QpProblem {
+                n,
+                m: qp.m,
+                h: &h_id,
+                g: &g_prox,
+                a: qp.a,
+                bl: qp.bl,
+                bu: qp.bu,
+                xl: qp.xl,
+                xu: qp.xu,
+                hessian_inertia: HessianInertia::Psd,
+            };
+            let reform = crate::elastic::ElasticReformulation::build(&qp_feas, gamma);
+            let qp_aug = reform.as_qp();
+            let (x_aug, working_aug) = reform.initial_seed(&qp_feas, &r, opts.feas_tol);
+            let ws = QpWarmStart {
+                x: x_aug,
+                lambda_g: vec![0.0; reform.m_aug],
+                lambda_x: vec![0.0; reform.n_aug],
+                working: working_aug,
+            };
+            // Direct inner call, as elsewhere on this path: bypasses the
+            // `solve` feasibility audit so this can never re-enter elastic.
+            let sol = match if opts_p1.use_schur_updates {
+                self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)
+            } else {
+                self.solve_general(&qp_aug, Some(&ws), &opts_p1)
+            } {
+                Ok(sol) => sol,
+                // A phase-1 that errors establishes nothing; keep whatever
+                // earlier passes found and stop. Never let a best-effort
+                // refutation turn into a hard error.
+                Err(_) => break,
+            };
+
+            let x = sol.x[..n].to_vec();
+            if !x.iter().all(|v| v.is_finite()) {
+                break;
+            }
+            let viol = max_violation(qp, &x);
+            let converged = sol.status == QpStatus::Optimal;
+            let improved = best.as_ref().is_none_or(|(_, b, _)| viol < *b);
+            if improved {
+                best = Some((x.clone(), viol, converged));
+            }
+            if self.original_qp_feasible(qp, &x, opts.feas_tol) {
+                return (Some(x), Some(true));
+            }
+            // A converged pass can answer the question outright, but only
+            // once its residual is too big to be penalty bias — and that
+            // is not a guess, it is the bound: with `(x̂, 0)` costing at
+            // most `½‖x̂ − r‖²` and the box bounding `‖x̂ − r‖`, no
+            // feasible instance can leave a residual above
+            // `D²/(2γ)`. Above that (and above the noise floor) the
+            // convex subproblem's optimum *is* the global minimal
+            // infeasibility, so this is a proof.
+            //
+            // Stopping here matters: escalating γ past a solved problem
+            // only makes it harder, and an escalated pass that then runs
+            // out of iterations discards the proof. Without this branch
+            // the fuzz certified 108/143 instead of 127/143. Without the
+            // bias bound in the test, a feasible instance whose bias
+            // (3.2e-6) merely exceeded the noise floor (2.7e-6) was
+            // certified infeasible — the exact defect being fixed.
+            let bias_bound = Self::penalty_bias_bound(qp, &x, &r, gamma);
+            if converged && viol > threshold.max(bias_bound) {
+                return (Some(x), Some(false));
+            }
+            if !improved {
+                break;
+            }
+            // Everything left is the ambiguous band — converged, but at a
+            // residual that could still be penalty bias. Raise γ, and aim
+            // it rather than just cranking it: a bigger γ buys a smaller
+            // bias bound at the cost of a harder subproblem, so overshoot
+            // is not free. Two targets, whichever is larger:
+            //
+            //  * enough to push the *bias bound* an order below this
+            //    residual, `γ ≥ 10·D²/(2s)`, which is what lets the next
+            //    pass certify;
+            //  * enough to push the *residual itself* under `feas_tol`,
+            //    `γ ≈ γ·s/feas_tol`, which is what lets it find a witness.
+            //
+            // Whichever fires, the point is that both are computed from
+            // measured quantities. Jumping straight to the cap instead —
+            // as scaling by `s/feas_tol` alone does on an infeasible
+            // instance, where the residual never drops — leaves γ at 1e14
+            // and the subproblem too hard to converge, which then throws
+            // away the certificate: 107/143 rather than 118/143.
+            //
+            // Only when the pass converged: the bound describes an
+            // optimum, so a residual it explains is one the solver
+            // actually reached. A pass that ran out of iterations has no
+            // such story, and a larger γ makes it harder, not easier.
+            if converged && viol > 0.0 && gamma < GAMMA_MAX {
+                // `bias_bound` scales as 1/γ, so the γ that would put it a
+                // factor of 10 under this residual is `γ·10·bias/viol`.
+                let for_certificate = gamma * 10.0 * bias_bound / viol;
+                let for_witness = gamma * (viol / opts.feas_tol.max(Number::MIN_POSITIVE)) * 10.0;
+                let target = if for_certificate.is_finite() {
+                    for_certificate.min(for_witness)
+                } else {
+                    for_witness
+                };
+                // Written as max-then-min rather than `clamp`: once γ is
+                // within a decade of the cap the "at least ×10" floor
+                // exceeds the ceiling, and `clamp` panics on an inverted
+                // range. (It did — the fuzz caught it on the first run.)
+                gamma = target.max(gamma * 10.0).min(GAMMA_MAX);
+            }
+            r = x;
+        }
+
+        match best {
+            None => (None, None),
+            Some((x, viol, converged)) => {
+                let bias_bound = Self::penalty_bias_bound(qp, &x, &r, gamma);
+                let verdict = if converged && viol > threshold.max(bias_bound) {
+                    // Converged, on a convex subproblem, to a minimal
+                    // infeasibility that is real on this data. A proof.
+                    Some(false)
+                } else {
+                    // Either it never converged, or it stopped at a
+                    // residual indistinguishable from roundoff. Neither
+                    // establishes anything; say so rather than guess.
+                    None
+                };
+                (Some(x), verdict)
+            }
+        }
     }
 
     /// True when `seed` is a sane warm-start point for the phase-2
@@ -3104,49 +3615,27 @@ impl QpSolver for ParametricActiveSetSolver {
             // a slack-feasible augmented problem — so the recursive solve
             // is never re-audited and the recovery cannot loop. Feasible
             // warm/cold results pass untouched.
-            if matches!(sol.status, QpStatus::Optimal)
-                && !point_is_feasible(qp, &sol.x, opts.feas_tol)
-            {
-                // Never-regress on the recovery. Elastic phase-1 is a *repair*
-                // for a solve that converged to a constraint-violating point,
-                // but it is not guaranteed to land somewhere better, and when it
-                // does not the substitution is destructive: on Maros-Meszaros
-                // `QADLITTL` (optimum 480319) the audited iterate sits at
-                // 500918 with a small violation, and the elastic result that
-                // replaced it was 8.07 — the elastic seed (origin projected
-                // into the box), essentially no answer at all. The symptom from
-                // outside was a *larger* `max_iter` producing a far worse
-                // objective, because only the bigger budget got far enough to
-                // reach `Optimal` and trip this audit.
-                //
-                // Keep whichever point is less infeasible. Elastic still wins
-                // whenever it does its job — driving the slacks out — which is
-                // the case this path exists for.
-                let before = max_violation(qp, &sol.x);
-                let repaired = self.solve_elastic(qp, opts)?;
-                let after = max_violation(qp, &repaired.x);
-                if after <= before {
-                    return Ok(repaired);
-                }
-                // Repair regressed feasibility: keep the audited point, but do
-                // not dress it up as `Optimal` — it violates constraints, which
-                // is exactly what the audit established.
-                let mut kept = sol;
-                kept.status = QpStatus::MaxIter;
-                return Ok(kept);
-            }
-            return Ok(sol);
+            return self.audit_and_repair(qp, sol, opts);
         }
 
         // Cold-start fast paths for problems with no general
         // inequalities and no warm-start.
-        if is_pure_equality_no_bounds(qp) {
-            return self.solve_equality_only(qp, opts);
-        }
-        if is_pure_box(qp) {
-            return self.solve_box_constrained(qp, opts);
-        }
-        self.solve_equality_plus_bounds(qp, opts)
+        //
+        // Audited too. These return a point without ever consulting the
+        // active-set loop, so nothing else checks them — and an
+        // inconsistent equality system is exactly what they cannot see:
+        // the smallest possible infeasible QP, `aᵀx = c₁` and `aᵀx = c₂`
+        // with `c₁ ≠ c₂` and a box, is all-equality with bounds, lands in
+        // `solve_equality_plus_bounds`, and came back `Optimal` at a point
+        // violating both rows by 2.9. Every tolerance, every version.
+        let sol = if is_pure_equality_no_bounds(qp) {
+            self.solve_equality_only(qp, opts)?
+        } else if is_pure_box(qp) {
+            self.solve_box_constrained(qp, opts)?
+        } else {
+            self.solve_equality_plus_bounds(qp, opts)?
+        };
+        self.audit_and_repair(qp, sol, opts)
     }
 
     fn solve_parametric(

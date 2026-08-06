@@ -9,6 +9,214 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the C working-set API validated nothing structural, and reported the wrong row order (#484 follow-up, round 4)
+
+- `IpoptSetWarmStartWorkingSet` range-checked its status codes and stopped
+  there. `POUNCE_WS_FIXED_OR_EQ` asserts `x_L == x_U` for a variable, or
+  `g_L == g_U` for a row; `POUNCE_WS_AT_LOWER` / `_AT_UPPER` assert the
+  bound being sat on is finite. Those are claims about the *model*, not
+  guesses about the active set, and the model is right there to check them
+  against. Passing a false one — `FIXED` for a variable whose bounds differ
+  — was accepted, `TRUE` was returned, the solve over-constrained itself,
+  and a **convex** program came back with the wrong optimum. Found by the
+  property-based probe in `adversary/fuzz/`; such codes are now rejected
+  with `FALSE`, which callers already handle.
+- Adding that validation immediately rejected pounce's *own*
+  `IpoptGetWorkingSet` output, which exposed the larger defect underneath:
+  **the statuses were reported in the SQP's internal row order, not the
+  caller's.** The SQP works on a reordered constraint vector — equalities
+  first, inequalities after — and both entry points copied that vector
+  positionally against the caller's indices. On HS071, whose rows are
+  `[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, `IpoptGetWorkingSet` returned
+  `[Equality, AtLower]`: exactly reversed. The documented
+  get → set round-trip was therefore feeding every warm start a working set
+  with its rows swapped. (Silently: a wrong working set is a wrong *hint*,
+  and hints are answer-preserving, so nothing downstream ever complained.)
+- Both entry points now translate between the caller's indexing and the
+  internal one. The permutation is a pure function of the bounds — a row is
+  an equality iff both sides are finite and equal, a variable is dropped iff
+  `x_L == x_U` — so it is reconstructed in the C layer with no plumbing of
+  `BoundClassification` out of `pounce-nlp`. Fixed variables, absent from
+  the internal problem, are reported as `POUNCE_WS_FIXED_OR_EQ`.
+- The GAMS link's state-file warm start (`gams/gams_pounce.c`) goes through
+  these two calls and was reading back mis-ordered statuses; it is fixed by
+  the same change, with no edit on its side.
+- Regression coverage asserts the *values*, not just that the codes are in
+  range: HS071's converged set must read `bounds = [1,0,0,0]`,
+  `constraints = [1,3]`. Confirmed to fail (`[3,1]`) without the change.
+
+### Fixed — `Optimal` at infeasible points, and a hard error, on the QP cold paths (#484 follow-up, round 3)
+
+- Two defects the property-based probe (`adversary/fuzz/`) had flagged as
+  open. Both predate #484 — they reproduce identically on the pre-#484
+  code — and both are now closed, taking the probe to a clean run: **zero
+  invariant violations over 400 generated instances**, against 18 before
+  this series began.
+- **The cold fast paths were never audited.** `solve` runs a feasibility
+  audit (M5) on solves that converge to a constraint-violating point and
+  label it `Optimal`, but the audit guarded only the `solve_general`
+  branch. `solve_equality_only`, `solve_box_constrained` and
+  `solve_equality_plus_bounds` returned straight to the caller. The
+  smallest possible infeasible QP falls in that gap: `aᵀx = c₁` and
+  `aᵀx = c₂` with `c₁ ≠ c₂` is all-equality with a box, so it routes to
+  `solve_equality_plus_bounds` — and came back `Optimal` at a point
+  violating both rows by 2.9, at every tolerance from 1e-9 to 1e-2. The
+  audit is now a helper (`audit_and_repair`) applied to every path.
+- **The rank-deficiency prune was single-shot.** `cold_general_initial`
+  prunes a rank-deficient equality set to an independent subset and
+  retries, but `independent_active_subset` is a *numerical* rank test
+  whose answer depends on the shift the factorization settled at, so the
+  pruned subset can itself be rejected at the next δ. It was: four
+  equality rows pruned to two, and the retry's own masked-deficiency guard
+  then found only one of those two independent. The retry's `?` propagated
+  `LinearSolverFailure("pinned KKT constraint block is rank-deficient …")`
+  to the caller — a hard error on a QP the elastic path handles. The prune
+  now iterates while the subset strictly shrinks (so it terminates), and
+  on persistent failure returns the function's existing "fall through to
+  elastic" signal instead of an error. A caller with a good next thing to
+  try should not be handed a linear-algebra failure.
+- Regression tests use the probe's *exact* instances, not tidied-up
+  equivalents. Hand-built versions of both do not reproduce: the free
+  variables, the indefinite Hessian and (for the rank case) the 1e6 row
+  scaling are all load-bearing, and a uniformly-scaled bounded version with
+  a PSD Hessian passes on the unfixed solver. Both were confirmed to fail
+  without the change.
+
+### Fixed — penalty bias was read as an infeasibility certificate (#484 follow-up, round 2)
+
+- The previous round stopped the l1-elastic path certifying infeasibility
+  off a *nonconvex* phase-1, by adding a convex feasibility phase-1 whose
+  verdict is sound. Property-based probing (`adversary/fuzz/`) showed that
+  fix was incomplete — 6/257 feasible instances were still certified
+  infeasible — and that the reason was a flaw in the new code, not a
+  leftover of the old one.
+- The convex phase-1 minimizes `½‖x − r‖² + γ‖v‖₁`. The proximal term
+  competes with the penalty, so a *feasible* instance still leaves a
+  residual: `(x̂, 0)` costs `½‖x̂ − r‖²`, hence `s* ≤ ‖x̂ − r‖²/(2γ)`. With
+  `γ = 1e6` and an ordinary box that ceiling is ~1e-5 — four orders above
+  `feas_tol`. The phase-1 was converging correctly and stopping a few 1e-6
+  short; the code then judged it against `feas_tol`, found it wanting, and
+  issued the certificate. A penalty artefact was being read as a Farkas
+  proof.
+- The bias is now computed rather than tripped over. `penalty_bias_bound`
+  evaluates `D²/(2γ)` from the box, and a residual may only certify once
+  it exceeds *both* that bound and a scale-relative noise floor
+  (one part per million of `max(‖A‖∞, ‖b‖∞)` — below which "infeasible"
+  and "feasible up to roundoff" are not distinguishable). Where the
+  residual sits under the bound, γ is escalated — aimed at the measured
+  shortfall rather than cranked, since overshoot leaves the subproblem too
+  hard to converge and throws the certificate away — and the phase-1
+  re-solves from the previous iterate.
+- Certifying now also *requires* the convex phase-1 to have converged.
+  Nonconvex residual slacks and "phase-2 failed to improve" are both
+  ignorance, not proof; neither may speak to infeasibility.
+- Free variables are handled explicitly. An unbounded box gives no `D`, and
+  returning infinity there would mean never certifying a QP with a free
+  variable — trading one wrong answer for another. Those coordinates take a
+  surrogate from the distance the solve actually travelled. That much is
+  judgment rather than theorem, and it is confined to the coordinates where
+  the theorem has nothing to say; the fuzz shows the answer is insensitive
+  to it across three orders of magnitude.
+- Measured over 400 generated instances (65% feasible-by-construction with
+  an attached witness, 35% infeasible by exact arithmetic; every instance
+  independently re-decided by `scipy.optimize.linprog`/HiGHS):
+
+  | | before #484 | round 1 | now |
+  |---|---|---|---|
+  | feasible QPs certified infeasible | 14 | 9 | **0** |
+  | genuine infeasibilities certified | 118/143 | 118/143 | 108/143 |
+
+  The 10 lost certifications are the price of demanding a sound proof: they
+  become a non-committal status rather than a confident one. That is the
+  right direction — a false certificate is a wrong answer, a non-committal
+  status is a weaker one — but it is a real cost, and it is not tunable:
+  raising the phase-1 iteration budget 5× recovers one of them at 3× the
+  wall time.
+- Regression test: `penalty_bias_is_not_an_infeasibility_certificate`, built
+  from an instance the probe found, with its feasibility witness checked
+  arithmetically in the test rather than assumed.
+
+### Fixed — active-set SQP declared feasible problems infeasible when started near a solution (#484 follow-up)
+
+- HS071 cold-starts fine from `(1,5,5,1)`, but nudge the start to
+  `x* + 1e-6·e₁` and the SQP died at iteration 0 with
+  `Infeasible_Problem_Detected` — on a problem whose feasible set had
+  not moved. Starting near a solution is the entire premise of warm
+  starting, so this stood directly behind the C-API defect above: fixing
+  the discarded iterate let callers reach the solution's neighbourhood,
+  which is where this waited.
+- The verdict came from the step QP's l1-elastic phase-1 in
+  `pounce_qp::solver::solve_elastic`, and two independent defects had to
+  line up to produce it.
+- **The residual-slack certificate was applied to nonconvex problems.**
+  It is a *global* claim — that the minimal l1 infeasibility is positive
+  — but an active-set solve of a nonconvex elastic problem returns a
+  local KKT point. The SQP's default Hessian is the exact ∇²L, indefinite
+  here (three zeros on its diagonal), and γ = 1e6 amplifies a ~1e-7 slack
+  into ~0.1 of apparent objective, so phase-1 settled at a far box vertex
+  carrying a cancelling `(v_l, v_u)` pair and missed `feas_tol` by a
+  factor of two — 1.95e-9 against 1e-9 — on a QP with points feasible to
+  slack 1.66. Before certifying, `solve_elastic` now runs a
+  feasibility-only phase-1 with the caller's objective replaced by
+  `½‖x‖²`. That subproblem is strictly convex however indefinite `H` is,
+  so its verdict is sound, and feasibility depends only on `A`, the row
+  bounds and the box, so nothing about the question is lost. A feasible
+  point it finds serves as both a phase-2 seed and a witness; the solver
+  no longer announces infeasibility while holding one.
+- **The phase-2 recovery seeded a cold working set.** A cold set marks
+  every row `Inactive`, equalities included, and the warm inner loop
+  cannot pull an Inactive equality into the working set — so the row was
+  never enforced. The recovery that exists to prevent false certificates
+  was therefore inert on any QP with an equality row: it converged to
+  `Optimal` at a point violating HS071's equality by 7.8, failed its own
+  feasibility check, and fell through to the certificate. Recovery seeds
+  are now classified (equalities active, rows and bounds at their
+  boundary snapped) instead of handed a cold set.
+- Genuine infeasibility is still certified — the existing certificate
+  tests are unchanged — and truly infeasible QPs now pay one extra convex
+  phase-1 before the verdict.
+- Regression tests: `crates/pounce-algorithm/tests/sqp_near_solution_start.rs`
+  sweeps 8 perturbation sizes × 4 coordinates around HS071's solution
+  (a single size is not enough — `1e-6` and `1e-3` failed while `1e-8`
+  and `1e-1` happened to survive), and
+  `nonconvex_step_qp_near_nlp_solution_not_false_infeasible` in
+  `pounce-qp` pins the exact step QP with an arithmetically verified
+  feasibility witness.
+
+### Fixed — `IpoptSetWarmStartWorkingSet` discarded the caller's iterate (#484)
+
+- `IpoptSetWarmStartWorkingSet` eagerly built a full `SqpIterates` and
+  hard-coded its primal to `x = 0`. `SqpAlgorithm::optimize_with_warm_start`
+  treats a supplied iterate as *the* starting point — it only consults the
+  NLP's `get_starting_x` on the cold branch — so those zeros silently
+  replaced the `x` buffer passed to `IpoptSolve`. The one call documented as
+  "supply a warm-start working set" was also, invisibly, resetting the
+  iterate to the origin.
+- The effect is not a slower warm start, it is a wrong answer: on any
+  problem whose bounds exclude the origin the warm solve returned
+  `Infeasible_Problem_Detected` at iteration 0 and wrote zeros back into
+  `x`. On HS071 (`1 ≤ x ≤ 5`), warm-starting *at the solution with the
+  exact active set* failed where the same solve without the call converged
+  in one iteration. An all-inactive working set — semantically a cold start
+  — failed identically, so the working set's contents never mattered;
+  making the call at all was the defect.
+- The C layer now stages the working set alone and merges it with the real
+  starting point inside `IpoptSolve`, which is the first moment the iterate
+  is known. This is what `pounce.h` already claimed, so no new symbols and
+  no API change. `IpoptSolveWarmStart`, which delegates to the same path,
+  is fixed with it — as is the native GAMS link's state-file warm start.
+- Initial multipliers now reach the SQP too, under
+  `warm_start_init_point=yes` — upstream Ipopt's contract for `mult_g` /
+  `mult_x_L` / `mult_x_U` being inputs rather than pure outputs. With the
+  option off (the default) they stay strictly outputs, so callers passing
+  uninitialized buffers cannot seed the solver with garbage. The SQP packs
+  them signed as `lambda_x = z_l − z_u`, matching the Python path.
+- Regression tests in `crates/pounce-cinterface/tests/warm_start_iterate.rs`
+  reproduce the reporter's four-case HS071 driver (cold / control / warm /
+  warm-with-inactive-set) and assert the converged iterate, not merely a
+  status code. The Rust and Python APIs were never affected — Rust callers
+  populate `SqpIterates.x` themselves, and the Python path was corrected in
+  gh#57.
 ### Changed — options naming unimplemented features are refused, not ignored (#483 follow-up, continuing #191)
 
 - The option registry is a faithful port of Ipopt's, so an `ipopt.opt`

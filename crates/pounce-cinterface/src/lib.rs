@@ -38,6 +38,7 @@ use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options,
 };
 use pounce_algorithm::intermediate as ip_intermediate;
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -121,6 +122,20 @@ pub struct IpoptProblemInfo {
     /// Used by `GetIpopt{IterCount,SolveTime,...}` accessors. Reset
     /// (cleared) by the next `IpoptSolve` call.
     pub(crate) last_solve: Option<LastSolve>,
+    /// Working set staged by [`IpoptSetWarmStartWorkingSet`], pending
+    /// until the next [`IpoptSolve`].
+    ///
+    /// Only the working set is stored here — deliberately *not* a full
+    /// `SqpIterates`. The primal/dual iterate is not knowable at set
+    /// time; it arrives with the `x` (and, under
+    /// `warm_start_init_point=yes`, `mult_g`/`mult_x_L`/`mult_x_U`)
+    /// buffers passed to `IpoptSolve`. Building the `SqpIterates`
+    /// eagerly here forced the primal to a placeholder — zeros — which
+    /// then *became* the starting iterate, because
+    /// `SqpAlgorithm::optimize_with_warm_start` uses a supplied warm
+    /// iterate instead of querying the NLP for a starting point. The
+    /// merge therefore has to happen inside `IpoptSolve` (gh#484).
+    pub(crate) pending_working_set: Option<pounce_qp::WorkingSet>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -324,6 +339,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             intermediate_cb: None,
             user_scaling: None,
             last_solve: None,
+            pending_working_set: None,
         });
         Box::into_raw(info)
     }
@@ -593,6 +609,47 @@ pub unsafe extern "C" fn IpoptSolve(
             } else {
                 Vec::new()
             };
+
+            // Merge any working set staged by
+            // `IpoptSetWarmStartWorkingSet` with the iterate the caller
+            // actually supplied. This is the point at which the primal
+            // starting point is known, so it is the only correct place
+            // to build the `SqpIterates` (gh#484).
+            //
+            // Duals follow upstream Ipopt's `IpoptSolve` contract:
+            // `mult_g` / `mult_x_L` / `mult_x_U` are inputs only when
+            // `warm_start_init_point=yes`, and out-only otherwise. A
+            // caller who has not opted in may pass uninitialized
+            // buffers, so reading them unconditionally would seed the
+            // SQP with garbage multipliers.
+            if let Some(working) = info.pending_working_set.take() {
+                let seed_duals = matches!(
+                    info.app
+                        .options()
+                        .get_bool_value("warm_start_init_point", ""),
+                    Ok((true, true))
+                );
+                let read_in = |p: *const Number, len: usize| -> Vec<Number> {
+                    if seed_duals && !p.is_null() && len > 0 {
+                        std::slice::from_raw_parts(p, len).to_vec()
+                    } else {
+                        vec![0.0; len]
+                    }
+                };
+                let lambda_g = read_in(mult_g as *const Number, m_us);
+                let z_l = read_in(mult_x_L as *const Number, n_us);
+                let z_u = read_in(mult_x_U as *const Number, n_us);
+                // SQP packs the bound multipliers signed, as
+                // `lambda_x = z_l − z_u` (see `sqp::warm_start`).
+                let lambda_x = z_l.iter().zip(&z_u).map(|(l, u)| l - u).collect();
+                info.app
+                    .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
+                        x: initial_x.clone(),
+                        lambda_g,
+                        lambda_x,
+                        working: Some(working),
+                    });
+            }
 
             let bridge = Rc::new(RefCell::new(CCallbackTnlp {
                 n: info.n,
@@ -1087,6 +1144,39 @@ fn int_to_cons_status(v: c_int) -> Option<pounce_qp::ConsStatus> {
     }
 }
 
+/// Internal → user row map for the SQP's constraint vector.
+///
+/// The SQP works on a *reordered* constraint vector: equalities first,
+/// inequalities after, each in ascending original index. Its working set
+/// is in that order, and both C entry points copied it positionally
+/// against the caller's row indices — so on HS071, whose rows are
+/// `[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, `IpoptGetWorkingSet` reported
+/// `[Equality, AtLower]`: exactly reversed. A caller feeding that back
+/// through `IpoptSetWarmStartWorkingSet`, which is the documented
+/// round-trip, warm-started with the statuses swapped.
+///
+/// The split is a pure function of the bounds — a row is an equality iff
+/// both sides are finite and equal — so the map is reconstructible here,
+/// with no need to plumb `BoundClassification` out of `pounce-nlp`.
+/// Mirrors `tnlp_adapter::classify_bounds`, sentinel test included.
+fn internal_to_user_rows(g_l: &[Number], g_u: &[Number]) -> Vec<usize> {
+    let m = g_l.len();
+    let is_eq =
+        |i: usize| g_l[i] > NLP_LOWER_BOUND_INF && g_u[i] < NLP_UPPER_BOUND_INF && g_l[i] == g_u[i];
+    let mut map: Vec<usize> = (0..m).filter(|&i| is_eq(i)).collect();
+    map.extend((0..m).filter(|&i| !is_eq(i)));
+    map
+}
+
+/// Internal → user variable map for the SQP's bound vector.
+///
+/// Fixed variables (`x_l == x_u`) are removed from the internal problem
+/// altogether, so the working set's bound vector is indexed by *non-fixed*
+/// position. Same reconstruction argument as `internal_to_user_rows`.
+fn internal_to_user_vars(x_l: &[Number], x_u: &[Number]) -> Vec<usize> {
+    (0..x_l.len()).filter(|&i| x_l[i] != x_u[i]).collect()
+}
+
 /// Retrieve the working set produced by the most recent SQP solve
 /// (`algorithm = active-set-sqp`). Buffer sizes are `n` for
 /// `bound_status_out` and `m` for `cons_status_out`. Pass `NULL`
@@ -1117,14 +1207,28 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
             Some(w) => w,
             None => return FALSE,
         };
+        // Translate out of the SQP's equalities-first ordering, back into
+        // the caller's row / variable indices.
+        let row_map = internal_to_user_rows(&info.g_l, &info.g_u);
+        let var_map = internal_to_user_vars(&info.x_l, &info.x_u);
+        if ws.constraints.len() != row_map.len() || ws.bounds.len() != var_map.len() {
+            // The stored set does not match this problem's shape. Report
+            // nothing rather than something mis-indexed.
+            return FALSE;
+        }
         if !bound_status_out.is_null() {
-            for (i, &s) in ws.bounds.iter().enumerate() {
-                *bound_status_out.add(i) = bound_status_to_int(s);
+            // A fixed variable is absent from the internal problem and so
+            // has no stored status. `Fixed` is what it is.
+            for i in 0..info.x_l.len() {
+                *bound_status_out.add(i) = POUNCE_WS_FIXED_OR_EQ;
+            }
+            for (internal, &user) in var_map.iter().enumerate() {
+                *bound_status_out.add(user) = bound_status_to_int(ws.bounds[internal]);
             }
         }
         if !cons_status_out.is_null() {
-            for (i, &s) in ws.constraints.iter().enumerate() {
-                *cons_status_out.add(i) = cons_status_to_int(s);
+            for (internal, &user) in row_map.iter().enumerate() {
+                *cons_status_out.add(user) = cons_status_to_int(ws.constraints[internal]);
             }
         }
         TRUE
@@ -1162,13 +1266,56 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
         let info = &mut *ipopt_problem;
         let n = info.n.max(0) as usize;
         let m = info.m.max(0) as usize;
-        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; n];
+        // The caller indexes by *their* rows and variables; the SQP works
+        // on the reordered, fixed-variables-removed vectors. Translate on
+        // the way in, mirroring `IpoptGetWorkingSet` on the way out, so
+        // the documented get/set round-trip is actually a round-trip.
+        let row_map = internal_to_user_rows(&info.g_l, &info.g_u);
+        let var_map = internal_to_user_vars(&info.x_l, &info.x_u);
+        // Validation is not just a range check. A status code says
+        // where the point sits relative to a bound — but `Fixed` /
+        // `Equality`, and `AtLower` / `AtUpper` against an infinite
+        // side, additionally assert something about the *problem*:
+        // that a variable has `x_l == x_u`, that a row has
+        // `b_l == b_u`, that the bound being sat on exists at all.
+        // Those are not guesses about the active set, they are claims
+        // about the model, and the model is right here to check them
+        // against.
+        //
+        // Accepting them unchecked converted a caller's mistake into a
+        // silently wrong answer: `POUNCE_WS_FIXED_OR_EQ` on a variable
+        // whose bounds differ pinned it, the solve over-constrained
+        // itself, and a *convex* program came back with the wrong
+        // optimum — the function having returned TRUE. Rejecting is
+        // strictly better: the caller already handles FALSE, and this
+        // function already returns it for an out-of-range code, so
+        // TRUE reasonably reads as "your working set was accepted".
+        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; var_map.len()];
         if !bound_status_in.is_null() {
+            // Validate every entry the caller supplied, including those for
+            // fixed variables that the internal problem drops: a wrong
+            // claim is worth rejecting whether or not it would be used.
             for i in 0..n {
                 let v = *bound_status_in.add(i);
-                match int_to_bound_status(v) {
-                    Some(s) => bounds[i] = s,
-                    None => return FALSE,
+                let Some(s) = int_to_bound_status(v) else {
+                    return FALSE;
+                };
+                let lo_finite = info.x_l[i] > NLP_LOWER_BOUND_INF;
+                let hi_finite = info.x_u[i] < NLP_UPPER_BOUND_INF;
+                let consistent = match s {
+                    pounce_qp::BoundStatus::Fixed => info.x_l[i] == info.x_u[i],
+                    pounce_qp::BoundStatus::AtLower => lo_finite,
+                    pounce_qp::BoundStatus::AtUpper => hi_finite,
+                    pounce_qp::BoundStatus::Inactive => true,
+                };
+                if !consistent {
+                    return FALSE;
+                }
+            }
+            for (internal, &user) in var_map.iter().enumerate() {
+                // Already range-checked above.
+                if let Some(s) = int_to_bound_status(*bound_status_in.add(user)) {
+                    bounds[internal] = s;
                 }
             }
         }
@@ -1176,29 +1323,44 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
         if !cons_status_in.is_null() {
             for i in 0..m {
                 let v = *cons_status_in.add(i);
-                match int_to_cons_status(v) {
-                    Some(s) => constraints[i] = s,
-                    None => return FALSE,
+                let Some(s) = int_to_cons_status(v) else {
+                    return FALSE;
+                };
+                let lo_finite = info.g_l[i] > NLP_LOWER_BOUND_INF;
+                let hi_finite = info.g_u[i] < NLP_UPPER_BOUND_INF;
+                let consistent = match s {
+                    pounce_qp::ConsStatus::Equality => {
+                        lo_finite && hi_finite && info.g_l[i] == info.g_u[i]
+                    }
+                    pounce_qp::ConsStatus::AtLower => lo_finite,
+                    pounce_qp::ConsStatus::AtUpper => hi_finite,
+                    pounce_qp::ConsStatus::Inactive => true,
+                };
+                if !consistent {
+                    return FALSE;
+                }
+            }
+            for (internal, &user) in row_map.iter().enumerate() {
+                if let Some(s) = int_to_cons_status(*cons_status_in.add(user)) {
+                    constraints[internal] = s;
                 }
             }
         }
-        // We do *not* know the primal/dual iterate here — the caller
-        // either left them at default zeros (cold) or already wrote
-        // them into `x` before calling `IpoptSolve`. We seed
-        // `SqpIterates` with zeros; `IpoptSolve` will use its `x`
-        // argument as the starting point (the SqpProblemSpec adapter
-        // wraps `IpoptNlp::get_starting_x`, which the C path
-        // initializes from the user-supplied `x` buffer).
-        info.app
-            .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
-                x: vec![0.0; n],
-                lambda_g: vec![0.0; m],
-                lambda_x: vec![0.0; n],
-                working: Some(pounce_qp::WorkingSet {
-                    bounds,
-                    constraints,
-                }),
-            });
+        // Stage the working set only. We do *not* know the
+        // primal/dual iterate here, and we must not invent one:
+        // `SqpAlgorithm::optimize_with_warm_start` treats a supplied
+        // `SqpIterates` as *the* starting iterate and never consults
+        // `get_starting_x` on that branch, so a placeholder `x` would
+        // silently override the `x` buffer the caller hands to
+        // `IpoptSolve`. Zeros here restarted every warm solve from
+        // the origin — outside the bounds on any problem with
+        // `x_l > 0` — and returned `Infeasible_Problem_Detected` at
+        // iteration 0 (gh#484). `IpoptSolve` merges this working set
+        // with the real starting point instead.
+        info.pending_working_set = Some(pounce_qp::WorkingSet {
+            bounds,
+            constraints,
+        });
         TRUE
     }
 }
@@ -1215,6 +1377,7 @@ pub unsafe extern "C" fn IpoptClearWarmStartWorkingSet(ipopt_problem: IpoptProbl
         if ipopt_problem.is_null() {
             return FALSE;
         }
+        (*ipopt_problem).pending_working_set = None;
         (*ipopt_problem).app.clear_sqp_warm_start();
         TRUE
     }

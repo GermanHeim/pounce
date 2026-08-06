@@ -2275,3 +2275,492 @@ fn collapsed_cone_no_interior_not_false_infeasible() {
         "G·x* must be ≤ 0, max row = {max_viol:.3e}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Nonconvex step QP falsely certified infeasible (gh#484 follow-up).
+//
+// This is HS071's SQP step QP, linearized at `x* + 1e-3·e₁` — one
+// millimetre from the NLP's own solution — with the exact ∇²L as the
+// Hessian, which is what `SqpHessianSource::Exact` (the default) hands
+// the QP solver. `H` is indefinite: three zeros on its diagonal.
+//
+// The QP is emphatically feasible. `p = (0, -0.0300768, 0, 0.1)` sits
+// well inside the box, satisfies the equality row exactly, and clears
+// the inequality row with a slack of 1.66. Yet `solve_elastic` returned
+// `QpStatus::Infeasible`, and the SQP driver turned that into
+// `Infeasible_Problem_Detected` at iteration 0.
+//
+// Two premises of the residual-slack certificate failed at once:
+//
+//  * It is a *global* claim — "the minimal l1 infeasibility is
+//    positive" — but an active-set solve of a NONCONVEX elastic problem
+//    stops at a local KKT point. With γ = 1e6 turning a ~1e-7 slack into
+//    ~0.1 of apparent objective, phase-1 settled at a far box vertex
+//    carrying a cancelling `(v_l, v_u)` pair, missing `feas_tol` by a
+//    factor of two: 1.95e-9 against 1e-9.
+//  * The phase-2 recovery that exists to catch exactly this seeded a
+//    COLD working set, marking the equality row `Inactive`. The warm
+//    inner loop cannot pull an Inactive equality in, so the row went
+//    unenforced and recovery "converged" to `Optimal` while violating
+//    it by 7.8 — never rescuing anything on any QP with an equality.
+#[rustfmt::skip]
+const HS071_STEP_QP_G: [f64; 4] = [
+    14.573655005576034, 1.3794082930783524, 2.3794082930783524, 9.565149621547352,
+];
+#[rustfmt::skip]
+const HS071_STEP_QP_A: [f64; 8] = [
+    25.005270924065304, 5.270925976501263, 6.543912442918067, 18.127534138759138,
+    2.0,                9.48799927585525,  7.642299967239455,  2.758816586156705,
+];
+/// Lower triangle in `(0,0), (1,0), (1,1), (2,0), …` order.
+#[rustfmt::skip]
+const HS071_STEP_QP_H: [f64; 10] = [
+    2.758816586156705,
+    1.3794082930783524, 0.0,
+    1.3794082930783524, 0.0, 0.0,
+    10.565149621547352, 1.0, 1.0, 0.0,
+];
+
+#[test]
+fn nonconvex_step_qp_near_nlp_solution_not_false_infeasible() {
+    let n = 4usize;
+    let m = 2usize;
+
+    let mut h_irows = Vec::new();
+    let mut h_jcols = Vec::new();
+    for i in 0..n {
+        for j in 0..=i {
+            h_irows.push(i as i32 + 1);
+            h_jcols.push(j as i32 + 1);
+        }
+    }
+    let h_space = SymTMatrixSpace::new(n as i32, h_irows, h_jcols);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&HS071_STEP_QP_H);
+
+    let mut a_irows = Vec::new();
+    let mut a_jcols = Vec::new();
+    for i in 0..m {
+        for j in 0..n {
+            a_irows.push(i as i32 + 1);
+            a_jcols.push(j as i32 + 1);
+        }
+    }
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, a_irows, a_jcols);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&HS071_STEP_QP_A);
+
+    let g = HS071_STEP_QP_G.to_vec();
+    // Row 0: one-sided inequality. Row 1: equality (bl == bu).
+    let bl = vec![-0.005270924065303717, -0.00948700098781785];
+    let bu = vec![NLP_UPPER_BOUND_INF, -0.00948700098781785];
+    let xl = vec![
+        0.0,
+        -3.743999637927625,
+        -2.8211499836197276,
+        -0.37940829307835244,
+    ];
+    let xu = vec![
+        4.0,
+        0.256000362072375,
+        1.1788500163802724,
+        3.6205917069216476,
+    ];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    // Sanity: the witness really is feasible, so the assertions below
+    // rest on arithmetic rather than on trusting the solver.
+    let witness = [0.0, -0.030_076_800_314_444_076, 0.0, 0.1];
+    let row = |i: usize| -> f64 {
+        (0..n)
+            .map(|j| HS071_STEP_QP_A[i * n + j] * witness[j])
+            .sum()
+    };
+    assert!(
+        row(0) >= bl[0],
+        "witness must satisfy row 0: {} < {}",
+        row(0),
+        bl[0]
+    );
+    assert!(
+        (row(1) - bl[1]).abs() < 1e-12,
+        "witness must satisfy the equality row: {} vs {}",
+        row(1),
+        bl[1]
+    );
+    for j in 0..n {
+        assert!(witness[j] >= xl[j] && witness[j] <= xu[j], "witness in box");
+    }
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+
+    assert_ne!(
+        sol.status,
+        QpStatus::Infeasible,
+        "feasible QP (witness clears row 0 by {:.3} and satisfies the \
+         equality exactly) must never be certified Infeasible",
+        row(0) - bl[0]
+    );
+
+    // Stronger post-fix contract: the convex feasibility phase-1 hands
+    // the recovery a usable seed and phase-2 converges from it.
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "expected Optimal, got {}",
+        sol.status
+    );
+
+    let ax: Vec<f64> = (0..m)
+        .map(|i| (0..n).map(|j| HS071_STEP_QP_A[i * n + j] * sol.x[j]).sum())
+        .collect();
+    let tol = QpOptions::default().feas_tol;
+    assert!(
+        ax[0] >= bl[0] - tol,
+        "row 0 violated: {} < {}",
+        ax[0],
+        bl[0]
+    );
+    assert!(
+        (ax[1] - bl[1]).abs() <= tol,
+        "equality row violated by {:.3e}",
+        (ax[1] - bl[1]).abs()
+    );
+    for j in 0..n {
+        assert!(
+            sol.x[j] >= xl[j] - tol && sol.x[j] <= xu[j] + tol,
+            "x[{j}] = {} outside [{}, {}]",
+            sol.x[j],
+            xl[j],
+            xu[j]
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Penalty bias read as an infeasibility certificate (gh#484 follow-up,
+// round 2). Found by the property-based probe in `adversary/fuzz/`.
+//
+// A feasible QP — the witness below satisfies every row and bound in
+// exact float arithmetic — with an indefinite `H`, two free variables,
+// and a near-parallel row pair. The first fix for the false-certificate
+// defect refuted a certificate only when its convex feasibility phase-1
+// landed within `feas_tol` of the rows, and here it cannot: the phase-1
+// minimizes `½‖x − r‖² + γ‖v‖₁`, whose proximal term competes with the
+// penalty, so its optimum carries a residual up to `‖x̂ − r‖²/(2γ)`.
+// With `γ = 1e6` and a box of this size that ceiling is ~1e-5 — four
+// orders above `feas_tol`. The phase-1 stopped a few 1e-6 short, was
+// judged "not feasible", and the certificate went out.
+//
+// The bias is now computed rather than tripped over: a residual is only
+// allowed to certify once it exceeds `D²/(2γ)`, and γ is escalated until
+// either the residual clears that bar or the point clears `feas_tol`.
+#[rustfmt::skip]
+const BIAS_QP_G: [f64; 3] = [
+    -0.7213796209979861, -7.231392669305645, 4.234973671720205,
+];
+#[rustfmt::skip]
+const BIAS_QP_A: [f64; 9] = [
+    -0.7911384941828317, 0.03702927627662023, 2.095070462604718,
+     1.934754937738557,  2.8782196768168857,  0.7027825799349712,
+     1.9935114267903111, 2.9656260009633773,  0.7241229757025899,
+];
+/// Feasibility witness. Satisfies every row and bound exactly.
+#[rustfmt::skip]
+const BIAS_QP_WITNESS: [f64; 3] = [
+    1.1096278255655565, 0.09990985992069845, -2.530165115509102,
+];
+
+#[test]
+fn penalty_bias_is_not_an_infeasibility_certificate() {
+    let n = 3usize;
+    let m = 3usize;
+
+    // Indefinite H with a zero diagonal — the exact-∇²L shape.
+    let mut h_irows = Vec::new();
+    let mut h_jcols = Vec::new();
+    for i in 0..n {
+        for j in 0..=i {
+            h_irows.push(i as i32 + 1);
+            h_jcols.push(j as i32 + 1);
+        }
+    }
+    let h_space = SymTMatrixSpace::new(n as i32, h_irows, h_jcols);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[-1.7, 2.4, 0.0, -0.9, 1.3, 3.1]);
+
+    let mut a_irows = Vec::new();
+    let mut a_jcols = Vec::new();
+    for i in 0..m {
+        for j in 0..n {
+            a_irows.push(i as i32 + 1);
+            a_jcols.push(j as i32 + 1);
+        }
+    }
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, a_irows, a_jcols);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&BIAS_QP_A);
+
+    let g = BIAS_QP_G.to_vec();
+    // Row 1 is an equality; rows 0 and 2 are one- and two-sided. Two of
+    // the three variables are free — the case where the box gives no
+    // bound on how far a feasible point can sit.
+    let bl = vec![-8.239786780104733, 0.6562644717578805, 0.6762003356215169];
+    let bu = vec![-4.110301012358298, 0.6562644717578805, NLP_UPPER_BOUND_INF];
+    let xl = vec![-5.64448797643853, -1.7243973211195898, NLP_LOWER_BOUND_INF];
+    let xu = vec![1.1096278255655565, NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF];
+
+    // The instance's feasibility is arithmetic, not an assumption.
+    for i in 0..m {
+        let ax: f64 = (0..n)
+            .map(|j| BIAS_QP_A[i * n + j] * BIAS_QP_WITNESS[j])
+            .sum();
+        assert!(
+            ax >= bl[i] - 1e-12 && (bu[i] >= NLP_UPPER_BOUND_INF || ax <= bu[i] + 1e-12),
+            "witness must satisfy row {i}: {ax} not in [{}, {}]",
+            bl[i],
+            bu[i]
+        );
+    }
+    for j in 0..n {
+        assert!(
+            BIAS_QP_WITNESS[j] >= xl[j] && BIAS_QP_WITNESS[j] <= xu[j],
+            "witness must be in the box at {j}"
+        );
+    }
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+
+    assert_ne!(
+        sol.status,
+        QpStatus::Infeasible,
+        "feasible QP certified Infeasible — a phase-1 residual bounded by \
+         the penalty bias is not a Farkas certificate"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// The cold fast paths returned `Optimal` at infeasible points.
+//
+// `solve` has a feasibility audit (M5) for solves that converge to a
+// constraint-violating point and label it `Optimal` — but it guarded only
+// the `solve_general` branch. The three cold fast paths at the bottom
+// (`solve_equality_only`, `solve_box_constrained`,
+// `solve_equality_plus_bounds`) returned straight to the caller, and
+// nothing else checked them.
+//
+// The smallest possible infeasible QP falls into exactly that gap:
+// `aᵀx = c₁` and `aᵀx = c₂` with `c₁ ≠ c₂` is all-equality, so it has no
+// general inequality and takes no warm start, and `solve` routes it to
+// `solve_equality_plus_bounds` — which came back `Optimal` at a point
+// violating both rows by 2.9, at every tolerance from 1e-9 to 1e-2.
+//
+// Data is the exact instance the property-based probe in `adversary/fuzz/`
+// found. Hand-built equivalents do *not* reproduce it: the free variable
+// (`x₀` unbounded below) and the indefinite `H` are both load-bearing, and
+// a tidy bounded version with a PSD Hessian passes on the unfixed solver.
+#[test]
+fn inconsistent_equalities_are_not_reported_optimal() {
+    let n = 2usize;
+    let m = 2usize;
+
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2, 2], vec![1, 1, 2]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[-2.7913153552489676, -0.9863948932143245, 0.0]);
+    let g = vec![-5.466878209095613, 8.48954475911776];
+
+    // Both rows are the same functional. It cannot take two values.
+    let row = [-2.5934781082241516_f64, 1.957129692504897];
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1, 2, 2], vec![1, 2, 1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[row[0], row[1], row[0], row[1]]);
+
+    let bl = vec![-5.590699548529652_f64, 0.20152723379558513];
+    let bu = bl.clone();
+    let xl = vec![NLP_LOWER_BOUND_INF, -2.3141811629330657];
+    let xu = vec![3.5443427682446997_f64, 3.3442587552272114];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+
+    // The point is that `Optimal` must not be claimed at a point that
+    // violates the problem. A non-committal status is honest here;
+    // certifying `Infeasible` would be better still. Claiming a solution
+    // is the one thing that is wrong.
+    if sol.status == QpStatus::Optimal {
+        let res: Vec<f64> = (0..m)
+            .map(|i| row[0] * sol.x[0] + row[1] * sol.x[1] - bl[i])
+            .collect();
+        panic!(
+            "returned Optimal on an inconsistent equality system; \
+             row residuals {res:?} at x = {:?}",
+            sol.x
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// A rank-deficient equality block escaped as a hard error.
+//
+// `cold_general_initial` prunes a rank-deficient equality set to an
+// independent subset and retries. The prune was single-shot, and
+// `independent_active_subset` is a *numerical* rank test whose answer
+// depends on the shift the factorization settled at — so the pruned subset
+// could itself be rejected at the next δ. Here it was: four equality rows
+// pruned to two, and the retry's own masked-deficiency guard then found
+// only one of those two independent. The retry's `?` propagated
+// `LinearSolverFailure("pinned KKT constraint block is rank-deficient …")`
+// to the caller — a hard error where the elastic path had a perfectly good
+// answer to give.
+//
+// Again the probe's exact instance. The 1e6 row scaling and the free `x₀`
+// are what push the rank test into disagreeing with itself; a uniformly
+// scaled, fully bounded version does not reproduce it.
+#[test]
+fn repeatedly_rank_deficient_equalities_do_not_error() {
+    let n = 5usize;
+    let m = 4usize;
+
+    let mut h_irows = Vec::new();
+    let mut h_jcols = Vec::new();
+    for i in 0..n {
+        for j in 0..=i {
+            h_irows.push(i as i32 + 1);
+            h_jcols.push(j as i32 + 1);
+        }
+    }
+    let h_space = SymTMatrixSpace::new(n as i32, h_irows, h_jcols);
+    let mut h = SymTMatrix::new(h_space);
+    #[rustfmt::skip]
+    h.set_values(&[
+        -1.6548767961092978,
+         2.064557047637633,  -3.650251250460926,
+         0.0,                -2.55214992299658,   0.0,
+         0.0,                -2.6125066492612103, 0.0, 2.686020283211974,
+        -2.702216601033217,  -0.3677125985327869, 2.1594310219402475,
+         1.1562910960930806,  0.0,
+    ]);
+
+    // Rows 0 and 2 are identical; row 1 is scaled ~1e6 against the rest.
+    #[rustfmt::skip]
+    let vals: [f64; 20] = [
+         2.4098251714297536, 1.4030741454122708, 1.2932054542069062,
+        -2.6693323747422992, 0.19214071677022115,
+        -1772507.6707250883, 952702.1423816633,  2701610.653564656,
+         2181005.4733584146, 957385.1779632831,
+         2.4098251714297536, 1.4030741454122708, 1.2932054542069062,
+        -2.6693323747422992, 0.19214071677022115,
+        -2.5443770494332574, -1.8411314201953106, -1.4152153780449328,
+         2.3312007522090887, -2.6027526355747406,
+    ];
+    let mut a_irows = Vec::new();
+    let mut a_jcols = Vec::new();
+    for i in 0..m {
+        for j in 0..n {
+            a_irows.push(i as i32 + 1);
+            a_jcols.push(j as i32 + 1);
+        }
+    }
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, a_irows, a_jcols);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&vals);
+
+    let bl = vec![
+        84.05103893366257_f64,
+        2663155354.6247716,
+        433.9344680755099,
+        -1383.6721463359931,
+    ];
+    let bu = bl.clone();
+    let xl = vec![
+        NLP_LOWER_BOUND_INF,
+        388.1155777186471,
+        389.1225518670195,
+        389.0009787098146,
+        392.18204924864364,
+    ];
+    let xu = vec![
+        NLP_UPPER_BOUND_INF,
+        395.0630589179779,
+        394.1037660233893,
+        395.7242293003824,
+        394.0346410306801,
+    ];
+    let g = vec![
+        -5.805815991484248_f64,
+        -3.5780398581700146,
+        2.9453592415953995,
+        5.212960644579471,
+        9.266168148934472,
+    ];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    // The contract is that it returns *an answer*. A rank-deficient active
+    // set is the solver's to prune, not the caller's to receive as a
+    // linear-algebra failure.
+    let sol = solver
+        .solve(&qp, None, &QpOptions::default())
+        .expect("rank-deficient equalities must not surface as a hard error");
+
+    // And whatever it says, `Optimal` has to mean feasible. (Rows 0 and 2
+    // are identical with different right-hand sides, so nothing can be.)
+    assert_ne!(
+        sol.status,
+        QpStatus::Optimal,
+        "returned Optimal on an inconsistent equality system at x = {:?}",
+        sol.x
+    );
+}
