@@ -1799,10 +1799,21 @@ impl IpoptAlgorithm {
         // tiny-step branch) and the entry mu — if μ can't reduce while
         // the flag is on, upstream `IpMonotoneMuUpdate.cpp:158-161`
         // throws TINY_STEP_DETECTED → STOP_AT_TINY_STEP, which we
-        // realise as a clean termination here. Only the monotone update
-        // throws: `IpAdaptiveMuUpdate.cpp` consumes the tiny-step flag
-        // via its `force_no_progress` path (fix μ, keep iterating), so
-        // the termination is gated on `terminates_on_tiny_step()`.
+        // realise as a clean termination here.
+        //
+        // Both updates terminate, by different routes (pounce#512).
+        // Monotone has one throw site covering its whole update, so the
+        // μ-unchanged comparison below reconstructs it exactly, gated on
+        // `terminates_on_tiny_step()`. `IpAdaptiveMuUpdate.cpp` throws at
+        // two specific sites (`:330-333`, `:377-380`) and merely fixes μ
+        // and keeps iterating elsewhere, so the comparison would over-fire
+        // there — on the no-bounds short-circuit, which returns before
+        // upstream even reads the flag, and on a free-mode oracle that
+        // re-picks the current μ. The adaptive update therefore raises
+        // `request_tiny_step_stop` at its own two sites and opts out of
+        // the comparison. (An earlier comment here claimed the adaptive
+        // update never self-terminates; it does — `force_no_progress` is
+        // what happens on the iterations that do *not* throw.)
         timing.update_barrier_parameter.start();
         let tiny_at_entry = self.data.borrow().tiny_step_flag;
         let mu_before = self.data.borrow().curr_mu;
@@ -1839,18 +1850,29 @@ impl IpoptAlgorithm {
         // already left. On #505's reproducer that rejected every trial
         // step from α=2.4e-6 down to 1e-12 on the filter alone and
         // forced a spurious restoration.
-        let ls_reset = {
+        //
+        // Both flags are consumed here, but the tiny-step stop is
+        // answered first: at each of the two adaptive sites that raise
+        // it, upstream's `TINY_STEP_DETECTED` throw sits *above* the
+        // reset it would otherwise reach (`cpp:330-333` before `:339`,
+        // `:377-380` before `:386`), so a terminating iteration never
+        // resets the line search.
+        let (tiny_step_stop_requested, ls_reset) = {
             let mut d = self.data.borrow_mut();
-            let f = d.request_ls_reset;
+            let flags = (d.request_tiny_step_stop, d.request_ls_reset);
+            d.request_tiny_step_stop = false;
             d.request_ls_reset = false;
-            f
+            flags
         };
+        if tiny_step_stop_requested
+            || (tiny_at_entry
+                && mu_terminates_on_tiny
+                && (next_mu - mu_before).abs() < Number::EPSILON)
+        {
+            return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
+        }
         if ls_reset {
             self.bundle.line_search.reset();
-        }
-
-        if tiny_at_entry && mu_terminates_on_tiny && (next_mu - mu_before).abs() < Number::EPSILON {
-            return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 
         // pounce#58 — iterate-quality guard for the probing oracle.

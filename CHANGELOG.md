@@ -41,6 +41,47 @@ changes.
   iterate-acceptability rejections, not filter rejections, so filter state is
   irrelevant at that point. This removes the later spurious restorations only.
 
+### Fixed — `mu_strategy=adaptive` kept iterating at a frozen point instead of stopping (#512)
+
+- When the line search takes two consecutive steps so small that any nonzero
+  step length is floating-point noise, the barrier update gets one chance to
+  move μ. If it cannot, nothing else can change either: every later iteration
+  recomputes the same point. IPOPT stops there and reports *search direction
+  is becoming too small* — "solved to the best accuracy this problem allows".
+  With `mu_strategy=adaptive`, POUNCE did not stop; it kept going until it hit
+  `max_iter` and then reported *maximum iterations exceeded*, which reads as
+  "your model was too hard" when the truth is "we finished 280 iterations
+  ago". A code comment asserted that only the monotone update terminates this
+  way; upstream's adaptive update does too, at two places
+  (`IpAdaptiveMuUpdate.cpp:330-333` and `:377-380`), and both are now ported.
+- Measured on the existing fixture corpus with `mu_strategy=adaptive`.
+  `airport.nl` at `tol=1e-12` went from 300 iterations and *maximum
+  iterations exceeded* to 16 and a clean tiny-step exit — with the final
+  objective, dual infeasibility and constraint violation agreeing to every
+  digit printed, so the 284 extra iterations moved nothing. Twelve other
+  models in the same sweep stop between 7 and 20 iterations where they
+  previously burned the whole budget. At **default** tolerances the same
+  models keep their status and reach it 4–6× faster: `hs71_obj1e8.nl`
+  certifies the same optimum in 11 iterations rather than 70, the `jit1`
+  family in 15–20 rather than 73–77.
+- Nothing changes for the default `mu_strategy` (monotone) — the fixture
+  corpus is bit-identical there — and no model in the sweep traded a better
+  status for a worse one.
+- Restoration runs the same inner solve, so it gained the same exit, and that
+  exposed a hole underneath it: `resto_inner_solver`'s tiny-step
+  locally-infeasible gate excluded square problems, so a square model that is
+  genuinely infeasible lost its AMPL 200 verdict to *restoration failed*
+  (AMPL 500, Pyomo `internalSolverError`) whenever the inner solve reached its
+  stationary point by tiny step. Upstream throws local-infeasibility on that
+  branch (`IpRestoMinC_1Nrm.cpp:278-291`) with no test on problem shape, and
+  POUNCE now matches. This also fixes the same wrong verdict on the default
+  monotone path, where it was already reachable: #508's own probe model at
+  `tol=1e-12` reported 500 before this change and reports 200 now.
+- Found by source comparison against upstream rather than by a failing model;
+  the reproducers above were found afterwards, in the fixtures already in the
+  repository. Regression coverage in
+  `crates/pounce-cli/tests/issue_512_adaptive_tiny_step.rs`.
+
 ### Fixed — infeasible models reported `internalSolverError` because the infeasibility threshold was built from `tol` (#508)
 
 - On a model with no solution, POUNCE chooses between *converged to a point

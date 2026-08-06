@@ -436,6 +436,24 @@ impl AdaptiveMuUpdate {
         let new_mu = self.adaptive_mu_monotone_init_factor * avrg;
         new_mu.clamp(mu_min, self.mu_max)
     }
+
+    /// Upstream's tiny-step termination test (pounce#512), shared by the
+    /// two sites that throw `TINY_STEP_DETECTED` in
+    /// `IpAdaptiveMuUpdate.cpp` — `:330-333` in the fixed-mode
+    /// Fiacco-McCormick decrease and `:377-380` on the free→fixed switch.
+    /// Both read `tiny_step_flag && new_mu == mu`: a tiny step was
+    /// detected *and* the update could not move μ, so no further
+    /// progress is available and the honest exit is "problem solved to
+    /// best possible numerical accuracy" (`STOP_AT_TINY_STEP`) rather
+    /// than iterating to the limit.
+    ///
+    /// Exact equality, like upstream. Both callers reach "unchanged" by
+    /// clamping to the same bound, which is bit-exact; an epsilon band
+    /// would instead swallow a genuine — if minute — reduction and stop
+    /// an iteration early.
+    fn tiny_step_is_terminal(tiny_step_flag: bool, new_mu: Number, curr_mu: Number) -> bool {
+        tiny_step_flag && new_mu == curr_mu
+    }
 }
 
 impl MuUpdate for AdaptiveMuUpdate {
@@ -597,7 +615,18 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
-            let sufficient_progress = !force_no_progress && self.check_sufficient_progress(cq);
+            //
+            // The gate is `sufficient_progress && !tiny_step_flag`
+            // (`cpp:304`) — plain `tiny_step_flag`, *not* the
+            // globalization-conditional `force_no_progress`, which
+            // upstream applies only in the free-mode branch below
+            // (`cpp:347-351`). Reusing `force_no_progress` here let
+            // `adaptive_mu_globalization=never-monotone-mode` switch back
+            // to free mode on a flagged tiny step, which upstream never
+            // does and which routed around the termination at `cpp:330`.
+            // At the default `obj-constr-filter` the two are equal, so
+            // this distinction only moves never-monotone-mode (pounce#512).
+            let sufficient_progress = !tiny_step_flag && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 // Switch back to free mode and record the iterate —
                 // upstream `cpp:303-311`. Upstream does NOT return
@@ -622,6 +651,15 @@ impl MuUpdate for AdaptiveMuUpdate {
                     let lin = self.mu_linear_decrease_factor * curr_mu;
                     let sup = curr_mu.powf(self.mu_superlinear_decrease_power);
                     let new_mu = lin.min(sup).max(mu_min).min(self.mu_max);
+                    // `cpp:330-333` — a tiny step was flagged and the
+                    // decrease left μ where it was (it is pinned at the
+                    // floor), so there is nothing left to try. Upstream
+                    // throws TINY_STEP_DETECTED *before* `Set_mu`/`Set_tau`;
+                    // the flag is unchanged by construction, so returning
+                    // it below is the same iterate either way.
+                    if Self::tiny_step_is_terminal(tiny_step_flag, new_mu, curr_mu) {
+                        data.borrow_mut().request_tiny_step_stop = true;
+                    }
                     let new_tau = self.tau_min.max(1.0 - new_mu);
                     let mut d = data.borrow_mut();
                     d.curr_tau = new_tau;
@@ -683,6 +721,15 @@ impl MuUpdate for AdaptiveMuUpdate {
                     }
                 }
                 let new_mu = self.new_fixed_mu(cq, mu_min);
+                // `cpp:377-380` — the same termination on the other
+                // throw site: the switch into fixed mode re-seeded μ to
+                // the value it already had, so the tiny step cannot be
+                // walked off by changing μ either. Ordered after the
+                // free-mode flip and the accepted-iterate restore, as
+                // upstream is.
+                if Self::tiny_step_is_terminal(tiny_step_flag, new_mu, curr_mu) {
+                    data.borrow_mut().request_tiny_step_stop = true;
+                }
                 let new_tau = self.tau_min.max(1.0 - new_mu);
                 let mut d = data.borrow_mut();
                 d.curr_tau = new_tau;
@@ -1108,6 +1155,39 @@ mod tests {
         // not propagate: `avrg > 0.0` is false for NaN, so we fall back.
         let mu_max = AdaptiveMuUpdate::lazy_mu_max(a.mu_max_fact, f64::NAN, a.mu_init, a.mu_min);
         assert!(mu_max.is_finite() && mu_max >= a.mu_min);
+    }
+
+    // pounce#512 — the shared condition behind both of upstream's
+    // `TINY_STEP_DETECTED` throws (`IpAdaptiveMuUpdate.cpp:330-333`,
+    // `:377-380`). Both conjuncts are load-bearing in opposite
+    // directions: without the flag the update is just at its floor and
+    // must keep iterating, and without the μ test a tiny step that the
+    // update *can* still respond to would stop the solve early.
+    #[test]
+    fn tiny_step_is_terminal_needs_the_flag_and_an_unmoved_mu() {
+        let mu = 1e-11;
+        assert!(AdaptiveMuUpdate::tiny_step_is_terminal(true, mu, mu));
+        // μ moved — the update has something left to try.
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(true, 0.2 * mu, mu));
+        // No tiny step: μ pinned at its floor is the ordinary end-game,
+        // not a reason to stop.
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(false, mu, mu));
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(
+            false,
+            0.2 * mu,
+            mu
+        ));
+    }
+
+    /// Equality is exact, as upstream's `new_mu == mu` is. A reduction of
+    /// one ulp is a reduction; an epsilon band would call it "unchanged"
+    /// and terminate an iteration early.
+    #[test]
+    fn tiny_step_is_terminal_does_not_round_a_reduction_away() {
+        let mu = 1e-11;
+        let nudged = mu - f64::EPSILON * 1e-4;
+        assert!(nudged < mu, "test setup: the nudge must actually reduce μ");
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(true, nudged, mu));
     }
 
     #[test]
