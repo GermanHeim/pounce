@@ -50,7 +50,12 @@ changes.
   `validation/p3_control.py` reads the log exactly that way. The CLI now
   re-emits the verdict that actually shipped as the final banner.
 - Reported by the adversary agent. Regression coverage in
-  `crates/pounce-cli/tests/issue_508_infeasibility_gap_status.rs`.
+  `crates/pounce-cli/tests/issue_508_infeasibility_gap_status.rs`. The banner
+  ordering is covered by an invariant guard rather than a bite-on-parent pin:
+  every non-promoted MC64 retry reachable from the fixture corpus happens to
+  return the same verdict the `.sol` keeps, so the two banners agree there by
+  luck; the mismatch is still a reachable state of the code. Noted in the test
+  so the gap is a known one.
 
 ### Fixed — false primal-infeasible certificate on redundant equality rows that disagree by one ULP (#496)
 

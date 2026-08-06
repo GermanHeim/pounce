@@ -225,6 +225,23 @@ fn the_gap_models_are_never_reported_solved() {
 /// expected and announced; the two disagreeing is not, and
 /// `validation/p3_control.py` reads exactly this way (last `EXIT:` line, paired
 /// with the `.sol`).
+///
+/// **Known gap, stated deliberately: this is an invariant guard, not a
+/// bite-on-parent regression pin.** It asserts the right thing and it does
+/// exercise the non-promoted retry path (the first assertion fails loudly if a
+/// future change stops it doing so), but it passes on the pre-fix commit,
+/// because every non-promoted retry reachable from this repo's fixture corpus
+/// happens to return `InfeasibleProblemDetected` — the same verdict the `.sol`
+/// keeps, so the two banners agree by luck rather than by construction. The
+/// reporter observed the mismatch on their own `.nl` at `tol=1e-4`
+/// (`Error in step computation.` at δ=1e-9, `Maximum Number of Iterations
+/// Exceeded.` at δ=1e-1, both over a `.sol` that said locally infeasible); a
+/// sweep over `tol`, `max_iter` and every `.nl` under `tests/fixtures/` did not
+/// reproduce a divergent retry status here. The fix does not depend on
+/// reproducing one — the retry's status is not constrained to match the kept
+/// verdict, and `scaling_retry_promoted` is false for most statuses, so the
+/// mismatch is a reachable state of the code whether or not a fixture reaches
+/// it. Vendoring a model that does would upgrade this to a real pin.
 #[test]
 fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_mc64_retry() {
     let sol = std::env::temp_dir().join("pounce_issue_508_banner.sol");
