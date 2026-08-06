@@ -310,7 +310,32 @@ const EMPTY_ROW_TOL: f64 = 1e-9;
 /// recovering bound multipliers. Looser than [`BOUND_FEAS_TOL`] because an
 /// interior-point solve only drives a variable to within ~1e-8 of a bound,
 /// not to machine zero; interior variables sit far further away.
+///
+/// Applied **relative to the bound's magnitude** — see [`at_bound`]. The
+/// "~1e-8" above is a relative statement, and reading it as an absolute
+/// window silently loses the multiplier of any bound bigger than about `1e4`.
 pub(crate) const ACTIVE_BOUND_TOL: f64 = 1e-6;
+
+/// Is `x` sitting *on* the bound `b`?
+///
+/// The window scales with the bound: an interior-point solve stops a relative
+/// ~1e-8 short of a bound, which is an absolute `5e-3` when the bound is
+/// `5e5`. Judged against a fixed `1e-6` such a variable reads as interior, and
+/// every rule keyed on this — the global bound-multiplier recovery below, and
+/// the tightened-bound re-attribution that reads its output — concludes the
+/// bound is slack and reports its multiplier as **zero**. That is a wrong dual
+/// on an ordinary model, not an edge case: `min x² − 4u·x` boxed at `x ≤ u`
+/// lost its bound multiplier for every `u ≳ 1e4` while still reporting
+/// `Optimal`, and it reaches `.sol` as `ipopt_zL_out`/`ipopt_zU_out` and as
+/// the dual of any constraint row that became a bound.
+///
+/// Widening is safe: a genuinely interior variable sits far outside even the
+/// scaled window, and both callers additionally require the reduced cost to
+/// have the sign that bound could produce, so a misread would have to carry a
+/// correctly-signed nonzero gradient to do any harm.
+pub(crate) fn at_bound(x: f64, b: f64) -> bool {
+    (x - b).abs() <= ACTIVE_BOUND_TOL * (1.0 + b.abs())
+}
 
 /// Group nonzero entries by row index: `out[row] = [(col, val), …]`.
 pub(crate) fn group_by_row(triplets: &[Triplet], m: usize) -> Vec<Vec<(usize, f64)>> {
@@ -2021,8 +2046,8 @@ impl Presolve {
         for i in 0..n {
             let lb = self.orig.lb_of(i);
             let ub = self.orig.ub_of(i);
-            let at_lb = lb > -BOUND_INF && (x[i] - lb).abs() <= ACTIVE_BOUND_TOL;
-            let at_ub = ub < BOUND_INF && (ub - x[i]).abs() <= ACTIVE_BOUND_TOL;
+            let at_lb = lb > -BOUND_INF && at_bound(x[i], lb);
+            let at_ub = ub < BOUND_INF && at_bound(x[i], ub);
             if at_lb && grad[i] > 0.0 {
                 z_lb[i] = grad[i];
             } else if at_ub && grad[i] < 0.0 {

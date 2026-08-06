@@ -80,7 +80,7 @@ use pounce_presolve::linear_eq_plan::{
     EliminationPlan, PlanConfig, PlanInput, VarRecovery, build_plan,
 };
 
-use crate::presolve::{ACTIVE_BOUND_TOL, group_by_row, merge_sort_coeffs};
+use crate::presolve::{at_bound, group_by_row, merge_sort_coeffs};
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, Triplet};
 
 /// A survivor's leftover reduced cost below this is noise, not a bound
@@ -368,8 +368,8 @@ fn on_bounds(orig: &QpProblem, x: &[f64], j: usize) -> (bool, bool) {
     let lb = orig.lb_of(j);
     let ub = orig.ub_of(j);
     (
-        lb > -BOUND_INF && (x[j] - lb).abs() <= ACTIVE_BOUND_TOL,
-        ub < BOUND_INF && (ub - x[j]).abs() <= ACTIVE_BOUND_TOL,
+        lb > -BOUND_INF && at_bound(x[j], lb),
+        ub < BOUND_INF && at_bound(x[j], ub),
     )
 }
 
