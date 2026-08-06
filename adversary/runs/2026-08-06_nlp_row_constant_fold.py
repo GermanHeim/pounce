@@ -429,19 +429,42 @@ def run_decline_cases(tmp):
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
-    # An imported function with a constant argument. No library is loaded, so
-    # the run must fail loudly at resolution — never fold `myfunc(2)` away and
-    # solve a model the file does not describe.
+    # An imported function with a constant argument. `myfunc(2)` looks like a
+    # constant and is not one: it resolves to a shared library long after
+    # parse. No library is loaded here, so the run must fail either way — the
+    # question is *where*, and the two failures are distinguishable.
+    #
+    #   guard present: the call survives parse, and the run dies later at
+    #     external-function resolution ("AMPLFUNC is not set"). That panic is
+    #     pre-existing and unrelated to this fold.
+    #   guard removed: the fold reaches `eval_expr` with a `Funcall`, which
+    #     panics by construction rather than guessing a value.
+    #
+    # So "the run failed" is NOT the check — a check that only asserted
+    # failure passes with the guard deleted, which is how this probe's first
+    # draft let that mutation through. The check is that the failure did not
+    # come from inside the fold's evaluator.
     d = Path(tempfile.mkdtemp(prefix="adv_fn_", dir=tmp))
     try:
         (d / "m.nl").write_text(
             "\n".join(base + ["F0 1 1 myfunc", "C0", "f0 1", "n2.0"] + tail) + "\n"
         )
         p = solve(d, "m")
-        if "Optimal Solution Found" in p.stdout:
+        out = p.stdout + p.stderr
+        if "Optimal Solution Found" in out:
             problems.append(
                 "a model calling the unresolved imported function myfunc(2) "
                 "solved to optimality; the call was folded away"
+            )
+        elif "eval_expr" in out:
+            problems.append(
+                "the fold evaluated an imported-function body: it reached "
+                "eval_expr with a Funcall instead of declining"
+            )
+        elif "AMPLFUNC" not in out:
+            problems.append(
+                f"unexpected failure mode for the funcall body (rc={p.returncode}); "
+                f"expected external-function resolution to be what fails: {out[-300:]}"
             )
     finally:
         shutil.rmtree(d, ignore_errors=True)
