@@ -99,13 +99,55 @@ ipopt_status_from_log() {
   echo "Unknown_Error"
 }
 
-# pounce CLI prints `Status: Solve_Succeeded` (or similar Status: <X>)
-# at the end. Fall back to log scraping if we can't find it.
+# Map one termination message → cutest-style status label. Same table as
+# `ipopt_status_from_log`, but scoped to a single line the caller has already
+# decided is authoritative, so ranking never enters into it.
+status_from_message() {
+  case "$1" in
+    *"Optimal Solution Found"*)                     echo "Solve_Succeeded" ;;
+    *"Solved To Acceptable Level"*)                 echo "Solved_To_Acceptable_Level" ;;
+    *"Maximum Number of Iterations Exceeded"*)      echo "Maximum_Iterations_Exceeded" ;;
+    *"Maximum CPU time exceeded"*)                  echo "Maximum_CpuTime_Exceeded" ;;
+    *"Converged to a point of local infeasibility"*) echo "Infeasible_Problem_Detected" ;;
+    *"feasible region is empty"*)                   echo "Infeasible_Problem_Detected" ;;
+    *"Restoration Failed"*)                         echo "Restoration_Failed" ;;
+    *"Search Direction is becoming Too Small"*)     echo "Search_Direction_Becomes_Too_Small" ;;
+    *"Diverging Iterates"*)                         echo "Diverging_Iterates" ;;
+    *"Invalid number"*)                             echo "Invalid_Number_Detected" ;;
+    *)                                              echo "Unknown_Error" ;;
+  esac
+}
+
+# The pounce CLI prints a machine-readable `Status: <upstream_name>` as the
+# last line of a solve. Prefer it; everything below is fallback for logs that
+# predate it or come off a path that does not emit it.
+#
+# The fallbacks are ordered by how much they can be trusted, and that order is
+# the point of this function. A whole-file phrase scrape is LAST because it
+# ranks phrases rather than reading the run: one pounce invocation can print
+# several `EXIT:` banners — the local-infeasibility second-opinion ladder
+# prints one per rung (gh #524), and the engine prints one per solve — and a
+# ranked scrape returns whichever phrase it happens to rank first, which need
+# not be the verdict that shipped. Measured: on `cresc100` the barrier rung
+# exits at `max_iter` and the original infeasibility verdict then stands, but
+# "Maximum Number of Iterations Exceeded" outranks "Converged to a point of
+# local infeasibility", so the scrape recorded `Maximum_Iterations_Exceeded`
+# for a run whose verdict was `Infeasible_Problem_Detected`. Reading the LAST
+# banner instead is correct by construction: pounce re-emits the verdict that
+# actually shipped as its final banner (gh #508).
 pounce_status_from_log() {
   local log="$1"
   local s
   s=$(grep -oE '^[Ss]tatus:[[:space:]]+\w+' "$log" | tail -1 | awk '{print $2}')
   if [ -n "$s" ]; then echo "$s"; return; fi
+  local last_exit
+  last_exit=$(grep -a 'EXIT:' "$log" | tail -1)
+  if [ -n "$last_exit" ]; then
+    s=$(status_from_message "$last_exit")
+    # An unrecognised banner falls through rather than reporting
+    # Unknown_Error, so the convex-path scrapes below still get their turn.
+    if [ "$s" != "Unknown_Error" ]; then echo "$s"; return; fi
+  fi
   # The convex IPM path (pounce-convex, solver_selection=lp-ipm/qp-ipm) prints
   # a single summary line "POUNCE (LP IPM, pounce-convex): <msg>  obj=... iters=...".
   # "Optimal Solution Found." is picked up by ipopt_status_from_log below; the
