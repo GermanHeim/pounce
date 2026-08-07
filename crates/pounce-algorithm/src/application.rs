@@ -30,6 +30,32 @@ use crate::iterates_vector::IteratesVector;
 use crate::restoration::RestorationPhase;
 use crate::upstream_options::register_all_upstream_options;
 
+/// Options-file names probed in the working directory when the caller
+/// names none, in probe order: pounce's own name first, then upstream's
+/// so an `ipopt.opt` written for Ipopt is honored unchanged.
+///
+/// Upstream probes only `ipopt.opt` (the registered default of
+/// `option_file_name`). Both are read here because a port that answers
+/// to `ipopt.opt` but not to its own name is the more surprising of the
+/// two behaviours — and gh#518 reported trying both.
+pub const DEFAULT_OPTION_FILE_NAMES: &[&str] = &["pounce.opt", "ipopt.opt"];
+
+/// What [`IpoptApplication::initialize_with_option_file`] did — enough
+/// for a caller to tell the user which file (if any) configured the run.
+#[derive(Debug, Default, Clone)]
+pub struct OptionFileLoad {
+    /// The file actually read. `None` means no options file was read:
+    /// nobody named one and neither default was present.
+    pub path: Option<PathBuf>,
+    /// Whether [`Self::path`] was named by the caller rather than found
+    /// by probing the working directory.
+    pub explicit: bool,
+    /// Non-fatal notes about option-file settings that did *not* take
+    /// effect. Nothing here stops a solve; the point is that it not
+    /// happen silently.
+    pub warnings: Vec<String>,
+}
+
 /// Factory that constructs a fresh restoration-phase strategy on
 /// demand. The outer algorithm owns at most one restoration object,
 /// so the factory is invoked once per `optimize_tnlp` call. The
@@ -95,7 +121,7 @@ use pounce_nlp::tnlp_adapter::{
 };
 use std::cell::RefCell;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -384,6 +410,88 @@ impl IpoptApplication {
     /// `pounce` binaries opt in when `--json-output` is passed.
     pub fn enable_iter_history(&mut self) {
         self.record_iter_history = true;
+    }
+
+    /// Read the run's options file, resolving *which* file the way
+    /// upstream's `IpoptApplication::Initialize` does — with one
+    /// deliberate difference, below.
+    ///
+    /// `explicit` is the file the caller named (upstream: the
+    /// `option_file_name` option, read out of the option store before
+    /// this point). With `None`, the working directory is probed for
+    /// [`DEFAULT_OPTION_FILE_NAMES`] and the first hit is read; an
+    /// absent default file is not an error, it just means "no file".
+    ///
+    /// The difference: upstream opens a named file with a bare
+    /// `std::ifstream` and reads nothing if the open fails, so a typo'd
+    /// `option_file_name` runs at stock defaults without a word. That
+    /// silence is what gh#518 was reported for — a benchmark that
+    /// measured defaults while claiming to measure a configuration — so
+    /// a named file that cannot be read is an error here.
+    pub fn initialize_with_option_file(
+        &mut self,
+        explicit: Option<&Path>,
+    ) -> Result<OptionFileLoad, SolverException> {
+        let mut load = OptionFileLoad::default();
+        let path = match explicit {
+            Some(p) => {
+                if !p.is_file() {
+                    return Err(SolverException::new(
+                        ExceptionKind::IPOPT_APPLICATION_ERROR,
+                        format!(
+                            "options file \"{}\" does not exist. It was named by \
+                             --options-file / option_file_name, so the run would \
+                             otherwise proceed at stock defaults with none of its \
+                             settings applied.",
+                            p.display()
+                        ),
+                        file!(),
+                        line!() as Index,
+                    ));
+                }
+                load.explicit = true;
+                p.to_path_buf()
+            }
+            None => {
+                let present: Vec<&&str> = DEFAULT_OPTION_FILE_NAMES
+                    .iter()
+                    .filter(|n| Path::new(n).is_file())
+                    .collect();
+                let Some(first) = present.first() else {
+                    return Ok(load);
+                };
+                // Both default names in one directory: say which one lost,
+                // rather than let the unread one look applied.
+                for other in &present[1..] {
+                    load.warnings.push(format!(
+                        "`{first}` and `{other}` are both present; reading `{first}` \
+                         only (pounce's own name wins). Pass \
+                         `option_file_name={other}` to read that one instead."
+                    ));
+                }
+                PathBuf::from(**first)
+            }
+        };
+        self.initialize_with_options_file(&path)?;
+        // `option_file_name` set *inside* an options file chains nowhere —
+        // by the time it is read, the file naming it has already been
+        // chosen. Upstream documents that ("it does not make any sense to
+        // specify this option within the options file") and then ignores
+        // it; name it instead, since an ignored setting that looks live is
+        // the whole complaint behind gh#518.
+        if let Ok((named, true)) = self.options.get_string_value("option_file_name", "")
+            && !named.is_empty()
+            && Path::new(&named) != path
+        {
+            load.warnings.push(format!(
+                "`{}` sets option_file_name to `{named}`, which has no effect: \
+                 the options file is chosen before it is read. Pass \
+                 `option_file_name={named}` on the command line to read that file.",
+                path.display()
+            ));
+        }
+        load.path = Some(path);
+        Ok(load)
     }
 
     /// Read an `ipopt.opt`-format options file. Equivalent to

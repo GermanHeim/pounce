@@ -280,14 +280,53 @@ pub fn main() -> ExitCode {
         app.enable_iter_history();
     }
 
-    if let Some(path) = &args.options_file {
-        if let Err(e) = app.initialize_with_options_file(path) {
-            eprintln!("pounce: failed to load options file: {e}");
+    // Load the options file before the `key=value` overrides below, so a
+    // command-line option beats a file option and not the other way round
+    // — which is also why `option_file_name` has to be read off argv here
+    // rather than out of the option store (upstream reads it from the
+    // store at this same point, before the store has the CLI's values).
+    //
+    // Until gh#518 the only way in was `--options-file`: `option_file_name`
+    // was refused, and the implicit `pounce.opt` / `ipopt.opt` lookup did
+    // not exist, so a run configured entirely through an option file ran
+    // at stock defaults and still reported success.
+    let option_file_choice = match args.option_file_choice() {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("pounce: {msg}");
             return ExitCode::from(2);
         }
-    } else if let Err(e) = app.initialize() {
-        eprintln!("pounce: initialize failed: {e}");
-        return ExitCode::from(2);
+    };
+    let mut option_file_read: Option<PathBuf> = None;
+    match &option_file_choice {
+        pounce_cli::cli::OptionFileChoice::Suppressed => {
+            if let Err(e) = app.initialize() {
+                eprintln!("pounce: initialize failed: {e}");
+                return ExitCode::from(2);
+            }
+        }
+        choice => {
+            let explicit = match choice {
+                pounce_cli::cli::OptionFileChoice::Named(p) => Some(p.as_path()),
+                _ => None,
+            };
+            match app.initialize_with_option_file(explicit) {
+                Ok(load) => {
+                    for warning in &load.warnings {
+                        eprintln!("pounce: warning: {warning}");
+                    }
+                    option_file_read = load.path;
+                }
+                Err(e) => {
+                    // `e.message` rather than the full `Display`: this one
+                    // is read by whoever wrote the options file, and the
+                    // C++-style "in file … at line …" prefix names a
+                    // pounce source location, not theirs.
+                    eprintln!("pounce: failed to load options file: {}", e.message);
+                    return ExitCode::from(2);
+                }
+            }
+        }
     }
 
     // Apply CLI `key=value` overrides after initialization, mirroring
@@ -444,6 +483,16 @@ pub fn main() -> ExitCode {
     if !suppress_banner && !json_dbg {
         print::print_logo();
         print::print_banner(backend_tag);
+    }
+    // Which options file configured this run, on the same `sb` gate as the
+    // banner (upstream prints its "Using option file" line here too). A
+    // discovered file especially has to announce itself: nothing on the
+    // command line hints that a `pounce.opt` sitting in the working
+    // directory is steering the solve.
+    if let Some(path) = &option_file_read {
+        if !suppress_banner && !json_dbg {
+            println!("Using option file \"{}\".\n", path.display());
+        }
     }
 
     // Snapshot the problem source as a string — needed downstream by

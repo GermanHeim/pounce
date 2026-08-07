@@ -33,11 +33,15 @@ cargo build -p pounce-cli --release --features ma57
 pounce problem.nl
 pounce problem.nl print_level=8 max_iter=500 tol=1e-10
 pounce problem.nl linear_solver=ma57            # with --features ma57
-pounce problem.nl --options-file ipopt.opt      # upstream-format options file
+pounce problem.nl --options-file tuned.opt      # upstream-format options file
+pounce problem.nl option_file_name=tuned.opt   # the Ipopt spelling; same thing
+pounce problem.nl --no-options-file            # ignore ./pounce.opt, ./ipopt.opt
 ```
 
 Trailing `KEY=VALUE` pairs follow the same syntax and semantics as the
-upstream Ipopt CLI; they override values loaded from `--options-file`.
+upstream Ipopt CLI; they override values loaded from the options file.
+With no options file named, `./pounce.opt` or `./ipopt.opt` is read if
+present, as `ipopt` reads `./ipopt.opt`.
 
 ### Degenerate / MPCC NLPs — ℓ₁-exact penalty-barrier wrapper
 
@@ -201,7 +205,8 @@ look-up. Trailing `KEY=VALUE` pairs are option overrides, not flags.
 |------|----------|-------|
 | `--problem` | `NAME` | Run a built-in TNLP. See `--list-problems`. |
 | `--nl-file` | `PATH` | Explicit form of the positional `.nl` argument; useful when scripting alongside other flags. |
-| `--options-file` | `PATH` | Upstream-format options file; trailing `KEY=VALUE` pairs override it. |
+| `--options-file` | `PATH` | Upstream-format options file; trailing `KEY=VALUE` pairs override it. Same as `option_file_name=PATH`. |
+| `--no-options-file` | — | Read no options file: skip the implicit `./pounce.opt` / `./ipopt.opt` lookup. |
 | `--sol-output` | `PATH` | Override the default `<input>.sol` output path. |
 | `--no-sol` | — | Suppress `.sol` writing entirely (used by harnesses that only consume `--json-output`). |
 | `--json-output` | `PATH` | Emit a `pounce.solve-report/v1` JSON report. |

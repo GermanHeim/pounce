@@ -9,10 +9,33 @@ pub enum ProblemSource {
     NlFile(PathBuf),
 }
 
+/// Which options file a run should read, decided from argv (and
+/// `$pounce_options`) *before* any file is opened. See
+/// [`Args::option_file_choice`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionFileChoice {
+    /// The user named a file: `--options-file <path>` or
+    /// `option_file_name=<path>`. A named file that does not exist is a
+    /// hard error — silently running at stock defaults is the failure
+    /// mode this whole path exists to remove (gh#518).
+    Named(PathBuf),
+    /// Nobody named one: probe the working directory for the default
+    /// names (`pounce.opt`, then `ipopt.opt`), reading whichever exists.
+    Discover,
+    /// `--no-options-file`: read none, probe nothing.
+    Suppressed,
+}
+
 #[derive(Debug, Clone)]
 pub struct Args {
     pub problem: ProblemSource,
     pub options_file: Option<PathBuf>,
+    /// `--no-options-file` — read no options file at all: neither an
+    /// implicit `pounce.opt` / `ipopt.opt` from the working directory nor
+    /// anything named by `option_file_name`. The escape hatch for a
+    /// directory holding an options file written for another run (or for
+    /// Ipopt), since that file is otherwise picked up automatically.
+    pub no_options_file: bool,
     /// `key=value` options collected from the command line. Forwarded to
     /// the application's `OptionsList` after the options-file load (so
     /// CLI args override file values), mirroring upstream ipopt's
@@ -257,6 +280,13 @@ Options may also be supplied via the `pounce_options` environment
 variable (AMPL's `<solver>_options` convention): a whitespace-separated
 list of KEY=VALUE tokens. Command-line KEY=VALUE options override it.
 
+Options are also read from an ipopt.opt-format options file: the one
+named by --options-file or by option_file_name=<path>, or — when
+neither names one — `pounce.opt` or `ipopt.opt` from the working
+directory, if present. A named file that does not exist is an error.
+KEY=VALUE options (command line or environment) override the file.
+--no-options-file reads none.
+
 Subcommands:
   pounce verify <problem.nl> <claim.sol> [--feas-tol T] [--json-output P]
                             independently check that a .sol solution
@@ -292,6 +322,10 @@ Required (one of):
 
 Options:
   --options-file <path>     read solver options from an ipopt.opt-format file
+                            (same as option_file_name=<path>)
+  --no-options-file         read no options file at all — skip the implicit
+                            pounce.opt / ipopt.opt lookup in the working
+                            directory
   --json-output <path>      write a JSON solve report to PATH after the solve
                             (pounce#8 — machine-readable, FAIR-aligned)
   --json-detail LEVEL       summary | full (default: summary). `full` adds
@@ -402,6 +436,7 @@ Multistart / find-minima (search for several local minima, not one):
     pub fn parse_argv(argv: Vec<String>) -> Result<Self, String> {
         let mut problem: Option<ProblemSource> = None;
         let mut options_file: Option<PathBuf> = None;
+        let mut no_options_file = false;
         let mut set_options: Vec<(String, String)> = Vec::new();
         let mut json_output: Option<PathBuf> = None;
         let mut json_detail = crate::solve_report::ReportDetail::Summary;
@@ -503,6 +538,7 @@ Multistart / find-minima (search for several local minima, not one):
                         .ok_or_else(|| "--options-file requires a value".to_string())?;
                     options_file = Some(PathBuf::from(v));
                 }
+                "--no-options-file" => no_options_file = true,
                 "--dump" => {
                     let v = it
                         .next()
@@ -667,6 +703,7 @@ Multistart / find-minima (search for several local minima, not one):
             return Ok(Self {
                 problem,
                 options_file,
+                no_options_file,
                 set_options,
                 json_output,
                 json_detail,
@@ -697,6 +734,7 @@ Multistart / find-minima (search for several local minima, not one):
         Ok(Self {
             problem: ProblemSource::Builtin(String::new()),
             options_file,
+            no_options_file,
             set_options,
             json_output,
             json_detail,
@@ -722,6 +760,52 @@ Multistart / find-minima (search for several local minima, not one):
             debug_script,
             minima,
         })
+    }
+}
+
+impl Args {
+    /// Which options file this run should read.
+    ///
+    /// Decided before any file is opened, because the file has to be read
+    /// *before* the `key=value` overrides are applied — command-line
+    /// options beat file options, not the other way round — and
+    /// `option_file_name` is itself one of those overrides.
+    ///
+    /// Precedence: `--no-options-file` beats everything; then the
+    /// explicit `--options-file <path>` flag; then `option_file_name=`
+    /// (from the command line or `$pounce_options`, last occurrence
+    /// winning, as for every other `key=value`); otherwise probe the
+    /// working directory. Upstream reads `option_file_name` out of the
+    /// option store at the same point for the same reason.
+    ///
+    /// Errors when `--no-options-file` is combined with a named file:
+    /// the two ask for opposite things, and guessing which one the user
+    /// meant is exactly the silence gh#518 is about.
+    pub fn option_file_choice(&self) -> Result<OptionFileChoice, String> {
+        let named = self
+            .options_file
+            .clone()
+            .or_else(|| self.option_file_name_override());
+        match (self.no_options_file, named) {
+            (true, Some(p)) => Err(format!(
+                "--no-options-file conflicts with the options file '{}' named on \
+                 the command line; pass one or the other",
+                p.display()
+            )),
+            (true, None) => Ok(OptionFileChoice::Suppressed),
+            (false, Some(p)) => Ok(OptionFileChoice::Named(p)),
+            (false, None) => Ok(OptionFileChoice::Discover),
+        }
+    }
+
+    /// The last `option_file_name=<path>` among the `key=value` options,
+    /// if any. Last-wins matches the order they are applied in.
+    fn option_file_name_override(&self) -> Option<PathBuf> {
+        self.set_options
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case("option_file_name"))
+            .map(|(_, v)| PathBuf::from(v))
     }
 }
 
@@ -877,6 +961,75 @@ mod tests {
     fn options_file_captured() {
         let a = Args::parse_argv(argv(&["--problem", "x", "--options-file", "ipopt.opt"])).unwrap();
         assert_eq!(a.options_file.unwrap().to_str(), Some("ipopt.opt"));
+    }
+
+    /// gh#518: which options file a run reads, decided from argv alone.
+    /// The filesystem end of it (the implicit lookup, a named file that
+    /// is missing) lives in `tests/issue_518_option_files.rs`.
+    #[test]
+    fn option_file_choice_defaults_to_discovery() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl"])).unwrap();
+        assert_eq!(a.option_file_choice(), Ok(OptionFileChoice::Discover));
+    }
+
+    #[test]
+    fn option_file_choice_from_option_file_name() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "option_file_name=tiny.opt"])).unwrap();
+        assert_eq!(
+            a.option_file_choice(),
+            Ok(OptionFileChoice::Named(PathBuf::from("tiny.opt")))
+        );
+    }
+
+    /// `set_options` are applied last-wins, so the file they name is too
+    /// — including a command-line value landing on top of one from
+    /// `$pounce_options` (which is merged in ahead of them).
+    #[test]
+    fn option_file_choice_takes_the_last_option_file_name() {
+        let a = Args::parse_argv(argv(&[
+            "/tmp/foo.nl",
+            "option_file_name=first.opt",
+            "option_file_name=second.opt",
+        ]))
+        .unwrap();
+        assert_eq!(
+            a.option_file_choice(),
+            Ok(OptionFileChoice::Named(PathBuf::from("second.opt")))
+        );
+    }
+
+    #[test]
+    fn options_file_flag_beats_option_file_name() {
+        let a = Args::parse_argv(argv(&[
+            "/tmp/foo.nl",
+            "--options-file",
+            "flag.opt",
+            "option_file_name=kv.opt",
+        ]))
+        .unwrap();
+        assert_eq!(
+            a.option_file_choice(),
+            Ok(OptionFileChoice::Named(PathBuf::from("flag.opt")))
+        );
+    }
+
+    #[test]
+    fn no_options_file_suppresses_discovery() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--no-options-file"])).unwrap();
+        assert!(a.no_options_file);
+        assert_eq!(a.option_file_choice(), Ok(OptionFileChoice::Suppressed));
+    }
+
+    #[test]
+    fn no_options_file_plus_a_named_file_is_rejected() {
+        let a = Args::parse_argv(argv(&[
+            "/tmp/foo.nl",
+            "--no-options-file",
+            "--options-file",
+            "tiny.opt",
+        ]))
+        .unwrap();
+        assert!(a.option_file_choice().is_err());
     }
 
     #[test]

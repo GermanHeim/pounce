@@ -9,6 +9,34 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — options files were silently ignored: `option_file_name` configured nothing and `./ipopt.opt` was never read (#518)
+
+- `option_file_name=` was *refused* (it named a feature POUNCE did not
+  implement) and there was no implicit options-file lookup at all, so the
+  only way to configure a run from a file was `--options-file`. On 0.9.0,
+  as released, `option_file_name=` was accepted and did nothing: a run
+  configured entirely through an options file executed at stock defaults
+  and still reported success. Nothing in the output said so, which
+  silently invalidates any benchmark set up that way — and the POUNCE side
+  looks *better* precisely because it dropped the stricter settings.
+- `option_file_name=<path>` is now implemented, and `--options-file` is
+  the same thing spelled as a flag (the flag wins if both are given).
+- With no file named, POUNCE probes the working directory for
+  `pounce.opt`, then `ipopt.opt`, and reads the first that exists — the
+  `ipopt` behaviour the issue found most visibly missing. Both present:
+  `pounce.opt` wins and the shadowed file is named in a warning. The run
+  prints `Using option file "<path>".`, on the same `sb` gate as the
+  banner, so a discovered file cannot steer a solve anonymously.
+- `--no-options-file` skips the lookup, for a directory holding an options
+  file meant for some other run.
+- Precedence is unchanged and now uniform: command-line `KEY=VALUE` and
+  `$pounce_options` override the file, never the reverse.
+- A file that was *named* but cannot be read is an error rather than a
+  shrug — upstream's `ifstream` reads nothing and says nothing there,
+  which is the same silence in a smaller box. `option_file_name` set
+  *inside* an options file still chains nowhere (the file is chosen before
+  it is read), but now warns instead of being ignored.
+
 ### Fixed — `pounce verify` printed "complementarity residual" for a quantity that is not the solver's complementarity (#516)
 
 - `verify` computed *constraint* complementarity — `max_i |λ_i| · dist(g_i,

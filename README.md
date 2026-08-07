@@ -220,7 +220,9 @@ pounce problem.nl linear_solver=ma57       # with --features ma57
 ```
 
 Trailing `KEY=VALUE` pairs follow the same syntax and semantics as the
-upstream Ipopt CLI; they override values loaded from `--options-file`.
+upstream Ipopt CLI; they override values loaded from an options file —
+`--options-file <path>`, `option_file_name=<path>`, or a `pounce.opt` /
+`ipopt.opt` found in the working directory.
 
 List available built-in test problems:
 

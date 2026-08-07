@@ -46,6 +46,12 @@
 //! one — has no counterpart here at all, and the port registered its
 //! whole option set. Those are refused.
 //!
+//! An entry leaves the table by being implemented. `option_file_name`
+//! was here — refusing it was the cheap half of gh#518's "implement it
+//! or fail loudly" — until gh#518 got the other half:
+//! [`crate::application::IpoptApplication::initialize_with_option_file`]
+//! reads the named file, so the option now configures something.
+//!
 //! # The default gate
 //!
 //! Only an explicit value **different from the registered default** is
@@ -162,12 +168,6 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         feature: "the linear-variable count hint for L-BFGS",
         advice: "",
         options: &["num_linear_variables"],
-    },
-    UnimplementedFeature {
-        feature: "reading options from a file",
-        advice: "pass options on the command line (`pounce model.nl key=value`) \
-                 or, from a library, via `initialize_with_options_str`",
-        options: &["option_file_name"],
     },
     UnimplementedFeature {
         feature: "skipping the finalize-solution callback",
@@ -408,6 +408,18 @@ mod tests {
         let mut app = crate::application::IpoptApplication::new();
         app.initialize().unwrap();
         assert!(!app.algorithm_builder_from_options().fast_step_computation);
+    }
+
+    /// `option_file_name` left the table when gh#518 implemented the
+    /// feature it names. Refusing it again would be a regression in the
+    /// other direction: it now configures the run, so a user who sets it
+    /// gets what they asked for rather than an error.
+    #[test]
+    fn option_file_name_is_implemented_not_refused() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("option_file_name", "tiny.opt", true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
     }
 
     /// The restoration switches wired in gh#483 / #191 round 2. Each
