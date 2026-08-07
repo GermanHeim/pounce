@@ -47,6 +47,38 @@ Full contract and a worked transcript: **`docs/src/debugger.md`**
 `debug_session_guide` documents the underlying protocol (for callers
 driving `--debug-json` directly instead of through the proxy).
 
+## Debugging discipline
+
+Three rules, each earned on a solver bug that took far longer than it should
+have (gh #505 is the worked example; see
+`dev-notes/termination-status-invariants.md`).
+
+- **Run the kill switch first.** Most POUNCE-only heuristics can be disabled by
+  an option — `infeas_stationarity_tol=0`, `presolve=no`, `acceptable_iter=0`,
+  `nlp_scaling_method=none`. If one of them flips the outcome, that heuristic is
+  the mechanism, established in a single run with no oracle and no code reading.
+  On gh #505 this control was decisive and was not run until roughly eighteen
+  hours and fifteen comments into the investigation.
+
+- **A fixture built from a hypothesis is not evidence for that hypothesis.** A
+  reduced model constructed to sit in the regime a theory predicts will
+  reproduce the symptom whether or not the theory is right — and it will feel
+  like confirmation. On gh #505 that fixture did reproduce *a* real defect,
+  which was then assumed to be *the* defect; the reporter's own measurement
+  falsified the route a day later, after a PR had already been opened on it.
+  The fixture was eventually dropped altogether — once the actual arming
+  condition was found and fixed (gh #519), it no longer reproduced anything.
+  Reproduce on the reporter's artifact before writing the fix, and treat a
+  purpose-built fixture as a regression test, never as a diagnosis.
+
+- **Stamp every measurement with the commit it was taken on, when you take it.**
+  Numbers from two build sets get quoted across each other otherwise. That
+  happened twice on gh #505 — once publicly, caught by a reviewer who noticed a
+  "bit-identical" claim between two numbers that differed in the fourth digit.
+  When a correction lands, propagate it to *every* surface carrying the bad
+  number: issue comment, PR body, commit message, code comment. The PR body is
+  what survives as the merge commit.
+
 ## Repo conventions
 
 - Build: `cargo build --release` (CLI binary at `target/release/pounce`).
