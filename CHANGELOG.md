@@ -47,6 +47,42 @@ changes.
   so `∇f` alone is its Lagrangian gradient. `verify` no longer skips the
   whole optimality section on those.
 
+### Fixed — adaptive μ floored the fixed-mode barrier decrease at `mu_min` instead of upstream's tolerance-derived floor (#511)
+
+- In the adaptive strategy's **fixed-mode** (monotone-mode) decrease, POUNCE
+  floored the reduced μ at `mu_min` (`1e-11`). Upstream
+  (`IpAdaptiveMuUpdate.cpp:325-329`) floors it at
+  `min(apply_obj_scaling(compl_inf_tol), tol) / (barrier_tol_factor + 1)` —
+  `9.09e-10` at the default `tol=1e-8`, `compl_inf_tol=1e-4`,
+  `barrier_tol_factor=10`. The two are not interchangeable: `mu_min` is the
+  *free*-mode clamp, and once the strategy has switched to fixed mode upstream
+  deliberately stops μ at the accuracy the termination test asks for, which is
+  the point of the switch. POUNCE also skipped upstream's objective-scaling
+  conversion of `compl_inf_tol`, so the paths additionally disagreed whenever
+  objective scaling was active.
+- Effect: whenever the strategy switched to fixed mode and the barrier
+  subproblem kept solving, POUNCE went on pushing μ to `1e-11` where upstream
+  stops ~91× higher, running the Newton system far past the point where the
+  extra digits buy anything — a plausible source of degenerate search
+  directions on an ill-conditioned Jacobian.
+- The floor now matches upstream, with `compl_inf_tol` converted into μ's
+  scaled space (#257) and the certificate-safe `mu_min` cap (#266) still
+  `max`ed in so the restoration sub-builder's `100 · outer_mu_min` safeguard
+  keeps applying — the same composition the monotone floor already used.
+- Behavioural check across the 60 `.nl` fixtures under
+  `mu_strategy=adaptive`, at both `tol=1e-8` and `tol=1e-4`: every exit
+  status, iteration count and objective is unchanged. The branch binds on
+  seven fixtures; on two of them (`jit1_node`, `nonconvex_qp`) the new floor
+  changes the μ trajectory, and both still land `Optimal Solution Found` in
+  the same iteration count with the same objective — μ simply stops at the
+  tolerance-derived floor instead of `1e-11`. On the rest the pre-existing
+  objective-scaling cap had already pulled both floors to the same value.
+- Found by the adversary agent while dissecting #505; not causal there.
+  Coverage in `crates/pounce-algorithm/src/mu/adaptive.rs`
+  (`fixed_mode_floor_matches_upstream_not_mu_min`,
+  `fixed_mode_floor_scales_compl_inf_tol`,
+  `fixed_mode_floor_keeps_resto_mu_min_safeguard`).
+
 ### Fixed — adaptive μ reset the line-search filter on "μ changed" instead of upstream's every-free-mode-iteration, so stale entries forced spurious restorations (#510)
 
 - Ipopt's μ updates hold a line-search handle and call `linesearch_->Reset()`
