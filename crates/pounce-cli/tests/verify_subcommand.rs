@@ -10,7 +10,10 @@
 //! * with `POUNCE_VERIFY_KEY` set, the receipt carries an HMAC-SHA256
 //!   signature that re-derives from the documented float-free preimage —
 //!   and flipping the key makes the signature change (an agent without the
-//!   key can't mint a receipt that validates).
+//!   key can't mint a receipt that validates);
+//! * the two complementarity residuals are labelled apart, and the bound one
+//!   reads `not checked` rather than a number when the `.sol` carries no
+//!   bound multipliers (gh #516).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -55,6 +58,16 @@ fn verify_exit(nl: &PathBuf, sol: &PathBuf) -> i32 {
         .expect("spawn pounce verify")
         .code()
         .expect("exit code")
+}
+
+fn verify_stdout(nl: &PathBuf, sol: &PathBuf) -> String {
+    let out = Command::new(pounce_exe())
+        .arg("verify")
+        .arg(nl)
+        .arg(sol)
+        .output()
+        .expect("spawn pounce verify");
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[test]
@@ -130,6 +143,174 @@ fn dimension_mismatch_is_usage_error() {
         "dimension mismatch must be a usage error"
     );
     let _ = std::fs::remove_file(&sol);
+}
+
+/// **gh #516.** `verify` printed `complementarity residual` for the *row*
+/// quantity, next to a `KKT stationarity residual` line under an
+/// `optimality` heading — the exact framing that invites a comparison
+/// against a solver's `Complementarity` output, which is the *bound*
+/// quantity. On the #505 model the two read `4.529e-2` and `1.179e-11`:
+/// nine orders of magnitude, same point, same file, both called
+/// "complementarity". Two people read the first as a signal about the
+/// solution before tracing it to the definition.
+#[test]
+fn the_two_complementarity_residuals_are_labelled_apart() {
+    let sol = tmp("compl.sol");
+    solve_to(&sol);
+    let out = verify_stdout(&fixture_nl(), &sol);
+
+    assert!(
+        out.contains("constraint complementarity (rows, |λ|·slack)"),
+        "the row quantity must say it is over rows:\n{out}"
+    );
+    assert!(
+        out.contains("bound complementarity (vars, |z|·slack)"),
+        "the bound quantity must say it is over variables:\n{out}"
+    );
+    // No line may offer a bare `complementarity residual` for either to be
+    // mistaken for. This is the assertion that fails if the label regresses.
+    assert!(
+        !out.contains("complementarity residual"),
+        "an unqualified `complementarity residual` label is the bug:\n{out}"
+    );
+    let _ = std::fs::remove_file(&sol);
+}
+
+/// The bound quantity needs `ipopt_zL_out` / `ipopt_zU_out`, which a `.sol`
+/// need not carry. When it doesn't, say *not checked* — reporting nothing
+/// leaves the row line to be read as the bound one, and reporting `0.0`
+/// would be a fabricated clean bill of health.
+#[test]
+fn absent_bound_multipliers_read_as_not_checked() {
+    // A hand-built .sol with duals but no suffix blocks at all.
+    let n = 5;
+    let m = 4;
+    let mut s = String::from("POUNCE: Optimal Solution Found\n\nOptions\n0\n");
+    s.push_str(&format!("{m}\n{m}\n{n}\n{n}\n"));
+    for _ in 0..m {
+        s.push_str("0.0\n");
+    }
+    for _ in 0..n {
+        s.push_str("0.5\n");
+    }
+    s.push_str("objno 0 0\n");
+    let sol = tmp("nozl.sol");
+    std::fs::write(&sol, s).unwrap();
+
+    let out = verify_stdout(&fixture_nl(), &sol);
+    let line = out
+        .lines()
+        .find(|l| l.contains("bound complementarity"))
+        .unwrap_or_else(|| panic!("no bound complementarity line:\n{out}"));
+    assert!(
+        line.contains("not checked"),
+        "bound complementarity must report `not checked`, not a number: {line}"
+    );
+    assert!(
+        out.contains("ipopt_zL_out/ipopt_zU_out"),
+        "say *why* it is not checked:\n{out}"
+    );
+    let _ = std::fs::remove_file(&sol);
+}
+
+/// The point of naming the bound quantity is that it *is* the solver's:
+/// `verify` re-derives it from the `.nl` and the `.sol` alone, so it must
+/// land on the same number the solve printed. Pinning the agreement is what
+/// makes the comparison the labels invite a legitimate one.
+#[test]
+fn bound_complementarity_reproduces_the_solvers_own_figure() {
+    let sol = tmp("compl_match.sol");
+    let out = Command::new(pounce_exe())
+        .arg(fixture_nl())
+        .arg(&sol)
+        .output()
+        .expect("spawn pounce solve");
+    assert!(out.status.success());
+    let solve_log = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // `Complementarity.........:   9.09e-10    9.09e-10` — scaled, unscaled.
+    // The fixture is unscaled, so either column serves.
+    let from_log = |label: &str| -> f64 {
+        let line = solve_log
+            .lines()
+            .find(|l| l.starts_with(label))
+            .unwrap_or_else(|| panic!("no `{label}` line in the solve log:\n{solve_log}"));
+        line.rsplit_once(':')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|t| t.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("unparseable `{label}` line: {line}"))
+    };
+    let solver_compl = from_log("Complementarity");
+    let solver_dual_inf = from_log("Dual infeasibility");
+
+    let report = verify_stdout(&fixture_nl(), &sol);
+    let from_report = |label: &str| -> f64 {
+        let line = report
+            .lines()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("no `{label}` line:\n{report}"));
+        line.rsplit_once(':')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|t| t.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("unparseable `{label}` line: {line}"))
+    };
+
+    // `verify` prints 3 significant digits, so agreement is to that.
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-3 * a.abs().max(b.abs()).max(1e-300);
+    let ours = from_report("bound complementarity (vars");
+    assert!(
+        close(ours, solver_compl),
+        "verify's bound complementarity {ours:.3e} must match the solver's \
+         Complementarity {solver_compl:.3e}"
+    );
+    let ours = from_report("dual infeasibility (with z_L/z_U");
+    assert!(
+        close(ours, solver_dual_inf),
+        "verify's exact dual infeasibility {ours:.3e} must match the solver's \
+         {solver_dual_inf:.3e}"
+    );
+
+    let _ = std::fs::remove_file(&sol);
+}
+
+/// A genuine pounce `.sol` does carry the suffixes, so both quantities are
+/// real numbers and the receipt names them apart too.
+#[test]
+fn receipt_separates_the_two_complementarity_fields() {
+    let sol = tmp("compl_receipt.sol");
+    solve_to(&sol);
+    let receipt = tmp("compl_receipt.json");
+    let status = Command::new(pounce_exe())
+        .arg("verify")
+        .arg(fixture_nl())
+        .arg(&sol)
+        .arg("--json-output")
+        .arg(&receipt)
+        .status()
+        .expect("spawn pounce verify --json-output");
+    assert_eq!(status.code(), Some(0));
+
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
+    let opt = &v["optimality"];
+    assert_eq!(opt["bound_multipliers_present"], true);
+    assert!(
+        opt["constraint_complementarity_residual"].is_number(),
+        "receipt must carry the row quantity under its own name: {opt}"
+    );
+    assert!(
+        opt["bound_complementarity_residual"].is_number(),
+        "a .sol with zL/zU suffixes must report bound complementarity: {opt}"
+    );
+    // The deprecated alias stays put for v1 consumers, and stays equal to
+    // the field it aliases.
+    assert_eq!(
+        opt["complementarity_residual"],
+        opt["constraint_complementarity_residual"]
+    );
+
+    let _ = std::fs::remove_file(&sol);
+    let _ = std::fs::remove_file(&receipt);
 }
 
 #[test]
