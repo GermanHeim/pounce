@@ -2194,6 +2194,17 @@ fn run_convex_qp(
     } else if presolve_on {
         match presolve(&qp) {
             PresolveOutcome::Reduced(ps) => {
+                // A screen claimed infeasibility and the re-derivation without
+                // the speculative fixings would not reproduce it, so presolve
+                // solved on instead (gh #523). Say so: the guard turns a false
+                // `Infeasible_Problem_Detected` into a normal solve, and this
+                // line is the only trace of the reduction that misfired.
+                if let Some(trigger) = ps.discarded_infeasibility() {
+                    println!(
+                        "Presolve: discarded an unconfirmed infeasibility claim — \
+                         {trigger}; solving normally"
+                    );
+                }
                 let st = ps.stats();
                 if st.reduced_anything() {
                     println!(
@@ -2221,7 +2232,13 @@ fn run_convex_qp(
                 };
                 ps.postsolve(&red)
             }
-            PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),
+            PresolveOutcome::Infeasible(trigger) => {
+                // Name the screen and what it tripped on. A presolve
+                // infeasibility arrives with no iteration behind it, so this
+                // line is the whole record of *why* (gh #523).
+                println!("Presolve: proved primal infeasible — {trigger}");
+                trivial(QpStatus::PrimalInfeasible)
+            }
             PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
         }
     } else if use_active_set {

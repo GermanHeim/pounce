@@ -116,7 +116,7 @@ fn reduced_size(prob: &QpProblem) -> (usize, usize) {
         other => panic!(
             "expected a reduction, got {}",
             match other {
-                PresolveOutcome::Infeasible => "Infeasible",
+                PresolveOutcome::Infeasible(_) => "Infeasible",
                 PresolveOutcome::Unbounded => "Unbounded",
                 PresolveOutcome::Reduced(_) => unreachable!(),
             }
@@ -580,7 +580,7 @@ fn contradictory_aliases_are_not_this_passs_verdict() {
             // The alias rows must still be there for someone else to judge.
             assert!(ps.reduced.m_eq() >= 2, "{}", ps.reduced.m_eq());
         }
-        PresolveOutcome::Infeasible => {
+        PresolveOutcome::Infeasible(_) => {
             // Reached by the *duplicate-row* reduction, which is entitled
             // to it: two identical rows with different right-hand sides.
         }

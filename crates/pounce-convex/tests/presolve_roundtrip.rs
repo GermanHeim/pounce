@@ -164,7 +164,7 @@ fn empty_row_infeasible_detected() {
         lb: vec![],
         ub: vec![],
     };
-    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible(_)));
     assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
 }
 
@@ -288,7 +288,7 @@ fn heavily_reduced_mixed_reductions_recovers_primal_and_dual() {
                 ps.reduced.n
             );
         }
-        PresolveOutcome::Infeasible => panic!("expected Reduced, got Infeasible"),
+        PresolveOutcome::Infeasible(_) => panic!("expected Reduced, got Infeasible"),
         PresolveOutcome::Unbounded => panic!("expected Reduced, got Unbounded"),
     }
 

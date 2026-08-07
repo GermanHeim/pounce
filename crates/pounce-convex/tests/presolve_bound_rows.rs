@@ -63,7 +63,7 @@ fn lower_box_to_rows(p: &QpProblem) -> QpProblem {
 fn reduced(prob: &QpProblem) -> pounce_convex::presolve::Presolve {
     match presolve(prob) {
         PresolveOutcome::Reduced(ps) => ps,
-        PresolveOutcome::Infeasible => panic!("expected Reduced, got Infeasible"),
+        PresolveOutcome::Infeasible(_) => panic!("expected Reduced, got Infeasible"),
         PresolveOutcome::Unbounded => panic!("expected Reduced, got Unbounded"),
     }
 }
