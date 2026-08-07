@@ -104,8 +104,8 @@ changes.
 - What it costs: nothing on a successful solve (a 733-problem Vanderbei
   sweep shows no objective drift and no status change other than `cresc4`),
   and up to two extra solves on one that reports infeasible. On the suite's
-  hardest infeasible case, `cresc132`, that is 3.65s → 73.84s; across the
-  whole suite, +6 %.
+  hardest infeasible case, `cresc132`, that is 3.65s → 73.4s; across the
+  whole suite, +7 %.
 
 ### Added — the CLI prints a machine-readable `Status:` line
 

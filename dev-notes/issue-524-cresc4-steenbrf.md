@@ -194,24 +194,32 @@ from being told the verdict was corroborated when it was not.
 ### What the extra rung costs
 
 Nothing on a successful solve — the ladder only runs on a local-infeasibility
-verdict, and a 733-problem Vanderbei sweep (PR binary against `54219714`, same
-host) shows no objective drift on any of the 700 problems both solve and no
-status change other than `cresc4`.
+verdict, and a 733-problem Vanderbei sweep (this branch's binary *and* driver
+against `54219714`, same host) shows no objective drift on any of the 700
+problems both solve, nothing broken, and exactly one status change from the
+solver: `cresc4`, `Infeasible_Problem_Detected` → `Solve_Succeeded`.
+
+Four further rows change, and none of them are the solver — they are the
+driver fix below reading logs it previously could not classify:
+`indef` and `static3` `Solver_Error` → `Diverging_Iterates`, `grouping` and
+`lewispol` `Solver_Error` → `Not_Enough_Degrees_Of_Freedom`. The last two
+abort before any `EXIT:` banner is printed, so the new `Status:` line is the
+only thing that resolves them.
 
 The cost lands entirely on problems that report infeasible, and there it is not
 negligible. Measured on that sweep:
 
 | problem | `54219714` | with the ladder |
 |---|---|---|
-| `cresc132` | 3.65s | **73.84s** (20×) |
-| `cresc100` | 0.97s | 6.05s |
-| `cresc50` | 2.33s | 4.74s |
-| `launch` | 0.10s | 0.25s |
-| `cresc4` | 0.06s | 0.08s (and now solves) |
-| vanderbei suite, total | 1430s | 1511s (+6 %) |
+| `cresc132` | 3.65s | **73.36s** (20×) |
+| `cresc100` | 0.97s | 5.95s |
+| `cresc50` | 2.33s | 4.56s |
+| `launch` | 0.10s | 0.22s |
+| `cresc4` | 0.06s | 0.07s (and now solves) |
+| vanderbei suite, total | 1430s | 1523s (+7 %) |
 
 Two extra solves on a hard infeasible problem is inherent to the design, and
-+6 % across a suite is a fair price for the class of wrong answer it removes.
++7 % across a suite is a fair price for the class of wrong answer it removes.
 The 20× on `cresc132` is worth stating plainly, because it is the number a
 branch-and-bound driver pruning many infeasible nodes would feel: the barrier
 rung there runs to `max_iter` before giving up.
