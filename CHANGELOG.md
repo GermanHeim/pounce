@@ -36,6 +36,21 @@ changes.
   which is the same silence in a smaller box. `option_file_name` set
   *inside* an options file still chains nowhere (the file is chosen before
   it is read), but now warns instead of being ignored.
+- Naming two different files at once — `--options-file a.opt` beside
+  `option_file_name=b.opt`, or either beside `--no-options-file` — is an
+  error. A precedence rule there would mean one of the files the user
+  named was quietly not read, which is the reported failure reintroduced
+  by the fix for it.
+- **Library callers still cannot set it.** `option_file_name` reaches a
+  file only through the CLI's resolution path; Python, the C interface and
+  WASM set their options directly and read no files, so there the option
+  is refused (`Invalid_Option`) naming the alternative, rather than
+  accepted and dropped. It was the blanket #483 refusal that covered this
+  before; the guard now sits exactly where the feature still does not
+  reach. Those entry points deliberately do *not* gain the implicit
+  `./ipopt.opt` lookup: action at a distance under Python or the GAMS C
+  link would be worse than not having it, and `pounce.opt` already means
+  something else to GAMS.
 
 ### Fixed — `pounce verify` printed "complementarity residual" for a quantity that is not the solver's complementarity (#516)
 
