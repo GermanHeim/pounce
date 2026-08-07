@@ -37,6 +37,8 @@ use std::rc::Rc;
 struct UserScaled {
     x_scaling: Vec<Number>,
     solved: bool,
+    /// The finalized `x`, in the user's own units.
+    x: Vec<Number>,
 }
 
 impl TNLP for UserScaled {
@@ -124,14 +126,16 @@ impl TNLP for UserScaled {
         true
     }
 
-    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+    fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
         self.solved = true;
+        self.x = sol.x.to_vec();
     }
 }
 
 /// Run the problem under `user-scaling` with the given variable
-/// factors; returns `(status, reached_finalize_solution)`.
-fn solve_with_x_scaling(x_scaling: &[Number]) -> (ApplicationReturnStatus, bool) {
+/// factors; returns `(status, reached_finalize_solution, x)`,
+/// where `x` is the finalized point in the user's own units.
+fn solve_with_x_scaling(x_scaling: &[Number]) -> (ApplicationReturnStatus, bool, Vec<Number>) {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_string_value("nlp_scaling_method", "user-scaling", true, false)
@@ -144,28 +148,44 @@ fn solve_with_x_scaling(x_scaling: &[Number]) -> (ApplicationReturnStatus, bool)
     let concrete = Rc::new(RefCell::new(UserScaled {
         x_scaling: x_scaling.to_vec(),
         solved: false,
+        x: Vec::new(),
     }));
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
     let status = app.optimize_tnlp(tnlp);
     let solved = concrete.borrow().solved;
-    (status, solved)
+    let x = concrete.borrow().x.clone();
+    (status, solved, x)
 }
 
-/// Non-unit variable factors are refused up front. Pre-fix this
-/// returned `SolveSucceeded` after solving with only the objective and
-/// constraint factors applied.
+/// Non-unit variable factors are APPLIED, as of gh#486 stage 2.
+///
+/// This asserted the opposite through stage 1, when the core had no
+/// representation for a change of variables and refusing was the only
+/// honest answer. The wrapper supplies that representation, so the
+/// solve runs and reports its answer in the user's own units.
 #[test]
-fn variable_scaling_factors_are_refused() {
-    let (status, solved) = solve_with_x_scaling(&[1.0, 1e4]);
+fn variable_scaling_factors_are_applied() {
+    let (status, solved, scaled_x) = solve_with_x_scaling(&[1.0, 1e4]);
     assert!(
-        matches!(status, ApplicationReturnStatus::InvalidOption),
-        "expected InvalidOption for an unmodelable x_scaling, got {status:?}",
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "a variable-scaled solve must run, got {status:?}",
     );
-    assert!(
-        !solved,
-        "the solve must not run at all — a converged answer here is an \
-         answer to a problem the caller did not describe",
-    );
+    assert!(solved, "finalize_solution should have run");
+
+    // The same problem without factors: the answer must not move,
+    // because scaling changes conditioning and nothing else.
+    let (_, _, plain_x) = solve_with_x_scaling(&[1.0, 1.0]);
+    assert_eq!(scaled_x.len(), plain_x.len());
+    for (i, (a, b)) in scaled_x.iter().zip(plain_x.iter()).enumerate() {
+        assert!(
+            (a - b).abs() <= 1e-6 * b.abs().max(1.0),
+            "x[{i}]: scaled solve reported {a}, unscaled {b}",
+        );
+    }
 }
 
 /// An all-ones `x_scaling` asks for nothing, so it is a no-op and the
@@ -174,7 +194,7 @@ fn variable_scaling_factors_are_refused() {
 /// the request channel being used at all.
 #[test]
 fn unit_variable_scaling_still_solves() {
-    let (status, solved) = solve_with_x_scaling(&[1.0, 1.0]);
+    let (status, solved, _) = solve_with_x_scaling(&[1.0, 1.0]);
     assert!(
         matches!(
             status,
