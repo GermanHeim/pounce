@@ -30,6 +30,10 @@ use pounce_nlp::tnlp::{
 struct Skewed {
     factors: Option<Vec<Number>>,
     solution: Rc<RefCell<Option<Vec<Number>>>>,
+    /// `(z_L, z_U)` at the solution. Both variables here are declared
+    /// free, so these must stay at zero: they are what a variable
+    /// gains if an absent bound is turned into a real one.
+    bound_mult: Rc<RefCell<Option<(Vec<Number>, Vec<Number>)>>>,
 }
 
 impl Skewed {
@@ -37,6 +41,7 @@ impl Skewed {
         Self {
             factors,
             solution: Rc::new(RefCell::new(None)),
+            bound_mult: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -52,6 +57,9 @@ impl TNLP for Skewed {
         })
     }
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        // Past the `±1e19` thresholds, so both variables are free.
+        // This is what `.nl` models look like: an absent bound arrives
+        // as a large finite sentinel, never as a true infinity.
         b.x_l.copy_from_slice(&[-1.0e20, -1.0e20]);
         b.x_u.copy_from_slice(&[1.0e20, 1.0e20]);
         b.g_l[0] = 7.0;
@@ -119,6 +127,7 @@ impl TNLP for Skewed {
     }
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _c: &IpoptCq) {
         *self.solution.borrow_mut() = Some(sol.x.to_vec());
+        *self.bound_mult.borrow_mut() = Some((sol.z_l.to_vec(), sol.z_u.to_vec()));
     }
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
         match &self.factors {
@@ -138,11 +147,13 @@ impl TNLP for Skewed {
 fn solve(factors: Option<Vec<Number>>, user_scaling: bool) -> Option<Vec<Number>> {
     let mut app = IpoptApplication::new();
     app.initialize().unwrap();
-    app.options_mut()
+    let _ = app
+        .options_mut()
         .set_integer_value("print_level", 0, true, false);
     if user_scaling {
-        app.options_mut()
-            .set_string_value("nlp_scaling_method", "user-scaling", true, false);
+        let _ =
+            app.options_mut()
+                .set_string_value("nlp_scaling_method", "user-scaling", true, false);
     }
     let concrete = Rc::new(RefCell::new(Skewed::new(factors)));
     let seen = concrete.borrow().solution.clone();
@@ -199,5 +210,68 @@ fn factors_are_ignored_under_other_scaling_methods() {
     assert!(
         (with_factors_but_gradient_based[0] - plain[0]).abs() < 1e-6,
         "the default scaling method must not consult the factors"
+    );
+}
+
+/// `variable_scaling()` describes the solve that just ran, so a second
+/// solve on the same application must not report the first one's
+/// factors. An `IpoptApplication` outlives a single solve: the C
+/// interface holds one across `IpoptSolve` calls, which is exactly the
+/// reuse the Ipopt API invites.
+#[test]
+fn the_reported_factors_do_not_survive_into_the_next_solve() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    let _ = app
+        .options_mut()
+        .set_integer_value("print_level", 0, true, false);
+    let _ = app
+        .options_mut()
+        .set_string_value("nlp_scaling_method", "user-scaling", true, false);
+
+    let scaled: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Skewed::new(Some(vec![1.0, 1.0e-6]))));
+    let _ = app.optimize_tnlp(scaled);
+    assert_eq!(
+        app.variable_scaling(),
+        Some(vec![1.0, 1.0e-6]),
+        "the scaled solve should report the factors it applied"
+    );
+
+    let plain: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Skewed::new(None)));
+    let _ = app.optimize_tnlp(plain);
+    assert_eq!(
+        app.variable_scaling(),
+        None,
+        "a solve with no factors must not report the previous solve's"
+    );
+}
+
+/// A variable declared free must still be free after scaling.
+///
+/// The sentinel standing in for "no bound" is a finite number, so a
+/// factor below 1 walks it inside the threshold and the variable picks
+/// up a barrier term and bound multipliers the model never declared.
+/// The solution can still land in the right place while that happens,
+/// which is why this asserts on the multipliers rather than on `x`.
+#[test]
+fn a_free_variable_gains_no_bound_multipliers_from_scaling() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    let _ = app
+        .options_mut()
+        .set_integer_value("print_level", 0, true, false);
+    let _ = app
+        .options_mut()
+        .set_string_value("nlp_scaling_method", "user-scaling", true, false);
+
+    let concrete = Rc::new(RefCell::new(Skewed::new(Some(vec![1.0, 1.0e-6]))));
+    let seen = concrete.borrow().bound_mult.clone();
+    let tnlp: Rc<RefCell<dyn TNLP>> = concrete;
+    let _ = app.optimize_tnlp(tnlp);
+
+    let (z_l, z_u) = seen.borrow().clone().expect("the solve finalizes");
+    assert!(
+        z_l.iter().chain(z_u.iter()).all(|v| v.abs() < 1e-8),
+        "free variables picked up bound multipliers: z_L = {z_l:?}, z_U = {z_u:?}"
     );
 }

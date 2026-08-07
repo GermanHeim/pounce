@@ -17,6 +17,12 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution, SparsityRequest,
     StartingPoint, TNLP,
 };
+use pounce_nlp::tnlp_adapter::{DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF};
+
+/// The registered defaults, which is what every test here means by
+/// "a bound at or past the threshold is absent".
+const LO: Number = DEFAULT_NLP_LOWER_BOUND_INF;
+const UP: Number = DEFAULT_NLP_UPPER_BOUND_INF;
 
 /// `min x0^2 + 3 x0 x1 + 2 x1^2  s.t.  x0 x1 = 1`, with a dense
 /// Jacobian row and a full lower-triangular Hessian, so every row of
@@ -145,7 +151,7 @@ const D: [Number; 2] = [2.0, 100.0];
 
 fn wrapped() -> Rc<RefCell<dyn TNLP>> {
     let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Fixture::new(D.to_vec())));
-    wrap_with_scaling(inner)
+    wrap_with_scaling(inner, LO, UP)
         .expect("valid factors")
         .expect("non-trivial factors wrap")
 }
@@ -299,7 +305,7 @@ fn finalize_inverts_the_substitution() {
     let inner = Rc::new(RefCell::new(Fixture::new(D.to_vec())));
     let got = inner.borrow().got.clone();
     let dynamic: Rc<RefCell<dyn TNLP>> = inner;
-    let w = wrap_with_scaling(dynamic).unwrap().unwrap();
+    let w = wrap_with_scaling(dynamic, LO, UP).unwrap().unwrap();
     w.borrow_mut().finalize_solution(
         Solution {
             status: SolverReturn::Success,
@@ -340,7 +346,7 @@ fn objective_and_constraint_scaling_pass_through() {
 fn factors_that_cannot_be_applied_are_refused() {
     for bad in [-2.0, 0.0, 1e-15] {
         let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Fixture::new(vec![bad, 1.0])));
-        let err = match wrap_with_scaling(inner) {
+        let err = match wrap_with_scaling(inner, LO, UP) {
             Err(e) => e,
             Ok(_) => panic!("factor {bad} must be refused"),
         };
@@ -367,14 +373,14 @@ fn values_before_structure_does_not_panic() {
 fn nothing_wraps_without_non_trivial_factors() {
     let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Fixture::new(vec![1.0, 1.0])));
     assert!(
-        wrap_with_scaling(inner).unwrap().is_none(),
+        wrap_with_scaling(inner, LO, UP).unwrap().is_none(),
         "all-ones needs no wrapper"
     );
     let mut f = Fixture::new(vec![2.0, 3.0]);
     f.use_x = false;
     let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(f));
     assert!(
-        wrap_with_scaling(inner).unwrap().is_none(),
+        wrap_with_scaling(inner, LO, UP).unwrap().is_none(),
         "use_x_scaling = false needs no wrapper"
     );
 }
@@ -388,5 +394,125 @@ fn the_presolve_flag_is_forwarded_not_claimed() {
     assert!(
         !w.borrow().is_presolve_wrapper(),
         "a plain inner TNLP means no presolve wrapper below"
+    );
+}
+
+/// Two variables with caller-chosen bounds and no constraints, for the
+/// bound-side tests. `.nl` models reach the solver with absent bounds
+/// written as the `±1e19` sentinel rather than a true infinity, which
+/// is the case that matters here.
+struct Bounded {
+    x_l: [Number; 2],
+    x_u: [Number; 2],
+    factors: [Number; 2],
+}
+
+impl TNLP for Bounded {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: 0,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&self.x_l);
+        b.x_u.copy_from_slice(&self.x_u);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        if sp.init_x {
+            sp.x.copy_from_slice(&[0.0, 0.0]);
+        }
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(x[0] * x[0] + x[1] * x[1])
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad_f: &mut [Number]) -> bool {
+        grad_f[0] = 2.0 * x[0];
+        grad_f[1] = 2.0 * x[1];
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _new_x: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _n: bool,
+        _o: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        _m: SparsityRequest<'_>,
+    ) -> bool {
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _c: &IpoptCq) {}
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = true;
+        req.x_scaling.copy_from_slice(&self.factors);
+        *req.use_g_scaling = false;
+        true
+    }
+}
+
+/// A variable with no bounds must still have none after scaling.
+///
+/// The sentinel is a finite number, so `x_l *= s` with `s < 1` walks it
+/// inside the threshold and the algorithm reads a real bound: the
+/// variable picks up a barrier term and `z_L`/`z_U` multipliers that
+/// the model never asked for. `s < 1` is the ordinary case for a model
+/// whose variables are large.
+#[test]
+fn absent_bounds_stay_absent_under_scaling() {
+    let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Bounded {
+        x_l: [LO, 1.0],
+        x_u: [UP, 2.0],
+        factors: [1.0e-6, 2.0],
+    }));
+    let w = wrap_with_scaling(inner, LO, UP).unwrap().unwrap();
+
+    let mut x_l = [0.0; 2];
+    let mut x_u = [0.0; 2];
+    assert!(w.borrow_mut().get_bounds_info(BoundsInfo {
+        x_l: &mut x_l,
+        x_u: &mut x_u,
+        g_l: &mut [],
+        g_u: &mut [],
+    }));
+
+    assert!(
+        x_l[0] <= LO && x_u[0] >= UP,
+        "the free variable gained bounds: [{}, {}] against thresholds [{LO}, {UP}]",
+        x_l[0],
+        x_u[0]
+    );
+    assert_eq!((x_l[1], x_u[1]), (2.0, 4.0), "real bounds still scale");
+}
+
+/// The mirror case: a real bound must not be scaled *past* a threshold,
+/// where it would read as absent and vanish. Nothing downstream could
+/// tell, so it is refused at setup, which is where there is a message.
+#[test]
+fn a_real_bound_scaled_past_the_threshold_is_refused() {
+    let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Bounded {
+        x_l: [-1.0e14, LO],
+        x_u: [1.0, UP],
+        factors: [1.0e6, 1.0],
+    }));
+    let err = match wrap_with_scaling(inner, LO, UP) {
+        Err(e) => e,
+        Ok(_) => panic!("a bound scaled to -1e20 must not be accepted"),
+    };
+    assert!(
+        err.contains("nlp_lower_bound_inf"),
+        "the refusal should name the threshold it crossed: {err}"
     );
 }

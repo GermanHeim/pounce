@@ -19,8 +19,8 @@
 //!
 //! * `user_scaling_suffix.nl` — objective + constraint factors only.
 //! * `user_scaling_var_suffix.nl` — the same, plus
-//!   `scaling_factor[x1] = 3`, a per-variable factor pounce does not
-//!   model.
+//!   `scaling_factor[x1] = 3`, a per-variable factor. It is applied as
+//!   a change of variables, so it must not move the answer.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -111,29 +111,55 @@ fn scaling_factor_suffix_is_inert_without_the_option() {
     );
 }
 
-/// A per-variable factor is refused with an explanation, not applied
-/// in part. Solving with the objective/constraint factors and dropping
-/// the variable one answers a question nobody asked.
+/// A per-variable factor is applied as a change of variables, which
+/// conditions the problem without redefining it. The check is parity
+/// against the same model with no variable factor: same objective in
+/// the user's own units, and the objective factor still reaching the
+/// IPM. Stage 1 refused this file outright.
 #[test]
-fn variable_scaling_factor_is_refused_with_a_message() {
+fn variable_scaling_factor_is_applied_without_moving_the_answer() {
     let (ok, stdout, stderr) = run(
         "user_scaling_var_suffix.nl",
         "varfactor",
         &["nlp_scaling_method=user-scaling"],
     );
-    assert!(!ok, "expected a failing exit\nstdout:\n{stdout}");
     assert!(
-        stderr.contains("per-variable scaling factors"),
-        "the refusal must say what was wrong; stderr:\n{stderr}",
+        ok,
+        "solve failed
+stdout:
+{stdout}
+stderr:
+{stderr}"
+    );
+    let (scaled, unscaled) = objective_columns(&stdout);
+
+    let (ok_ref, stdout_ref, stderr_ref) = run(
+        "user_scaling_suffix.nl",
+        "varfactor_ref",
+        &["nlp_scaling_method=user-scaling"],
     );
     assert!(
-        stderr.contains("483"),
-        "the refusal should point at the tracking issue; stderr:\n{stderr}",
+        ok_ref,
+        "reference solve failed
+stdout:
+{stdout_ref}
+stderr:
+{stderr_ref}"
+    );
+    let (_, unscaled_ref) = objective_columns(&stdout_ref);
+
+    assert!(
+        (unscaled - unscaled_ref).abs() <= 1e-6 * unscaled_ref.abs().max(1.0),
+        "scaling_factor[x1]=3 must not move the objective in user units;          got {unscaled} with the factor, {unscaled_ref} without",
+    );
+    assert!(
+        (scaled / unscaled - 100.0).abs() < 1e-6,
+        "scaling_factor[obj]=100 should still reach the IPM alongside          the variable factor; got scaled={scaled}, unscaled={unscaled}",
     );
 }
 
-/// Without `user-scaling` the variable entry is not a request pounce
-/// is dropping, so the solve runs normally.
+/// Without `user-scaling` the factors are not consulted at all, so
+/// the variable entry is inert and the solve runs unscaled.
 #[test]
 fn variable_scaling_factor_is_inert_without_the_option() {
     let (ok, stdout, stderr) = run("user_scaling_var_suffix.nl", "varinert", &[]);

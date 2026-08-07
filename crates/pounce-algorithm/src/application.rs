@@ -672,6 +672,12 @@ impl IpoptApplication {
         &self,
         tnlp: Rc<RefCell<dyn TNLP>>,
     ) -> Result<Rc<RefCell<dyn TNLP>>, String> {
+        // Cleared first so the accessor describes *this* solve. An
+        // application is reusable across solves (`pounce-cinterface`
+        // holds one across `IpoptSolve` calls), and a stale vector
+        // would have a later unscaled solve reporting the previous
+        // solve's factors.
+        *self.variable_scaling.borrow_mut() = None;
         let method = self
             .options
             .get_string_value("nlp_scaling_method", "")
@@ -681,7 +687,11 @@ impl IpoptApplication {
         if method != "user-scaling" {
             return Ok(tnlp);
         }
-        match pounce_nlp::scaling_tnlp::wrap_with_scaling(Rc::clone(&tnlp)) {
+        match pounce_nlp::scaling_tnlp::wrap_with_scaling(
+            Rc::clone(&tnlp),
+            self.nlp_lower_bound_inf(),
+            self.nlp_upper_bound_inf(),
+        ) {
             Ok(Some(wrapped)) => {
                 *self.variable_scaling.borrow_mut() =
                     pounce_nlp::scaling_tnlp::factors_of(&wrapped);
@@ -689,8 +699,9 @@ impl IpoptApplication {
             }
             Ok(None) => Ok(tnlp),
             Err(why) => Err(format!(
-                "pounce: nlp_scaling_method=user-scaling supplied per-variable                  scaling factors that cannot be applied. {why}. Correct the                  factors, or drop nlp_scaling_method=user-scaling.
-"
+                "pounce: nlp_scaling_method=user-scaling supplied per-variable \
+                 scaling factors that cannot be applied. {why}. Correct the \
+                 factors, or drop nlp_scaling_method=user-scaling."
             )),
         }
     }

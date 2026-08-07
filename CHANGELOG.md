@@ -37,6 +37,17 @@ changes.
 - Factors must be positive and finite. A negative factor reverses a
   variable and swaps its bounds, so it raises rather than being
   applied silently.
+- Absent bounds survive scaling. A variable with no bound arrives
+  carrying the `nlp_lower_bound_inf` / `nlp_upper_bound_inf` sentinel,
+  which is an ordinary finite number (`±1e19`) and not an infinity, so
+  scaling it by a factor below 1 would move it inside the threshold
+  and hand a free variable a barrier term and bound multipliers it
+  never had. Bounds are scaled only where present, and a present bound
+  that would scale *past* a threshold, where it would read as no bound
+  at all, is refused with a message naming the threshold it crossed.
+- `Problem.set_problem_scaling` accepts `x_scaling` from Python, and
+  the C `SetIpoptProblemScaling` applies it, both landing in the
+  caller's own units. Each previously refused any non-unit entry.
 - The sensitivity path still refuses variable factors. Its accessors
   read the KKT factorization directly and do not yet carry the
   substitution, so they would report scaled-space numbers under a

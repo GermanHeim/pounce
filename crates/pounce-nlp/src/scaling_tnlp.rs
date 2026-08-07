@@ -21,7 +21,8 @@
 //!
 //! | quantity | transform |
 //! |---|---|
-//! | bounds, starting point | `× d` |
+//! | starting point | `× d` |
+//! | bounds, where present | `× d` |
 //! | objective, constraint values | unchanged |
 //! | objective gradient | `÷ d` |
 //! | Jacobian entry | `÷ d[col]` |
@@ -29,6 +30,14 @@
 //! | solution `x` | `÷ d` |
 //! | bound multipliers `z_L`, `z_U` | `× d` on the way out, `÷ d` in |
 //! | constraint multipliers `λ` | unchanged |
+//!
+//! "Where present" is the whole of the bounds subtlety. An absent
+//! bound arrives as the `nlp_lower_bound_inf` / `nlp_upper_bound_inf`
+//! sentinel, an ordinary finite number, so scaling it would move it
+//! inside the threshold and turn a free variable into a bounded one.
+//! Absent bounds are passed through untouched, and a present bound
+//! that would scale *past* a threshold is refused in
+//! [`wrap_with_scaling`].
 //!
 //! The multiplier rule follows from stationarity. Writing the scaled
 //! condition `∇f̃ - J̃ᵀλ - z̃_L + z̃_U = 0` and substituting
@@ -43,6 +52,19 @@
 //! upward unchanged, since the core already models those. Without
 //! non-trivial variable factors it returns `Ok(None)` and the caller
 //! keeps the bare TNLP, so an unscaled solve pays nothing.
+//!
+//! # Where this sits
+//!
+//! `optimize_tnlp` installs the wrapper around whatever TNLP it was
+//! handed, so with presolve in play the wrapper is *outermost* and the
+//! factors it reads are already in reduced variable indices: the CLI
+//! builds a `PresolveTnlp` first and hands that over. That is
+//! consistent rather than accidental, because the presolve layers
+//! project the factors along with everything else. `linear_eq_elim`
+//! maps each surviving column's factor through `vars_kept`, and the
+//! row-only reducer leaves columns alone. `finalize_solution` then
+//! unscales in those same reduced indices, before the presolve layer
+//! beneath expands back to the full variable vector.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -75,8 +97,17 @@ pub struct ScalingTnlp {
     jac_cols: Vec<usize>,
     hess_rc: Vec<(usize, usize)>,
     index_offset: usize,
-    /// Scratch for the unscaled `x` handed to the inner TNLP.
+    /// Scratch for the unscaled `x` handed to the inner TNLP. Moved
+    /// out and back by [`ScalingTnlp::with_unscaled`] so it keeps its
+    /// capacity across iterations.
     x_scratch: Vec<Number>,
+    /// `nlp_lower_bound_inf` / `nlp_upper_bound_inf`. A bound at or
+    /// past its threshold means "absent", and an absent bound has to
+    /// stay absent under scaling: multiplying the `±1e19` sentinel by
+    /// a factor below 1 would move it inside the threshold and hand a
+    /// free variable a barrier term it should not have.
+    lo_inf: Number,
+    up_inf: Number,
 }
 
 impl ScalingTnlp {
@@ -146,13 +177,29 @@ impl ScalingTnlp {
         ok
     }
 
-    /// Unscale the algorithm's `x̃` into the scratch buffer and return
-    /// it, so the inner TNLP always sees the user's own coordinates.
-    fn unscale_x(&mut self, x: &[Number]) -> &[Number] {
-        let n = self.d.len().min(x.len());
-        self.x_scratch.clear();
-        self.x_scratch.extend((0..n).map(|i| x[i] / self.d[i]));
-        &self.x_scratch
+    /// Call `f` with the inner TNLP seeing `x` in the user's own
+    /// coordinates. The scratch buffer is moved out for the duration
+    /// so `f` can still borrow `self`, then moved back, which keeps
+    /// its capacity instead of allocating once per evaluation.
+    ///
+    /// Everything about this wrapper rests on `x` and `d` indexing the
+    /// same variables, so a length mismatch is a wiring bug and is
+    /// asserted rather than papered over: truncating would hand back
+    /// quietly wrong derivatives.
+    fn with_unscaled<R>(&mut self, x: &[Number], f: impl FnOnce(&mut Self, &[Number]) -> R) -> R {
+        assert_eq!(
+            x.len(),
+            self.d.len(),
+            "scaling: got {} variables but {} factors",
+            x.len(),
+            self.d.len()
+        );
+        let mut buf = std::mem::take(&mut self.x_scratch);
+        buf.clear();
+        buf.extend(x.iter().zip(self.d.iter()).map(|(&v, &s)| v / s));
+        let out = f(self, &buf);
+        self.x_scratch = buf;
+        out
     }
 }
 
@@ -166,6 +213,8 @@ impl ScalingTnlp {
 /// than silently applied.
 pub fn wrap_with_scaling(
     inner: Rc<RefCell<dyn TNLP>>,
+    lo_inf: Number,
+    up_inf: Number,
 ) -> Result<Option<Rc<RefCell<dyn TNLP>>>, String> {
     let info = inner
         .borrow_mut()
@@ -214,6 +263,46 @@ pub fn wrap_with_scaling(
         }
     }
 
+    // A present bound scaled past its threshold would read as absent
+    // and disappear, the mirror of the sentinel problem the wrapper's
+    // `get_bounds_info` guards against. It cannot be reported from
+    // there, because that callback returns a bare bool, so the bounds
+    // are fetched once here where there is a message channel.
+    {
+        let mut x_l = vec![0.0; n];
+        let mut x_u = vec![0.0; n];
+        let mut g_l = vec![0.0; m];
+        let mut g_u = vec![0.0; m];
+        let got = inner.borrow_mut().get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        });
+        if got {
+            for (i, &s) in x_scaling.iter().enumerate() {
+                if x_l[i] > lo_inf && x_l[i] * s <= lo_inf {
+                    return Err(format!(
+                        "scaling: variable {i} has lower bound {} and scaling factor \
+                         {s}; the scaled bound {} is at or past nlp_lower_bound_inf \
+                         ({lo_inf}), where it would be read as no bound at all",
+                        x_l[i],
+                        x_l[i] * s
+                    ));
+                }
+                if x_u[i] < up_inf && x_u[i] * s >= up_inf {
+                    return Err(format!(
+                        "scaling: variable {i} has upper bound {} and scaling factor \
+                         {s}; the scaled bound {} is at or past nlp_upper_bound_inf \
+                         ({up_inf}), where it would be read as no bound at all",
+                        x_u[i],
+                        x_u[i] * s
+                    ));
+                }
+            }
+        }
+    }
+
     let index_offset = match info.index_style {
         IndexStyle::C => 0,
         IndexStyle::Fortran => 1,
@@ -231,6 +320,8 @@ pub fn wrap_with_scaling(
         hess_rc: Vec::new(),
         index_offset,
         x_scratch: Vec::with_capacity(n),
+        lo_inf,
+        up_inf,
     }))))
 }
 
@@ -257,10 +348,20 @@ impl TNLP for ScalingTnlp {
             return false;
         }
         // Positive factors preserve the order of the bounds, so no
-        // swap is needed; infinities scale to themselves.
+        // swap is needed. Absence is directional and decided against
+        // the thresholds, matching `classify_bounds`: a lower bound is
+        // absent at or below `lo_inf`, an upper bound at or above
+        // `up_inf`. Those sentinels are ordinary finite numbers
+        // (`±1e19` by default, and the `.nl` reader writes them rather
+        // than a true infinity), so scaling one would turn "no bound"
+        // into a real bound.
         for (i, &s) in self.d.iter().enumerate() {
-            x_l[i] *= s;
-            x_u[i] *= s;
+            if x_l[i] > self.lo_inf {
+                x_l[i] *= s;
+            }
+            if x_u[i] < self.up_inf {
+                x_u[i] *= s;
+            }
         }
         true
     }
@@ -304,13 +405,13 @@ impl TNLP for ScalingTnlp {
     }
 
     fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
-        let xu = self.unscale_x(x).to_vec();
-        self.inner.borrow_mut().eval_f(&xu, new_x)
+        self.with_unscaled(x, |me, xu| me.inner.borrow_mut().eval_f(xu, new_x))
     }
 
     fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
-        let xu = self.unscale_x(x).to_vec();
-        if !self.inner.borrow_mut().eval_grad_f(&xu, new_x, grad_f) {
+        if !self.with_unscaled(x, |me, xu| {
+            me.inner.borrow_mut().eval_grad_f(xu, new_x, grad_f)
+        }) {
             return false;
         }
         for (i, &s) in self.d.iter().enumerate() {
@@ -320,8 +421,7 @@ impl TNLP for ScalingTnlp {
     }
 
     fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
-        let xu = self.unscale_x(x).to_vec();
-        self.inner.borrow_mut().eval_g(&xu, new_x, g)
+        self.with_unscaled(x, |me, xu| me.inner.borrow_mut().eval_g(xu, new_x, g))
     }
 
     fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
@@ -343,12 +443,24 @@ impl TNLP for ScalingTnlp {
                 ok
             }
             SparsityRequest::Values { values } => {
-                let xu = x.map(|xs| self.unscale_x(xs).to_vec());
-                let ok = self.inner.borrow_mut().eval_jac_g(
-                    xu.as_deref(),
-                    new_x,
-                    SparsityRequest::Values { values },
-                );
+                let ok = match x {
+                    Some(xs) => self.with_unscaled(xs, |me, xu| {
+                        me.inner.borrow_mut().eval_jac_g(
+                            Some(xu),
+                            new_x,
+                            SparsityRequest::Values {
+                                values: &mut *values,
+                            },
+                        )
+                    }),
+                    None => self.inner.borrow_mut().eval_jac_g(
+                        None,
+                        new_x,
+                        SparsityRequest::Values {
+                            values: &mut *values,
+                        },
+                    ),
+                };
                 if !ok || !self.ensure_jac_cols() {
                     return false;
                 }
@@ -394,15 +506,30 @@ impl TNLP for ScalingTnlp {
                 ok
             }
             SparsityRequest::Values { values } => {
-                let xu = x.map(|xs| self.unscale_x(xs).to_vec());
-                let ok = self.inner.borrow_mut().eval_h(
-                    xu.as_deref(),
-                    new_x,
-                    obj_factor,
-                    lambda,
-                    new_lambda,
-                    SparsityRequest::Values { values },
-                );
+                let ok = match x {
+                    Some(xs) => self.with_unscaled(xs, |me, xu| {
+                        me.inner.borrow_mut().eval_h(
+                            Some(xu),
+                            new_x,
+                            obj_factor,
+                            lambda,
+                            new_lambda,
+                            SparsityRequest::Values {
+                                values: &mut *values,
+                            },
+                        )
+                    }),
+                    None => self.inner.borrow_mut().eval_h(
+                        None,
+                        new_x,
+                        obj_factor,
+                        lambda,
+                        new_lambda,
+                        SparsityRequest::Values {
+                            values: &mut *values,
+                        },
+                    ),
+                };
                 if !ok || !self.ensure_hess_rc() {
                     return false;
                 }
@@ -416,6 +543,13 @@ impl TNLP for ScalingTnlp {
     }
 
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
+        assert_eq!(
+            sol.x.len(),
+            self.d.len(),
+            "scaling: solution has {} variables but {} factors",
+            sol.x.len(),
+            self.d.len()
+        );
         let x: Vec<Number> = sol
             .x
             .iter()

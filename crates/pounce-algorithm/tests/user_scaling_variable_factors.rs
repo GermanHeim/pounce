@@ -1,26 +1,12 @@
-//! Regression test for gh#483: `nlp_scaling_method=user-scaling` with
-//! per-variable scaling factors must fail the solve, not run it with
-//! the factors quietly thrown away.
+//! `nlp_scaling_method=user-scaling` with per-variable scaling
+//! factors. gh#483 found them accepted and then discarded, leaving a
+//! differently-conditioned problem and nothing to say so; stage 1
+//! refused the solve outright, which was honest but not useful.
 //!
-//! pounce models objective and constraint scaling only. Until this
-//! test, `OrigIpoptNlp::scale_user_supplied` ended in
-//!
-//! ```text
-//! // `use_x_scaling`: silently ignored (not modeled — see doc).
-//! let _ = use_x_scaling;
-//! ```
-//!
-//! so a TNLP that asked for variable scaling got a converged answer to
-//! a differently-conditioned problem than the one it described, with
-//! nothing in the log to say the request had been dropped. The
-//! objective and constraint factors on the same request *were* applied,
-//! which makes the discard worse than a plain no-op: the conditioning
-//! that came back was neither what was asked for nor the unscaled
-//! problem.
-//!
-//! Problem (n = 2, m = 1): `min (x0 - 3)^2 + (x1 - 2)^2` s.t.
-//! `x0 + x1 = 1`. Small, convex, and solvable — so a failure here is
-//! the refusal, never the model.
+//! Stage 2 applies them as a change of variables, so the test that
+//! pinned the refusal now pins the property that replaced it: the
+//! solve runs, and its answer matches the unfactored solve in the
+//! user's own units.
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};

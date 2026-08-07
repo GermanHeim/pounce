@@ -460,11 +460,11 @@ impl PyProblem {
     ///
     /// * `obj_scaling` — multiplier applied to the objective (and the
     ///   final reported value is divided back out).
-    /// * `x_scaling` — length-`n` per-variable factors. pounce models
-    ///   objective and constraint scaling only, so anything other than
-    ///   all-`1.0` (or `None`) **raises**: these factors used to be
-    ///   accepted and then discarded, leaving the caller with a
-    ///   differently-conditioned problem and no way to tell (gh#483).
+    /// * `x_scaling` — length-`n` per-variable factors, applied as a
+    ///   change of variables `x_scaled[i] = x_scaling[i] * x[i]`
+    ///   (gh#486). Everything the solve reports back, including `x` and
+    ///   the bound multipliers, is in your own units. A factor that is
+    ///   not finite and positive fails the solve with an explanation.
     /// * `g_scaling` — length-`m` per-constraint factors, or `None`
     ///   to leave constraint scaling off.
     ///
@@ -481,21 +481,6 @@ impl PyProblem {
         let x = x_scaling
             .map(|v| extract_f64_vec(&v, self.n as usize, "x_scaling"))
             .transpose()?;
-        if let Some(bad) = x
-            .as_ref()
-            .and_then(|v| v.iter().position(|&s| s != 1.0).map(|i| (i, v[i])))
-        {
-            let (i, s) = bad;
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "set_problem_scaling: x_scaling[{i}] = {s} — pounce models only \
-                 objective and constraint scaling, so per-variable factors cannot \
-                 be honored. They were previously accepted and then discarded, \
-                 which left the solve conditioned differently than you asked for \
-                 with nothing to say so (gh#483). Pass x_scaling=None (or all \
-                 1.0) and rescale those variables in the model itself \
-                 (substitute x[{i}] = z / {s} and give the solver z)."
-            )));
-        }
         let g = g_scaling
             .map(|v| extract_f64_vec(&v, self.m as usize, "g_scaling"))
             .transpose()?;
