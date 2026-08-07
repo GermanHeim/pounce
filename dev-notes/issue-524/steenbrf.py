@@ -7,24 +7,30 @@ A totally separable nonconvex multi-commodity network problem
     python3 steenbrf.py steenbrf.nl           # STEENBRF
     python3 steenbrf.py steenbrb.nl --as-b    # STEENBRB, the control
 
-This is the evidence behind the `steenbrf` half of gh #524 (see
-`dev-notes/issue-524-cresc4-steenbrf.md`): the corpus file the issue reports
-on is NOT this problem, so that half could not be worked.
+This is the control behind the `steenbrf` half of gh #524 (see
+`dev-notes/issue-524-cresc4-steenbrf.md`): the corpus file the issue reports on
+is NOT this problem. Vanderbei's `steenbrf` prices only commodities 11 and 12,
+leaving 360 of its 468 variables out of the objective entirely; this one prices
+all twelve, as the SIF does. Same network, same data, same start point —
+53 iterations here against 2570 there.
 
-The control is what makes that claim checkable rather than an excuse.
+The control is what makes that claim checkable rather than an assertion.
 `STEENBRB.SIF` is byte-identical to `STEENBRF.SIF` except for one line —
 `AM LA(4) LA(4) 0.5`, halving the investment cost of arc 4 — so `--as-b`
 un-halves that single coefficient and changes nothing else. It reproduces
 `9075.8553865777394`, against the `9075.855` recorded for `steenbrb` in
 `benchmarks/vanderbei/cute_table_status.json` and the `SOLTN 9098.9319884` in
-STEENBRB.SIF's own header: every digit those sources carry.
+STEENBRB.SIF's own header: every digit those sources carry. Vanderbei's own
+`steenbrb.nl` has since confirmed it outright — his file and this one solve to
+the same objective in the same 49 iterations.
 
 So the transcription is right, and mastsif STEENBRF has an optimum near 8991
 (POUNCE solves it cleanly, 53 iterations, no stall). The corpus `steenbrf`
-sits near 282 — two orders of magnitude lower, and below a floor this model
-cannot go under: commodity 1 alone must move 2000 units over a cheapest path
-costing 40, contributing 2000*40*0.01 = 800 from the objective's linear term
-before anything else is counted.
+optimum is 282.678 — below a floor this model provably cannot reach. Dropping
+the non-negative congestion term leaves a pure min-cost multicommodity-flow LP,
+which POUNCE solves at 8250.0, and the capacity term adds at least 1.64. So
+282.678 is not a second local minimum of this model; it is unreachable by it,
+which is what makes "different problem" a measurement rather than a guess.
 """
 
 import sys

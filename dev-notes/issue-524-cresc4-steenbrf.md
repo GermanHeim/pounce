@@ -23,38 +23,17 @@ transcribed from their CUTEst `mastsif` SIF sources (reachable at
 `https://bitbucket.org/optrove/sif/raw/master/<NAME>.SIF`) into Pyomo and
 written to `.nl` with Pyomo's own writer — no AMPL needed.
 
-**Correction, and a live loose end.** The reporter *did* attach the real
-`steenbrf.nl` — inlined in
+**The `steenbrf` half now uses the reporter's own file.** It was attached to
 [a comment on #524](https://github.com/jkitchin/pounce/issues/524#issuecomment-5219526863)
-as a base64 gzipped tarball (8093 B packed, `sha256
-bba26942506ca72bd77bdb98150a9cf1409f0fc1e2c4d14377a7fe059278d0ab`), precisely
-so the reproducer would not depend on the corpus. It was not used here: the
-only way to reach it from this environment is to copy ~10.8 kB of base64 out of
-a tool result by hand, and the attempt produced a truncated archive (5.3 kB of
-the 10.8, middle dropped, tail intact — `tar` listed the members and then hit
-EOF). Rather than build on a corrupt fixture, the `steenbrf` analysis below
-stays on the mastsif transcription, and is labelled throughout as being about
-*that* problem rather than the reporter's. Anyone with the corpus, or with a
-way to get that attachment onto disk, should redo the `steenbrf` half against
-the real file before trusting any of it. `cresc4` has no attachment on the
-issue, so its transcription remains the only route regardless.
+as a base64 tarball all along, and was later uploaded into the container
+directly; `sha256 bba26942…78d0ab` matches the issue's checksum, so the
+`steenbrf` section below is measured on the exact benchmark input. `cresc4` has
+no attachment on the issue and its transcription remains the only route.
 
-That is a weaker artifact than the reporter's, and the discipline in
-`AGENTS.md` applies: a transcription is only evidence once it reproduces the
-reported *signature*, not merely the reported *symptom*. What was checked
-before believing it:
-
-- the objective POUNCE reaches on a healthy encoding matches the published
-  reference (`cresc4`: `0.87189753860735963` vs `0.8718976`);
-- the failure signature matches the issue's table cell for cell — status,
-  near-zero objective at exit, and recovery under both `mu_strategy=adaptive`
-  and `nlp_scaling_method=none`;
-- the transcription machinery was validated end to end on an unrelated control
-  (`STEENBRB`, below) that has a published reference number.
-
-Iteration counts still differ from the corpus files, and every claim below is
-about the transcribed models. Both transcriptions are committed so they can be
-audited against the SIF rather than taken on trust:
+So `cresc4` below is measured on a transcription whose iteration counts differ
+from the corpus file, and `steenbrf` below is measured on the corpus file
+itself. Both transcriptions are committed so they can be audited against the
+SIF rather than taken on trust:
 
 - `crates/pounce-cli/tests/fixtures/cresc4.py` regenerates the committed
   fixture `cresc4.nl` byte for byte;
@@ -221,67 +200,142 @@ inspectable — the issue's own observation, and still the best next step.
 
 ---
 
-## `steenbrf` — did not reproduce, and the corpus file is the reason
+## `steenbrf` — the reporter's file, and why it crawls
 
-The transcription of `mastsif/STEENBRF.SIF` **solves cleanly**: 53 iterations,
-`Optimal Solution Found`, objective `8991.85`. No stall, nothing like the
-reported 3000-iteration grind.
+**This section was rewritten once the reporter's actual `.nl` reached the
+container** (uploaded directly; `sha256
+bba26942506ca72bd77bdb98150a9cf1409f0fc1e2c4d14377a7fe059278d0ab`, matching the
+issue comment's checksum exactly, 19004 B). Everything below is measured on
+that file. The earlier version of this note reasoned from a `mastsif`
+transcription and reached the right *conclusion* — the corpus file is not
+CUTEst `STEENBRF` — for incomplete reasons. The real answer is sharper.
 
-That is not a transcription bug. The control:
+### It does not stall here
 
-- `STEENBRB.SIF` is byte-identical to `STEENBRF.SIF` except for four lines
-  (`AM LA(4) LA(4) 0.5`, "half investment cost for arc 4") and the problem name.
-- Transcribing it with the same code and un-halving that one coefficient gives
-  **`9075.8553865777394`**, against the published reference `9075.855` in
-  `benchmarks/vanderbei/cute_table_status.json` — every digit the table
-  carries. `STEENBRB.SIF` also records `SOLTN 9098.9319884` in its own header.
+On this machine, at the reporter's own commit, on the byte-identical file:
 
-So the machinery is right, and mastsif `STEENBRF` has an optimum near `8991`.
-But every number in the issue and in the reference table puts the corpus
-`steenbrf` two orders of magnitude lower: POUNCE stalls at `397.818`, POUNCE
-under adaptive µ reaches `282.678`, Ipopt reaches `1321.652`, and the table's
-`ref_obj` is `282.7578`.
+| | reporter (`a664dc05`) | here, `a664dc0` | here, +this PR |
+|---|---|---|---|
+| defaults | Maximum_Iterations_Exceeded, 3000 | **Optimal, 2570 iters, 282.678** | identical, 2570 |
+| `mu_strategy=adaptive` | Solved To Acceptable Level, 567 | Solved To Acceptable Level, 567 | identical, 567 |
 
-A floor argument confirms the two cannot be the same model. In mastsif
-`STEENBRF` the objective's linear term alone is `Σ_arcs 0.01 · COST · FLOW`, and
-commodity 1 must move 2000 units from node 2 to node 3, whose cheapest path
-(arcs 5 and 8) costs 40 — contributing `2000 · 40 · 0.01 = 800` before any of
-the other eleven commodities, the cubic congestion term, or the capacity term.
-An objective of `282.76` is not reachable.
+The adaptive column matches the reporter to the iteration, which is what says
+the file and the setup are right. The default column does not: it converges,
+2570 iterations, 430 short of the cap.
 
-**Conclusion: the corpus's `vanderbei/nl/steenbrf.nl` is not a transliteration
-of CUTEst `STEENBRF`.** Two things follow, both for the maintainer to decide:
+That is not run-to-run noise — three runs give 2570 exactly, and
+`RAYON_NUM_THREADS=1` and `=4` give 2570 too. It is not this PR either: the
+parent binary produces bit-identical output. So the trajectory is **platform
+dependent**, and the reporter's machine and this container fall on opposite
+sides of a 3000-iteration cap that this problem approaches either way.
 
-1. The `steenbrf` half of #524 needs the reporter's own file, which **is
-   available** — attached to the issue as a base64 tarball (see the correction
-   above) — just not reachable from this environment. That half is unstarted,
-   not blocked: decode the attachment and the stall should reproduce directly.
-2. It is worth checking whether that `.mod` is faithful at all before spending
-   more on it. The reference table already flags it: `steenbrf` is one of the
-   few entries with `solvers_agree: false` (`nitro` 282.7578, `snopt` 319.0946,
-   `loqo` no answer), and the siblings that *do* agree — `steenbra` 16957.67,
-   `steenbrb` 9075.855, `steenbrd` 9030.082, `steenbre` 27459.16 — are all in
-   the band the SIF sources predict. `steenbrf` is the outlier in its own
-   family by a factor of ~32. A solver being blamed for a 3000-iteration stall
-   on a model whose three reference solvers cannot agree on the answer is worth
-   confirming before it is worth optimising for.
+Do not read that as "cannot reproduce, closing". Read it as: the margin to
+`max_iter` on this model is about 15 %, and which side of it you land on is
+decided by the floating-point environment. The interesting question was never
+"does it hit 3000" but "why does the default path need 4.5× the iterations
+adaptive needs", and that reproduces perfectly.
 
-### The second `steenbrf` question, answered from existing work
+### Why: 360 of 468 variables carry no objective at all
 
-The issue also asks whether a stall that flat — objective unchanged to eight
-digits over hundreds of iterations, primal feasible throughout — should be
-detected and terminated early rather than grinding to the iteration cap.
+Vanderbei's `steenbrf` is **not** a transliteration of CUTEst `STEENBRF`, and
+the difference is not a scale factor — it is a dropped index set.
 
-That has already been prototyped and discarded once, and the write-up applies
-directly here: `dev-notes/issue-131-monotone-lbfgs-stall.md`, "Follow-up A".
-An opt-in `monotone_stall_iter` was wired end to end and reverted, because
-building it falsified its own premise — what reads as a hard stall in a
-`print_level=5` trace was a uniformly decelerating crawl with no clean
-bimodality separating "slow but will clear" from "doomed", leaving only
-problem-specific thresholds. The conclusion there was that if a
-"don't silently grind to `max_iter`" signal is ever wanted, it should be a
-*post-hoc* diagnostic keyed on the existing `max_iter` + frozen-µ exit state,
-never a mid-solve heuristic that perturbs the trajectory. Nothing in #524
-changes that, and `steenbrf`'s trace (`inf_du` oscillating *upward* while the
-objective is pinned) is if anything a cleaner candidate for the post-hoc
-diagnostic than for a mid-solve gate.
+Read straight off the `.nl` header and the `G0` segment:
+
+```
+steenbrb.nl:   0 468 0      # nonlinear vars in constraints, objectives, both
+               864 468      # nonzeros in Jacobian, objective gradient
+steenbrf.nl:   0 108 0
+               864 108
+```
+
+Both files have 468 variables and 108 rows. In `steenbrb` every flow variable
+appears in the objective. In `steenbrf` only **108** do, and the `.col` map
+names them: `cd1..cd18`, `cr1..cr18` (the 36 capacities), plus `d11_k`,
+`r11_k`, `d12_k`, `r12_k` for each arc — the flows of **commodities 11 and 12
+only**. The congestion term is `LC_k · (d11_k + d12_k)³ / cd_k²`, summing two
+of the twelve commodities.
+
+Commodities 1 through 10 — **360 variables** — appear in no objective term,
+neither linear nor nonlinear. They are pinned only by flow conservation and
+`x ≥ 0`.
+
+CUTEst `STEENBRF` sums all twelve (`Σ_{i=1..12} d[i,k]`). So Vanderbei's `.mod`
+looks like a transliteration defect — an index set written over two commodities
+where the source has twelve.
+
+That single fact explains every anomaly in this problem:
+
+- **The objective value.** 282.678 here versus ≥ 8251.6 for the CUTEst model.
+  That floor is not an estimate: dropping the (non-negative) congestion term
+  from `mastsif` STEENBRF leaves a pure min-cost multicommodity-flow LP, and
+  POUNCE solves it at **8250.0**; the capacity term adds ≥ 1.64. So 282.678 is
+  not a different local minimum of the CUTEst model — it is **unreachable** by
+  it, which is what proves the two are different problems rather than two
+  answers to one.
+- **The reference table disagreeing with itself.** `steenbrf` is one of the few
+  entries in `benchmarks/vanderbei/cute_table_status.json` with
+  `solvers_agree: false` (nitro 282.7578, snopt 319.0946, loqo no answer). With
+  360 cost-free variables the optimal face is a large flat polytope; solvers
+  stop at different points of it and report different objectives.
+- **The crawl.** This is the part that matters for #524. Those 360 variables
+  enter the barrier problem *only* through their `log(x)` terms — zero
+  objective gradient, zero Hessian contribution. Nothing pulls them anywhere;
+  they are driven purely by µ, and the monotone schedule has to walk all 360 of
+  them down decade by decade with the line search fighting the bound. That is
+  precisely the trace the issue quotes: objective pinned to eight digits,
+  `inf_pr` at 1e-9 (feasible throughout), tiny steps, 20+ backtracks per
+  iteration. Adaptive µ, which sets µ from the current centrality rather than
+  from a fixed schedule, is not hostage to that and finishes in 567.
+
+The controlled comparison, same network, same data, same start point, the only
+difference being whether the other ten commodities carry cost:
+
+| model | congestion term | iterations (defaults) |
+|---|---|---|
+| CUTEst `STEENBRF` (transcribed) | all 12 commodities | **53** |
+| Vanderbei `steenbrf` (reporter's file) | commodities 11–12 only | **2570** |
+
+Fifty-three against two thousand five hundred and seventy, on the same network.
+The slowness is a property of the degenerate model, not of the solver.
+
+### What to do about it
+
+Nothing in the solver, on this evidence. POUNCE reaches 282.678, which agrees
+with the best reference (nitro's 282.7578) to four digits, and does it in
+2570 iterations under defaults and 567 under adaptive µ. There is no wrong
+answer here — only a slow path on a model whose objective ignores 77 % of its
+variables.
+
+Three things are worth doing, none of them a code change:
+
+1. **Check the corpus entry.** If `steenbrf.mod` really does sum two
+   commodities where the source sums twelve, the benchmark is scoring solvers
+   on a typo. The same check is worth running across the family — this note
+   only establishes it for `steenbrf`, and `steenbrb` is *not* affected (its
+   objective touches all 468 variables and its optimum, 9075.8553865777394,
+   matches the published 9075.855 exactly, verified against Vanderbei's own
+   file, not just the table).
+2. **If the entry stays, expect the iteration count.** A model with a large
+   cost-free subspace is a legitimate stress case for a monotone barrier, but
+   it should be filed as "monotone µ is slow on degenerate models", not as a
+   stall bug, and it should not be measured against a 3000-iteration cap it
+   sits 15 % inside.
+3. **The `max_iter` margin is the only real robustness question**, and it is
+   the one from `dev-notes/issue-131-monotone-lbfgs-stall.md`: a post-hoc
+   diagnostic on the `max_iter` + frozen-µ exit that says "this looks like a
+   degenerate crawl, try `mu_strategy=adaptive`" would have turned the
+   reporter's 3000-iteration wall into a one-line answer. Follow-up A in that
+   note establishes that the *mid-solve* version of this is an unprincipled
+   patience knob; the post-hoc version is still unbuilt and is still the right
+   shape.
+
+### On the earlier version of this note
+
+It claimed the corpus file "could not be obtained" and then, after the
+attachment was found, that it could not be decoded. Both were true at the time
+and both are now moot. What survives unchanged is the STEENBRB control, which
+is what made the "different model" conclusion safe to state before the file
+arrived — and which the reporter's own `steenbrb.nl` has since confirmed
+outright: transcription and original solve to the same objective in the same 49
+iterations.
