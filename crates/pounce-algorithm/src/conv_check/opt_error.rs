@@ -44,7 +44,9 @@ pub struct OptErrorConvCheck {
     pub infeas_stationarity_tol: Number,
     /// Multiple of `constr_viol_tol` the constraint violation must
     /// exceed before an iterate can count as infeasible-stationary —
-    /// keeps detection from firing on nearly-feasible flat spots.
+    /// keeps detection from firing on nearly-feasible flat spots. Floored
+    /// at [`MIN_INFEAS_VIOL_FLOOR`]; see
+    /// [`OptErrorConvCheck::absolute_viol_threshold`].
     pub infeas_viol_kappa: Number,
     /// Consecutive infeasible-stationary iterations required before
     /// terminating with `LocallyInfeasible`. Non-positive disables
@@ -100,6 +102,32 @@ pub struct OptErrorConvCheck {
 /// this number: whatever happens after the budget is spent, the refused
 /// certificate is still restored if the run ends without a better one.
 const VETO_MAX_EXTRA_ITERS: Index = 60;
+
+/// Smallest constraint violation rapid infeasibility detection will ever treat
+/// as "bounded away from feasible" (gh #519).
+///
+/// Both arms of [`OptErrorConvCheck::is_infeasible_stationary`] scale their
+/// violation floor with `constr_viol_tol`, which is a *feasibility* tolerance:
+/// left unclamped, tightening it widens the set of points the detector is
+/// willing to convict, so asking for a stricter feasibility standard makes the
+/// solver more eager to answer "locally infeasible". That inversion is the bug
+/// this floor exists to prevent — at `constr_viol_tol = 1e-6` the absolute arm's
+/// floor fell to `1e-4` and @bernalde's `f=1` model (gh #505), plateaued at an
+/// unscaled violation of `1.94e-4` with a scaled NLP error of `4.89e-10`, was
+/// reported infeasible at iteration 27 instead of "Solved To Acceptable Level"
+/// at 37. The flip tracked `100 · constr_viol_tol` to three significant figures.
+///
+/// `1e-2` is the default `acceptable_constr_viol_tol`, so the floor also states
+/// the intended rule directly: never convict a point of infeasibility while its
+/// violation sits inside the band the defaults call acceptable. The two forms
+/// coincide out of the box, which is why the defect was invisible there.
+///
+/// Erring loose is the safe direction — a withheld verdict costs iterations and
+/// ends at `MaxIterExceeded` or an acceptable point, while a fabricated one is
+/// a wrong answer. `infeas_viol_kappa` still raises the floor above this; the
+/// disable switch remains `infeas_stationarity_tol = 0` (or
+/// `infeas_max_streak = 0`), not a floor small enough to never bind.
+const MIN_INFEAS_VIOL_FLOOR: Number = 1e-2;
 
 /// Is a passing strict certificate *masked* by an extreme objective scale
 /// (gh #200)?
@@ -313,12 +341,27 @@ impl OptErrorConvCheck {
     /// not) is the conservative direction: too-loose withholds a verdict,
     /// too-tight fabricates one.
     fn relative_viol_threshold(&self) -> Number {
-        (100.0 * self.constr_viol_tol).max(1e-2)
+        (100.0 * self.constr_viol_tol).max(MIN_INFEAS_VIOL_FLOOR)
+    }
+
+    /// Absolute violation floor for rapid infeasibility detection:
+    /// `max(infeas_viol_kappa · constr_viol_tol, 1e-2)`.
+    ///
+    /// The same shape as [`Self::relative_viol_threshold`] and clamped for the
+    /// same reason (gh #519): the product alone slides with the user's
+    /// feasibility tolerance, so a *tighter* `constr_viol_tol` admitted smaller
+    /// and smaller violations as evidence of infeasibility — the one direction
+    /// a feasibility tolerance must never move this predicate. See
+    /// [`MIN_INFEAS_VIOL_FLOOR`]. Raising `infeas_viol_kappa` still raises the
+    /// floor; the clamp only stops it from falling below what the defaults
+    /// consider an acceptable violation.
+    fn absolute_viol_threshold(&self) -> Number {
+        (self.infeas_viol_kappa * self.constr_viol_tol).max(MIN_INFEAS_VIOL_FLOOR)
     }
 
     /// Pure predicate for a single infeasible-stationary iterate: the
     /// constraint violation is bounded away from zero — absolutely
-    /// (`constr_viol > infeas_viol_kappa · constr_viol_tol`) **or relative to
+    /// (`constr_viol` above [`Self::absolute_viol_threshold`]) **or relative to
     /// the violated row's own magnitude** (`rel_viol` above
     /// [`Self::relative_viol_threshold`]; a row violated by 10% of everything
     /// it is made of is bounded away from feasible no matter how small its
@@ -340,8 +383,7 @@ impl OptErrorConvCheck {
         if self.infeas_stationarity_tol <= 0.0 || self.infeas_max_streak <= 0 {
             return false;
         }
-        (constr_viol > self.infeas_viol_kappa * self.constr_viol_tol
-            || rel_viol > self.relative_viol_threshold())
+        (constr_viol > self.absolute_viol_threshold() || rel_viol > self.relative_viol_threshold())
             && stationarity <= self.infeas_stationarity_tol
     }
 
@@ -1110,6 +1152,67 @@ mod tests {
         // Gradient flat but violation below threshold → nearly
         // feasible, does not count.
         assert!(!c.is_infeasible_stationary(1e-3, 0.0, 1e-9));
+    }
+
+    /// gh #519: tightening `constr_viol_tol` must never widen the set of
+    /// points the detector is willing to call infeasible. The absolute arm's
+    /// floor used to be `infeas_viol_kappa · constr_viol_tol` unclamped, so at
+    /// `constr_viol_tol = 1e-6` it fell to `1e-4` — and @bernalde's `f=1`
+    /// model (gh #505), plateaued at an unscaled violation of `1.943e-4`, was
+    /// convicted at a point its own run reported as acceptable.
+    #[test]
+    fn tightening_constr_viol_tol_never_arms_the_absolute_arm_lower() {
+        let plateau_viol = 1.9430136821e-4; // the measured `f=1` plateau
+        // Every value at or below the default: tightening from here must not
+        // move the floor at all, and certainly not downward.
+        for &cvt in &[1e-4, 1e-5, 1.94e-6, 1e-7, 1e-9, 1e-12] {
+            let c = OptErrorConvCheck {
+                constr_viol_tol: cvt,
+                ..Default::default()
+            };
+            let floor = c.absolute_viol_threshold();
+            assert_eq!(
+                floor, MIN_INFEAS_VIOL_FLOOR,
+                "constr_viol_tol={cvt} moved the absolute floor to {floor}"
+            );
+            // The `f=1` plateau is a nearly-feasible flat spot at every one
+            // of these tolerances, so no `constr_viol_tol` may arm the
+            // absolute arm on it (the relative signal is 0 here: the row is
+            // unit-scale, so only the absolute arm is in play).
+            assert!(
+                !c.is_infeasible_stationary(plateau_viol, 0.0, 1e-9),
+                "constr_viol_tol={cvt} armed the detector on the {plateau_viol} plateau"
+            );
+        }
+    }
+
+    /// The clamp is a floor, not a cap: `infeas_viol_kappa` still raises the
+    /// absolute threshold, and a violation genuinely bounded away from
+    /// feasible still arms the detector at any `constr_viol_tol`.
+    #[test]
+    fn absolute_viol_floor_is_a_floor_not_a_cap() {
+        let strict = OptErrorConvCheck {
+            constr_viol_tol: 1e-9,
+            ..Default::default()
+        };
+        assert_eq!(strict.absolute_viol_threshold(), 1e-2);
+        assert!(strict.is_infeasible_stationary(0.5, 0.0, 1e-9));
+        // Raising kappa above the floor still moves the threshold.
+        let wide = OptErrorConvCheck {
+            constr_viol_tol: 1e-4,
+            infeas_viol_kappa: 1e4, // 1e0, well above the 1e-2 floor
+            ..Default::default()
+        };
+        assert_eq!(wide.absolute_viol_threshold(), 1.0);
+        assert!(!wide.is_infeasible_stationary(0.5, 0.0, 1e-9));
+        assert!(wide.is_infeasible_stationary(2.0, 0.0, 1e-9));
+        // Loosening `constr_viol_tol` past the floor moves it too — the floor
+        // only binds from below.
+        let loose = OptErrorConvCheck {
+            constr_viol_tol: 1e-2,
+            ..Default::default()
+        };
+        assert_eq!(loose.absolute_viol_threshold(), 1.0);
     }
 
     /// gh #508: the status-decision sites that ask "is this violation real"
