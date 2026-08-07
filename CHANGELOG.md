@@ -47,7 +47,10 @@ changes.
   is refused (`Invalid_Option`) naming the alternative, rather than
   accepted and dropped. It was the blanket #483 refusal that covered this
   before; the guard now sits exactly where the feature still does not
-  reach. Those entry points deliberately do *not* gain the implicit
+  reach, and keeps that machinery's default gate — `option_file_name` set
+  to its registered `ipopt.opt` asks for nothing and still solves, so a
+  caller replaying a full option dump is unaffected. Those entry points
+  deliberately do *not* gain the implicit
   `./ipopt.opt` lookup: action at a distance under Python or the GAMS C
   link would be worse than not having it, and `pounce.opt` already means
   something else to GAMS.
