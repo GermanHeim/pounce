@@ -101,6 +101,33 @@ changes.
   extra solve is spent only on runs that would otherwise report failure.
   Set both options to `no` for upstream IPOPT's behaviour of shipping the
   first verdict.
+- What it costs: nothing on a successful solve (a 733-problem Vanderbei
+  sweep shows no objective drift and no status change other than `cresc4`),
+  and up to two extra solves on one that reports infeasible. On the suite's
+  hardest infeasible case, `cresc132`, that is 3.65s → 73.84s; across the
+  whole suite, +6 %.
+
+### Added — the CLI prints a machine-readable `Status:` line
+
+- Every NLP solve now ends with `Status: <upstream_name>` —
+  `Status: Infeasible_Problem_Detected`, using the upstream IPOPT
+  enumerator spelling that CUTEst tables and the benchmark references
+  already use. Printed once, after the verdict is final, and suppressed at
+  `print_level 0` and under `--json-debug` (whose stdout is a protocol
+  channel).
+- This exists because free-form banners are not a status channel and the
+  second-opinion ladder above proved it. The engine prints one `EXIT:`
+  banner per *solve*, so a laddered run prints several, and a consumer that
+  scans the log for known phrases gets whichever phrase it ranks first
+  rather than the verdict that shipped. `benchmarks/scripts/run_nl_bench.sh`
+  ranks the iteration-limit phrase above the local-infeasibility one, so on
+  `cresc100` — barrier rung hits `max_iter`, original infeasibility verdict
+  then stands — it recorded `Maximum_Iterations_Exceeded` for a run that
+  shipped `Infeasible_Problem_Detected`. Wrong status, no error, straight
+  into `BENCHMARK_REPORT.md`. That driver already preferred a `Status:`
+  line and only fell back to phrase-ranking because nothing emitted one.
+- `ApplicationReturnStatus::upstream_name()` is public, for embedders that
+  need the same spelling.
 
 ### Fixed — tightening `constr_viol_tol` made POUNCE more likely to report local infeasibility (#519)
 

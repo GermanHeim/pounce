@@ -5,12 +5,16 @@ problems where POUNCE fails and the committed Ipopt-MA57 reference succeeds.
 The issue's hypothesis was that they share a cause, because both are fixed by
 `mu_strategy=adaptive`.
 
-Outcome: **`cresc4` reproduced, diagnosed and fixed. `steenbrf` did not
-reproduce**, and the reason it did not is itself a finding about the benchmark
-corpus — see the second half.
+Outcome: **`cresc4` reproduced, diagnosed and fixed — confirmed on the corpus
+file itself. `steenbrf` is a real solver defect and is not fixed here**; it
+shares the `cresc4` failure shape (restoration progress repeatedly discarded)
+and needs its own issue.
 
-All measurements below were taken on `a664dc0` plus the change described here,
-FERAL backend, release build.
+Most measurements below were taken on `a664dc0` plus the change described here,
+FERAL backend, release build, in a container without the corpus. The two
+sections that say so were re-measured later on the reporter's own machine
+against `$POUNCE_BENCH_DATA` — `cresc4` end-to-end on the corpus `.nl`, and the
+whole of the `steenbrf` half.
 
 ---
 
@@ -32,7 +36,18 @@ no attachment on the issue and its transcription remains the only route.
 
 So `cresc4` below is measured on a transcription whose iteration counts differ
 from the corpus file, and `steenbrf` below is measured on the corpus file
-itself. Both transcriptions are committed so they can be audited against the
+itself.
+
+**The corpus `cresc4.nl` has since been run directly**, on the reporter's
+machine, and the fix holds on it — rung 1 (`feral_scaling=mc64`) still returns
+local infeasibility, rung 2 (`mu_strategy=adaptive`) returns
+`Optimal Solution Found` at `0.87189752899987727`, matching the committed
+Ipopt-MA57 reference `0.8718975393` to nine significant figures. Merged `main`
+still reports `Infeasible_Problem_Detected` on that same file. The
+transcription and the corpus file differ in iteration counts and agree on
+everything this change turns on.
+
+Both transcriptions are committed so they can be audited against the
 SIF rather than taken on trust:
 
 - `crates/pounce-cli/tests/fixtures/cresc4.py` regenerates the committed
@@ -176,6 +191,38 @@ it reports infeasibility on a problem they believe is feasible. Doing it in the
 solver spares the round trip, and — the point of this issue — spares the user
 from being told the verdict was corroborated when it was not.
 
+### What the extra rung costs
+
+Nothing on a successful solve — the ladder only runs on a local-infeasibility
+verdict, and a 733-problem Vanderbei sweep (PR binary against `54219714`, same
+host) shows no objective drift on any of the 700 problems both solve and no
+status change other than `cresc4`.
+
+The cost lands entirely on problems that report infeasible, and there it is not
+negligible. Measured on that sweep:
+
+| problem | `54219714` | with the ladder |
+|---|---|---|
+| `cresc132` | 3.65s | **73.84s** (20×) |
+| `cresc100` | 0.97s | 6.05s |
+| `cresc50` | 2.33s | 4.74s |
+| `launch` | 0.10s | 0.25s |
+| `cresc4` | 0.06s | 0.08s (and now solves) |
+| vanderbei suite, total | 1430s | 1511s (+6 %) |
+
+Two extra solves on a hard infeasible problem is inherent to the design, and
++6 % across a suite is a fair price for the class of wrong answer it removes.
+The 20× on `cresc132` is worth stating plainly, because it is the number a
+branch-and-bound driver pruning many infeasible nodes would feel: the barrier
+rung there runs to `max_iter` before giving up.
+
+A rung only ever counts when it *converges*, so a rung that runs to the
+iteration cap has burned a full solve to contribute nothing. Capping the rungs'
+`max_iter` below the baseline's would bound this worst case, at the cost of
+declining any recovery that genuinely needs the iterations. Not attempted here —
+it changes what the ladder can find, so it needs its own justification and its
+own sweep rather than being folded into this change.
+
 ### Known gap, pre-existing and not widened by choice
 
 On a ladder that does *not* promote, `status` and the statistics revert to the
@@ -210,30 +257,98 @@ that file. The earlier version of this note reasoned from a `mastsif`
 transcription and reached the right *conclusion* — the corpus file is not
 CUTEst `STEENBRF` — for incomplete reasons. The real answer is sharper.
 
-### It does not stall here
+### It does not stall in the container; it does stall on the reporter's machine
 
-On this machine, at the reporter's own commit, on the byte-identical file:
+The first version of this section was written in a container, where the default
+path converges at 2570 iterations — 430 short of the cap — and concluded from
+that margin that there was no stall to fix. Re-measured on the reporter's own
+machine (Darwin 25.5.0 arm64, release + FERAL, same `.nl`), that conclusion does
+not survive:
 
-| | reporter (`a664dc05`) | here, `a664dc0` | here, +this PR |
-|---|---|---|---|
-| defaults | Maximum_Iterations_Exceeded, 3000 | **Optimal, 2570 iters, 282.678** | identical, 2570 |
-| `mu_strategy=adaptive` | Solved To Acceptable Level, 567 | Solved To Acceptable Level, 567 | identical, 567 |
+| | container, `a664dc0` | reporter's machine, `54219714` |
+|---|---|---|
+| defaults | Optimal, 2570 iters, 282.678 | **Maximum_Iterations_Exceeded, 3000** |
+| defaults, `max_iter=6000` | — | **Restoration_Failed at 3039** |
+| `mu_strategy=adaptive` | Solved To Acceptable Level, 567 | Solved To Acceptable Level, 567 |
 
-The adaptive column matches the reporter to the iteration, which is what says
-the file and the setup are right. The default column does not: it converges,
-2570 iterations, 430 short of the cap.
+Two things follow, and the second is the one that matters.
 
-That is not run-to-run noise — three runs give 2570 exactly, and
-`RAYON_NUM_THREADS=1` and `=4` give 2570 too. It is not this PR either: the
-parent binary produces bit-identical output. So the trajectory is **platform
-dependent**, and the reporter's machine and this container fall on opposite
-sides of a 3000-iteration cap that this problem approaches either way.
+The trajectory really is **platform dependent** — same commit, same bytes, two
+different answers, and on neither machine is it run-to-run noise (three runs
+agree exactly, `RAYON_NUM_THREADS=1` and `=4` agree too). The adaptive row is
+identical on both, which is what confirms the file and the setup are right.
 
-Do not read that as "cannot reproduce, closing". Read it as: the margin to
-`max_iter` on this model is about 15 %, and which side of it you land on is
-decided by the floating-point environment. The interesting question was never
-"does it hit 3000" but "why does the default path need 4.5× the iterations
-adaptive needs", and that reproduces perfectly.
+But the 15 % margin the container seemed to show is **not a margin**. Raising
+the cap does not let the default path finish: with `max_iter=6000` it fails at
+iteration 3039 with `Restoration Failed`. The container's 2570-iteration
+"success" is the lucky side of a coin, not evidence that the model merely needs
+patience. There is no cap to sit safely inside.
+
+### The barrier parameter stops moving, and restoration is why
+
+Both solvers walk µ down identically through the first three barrier levels and
+then part at the fourth. Counting non-restoration iterations at each `lg(mu)`,
+from the reporter's machine and the committed reference log
+(`benchmarks/vanderbei/logs/vanderbei/steenbrf.ipopt-ma57.log`, Ipopt 3.14.20 +
+MA57):
+
+| lg(µ) | −1.0 | −1.7 | −2.5 | **−3.8** | −5.7 | −8.6 |
+|---|---|---|---|---|---|---|
+| Ipopt-MA57 | 43 | 133 | 422 | **29** | 18 | 1192 |
+| POUNCE, defaults | 37 | 78 | 242 | **2360** | — | — |
+
+POUNCE reaches `lg(mu) = -3.8` at iteration 366 and never leaves it. Ipopt
+clears the same level in 29 iterations. They *enter* it in near-identical
+states, so nothing before this point is the cause:
+
+```
+ipopt   608  5.1501578e+02 1.48e-07 3.23e+03  -3.8 2.69e+01  -3.0 8.76e-01 1.48e-01f  1
+pounce  366  3.6948567e+02 1.52e-07 3.81e+03  -3.8 4.27e-01  -1.4 1.00e+00 1.49e-01f  1
+```
+
+The mechanism is visible in the next thirty iterations, and it is not that
+POUNCE fails to make progress. It makes the progress and then throws it away:
+
+```
+ 389  obj=3.667223e+02 inf_pr=2.19e-08 inf_du=6.20e-03   ← essentially at the µ-update test
+ 390  obj=3.656657e+02 inf_pr=1.30e-08 inf_du=6.42e-03
+ 391r obj=1.764715e+02 inf_pr=1.30e-08 inf_du=1.00e+03   ← restoration
+ …
+ 394  obj=3.680784e+02 inf_pr=6.81e-09 inf_du=3.44e+03   ← back out, five orders worse
+```
+
+`inf_du` gets to 6.2e-03 with `inf_pr` at 2e-08 — feasible and one short step
+from the dual tolerance that would drop µ — and restoration then resets it to
+3.4e+03. That cycle repeats for the remaining 2600 iterations. The objective is
+not pinned as the issue's quoted tail suggests; over iterations 2500–3000 it
+swings between 395.4 and 436.1 while `inf_du` swings between 1.06 and 1.46e+04.
+It is a limit cycle, not a crawl.
+
+The restoration counts are the whole story in one line:
+
+| run | iterations | restoration iterations | **restoration episodes** | outcome |
+|---|---|---|---|---|
+| POUNCE, defaults | 3000 | 346 | **62** | Maximum_Iterations_Exceeded |
+| POUNCE, `mu_strategy=adaptive` | 567 | 10 | **1** | Solved To Acceptable Level |
+| Ipopt-MA57, defaults | 1846 | 10 | **1** | Solved To Acceptable Level |
+
+Adaptive µ and Ipopt have *identical* restoration profiles on this problem — ten
+restoration iterations in a single episode. The monotone default enters
+restoration sixty-two times.
+
+One earlier reading has to be withdrawn: it looked like POUNCE was taking wild
+unregularized steps (‖d‖ = 5.4e+03, 6.9e+03 at iterations 368–369) that Ipopt
+did not. It is not a discriminator — Ipopt takes a 7.9e+04 step at its
+iteration 614 and a 1.1e+05 step later in the same phase, both larger than
+anything POUNCE takes here. Big unregularized steps are normal on this model.
+The repeated restoration entry is what is not.
+
+**This is the `cresc4` shape.** The "Not fixed here" section above describes
+`cresc4` as restoration progress being repeatedly undone by the main loop under
+monotone µ, on six variables. `steenbrf` is the same failure on 468 — and it is
+the reason the issue's original hypothesis (both fall to `mu_strategy=adaptive`,
+so they share a cause) looks right after all, even though only one of them is
+fixed here.
 
 ### Why: 360 of 468 variables carry no objective at all
 
@@ -264,7 +379,9 @@ CUTEst `STEENBRF` sums all twelve (`Σ_{i=1..12} d[i,k]`). So Vanderbei's `.mod`
 looks like a transliteration defect — an index set written over two commodities
 where the source has twelve.
 
-That single fact explains every anomaly in this problem:
+That single fact explains why the problem is hard, and it explains two of the
+three anomalies outright. It does **not** explain the stall — see the third
+bullet.
 
 - **The objective value.** 282.678 here versus ≥ 8251.6 for the CUTEst model.
   That floor is not an estimate: dropping the (non-negative) congestion term
@@ -278,15 +395,17 @@ That single fact explains every anomaly in this problem:
   `solvers_agree: false` (nitro 282.7578, snopt 319.0946, loqo no answer). With
   360 cost-free variables the optimal face is a large flat polytope; solvers
   stop at different points of it and report different objectives.
-- **The crawl.** This is the part that matters for #524. Those 360 variables
-  enter the barrier problem *only* through their `log(x)` terms — zero
-  objective gradient, zero Hessian contribution. Nothing pulls them anywhere;
-  they are driven purely by µ, and the monotone schedule has to walk all 360 of
-  them down decade by decade with the line search fighting the bound. That is
-  precisely the trace the issue quotes: objective pinned to eight digits,
-  `inf_pr` at 1e-9 (feasible throughout), tiny steps, 20+ backtracks per
-  iteration. Adaptive µ, which sets µ from the current centrality rather than
-  from a fixed schedule, is not hostage to that and finishes in 567.
+- **The difficulty — but not the stall.** Those 360 variables enter the barrier
+  problem *only* through their `log(x)` terms: zero objective gradient, zero
+  Hessian contribution. Nothing pulls them anywhere, so they are driven purely
+  by µ, the optimal face is a large flat polytope, and the whole model is a
+  legitimately nasty case for a monotone barrier. That is a real property of
+  the model and it is why every solver takes hundreds of iterations on it.
+  It is **not** an explanation of POUNCE's failure, because Ipopt solves *that
+  same file*, with those same 360 unpriced variables, and its µ keeps
+  advancing. A model property that both solvers face cannot account for a
+  behaviour only one of them shows. What separates them is the sixty-two
+  restoration episodes measured above.
 
 The controlled comparison, same network, same data, same start point, the only
 difference being whether the other ten commodities carry cost:
@@ -294,20 +413,30 @@ difference being whether the other ten commodities carry cost:
 | model | congestion term | iterations (defaults) |
 |---|---|---|
 | CUTEst `STEENBRF` (transcribed) | all 12 commodities | **53** |
-| Vanderbei `steenbrf` (reporter's file) | commodities 11–12 only | **2570** |
+| Vanderbei `steenbrf` (reporter's file) | commodities 11–12 only | 2570 (container) / **3000, cap** (reporter) |
 
-Fifty-three against two thousand five hundred and seventy, on the same network.
-The slowness is a property of the degenerate model, not of the solver.
+Fifty-three against thousands, on the same network: the corpus model is
+enormously harder than the CUTEst one it was transcribed from. That is worth
+knowing on its own, and it is a separate fact from POUNCE failing where Ipopt
+does not.
 
 ### What to do about it
 
-Nothing in the solver, on this evidence. POUNCE reaches 282.678, which agrees
-with the best reference (nitro's 282.7578) to four digits, and does it in
-2570 iterations under defaults and 567 under adaptive µ. There is no wrong
-answer here — only a slow path on a model whose objective ignores 77 % of its
-variables.
+Two separate things, and the earlier version of this note collapsed them into
+one and concluded "nothing in the solver". That was wrong.
 
-Three things are worth doing, none of them a code change:
+**There is a solver defect here, and #524 should not be closed on `steenbrf`.**
+Under monotone µ the main loop repeatedly walks `inf_du` down to ~6e-03 at a
+feasible point, enters restoration, and comes back five orders of magnitude
+worse — sixty-two times, until the iteration cap. Adaptive µ and Ipopt both do
+this once. Raising `max_iter` does not help (`Restoration Failed` at 3039), so
+there is no "just be patient" reading available. It is the same shape as
+`cresc4`'s "Not fixed here" above — restoration progress the main loop does not
+hold on to — and it wants a single issue covering both, with `cresc4`'s six
+variables as the tractable reproducer and `steenbrf` as the confirmation that
+it is not a small-problem curiosity.
+
+Then, separately, three things about the corpus entry, none of them code:
 
 1. **Check the corpus entry.** If `steenbrf.mod` really does sum two
    commodities where the source sums twelve, the benchmark is scoring solvers
@@ -317,25 +446,38 @@ Three things are worth doing, none of them a code change:
    matches the published 9075.855 exactly, verified against Vanderbei's own
    file, not just the table).
 2. **If the entry stays, expect the iteration count.** A model with a large
-   cost-free subspace is a legitimate stress case for a monotone barrier, but
-   it should be filed as "monotone µ is slow on degenerate models", not as a
-   stall bug, and it should not be measured against a 3000-iteration cap it
-   sits 15 % inside.
-3. **The `max_iter` margin is the only real robustness question**, and it is
-   the one from `dev-notes/issue-131-monotone-lbfgs-stall.md`: a post-hoc
-   diagnostic on the `max_iter` + frozen-µ exit that says "this looks like a
-   degenerate crawl, try `mu_strategy=adaptive`" would have turned the
+   cost-free subspace is a legitimate stress case for a monotone barrier, and
+   hundreds of iterations on it are not by themselves a bug. What is a bug is
+   the limit cycle documented above — keep the two claims apart when reading
+   the suite.
+3. **The post-hoc diagnostic is still worth building**, and it is the one from
+   `dev-notes/issue-131-monotone-lbfgs-stall.md`: a message on the `max_iter` +
+   frozen-µ exit that says "µ has not moved in N iterations and restoration was
+   entered M times — try `mu_strategy=adaptive`" would have turned the
    reporter's 3000-iteration wall into a one-line answer. Follow-up A in that
    note establishes that the *mid-solve* version of this is an unprincipled
    patience knob; the post-hoc version is still unbuilt and is still the right
-   shape.
+   shape. The restoration-episode count is the signal to key it off — 62 versus
+   1 separates the failing run from both healthy ones cleanly.
 
-### On the earlier version of this note
+### On the earlier versions of this note
 
-It claimed the corpus file "could not be obtained" and then, after the
-attachment was found, that it could not be decoded. Both were true at the time
-and both are now moot. What survives unchanged is the STEENBRB control, which
-is what made the "different model" conclusion safe to state before the file
-arrived — and which the reporter's own `steenbrb.nl` has since confirmed
-outright: transcription and original solve to the same objective in the same 49
-iterations.
+Two claims have been withdrawn, both from reasoning that ran ahead of the
+measurement:
+
+- *"The corpus file could not be obtained"*, then *"could not be decoded"*.
+  True at the time, moot now — the whole `steenbrf` half is measured on the
+  reporter's file.
+- *"It does not stall here, so there is nothing in the solver."* The container's
+  2570-iteration convergence was real but is the lucky side of a
+  platform-dependent trajectory, and the 15 % margin to `max_iter` it seemed to
+  establish does not exist (`max_iter=6000` → `Restoration Failed` at 3039). A
+  narrower claim from that same session — that POUNCE takes large unregularized
+  steps Ipopt does not — is also withdrawn: Ipopt takes larger ones on this
+  problem.
+
+What survives unchanged is the STEENBRB control, which is what made the
+"different model" conclusion safe to state before the file arrived — and which
+the reporter's own `steenbrb.nl` has since confirmed outright: transcription and
+original solve to the same objective in the same 49 iterations. The corpus
+finding and the solver finding are independent, and both hold.

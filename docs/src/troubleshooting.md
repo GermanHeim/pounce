@@ -344,7 +344,14 @@ pounce: second opinion — re-solving with feral_scaling=mc64…
 pounce: feral_scaling=mc64 re-solve did not recover (InfeasibleProblemDetected).
 pounce: second opinion — re-solving with mu_strategy=adaptive…
 pounce: mu_strategy=adaptive re-solve recovered the problem — promoting (SolveSucceeded).
+Status: Solve_Succeeded
 ```
+
+Note the trailing `Status:` line. Each rung prints its own `EXIT:` banner,
+so a laddered run has several and only the last one is the verdict that
+shipped — if you are parsing pounce's output, read `Status:` and ignore the
+banners. It carries the upstream IPOPT enumerator spelling
+(`Infeasible_Problem_Detected`, `Maximum_Iterations_Exceeded`, …).
 
 The two rungs probe different things, and the distinction matters when
 you are reading a log:
