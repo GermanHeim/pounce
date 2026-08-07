@@ -1604,6 +1604,40 @@ pub fn main() -> ExitCode {
         }
     }
 
+    // The machine-readable verdict, printed exactly once per run, after every
+    // path above has finished moving `status`.
+    //
+    // Free-form banners are not a usable status channel and the ladder is what
+    // proved it. `Application::emit_end_summary` prints one `EXIT:` banner per
+    // *solve*, so a laddered run prints one per rung — and a consumer that
+    // scans the whole log for known phrases picks up whichever phrase it ranks
+    // first, not whichever solve shipped. `benchmarks/scripts/run_nl_bench.sh`
+    // ranks "Maximum Number of Iterations Exceeded" above "Converged to a point
+    // of local infeasibility", so on `cresc100` — where the barrier rung hits
+    // `max_iter` and the original infeasibility verdict then stands — it
+    // recorded `Maximum_Iterations_Exceeded` for a run that shipped
+    // `Infeasible_Problem_Detected`. Wrong status, no error, straight into
+    // `BENCHMARK_REPORT.md`.
+    //
+    // That driver already prefers a `Status:` line and only falls back to
+    // phrase-ranking because nothing ever emitted one. This is that line. It
+    // carries the upstream enumerator spelling (`Infeasible_Problem_Detected`),
+    // which is what CUTEst tables and the reference JSONs use, and being last
+    // and unique it cannot be confused with a rung's banner.
+    //
+    // Gated like the banners it disambiguates: `print_level >= 1` (at 0 the
+    // console is silent by request), and never under `--json-debug`, whose
+    // stdout is a pure protocol channel.
+    if !json_dbg
+        && app
+            .options()
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true)
+    {
+        println!("Status: {}", status.upstream_name());
+    }
+
     // `solve_stats` was snapshotted right after the solve loop and updated
     // above iff the MC64 retry was promoted, so it always matches `status`.
     let counters = counting.borrow();
