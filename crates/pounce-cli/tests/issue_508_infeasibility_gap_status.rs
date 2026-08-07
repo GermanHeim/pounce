@@ -218,13 +218,21 @@ fn the_gap_models_are_never_reported_solved() {
     }
 }
 
-/// Secondary defect from the same report: when the MC64 hypersensitivity
-/// re-solve runs and is *not* promoted, the `.sol` keeps the first solve's
-/// verdict while the terminal's last `EXIT:` banner was the retry's — so the
-/// console and the modelling layer disagreed about one solve. Two banners is
-/// expected and announced; the two disagreeing is not, and
+/// Secondary defect from the same report: when the local-infeasibility
+/// second-opinion re-solve runs and is *not* promoted, the `.sol` keeps the
+/// first solve's verdict while the terminal's last `EXIT:` banner was the
+/// retry's — so the console and the modelling layer disagreed about one solve.
+/// Several banners is expected and announced; them disagreeing is not, and
 /// `validation/p3_control.py` reads exactly this way (last `EXIT:` line, paired
 /// with the `.sol`).
+///
+/// The retry is a ladder as of gh #524 (`feral_scaling=mc64`, then
+/// `mu_strategy=adaptive`), so this now covers a run that emits *three* end-of-
+/// run banners rather than two — which is strictly more of the failure mode the
+/// invariant is about. The path is detected off the ladder's own
+/// "keeping the original local-infeasibility verdict" line rather than any one
+/// rung's message, so adding or reordering rungs cannot silently turn this test
+/// into a no-op the way naming a rung would.
 ///
 /// **Known gap, stated deliberately: this is an invariant guard, not a
 /// bite-on-parent regression pin.** It asserts the right thing and it does
@@ -232,7 +240,7 @@ fn the_gap_models_are_never_reported_solved() {
 /// future change stops it doing so), but it passes on the pre-fix commit,
 /// because every non-promoted retry reachable from this repo's fixture corpus
 /// happens to return `InfeasibleProblemDetected` — the same verdict the `.sol`
-/// keeps, so the two banners agree by luck rather than by construction. The
+/// keeps, so the banners agree by luck rather than by construction. The
 /// reporter observed the mismatch on their own `.nl` at `tol=1e-4`
 /// (`Error in step computation.` at δ=1e-9, `Maximum Number of Iterations
 /// Exceeded.` at δ=1e-1, both over a `.sol` that said locally infeasible); a
@@ -243,7 +251,7 @@ fn the_gap_models_are_never_reported_solved() {
 /// mismatch is a reachable state of the code whether or not a fixture reaches
 /// it. Vendoring a model that does would upgrade this to a real pin.
 #[test]
-fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_mc64_retry() {
+fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_second_opinion() {
     let sol = std::env::temp_dir().join("pounce_issue_508_banner.sol");
     let _ = std::fs::remove_file(&sol);
 
@@ -261,7 +269,7 @@ fn the_last_exit_banner_matches_the_sol_after_a_non_promoted_mc64_retry() {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        stderr.contains("MC64 re-solve did not recover"),
+        stderr.contains("keeping the original local-infeasibility verdict"),
         "fixture no longer exercises the non-promoted retry path, so this test \
          proves nothing — pick a model/tol that still does:\nstderr:\n{stderr}"
     );
