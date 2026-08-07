@@ -27,6 +27,7 @@ pub mod expression_provider;
 pub mod ipopt_nlp;
 pub mod orig_ipopt_nlp;
 pub mod return_codes;
+pub mod scaling_tnlp;
 pub mod solve_statistics;
 pub mod tnlp;
 pub mod tnlp_adapter;

@@ -9,6 +9,39 @@ changes.
 
 ## [Unreleased]
 
+### Added — per-variable scaling reaches the solver
+
+- `nlp_scaling_method=user-scaling` now applies per-variable
+  `scaling_factor` entries, closing the last of the three factor kinds
+  (gh #486 stage 2, after #485 delivered the objective and constraint
+  halves). A new `ScalingTnlp` wrapper substitutes variables one level
+  below the algorithm, mirroring how `PresolveTnlp` transforms
+  coordinates and inverts the transform at `finalize_solution`. The
+  substitution is diagonal, so sparsity is untouched and every
+  transform is an elementwise multiply or divide: bounds and the
+  starting point scale, the objective gradient and Jacobian columns
+  divide, Hessian entries divide by both their row's and column's
+  factor, and on the way out the solution divides back while bound
+  multipliers multiply, with constraint multipliers unchanged.
+- Installed at `optimize_tnlp`, the single entry point every path
+  funnels through, so the CLI, the Python bindings, and the batch
+  solvers all get it from one place. Only `user-scaling` consults the
+  problem for factors, so no other scaling method is affected and an
+  unscaled solve pays nothing.
+- Consumers that read the algorithm's own iterate rather than the
+  `finalize_solution` payload — the CLI's `on_converged` hook, which
+  feeds the `.sol` file, the JSON report, and the bound-multiplier
+  suffixes — now undo the substitution explicitly, so every output
+  carries the model's units. A caught defect, not a hypothetical: the
+  `.sol` reported the scaled iterate before this.
+- Factors must be positive and finite. A negative factor reverses a
+  variable and swaps its bounds, so it raises rather than being
+  applied silently.
+- The sensitivity path still refuses variable factors. Its accessors
+  read the KKT factorization directly and do not yet carry the
+  substitution, so they would report scaled-space numbers under a
+  natural-units contract; stage 3 lifts this.
+
 ### Fixed — tightening `constr_viol_tol` made POUNCE more likely to report local infeasibility (#519)
 
 - Rapid infeasibility detection counted an iterate toward its streak when

@@ -1602,6 +1602,27 @@ pub fn main() -> ExitCode {
             }
         }
     }
+    // Variable scaling (gh#486) is the same shape of problem as the
+    // reductions above, one level further out: the `on_converged` hook
+    // reads the algorithm's own iterate, and under a change of
+    // variables that iterate is in scaled coordinates. `.sol` and the
+    // JSON report must carry the model's own units, so undo the
+    // substitution here. `finalize_solution` already did it for every
+    // consumer that reads THAT payload; this fixes the ones that do not.
+    if let Some(d) = app.variable_scaling() {
+        if let Some((x, _lambda)) = nominal_capture.borrow_mut().as_mut() {
+            for (xi, s) in x.iter_mut().zip(d.iter()) {
+                *xi /= s;
+            }
+        }
+        if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+            for ((l, u), s) in z_l.iter_mut().zip(z_u.iter_mut()).zip(d.iter()) {
+                *l *= s;
+                *u *= s;
+            }
+        }
+    }
+
     // Bound multipliers are per *variable*, so only the column reduction can
     // shorten them. Swap in the wrapper's full-space pair when — and only
     // when — the captured one is the wrong length; leaving a correctly-sized

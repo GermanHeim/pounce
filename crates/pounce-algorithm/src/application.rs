@@ -128,6 +128,13 @@ use std::time::Instant;
 
 pub struct IpoptApplication {
     options: OptionsList,
+    /// Per-variable scaling factors applied by the wrapper installed in
+    /// [`Self::optimize_tnlp`] (gh#486). Recorded so consumers that read
+    /// the algorithm's own iterate rather than the `finalize_solution`
+    /// payload — the CLI's `on_converged` hook feeding the `.sol` and
+    /// the JSON report — can undo the substitution. `None` when no
+    /// variable scaling was applied.
+    variable_scaling: RefCell<Option<Vec<Number>>>,
     /// Whether the submitted TNLP has already been explicitly wrapped by the
     /// caller's presolve layer.
     presolve_already_applied: bool,
@@ -278,6 +285,7 @@ impl IpoptApplication {
         let reg = Rc::new(reg);
         Self {
             options: OptionsList::with_registered(Rc::clone(&reg)),
+            variable_scaling: RefCell::new(None),
             presolve_already_applied: false,
             reg_options: reg,
             journalist: Rc::new(Journalist::new()),
@@ -653,7 +661,68 @@ impl IpoptApplication {
     /// * Unconstrained problems (`m == 0`) keep going through the
     ///   in-`pounce-nlp` Newton driver so the trivial path is
     ///   independent of the linear-solver backend.
+    /// Wrap `tnlp` so per-variable scaling factors are applied as a
+    /// change of variables, when `nlp_scaling_method=user-scaling` is
+    /// in effect and the problem supplies non-unit factors (gh#486).
+    ///
+    /// Returns the TNLP unchanged under any other scaling method, or
+    /// when the problem asks for no variable scaling, so an unscaled
+    /// solve pays nothing. The `Err` carries a message ready to print.
+    fn install_variable_scaling(
+        &self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+    ) -> Result<Rc<RefCell<dyn TNLP>>, String> {
+        let method = self
+            .options
+            .get_string_value("nlp_scaling_method", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or_else(|| "gradient-based".to_string());
+        if method != "user-scaling" {
+            return Ok(tnlp);
+        }
+        match pounce_nlp::scaling_tnlp::wrap_with_scaling(Rc::clone(&tnlp)) {
+            Ok(Some(wrapped)) => {
+                *self.variable_scaling.borrow_mut() =
+                    pounce_nlp::scaling_tnlp::factors_of(&wrapped);
+                Ok(wrapped)
+            }
+            Ok(None) => Ok(tnlp),
+            Err(why) => Err(format!(
+                "pounce: nlp_scaling_method=user-scaling supplied per-variable                  scaling factors that cannot be applied. {why}. Correct the                  factors, or drop nlp_scaling_method=user-scaling.
+"
+            )),
+        }
+    }
+
+    /// The per-variable scaling factors applied to the last solve, if
+    /// any (gh#486). A consumer reading the algorithm's iterate rather
+    /// than the `finalize_solution` payload sees scaled coordinates and
+    /// must divide `x` by these, and multiply bound multipliers.
+    pub fn variable_scaling(&self) -> Option<Vec<Number>> {
+        self.variable_scaling.borrow().clone()
+    }
+
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        // gh#486 stage 2: per-variable `scaling_factor` is applied by
+        // substituting variables one level below the algorithm, since
+        // the core's scaling models the objective and the constraint
+        // rows only. The wrapper consumes the variable factors and
+        // forwards the rest, so `OrigIpoptNlp` sees exactly what it
+        // has always handled. Installed here because every entry point
+        // funnels through this method, and only under `user-scaling`,
+        // the one method that consults the TNLP for factors at all.
+        let tnlp = match self.install_variable_scaling(tnlp) {
+            Ok(t) => t,
+            Err(msg) => {
+                use pounce_common::journalist::JournalCategory;
+                eprint!("{msg}");
+                self.journalist
+                    .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+                return ApplicationReturnStatus::InvalidOption;
+            }
+        };
+
         if let Some(value) = self.unsupported_library_solver_selection() {
             use pounce_common::journalist::JournalCategory;
             self.journalist.print(
@@ -2189,32 +2258,6 @@ impl IpoptApplication {
             obj_target_gradient,
             constr_target_gradient,
         );
-
-        // `user-scaling` with per-variable factors: pounce models
-        // objective and constraint scaling only. Applying the rest and
-        // dropping the variable factors would solve a problem
-        // conditioned differently from the one described, with nothing
-        // said about it — so refuse instead (gh#483).
-        if orig_nlp.user_x_scaling_rejected() {
-            use pounce_common::journalist::JournalCategory;
-            const MSG: &str = "pounce: nlp_scaling_method=user-scaling supplied \
-                 per-variable scaling factors, but pounce models only objective \
-                 and constraint scaling. Applying the objective/constraint \
-                 factors alone would change the problem's conditioning in a way \
-                 you did not ask for, so the solve is refused rather than run. \
-                 Leave the variable factors at 1.0 (rescaling those variables in \
-                 the model itself), or drop nlp_scaling_method=user-scaling. \
-                 Tracking issue: https://github.com/jkitchin/pounce/issues/483\n";
-            // stderr, not stdout: this must reach the user even under
-            // `print_level=0` / `--json-output`, where stdout is reserved
-            // for machine-readable output. The journalist copy lands in
-            // any attached `output_file`.
-            eprint!("{MSG}");
-            self.journalist
-                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, MSG);
-            timing.overall_alg.end();
-            return ApplicationReturnStatus::InvalidOption;
-        }
 
         let nlp_handle: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
