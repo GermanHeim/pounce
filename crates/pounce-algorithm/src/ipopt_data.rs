@@ -118,6 +118,18 @@ pub struct IpoptData {
     /// counterpart. See pounce#58.
     pub request_resto: bool,
 
+    /// Line-search reset request from the μ-update layer (pounce#510).
+    /// Upstream's μ updates hold a `linesearch_` handle and call
+    /// `linesearch_->Reset()` themselves at fixed points
+    /// (`IpAdaptiveMuUpdate.cpp:339, 386, 431`,
+    /// `IpMonotoneMuUpdate.cpp:165`); pounce's [`MuUpdate`] trait has no
+    /// such handle, so the updates raise this flag instead and the main
+    /// loop performs the reset immediately after
+    /// `update_barrier_parameter` returns. Consuming the flag clears it.
+    ///
+    /// [`MuUpdate`]: crate::mu::MuUpdate
+    pub request_ls_reset: bool,
+
     /// Tiny-step termination request from the μ-update layer (pounce#512).
     /// Upstream signals "problem solved to best possible numerical
     /// accuracy" by throwing `TINY_STEP_DETECTED` from inside
@@ -206,6 +218,7 @@ impl IpoptData {
             info_string: String::new(),
             tiny_step_flag: false,
             request_resto: false,
+            request_ls_reset: false,
             request_tiny_step_stop: false,
             info_alpha_primal_char: ' ',
             info_ls_count: 0,

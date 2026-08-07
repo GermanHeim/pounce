@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — adaptive μ reset the line-search filter on "μ changed" instead of upstream's every-free-mode-iteration, so stale entries forced spurious restorations (#510)
+
+- Ipopt's μ updates hold a line-search handle and call `linesearch_->Reset()`
+  themselves — which clears the entire filter — at four points:
+  `IpAdaptiveMuUpdate.cpp:339` (fixed-mode decrease), `:386` (free→fixed
+  switch), `:431` (**unconditionally, every free-mode iteration**), and
+  `IpMonotoneMuUpdate.cpp:165` (after a monotone reduction). POUNCE's
+  `MuUpdate` trait carries no line-search handle, so the main loop inferred
+  the reset from `next_mu != mu_before`. That proxy is right for the monotone
+  update and wrong for the adaptive one: upstream's line 431 does not consult
+  μ at all.
+- The gap was documented in `mu/adaptive.rs` as "primarily affects the
+  watchdog counter, not convergence". Measurement says otherwise. On the
+  unscaled reproducer from #505 (`nlp_scaling_method=none`, adaptive μ), at
+  internal iteration 69 — after a restoration that returned at the μ it left
+  with, so no reset fired — the filter still held the pre-restoration entries
+  `(θ, φ) = (0.0141, 22157.56)` and `(0.0220, 22157.56)`. Every trial step
+  from `α = 2.4e-6` down to `1e-12` was rejected on the filter alone, forcing
+  a third entry into restoration. Those entries were computed against a
+  barrier parameter and an iterate the algorithm had long since left.
+- Each μ update now raises `IpoptData::request_ls_reset` at exactly upstream's
+  call sites and the main loop honours it — the same plumbing the pounce#58
+  probing guard already uses for `request_resto`. The affected paths are the
+  adaptive ones where μ can stay numerically fixed across an iteration: the
+  whole free-mode endgame, every iteration following a restoration that
+  returns at the same μ, and the two clamp-flattened decreases. Monotone runs
+  are unchanged — its reduction loop only ever exits with a strictly smaller
+  μ, so flag and proxy agree.
+- Not a fix for #505: that model's first restoration is entered on
+  iterate-acceptability rejections, not filter rejections, so filter state is
+  irrelevant at that point. This removes the later spurious restorations only.
+
 ### Fixed — `mu_strategy=adaptive` kept iterating at a frozen point instead of stopping (#512)
 
 - When the line search takes two consecutive steps so small that any nonzero

@@ -1826,11 +1826,43 @@ impl IpoptAlgorithm {
         );
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
-        let tiny_step_stop_requested = {
+
+        // pounce#510 — line-search reset. Upstream's μ updates own a
+        // `linesearch_` handle and call `linesearch_->Reset()` (which
+        // clears the filter via `FilterLSAcceptor::Reset`,
+        // `IpFilterLSAcceptor.cpp:524-532`) at four fixed points:
+        // `IpAdaptiveMuUpdate.cpp:339` (fixed-mode decrease), `:386`
+        // (free→fixed switch), `:431` (**unconditionally** on every
+        // free-mode iteration, μ moved or not), and
+        // `IpMonotoneMuUpdate.cpp:165` (after a monotone reduction).
+        // Pounce's `MuUpdate` trait has no line-search handle, so each
+        // update raises `request_ls_reset` at exactly those points and
+        // we honour it here — the same plumbing `request_resto` uses
+        // below.
+        //
+        // This used to be inferred from `next_mu != mu_before`. That
+        // proxy is right for the monotone update but wrong for the
+        // adaptive one, which resets every free-mode iteration
+        // regardless of μ: whenever μ stayed numerically put (the
+        // free-mode endgame, and any iteration after a restoration that
+        // returns at the same μ) the filter kept entries computed
+        // against a barrier parameter and an iterate the algorithm had
+        // already left. On #505's reproducer that rejected every trial
+        // step from α=2.4e-6 down to 1e-12 on the filter alone and
+        // forced a spurious restoration.
+        //
+        // Both flags are consumed here, but the tiny-step stop is
+        // answered first: at each of the two adaptive sites that raise
+        // it, upstream's `TINY_STEP_DETECTED` throw sits *above* the
+        // reset it would otherwise reach (`cpp:330-333` before `:339`,
+        // `:377-380` before `:386`), so a terminating iteration never
+        // resets the line search.
+        let (tiny_step_stop_requested, ls_reset) = {
             let mut d = self.data.borrow_mut();
-            let f = d.request_tiny_step_stop;
+            let flags = (d.request_tiny_step_stop, d.request_ls_reset);
             d.request_tiny_step_stop = false;
-            f
+            d.request_ls_reset = false;
+            flags
         };
         if tiny_step_stop_requested
             || (tiny_at_entry
@@ -1838,6 +1870,9 @@ impl IpoptAlgorithm {
                 && (next_mu - mu_before).abs() < Number::EPSILON)
         {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
+        }
+        if ls_reset {
+            self.bundle.line_search.reset();
         }
 
         // pounce#58 — iterate-quality guard for the probing oracle.
@@ -1867,20 +1902,6 @@ impl IpoptAlgorithm {
                     next_mu,
                 );
             }
-        }
-
-        // Mirror upstream `IpAdaptiveMuUpdate.cpp:339, 386, 431` and
-        // `IpMonotoneMuUpdate.cpp:165`: every code path that *changes*
-        // μ calls `linesearch_->Reset()`, which clears the filter via
-        // `FilterLSAcceptor::Reset` (`IpFilterLSAcceptor.cpp:524-532`).
-        // Rationale: filter entries are computed against the current
-        // barrier — when μ changes, prior entries no longer apply and
-        // would over-constrain acceptance. The two upstream paths that
-        // do NOT reset (stay-fixed-no-decrease and fixed→free transition)
-        // both keep μ at curr_mu, so the `mu_changed` check captures
-        // the intended distinction.
-        if next_mu != mu_before {
-            self.bundle.line_search.reset();
         }
 
         // Sub-iteration checkpoint: μ has been updated for this iteration.
