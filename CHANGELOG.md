@@ -29,12 +29,15 @@ changes.
   follows from the algorithm; with the cap lifted, `bore3d` reaches a real
   fixpoint for the first time (238 layers).
 - The budget is a **count, not a magnitude**, so no scale-dependent constant
-  of the kind #523 came out of enters. That matters because the obvious
-  guard does not work here: an absolute floor (`BOUND_FEAS_TOL`) already
-  exists and stops a cascade collapsing toward *zero*, but cannot stop one
-  converging to a limit of `1e3`, where the improvements stay `1e-7`-sized
-  forever while the relative improvement is a hair under 100% every round.
-  Exhausting the budget costs at most a looser box, never a wrong one.
+  of the kind #523 came out of enters. That matters because a
+  minimum-improvement threshold does not work here, and the absolute and
+  relative versions fail on different models: an absolute floor
+  (`BOUND_FEAS_TOL`) already exists and stops a cascade collapsing toward
+  *zero*, but not one converging to a limit of `1e3`, where the improvements
+  stay far above any floor; and a relative floor fails on `bore3d` itself,
+  whose cascade shrinks each bound to `3.887e-2` of its previous value — a
+  96% relative improvement, every round. Exhausting the budget costs at most
+  a looser box, never a wrong one.
 - **The exit reason is now recorded and reported.** `PresolveStats` carries
   `exit: FixpointExit` (`Fixpoint` or `RoundCap`) and `rounds`, and the CLI
   prints a line whenever the loop was truncated. A reduction that came out

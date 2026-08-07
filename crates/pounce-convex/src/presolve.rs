@@ -360,6 +360,16 @@ impl BoxRefinements {
         }
     }
 
+    /// Columns this budget is sized for. A mismatch against the problem
+    /// would make [`Self::allows`] answer `false` for the missing tail and
+    /// silently switch bound tightening off — a constant deciding the
+    /// reduction with nothing to say so, which is the failure class gh #527
+    /// exists to remove. Asserted at each [`presolve_once`] entry.
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.ub.len(), self.lb.len(), "budget sides diverged");
+        self.ub.len()
+    }
+
     /// May this pass still refine `col`'s upper (`is_upper`) or lower bound?
     fn allows(&self, col: usize, is_upper: bool) -> bool {
         let side = if is_upper { &self.ub } else { &self.lb };
@@ -716,9 +726,9 @@ struct Row {
 /// parallel rows, an emptied row's residual — so no infeasibility class the
 /// catalog could detect before is lost.
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
-    match presolve_fixpoint(prob, Catalog::Full) {
+    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled) {
         PresolveOutcome::Infeasible(trigger) => {
-            match presolve_fixpoint(prob, Catalog::NoSpeculativeFixings) {
+            match presolve_fixpoint(prob, Catalog::NoSpeculativeFixings, DedupMemo::Enabled) {
                 // Confirmed without the speculative fixings: the problem
                 // really is infeasible, and this is the trigger that shows it.
                 confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
@@ -763,6 +773,24 @@ impl Catalog {
     }
 }
 
+/// Whether the fixpoint may skip re-deriving a duplicate-row merge it has
+/// already performed (gh #527).
+///
+/// [`DedupMemo::Disabled`] exists so a test can run the same problem both ways
+/// and assert the reduced problems come out identical. The skip is the one
+/// change in #527 that could alter a *reduction* rather than merely a box, and
+/// its soundness was argued by reading; `dedup_memo_tests` makes it something
+/// execution checks instead, so a reduction added later cannot quietly
+/// invalidate the argument from elsewhere in the catalog.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DedupMemo {
+    Enabled,
+    /// Only ever constructed by `dedup_memo_tests` — that is the point of it,
+    /// so a release build has nothing to warn about.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Disabled,
+}
+
 /// The fixpoint iteration itself, over the reductions `catalog` permits.
 ///
 /// # Why this terminates (gh #527)
@@ -781,7 +809,7 @@ impl Catalog {
 /// cap, `bore3d` among them; what has changed is that the loop now says so
 /// ([`FixpointExit`]) instead of leaving a truncated reduction and a fixpoint
 /// looking identical.
-fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
+fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> PresolveOutcome {
     // Cap layers defensively. A round can contribute two (the catalog pass
     // and an aggregation), so this is a bound on layers, not on rounds.
     //
@@ -846,7 +874,7 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
             }
             None => false,
         };
-        structure_stable = bounds_only && !aggregated;
+        structure_stable = memo == DedupMemo::Enabled && bounds_only && !aggregated;
         if !catalog_changed && !aggregated {
             exit = FixpointExit::Fixpoint; // neither half found anything
             break;
@@ -1010,6 +1038,12 @@ fn presolve_once(
     structure_stable: bool,
 ) -> PresolveOutcome {
     let n = prob.n;
+    debug_assert_eq!(
+        refinements.len(),
+        n,
+        "refinement budget must be sized for the problem it gates; a short \
+         budget silently disables bound tightening on the missing columns"
+    );
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
     // gh #295: a *present* lower bound at `+∞` or upper bound at `−∞` admits no
@@ -2271,7 +2305,9 @@ pub struct PresolveStats {
     pub aggregated_vars: usize,
     /// Layers in the reduction chain — how many passes the fixpoint took.
     /// One round contributes one or two (the catalog pass, and an
-    /// aggregation when one fired). `0` for a single-pass presolve.
+    /// aggregation when one fired). `1` whenever the handle *is* a single
+    /// layer, which covers the conic path, a no-op presolve, and a fixpoint
+    /// that converged in one round alike — those are the same object here.
     pub rounds: usize,
     /// Why the fixpoint iteration stopped (gh #527). [`FixpointExit::RoundCap`]
     /// means the reduction below is a **truncation**, not the fixpoint
@@ -2389,6 +2425,8 @@ impl Presolve {
             orig_rows: self.orig_m_eq + self.orig_m_ineq,
             reduced_rows: self.reduced.m_eq() + self.reduced.m_ineq(),
             exit: self.exit,
+            // This handle is exactly one layer, however it was reached.
+            rounds: 1,
             ..Default::default()
         };
         for r in &self.stack {
@@ -2727,5 +2765,261 @@ where
             let red = solve(&ps.reduced);
             ps.postsolve(&red)
         }
+    }
+}
+
+#[cfg(test)]
+mod dedup_memo_tests {
+    //! gh #527 — the duplicate-row memoization must not change a reduction.
+    //!
+    //! Skipping `dedup_rows` on a structure-stable round is sound only because
+    //! an all-`BoundTightening` stack implies no column was fixed or
+    //! substituted, so the rows this pass builds are byte-for-byte the rows
+    //! the previous pass already deduped. That argument depends on every
+    //! column-removing reduction pushing a stack entry, and on the two
+    //! `*_dropped` flags covering the row removals that push none — an
+    //! exhaustiveness claim over the whole catalog that a reduction added
+    //! later can break from anywhere. Running both ways and comparing is what
+    //! turns it from a reading into a check.
+
+    use super::*;
+
+    /// Everything about a reduced problem that a wrongly-skipped dedup could
+    /// disturb: its shape, its coefficients, and its boxes.
+    fn fingerprint(p: &QpProblem) -> String {
+        let trips = |t: &[Triplet]| {
+            let mut v: Vec<(usize, usize, u64)> =
+                t.iter().map(|t| (t.row, t.col, t.val.to_bits())).collect();
+            v.sort_unstable();
+            format!("{v:?}")
+        };
+        let floats = |f: &[f64]| format!("{:?}", f.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        format!(
+            "n={} m_eq={} m_ineq={} P={} c={} A={} b={} G={} h={} lb={} ub={}",
+            p.n,
+            p.m_eq(),
+            p.m_ineq(),
+            trips(&p.p_lower),
+            floats(&p.c),
+            trips(&p.a),
+            floats(&p.b),
+            trips(&p.g),
+            floats(&p.h),
+            floats(&p.lb),
+            floats(&p.ub),
+        )
+    }
+
+    fn reduce(prob: &QpProblem, memo: DedupMemo) -> Option<(String, PresolveStats)> {
+        match presolve_fixpoint(prob, Catalog::Full, memo) {
+            PresolveOutcome::Reduced(ps) => Some((fingerprint(&ps.reduced), ps.stats())),
+            _ => None,
+        }
+    }
+
+    /// Compare the two builds on `prob`, naming `label` if they diverge.
+    fn assert_same(label: &str, prob: &QpProblem) {
+        let on = reduce(prob, DedupMemo::Enabled);
+        let off = reduce(prob, DedupMemo::Disabled);
+        match (on, off) {
+            (Some((f_on, s_on)), Some((f_off, s_off))) => {
+                assert_eq!(f_on, f_off, "{label}: reduced problems differ");
+                // The stats too: a skipped merge that dropped a different row
+                // could leave the same shape by coincidence.
+                assert_eq!(
+                    (s_on.fixed_vars, s_on.aggregated_vars, s_on.forcing_rows),
+                    (s_off.fixed_vars, s_off.aggregated_vars, s_off.forcing_rows),
+                    "{label}: reduction counts differ"
+                );
+            }
+            (None, None) => {} // both proved infeasible / unbounded — agreed
+            (a, b) => panic!(
+                "{label}: outcomes differ ({:?})",
+                (a.is_some(), b.is_some())
+            ),
+        }
+    }
+
+    /// A deterministic stand-in for a random generator, so a failure is
+    /// reproducible from the seed alone.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() as usize) % n
+        }
+        fn coef(&mut self) -> f64 {
+            // Small integers keep duplicate/parallel rows genuinely reachable
+            // — the whole point is to give dedup something to find.
+            [-2.0, -1.0, 1.0, 2.0, 3.0][self.below(5)]
+        }
+    }
+
+    /// Random bounded LPs with **deliberately duplicated and scaled rows**, so
+    /// the memoized pass has real merges to get wrong, and with boxes wide
+    /// enough that bound propagation runs for several rounds and the skip
+    /// actually engages.
+    #[test]
+    fn the_dedup_memoization_never_changes_the_reduction() {
+        let mut rng = Lcg(0x527);
+        for case in 0..200 {
+            let n = 4 + rng.below(8);
+            let m_eq = 1 + rng.below(4);
+            let m_ineq = 2 + rng.below(5);
+            let mut a = Vec::new();
+            for r in 0..m_eq {
+                for _ in 0..2 + rng.below(2) {
+                    a.push(Triplet::new(r, rng.below(n), rng.coef()));
+                }
+            }
+            let mut g = Vec::new();
+            for r in 0..m_ineq {
+                for _ in 0..2 + rng.below(2) {
+                    g.push(Triplet::new(r, rng.below(n), rng.coef()));
+                }
+            }
+            // Duplicate one inequality row, and add a positive multiple of
+            // another — the two shapes `dedup_rows` merges.
+            let dup_src = rng.below(m_ineq);
+            let scale = [1.0, 2.0, 0.5][rng.below(3)];
+            let extra: Vec<Triplet> = g
+                .iter()
+                .filter(|t| t.row == dup_src)
+                .map(|t| Triplet::new(m_ineq, t.col, t.val * scale))
+                .collect();
+            g.extend(extra);
+            let mut h: Vec<f64> = (0..m_ineq).map(|_| 1.0 + rng.below(20) as f64).collect();
+            h.push(h[dup_src] * scale);
+
+            let prob = QpProblem {
+                n,
+                p_lower: vec![],
+                c: (0..n).map(|_| rng.coef()).collect(),
+                a,
+                b: (0..m_eq).map(|_| rng.below(5) as f64).collect(),
+                g,
+                h,
+                lb: vec![0.0; n],
+                ub: vec![1e5; n],
+            };
+            assert_same(&format!("case {case}"), &prob);
+        }
+    }
+
+    /// The case that gives this test its teeth: a fixing whose **substitution
+    /// creates a duplicate pair that did not exist before**, on a round after
+    /// the first.
+    ///
+    /// `x₃ = 1` fixes in round 1, which turns `x₂ − x₃ = −1` into a singleton
+    /// that fixes `x₂ = 0` in round 2. Substituting `x₂` out collapses
+    /// `x₀ + x₁ + x₂ ≤ 10` onto `x₀ + x₁ ≤ 5`, and only then are the two rows
+    /// parallel — dedup must run on that round and drop the looser one.
+    ///
+    /// This is the failure the gate's stack check is written to prevent. Worth
+    /// recording what trying to *provoke* it showed, because it changes where
+    /// the safety actually comes from: weakening the gate all the way to
+    /// `rows_unchanged = structure_stable` does **not** make this diverge. The
+    /// round trace says why — the aggregation collapses the `x₃ → x₂` chain in
+    /// round 1, so the substitution and the merge both land in round 2, whose
+    /// predecessor was a *structural* round and which therefore never had
+    /// `structure_stable` set in the first place.
+    ///
+    /// That appears to be general: a column removal is always preceded by a
+    /// round that changed the shape, so the `bounds_only` dimension check is
+    /// what carries the argument and the stack/`*_dropped` conjuncts are belt
+    /// and braces. They are kept — being conservative here costs one boolean —
+    /// but this test is a *guard against future divergence*, not a
+    /// demonstration of a caught bug, and no weakening tried so far makes it
+    /// fail. See the PR thread on #530.
+    #[test]
+    fn a_substitution_that_creates_a_duplicate_still_gets_deduped() {
+        let prob = QpProblem {
+            n: 5,
+            p_lower: vec![],
+            // x₀/x₁ carry a negative cost so they are not dominated columns
+            // (which would fix them at their lower bound and erase the rows).
+            c: vec![-1.0, -1.0, 0.0, 0.0, 1.0],
+            a: vec![
+                Triplet::new(0, 3, 1.0),
+                Triplet::new(1, 2, 1.0),
+                Triplet::new(1, 3, -1.0),
+            ],
+            b: vec![1.0, -1.0],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(0, 2, 1.0),
+                Triplet::new(1, 0, 1.0),
+                Triplet::new(1, 1, 1.0),
+                Triplet::new(2, 4, -1.0),
+            ],
+            h: vec![10.0, 5.0, -10.0],
+            lb: vec![0.0, 0.0, 0.0, 0.0, f64::NEG_INFINITY],
+            ub: vec![100.0, 100.0, 100.0, 100.0, f64::INFINITY],
+        };
+        assert_same("substitution-created duplicate", &prob);
+
+        // And the merge really happens, or the comparison above is vacuous:
+        // the looser of the two parallel rows must be gone.
+        let PresolveOutcome::Reduced(ps) =
+            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled)
+        else {
+            panic!("feasible bounded problem");
+        };
+        let kept: Vec<f64> = ps.reduced.h.clone();
+        assert!(
+            !kept.contains(&10.0),
+            "the looser parallel row survived — dedup did not run on the \
+             substitution round; reduced h = {kept:?}"
+        );
+    }
+
+    /// The shape the skip is actually built for: many consecutive rounds whose
+    /// only change is a narrowed box, with duplicate rows present throughout.
+    /// If the memoization is going to drop a merge, it is here.
+    #[test]
+    fn a_long_bounds_only_cascade_reduces_identically_either_way() {
+        // x₀ − 0.999·x₁ ≤ 1 and its mirror: one refinement per round for as
+        // many rounds as the budget allows. Rows 2 and 3 duplicate row 0
+        // exactly and at a positive multiple.
+        let prob = QpProblem {
+            n: 3,
+            p_lower: vec![],
+            c: vec![0.0, 0.0, 1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, -0.999),
+                Triplet::new(1, 1, 1.0),
+                Triplet::new(1, 0, -0.999),
+                Triplet::new(2, 0, 1.0),
+                Triplet::new(2, 1, -0.999),
+                Triplet::new(3, 0, 2.0),
+                Triplet::new(3, 1, -1.998),
+                Triplet::new(4, 2, -1.0),
+            ],
+            h: vec![1.0, 1.0, 1.0, 2.0, -10.0],
+            lb: vec![0.0, 0.0, f64::NEG_INFINITY],
+            ub: vec![1e6, 1e6, f64::INFINITY],
+        };
+        assert_same("contracting pair with duplicate rows", &prob);
+
+        // And the skip must really be engaging, or the test proves nothing.
+        let PresolveOutcome::Reduced(ps) =
+            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled)
+        else {
+            panic!("feasible bounded problem");
+        };
+        assert!(
+            ps.stats().rounds > 4,
+            "expected several bounds-only rounds for the skip to apply to, \
+             got {} layers",
+            ps.stats().rounds
+        );
     }
 }

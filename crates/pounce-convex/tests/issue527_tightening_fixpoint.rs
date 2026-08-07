@@ -15,15 +15,28 @@
 //! fires every round forever, converging toward a limit it never reaches.
 //!
 //! The obvious guard — refuse an improvement that is too small — does not
-//! work here, which is what these tests are shaped around. There is already
-//! an absolute floor (`BOUND_FEAS_TOL`) and it does stop a cascade whose
-//! bounds collapse toward *zero*, as `bore3d`'s #523 cascade did once its
-//! boxes reached `1e-9`. It cannot stop one converging to a limit of `1e3`:
-//! the improvements there are `1e-7`-sized forever, far above any absolute
-//! floor, while the *relative* improvement is a hair under 100% every round,
-//! so a relative test never fires either. `MAX_BOX_REFINEMENTS` bounds the
-//! number of refinements instead of judging their size, which is what makes
-//! it independent of the scale the model happens to be written in.
+//! work, and it is worth being precise about *why*, because the absolute and
+//! the relative version fail on different models and neither failure is
+//! visible from the other.
+//!
+//! - An **absolute** floor already exists (`BOUND_FEAS_TOL`). It does stop a
+//!   cascade whose bounds collapse toward *zero* — `bore3d`'s #523 cascade
+//!   died on it once its boxes reached `1e-9`. It cannot stop one converging
+//!   to a limit of `1e3`, where the improvements stay far above any floor
+//!   anyone would set. That is the model below, and the case these tests pin.
+//! - A **relative** floor fails on `bore3d` itself, whose real cascade shrinks
+//!   each bound to `3.887e-2` of its previous value — a 96% relative
+//!   improvement, every round, forever. No relative threshold stops that.
+//!
+//! The model below is *not* evidence about relative thresholds: its relative
+//! step is 0.1%, which a relative floor could well catch. It is a
+//! self-contained stand-in for the mechanism, since `bore3d` needs a corpus
+//! fixture that is not vendored. The relative half of the argument rests on
+//! the measured `bore3d` ratio, recorded in `presolve.rs`.
+//!
+//! `MAX_BOX_REFINEMENTS` bounds the *number* of refinements instead of judging
+//! their size, so neither failure mode applies to it and no scale-dependent
+//! constant enters.
 
 use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve, solve_with_presolve};
 use pounce_convex::{QpOptions, QpProblem, QpSolution, QpStatus, Triplet, solve_qp_ipm};
@@ -138,11 +151,16 @@ fn the_refinement_budget_does_not_change_the_answer() {
 }
 
 /// A cascade whose limit is far from zero is the case the existing absolute
-/// floor cannot catch, and the reason the fix counts refinements instead of
-/// measuring them. Pinning the numbers so a future "just add a minimum
+/// floor cannot catch. Pinning the numbers so a future "just add a minimum
 /// improvement threshold" change has to confront them.
+///
+/// Note what this does and does not establish. The *absolute* floor demonstrably
+/// fails here — tens of thousands of rounds before it bites. The *relative*
+/// step is 0.1%, so a relative floor might well stop this particular cascade;
+/// the evidence that a relative floor fails is `bore3d`'s measured 96%, which
+/// needs the corpus and so lives in `presolve.rs` rather than here.
 #[test]
-fn neither_an_absolute_nor_a_relative_threshold_would_stop_this() {
+fn the_absolute_floor_would_take_tens_of_thousands_of_rounds_here() {
     // The propagation is `u ← 1 + 0.999·u` from `u = 1e6`, limit 1000.
     let (mut u, limit) = (1e6_f64, 1000.0_f64);
     let mut rounds = 0;
@@ -152,14 +170,28 @@ fn neither_an_absolute_nor_a_relative_threshold_would_stop_this() {
         if improvement <= 1e-9 {
             break;
         }
-        // Relative to the value being improved, every step is ~100%
-        // of the way to the limit's neighbourhood — a relative test passes
-        // forever.
-        let relative = improvement / (u - limit);
+        // The step is a *constant* fraction of the remaining distance to the
+        // limit — and that distance is precisely what no runtime test can
+        // see, since the limit is what propagation has not reached yet.
+        let of_gap = improvement / (u - limit);
         assert!(
-            (relative - 0.001).abs() < 1e-5,
-            "expected a constant relative step, got {relative}"
+            (of_gap - 0.001).abs() < 1e-5,
+            "expected a constant fraction of the gap, got {of_gap}"
         );
+        // Measured against the bound itself — the only quantity a threshold
+        // could actually compare — it opens at 0.1% and *decays* toward zero
+        // as the bound approaches its limit. Recorded because it is the
+        // honest weakness of this model as an argument about relative
+        // thresholds: one would eventually catch this cascade. It is the
+        // absolute floor that provably does not, which is what this test
+        // asserts below.
+        if rounds == 0 {
+            let of_bound = improvement / u;
+            assert!(
+                (of_bound - 0.001).abs() < 1e-5,
+                "expected the opening step to be ~0.1% of the bound, got {of_bound}"
+            );
+        }
         u = next;
         rounds += 1;
         assert!(rounds < 100_000, "guard");

@@ -2207,10 +2207,26 @@ fn run_convex_qp(
                 }
                 let st = ps.stats();
                 if st.reduced_anything() {
+                    // Whether the fixpoint converged or the layer cap stopped
+                    // it (gh #527), as a suffix rather than a line of its own.
+                    // The corpus sweep on #530 measured the cap binding on 46%
+                    // of LP and 25% of QP models — it is the common case, not
+                    // an alarm, and it never changed the structural reduction
+                    // on any of the 394 models that presolve at all. A second
+                    // stdout line on half of all solves would read as a
+                    // warning about something that is working as designed;
+                    // what the reduction needs to carry is which of the two it
+                    // came out of, and that fits here.
+                    let exit = match st.exit {
+                        FixpointExit::Fixpoint => String::new(),
+                        FixpointExit::RoundCap => {
+                            format!(", cap-truncated after {} layers", st.rounds)
+                        }
+                    };
                     println!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
-                         forcing {}, dominated {}, tightened {})",
+                         forcing {}, dominated {}, tightened {}{})",
                         st.orig_vars,
                         st.reduced_vars,
                         st.orig_rows,
@@ -2222,18 +2238,7 @@ fn run_convex_qp(
                         st.forcing_rows,
                         st.dominated_cols,
                         st.tightened_bounds,
-                    );
-                }
-                // Which of the two exits the fixpoint took, and after how many
-                // layers (gh #527). Worth a line whenever the loop was cut off:
-                // a reduction that came out of the layer cap is a *truncation*,
-                // and a different cap would have handed the solver a different
-                // problem — the one thing the loop could not previously say.
-                if st.exit == FixpointExit::RoundCap {
-                    println!(
-                        "Presolve: stopped on the layer cap after {} layers, \
-                         not at a fixpoint — reductions were still firing",
-                        st.rounds,
+                        exit,
                     );
                 }
                 let red = if use_active_set {
