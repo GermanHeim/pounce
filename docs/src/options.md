@@ -12,14 +12,51 @@ and semantics follow Ipopt's, so an existing Ipopt options file or
 pounce problem.nl tol=1e-10 max_iter=500 print_level=8
 ```
 
-**From an options file** — upstream `ipopt.opt` format:
+**From an options file** — upstream `ipopt.opt` format (one `name value`
+pair per line, `#` comments):
 
 ```sh
-pounce problem.nl --options-file ipopt.opt
+pounce problem.nl --options-file tuned.opt
+pounce problem.nl option_file_name=tuned.opt   # the Ipopt spelling; same thing
 ```
 
-Command-line `KEY=VALUE` pairs override values loaded from the options
-file.
+**From an options file nobody named.** With neither of the above, POUNCE
+looks in the working directory for `pounce.opt`, then `ipopt.opt`, and
+reads the first one it finds — the way `ipopt` picks up `./ipopt.opt`:
+
+```sh
+printf 'max_iter 5\n' > ipopt.opt
+pounce problem.nl        # → Using option file "ipopt.opt".
+```
+
+The run says which file configured it (on the same `sb` gate as the
+banner). If both default names are present, `pounce.opt` wins and the
+other is named in a warning rather than left to look applied.
+`--no-options-file` skips the lookup entirely — the escape hatch for a
+directory holding an options file written for some other run.
+
+Command-line `KEY=VALUE` pairs — and `$pounce_options`, AMPL's
+`<solver>_options` channel — override values loaded from the options
+file, never the reverse.
+
+An options file that was *named* but cannot be read is an error, not a
+shrug:
+
+```
+$ pounce problem.nl option_file_name=typo.opt
+pounce: failed to load options file: options file "typo.opt" does not exist. …
+```
+
+Upstream opens a named file with a bare `ifstream` and reads nothing if
+that fails, so a typo there runs at stock defaults without a word. That
+silence is the one thing this path exists to remove
+([#518](https://github.com/jkitchin/pounce/issues/518)): a run configured
+entirely through an options file that quietly ran at defaults still
+*reported success*, which invalidates any benchmark set up that way.
+
+One upstream quirk is inherited: `option_file_name` set *inside* an
+options file chains nowhere, because the file has already been chosen by
+the time it is read. POUNCE warns about that rather than ignoring it.
 
 ## Commonly used options
 
@@ -71,9 +108,13 @@ line search, derivative approximation by finite differences,
 linear-dependency detection, the per-iteration NaN/Inf derivative check,
 multiplier recalculation by least squares, a selectable
 constraint-violation norm, magic steps, bound replacement, the L-BFGS
-augmented-system variants, reading options from a file, skipping the
-finalize callback, the dynamic HSL loader, and `suppress_all_output` /
-`debug_print_level`.
+augmented-system variants, skipping the finalize callback, the dynamic
+HSL loader, and `suppress_all_output` / `debug_print_level`.
+
+`option_file_name` was on that list until
+[#518](https://github.com/jkitchin/pounce/issues/518) implemented it;
+refusing an option is the cheap half of "implement it or fail loudly",
+and an entry leaves this table by getting the other half.
 
 Two deliberate exceptions:
 

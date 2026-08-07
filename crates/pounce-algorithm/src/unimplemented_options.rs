@@ -46,6 +46,12 @@
 //! one — has no counterpart here at all, and the port registered its
 //! whole option set. Those are refused.
 //!
+//! An entry leaves the table by being implemented. `option_file_name`
+//! was here — refusing it was the cheap half of gh#518's "implement it
+//! or fail loudly" — until gh#518 got the other half:
+//! [`crate::application::IpoptApplication::initialize_with_option_file`]
+//! reads the named file, so the option now configures something.
+//!
 //! # The default gate
 //!
 //! Only an explicit value **different from the registered default** is
@@ -164,12 +170,6 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         options: &["num_linear_variables"],
     },
     UnimplementedFeature {
-        feature: "reading options from a file",
-        advice: "pass options on the command line (`pounce model.nl key=value`) \
-                 or, from a library, via `initialize_with_options_str`",
-        options: &["option_file_name"],
-    },
-    UnimplementedFeature {
         feature: "skipping the finalize-solution callback",
         advice: "",
         options: &["skip_finalize_solution_call"],
@@ -210,7 +210,11 @@ pub const UNEXPLOITED_HINTS: &[&str] = &[
 /// Both halves matter. `found` alone would fire on an `ipopt.opt` that
 /// spells out a default; comparing values alone would fire on nothing,
 /// since an unset option *reads back* as its default.
-fn set_to_a_non_default(options: &OptionsList, reg: &RegisteredOptions, name: &str) -> bool {
+pub(crate) fn set_to_a_non_default(
+    options: &OptionsList,
+    reg: &RegisteredOptions,
+    name: &str,
+) -> bool {
     let Some(opt) = reg.get_option(name) else {
         return false;
     };
@@ -408,6 +412,74 @@ mod tests {
         let mut app = crate::application::IpoptApplication::new();
         app.initialize().unwrap();
         assert!(!app.algorithm_builder_from_options().fast_step_computation);
+    }
+
+    /// `option_file_name` left the table when gh#518 implemented the
+    /// feature it names. Refusing it *from the table* again would be a
+    /// regression in the other direction: it now configures the run, so
+    /// a user who sets it gets what they asked for rather than an error.
+    #[test]
+    fn option_file_name_is_implemented_not_in_the_table() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("option_file_name", "tiny.opt", true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
+    }
+
+    /// …but leaving the table must not hand the option back its silence
+    /// on the surfaces that still cannot honor it. Only
+    /// `initialize_with_option_file` resolves it, and library callers
+    /// (Python, the C interface, WASM) never call it — so there, setting
+    /// the option is still refused, just by a different guard.
+    #[test]
+    fn option_file_name_is_refused_where_nothing_resolves_it() {
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        assert_eq!(app.unhonored_option_file_name(), None, "unset asks nothing");
+
+        app.initialize_with_options_str("option_file_name tiny.opt\n")
+            .unwrap();
+        let msg = app
+            .unhonored_option_file_name()
+            .expect("a library caller cannot honor it");
+        assert!(msg.contains("tiny.opt"), "{msg}");
+        assert!(msg.contains("does not read options files"), "{msg}");
+        assert!(msg.contains("518"), "{msg}");
+    }
+
+    /// The default gate applies here too: `option_file_name` defaults to
+    /// `ipopt.opt`, so a caller replaying a full option dump sets that
+    /// value while asking for nothing. Failing them would break the same
+    /// compatibility the explicitly-set-default rule protects everywhere
+    /// else.
+    #[test]
+    fn option_file_name_at_its_default_asks_nothing_of_a_library_caller() {
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize_with_options_str("option_file_name ipopt.opt\n")
+            .unwrap();
+        assert_eq!(app.unhonored_option_file_name(), None);
+    }
+
+    /// On the CLI's path the option *is* resolved, so the guard stays
+    /// quiet — including when the resolver finds no file to read, which
+    /// still means the option was honored (there was nothing to read).
+    #[test]
+    fn the_guard_is_quiet_once_the_option_file_path_has_run() {
+        let dir = std::env::temp_dir().join(format!("pounce_gh518_lib_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.opt");
+        std::fs::write(&path, "max_iter 5\n").unwrap();
+
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize_with_option_file(Some(&path)).unwrap();
+        assert_eq!(app.unhonored_option_file_name(), None);
+        assert_eq!(
+            app.options().get_integer_value("max_iter", "").unwrap(),
+            (5, true),
+            "the file must actually have been read",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The restoration switches wired in gh#483 / #191 round 2. Each
