@@ -329,6 +329,65 @@ The recipe in plain English:
 > it (`crates/pounce-cli/tests/l1_fallback_no_panic.rs`) uses this
 > same `infeasible-eq` builtin.
 
+### The second-opinion ladder (what those extra solves in your log are)
+
+Before shipping a local-infeasibility verdict the CLI re-solves the
+problem along up to two *different* trajectories and only keeps the
+verdict if they agree. You will see this in the log:
+
+```
+EXIT: Converged to a point of local infeasibility. Problem may be infeasible.
+pounce: local infeasibility — re-solving along 2 different trajectories before
+        believing it (second-opinion ladder: feral_scaling=mc64,
+        mu_strategy=adaptive).
+pounce: second opinion — re-solving with feral_scaling=mc64…
+pounce: feral_scaling=mc64 re-solve did not recover (InfeasibleProblemDetected).
+pounce: second opinion — re-solving with mu_strategy=adaptive…
+pounce: mu_strategy=adaptive re-solve recovered the problem — promoting (SolveSucceeded).
+Status: Solve_Succeeded
+```
+
+Note the trailing `Status:` line. Each rung prints its own `EXIT:` banner,
+so a laddered run has several and only the last one is the verdict that
+shipped — if you are parsing pounce's output, read `Status:` and ignore the
+banners. It carries the upstream IPOPT enumerator spelling
+(`Infeasible_Problem_Detected`, `Maximum_Iterations_Exceeded`, …).
+
+The two rungs probe different things, and the distinction matters when
+you are reading a log:
+
+| rung | option | varies |
+|---|---|---|
+| `feral_scaling=mc64` | `feral_infeasibility_scaling_retry` | the linear algebra |
+| `mu_strategy=adaptive` | `infeasibility_mu_strategy_retry` | the barrier trajectory |
+
+The first rung is evidence only when the trajectory is
+hypersensitive — two equally backward-stable scalings staying
+bit-identical for many iterations, then diverging by ~1 ULP into
+different basins (`discs.nl` is the canonical case). When it is not,
+MC64 retraces the same iterates and agrees for the same reason the
+first solve was wrong, so **the scaling rung agreeing is not by itself
+a reason to believe the verdict**. That is why the barrier rung exists
+([pounce#524](https://github.com/jkitchin/pounce/issues/524): CUTE
+`cresc4` is feasible, Ipopt solves it in 71 iterations, and the MC64
+re-solve reproduced the failing trajectory bit-identically).
+
+Things worth knowing:
+
+- A rung is promoted only if it returns `Solve_Succeeded` /
+  `Solved_To_Acceptable_Level`, so an overturned verdict always comes
+  with a point that passed the ordinary convergence check.
+- Rungs are applied to your baseline options, not stacked on each
+  other, and a rung that would change nothing (you already set
+  `mu_strategy=adaptive`) is skipped.
+- The extra solves are spent only on runs that would otherwise report
+  failure. Nothing changes on a successful solve.
+- Both rungs are on by default; set them to `no` for upstream IPOPT's
+  behaviour of shipping the first verdict.
+- If a rung recovers the problem, that is a signal about your model as
+  well as about the solver: the verdict was trajectory-dependent, so
+  the starting point or the scaling of the formulation is worth a look.
+
 ### When the residual is small but the verdict still says infeasible
 
 Some models cannot reach a small *absolute* residual no matter how well

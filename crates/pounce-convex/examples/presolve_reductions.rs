@@ -16,7 +16,7 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
 fn report(name: &str, prob: &QpProblem) {
     print!("{name:<34} {}×{} → ", prob.n, prob.m_eq() + prob.m_ineq());
     match presolve(prob) {
-        PresolveOutcome::Infeasible => println!("INFEASIBLE (detected in presolve)"),
+        PresolveOutcome::Infeasible(_) => println!("INFEASIBLE (detected in presolve)"),
         PresolveOutcome::Unbounded => println!("UNBOUNDED (detected in presolve)"),
         PresolveOutcome::Reduced(ps) => {
             let r = &ps.reduced;

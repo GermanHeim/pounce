@@ -196,7 +196,7 @@ fn duplicate_equality_rows_conflicting_infeasible() {
         lb: vec![],
         ub: vec![],
     };
-    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible(_)));
     assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
 }
 
@@ -417,7 +417,7 @@ fn parallel_equality_inconsistent_infeasible() {
         lb: vec![],
         ub: vec![],
     };
-    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible(_)));
 }
 
 /// Parallel inequalities (positive multiple): `x0 + x1 ≤ 3` and
@@ -690,7 +690,7 @@ fn activity_infeasible_inequality() {
         lb: vec![2.0],
         ub: vec![3.0],
     };
-    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible(_)));
     assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
 }
 
@@ -709,7 +709,7 @@ fn activity_infeasible_equality() {
         lb: vec![0.0, 0.0],
         ub: vec![1.0, 1.0],
     };
-    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible(_)));
     assert_eq!(with_presolve(&prob).status, QpStatus::PrimalInfeasible);
 }
 
@@ -781,7 +781,7 @@ fn unbounded_variable_row_becomes_the_bound_it_is() {
 fn status_of(o: &PresolveOutcome) -> &'static str {
     match o {
         PresolveOutcome::Reduced(_) => "Reduced",
-        PresolveOutcome::Infeasible => "Infeasible",
+        PresolveOutcome::Infeasible(_) => "Infeasible",
         PresolveOutcome::Unbounded => "Unbounded",
     }
 }
@@ -1081,7 +1081,10 @@ fn contradictory_singleton_rows_are_seen_as_an_empty_box() {
     // without any arithmetic on the solver's part.
     for gap in [1e-8, 1e-7, 1e-6, 1.0] {
         assert!(
-            matches!(presolve(&boxed_by_rows(gap)), PresolveOutcome::Infeasible),
+            matches!(
+                presolve(&boxed_by_rows(gap)),
+                PresolveOutcome::Infeasible(_)
+            ),
             "gap={gap:e} must presolve to Infeasible"
         );
     }

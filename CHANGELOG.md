@@ -42,6 +42,159 @@ changes.
   substitution, so they would report scaled-space numbers under a
   natural-units contract; stage 3 lifts this.
 
+### Fixed — `pounce-convex` reported false `Infeasible_Problem_Detected` at iteration 0 on `bore3d` / `QBORE3D` (#523)
+
+- Netlib `bore3d` and its Maros-Mészáros quadratic twin `QBORE3D` (both
+  n=315, m=233, both feasible) came back from the convex path as
+  `Infeasible_Problem_Detected` in ~5 ms with `iters=0` and no diagnostic,
+  while the NLP path (`solver_selection=nlp`) solved both to the committed
+  Ipopt-MA57 reference objectives. They were the only non-matching failure
+  in the `lp` suite and the only one in the `qp` suite.
+- The claim came from presolve's **forcing-constraint** reduction. Bound
+  tightening propagated a group of nonnegative variables' upper bounds
+  geometrically toward their true limit of zero; by round 21 of the
+  presolve fixpoint those boxes were ~1e-8 wide, and one equality row's
+  activity range `[-6.29e-10, 4.87e-8]` came within `ACTIVITY_TOL` (1e-9)
+  of its right-hand side `0`. Forcing read that as "this row can hold only
+  at its min vertex" and pinned all six of its variables to bounds — two of
+  them, with coefficients `-1.14e-1` and `-5.7e-3`, to *upper* bounds
+  `4.8e-9` and `1.5e-8` from zero. A gap of `6.29e-10` had licensed a
+  displacement of `1.5e-8`. Substituted into the next row those two
+  appeared in, the residual was `2.0e-8` against a tolerance of `1.0e-9`,
+  and a feasible problem was declared infeasible.
+- **Forcing now requires the pin to be tight.** A row whose activity range
+  only *approximately* touches its right-hand side may still spend the
+  residual gap, moving each variable up to `gap / |coefⱼ|` (capped by its
+  box width) off the bound the pin claims it must occupy. Forcing fires
+  only when that displacement is within `FORCING_PIN_TOL` for **every**
+  variable in the row, so a pin is a deduction rather than a guess. A row
+  that genuinely touches (gap 0) is unaffected.
+- **An infeasibility verdict is now re-derived before it is emitted.**
+  Two reductions — forcing constraints and dominated columns — fix a
+  variable at a value chosen from a tolerance judgment, and a wrong one is
+  substituted into every row that variable touches until some row reads as
+  contradictory. When any screen reports infeasible, presolve re-runs from
+  the original problem with those two withheld; only a verdict that pass
+  reaches on its own is returned as `PrimalInfeasible`. Otherwise the
+  reduction is solved normally and the discarded claim is kept on the
+  handle (`Presolve::discarded_infeasibility`). Everything that only
+  *reports* — empty rows, activity ranges, parallel rows, emptied-row
+  residuals — is retained, so no infeasibility class detectable before is
+  lost. Verified: with the forcing fix reverted, the guard alone still
+  solves both problems to the reference objective.
+- **The screen that fired is now named.** `PresolveOutcome::Infeasible`
+  carries an `InfeasibleTrigger` (the screen plus the row / column / bound
+  and the compared values), and the CLI prints it — `Presolve: proved
+  primal infeasible — <screen> (<detail>)`, or `Presolve: discarded an
+  unconfirmed infeasibility claim — …; solving normally`. Previously even
+  `print_level=8` emitted nothing on the way out.
+- **Breaking (pounce-convex API):** `PresolveOutcome::Infeasible` is now a
+  tuple variant; `matches!(…, PresolveOutcome::Infeasible)` becomes
+  `PresolveOutcome::Infeasible(_)`.
+
+### Fixed — the local-infeasibility re-solve corroborated its own mistake; it now varies the barrier trajectory too (#524)
+
+- A local-infeasibility verdict was second-guessed by exactly one re-solve,
+  `feral_scaling=mc64` (`feral_infeasibility_scaling_retry`). That rung
+  perturbs the *linear algebra* only, so it is evidence only when the
+  trajectory is ULP-hypersensitive the way `discs.nl` is. When it is not,
+  MC64 retraces the same iterates and agrees for the same reason the first
+  solve was wrong — and the CLI then printed "now corroborated by a second
+  scaling", asserting confidence that had not been earned.
+- The worked case is CUTE `cresc4` (6 variables, 8 constraints, nonconvex,
+  feasible; LOQO, SNOPT and Ipopt-MA57 all reach `0.8718976`, Ipopt in 71
+  iterations). POUNCE on defaults converged to a point with constraint
+  violation 0.51 and objective `~2e-09` — a degenerate zero-area crescent —
+  and reported `Infeasible_Problem_Detected`. The MC64 re-solve reproduced
+  the failing trajectory character-for-character through iteration 15,
+  diverged at iteration 16 in the eighth significant digit — the exact
+  hypersensitivity signature the guard was written for — and landed in the
+  same basin anyway. Whether that ULP-scale perturbation escapes is luck.
+- The retry is now a two-rung ladder, and the new second rung
+  (`infeasibility_mu_strategy_retry`, default `yes`) re-solves with
+  `mu_strategy=adaptive`, which changes the iterate sequence itself rather
+  than the arithmetic underneath it. `cresc4` now returns
+  `Optimal Solution Found` at `0.8718975`, matching the reference to eight
+  significant figures. Retrying a different barrier strategy is also the
+  remedy IPOPT's own documentation gives a user who gets an infeasibility
+  verdict on a problem they believe is feasible.
+- Rungs apply to the *baseline* options, not on top of each other: the
+  barrier rung re-asserts the baseline `feral_scaling` first. This is
+  load-bearing — on `cresc4`, `mu_strategy=adaptive` recovers the optimum
+  and `mu_strategy=adaptive` together with `feral_scaling=mc64` still
+  reports local infeasibility, so a cumulative ladder would have discarded
+  the fix.
+- Safety is unchanged in the direction that matters: a rung is promoted
+  only when it returns `Solve_Succeeded` / `Solved_To_Acceptable_Level`, so
+  an overturned verdict is always backed by the retry's own convergence
+  check rather than by trusting the strategy. Genuinely infeasible models
+  still report infeasible (the ladder simply runs out of rungs), a rung
+  that would be a no-op at the current options is skipped rather than
+  burning a solve, presolve-certified infeasibility remains exempt, and the
+  extra solve is spent only on runs that would otherwise report failure.
+  Set both options to `no` for upstream IPOPT's behaviour of shipping the
+  first verdict.
+- What it costs: nothing on a successful solve (a 733-problem Vanderbei
+  sweep shows no objective drift and no status change other than `cresc4`),
+  and up to two extra solves on one that reports infeasible. On the suite's
+  hardest infeasible case, `cresc132`, that is 3.65s → 73.4s; across the
+  whole suite, +7 %.
+
+### Fixed — a successful restoration phase left the watchdog's shortened-step counter running, arming the watchdog where IPOPT would not (#524)
+
+- `steenbrf` (n=468, m=108) ran to `max_iter` at 3000 iterations under the
+  monotone barrier default while Ipopt-MA57 solved the same file. It now
+  converges in **481 iterations** to `Solve_Succeeded` — to full tolerance,
+  at a lower local minimum (282.678) than the reference's acceptable-level
+  point (1321.65 at 1846 iterations).
+- The watchdog arms after `watchdog_shortened_iter_trigger` (default 10)
+  **consecutive** shortened line-search steps. Upstream clears that counter
+  when the restoration phase succeeds
+  (`IpBacktrackingLineSearch.cpp:624-631`), because an iterate that came
+  back from restoration is a different point and the run of shortened steps
+  before it did not continue through it. POUNCE had no equivalent: upstream
+  calls `PerformRestoration()` from inside `FindAcceptableTrialPoint`, so
+  those assignments sit in scope there, whereas POUNCE returns
+  `Outcome::Failed` and the main loop runs restoration — and its recovery
+  path never told the line search it had happened.
+- So runs of shortened steps on either side of a restoration accumulated as
+  if consecutive. On `steenbrf`: five shortened steps, restoration, five
+  more — exactly the trigger. The watchdog armed, spent its three trial
+  iterations, reverted to the pre-watchdog iterate (the reverted iteration's
+  objective and `inf_pr` are bit-identical to the snapshot's), and the line
+  search then collapsed to `alpha` ~1e-08 with 20+ backtracks. That cycle
+  repeated 105 times. Upstream's longest run of consecutive shortened steps
+  on this problem is 6, so its watchdog never arms at all.
+- `in_soft_resto_phase` and `soft_resto_counter` are reset alongside it, as
+  upstream does at the same site.
+- Corpus effect (733-problem Vanderbei sweep, same host): **two problems
+  fixed** — `steenbrf` and `brainpc2` (`Maximum_Iterations_Exceeded` at 3000
+  → `Solved_To_Acceptable_Level` at 1003) — **none broken**, no objective
+  drift on any problem both runs solve, and the suite gets *faster*: total
+  solve time −6.5 %, total iterations −7.3 %.
+
+### Added — the CLI prints a machine-readable `Status:` line
+
+- Every NLP solve now ends with `Status: <upstream_name>` —
+  `Status: Infeasible_Problem_Detected`, using the upstream IPOPT
+  enumerator spelling that CUTEst tables and the benchmark references
+  already use. Printed once, after the verdict is final, and suppressed at
+  `print_level 0` and under `--json-debug` (whose stdout is a protocol
+  channel).
+- This exists because free-form banners are not a status channel and the
+  second-opinion ladder above proved it. The engine prints one `EXIT:`
+  banner per *solve*, so a laddered run prints several, and a consumer that
+  scans the log for known phrases gets whichever phrase it ranks first
+  rather than the verdict that shipped. `benchmarks/scripts/run_nl_bench.sh`
+  ranks the iteration-limit phrase above the local-infeasibility one, so on
+  `cresc100` — barrier rung hits `max_iter`, original infeasibility verdict
+  then stands — it recorded `Maximum_Iterations_Exceeded` for a run that
+  shipped `Infeasible_Problem_Detected`. Wrong status, no error, straight
+  into `BENCHMARK_REPORT.md`. That driver already preferred a `Status:`
+  line and only fell back to phrase-ranking because nothing emitted one.
+- `ApplicationReturnStatus::upstream_name()` is public, for embedders that
+  need the same spelling.
+
 ### Fixed — tightening `constr_viol_tol` made POUNCE more likely to report local infeasibility (#519)
 
 - Rapid infeasibility detection counted an iterate toward its streak when
