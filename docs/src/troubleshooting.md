@@ -329,6 +329,48 @@ The recipe in plain English:
 > it (`crates/pounce-cli/tests/l1_fallback_no_panic.rs`) uses this
 > same `infeasible-eq` builtin.
 
+### When the residual is small but the verdict still says infeasible
+
+Some models cannot reach a small *absolute* residual no matter how well
+they are solved. An ill-conditioned change of variables — a moving-boundary
+PDE on a Landau coordinate, say — can leave a row carrying a coefficient
+of `1e9`, so a residual of `1e-3` is eleven relative digits: the equation
+is satisfied about as well as double precision allows, and no absolute
+tolerance will ever be met. That is exactly the regime the acceptable-level
+fallback exists for, and the exit you want is
+`Solved_To_Acceptable_Level`.
+
+Set `acceptable_tol` to a level you can actually reach, and read the
+result there:
+
+```
+$ pounce model.nl -AMPL tol=1e-6 acceptable_tol=1e-3
+```
+
+Three things are worth knowing about how that interacts with the
+infeasibility detector:
+
+- `acceptable_constr_viol_tol` (default `1e-2`) is the feasibility band
+  the acceptable-level exit uses, and it is **separate** from
+  `constr_viol_tol`. Widening the latter does not widen the former.
+- Tightening `constr_viol_tol` does **not** make POUNCE readier to call a
+  model infeasible. The rapid-infeasibility detector's violation floor is
+  clamped so it never convicts a point whose violation sits inside the
+  band the defaults call acceptable
+  ([pounce#519](https://github.com/jkitchin/pounce/issues/519)). If you
+  are still seeing `Infeasible_Problem_Detected`, the point is outside
+  the band you declared: compare the reported `Overall NLP error` against
+  your `acceptable_tol`, and the `Constraint violation` against
+  `acceptable_constr_viol_tol`.
+- If the solve did pass through an acceptable iterate before giving up,
+  that point is returned rather than discarded, whichever internal route
+  reached the verdict
+  ([pounce#505](https://github.com/jkitchin/pounce/issues/505)).
+
+If the residual is large relative to its own row — not just in absolute
+terms — the verdict is the honest one, and the ℓ₁ wrapper above is the
+way to corroborate it.
+
 ## Linear solver choice
 
 `linear_solver=ma57` (when built with HSL):

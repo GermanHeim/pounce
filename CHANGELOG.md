@@ -311,6 +311,25 @@ changes.
   computed rather than typed. Regression coverage in
   `crates/pounce-convex/tests/issue496_ulp_inconsistent_equalities.rs`.
 
+### Fixed — two of three local-infeasibility exits discarded an acceptable point (#505)
+
+- Three routes in `ipopt_alg.rs` conclude `LocalInfeasibility`: the
+  convergence check's rapid detection, restoration layer 2, and the
+  slow-cycle exits. Only the cycle exits consulted the acceptable-point
+  stash before surfacing the verdict. The other two built the terminate
+  outcome inline, so a solve that had already passed through an acceptable
+  iterate — stashed, un-vetoed, sitting there precisely as a rollback
+  target — discarded it and reported the hard failure instead.
+- The two were found independently, months apart, because nothing tied them
+  together. All three now go through `terminate_local_infeasibility`, and a
+  tripwire test fails if a new site rebuilds the outcome inline.
+- Upstream Ipopt does the same thing at the equivalent point: its
+  `CurrentIsAcceptable()` check intercepts restoration entry and throws
+  `ACCEPTABLE_POINT_REACHED` rather than proceeding from a good point.
+- Inert on genuinely infeasible models: nothing is stashed unless the whole
+  acceptable triplet passed, so the restore falls through to the verdict
+  unchanged.
+
 ### Fixed — `solve_qp(method="active-set")` panicked across the FFI on a reversed box (#491)
 
 - `pounce.solve_qp(..., method="active-set")` with a crossed bound
