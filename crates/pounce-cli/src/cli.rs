@@ -771,21 +771,32 @@ impl Args {
     /// options beat file options, not the other way round — and
     /// `option_file_name` is itself one of those overrides.
     ///
-    /// Precedence: `--no-options-file` beats everything; then the
-    /// explicit `--options-file <path>` flag; then `option_file_name=`
-    /// (from the command line or `$pounce_options`, last occurrence
-    /// winning, as for every other `key=value`); otherwise probe the
-    /// working directory. Upstream reads `option_file_name` out of the
-    /// option store at the same point for the same reason.
+    /// `--options-file <path>` and `option_file_name=<path>` are two
+    /// spellings of one thing; `option_file_name=` may repeat, in which
+    /// case the last wins as it does for every other `key=value`. With
+    /// no file named, the working directory is probed. Upstream reads
+    /// `option_file_name` out of the option store at the same point for
+    /// the same reason.
     ///
-    /// Errors when `--no-options-file` is combined with a named file:
-    /// the two ask for opposite things, and guessing which one the user
-    /// meant is exactly the silence gh#518 is about.
+    /// Every way of asking for *two different things at once* is an
+    /// error rather than a precedence rule — `--no-options-file` beside
+    /// a named file, or the two spellings naming different files. A
+    /// precedence rule here would mean one of the two files the user
+    /// named was quietly not read, which is the failure gh#518 reports,
+    /// reintroduced by the fix for it.
     pub fn option_file_choice(&self) -> Result<OptionFileChoice, String> {
-        let named = self
-            .options_file
-            .clone()
-            .or_else(|| self.option_file_name_override());
+        let named = match (&self.options_file, self.option_file_name_override()) {
+            (Some(flag), Some(kv)) if *flag != kv => {
+                return Err(format!(
+                    "--options-file '{}' and option_file_name={} name different \
+                     options files; only one is read, so pass one or the other",
+                    flag.display(),
+                    kv.display()
+                ));
+            }
+            (Some(flag), _) => Some(flag.clone()),
+            (None, kv) => kv,
+        };
         match (self.no_options_file, named) {
             (true, Some(p)) => Err(format!(
                 "--no-options-file conflicts with the options file '{}' named on \
@@ -998,8 +1009,26 @@ mod tests {
         );
     }
 
+    /// The two spellings agreeing is fine; disagreeing is an error, not
+    /// a precedence rule — picking a winner would silently not read the
+    /// other file the user named.
     #[test]
-    fn options_file_flag_beats_option_file_name() {
+    fn the_two_spellings_may_agree() {
+        let a = Args::parse_argv(argv(&[
+            "/tmp/foo.nl",
+            "--options-file",
+            "same.opt",
+            "option_file_name=same.opt",
+        ]))
+        .unwrap();
+        assert_eq!(
+            a.option_file_choice(),
+            Ok(OptionFileChoice::Named(PathBuf::from("same.opt")))
+        );
+    }
+
+    #[test]
+    fn the_two_spellings_disagreeing_is_rejected() {
         let a = Args::parse_argv(argv(&[
             "/tmp/foo.nl",
             "--options-file",
@@ -1007,10 +1036,8 @@ mod tests {
             "option_file_name=kv.opt",
         ]))
         .unwrap();
-        assert_eq!(
-            a.option_file_choice(),
-            Ok(OptionFileChoice::Named(PathBuf::from("flag.opt")))
-        );
+        let err = a.option_file_choice().unwrap_err();
+        assert!(err.contains("flag.opt") && err.contains("kv.opt"), "{err}");
     }
 
     #[test]

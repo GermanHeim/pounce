@@ -223,6 +223,22 @@ fn no_options_file_skips_the_implicit_lookup() {
     );
 }
 
+/// Two spellings naming two files: reading one and dropping the other
+/// would be gh#518's failure reintroduced by the fix for it, so neither
+/// wins.
+#[test]
+fn the_two_option_file_spellings_may_not_disagree() {
+    let dir = scratch("two_names");
+    write(&dir, "a.opt", "max_iter 1\n");
+    write(&dir, "b.opt", "max_iter 1\n");
+    let (code, out) = run(&dir, &["--options-file", "a.opt", "option_file_name=b.opt"]);
+    assert_eq!(code, Some(2), "should fail; output:\n{out}");
+    assert!(
+        out.contains("a.opt") && out.contains("b.opt"),
+        "the message should name both; output:\n{out}"
+    );
+}
+
 #[test]
 fn no_options_file_conflicts_with_a_named_one() {
     let dir = scratch("conflict");

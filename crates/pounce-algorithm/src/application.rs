@@ -181,6 +181,14 @@ pub struct IpoptApplication {
     /// by default so library callers that never read the iterations
     /// vector don't pay the per-iter alloc.
     record_iter_history: bool,
+    /// Whether [`Self::initialize_with_option_file`] ran — i.e. whether
+    /// anything on this application actually consulted
+    /// `option_file_name` and resolved it to a file. Only the `pounce`
+    /// CLI does; a library caller sets its options directly. The guard
+    /// in [`Self::unhonored_option_file_name`] reads this so that
+    /// setting the option on a surface that cannot honor it is refused
+    /// rather than dropped (gh#518).
+    option_file_resolved: bool,
     /// Shared sink that the linear-solver backend writes a rolling
     /// [`LinearSolverSummary`] into after every factor. Reset at the
     /// top of every solve (so back-to-back `optimize_tnlp` calls don't
@@ -282,6 +290,7 @@ impl IpoptApplication {
             restoration_factory_provider: None,
             on_converged: None,
             record_iter_history: false,
+            option_file_resolved: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
@@ -433,6 +442,12 @@ impl IpoptApplication {
         explicit: Option<&Path>,
     ) -> Result<OptionFileLoad, SolverException> {
         let mut load = OptionFileLoad::default();
+        // Set before the early returns below: what this flag records is
+        // that `option_file_name` was *consulted*, not that a file turned
+        // up. A caller on this path who names nothing and has no
+        // `pounce.opt` to find still gets the option honored — there was
+        // simply nothing to read.
+        self.option_file_resolved = true;
         let path = match explicit {
             Some(p) => {
                 if !p.is_file() {
@@ -670,7 +685,13 @@ impl IpoptApplication {
         // implement is refused, not shrugged off. See
         // `unimplemented_options` for how membership was established and
         // why an explicitly-set *default* is deliberately still allowed.
-        if let Some(msg) = self.unimplemented_option_refusal() {
+        // gh#518: same treatment for `option_file_name` on an entry point
+        // that cannot resolve it. Separate from the table above because
+        // the *feature* now exists — just not here.
+        if let Some(msg) = self
+            .unimplemented_option_refusal()
+            .or_else(|| self.unhonored_option_file_name())
+        {
             use pounce_common::journalist::JournalCategory;
             eprintln!("{msg}");
             self.journalist.print(
@@ -1030,6 +1051,39 @@ impl IpoptApplication {
     /// `optimize_tnlp`. See [`crate::unimplemented_options`].
     pub fn unimplemented_option_refusal(&self) -> Option<String> {
         crate::unimplemented_options::refusal(&self.options, &self.reg_options)
+    }
+
+    /// `option_file_name` set on a surface that never resolves it.
+    ///
+    /// The option reaches a file through exactly one path —
+    /// [`Self::initialize_with_option_file`], which the `pounce` CLI
+    /// drives. A library caller (Python, the C interface, WASM) sets its
+    /// options directly and calls no such thing, so on those surfaces the
+    /// option names a whole configuration and applies none of it: gh#518's
+    /// failure mode, one surface over. It used to be caught by the blanket
+    /// [`crate::unimplemented_options`] refusal, which no longer covers it
+    /// now that the feature exists; this keeps the guard exactly where the
+    /// feature still doesn't.
+    ///
+    /// Deliberately *not* fixed by having the library read an options file
+    /// too: an implicit `./ipopt.opt` lookup under Python or the GAMS C
+    /// link would be a surprising action at a distance, and `pounce.opt`
+    /// already means something else to GAMS.
+    pub fn unhonored_option_file_name(&self) -> Option<String> {
+        if self.option_file_resolved {
+            return None;
+        }
+        match self.options.get_string_value("option_file_name", "") {
+            Ok((name, true)) if !name.is_empty() => Some(format!(
+                "pounce: `option_file_name` was set to `{name}`, but this entry \
+                 point does not read options files — it would configure nothing. \
+                 The `pounce` CLI honors it (and `./pounce.opt` / `./ipopt.opt`); \
+                 from a library, read the file yourself and pass its contents to \
+                 `initialize_with_options_str`, or set the options directly. \
+                 Tracking issue: https://github.com/jkitchin/pounce/issues/518"
+            )),
+            _ => None,
+        }
     }
 
     /// Warnings for caching hints pounce does not exploit. These never

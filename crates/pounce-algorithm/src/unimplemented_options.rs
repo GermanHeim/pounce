@@ -411,15 +411,58 @@ mod tests {
     }
 
     /// `option_file_name` left the table when gh#518 implemented the
-    /// feature it names. Refusing it again would be a regression in the
-    /// other direction: it now configures the run, so a user who sets it
-    /// gets what they asked for rather than an error.
+    /// feature it names. Refusing it *from the table* again would be a
+    /// regression in the other direction: it now configures the run, so
+    /// a user who sets it gets what they asked for rather than an error.
     #[test]
-    fn option_file_name_is_implemented_not_refused() {
+    fn option_file_name_is_implemented_not_in_the_table() {
         let (mut opts, reg) = fixture();
         opts.set_string_value("option_file_name", "tiny.opt", true, false)
             .unwrap();
         assert_eq!(refusal(&opts, &reg), None);
+    }
+
+    /// …but leaving the table must not hand the option back its silence
+    /// on the surfaces that still cannot honor it. Only
+    /// `initialize_with_option_file` resolves it, and library callers
+    /// (Python, the C interface, WASM) never call it — so there, setting
+    /// the option is still refused, just by a different guard.
+    #[test]
+    fn option_file_name_is_refused_where_nothing_resolves_it() {
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        assert_eq!(app.unhonored_option_file_name(), None, "unset asks nothing");
+
+        app.initialize_with_options_str("option_file_name tiny.opt\n")
+            .unwrap();
+        let msg = app
+            .unhonored_option_file_name()
+            .expect("a library caller cannot honor it");
+        assert!(msg.contains("tiny.opt"), "{msg}");
+        assert!(msg.contains("does not read options files"), "{msg}");
+        assert!(msg.contains("518"), "{msg}");
+    }
+
+    /// On the CLI's path the option *is* resolved, so the guard stays
+    /// quiet — including when the resolver finds no file to read, which
+    /// still means the option was honored (there was nothing to read).
+    #[test]
+    fn the_guard_is_quiet_once_the_option_file_path_has_run() {
+        let dir = std::env::temp_dir().join(format!("pounce_gh518_lib_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.opt");
+        std::fs::write(&path, "max_iter 5\n").unwrap();
+
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize_with_option_file(Some(&path)).unwrap();
+        assert_eq!(app.unhonored_option_file_name(), None);
+        assert_eq!(
+            app.options().get_integer_value("max_iter", "").unwrap(),
+            (5, true),
+            "the file must actually have been read",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The restoration switches wired in gh#483 / #191 round 2. Each
