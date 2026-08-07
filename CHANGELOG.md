@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `pounce verify` printed "complementarity residual" for a quantity that is not the solver's complementarity (#516)
+
+- `verify` computed *constraint* complementarity — `max_i |λ_i| · dist(g_i,
+  nearest finite side)` over **rows**, from the `.sol`'s constraint duals —
+  and printed it as a bare `complementarity residual`, on the line below
+  `KKT stationarity residual`, under an `optimality` heading. A solver's
+  `Complementarity` is *bound* complementarity — `max_j max(|z_L·(x−x_L)|,
+  |z_U·(x_U−x)|)` over **variables**, from the bound multipliers. On the
+  #505 model at Ipopt's solution the two read `4.529e-2` and `1.1786e-11`:
+  nine orders of magnitude, same point, same file, both labelled
+  "complementarity". Two people read the first as a signal about the
+  solution before tracing it to the definition.
+- Both are now named by what they range over — `constraint complementarity
+  (rows, |λ|·slack)` and `bound complementarity (vars, |z|·slack)` — in the
+  console report, the `--help` text, and the JSON receipt
+  (`constraint_complementarity_residual` /
+  `bound_complementarity_residual`; the old `complementarity_residual` stays
+  as a deprecated alias so v1 consumers keep parsing). No line offers an
+  unqualified `complementarity residual` for either to be mistaken for.
+- `verify` now *computes* bound complementarity, by reading the
+  `ipopt_zL_out` / `ipopt_zU_out` variable suffixes out of the `.sol` — the
+  only route by which bound multipliers reach one. Where the suffixes are
+  absent the line reads `not checked`, with the reason, rather than `0.0`.
+  On the `parametric.nl` fixture the reported `9.091e-10` reproduces the
+  solve's own `Complementarity` line exactly; a test pins the agreement.
+- The same suffixes sharpen stationarity. The existing residual is
+  bound-*projected*: it projects out exactly the component a bound
+  multiplier would carry, so it reads `0.0` on a point whose multiplier is
+  missing or wrong (#495). With the suffixes in hand `verify` also reports
+  the exact `‖∇f + Jᵀλ − (zL_out + zU_out)‖∞`, which matches the solver's
+  `Dual infeasibility`, and `--require-optimal` gates on that whenever it is
+  available — the projection can only understate the residual. A `.sol`
+  whose `ipopt_zU_out` sign is flipped now scores `8.0` where the projected
+  residual still reads `0.000e0`.
+- Also: a bounds-only model (no rows) legitimately has an empty dual block,
+  so `∇f` alone is its Lagrangian gradient. `verify` no longer skips the
+  whole optimality section on those.
+
 ### Fixed — adaptive μ reset the line-search filter on "μ changed" instead of upstream's every-free-mode-iteration, so stale entries forced spurious restorations (#510)
 
 - Ipopt's μ updates hold a line-search handle and call `linesearch_->Reset()`

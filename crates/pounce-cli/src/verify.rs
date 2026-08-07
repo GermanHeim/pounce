@@ -39,6 +39,29 @@
 //! does not gate — feasibility is the rigorous, sign-convention-independent
 //! guarantee; pass `--require-optimal` to also gate on the stationarity
 //! residual.
+//!
+//! # Two different complementarity quantities (gh #516)
+//!
+//! "Complementarity" names two distinct residuals, and printing either one
+//! under the bare label invites a comparison against the other:
+//!
+//! * **constraint** complementarity — `max_i |λ_i| · dist(g_i, nearest
+//!   finite side)` over **rows**, from the `.sol`'s constraint duals. This
+//!   is the one `verify` has always computed.
+//! * **bound** complementarity — `max_j max(|z_L·(x−x_L)|, |z_U·(x_U−x)|)`
+//!   over **variables**, from the bound multipliers. This is what Ipopt
+//!   prints as `Complementarity`, and it needs the `ipopt_zL_out` /
+//!   `ipopt_zU_out` `.sol` suffixes.
+//!
+//! They can differ by many orders of magnitude at the same point and
+//! neither is wrong for what it measures. `verify` therefore names both
+//! explicitly, reads the bound multipliers when the `.sol` carries them,
+//! and says "not checked" — rather than nothing — when it does not.
+//!
+//! Those same suffixes also sharpen stationarity: without them the residual
+//! is bound-*projected* and cannot see a bound multiplier that is missing or
+//! wrong (gh #495); with them the exact residual is available, and
+//! `--require-optimal` gates on it.
 
 use crate::nl_reader;
 use pounce_common::tolerance::is_negligible;
@@ -95,6 +118,16 @@ Options:
                          exceeds --opt-tol (needs duals in the .sol)
   --json-output <path>   write a JSON verification receipt to <path>
   -h, --help             print this message
+
+Complementarity: two different residuals carry that name, and they can
+differ by many orders of magnitude at the same point.
+  * constraint complementarity (rows, |lambda|*slack) is computed from the
+    .sol's constraint duals and is always reported alongside stationarity.
+  * bound complementarity (vars, |z|*slack) is the quantity Ipopt prints as
+    `Complementarity`. It needs the bound multipliers, which reach a .sol
+    only as the `ipopt_zL_out` / `ipopt_zU_out` suffixes; without them it is
+    reported as `not checked`, never as a number.
+Do not compare the row quantity against a solver's `Complementarity` line.
 
 Exit code: 0 = verified feasible, 20 = violation exceeds tolerance,
 2 = usage/IO error.";
@@ -176,7 +209,21 @@ pub struct VerifyOutcome {
     pub duals_present: bool,
     pub stationarity: Option<Number>,
     pub dual_sign: Option<i32>,
-    pub complementarity: Option<Number>,
+    /// `max_i |λ_i| · dist(g_i, active side)` over **rows**. NOT the
+    /// quantity a solver reports as `Complementarity` — see
+    /// [`bound_complementarity`](VerifyOutcome::bound_complementarity).
+    pub constraint_complementarity: Option<Number>,
+    /// Whether the `.sol` carried `ipopt_zL_out` / `ipopt_zU_out`.
+    pub bound_multipliers_present: bool,
+    /// `max_j max(|z_L·(x−x_L)|, |z_U·(x_U−x)|)` over **variables** — the
+    /// quantity Ipopt prints as `Complementarity`. `None` when the `.sol`
+    /// carried no bound multipliers, in which case it is *not checked*
+    /// rather than zero.
+    pub bound_complementarity: Option<Number>,
+    /// Exact (non-projected) dual infeasibility
+    /// `‖∇f + sign·Jᵀλ − (z_L^suffix + z_U^suffix)‖∞`, available only when
+    /// both duals and bound multipliers are present.
+    pub stationarity_with_bound_multipliers: Option<Number>,
     pub optimal: Option<bool>,
     // final
     pub verified: bool,
@@ -418,12 +465,32 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     // --- objective ---
     let objective = tnlp.eval_f(&x, true);
 
+    // --- bound multipliers, when the `.sol` exported them (gh #516) ---
+    //
+    // The bound complementarity Ipopt prints as `Complementarity` cannot be
+    // computed from the primal and the constraint duals alone; it needs
+    // `z_L` / `z_U`, which reach a `.sol` only as the `ipopt_zL_out` /
+    // `ipopt_zU_out` variable suffixes. Absent them the quantity is *not
+    // checked* — never silently reported as the row quantity.
+    let bound_multipliers_present = parsed.z_l.is_some() || parsed.z_u.is_some();
+    let z_l_suf = parsed.z_l.clone().unwrap_or_else(|| vec![0.0; n]);
+    let z_u_suf = parsed.z_u.clone().unwrap_or_else(|| vec![0.0; n]);
+    let bound_complementarity = if bound_multipliers_present {
+        Some(bound_complementarity(&x, &x_l, &x_u, &z_l_suf, &z_u_suf))
+    } else {
+        None
+    };
+
     // --- first-order / KKT stationarity (only when duals are supplied) ---
     let mut stationarity = None;
     let mut dual_sign = None;
-    let mut complementarity = None;
+    let mut constraint_complementarity = None;
+    let mut stationarity_with_bound_multipliers = None;
     let mut optimal = None;
-    if duals_present {
+    // A problem with no rows has no constraint duals to carry, so `∇f` alone
+    // is the Lagrangian gradient and the residual is available from an empty
+    // dual block — which is what a `.sol` for a bounds-only model has.
+    if duals_present || m == 0 {
         let lambda = &parsed.lambda;
 
         // ∇f(x*)
@@ -452,21 +519,30 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         // than guess, compute the bound-projected stationarity residual
         // for both signs and keep the better one. A genuine KKT point is
         // stationary for exactly one of them; we report which.
-        let (resid_pos, _comp_pos) = stationarity_residual(
-            1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda, &x, &x_l, &x_u,
-        );
-        let (resid_neg, _comp_neg) = stationarity_residual(
-            -1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda, &x, &x_l, &x_u,
-        );
-        let (best_resid, sign) = if resid_pos <= resid_neg {
-            (resid_pos, 1)
+        let s_pos = lagrangian_gradient(1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda);
+        let s_neg = lagrangian_gradient(-1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda);
+        let resid_pos = bound_projected_residual(&s_pos, &x, &x_l, &x_u);
+        let resid_neg = bound_projected_residual(&s_neg, &x, &x_l, &x_u);
+        let (best_resid, sign, s) = if resid_pos <= resid_neg {
+            (resid_pos, 1, &s_pos)
         } else {
-            (resid_neg, -1)
+            (resid_neg, -1, &s_neg)
         };
         stationarity = Some(best_resid);
         dual_sign = Some(sign);
-        complementarity = Some(constraint_complementarity(lambda, &g, &g_l, &g_u));
-        optimal = Some(best_resid <= args.opt_tol);
+        constraint_complementarity = Some(row_complementarity(lambda, &g, &g_l, &g_u));
+
+        // With the bound multipliers in hand the residual no longer has to
+        // be projected: the exact dual infeasibility is available, and it
+        // is what a solver reports. It is also the strictly sharper check —
+        // the projection can only *remove* residual — so `--require-optimal`
+        // gates on it whenever it exists.
+        if bound_multipliers_present {
+            stationarity_with_bound_multipliers =
+                Some(exact_dual_infeasibility(s, &z_l_suf, &z_u_suf));
+        }
+        let gate = stationarity_with_bound_multipliers.unwrap_or(best_resid);
+        optimal = Some(gate <= args.opt_tol);
     }
 
     // Verified = feasible (always required) AND, if --require-optimal,
@@ -490,18 +566,18 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         duals_present,
         stationarity,
         dual_sign,
-        complementarity,
+        constraint_complementarity,
+        bound_multipliers_present,
+        bound_complementarity,
+        stationarity_with_bound_multipliers,
         optimal,
         verified,
     })
 }
 
-/// Bound-projected stationarity (a.k.a. "dual infeasibility"):
-/// `s = ∇f + sign·Jᵀλ`, then for each variable the part of `s` that a
-/// valid sign-constrained bound multiplier `z_L, z_U ≥ 0` cannot absorb.
-/// Returns `(‖projected s‖∞, _)`.
-#[allow(clippy::too_many_arguments)]
-fn stationarity_residual(
+/// `s = ∇f + sign·Jᵀλ` — the part of the Lagrangian gradient the constraint
+/// duals can account for, before any bound multiplier enters.
+fn lagrangian_gradient(
     sign: Number,
     grad_f: &[Number],
     irow: &[i32],
@@ -509,10 +585,7 @@ fn stationarity_residual(
     jval: &[Number],
     fortran: bool,
     lambda: &[Number],
-    x: &[Number],
-    x_l: &[Number],
-    x_u: &[Number],
-) -> (Number, Number) {
+) -> Vec<Number> {
     let n = grad_f.len();
     let off = if fortran { 1 } else { 0 };
     let mut s = grad_f.to_vec();
@@ -523,6 +596,19 @@ fn stationarity_residual(
             s[col] += sign * jval[k] * lambda[row];
         }
     }
+    s
+}
+
+/// Bound-**projected** stationarity (a.k.a. "dual infeasibility"): for each
+/// variable, the part of `s` that a valid sign-constrained bound multiplier
+/// `z_L, z_U ≥ 0` cannot absorb. Returns `‖projected s‖∞`.
+///
+/// This is a *relaxation*: it projects out exactly the component a bound
+/// multiplier would carry, so it cannot see a missing or wrong `z` (gh #495).
+/// When the `.sol` exports the multipliers, prefer
+/// [`exact_dual_infeasibility`].
+fn bound_projected_residual(s: &[Number], x: &[Number], x_l: &[Number], x_u: &[Number]) -> Number {
+    let n = s.len();
     // Activity tolerance for "x_j sits on a bound."
     let mut dual_inf = 0.0_f64;
     for j in 0..n {
@@ -546,18 +632,68 @@ fn stationarity_residual(
         };
         dual_inf = dual_inf.max(r);
     }
-    (dual_inf, 0.0)
+    dual_inf
+}
+
+/// Exact dual infeasibility `‖s − (z_L^suffix + z_U^suffix)‖∞`, with `s` the
+/// [`lagrangian_gradient`] at the sign matching the `.sol`'s dual convention.
+///
+/// Stationarity in pounce's internal convention is
+/// `∇f + Jᵀλ − z_L + z_U = 0` with `z_L, z_U ≥ 0`, and the `.sol` suffixes
+/// carry `ipopt_zL_out = +z_L`, `ipopt_zU_out = −z_U` — both equal to the
+/// objective-gradient component at the bound, matching Ipopt 3.14 (gh #296).
+/// So `−z_L + z_U` is exactly `−(zL_out + zU_out)`, and no sign has to be
+/// guessed here beyond the one already chosen for `λ`.
+///
+/// Unlike [`bound_projected_residual`] this sees a bound multiplier that is
+/// missing or wrong, because nothing is projected away.
+fn exact_dual_infeasibility(s: &[Number], z_l_suf: &[Number], z_u_suf: &[Number]) -> Number {
+    let mut dual_inf = 0.0_f64;
+    for (j, &s_j) in s.iter().enumerate() {
+        let z = z_l_suf.get(j).copied().unwrap_or(0.0) + z_u_suf.get(j).copied().unwrap_or(0.0);
+        dual_inf = dual_inf.max((s_j - z).abs());
+    }
+    dual_inf
+}
+
+/// Bound complementarity over **variables**:
+/// `max_j max(|z_L·(x−x_L)|, |z_U·(x_U−x)|)` — the quantity Ipopt prints as
+/// `Complementarity` (gh #516). Only variables with a finite bound on the
+/// side in question contribute.
+///
+/// Magnitudes throughout, so the result does not depend on which sign
+/// convention the writer used for the multipliers, nor on which side of a
+/// bound the point sits.
+fn bound_complementarity(
+    x: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    z_l_suf: &[Number],
+    z_u_suf: &[Number],
+) -> Number {
+    let mut comp = 0.0_f64;
+    for j in 0..x.len() {
+        if lower_bound_present(x_l[j]) {
+            let z = z_l_suf.get(j).copied().unwrap_or(0.0);
+            comp = comp.max((z * (x[j] - x_l[j])).abs());
+        }
+        if upper_bound_present(x_u[j]) {
+            let z = z_u_suf.get(j).copied().unwrap_or(0.0);
+            comp = comp.max((z * (x_u[j] - x[j])).abs());
+        }
+    }
+    comp
 }
 
 /// `max_i |λ_i| · dist(g_i, active side)` over constraints with a finite
 /// range — a constraint with a nonzero multiplier should be active.
 /// Equalities (`g_l == g_u`) contribute 0. Best-effort, informational.
-fn constraint_complementarity(
-    lambda: &[Number],
-    g: &[Number],
-    g_l: &[Number],
-    g_u: &[Number],
-) -> Number {
+///
+/// This is **constraint** complementarity, over rows, and is not the
+/// quantity a solver reports as `Complementarity` — that one is
+/// [`bound_complementarity`], over variables. The two are unrelated in
+/// magnitude; see the module docs (gh #516).
+fn row_complementarity(lambda: &[Number], g: &[Number], g_l: &[Number], g_u: &[Number]) -> Number {
     let mut comp = 0.0_f64;
     for i in 0..lambda.len() {
         // An equality needs *both* bounds present (gh #403): `g_l = g_u = -5e20`
@@ -603,12 +739,17 @@ struct ParsedSol {
     x: Vec<Number>,
     lambda: Vec<Number>,
     solve_result_num: Option<i32>,
+    /// `ipopt_zL_out` variable suffix, densified to `n`, when present.
+    z_l: Option<Vec<Number>>,
+    /// `ipopt_zU_out` variable suffix, densified to `n`, when present.
+    z_u: Option<Vec<Number>>,
 }
 
 /// Parse the ASCII AMPL `.sol` form pounce writes: a free-text banner, a
 /// blank line, `Options`, an option count + that many option words, the
 /// four-integer count block `<n_dual> <m> <n_primal> <n>`, then the dual
-/// block followed by the primal block, then an optional `objno` line.
+/// block followed by the primal block, then an optional `objno` line and any
+/// number of suffix blocks.
 fn parse_sol(text: &str) -> Result<ParsedSol, String> {
     // Find the "Options" delimiter line, then tokenize everything after it.
     let mut after_options = None;
@@ -664,20 +805,96 @@ fn parse_sol(text: &str) -> Result<ParsedSol, String> {
         );
     }
 
-    // Optional `objno <objno> <solve_result_num>`.
-    let mut solve_result_num = None;
+    // Trailing section: an optional `objno <objno> <solve_result_num>` and
+    // any number of suffix blocks.
     let rest: Vec<&str> = toks.collect();
-    if let Some(p) = rest.iter().position(|&t| t == "objno") {
-        if let Some(code) = rest.get(p + 2) {
-            solve_result_num = code.parse::<i32>().ok();
-        }
-    }
+    let (solve_result_num, var_suffixes) = parse_sol_tail(&rest, n_primal);
+    let suffix = |name: &str| -> Option<Vec<Number>> {
+        var_suffixes
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
 
     Ok(ParsedSol {
         x,
         lambda,
         solve_result_num,
+        z_l: suffix("ipopt_zL_out"),
+        z_u: suffix("ipopt_zU_out"),
     })
+}
+
+/// Walk the tokens after the primal block: an optional
+/// `objno <objno> <solve_result_num>` and any number of suffix blocks, each
+/// `suffix <kind> <nvalues> <namelen> <tablen> <tabline>`, the name on its
+/// own line, then `<idx> <value>` pairs (see `pounce_nl::sol_writer` for the
+/// shape pounce writes and Ipopt's AMPL interface writes back).
+///
+/// Returns the `solve_result_num` and every **variable-indexed real**
+/// suffix, densified to `n` — a `.sol` sparse-trims zero entries, so an
+/// absent index means zero, not missing.
+///
+/// A malformed or unsupported block stops the walk and keeps what was read
+/// so far: a `.sol` is still perfectly usable for the feasibility check that
+/// is this tool's actual gate, and a parse error there must not turn a
+/// checkable solution into an I/O failure.
+fn parse_sol_tail(rest: &[&str], n: usize) -> (Option<i32>, Vec<(String, Vec<Number>)>) {
+    let mut solve_result_num = None;
+    let mut out: Vec<(String, Vec<Number>)> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "objno" => {
+                solve_result_num = rest.get(i + 2).and_then(|t| t.parse::<i32>().ok());
+                i += 3;
+            }
+            "suffix" => {
+                let int_at = |k: usize| rest.get(i + k).and_then(|t| t.parse::<i64>().ok());
+                let (Some(kind), Some(nvalues), Some(tablen)) = (int_at(1), int_at(2), int_at(4))
+                else {
+                    break;
+                };
+                let (Some(name), true) = (rest.get(i + 6), nvalues >= 0) else {
+                    break;
+                };
+                let name = (*name).to_string();
+                i += 7;
+                // A suffix value table follows the name as free text we
+                // cannot delimit by whitespace, so its tokens would be
+                // mis-read as values. Neither pounce nor Ipopt writes one.
+                if tablen != 0 {
+                    break;
+                }
+                // Low two bits pick the target (0 = var), 0x4 flags a real
+                // payload — ASL's `ASL_Sufkind_*` bits.
+                let want = (kind & 0x3) == 0 && (kind & 0x4) != 0;
+                let mut dense = vec![0.0; n];
+                let mut complete = true;
+                for _ in 0..nvalues as usize {
+                    let (Some(it), Some(vt)) = (rest.get(i), rest.get(i + 1)) else {
+                        complete = false;
+                        break;
+                    };
+                    if let (true, Ok(idx), Ok(v)) =
+                        (want, it.parse::<usize>(), vt.parse::<Number>())
+                        && idx < n
+                    {
+                        dense[idx] = v;
+                    }
+                    i += 2;
+                }
+                if !complete {
+                    break;
+                }
+                if want {
+                    out.push((name, dense));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    (solve_result_num, out)
 }
 
 // ---------------------------------------------------------------------------
@@ -713,15 +930,43 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
     if let Some(obj) = o.objective {
         println!("  objective at x*: {obj:.10e}");
     }
-    if o.duals_present {
+    if o.stationarity.is_some() || o.bound_multipliers_present {
+        let source = match (o.duals_present, o.bound_multipliers_present) {
+            (true, true) => "duals + bound multipliers supplied",
+            (true, false) => "duals supplied",
+            (false, true) => "bound multipliers supplied",
+            (false, false) => "no rows, so no duals to supply",
+        };
         println!();
-        println!("  optimality (tol {:.1e}, duals supplied):", o.opt_tol);
+        println!("  optimality (tol {:.1e}, {source}):", o.opt_tol);
         if let Some(s) = o.stationarity {
             let sign = o.dual_sign.unwrap_or(1);
-            println!("    KKT stationarity residual: {s:.3e}  (dual sign {sign:+})");
+            println!(
+                "    KKT stationarity residual (bound-projected)  : {s:.3e}  (dual sign {sign:+})"
+            );
         }
-        if let Some(c) = o.complementarity {
-            println!("    complementarity residual : {c:.3e}");
+        if let Some(s) = o.stationarity_with_bound_multipliers {
+            println!("    dual infeasibility (with z_L/z_U suffixes)   : {s:.3e}");
+        }
+        // Two different residuals answer to "complementarity", and the row
+        // one is NOT what a solver prints as `Complementarity` — label both
+        // by what they range over so the numbers cannot be crossed (gh #516).
+        if let Some(c) = o.constraint_complementarity {
+            println!("    constraint complementarity (rows, |λ|·slack) : {c:.3e}");
+        }
+        match o.bound_complementarity {
+            Some(c) => println!("    bound complementarity (vars, |z|·slack)      : {c:.3e}"),
+            None => {
+                println!(
+                    "    bound complementarity (vars, |z|·slack)      : not checked \
+                     — the .sol carries no"
+                );
+                println!(
+                    "      ipopt_zL_out/ipopt_zU_out suffixes. This, not the row line \
+                     above, is the"
+                );
+                println!("      quantity a solver reports as `Complementarity`.");
+            }
         }
     } else {
         println!();
@@ -732,7 +977,7 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
         "VERIFIED — solution is feasible for the canonical problem".to_string()
     } else if !o.feasible {
         "REJECTED — solution VIOLATES the canonical constraints".to_string()
-    } else if !o.duals_present {
+    } else if o.optimal.is_none() {
         // Feasible, --require-optimal was asked for, but optimality could not
         // be checked at all because the .sol carried no duals — say so rather
         // than implying we found it non-optimal.
@@ -796,7 +1041,7 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
     use serde_json::json;
     let worst_con = o.worst_con.as_ref().map(row_json);
     let worst_bound = o.worst_bound.as_ref().map(row_json);
-    let optimality = if o.duals_present {
+    let optimality = if o.duals_present || o.bound_multipliers_present {
         // Optimality is a property of a FEASIBLE point, so this must not report
         // `true` for one that violates the constraints. The stationarity
         // residual of an infeasible point can be legitimately zero, which
@@ -811,13 +1056,31 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
             "objective": o.objective,
             "stationarity_residual": o.stationarity,
             "dual_sign": o.dual_sign,
-            "complementarity_residual": o.complementarity,
+            "stationarity_residual_with_bound_multipliers":
+                o.stationarity_with_bound_multipliers,
+            "constraint_complementarity_residual": o.constraint_complementarity,
+            "bound_complementarity_residual": o.bound_complementarity,
+            "bound_multipliers_present": o.bound_multipliers_present,
+            // Deprecated alias, kept so a v1 consumer does not break. Its bare
+            // name is the trap gh #516 is about: read
+            // `constraint_complementarity_residual` instead.
+            "complementarity_residual": o.constraint_complementarity,
             "optimal": optimal,
-            "note": "bound-projected stationarity (dual infeasibility) using the .sol's \
-                     constraint duals; bound multipliers inferred from activity. Sign chosen \
-                     to match the supplied dual convention. Feasibility is the rigorous gate, \
-                     and `optimal` is reported false for an infeasible point regardless of \
-                     its stationarity residual."
+            "note": "`stationarity_residual` is the BOUND-PROJECTED dual infeasibility from \
+                     the .sol's constraint duals, with bound multipliers inferred from \
+                     activity; the sign is chosen to match the supplied dual convention. \
+                     `constraint_complementarity_residual` is max_i |lambda_i| * dist(g_i, \
+                     nearest finite side) over ROWS — it is NOT what a solver reports as \
+                     `Complementarity`. That is `bound_complementarity_residual`, \
+                     max_j max(|z_L*(x-x_L)|, |z_U*(x_U-x)|) over VARIABLES, available only \
+                     when the .sol carries the ipopt_zL_out/ipopt_zU_out suffixes (null \
+                     otherwise, meaning not checked — not zero). When those suffixes are \
+                     present, `stationarity_residual_with_bound_multipliers` is the exact, \
+                     unprojected residual and is what `--require-optimal` gates on. \
+                     `complementarity_residual` is a deprecated alias of \
+                     `constraint_complementarity_residual`. Feasibility is the rigorous \
+                     gate, and `optimal` is reported false for an infeasible point \
+                     regardless of its stationarity residual."
         })
     } else {
         json!({ "available": false })
@@ -1169,6 +1432,151 @@ mod tests {
         assert_eq!(
             box_violation(1e30, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF),
             0.0
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // gh #516 — the two complementarity quantities.
+    // -----------------------------------------------------------------
+
+    /// The bound multipliers reach a `.sol` only as suffix blocks, so the
+    /// parser has to pick them out of the trailing section — past `objno`
+    /// and past whatever other suffixes the writer emitted.
+    #[test]
+    fn parse_sol_reads_the_bound_multiplier_suffixes() {
+        use crate::nl_writer::{SolSuffix, SolSuffixTarget, SolSuffixValues};
+        let payload = SolutionFile {
+            message: "msg",
+            x: &[1.0, -1.0, 0.0],
+            mult_g: &[0.5],
+            solve_result_num: 0,
+            suffixes: &[
+                // An unrelated block first: the walk must step over it.
+                SolSuffix {
+                    name: "sens_sol_state_1".to_string(),
+                    target: SolSuffixTarget::Var,
+                    values: SolSuffixValues::Real(vec![9.0, 9.0, 9.0]),
+                },
+                SolSuffix {
+                    name: "ipopt_zL_out".to_string(),
+                    target: SolSuffixTarget::Var,
+                    values: SolSuffixValues::Real(vec![0.0, 2.0, 0.0]),
+                },
+                SolSuffix {
+                    name: "ipopt_zU_out".to_string(),
+                    target: SolSuffixTarget::Var,
+                    values: SolSuffixValues::Real(vec![-4.0, 0.0, 0.0]),
+                },
+            ],
+        };
+        let parsed = parse_sol(&format_sol(&payload)).expect("parse");
+        assert_eq!(parsed.solve_result_num, Some(0), "objno still parses");
+        // Densified back to `n`: the writer sparse-trims zeros, so an absent
+        // index means zero — not a short vector, and not "missing".
+        assert_eq!(parsed.z_l, Some(vec![0.0, 2.0, 0.0]));
+        assert_eq!(parsed.z_u, Some(vec![-4.0, 0.0, 0.0]));
+    }
+
+    /// No suffixes → bound complementarity is *not checked*, and must stay
+    /// `None` rather than collapse to a comfortable `0.0`.
+    #[test]
+    fn parse_sol_reports_absent_bound_multipliers_as_absent() {
+        let payload = SolutionFile {
+            message: "msg",
+            x: &[1.0],
+            mult_g: &[0.5],
+            solve_result_num: 0,
+            suffixes: &[],
+        };
+        let parsed = parse_sol(&format_sol(&payload)).expect("parse");
+        assert!(parsed.z_l.is_none() && parsed.z_u.is_none());
+    }
+
+    /// `min (x−3)² + (y+2)²  s.t.  x ≤ 1, y ≥ −1` — the model whose export
+    /// convention is pinned in `main.rs` (gh #296): `ipopt_zL_out = +z_L`,
+    /// `ipopt_zU_out = −z_U`, both equal to `∂f/∂x` at the bound.
+    ///
+    /// At the exact optimum every slack is zero, so bound complementarity is
+    /// zero whichever sign convention the writer used — the check is on
+    /// magnitudes. Off the optimum it is `|z| · slack`.
+    #[test]
+    fn bound_complementarity_is_z_times_slack_over_variables() {
+        let x_l = [NLP_LOWER_BOUND_INF, -1.0];
+        let x_u = [1.0, NLP_UPPER_BOUND_INF];
+        // Exactly on both bounds: no slack anywhere.
+        assert_eq!(
+            bound_complementarity(&[1.0, -1.0], &x_l, &x_u, &[0.0, 2.0], &[-4.0, 0.0]),
+            0.0
+        );
+        // Pull x off its upper bound by 1e-3 while keeping z_U: the product
+        // is the residual, and the sign of the multiplier does not enter.
+        let c = bound_complementarity(&[0.999, -1.0], &x_l, &x_u, &[0.0, 2.0], &[-4.0, 0.0]);
+        assert!((c - 4.0e-3).abs() < 1e-12, "got {c}");
+        let flipped = bound_complementarity(&[0.999, -1.0], &x_l, &x_u, &[0.0, 2.0], &[4.0, 0.0]);
+        assert_eq!(c, flipped, "magnitudes only — no sign convention assumed");
+        // A variable with no bound on the side in question contributes
+        // nothing, however large its (meaningless) multiplier.
+        assert_eq!(
+            bound_complementarity(
+                &[0.0],
+                &[NLP_LOWER_BOUND_INF],
+                &[NLP_UPPER_BOUND_INF],
+                &[1e6],
+                &[1e6]
+            ),
+            0.0
+        );
+    }
+
+    /// The exact residual uses the multipliers the `.sol` actually carries,
+    /// so it sees what the bound-projected one projects away — the gh #495
+    /// blind spot: a bound multiplier that is missing or wrong leaves the
+    /// projected residual at `0.0`.
+    #[test]
+    fn exact_dual_infeasibility_sees_what_the_projection_hides() {
+        // `min (x−3)² s.t. x ≤ 1`: x* = 1, ∇f = −4, so z_U = 4 and the
+        // exported suffix is `ipopt_zU_out = −4`.
+        let s = [-4.0];
+        let x = [1.0];
+        let x_l = [NLP_LOWER_BOUND_INF];
+        let x_u = [1.0];
+        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[-4.0]), 0.0);
+
+        // Projection: x sits on its upper bound, so a valid z_U absorbs the
+        // whole negative gradient and the residual reads zero — with *no*
+        // multiplier supplied at all.
+        assert_eq!(bound_projected_residual(&s, &x, &x_l, &x_u), 0.0);
+        // The exact check does not get to assume one exists.
+        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[0.0]), 4.0);
+        // Nor that it has the right sign.
+        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[4.0]), 8.0);
+    }
+
+    /// **gh #516.** Constraint complementarity (rows) and bound
+    /// complementarity (variables) are different quantities at the same
+    /// point, and can disagree by orders of magnitude. Printing either under
+    /// a bare `complementarity residual` label invites the comparison that
+    /// cost two people an afternoon in #505; this test pins the fact that
+    /// makes the label matter.
+    #[test]
+    fn row_and_bound_complementarity_are_different_quantities() {
+        // One inequality row `g ≥ 0`, slack 4.5e-2, multiplier 1 — a real
+        // row-complementarity residual.
+        let rows = row_complementarity(&[1.0], &[4.5e-2], &[0.0], &[NLP_UPPER_BOUND_INF]);
+        assert!((rows - 4.5e-2).abs() < 1e-15);
+        // The same point's variables sit hard on their bounds: bound
+        // complementarity is eleven orders of magnitude smaller.
+        let bounds = bound_complementarity(
+            &[1.0],
+            &[NLP_LOWER_BOUND_INF],
+            &[1.0 + 1e-11],
+            &[0.0],
+            &[-1.0],
+        );
+        assert!(bounds < 1e-10, "got {bounds}");
+        assert!(
+            rows / bounds > 1e8,
+            "the two must not be read as one number"
         );
     }
 

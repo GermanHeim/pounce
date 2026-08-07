@@ -58,9 +58,11 @@ pounce verify — independent solution check
     max bound violation     : 9.775e-9   at x[24]  (value 1.05, bounds [1.05, 2.0])
   objective at x*: 1.2899875310e0
 
-  optimality (tol 1.0e-6, duals supplied):
-    KKT stationarity residual: 2.675e-3  (dual sign +1)
-    complementarity residual : 0.000e0
+  optimality (tol 1.0e-6, duals + bound multipliers supplied):
+    KKT stationarity residual (bound-projected)  : 2.675e-3  (dual sign +1)
+    dual infeasibility (with z_L/z_U suffixes)   : 6.248e-14
+    constraint complementarity (rows, |λ|·slack) : 0.000e0
+    bound complementarity (vars, |z|·slack)      : 9.091e-10
 
   VERDICT: VERIFIED — solution is feasible for the canonical problem
 ```
@@ -79,7 +81,7 @@ A consumer (CI step, agent harness, Makefile) gates on the exit code.
 |---|---|---|
 | `--feas-tol <t>` | `1e-6` | feasibility tolerance for constraints and bounds |
 | `--opt-tol <t>` | `1e-6` | stationarity tolerance for the optimality check |
-| `--require-optimal` | off | also fail (exit 20) if the KKT stationarity residual exceeds `--opt-tol` |
+| `--require-optimal` | off | also fail (exit 20) if the KKT stationarity residual exceeds `--opt-tol` — the exact one when the `.sol` carries bound multipliers, otherwise the bound-projected one |
 | `--json-output <path>` | — | write a JSON verification receipt |
 
 ### Feasibility is the gate; optimality is reported
@@ -91,11 +93,43 @@ claim is "this solution meets the constraints."
 When the `.sol` carries constraint duals, `verify` also reports a **KKT
 stationarity residual** (the bound-projected "dual infeasibility": the part
 of `∇f + Jᵀλ` that a valid sign-constrained bound multiplier cannot absorb)
-and a complementarity residual. These are *informational* unless you pass
-`--require-optimal`. The AMPL dual-sign convention can differ from pounce's,
-so `verify` computes the residual for both signs and reports the better one
-plus the sign it used. Bound multipliers `z_L, z_U` are not present in a
-`.sol`, so they are inferred from which bounds are active.
+and the complementarity residuals below. These are *informational* unless
+you pass `--require-optimal`. The AMPL dual-sign convention can differ from
+pounce's, so `verify` computes the residual for both signs and reports the
+better one plus the sign it used.
+
+### The two complementarity residuals
+
+Two distinct quantities answer to "complementarity", and at the same point
+they can disagree by many orders of magnitude. `verify` names both by what
+they range over, and never prints an unqualified `complementarity residual`:
+
+| Line | Quantity | Needs |
+|---|---|---|
+| `constraint complementarity (rows, \|λ\|·slack)` | `max_i \|λ_i\| · dist(g_i, nearest finite side)` over **rows** | the `.sol`'s constraint duals |
+| `bound complementarity (vars, \|z\|·slack)` | `max_j max(\|z_L·(x−x_L)\|, \|z_U·(x_U−x)\|)` over **variables** | the `ipopt_zL_out` / `ipopt_zU_out` suffixes |
+
+**The bound one is what a solver prints as `Complementarity`** — Ipopt's and
+pounce's own end-of-solve report alike. Do not compare a solver's
+`Complementarity` against the row line; they measure different things and
+neither is wrong for what it measures.
+
+When the `.sol` carries no `ipopt_zL_out` / `ipopt_zU_out` suffixes, bound
+complementarity is reported as `not checked`, never as `0.0`.
+
+### Bound multipliers sharpen the stationarity check
+
+Without the suffixes, `z_L` and `z_U` are *inferred* from which bounds are
+active, and the reported stationarity residual is bound-**projected**: it
+projects out exactly the component a bound multiplier would carry, so it
+reads `0.0` on a point whose bound multiplier is missing or wrong.
+
+When the `.sol` does carry them (pounce always writes them; so does Ipopt's
+AMPL interface), `verify` additionally reports the **exact** dual
+infeasibility `‖∇f + Jᵀλ − (zL_out + zU_out)‖∞`, using the multipliers the
+file actually claims. That number is directly comparable to the solver's
+`Dual infeasibility`, and it is what `--require-optimal` gates on whenever
+it is available — the projected residual can only understate it.
 
 ## The JSON receipt
 
@@ -118,11 +152,28 @@ both inputs by SHA-256** — so a downstream consumer can confirm exactly
     "worst_bound": { "index": 24, "name": "x[24]", … },
     "feasible": true
   },
-  "optimality": { "available": true, "stationarity_residual": 2.6e-3, … },
+  "optimality": {
+    "available": true,
+    "stationarity_residual": 2.6e-3,
+    "stationarity_residual_with_bound_multipliers": 6.2e-14,
+    "constraint_complementarity_residual": 0.0,
+    "bound_complementarity_residual": 9.1e-10,
+    "bound_multipliers_present": true,
+    "complementarity_residual": 0.0,
+    "optimal": true, "note": "…"
+  },
   "verdict": "VERIFIED",
   "verified": true
 }
 ```
+
+`bound_complementarity_residual` and
+`stationarity_residual_with_bound_multipliers` are `null` when the `.sol`
+carries no `ipopt_zL_out` / `ipopt_zU_out` suffixes — `null` means *not
+checked*, not zero. `complementarity_residual` is a **deprecated alias** of
+`constraint_complementarity_residual`, kept so v1 consumers keep parsing;
+its bare name is the one that invited the wrong comparison, so read the
+qualified field instead.
 
 A consumer should accept a solution **iff**:
 
