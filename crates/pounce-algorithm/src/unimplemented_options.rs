@@ -210,7 +210,11 @@ pub const UNEXPLOITED_HINTS: &[&str] = &[
 /// Both halves matter. `found` alone would fire on an `ipopt.opt` that
 /// spells out a default; comparing values alone would fire on nothing,
 /// since an unset option *reads back* as its default.
-fn set_to_a_non_default(options: &OptionsList, reg: &RegisteredOptions, name: &str) -> bool {
+pub(crate) fn set_to_a_non_default(
+    options: &OptionsList,
+    reg: &RegisteredOptions,
+    name: &str,
+) -> bool {
     let Some(opt) = reg.get_option(name) else {
         return false;
     };
@@ -441,6 +445,19 @@ mod tests {
         assert!(msg.contains("tiny.opt"), "{msg}");
         assert!(msg.contains("does not read options files"), "{msg}");
         assert!(msg.contains("518"), "{msg}");
+    }
+
+    /// The default gate applies here too: `option_file_name` defaults to
+    /// `ipopt.opt`, so a caller replaying a full option dump sets that
+    /// value while asking for nothing. Failing them would break the same
+    /// compatibility the explicitly-set-default rule protects everywhere
+    /// else.
+    #[test]
+    fn option_file_name_at_its_default_asks_nothing_of_a_library_caller() {
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize_with_options_str("option_file_name ipopt.opt\n")
+            .unwrap();
+        assert_eq!(app.unhonored_option_file_name(), None);
     }
 
     /// On the CLI's path the option *is* resolved, so the guard stays

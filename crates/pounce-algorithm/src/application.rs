@@ -1073,6 +1073,18 @@ impl IpoptApplication {
         if self.option_file_resolved {
             return None;
         }
+        // Same default gate as the table: an explicitly-set *default*
+        // asks for nothing, so it must not fail. `option_file_name`
+        // defaults to `ipopt.opt`, and a caller round-tripping a full
+        // option dump — or a generated config that spells out every
+        // registered name — hits that value without asking for anything.
+        if !crate::unimplemented_options::set_to_a_non_default(
+            &self.options,
+            &self.reg_options,
+            "option_file_name",
+        ) {
+            return None;
+        }
         match self.options.get_string_value("option_file_name", "") {
             Ok((name, true)) if !name.is_empty() => Some(format!(
                 "pounce: `option_file_name` was set to `{name}`, but this entry \
