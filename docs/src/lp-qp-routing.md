@@ -221,6 +221,29 @@ apply — so no infeasibility presolve could detect before goes undetected
 now. What the guard costs, in the rare case it fires, is a handful of
 eliminations.
 
+### When the reduction is truncated
+
+The reductions are iterated to a **fixpoint** — each one can expose work
+for the next, so presolve keeps going until nothing fires. It also carries
+a cap on how many layers that may take, as a backstop.
+
+On most models the cap is never reached. On a model with a long
+bound-propagation chain it can be, and then the reduced problem you get is
+whatever the cap left rather than the smallest one presolve could find. It
+is still a *correct* problem — every reduction applied is a sound transform
+with its own dual recovery, and your solution is still postsolved back to
+the original — it is just not as small as it could be. Presolve says so
+rather than leaving the two cases looking identical:
+
+```text
+Presolve: stopped on the layer cap after 32 layers, not at a fixpoint — reductions were still firing
+```
+
+Nothing is wrong when you see it, and there is no option to turn up: the
+line is there so that a reduction which came out of a truncated loop is
+distinguishable from one that converged, which matters when you are
+comparing two runs or reporting a bug against presolve.
+
 Presolve is on by default. Turn it off with `qp_presolve=no` (e.g. to
 compare timings or isolate a solver issue):
 
