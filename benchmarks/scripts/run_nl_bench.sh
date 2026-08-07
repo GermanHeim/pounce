@@ -106,14 +106,25 @@ status_from_message() {
   case "$1" in
     *"Optimal Solution Found"*)                     echo "Solve_Succeeded" ;;
     *"Solved To Acceptable Level"*)                 echo "Solved_To_Acceptable_Level" ;;
-    *"Maximum Number of Iterations Exceeded"*)      echo "Maximum_Iterations_Exceeded" ;;
-    *"Maximum CPU time exceeded"*)                  echo "Maximum_CpuTime_Exceeded" ;;
     *"Converged to a point of local infeasibility"*) echo "Infeasible_Problem_Detected" ;;
     *"feasible region is empty"*)                   echo "Infeasible_Problem_Detected" ;;
-    *"Restoration Failed"*)                         echo "Restoration_Failed" ;;
     *"Search Direction is becoming Too Small"*)     echo "Search_Direction_Becomes_Too_Small" ;;
-    *"Diverging Iterates"*)                         echo "Diverging_Iterates" ;;
+    *"Iterates diverging"*)                         echo "Diverging_Iterates" ;;
+    *"user request"*)                               echo "User_Requested_Stop" ;;
+    *"Feasible Point Found"*)                       echo "Feasible_Point_Found" ;;
+    *"Maximum Number of Iterations Exceeded"*)      echo "Maximum_Iterations_Exceeded" ;;
+    *"Restoration Failed"*)                         echo "Restoration_Failed" ;;
+    *"Error in step computation"*)                  echo "Error_In_Step_Computation" ;;
+    *"Maximum CPU time exceeded"*)                  echo "Maximum_CpuTime_Exceeded" ;;
+    *"Maximum wallclock time exceeded"*)            echo "Maximum_WallTime_Exceeded" ;;
+    *"Not Enough Degrees of Freedom"*)              echo "Not_Enough_Degrees_Of_Freedom" ;;
+    *"Invalid Problem Definition"*)                 echo "Invalid_Problem_Definition" ;;
+    *"Invalid Option"*)                             echo "Invalid_Option" ;;
     *"Invalid number"*)                             echo "Invalid_Number_Detected" ;;
+    *"Unrecoverable Exception"*)                    echo "Unrecoverable_Exception" ;;
+    *"Exception of type"*)                          echo "NonIpopt_Exception_Thrown" ;;
+    *"Insufficient memory"*)                        echo "Insufficient_Memory" ;;
+    *"INTERNAL ERROR"*)                             echo "Internal_Error" ;;
     *)                                              echo "Unknown_Error" ;;
   esac
 }
