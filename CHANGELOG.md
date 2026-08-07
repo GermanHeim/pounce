@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — tightening `constr_viol_tol` made POUNCE more likely to report local infeasibility (#519)
+
+- Rapid infeasibility detection counted an iterate toward its streak when
+  the constraint violation exceeded `infeas_viol_kappa · constr_viol_tol`
+  (default `1e2 · 1e-4 = 1e-2`), unclamped. `constr_viol_tol` is a
+  *feasibility* tolerance, so tightening it lowered the bar for "bounded
+  away from feasible": at `constr_viol_tol = 1e-6` a violation of `1e-4`
+  counted, at `1e-9` a violation of `1e-7` did. Asking for a stricter
+  feasibility standard widened the set of points the solver was willing to
+  call infeasible — the wrong direction.
+- On the model behind #505, whose run plateaus at an unscaled violation of
+  `1.943e-4` with a scaled NLP error of `4.89e-10`, the flip tracked
+  `100 · constr_viol_tol` to three significant figures: `constr_viol_tol`
+  of `1e-4` / `1e-5` reached Solved To Acceptable Level at iteration 37,
+  while `1.92e-6` and `1.94e-6` exited at 26–27 with `objno 200`. The
+  reporter's stack set `constr_viol_tol = 1e-6` by default, so every solve
+  through it carried the lowered floor.
+- Both arms of the detector are now floored at a shared
+  `MIN_INFEAS_VIOL_FLOOR = 1e-2` — the relative arm already was, with a doc
+  comment stating the rule ("too-loose withholds a verdict, too-tight
+  fabricates one"); the absolute arm was the same expression without the
+  clamp. `1e-2` is also the default `acceptable_constr_viol_tol`, so the
+  detector can no longer convict a point whose violation sits inside the
+  band the defaults call acceptable. The two coincide at the defaults,
+  which is why the defect was invisible out of the box.
+- Behaviour at the default tolerances is unchanged, and genuine
+  infeasibility detection is untouched: `infeas_viol_kappa` still raises
+  the floor, and the disable switches (`infeas_stationarity_tol = 0`,
+  `infeas_max_streak = 0`) are unchanged.
+
 ### Fixed — `pounce verify` printed "complementarity residual" for a quantity that is not the solver's complementarity (#516)
 
 - `verify` computed *constraint* complementarity — `max_i |λ_i| · dist(g_i,
