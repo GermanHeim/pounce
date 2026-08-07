@@ -121,6 +121,54 @@ does not clearly discriminate. Keep all families moving.
   it. When a feature has a transparent fallback, assert that it *engaged*, not
   just that the answer is right.
 
+### Attack the option space, not only the problem space
+
+Everything above picks a *problem*. A whole class of defect is invisible to
+that, because it needs a **non-default option** to surface — and the run that
+found gh #508 was the one run that swept an option rather than choosing a new
+model. Treat the option grid as a target in its own right, worth roughly one
+run in four.
+
+The shape: take a model whose answer you already know (a previous PASS from the
+log is ideal — the answer is recorded and the formulation is already
+adjudicated), then sweep the options around it and assert that the *verdict*
+holds. Three probes, in order of yield:
+
+1. **Kill-switch ablation.** Every POUNCE-only heuristic — one with no upstream
+   Ipopt analogue — has an option that disables it: `infeas_stationarity_tol=0`
+   for rapid infeasibility detection, `presolve=no`, `acceptable_iter=0`,
+   `feral_ordering=…`. Run the model with each switch off and diff the verdict
+   against stock. **A model where *disabling* a heuristic improves the verdict
+   is a bug candidate, and the heuristic is the suspect.** This is also the
+   cheapest possible discriminator once something looks wrong: it isolates the
+   mechanism in one run, without an oracle and without reading any code.
+   gh #505's mechanism was settled by exactly this and nothing else.
+
+2. **Tolerance monotonicity, feasible direction.** Sweep each tolerance option
+   independently over 4–6 orders on a model known feasible, and assert the
+   verdict never crosses into the AMPL 200 (infeasible) or 500 (error) bands.
+   Tightening may legitimately cost iterations or downgrade
+   `Solved` → `Acceptable` → `MaxIter`; it must never manufacture an
+   infeasibility. gh #505 is precisely this failure: `constr_viol_tol=1e-6` on a
+   solved model produced `local infeasibility` at a point six orders inside
+   `acceptable_tol`.
+
+3. **Real driver option sets.** POUNCE's tests run at defaults; users do not.
+   Harvest the option sets that real stacks pass unconditionally — Pyomo
+   drivers, GAMS `option` blocks, the reporter scripts attached to filed issues
+   — and run the corpus under them. gh #505 needed `constr_viol_tol=1e-6`,
+   which the reporter's driver set on *every* solve, and which POUNCE's own
+   fixtures had never once set on a feasible model.
+
+Two properties make this arm strong. It needs **no oracle** — a verdict that
+moves when only an option moved is an internal contradiction in POUNCE's own
+semantics, which is the load-bearing evidence in both gh #505 and gh #508. And
+it needs **no new formulation**, so the usual "your script is wrong more often
+than the solver" risk largely disappears.
+
+Background and the standing invariants this arm defends:
+`dev-notes/termination-status-invariants.md`.
+
 ## Environment
 
 - **venv:** `source /Users/jkitchin/projects/pounce/.venv-qa/bin/activate`
@@ -200,6 +248,13 @@ for non-SOS; SOS degree small enough to stay under a few seconds); solvable in
 **< 10 s**; **not already in `adversary/log.org`**; not a near-duplicate of an
 existing `python/tests/` fixture. Record the **exact source** (paper/book page,
 equation, or URL) and the known optimum. Use web search if needed.
+
+**Option-sweep runs invert this step.** If the target is the option space (see
+"Attack the option space" above), do *not* find a new problem — reuse a model
+already logged as PASS, or one infeasible by exact construction, and let the
+option grid be the novelty. The known answer is already recorded, so the run
+spends its budget on coverage of the option space instead of on re-adjudicating
+a formulation.
 
 ### 3. Formulate as a runnable cross-check script
 Write `adversary/runs/YYYY-MM-DD_<family>_<name>.py`. It must:
