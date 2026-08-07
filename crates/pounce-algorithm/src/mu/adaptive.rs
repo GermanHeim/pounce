@@ -474,6 +474,24 @@ impl AdaptiveMuUpdate {
         let new_mu = self.adaptive_mu_monotone_init_factor * avrg;
         new_mu.clamp(mu_min, self.mu_max)
     }
+
+    /// Upstream's tiny-step termination test (pounce#512), shared by the
+    /// two sites that throw `TINY_STEP_DETECTED` in
+    /// `IpAdaptiveMuUpdate.cpp` — `:330-333` in the fixed-mode
+    /// Fiacco-McCormick decrease and `:377-380` on the free→fixed switch.
+    /// Both read `tiny_step_flag && new_mu == mu`: a tiny step was
+    /// detected *and* the update could not move μ, so no further
+    /// progress is available and the honest exit is "problem solved to
+    /// best possible numerical accuracy" (`STOP_AT_TINY_STEP`) rather
+    /// than iterating to the limit.
+    ///
+    /// Exact equality, like upstream. Both callers reach "unchanged" by
+    /// clamping to the same bound, which is bit-exact; an epsilon band
+    /// would instead swallow a genuine — if minute — reduction and stop
+    /// an iteration early.
+    fn tiny_step_is_terminal(tiny_step_flag: bool, new_mu: Number, curr_mu: Number) -> bool {
+        tiny_step_flag && new_mu == curr_mu
+    }
 }
 
 impl MuUpdate for AdaptiveMuUpdate {
@@ -530,11 +548,22 @@ impl MuUpdate for AdaptiveMuUpdate {
     /// `nlp` / `pd_search_dir` are unavailable (mirrors upstream
     /// lines 402-408).
     ///
-    /// Note: line-search reset (upstream's `linesearch_->Reset()` at
-    /// lines 339, 386, 431) is not yet wired here — that handle is
-    /// not part of the [`MuUpdate`] trait surface. This is a
-    /// deliberate v1.0 deviation; it primarily affects the watchdog
-    /// counter, not convergence.
+    /// Line-search reset: upstream calls `linesearch_->Reset()` at
+    /// three points — line 339 (fixed-mode decrease), line 386
+    /// (free→fixed switch) and line 431 (**every** free-mode
+    /// iteration, whether or not μ moved). The [`MuUpdate`] trait
+    /// surface carries no line-search handle, so we raise
+    /// [`IpoptData::request_ls_reset`] at exactly those three points
+    /// and `IpoptAlgorithm::iterate` performs the reset right after
+    /// this call returns — the same plumbing the pounce#58 probing
+    /// guard uses for [`IpoptData::request_resto`]. See pounce#510:
+    /// the previous "reset when μ changed" proxy in the caller is
+    /// correct for the monotone update but not for this one, and left
+    /// the filter holding pre-restoration entries whenever μ happened
+    /// to stay put.
+    ///
+    /// [`IpoptData::request_ls_reset`]: crate::ipopt_data::IpoptData::request_ls_reset
+    /// [`IpoptData::request_resto`]: crate::ipopt_data::IpoptData::request_resto
     fn update_barrier_parameter(
         &mut self,
         data: &IpoptDataHandle,
@@ -625,7 +654,18 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
-            let sufficient_progress = !force_no_progress && self.check_sufficient_progress(cq);
+            //
+            // The gate is `sufficient_progress && !tiny_step_flag`
+            // (`cpp:304`) — plain `tiny_step_flag`, *not* the
+            // globalization-conditional `force_no_progress`, which
+            // upstream applies only in the free-mode branch below
+            // (`cpp:347-351`). Reusing `force_no_progress` here let
+            // `adaptive_mu_globalization=never-monotone-mode` switch back
+            // to free mode on a flagged tiny step, which upstream never
+            // does and which routed around the termination at `cpp:330`.
+            // At the default `obj-constr-filter` the two are equal, so
+            // this distinction only moves never-monotone-mode (pounce#512).
+            let sufficient_progress = !tiny_step_flag && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 // Switch back to free mode and record the iterate —
                 // upstream `cpp:303-311`. Upstream does NOT return
@@ -654,11 +694,30 @@ impl MuUpdate for AdaptiveMuUpdate {
                     let tol = data.borrow().tol;
                     let floor = self.fixed_mode_mu_floor(tol, obj_scaling_factor);
                     let new_mu = lin.min(sup).max(floor).min(self.mu_max);
+                    // `cpp:330-333` — a tiny step was flagged and the
+                    // decrease left μ where it was (it is pinned at the
+                    // floor), so there is nothing left to try. Upstream
+                    // throws TINY_STEP_DETECTED *before* `Set_mu`/`Set_tau`;
+                    // the flag is unchanged by construction, so returning
+                    // it below is the same iterate either way. Pairing it
+                    // with the #511 floor is upstream's own pairing: the
+                    // termination triggers off the same floor the decrease
+                    // stops at, so it now fires at the tolerance-derived
+                    // floor instead of at `mu_min`.
+                    if Self::tiny_step_is_terminal(tiny_step_flag, new_mu, curr_mu) {
+                        data.borrow_mut().request_tiny_step_stop = true;
+                    }
                     let new_tau = self.tau_min.max(1.0 - new_mu);
-                    data.borrow_mut().curr_tau = new_tau;
+                    let mut d = data.borrow_mut();
+                    d.curr_tau = new_tau;
+                    // Upstream `cpp:339` — reset inside this branch,
+                    // unconditionally, even when the clamps leave μ
+                    // where it was (pounce#510).
+                    d.request_ls_reset = true;
                     return new_mu;
                 }
-                // Subproblem not yet solved — keep μ.
+                // Subproblem not yet solved — keep μ. Upstream does NOT
+                // reset the line search on this path (`cpp:335-341`).
                 let new_tau = self.tau_min.max(1.0 - curr_mu);
                 data.borrow_mut().curr_tau = new_tau;
                 return curr_mu;
@@ -709,8 +768,22 @@ impl MuUpdate for AdaptiveMuUpdate {
                     }
                 }
                 let new_mu = self.new_fixed_mu(cq, mu_min);
+                // `cpp:377-380` — the same termination on the other
+                // throw site: the switch into fixed mode re-seeded μ to
+                // the value it already had, so the tiny step cannot be
+                // walked off by changing μ either. Ordered after the
+                // free-mode flip and the accepted-iterate restore, as
+                // upstream is.
+                if Self::tiny_step_is_terminal(tiny_step_flag, new_mu, curr_mu) {
+                    data.borrow_mut().request_tiny_step_stop = true;
+                }
                 let new_tau = self.tau_min.max(1.0 - new_mu);
-                data.borrow_mut().curr_tau = new_tau;
+                let mut d = data.borrow_mut();
+                d.curr_tau = new_tau;
+                // Upstream `cpp:386` — the free→fixed switch resets the
+                // line search whether or not `new_fixed_mu` differs from
+                // the μ we came in with (pounce#510).
+                d.request_ls_reset = true;
                 return new_mu;
             }
         }
@@ -770,6 +843,10 @@ impl MuUpdate for AdaptiveMuUpdate {
                             self.probing_iterate_quality_factor,
                         );
                     }
+                    // No `request_ls_reset` here: this early return is a
+                    // pounce-specific guard with no upstream counterpart,
+                    // it leaves μ untouched, and the caller hands the
+                    // iterate straight to restoration.
                     data.borrow_mut().request_resto = true;
                     return curr_mu;
                 }
@@ -824,6 +901,16 @@ impl MuUpdate for AdaptiveMuUpdate {
         let lower = self.lower_mu_safeguard(dual_inf, primal_inf, candidate);
         let mu = candidate.max(mu_min).max(lower).min(self.mu_max);
 
+        // Upstream `cpp:431` — the free-mode block closes with an
+        // unconditional `linesearch_->Reset()`. This is the point the
+        // old caller-side "μ changed" proxy missed (pounce#510): it
+        // fires on every free-mode iteration, including the ones where
+        // the oracle re-picks the μ we already had, and including the
+        // fixed→free transition that falls through to here. Filter
+        // entries are keyed on a barrier parameter *and* an iterate;
+        // "μ is unchanged" does not make yesterday's entries valid.
+        data.borrow_mut().request_ls_reset = true;
+
         // NB: upstream `IpAdaptiveMuUpdate.cpp:410-426` does NOT require
         // `mu ≤ curr_mu` in free mode — the oracle is allowed to bump
         // μ back up. A prior attempt to cap growth here ("HAIFAM
@@ -840,6 +927,107 @@ impl MuUpdate for AdaptiveMuUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mu::test_fixture;
+
+    /// pounce#510: upstream resets the line search on **every** free-mode
+    /// iteration (`IpAdaptiveMuUpdate.cpp:431`), not only when μ moves.
+    /// The caller used to infer the reset from `next_mu != mu_before`,
+    /// which silently skipped it whenever the oracle re-picked the μ we
+    /// already had — leaving the filter holding entries computed against
+    /// an iterate and a barrier parameter the algorithm had left behind.
+    #[test]
+    fn free_mode_requests_ls_reset_even_when_mu_is_unchanged() {
+        let mut a = AdaptiveMuUpdate::new();
+        // Never-monotone globalization keeps the state machine in free
+        // mode across both calls, which is the endgame this issue is
+        // about; the filter/KKT variants are covered below.
+        a.adaptive_mu_globalization = AdaptiveMuGlobalization::NeverMonotoneMode;
+        let (data, cq) = test_fixture::fixture(0.1);
+        // First pass: free mode with an empty filter ⇒ sufficient
+        // progress ⇒ the oracle picks μ.
+        let mu1 = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(a.free_mu_mode);
+        assert!(data.borrow().request_ls_reset);
+
+        // Re-enter at exactly the μ the oracle just chose, on the same
+        // (unchanged) iterate: μ cannot move, and the pre-fix caller
+        // would therefore never reset.
+        data.borrow_mut().request_ls_reset = false;
+        data.borrow_mut().curr_mu = mu1;
+        let mu2 = a.update_barrier_parameter(&data, &cq, None, None);
+        assert_eq!(mu2, mu1, "fixture must hold μ still for this test");
+        assert!(
+            data.borrow().request_ls_reset,
+            "free-mode iteration must request a line-search reset with μ unchanged"
+        );
+    }
+
+    /// pounce#510: the free→fixed switch is upstream's `cpp:386` reset,
+    /// which likewise does not care whether `new_fixed_mu` differs from
+    /// the incoming μ.
+    #[test]
+    fn free_to_fixed_switch_requests_ls_reset() {
+        let mut a = AdaptiveMuUpdate::new();
+        let (data, cq) = test_fixture::fixture(0.1);
+        // Seed the filter with the current point, then re-run: the same
+        // (θ, f) is now dominated, so progress is insufficient and the
+        // update drops into fixed mode.
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        data.borrow_mut().request_ls_reset = false;
+        let _ = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(
+            !a.free_mu_mode,
+            "fixture must fall out of free mode for this test"
+        );
+        assert!(data.borrow().request_ls_reset);
+    }
+
+    /// pounce#510: the fixed-mode μ decrease is upstream's `cpp:339`
+    /// reset. Note it fires inside the branch, so a decrease that the
+    /// `mu_min`/`mu_max` clamps flatten still resets.
+    #[test]
+    fn fixed_mode_decrease_requests_ls_reset() {
+        let mut a = AdaptiveMuUpdate::new();
+        let (data, cq) = test_fixture::fixture(0.1);
+        a.free_mu_mode = false;
+        // Force "no sufficient progress" so the update stays in fixed
+        // mode, and a barrier tolerance loose enough that the decrease
+        // branch fires on this (far-from-optimal) iterate.
+        a.adaptive_mu_globalization = AdaptiveMuGlobalization::KktError;
+        a.adaptive_mu_kkterror_red_iters = 1;
+        a.adaptive_mu_kkterror_red_fact = 0.0;
+        a.refs_vals.push_back(1.0);
+        a.barrier_tol_factor = 1e6;
+        // Degenerate decrease factors: `min(1·μ, μ^1) = μ`. The branch is
+        // taken but μ does not move, so the pre-fix `next_mu != mu_before`
+        // proxy would have skipped the reset here as well.
+        a.mu_linear_decrease_factor = 1.0;
+        a.mu_superlinear_decrease_power = 1.0;
+        let mu = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(!a.free_mu_mode, "must stay in fixed mode for this test");
+        assert_eq!(mu, 0.1, "flat decrease leaves μ where it was");
+        assert!(data.borrow().request_ls_reset);
+    }
+
+    /// The one fixed-mode path upstream leaves alone (`cpp:335-341`):
+    /// the barrier subproblem is not solved yet, μ stays, no reset.
+    #[test]
+    fn fixed_mode_without_decrease_does_not_request_ls_reset() {
+        let mut a = AdaptiveMuUpdate::new();
+        let (data, cq) = test_fixture::fixture(1e-8);
+        a.free_mu_mode = false;
+        // A far-from-optimal iterate at a tiny μ: the barrier error is
+        // way above `barrier_tol_factor · μ`, and the filter is empty so
+        // `check_sufficient_progress` must be forced to fail.
+        a.adaptive_mu_globalization = AdaptiveMuGlobalization::KktError;
+        a.adaptive_mu_kkterror_red_iters = 1;
+        a.adaptive_mu_kkterror_red_fact = 0.0;
+        a.refs_vals.push_back(1.0);
+        let mu = a.update_barrier_parameter(&data, &cq, None, None);
+        assert!(!a.free_mu_mode);
+        assert_eq!(mu, 1e-8);
+        assert!(!data.borrow().request_ls_reset);
+    }
 
     /// pounce#266, adaptive twin of the monotone test: the raw `mu_min`
     /// clamp must yield to `compl_inf_tol·|df|/(barrier_tol_factor+1)` once
@@ -1068,6 +1256,39 @@ mod tests {
         // not propagate: `avrg > 0.0` is false for NaN, so we fall back.
         let mu_max = AdaptiveMuUpdate::lazy_mu_max(a.mu_max_fact, f64::NAN, a.mu_init, a.mu_min);
         assert!(mu_max.is_finite() && mu_max >= a.mu_min);
+    }
+
+    // pounce#512 — the shared condition behind both of upstream's
+    // `TINY_STEP_DETECTED` throws (`IpAdaptiveMuUpdate.cpp:330-333`,
+    // `:377-380`). Both conjuncts are load-bearing in opposite
+    // directions: without the flag the update is just at its floor and
+    // must keep iterating, and without the μ test a tiny step that the
+    // update *can* still respond to would stop the solve early.
+    #[test]
+    fn tiny_step_is_terminal_needs_the_flag_and_an_unmoved_mu() {
+        let mu = 1e-11;
+        assert!(AdaptiveMuUpdate::tiny_step_is_terminal(true, mu, mu));
+        // μ moved — the update has something left to try.
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(true, 0.2 * mu, mu));
+        // No tiny step: μ pinned at its floor is the ordinary end-game,
+        // not a reason to stop.
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(false, mu, mu));
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(
+            false,
+            0.2 * mu,
+            mu
+        ));
+    }
+
+    /// Equality is exact, as upstream's `new_mu == mu` is. A reduction of
+    /// one ulp is a reduction; an epsilon band would call it "unchanged"
+    /// and terminate an iteration early.
+    #[test]
+    fn tiny_step_is_terminal_does_not_round_a_reduction_away() {
+        let mu = 1e-11;
+        let nudged = mu - f64::EPSILON * 1e-4;
+        assert!(nudged < mu, "test setup: the nudge must actually reduce μ");
+        assert!(!AdaptiveMuUpdate::tiny_step_is_terminal(true, nudged, mu));
     }
 
     #[test]

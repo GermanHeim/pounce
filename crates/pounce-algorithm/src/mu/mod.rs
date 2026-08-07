@@ -10,6 +10,8 @@
 pub mod adaptive;
 pub mod monotone;
 pub mod oracle;
+#[cfg(test)]
+pub(crate) mod test_fixture;
 pub mod r#trait;
 
 pub use r#trait::MuUpdate;

@@ -34,13 +34,22 @@ pub trait MuUpdate {
         pd_search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Number;
 
-    /// Whether a flagged tiny step with μ unable to decrease should
-    /// terminate the algorithm with `STOP_AT_TINY_STEP`. Upstream
-    /// `IpMonotoneMuUpdate.cpp` throws `TINY_STEP_DETECTED` in exactly
-    /// that case; `IpAdaptiveMuUpdate.cpp` instead routes the tiny-step
-    /// flag through its `force_no_progress` path — it fixes μ and keeps
-    /// iterating, never self-terminating. Default `false` matches the
-    /// adaptive behaviour; `MonotoneMuUpdate` overrides to `true`.
+    /// Whether the main loop may infer `STOP_AT_TINY_STEP` from
+    /// "tiny-step flag set and μ came back unchanged".
+    ///
+    /// Upstream `IpMonotoneMuUpdate.cpp:158-161` throws
+    /// `TINY_STEP_DETECTED` in exactly that case, and it is the update's
+    /// only throw site, so the inference is exact — `MonotoneMuUpdate`
+    /// overrides to `true`.
+    ///
+    /// `IpAdaptiveMuUpdate.cpp` also terminates on a tiny step (`:330-333`
+    /// and `:377-380`), but only at those two sites; elsewhere it routes
+    /// the flag through `force_no_progress`, fixing μ and continuing. The
+    /// μ comparison cannot tell the two apart, so the adaptive update
+    /// signals its own termination through
+    /// [`IpoptData::request_tiny_step_stop`](crate::ipopt_data::IpoptData::request_tiny_step_stop)
+    /// and leaves this `false` (pounce#512). A `false` here means "does
+    /// not use the inference", not "never terminates".
     fn terminates_on_tiny_step(&self) -> bool {
         false
     }

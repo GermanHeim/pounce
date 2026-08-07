@@ -118,6 +118,36 @@ pub struct IpoptData {
     /// counterpart. See pounce#58.
     pub request_resto: bool,
 
+    /// Line-search reset request from the μ-update layer (pounce#510).
+    /// Upstream's μ updates hold a `linesearch_` handle and call
+    /// `linesearch_->Reset()` themselves at fixed points
+    /// (`IpAdaptiveMuUpdate.cpp:339, 386, 431`,
+    /// `IpMonotoneMuUpdate.cpp:165`); pounce's [`MuUpdate`] trait has no
+    /// such handle, so the updates raise this flag instead and the main
+    /// loop performs the reset immediately after
+    /// `update_barrier_parameter` returns. Consuming the flag clears it.
+    ///
+    /// [`MuUpdate`]: crate::mu::MuUpdate
+    pub request_ls_reset: bool,
+
+    /// Tiny-step termination request from the μ-update layer (pounce#512).
+    /// Upstream signals "problem solved to best possible numerical
+    /// accuracy" by throwing `TINY_STEP_DETECTED` from inside
+    /// `UpdateBarrierParameter`; a Rust port returns a μ instead, so the
+    /// two throw sites in `IpAdaptiveMuUpdate.cpp` (`:330-333` fixed
+    /// mode, `:377-380` on the free→fixed switch) raise this flag and
+    /// the main loop turns it into `SolverReturn::StopAtTinyStep`.
+    ///
+    /// The flag exists because the throw's exact branch matters:
+    /// "a tiny step was flagged and μ came back unchanged" is also true
+    /// on adaptive paths where upstream does *not* throw (the no-bounds
+    /// short-circuit, and a free-mode oracle that happens to re-pick the
+    /// current μ), so it cannot be reconstructed from the μ values alone.
+    /// [`MonotoneMuUpdate`](crate::mu::monotone::MonotoneMuUpdate) has a
+    /// single throw site covering its whole update and is served by the
+    /// main loop's `terminates_on_tiny_step()` μ-comparison instead.
+    pub request_tiny_step_stop: bool,
+
     /// One-char marker the iteration output puts in front of
     /// `alpha_primal` (e.g. `'f'` for filter, `'r'` for restoration,
     /// `'h'` for the very first iterate). Mirrors
@@ -188,6 +218,8 @@ impl IpoptData {
             info_string: String::new(),
             tiny_step_flag: false,
             request_resto: false,
+            request_ls_reset: false,
+            request_tiny_step_stop: false,
             info_alpha_primal_char: ' ',
             info_ls_count: 0,
             info_last_output: -1.0,
