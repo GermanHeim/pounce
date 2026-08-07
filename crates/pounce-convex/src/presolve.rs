@@ -144,6 +144,62 @@
 //! a within-round coupled solve, and validated by randomized KKT roundtrips
 //! over *overlapping* constraint chains
 //! (`tests/presolve_bound_tightening.rs`).
+//!
+//! # What makes the fixpoint a fixpoint (gh #527)
+//!
+//! Resolving the overlap across rounds is also what makes the iteration able
+//! to run away. Every reduction but one *consumes* what it acts on — a fixed
+//! or substituted column and a dropped or aggregated row are gone from the
+//! next round's problem — so those can fire at most `n + m` times in total
+//! however many rounds there are. Bound tightening consumes nothing: the
+//! column stays, the row stays, and only the box moves. Two equality rows
+//! that mutually imply ever-tighter bounds on the same nonnegative variables
+//! therefore converge *geometrically* toward a limit they never reach, and
+//! every round finds a strictly tighter box, reports progress, and asks for
+//! another one.
+//!
+//! Netlib `bore3d` does exactly that. Before #527 the loop exited on its
+//! layer cap on every solve at every cap tried (32, 64, 200) and never once
+//! on the fixpoint the module documents, which meant an arbitrary defensive
+//! constant — not the algorithm — was choosing which of two different reduced
+//! problems the solver was handed, with nothing anywhere to say so.
+//!
+//! Two things close that:
+//!
+//! - [`MAX_BOX_REFINEMENTS`] bounds how many times the iteration may refine
+//!   the *same* box, so the one non-consuming reduction becomes finite like
+//!   the rest and termination follows from the algorithm rather than from the
+//!   cap. It is a count, never a magnitude, so no scale-dependent tolerance
+//!   enters (which is what makes it safe where a minimum-improvement
+//!   threshold is not: on this cascade the relative improvement is ~96% every
+//!   round, so a relative test passes forever, and an absolute floor is
+//!   exactly the sort of constant gh #523 came out of).
+//! - [`FixpointExit`], recorded on [`PresolveStats::exit`], says which of the
+//!   two exits happened. A reduction that came out of a truncated loop is no
+//!   longer indistinguishable from one that came out of a fixpoint.
+//!
+//! With the budget in place and the cap lifted, `bore3d` reaches
+//! `FixpointExit::Fixpoint` for the first time, in 238 layers.
+//!
+//! ## What that leaves, and why the cap still binds on `bore3d`
+//!
+//! 238 is not 32, and at the shipped cap that model still stops on the cap.
+//! The reason is a *second*, independent mechanism, and it is worth naming so
+//! the next person does not go looking for more cascade. Bound propagation is
+//! **serialized**: a source row may claim a `(column, side)` only if no other
+//! row already claimed it this pass, because that disjointness is what keeps
+//! the dual re-attributions independent (see above). One round therefore
+//! advances the propagation graph by roughly one edge per column — on
+//! `bore3d`, about three tightenings per layer — and traversing it takes
+//! hundreds of rounds no matter how well behaved each individual box is.
+//! Variables are still receiving their *first* finite bound at layer 320.
+//!
+//! Measured, that extra depth buys nothing on this model: 32 layers and 330
+//! layers reduce `bore3d` to the same 128 variables and 77 rows, with the
+//! same 61 fixings, 17 forcing rows and 64 aggregations. Only the boxes
+//! differ. So the cap is not currently costing a reduction here — but that it
+//! *isn't* is now a measurement rather than an assumption, and the exit
+//! reason says which case a given solve was in.
 
 use crate::cones::ConeSpec;
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
@@ -195,6 +251,142 @@ impl std::fmt::Display for InfeasibleTrigger {
 /// Build a [`PresolveOutcome::Infeasible`] with its trigger recorded.
 fn infeasible(screen: &'static str, detail: String) -> PresolveOutcome {
     PresolveOutcome::Infeasible(InfeasibleTrigger { screen, detail })
+}
+
+/// Why the fixpoint iteration stopped (gh #527).
+///
+/// Recorded because the two answers mean very different things and the loop
+/// could not previously tell them apart. [`Self::Fixpoint`] is the documented
+/// contract: no reduction in the catalog fires any more, and the reduced
+/// problem is the one presolve actually converges to. [`Self::RoundCap`] is a
+/// *truncation* — more reductions were still firing when the layer cap cut
+/// them off, so the reduced problem handed to the solver is whatever the cap
+/// happened to leave, and a different cap would have produced a different one.
+///
+/// That distinction went unseen through three releases on netlib `bore3d`,
+/// where every solve exited on the cap at every cap and the constant was
+/// silently choosing between two different reduced problems. Surfaced on
+/// [`PresolveStats::exit`] so it is reportable rather than invisible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FixpointExit {
+    /// A round found nothing left to reduce — the real fixpoint.
+    #[default]
+    Fixpoint,
+    /// The `MAX_ROUNDS` layer cap stopped a loop that was still reducing.
+    RoundCap,
+}
+
+impl std::fmt::Display for FixpointExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixpointExit::Fixpoint => f.write_str("fixpoint"),
+            FixpointExit::RoundCap => f.write_str("round cap"),
+        }
+    }
+}
+
+/// How many times the fixpoint may refine the *same* variable box before it
+/// stops chasing that box (gh #527).
+///
+/// Bound propagation is the one reduction whose output can feed itself
+/// forever. Two rows that mutually imply ever-tighter bounds on the same
+/// nonnegative variables converge geometrically to a limit they never reach,
+/// so every round finds a strictly tighter box, reports progress, and the
+/// loop runs until something else stops it. On `bore3d` that something else
+/// was `MAX_ROUNDS`, at every cap tried — the "fixpoint" was never reached
+/// and the cap, not the algorithm, set how much reduction the solver got.
+///
+/// The budget is a **count, not a magnitude**: it never asks whether an
+/// improvement is "big enough", so it introduces no scale-dependent constant
+/// of the kind gh #523 came out of. A box that is genuinely being narrowed by
+/// distinct deductions settles in a handful of refinements — the `bore3d`
+/// cascade that triggered #523 needed seven — while a box being chased toward
+/// an unreachable limit needs unboundedly many, and that is exactly what runs
+/// out of budget.
+///
+/// Exhausting it costs at most a *tighter box*, never a wrong one: the bounds
+/// already derived stay, and the variable is still handed to the solver with
+/// every deduction made so far.
+///
+/// # Why twelve
+///
+/// Swept on `bore3d` with the layer cap lifted, so the budget is the only
+/// thing ending the loop. `vars/rows` is the reduced problem it converges to;
+/// unlimited refinement converges to `128/77` in 330 layers.
+///
+/// | budget | layers | vars/rows |
+/// |---|---|---|
+/// | 2 | — | 136/83 |
+/// | 6 | — | 136/83 |
+/// | **8** | 184 | **128/77** |
+/// | 12 | 238 | 128/77 |
+/// | 16 | 274 | 128/77 |
+/// | 24 | 979 tightenings | 128/77 |
+///
+/// Eight is where the full reduction appears — the deepest box that unlocks a
+/// structural reduction on this model is refined seven times before it does.
+/// Twelve leaves a margin over that without buying anything past it, and the
+/// cost of the margin is bounded: a box that has stopped yielding deductions
+/// stops being refined on its own, long before the budget is reached.
+const MAX_BOX_REFINEMENTS: u8 = 12;
+
+/// Remaining [`MAX_BOX_REFINEMENTS`] per variable box side, carried across
+/// fixpoint rounds.
+///
+/// Bound tightening is the only reduction that needs cross-round state. Every
+/// other one consumes itself — a fixed column is gone, a dropped row is gone —
+/// so a round that reruns the catalog cannot repeat it. Refining a box leaves
+/// the column in place and the row live, so nothing but this stops the pair
+/// from firing again next round.
+struct BoxRefinements {
+    ub: Vec<u8>,
+    lb: Vec<u8>,
+}
+
+impl BoxRefinements {
+    fn new(n: usize) -> Self {
+        BoxRefinements {
+            ub: vec![MAX_BOX_REFINEMENTS; n],
+            lb: vec![MAX_BOX_REFINEMENTS; n],
+        }
+    }
+
+    /// A budget that never runs out, for the single-pass callers ([`presolve_conic`])
+    /// that do not iterate and so cannot cascade.
+    fn unlimited(n: usize) -> Self {
+        BoxRefinements {
+            ub: vec![u8::MAX; n],
+            lb: vec![u8::MAX; n],
+        }
+    }
+
+    /// May this pass still refine `col`'s upper (`is_upper`) or lower bound?
+    fn allows(&self, col: usize, is_upper: bool) -> bool {
+        let side = if is_upper { &self.ub } else { &self.lb };
+        side.get(col).is_some_and(|&r| r > 0)
+    }
+
+    /// Charge `layer`'s bound tightenings against the budget. A layer records
+    /// at most one [`Reduction::BoundTightening`] per `(column, side)`, so
+    /// this is one decrement per box side actually refined.
+    fn charge(&mut self, layer: &Presolve) {
+        for r in &layer.stack {
+            if let Reduction::BoundTightening { col, is_upper, .. } = *r {
+                let side = if is_upper { &mut self.ub } else { &mut self.lb };
+                if let Some(r) = side.get_mut(col) {
+                    *r = r.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    /// Renumber onto a layer's surviving columns (`kept_cols[new] = old`), so
+    /// a box's remaining budget follows it across the eliminations that
+    /// renumber the problem between rounds.
+    fn remap(&mut self, kept_cols: &[usize]) {
+        self.ub = kept_cols.iter().map(|&c| self.ub[c]).collect();
+        self.lb = kept_cols.iter().map(|&c| self.lb[c]).collect();
+    }
 }
 
 /// A reversible presolve transaction. Each variant stores exactly what
@@ -323,6 +515,10 @@ pub struct Presolve {
     /// reduction returned instead (gh #523). `None` on the normal path. Read
     /// it with [`Presolve::discarded_infeasibility`].
     discarded_infeasibility: Option<InfeasibleTrigger>,
+    /// Why the fixpoint iteration stopped (gh #527). Read it with
+    /// [`PresolveStats::exit`]; `Fixpoint` for a single pass, which by
+    /// definition did not run out of anything.
+    exit: FixpointExit,
 }
 
 /// Coefficients are treated as nonzero unless exactly 0.0.
@@ -568,24 +764,70 @@ impl Catalog {
 }
 
 /// The fixpoint iteration itself, over the reductions `catalog` permits.
+///
+/// # Why this terminates (gh #527)
+///
+/// Every reduction but one consumes what it acts on — a fixed or substituted
+/// column leaves the problem, a dropped or aggregated row leaves the problem —
+/// so those can fire at most `n + m` times in total across all rounds. Bound
+/// tightening is the exception: it keeps the column and keeps the row, so the
+/// same pair may fire every round forever, and on `bore3d` it did. A
+/// [`BoxRefinements`] budget bounds that at `MAX_BOX_REFINEMENTS` per box
+/// side, which caps bound-only rounds at `2n·MAX_BOX_REFINEMENTS`. With both
+/// halves finite the loop reaches a genuine fixpoint on its own — `MAX_ROUNDS`
+/// is a backstop against a bug, not the argument for why this stops.
+///
+/// It can still *bind* on a model whose propagation graph is deeper than the
+/// cap, `bore3d` among them; what has changed is that the loop now says so
+/// ([`FixpointExit`]) instead of leaving a truncated reduction and a fixpoint
+/// looking identical.
 fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
-    // Cap layers defensively; in practice it converges in a few. A round
-    // can contribute two (the catalog pass and an aggregation), so this is
-    // a bound on layers, not on rounds.
+    // Cap layers defensively. A round can contribute two (the catalog pass
+    // and an aggregation), so this is a bound on layers, not on rounds.
+    //
+    // Left at 32 deliberately (gh #527). It is no longer the termination
+    // argument — that is `MAX_BOX_REFINEMENTS` — and it is no longer silent
+    // when it binds, which is what made it dangerous. Raising it was measured
+    // rather than assumed: with the structure-stable dedup skip below, 128
+    // layers on `bore3d` cost ~16 ms against ~14 ms for 32 layers on `main`,
+    // so it is affordable — but it reduced `bore3d` to exactly the same
+    // problem (128 vars / 77 rows) that 32 layers reach, while multiplying
+    // the chain's retained memory, since every layer holds a clone of its
+    // input. A deeper search with no measured reduction to show for it and a
+    // real memory cost is not a trade worth making blind.
     const MAX_ROUNDS: usize = 32;
     let mut chain: Vec<Presolve> = Vec::new();
     let mut current = prob.clone();
+    // Per-box refinement allowance, carried across rounds and renumbered onto
+    // each layer's surviving columns.
+    let mut refinements = BoxRefinements::new(prob.n);
     // The passthrough layer from a first round that changed nothing, kept
     // so a no-op presolve still returns a usable handle.
     let mut passthrough: Option<Presolve> = None;
+    // Whether the previous round left the coefficient structure alone (it
+    // only narrowed boxes), which lets the next pass skip the duplicate-row
+    // hashing. False on the first round: nothing has been deduped yet.
+    let mut structure_stable = false;
+    let exit;
     loop {
-        let ps = match presolve_once(&current, &[], catalog) {
+        let ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable) {
             infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
             PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
             PresolveOutcome::Reduced(ps) => ps,
         };
         let catalog_changed = ps.changed();
+        // A round that only narrowed boxes leaves every row exactly as the
+        // previous pass deduped it (gh #527).
+        let bounds_only = ps.reduced.n == ps.orig_n
+            && ps.reduced.m_eq() == ps.orig_m_eq
+            && ps.reduced.m_ineq() == ps.orig_m_ineq
+            && ps
+                .stack
+                .iter()
+                .all(|r| matches!(r, Reduction::BoundTightening { .. }));
         if catalog_changed {
+            refinements.charge(&ps);
+            refinements.remap(&ps.kept_cols);
             current = ps.reduced.clone();
             chain.push(ps);
         } else if passthrough.is_none() {
@@ -597,19 +839,25 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
         // gets a crack at whatever the aggregation exposes.
         let aggregated = match aggregate_once(&current) {
             Some(ps) => {
+                refinements.remap(&ps.kept_cols);
                 current = ps.reduced.clone();
                 chain.push(ps);
                 true
             }
             None => false,
         };
+        structure_stable = bounds_only && !aggregated;
         if !catalog_changed && !aggregated {
-            break; // fixpoint: neither half found anything
+            exit = FixpointExit::Fixpoint; // neither half found anything
+            break;
         }
         if chain.len() >= MAX_ROUNDS {
+            exit = FixpointExit::RoundCap;
             break;
         }
     }
+    // A chain this short cannot have reached `MAX_ROUNDS`, so `exit` is
+    // `Fixpoint` here and the single-pass layer already carries it.
     if chain.is_empty() {
         // Nothing to do at all; hand back the verbatim-forwarding layer.
         return PresolveOutcome::Reduced(
@@ -617,7 +865,9 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
         );
     }
     if chain.len() == 1 {
-        return PresolveOutcome::Reduced(chain.pop().expect("chain has one layer"));
+        let mut only = chain.pop().expect("chain has one layer");
+        only.exit = exit;
+        return PresolveOutcome::Reduced(only);
     }
     let reduced = chain.last().expect("chain non-empty").reduced.clone();
     PresolveOutcome::Reduced(Presolve {
@@ -633,6 +883,7 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
         stack: Vec::new(),
         chain,
         discarded_infeasibility: None,
+        exit,
     })
 }
 
@@ -663,6 +914,7 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
         }],
         chain: Vec::new(),
         discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
     })
 }
 
@@ -700,9 +952,18 @@ pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
     // Same guard as [`presolve`] (gh #523): an infeasibility verdict is
     // re-derived without the speculative fixings before it is emitted, and
     // downgraded to that pass's reduction when it will not confirm.
-    match presolve_once(prob, &protected_row, Catalog::Full) {
+    // A single pass cannot cascade its own bound tightening, so it needs no
+    // refinement budget (gh #527); the conic path does not iterate.
+    let refinements = BoxRefinements::unlimited(prob.n);
+    match presolve_once(prob, &protected_row, Catalog::Full, &refinements, false) {
         PresolveOutcome::Infeasible(trigger) => {
-            match presolve_once(prob, &protected_row, Catalog::NoSpeculativeFixings) {
+            match presolve_once(
+                prob,
+                &protected_row,
+                Catalog::NoSpeculativeFixings,
+                &refinements,
+                false,
+            ) {
                 confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
                 PresolveOutcome::Reduced(mut ps) => {
                     ps.discarded_infeasibility = Some(trigger);
@@ -731,7 +992,23 @@ pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
 /// `catalog` selects which reductions run: [`Catalog::NoSpeculativeFixings`]
 /// withholds the two that fix a variable at a tolerance-chosen value, leaving
 /// the pass unable to manufacture a contradiction that way (gh #523).
-fn presolve_once(prob: &QpProblem, soc_row: &[bool], catalog: Catalog) -> PresolveOutcome {
+///
+/// `refinements` is the caller's per-box tightening allowance (gh #527). A box
+/// side whose budget is spent is left alone by bound tightening — every other
+/// reduction, this one's own already-derived bounds included, is unaffected.
+///
+/// `structure_stable` says the previous round left the coefficient structure
+/// alone (it only narrowed boxes), which lets this pass skip re-deriving a
+/// duplicate-row merge it already performed — see the memoization at the
+/// `dedup_rows` calls. `false` is always safe; the iterated caller is the only
+/// one that can ever pass `true`.
+fn presolve_once(
+    prob: &QpProblem,
+    soc_row: &[bool],
+    catalog: Catalog,
+    refinements: &BoxRefinements,
+    structure_stable: bool,
+) -> PresolveOutcome {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -1338,6 +1615,13 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool], catalog: Catalog) -> Presol
         }
         let mut tightened = 0usize;
         for (k, is_upper, val, a) in updates {
+            // Out of refinements for this box side (gh #527): leave the bound
+            // where the earlier rounds derived it. Skipping *before* the
+            // update also leaves the row unclaimed when nothing else in it
+            // tightened, so a spent box does not block its neighbours.
+            if !refinements.allows(k, is_upper) {
+                continue;
+            }
             if is_upper {
                 if val < tub[k] - BOUND_FEAS_TOL {
                     tub[k] = val;
@@ -1579,13 +1863,37 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool], catalog: Catalog) -> Presol
         Err(trigger) => return PresolveOutcome::Infeasible(trigger),
     };
 
-    let eq_rows = match dedup_rows(eq_rows, true, &[]) {
-        Ok(rows) => rows,
-        Err(trigger) => return PresolveOutcome::Infeasible(trigger),
+    // Duplicate/parallel-row merging reads *coefficients and right-hand
+    // sides only* — never a variable box. So when the previous round left
+    // the structure untouched (it only narrowed boxes) and this pass has
+    // fixed nothing, substituted nothing and dropped no row, the rows here
+    // are byte-for-byte the rows the previous pass already deduped, and
+    // running it again cannot find a pair or a contradiction it did not find
+    // then. Skipping it is a memoization, not a heuristic — and it is what
+    // makes iterating to a real fixpoint affordable, since on a
+    // bound-propagation cascade nearly every round is of exactly this shape
+    // (gh #527; this hashing pass was ~70% of presolve's cost on `bore3d`).
+    let rows_unchanged = structure_stable
+        && stack
+            .iter()
+            .all(|r| matches!(r, Reduction::BoundTightening { .. }))
+        && !eq_dropped.contains(&true)
+        && !ineq_dropped.contains(&true);
+    let eq_rows = if rows_unchanged {
+        eq_rows
+    } else {
+        match dedup_rows(eq_rows, true, &[]) {
+            Ok(rows) => rows,
+            Err(trigger) => return PresolveOutcome::Infeasible(trigger),
+        }
     };
     // SOC rows are coupled and must survive verbatim — exclude them from
     // parallel/duplicate merging.
-    let ineq_rows = dedup_rows(ineq_rows, false, soc_row).expect("ineq dedup never infeasible");
+    let ineq_rows = if rows_unchanged {
+        ineq_rows
+    } else {
+        dedup_rows(ineq_rows, false, soc_row).expect("ineq dedup never infeasible")
+    };
 
     // --- flatten surviving rows to triplets + kept-row maps ---
     let mut kept_eq = Vec::with_capacity(eq_rows.len());
@@ -1650,6 +1958,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool], catalog: Catalog) -> Presol
         stack,
         chain: Vec::new(),
         discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
     })
 }
 
@@ -1960,6 +2269,16 @@ pub struct PresolveStats {
     /// Variables folded onto another by a two-variable equality row
     /// (doubleton aggregation). Each also consumes its row.
     pub aggregated_vars: usize,
+    /// Layers in the reduction chain — how many passes the fixpoint took.
+    /// One round contributes one or two (the catalog pass, and an
+    /// aggregation when one fired). `0` for a single-pass presolve.
+    pub rounds: usize,
+    /// Why the fixpoint iteration stopped (gh #527). [`FixpointExit::RoundCap`]
+    /// means the reduction below is a **truncation**, not the fixpoint
+    /// presolve documents — reductions were still firing when the layer cap
+    /// stopped them, and a different cap would have handed the solver a
+    /// different problem.
+    pub exit: FixpointExit,
 }
 
 impl PresolveStats {
@@ -2046,6 +2365,8 @@ impl Presolve {
             reduced_vars: self.reduced.n,
             orig_rows: self.orig_m_eq + self.orig_m_ineq,
             reduced_rows: self.reduced.m_eq() + self.reduced.m_ineq(),
+            exit: self.exit,
+            rounds: self.chain.len(),
             ..Default::default()
         };
         for layer in &self.chain {
@@ -2067,6 +2388,7 @@ impl Presolve {
             reduced_vars: self.reduced.n,
             orig_rows: self.orig_m_eq + self.orig_m_ineq,
             reduced_rows: self.reduced.m_eq() + self.reduced.m_ineq(),
+            exit: self.exit,
             ..Default::default()
         };
         for r in &self.stack {

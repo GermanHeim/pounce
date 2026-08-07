@@ -2121,7 +2121,7 @@ fn run_convex_qp(
     engine_overrides: pounce_convex::ActiveSetOverrides,
 ) -> ExitCode {
     use pounce_convex::active_set::solve_qp_active_set;
-    use pounce_convex::presolve::{PresolveOutcome, presolve};
+    use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
     let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
@@ -2222,6 +2222,18 @@ fn run_convex_qp(
                         st.forcing_rows,
                         st.dominated_cols,
                         st.tightened_bounds,
+                    );
+                }
+                // Which of the two exits the fixpoint took, and after how many
+                // layers (gh #527). Worth a line whenever the loop was cut off:
+                // a reduction that came out of the layer cap is a *truncation*,
+                // and a different cap would have handed the solver a different
+                // problem — the one thing the loop could not previously say.
+                if st.exit == FixpointExit::RoundCap {
+                    println!(
+                        "Presolve: stopped on the layer cap after {} layers, \
+                         not at a fixpoint — reductions were still firing",
+                        st.rounds,
                     );
                 }
                 let red = if use_active_set {

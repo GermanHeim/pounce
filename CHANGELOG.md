@@ -9,6 +9,58 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `pounce-convex` presolve documented a fixpoint it never reached, and the layer cap silently decided the reduction (#527)
+
+- `presolve` describes itself as iterating the reduction passes to a
+  **fixpoint**. On netlib `bore3d` it never reached one: it exited on the
+  `MAX_ROUNDS` layer cap on every solve, at every cap tried (32, 64, 200).
+  An arbitrary defensive constant — not the algorithm — was choosing which
+  of two different reduced problems the solver was handed, and nothing
+  anywhere recorded that it had. Follow-up from #523 / #525, which fixed the
+  correctness bug this mechanism set up.
+- **The cause is that bound tightening is the one reduction that consumes
+  nothing.** A fixing removes its column and an aggregation removes its
+  row, so those can fire at most `n + m` times however long the loop runs.
+  Narrowing a box leaves the column *and* the row in place, so rows that
+  mutually imply ever-tighter bounds fire every round, converging toward a
+  limit they never reach. A `MAX_BOX_REFINEMENTS` budget (12) now bounds how
+  many times the iteration may refine the *same* box side, carried across
+  rounds and renumbered onto each layer's surviving columns. Termination
+  follows from the algorithm; with the cap lifted, `bore3d` reaches a real
+  fixpoint for the first time (238 layers).
+- The budget is a **count, not a magnitude**, so no scale-dependent constant
+  of the kind #523 came out of enters. That matters because the obvious
+  guard does not work here: an absolute floor (`BOUND_FEAS_TOL`) already
+  exists and stops a cascade collapsing toward *zero*, but cannot stop one
+  converging to a limit of `1e3`, where the improvements stay `1e-7`-sized
+  forever while the relative improvement is a hair under 100% every round.
+  Exhausting the budget costs at most a looser box, never a wrong one.
+- **The exit reason is now recorded and reported.** `PresolveStats` carries
+  `exit: FixpointExit` (`Fixpoint` or `RoundCap`) and `rounds`, and the CLI
+  prints a line whenever the loop was truncated. A reduction that came out
+  of the cap is no longer indistinguishable from one that came out of a
+  fixpoint — which is why this went unnoticed through three releases.
+- **Presolve got faster.** Duplicate/parallel-row merging reads coefficients
+  and right-hand sides only, never a variable box, so a round that follows a
+  bounds-only round and itself fixes, substitutes and drops nothing is
+  re-deduping rows it already deduped. Skipping it there is a memoization,
+  not a heuristic. That hashing pass was ~70% of presolve's cost on a
+  cascade: `bore3d` presolve goes from ~14 ms to ~5 ms for the identical
+  reduced problem (128 vars / 77 rows).
+- `MAX_ROUNDS` is left at 32 deliberately. It is no longer the termination
+  argument and no longer silent, and raising it was measured rather than
+  assumed: 128 layers cost ~16 ms and reduced `bore3d` to exactly the same
+  problem 32 layers reach, while multiplying the chain's retained memory
+  (every layer holds a clone of its input). `bore3d` still stops on the cap,
+  for a second and independent reason now documented in the module: bound
+  propagation is *serialized* by the disjoint-source rule that keeps the
+  dual re-attributions independent, so one round advances the propagation
+  graph by roughly one edge per column — about three tightenings per layer
+  on `bore3d`, with variables still receiving their first finite bound at
+  layer 320. Measured, that extra depth changes only boxes: 32 layers and
+  330 layers give the same 128 variables, 77 rows, 61 fixings, 17 forcing
+  rows and 64 aggregations.
+
 ### Fixed — `pounce-convex` reported false `Infeasible_Problem_Detected` at iteration 0 on `bore3d` / `QBORE3D` (#523)
 
 - Netlib `bore3d` and its Maros-Mészáros quadratic twin `QBORE3D` (both
