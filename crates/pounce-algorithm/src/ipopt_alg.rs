@@ -1283,6 +1283,37 @@ impl IpoptAlgorithm {
         }
     }
 
+    /// The single place this module turns a local-infeasibility conclusion
+    /// into a returned status (gh #505).
+    ///
+    /// Three separate routes reach that verdict — the conv-check's rapid
+    /// detection, restoration layer 2, and the slow-cycle exits — and the same
+    /// defect was found in two of them independently: returning the hard
+    /// verdict without consulting the acceptable-point stash, so a solve that
+    /// had already passed through an acceptable iterate discarded it. Only the
+    /// cycle exits got it right, and nothing structural said the other two were
+    /// wrong.
+    ///
+    /// That is the shape of a defect that comes back. The route a solve takes
+    /// to the verdict is an internal detail — the user sees one status either
+    /// way — so the *decision* about what that status means must not live at
+    /// each route. It lives here, and
+    /// [`no_route_concludes_local_infeasibility_alone`] is a tripwire against
+    /// a new site rebuilding the outcome inline.
+    ///
+    /// The cycle exits are not routed through here because their fallback is
+    /// chosen between `LocalInfeasibility` and `ErrorInStepComputation` at the
+    /// call site; they already reach `terminate_acceptable_or`, which is the
+    /// behaviour this guarantees.
+    ///
+    /// Scope: this governs how *this module* returns the verdict. Other layers
+    /// name `SolverReturn::LocalInfeasibility` for their own reasons — the SQP
+    /// status map and the ℓ₁ elastic path in `application.rs`, for instance —
+    /// and are outside both this funnel and its tripwire.
+    fn terminate_local_infeasibility(&mut self) -> IterateOutcome {
+        self.terminate_acceptable_or(SolverReturn::LocalInfeasibility)
+    }
+
     pub fn with_nlp(mut self, nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
         self.nlp = Some(nlp);
         self
@@ -1742,7 +1773,33 @@ impl IpoptAlgorithm {
             }
             ConvergenceStatus::LocallyInfeasible => {
                 timing.check_convergence.end();
-                return IterateOutcome::Terminate(SolverReturn::LocalInfeasibility);
+                // gh #505: consult the acceptable-point stash, as the
+                // restoration-cycle exits below already do (`:2686`, `:2716`,
+                // both via `terminate_acceptable_or`). This arm used to return
+                // without it, so a solve that had passed through an acceptable
+                // iterate — stashed, un-vetoed, sitting there as a rollback
+                // target — discarded it and surfaced the hard verdict instead.
+                // The stashing code sits *after* this match, so the firing
+                // iteration returns before it would even consider stashing;
+                // only iterates from earlier in the solve are on offer, which
+                // is exactly what a rollback target is.
+                //
+                // This is about what to *return* once the verdict has fired,
+                // not about when it fires. Whether the rapid detector should
+                // have convicted this point at all is a separate question,
+                // answered by the violation floor in `OptErrorConvCheck`
+                // (gh #519).
+                //
+                // Inert on genuinely infeasible models: `store_acceptable_point`
+                // is gated on `current_is_acceptable_with_state`, which requires
+                // `acceptable_tol` *and* the unscaled violation against
+                // `acceptable_constr_viol_tol`, and the scale-relative veto
+                // blocks the stash outright for a row violated relative to its
+                // own magnitude. Nothing is stashed on such a model, so
+                // `terminate_acceptable_or` falls through to the verdict
+                // unchanged. `infeasible_models_are_never_reported_solved`
+                // (`infeasible_status_tol_invariance.rs`) is the standing guard.
+                return self.terminate_local_infeasibility();
             }
             ConvergenceStatus::Failed => {
                 timing.check_convergence.end();
@@ -2877,7 +2934,22 @@ impl IpoptAlgorithm {
                 // residual is still well above `tol`. Without this
                 // detection the outer would re-enter restoration on the
                 // unchanged iterate forever.
-                IterateOutcome::Terminate(SolverReturn::LocalInfeasibility)
+                //
+                // gh #505: consult the acceptable-point stash, for the same
+                // reason the conv-check arm above does and the cycle exits
+                // already did. This is the *third* site that produced
+                // `LocalInfeasibility`, and the only one not gated on
+                // `infeas_max_streak` — which matters, because on the reported
+                // instance raising that knob to 15 did not move the run by a
+                // single iteration, so the verdict there is not the outer
+                // detector's. Whichever route reaches it, a solve that passed
+                // through an acceptable iterate must not discard it.
+                //
+                // Inert on genuinely infeasible models by the same argument as
+                // the other two: nothing is stashed unless the whole acceptable
+                // triplet passed, so `terminate_acceptable_or` falls through to
+                // the verdict unchanged.
+                self.terminate_local_infeasibility()
             }
         }
     }
@@ -3668,5 +3740,59 @@ mod tests {
         // point outranks it regardless of objective.
         assert!(ranks_better_within_band(0.0, 0.0, -100.0, f64::NAN, band));
         assert!(!ranks_better_within_band(-100.0, f64::NAN, 0.0, 0.0, band));
+    }
+
+    /// gh #505: no route may conclude `LocalInfeasibility` on its own.
+    ///
+    /// Three routes reach that verdict, and two of them independently shipped
+    /// the same defect — building the terminate outcome directly, so the
+    /// acceptable-point stash was never consulted and a good point the solve
+    /// already had in hand was discarded. They were found one at a time,
+    /// because nothing tied them together.
+    ///
+    /// The route a solve takes is an internal detail; the user sees one status
+    /// either way. So what that status means is decided in one place — every
+    /// route goes through [`IpoptAlgorithm::terminate_local_infeasibility`],
+    /// or, for the cycle exits whose fallback is chosen between two statuses
+    /// at the call site, through `terminate_acceptable_or`. Both consult the
+    /// stash.
+    ///
+    /// **This is a tripwire, not a proof.** It is a substring scan of this
+    /// file's source for the bare `IterateOutcome::Terminate(SolverReturn::
+    /// LocalInfeasibility)` construction. A rustfmt line break through that
+    /// expression, a `let` binding for the status, or a construction in
+    /// another module all evade it — `application.rs` names the same variant
+    /// on the SQP and ℓ₁ elastic paths and is deliberately out of scope. What
+    /// it does buy is that the *obvious* way to add a fourth bare exit here
+    /// fails loudly and points at the helper, which is the mistake that was
+    /// actually made twice.
+    ///
+    /// The needle is assembled at runtime so this test's own source cannot
+    /// satisfy the pattern it is checking for; an earlier version counted its
+    /// own lines and failed against clean code.
+    #[test]
+    fn no_route_concludes_local_infeasibility_alone() {
+        let needle = format!(
+            "IterateOutcome::Terminate(SolverReturn::{})",
+            "LocalInfeasibility"
+        );
+        let offenders: Vec<usize> = include_str!("ipopt_alg.rs")
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("///")
+            })
+            .filter(|(_, l)| l.contains(&needle))
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "line(s) {offenders:?} build the local-infeasibility verdict directly. \
+             Call `terminate_local_infeasibility()` instead — it consults the \
+             acceptable-point stash first, so a solve that already passed through an \
+             acceptable iterate returns that point rather than a hard failure. Two \
+             routes shipped this bug before the helper existed (gh #505)."
+        );
     }
 }
