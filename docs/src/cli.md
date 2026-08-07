@@ -11,12 +11,16 @@ per-iteration table, and final summary, so anyone used to reading
 pounce problem.nl
 pounce problem.nl print_level=8 max_iter=500 tol=1e-10
 pounce problem.nl linear_solver=ma57            # with --features ma57
-pounce problem.nl --options-file ipopt.opt      # upstream-format options file
+pounce problem.nl --options-file tuned.opt      # upstream-format options file
+pounce problem.nl option_file_name=tuned.opt   # the Ipopt spelling; same thing
+pounce problem.nl --no-options-file            # ignore ./pounce.opt, ./ipopt.opt
 ```
 
 Trailing `KEY=VALUE` pairs follow the same syntax and semantics as the
-upstream Ipopt CLI; they override values loaded from `--options-file`.
-See [Solver Options](options.md).
+upstream Ipopt CLI; they override values loaded from the options file.
+With no options file named, `./pounce.opt` or `./ipopt.opt` is read if
+present, as `ipopt` reads `./ipopt.opt`. See
+[Solver Options](options.md).
 
 ## Built-in problems
 

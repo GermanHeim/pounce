@@ -59,7 +59,6 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
         ("check_derivatives_for_naninf=yes", "NaN/Inf"),
         ("recalc_y=yes", "multiplier recalculation"),
         ("magic_steps=yes", "magic steps"),
-        ("option_file_name=other.opt", "reading options from a file"),
         ("suppress_all_output=yes", "output controls"),
         ("hsllib=libcoinhsl.so", "HSL loader"),
     ]
