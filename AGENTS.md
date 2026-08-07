@@ -66,6 +66,8 @@ have (gh #505 is the worked example; see
   like confirmation. On gh #505 that fixture did reproduce *a* real defect,
   which was then assumed to be *the* defect; the reporter's own measurement
   falsified the route a day later, after a PR had already been opened on it.
+  The fixture was eventually dropped altogether — once the actual arming
+  condition was found and fixed (gh #519), it no longer reproduced anything.
   Reproduce on the reporter's artifact before writing the fix, and treat a
   purpose-built fixture as a regression test, never as a diagnosis.
 
