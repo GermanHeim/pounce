@@ -59,6 +59,49 @@ changes.
   tuple variant; `matches!(…, PresolveOutcome::Infeasible)` becomes
   `PresolveOutcome::Infeasible(_)`.
 
+### Fixed — the local-infeasibility re-solve corroborated its own mistake; it now varies the barrier trajectory too (#524)
+
+- A local-infeasibility verdict was second-guessed by exactly one re-solve,
+  `feral_scaling=mc64` (`feral_infeasibility_scaling_retry`). That rung
+  perturbs the *linear algebra* only, so it is evidence only when the
+  trajectory is ULP-hypersensitive the way `discs.nl` is. When it is not,
+  MC64 retraces the same iterates and agrees for the same reason the first
+  solve was wrong — and the CLI then printed "now corroborated by a second
+  scaling", asserting confidence that had not been earned.
+- The worked case is CUTE `cresc4` (6 variables, 8 constraints, nonconvex,
+  feasible; LOQO, SNOPT and Ipopt-MA57 all reach `0.8718976`, Ipopt in 71
+  iterations). POUNCE on defaults converged to a point with constraint
+  violation 0.51 and objective `~2e-09` — a degenerate zero-area crescent —
+  and reported `Infeasible_Problem_Detected`. The MC64 re-solve reproduced
+  the failing trajectory character-for-character through iteration 15,
+  diverged at iteration 16 in the eighth significant digit — the exact
+  hypersensitivity signature the guard was written for — and landed in the
+  same basin anyway. Whether that ULP-scale perturbation escapes is luck.
+- The retry is now a two-rung ladder, and the new second rung
+  (`infeasibility_mu_strategy_retry`, default `yes`) re-solves with
+  `mu_strategy=adaptive`, which changes the iterate sequence itself rather
+  than the arithmetic underneath it. `cresc4` now returns
+  `Optimal Solution Found` at `0.8718975`, matching the reference to eight
+  significant figures. Retrying a different barrier strategy is also the
+  remedy IPOPT's own documentation gives a user who gets an infeasibility
+  verdict on a problem they believe is feasible.
+- Rungs apply to the *baseline* options, not on top of each other: the
+  barrier rung re-asserts the baseline `feral_scaling` first. This is
+  load-bearing — on `cresc4`, `mu_strategy=adaptive` recovers the optimum
+  and `mu_strategy=adaptive` together with `feral_scaling=mc64` still
+  reports local infeasibility, so a cumulative ladder would have discarded
+  the fix.
+- Safety is unchanged in the direction that matters: a rung is promoted
+  only when it returns `Solve_Succeeded` / `Solved_To_Acceptable_Level`, so
+  an overturned verdict is always backed by the retry's own convergence
+  check rather than by trusting the strategy. Genuinely infeasible models
+  still report infeasible (the ladder simply runs out of rungs), a rung
+  that would be a no-op at the current options is skipped rather than
+  burning a solve, presolve-certified infeasibility remains exempt, and the
+  extra solve is spent only on runs that would otherwise report failure.
+  Set both options to `no` for upstream IPOPT's behaviour of shipping the
+  first verdict.
+
 ### Fixed — tightening `constr_viol_tol` made POUNCE more likely to report local infeasibility (#519)
 
 - Rapid infeasibility detection counted an iterate toward its streak when

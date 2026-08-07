@@ -260,6 +260,114 @@ fn the_convex_route_still_solves_both_shapes() {
     }
 }
 
+/// gh #524: the local-infeasibility second-opinion ladder must be
+/// *algorithmically* diverse, not just numerically diverse.
+///
+/// `cresc4` is a CUTE problem (Ph. Toint, 1993): fit the smallest-area crescent
+/// containing four given points. Six variables, eight constraints, nonconvex,
+/// feasible, with a known optimum — LOQO, SNOPT and Ipopt-MA57 all reach
+/// `0.8718976`, Ipopt in 71 iterations. POUNCE on defaults converges to a point
+/// with constraint violation 0.51, objective ~2e-09 (a degenerate zero-area
+/// crescent), and reports `Infeasible_Problem_Detected`.
+///
+/// What makes it a ladder bug rather than one more false-infeasibility case is
+/// what happened next: the MC64 re-solve fired, reproduced the original
+/// trajectory character-for-character through iteration 15, diverged at
+/// iteration 16 in the eighth significant digit, landed in the same basin
+/// anyway, and the CLI announced the verdict "corroborated by a second
+/// scaling". Rung 1 varies only the linear algebra, so whether its ULP-scale
+/// perturbation escapes the basin is luck — on `discs.nl`, the case the guard
+/// was written for, it was lucky. Here it was not, and the unlucky draw was
+/// reported as corroboration.
+///
+/// `mu_strategy=adaptive` changes the iterate sequence itself and walks
+/// straight to `0.8718975`. So does `nlp_scaling_method=none` — a third
+/// trajectory disagreeing with the first two is what tells you the verdict was
+/// never about scaling at all.
+///
+/// Fixture provenance: transcribed from CUTEst `mastsif/CRESC4.SIF` (the model,
+/// bounds and start point are the SIF's, and the objective it reaches matches
+/// the published `0.8718976`), then written to `.nl` by Pyomo. It is *not*
+/// byte-identical to the benchmark corpus's AMPL-generated `cresc4.nl` from the
+/// issue, which was not reachable from this environment. It reproduces the
+/// reported failure signature exactly — `Infeasible_Problem_Detected` at a
+/// near-zero objective with a constraint violation near a half, recovered under
+/// both `mu_strategy=adaptive` and `nlp_scaling_method=none` — but the
+/// iteration counts differ (the corpus file exits at 74, this one at 61).
+const CRESC4_STAR: f64 = 0.871_897_6;
+
+#[test]
+fn cresc4_is_not_reported_infeasible() {
+    let report = solve("cresc4.nl", &[]);
+    let code = report.solution.solve_result_num;
+    assert!(
+        !(200..300).contains(&code),
+        "cresc4 reported INFEASIBLE (solve_result_num={code}, status={:?}) — it \
+         is feasible, with f* = {CRESC4_STAR} reached by LOQO, SNOPT and Ipopt \
+         (71 iterations). Pre-fix POUNCE stopped at a point with constraint \
+         violation 0.51 and objective ~2e-09, and the MC64 rung of the retry \
+         ladder re-traced the same trajectory and 'corroborated' it",
+        report.solution.status,
+    );
+    let obj = report.solution.objective;
+    let rel = (obj - CRESC4_STAR).abs() / CRESC4_STAR;
+    assert!(
+        rel < 1e-6,
+        "cresc4: got objective {obj}, expected the known optimum {CRESC4_STAR} \
+         (rel err {rel:.3e})",
+    );
+}
+
+/// The mechanism, pinned separately from the outcome: the ladder recovers
+/// `cresc4` *because* of the barrier-strategy rung, not the scaling rung.
+///
+/// Rung 1 alone still fails here — that is the whole point of the issue — so if
+/// a future change collapses the ladder back to a single MC64 re-solve this
+/// test says so directly, rather than leaving the headline test above to fail
+/// with no explanation.
+#[test]
+fn cresc4_needs_the_barrier_rung_not_the_scaling_rung() {
+    let scaling_only = solve("cresc4.nl", &["infeasibility_mu_strategy_retry=no"]);
+    assert!(
+        (200..300).contains(&scaling_only.solution.solve_result_num),
+        "cresc4 with only the MC64 rung is expected to still report infeasible \
+         (that is gh #524); it returned status={:?}. If this now passes, the \
+         underlying monotone-mu failure may have been fixed properly — good, but \
+         re-derive whether the barrier rung is still carrying this case",
+        scaling_only.solution.status,
+    );
+
+    // …and the knob the rung applies is the one that actually works, by hand.
+    for opts in [
+        vec!["mu_strategy=adaptive"],
+        vec!["nlp_scaling_method=none"],
+    ] {
+        let r = solve("cresc4.nl", &opts);
+        assert!(
+            !(200..300).contains(&r.solution.solve_result_num),
+            "cresc4 with {opts:?} should solve; got status={:?}",
+            r.solution.status,
+        );
+    }
+}
+
+/// A rung that would not change anything must not burn a solve: with the
+/// baseline already on `mu_strategy=adaptive` there is no second opinion left
+/// to ask, and the ladder is empty.
+#[test]
+fn ladder_rungs_are_skipped_when_the_baseline_already_has_them() {
+    let report = solve(
+        "infeasible_equalities.nl",
+        &["mu_strategy=adaptive", "feral_scaling=mc64"],
+    );
+    assert!(
+        (200..300).contains(&report.solution.solve_result_num),
+        "genuinely infeasible problem must still report infeasible with both \
+         ladder knobs already set at baseline; got status={:?}",
+        report.solution.status,
+    );
+}
+
 /// The other direction, and the test whose absence caused two wrong fixes.
 ///
 /// The probe withholds the verdict when a materially less-violating point sits
