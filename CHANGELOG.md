@@ -107,6 +107,39 @@ changes.
   hardest infeasible case, `cresc132`, that is 3.65s → 73.4s; across the
   whole suite, +7 %.
 
+### Fixed — a successful restoration phase left the watchdog's shortened-step counter running, arming the watchdog where IPOPT would not (#524)
+
+- `steenbrf` (n=468, m=108) ran to `max_iter` at 3000 iterations under the
+  monotone barrier default while Ipopt-MA57 solved the same file. It now
+  converges in **481 iterations** to `Solve_Succeeded` — to full tolerance,
+  at a lower local minimum (282.678) than the reference's acceptable-level
+  point (1321.65 at 1846 iterations).
+- The watchdog arms after `watchdog_shortened_iter_trigger` (default 10)
+  **consecutive** shortened line-search steps. Upstream clears that counter
+  when the restoration phase succeeds
+  (`IpBacktrackingLineSearch.cpp:624-631`), because an iterate that came
+  back from restoration is a different point and the run of shortened steps
+  before it did not continue through it. POUNCE had no equivalent: upstream
+  calls `PerformRestoration()` from inside `FindAcceptableTrialPoint`, so
+  those assignments sit in scope there, whereas POUNCE returns
+  `Outcome::Failed` and the main loop runs restoration — and its recovery
+  path never told the line search it had happened.
+- So runs of shortened steps on either side of a restoration accumulated as
+  if consecutive. On `steenbrf`: five shortened steps, restoration, five
+  more — exactly the trigger. The watchdog armed, spent its three trial
+  iterations, reverted to the pre-watchdog iterate (the reverted iteration's
+  objective and `inf_pr` are bit-identical to the snapshot's), and the line
+  search then collapsed to `alpha` ~1e-08 with 20+ backtracks. That cycle
+  repeated 105 times. Upstream's longest run of consecutive shortened steps
+  on this problem is 6, so its watchdog never arms at all.
+- `in_soft_resto_phase` and `soft_resto_counter` are reset alongside it, as
+  upstream does at the same site.
+- Corpus effect (733-problem Vanderbei sweep, same host): **two problems
+  fixed** — `steenbrf` and `brainpc2` (`Maximum_Iterations_Exceeded` at 3000
+  → `Solved_To_Acceptable_Level` at 1003) — **none broken**, no objective
+  drift on any problem both runs solve, and the suite gets *faster*: total
+  solve time −6.5 %, total iterations −7.3 %.
+
 ### Added — the CLI prints a machine-readable `Status:` line
 
 - Every NLP solve now ends with `Status: <upstream_name>` —

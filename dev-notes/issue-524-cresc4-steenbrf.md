@@ -351,14 +351,95 @@ iteration 614 and a 1.1e+05 step later in the same phase, both larger than
 anything POUNCE takes here. Big unregularized steps are normal on this model.
 The repeated restoration entry is what is not.
 
-**This is the `cresc4` shape.** The "Not fixed here" section above describes
-`cresc4` as restoration progress being repeatedly undone by the main loop under
-monotone µ, on six variables. `steenbrf` is the same failure on 468 — and it is
-the reason the issue's original hypothesis (both fall to `mu_strategy=adaptive`,
-so they share a cause) looks right after all, even though only one of them is
-fixed here.
+It *looks* like the `cresc4` shape — restoration progress the main loop does not
+hold on to — and the previous version of this note said so. That reading is now
+withdrawn: the repeated restoration entry is a symptom, not the cause. The cause
+is one line of missing state, and it is in the line search rather than the
+restoration hand-off. See the next section.
 
-### Why: 360 of 468 variables carry no objective at all
+### The actual defect: the watchdog counter survives restoration
+
+Ablation isolates it in one run. Against the three globalization heuristics
+active in the stall, only one matters:
+
+| run | outcome |
+|---|---|
+| defaults | `Maximum_Iterations_Exceeded`, 3000 |
+| `soft_resto_pderror_reduction_factor=0` (soft resto off) | `Maximum_Iterations_Exceeded`, 3000 |
+| **`watchdog_shortened_iter_trigger=0` (watchdog off)** | **`Solve_Succeeded`, 481** |
+| both off | `Error_In_Step_Computation`, 2389 |
+
+The marker tally says the same thing structurally — POUNCE spends the stall in
+mechanisms Ipopt never enters at all:
+
+| run | `f` | `s` (soft resto) | `h` | `w` (watchdog) | `R` |
+|---|---|---|---|---|---|
+| POUNCE, defaults | 1668 | 472 | 398 | **334** | 124 |
+| Ipopt-MA57 | 1783 | **0** | 42 | **0** | 1 |
+
+The watchdog arms after `watchdog_shortened_iter_trigger` (default 10)
+**consecutive** shortened steps. Upstream zeroes that counter when the
+restoration phase succeeds — `IpBacktrackingLineSearch.cpp:624-631`, alongside
+`in_soft_resto_phase_` and `soft_resto_counter_` — because an iterate returned
+by restoration is a different point, so a run of shortened steps does not
+continue through it.
+
+POUNCE had no equivalent, and the reason is structural rather than an oversight
+in reading the source. Upstream calls `PerformRestoration()` from *inside*
+`FindAcceptableTrialPoint`, so the four resets sit immediately after it with the
+line-search state in scope. POUNCE returns `Outcome::Failed` and lets
+`IpoptAlgorithm::invoke_restoration` run restoration, so there was no site where
+that code could land — and nothing on the recovery path told the line search a
+restoration had happened.
+
+The arithmetic on this problem, straight off the log:
+
+| iterations | what | counter |
+|---|---|---|
+| 381–385 | five shortened steps (`ls` = 11, 12, 13, 15, 16) | 1 → 5 |
+| 386–390 | soft restoration (`s`) — neither side touches the counter | 5 |
+| 391–394 | full restoration, succeeds | upstream → **0**; POUNCE → **5** |
+| 399–403 | five more shortened steps | upstream 5; POUNCE → **10 = trigger** |
+| 404 | — | POUNCE arms the watchdog |
+
+Then the collapse, which is what actually costs the solve:
+
+```
+ 403  3.6779355e+02 1.22e-08 4.61e+02  -3.8 1.27e-03  4.1 1.00e+00 1.53e-05f 17
+ 404  3.6744474e+02 3.68e-07 9.11e+01  -3.8 2.29e-03  3.7 1.00e+00 1.00e+00w  1
+ 405  3.6709336e+02 1.23e-07 1.87e+02  -3.8 2.86e-03  3.2 1.00e+00 9.88e-01w  1
+ 406  3.6675112e+02 1.35e-07 1.97e+02  -3.8 4.23e-03  2.7 1.00e+00 9.30e-01w  1
+ 407  3.6779355e+02 1.22e-08 4.72e+02  -3.8 7.70e-03  2.2 1.00e+00 4.77e-07f 21
+ 408  3.6779355e+02 1.22e-08 4.89e+04  -3.8 8.68e-02  1.8 1.00e+00 4.04e-08f 20
+ 409  3.6779355e+02 1.22e-08 1.08e+04  -3.8 1.27e-01  1.3 7.83e-01 2.91e-08f 23
+```
+
+404–406 are exactly `watchdog_trial_iter_max = 3` trial iterations; iteration
+407's objective and `inf_pr` are bit-identical to 403's, which is `StopWatchDog`
+reverting to the snapshot. The three `w` steps bought nothing and the line
+search comes out of the revert backtracking 20+ times to `alpha` ~1e-08. That
+cycle ran 105 times. Ipopt's longest run of consecutive shortened steps on this
+problem is **6** — it never reaches the trigger, which is exactly what the
+missing reset predicts.
+
+The fix is `BacktrackingLineSearch::reset_after_restoration()`, called from the
+`RestorationOutcome::Recovered` arm of `invoke_restoration`. It ports the three
+resets that apply (`count_successive_shortened_steps_` is not ported at all —
+upstream reads it only under `expect_infeasible_problem_`, `cpp:798-804`).
+
+With it, `steenbrf` converges in 481 iterations to `Solve_Succeeded`, at
+constraint violation 4.4e-11 and objective 282.678 — a *lower* minimum than the
+Ipopt-MA57 reference reaches (1321.65, and only to acceptable level, in 1846
+iterations). The marker tally drops to 0 `w` and 12 `s`.
+
+On the 733-problem Vanderbei sweep this fixes a second problem nobody was
+looking at — `brainpc2`, `Maximum_Iterations_Exceeded` at 3000 →
+`Solved_To_Acceptable_Level` at 1003 — breaks nothing, drifts no objective, and
+takes 6.5 % off total solve time and 7.3 % off total iterations. That last part
+is the tell that this was a defect and not a tuning preference: a heuristic that
+fires when it should not costs iterations everywhere, quietly.
+
+### Why the model is hard anyway: 360 of 468 variables carry no objective at all
 
 Vanderbei's `steenbrf` is **not** a transliteration of CUTEst `STEENBRF`, and
 the difference is not a scale factor — it is a dropped index set.
@@ -430,19 +511,13 @@ does not.
 
 ### What to do about it
 
-Two separate things, and the earlier version of this note collapsed them into
-one and concluded "nothing in the solver". That was wrong.
+Two separate things, and the earlier versions of this note got the split wrong
+twice — first collapsing them into "nothing in the solver", then into "the same
+unfixed shared cause as `cresc4`".
 
-**There is a solver defect here, and #524 should not be closed on `steenbrf`.**
-Under monotone µ the main loop repeatedly walks `inf_du` down to ~6e-03 at a
-feasible point, enters restoration, and comes back five orders of magnitude
-worse — sixty-two times, until the iteration cap. Adaptive µ and Ipopt both do
-this once. Raising `max_iter` does not help (`Restoration Failed` at 3039), so
-there is no "just be patient" reading available. It is the same shape as
-`cresc4`'s "Not fixed here" above — restoration progress the main loop does not
-hold on to — and it wants a single issue covering both, with `cresc4`'s six
-variables as the tractable reproducer and `steenbrf` as the confirmation that
-it is not a small-problem curiosity.
+**The solver defect is fixed**: the missing post-restoration reset of the
+watchdog counter, above. `steenbrf` converges. It was *not* the `cresc4` shape —
+`cresc4`'s "Not fixed here" item stands on its own and is unchanged by this.
 
 Then, separately, three things about the corpus entry, none of them code:
 
@@ -455,9 +530,10 @@ Then, separately, three things about the corpus entry, none of them code:
    file, not just the table).
 2. **If the entry stays, expect the iteration count.** A model with a large
    cost-free subspace is a legitimate stress case for a monotone barrier, and
-   hundreds of iterations on it are not by themselves a bug. What is a bug is
-   the limit cycle documented above — keep the two claims apart when reading
-   the suite.
+   hundreds of iterations on it are not by themselves a bug — 481 post-fix is
+   still an order of magnitude more than the family's other members. What was a
+   bug was the limit cycle, and that is now fixed; keep the two claims apart
+   when reading the suite.
 3. **The post-hoc diagnostic is still worth building**, and it is the one from
    `dev-notes/issue-131-monotone-lbfgs-stall.md`: a message on the `max_iter` +
    frozen-µ exit that says "µ has not moved in N iterations and restoration was
@@ -466,11 +542,12 @@ Then, separately, three things about the corpus entry, none of them code:
    note establishes that the *mid-solve* version of this is an unprincipled
    patience knob; the post-hoc version is still unbuilt and is still the right
    shape. The restoration-episode count is the signal to key it off — 62 versus
-   1 separates the failing run from both healthy ones cleanly.
+   1 separated the failing run from both healthy ones cleanly. `steenbrf` is no
+   longer the motivating example, but the diagnostic is not specific to it.
 
 ### On the earlier versions of this note
 
-Two claims have been withdrawn, both from reasoning that ran ahead of the
+Three claims have been withdrawn, all from reasoning that ran ahead of the
 measurement:
 
 - *"The corpus file could not be obtained"*, then *"could not be decoded"*.
@@ -483,6 +560,14 @@ measurement:
   narrower claim from that same session — that POUNCE takes large unregularized
   steps Ipopt does not — is also withdrawn: Ipopt takes larger ones on this
   problem.
+- *"It is the `cresc4` shape — restoration progress the main loop does not hold
+  on to — and it wants a single issue covering both."* Written when the
+  repeated restoration entry was the most visible thing in the trace. It was
+  the symptom: restoration was being re-entered because the watchdog kept
+  wrecking the line search, not the other way round. Both problems do respond
+  to `mu_strategy=adaptive`, which is what made the shared-cause reading
+  attractive, but a heuristic that only fires under the monotone schedule will
+  produce that signature without sharing anything else.
 
 What survives unchanged is the STEENBRB control, which is what made the
 "different model" conclusion safe to state before the file arrived — and which

@@ -277,6 +277,42 @@ impl BacktrackingLineSearch {
         self.acceptor.reset();
     }
 
+    /// Clear the globalization heuristics' cross-iteration counters
+    /// after the full restoration phase has *succeeded* — port of
+    /// `IpBacktrackingLineSearch.cpp:624-631`.
+    ///
+    /// Upstream calls `PerformRestoration()` from inside
+    /// `FindAcceptableTrialPoint`, so these four assignments sit
+    /// directly after it and the state is in scope. pounce hands the
+    /// restoration off to the caller (`IpoptAlgorithm::invoke_restoration`)
+    /// and returns `Outcome::Failed`, so the reset has to be driven from
+    /// there instead — see the `RestorationOutcome::Recovered` arm.
+    ///
+    /// Getting this wrong is not cosmetic. `watchdog_shortened_iter`
+    /// counts *consecutive* shortened steps, and the watchdog arms at
+    /// `watchdog_shortened_iter_trigger` (default 10). A restoration
+    /// episode is not a shortened step — it is a different point — so
+    /// carrying the count across one lets runs of shortened steps that
+    /// are separated by restoration accumulate as if they were
+    /// consecutive. On `steenbrf` that is exactly what happened: five
+    /// shortened steps before restoration plus five after reached the
+    /// trigger, the watchdog armed, spent its three trial iterations
+    /// and reverted to the pre-watchdog point, and the line search then
+    /// collapsed to alpha ~1e-08 with 20+ backtracks. That cycle
+    /// repeated 105 times and the solve hit `max_iter`; with the reset
+    /// in place the counter never reaches the trigger (upstream
+    /// Ipopt's longest run on this problem is 6) and the same
+    /// trajectory converges.
+    ///
+    /// `count_successive_shortened_steps_` (cpp:624) is not ported —
+    /// upstream reads it only under `expect_infeasible_problem_`
+    /// (cpp:798-804), which pounce does not implement.
+    pub fn reset_after_restoration(&mut self) {
+        self.in_soft_resto_phase = false;
+        self.soft_resto_counter = 0;
+        self.watchdog_shortened_iter = 0;
+    }
+
     /// Public line-search entry point. Wraps the regular filter line
     /// search ([`Self::run_filter_line_search`]) with the soft
     /// restoration phase — port of the `in_soft_resto_phase_` state
@@ -1527,6 +1563,37 @@ mod tests {
         assert!(bls.last_mu < 0.0);
         assert_eq!(bls.watchdog_shortened_iter_trigger, 10);
         assert_eq!(bls.watchdog_trial_iter_max, 3);
+    }
+
+    #[test]
+    fn restoration_resets_the_shortened_iter_counter() {
+        // Port check for `IpBacktrackingLineSearch.cpp:624-631`. The
+        // shortened-iter counter is a *consecutive* count, so a
+        // restoration episode has to zero it — otherwise runs of
+        // shortened steps on either side of one restoration add up and
+        // arm the watchdog where upstream would not.
+        //
+        // The numbers here are steenbrf's (gh #524): five shortened
+        // steps, restoration, five more. Without the reset that is 10 —
+        // exactly `watchdog_shortened_iter_trigger` — and the watchdog
+        // arms, burns its three trial iterations, reverts, and the line
+        // search collapses to alpha ~1e-08. With it the counter tops
+        // out at 5 and the solve converges.
+        let mut bls = BacktrackingLineSearch::new(Box::new(FilterLsAcceptor::new()));
+        bls.watchdog_shortened_iter = 5;
+        bls.in_soft_resto_phase = true;
+        bls.soft_resto_counter = 4;
+
+        bls.reset_after_restoration();
+
+        assert_eq!(bls.watchdog_shortened_iter, 0);
+        assert!(!bls.in_soft_resto_phase);
+        assert_eq!(bls.soft_resto_counter, 0);
+
+        // Five more shortened steps after the restoration stay clear of
+        // the trigger, which is the whole point.
+        bls.watchdog_shortened_iter += 5;
+        assert!(bls.watchdog_shortened_iter < bls.watchdog_shortened_iter_trigger);
     }
 
     #[test]
