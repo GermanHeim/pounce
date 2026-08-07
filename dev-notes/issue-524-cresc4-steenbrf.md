@@ -23,6 +23,22 @@ transcribed from their CUTEst `mastsif` SIF sources (reachable at
 `https://bitbucket.org/optrove/sif/raw/master/<NAME>.SIF`) into Pyomo and
 written to `.nl` with Pyomo's own writer — no AMPL needed.
 
+**Correction, and a live loose end.** The reporter *did* attach the real
+`steenbrf.nl` — inlined in
+[a comment on #524](https://github.com/jkitchin/pounce/issues/524#issuecomment-5219526863)
+as a base64 gzipped tarball (8093 B packed, `sha256
+bba26942506ca72bd77bdb98150a9cf1409f0fc1e2c4d14377a7fe059278d0ab`), precisely
+so the reproducer would not depend on the corpus. It was not used here: the
+only way to reach it from this environment is to copy ~10.8 kB of base64 out of
+a tool result by hand, and the attempt produced a truncated archive (5.3 kB of
+the 10.8, middle dropped, tail intact — `tar` listed the members and then hit
+EOF). Rather than build on a corrupt fixture, the `steenbrf` analysis below
+stays on the mastsif transcription, and is labelled throughout as being about
+*that* problem rather than the reporter's. Anyone with the corpus, or with a
+way to get that attachment onto disk, should redo the `steenbrf` half against
+the real file before trusting any of it. `cresc4` has no attachment on the
+issue, so its transcription remains the only route regardless.
+
 That is a weaker artifact than the reporter's, and the discipline in
 `AGENTS.md` applies: a transcription is only evidence once it reproduces the
 reported *signature*, not merely the reported *symptom*. What was checked
@@ -236,9 +252,10 @@ An objective of `282.76` is not reachable.
 **Conclusion: the corpus's `vanderbei/nl/steenbrf.nl` is not a transliteration
 of CUTEst `STEENBRF`.** Two things follow, both for the maintainer to decide:
 
-1. The `steenbrf` half of #524 cannot be worked without the corpus artifact.
-   It needs `$POUNCE_BENCH_DATA` or a reachable copy of Vanderbei's
-   `cresc4.mod`-style `steenbrf.mod`.
+1. The `steenbrf` half of #524 needs the reporter's own file, which **is
+   available** — attached to the issue as a base64 tarball (see the correction
+   above) — just not reachable from this environment. That half is unstarted,
+   not blocked: decode the attachment and the stall should reproduce directly.
 2. It is worth checking whether that `.mod` is faithful at all before spending
    more on it. The reference table already flags it: `steenbrf` is one of the
    few entries with `solvers_agree: false` (`nitro` 282.7578, `snopt` 319.0946,
