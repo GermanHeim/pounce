@@ -215,7 +215,7 @@ fn randomized_bound_tightening_roundtrip() {
         // Skip presolve-detected infeasible instances (random RHS can make
         // a group infeasible); the direct solve agrees by status.
         match presolve(&prob) {
-            PresolveOutcome::Infeasible => {
+            PresolveOutcome::Infeasible(_) => {
                 assert_eq!(direct(&prob).status, QpStatus::PrimalInfeasible);
                 continue;
             }
@@ -290,7 +290,7 @@ fn randomized_overlapping_tightening_roundtrip() {
         };
 
         match presolve(&prob) {
-            PresolveOutcome::Infeasible => {
+            PresolveOutcome::Infeasible(_) => {
                 assert_eq!(direct(&prob).status, QpStatus::PrimalInfeasible);
                 continue;
             }

@@ -162,11 +162,39 @@ pub enum PresolveOutcome {
     Reduced(Presolve),
     /// Presolve proved the problem primal-infeasible (e.g. an empty row
     /// `0 = b` with `b ≠ 0`, contradictory fixed bounds, or duplicate
-    /// equality rows with different right-hand sides).
-    Infeasible,
+    /// equality rows with different right-hand sides). Carries the screen
+    /// that fired and what it tripped on — see [`InfeasibleTrigger`].
+    Infeasible(InfeasibleTrigger),
     /// Presolve proved the problem unbounded below (a free column with a
     /// nonzero objective coefficient).
     Unbounded,
+}
+
+/// Which screen concluded that the problem is primal-infeasible, and what it
+/// tripped on.
+///
+/// A presolve infeasibility comes back in milliseconds with no iteration
+/// behind it, so when it is wrong it is the most expensive failure the solver
+/// has: a confident wrong answer with no trace. Carrying the trigger makes
+/// the claim auditable — the CLI prints it, and a bug report names a row, a
+/// column and the numbers that were compared instead of `iters=0` (gh #523).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfeasibleTrigger {
+    /// The screen that fired, e.g. `"empty equality row"`.
+    pub screen: &'static str,
+    /// The row / column / bound it tripped on, with the compared values.
+    pub detail: String,
+}
+
+impl std::fmt::Display for InfeasibleTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.screen, self.detail)
+    }
+}
+
+/// Build a [`PresolveOutcome::Infeasible`] with its trigger recorded.
+fn infeasible(screen: &'static str, detail: String) -> PresolveOutcome {
+    PresolveOutcome::Infeasible(InfeasibleTrigger { screen, detail })
 }
 
 /// A reversible presolve transaction. Each variant stores exactly what
@@ -290,6 +318,11 @@ pub struct Presolve {
     /// `postsolve` folds the layers in reverse. The single-pass fields
     /// above are unused in that case.
     chain: Vec<Presolve>,
+    /// An infeasibility claim the full catalog raised that the confirming
+    /// re-derivation would not reproduce, so it was discarded and this
+    /// reduction returned instead (gh #523). `None` on the normal path. Read
+    /// it with [`Presolve::discarded_infeasibility`].
+    discarded_infeasibility: Option<InfeasibleTrigger>,
 }
 
 /// Coefficients are treated as nonzero unless exactly 0.0.
@@ -298,6 +331,18 @@ const ZERO_TOL: f64 = 0.0;
 const BOUND_FEAS_TOL: f64 = 1e-9;
 /// Slack allowed in activity-bound comparisons (redundancy / feasibility).
 const ACTIVITY_TOL: f64 = 1e-9;
+/// How far a **forcing** reduction may be wrong about where it pins a
+/// variable before the pin stops counting as a deduction (gh #523).
+///
+/// A forcing row's vertex is only ever recognized to within [`ACTIVITY_TOL`],
+/// so a residual gap of that size survives the test — and the row can still
+/// spend it. Spent on one variable it moves that variable `gap / |coefⱼ|` off
+/// the bound the pin claims it must sit at, which for a small coefficient is
+/// orders of magnitude more than the gap that licensed the pin. Matching
+/// [`BOUND_FEAS_TOL`] keeps a pinned value inside the same window presolve
+/// judges every other fixed value's box feasibility by. See
+/// [`forcing_pin_is_tight`].
+const FORCING_PIN_TOL: f64 = BOUND_FEAS_TOL;
 /// Relative slack allowed when a row emptied by substitution is checked for
 /// feasibility (`0 = rhs` / `0 ≤ rhs`). Scaled by the size of the terms that
 /// cancelled, because that is where the residual's rounding error lives —
@@ -371,6 +416,53 @@ where
     (amin, amax)
 }
 
+/// Does a row whose activity range *touches* its right-hand side to within
+/// [`ACTIVITY_TOL`] really **force** its variables onto the touched vertex?
+///
+/// `gap` is the leftover activity at the vertex (`b − amin` for a row pinned
+/// to its min vertex, `amax − b` for the max vertex, `h − amin` for a `≤`
+/// row); the forcing test accepted the row because `|gap| ≤ ACTIVITY_TOL`.
+/// A *genuine* forcing row has `gap == 0`: the vertex is the only point of
+/// the box the row admits, so pinning every variable there is a deduction.
+/// A merely-near-zero gap is not. The row can still spend that activity, and
+/// spending all of it on variable `j` moves it `gap / |coefⱼ|` off the bound
+/// the pin claims it must occupy — capped by `j`'s own box width, since it
+/// cannot leave its box either way.
+///
+/// With a small coefficient, or a box that bound tightening has already
+/// narrowed toward rounding-noise width, that displacement runs orders of
+/// magnitude past the gap that licensed it. The pin is then not a deduction
+/// but a guess: it fixes variables at values the feasible set does not
+/// require, and the next row those variables appear in reads as
+/// contradictory — a **false primal infeasibility** on a feasible problem.
+///
+/// That is exactly gh #523 (netlib `bore3d` / Maros-Mészáros `QBORE3D`),
+/// where a gap of `6.3e-10` on a row with coefficients `−1.14e-1` and
+/// `−5.7e-3` pinned two variables `4.8e-9` and `1.5e-8` away from their true
+/// values, and a later row emptied by those fixings was declared inconsistent
+/// by `2.0e-8`.
+///
+/// So a forcing row must clear a stronger bar than "the gap is small": the
+/// gap must be small enough that **every** pinned variable lands within
+/// [`FORCING_PIN_TOL`] of where the pin says it is.
+fn forcing_pin_is_tight<L, U>(row: &[(usize, f64)], gap: f64, lb: &L, ub: &U) -> bool
+where
+    L: Fn(usize) -> f64,
+    U: Fn(usize) -> f64,
+{
+    // A gap the wrong side of zero means the vertex slightly *violates* the
+    // right-hand side (the activity screen tolerates that much before calling
+    // the row infeasible); there is no leftover activity to spend, so the
+    // displacement it licenses is zero, not negative.
+    let gap = gap.max(0.0);
+    row.iter().all(|&(c, coef)| {
+        // Coefficients reaching here are nonzero (`group_by_row` drops exact
+        // zeros), so the division is safe.
+        let displacement = (gap / coef.abs()).min(ub(c) - lb(c));
+        displacement <= FORCING_PIN_TOL
+    })
+}
+
 /// A single constraint row in the reduced column space, tagged with its
 /// original row index. Used for duplicate detection and final assembly.
 struct Row {
@@ -399,7 +491,84 @@ struct Row {
 /// a unit. Both feed the same fixpoint: an aggregation can expose a
 /// singleton the catalog then fixes, and a fixing can turn a three-term row
 /// into a doubleton the next aggregation folds away.
+///
+/// # Infeasibility is re-derived before it is believed (gh #523)
+///
+/// A presolve infeasibility is the worst answer this solver can give when it
+/// is wrong: `Infeasible_Problem_Detected` in five milliseconds, with no
+/// iteration behind it, on a problem that has an optimum. And the catalog can
+/// manufacture one. Two of its reductions — forcing constraints and dominated
+/// columns — do not merely drop or rewrite constraints, they **fix a variable
+/// at a value they chose from a tolerance judgment**. A fixing that is wrong
+/// is substituted into every row the variable appears in, and the first row
+/// that cannot absorb it reads as contradictory: a false infeasibility, in a
+/// row nowhere near the reduction that caused it.
+///
+/// So an infeasibility verdict is not emitted on the strength of the pass
+/// that raised it. It is **re-derived from the original problem with those
+/// two reductions switched off** ([`Catalog::NoSpeculativeFixings`]), and
+/// only a verdict the re-derivation reaches on its own is returned as
+/// `Infeasible`. If the re-derivation instead reduces, the claim depended on
+/// a fixing that was not forced, and the reduction it hands back is solved
+/// normally — a misfiring reduction costs a few eliminations instead of the
+/// answer. The discarded claim rides along on the returned handle
+/// ([`Presolve::discarded_infeasibility`]) so the near-miss is reportable
+/// rather than silent.
+///
+/// The re-derivation keeps everything else, including the screens that reason
+/// through tolerances but only ever *report* — empty rows, activity ranges,
+/// parallel rows, an emptied row's residual — so no infeasibility class the
+/// catalog could detect before is lost.
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
+    match presolve_fixpoint(prob, Catalog::Full) {
+        PresolveOutcome::Infeasible(trigger) => {
+            match presolve_fixpoint(prob, Catalog::NoSpeculativeFixings) {
+                // Confirmed without the speculative fixings: the problem
+                // really is infeasible, and this is the trigger that shows it.
+                confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
+                PresolveOutcome::Reduced(mut ps) => {
+                    ps.discarded_infeasibility = Some(trigger);
+                    PresolveOutcome::Reduced(ps)
+                }
+                unbounded => unbounded,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Which reductions a presolve pass may apply.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Catalog {
+    /// The whole catalog.
+    Full,
+    /// The catalog minus its **speculative fixings**: the two reductions that
+    /// pick a *value* for a variable out of a tolerance judgment instead of
+    /// deriving it — forcing constraints (pin every variable of a row whose
+    /// activity range comes within [`ACTIVITY_TOL`] of touching its
+    /// right-hand side) and dominated columns (fix a variable at a bound on
+    /// sign conditions read off the rows the activity screen left live).
+    ///
+    /// Those two are singled out by *how* a wrong one fails. Every other
+    /// reduction drops a constraint, narrows a box, or rewrites a row — being
+    /// wrong loses a reduction. A wrong fixing instead substitutes a
+    /// fabricated value into every row the variable appears in, and the first
+    /// row that cannot absorb it reads as contradictory. That is the
+    /// mechanism behind gh #523, and the one an infeasibility verdict is
+    /// re-derived without; see [`presolve`].
+    NoSpeculativeFixings,
+}
+
+impl Catalog {
+    /// Whether the speculative fixings — forcing rows, dominated columns —
+    /// may run.
+    fn speculative_fixings(self) -> bool {
+        self == Catalog::Full
+    }
+}
+
+/// The fixpoint iteration itself, over the reductions `catalog` permits.
+fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog) -> PresolveOutcome {
     // Cap layers defensively; in practice it converges in a few. A round
     // can contribute two (the catalog pass and an aggregation), so this is
     // a bound on layers, not on rounds.
@@ -410,8 +579,8 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
     // so a no-op presolve still returns a usable handle.
     let mut passthrough: Option<Presolve> = None;
     loop {
-        let ps = match presolve_once(&current, &[]) {
-            PresolveOutcome::Infeasible => return PresolveOutcome::Infeasible,
+        let ps = match presolve_once(&current, &[], catalog) {
+            infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
             PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
             PresolveOutcome::Reduced(ps) => ps,
         };
@@ -463,6 +632,7 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         orig: prob.clone(),
         stack: Vec::new(),
         chain,
+        discarded_infeasibility: None,
     })
 }
 
@@ -492,6 +662,7 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
             plan: Box::new(plan),
         }],
         chain: Vec::new(),
+        discarded_infeasibility: None,
     })
 }
 
@@ -526,7 +697,22 @@ pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
         }
         row += d;
     }
-    presolve_once(prob, &protected_row)
+    // Same guard as [`presolve`] (gh #523): an infeasibility verdict is
+    // re-derived without the speculative fixings before it is emitted, and
+    // downgraded to that pass's reduction when it will not confirm.
+    match presolve_once(prob, &protected_row, Catalog::Full) {
+        PresolveOutcome::Infeasible(trigger) => {
+            match presolve_once(prob, &protected_row, Catalog::NoSpeculativeFixings) {
+                confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
+                PresolveOutcome::Reduced(mut ps) => {
+                    ps.discarded_infeasibility = Some(trigger);
+                    PresolveOutcome::Reduced(ps)
+                }
+                unbounded => unbounded,
+            }
+        }
+        other => other,
+    }
 }
 
 /// A single presolve pass (the reduction catalog applied once). [`presolve`]
@@ -541,7 +727,11 @@ pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
 /// columns, free-column singletons, fixed-variable substitution) apply
 /// regardless. Marked rows are never dropped, so the conic partition is
 /// recoverable from the kept rows.
-fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
+///
+/// `catalog` selects which reductions run: [`Catalog::NoSpeculativeFixings`]
+/// withholds the two that fix a variable at a tolerance-chosen value, leaving
+/// the pass unable to manufacture a contradiction that way (gh #523).
+fn presolve_once(prob: &QpProblem, soc_row: &[bool], catalog: Catalog) -> PresolveOutcome {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -551,8 +741,16 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     // front so an impossible bound is never mistaken for an *absent* one (the
     // normal one-sided `±∞` encoding, which stays feasible). See
     // [`QpProblem::bounds_admit_no_point`].
-    if prob.bounds_admit_no_point() {
-        return PresolveOutcome::Infeasible;
+    if let Some(k) = (0..n).find(|&i| prob.lb_of(i) >= BOUND_INF || prob.ub_of(i) <= -BOUND_INF) {
+        debug_assert!(prob.bounds_admit_no_point());
+        return infeasible(
+            "impossible variable bound",
+            format!(
+                "column {k} has lb={:e}, ub={:e}",
+                prob.lb_of(k),
+                prob.ub_of(k)
+            ),
+        );
     }
     let is_soc_row = |i: usize| soc_row.get(i).copied().unwrap_or(false);
     // A column is conic-coupled if it appears in any SOC inequality row.
@@ -614,7 +812,10 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         match eq_nnz[row] {
             0 => {
                 if prob.b[row] != 0.0 {
-                    return PresolveOutcome::Infeasible;
+                    return infeasible(
+                        "empty equality row",
+                        format!("equality row {row} is `0 = {:e}`", prob.b[row]),
+                    );
                 }
                 eq_dropped[row] = true;
             }
@@ -626,7 +827,15 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
                     if value < prob.lb_of(col) - BOUND_FEAS_TOL
                         || value > prob.ub_of(col) + BOUND_FEAS_TOL
                     {
-                        return PresolveOutcome::Infeasible;
+                        return infeasible(
+                            "singleton equality outside variable box",
+                            format!(
+                                "equality row {row} fixes column {col} to {value:e}, \
+                                 outside its box [{:e}, {:e}]",
+                                prob.lb_of(col),
+                                prob.ub_of(col)
+                            ),
+                        );
                     }
                     fixed[col] = Some(value);
                     eq_dropped[row] = true;
@@ -694,7 +903,10 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     for row in 0..m_ineq {
         if !is_soc_row(row) && ineq_nnz[row] == 0 {
             if prob.h[row] < 0.0 {
-                return PresolveOutcome::Infeasible;
+                return infeasible(
+                    "empty inequality row",
+                    format!("inequality row {row} is `0 <= {:e}`", prob.h[row]),
+                );
             }
             ineq_dropped[row] = true;
         }
@@ -719,7 +931,13 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         }
         let (amin, amax) = activity(&g_by_row[row], &eff_lb, &eff_ub);
         if amin > prob.h[row] + ACTIVITY_TOL {
-            return PresolveOutcome::Infeasible;
+            return infeasible(
+                "inequality activity above right-hand side",
+                format!(
+                    "inequality row {row}: min activity {amin:e} > h {:e}",
+                    prob.h[row]
+                ),
+            );
         }
         if amax <= prob.h[row] + ACTIVITY_TOL {
             ineq_dropped[row] = true;
@@ -736,7 +954,13 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         }
         let (amin, amax) = activity(&a_by_row[row], &eff_lb, &eff_ub);
         if prob.b[row] < amin - ACTIVITY_TOL || prob.b[row] > amax + ACTIVITY_TOL {
-            return PresolveOutcome::Infeasible;
+            return infeasible(
+                "equality right-hand side outside activity range",
+                format!(
+                    "equality row {row}: b {:e} outside [{amin:e}, {amax:e}]",
+                    prob.b[row]
+                ),
+            );
         }
     }
 
@@ -803,7 +1027,16 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         true
     };
 
-    for row in 0..m_ineq {
+    // A forcing pin is a speculative fixing, so a confirming pass withholds it
+    // (gh #523) — an empty range rather than a wrapper block, to keep the two
+    // loops below at their original indentation.
+    let (forcing_ineq, forcing_eq) = if catalog.speculative_fixings() {
+        (m_ineq, m_eq)
+    } else {
+        (0, 0)
+    };
+
+    for row in 0..forcing_ineq {
         if ineq_dropped[row] || is_soc_row(row) || g_by_row[row].is_empty() {
             continue;
         }
@@ -812,6 +1045,12 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         });
         if amin.is_finite()
             && (prob.h[row] - amin).abs() <= ACTIVITY_TOL
+            && forcing_pin_is_tight(
+                &g_by_row[row],
+                prob.h[row] - amin,
+                &|c| eff_lb_at(&fixed, c),
+                &|c| eff_ub_at(&fixed, c),
+            )
             && try_force(
                 &g_by_row[row],
                 row,
@@ -826,7 +1065,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         }
     }
 
-    for row in 0..m_eq {
+    for row in 0..forcing_eq {
         if eq_dropped[row] || a_by_row[row].len() < 2 {
             continue;
         }
@@ -834,9 +1073,16 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
             eff_ub_at(&fixed, c)
         });
         let b = prob.b[row];
-        let at_max = if amin.is_finite() && (b - amin).abs() <= ACTIVITY_TOL {
+        // Both vertices are candidates; each must clear the pin-tightness bar
+        // (gh #523) on its own gap before it may fix anything.
+        let tight = |gap: f64| {
+            forcing_pin_is_tight(&a_by_row[row], gap, &|c| eff_lb_at(&fixed, c), &|c| {
+                eff_ub_at(&fixed, c)
+            })
+        };
+        let at_max = if amin.is_finite() && (b - amin).abs() <= ACTIVITY_TOL && tight(b - amin) {
             Some(false)
-        } else if amax.is_finite() && (amax - b).abs() <= ACTIVITY_TOL {
+        } else if amax.is_finite() && (amax - b).abs() <= ACTIVITY_TOL && tight(amax - b) {
             Some(true)
         } else {
             None
@@ -867,7 +1113,11 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     // for the upper) make nonnegative — so the recovered dual is valid by
     // construction. This is PaPILO's dominated-column reduction, restricted
     // to the case with a clean, sign-guaranteed dual.
-    {
+    //
+    // It reads `ineq_dropped`, which the activity screen writes, so it can fix
+    // a variable at a bound that a row dropped as redundant would have
+    // forbidden: a speculative fixing, withheld by a confirming pass.
+    if catalog.speculative_fixings() {
         // Per-column G-coefficient sign summary over *live* inequality rows.
         let mut g_all_nonneg = vec![true; n];
         let mut g_all_nonpos = vec![true; n];
@@ -981,8 +1231,8 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
 
     // Tighten variable boxes from one row whose activity lies in `[lo, hi]`
     // (inequality `≤ h`: `lo = −∞, hi = h`; equality: `lo = hi = b`).
-    // `None` ⇒ a detected empty domain (infeasible); `Some(k)` ⇒ `k` bounds
-    // were tightened.
+    // `Err((col, lb, ub))` ⇒ a detected empty domain (infeasible), naming the
+    // column whose box crossed; `Ok(k)` ⇒ `k` bounds were tightened.
     let tighten_from_row = |entries: &[(usize, f64)],
                             lo: f64,
                             hi: f64,
@@ -992,7 +1242,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
                             tub: &mut [f64],
                             ub_src: &mut [Option<(usize, f64, bool)>],
                             lb_src: &mut [Option<(usize, f64, bool)>]|
-     -> Option<usize> {
+     -> Result<usize, (usize, f64, f64)> {
         // Row activity as a *finite part plus a count of infinite terms*,
         // rather than the plain sum [`activity`] returns.
         //
@@ -1100,10 +1350,10 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
                 tightened += 1;
             }
             if tlb[k] > tub[k] + BOUND_FEAS_TOL {
-                return None;
+                return Err((k, tlb[k], tub[k]));
             }
         }
-        Some(tightened)
+        Ok(tightened)
     };
 
     // A source row claims its columns (blocking overlapping sources, so the
@@ -1132,9 +1382,14 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
             &mut ub_src,
             &mut lb_src,
         ) {
-            None => return PresolveOutcome::Infeasible,
-            Some(0) => {}
-            Some(_) => {
+            Err((c, lo, hi)) => {
+                return infeasible(
+                    "bound tightening emptied a variable box",
+                    format!("inequality row {row} tightened column {c} to [{lo:e}, {hi:e}]"),
+                );
+            }
+            Ok(0) => {}
+            Ok(_) => {
                 for (c, up) in row_claims(&g_by_row[row], false) {
                     if up {
                         bt_used_upper[c] = true;
@@ -1164,9 +1419,14 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
             &mut ub_src,
             &mut lb_src,
         ) {
-            None => return PresolveOutcome::Infeasible,
-            Some(0) => {}
-            Some(_) => {
+            Err((c, lo, hi)) => {
+                return infeasible(
+                    "bound tightening emptied a variable box",
+                    format!("equality row {row} tightened column {c} to [{lo:e}, {hi:e}]"),
+                );
+            }
+            Ok(0) => {}
+            Ok(_) => {
                 for (c, up) in row_claims(&a_by_row[row], true) {
                     if up {
                         bt_used_upper[c] = true;
@@ -1303,7 +1563,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         &[],
     ) {
         Ok(rows) => rows,
-        Err(()) => return PresolveOutcome::Infeasible,
+        Err(trigger) => return PresolveOutcome::Infeasible(trigger),
     };
     let ineq_rows = match build_rows(
         &prob.g,
@@ -1316,12 +1576,12 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         soc_row,
     ) {
         Ok(rows) => rows,
-        Err(()) => return PresolveOutcome::Infeasible,
+        Err(trigger) => return PresolveOutcome::Infeasible(trigger),
     };
 
     let eq_rows = match dedup_rows(eq_rows, true, &[]) {
         Ok(rows) => rows,
-        Err(()) => return PresolveOutcome::Infeasible,
+        Err(trigger) => return PresolveOutcome::Infeasible(trigger),
     };
     // SOC rows are coupled and must survive verbatim — exclude them from
     // parallel/duplicate merging.
@@ -1389,6 +1649,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         orig: prob.clone(),
         stack,
         chain: Vec::new(),
+        discarded_infeasibility: None,
     })
 }
 
@@ -1396,7 +1657,8 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
 /// substituting fixed variables into the right-hand side. Rows that
 /// become empty after substitution trigger a feasibility check:
 /// `0 = rhs` (equality) requires `rhs ≈ 0`; `0 ≤ rhs` (inequality)
-/// requires `rhs ⪆ 0`. Returns `Err(())` on detected infeasibility.
+/// requires `rhs ⪆ 0`. Returns `Err` with the trigger on detected
+/// infeasibility.
 ///
 /// The residual `rhs` of an emptied row is `b − Σ aⱼ vⱼ`, a *computed*
 /// difference of terms of size up to [`Row::scale`], so it carries that
@@ -1414,7 +1676,7 @@ fn build_rows(
     col_new: &[usize],
     is_equality: bool,
     protected: &[bool],
-) -> Result<Vec<Row>, ()> {
+) -> Result<Vec<Row>, InfeasibleTrigger> {
     // A coupled cone row (second-order / exp / power / PSD) is kept verbatim
     // even when substitution empties its coefficients: an empty `G` row with
     // `s = h` is a legal cone slack (e.g. `h<0` is in `K_exp`), so it must
@@ -1465,12 +1727,25 @@ fn build_rows(
             // residual that is only meaningful down to the rounding error
             // of the substitution that produced it.
             let tol = EMPTY_ROW_TOL * (1.0 + row.scale);
-            if is_equality {
-                if row.rhs.abs() > tol {
-                    return Err(());
-                }
-            } else if row.rhs < -tol {
-                return Err(());
+            let kind = if is_equality {
+                "equality"
+            } else {
+                "inequality"
+            };
+            let violated = if is_equality {
+                row.rhs.abs() > tol
+            } else {
+                row.rhs < -tol
+            };
+            if violated {
+                return Err(InfeasibleTrigger {
+                    screen: "row emptied by substitution is inconsistent",
+                    detail: format!(
+                        "{kind} row {}: residual {:e} exceeds tolerance {tol:e} \
+                         (cancellation scale {:e})",
+                        row.orig, row.rhs, row.scale
+                    ),
+                });
             }
             // Feasible empty row: drop it (no coefficients, no dual).
             continue;
@@ -1559,7 +1834,11 @@ fn approx_parallel(a: &[(usize, f64)], b: &[(usize, f64)]) -> bool {
 /// - inequalities — positive multiples of one direction; keep the **most
 ///   restrictive** original row (smallest normalized rhs `h / |pivot|`)
 ///   and drop the looser ones, which it implies.
-fn dedup_rows(rows: Vec<Row>, is_equality: bool, protected: &[bool]) -> Result<Vec<Row>, ()> {
+fn dedup_rows(
+    rows: Vec<Row>,
+    is_equality: bool,
+    protected: &[bool],
+) -> Result<Vec<Row>, InfeasibleTrigger> {
     if rows.len() < 2 {
         return Ok(rows);
     }
@@ -1617,7 +1896,16 @@ fn dedup_rows(rows: Vec<Row>, is_equality: bool, protected: &[bool]) -> Result<V
                 let r0 = norm_rhs(group[0]);
                 for &g in &group[1..] {
                     if (norm_rhs(g) - r0).abs() > PARALLEL_TOL * (1.0 + r0.abs()) {
-                        return Err(());
+                        return Err(InfeasibleTrigger {
+                            screen: "parallel equalities disagree",
+                            detail: format!(
+                                "equality rows {} and {} are scalar multiples with \
+                                 normalized right-hand sides {r0:e} and {:e}",
+                                rows[group[0]].orig,
+                                rows[g].orig,
+                                norm_rhs(g)
+                            ),
+                        });
                     }
                 }
                 for &g in &group[1..] {
@@ -1682,6 +1970,20 @@ impl PresolveStats {
 }
 
 impl Presolve {
+    /// An infeasibility claim the full catalog raised that the confirming
+    /// re-derivation would not reproduce, so [`presolve`] discarded it and
+    /// returned this reduction instead (gh #523).
+    ///
+    /// `None` on every normal solve. When it is `Some`, presolve came within
+    /// one speculative fixing of answering `Infeasible_Problem_Detected` on a
+    /// problem it could not otherwise prove infeasible — worth surfacing,
+    /// because the guard turns that into a few lost eliminations rather than
+    /// a wrong answer, and nobody finds the underlying bug if the near-miss
+    /// is silent.
+    pub fn discarded_infeasibility(&self) -> Option<&InfeasibleTrigger> {
+        self.discarded_infeasibility.as_ref()
+    }
+
     /// The cone partition of the *reduced* inequality block, given the
     /// original `cones`. Walks the kept inequality rows (a cone-aware
     /// presolve never drops or reorders a second-order-cone block, so each
@@ -2097,7 +2399,7 @@ where
         iterates: Vec::new(),
     };
     match presolve(prob) {
-        PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),
+        PresolveOutcome::Infeasible(_) => trivial(QpStatus::PrimalInfeasible),
         PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
         PresolveOutcome::Reduced(ps) => {
             let red = solve(&ps.reduced);

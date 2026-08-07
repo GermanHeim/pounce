@@ -202,7 +202,7 @@ fn presolve_rejects_present_infinite_bound() {
         lb: vec![POS_INF],
         ub: vec![POS_INF],
     };
-    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible(_)));
 }
 
 /// Box-constrained LP: min −x0 − x1 with 0 ≤ x ≤ 1. Optimum (1, 1).

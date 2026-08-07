@@ -188,6 +188,39 @@ Two things this deliberately does **not** do:
 The aggregation shares its planner with the NLP path's Phase 6, so the
 two agree on what can be eliminated (see [NLP Presolve](./options.md)).
 
+### Infeasibility verdicts are re-derived before they are reported
+
+A presolve infeasibility comes back in milliseconds with no iteration
+behind it, so when it is wrong it is the most expensive answer the solver
+can give. Two reductions — forcing constraints and dominated columns —
+*fix a variable* at a value they choose from a tolerance judgment, and a
+fixing that is wrong is substituted into every row that variable appears
+in until some row reads as contradictory: a false infeasibility, reported
+against a row nowhere near the reduction that caused it.
+
+So presolve does not report an infeasibility on the strength of the pass
+that found it. It re-derives the verdict from your original model with
+those two reductions switched off, and reports `Infeasible_Problem_Detected`
+only if that pass reaches the same conclusion on its own. If it does not,
+the model is solved normally and presolve says so:
+
+```text
+Presolve: discarded an unconfirmed infeasibility claim — <screen> (<detail>); solving normally
+```
+
+A confirmed verdict now names the screen that proved it and the row,
+column, or bound it tripped on, rather than exiting silently:
+
+```text
+Presolve: proved primal infeasible — empty equality row (equality row 7 is `0 = 3e0`)
+```
+
+Nothing that only *reports* is withheld from the re-derivation — empty
+rows, activity ranges, parallel rows, and emptied-row residuals all still
+apply — so no infeasibility presolve could detect before goes undetected
+now. What the guard costs, in the rare case it fires, is a handful of
+eliminations.
+
 Presolve is on by default. Turn it off with `qp_presolve=no` (e.g. to
 compare timings or isolate a solver issue):
 

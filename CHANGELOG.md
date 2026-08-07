@@ -9,6 +9,56 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `pounce-convex` reported false `Infeasible_Problem_Detected` at iteration 0 on `bore3d` / `QBORE3D` (#523)
+
+- Netlib `bore3d` and its Maros-Mészáros quadratic twin `QBORE3D` (both
+  n=315, m=233, both feasible) came back from the convex path as
+  `Infeasible_Problem_Detected` in ~5 ms with `iters=0` and no diagnostic,
+  while the NLP path (`solver_selection=nlp`) solved both to the committed
+  Ipopt-MA57 reference objectives. They were the only non-matching failure
+  in the `lp` suite and the only one in the `qp` suite.
+- The claim came from presolve's **forcing-constraint** reduction. Bound
+  tightening propagated a group of nonnegative variables' upper bounds
+  geometrically toward their true limit of zero; by round 21 of the
+  presolve fixpoint those boxes were ~1e-8 wide, and one equality row's
+  activity range `[-6.29e-10, 4.87e-8]` came within `ACTIVITY_TOL` (1e-9)
+  of its right-hand side `0`. Forcing read that as "this row can hold only
+  at its min vertex" and pinned all six of its variables to bounds — two of
+  them, with coefficients `-1.14e-1` and `-5.7e-3`, to *upper* bounds
+  `4.8e-9` and `1.5e-8` from zero. A gap of `6.29e-10` had licensed a
+  displacement of `1.5e-8`. Substituted into the next row those two
+  appeared in, the residual was `2.0e-8` against a tolerance of `1.0e-9`,
+  and a feasible problem was declared infeasible.
+- **Forcing now requires the pin to be tight.** A row whose activity range
+  only *approximately* touches its right-hand side may still spend the
+  residual gap, moving each variable up to `gap / |coefⱼ|` (capped by its
+  box width) off the bound the pin claims it must occupy. Forcing fires
+  only when that displacement is within `FORCING_PIN_TOL` for **every**
+  variable in the row, so a pin is a deduction rather than a guess. A row
+  that genuinely touches (gap 0) is unaffected.
+- **An infeasibility verdict is now re-derived before it is emitted.**
+  Two reductions — forcing constraints and dominated columns — fix a
+  variable at a value chosen from a tolerance judgment, and a wrong one is
+  substituted into every row that variable touches until some row reads as
+  contradictory. When any screen reports infeasible, presolve re-runs from
+  the original problem with those two withheld; only a verdict that pass
+  reaches on its own is returned as `PrimalInfeasible`. Otherwise the
+  reduction is solved normally and the discarded claim is kept on the
+  handle (`Presolve::discarded_infeasibility`). Everything that only
+  *reports* — empty rows, activity ranges, parallel rows, emptied-row
+  residuals — is retained, so no infeasibility class detectable before is
+  lost. Verified: with the forcing fix reverted, the guard alone still
+  solves both problems to the reference objective.
+- **The screen that fired is now named.** `PresolveOutcome::Infeasible`
+  carries an `InfeasibleTrigger` (the screen plus the row / column / bound
+  and the compared values), and the CLI prints it — `Presolve: proved
+  primal infeasible — <screen> (<detail>)`, or `Presolve: discarded an
+  unconfirmed infeasibility claim — …; solving normally`. Previously even
+  `print_level=8` emitted nothing on the way out.
+- **Breaking (pounce-convex API):** `PresolveOutcome::Infeasible` is now a
+  tuple variant; `matches!(…, PresolveOutcome::Infeasible)` becomes
+  `PresolveOutcome::Infeasible(_)`.
+
 ### Fixed — tightening `constr_viol_tol` made POUNCE more likely to report local infeasibility (#519)
 
 - Rapid infeasibility detection counted an iterate toward its streak when

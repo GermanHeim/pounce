@@ -1,8 +1,10 @@
 # Termination-status invariants
 
-One invariant has now been violated at four independent sites, and each was
-fixed in isolation as if it were a one-off. It is written here so the fifth one
-gets recognised as a recurrence rather than rediscovered.
+One invariant has now been violated at five independent sites, and the first
+four were each fixed in isolation as if it were a one-off. It is written here
+so the next one gets recognised as a recurrence rather than rediscovered — the
+fifth (gh #523) was, and it turned up in a different subsystem, by a mechanism
+the first four do not share.
 
 ## The invariant
 
@@ -27,7 +29,7 @@ The comment on that guard is the point of this note:
 It was applied to restoration and never generalised. Two more holes followed,
 in two other files.
 
-## The four holes
+## The holes
 
 | # | site | mechanism | fixed |
 |---|---|---|---|
@@ -35,6 +37,7 @@ in two other files.
 | gh #385 / #390 | `conv_check` surrogate `‖Jᵀc‖/max(1,‖c‖)` | not scale-invariant; row scaling drives it to zero anywhere | no-descent confirmation |
 | gh #508 | `ipopt_alg.rs` cycle exit | violation compared against a threshold built from `tol` | 097a4719 |
 | gh #519 | `conv_check/opt_error.rs` rapid detector | violation compared against an unclamped `infeas_viol_kappa · constr_viol_tol` | PR #521, ef5d77e8 |
+| gh #523 | `pounce-convex/src/presolve.rs` forcing rows | a *reduction*, not a threshold: an approximate touch pinned variables far enough off to contradict another row | see below |
 
 Each was found by a different route, none by the guard that already existed.
 gh #505 came from an external reporter; gh #508 from an `/adversary` run
@@ -48,6 +51,70 @@ earlier hypothesis, was rescoped afterwards to the structural change it always
 should have been (below) and explicitly disclaims the fix. **The bug report and
 the defect are different objects; conflating them is what made #505 take four
 diagnoses to converge.**
+
+## The fifth hole is in a different subsystem (gh #523)
+
+The note above was written so a fifth instance would be recognised rather than
+rediscovered. It was — but not where the first four pointed. gh #523 is a false
+infeasibility from **presolve** in `pounce-convex`, not from the NLP
+termination path, and its mechanism is not a threshold at all.
+
+The four holes above are all one shape: *a violation compared against a
+threshold built from the wrong tolerance*. Audit the comparisons and you find
+them. gh #523 has no such comparison. Its screens were individually fine; the
+**state they screened** was wrong. Presolve's forcing reduction saw an equality
+row whose activity range `[-6.29e-10, 4.87e-8]` came within `ACTIVITY_TOL` of
+its right-hand side `0`, concluded the row could hold only at that vertex, and
+pinned six variables to bounds. Two of them, with coefficients `-1.14e-1` and
+`-5.7e-3`, went to *upper* bounds `4.8e-9` and `1.5e-8` from zero: a gap of
+`6.29e-10` licensed a displacement 24× larger, because the displacement a gap
+buys is `gap / |coef|`, not `gap`. Substituted forward, the next row those two
+appeared in read as inconsistent by `2.0e-8`, and presolve returned
+`Infeasible_Problem_Detected` in five milliseconds on a feasible LP.
+
+So the generalisation the earlier holes suggest — *audit every threshold* —
+would not have found this one. The generalisation that would is:
+
+> **A tolerance that gates a *model change* is not the same risk as one that
+> gates a *report*.** A wrong report is one wrong answer. A wrong model change
+> propagates: it substitutes a fabricated value into every row the variable
+> touches, and the failure surfaces somewhere else entirely, in a screen that
+> is behaving correctly on data that is not.
+
+Two of presolve's reductions have that shape — forcing constraints and
+dominated columns fix a variable at a value chosen from a tolerance judgment.
+Everything else in the catalog drops a constraint, narrows a box, or rewrites a
+row; being wrong there loses a reduction. The fix is in two layers, and the
+second is the one worth generalising:
+
+1. **Root cause.** Forcing now fires only when the residual gap is small enough
+   that *every* variable in the row lands within `FORCING_PIN_TOL` of the bound
+   it is pinned to — `min(gap / |coefⱼ|, widthⱼ) ≤ tol`, not `gap ≤ tol`.
+2. **Structural guard.** An infeasibility verdict is no longer emitted on the
+   strength of the pass that raised it. It is re-derived from the original
+   problem with those two reductions withheld, and only a verdict *that* pass
+   reaches on its own is returned. Otherwise the reduction is solved normally
+   and the discarded claim is kept on the handle so the near-miss is
+   reportable. A misfiring reduction now costs a few eliminations instead of
+   the answer.
+
+Layer 2 was verified to stand on its own: with layer 1 reverted, `bore3d` and
+`QBORE3D` still solve to the reference objectives, with the discarded claim
+reported. That is the property to want from every "confident fast answer" path
+— **the fast path must be checkable against a slower one that does not share
+its assumptions**, not merely correct.
+
+The reporting lesson from the last section of this note recurred verbatim:
+`print_level=8` emitted nothing on the way out, so a five-millisecond wrong
+answer had no trace at all. `PresolveOutcome::Infeasible` now carries the
+screen and the row/column/bound it tripped on, and the CLI prints it.
+
+Worth noting how the bug advertised itself and was ignored: the termination
+block printed alongside the false verdict reported a constraint violation of
+`1.79e+01` and dual infeasibility of `3.35e+02` at the returned point — i.e. a
+point that is neither feasible nor a certificate of anything. **A status block
+internally inconsistent with its own status is enforcement item 1 of this note,
+already written down, and it was printing.**
 
 ## Why gh #505 survived three releases
 

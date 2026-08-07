@@ -65,7 +65,7 @@ fn ulp_inconsistent_redundant_equalities_are_feasible() {
     assert!((x_from_row0 - x_from_row1).abs() < 1e-16);
 
     assert!(
-        !matches!(presolve(&prob), PresolveOutcome::Infeasible),
+        !matches!(presolve(&prob), PresolveOutcome::Infeasible(_)),
         "presolve wrongly certified infeasibility at 1 ULP (gh#496)"
     );
 
@@ -88,7 +88,7 @@ fn ulp_inconsistency_stays_feasible_under_scaling() {
     for s in [1e-3, 1.0, 1e3, 1e6] {
         let prob = two_row_lp(A0 * s, B0 * s, A1 * s, B1 * s);
         assert!(
-            !matches!(presolve(&prob), PresolveOutcome::Infeasible),
+            !matches!(presolve(&prob), PresolveOutcome::Infeasible(_)),
             "scale {s}: presolve wrongly certified infeasibility"
         );
         assert_eq!(with_presolve(&prob).status, QpStatus::Optimal, "scale {s}");
@@ -120,7 +120,7 @@ fn genuinely_inconsistent_equalities_still_infeasible() {
     for gap in [1e-6, 1e-3, 1.0, 100.0] {
         let prob = two_row_lp(A0, B0, A1, B1 - gap);
         assert!(
-            matches!(presolve(&prob), PresolveOutcome::Infeasible),
+            matches!(presolve(&prob), PresolveOutcome::Infeasible(_)),
             "gap {gap}: real conflict went undetected"
         );
         assert_eq!(
@@ -166,7 +166,7 @@ fn random_redundant_equalities_around_a_feasible_point() {
         let prob = two_row_lp(a0, a0 * x_star, a1, a1 * x_star);
 
         assert!(
-            !matches!(presolve(&prob), PresolveOutcome::Infeasible),
+            !matches!(presolve(&prob), PresolveOutcome::Infeasible(_)),
             "trial {trial}: a0={a0} a1={a1} x*={x_star} wrongly certified infeasible"
         );
         let sol = with_presolve(&prob);
@@ -223,7 +223,7 @@ fn ulp_violated_emptied_inequality_is_feasible() {
         ub: vec![10.0],
     };
     assert!(
-        !matches!(presolve(&prob), PresolveOutcome::Infeasible),
+        !matches!(presolve(&prob), PresolveOutcome::Infeasible(_)),
         "emptied inequality wrongly certified infeasible at 1 ULP"
     );
     assert_eq!(with_presolve(&prob).status, QpStatus::Optimal);

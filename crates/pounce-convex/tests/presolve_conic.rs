@@ -125,7 +125,7 @@ fn exp_cone_empty_row_negative_h_is_not_infeasible() {
             assert_eq!(ps.reduced.m_ineq(), 3, "exp block rows must all survive");
             assert_eq!(ps.reduced_cones(&cones), vec![ConeSpec::Exponential]);
         }
-        PresolveOutcome::Infeasible => {
+        PresolveOutcome::Infeasible(_) => {
             panic!("empty exp row with h<0 wrongly reported Infeasible (H9)")
         }
         PresolveOutcome::Unbounded => panic!("unexpected Unbounded"),
@@ -164,7 +164,7 @@ fn exp_cone_activity_redundant_row_not_dropped() {
         }
         other => panic!(
             "expected Reduced with 3 rows, got {}",
-            matches!(other, PresolveOutcome::Infeasible)
+            matches!(other, PresolveOutcome::Infeasible(_))
         ),
     }
 }
