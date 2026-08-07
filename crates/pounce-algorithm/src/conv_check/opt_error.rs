@@ -232,6 +232,42 @@ impl OptErrorConvCheck {
             && compl_inf <= self.compl_inf_tol
     }
 
+    /// The aggregate KKT error the **strict** gate judges against `tol`
+    /// (gh #528): [`IpoptCalculatedQuantities::curr_nlp_error_above_primal_noise`],
+    /// which is `nlp_err` with each constraint row's residual counted only
+    /// where it rises above what that row's residual can represent in floating
+    /// point.
+    ///
+    /// The primal term of the KKT error is the one term Ipopt leaves as a bare
+    /// absolute residual (the other two carry `s_d` / `s_c`), and it is
+    /// quantised in units of `eps ·` the rows' own magnitude. Once that quantum
+    /// exceeds `tol` — constraint values past `~4.5e7` at the `1e-8` default —
+    /// `nlp_err <= tol` stops being a statement about the iterate: it asks the
+    /// residual to land on an exact `0` rather than on one ulp, which is
+    /// arithmetic luck, and every iterate that misses keeps the solve running
+    /// at a point it cannot improve until the step collapses
+    /// (`Search_Direction_Becomes_Too_Small`, on LPs whose optimum POUNCE
+    /// already had to 8 significant figures).
+    ///
+    /// Only this gate reads the floored value. `constr_viol` is still tested
+    /// against `constr_viol_tol` on the full, unfloored residual, and the
+    /// scale-relative veto still sees it too — so the noise floor can never
+    /// admit a violation the user's own feasibility tolerance would reject, it
+    /// only stops an unrepresentable one from vetoing a certificate. The
+    /// acceptable-level band is deliberately left on the raw `nlp_err`: it sits
+    /// two decades above `tol`, far clear of any realistic quantum.
+    ///
+    /// A non-finite `nlp_err` is passed through untouched — `f64::min` returns
+    /// the *other* operand at `NaN`, which would launder exactly the
+    /// `Invalid_Number_Detected` signal gh #292 built `curr_nlp_error`'s
+    /// `has_valid_numbers` sweep to raise.
+    fn strict_overall(nlp_err: Number, above_primal_noise: Number) -> Number {
+        if !nlp_err.is_finite() {
+            return nlp_err;
+        }
+        nlp_err.min(above_primal_noise)
+    }
+
     /// Pure helper mirroring upstream
     /// `OptimalityErrorConvergenceCheck::CurrentIsAcceptable`. Tests
     /// the per-component `acceptable_*_tol` triplet plus the optional
@@ -489,6 +525,24 @@ impl ConvCheck for OptErrorConvCheck {
         let rel_viol = cq_ref.curr_relative_primal_infeasibility_max();
         let curr_f = cq_ref.curr_f();
         let unscaled_err = cq_ref.curr_unscaled_nlp_error();
+        // gh #528 — see `strict_overall`. Only the strict gate below reads
+        // this; `nlp_err` itself carries on to the acceptable-level band, the
+        // rapid-infeasibility pre-filter and everything downstream unchanged.
+        //
+        // Computed only on the iterations where it can change the verdict, so
+        // the two extra `compute_row_amax` sweeps stay off the hot path. The
+        // laziness is exact, not an approximation: below `tol` the floored
+        // value is smaller still and the gate passes either way, and with any
+        // component tolerance already blown `passes_component_tols` is false
+        // whatever the aggregate says.
+        let components_pass = dual_inf <= self.dual_inf_tol
+            && constr_viol <= self.constr_viol_tol
+            && compl_inf <= self.compl_inf_tol;
+        let strict_err = if nlp_err <= self.tol || !components_pass {
+            nlp_err
+        } else {
+            Self::strict_overall(nlp_err, cq_ref.curr_nlp_error_above_primal_noise())
+        };
         // The gate asks whether *our* scaling clamped, not how the user chose
         // to scale their objective — see `certificate_masked`.
         let obj_scale = cq_ref.computed_obj_scaling_factor();
@@ -553,7 +607,7 @@ impl ConvCheck for OptErrorConvCheck {
         // snapshot an arbitrary mid-solve iterate) on runs that were never
         // about to stop.
         let refusing_strict =
-            masked && self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf);
+            masked && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf);
         if refusing_strict && !self.veto_fired {
             self.veto_fired = true;
             tracing::info!(
@@ -566,7 +620,7 @@ impl ConvCheck for OptErrorConvCheck {
             );
         }
 
-        if !masked && self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf) {
+        if !masked && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf) {
             if rel_veto {
                 rel_veto_blocked = true;
                 if self.rel_infeas_extra_iters == 0 {
@@ -692,8 +746,12 @@ impl ConvCheck for OptErrorConvCheck {
         let dual_inf = cq_ref.curr_unscaled_dual_infeasibility_max();
         let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
+        // Same noise-floored aggregate the strict gate uses (gh #528) — this
+        // predicate exists to answer "would that gate have passed here?", so it
+        // has to ask the same question.
+        let strict_err = Self::strict_overall(nlp_err, cq_ref.curr_nlp_error_above_primal_noise());
         drop(cq_ref);
-        self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf)
+        self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf)
     }
 
     fn tol_or_default(&self) -> Number {
@@ -1299,6 +1357,35 @@ mod tests {
             assert!(!c.note_infeasible_stationary(1e9, 0.0, 0.0));
         }
         assert_eq!(c.infeas_streak, 0);
+    }
+
+    /// gh #528. The strict gate reads the noise-floored aggregate when that is
+    /// the smaller of the two, and is otherwise untouched — the floored value
+    /// can never *raise* the error.
+    #[test]
+    fn strict_overall_takes_the_noise_floored_aggregate() {
+        // The reported case: KKT error pinned one ulp of `|b| ~ 1e8` above
+        // `tol`, with the primal residual entirely inside its own resolution.
+        assert_eq!(
+            OptErrorConvCheck::strict_overall(1.49e-8, 9.09e-10),
+            9.09e-10
+        );
+        // Nothing at its resolution limit: the two agree and the gate is the
+        // upstream one, bit for bit.
+        assert_eq!(OptErrorConvCheck::strict_overall(1e-9, 1e-9), 1e-9);
+    }
+
+    /// A non-finite KKT error must survive the floor untouched. `f64::min`
+    /// returns the *other* operand at `NaN`, so a bare `min` would launder the
+    /// `Invalid_Number_Detected` signal `curr_nlp_error`'s `has_valid_numbers`
+    /// sweep exists to raise (gh #292).
+    #[test]
+    fn strict_overall_passes_a_non_finite_error_through() {
+        assert!(OptErrorConvCheck::strict_overall(Number::NAN, 1e-12).is_nan());
+        assert_eq!(
+            OptErrorConvCheck::strict_overall(Number::INFINITY, 1e-12),
+            Number::INFINITY
+        );
     }
 
     #[test]

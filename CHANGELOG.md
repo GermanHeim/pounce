@@ -9,6 +9,42 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — feasible, bounded LPs exited `Search_Direction_Becomes_Too_Small` once the data reached `~1e7` (#528)
+
+- On plain LPs with `O(1)` matrix entries but right-hand sides of magnitude
+  `~1e7` and above, the NLP filter-IPM exited code 3
+  (`Search_Direction_Becomes_Too_Small`) while *holding the correct
+  optimum* — matching scipy/HiGHS to eight significant figures. 9 of 48
+  runs in the reporter's sweep, none at `1e6`, more of them at `1e8`.
+- The KKT error the convergence test compares against `tol` is
+  `max(‖∇L‖_∞/s_d, max(‖c‖_∞, ‖d − s‖_∞), ‖compl‖_∞/s_c)`. The dual and
+  complementarity terms are normalised; the primal one is a bare absolute
+  residual — and `c_i` and `d_i − s_i` are each a difference of quantities
+  the row's own size, so they are quantised in units of `eps ·` that
+  magnitude. At `|b| ~ 1e8` the smallest **nonzero** value `‖d − s‖_∞` can
+  take is one ulp, `1.5e-8`, already above the default `tol = 1e-8`. So
+  `nlp_err <= tol` stopped being a statement about the iterate and became a
+  bet on the residual landing on an exact `0` rather than on one ulp —
+  which is why the failures were scattered across seeds instead of
+  uniform. An iterate that lost the bet could never certify, the solve kept
+  recomputing a point it could not improve, and it exited on the collapsed
+  search direction.
+- **The strict gate now judges the primal term against the finest residual
+  each row can represent**
+  (`IpoptCalculatedQuantities::curr_primal_infeasibility_above_noise`,
+  built on the same per-row `row_noise_floor` model #390 / #446 already use
+  to decide when a residual is too fine to be real). Only that gate reads
+  it: `constr_viol` is still tested against `constr_viol_tol` on the full,
+  unfloored residual, and the scale-relative feasibility veto still sees it
+  too — so the floor cannot admit a violation the user's own feasibility
+  tolerance would reject, it only stops an unrepresentable one from vetoing
+  a certificate. The acceptable-level band keeps the raw error.
+- The reporter's 48-run sweep now returns `Solve_Succeeded` on all 48, at
+  the scipy optimum; the same LP family solves cleanly out to a data scale
+  of `1e10`. Problems whose data is `O(1)` are bit-for-bit unchanged — no
+  row is anywhere near its resolution limit, so the floored aggregate and
+  the raw one are the same number.
+
 ### Fixed — `pounce-convex` reported false `Infeasible_Problem_Detected` at iteration 0 on `bore3d` / `QBORE3D` (#523)
 
 - Netlib `bore3d` and its Maros-Mészáros quadratic twin `QBORE3D` (both

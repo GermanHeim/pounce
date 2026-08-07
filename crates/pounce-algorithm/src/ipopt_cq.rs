@@ -117,6 +117,32 @@ pub fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
     }
 }
 
+/// `‖v‖_∞` over the components that clear their own entry of `floor`;
+/// components at or below it contribute `0`. Used by
+/// [`IpoptCalculatedQuantities::curr_primal_infeasibility_above_noise`], which
+/// documents what the floor means.
+///
+/// A vector that is not dense, is uninitialized, or whose length disagrees
+/// with `floor` falls back to the plain `‖v‖_∞` — no floor can be attributed
+/// component-wise, and over-reporting the residual is the safe direction.
+fn amax_above_floor(v: &dyn Vector, floor: &[Number]) -> Number {
+    let Some(d) = v.as_any().downcast_ref::<DenseVector>() else {
+        return v.amax();
+    };
+    if !d.is_initialized() {
+        return v.amax();
+    }
+    let values = d.expanded_values();
+    if values.len() != floor.len() {
+        return v.amax();
+    }
+    values
+        .iter()
+        .zip(floor.iter())
+        .map(|(&x, &f)| if x.abs() > f { x.abs() } else { 0.0 })
+        .fold(0.0, Number::max)
+}
+
 /// Result of [`IpoptCalculatedQuantities::adjusted_trial_bounds`]: the
 /// new `x_L / x_U / d_L / d_U` to install on the NLP when one or more
 /// trial slacks were corrected by the safe-slack mechanism.
@@ -1160,6 +1186,127 @@ impl IpoptCalculatedQuantities {
         )
     }
 
+    /// [`Self::curr_primal_infeasibility_max`] — `max(‖c‖_∞, ‖d − s‖_∞)` —
+    /// counting each row only where its residual rises above the finest value
+    /// that residual can take in floating point (gh #528).
+    ///
+    /// Both residuals are *differences of quantities the row's own size*:
+    /// `c_i = g_i(x) − b_i` and `d_i − s_i` with `s_i` confined to `d_i`'s
+    /// bounds. A difference of doubles of magnitude `m` is quantised in units
+    /// of `eps · m`, so no iterate can place either residual strictly between
+    /// `0` and `eps · m_i` — it lands on an exact `0` or on a multiple of the
+    /// quantum, and which of the two is arithmetic luck. Once `eps · m_i`
+    /// exceeds `tol` that luck decides whether a fully converged solve gets a
+    /// certificate: on gh #528's LPs (`|b| ~ 1e8`, so one ulp is `1.5e-8`
+    /// against the default `tol = 1e-8`) the KKT error was pinned one ulp
+    /// above the tolerance at the exact optimum, the solve kept iterating at a
+    /// point it could not improve, and it exited
+    /// `Search_Direction_Becomes_Too_Small` with the right answer in hand.
+    ///
+    /// The floor per row is the larger of two irreducible effects, both
+    /// carrying [`ROW_NOISE_KAPPA`] for the same reason
+    /// [`Self::row_noise_floor`] does (accumulation over the row's nonzeros
+    /// and the linear solve's conditioning):
+    ///
+    /// * **Placing `x`** — [`Self::row_noise_floor`], `eps · ‖x‖_∞` passed
+    ///   through the row at `max_j |∂g_i/∂x_j|`. A row whose Jacobian is
+    ///   empty gets `INFINITY` there, meaning "abstain", which is the safe
+    ///   direction for the *relative* measures that floor was written for and
+    ///   the unsafe one here — silencing a constant row `0 = b` would forgive
+    ///   a genuine infeasibility outright. Non-finite floors are therefore
+    ///   read as `0`: such a row is judged on its residual alone.
+    /// * **Forming the residual** — `eps · m_i`, with `m_i` the magnitude of
+    ///   the quantities subtracted: the declared right-hand side `|b_i|` on
+    ///   the equality block (the value `c_i` was formed against), and
+    ///   `max(|d_i|, |s_i|)` on the inequality block. A block with no declared
+    ///   magnitude to hand (the restoration NLP's `c`, whose rows are not the
+    ///   user's) contributes nothing here and is left to the placement floor.
+    ///
+    /// A row's residual is counted in full or not at all, matching how
+    /// [`Self::relative_c_infeasibility_max`] and
+    /// [`Self::relative_d_infeasibility_max`] use their floors: the question
+    /// is whether the row says anything, not how much of it to subtract.
+    pub fn curr_primal_infeasibility_above_noise(&self) -> Number {
+        let c = self.curr_c();
+        let dms = self.curr_d_minus_s();
+
+        let c_above = if c.dim() == 0 {
+            0.0
+        } else {
+            let mag = self
+                .nlp
+                .borrow()
+                .declared_c_rhs()
+                .map(|rhs| rhs.iter().map(|b| b.abs()).collect::<Vec<_>>());
+            let floor = self.primal_residual_noise_floor(
+                &*self.curr_jac_c(),
+                &*c,
+                mag.as_deref(),
+                c.dim() as usize,
+            );
+            amax_above_floor(&*c, &floor)
+        };
+
+        let d_above = if dms.dim() == 0 {
+            0.0
+        } else {
+            let d = self.curr_d();
+            let s = self.curr_iv().s;
+            let mag = match (
+                d.as_any().downcast_ref::<DenseVector>(),
+                s.as_any().downcast_ref::<DenseVector>(),
+            ) {
+                (Some(d), Some(s)) if d.is_initialized() && s.is_initialized() => {
+                    let (dv, sv) = (d.expanded_values(), s.expanded_values());
+                    (dv.len() == sv.len()).then(|| {
+                        dv.iter()
+                            .zip(&sv)
+                            .map(|(a, b)| a.abs().max(b.abs()))
+                            .collect::<Vec<_>>()
+                    })
+                }
+                _ => None,
+            };
+            let floor = self.primal_residual_noise_floor(
+                &*self.curr_jac_d(),
+                &*dms,
+                mag.as_deref(),
+                dms.dim() as usize,
+            );
+            amax_above_floor(&*dms, &floor)
+        };
+
+        c_above.max(d_above)
+    }
+
+    /// Per-row floor for [`Self::curr_primal_infeasibility_above_noise`]:
+    /// `max(placement floor, ROW_NOISE_KAPPA · eps · magnitude_i)`, with a
+    /// finite value on every row (`0` where nothing can be said, so that row
+    /// is judged on its residual alone). See that method for the derivation.
+    fn primal_residual_noise_floor(
+        &self,
+        jac: &dyn Matrix,
+        residual: &dyn Vector,
+        magnitude: Option<&[Number]>,
+        dim: usize,
+    ) -> Vec<Number> {
+        let placement = self.row_noise_floor(jac, residual);
+        let finite_or_zero = |v: Number| if v.is_finite() && v > 0.0 { v } else { 0.0 };
+        (0..dim)
+            .map(|i| {
+                let from_placement = placement
+                    .as_ref()
+                    .and_then(|p| p.get(i))
+                    .copied()
+                    .unwrap_or(0.0);
+                let from_formation = magnitude
+                    .and_then(|m| m.get(i))
+                    .map_or(0.0, |&m| ROW_NOISE_KAPPA * Number::EPSILON * m);
+                finite_or_zero(from_placement).max(finite_or_zero(from_formation))
+            })
+            .collect()
+    }
+
     /// The inequality-block half of
     /// [`Self::curr_relative_primal_infeasibility_max`]:
     /// `max_i |d_i − s_i| / max(|d_i|, |d_l_i|, |d_u_i|)`.
@@ -1846,6 +1993,33 @@ impl IpoptCalculatedQuantities {
     /// Uses `mu_target = 0` (the unbarriered KKT residual). The
     /// barriered variant is `curr_barrier_error` (TODO in Phase 7).
     pub fn curr_nlp_error(&self) -> Number {
+        self.nlp_error(false)
+    }
+
+    /// [`Self::curr_nlp_error`] with the primal-infeasibility term replaced by
+    /// [`Self::curr_primal_infeasibility_above_noise`] — i.e. counting a
+    /// constraint row's residual only where it rises above the finest value
+    /// that row's residual can take in floating point (gh #528).
+    ///
+    /// Never larger than [`Self::curr_nlp_error`], and equal to it whenever no
+    /// row is at its own resolution limit — which is every problem whose data
+    /// is `O(1)`, so the common path is unchanged. It exists because the other
+    /// two terms of the KKT error are already normalised (`s_d`, `s_c`) while
+    /// the primal one is a bare absolute residual: `‖c‖_∞` and `‖d − s‖_∞` are
+    /// quantised in units of `eps ·` the rows' own magnitude, so on a model
+    /// whose constraint values reach `~1e8` the smallest *nonzero* value the
+    /// term can take already exceeds the default `tol = 1e-8`. Judging that
+    /// term absolutely there asks for a residual no iterate can represent.
+    ///
+    /// Read only by the **strict** convergence gate, which pairs it with the
+    /// unscaled `constr_viol_tol` test on the full, unfloored residual — so
+    /// what this admits is bounded by the user's own feasibility tolerance,
+    /// never by the noise floor alone.
+    pub fn curr_nlp_error_above_primal_noise(&self) -> Number {
+        self.nlp_error(true)
+    }
+
+    fn nlp_error(&self, above_primal_noise: bool) -> Number {
         let iv = self.curr_iv();
         let (s_d, s_c) = self.optimality_error_scaling(&iv);
 
@@ -1884,7 +2058,11 @@ impl IpoptCalculatedQuantities {
         }
 
         let dual = glx.amax().max(gls.amax()) / s_d;
-        let primal = c.amax().max(dms.amax());
+        let primal = if above_primal_noise {
+            self.curr_primal_infeasibility_above_noise()
+        } else {
+            c.amax().max(dms.amax())
+        };
         let compl = cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()) / s_c;
 
         dual.max(primal).max(compl)
@@ -3170,5 +3348,43 @@ mod tests {
             .max(cq.curr_unscaled_primal_infeasibility_max())
             .max(cq.curr_unscaled_complementarity_max());
         assert_eq!(cq.curr_unscaled_nlp_error(), expected);
+    }
+
+    /// gh #528. A component at or below its own floor drops out; everything
+    /// above it is counted in full, not net of the floor — the question the
+    /// floor answers is whether the row says anything at all.
+    #[test]
+    fn amax_above_floor_drops_only_sub_floor_components() {
+        let v = dvec(&[1e-9, -3e-7, 5e-3]);
+        assert_eq!(amax_above_floor(&v, &[1e-8, 1e-8, 1e-8]), 5e-3);
+        // The largest component is the only one under its floor: the max comes
+        // from what remains, not from the vector's own `amax`.
+        assert_eq!(amax_above_floor(&v, &[1e-8, 1e-8, 1.0]), 3e-7);
+        // Everything silenced.
+        assert_eq!(amax_above_floor(&v, &[1.0, 1.0, 1.0]), 0.0);
+        // Exactly at the floor is silenced (`>`, not `>=`).
+        assert_eq!(amax_above_floor(&dvec(&[1e-8]), &[1e-8]), 0.0);
+    }
+
+    /// A floor that cannot be attributed component-wise must not silence
+    /// anything: over-reporting the residual is the safe direction.
+    #[test]
+    fn amax_above_floor_falls_back_on_a_length_mismatch() {
+        let v = dvec(&[1e-9, -3e-7]);
+        assert_eq!(amax_above_floor(&v, &[1.0]), 3e-7);
+        assert_eq!(amax_above_floor(&v, &[]), 3e-7);
+    }
+
+    /// The floored aggregate is never larger than the raw one, and on a
+    /// fixture whose residuals (`c = 4`, `d − s = −2`) are nowhere near any
+    /// resolution limit the two are identical — the common path is untouched.
+    #[test]
+    fn nlp_error_above_primal_noise_matches_on_ordinary_residuals() {
+        let cq = fixture_with(MockNlp::new());
+        assert_eq!(
+            cq.curr_primal_infeasibility_above_noise(),
+            cq.curr_primal_infeasibility_max()
+        );
+        assert_eq!(cq.curr_nlp_error_above_primal_noise(), cq.curr_nlp_error());
     }
 }
