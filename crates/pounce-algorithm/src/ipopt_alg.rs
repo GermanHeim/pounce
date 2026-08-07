@@ -2847,6 +2847,18 @@ impl IpoptAlgorithm {
         }
         match outcome {
             RestorationOutcome::Recovered => {
+                // Mirror upstream `IpBacktrackingLineSearch.cpp:624-631`:
+                // a successful restoration clears the line search's
+                // cross-iteration globalization counters. Upstream runs
+                // restoration inside `FindAcceptableTrialPoint` so those
+                // assignments are inline; pounce runs it here, so the
+                // reset has to be driven from here. Without it
+                // `watchdog_shortened_iter` survives a restoration
+                // episode and runs of shortened steps on either side of
+                // one accumulate as if consecutive, arming the watchdog
+                // where upstream would not. See
+                // `BacktrackingLineSearch::reset_after_restoration`.
+                self.bundle.line_search.reset_after_restoration();
                 // The driver has staged the recovered point on
                 // `data.trial`; apply the safe-slack bound adjustment
                 // (as the main accept path does), then promote it and

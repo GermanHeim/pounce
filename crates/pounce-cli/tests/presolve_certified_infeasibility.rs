@@ -228,11 +228,19 @@ fn both_paths_stay_in_the_ampl_infeasible_band() {
     }
 }
 
-/// A proof is not something a different matrix scaling can overturn, so the
-/// MC64 re-solve guard — which exists to second-guess a *numerical* local
-/// infeasibility — must not fire and burn a second solve.
+/// A proof is not something a different matrix scaling or a different barrier
+/// trajectory can overturn, so the local-infeasibility second-opinion ladder —
+/// which exists to second-guess a *numerical* local infeasibility — must not
+/// fire and burn extra solves.
+///
+/// Detected off the ladder's announcement line, which is emitted once before
+/// any rung runs, so this stays a real guard as rungs are added or renamed.
+/// An earlier version matched the literal "re-solving once with MC64"; when
+/// gh #524 turned the single retry into a ladder and reworded that message, the
+/// negative assertion went vacuously true and would have stopped guarding
+/// anything silently — the one failure mode a `!contains` test has.
 #[test]
-fn certified_infeasibility_skips_the_mc64_second_opinion() {
+fn certified_infeasibility_skips_the_second_opinion_ladder() {
     let sol = std::env::temp_dir().join("pounce_presolve_cert_mc64.sol");
     let _ = std::fs::remove_file(&sol);
     let out = Command::new(pounce_exe())
@@ -251,9 +259,10 @@ fn certified_infeasibility_skips_the_mc64_second_opinion() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !combined.contains("re-solving once with MC64"),
-        "the MC64 second-opinion retry re-derives a verdict that scaling \
-         cannot affect; it must be skipped for a proof:\n{combined}"
+        !combined.contains("second-opinion ladder"),
+        "the second-opinion ladder re-derives a verdict that neither scaling \
+         nor the barrier strategy can affect; it must be skipped for a \
+         proof:\n{combined}"
     );
 }
 
