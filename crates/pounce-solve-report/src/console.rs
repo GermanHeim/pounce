@@ -507,6 +507,26 @@ pub fn print_summary(
         stats.final_kkt_error,
         stats.final_unscaled_kkt_error,
     );
+    // gh #528. The strict gate judges the primal term against what each row
+    // can actually represent in floating point, so on a model whose constraint
+    // values run to `~1e8` the raw error above can sit above `tol` beside an
+    // `EXIT: Optimal Solution Found`. Print the number that was tested, but
+    // only when it differs — every `O(1)` model, and every run with the floor
+    // switched off, keeps the summary block byte-identical to upstream's.
+    if stats.final_kkt_error_above_noise.is_finite()
+        && stats.final_kkt_error.is_finite()
+        && stats.final_kkt_error_above_noise != stats.final_kkt_error
+    {
+        println!(
+            "  ...above the per-row floating-point noise floor:   {}",
+            fmt_ipopt(stats.final_kkt_error_above_noise),
+        );
+        println!(
+            "  (the strict convergence test judges this value; the residual \
+             below it is finer than the row's own arithmetic can resolve. \
+             Set primal_noise_floor_kappa = 0 to disable.)"
+        );
+    }
     println!();
     println!();
     println!(
