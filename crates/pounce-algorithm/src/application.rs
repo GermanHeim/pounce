@@ -3238,6 +3238,15 @@ impl IpoptApplication {
         if let Some(v) = read_num("theta_max_row_scale_kappa") {
             builder.line_search.theta_max_row_scale_kappa = v;
         }
+        if let Some(v) = read_int("theta_max_adaptive_trigger") {
+            builder.line_search.theta_max_adaptive_trigger = v.max(0) as u32;
+        }
+        if let Some(v) = read_num("theta_max_adaptive_factor") {
+            builder.line_search.theta_max_adaptive_factor = v;
+        }
+        if let Some(v) = read_int("theta_max_adaptive_max_raises") {
+            builder.line_search.theta_max_adaptive_max_raises = v.max(0) as u32;
+        }
         if let Some(v) = read_num("theta_max_fact") {
             builder.line_search.theta_max_fact = v;
         }

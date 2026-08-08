@@ -9,6 +9,91 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the filter's `theta_max` ceiling is now raised on demand instead of blocking a solve forever (#476, #546)
+
+The filter rejects any trial iterate whose constraint violation exceeds
+
+```
+theta_max = theta_max_fact · max(1, θ₀)          (Wächter–Biegler Eqn. 21)
+```
+
+outright, before its usual tests run. The `1` in that `max` is
+dimensionally wrong for POUNCE: `θ` is a **1-norm over constraint rows**
+(`‖c‖₁ + ‖d − s‖₁`), a *sum* of `m` residuals, so a fixed ceiling means a
+mean per-row allowance of `theta_max/m` that shrinks as the model grows.
+On a model started at a **feasible** point (`θ₀ = 0`) the `max` collapses
+entirely and the ceiling is the bare constant `1e4` however large the
+model is. `robot_a` (52 013 rows, feasible start) has to pass through
+`θ ≈ 9.4e7` to reach its optimum, so every productive step was refused at
+the gate and the solve ran to its iteration limit at objective `14.23`.
+
+**What is new: `theta_max_adaptive_trigger` (default `3`).** POUNCE now
+measures whether the gate is what is refusing the line search instead of
+guessing from problem size. A trial refused because `θ_trial > theta_max`
+takes a distinct early exit, so the acceptor counts those and compares
+against the trials attempted. When **every** trial of a line search was
+refused at the gate, for this many consecutive line searches, the ceiling
+is multiplied by `theta_max_adaptive_factor` (default `100`), at most
+`theta_max_adaptive_max_raises` times per solve (default `4`).
+
+| model | before | after |
+|---|---|---|
+| `robot_a` | `Maximum_Iterations_Exceeded`, 14.23 | **Optimal**, 1.0432009, 190 it |
+| `robot_b` | max time, 15.484684 | **Optimal**, 2.3330990, 269 it |
+| `robot_c` | max time, 29.039906 | **Optimal**, 1.4059756, 222 it |
+
+**Nothing that was converging changes.** A converging model is accepting
+steps and therefore not being refused at the gate, so it never accumulates
+the streak. `brainpc1/3/5/7` and `bt4` — the models that #545's static
+row-count floor regressed at every `kappa` tried — are bit-for-bit
+unchanged (64 / 43 / 982 / 43 iterations; `bt4` 9 iterations at
+`−3.7047681836394486`). That is a property of the design rather than of a
+chosen constant, which is exactly what the static floor could not offer:
+it asked "does this model have many rows?", a proxy, and a kappa scan
+showed the proxy was wrong with no separating value.
+
+Requiring a *streak* rather than one line search is deliberate — a single
+overshooting Newton direction can legitimately have all of its trials
+refused, and backtracking is the correct response. The raise cap is what
+keeps `theta_max` finite, which is what Wächter–Biegler's global
+convergence argument (Thm. 2) needs; it needs the ceiling finite, not
+fixed, so a solve cannot ratchet the safeguard away one line search at a
+time.
+
+Set `theta_max_adaptive_trigger = 0` for upstream Ipopt's fixed ceiling
+exactly. The restoration sub-IPM always runs with the rule disabled, since
+upstream already corrects the resto phase's instance of this degeneracy by
+hard-coding `resto.theta_max_fact = 1e8` (`IpRestoMinC_1Nrm.cpp:91`).
+
+`theta_max_row_scale_kappa` (#545) is unchanged and still defaults to `0`.
+
+**Full Vanderbei sweep (733 problems), against `main` on the same
+machine: 702 → 703 `Optimal`, and four problems move.**
+
+| model | main | with the rule |
+|---|---|---|
+| `britgas` | `Maximum_Iterations_Exceeded`, 3000 it, 13943.55 | **`Optimal`, 16 it, −1.59e-07** |
+| `catenary` | `Optimal`, 56 it | `Optimal`, **50 it**, same objective to all 16 digits |
+| `coshfun` | `Error_In_Step_Computation`, 677 it | `Diverging_Iterates`, 1022 it, −6.6e10 |
+| `brainpc0` | max_iter, 0.37934 | max_iter, 0.35545 |
+
+`coshfun` is not a regression: it fails either way, and Ipopt 3.14 runs it
+to `Maximum_Iterations_Exceeded` at −1.17e11, so "iterates diverging,
+problem might be unbounded" is the more accurate diagnosis of the same
+underlying behaviour. `brainpc0` fails either way too, at a better
+objective. `catenary` matches Ipopt's answer exactly
+(`−348403.1570810291`) in both columns.
+
+`drcav3lq` and `drcavty3` also show small iteration-count differences, but
+the rule never fires on either (verified directly) — both are
+CPU-time-limited, so that is wall-clock noise, not a behaviour change.
+
+Note `brainpc0` *is* gate-blocked and does trip the rule, while
+`brainpc1/3/5/7` do not. That is the distinction the static row-count
+floor could not draw: all five have the same row count.
+
+
+
 ### Added — per-variable scaling reaches the solver
 
 - `nlp_scaling_method=user-scaling` now applies per-variable

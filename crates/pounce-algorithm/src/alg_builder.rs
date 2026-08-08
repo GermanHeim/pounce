@@ -597,6 +597,17 @@ pub struct LineSearchOptions {
     /// that stalls from a feasible start. See
     /// [`FilterLsAcceptor::theta_max_row_scale_kappa`].
     pub theta_max_row_scale_kappa: Number,
+    /// `theta_max_adaptive_trigger` — consecutive line searches whose
+    /// every trial was refused at the `theta_max` gate before the
+    /// ceiling is raised. `0` disables the rule. See
+    /// [`FilterLsAcceptor::theta_max_adaptive_trigger`] (pounce#546).
+    pub theta_max_adaptive_trigger: u32,
+    /// Geometric factor applied to `theta_max` on each adaptive raise.
+    /// See [`FilterLsAcceptor::theta_max_adaptive_factor`].
+    pub theta_max_adaptive_factor: Number,
+    /// Cap on adaptive raises per solve, which is what keeps `theta_max`
+    /// finite. See [`FilterLsAcceptor::theta_max_adaptive_max_raises`].
+    pub theta_max_adaptive_max_raises: u32,
     /// `gamma_phi` — filter margin factor for the barrier function
     /// (Eqn. (18a)).
     pub gamma_phi: Number,
@@ -648,6 +659,9 @@ impl Default for LineSearchOptions {
             theta_min_fact: 1e-4,
             theta_max_fact: 1e4,
             theta_max_row_scale_kappa: 0.0,
+            theta_max_adaptive_trigger: 3,
+            theta_max_adaptive_factor: 100.0,
+            theta_max_adaptive_max_raises: 4,
             gamma_phi: 1e-8,
             gamma_theta: 1e-5,
             s_phi: 2.3,
@@ -1061,6 +1075,9 @@ impl AlgorithmBuilder {
                 f.theta_min_fact = self.line_search.theta_min_fact;
                 f.theta_max_fact = self.line_search.theta_max_fact;
                 f.theta_max_row_scale_kappa = self.line_search.theta_max_row_scale_kappa;
+                f.theta_max_adaptive_trigger = self.line_search.theta_max_adaptive_trigger;
+                f.theta_max_adaptive_factor = self.line_search.theta_max_adaptive_factor;
+                f.theta_max_adaptive_max_raises = self.line_search.theta_max_adaptive_max_raises;
                 f.gamma_phi = self.line_search.gamma_phi;
                 f.gamma_theta = self.line_search.gamma_theta;
                 f.s_phi = self.line_search.s_phi;

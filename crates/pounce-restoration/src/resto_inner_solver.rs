@@ -406,6 +406,17 @@ pub fn run_inner_resto(
         .line_search
         .acceptor_mut()
         .set_theta_max_row_scale_kappa(0.0);
+    // ...and out of the adaptive ceiling (`theta_max_adaptive_trigger`,
+    // pounce#546) for the same reason. That rule raises `theta_max` when
+    // the gate is demonstrably what is refusing the line search, which
+    // is the right question for the outer phase. Here the ceiling is
+    // already `1e8` by upstream's own hand, so a rule that ratchets it
+    // further would be compounding a correction that has already been
+    // made. The resto sub-IPM stays bit-for-bit upstream.
+    alg_bundle
+        .line_search
+        .acceptor_mut()
+        .set_theta_max_adaptive_trigger(0);
 
     // Replace the inner-bundle mu update with a resto-configured fresh
     // copy. Upstream `IpAlgBuilder.cpp:929` looks up
