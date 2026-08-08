@@ -14,16 +14,18 @@ Three things are pinned here.
 2. **It reaches the solver on both paths** — the ASL/subprocess path
    through the writer's `.nl` suffix segments, and the in-process
    sensitivity path through `Problem.set_problem_scaling`.
-3. **Nothing it cannot honor is dropped quietly**: a per-variable
-   factor raises, and a `user-scaling` request with no Suffix to apply
-   warns.
+3. **Nothing it cannot honor is dropped quietly**: a `user-scaling`
+   request with no Suffix to apply warns.
 
 The sensitivity accessors get their own axis. `natural_units_conj`
-already translates `df` / `dc` / `dd` back to model units for any
-scaling method, so user scaling *should* be invisible to every
-accessor — but that is the kind of claim worth proving rather than
-assuming, so each one is checked against the same quantity computed
-with no scaling engaged.
+translates `df` / `dc` / `dd` — and, since gh #486 stage 3, the
+per-variable factors — back to model units for any scaling method, so
+user scaling *should* be invisible to every accessor. That is the kind
+of claim worth proving rather than assuming, so each one is checked
+against the same quantity computed with no scaling engaged. Variable
+factors get the same treatment on their own axis (`solve_pair(x_scale=…)`):
+stages 1 and 2 refused those queries, and what replaces the refusal is
+not "it runs" but "it agrees with the unscaled answer".
 """
 import warnings
 
@@ -45,7 +47,6 @@ from pyomo_pounce import (
     retain_kkt,
 )
 from pyomo_pounce.scaling import (
-    check_no_variable_scaling,
     problem_scaling,
     read_scaling,
     user_scaling_requested,
@@ -147,14 +148,18 @@ def test_user_scaling_requested_reads_the_option():
     assert not user_scaling_requested(None)
 
 
+COLS = ["x[1]", "x[2]"]
+
+
 def test_problem_scaling_builds_dense_row_vectors():
     # Untagged rows stay at 1.0, and a tagged constraint the solve does
     # not have a row for is skipped rather than mis-indexed.
     m = tagged_model(o=100.0, c1=10.0)
-    obj, g = problem_scaling(m, ["c1", "c2"], {})
+    obj, g, x = problem_scaling(m, ["c1", "c2"], {}, COLS)
     assert obj == 100.0
     assert g == [10.0, 1.0]
-    obj, g = problem_scaling(m, ["c2"], {})
+    assert x is None, "no variable entry means no change of variables"
+    obj, g, x = problem_scaling(m, ["c2"], {}, COLS)
     assert g == [1.0]
 
 
@@ -162,29 +167,30 @@ def test_problem_scaling_follows_the_surgery_alias():
     # The declared-parameter surgery renames replaced rows on the clone
     # that is actually solved; the Suffix is keyed by the original.
     m = tagged_model(c1=10.0)
-    obj, g = problem_scaling(m, ["_pounce.c1", "c2"], {"c1": "_pounce.c1"})
+    obj, g, _ = problem_scaling(m, ["_pounce.c1", "c2"],
+                                {"c1": "_pounce.c1"}, COLS)
     assert g == [10.0, 1.0]
 
 
-# ── refusals and warnings ────────────────────────────────────────────────────
-
-def test_variable_factor_raises():
-    with pytest.raises(ValueError, match="variable"):
-        check_no_variable_scaling(tagged_model(o=100.0, x1=3.0))
-
-
-def test_variable_factor_error_names_the_variables_and_the_issue():
-    with pytest.raises(ValueError) as exc:
-        check_no_variable_scaling(tagged_model(x1=3.0, x2=0.5))
-    msg = str(exc.value)
-    assert "x[1]" in msg and "x[2]" in msg
-    assert "486" in msg, "the guard now points at the sensitivity stage"
+def test_problem_scaling_builds_the_variable_vector():
+    # gh #486 stage 3: variable entries are translated for the
+    # in-process path too, dense and in `.col` order, so the column a
+    # factor lands on is the one the Suffix named.
+    m = tagged_model(o=100.0, x2=0.25)
+    _, _, x = problem_scaling(m, ["c1", "c2"], {}, COLS)
+    assert x == [1.0, 0.25]
 
 
-def test_unit_variable_factor_is_not_a_request():
-    # 1.0 asks for nothing; failing a solve over it would be noise.
-    check_no_variable_scaling(tagged_model(o=100.0, x1=1.0))
+def test_problem_scaling_skips_a_variable_with_no_column():
+    # A component the written model has no column for is not a column
+    # pounce could rescale -- the same rule the rows follow, and the
+    # alternative is a silently mis-indexed factor.
+    m = tagged_model(x1=3.0)
+    _, _, x = problem_scaling(m, ["c1", "c2"], {}, ["x[2]"])
+    assert x is None
 
+
+# ── warnings ─────────────────────────────────────────────────────────────────
 
 def test_solve_applies_a_variable_factor():
     # gh #486 stage 2 inverted this: the core applies variable factors
@@ -252,11 +258,16 @@ def linear_data():
     return x, y, np.column_stack([np.ones(N), x])
 
 
-def linear_model(x, y, scale=None, dead=False, param=False):
+def linear_model(x, y, scale=None, x_scale=None, dead=False, param=False):
     """`min sum r_i^2` with `r_i == y_i - a - b x_i`: the estimation
     fixture the covariance/information tests use, optionally tagged
     with a `scaling_factor` Suffix, optionally carrying an inert fixed
-    variable, optionally with a declared sensitivity parameter."""
+    variable, optionally with a declared sensitivity parameter.
+
+    `scale` is the `(objective, constraint)` pair; `x_scale` is a
+    `{'a': 4.0, 'b': 1e-2, 'r': 25.0}`-shaped mapping of per-variable
+    factors, which needs `scale` set too (the Suffix is created there).
+    """
     m = pyo.ConcreteModel()
     m.I = pyo.RangeSet(0, len(x) - 1)
     m.a = pyo.Var(initialize=0.0)
@@ -289,15 +300,22 @@ def linear_model(x, y, scale=None, dead=False, param=False):
         m.scaling_factor[m.obj] = obj_s
         for i in m.I:
             m.scaling_factor[m.res[i]] = con_s
+        for name, factor in (x_scale or {}).items():
+            comp = getattr(m, name)
+            for vd in (comp.values() if comp.is_indexed() else [comp]):
+                m.scaling_factor[vd] = factor
     return m
 
 
-def solve_pair(**kwargs):
+def solve_pair(x_scale=None, **kwargs):
     """The same estimation model solved twice — user scaling engaged,
     and no scaling at all — so every accessor can be compared against
-    unscaled ground truth."""
+    unscaled ground truth. `x_scale` adds a change of variables to the
+    scaled arm (gh #486 stage 3); the unscaled arm never gets one, so
+    every comparison below is scaled-against-plain, never
+    scaled-against-scaled."""
     x, y, X = linear_data()
-    scaled = linear_model(x, y, scale=(1e-3, 50.0), **kwargs)
+    scaled = linear_model(x, y, scale=(1e-3, 50.0), x_scale=x_scale, **kwargs)
     pyo.SolverFactory("pounce").solve(scaled, options=dict(USER_SCALING))
     plain = linear_model(x, y, **kwargs)
     pyo.SolverFactory("pounce").solve(plain)
@@ -306,37 +324,6 @@ def solve_pair(**kwargs):
 
 def session_scaling(m):
     return m.__dict__["_pounce_sens"].session.solver.nlp_scaling
-
-
-def test_a_variable_scaled_solve_runs_but_its_accessors_refuse():
-    # The refusal belongs at the ACCESSORS, not the solve. A declared
-    # model may want the scaled solve and never ask a sensitivity
-    # question, and blocking the solve would deny it that for no
-    # reason. What cannot be answered is a query against the held
-    # factorization, which is the scaled problem's (gh #486 stage 3).
-    x, y, _ = linear_data()
-    m = linear_model(x, y, scale=(1e-3, 50.0))
-    m.scaling_factor[m.a] = 4.0
-    res = pyo.SolverFactory("pounce").solve(m, options=dict(USER_SCALING))
-    assert res.solver.termination_condition == TerminationCondition.optimal
-
-    for call in (
-        lambda: covariance(m),
-        lambda: information(m),
-        lambda: gradient(m.a, wrt=m.p) if hasattr(m, "p") else _skip(),
-    ):
-        try:
-            call()
-        except RuntimeError as e:
-            assert "486" in str(e), f"wrong error: {e}"
-        except (AttributeError, TypeError, NameError):
-            pass  # accessor not applicable to this fixture
-        else:
-            raise AssertionError("accessor answered from a scaled factor")
-
-
-def _skip():
-    raise TypeError("not applicable")
 
 
 def test_in_process_variable_factor_is_inert_without_the_option():
@@ -465,3 +452,110 @@ def test_retain_only_block_matches_unscaled():
     finally:
         release_kkt(scaled)
         release_kkt(plain)
+
+
+# ── variable factors on the sensitivity path (gh #486 stage 3) ───────────────
+
+#: A change of variables spanning six orders of magnitude, and not
+#: uniform: `a` and `b` are the fitted parameters the covariance is
+#: about, `r` the residual block. A uniform factor would cancel out of
+#: several of the quantities below and prove less.
+X_SCALE = {"a": 1e3, "b": 1e-3, "r": 20.0}
+
+
+def test_the_in_process_path_installs_the_variable_factors():
+    """Guard for the wiring, the same role
+    `test_in_process_path_installs_the_user_scaling` plays for the row
+    factors: without it every comparison below passes vacuously, on a
+    solve that quietly applied no change of variables at all."""
+    scaled, plain, _ = solve_pair(x_scale=X_SCALE)
+    d = session_scaling(scaled)["x_scaling"]
+    assert d is not None, "the solve applied no change of variables"
+    assert session_scaling(plain)["x_scaling"] is None
+    # By name, not by position: the writer chooses the column order,
+    # and a factor landing on the wrong column is exactly the failure
+    # this guard is here to catch.
+    cols = scaled.__dict__["_pounce_sens"].session.var_names
+    by_name = dict(zip(cols, np.asarray(d).tolist()))
+    assert by_name["a"] == pytest.approx(1e3)
+    assert by_name["b"] == pytest.approx(1e-3)
+    assert by_name["r[0]"] == pytest.approx(20.0)
+
+
+def test_estimates_are_unmoved_by_variable_scaling():
+    scaled, plain, _ = solve_pair(x_scale=X_SCALE)
+    for name in ("a", "b"):
+        assert pyo.value(getattr(scaled, name)) == pytest.approx(
+            pyo.value(getattr(plain, name)), rel=1e-6)
+
+
+def test_covariance_matches_unscaled_ground_truth_under_variable_scaling():
+    scaled, plain, X = solve_pair(x_scale=X_SCALE)
+    np.testing.assert_allclose(
+        covariance(scaled, sigma_sq=SIGMA**2).matrix,
+        covariance(plain, sigma_sq=SIGMA**2).matrix, rtol=1e-6)
+    # and against the closed form, so both runs being wrong the same
+    # way cannot pass
+    np.testing.assert_allclose(
+        covariance(scaled, sigma_sq=SIGMA**2).matrix,
+        SIGMA**2 * np.linalg.inv(X.T @ X), rtol=1e-6)
+
+
+def test_information_matches_unscaled_ground_truth_under_variable_scaling():
+    scaled, plain, X = solve_pair(x_scale=X_SCALE)
+    np.testing.assert_allclose(information(scaled).matrix,
+                               information(plain).matrix, rtol=1e-6)
+    np.testing.assert_allclose(information(scaled).matrix,
+                               2.0 * X.T @ X, rtol=1e-6)
+    # The Gauss-Newton form is built from the residual Jacobian rather
+    # than the KKT factor, so it carries the substitution down its own
+    # path and needs asserting separately.
+    np.testing.assert_allclose(
+        information(scaled, hessian="gauss-newton").matrix,
+        2.0 * X.T @ X, rtol=1e-6)
+
+
+def test_wrt_blocks_match_unscaled_under_variable_scaling():
+    # The residual block is where a per-variable factor is most visible:
+    # `r` carries a factor of its own, and the prediction band is a
+    # rank-deficient block whose projection would not survive a missed
+    # one.
+    scaled, plain, X = solve_pair(x_scale=X_SCALE)
+    C = SIGMA**2 * np.linalg.inv(X.T @ X)
+    assert covariance(scaled, sigma_sq=SIGMA**2,
+                      wrt=[scaled.a])[scaled.a] == pytest.approx(C[0, 0],
+                                                                 rel=1e-6)
+    H = X @ np.linalg.solve(X.T @ X, X.T)
+    np.testing.assert_allclose(
+        covariance(scaled, sigma_sq=SIGMA**2, wrt=scaled.r).matrix,
+        SIGMA**2 * H, rtol=1e-5, atol=1e-10)
+
+
+def test_classifier_statuses_match_unscaled_under_variable_scaling():
+    scaled, plain, _ = solve_pair(x_scale=X_SCALE)
+    assert (covariance(scaled, sigma_sq=SIGMA**2).conditioned_on
+            == covariance(plain, sigma_sq=SIGMA**2).conditioned_on)
+
+
+def test_gradient_and_estimate_match_unscaled_under_variable_scaling():
+    scaled, plain, _ = solve_pair(x_scale=X_SCALE, param=True)
+    for target in ("a", "b"):
+        g_scaled = gradient(getattr(scaled, target), wrt=scaled.shift)
+        g_plain = gradient(getattr(plain, target), wrt=plain.shift)
+        assert g_scaled == pytest.approx(g_plain, abs=1e-6)
+    est_scaled = estimate(scaled, [(scaled.shift, 0.25)])
+    est_plain = estimate(plain, [(plain.shift, 0.25)])
+    assert est_scaled[scaled.a] == pytest.approx(est_plain[plain.a], abs=1e-6)
+    assert est_scaled[scaled.b] == pytest.approx(est_plain[plain.b], abs=1e-6)
+
+
+def test_fixed_variable_composition_survives_variable_scaling():
+    # A fixed variable is dropped from the solve's columns but not from
+    # the Suffix's index space, so the factor vector and the factor's
+    # `x` block are different lengths -- the composition gh #450 is
+    # about, now with a change of variables on top.
+    scaled, plain, X = solve_pair(x_scale=X_SCALE, dead=True)
+    np.testing.assert_allclose(information(scaled).matrix,
+                               2.0 * X.T @ X, rtol=1e-6)
+    np.testing.assert_allclose(information(scaled).matrix,
+                               information(plain).matrix, rtol=1e-6)

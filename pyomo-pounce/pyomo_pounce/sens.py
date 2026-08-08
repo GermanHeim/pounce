@@ -63,7 +63,6 @@ from pyomo.core.expr.visitor import replace_expressions
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
 from pyomo_pounce.scaling import (
-    read_scaling,
     problem_scaling,
     user_scaling_requested,
     warn_if_no_suffix,
@@ -322,14 +321,6 @@ class _Session:
         self._con_row = _row_index(con_names) if con_row is None else con_row
         self.pins = pins              # ComponentMap: param data -> pin row
         self.con_alias = con_alias    # original con name -> clone row name
-        # Whether the solve applied per-variable scaling (gh #486 stage
-        # 2). The solve itself is fine; the ACCESSORS are not, because
-        # they read the KKT factorization directly rather than through
-        # the scaling layer, so their natural-units contract does not
-        # hold. Checked by `_no_variable_scaling`, not at solve time:
-        # refusing the solve would block a scaled run that never asks a
-        # sensitivity question.
-        self.variable_scaled = ()
         self.base_x = None
         # Objective value at the solve. NaN, not None, is the "never
         # computed" sentinel: that is the convention the engine itself
@@ -724,12 +715,18 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     # unconditionally is safe: `nlp_scaling_method` decides whether the
     # engine looks, so a tagged model solved without `user-scaling`
     # behaves as before.
+    #
+    # Variable entries go in alongside the row ones (gh #486 stage 3):
+    # the core applies them as a change of variables and the
+    # sensitivity accessors carry the factors back out, so this path
+    # honors the same Suffix the ASL one does.
     if user_scaling_requested(options):
         warn_if_no_suffix(model)
-    scaling = problem_scaling(model, con_names, con_alias)
+    scaling = problem_scaling(model, con_names, con_alias, var_names)
     if scaling is not None:
-        obj_scale, g_scale = scaling
-        prob.set_problem_scaling(obj_scale, g_scaling=g_scale)
+        obj_scale, g_scale, x_scale = scaling
+        prob.set_problem_scaling(obj_scale, x_scaling=x_scale,
+                                 g_scaling=g_scale)
     warm = {}
     if _warm_start_requested(options):
         warm = _warm_start_from_suffixes(
@@ -827,13 +824,6 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
 
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias, var_row=var_row, con_row=con_row)
-    # Record rather than refuse: a variable-scaled solve is correct, and
-    # only a later sensitivity QUERY would be answered in the wrong
-    # space (gh #486 stage 3).
-    if user_scaling_requested(options):
-        parsed = read_scaling(model)
-        if parsed is not None:
-            session.variable_scaled = tuple(vd for vd, _ in parsed[2])
     session.base_x = np.asarray(x)
     # the engine always reports obj_val (NaN when it evaluated nothing),
     # and it is eval_f on this model's own bridge at the final iterate --
@@ -971,32 +961,6 @@ class Gradient:
             columns=[p.name for p in self._params])
 
 
-def _no_variable_scaling(session, who, max_list=5):
-    """Raise if this session's solve applied per-variable scaling.
-
-    The solve was correct. What does not hold is the accessors'
-    contract: they read the held KKT factorization, which is the
-    factorization of the SCALED problem, so every number they derive
-    from it would be in scaled coordinates while the documentation
-    promises the model's own units. Stage 3 of gh #486 carries the
-    factors into that translation and this goes away.
-    """
-    tagged = getattr(session, "variable_scaled", ())
-    if not tagged:
-        return
-    shown = ", ".join(vd.name for vd in tagged[:max_list])
-    more = f" (+{len(tagged) - max_list} more)" if len(tagged) > max_list else ""
-    raise RuntimeError(
-        f"{who}: this solve applied per-variable scaling factors to "
-        f"{len(tagged)} variable(s) ({shown}{more}). The solve itself is "
-        "correct and its solution is in your model's units, but the "
-        "sensitivity accessors read the KKT factorization directly and do "
-        "not yet carry those factors, so they would report scaled-space "
-        "numbers. Re-solve without the variable entries in the "
-        "`scaling_factor` Suffix to ask this question. Tracking issue: "
-        "https://github.com/jkitchin/pounce/issues/486")
-
-
 def gradient(target=None, *, wrt):
     """d(target*)/d(wrt).
 
@@ -1007,7 +971,6 @@ def gradient(target=None, *, wrt):
     Scalar target and scalar wrt -> float. Anything else -> a Gradient
     object: g[target, param], or g.to_dataframe() for the full Jacobian."""
     session = _session_for(wrt)
-    _no_variable_scaling(session, "gradient")
     params = list(_iter_data(wrt))
     if target is None:
         targets = [v for v in (session.orig_var(nm)
@@ -1047,7 +1010,6 @@ def estimate(model, perturb, clamp=True):
         raise RuntimeError(
             "no sensitivity session: declare_sens_param() then solve with "
             "SolverFactory('pounce') first")
-    _no_variable_scaling(session, "estimate")
 
     items = perturb.items() if hasattr(perturb, "items") else perturb
     pin_idx, deltas = [], []
@@ -2001,7 +1963,6 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian",
             "declare_residual()), or retain_kkt() for "
             "wrt= queries with nothing declared, then solve with "
             "SolverFactory('pounce') first")
-    _no_variable_scaling(session, "covariance")
     # the block: the declared fitted parameters by default, or any
     # block of the solve's variables via wrt= (each call re-reduces
     # onto its own argument, so one solve serves as many blocks as are
@@ -2385,7 +2346,6 @@ def information(model, hessian="lagrangian", wrt=None):
             "declare_residual()), or retain_kkt() for "
             "wrt= queries with nothing declared, then solve with "
             "SolverFactory('pounce') first")
-    _no_variable_scaling(session, "information")
     params, rows = _resolve_wrt(session, wrt, "information")
     n_params = len(params)
     wording = "fitted" if wrt is None else "block"

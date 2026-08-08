@@ -368,6 +368,24 @@ pub trait IpoptNlp: Nlp {
         None
     }
 
+    /// The per-variable factors `d` a scaling wrapper below this NLP
+    /// applied as a change of variables `x̃ = d ⊙ x` (gh#486). `None`
+    /// ⇔ no variable scaling; length [`Self::n_full_x`] when present,
+    /// i.e. the **full-x** space of the TNLP that was submitted, before
+    /// fixed variables were dropped.
+    ///
+    /// This is the x-axis counterpart of [`Self::obj_scaling_factor`] /
+    /// [`Self::c_scale_vec`] / [`Self::d_scale_vec`], and it exists for
+    /// the same reason: a consumer reading the converged KKT system
+    /// rather than the `finalize_solution` payload is looking at `x̃`,
+    /// not `x`, and needs the factors to say so. Unlike the other
+    /// three, the substitution happens *below* the NLP — in
+    /// `ScalingTnlp` — so this only forwards what the TNLP reports.
+    /// Default `None`; `OrigIpoptNlp` overrides.
+    fn variable_scaling(&self) -> Option<Vec<Number>> {
+        None
+    }
+
     /// Human-readable variable / constraint names projected into the
     /// algorithm's split space (free variables, equalities, inequalities),
     /// or `None` when the model carries no names. The debugger uses this to

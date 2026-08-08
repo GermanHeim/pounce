@@ -98,7 +98,9 @@ pub enum SolverError {
 pub struct ConvergedState {
     /// IPM return status of the most recent solve.
     pub status: ApplicationReturnStatus,
-    /// Final primal iterate `x*` (length `n_x`).
+    /// Final primal iterate `x*` (length `n_x`), in the user's own
+    /// units: a `user-scaling` change of variables is undone here, so
+    /// this is `x`, never the algorithm's `x̃ = d ⊙ x` (gh#486).
     pub x: Vec<Number>,
     /// Final objective value `f(x*)`.
     pub obj_val: Number,
@@ -211,7 +213,19 @@ impl Solver {
                         return;
                     }
                 };
-                let x = dense_to_vec(&*curr.x);
+                // The algorithm's iterate is `x̃ = d ⊙ x` when the
+                // solve ran under a change of variables (gh#486): this
+                // capture reads the iterate, not the
+                // `finalize_solution` payload, so it undoes the
+                // substitution itself. The backsolver already read the
+                // factors off the NLP, in this same var-x space.
+                let mut x = dense_to_vec(&*curr.x);
+                if let Some(d) = backsolver.variable_scaling() {
+                    debug_assert_eq!(x.len(), d.len());
+                    for (xi, &di) in x.iter_mut().zip(d.iter()) {
+                        *xi /= di;
+                    }
+                }
                 let obj_val = cq.borrow_mut().curr_f();
                 // Status is overwritten with the real value after
                 // optimize_tnlp returns.
@@ -342,7 +356,10 @@ impl Solver {
     /// [`Self::kkt_solve`] without the natural-units conjugation: the
     /// back-solve runs against the factor exactly as the IPM holds it
     /// (the solver's internal scaled space). Identical to `kkt_solve`
-    /// when no NLP scaling is active.
+    /// when no NLP scaling is active. "Scaled space" includes a
+    /// `user-scaling` change of variables (gh#486), so on such a solve
+    /// the `x` and `z` blocks here are in the substituted coordinates
+    /// `x̃ = d ⊙ x`, not the model's.
     pub fn kkt_solve_scaled(&self, rhs: &[Number], lhs: &mut [Number]) -> Result<(), SolverError> {
         self.kkt_solve_impl(rhs, lhs, true)
     }
@@ -689,6 +706,20 @@ impl Solver {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         Ok(state.backsolver.nlp_scaling())
+    }
+
+    /// The per-variable `user-scaling` factors `d` the held solve ran
+    /// under (gh#486), in the user TNLP's **full-x** space, or `None`
+    /// when the solve applied no change of variables.
+    ///
+    /// Every accessor on this type already reports natural units, so
+    /// this is diagnostic rather than a correction a caller has to
+    /// apply — it answers "was this solve conditioned, and by how
+    /// much", the x-axis counterpart of [`Self::nlp_scaling`].
+    pub fn variable_scaling(&self) -> Result<Option<Vec<Number>>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        Ok(state.backsolver.variable_scaling_full().map(|d| d.to_vec()))
     }
 
     /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked

@@ -111,7 +111,9 @@ pub struct SensResult {
     /// sensitivity failure from a not-requested computation.
     pub error: Option<String>,
     /// Final primal iterate `x*`. Length `n_x`. None when the solve
-    /// failed before convergence.
+    /// failed before convergence. In the user's own units: a
+    /// `user-scaling` change of variables is undone here, so this is
+    /// `x`, never the algorithm's `x̃ = d ⊙ x` (gh#486).
     pub x: Option<Vec<Number>>,
     /// Final objective `f(x*)`. None when the solve failed.
     pub obj_val: Option<Number>,
@@ -188,7 +190,9 @@ pub struct SensResult {
     /// `n_full_x`, divided by `obj_scale_factor` like
     /// [`Self::mult_g`] (via `finalize_solution_z_l`) — the same
     /// natural-units convention as the C ABI / Python info dict's
-    /// `mult_x_L`.
+    /// `mult_x_L`. A `user-scaling` change of variables is undone on
+    /// top of that (`z = d ⊙ z̃`, gh#486), since the bound
+    /// multipliers are the one dual block the substitution moves.
     pub mult_x_l: Option<Vec<Number>>,
     /// Converged user-space upper-bound multipliers `z_U`, length
     /// `n_full_x`. Same convention (`finalize_solution_z_u` /
@@ -309,7 +313,9 @@ impl SensSolve {
             };
 
             // Always capture x and obj_val so the caller gets them
-            // even when only the reduced Hessian was requested.
+            // even when only the reduced Hessian was requested. `x` is
+            // unscaled below, once the backsolver has read the change
+            // of variables off the NLP (gh#486).
             outbox_cb.borrow_mut().x = Some(dense_to_vec(&*curr.x));
             outbox_cb.borrow_mut().obj_val = Some(cq.borrow_mut().curr_f());
 
@@ -370,6 +376,36 @@ impl SensSolve {
             };
             let n_full = backsolver.dim();
 
+            // Every capture above reads the algorithm's own iterate or
+            // an `IpoptNlp`-level report, and both sit BELOW the
+            // `ScalingTnlp` that applied a `user-scaling` change of
+            // variables — so under one they hold `x̃ = d ⊙ x` and the
+            // matching `z̃ = z ⊘ d`, not the model's own units
+            // (gh#486 stage 3). `finalize_solution_z_*` already
+            // divided out `df`; what is left is the substitution.
+            // `mult_g` and `g` need nothing: rows and their
+            // multipliers are untouched by a change of variables.
+            let d_var = backsolver.variable_scaling().map(|d| d.to_vec());
+            let d_full = backsolver.variable_scaling_full().map(|d| d.to_vec());
+            if let Some(d) = &d_var {
+                if let Some(x) = outbox_cb.borrow_mut().x.as_mut() {
+                    for (xi, &di) in x.iter_mut().zip(d.iter()) {
+                        *xi /= di;
+                    }
+                }
+            }
+            if let Some(d) = &d_full {
+                let mut out = outbox_cb.borrow_mut();
+                let CallbackOut {
+                    mult_x_l, mult_x_u, ..
+                } = &mut *out;
+                for z in [mult_x_l.as_mut(), mult_x_u.as_mut()].into_iter().flatten() {
+                    for (zi, &di) in z.iter_mut().zip(d.iter()) {
+                        *zi *= di;
+                    }
+                }
+            }
+
             // Pin constraint indices are user-facing 0-based indices
             // into g(x); the matching y_c slot is found through the
             // NLP's c/d-split row map (pounce#128: a direct
@@ -420,7 +456,24 @@ impl SensSolve {
                     // clamp only the primal-x block of dx_full; the
                     // rest (s, multipliers) doesn't have primal bounds.
                     let mut dx_primal = dx_full[..n_x].to_vec();
+                    // The iterate and the NLP's bounds are both in the
+                    // solve's own coordinates, but the step came back
+                    // from the natural-units back-solve — so it goes
+                    // INTO the substitution for the projection and
+                    // comes back out of it (gh#486 stage 3). Clamping
+                    // a natural step against scaled bounds would
+                    // project onto the wrong box.
+                    if let Some(d) = &d_var {
+                        for (s, &di) in dx_primal.iter_mut().zip(d.iter()) {
+                            *s *= di;
+                        }
+                    }
                     let _ = clamp_with_nlp(&*nlp.borrow(), &x_curr, &mut dx_primal, eps);
+                    if let Some(d) = &d_var {
+                        for (s, &di) in dx_primal.iter_mut().zip(d.iter()) {
+                            *s /= di;
+                        }
+                    }
                     dx_full[..n_x].copy_from_slice(&dx_primal);
                 }
                 let dx_primal = dx_full[..n_x].to_vec();

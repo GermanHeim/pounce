@@ -94,6 +94,21 @@ pub fn compute_sens_perturbed_x(
     let curr = data.borrow().curr.clone()?;
     let n_x = curr.x.dim() as usize;
 
+    // Per-variable `user-scaling` factors in var-x order, or all-ones
+    // (gh#486 stage 3). The step below comes back from the
+    // natural-units back-solve, but the iterate and the NLP's bounds
+    // are in the coordinates the solve ran in — so the projection has
+    // to move between them.
+    let d_var: Vec<Number> = {
+        let nlp_ref = nlp.borrow();
+        match nlp_ref.variable_scaling() {
+            Some(d) => (0..n_x)
+                .map(|v| d[nlp_ref.var_x_to_full_x(v as Index) as usize])
+                .collect(),
+            None => vec![1.0; n_x],
+        }
+    };
+
     if let Some(eps) = boundcheck_eps {
         // Single-pass clamp of the primal step before scattering onto
         // the full-x grid; see pounce_sensitivity::boundcheck for the
@@ -105,12 +120,21 @@ pub fn compute_sens_perturbed_x(
             .map(|d| d.values().to_vec())
             .unwrap_or_default();
         let mut dx_primal = dx[..n_x].to_vec();
+        // Into the solve's coordinates for the projection, and back
+        // out of them after: clamping a natural-units step against
+        // scaled bounds would project onto the wrong box.
+        for (s, &di) in dx_primal.iter_mut().zip(d_var.iter()) {
+            *s *= di;
+        }
         let n_clamped = pounce_sensitivity::boundcheck::clamp_with_nlp(
             &*nlp.borrow(),
             &x_curr_compressed,
             &mut dx_primal,
             eps,
         );
+        for (s, &di) in dx_primal.iter_mut().zip(d_var.iter()) {
+            *s /= di;
+        }
         if n_clamped > 0 {
             eprintln!("pounce: --sens-boundcheck clamped {n_clamped} primal coordinate(s)");
             dx[..n_x].copy_from_slice(&dx_primal);

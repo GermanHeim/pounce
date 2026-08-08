@@ -96,19 +96,14 @@ Factors must be positive and finite. A negative factor would reverse a
 variable's direction and swap its bounds, so it raises rather than
 being applied.
 
-**One exception: the sensitivity path.** A model carrying
-[sensitivity](sensitivity.md) declarations raises if the Suffix tags a
-variable. Those accessors read the solver's KKT factorization directly
-rather than through the scaling layer, so on a variable-scaled solve
-they would report scaled-space numbers while promising your model's
-units. Solve without the sensitivity declarations, or drop the variable
-entries, until
-[issue #486](https://github.com/jkitchin/pounce/issues/486) carries the
-factors into that translation.
-
 This works on both solve paths: the ordinary ASL/subprocess solve and
 the in-process path taken when the model carries [sensitivity
-declarations](sensitivity.md).
+declarations](sensitivity.md) — including the accessors themselves.
+`covariance()`, `information()`, `gradient()` and `estimate()` read the
+solver's KKT factorization directly rather than through the scaling
+layer, so they carry the factors through their own natural-units
+translation and answer in your model's units on a variable-scaled solve
+([issue #486](https://github.com/jkitchin/pounce/issues/486)).
 
 ## Preflight and initialization
 

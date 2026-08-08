@@ -133,10 +133,55 @@ floor could not draw: all five have the same row count.
 - `Problem.set_problem_scaling` accepts `x_scaling` from Python, and
   the C `SetIpoptProblemScaling` applies it, both landing in the
   caller's own units. Each previously refused any non-unit entry.
-- The sensitivity path still refuses variable factors. Its accessors
-  read the KKT factorization directly and do not yet carry the
-  substitution, so they would report scaled-space numbers under a
-  natural-units contract; stage 3 lifts this.
+- The sensitivity accessors were refused at this stage: they read the
+  KKT factorization directly and did not yet carry the substitution,
+  so they would have reported scaled-space numbers under a
+  natural-units contract. Stage 3, below, carries the factors through
+  and removes the refusal — within this same release, so no version
+  ever shipped with it.
+
+### Added — the sensitivity layer carries the variable factors, and the last refusals lift
+
+- Every sensitivity accessor now answers in the model's own units on a
+  variable-scaled solve (gh #486 stage 3), and the four refusals stage
+  2 left in place — on pyomo-pounce's `gradient`, `estimate`,
+  `covariance` and `information` — are gone. Nothing about user
+  scaling is refused any more on any axis.
+- The change of variables joins the objective and per-row factors in
+  the held factor's natural-units conjugation (`PdSensBacksolver`), as
+  a `1/d` on both sides of the `x` block and a `d` on the way out of
+  the bound-multiplier rows — the `z`-row `d` cancels against the
+  slack diagonal, so it appears in `F` alone. It is diagonal like the
+  other two, so the three compose by elementwise product and
+  `kkt_solve`, `parametric_step`, `parametric_step_full` and the
+  reduced Hessian all follow without further work.
+- The accessors that read the model's matrices rather than the factor
+  carry it separately: `hessian_vec` (`H = H̃ ⊙ (d ⊗ d)`),
+  `row_normal` (`∇g = ∇g̃ ⊙ d`), and `classify_activity`, whose
+  exported `Σ` gains the `d²` it was missing. Classification itself is
+  run on the unscaled geometry rather than only corrected on export:
+  the per-entry ratio `Σ/q` absorbs any `d`, but the identification
+  floor is one number shared across entries, so a *non-uniform* `d`
+  would otherwise move entries across it and change a status.
+- The two consumers that capture the algorithm's iterate — the
+  `Solver` session's `ConvergedState::x` and the `SensSolve` builder's
+  `x` / `mult_x_L` / `mult_x_U` — undo the substitution, the same
+  predicate that caught the CLI's `on_converged` hook in stage 2. The
+  `sens_boundcheck` projection now scales its step into the solve's
+  own coordinates before clamping against the solve's own bounds,
+  which the natural-units step no longer shared.
+- The factors a solve ran under are readable back:
+  `Solver.nlp_scaling["x_scaling"]` (Python),
+  `Solver::variable_scaling` (Rust), reported in the user's full-x
+  space. Diagnostic rather than a correction to apply, since every
+  output already carries it.
+- pyomo-pounce's in-process sensitivity path applies variable factors
+  too. It builds no `.nl` for the solver, so it had no suffix segments
+  to read; `problem_scaling` now translates the Suffix's variable
+  entries into `set_problem_scaling(x_scaling=…)` alongside the row
+  ones, by name against the written model's columns.
+- `nlp_scaling_method` note unchanged by any of this: `tol` still
+  compares scaled quantities, matching upstream.
 
 ### Fixed — the inertia test was answered with `δ_w` even when the factorization could not measure inertia (#540)
 

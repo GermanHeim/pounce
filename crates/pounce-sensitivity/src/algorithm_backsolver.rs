@@ -111,7 +111,35 @@ pub struct PdSensBacksolver {
     /// bound-multiplier rows exactly (those rows admit no symmetric
     /// diagonal: `K̃_{z,x} = df·Z·Pᵀ` but `K̃_{z,z} = X − x_L` is
     /// unscaled). `None` ⇔ scaling inactive, identity.
+    ///
+    /// **Variable scaling** (gh#486 stage 3) multiplies into the same
+    /// pair. A change of variables `x̃ = d ⊙ x` contributes
+    ///
+    /// ```text
+    ///        x      z_l/z_u          everything else
+    /// E  =   1/d    1                1
+    /// F  =   1/d    d_{px(j)}        1
+    /// ```
+    ///
+    /// (`d_{px(j)}` = the factor of the variable carrying the j-th
+    /// finite bound, through the `px_l` / `px_u` expansion). The `s`,
+    /// `y_c`, `y_d`, `v_l` and `v_u` blocks are untouched because the
+    /// substitution leaves `c`, `d` and their multipliers alone. The
+    /// two contributions compose by elementwise product, in either
+    /// order, because both are diagonal.
     conj: Option<Rc<ConjPair>>,
+    /// Per-variable factors `d` the solve ran under (gh#486), in the
+    /// algorithm's **var-x** space — i.e. already projected through
+    /// the fixed-variable map, so entry `i` matches KKT row `i`.
+    /// `None` ⇔ no variable scaling. Folded into [`Self::conj`] for
+    /// the back-solves; kept here for the consumers that read the
+    /// converged iterate and the model's matrices directly rather than
+    /// through the factor (see [`crate::activity`]).
+    d_var: Option<Rc<Vec<Number>>>,
+    /// The same factors in the user TNLP's **full-x** space, the shape
+    /// `finalize_solution_z_l` / `n_full_x`-length reports come in.
+    /// `None` alongside [`Self::d_var`].
+    d_full: Option<Rc<Vec<Number>>>,
 }
 
 /// Left/right diagonal pair for the natural-units back-solve; see the
@@ -159,7 +187,8 @@ impl PdSensBacksolver {
             curr.v_l.dim() as usize,
             curr.v_u.dim() as usize,
         ];
-        let conj = Self::natural_units_conj(nlp, &dims)?;
+        let (d_var, d_full) = Self::variable_factors(nlp, &dims)?;
+        let conj = Self::natural_units_conj(nlp, &dims, d_var.as_ref().map(|v| v.as_slice()))?;
         Ok(Self {
             pd,
             data: Rc::clone(data),
@@ -168,11 +197,79 @@ impl PdSensBacksolver {
             dims,
             template: curr,
             conj,
+            d_var,
+            d_full,
         })
     }
 
+    /// Read the variable factors the solve ran under off the NLP and
+    /// project them into the algorithm's var-x space (gh#486 stage 3).
+    ///
+    /// Returns `(None, None)` when no variable scaling is active.
+    /// Errors when the reported vector does not match the NLP's own
+    /// full-x width, or when the projection does not fill the `x`
+    /// block: either would silently mis-pair a factor with a variable,
+    /// which is the whole failure mode this plumbing exists to avoid.
+    #[allow(clippy::type_complexity)]
+    fn variable_factors(
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        dims: &[usize; 8],
+    ) -> Result<(Option<Rc<Vec<Number>>>, Option<Rc<Vec<Number>>>), String> {
+        let nlp_ref = nlp.borrow();
+        let Some(d_full) = nlp_ref.variable_scaling() else {
+            return Ok((None, None));
+        };
+        let n_full = nlp_ref.n_full_x() as usize;
+        if d_full.len() != n_full {
+            return Err(format!(
+                "variable scaling length {} != n_full_x {}",
+                d_full.len(),
+                n_full
+            ));
+        }
+        // NaN is not a "no-op" factor and neither is zero; the wrapper
+        // refuses both at setup, so seeing one here means the vector
+        // did not come from the wrapper that ran.
+        if let Some(bad) = d_full.iter().find(|v| !v.is_finite() || **v <= 0.0) {
+            return Err(format!(
+                "variable scaling factor {bad} is not finite and positive"
+            ));
+        }
+        let mut d_var = vec![Number::NAN; dims[0]];
+        for (full, &factor) in d_full.iter().enumerate() {
+            if let Some(var) = nlp_ref.full_x_to_var_x(full as Index) {
+                let slot = d_var.get_mut(var as usize).ok_or_else(|| {
+                    format!("var-x index {var} outside x block of width {}", dims[0])
+                })?;
+                *slot = factor;
+            }
+        }
+        if let Some(pos) = d_var.iter().position(|v| v.is_nan()) {
+            return Err(format!(
+                "variable scaling left var-x column {pos} of {} unmapped",
+                dims[0]
+            ));
+        }
+        Ok((Some(Rc::new(d_var)), Some(Rc::new(d_full))))
+    }
+
+    /// The per-variable factors the held solve ran under, in the
+    /// algorithm's **var-x** space (one entry per `x`-block KKT row),
+    /// or `None` when no variable scaling was active (gh#486).
+    pub fn variable_scaling(&self) -> Option<&[Number]> {
+        self.d_var.as_deref().map(|v| v.as_slice())
+    }
+
+    /// [`Self::variable_scaling`] in the user TNLP's **full-x** space:
+    /// the shape of an `n_full_x`-length report, with the columns the
+    /// solve dropped as fixed still present.
+    pub fn variable_scaling_full(&self) -> Option<&[Number]> {
+        self.d_full.as_deref().map(|v| v.as_slice())
+    }
+
     /// Build the natural-units scaling pair `(E, F)` from the NLP's
-    /// effective scaling (see the field doc on [`Self::conj`]).
+    /// effective scaling and the variable factors `d_var` the solve
+    /// ran under (see the field doc on [`Self::conj`]).
     /// Returns `Ok(None)` when no scaling is active. Errors when the
     /// NLP reports scaling data inconsistent with the converged
     /// iterate's block dimensions (would silently corrupt every
@@ -180,12 +277,16 @@ impl PdSensBacksolver {
     fn natural_units_conj(
         nlp: &Rc<RefCell<dyn IpoptNlp>>,
         dims: &[usize; 8],
+        d_var: Option<&[Number]>,
     ) -> Result<Option<Rc<ConjPair>>, String> {
         let nlp_ref = nlp.borrow();
         let df = nlp_ref.obj_scaling_factor();
         let dc = nlp_ref.c_scale_vec();
         let dd = nlp_ref.d_scale_vec();
-        if df == 1.0 && dc.is_none() && dd.is_none() {
+        // `d_var` counts as active scaling on its own: a solve with
+        // unit objective and row factors but a change of variables
+        // still holds its factor in scaled coordinates.
+        if df == 1.0 && dc.is_none() && dd.is_none() && d_var.is_none() {
             return Ok(None);
         }
         // df may be negative (obj_scaling_factor < 0 means maximize);
@@ -208,13 +309,27 @@ impl PdSensBacksolver {
                 ));
             }
         }
-        // Per-entry d-row scale for the compressed v_l / v_u blocks:
-        // entry j of v_l covers the d row pd_l.expanded_pos[j].
-        let v_row_scale = |pm: Rc<dyn pounce_linalg::matrix::Matrix>,
-                           n_v: usize,
-                           which: &str|
+        if let Some(d) = d_var {
+            if d.len() != dims[0] {
+                return Err(format!(
+                    "variable scaling length {} != x dim {}",
+                    d.len(),
+                    dims[0]
+                ));
+            }
+        }
+        // Per-entry source scale for a compressed bound-multiplier
+        // block: entry j of z_l / v_l covers the row
+        // `px_l.expanded_pos[j]` / `pd_l.expanded_pos[j]` of `src`.
+        // Used for the v blocks (source `d_scale`, indexed by
+        // inequality row) and the z blocks (source `d_var`, indexed by
+        // var-x column).
+        let bound_row_scale = |pm: Rc<dyn pounce_linalg::matrix::Matrix>,
+                               src: Option<&[Number]>,
+                               n_v: usize,
+                               which: &str|
          -> Result<Vec<Number>, String> {
-            let Some(dd) = &dd else {
+            let Some(vals) = src else {
                 return Ok(vec![1.0; n_v]);
             };
             if n_v == 0 {
@@ -237,25 +352,41 @@ impl PdSensBacksolver {
             }
             pos.iter()
                 .map(|&r| {
-                    dd.get(r as usize).copied().ok_or_else(|| {
+                    vals.get(r as usize).copied().ok_or_else(|| {
                         format!(
-                            "{which} expansion row {r} out of d_scale range {}",
-                            dd.len()
+                            "{which} expansion row {r} out of scale-vector range {}",
+                            vals.len()
                         )
                     })
                 })
                 .collect()
         };
-        let vl_dd = v_row_scale(nlp_ref.pd_l(), dims[6], "pd_l")?;
-        let vu_dd = v_row_scale(nlp_ref.pd_u(), dims[7], "pd_u")?;
+        let vl_dd = bound_row_scale(nlp_ref.pd_l(), dd.as_deref(), dims[6], "pd_l")?;
+        let vu_dd = bound_row_scale(nlp_ref.pd_u(), dd.as_deref(), dims[7], "pd_u")?;
+        // The variable factor carried by each finite x-bound, through
+        // the same expansion (gh#486). `d_var` indexes var-x columns,
+        // and `px_l` / `px_u` say which column each z entry belongs to.
+        let zl_dx = bound_row_scale(nlp_ref.px_l(), d_var, dims[4], "px_l")?;
+        let zu_dx = bound_row_scale(nlp_ref.px_u(), d_var, dims[5], "px_u")?;
         drop(nlp_ref);
 
         let total: usize = dims.iter().sum();
         let mut e = Vec::with_capacity(total);
         let mut f = Vec::with_capacity(total);
-        // x block: E = df, F = 1.
-        e.extend(std::iter::repeat_n(df, dims[0]));
-        f.extend(std::iter::repeat_n(1.0, dims[0]));
+        // x block: E = df/d_i, F = 1/d_i. `df` is the objective scale;
+        // the `1/d_i` on both sides is the change of variables —
+        // `∇f̃ = ∇f ⊘ d` puts the RHS in scaled units and `x = x̃ ⊘ d`
+        // brings the solution back.
+        match d_var {
+            Some(d) => {
+                e.extend(d.iter().map(|&di| df / di));
+                f.extend(d.iter().map(|&di| 1.0 / di));
+            }
+            None => {
+                e.extend(std::iter::repeat_n(df, dims[0]));
+                f.extend(std::iter::repeat_n(1.0, dims[0]));
+            }
+        }
         // s block: E = df/dd_i, F = 1/dd_i (slacks live in scaled d-space).
         match &dd {
             Some(v) => {
@@ -289,11 +420,15 @@ impl PdSensBacksolver {
                 f.extend(std::iter::repeat_n(1.0 / df, dims[3]));
             }
         }
-        // z_l / z_u blocks: E = df, F = 1/df (z̃ = df·z; bounds on x
-        // are unscaled so the slack diagonal X − x_L is shared by both
-        // systems).
+        // z_l / z_u blocks: E = df, F = d_{px(j)}/df (z̃ = (df/d)·z,
+        // and the slack diagonal x̃ − x̃_L = d·(x − x_L) carries the
+        // variable factor, so the two cancel in the row and leave it
+        // identical to the natural one — E takes no `d` at all).
+        // Without variable scaling this is the pre-#486 `F = 1/df`:
+        // bounds on x are unscaled and the slack diagonal is shared.
         e.extend(std::iter::repeat_n(df, dims[4] + dims[5]));
-        f.extend(std::iter::repeat_n(1.0 / df, dims[4] + dims[5]));
+        f.extend(zl_dx.iter().map(|&dx| dx / df));
+        f.extend(zu_dx.iter().map(|&dx| dx / df));
         // v_l / v_u blocks: E = df, F = dd_r/df (ṽ = (df/dd)·v and the
         // slack diagonal s̃ − d̃_l = dd·(s − d_l) carries the d-row
         // scale).
