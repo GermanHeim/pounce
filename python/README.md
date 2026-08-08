@@ -63,16 +63,17 @@ by orders of magnitude, attach explicit scaling factors:
 ```python
 prob.set_problem_scaling(
     obj_scaling=1e-3,
+    x_scaling=np.array([1.0, 1e-6, 1.0, 1.0]),  # optional
     g_scaling=np.array([1.0, 1e-2]),            # optional
 )
 prob.add_option('nlp_scaling_method', 'user-scaling')
 ```
 
-`x_scaling=` is accepted only as all-ones: POUNCE models objective and
-constraint scaling, not per-variable rescaling, and a non-unit
-`x_scaling` raises rather than being discarded ([issue
-#483](https://github.com/jkitchin/pounce/issues/483)). Rescale those
-variables in the model itself.
+`x_scaling=` applies the change of variables `x_scaled = x_scaling * x`,
+so it changes how the problem is conditioned and not what the problem
+is. Everything handed back, including `x` and the bound multipliers, is
+in your own units. Factors must be finite and positive: a negative one
+would reverse a variable and swap its bounds.
 
 See [`docs/src/scaling.md`](../docs/src/scaling.md) for the
 gradient-based vs. user-scaling tradeoff.

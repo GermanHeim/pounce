@@ -149,7 +149,6 @@ class POUNCE(ASL):
         # ASL/CLI path runs. The model may arrive positionally or as the
         # `model` keyword.
         from pyomo_pounce.scaling import (
-            check_no_variable_scaling,
             user_scaling_requested,
             warn_if_no_suffix,
         )
@@ -204,13 +203,12 @@ class POUNCE(ASL):
         if model is not None and user_scaling_requested(opts):
             # gh #483: the `scaling_factor` Suffix is the standard Pyomo
             # channel for user scaling, and it used to reach pyomo-pounce
-            # and stop -- the option was accepted and meant "none". The
-            # objective/constraint factors now flow through (the writer's
-            # `.nl` suffix segments on this path, `set_problem_scaling` on
-            # the in-process one); a variable factor POUNCE cannot model is
-            # refused here rather than discarded, and a request with nothing
-            # to apply says so.
-            check_no_variable_scaling(model)
+            # and stop -- the option was accepted and meant "none". All
+            # three kinds of factor now flow through: objective and
+            # constraint via the writer's `.nl` suffix segments, and
+            # variable factors as a change of variables inside the core
+            # (gh #486 stage 2). A request with nothing to apply still
+            # says so.
             warn_if_no_suffix(model)
         if model is not None and (has_declarations(model) or explicit):
             return sens_solve(model, tee=kwds.get("tee", False),

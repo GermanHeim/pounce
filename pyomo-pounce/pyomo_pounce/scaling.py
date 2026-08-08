@@ -21,11 +21,16 @@ Two things happen here now:
   The in-process sensitivity path builds no `.nl` for the solver, so
   :func:`problem_scaling` translates the Suffix into the vectors
   `pounce.Problem.set_problem_scaling` wants.
-* **Variable factors are refused, loudly.** pounce models objective and
-  constraint scaling only. Accepting a per-variable factor and dropping
-  it hands back a differently-conditioned problem than the one the
-  suffix describes, so :func:`check_no_variable_scaling` raises instead.
-  (Lifting this is staged behind the core work in gh #483.)
+* **Variable factors reach the solver** (gh #486 stage 2). The core
+  applies them as a change of variables one level below the algorithm
+  and returns the solution in the model's own units, so no clone and
+  no ``propagate_solution`` step is involved.
+* **The sensitivity path still refuses them.** Its accessors read the
+  KKT factorization directly rather than through the solver's TNLP
+  chain, so on a variable-scaled solve they would report scaled-space
+  numbers while promising natural units. :func:`check_no_variable_scaling`
+  raises there until gh #486 stage 3 teaches that translation the
+  variable factors.
 
 Semantics, matching the AMPL/Ipopt reading of the suffix:
 
@@ -135,10 +140,13 @@ def read_scaling(model):
 def check_no_variable_scaling(model, max_list=5):
     """Raise if the `scaling_factor` Suffix tags variables.
 
-    pounce models objective and constraint scaling only. Silently
-    dropping per-variable factors is what gh #483 is about, so this is a
-    hard error rather than a warning: the alternative is a solve whose
-    conditioning does not match the suffix the user wrote.
+    Ordinary solves apply variable factors (gh #486 stage 2), so this
+    guards the SENSITIVITY path alone. Its accessors read the KKT
+    factorization directly rather than through the solver's TNLP
+    chain, so a variable-scaled solve would have them report
+    scaled-space numbers under a natural-units contract. That is the
+    silent-wrong-answer shape gh #483 was opened about, so it is a hard
+    error until stage 3 carries the factors into that translation.
     """
     parsed = read_scaling(model)
     if parsed is None:
@@ -150,16 +158,15 @@ def check_no_variable_scaling(model, max_list=5):
     more = (f" (+{len(variables) - max_list} more)"
             if len(variables) > max_list else "")
     raise ValueError(
-        "pounce solve: nlp_scaling_method=user-scaling, and the model's "
-        f"`{SUFFIX_NAME}` Suffix sets a scaling factor on "
-        f"{len(variables)} variable(s) ({shown}{more}). POUNCE models "
-        "objective and constraint scaling only, so those factors cannot be "
-        "applied -- and applying the objective/constraint ones alone would "
-        "silently give you a differently conditioned problem than the "
-        "suffix describes. Remove the variable entries and rescale those "
-        "variables in the model itself (substitute x = z / factor and "
-        "declare z), or drop nlp_scaling_method=user-scaling. Tracking "
-        "issue: https://github.com/jkitchin/pounce/issues/483")
+        "pounce sensitivity solve: nlp_scaling_method=user-scaling, and the "
+        f"model's `{SUFFIX_NAME}` Suffix sets a scaling factor on "
+        f"{len(variables)} variable(s) ({shown}{more}). Ordinary solves "
+        "apply variable factors, but the sensitivity accessors read the KKT "
+        "factorization directly and do not yet carry those factors, so they "
+        "would report scaled-space numbers while promising the model's own "
+        "units. Drop the variable entries for this solve, or solve without "
+        "the sensitivity declarations. Tracking issue: "
+        "https://github.com/jkitchin/pounce/issues/486")
 
 
 def warn_if_no_suffix(model):

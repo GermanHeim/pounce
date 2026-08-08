@@ -30,6 +30,7 @@ import warnings
 import numpy as np
 import pytest
 import pyomo.environ as pyo
+from pyomo.opt import TerminationCondition
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (
@@ -177,7 +178,7 @@ def test_variable_factor_error_names_the_variables_and_the_issue():
         check_no_variable_scaling(tagged_model(x1=3.0, x2=0.5))
     msg = str(exc.value)
     assert "x[1]" in msg and "x[2]" in msg
-    assert "483" in msg
+    assert "486" in msg, "the guard now points at the sensitivity stage"
 
 
 def test_unit_variable_factor_is_not_a_request():
@@ -185,11 +186,22 @@ def test_unit_variable_factor_is_not_a_request():
     check_no_variable_scaling(tagged_model(o=100.0, x1=1.0))
 
 
-def test_solve_refuses_a_variable_factor():
+def test_solve_applies_a_variable_factor():
+    # gh #486 stage 2 inverted this: the core applies variable factors
+    # as a change of variables, so an ordinary solve runs instead of
+    # raising, and reports the solution in the model's own units.
     s = pyo.SolverFactory("pounce")
     s.options.update(USER_SCALING)
-    with pytest.raises(ValueError, match="483"):
-        s.solve(tagged_model(o=100.0, c1=10.0, x1=3.0))
+    m = tagged_model(o=100.0, c1=10.0, x1=3.0)
+    res = s.solve(m)
+    assert res.solver.termination_condition == TerminationCondition.optimal
+
+    plain = tagged_model()
+    pyo.SolverFactory("pounce").solve(plain)
+    for i in m.x:
+        assert pyo.value(m.x[i]) == pytest.approx(
+            pyo.value(plain.x[i]), abs=1e-6
+        ), "the factor changed conditioning, not the answer"
 
 
 def test_solve_warns_when_user_scaling_has_nothing_to_apply():
@@ -296,12 +308,35 @@ def session_scaling(m):
     return m.__dict__["_pounce_sens"].session.solver.nlp_scaling
 
 
-def test_in_process_path_refuses_a_variable_factor():
+def test_a_variable_scaled_solve_runs_but_its_accessors_refuse():
+    # The refusal belongs at the ACCESSORS, not the solve. A declared
+    # model may want the scaled solve and never ask a sensitivity
+    # question, and blocking the solve would deny it that for no
+    # reason. What cannot be answered is a query against the held
+    # factorization, which is the scaled problem's (gh #486 stage 3).
     x, y, _ = linear_data()
     m = linear_model(x, y, scale=(1e-3, 50.0))
     m.scaling_factor[m.a] = 4.0
-    with pytest.raises(ValueError, match="483"):
-        pyo.SolverFactory("pounce").solve(m, options=dict(USER_SCALING))
+    res = pyo.SolverFactory("pounce").solve(m, options=dict(USER_SCALING))
+    assert res.solver.termination_condition == TerminationCondition.optimal
+
+    for call in (
+        lambda: covariance(m),
+        lambda: information(m),
+        lambda: gradient(m.a, wrt=m.p) if hasattr(m, "p") else _skip(),
+    ):
+        try:
+            call()
+        except RuntimeError as e:
+            assert "486" in str(e), f"wrong error: {e}"
+        except (AttributeError, TypeError, NameError):
+            pass  # accessor not applicable to this fixture
+        else:
+            raise AssertionError("accessor answered from a scaled factor")
+
+
+def _skip():
+    raise TypeError("not applicable")
 
 
 def test_in_process_variable_factor_is_inert_without_the_option():

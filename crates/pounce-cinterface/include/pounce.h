@@ -199,10 +199,10 @@ bool OpenIpoptOutputFile(
  *  `nlp_scaling_method = user-scaling` for the scaling to take
  *  effect.
  *
- *  pounce models objective and constraint scaling only. A non-trivial
- *  `x_scaling` is stored here (this call still returns true) and then
- *  refused by IpoptSolve, which returns Invalid_Option and prints why,
- *  rather than silently solving an unscaled-in-x problem. */
+ *  `x_scaling` is applied as a change of variables, so the solution
+ *  and bound multipliers IpoptSolve writes back are in your own units.
+ *  A factor that is not finite and positive is refused by IpoptSolve,
+ *  which returns Invalid_Option and prints why. */
 bool SetIpoptProblemScaling(
     IpoptProblem ipopt_problem,
     ipnumber     obj_scaling,
