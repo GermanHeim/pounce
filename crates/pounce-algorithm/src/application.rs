@@ -2503,9 +2503,8 @@ impl IpoptApplication {
                 let cq = alg.cq.borrow();
                 stats.final_dual_inf = cq.curr_dual_infeasibility_max();
                 // Stays on the *internal* measure deliberately: the summary's
-                // "Overall NLP error" is `curr_nlp_error`, which is also the
-                // convergence gate (`ipopt_alg.rs`), and it is built from this
-                // same `max(||c||, ||d - s||)`. Switching the violation line
+                // "Overall NLP error" is `curr_nlp_error`, and it is built from
+                // this same `max(||c||, ||d - s||)`. Switching the violation line
                 // alone to the original-NLP measure
                 // (`curr_unscaled_nlp_constraint_violation_max`, now used by the
                 // `inf_pr` column) would leave the block self-inconsistent —
@@ -2513,6 +2512,22 @@ impl IpoptApplication {
                 // them agree means deciding whether *convergence* should be
                 // judged on the original NLP, which is a behaviour change for
                 // every model, not a reporting fix. See pounce#476.
+                //
+                // NOTE (gh #528): "Overall NLP error" is no longer the number
+                // the strict gate tests. That gate judges
+                // `curr_nlp_error_above_primal_noise` — the same aggregate with
+                // each row's residual counted only above what it can represent
+                // in floating point — so on a model whose constraint values run
+                // to `~1e8` the summary can report an error above `tol` beside
+                // `EXIT: Optimal Solution Found`. The gap is exactly the part
+                // of the residual that is quantisation noise, and it is bounded
+                // by `constr_viol_tol`, which is still tested here on the full
+                // unfloored residual. Reporting is deliberately left on the raw
+                // value: it is the honest measurement, and at these magnitudes
+                // the default `bound_relax_factor = 1e-8` has already moved
+                // every bound by orders of magnitude more than the floor
+                // forgives, so the raw number was never an exact statement
+                // about the original NLP either.
                 stats.final_constr_viol = cq.curr_primal_infeasibility_max();
                 // Infinity-norm complementarity, max over all four bound
                 // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The
@@ -2526,6 +2541,12 @@ impl IpoptApplication {
                     .max(cq.curr_compl_s_u().amax());
                 stats.final_compl = compl;
                 stats.final_kkt_error = cq.curr_nlp_error();
+                // The aggregate the strict gate tested (gh #528). Reported
+                // alongside the raw one so a summary can account for the gap
+                // between them; equal to it on every `O(1)` model, and on any
+                // run with `primal_noise_floor_kappa = 0`.
+                stats.final_kkt_error_above_noise = cq
+                    .curr_nlp_error_above_primal_noise(builder.conv_check.primal_noise_floor_kappa);
                 // Unscaled (user-space) counterparts — divide the nlp_scaling
                 // back out so a consumer can verify the certificate in its own
                 // units (pounce#173). Identical to the scaled fields when no
@@ -2893,6 +2914,9 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("obj_scale_certificate_threshold") {
             builder.conv_check.obj_scale_certificate_threshold = v;
+        }
+        if let Some(v) = read_num("primal_noise_floor_kappa") {
+            builder.conv_check.primal_noise_floor_kappa = v;
         }
         if let Some(v) = read_num("kkt_fidelity_tol") {
             builder.kkt_fidelity_tol = v;

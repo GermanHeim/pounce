@@ -366,6 +366,12 @@ pub struct StatisticsInfo {
     pub final_compl: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_kkt_error: Number,
+    /// The aggregate the strict convergence gate tested (gh #528): as
+    /// `final_kkt_error`, but counting each constraint row's residual only
+    /// where it exceeds what that row can represent in floating point. Equal
+    /// to `final_kkt_error` unless a row is at its own resolution limit.
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
+    pub final_kkt_error_above_noise: Number,
     pub num_obj_evals: Index,
     pub num_constr_evals: Index,
     pub num_obj_grad_evals: Index,
@@ -447,6 +453,7 @@ impl ReportBuilder {
             final_constr_viol: src.final_constr_viol,
             final_compl: src.final_compl,
             final_kkt_error: src.final_kkt_error,
+            final_kkt_error_above_noise: src.final_kkt_error_above_noise,
             num_obj_evals: src.num_obj_evals,
             num_constr_evals: src.num_constr_evals,
             num_obj_grad_evals: src.num_obj_grad_evals,
@@ -524,6 +531,7 @@ fn empty_stats() -> StatisticsInfo {
         final_constr_viol: 0.0,
         final_compl: 0.0,
         final_kkt_error: 0.0,
+        final_kkt_error_above_noise: 0.0,
         num_obj_evals: 0,
         num_constr_evals: 0,
         num_obj_grad_evals: 0,
