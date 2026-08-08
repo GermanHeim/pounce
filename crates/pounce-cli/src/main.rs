@@ -2333,7 +2333,7 @@ fn run_convex_qp(
     engine_overrides: pounce_convex::ActiveSetOverrides,
 ) -> ExitCode {
     use pounce_convex::active_set::solve_qp_active_set;
-    use pounce_convex::presolve::{PresolveOutcome, presolve};
+    use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
     let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
@@ -2419,10 +2419,26 @@ fn run_convex_qp(
                 }
                 let st = ps.stats();
                 if st.reduced_anything() {
+                    // Whether the fixpoint converged or the layer cap stopped
+                    // it (gh #527), as a suffix rather than a line of its own.
+                    // The corpus sweep on #530 measured the cap binding on 46%
+                    // of LP and 25% of QP models — it is the common case, not
+                    // an alarm, and it never changed the structural reduction
+                    // on any of the 394 models that presolve at all. A second
+                    // stdout line on half of all solves would read as a
+                    // warning about something that is working as designed;
+                    // what the reduction needs to carry is which of the two it
+                    // came out of, and that fits here.
+                    let exit = match st.exit {
+                        FixpointExit::Fixpoint => String::new(),
+                        FixpointExit::RoundCap => {
+                            format!(", cap-truncated after {} layers", st.rounds)
+                        }
+                    };
                     println!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
-                         forcing {}, dominated {}, tightened {})",
+                         forcing {}, dominated {}, tightened {}{})",
                         st.orig_vars,
                         st.reduced_vars,
                         st.orig_rows,
@@ -2434,6 +2450,7 @@ fn run_convex_qp(
                         st.forcing_rows,
                         st.dominated_cols,
                         st.tightened_bounds,
+                        exit,
                     );
                 }
                 let red = if use_active_set {

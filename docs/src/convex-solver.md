@@ -177,6 +177,17 @@ verified by KKT-residual tests. A cone-aware variant (`presolve_conic`)
 gates the `≤`-row reductions off second-order-cone blocks (which are
 coupled) and recovers the reduced cone partition.
 
+The iteration also carries a **layer cap**, and on a model with a long
+bound-propagation chain — commonly, on roughly half the LP corpus — the cap
+is what stops it rather than the fixpoint. That distinction is visible:
+presolve reports which of the two happened and the CLI says so on its
+summary line (see
+[LP / QP Solver Routing](lp-qp-routing.md#when-the-reduction-is-truncated)).
+A truncated reduction is still correct — every reduction it did apply is a
+sound transform with its own dual recovery — and measured across the LP and
+QP suites the truncation costs only box tightness, never a structural
+reduction.
+
 Presolve is applied automatically on the CLI LP/QP route; it lives in
 `pounce-convex::presolve` for Rust callers. See
 [LP / QP Solver Routing](lp-qp-routing.md).
