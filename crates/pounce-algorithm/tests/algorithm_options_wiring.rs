@@ -321,3 +321,40 @@ fn resto_constants_override_flows_through() {
     assert_eq!(r.resto_proximity_weight, 2.0);
     assert_eq!(r.required_infeasibility_reduction, 0.25);
 }
+
+/// gh #532. `dual_inf_scale_kappa` is only *read* when the user sets it
+/// explicitly (`read_num` returns `None` otherwise), so the registered default
+/// and the `ConvCheckOptions` default have to be the same number — a drift
+/// between them would ship a value nobody chose and no test would see it.
+#[test]
+fn dual_inf_scale_kappa_default_matches_registered() {
+    let app = IpoptApplication::new();
+    let (registered, found) = app
+        .options()
+        .get_numeric_value("dual_inf_scale_kappa", "")
+        .unwrap();
+    assert!(
+        !found,
+        "the option must read as unset until the user sets it"
+    );
+    assert_eq!(registered, 1.0, "registered default");
+    let b = builder_from(|_| {});
+    assert_eq!(
+        b.conv_check.dual_inf_scale_kappa, registered,
+        "the struct default and the registered default must agree"
+    );
+}
+
+#[test]
+fn dual_inf_scale_kappa_override_flows_through() {
+    // Including the documented `0` opt-out, which a `found`-less read would
+    // silently drop back to the default — the exact #191 failure mode.
+    for value in [0.0, 8.0] {
+        let b = builder_from(|app| {
+            app.options_mut()
+                .set_numeric_value("dual_inf_scale_kappa", value, true, false)
+                .unwrap();
+        });
+        assert_eq!(b.conv_check.dual_inf_scale_kappa, value);
+    }
+}

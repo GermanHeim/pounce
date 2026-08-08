@@ -1704,6 +1704,86 @@ impl IpoptCalculatedQuantities {
         glx.amax().max(gls.amax())
     }
 
+    /// Magnitude of the largest **term** the Lagrangian gradient is assembled
+    /// from — the scale [`Self::curr_dual_infeasibility_max`] is a residual
+    /// *of* (gh #532).
+    ///
+    /// ```text
+    ///   D = max( ‖∇f‖_∞ , ‖J_cᵀ y_c‖_∞ , ‖J_dᵀ y_d‖_∞ ,
+    ///            ‖P_L z_L‖_∞ , ‖P_U z_U‖_∞ ,
+    ///            ‖y_d‖_∞ , ‖P_L v_L‖_∞ , ‖P_U v_U‖_∞ )
+    /// ```
+    ///
+    /// `∇L` is the *sum* of exactly these terms, so `dual_inf / D` is the
+    /// fraction of them that failed to cancel: `1` at a point where nothing
+    /// cancelled (`min -exp(x) s.t. x >= 0` running away, `∇f = −8.8e47` with
+    /// no multiplier to meet it), and `~eps` at a point where the cancellation
+    /// was as complete as the arithmetic allows. That ratio is the
+    /// scale-invariant statement of stationarity: it is unchanged by
+    /// multiplying the objective — and hence every multiplier — by a positive
+    /// constant, which is the map an absolute bound on `dual_inf` is not
+    /// invariant under.
+    ///
+    /// The projections are applied rather than assumed away: `P_L`/`P_U` are
+    /// 0/1 expansion matrices in the main NLP, where the scatter leaves the
+    /// max-norm alone, but the term's own norm is what this measures and the
+    /// restoration NLP supplies its own operators.
+    ///
+    /// No `has_valid_numbers` sweep, unlike [`Self::curr_nlp_error`] (gh #292):
+    /// `amax` drops NaN, so a NaN gradient reads here as a finite scale. That
+    /// cannot launder anything, because the only caller pairs this with the
+    /// aggregate `nlp_err <= tol` test, and `nlp_err` carries that sweep — a
+    /// NaN anywhere in `∇L` makes it NaN, and `NaN <= tol` is false.
+    ///
+    /// Repeats the `∇f` and the two transpose products
+    /// [`Self::curr_grad_lag_x`] already performs on the same iterate, plus
+    /// four scatters. The evaluations themselves hit `OrigIpoptNLP`'s
+    /// per-iterate caches, so the marginal cost is the products — but it is
+    /// still a second pass, and the caller reads this only where a termination
+    /// certificate is otherwise on the table. See
+    /// `OptErrorConvCheck::dual_inf_bound`.
+    pub fn curr_dual_infeasibility_scale_max(&self) -> Number {
+        let iv = self.curr_iv();
+        let mut scale = self
+            .curr_grad_f()
+            .amax()
+            .max(self.curr_jac_c_t_times_curr_y_c().amax())
+            .max(self.curr_jac_d_t_times_curr_y_d().amax())
+            .max(iv.y_d.amax());
+
+        let nlp = self.nlp.borrow();
+        let mut tmp_x = iv.x.make_new();
+        nlp.px_l().mult_vector(1.0, &*iv.z_l, 0.0, &mut *tmp_x);
+        scale = scale.max(tmp_x.amax());
+        nlp.px_u().mult_vector(1.0, &*iv.z_u, 0.0, &mut *tmp_x);
+        scale = scale.max(tmp_x.amax());
+
+        let mut tmp_s = iv.y_d.make_new();
+        nlp.pd_l().mult_vector(1.0, &*iv.v_l, 0.0, &mut *tmp_s);
+        scale = scale.max(tmp_s.amax());
+        nlp.pd_u().mult_vector(1.0, &*iv.v_u, 0.0, &mut *tmp_s);
+        scale.max(tmp_s.amax())
+    }
+
+    /// [`Self::curr_dual_infeasibility_scale_max`] in the **unscaled**
+    /// (user-original) space. Every term of the scaled Lagrangian gradient is
+    /// `df` times its user-space counterpart — `∇f_scaled = df·∇f`,
+    /// `J_cᵀ_scaled y_c_scaled = Jᵀ(dc ⊙ y_c_scaled) = df·Jᵀ y_c` since
+    /// `dc ⊙ y_scaled = df·y_user`, and likewise for the bound blocks, POUNCE
+    /// applying no variable scaling — so the unscaling is the single divide by
+    /// `|df|` that [`Self::curr_unscaled_dual_infeasibility_max`] performs on
+    /// the residual, term for term and row scaling included. Magnitude, for
+    /// the reason documented there: `df` is signed, a max-norm is not.
+    pub fn curr_unscaled_dual_infeasibility_scale_max(&self) -> Number {
+        let df = self.nlp.borrow().obj_scaling_factor().abs();
+        let scaled = self.curr_dual_infeasibility_scale_max();
+        if df == 0.0 || df == 1.0 {
+            scaled
+        } else {
+            scaled / df
+        }
+    }
+
     /// Scaled stationarity of the infeasibility measure `½‖(c, d−s)‖²`
     /// — `‖J_cᵀ c + J_dᵀ (d−s)‖_∞ / max(1, ‖(c, d−s)‖_∞)`. The
     /// numerator is the x-gradient of the squared constraint
@@ -3310,6 +3390,39 @@ mod tests {
             "unscaled {unscaled} != scaled/df {}",
             scaled / 2.0
         );
+    }
+
+    /// gh #532. The dual *scale* is the largest single term `∇L` is assembled
+    /// from, so the strict gate can ask what fraction of those terms failed to
+    /// cancel instead of comparing a residual against an absolute constant.
+    #[test]
+    fn dual_inf_scale_is_the_largest_lagrangian_term() {
+        // Fixture at x = (2, 3): ∇f = (4, 6); J_cᵀ y_c = (1, 1); J_dᵀ y_d =
+        // (1, 0); y_d = 1; P_L z_L = 0.5; P_U z_U = 0.7; P_L v_L = 0.3; v_U is
+        // empty. The largest is ‖∇f‖_∞ = 6.
+        let cq = fixture();
+        assert_eq!(cq.curr_dual_infeasibility_scale_max(), 6.0);
+        // No scaling → the unscaled accessor is the identity, as for every
+        // other residual on the common path.
+        assert_eq!(
+            cq.curr_unscaled_dual_infeasibility_scale_max(),
+            cq.curr_dual_infeasibility_scale_max()
+        );
+    }
+
+    /// The scale unscales exactly as the residual it is the scale of: every
+    /// term of the scaled Lagrangian gradient carries `df`, so both are the
+    /// scaled value over `|df|`. If the two ever divided differently the ratio
+    /// the strict gate tests would silently pick up a factor of `df`.
+    #[test]
+    fn unscaled_dual_inf_scale_is_scaled_over_df() {
+        let cq = fixture_with(MockNlp::new().with_scaling(2.0, None, None));
+        assert_eq!(cq.curr_unscaled_dual_infeasibility_scale_max(), 3.0);
+        // A negative factor is the documented way to pose a maximization; a
+        // max-norm has no business coming back negative (the sign trap that
+        // defeated the unscaled dual residual gate).
+        let neg = fixture_with(MockNlp::new().with_scaling(-2.0, None, None));
+        assert_eq!(neg.curr_unscaled_dual_infeasibility_scale_max(), 3.0);
     }
 
     #[test]
