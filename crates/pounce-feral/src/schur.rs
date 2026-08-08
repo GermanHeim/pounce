@@ -361,6 +361,15 @@ impl FeralSchurSolver {
         self.negevals = (neg_ff + neg_s) as Index;
         self.have_factor = true;
         if check_neg_evals && self.negevals != num_neg_evals {
+            // pounce gh#540: a count summed from factors whose smallest pivot
+            // is at the working-precision floor is noise; report `Singular`
+            // so the IPM reaches for δ_c rather than the δ_w ladder. Mirrors
+            // `FeralSolverInterface::factor`.
+            if self.pivot_below_inertia_floor(&self.ff_solver)
+                || self.pivot_below_inertia_floor(&self.s_solver)
+            {
+                return self.set_status(ESymSolverStatus::Singular);
+            }
             // Factor is valid and usable; the caller's perturbation loop will
             // bump δ and re-factor. Mirror the monolithic backend's contract.
             return self.set_status(ESymSolverStatus::WrongInertia);
@@ -463,6 +472,17 @@ impl FeralSchurSolver {
         if self.cfg.singular_pivot_floor > 0.0 {
             if let Some(min_piv) = solver.min_pivot_magnitude() {
                 return min_piv < self.cfg.singular_pivot_floor;
+            }
+        }
+        false
+    }
+
+    /// Inertia-trust floor — see [`crate::FeralConfig::inertia_pivot_floor`].
+    /// Only consulted once the summed count has already mismatched.
+    fn pivot_below_inertia_floor(&self, solver: &Solver) -> bool {
+        if self.cfg.inertia_pivot_floor > 0.0 {
+            if let Some(min_piv) = solver.min_pivot_magnitude() {
+                return min_piv < self.cfg.inertia_pivot_floor;
             }
         }
         false

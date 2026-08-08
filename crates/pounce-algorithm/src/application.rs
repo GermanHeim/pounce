@@ -3549,6 +3549,9 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
         cfg.singular_pivot_floor = v;
     }
+    if let Ok((v, true)) = options.get_numeric_value("feral_inertia_pivot_floor", "") {
+        cfg.inertia_pivot_floor = v;
+    }
     // Number option (not integer): the gate is a u64 and Index is i32, too
     // narrow for large flop counts or the u64::MAX reject-all sentinel. The
     // lower bound (0.0) rules out negatives; `as u64` then saturates a very
