@@ -79,6 +79,15 @@ pub struct OptErrorConvCheck {
     /// which the test stands aside and the streak terminates as it would
     /// without it.
     pub acceptable_progress_refusals: Index,
+    /// Safety factor on the scale-relative floor the **strict** gate judges
+    /// `dual_inf` against (gh #532); see [`Self::dual_inf_bound`]. `0` disables
+    /// the floor, restoring upstream Ipopt's bare-absolute `dual_inf_tol`.
+    pub dual_inf_scale_kappa: Number,
+    /// Whether the gh #532 scale-relative dual floor has already been reported
+    /// this solve. Diagnostic only — the certificate below carries a dual
+    /// infeasibility above `dual_inf_tol`, which is worth saying once and not
+    /// once per iteration.
+    pub dual_floor_reported: bool,
     /// Whether a masked **strict** certificate was ever refused this solve.
     pub veto_fired: bool,
     /// Whether a masked **acceptable-level** termination was ever refused.
@@ -274,6 +283,8 @@ impl Default for OptErrorConvCheck {
             acceptable_progress_kappa: 1e-1,
             acceptable_window: std::collections::VecDeque::new(),
             acceptable_progress_refusals: 0,
+            dual_inf_scale_kappa: 1.0,
+            dual_floor_reported: false,
             veto_fired: false,
             acceptable_veto_fired: false,
             masked_acceptable_veto_fired: false,
@@ -293,17 +304,79 @@ impl OptErrorConvCheck {
     /// iff every supplied residual sits at or below its tolerance.
     /// Factored out so tests can exercise the gating logic without
     /// constructing a full `IpoptCq`.
+    ///
+    /// `dual_scale` is the magnitude of the terms `∇L` is assembled from
+    /// ([`IpoptCalculatedQuantities::curr_unscaled_dual_infeasibility_scale_max`]),
+    /// which sets the scale-relative floor under `dual_inf_tol` — see
+    /// [`Self::dual_inf_bound`]. Pass `0` for the bare absolute bound.
     fn passes_component_tols(
         &self,
         overall: Number,
         dual_inf: Number,
         constr_viol: Number,
         compl_inf: Number,
+        dual_scale: Number,
     ) -> bool {
         overall <= self.tol
-            && dual_inf <= self.dual_inf_tol
+            && dual_inf <= self.dual_inf_bound(dual_scale)
             && constr_viol <= self.constr_viol_tol
             && compl_inf <= self.compl_inf_tol
+    }
+
+    /// The bound the **strict** gate judges the unscaled dual infeasibility
+    /// against: `max(dual_inf_tol, dual_inf_scale_kappa · tol · dual_scale)`
+    /// (gh #532).
+    ///
+    /// `dual_inf_tol` is a bare absolute bound on a quantity the aggregate KKT
+    /// error normalises. The aggregate's dual term is `‖∇L‖_∞ / s_d`, and `s_d`
+    /// grows with the mean magnitude of the multipliers, so on a model whose
+    /// gradients live at `1e10` the two are judging one quantity by two
+    /// standards ten orders apart: Vanderbei's `orthrds2` reaches `s_d ≈ 1.6e10`
+    /// with `‖∇L‖_∞ = 89.7`, an aggregate dual term of `5.6e-09` — comfortably
+    /// inside the default `tol = 1e-8` — and the component gate refused it
+    /// against `1.0`, so a solve stationary to nine digits exited
+    /// `Solved_To_Acceptable_Level` holding the answer. `1.0` is a reasonable
+    /// absolute bound when `‖∇f‖` is `O(1)`; it is meaningless when `‖∇f‖` is
+    /// `1e10`, and the same LP with its objective multiplied by a positive
+    /// constant — which changes no feasible point, no solution and no active
+    /// set — crossed it.
+    ///
+    /// The floor is stated relative to the terms `∇L` is *made of*
+    /// (`dual_scale`), not to `s_d`. Both remove the asymmetry the issue
+    /// reports, but `s_d` is built from multiplier magnitudes alone and does not
+    /// see `∇f`: a model with tiny constraint gradients and huge multipliers
+    /// (`‖J‖ ~ 1e-12`, `‖y‖ ~ 1e12`, so every term of `∇L` is `O(1)`) has
+    /// `s_d ~ 1e10` and would have its genuinely non-stationary residual
+    /// forgiven — exactly the user-space drift the unscaled component gate was
+    /// added for (pounce#173). `dual_scale` cannot be fooled that way, because
+    /// `dual_inf / dual_scale` is the fraction of the terms that failed to
+    /// cancel.
+    ///
+    /// So the relaxation only ever forgives a residual that is small *relative
+    /// to the problem's own scale*, and it is bounded twice over: the aggregate
+    /// `overall <= tol` gate still has to pass on the same iterate, and at the
+    /// default `kappa = 1` the floor only rises above `dual_inf_tol` once
+    /// `dual_scale` exceeds `dual_inf_tol / tol = 1e8`. A genuinely
+    /// non-stationary point has `dual_inf ≈ dual_scale` (nothing cancelled) and
+    /// is refused by eight orders of magnitude — `min -exp(x) s.t. x >= 0`
+    /// reaching `inf_du = 8.8e+47` with `∇f = −8.8e47` stays refused, which is
+    /// the case any such rule has to keep rejecting.
+    ///
+    /// A user who tightens `dual_inf_tol` below the floor is asking for an
+    /// absolute standard the floor may override; `dual_inf_scale_kappa = 0`
+    /// switches it off and restores upstream's bare comparison. Non-finite or
+    /// non-positive scales are read as "nothing can be said", which is the
+    /// absolute bound.
+    fn dual_inf_bound(&self, dual_scale: Number) -> Number {
+        if self.dual_inf_scale_kappa.is_nan()
+            || self.dual_inf_scale_kappa <= 0.0
+            || !dual_scale.is_finite()
+            || dual_scale <= 0.0
+        {
+            return self.dual_inf_tol;
+        }
+        self.dual_inf_tol
+            .max(self.dual_inf_scale_kappa * self.tol * dual_scale)
     }
 
     /// The aggregate KKT error the **strict** gate judges against `tol`
@@ -798,9 +871,24 @@ impl ConvCheck for OptErrorConvCheck {
         // value is smaller still and the gate passes either way, and with any
         // component tolerance already blown `passes_component_tols` is false
         // whatever the aggregate says.
-        let components_pass = dual_inf <= self.dual_inf_tol
-            && constr_viol <= self.constr_viol_tol
-            && compl_inf <= self.compl_inf_tol;
+        //
+        // gh #532 — the scale-relative floor under `dual_inf_tol`. Computed on
+        // the same terms `dual_inf` was assembled from, and only where it can
+        // change the verdict: below `dual_inf_tol` the absolute arm has already
+        // passed and the floor can only be looser, and with the primal or
+        // complementarity component already blown no floor on the dual makes a
+        // certificate. That laziness matters because the accessor repeats
+        // `curr_grad_lag_x`'s `∇f` and two transpose products.
+        let primal_compl_pass =
+            constr_viol <= self.constr_viol_tol && compl_inf <= self.compl_inf_tol;
+        let dual_scale =
+            if primal_compl_pass && dual_inf > self.dual_inf_tol && self.dual_inf_scale_kappa > 0.0
+            {
+                cq_ref.curr_unscaled_dual_infeasibility_scale_max()
+            } else {
+                0.0
+            };
+        let components_pass = primal_compl_pass && dual_inf <= self.dual_inf_bound(dual_scale);
         let strict_err = if nlp_err <= self.tol || !components_pass || !self.noise_floor_enabled() {
             nlp_err
         } else {
@@ -874,8 +962,8 @@ impl ConvCheck for OptErrorConvCheck {
         // long before convergence — and using it would arm the fallback (and
         // snapshot an arbitrary mid-solve iterate) on runs that were never
         // about to stop.
-        let refusing_strict =
-            masked && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf);
+        let refusing_strict = masked
+            && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale);
         if refusing_strict && !self.veto_fired {
             self.veto_fired = true;
             tracing::info!(
@@ -888,7 +976,9 @@ impl ConvCheck for OptErrorConvCheck {
             );
         }
 
-        if !masked && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf) {
+        if !masked
+            && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale)
+        {
             if rel_veto {
                 rel_veto_blocked = true;
                 if self.rel_infeas_extra_iters == 0 {
@@ -902,6 +992,21 @@ impl ConvCheck for OptErrorConvCheck {
                     );
                 }
             } else {
+                // The certificate is going out with a dual infeasibility above
+                // `dual_inf_tol`, which the end-of-run summary will print
+                // beside `EXIT: Optimal Solution Found`. Say why, once.
+                if dual_inf > self.dual_inf_tol && !self.dual_floor_reported {
+                    self.dual_floor_reported = true;
+                    tracing::info!(
+                        dual_inf,
+                        dual_scale,
+                        dual_inf_tol = self.dual_inf_tol,
+                        bound = self.dual_inf_bound(dual_scale),
+                        "certifying with a dual infeasibility above dual_inf_tol: it is \
+                         within the scale-relative floor set by the terms the Lagrangian \
+                         gradient is built from (dual_inf_scale_kappa=0 disables)"
+                    );
+                }
                 return ConvergenceStatus::Converged;
             }
         }
@@ -1016,7 +1121,8 @@ impl ConvCheck for OptErrorConvCheck {
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         // Same noise-floored aggregate the strict gate uses (gh #528) — this
         // predicate exists to answer "would that gate have passed here?", so it
-        // has to ask the same question.
+        // has to ask the same question. Same scale-relative dual floor
+        // (gh #532), and lazily for the same reason.
         let strict_err = if self.noise_floor_enabled() {
             Self::strict_overall(
                 nlp_err,
@@ -1025,8 +1131,13 @@ impl ConvCheck for OptErrorConvCheck {
         } else {
             nlp_err
         };
+        let dual_scale = if dual_inf > self.dual_inf_tol && self.dual_inf_scale_kappa > 0.0 {
+            cq_ref.curr_unscaled_dual_infeasibility_scale_max()
+        } else {
+            0.0
+        };
         drop(cq_ref);
-        self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf)
+        self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale)
     }
 
     fn tol_or_default(&self) -> Number {
@@ -1302,7 +1413,7 @@ mod tests {
             ..Default::default()
         };
         // The residuals alone say "converged"; the objective says nothing usable.
-        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0));
+        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0, 0.0));
         // The masked predicate itself is unchanged — the finiteness gate lives at
         // the call site, where `curr_f` is in hand.
         assert!(certificate_masked(
@@ -1627,7 +1738,7 @@ mod tests {
             ..Default::default()
         };
         // The gh #200 iterate: passes the strict test in scaled space...
-        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0));
+        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0, 0.0));
         // ...and the veto is what withholds it.
         assert!(certificate_masked(
             1e-8,
@@ -1651,13 +1762,13 @@ mod tests {
             ..Default::default()
         };
         // All under threshold → converged.
-        assert!(c.passes_component_tols(1e-9, 0.5, 1e-5, 1e-5));
+        assert!(c.passes_component_tols(1e-9, 0.5, 1e-5, 1e-5, 0.0));
         // dual_inf above its tolerance blocks even when nlp_err is tiny.
-        assert!(!c.passes_component_tols(1e-12, 2.0, 1e-5, 1e-5));
+        assert!(!c.passes_component_tols(1e-12, 2.0, 1e-5, 1e-5, 0.0));
         // compl_inf above its tolerance blocks.
-        assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2));
+        assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2, 0.0));
         // constr_viol above its tolerance blocks.
-        assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0));
+        assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0, 0.0));
     }
 
     #[test]
@@ -1825,6 +1936,78 @@ mod tests {
             assert!(!c.note_infeasible_stationary(1e9, 0.0, 0.0));
         }
         assert_eq!(c.infeas_streak, 0);
+    }
+
+    /// gh #532. The scale-relative floor under `dual_inf_tol`, on the numbers
+    /// that produced the report: `orthrds2` must pass, and the runaway
+    /// `min -exp(x) s.t. x >= 0` must not.
+    #[test]
+    fn dual_inf_bound_forgives_a_relatively_stationary_residual_only() {
+        let c = OptErrorConvCheck::new();
+        assert_eq!(c.dual_inf_tol, 1.0);
+        assert_eq!(c.dual_inf_scale_kappa, 1.0);
+
+        // `orthrds2`: ‖∇L‖_∞ = 89.7 against terms of magnitude ~1.6e12 (the
+        // mean multiplier magnitude behind its `s_d ≈ 1.6e10`) — stationary to
+        // nine digits relative to what it is made of, and refused by the bare
+        // `1.0` before the fix.
+        let (orthrds2_dual_inf, orthrds2_scale) = (89.669_051_358_301_67, 1.6e12);
+        assert!(orthrds2_dual_inf > c.dual_inf_tol, "the reported refusal");
+        assert!(orthrds2_dual_inf <= c.dual_inf_bound(orthrds2_scale));
+        assert!(c.passes_component_tols(
+            5.537e-9,
+            orthrds2_dual_inf,
+            1.741e-8,
+            0.0,
+            orthrds2_scale
+        ));
+
+        // `min -exp(x) s.t. x >= 0` running away: `∇f = −8.8e47` with no
+        // multiplier to meet it, so nothing cancelled and the residual IS the
+        // scale. Refused by eight orders — the case any such rule has to keep
+        // rejecting.
+        let runaway = 8.8e47;
+        assert!(runaway > c.dual_inf_bound(runaway));
+        assert!(!c.passes_component_tols(1e-12, runaway, 1.7e-10, 0.0, runaway));
+
+        // The floor is a floor, never a tightening: below `dual_inf_tol` the
+        // absolute arm decides, at any scale.
+        assert_eq!(c.dual_inf_bound(1.0), c.dual_inf_tol);
+        assert_eq!(c.dual_inf_bound(0.0), c.dual_inf_tol);
+        assert_eq!(c.dual_inf_bound(1e-30), c.dual_inf_tol);
+        // ...and it only lifts off `dual_inf_tol` once the scale passes
+        // `dual_inf_tol / (kappa · tol)` = 1e8, so every `O(1)` model keeps the
+        // upstream comparison bit for bit.
+        assert_eq!(c.dual_inf_bound(1e7), c.dual_inf_tol);
+        assert!(c.dual_inf_bound(1e10) > c.dual_inf_tol);
+
+        // Non-finite scales say nothing and must not widen anything.
+        for bad in [Number::NAN, Number::INFINITY, Number::NEG_INFINITY] {
+            assert_eq!(c.dual_inf_bound(bad), c.dual_inf_tol, "scale {bad}");
+        }
+    }
+
+    /// The floor tracks `tol`: asking for a stricter solve tightens the dual
+    /// component gate in proportion, and `dual_inf_scale_kappa = 0` is the
+    /// documented opt-out back to upstream's bare absolute bound.
+    #[test]
+    fn dual_inf_bound_tracks_tol_and_honours_the_opt_out() {
+        let mut c = OptErrorConvCheck::new();
+        assert_eq!(c.dual_inf_bound(1e12), 1e4);
+        c.tol = 1e-10;
+        assert_eq!(c.dual_inf_bound(1e12), 1e2);
+        // Kappa scales the floor as advertised.
+        c.tol = 1e-8;
+        c.dual_inf_scale_kappa = 10.0;
+        assert_eq!(c.dual_inf_bound(1e12), 1e5);
+        // `0` (and, defensively, a negative or NaN value the option's own lower
+        // bound already refuses) disables it outright — the most extreme scale
+        // must not move the bound.
+        for off in [0.0, -1.0, Number::NAN] {
+            c.dual_inf_scale_kappa = off;
+            assert_eq!(c.dual_inf_bound(1e30), c.dual_inf_tol, "kappa {off}");
+            assert!(!c.passes_component_tols(1e-12, 89.7, 0.0, 0.0, 1.6e12));
+        }
     }
 
     /// gh #528. The strict gate reads the noise-floored aggregate when that is

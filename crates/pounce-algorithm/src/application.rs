@@ -2402,6 +2402,8 @@ impl IpoptApplication {
         alg.tiny_step_y_tol = builder.tiny_step_y_tol;
         alg.diverging_iterates_tol = builder.diverging_iterates_tol;
         alg.dual_diverging_streak = builder.dual_diverging_streak.max(0) as usize;
+        alg.resto_decline_deferrals = builder.resto_decline_deferrals.max(0) as usize;
+        alg.resto_decline_progress_ratio = builder.resto_decline_progress_ratio;
         alg.kkt_fidelity_tol = builder.kkt_fidelity_tol;
         // Honor `print_level == 0`: silence the algorithm's direct-to-stdout
         // output — the per-iteration table and, new in #206, the
@@ -2921,6 +2923,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("acceptable_progress_kappa") {
             builder.conv_check.acceptable_progress_kappa = v;
         }
+        if let Some(v) = read_num("dual_inf_scale_kappa") {
+            builder.conv_check.dual_inf_scale_kappa = v;
+        }
         if let Some(v) = read_num("kkt_fidelity_tol") {
             builder.kkt_fidelity_tol = v;
         }
@@ -2992,6 +2997,12 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("dual_diverging_streak") {
             builder.dual_diverging_streak = v;
+        }
+        if let Some(v) = read_int("resto_decline_deferrals") {
+            builder.resto_decline_deferrals = v;
+        }
+        if let Some(v) = read_num("resto_decline_progress_ratio") {
+            builder.resto_decline_progress_ratio = v;
         }
 
         // Barrier-parameter (μ) options — consumers in

@@ -360,6 +360,61 @@ Set `acceptable_progress_kappa = 0` to switch the progress test off and
 restore upstream Ipopt's bare consecutive-count criterion. Widening
 `acceptable_tol` widens the flat bar with it, so asking for a looser band
 still gets you the early exit.
+## Large gradients and `dual_inf_scale_kappa`
+
+The dual side of the same story. `dual_inf_tol` (default `1.0`) is a bare
+**absolute** bound on `‖∇L‖∞` — but the aggregate above **normalises**
+that quantity, dividing it by `s_d`, which grows with the mean magnitude
+of the multipliers. On a model whose gradients live at `1e10` the two
+gates are judging one number by standards ten orders apart.
+
+Vanderbei's `orthrds2` is the reported case: `s_d ≈ 1.6e10` with
+`‖∇L‖∞ = 89.7`, so the aggregate's dual term is `5.6e-09` — comfortably
+inside the default `tol = 1e-8`, i.e. stationary to nine digits relative
+to the size of the gradients involved — while the component gate refused
+it against `1.0`. The solve exited `Solved_To_Acceptable_Level` holding
+the answer, and `dual_inf_tol=1e3` alone turned it into
+`Optimal Solution Found` at the same objective.
+
+The simplest statement of the defect: multiply an objective by a positive
+constant. Same feasible set, same solution, same active set, same Newton
+step — and every multiplier, `s_d` and `‖∇L‖∞` scale with it, so a large
+enough constant costs the certificate.
+
+The **strict** test therefore judges the unscaled dual infeasibility
+against
+
+```
+max( dual_inf_tol ,  kappa · tol · dual_scale )
+```
+
+with `kappa = dual_inf_scale_kappa` (default `1`) and `dual_scale` the
+magnitude of the largest single term `∇L` is assembled from (`∇f`,
+`Jᵀy`, the bound multipliers). Since `∇L` is the *sum* of those terms,
+`‖∇L‖∞ / dual_scale` is the fraction of them that failed to cancel — a
+scale-invariant statement of stationarity, and the thing the absolute
+bound was standing in for.
+
+What bounds it:
+
+* **It cannot forgive non-stationarity.** A point where nothing cancelled
+  has `‖∇L‖∞ ≈ dual_scale`, a ratio of `1` against a bar of `1e-8`.
+  `min −exp(x) s.t. x >= 0` running away to `inf_du = 8.8e+47` is refused
+  by eight orders, because its `∇f` runs away by exactly the same factor.
+* **The aggregate still has to pass.** `nlp_err <= tol` is tested on the
+  same iterate; this only removes the second, inconsistent standard.
+* **It is inert on ordinary models.** At the defaults the floor does not
+  rise above `dual_inf_tol` until `dual_scale` exceeds
+  `dual_inf_tol / tol = 1e8`, so every model with `O(1)` gradients keeps
+  upstream's comparison bit for bit.
+* **Only the strict gate reads it.** `acceptable_dual_inf_tol` (`1e10`) is
+  untouched.
+
+Set `dual_inf_scale_kappa = 0` to switch the floor off and restore
+upstream Ipopt's bare-absolute bound. That is also the setting to reach
+for if you *tighten* `dual_inf_tol` and want that absolute standard
+honoured unconditionally — the floor is a floor, so it can override a
+tightened `dual_inf_tol` on a large-gradient model.
 
 ## Objective sense and `obj_scaling_factor`
 

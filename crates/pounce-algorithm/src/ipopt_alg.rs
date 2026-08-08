@@ -52,6 +52,30 @@ const DUAL_DIV_COUNT_FLOOR: Number = 1e2;
 /// restoration happens *before* the seconds-long factorizations start.
 const DUAL_DIV_FIRE_TOL: Number = 1e8;
 
+/// gh #534 — how many consecutive outer NLP errors the progress test reads.
+/// Four samples give three ratios: enough that a single lucky step cannot pass
+/// the test, short enough to still be inside the endgame it is meant to
+/// recognise. `eigena2`'s quoted tail is exactly four iterations long
+/// (`1.19e-5 → 2.96e-6 → 7.38e-7 → 1.84e-7`).
+const DECLINE_PROGRESS_SAMPLES: usize = 4;
+/// gh #534 — default `resto_decline_progress_ratio`: every one of those ratios
+/// must be at least this contraction for the decline to be deferred. `eigena2`
+/// quarters (ratio `0.249`) and passes; `eigenb2`'s tail *rises*
+/// (`1.88e-7, 2.69e-7, 2.89e-7, 2.93e-7`) and fails, which is the intended
+/// split — the issue calls `eigenb2` a plausible genuine stall and the guard
+/// plausibly right there.
+const DEFAULT_DECLINE_PROGRESS_RATIO: Number = 0.5;
+/// gh #534 — outer iterations a deferred continuation gets to produce a strict
+/// certificate before it is cut and the floor reported. `eigena2`'s
+/// extrapolation needs three; ten leaves room for a slower but still genuine
+/// endgame while keeping the cost of a lost bet bounded and small.
+const DECLINE_CONTINUATION_BUDGET: Index = 10;
+/// gh #534 — default for `resto_decline_deferrals`. One deferral is enough for
+/// the reported case (the continuation either converges within the budget or it
+/// does not); more entries would mostly re-bet on a point the first bet already
+/// failed to improve.
+const DEFAULT_RESTO_DECLINE_DEFERRALS: usize = 1;
+
 pub struct IpoptAlgorithm {
     pub data: IpoptDataHandle,
     pub cq: IpoptCqHandle,
@@ -210,6 +234,38 @@ pub struct IpoptAlgorithm {
     /// let MAKELA3, HAIFAM, HALDMADS, ROBOT, TENBARS2 — which need
     /// 2-3 consecutive resto entries to recover — pass through.
     resto_no_outer_progress_count: usize,
+    /// `resto_decline_deferrals` (gh #534) — how many times the
+    /// acceptable-point restoration decline in [`Self::invoke_restoration`] may
+    /// be *deferred* on a solve whose NLP error is still contracting. `0`
+    /// restores the pre-#534 behaviour (decline immediately, always).
+    ///
+    /// See [`Self::may_defer_acceptable_decline`] for the progress test and
+    /// [`Self::honour_decline_floor`] for what makes a spent deferral harmless.
+    pub resto_decline_deferrals: usize,
+    /// `resto_decline_progress_ratio` (gh #534) — the contraction each of the
+    /// last [`DECLINE_PROGRESS_SAMPLES`]` - 1` iterations must have achieved for
+    /// the decline to be deferred. Default
+    /// [`DEFAULT_DECLINE_PROGRESS_RATIO`]. A value of `1` admits any
+    /// non-increasing window and a large one drops the progress requirement
+    /// altogether, which is the "patch the guard and see" experiment the issue
+    /// asks for, available without patching.
+    pub resto_decline_progress_ratio: Number,
+    /// The most recent outer-iteration NLP errors, oldest first, with
+    /// [`Self::nlp_err_recent_len`] entries live. Feeds the gh #534 progress
+    /// test and nothing else.
+    nlp_err_recent: [Number; DECLINE_PROGRESS_SAMPLES],
+    nlp_err_recent_len: usize,
+    /// gh #534 — deferrals of the acceptable-point decline spent so far.
+    decline_deferrals_used: usize,
+    /// gh #534 — the iterate the guard would have returned had it not been
+    /// deferred. Captured at the *first* deferral only, because that point is
+    /// precisely the answer the pre-#534 build reports; it is the floor the
+    /// continuation is never allowed to fall below.
+    decline_floor: Option<VetoSnapshot>,
+    /// gh #534 — outer iteration by which the deferred continuation must have
+    /// produced a strict certificate. Past it the continuation is cut and the
+    /// floor is reported, so the bet costs a bounded number of iterations.
+    decline_deadline_iter: Option<Index>,
     /// Count of consecutive restoration entries on which the outer
     /// constraint violation at entry was already below `tol` (the
     /// outer optimality tolerance). Matches the *intent* of upstream
@@ -357,6 +413,13 @@ impl IpoptAlgorithm {
             last_resto_recovery_x: None,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
+            resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
+            resto_decline_progress_ratio: DEFAULT_DECLINE_PROGRESS_RATIO,
+            nlp_err_recent: [Number::NAN; DECLINE_PROGRESS_SAMPLES],
+            nlp_err_recent_len: 0,
+            decline_deferrals_used: 0,
+            decline_floor: None,
+            decline_deadline_iter: None,
             resto_near_feasible_count: 0,
             acceptable_iterate: None,
             vetoed: None,
@@ -386,6 +449,46 @@ impl IpoptAlgorithm {
             self.acceptable_iterate = Some(curr.clone());
             self.acceptable_iter_number = d.iter_count;
         }
+    }
+
+    /// Record this outer iteration's NLP error for the gh #534 progress test.
+    ///
+    /// One push per `iterate()` call, so the samples are consecutive outer
+    /// iterations by construction. Deliberately *not* cleared when restoration
+    /// recovers: a recovery that helped shows up as continued contraction and a
+    /// recovery that hurt shows up as a jump, and the ratio test reads both
+    /// correctly without needing to know which happened.
+    fn note_nlp_err(&mut self, nlp_err: Number) {
+        push_sample(
+            &mut self.nlp_err_recent,
+            &mut self.nlp_err_recent_len,
+            nlp_err,
+        );
+    }
+
+    /// Whether the last [`DECLINE_PROGRESS_SAMPLES`] outer iterations each cut
+    /// the NLP error by at least `resto_decline_progress_ratio` (gh #534).
+    ///
+    /// The question the restoration-decline guard never asked: *is this solve
+    /// still converging?* A full window is required, so the test cannot pass on
+    /// a short history — the early iterations of every solve included.
+    ///
+    /// The test itself lives in the pure [`window_is_contracting`], for the
+    /// reason [`ranks_better_within_band`] does: what it must and must not fire
+    /// on is stated in the issue as two recorded traces, and those are provable
+    /// by deterministic unit test rather than inferable from a solve.
+    fn nlp_err_contracting(&self) -> bool {
+        if self.nlp_err_recent_len < DECLINE_PROGRESS_SAMPLES {
+            return false;
+        }
+        window_is_contracting(&self.nlp_err_recent, self.resto_decline_progress_ratio)
+    }
+
+    /// The live progress window, oldest first, for the gh #534 trace lines.
+    fn nlp_err_window_str(&self) -> String {
+        let live = &self.nlp_err_recent[..self.nlp_err_recent_len];
+        let parts: Vec<String> = live.iter().map(|e| format!("{e:.3e}")).collect();
+        format!("[{}]", parts.join(" -> "))
     }
 
     /// Roll the iterate back to the last acceptable snapshot — port of
@@ -1281,6 +1384,162 @@ impl IpoptAlgorithm {
         d.curr_mu = snap.mu;
     }
 
+    /// Decide whether the acceptable-point restoration decline may be deferred
+    /// this once (gh #534), and arm the bookkeeping that bounds the bet.
+    ///
+    /// Four conditions, all required:
+    ///
+    /// * the option leaves deferrals available at all
+    ///   (`resto_decline_deferrals`, `0` = pre-#534 behaviour);
+    /// * the budget is not already spent;
+    /// * the NLP error has contracted on every one of the last
+    ///   [`DECLINE_PROGRESS_SAMPLES`]` - 1` iterations
+    ///   ([`Self::nlp_err_contracting`]) — the progress test the guard lacked;
+    /// * the iteration budget has room for a continuation, and the entry point
+    ///   can actually be captured. Without a floor there is nothing to fall
+    ///   back to, and a bet with no floor is exactly what must not be placed.
+    ///
+    /// The deadline is clamped below `max_iter` so a lost bet can never turn a
+    /// reportable `StopAtAcceptablePoint` into `Maximum_Iterations_Exceeded`:
+    /// the continuation is always cut before the iteration budget runs out. A
+    /// *time* budget is not clamped the same way — elapsed time is an external
+    /// fact and the deadline cannot predict it — so a solve that expires inside
+    /// the continuation window still reports the time limit, at the floor
+    /// iterate rather than at whatever the continuation last touched.
+    fn may_defer_acceptable_decline(&mut self) -> bool {
+        if self.decline_deferrals_used >= self.resto_decline_deferrals {
+            return false;
+        }
+        if !self.nlp_err_contracting() {
+            return false;
+        }
+        let iter = self.data.borrow().iter_count;
+        // No room to continue: the deadline below would fire on the very next
+        // iteration, so the deferral would buy nothing and cost a restoration.
+        if iter.saturating_add(1) >= self.max_iter {
+            return false;
+        }
+        if self.decline_floor.is_none() {
+            let Some(snap) = self.snapshot_current(iter) else {
+                return false;
+            };
+            self.decline_floor = Some(snap);
+        }
+        self.decline_deferrals_used += 1;
+        self.decline_deadline_iter = Some(
+            iter.saturating_add(DECLINE_CONTINUATION_BUDGET)
+                .min(self.max_iter.saturating_sub(1)),
+        );
+        true
+    }
+
+    /// The deferred continuation ran out of budget without a strict certificate
+    /// (gh #534). Report the floor — the point the pre-#534 guard would have
+    /// returned — unless the continuation is standing somewhere at least as
+    /// good.
+    fn terminate_at_decline_floor(&mut self) -> IterateOutcome {
+        let Some(floor) = self.decline_floor.clone() else {
+            // Unreachable in practice: the deadline is only ever set after a
+            // floor is captured. Stopping at the current point is still the
+            // right thing if it somehow is not — the point passed the
+            // acceptable-level triplet when the deferral was taken.
+            return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
+        };
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] deferred restoration decline expired at iter {} without a strict \
+             certificate; falling back to the floor from iter {} (gh #534).",
+            self.data.borrow().iter_count, floor.iter,
+        );
+        if !self.continuation_outranks(&floor) {
+            self.restore_snapshot(&floor);
+        }
+        IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
+    }
+
+    /// Whether the current iterate is a *better* answer than the gh #534 floor.
+    ///
+    /// Two gates, in order. The current point must itself pass the
+    /// acceptable-level triplet — the floor is going to be reported under
+    /// `Solved_To_Acceptable_Level`, and a continuation that wandered off is not
+    /// entitled to that status however attractive its objective looks. Only then
+    /// does [`Self::ranks_better`]'s feasibility-first key decide, and only under
+    /// an unmoved objective scaling factor, since the two objectives are
+    /// otherwise not comparable.
+    fn continuation_outranks(&self, floor: &VetoSnapshot) -> bool {
+        let (curr_f, _) = self.curr_obj_and_unscaled_kkt();
+        if !curr_f.is_finite() {
+            return false;
+        }
+        let nlp_err = self.cq.borrow().curr_nlp_error();
+        if !self
+            .bundle
+            .conv_check
+            .current_is_acceptable_with_state(nlp_err, &self.data, &self.cq)
+        {
+            return false;
+        }
+        let (curr_viol, curr_scale) = {
+            let cq = self.cq.borrow();
+            (
+                cq.curr_unscaled_primal_infeasibility_max(),
+                cq.obj_scaling_factor(),
+            )
+        };
+        if curr_scale != floor.obj_scale {
+            return false;
+        }
+        !self.ranks_better(floor.obj, floor.constr_viol, curr_f, curr_viol)
+    }
+
+    /// Make a deferred restoration decline non-destructive (gh #534).
+    ///
+    /// The deferral is a bet that a contracting endgame is three iterations from
+    /// a certificate. This is what makes losing it cost only those iterations:
+    /// whatever the continued run ends up returning, if it is not at least as
+    /// good an answer as the floor — the point the pre-#534 guard would have
+    /// reported — the floor is restored and reported instead.
+    ///
+    /// Applied once, in [`Self::optimize`], for the same reason the gh #200 and
+    /// pounce#250 hooks are: the driver loop has many `return`s and this must
+    /// see all of them.
+    ///
+    /// A strict `Success` is never overridden — that is the bet paying off, and
+    /// a real certificate outranks any acceptable-level point by construction.
+    /// The budget statuses keep their own status, as they do in
+    /// [`Self::honour_best_acceptable_after_dual_guard`]: a caller polling for
+    /// "did I run out of time" must be told so, even while the point it gets
+    /// back is swapped for the better one.
+    fn honour_decline_floor(&mut self, result: SolverReturn) -> SolverReturn {
+        if matches!(result, SolverReturn::Success) {
+            if self.decline_floor.is_some() {
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] the deferred restoration decline paid off: the continuation \
+                     reached a strict certificate (gh #534).",
+                );
+            }
+            return result;
+        }
+        let Some(floor) = self.decline_floor.clone() else {
+            return result;
+        };
+        if self.continuation_outranks(&floor) {
+            return result;
+        }
+        tracing::debug!(target: "pounce::algorithm",
+            "[POUNCE] the deferred restoration decline did not pay off; restoring the \
+             floor from iter {} (obj {:.10e} viol {:.3e}) and reporting it (gh #534).",
+            floor.iter, floor.obj, floor.constr_viol,
+        );
+        self.restore_snapshot(&floor);
+        match result {
+            SolverReturn::MaxiterExceeded
+            | SolverReturn::CpuTimeExceeded
+            | SolverReturn::WallTimeExceeded
+            | SolverReturn::UserRequestedStop => result,
+            _ => SolverReturn::StopAtAcceptablePoint,
+        }
+    }
+
     /// Terminal fallback for a near-feasible numerical breakdown (a
     /// restoration cycle or a failed step computation). If a finite
     /// acceptable iterate was recorded earlier in the solve, roll back
@@ -1616,6 +1875,10 @@ impl IpoptAlgorithm {
             timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
         }
+        // gh #534 progress history. One sample per outer iteration, recorded
+        // before any of the guards below can divert, so the samples the
+        // restoration-decline test reads are consecutive by construction.
+        self.note_nlp_err(nlp_err);
         // Divergence guard — port of upstream `IpIpoptAlg.cpp` post-
         // AcceptTrialPoint check. When `max_i |x_i|` exceeds the
         // registered `diverging_iterates_tol` (default `1e20`), exit
@@ -1855,6 +2118,16 @@ impl IpoptAlgorithm {
             self.record_best_acceptable(curr_f);
         }
         timing.check_convergence.end();
+
+        // gh #534: a deferred restoration decline is a bet with a deadline.
+        // Checked *after* the convergence check, so a strict certificate the
+        // continuation reached in the meantime wins the bet rather than being
+        // pre-empted by its own expiry; and after the acceptable stash, so a
+        // continuation that ended somewhere better has been recorded before the
+        // floor comparison reads it.
+        if self.decline_deadline_iter.is_some_and(|d| iter_count > d) {
+            return self.terminate_at_decline_floor();
+        }
 
         // 3. Hessian update. Must run BEFORE `update_barrier_parameter`
         // so the adaptive-μ oracles (probing, quality-function) drive
@@ -2559,6 +2832,18 @@ impl IpoptAlgorithm {
             let cq = self.cq.borrow();
             (cq.curr_f().is_finite(), cq.curr_nlp_error())
         };
+        //
+        // What the guard still did not ask is whether the solve was *converging*
+        // (gh #534). It reads the entry point and nothing about the trajectory
+        // that reached it, so it stops a contracting endgame and a dead stall
+        // with equal confidence. On `eigena2` it fires while the dual
+        // infeasibility is quartering every iteration on unit steps
+        // (`1.19e-5 → 2.96e-6 → 7.38e-7 → 1.84e-7`), three iterations short of a
+        // strict certificate that costs nothing but those three iterations.
+        // [`Self::may_defer_acceptable_decline`] adds that missing question,
+        // and only that: when the answer is no — `eigenb2`'s tail rises, and
+        // `csfi2`'s last two iterations are flat to three digits — the guard
+        // fires exactly as before.
         if entry_f_finite
             && self.bundle.conv_check.current_is_acceptable_with_state(
                 entry_nlp_err,
@@ -2566,13 +2851,31 @@ impl IpoptAlgorithm {
                 &self.cq,
             )
         {
-            tracing::debug!(target: "pounce::algorithm",
-                "[POUNCE] declining restoration at theta {:.3e}: the entry point already \
-                 passes the acceptable-level tolerances (nlp_err {:.3e}); reporting it \
-                 rather than risking it in restoration.",
-                reference_theta, entry_nlp_err,
-            );
-            return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
+            if self.may_defer_acceptable_decline() {
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] deferring the restoration decline at theta {:.3e}: the entry \
+                     point passes the acceptable-level tolerances (nlp_err {:.3e}) but the \
+                     NLP error has contracted every iteration over the last {} \
+                     ({:.3e} -> {:.3e}); continuing for up to {} iterations, with that point \
+                     held as the floor (gh #534).",
+                    reference_theta, entry_nlp_err, DECLINE_PROGRESS_SAMPLES - 1,
+                    self.nlp_err_recent[0], entry_nlp_err, DECLINE_CONTINUATION_BUDGET,
+                );
+            } else {
+                // The window is on the line because "why did the guard not
+                // defer?" is the first question anyone reading this trace has
+                // (gh #534), and reconstructing it from the iteration table
+                // means recomputing the scaled aggregate by hand.
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] declining restoration at theta {:.3e}: the entry point already \
+                     passes the acceptable-level tolerances (nlp_err {:.3e}); reporting it \
+                     rather than risking it in restoration. Recent NLP errors {} \
+                     (contracting: {}).",
+                    reference_theta, entry_nlp_err,
+                    self.nlp_err_window_str(), self.nlp_err_contracting(),
+                );
+                return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
+            }
         }
 
         // No-progress restoration cycle detector. Two layered checks
@@ -3092,6 +3395,12 @@ impl IpoptAlgorithm {
         // this point by construction.
         let result = self.honour_best_acceptable_after_dual_guard(result);
 
+        // gh #534: deferring the acceptable-point restoration decline is also a
+        // bet, and this is the net under it — a continuation that did not beat
+        // the point the guard would have returned hands that point back. Last of
+        // the three, so it compares against whatever the hooks above settled on.
+        let result = self.honour_decline_floor(result);
+
         // Terminal post-mortem checkpoint. Skipped when the user already
         // asked to stop (they were just at a prompt); otherwise the
         // debugger gets a last look at the final/failing iterate.
@@ -3394,6 +3703,38 @@ enum IterateOutcome {
 /// (the trap gh #267 caught). [`IpoptAlgorithm::ranks_better`] supplies `band`
 /// as `min(acceptable_constr_viol_tol, FEASIBLE_ENOUGH_CAP)`; both the record
 /// and the read side route through here, so they cannot disagree.
+/// Append `value` to a fixed-capacity oldest-first window, dropping the oldest
+/// sample once the window is full (gh #534).
+fn push_sample(buf: &mut [Number; DECLINE_PROGRESS_SAMPLES], len: &mut usize, value: Number) {
+    if *len < DECLINE_PROGRESS_SAMPLES {
+        buf[*len] = value;
+        *len += 1;
+    } else {
+        buf.rotate_left(1);
+        buf[DECLINE_PROGRESS_SAMPLES - 1] = value;
+    }
+}
+
+/// Whether every consecutive pair in `samples` (oldest first) contracted by at
+/// least `ratio` — the gh #534 progress test, as a pure function.
+///
+/// A sample that is not finite, or a predecessor that is not strictly positive,
+/// fails the window: neither is evidence of progress, and a zero predecessor
+/// makes the ratio meaningless. A `ratio` of `1` admits any non-increasing
+/// window, and a large one admits every finite window — which is how
+/// `resto_decline_progress_ratio` doubles as the "drop the progress
+/// requirement" switch.
+///
+/// Pure and total for the same reason [`ranks_better_within_band`] is: the two
+/// traces the issue records — `eigena2` quartering and `eigenb2` rising — decide
+/// what this must do, and a unit test can hold it to them exactly.
+fn window_is_contracting(samples: &[Number], ratio: Number) -> bool {
+    samples.windows(2).all(|w| {
+        let (prev, next) = (w[0], w[1]);
+        prev.is_finite() && prev > 0.0 && next.is_finite() && next <= ratio * prev
+    })
+}
+
 fn ranks_better_within_band(
     a_obj: Number,
     a_viol: Number,
@@ -3774,6 +4115,113 @@ mod tests {
         // point outranks it regardless of objective.
         assert!(ranks_better_within_band(0.0, 0.0, -100.0, f64::NAN, band));
         assert!(!ranks_better_within_band(-100.0, f64::NAN, 0.0, 0.0, band));
+    }
+
+    /// gh #534, the case the guard was stopping: `eigena2`'s dual infeasibility
+    /// quarters on unit steps for four straight iterations, three short of a
+    /// strict certificate. Quoted from the issue's own iteration table.
+    #[test]
+    fn eigena2_endgame_reads_as_contracting() {
+        let eigena2 = [1.19e-05, 2.96e-06, 7.38e-07, 1.84e-07];
+        assert!(window_is_contracting(
+            &eigena2,
+            DEFAULT_DECLINE_PROGRESS_RATIO
+        ));
+    }
+
+    /// gh #534, the case the guard was right about: `eigenb2`'s tail *rises*
+    /// on heavily backtracked steps. The issue calls it a plausible genuine
+    /// stall, so the progress test must refuse it and leave the guard alone.
+    #[test]
+    fn eigenb2_stall_does_not_read_as_contracting() {
+        let eigenb2 = [1.88e-07, 2.69e-07, 2.89e-07, 2.93e-07];
+        assert!(!window_is_contracting(
+            &eigenb2,
+            DEFAULT_DECLINE_PROGRESS_RATIO
+        ));
+    }
+
+    /// gh #534: `csfi2`'s window, measured on this build at the guard. Three
+    /// healthy contractions and then a flat step — the solve has stopped
+    /// moving, so the deferral must not fire however good the earlier ratios
+    /// look. This is the shape every live guard firing reachable from the
+    /// in-repo corpus has, which is why the whole window is tested and not
+    /// just its first ratios.
+    #[test]
+    fn csfi2_flat_final_step_does_not_read_as_contracting() {
+        let csfi2 = [3.267e0, 1.845e-6, 8.468e-8, 8.524e-8];
+        assert!(!window_is_contracting(
+            &csfi2,
+            DEFAULT_DECLINE_PROGRESS_RATIO
+        ));
+        // ... and it is the *last* step that decides: drop it and the same
+        // trace passes, which is exactly the distinction the test exists for.
+        assert!(window_is_contracting(
+            &csfi2[..3],
+            DEFAULT_DECLINE_PROGRESS_RATIO
+        ));
+    }
+
+    /// gh #534: a large ratio drops the progress requirement, so the decline is
+    /// deferred on any window. That is the "bypass the guard and see how far the
+    /// solve gets" switch the issue asks for. A ratio of exactly `1` is the
+    /// weaker "no backsliding" reading and still refuses `csfi2`, whose last
+    /// step rises.
+    #[test]
+    fn a_large_ratio_accepts_a_stalled_window() {
+        let csfi2 = [3.267e0, 1.845e-6, 8.468e-8, 8.524e-8];
+        assert!(!window_is_contracting(&csfi2, 1.0));
+        assert!(window_is_contracting(&[1e-8, 1e-8, 1e-8, 1e-8], 1.0));
+        assert!(window_is_contracting(&csfi2, 1e20));
+        // Still not a licence to read garbage as progress.
+        assert!(!window_is_contracting(
+            &[1.0, Number::NAN, 1e-9, 1e-12],
+            1e20
+        ));
+    }
+
+    /// gh #534 edge cases: the ratio must never be evaluated against a
+    /// non-positive or non-finite predecessor.
+    #[test]
+    fn degenerate_windows_never_read_as_contracting() {
+        let r = DEFAULT_DECLINE_PROGRESS_RATIO;
+        // A zero predecessor makes the ratio meaningless (0 <= 0.5*0 would
+        // otherwise read as "contracting" forever).
+        assert!(!window_is_contracting(&[0.0, 0.0, 0.0, 0.0], r));
+        assert!(!window_is_contracting(&[1e-9, 0.0, 0.0, 0.0], r));
+        assert!(!window_is_contracting(
+            &[Number::INFINITY, 1e-3, 1e-6, 1e-9],
+            r
+        ));
+        assert!(!window_is_contracting(&[1e-3, 1e-6, 1e-9, Number::NAN], r));
+        // A genuine run down to exactly zero is progress, not a degenerate
+        // window — the predecessor is positive at every step.
+        assert!(window_is_contracting(&[1e-3, 1e-6, 1e-9, 0.0], r));
+    }
+
+    /// gh #534: the window slides one sample per outer iteration and holds the
+    /// most recent [`DECLINE_PROGRESS_SAMPLES`]. A short history is never a full
+    /// window, which is what stops the first restoration entry of a solve from
+    /// being deferred on no evidence at all — `nlp_err_contracting` requires
+    /// `len == DECLINE_PROGRESS_SAMPLES` before it consults the samples.
+    #[test]
+    fn progress_window_slides_oldest_out() {
+        let mut buf = [Number::NAN; DECLINE_PROGRESS_SAMPLES];
+        let mut len = 0usize;
+        for e in [1e-1, 1e-2, 1e-3] {
+            push_sample(&mut buf, &mut len, e);
+        }
+        assert_eq!(len, 3);
+        push_sample(&mut buf, &mut len, 1e-4);
+        assert_eq!(len, DECLINE_PROGRESS_SAMPLES);
+        assert_eq!(buf, [1e-1, 1e-2, 1e-3, 1e-4]);
+        assert!(window_is_contracting(&buf, DEFAULT_DECLINE_PROGRESS_RATIO));
+        // One flat iteration slides the oldest sample out and withdraws the
+        // verdict.
+        push_sample(&mut buf, &mut len, 1e-4);
+        assert_eq!(len, DECLINE_PROGRESS_SAMPLES);
+        assert_eq!(buf, [1e-2, 1e-3, 1e-4, 1e-4]);
+        assert!(!window_is_contracting(&buf, DEFAULT_DECLINE_PROGRESS_RATIO));
     }
 
     /// gh #505: no route may conclude `LocalInfeasibility` on its own.
