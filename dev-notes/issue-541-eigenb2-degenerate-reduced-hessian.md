@@ -1,4 +1,4 @@
-# issue #541 — `eigenb2`: the missing inertia correction is not the bug
+# issue #541 — `eigenb2`: a degenerate reduced Hessian, and an inertia test that stops meaning anything
 
 [#541](https://github.com/jkitchin/pounce/issues/541): `eigenb2` (Vanderbei)
 exits `Solved To Acceptable Level` after 67 iterations where Ipopt certifies
@@ -7,14 +7,31 @@ applies `delta_w = 10^2.9 ≈ 794` and POUNCE applies none, and proposes that bo
 this and the sister issue [#540](https://github.com/jkitchin/pounce/issues/540)
 (`eigena2`) trace to one root cause in the inertia-correction update.
 
-**Outcome: the inertia-correction update is not the bug, and iteration 3 is not
-the cause of the 67 iterations.** POUNCE's inertia at iteration 3 is *correct* —
-verified against a dense eigendecomposition of the dumped KKT matrix — and the
-`PdPerturbationHandler` is a faithful line-by-line port of upstream 3.14. The
-run is slow because `eigenb2` is a **degenerate NLP**: the reduced Hessian
-`Zᵀ W Z` has a smallest eigenvalue that collapses to zero while the inertia
-stays correct, so the inertia test never asks for regularization and the Newton
-step blows up along a direction of numerically-zero curvature.
+**Outcome: iteration 3 is not the cause of the 67 iterations, and the `delta_w`
+update rule is not the bug — but the sister-issue conjecture in #541 was right,
+and the shared root cause is real.** POUNCE's inertia at iteration 3 is
+*correct* — verified against a dense eigendecomposition of the dumped KKT
+matrix — and `PdPerturbationHandler` is a faithful line-by-line port of upstream
+3.14. The run is slow because `eigenb2` is a **degenerate NLP**: the reduced
+Hessian `Zᵀ W Z` has a smallest eigenvalue that collapses to zero, and the
+Newton step blows up along a direction of numerically-zero curvature.
+
+> **Superseded in part by [#544](https://github.com/jkitchin/pounce/pull/544).**
+> This note originally concluded that the inertia test stays satisfied and
+> `delta_w` stays zero for the whole run. That is wrong, and §2 below says why
+> the sample that suggested it does not reach the part of the run that matters.
+> On `270a0502` the failing tail is *full* of inertia activity: 20
+> factorizations mismatch, with FERAL reporting 43…64 against an expected 55,
+> and 11 iterations carry a nonzero `lg(rg)` — re-escalating 1.9, 1.4, 0.9, 0.5,
+> 1.8, 1.3, 1.7 over iterations 61-67, which is the same signature #540 reported
+> for `eigena2`. The KKT is singular to working precision there, so its
+> negative-eigenvalue count is noise and `delta_w` is the wrong answer to it.
+> #544 routes an unmeasurable inertia test to `delta_c` instead; its trigger
+> fires **15 times on `eigenb2`**, more than the 5 on `eigena2`, the model it was
+> written for. `eigenb2` now certifies `Optimal` in 68 iterations under stock
+> defaults. §5's reading — that Ipopt escapes only because MA57's inertia is
+> thresholded in practice — is exactly what #544 implements, and was reached
+> here independently from a different model.
 
 Everything below is measured on `270a0502` + the committed fixture
 `crates/pounce-cli/tests/fixtures/eigenb2.nl`
@@ -56,7 +73,7 @@ iter      objective   inf_pr   inf_du lg(mu)    ||d|| lg(rg) alpha_du alpha_pr  
 Byte-identical to the issue, including `lg(rg) = -` at iteration 3 and the
 67-iteration `Solved To Acceptable Level` exit.
 
-## 2. POUNCE's inertia is the correct one
+## 2. POUNCE's inertia is the correct one — over the first five iterations
 
 `--dump kkt:all` writes each factorization's triplets. Feeding them to a dense
 `numpy.linalg.eigvalsh` gives the exact inertia of the matrix POUNCE actually
@@ -72,8 +89,19 @@ factored:
 | iter 3, factor 1 | 0 | 55 | Success | (110, 55, 0) |
 | iter 4, factor 1 | 0 | 55 | Success | (110, 55, 0) |
 
-FERAL's count matches the exact spectrum on **every** factorization. The
-escalation ladders match Ipopt's printed `lg(rg)` exactly where they overlap:
+FERAL's count matches the exact spectrum on every factorization **in this
+sample**.
+
+> **Do not generalize this table to the run.** It covers iterations 0-4, where
+> the KKT is still well conditioned and the count is a meaningful quantity. The
+> stall lives in the tail, and there the matrix is singular to working precision
+> and the count is noise — 20 mismatches across the run, FERAL reporting
+> 43…64 against an expected 55. Reading "correct on every factorization" off
+> these seven rows is what led the original version of this note to conclude
+> that `delta_w` stayed zero throughout; it does not. See the banner at the top,
+> and #544.
+
+The escalation ladders match Ipopt's printed `lg(rg)` exactly where they overlap:
 iteration 0 runs `0 → 1e-4 → 1e-2 → 1 → 100` (`lg(rg) = 2.0`), iteration 1 runs
 `0 → 100/3 → 267 → 2133` (`lg(rg) = 3.3`). Ipopt's `2.9` at iteration 3 is
 `2133/3 = 711`, i.e. exactly one `get_deltas_for_wrong_inertia` step from the
@@ -339,7 +367,12 @@ OMP_NUM_THREADS=1 RAYON_NUM_THREADS=1 \
 ```
 
 `crates/pounce-cli/tests/issue_541_eigenb2_degenerate_hessian.rs` pins the
-behaviour this note describes: the default solve reaches the correct objective,
-and the `feral_singular_pivot_floor` recipe certifies `Optimal` in materially
-fewer iterations. It will fail if the recipe stops working — which is the point,
-because until §7 lands the recipe is the only answer this problem has.
+post-#544 behaviour: the default solve certifies `Optimal`, and
+`feral_singular_pivot_floor=1e-8` still reaches it in materially fewer
+iterations (39 against 68).
+
+The first of those is the regression test for the `eigenb2` half of #544 —
+that PR pins `eigena2` and found this model only through a corpus sweep, so
+without this test its second claim rests on the sweep alone. The second keeps
+the knob honest: it is no longer needed for correctness, but it remains the
+fastest route through this model's degeneracy.

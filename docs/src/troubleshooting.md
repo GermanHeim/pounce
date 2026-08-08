@@ -32,7 +32,7 @@ walks through adding it.
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
-| `lg(rg)` blank for many iterations while `alpha_pr` halves toward `1/128` and `\|\|d\|\|` grows | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-degenerate-reduced-hessian-that-never-asks-for-regularization) |
+| `alpha_pr` halves toward `1/128` while `\|\|d\|\|` grows and the dual residual stalls | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-reduced-hessian-that-collapses-to-singular) |
 
 ---
 
@@ -480,27 +480,35 @@ race entirely on subsequent runs. See the full
 [`feral_ordering` table](options.md#feral_ordering-variants) for the
 other variants.
 
-### `feral_singular_pivot_floor`: a degenerate reduced Hessian that never asks for regularization
+### `feral_singular_pivot_floor`: a reduced Hessian that collapses to singular
 
 #### When to try it
 
-The `lg(rg)` column is blank (`-`) on iteration after iteration while
 `alpha_pr` walks down `1/2, 1/4, … 1/128` with a matching `ls` count,
-`||d||` *grows* instead of shrinking, and the run finally exits
-`Solved To Acceptable Level` with `dual_inf` parked a couple of orders
-of magnitude above `tol`. Feasibility is usually already at machine
-precision, and the objective is right to many digits — only the dual
-residual will not come down.
+`||d||` *grows* instead of shrinking, and the run exits with `dual_inf`
+parked a couple of orders of magnitude above `tol` — or reaches `tol`
+only after a long tail of tiny steps. Feasibility is usually already at
+machine precision, and the objective is right to many digits; only the
+dual residual will not come down. The `lg(rg)` column in that tail is
+typically *churning* — small values re-escalating iteration after
+iteration — rather than settling.
 
 That combination means the reduced Hessian `Zᵀ W Z` has become
-numerically singular while its inertia is still formally correct. The
-inertia test is satisfied, so no Hessian perturbation is applied, and
-the Newton step runs off along a direction whose curvature is at the
-noise floor. The line search then has no choice but to cut the step to
-nothing. It shows up on problems whose solution set is a manifold
-rather than a point — degenerate eigenvalue models are the classic
-case — and it is not something the exit criteria can fix, because the
-iterate handed to them is the problem.
+numerically singular, so the Newton step runs off along a direction
+whose curvature is at the noise floor and the line search has no choice
+but to cut the step to nothing. It shows up on problems whose solution
+set is a manifold rather than a point — degenerate eigenvalue models
+are the classic case — and it is not something the exit criteria can
+fix, because the iterate handed to them is the problem.
+
+Since [#544](https://github.com/jkitchin/pounce/pull/544) pounce already
+handles the sharpest form of this automatically: when the KKT is
+singular to working precision its inertia count is meaningless, and
+`feral_inertia_pivot_floor` (default `1e-12`) routes that case to `δ_c`
+rather than answering an unmeasurable test with `δ_w`. The recipe below
+is for what remains — it attacks the same degeneracy higher up, capping
+the null-direction step outright, and on some models that is still
+markedly faster.
 
 To confirm before reaching for the knob, dump the KKT systems and look
 at the smallest pivot:
@@ -535,13 +543,18 @@ factorizations cost more than they save.
 
 110 variables, 55 equality constraints, no bounds at all. `Zᵀ W Z`'s
 smallest eigenvalue falls from `1.4e+02` at iteration 2 to `1.4e-11` by
-iteration 36 — against `‖W‖ ≈ 1.3e+02` — while the negative-eigenvalue
-count stays at exactly 55 throughout, so `lg(rg)` is blank for the whole
-run.
+iteration 36, against `‖W‖ ≈ 1.3e+02`. The KKT is singular to working
+precision down that tail, so its negative-eigenvalue count stops being
+measurable — FERAL reports anywhere from 43 to 64 against an expected
+55.
+
+Since #544 the default solve certifies `Optimal` (before it, this
+exited `Solved To Acceptable Level` in 67 iterations). The knob is now
+a speedup rather than a rescue:
 
 | options | iterations | dual inf | exit |
 |---|---|---|---|
-| *(defaults)* | 67 | 4.69e-07 | Solved To Acceptable Level |
+| *(defaults)* | 68 | 4.70e-09 | Optimal Solution Found |
 | `feral_singular_pivot_floor=1e-8` | 39 | 1.25e-09 | Optimal Solution Found |
 | `feral_singular_pivot_floor=1e-8 mu_strategy=adaptive` | 30 | 4.98e-09 | Optimal Solution Found |
 
