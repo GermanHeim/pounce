@@ -75,6 +75,14 @@ pub struct SolveStatistics {
     pub final_unscaled_constr_viol: Number,
     pub final_unscaled_compl: Number,
     pub final_unscaled_kkt_error: Number,
+    /// `final_kkt_error` with each constraint row's residual counted only
+    /// where it rises above what that row can represent in floating point —
+    /// the aggregate the **strict** convergence gate actually tests (gh #528).
+    /// Equal to `final_kkt_error` on every problem whose data is `O(1)`, and
+    /// smaller only where a row is at its own resolution limit. Reported so a
+    /// summary that ends `EXIT: Optimal Solution Found` beside an error above
+    /// `tol` accounts for the gap rather than merely presenting it.
+    pub final_kkt_error_above_noise: Number,
     /// Final barrier parameter μ at termination (the IPM's `curr_mu`
     /// after the last iterate). Lets a caller thread the converged
     /// barrier into a warm-started re-solve's `mu_init` /
@@ -186,6 +194,7 @@ impl Default for SolveStatistics {
             final_unscaled_constr_viol: Number::NAN,
             final_unscaled_compl: Number::NAN,
             final_unscaled_kkt_error: Number::NAN,
+            final_kkt_error_above_noise: Number::NAN,
             final_mu: 0.0,
             restoration_calls: 0,
             restoration_inner_iters: 0,

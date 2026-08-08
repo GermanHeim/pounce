@@ -41,9 +41,39 @@ changes.
   a certificate. The acceptable-level band keeps the raw error.
 - The reporter's 48-run sweep now returns `Solve_Succeeded` on all 48, at
   the scipy optimum; the same LP family solves cleanly out to a data scale
-  of `1e10`. Problems whose data is `O(1)` are bit-for-bit unchanged — no
-  row is anywhere near its resolution limit, so the floored aggregate and
-  the raw one are the same number.
+  of `1e10`.
+- **It fixes considerably more than the LP family it was opened for.** A
+  corpus sweep against the parent commit found 8 status changes across 733
+  Vanderbei NLPs, every one an improvement and no regressions: `orthrege`
+  goes from 2652 iterations and `Solved_To_Acceptable_Level` to **84
+  iterations** and a real certificate at the same objective; `steenbrf`
+  from a 3000-iteration `Maximum_Iterations_Exceeded` to `Solve_Succeeded`
+  in 481; `cresc4` from `Infeasible_Problem_Detected` to `Solve_Succeeded`.
+  Each is the same pathology as the issue — thousands of iterations spent
+  at a point the solver could not improve because the certificate was
+  unreachable.
+- **On LPs and QPs nothing moves at all.** 371 netlib/Meszaros LPs and 138
+  Maros-Mészáros QPs are bit-identical to the parent commit, model by
+  model, in both the objective bit pattern and the iteration count: on data
+  that is `O(1)` no row is near its resolution limit, so the floored
+  aggregate and the raw one are the same number and the gate is upstream's.
+  On *nonlinear* problems iterate trajectories do change — a solve that
+  previously spent nine iterations re-rolling until the residual happened
+  to land on an exact `0` now stops when it has converged, so iteration
+  counts and final points differ even on models that already succeeded.
+- Locally-infeasible models can now cost *more*: the ℓ₁ fallback's outer
+  loop stops escalating ρ when an inner solve fails numerically, and the
+  old false `Search_Direction_Becomes_Too_Small` was being read as exactly
+  that. With the inner solve certifying honestly the loop runs the
+  escalation it was always meant to (`cresc50`: 2 attempts → 3, same
+  `Infeasible_Problem_Detected`). The earlier saving was a false economy,
+  not a cost this removed.
+- New option **`primal_noise_floor_kappa`** (default `64`) sets the safety
+  factor on the per-row floor; **`0` switches it off entirely**, restoring
+  upstream Ipopt's bare-absolute primal term bit-for-bit.
+- When the floor changes the verdict the end-of-run summary now says so,
+  printing the tested value under `Overall NLP error`. Solves where the two
+  agree — every `O(1)` model — keep the summary block unchanged.
 
 ### Fixed — `pounce-convex` presolve documented a fixpoint it never reached, and the layer cap silently decided the reduction (#527)
 

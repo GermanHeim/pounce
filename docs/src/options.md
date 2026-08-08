@@ -247,6 +247,66 @@ constraint-violation and complementarity figures in the end-of-run
 summary are for the **non-projected** point; only the reported `x` (and
 the objective and constraint values evaluated at it) move.
 
+## Large constraint values and `primal_noise_floor_kappa`
+
+On a model whose constraint values run to `~1e7` and beyond, a converged
+solve could exit `Search_Direction_Becomes_Too_Small` **while holding the
+correct optimum**. The cause is arithmetic, not the model.
+
+The KKT error the convergence test compares against `tol` is
+
+```
+max( ‖∇L‖∞ / s_d ,  max(‖c‖∞, ‖d − s‖∞) ,  ‖compl‖∞ / s_c )
+```
+
+The dual and complementarity terms are normalised; the primal one — like
+upstream Ipopt's — is a bare absolute residual. But `c_i = g_i(x) − b_i`
+and `d_i − s_i` are each a *difference of quantities the row's own size*,
+so they are quantised in units of `eps · |b_i|`. At `|b| ~ 1e8` the
+smallest **nonzero** value the primal term can take is one ulp,
+`1.5e-8` — already larger than the default `tol = 1e-8`. Asking for
+`nlp_err <= tol` there is asking the residual to land on a bitwise-exact
+`0` rather than on one ulp, which is arithmetic luck rather than a
+property of the iterate.
+
+POUNCE therefore judges the primal term in the **strict** test against
+each row's own floating-point resolution: a row's residual counts only
+where it exceeds `max(placement floor, kappa · eps · |row magnitude|)`,
+with `kappa = primal_noise_floor_kappa` (default `64`). Verdicts are flat
+across kappa from 8 to 1024 on the measured set.
+
+Three things bound what this can do:
+
+* **Only the strict test reads it.** `constr_viol` is still checked
+  against `constr_viol_tol` (default `1e-4`) on the full, unfloored
+  residual, so nothing the floor forgives can exceed the feasibility
+  tolerance you set — however large your data grows.
+* **The acceptable-level band keeps the raw error.** It sits two decades
+  above `tol`, clear of any realistic quantum.
+* **It cannot rescue an infeasible model.** On a model with no feasible
+  point the filter and restoration phase reach a verdict on their own
+  criteria; the floor only ever participates at a point the rest of the
+  algorithm already believes is converged.
+
+Set `primal_noise_floor_kappa = 0` to switch the floor off and restore
+upstream Ipopt's bare-absolute primal term exactly.
+
+When the floor changes the reported picture, the end-of-run summary says
+so — a large-`|b|` solve prints the tested value under the raw one:
+
+```
+Overall NLP error.......:   2.3841857910156250e-07    2.3841857910156250e-07
+  ...above the per-row floating-point noise floor:   0.0000000000000000e+00
+```
+
+Solves where the two agree — every model whose data is `O(1)` — print the
+usual block unchanged.
+
+One case this does **not** paper over: tightening `constr_viol_tol` below
+a row's own ulp (say `1e-8` on data at `1e8`) still will not certify. That
+is the tolerance gate doing what you asked — the residual you requested is
+not representable at that scale.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a

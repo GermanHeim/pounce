@@ -149,6 +149,11 @@ pub struct ConvCheckOptions {
     /// refused while the unscaled KKT error is still above `acceptable_tol`
     /// (gh #200). `0` disables the mechanism.
     pub obj_scale_certificate_threshold: Number,
+    /// Safety factor on the per-row floor the **strict** gate uses to decide
+    /// when a constraint residual is finer than the row can represent
+    /// (gh #528). `0` disables the floor, restoring upstream Ipopt's
+    /// bare-absolute primal term.
+    pub primal_noise_floor_kappa: Number,
 }
 
 impl Default for ConvCheckOptions {
@@ -171,6 +176,7 @@ impl Default for ConvCheckOptions {
             infeas_viol_kappa: 1e2,
             infeas_max_streak: 5,
             obj_scale_certificate_threshold: 1e-4,
+            primal_noise_floor_kappa: 64.0,
         }
     }
 }
@@ -1078,6 +1084,7 @@ impl AlgorithmBuilder {
                 infeas_max_streak: self.conv_check.infeas_max_streak,
                 infeas_streak: 0,
                 obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
+                primal_noise_floor_kappa: self.conv_check.primal_noise_floor_kappa,
                 veto_fired: false,
                 acceptable_veto_fired: false,
                 veto_extra_iters: 0,

@@ -1226,7 +1226,7 @@ impl IpoptCalculatedQuantities {
     /// [`Self::relative_c_infeasibility_max`] and
     /// [`Self::relative_d_infeasibility_max`] use their floors: the question
     /// is whether the row says anything, not how much of it to subtract.
-    pub fn curr_primal_infeasibility_above_noise(&self) -> Number {
+    pub fn curr_primal_infeasibility_above_noise(&self, kappa: Number) -> Number {
         let c = self.curr_c();
         let dms = self.curr_d_minus_s();
 
@@ -1243,6 +1243,7 @@ impl IpoptCalculatedQuantities {
                 &*c,
                 mag.as_deref(),
                 c.dim() as usize,
+                kappa,
             );
             amax_above_floor(&*c, &floor)
         };
@@ -1272,6 +1273,7 @@ impl IpoptCalculatedQuantities {
                 &*dms,
                 mag.as_deref(),
                 dms.dim() as usize,
+                kappa,
             );
             amax_above_floor(&*dms, &floor)
         };
@@ -1289,7 +1291,12 @@ impl IpoptCalculatedQuantities {
         residual: &dyn Vector,
         magnitude: Option<&[Number]>,
         dim: usize,
+        kappa: Number,
     ) -> Vec<Number> {
+        // `row_noise_floor` bakes in `ROW_NOISE_KAPPA`; rescale it so both
+        // contributions carry the caller's `kappa` and nothing else changes
+        // for the relative measures that share that helper.
+        let rescale = kappa / ROW_NOISE_KAPPA;
         let placement = self.row_noise_floor(jac, residual);
         let finite_or_zero = |v: Number| if v.is_finite() && v > 0.0 { v } else { 0.0 };
         (0..dim)
@@ -1299,9 +1306,10 @@ impl IpoptCalculatedQuantities {
                     .and_then(|p| p.get(i))
                     .copied()
                     .unwrap_or(0.0);
+                let from_placement = from_placement * rescale;
                 let from_formation = magnitude
                     .and_then(|m| m.get(i))
-                    .map_or(0.0, |&m| ROW_NOISE_KAPPA * Number::EPSILON * m);
+                    .map_or(0.0, |&m| kappa * Number::EPSILON * m);
                 finite_or_zero(from_placement).max(finite_or_zero(from_formation))
             })
             .collect()
@@ -1993,7 +2001,7 @@ impl IpoptCalculatedQuantities {
     /// Uses `mu_target = 0` (the unbarriered KKT residual). The
     /// barriered variant is `curr_barrier_error` (TODO in Phase 7).
     pub fn curr_nlp_error(&self) -> Number {
-        self.nlp_error(false)
+        self.nlp_error(None)
     }
 
     /// [`Self::curr_nlp_error`] with the primal-infeasibility term replaced by
@@ -2015,11 +2023,18 @@ impl IpoptCalculatedQuantities {
     /// unscaled `constr_viol_tol` test on the full, unfloored residual — so
     /// what this admits is bounded by the user's own feasibility tolerance,
     /// never by the noise floor alone.
-    pub fn curr_nlp_error_above_primal_noise(&self) -> Number {
-        self.nlp_error(true)
+    ///
+    /// `kappa` is the safety factor on the per-row floor —
+    /// [`ROW_NOISE_KAPPA`] by default, from the `primal_noise_floor_kappa`
+    /// option. **`0` switches the floor off entirely**, making this identical
+    /// to [`Self::curr_nlp_error`] and the strict gate bit-for-bit upstream's.
+    pub fn curr_nlp_error_above_primal_noise(&self, kappa: Number) -> Number {
+        self.nlp_error(Some(kappa))
     }
 
-    fn nlp_error(&self, above_primal_noise: bool) -> Number {
+    /// `above_primal_noise` carries the floor's `kappa` when the primal term is
+    /// to be floored, and is `None` for the plain upstream aggregate.
+    fn nlp_error(&self, above_primal_noise: Option<Number>) -> Number {
         let iv = self.curr_iv();
         let (s_d, s_c) = self.optimality_error_scaling(&iv);
 
@@ -2058,10 +2073,9 @@ impl IpoptCalculatedQuantities {
         }
 
         let dual = glx.amax().max(gls.amax()) / s_d;
-        let primal = if above_primal_noise {
-            self.curr_primal_infeasibility_above_noise()
-        } else {
-            c.amax().max(dms.amax())
+        let primal = match above_primal_noise {
+            Some(kappa) if kappa > 0.0 => self.curr_primal_infeasibility_above_noise(kappa),
+            _ => c.amax().max(dms.amax()),
         };
         let compl = cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()) / s_c;
 
@@ -3382,9 +3396,121 @@ mod tests {
     fn nlp_error_above_primal_noise_matches_on_ordinary_residuals() {
         let cq = fixture_with(MockNlp::new());
         assert_eq!(
-            cq.curr_primal_infeasibility_above_noise(),
+            cq.curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
             cq.curr_primal_infeasibility_max()
         );
-        assert_eq!(cq.curr_nlp_error_above_primal_noise(), cq.curr_nlp_error());
+        assert_eq!(
+            cq.curr_nlp_error_above_primal_noise(ROW_NOISE_KAPPA),
+            cq.curr_nlp_error()
+        );
+    }
+
+    /// gh #528, **equality block**, through the real accessor rather than a
+    /// hand-supplied floor. The integration LP is all-inequality (`g_u = 2e19`,
+    /// so `c.dim() == 0`), so this is the only cover the `declared_c_rhs()`
+    /// branch has.
+    ///
+    /// `x = (4, 3)` puts `d = x0 = 4` on top of `s = 4`, so the inequality
+    /// block's residual is an exact `0` and what the accessor returns is the
+    /// `c` block alone.
+    #[test]
+    fn a_sub_quantum_equality_residual_is_silenced_and_a_coarser_one_is_not() {
+        let rhs = 1e8;
+        let floor = ROW_NOISE_KAPPA * Number::EPSILON * rhs;
+        let cq_for = |c: Number| {
+            fixture_with_x(
+                MockNlp::new().with_c_rhs(Some(vec![rhs])).with_c(c),
+                &[4.0, 3.0],
+            )
+        };
+
+        // Under the quantum of `g(x) − b` at `|b| = 1e8`: no iterate could
+        // have placed the residual here, so the row says nothing.
+        let cq = cq_for(floor * 0.5);
+        assert_eq!(cq.curr_primal_infeasibility_max(), floor * 0.5);
+        assert_eq!(
+            cq.curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
+            0.0
+        );
+
+        // Above it: counted in full, not net of the floor.
+        let cq = cq_for(floor * 2.0);
+        assert_eq!(
+            cq.curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
+            floor * 2.0
+        );
+
+        // The placement floor alone would not have silenced anything here —
+        // at ‖x‖_∞ = 4 through a row of `max_j |∂c/∂x_j| = 1` it is ~5.7e-14,
+        // eight decades under the formation floor. The `c` branch's own
+        // magnitude is what does the work.
+        let cq = fixture_with_x(MockNlp::new().with_c(floor * 0.5), &[4.0, 3.0]);
+        assert_eq!(
+            cq.curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
+            floor * 0.5
+        );
+    }
+
+    /// The `primal_noise_floor_kappa = 0` escape hatch: every floor collapses
+    /// to `0`, so every residual is counted and the floored aggregate is the
+    /// raw one — the strict gate is bit-for-bit upstream Ipopt's again. Pinned
+    /// on a fixture where the floor otherwise *does* silence the row, so this
+    /// cannot pass by the two agreeing anyway.
+    #[test]
+    fn a_zero_kappa_switches_the_floor_off_completely() {
+        let rhs = 1e8;
+        let residual = ROW_NOISE_KAPPA * Number::EPSILON * rhs * 0.5;
+        let cq = fixture_with_x(
+            MockNlp::new().with_c_rhs(Some(vec![rhs])).with_c(residual),
+            &[4.0, 3.0],
+        );
+        // The floor is live at the default kappa …
+        assert_eq!(
+            cq.curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
+            0.0
+        );
+        // … and gone at zero.
+        assert_eq!(
+            cq.curr_primal_infeasibility_above_noise(0.0),
+            cq.curr_primal_infeasibility_max()
+        );
+        assert_eq!(
+            cq.curr_nlp_error_above_primal_noise(0.0),
+            cq.curr_nlp_error()
+        );
+    }
+
+    /// The equality floor rides the row scaling, because both sides of the
+    /// comparison do: `declared_c_rhs()` reapplies `c_scale` (pinned by
+    /// `declared_c_rhs_carries_the_row_scaling` in `orig_ipopt_nlp.rs`) and
+    /// `curr_c()` is the scaled residual `dc · (g(x) − b)`. Scaling a row by
+    /// `k` scales its residual and its floor together, so the verdict is
+    /// invariant — which is what makes it legitimate to compare a floor built
+    /// from the declared RHS against `curr_c()` at all.
+    #[test]
+    fn the_equality_floor_rides_the_row_scaling() {
+        let rhs = 1e8;
+        let quantum = ROW_NOISE_KAPPA * Number::EPSILON * rhs;
+        for k in [1.0, 4.0, 0.25] {
+            let cq_for = |c: Number| {
+                fixture_with_x(
+                    MockNlp::new()
+                        .with_scaling(1.0, Some(vec![k]), None)
+                        .with_c_rhs(Some(vec![k * rhs]))
+                        .with_c(k * c),
+                    &[4.0, 3.0],
+                )
+            };
+            assert_eq!(
+                cq_for(quantum * 0.5).curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
+                0.0,
+                "sub-quantum residual must stay silenced at row scaling {k}",
+            );
+            assert_eq!(
+                cq_for(quantum * 2.0).curr_primal_infeasibility_above_noise(ROW_NOISE_KAPPA),
+                k * quantum * 2.0,
+                "above-quantum residual must survive at row scaling {k}",
+            );
+        }
     }
 }

@@ -59,6 +59,10 @@ pub struct OptErrorConvCheck {
     /// (gh #200). See [`certificate_masked`]. `0` disables the mechanism
     /// entirely, restoring bit-for-bit upstream-Ipopt behaviour.
     pub obj_scale_certificate_threshold: Number,
+    /// Safety factor on the per-row noise floor the **strict** gate judges the
+    /// primal term against (gh #528). `0` disables the floor entirely,
+    /// restoring upstream Ipopt's bare-absolute primal residual.
+    pub primal_noise_floor_kappa: Number,
     /// Whether a masked **strict** certificate was ever refused this solve.
     pub veto_fired: bool,
     /// Whether a masked **acceptable-level** termination was ever refused.
@@ -201,6 +205,7 @@ impl Default for OptErrorConvCheck {
             // (`hs1`/`hs38` at ~4e-2, the 19-problem list at ~1e-2). See
             // [`certificate_masked`].
             obj_scale_certificate_threshold: 1e-4,
+            primal_noise_floor_kappa: 64.0,
             veto_fired: false,
             acceptable_veto_fired: false,
             veto_extra_iters: 0,
@@ -261,6 +266,23 @@ impl OptErrorConvCheck {
     /// the *other* operand at `NaN`, which would launder exactly the
     /// `Invalid_Number_Detected` signal gh #292 built `curr_nlp_error`'s
     /// `has_valid_numbers` sweep to raise.
+    ///
+    /// On finite input the `min` is belt-and-braces rather than a live choice:
+    /// `nlp_error(true)` shares its dual and complementarity terms with
+    /// `nlp_error(false)` and `amax_above_floor` returns at most the vector's
+    /// own `amax` on every path including its fallbacks, so
+    /// `above_primal_noise <= nlp_err` always. It is kept so that the gate
+    /// cannot be loosened by a future change to either accessor without that
+    /// change being deliberate.
+    /// Whether the gh #528 primal noise floor is live. `0` (or a negative
+    /// value, which the option's lower bound already refuses) is the opt-out
+    /// back to upstream Ipopt's bare-absolute primal term; the accessor is not
+    /// even called then, so the opt-out costs nothing as well as changing
+    /// nothing.
+    fn noise_floor_enabled(&self) -> bool {
+        self.primal_noise_floor_kappa > 0.0
+    }
+
     fn strict_overall(nlp_err: Number, above_primal_noise: Number) -> Number {
         if !nlp_err.is_finite() {
             return nlp_err;
@@ -529,19 +551,31 @@ impl ConvCheck for OptErrorConvCheck {
         // this; `nlp_err` itself carries on to the acceptable-level band, the
         // rapid-infeasibility pre-filter and everything downstream unchanged.
         //
-        // Computed only on the iterations where it can change the verdict, so
-        // the two extra `compute_row_amax` sweeps stay off the hot path. The
-        // laziness is exact, not an approximation: below `tol` the floored
+        // Computed only on the iterations where it can change the verdict.
+        // That laziness is doing real work, because the accessor is not two
+        // extra Jacobian sweeps on top of a cached number — it is
+        // `nlp_error(true)`, a second evaluation of the *whole* KKT error:
+        // `optimality_error_scaling`, `curr_grad_lag_x`/`_s` (each a fresh
+        // allocation plus two mat-vecs, and uncached — `nlp_error` has no
+        // entry among the caches in `ipopt_cq.rs`), all four complementarity
+        // vectors and the `has_valid_numbers` sweep, plus the two
+        // `compute_row_amax` sweeps the floors need. Anyone reusing this
+        // accessor anywhere hotter should read that cost first.
+        //
+        // The laziness is exact, not an approximation: below `tol` the floored
         // value is smaller still and the gate passes either way, and with any
         // component tolerance already blown `passes_component_tols` is false
         // whatever the aggregate says.
         let components_pass = dual_inf <= self.dual_inf_tol
             && constr_viol <= self.constr_viol_tol
             && compl_inf <= self.compl_inf_tol;
-        let strict_err = if nlp_err <= self.tol || !components_pass {
+        let strict_err = if nlp_err <= self.tol || !components_pass || !self.noise_floor_enabled() {
             nlp_err
         } else {
-            Self::strict_overall(nlp_err, cq_ref.curr_nlp_error_above_primal_noise())
+            Self::strict_overall(
+                nlp_err,
+                cq_ref.curr_nlp_error_above_primal_noise(self.primal_noise_floor_kappa),
+            )
         };
         // The gate asks whether *our* scaling clamped, not how the user chose
         // to scale their objective — see `certificate_masked`.
@@ -749,7 +783,14 @@ impl ConvCheck for OptErrorConvCheck {
         // Same noise-floored aggregate the strict gate uses (gh #528) — this
         // predicate exists to answer "would that gate have passed here?", so it
         // has to ask the same question.
-        let strict_err = Self::strict_overall(nlp_err, cq_ref.curr_nlp_error_above_primal_noise());
+        let strict_err = if self.noise_floor_enabled() {
+            Self::strict_overall(
+                nlp_err,
+                cq_ref.curr_nlp_error_above_primal_noise(self.primal_noise_floor_kappa),
+            )
+        } else {
+            nlp_err
+        };
         drop(cq_ref);
         self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf)
     }
