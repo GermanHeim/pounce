@@ -47,6 +47,47 @@ changes.
   response.
 - With this the `Ipopt only` column of the benchmark report loses its last
   two entries that POUNCE was thought unable to reach at all.
+### Fixed — `dual_inf_tol` was an absolute bound on a normalized quantity, so large-gradient models could not certify (#532)
+
+- The dual twin of #528. The KKT error the strict test compares against
+  `tol` is `max(‖∇L‖_∞/s_d, max(‖c‖_∞, ‖d − s‖_∞), ‖compl‖_∞/s_c)`, and its
+  dual term carries `s_d`, which grows with the mean magnitude of the
+  multipliers. The per-component gate then tested that same `‖∇L‖_∞`
+  against `dual_inf_tol`, default `1.0` — one quantity, two standards, and
+  on a model whose gradients live at `1e10` they sit ten orders apart.
+- Vanderbei's `orthrds2` at default options: `s_d ≈ 1.6e10` with
+  `‖∇L‖_∞ = 89.7`, an aggregate dual term of `5.6e-09` against
+  `tol = 1e-8` — stationary to nine digits relative to the size of the
+  gradients involved — and `89.7 > 1.0` refused it. The solve exited
+  `Solved_To_Acceptable_Level` holding the answer; `dual_inf_tol=1e3` alone
+  turned it into `Optimal Solution Found` at the same objective, with
+  nothing else about the solve changing.
+- The map that exposes it is as simple as they come: multiplying an
+  objective by a positive constant changes no feasible point, no solution
+  and no active set, but multiplies `∇f`, every multiplier, `s_d` and
+  `‖∇L‖_∞` — so a large enough constant costs the certificate.
+- **The strict gate now judges the unscaled dual infeasibility against
+  `max(dual_inf_tol, kappa · tol · dual_scale)`**, where `dual_scale`
+  (`IpoptCalculatedQuantities::curr_unscaled_dual_infeasibility_scale_max`)
+  is the magnitude of the largest single term `∇L` is assembled from —
+  `∇f`, `Jᵀy`, the bound multipliers. `∇L` is the sum of exactly those
+  terms, so `‖∇L‖_∞ / dual_scale` is the fraction of them that failed to
+  cancel: a scale-invariant statement of stationarity, and one `s_d` cannot
+  make, since it is built from multiplier magnitudes alone and never sees
+  `∇f`.
+- The relaxation only ever forgives a residual small *relative to the
+  problem's own scale*, and never admits a non-stationary point:
+  `min -exp(x) s.t. x >= 0` reaching `inf_du = 8.8e+47` has `∇f = −8.8e47`
+  with no multiplier to meet it, so nothing cancelled and it stays refused
+  by eight orders. It is bounded twice over — the aggregate `nlp_err <= tol`
+  gate must still pass on the same iterate, and at the default `kappa = 1`
+  the floor does not rise above `dual_inf_tol` until `dual_scale` exceeds
+  `dual_inf_tol / tol = 1e8`, leaving every `O(1)` model on upstream's
+  comparison bit for bit. `acceptable_dual_inf_tol` is untouched.
+- New option **`dual_inf_scale_kappa`** (default `1`) sets the safety factor
+  on the floor; **`0` switches it off entirely**, restoring upstream Ipopt's
+  bare-absolute bound. That is also the setting to use if you tighten
+  `dual_inf_tol` and want that absolute standard honoured unconditionally.
 
 ### Fixed — feasible, bounded LPs exited `Search_Direction_Becomes_Too_Small` once the data reached `~1e7` (#528)
 

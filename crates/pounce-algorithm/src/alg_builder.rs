@@ -154,6 +154,10 @@ pub struct ConvCheckOptions {
     /// (gh #528). `0` disables the floor, restoring upstream Ipopt's
     /// bare-absolute primal term.
     pub primal_noise_floor_kappa: Number,
+    /// Safety factor on the scale-relative floor under `dual_inf_tol` the
+    /// **strict** gate judges the dual infeasibility against (gh #532). `0`
+    /// disables the floor, restoring upstream Ipopt's bare-absolute bound.
+    pub dual_inf_scale_kappa: Number,
 }
 
 impl Default for ConvCheckOptions {
@@ -177,6 +181,7 @@ impl Default for ConvCheckOptions {
             infeas_max_streak: 5,
             obj_scale_certificate_threshold: 1e-4,
             primal_noise_floor_kappa: 64.0,
+            dual_inf_scale_kappa: 1.0,
         }
     }
 }
@@ -1085,6 +1090,8 @@ impl AlgorithmBuilder {
                 infeas_streak: 0,
                 obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
                 primal_noise_floor_kappa: self.conv_check.primal_noise_floor_kappa,
+                dual_inf_scale_kappa: self.conv_check.dual_inf_scale_kappa,
+                dual_floor_reported: false,
                 veto_fired: false,
                 acceptable_veto_fired: false,
                 veto_extra_iters: 0,
