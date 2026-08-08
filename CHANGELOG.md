@@ -9,6 +9,45 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `auto` sent the NETLIB GEN family to the convex IPM, which cannot certify it, while the NLP path solves it in a second (#535)
+
+- `solver_selection=auto` routes every detected LP to the convex
+  interior-point method. On `gen` / `gen1` that costs **194× in wall clock
+  and the certificate**: 199 of a 200-iteration budget, 190.8 s, and
+  `Solved_To_Acceptable_Level` at a primal residual of `1.374e-7` against
+  `tol = 1e-8`. The general NLP filter-IPM — the same binary, the default
+  for every other class — solves the same model in **19 iterations and
+  0.982 s** to `Solve_Succeeded`, matching Ipopt-3.14.20/MA57's objective
+  to four figures.
+- The root cause is #133 and still stands: the family is highly degenerate
+  and rank-deficient, strict complementarity fails, the
+  fraction-to-boundary step collapses, and a pure IPM cannot certify the
+  vertex. Crossover was built to close exactly this and does not (it is off
+  by default because it regressed LP-suite solve times 3×–800× while still
+  not reaching an exact vertex on GEN). This is not the #528 noise floor
+  either — the largest right-hand side in `gen.nl` is `65.16`, so #531's
+  `κ = 64` floor sits at `9.2e-13` there, five orders below the violation.
+- **The routing is now the lever, not the crossover engine.** Under `auto`,
+  an LP whose convex solve finishes *without a certificate* —
+  `OptimalInaccurate` or `IterationLimit` — is re-solved on the general NLP
+  interior-point path, which owns the whole verdict. An LP is also a valid
+  NLP, and the fallback is the same discipline the conic path has used
+  since the `airport` stall: the decision is taken above the status line,
+  the `.sol` write and the JSON report, so a rerouted run still reports
+  exactly one status.
+- It is also the *faster* answer here — one second of NLP after a failed
+  convex attempt is nothing against the 190.8 s the convex attempt costs.
+- Narrow by construction. It does not fire on a convex QP (`P ≠ 0`), on a
+  solve that certified, on a *verified* infeasible / unbounded verdict, when
+  `solver_selection` names an engine, when `max_iter` was set explicitly
+  (a user-set budget is the question being asked, and `max_iter=0` must
+  still stop without a solve, #186), or with the interactive debugger
+  attached. A tightened `tol` deliberately does **not** suppress it: that is
+  an accuracy request, so trying the engine that can meet it is the right
+  response.
+- With this the `Ipopt only` column of the benchmark report loses its last
+  two entries that POUNCE was thought unable to reach at all.
+
 ### Fixed — feasible, bounded LPs exited `Search_Direction_Becomes_Too_Small` once the data reached `~1e7` (#528)
 
 - On plain LPs with `O(1)` matrix entries but right-hand sides of magnitude

@@ -288,6 +288,40 @@ A *positive* `obj_scaling_factor` is not in this table: it only rescales
 conditioning, and the convex path reports natural units either way, so
 both paths give the same answer.
 
+### When the convex path cannot certify an LP
+
+Routing gives way one more time, and this one is decided *after* the solve
+rather than before it. Under `auto`, an **LP** whose convex solve finishes
+without a KKT certificate — `Solved to acceptable level (reduced accuracy)`
+or `Maximum iterations exceeded` — is re-solved on the general NLP
+interior-point path, which owns the whole verdict. Nothing from the
+declined convex solve is printed or written, so a rerouted run still
+reports exactly one status.
+
+The case this exists for is the NETLIB `gen` / `gen1` family. They are
+highly degenerate and rank-deficient, strict complementarity fails, and a
+pure interior-point method cannot certify the optimal vertex: the convex
+IPM spends its whole 200-iteration budget (190.8 s) and stops at a primal
+residual of `1.4e-7` against `tol = 1e-8`. The NLP filter-IPM — the same
+binary, the default for every other class — solves the same model in 19
+iterations and 0.98 s to a strict certificate, matching Ipopt-3.14.20/MA57
+to four figures. Rerouting is also the *faster* answer here: a second solve
+of one second is nothing against the three minutes the first one costs.
+
+The fallback is narrow by construction, and does not fire when:
+
+| | why |
+|---|---|
+| the class is not LP (`P ≠ 0`) | a stalling convex QP is a different, unmeasured population |
+| the solve certified (`Optimal Solution Found`) | there is nothing to improve, and a second solve would double the cost of every LP |
+| the status is infeasible or unbounded | those verdicts carry a *verified* certificate (see below); a second solve must not overwrite a proof |
+| `solver_selection` names an engine | a named engine keeps its verdict — that is what makes the stall observable |
+| `max_iter` was set explicitly | a user-set budget is the question being asked; `max_iter=0` in particular must stop without a solve |
+| the interactive debugger is attached | you are stepping *this* engine |
+
+A tightened `tol` is deliberately **not** in that list: that is an accuracy
+request, so trying the engine that can meet it is the right response.
+
 ### Infeasible and unbounded problems
 
 The convex solver detects infeasibility and unboundedness directly,
@@ -302,7 +336,8 @@ reporting a clean status instead of exhausting the iteration budget:
 Each verdict is backed by a *verified* certificate (a Farkas
 infeasibility proof or an unbounded recession direction that is checked,
 not merely inferred), so these statuses are never reported in error; a
-problem the solver cannot certify simply runs to the iteration limit.
+problem the solver cannot certify simply runs to the iteration limit —
+and, if it is an LP under `auto`, is then handed to the NLP path (above).
 
 `solver_selection=qp-active-set` follows the same contract. Its inner QP
 certifies the recession ray of the *linearization*, which on a nonlinear
