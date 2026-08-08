@@ -350,6 +350,21 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     };
     let cq = cq.borrow();
 
+    // Per-variable factors of a `user-scaling` change of variables
+    // (gh#486 stage 3), in var-x space; 1.0 everywhere when none ran.
+    // Every internal x-space quantity below is a `d`-transform of the
+    // model's own — writing `a_j` for the gradient of inequality row
+    // `j`, since `d` is spoken for here: `ã = a ⊘ d`,
+    // `H̃ = H ⊘ (d ⊗ d)`, `Σ̃ = Σ · df ⊘ (d ⊙ d)`. Undoing that here rather than only on
+    // the exported `Σ` is what keeps a status from depending on the
+    // conditioning the user asked for: the per-entry ratio `Σ/q` is
+    // invariant, but the identification `floor` is a single number
+    // shared across entries, so a non-uniform `d` moves entries across
+    // it. `1.0` multiplies are exact, so an unscaled solve is
+    // bit-identical to the pre-#486 path.
+    let d_var = bs.variable_scaling();
+    let dv = |i: usize| -> Number { d_var.map_or(1.0, |d| d[i]) };
+
     // --- variables, in internal space ------------------------------------
     let has_l = present(&px_l, n);
     let has_u = present(&px_u, n);
@@ -357,13 +372,24 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
     let z_u = expand(&dense_to_vec(mult_z_u.as_ref()), &px_u, n);
     let s_l = expand(&dense_to_vec(cq.curr_slack_x_l().as_ref()), &px_l, n);
     let s_u = expand(&dense_to_vec(cq.curr_slack_x_u().as_ref()), &px_u, n);
-    let sigma_x = dense_to_vec(cq.curr_sigma_x().as_ref());
+    // `Σ̃_i = df·Σ_i/d_i²`: the `d_i²` comes out here, the `df` on
+    // export below (it cancels in every ratio, so classification never
+    // sees it).
+    let sigma_x: Vec<Number> = dense_to_vec(cq.curr_sigma_x().as_ref())
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| s * dv(i) * dv(i))
+        .collect();
 
     let hess = cq.curr_exact_hessian();
     // the identification floor is relative to the largest curvature
     // anywhere on the diagonal, not just the bounded entries, so a
     // row-only model still measures q against the model's own scale
-    let diag = hessian_diagonal(&hess, n);
+    let diag: Vec<Number> = hessian_diagonal(&hess, n)
+        .iter()
+        .enumerate()
+        .map(|(i, &h)| h * dv(i) * dv(i))
+        .collect();
     let max_abs_diag = diag.iter().fold(0.0, |a: Number, d| a.max(d.abs()));
     let floor = Number::EPSILON.sqrt() * max_abs_diag.max(1.0);
 
@@ -376,9 +402,10 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         e.off_path = (has_l[i] && off_path(s_l[i], z_l[i], mu))
             || (has_u[i] && off_path(s_u[i], z_u[i], mu));
         // the ratio is scale-invariant, so classification ran in the
-        // solver's scaled space; the REPORTED sigma follows the repo's
-        // natural-units contract: internal z carries the objective
-        // scale (x is never scaled), so Sigma_nat = Sigma / df
+        // solver's own space up to the change of variables already
+        // divided out of `sigma_x` / `diag` above; the REPORTED sigma
+        // follows the repo's natural-units contract, and what is left
+        // to undo is the objective scale the internal z carries
         e.sigma /= obj_scale;
         vars[i] = e;
     }
@@ -409,7 +436,10 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
             // sum, matching mult_vector; indices are 1-based)
             let mut support: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m_d];
             for ((&r, &c), &v) in jt.irows().iter().zip(jt.jcols()).zip(jt.values()) {
-                support[(r - 1) as usize].push(((c - 1) as usize, v));
+                let col = (c - 1) as usize;
+                // `a = ã ⊙ d`: the row's own scale stays (the ratio
+                // divides it out), the change of variables does not.
+                support[(r - 1) as usize].push((col, v * dv(col)));
             }
             for sup in &mut support {
                 sup.sort_unstable_by_key(|&(c, _)| c);
@@ -425,6 +455,9 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
             let mut adj: Vec<Vec<(usize, Number)>> = vec![Vec::new(); n];
             for ((&i, &l), &v) in ht.irows().iter().zip(ht.jcols()).zip(ht.values()) {
                 let (a, b) = ((i - 1) as usize, (l - 1) as usize);
+                // `H = H̃ ⊙ (d ⊗ d)`, matching the `d²` already taken
+                // out of `diag` (which sets the shared floor).
+                let v = v * dv(a) * dv(b);
                 adj[a].push((b, v));
                 if a != b {
                     adj[b].push((a, v));
@@ -483,10 +516,21 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
             e_row.values_mut()[j] = 1.0;
             grad.values_mut().fill(0.0);
             jac_d.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
-            let norm2: Number = grad.values_mut().iter().map(|g| *g * *g).sum();
+            // `a = ã ⊙ d`, then `aᵀHa = uᵀH̃u` with `u = d ⊙ a`
+            // (since `H = H̃ ⊙ (d ⊗ d)`) — so the vector handed to the
+            // internal Hessian carries `d²`, and `norm2` carries `d`.
+            let norm2: Number = grad
+                .values_mut()
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (*g * dv(i)) * (*g * dv(i)))
+                .sum();
             rows[j] = if norm2 <= 0.0 {
                 zero_gradient_row(sigma_s[j], floor)
             } else {
+                for (i, g) in grad.values_mut().iter_mut().enumerate() {
+                    *g *= dv(i) * dv(i);
+                }
                 hgrad.values_mut().fill(0.0);
                 hess.mult_vector(1.0, &grad, 0.0, &mut hgrad);
                 let ghg: Number = {
@@ -626,12 +670,16 @@ pub(crate) fn row_normal(bs: &PdSensBacksolver, user_row: usize) -> Result<Vec<N
     grad.values_mut().fill(0.0);
     jac.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
 
+    let d_var = bs.variable_scaling();
     let nl = nlp.borrow();
     let n_full_x = nl.n_full_x() as usize;
     let mut full = vec![0.0; n_full_x];
     let g = grad.values_mut();
     for (i, slot) in g.iter().enumerate() {
-        full[nl.var_x_to_full_x(i as Index) as usize] = *slot / row_scale;
+        // `∇g̃ = (∇g ⊘ d) · row_scale`, so both come back out here
+        // (gh#486 stage 3).
+        let dx = d_var.map_or(1.0, |d| d[i]);
+        full[nl.var_x_to_full_x(i as Index) as usize] = *slot * dx / row_scale;
     }
     Ok(full)
 }
@@ -661,6 +709,10 @@ pub(crate) fn hessian_vec(bs: &PdSensBacksolver, v_full: &[Number]) -> Result<Ve
         return Err(n_full_x);
     }
 
+    // `H = H̃ ⊙ (d ⊗ d)` under a change of variables (gh#486 stage 3),
+    // so `H v = d ⊙ (H̃ (d ⊙ v))`: the factor goes in with the vector
+    // and comes back out of the product.
+    let d_var = bs.variable_scaling();
     let nspace = DenseVectorSpace::new(n as i32);
     let mut v_int = DenseVector::new(nspace.clone());
     let mut hv = DenseVector::new(nspace);
@@ -669,7 +721,8 @@ pub(crate) fn hessian_vec(bs: &PdSensBacksolver, v_full: &[Number]) -> Result<Ve
         let vals = v_int.values_mut();
         vals.fill(0.0);
         for i in 0..n {
-            vals[i] = v_full[nl.var_x_to_full_x(i as Index) as usize];
+            let dx = d_var.map_or(1.0, |d| d[i]);
+            vals[i] = v_full[nl.var_x_to_full_x(i as Index) as usize] * dx;
         }
     }
     let hess = {
@@ -682,7 +735,8 @@ pub(crate) fn hessian_vec(bs: &PdSensBacksolver, v_full: &[Number]) -> Result<Ve
     let mut out = vec![0.0; n_full_x];
     let h = hv.values_mut();
     for (i, slot) in h.iter().enumerate() {
-        out[nl.var_x_to_full_x(i as Index) as usize] = *slot / obj_scale;
+        let dx = d_var.map_or(1.0, |d| d[i]);
+        out[nl.var_x_to_full_x(i as Index) as usize] = *slot * dx / obj_scale;
     }
     Ok(out)
 }

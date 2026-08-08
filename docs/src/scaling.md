@@ -48,18 +48,31 @@ gradient-based heuristic.
 If the TNLP's `get_scaling_parameters` returns false (the default),
 pounce falls back to no automatic scaling.
 
-> **Per-variable factors are refused, not ignored.** pounce's
-> `OrigIpoptNlp` models `obj_scaling` and per-constraint `g_scaling`
-> (the design in [issue #61](https://github.com/jkitchin/pounce/issues/61));
-> it does not rescale variables. A request that sets any `x_scaling`
-> entry away from `1.0` therefore **fails the solve** with
-> `Invalid_Option` and an explanatory message, rather than applying the
-> other two axes and dropping this one — which used to hand back a
-> converged answer to a differently-conditioned problem with nothing
-> said about it ([issue #483](https://github.com/jkitchin/pounce/issues/483)).
-> Rescale those variables in the model itself (substitute `x = z / s`
-> and give the solver `z`). Modelling variable scaling in the core is
-> staged work tracked on #483.
+> **Per-variable factors are a change of variables.** `OrigIpoptNlp`
+> models `obj_scaling` and per-constraint `g_scaling` only (the design
+> in [issue #61](https://github.com/jkitchin/pounce/issues/61)), so
+> `x_scaling` is applied one level below the algorithm instead: a
+> wrapper substitutes `x̃ = d ⊙ x`, the IPM works in the scaled
+> coordinates, and everything reported back — the solution, the duals,
+> the bound multipliers, and every
+> [sensitivity](sensitivity.md) accessor — is in your own units
+> ([issue #486](https://github.com/jkitchin/pounce/issues/486)). No
+> clone of the model is made and no `propagate_solution` step is
+> needed, which is what distinguishes this from Pyomo's
+> `core.scale_model`.
+>
+> Factors must be **finite and strictly positive**. Zero and negative
+> are refused rather than applied: a negative factor reverses a
+> variable's direction and swaps its bounds. A factor that would push
+> a finite bound past `nlp_lower_bound_inf` / `nlp_upper_bound_inf` —
+> turning a bounded variable into a free one — is refused too, naming
+> the threshold it crossed. Absent bounds stay absent: the `±1e19`
+> sentinel is an ordinary finite number, so it is passed through
+> unscaled rather than multiplied into range.
+>
+> One user-visible consequence: `tol` keeps comparing **scaled**
+> quantities, matching upstream Ipopt, so the same `tol` stops at a
+> different point than it would on the unscaled model.
 
 #### Setting user scaling
 

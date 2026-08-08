@@ -2363,6 +2363,15 @@ impl IpoptNlp for OrigIpoptNlp {
         OrigIpoptNlp::finalize_solution_z_u(self, z_u)
     }
 
+    fn variable_scaling(&self) -> Option<Vec<Number>> {
+        // Forwarded, not stored: the substitution lives in the
+        // `ScalingTnlp` the adapter wraps, and `TNLP::scaling_factors`
+        // is the channel it reports through (gh#486). A transparent
+        // decorator between the two forwards the inner answer, so one
+        // hop off the adapter reaches whichever wrapper applied it.
+        self.adapter.borrow().tnlp().borrow().scaling_factors()
+    }
+
     fn full_x_to_var_x(&self, full_idx: Index) -> Option<Index> {
         let cls = self.adapter.borrow();
         let cls = cls.classification();

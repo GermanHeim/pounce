@@ -13,7 +13,7 @@ no scaling code at all, so the option was accepted and meant "none": a
 badly conditioned model kept converging badly with nothing to say the
 suffix had been ignored.
 
-Two things happen here now:
+Three things happen here now:
 
 * **Objective and constraint factors are honored.** The subprocess
   (ASL) path needs nothing from this module — the writer emits the
@@ -25,12 +25,13 @@ Two things happen here now:
   applies them as a change of variables one level below the algorithm
   and returns the solution in the model's own units, so no clone and
   no ``propagate_solution`` step is involved.
-* **The sensitivity path still refuses them.** Its accessors read the
-  KKT factorization directly rather than through the solver's TNLP
-  chain, so on a variable-scaled solve they would report scaled-space
-  numbers while promising natural units. :func:`check_no_variable_scaling`
-  raises there until gh #486 stage 3 teaches that translation the
-  variable factors.
+* **The sensitivity path honors them too** (gh #486 stage 3).
+  :func:`problem_scaling` translates the variable entries alongside the
+  row ones, and the sensitivity accessors carry the factors through
+  their natural-units translation, so a variable-scaled solve answers
+  every query in the model's own units. Stages 1 and 2 refused those
+  queries rather than answering them in scaled coordinates; nothing is
+  refused now.
 
 Semantics, matching the AMPL/Ipopt reading of the suffix:
 
@@ -137,38 +138,6 @@ def read_scaling(model):
     return obj_factor, constraints, variables
 
 
-def check_no_variable_scaling(model, max_list=5):
-    """Raise if the `scaling_factor` Suffix tags variables.
-
-    Ordinary solves apply variable factors (gh #486 stage 2), so this
-    guards the SENSITIVITY path alone. Its accessors read the KKT
-    factorization directly rather than through the solver's TNLP
-    chain, so a variable-scaled solve would have them report
-    scaled-space numbers under a natural-units contract. That is the
-    silent-wrong-answer shape gh #483 was opened about, so it is a hard
-    error until stage 3 carries the factors into that translation.
-    """
-    parsed = read_scaling(model)
-    if parsed is None:
-        return
-    _, _, variables = parsed
-    if not variables:
-        return
-    shown = ", ".join(f"{vd.name}={f:g}" for vd, f in variables[:max_list])
-    more = (f" (+{len(variables) - max_list} more)"
-            if len(variables) > max_list else "")
-    raise ValueError(
-        "pounce sensitivity solve: nlp_scaling_method=user-scaling, and the "
-        f"model's `{SUFFIX_NAME}` Suffix sets a scaling factor on "
-        f"{len(variables)} variable(s) ({shown}{more}). Ordinary solves "
-        "apply variable factors, but the sensitivity accessors read the KKT "
-        "factorization directly and do not yet carry those factors, so they "
-        "would report scaled-space numbers while promising the model's own "
-        "units. Drop the variable entries for this solve, or solve without "
-        "the sensitivity declarations. Tracking issue: "
-        "https://github.com/jkitchin/pounce/issues/486")
-
-
 def warn_if_no_suffix(model):
     """Warn when `user-scaling` is on but the model tags nothing.
 
@@ -187,30 +156,39 @@ def warn_if_no_suffix(model):
             stacklevel=3)
 
 
-def problem_scaling(model, con_names, con_alias):
-    """Suffix -> `(obj_factor, g_scaling)` for `Problem.set_problem_scaling`.
+def problem_scaling(model, con_names, con_alias, var_names):
+    """Suffix -> `(obj_factor, g_scaling, x_scaling)` for
+    `Problem.set_problem_scaling`.
 
     Used by the in-process sensitivity path, which hands pounce
     evaluator callbacks rather than an `.nl` file and so has no suffix
     segments for the solver to read.
 
-    `con_names` is the solve's constraint rows in `.nl` order and
-    `con_alias` maps an original constraint's name to the clone name the
+    `con_names` is the solve's constraint rows in `.nl` order,
+    `var_names` its variable columns in the same order, and `con_alias`
+    maps an original constraint's name to the clone name the
     declared-parameter surgery gave it, exactly as in
-    `_warm_start_from_suffixes`. Rows the Suffix does not mention stay
-    at 1.0. Returns ``None`` when the model declares no Suffix.
+    `_warm_start_from_suffixes`. Rows and columns the Suffix does not
+    mention stay at 1.0. Returns ``None`` when the model declares no
+    Suffix.
 
-    Variable entries are not this function's business: like the `.nl`
-    writer, it translates what it can and leaves the refusal to
-    :func:`check_no_variable_scaling`, which callers run only when
-    `user-scaling` is actually on. That keeps a `scaling_factor` Suffix
-    written for Pyomo's `core.scale_model` from failing an ordinary
-    solve.
+    Variables are translated here rather than refused (gh #486 stage
+    3): the core applies them as a change of variables and every
+    sensitivity accessor carries the factors back out, so the
+    in-process path has the same reach as the ASL one, where the
+    writer emits the entries as `.nl` suffix segments. `x_scaling` is
+    ``None`` when the Suffix asks for nothing on that axis, which
+    keeps the wrapper — and its cost — off an unscaled solve.
+
+    Variables the Suffix names but the written model has no column for
+    are skipped, like the constraints: the surgery clone is what was
+    written, and a component missing from it is not a column pounce
+    could rescale.
     """
     parsed = read_scaling(model)
     if parsed is None:
         return None
-    obj_factor, constraints, _ = parsed
+    obj_factor, constraints, variables = parsed
     con_row = {name: i for i, name in enumerate(con_names)}
     g_scaling = [1.0] * len(con_names)
     for cd, factor in constraints.items():
@@ -220,4 +198,14 @@ def problem_scaling(model, con_names, con_alias):
         row = con_row.get(con_alias.get(cd.name, cd.name))
         if row is not None:
             g_scaling[row] = factor
-    return obj_factor, g_scaling
+
+    var_col = {name: i for i, name in enumerate(var_names)}
+    x_scaling = None
+    for vd, factor in variables:
+        col = var_col.get(vd.name)
+        if col is None:
+            continue
+        if x_scaling is None:
+            x_scaling = [1.0] * len(var_names)
+        x_scaling[col] = factor
+    return obj_factor, g_scaling, x_scaling

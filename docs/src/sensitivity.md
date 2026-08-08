@@ -587,18 +587,34 @@ pounce undoes that scaling in every held-factor back-solve, so `dx`,
 problem was scaled internally
 ([#128](https://github.com/jkitchin/pounce/issues/128)).
 
-`classify_activity()` is scale-invariant for the same reason, and by
-construction rather than by undoing anything: its ratios are formed so
-that rescaling a variable, a constraint row, or the objective leaves
-them fixed. Writing a constraint as `1000·x ≥ 0` instead of `x ≥ 0`
-does not move a status, and neither does the solver's own per-row
-`d_scale`. The values the report exports follow the natural-units
-contract like everything else: `var_sigma` and `row_sigma` are the
-barrier diagonals in the model's own units, `row_normal(j)` is the
-constraint gradient with the solver's per-row scale divided out, and
-`hessian_vec(v)` is the exact Lagrangian Hessian times a user-space
-vector with the objective scale divided out; classification happens on
-the scaled quantities internally, the report never shows them.
+That covers **user scaling** too, on all three of its axes. A
+per-variable `scaling_factor` is applied as a change of variables
+`x̃ = d ⊙ x` below the algorithm, so the held factor is the scaled
+problem's; the factors are carried into the same translation, and
+every accessor answers in your units
+([#486](https://github.com/jkitchin/pounce/issues/486)). The factors a
+solve ran under are readable back from `Solver.nlp_scaling["x_scaling"]`
+(Python) / `Solver::variable_scaling` (Rust) — diagnostic rather than a
+correction to apply, since the outputs already carry it.
+
+`classify_activity()` is scale-invariant for the same reason, and
+mostly by construction rather than by undoing anything: its ratios are
+formed so that rescaling a constraint row or the objective leaves them
+fixed. Writing a constraint as `1000·x ≥ 0` instead of `x ≥ 0` does
+not move a status, and neither does the solver's own per-row
+`d_scale`. A change of variables is the one case the ratios do not
+absorb on their own — the identification floor is a single number
+shared across entries, so a *non-uniform* `d` would move entries
+across it — and there the factors are divided out of the geometry
+before anything is classified, which keeps a status from depending on
+the conditioning you asked for. The values the report exports follow
+the natural-units contract like everything else: `var_sigma` and
+`row_sigma` are the barrier diagonals in the model's own units,
+`row_normal(j)` is the constraint gradient with the solver's per-row
+scale divided out, and `hessian_vec(v)` is the exact Lagrangian
+Hessian times a user-space vector with the objective scale divided
+out; classification happens on the scaled quantities internally, the
+report never shows them.
 
 **Variable indices are user-space, factor rows are not.** Everything
 the sensitivity API reports or accepts — the `.col` file's order, the
@@ -627,7 +643,7 @@ solver-space value and the factors that relate the two are exposed:
   `info["obj_scaling_factor"]`, `info["pin_g_scaling"]`;
   `Solver.reduced_hessian(pins, scaled=True)`,
   `Solver.kkt_solve(rhs, scaled=True)`, and the `Solver.nlp_scaling`
-  dict (`{"obj": df, "c_scale": …, "d_scale": …}`).
+  dict (`{"obj": df, "c_scale": …, "d_scale": …, "x_scaling": …}`).
 - Rust: `SensResult::{reduced_hessian_scaled, obj_scaling_factor,
   pin_g_scaling}`, `Solver::{compute_reduced_hessian_scaled,
   kkt_solve_scaled, nlp_scaling, pin_g_scaling}`, and

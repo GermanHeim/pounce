@@ -159,10 +159,11 @@ impl PySolver {
     ///
     /// `K` is the **natural-units** (unscaled) KKT matrix: when the
     /// IPM solved with active NLP scaling (`nlp_scaling_method`,
-    /// `obj_scaling_factor`, user scaling) the back-solve is
-    /// conjugated so RHS and solution are in the user's own units
-    /// (pounce#128). Pass `scaled=True` for the raw back-solve against
-    /// the factor exactly as the IPM holds it.
+    /// `obj_scaling_factor`, user scaling — including a per-variable
+    /// change of variables, gh#486) the back-solve is conjugated so
+    /// RHS and solution are in the user's own units (pounce#128). Pass
+    /// `scaled=True` for the raw back-solve against the factor exactly
+    /// as the IPM holds it.
     #[pyo3(signature = (rhs, scaled = false))]
     fn kkt_solve<'py>(
         &self,
@@ -369,19 +370,27 @@ impl PySolver {
     /// dict with keys `obj` (float, the objective factor `df`),
     /// `c_scale` and `d_scale` (each an ndarray of per-row factors
     /// over the algorithm's equality / inequality blocks, or `None`
-    /// when that block carries no row scaling).
-    /// `{"obj": 1.0, "c_scale": None, "d_scale": None}` ⇔ no scaling
-    /// was active.
+    /// when that block carries no row scaling), and `x_scaling` (an
+    /// ndarray of length `n` when the solve applied a per-variable
+    /// change of variables `x̃ = d ⊙ x`, else `None`).
+    /// `{"obj": 1.0, "c_scale": None, "d_scale": None,
+    /// "x_scaling": None}` ⇔ no scaling was active.
+    ///
+    /// Every accessor on this class already reports natural units,
+    /// `x_scaling` included (gh#486), so this dict describes the
+    /// solve rather than handing back a correction to apply.
     #[getter]
     fn nlp_scaling<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("nlp_scaling: no converged factor (call solve() first)")
         })?;
         let (df, dc, dd) = s.inner.nlp_scaling().map_err(solver_error_to_py)?;
+        let dx = s.inner.variable_scaling().map_err(solver_error_to_py)?;
         let out = PyDict::new_bound(py);
         out.set_item("obj", df)?;
         out.set_item("c_scale", crate::problem::opt_vec_to_py(py, dc))?;
         out.set_item("d_scale", crate::problem::opt_vec_to_py(py, dd))?;
+        out.set_item("x_scaling", crate::problem::opt_vec_to_py(py, dx))?;
         Ok(out)
     }
 
