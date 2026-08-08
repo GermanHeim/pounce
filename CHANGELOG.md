@@ -88,6 +88,52 @@ changes.
   on the floor; **`0` switches it off entirely**, restoring upstream Ipopt's
   bare-absolute bound. That is also the setting to use if you tighten
   `dual_inf_tol` and want that absolute standard honoured unconditionally.
+### Fixed — the restoration-declining guard stopped solves that were still converging (#534)
+
+- When the line search fails at a point that already passes the
+  acceptable-level tolerances, POUNCE declines to enter restoration and
+  reports that point (upstream `IpBacktrackingLineSearch.cpp`'s
+  `ACCEPTABLE_POINT_REACHED`). The reasoning is sound — restoration reduces
+  the constraint violation, and from an acceptable point it has nothing to
+  reduce and a reportable solution to lose — but the guard read the entry
+  point and **nothing about the trajectory that reached it**, so it stopped
+  a contracting endgame and a dead stall with equal confidence. On CUTE
+  `eigena2` it fires while the dual infeasibility is quartering every
+  iteration on unit steps (`1.19e-5 → 2.96e-6 → 7.38e-7 → 1.84e-7`), three
+  iterations short of a strict certificate at a point already feasible to
+  `2.4e-11`.
+- **The guard now asks whether the solve is still converging.** The decline
+  is deferred — at most `resto_decline_deferrals` times per solve, default
+  1 — when the overall NLP error contracted by at least
+  `resto_decline_progress_ratio` (default `0.5`) on each of the last three
+  outer iterations. The solve then continues for up to ten more iterations.
+- **A deferral that does not pay off is free.** The point the guard would
+  have returned is snapshotted as a floor; if the continuation does not
+  reach a strict certificate, or ends anywhere that is not at least as good
+  an answer, the floor is restored and reported. The deadline is also
+  clamped below `max_iter`, so a lost bet cannot turn
+  `Solved_To_Acceptable_Level` into `Maximum_Iterations_Exceeded`. Worst
+  case is the old behaviour plus a bounded handful of iterations, never a
+  worse reported point.
+- Where the answer *is* a stall the guard fires exactly as before: on
+  `csfi2` — the other model the issue names as reaching this guard, added
+  as a fixture — the window at the decline is
+  `[3.267e0, 1.845e-6, 8.468e-8, 8.524e-8]`, flat on its last step, and the
+  default build's answer is bit-identical to `resto_decline_deferrals=0`.
+  Forcing the deferral there costs 11 iterations and returns the same
+  primal vector, bit for bit.
+- Two new options, both pounce additions: `resto_decline_deferrals`
+  (`0` restores the pre-#534 behaviour) and
+  `resto_decline_progress_ratio` (set it very large to drop the progress
+  requirement entirely — the "bypass the guard and see how far the solve
+  gets" experiment, previously only reachable by patching the source). The
+  `pounce::algorithm` debug line for a decline now carries the NLP-error
+  window and the verdict, so a trace answers "why did it not defer?" on its
+  own.
+- **Not verified end-to-end on `eigena2`/`eigenb2`.** Those `.nl` live in
+  the gitignored benchmark archive and were not reproducible from the
+  published `.mod`; what the progress test does on their recorded traces is
+  pinned as a unit test over the numbers in the issue instead.
 
 ### Fixed — feasible, bounded LPs exited `Search_Direction_Becomes_Too_Small` once the data reached `~1e7` (#528)
 

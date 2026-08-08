@@ -1,0 +1,179 @@
+//! The acceptable-point restoration decline must not stop a solve that is still
+//! converging — and deferring it must never cost the answer (gh #534).
+//!
+//! THE GUARD. When the line search fails at a point that already passes the
+//! acceptable-level tolerances, `IpoptAlgorithm::invoke_restoration` declines to
+//! enter restoration and reports that point (upstream
+//! `IpBacktrackingLineSearch.cpp`'s `ACCEPTABLE_POINT_REACHED`). The reasoning
+//! is sound — restoration reduces the constraint violation, and from an already
+//! acceptable point it has nothing to reduce and a reportable solution to lose.
+//!
+//! WHAT IT WAS MISSING. It read the entry point and nothing about the trajectory
+//! that reached it, so it stopped a contracting endgame and a dead stall with
+//! equal confidence. On CUTE `eigena2` it fires while the dual infeasibility is
+//! quartering every iteration on unit steps (`1.19e-5 → 2.96e-6 → 7.38e-7 →
+//! 1.84e-7`), three iterations short of a strict certificate. `#534` adds the
+//! missing progress test, plus a floor that makes the resulting bet free.
+//!
+//! WHAT THIS FILE PINS, and what it does not. `eigena2` is not reproducible
+//! here — the benchmark `.nl` archive is gitignored and not in the checkout.
+//! `csfi2` is: it is the other model the issue names as reaching this guard, it
+//! is small enough to carry as a fixture, and this build reaches the guard on it
+//! at `theta 1.501e-7`, matching the value quoted in the issue to four digits.
+//! So the two properties tested here are the two that `csfi2` can actually
+//! decide:
+//!
+//!   * a **stall** is still declined, unchanged. `csfi2`'s window at the guard
+//!     is `[3.267e0, 1.845e-6, 8.468e-8, 8.524e-8]` — three healthy contractions
+//!     and then a flat step — so the progress test refuses and the answer is
+//!     bit-identical to `resto_decline_deferrals=0`, the pre-#534 behaviour.
+//!   * a **lost bet is free**. Forcing the deferral (`resto_decline_progress_
+//!     ratio` large drops the progress requirement) makes `csfi2` take the bet
+//!     it should not take: the continuation runs, finds nothing better, the
+//!     deadline expires, the floor is restored — and the reported answer is
+//!     again bit-identical, at a cost of the ten-iteration budget and no more.
+//!
+//! That second case is the worst case the issue asks to be guaranteed ("the
+//! worst case is the current behaviour plus a few wasted iterations, never a
+//! worse reported answer"), exercised on a real model rather than argued.
+//!
+//! Whether the deferral *converts* an `eigena2`-shaped solve into a strict
+//! certificate is NOT tested here, because no model that reaches this guard with
+//! a contracting window was reachable from this checkout — every live firing
+//! found (the fixture corpus, plus `csfi2` swept over nineteen starting points)
+//! is a stall with a flat final step. The progress test's behaviour on the
+//! contracting trace is pinned instead as a unit test over the issue's recorded
+//! numbers, in `ipopt_alg.rs` (`eigena2_endgame_reads_as_contracting`).
+//!
+//! FIXTURE PROVENANCE. `fixtures/csfi2.nl` is CUTE `CSFI2` (problem MINLEN in
+//! Vasko and Stott, *SIAM Review* 37(1) pp. 82-84, 1995; SIF input A.R. Conn,
+//! April 1995), transcribed statement for statement from the AMPL `.mod` in
+//! Vanderbei's CUTE-in-AMPL collection and written to `.nl` with Pyomo rather
+//! than AMPL. 5 variables, 4 constraints. It is the same problem the benchmark
+//! archive carries: this build solves it to `55.017604529660318`, against
+//! `55.01760452966031` in `benchmarks/BENCHMARK_REPORT.json`, and reaches the
+//! guard at the `theta 1.501e-7` the issue quotes.
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use pounce_cli::solve_report::SolveReport;
+
+fn pounce_exe() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
+}
+
+fn fixture(name: &str) -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests");
+    p.push("fixtures");
+    p.push(name);
+    p
+}
+
+fn tmp_path(suffix: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut p = std::env::temp_dir();
+    p.push(format!(
+        "pounce_issue534_{}_{}_{suffix}",
+        std::process::id(),
+        n
+    ));
+    p
+}
+
+fn solve(extra: &[&str]) -> SolveReport {
+    let json_path = tmp_path("csfi2.json");
+    let sol_path = tmp_path("csfi2.sol");
+    let mut cmd = Command::new(pounce_exe());
+    cmd.arg(fixture("csfi2.nl"))
+        .arg(&sol_path)
+        .arg("--json-output")
+        .arg(&json_path);
+    for o in extra {
+        cmd.arg(o);
+    }
+    let _ = cmd.status().expect("spawn pounce");
+    let text = std::fs::read_to_string(&json_path).expect("read json report");
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&sol_path);
+    serde_json::from_str(&text).expect("deserialize SolveReport")
+}
+
+/// Drops the progress requirement, so the decline is deferred on any window —
+/// the "bypass the guard and see how far the solve gets" switch. On `csfi2` the
+/// bet is a losing one, which is the point: this is the worst case.
+const FORCE_DEFERRAL: [&str; 1] = ["resto_decline_progress_ratio=1e20"];
+/// The pre-#534 behaviour: decline immediately, always.
+const NO_DEFERRAL: [&str; 1] = ["resto_decline_deferrals=0"];
+
+/// `csfi2` stalls at the guard, so the default settings must behave exactly as
+/// the pre-#534 build did — same status, same objective, same iteration count.
+#[test]
+fn a_stalled_solve_is_declined_exactly_as_before() {
+    let baseline = solve(&NO_DEFERRAL);
+    let default = solve(&[]);
+    assert_eq!(
+        default.solution.status, baseline.solution.status,
+        "the progress test changed the status on a stalled solve",
+    );
+    assert_eq!(
+        default.solution.objective, baseline.solution.objective,
+        "the progress test moved the reported point on a stalled solve",
+    );
+    assert_eq!(
+        default.statistics.iteration_count, baseline.statistics.iteration_count,
+        "the progress test cost iterations on a solve it should not have \
+         deferred at all",
+    );
+}
+
+/// The floor: a deferral that does not pay off returns the same point the guard
+/// would have returned. Bit-identical, not merely close — the floor is a
+/// restored snapshot of that exact iterate, so anything else means the rollback
+/// did not happen.
+#[test]
+fn a_lost_deferral_returns_the_same_point() {
+    let baseline = solve(&NO_DEFERRAL);
+    let deferred = solve(&FORCE_DEFERRAL);
+    assert_eq!(
+        deferred.solution.status, baseline.solution.status,
+        "a lost deferral changed the reported status",
+    );
+    assert_eq!(
+        deferred.solution.objective, baseline.solution.objective,
+        "a lost deferral returned a different point than declining would have \
+         ({} vs {})",
+        deferred.solution.objective, baseline.solution.objective,
+    );
+    assert_eq!(
+        deferred.solution.x, baseline.solution.x,
+        "a lost deferral returned a different primal iterate than declining \
+         would have",
+    );
+}
+
+/// ...and the cost of losing it is bounded by the continuation budget, not open
+/// ended. Pre-#534 the same model that motivated this guard (`qcqp1000-1nc`)
+/// ground out 2780 iterations after entering restoration from an acceptable
+/// point; the deadline is what makes that impossible now.
+#[test]
+fn a_lost_deferral_costs_a_bounded_number_of_iterations() {
+    let baseline = solve(&NO_DEFERRAL).statistics.iteration_count;
+    let deferred = solve(&FORCE_DEFERRAL).statistics.iteration_count;
+    assert!(
+        deferred > baseline,
+        "the deferral was not actually taken (both runs stopped at iteration \
+         {baseline}); this test would then pass vacuously",
+    );
+    // The budget is ten outer iterations past the deferral, plus the iteration
+    // that observes the expiry.
+    assert!(
+        deferred <= baseline + 11,
+        "a lost deferral ran {} iterations past the decline; the continuation \
+         budget is 10",
+        deferred - baseline,
+    );
+}

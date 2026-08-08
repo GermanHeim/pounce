@@ -283,6 +283,15 @@ pub struct AlgorithmBuilder {
     /// is opt-in rather than imposed. See `upstream_options.rs` for the full
     /// account.
     pub dual_diverging_streak: Index,
+    /// `resto_decline_deferrals` (gh #534) — how many times the
+    /// acceptable-point restoration decline may be deferred on a solve whose
+    /// NLP error is still contracting. Default `1`; `0` restores the pre-#534
+    /// behaviour (decline immediately, always). See `upstream_options.rs`.
+    pub resto_decline_deferrals: Index,
+    /// `resto_decline_progress_ratio` (gh #534) — required per-iteration
+    /// contraction of the NLP error before a decline is deferred. Default
+    /// `0.5`; at or above `1` the progress requirement is dropped entirely.
+    pub resto_decline_progress_ratio: Number,
     /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
     /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
     /// candidate points by the status each will be *reported* under. Default
@@ -829,6 +838,8 @@ impl Default for AlgorithmBuilder {
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
             dual_diverging_streak: 0,
+            resto_decline_deferrals: 1,
+            resto_decline_progress_ratio: 0.5,
             kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -1251,6 +1262,8 @@ mod tests {
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,
                             dual_diverging_streak: 0,
+                            resto_decline_deferrals: 1,
+                            resto_decline_progress_ratio: 0.5,
                             kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
