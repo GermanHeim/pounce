@@ -9,6 +9,80 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a single dense Hessian row made `.nl` setup and every `eval_h` O(n²) (#552)
+
+`NlTnlp` recovers the Lagrangian Hessian by graph coloring: columns whose
+nonzero rows are pairwise disjoint share a color, and one directional
+product `H·s_c` per color recovers all of them at once. The seed and
+result buffers are `n_colors × n` dense arrays, which is fine while the
+coloring works.
+
+It does not work when the Hessian has one **dense row**. A variable that
+multiplies a sum over all the others — a total-cost variable, a shared
+design parameter, a scalar entering every constraint — puts a nonzero in
+*every* column at its own row, so no two columns may share a color and
+the greedy walk hands out one color per variable. `seeds` and
+`compressed` then become O(n²), on a model whose Hessian is otherwise
+perfectly sparse.
+
+A second, independent O(n²) sat behind it in `Tape::hessian_sparsity`,
+which kept a `BTreeSet` of dependent variables alive for *every* tape
+slot. A long additive chain — exactly what a dense row is built from —
+left one full-size set per partial sum and copied the whole running set
+at each union. (`split_top_sums` keeps top-level sums out of a single
+tape, so this only bit when the sum fed an enclosing operator.)
+
+**What is new.** Columns whose nonzero-row count exceeds
+`DENSE_COL_FACTOR` (16) times the average — never fewer than
+`DENSE_COL_MIN` (32) entries, at most `MAX_PEELED_COLS` (256) of them —
+are peeled out of the coloring and given a singleton color each. One
+product with seed `e_d` recovers the whole of column `d`, and because
+`H[d, j] == H[j, d]` that same pass also supplies every entry in row `d`.
+Row `d` therefore stops constraining anyone else's color and drops out of
+the conflict structure, leaving the rest to color on their real sparsity.
+`hessian_sparsity` additionally computes slot lifetimes up front and
+moves a dying operand's set into its consumer instead of copying it.
+
+Measured on `min Σ(xⱼ−1)² + x₀·Σxⱼ` discretized alongside a sparse
+constraint chain — one dense row, `nnz_h ≈ 2n`:
+
+| n = 8,010 | before | after |
+|---|---|---|
+| colors | 8,010 | 6 |
+| peak RSS through setup | 1,038 MB | 59 MB |
+| setup wall clock | 2.69 s | 0.18 s |
+
+| n = 4,010, 10 iterations | before | after |
+|---|---|---|
+| `LagrangianHessianEvaluations` | 2.069 s | 0.019 s |
+| `OverallAlgorithm` | 2.385 s | 0.284 s |
+
+Memory is now linear in `n` where it was quadratic, so what used to
+extrapolate to ~6.4 GB at n = 20,000 (and an OOM at flowsheet sizes) is a
+few tens of MB. Models without a dense row are untouched: a banded
+Hessian peels nothing and colors by its bandwidth exactly as before, and
+every one of the repository's 62 `.nl` fixtures returns a bit-identical
+objective and exit status.
+
+### Changed — the `.nl` reader's parse and setup paths allocate far less (#552)
+
+Reading a `.nl` put two heap allocations on every data line: one for the
+`String` the reader handed over, another for the `Vec<&str>` that
+`parse_var_coef` / `parse_bound_line` collected from it. `parse_expr`
+allocated a `String` per expression token — one per node of every
+expression tree in the file, ~620k of them for a 20k-variable model. All
+of these now borrow from the source buffer. Setup also replaced the
+global Hessian-pair `BTreeSet`, the per-row Jacobian column sets, and the
+per-summand color sets with `Vec` + `sort_unstable` + `dedup`, and
+dropped a `HashMap` that was built with one entry per Hessian nonzero,
+read once, and discarded — the decode tables are now built straight from
+the sorted pair list, which also makes the `eval_h` scatter walk `values`
+forward instead of in `HashMap` order.
+
+This is a constant-factor cleanup, not a complexity change: total setup
+on ordinary sparse models moves 1.00–1.07×. The dense-row case above is
+where the compounding shows up.
+
 ### Fixed — the filter's `theta_max` ceiling is now raised on demand instead of blocking a solve forever (#476, #546)
 
 The filter rejects any trial iterate whose constraint violation exceeds

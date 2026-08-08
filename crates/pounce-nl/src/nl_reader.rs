@@ -39,7 +39,7 @@ use pounce_nlp::tnlp::{
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -611,7 +611,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
             'C' => {
                 let (_hdr, rest) = p.eat_segment_header()?;
                 let _ = rest;
-                let idx = parse_segment_index(&_hdr, 'C')?;
+                let idx = parse_segment_index(_hdr, 'C')?;
                 if idx >= m {
                     return Err(format!("C{idx} out of range; m={m}"));
                 }
@@ -637,7 +637,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 p.eat_segment_header()?;
                 for i in 0..m {
                     let line = p.next_data_line()?;
-                    let (lo, hi) = parse_bound_line(&line)?;
+                    let (lo, hi) = parse_bound_line(line)?;
                     g_l[i] = lo;
                     g_u[i] = hi;
                 }
@@ -646,7 +646,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 p.eat_segment_header()?;
                 for i in 0..n {
                     let line = p.next_data_line()?;
-                    let (lo, hi) = parse_bound_line(&line)?;
+                    let (lo, hi) = parse_bound_line(line)?;
                     x_l[i] = lo;
                     x_u[i] = hi;
                 }
@@ -665,7 +665,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 // far-removed error. Validate against the expected `n-1`
                 // so a mismatch surfaces here, clearly, at its source.
                 let (hdr, _) = p.eat_segment_header()?;
-                let declared = parse_segment_index(&hdr, 'k')?;
+                let declared = parse_segment_index(hdr, 'k')?;
                 let expected = if n == 0 { 0 } else { n - 1 };
                 if declared != expected {
                     return Err(format!(
@@ -690,7 +690,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 }
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
-                    let (var, coef) = parse_var_coef(&line)?;
+                    let (var, coef) = parse_var_coef(line)?;
                     // Validate the column index here: an out-of-range `var`
                     // would otherwise be stored and panic as a slice OOB
                     // (`x[var]`) during constraint evaluation. Mirror the
@@ -714,7 +714,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 let mut acc = Vec::with_capacity(nz);
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
-                    let (var, coef) = parse_var_coef(&line)?;
+                    let (var, coef) = parse_var_coef(line)?;
                     // Same as J: reject an out-of-range gradient column index
                     // up front rather than letting it panic on `x[var]` later.
                     if var >= n {
@@ -737,7 +737,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                     .ok_or_else(|| format!("malformed x-segment header: {hdr}"))?;
                 for _ in 0..nx {
                     let line = p.next_data_line()?;
-                    let (idx, val) = parse_var_coef(&line)?;
+                    let (idx, val) = parse_var_coef(line)?;
                     // Reject out-of-range indices as a parse error, matching
                     // J/G strictness, rather than silently dropping the entry
                     // (which hides a corrupt initial-primal segment).
@@ -758,7 +758,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                     .ok_or_else(|| format!("malformed d-segment header: {hdr}"))?;
                 for _ in 0..nd {
                     let line = p.next_data_line()?;
-                    let (idx, val) = parse_var_coef(&line)?;
+                    let (idx, val) = parse_var_coef(line)?;
                     // Reject out-of-range indices as a parse error, matching
                     // J/G strictness, rather than silently dropping the entry
                     // (which hides a corrupt initial-dual segment).
@@ -997,37 +997,45 @@ fn parse_segment_index(s: &str, tag: char) -> Result<usize, String> {
         .map_err(|e| format!("malformed {tag}-segment index '{s}': {e}"))
 }
 
+// `parse_bound_line` and `parse_var_coef` run once per `r` / `b` / `J` /
+// `G` / `x` / `d` data line, so between them they see every Jacobian and
+// gradient nonzero in the file. Both walk the whitespace iterator
+// directly instead of collecting a `Vec<&str>` first — that collect was
+// a heap allocation per line on top of the one the reader used to make
+// handing the line over.
 fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err("empty bound line".into());
-    }
-    let kind: i32 = parts[0].parse().map_err(|e| format!("bound kind: {e}"))?;
+    let mut parts = line.split_whitespace();
+    let kind: i32 = parts
+        .next()
+        .ok_or("empty bound line")?
+        .parse()
+        .map_err(|e| format!("bound kind: {e}"))?;
     let lo;
     let hi;
     match kind {
         0 => {
             // 0  lo  hi
-            if parts.len() < 3 {
+            let (l, h) = (parts.next(), parts.next());
+            let (Some(l), Some(h)) = (l, h) else {
                 return Err(format!("bound kind 0 needs 2 values: '{line}'"));
-            }
-            lo = parts[1].parse().map_err(|e| format!("lo: {e}"))?;
-            hi = parts[2].parse().map_err(|e| format!("hi: {e}"))?;
+            };
+            lo = l.parse().map_err(|e| format!("lo: {e}"))?;
+            hi = h.parse().map_err(|e| format!("hi: {e}"))?;
         }
         1 => {
             // 1  hi
-            if parts.len() < 2 {
+            let Some(h) = parts.next() else {
                 return Err(format!("bound kind 1 needs 1 value: '{line}'"));
-            }
+            };
             lo = -1e19;
-            hi = parts[1].parse().map_err(|e| format!("hi: {e}"))?;
+            hi = h.parse().map_err(|e| format!("hi: {e}"))?;
         }
         2 => {
             // 2  lo
-            if parts.len() < 2 {
+            let Some(l) = parts.next() else {
                 return Err(format!("bound kind 2 needs 1 value: '{line}'"));
-            }
-            lo = parts[1].parse().map_err(|e| format!("lo: {e}"))?;
+            };
+            lo = l.parse().map_err(|e| format!("lo: {e}"))?;
             hi = 1e19;
         }
         3 => {
@@ -1037,10 +1045,10 @@ fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
         }
         4 => {
             // 4  eq
-            if parts.len() < 2 {
+            let Some(v) = parts.next() else {
                 return Err(format!("bound kind 4 needs 1 value: '{line}'"));
-            }
-            let v: Number = parts[1].parse().map_err(|e| format!("eq: {e}"))?;
+            };
+            let v: Number = v.parse().map_err(|e| format!("eq: {e}"))?;
             lo = v;
             hi = v;
         }
@@ -1051,12 +1059,12 @@ fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
 }
 
 fn parse_var_coef(line: &str) -> Result<(usize, Number), String> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 2 {
+    let mut parts = line.split_whitespace();
+    let (Some(v), Some(c)) = (parts.next(), parts.next()) else {
         return Err(format!("malformed var/coef line: '{line}'"));
-    }
-    let v: usize = parts[0].parse().map_err(|e| format!("var idx: {e}"))?;
-    let c: Number = parts[1].parse().map_err(|e| format!("coef: {e}"))?;
+    };
+    let v: usize = v.parse().map_err(|e| format!("var idx: {e}"))?;
+    let c: Number = c.parse().map_err(|e| format!("coef: {e}"))?;
     Ok((v, c))
 }
 
@@ -1102,11 +1110,23 @@ impl<'a> Parser<'a> {
         None
     }
 
-    fn next_data_line(&mut self) -> Result<String, String> {
-        let raw = self
-            .next_line()
-            .ok_or_else(|| "unexpected end of file in data line".to_string())?;
-        Ok(strip_comment(raw).trim().to_string())
+    /// Next non-blank line, comment stripped and trimmed.
+    ///
+    /// Borrows from the source text rather than allocating: the result
+    /// is `&'a str`, tied to the `.nl` buffer and not to `self`, so it
+    /// outlives the `&mut self` this took. A large `.nl` is mostly data
+    /// lines — 620k of them for a 20k-variable model — and returning an
+    /// owned `String` put one heap allocation on every single one.
+    fn next_data_line(&mut self) -> Result<&'a str, String> {
+        while self.pos < self.lines.len() {
+            let l = self.lines[self.pos];
+            self.pos += 1;
+            let trimmed = strip_comment(l).trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
+            }
+        }
+        Err("unexpected end of file in data line".to_string())
     }
 
     fn parse_header(&mut self) -> Result<(), String> {
@@ -1153,19 +1173,22 @@ impl<'a> Parser<'a> {
 
     /// Eat the next non-blank line as a segment header. Returns the
     /// whole header (after stripping comments) and the comment text.
-    fn eat_segment_header(&mut self) -> Result<(String, String), String> {
+    fn eat_segment_header(&mut self) -> Result<(&'a str, &'a str), String> {
         let raw = self
             .next_line()
             .ok_or_else(|| "expected segment header".to_string())?;
         let (hdr, comment) = split_comment(raw);
-        Ok((hdr.trim().to_string(), comment.trim().to_string()))
+        Ok((hdr.trim(), comment.trim()))
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
         let raw = self
             .next_line()
             .ok_or_else(|| "expected expression token".to_string())?;
-        let tok = strip_comment(raw).trim().to_string();
+        // Borrowed, not owned: this runs once per node of every
+        // expression tree in the file, so an owned `String` here is one
+        // heap allocation per tape op in the whole model.
+        let tok = strip_comment(raw).trim();
         if tok.is_empty() {
             return Err("empty expression token".into());
         }
@@ -1469,7 +1492,7 @@ impl<'a> Parser<'a> {
         let mut linear: Vec<(usize, Number)> = Vec::with_capacity(nlin);
         for _ in 0..nlin {
             let line = self.next_data_line()?;
-            let (var, coef) = parse_var_coef(&line)?;
+            let (var, coef) = parse_var_coef(line)?;
             linear.push((var, coef));
         }
         let nonlin = self.parse_expr()?;
@@ -2409,18 +2432,89 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
 /// color assigned to variable `k`, or `u32::MAX` for variables
 /// not in any Hessian pair (they contribute nothing and don't
 /// need a color).
-fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32>, usize) {
+/// A column is treated as **dense** — and peeled out of the coloring —
+/// once its nonzero-row count exceeds `DENSE_COL_FACTOR` times the
+/// average, but never below `DENSE_COL_MIN`. Both guards matter: the
+/// factor keeps uniformly-dense Hessians (where every column looks like
+/// every other) on the plain coloring path, and the absolute floor stops
+/// a very sparse average from declaring a 10-entry column "dense".
+const DENSE_COL_FACTOR: usize = 16;
+const DENSE_COL_MIN: usize = 32;
+/// Hard cap on how many columns get peeled. Each peeled column costs
+/// exactly one color, so this bounds the damage if the heuristic
+/// misfires on an unusual pattern.
+const MAX_PEELED_COLS: usize = 256;
+
+/// Greedy distance-1 coloring of the Hessian's column-intersection
+/// graph, with **dense columns peeled out**.
+///
+/// Returns `(var_color, n_colors, peeled)`. `var_color[j] == u32::MAX`
+/// marks a column that needs no directional product of its own: either
+/// it has no Hessian entries at all, or every entry it has is recovered
+/// from a peeled column's pass (see below).
+///
+/// # Why peeling
+///
+/// The plain coloring rule is "two columns may share a color when they
+/// have no common nonzero row". A single **dense row** — one variable
+/// multiplying a sum over all the others, a total-cost variable, a
+/// shared design parameter — puts a nonzero in *every* column at that
+/// row, so every pair of columns conflicts and the greedy walk hands out
+/// `n` colors for a Hessian that may have only ~3n nonzeros. Since
+/// `NlTnlp` holds `n_colors × n` dense `seeds` and `compressed` arrays,
+/// that turns into O(n²) memory (6.4 GB at n = 20,000) and O(n²) work
+/// per `eval_h`, on a problem whose Hessian is perfectly sparse.
+///
+/// Peeling exploits the Hessian's symmetry. Give a dense column `d` its
+/// own singleton color: one directional product with seed `e_d` recovers
+/// the whole of column `d` exactly. Every pair `(d, j)` — row `d`,
+/// column `j` — is then already known, because `H[d, j] == H[j, d]` sits
+/// at row `j` of that same pass. So row `d` no longer constrains any
+/// other column's color and is dropped from the conflict structure, and
+/// the remaining columns colour on their genuine sparsity. On the
+/// one-dense-row case above this takes `n_colors` from `n` to a handful.
+fn greedy_hessian_coloring(
+    n: usize,
+    lower_pairs: &[(usize, usize)],
+) -> (Vec<u32>, usize, Vec<bool>) {
     if n == 0 {
-        return (Vec::new(), 0);
+        return (Vec::new(), 0, Vec::new());
     }
 
-    // For each variable k, list of rows in which column k has a
-    // nonzero in the FULL (symmetric) Hessian. Built from lower
-    // pairs: (i, j) with i >= j contributes row i to column j and
-    // row j to column i (when i != j); diagonals contribute once.
+    // Column degrees in the FULL (symmetric) Hessian: pair (i, j) with
+    // i >= j contributes row i to column j and row j to column i; a
+    // diagonal contributes once.
+    let mut deg = vec![0usize; n];
+    for &(i, j) in lower_pairs {
+        deg[j] += 1;
+        if i != j {
+            deg[i] += 1;
+        }
+    }
+
+    // Pick the dense columns to peel.
+    let total: usize = deg.iter().sum();
+    let threshold = DENSE_COL_MIN.max(DENSE_COL_FACTOR.saturating_mul(total / n));
+    let mut peeled = vec![false; n];
+    let mut dense: Vec<usize> = (0..n).filter(|&j| deg[j] > threshold).collect();
+    if dense.len() > MAX_PEELED_COLS {
+        // Keep the worst offenders: they remove the most conflicts.
+        dense.sort_unstable_by(|&a, &b| deg[b].cmp(&deg[a]).then(a.cmp(&b)));
+        dense.truncate(MAX_PEELED_COLS);
+    }
+    for &j in &dense {
+        peeled[j] = true;
+    }
+
+    // Conflict structure over the *non-peeled* columns only. Pairs with
+    // a peeled endpoint are recovered from that endpoint's own pass, so
+    // they neither need a color nor constrain one.
     let mut col_rows: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut row_cols: Vec<Vec<u32>> = vec![Vec::new(); n];
     for &(i, j) in lower_pairs {
+        if peeled[i] || peeled[j] {
+            continue;
+        }
         col_rows[j].push(i as u32);
         row_cols[i].push(j as u32);
         if i != j {
@@ -2434,8 +2528,9 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
     let mut n_colors: u32 = 0;
 
     for j in 0..n {
-        // Variable `j` has no Hessian entries → skip (no color).
-        if col_rows[j].is_empty() {
+        // Peeled columns are colored below; a column with no surviving
+        // Hessian entries needs no color at all.
+        if peeled[j] || col_rows[j].is_empty() {
             continue;
         }
         // Mark colors used by any column sharing a row with `j`.
@@ -2463,7 +2558,14 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
         }
     }
 
-    (var_color, n_colors as usize)
+    // One singleton color per peeled column, appended after the shared
+    // ones so the non-peeled numbering is untouched.
+    for &j in &dense {
+        var_color[j] = n_colors;
+        n_colors += 1;
+    }
+
+    (var_color, n_colors as usize, peeled)
 }
 
 impl NlTnlp {
@@ -2555,30 +2657,36 @@ impl NlTnlp {
 
         // Hessian-of-Lagrangian sparsity: union of each tape's own
         // structural Hessian sparsity.
-        let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+        // One flat `Vec`, sorted and deduped once, rather than a global
+        // `BTreeSet` fed a single insert at a time across every summand
+        // in the model: sort+dedup walks contiguous memory where the tree
+        // chased a pointer and allocated a node per entry. The result is
+        // exactly the ascending order the rest of this function wants, so
+        // it doubles as `lower_pairs` instead of being copied into it.
+        let mut lower_pairs: Vec<(usize, usize)> = Vec::new();
         for t in &obj_tapes {
-            pairs.extend(t.hessian_sparsity());
+            lower_pairs.extend(t.hessian_sparsity());
         }
         for row in &con_tapes {
             for t in row {
-                pairs.extend(t.hessian_sparsity());
+                lower_pairs.extend(t.hessian_sparsity());
             }
         }
-        let mut h_irow = Vec::with_capacity(pairs.len());
-        let mut h_jcol = Vec::with_capacity(pairs.len());
-        let mut hess_map = HashMap::with_capacity(pairs.len());
-        for (k, (hi, lo)) in pairs.iter().enumerate() {
-            h_irow.push(*hi as i32);
-            h_jcol.push(*lo as i32);
-            hess_map.insert((*hi, *lo), k);
+        lower_pairs.sort_unstable();
+        lower_pairs.dedup();
+
+        let mut h_irow = Vec::with_capacity(lower_pairs.len());
+        let mut h_jcol = Vec::with_capacity(lower_pairs.len());
+        for &(hi, lo) in &lower_pairs {
+            h_irow.push(hi as i32);
+            h_jcol.push(lo as i32);
         }
 
         // Hessian column coloring. The chromatic number of the
         // column-intersection graph bounds how many directional
         // Hessian-vector products we need per `eval_h` call —
         // typically O(stencil) for PDE-mesh problems.
-        let lower_pairs: Vec<(usize, usize)> = pairs.iter().copied().collect();
-        let (var_color, n_colors) = greedy_hessian_coloring(prob.n, &lower_pairs);
+        let (var_color, n_colors, peeled) = greedy_hessian_coloring(prob.n, &lower_pairs);
 
         // Per-color seed vectors (dense for O(1) Var lookup in
         // `Tape::hessian_directional`).
@@ -2594,15 +2702,28 @@ impl NlTnlp {
         // computing compressed_{c_j} = (H · s_{c_j}), the value at
         // row i is exactly H[i, j] (coloring guarantees no other
         // column in c_j has a nonzero at row i).
+        // Built straight from `lower_pairs`, which is sorted, so each
+        // color's table is in ascending `hess_idx` order and the decode
+        // scatter walks `values` forward instead of hopping (the old
+        // build drained a `HashMap`, whose iteration order is arbitrary).
         let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
-        for (&(i, j), &idx) in hess_map.iter() {
-            let c = var_color[j];
+        for (idx, &(i, j)) in lower_pairs.iter().enumerate() {
+            // Which directional product recovers H[i, j]? Column `j`'s,
+            // read at row `i` — except when `i` is a peeled column and
+            // `j` is not: then `j` may have no color of its own, and the
+            // entry is already in column `i`'s pass at row `j`, since
+            // H[i, j] == H[j, i].
+            let (c, row) = if peeled[i] && !peeled[j] {
+                (var_color[i], j)
+            } else {
+                (var_color[j], i)
+            };
             debug_assert!(
                 c != u32::MAX,
-                "column {j} has Hessian pair {idx} but no color"
+                "Hessian pair ({i}, {j}) at index {idx} has no color"
             );
             decoding[c as usize].push(ColorWrite {
-                row: i as u32,
+                row: row as u32,
                 hess_idx: idx as u32,
             });
         }
@@ -2611,14 +2732,15 @@ impl NlTnlp {
         // its variables fall into. `eval_h` loops over only these
         // (tape, color) pairs instead of n_tapes × n_colors.
         let tape_colors = |t: &Tape| -> Vec<u32> {
-            let mut s: BTreeSet<u32> = BTreeSet::new();
-            for v in t.variables() {
-                let c = var_color[v];
-                if c != u32::MAX {
-                    s.insert(c);
-                }
-            }
-            s.into_iter().collect()
+            let mut s: Vec<u32> = t
+                .variables()
+                .into_iter()
+                .map(|v| var_color[v])
+                .filter(|&c| c != u32::MAX)
+                .collect();
+            s.sort_unstable();
+            s.dedup();
+            s
         };
         let obj_tape_colors: Vec<Vec<u32>> = obj_tapes.iter().map(tape_colors).collect();
         let con_tape_colors: Vec<Vec<Vec<u32>>> = con_tapes
@@ -2630,17 +2752,15 @@ impl NlTnlp {
         // linear-segment vars.
         let mut jac_cols: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
         let mut jac_nnz = 0;
-        for i in 0..prob.m {
-            let mut set: BTreeSet<usize> = BTreeSet::new();
-            for t in &con_tapes[i] {
-                for v in t.variables() {
-                    set.insert(v);
-                }
+        for (i, row_tapes) in con_tapes.iter().enumerate() {
+            let mut cols: Vec<usize> = Vec::with_capacity(prob.con_linear[i].len());
+            for t in row_tapes {
+                cols.extend(t.variables());
             }
-            for (v, _) in &prob.con_linear[i] {
-                set.insert(*v);
-            }
-            let cols: Vec<usize> = set.into_iter().collect();
+            cols.extend(prob.con_linear[i].iter().map(|(v, _)| *v));
+            cols.sort_unstable();
+            cols.dedup();
+            cols.shrink_to_fit();
             jac_nnz += cols.len();
             jac_cols.push(cols);
         }
@@ -4006,6 +4126,153 @@ J0 2
             vec![7.0],
             "without init_lambda the multiplier buffer must be untouched"
         );
+    }
+
+    /// `.nl` text for `minimize sum_j (x_j - 1)^2 + x_0 * sum_j x_j`,
+    /// unconstrained, `n` variables. The trailing product puts a nonzero
+    /// in row 0 of *every* Hessian column, which is the shape that used
+    /// to force the greedy coloring to hand out one color per variable.
+    fn dense_row_objective_nl(n: usize) -> String {
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} 0 1 0 0 0\n"));
+        s.push_str(" 0 1\n 0 0\n");
+        s.push_str(&format!(" {n} {n} {n}\n"));
+        s.push_str(" 0 0 0 1\n 0 0 0 0 0\n");
+        s.push_str(&format!(" 0 {n}\n"));
+        s.push_str(" 0 0\n 0 0 0 0 0\n");
+        // objective
+        s.push_str("O0 0\n");
+        s.push_str(&format!("o54\n{}\n", n + 1));
+        for j in 0..n {
+            s.push_str(&format!("o5\no1\nv{j}\nn1.0\nn2\n"));
+        }
+        s.push_str(&format!("o2\nv0\no54\n{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("v{j}\n"));
+        }
+        // start, bounds, gradient
+        s.push_str(&format!("x{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.5\n"));
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        s.push_str(&format!("G0 {n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.0\n"));
+        }
+        s
+    }
+
+    /// A single dense Hessian row must not blow the coloring up to one
+    /// color per variable. It used to: every column shares row 0, so no
+    /// two columns could be colored alike, and `seeds` / `compressed`
+    /// — both `n_colors × n` dense — became O(n²) memory and O(n²) work
+    /// per `eval_h` on a Hessian holding only ~2n nonzeros.
+    #[test]
+    fn a_dense_hessian_row_does_not_explode_the_coloring() {
+        let n = 200;
+        let p = parse_nl_text(&dense_row_objective_nl(n)).expect("parse");
+        let t = NlTnlp::new(p);
+        // 2n - 1 entries: the diagonal (j, j) for every j, plus (j, 0)
+        // for j >= 1 from the coupling term.
+        assert_eq!(t.h_irow.len(), 2 * n - 1);
+        assert!(
+            t.seeds.len() <= 4,
+            "one dense row should cost one extra color, not n; got {} colors for n={n}",
+            t.seeds.len()
+        );
+        assert_eq!(t.seeds.len(), t.compressed.len());
+    }
+
+    /// Peeling changes *which* directional product recovers an entry, so
+    /// the recovered Hessian must still be exactly right — including the
+    /// entries read out of a peeled column's pass by symmetry.
+    #[test]
+    fn peeled_dense_column_still_recovers_the_exact_hessian() {
+        let n = 200;
+        let p = parse_nl_text(&dense_row_objective_nl(n)).expect("parse");
+        let mut t = NlTnlp::new(p);
+        let info = t.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+
+        let mut irow = vec![0_i32; nnz];
+        let mut jcol = vec![0_i32; nnz];
+        assert!(t.eval_h(
+            None,
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+
+        // f = sum_j (x_j - 1)^2 + x_0 * sum_j x_j
+        //   H[0,0] = 2 + 2 = 4;  H[j,j] = 2 (j >= 1);  H[j,0] = 1 (j >= 1).
+        let x: Vec<f64> = (0..n).map(|j| 0.1 * j as f64).collect();
+        let obj_factor = 2.5;
+        let mut vals = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            obj_factor,
+            None,
+            true,
+            SparsityRequest::Values { values: &mut vals }
+        ));
+
+        let mut seen_diag = 0;
+        let mut seen_coupling = 0;
+        for k in 0..nnz {
+            let (i, j) = (irow[k] as usize, jcol[k] as usize);
+            let want = if i == 0 && j == 0 {
+                4.0
+            } else if i == j {
+                seen_diag += 1;
+                2.0
+            } else {
+                assert_eq!(j, 0, "unexpected off-diagonal ({i}, {j})");
+                seen_coupling += 1;
+                1.0
+            } * obj_factor;
+            assert!(
+                (vals[k] - want).abs() < 1e-12,
+                "H[{i},{j}] = {}, want {want}",
+                vals[k]
+            );
+        }
+        assert_eq!(seen_diag, n - 1);
+        assert_eq!(seen_coupling, n - 1);
+    }
+
+    /// The peeling threshold must leave ordinary sparse models on
+    /// exactly the coloring they had before: a banded Hessian colors by
+    /// its bandwidth, with nothing peeled.
+    #[test]
+    fn a_sparse_hessian_is_colored_by_its_bandwidth_not_peeled() {
+        let n = 400;
+        let pairs: Vec<(usize, usize)> = (0..n)
+            .flat_map(|j| {
+                let mut v = vec![(j, j)];
+                if j + 1 < n {
+                    v.push((j + 1, j));
+                }
+                v
+            })
+            .collect();
+        let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, &pairs);
+        assert!(!peeled.iter().any(|&p| p), "nothing in a band is dense");
+        assert!(
+            n_colors <= 3,
+            "a tridiagonal Hessian needs a handful of colors, got {n_colors}"
+        );
+        assert!(var_color.iter().all(|&c| c != u32::MAX));
     }
 
     #[test]

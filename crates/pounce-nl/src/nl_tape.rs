@@ -1737,6 +1737,66 @@ impl Tape {
         let mut var_sets: Vec<BTreeSet<usize>> = Vec::with_capacity(n);
         let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
 
+        // Slot lifetimes: `last_use[i]` is the highest-numbered op that
+        // reads slot `i` (or `i` itself when nothing does). A slot's
+        // variable set is dead the moment its last reader has been
+        // processed, so it can be *moved into* that reader's result
+        // instead of copied, and dropped otherwise.
+        //
+        // Without this the pass is O(n²) in both time and memory on any
+        // tape carrying a long additive chain — `v0 * (v0 + v1 + … + vk)`,
+        // the shape a dense Hessian row comes from — because every
+        // partial sum leaves behind its own full-size `BTreeSet` and each
+        // union copies the whole running set. `split_top_sums` keeps
+        // *top-level* sums out of a single tape, so this only bites when
+        // the sum feeds an enclosing operator, which is exactly the dense
+        // case. With reuse, a left-leaning chain extends one set in place.
+        let mut last_use: Vec<usize> = (0..n).collect();
+        for (i, op) in self.ops.iter().enumerate() {
+            for_each_input(op, |a| last_use[a] = i);
+        }
+        // Union of two operand sets, taking ownership of whichever dies
+        // at this op rather than copying. `a == b` is handled first:
+        // taking one would empty the other.
+        macro_rules! merge {
+            ($a:expr, $b:expr, $i:expr) => {{
+                let (a, b, i) = ($a, $b, $i);
+                if a == b {
+                    if last_use[a] == i {
+                        std::mem::take(&mut var_sets[a])
+                    } else {
+                        var_sets[a].clone()
+                    }
+                } else {
+                    // Prefer moving the larger of the two dead sets.
+                    let take_a = last_use[a] == i
+                        && (last_use[b] != i || var_sets[a].len() >= var_sets[b].len());
+                    if take_a {
+                        let mut s = std::mem::take(&mut var_sets[a]);
+                        s.extend(var_sets[b].iter().copied());
+                        s
+                    } else if last_use[b] == i {
+                        let mut s = std::mem::take(&mut var_sets[b]);
+                        s.extend(var_sets[a].iter().copied());
+                        s
+                    } else {
+                        var_sets[a].union(&var_sets[b]).copied().collect()
+                    }
+                }
+            }};
+        }
+        // Same, for the one-operand ops.
+        macro_rules! carry {
+            ($a:expr, $i:expr) => {{
+                let (a, i) = ($a, $i);
+                if last_use[a] == i {
+                    std::mem::take(&mut var_sets[a])
+                } else {
+                    var_sets[a].clone()
+                }
+            }};
+        }
+
         let emit_cross =
             |s1: &BTreeSet<usize>, s2: &BTreeSet<usize>, pairs: &mut BTreeSet<(usize, usize)>| {
                 for &v1 in s1 {
@@ -1756,7 +1816,7 @@ impl Tape {
             }
         };
 
-        for op in &self.ops {
+        for (i, op) in self.ops.iter().enumerate() {
             let vset = match op {
                 TapeOp::Const(_) => BTreeSet::new(),
                 TapeOp::Var(j) => {
@@ -1764,22 +1824,19 @@ impl Tape {
                     s.insert(*j);
                     s
                 }
-                TapeOp::Add(a, b) | TapeOp::Sub(a, b) => {
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
-                }
-                TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a].clone(),
+                TapeOp::Add(a, b) | TapeOp::Sub(a, b) => merge!(*a, *b, i),
+                TapeOp::Neg(a) | TapeOp::Abs(a) => carry!(*a, i),
                 TapeOp::Mul(a, b) => {
                     emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                    merge!(*a, *b, i)
                 }
                 TapeOp::Div(a, b) => {
                     emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
                     emit_self(&var_sets[*b], &mut pairs);
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                    merge!(*a, *b, i)
                 }
                 TapeOp::Pow(a, b) => {
-                    let combined: BTreeSet<usize> =
-                        var_sets[*a].union(&var_sets[*b]).copied().collect();
+                    let combined = merge!(*a, *b, i);
                     emit_self(&combined, &mut pairs);
                     combined
                 }
@@ -1802,15 +1859,14 @@ impl Tape {
                 | TapeOp::XLogX(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], &mut pairs);
-                    var_sets[*a].clone()
+                    carry!(*a, i)
                 }
                 // atan2(y, x) and centropy(a, b) are nonlinear in both
                 // operands with a full 2×2 second-derivative block; the
                 // structural superset is every self/cross pair within the
                 // combined operand set.
                 TapeOp::Atan2(a, b) | TapeOp::CEntropy(a, b) => {
-                    let combined: BTreeSet<usize> =
-                        var_sets[*a].union(&var_sets[*b]).copied().collect();
+                    let combined = merge!(*a, *b, i);
                     emit_self(&combined, &mut pairs);
                     combined
                 }
@@ -1828,16 +1884,14 @@ impl Tape {
                 // (either may become active as x varies — conservative
                 // and correct for a structural superset). The condition
                 // contributes no derivative and is excluded.
-                TapeOp::Select(_c, t, e) => var_sets[*t].union(&var_sets[*e]).copied().collect(),
+                TapeOp::Select(_c, t, e) => merge!(*t, *e, i),
                 // min/max are piecewise linear: the active operand passes
                 // through with unit derivative, so the second derivative is
                 // identically zero (no pairs). Their dependence set is the
                 // union of both operands (either may become active as x
                 // varies — conservative and correct for a structural
                 // superset), mirroring Select.
-                TapeOp::Min(a, b) | TapeOp::Max(a, b) => {
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
-                }
+                TapeOp::Min(a, b) | TapeOp::Max(a, b) => merge!(*a, *b, i),
                 TapeOp::Funcall(fc) => {
                     let args = &fc.args;
                     let mut combined: BTreeSet<usize> = BTreeSet::new();
@@ -1852,9 +1906,83 @@ impl Tape {
                     combined
                 }
             };
+            // Release any operand whose last reader was this op and which
+            // `merge!` / `carry!` did not already move out (already-moved
+            // slots are empty, so this is a no-op for them). Without it a
+            // tape's peak memory is the sum of every intermediate set
+            // rather than the live ones.
+            for_each_input(op, |a| {
+                if last_use[a] == i {
+                    var_sets[a].clear();
+                }
+            });
             var_sets.push(vset);
         }
         pairs
+    }
+}
+
+/// Call `f` on every tape slot `op` reads.
+///
+/// Deliberately written as an exhaustive match with **no catch-all arm**:
+/// a new `TapeOp` variant must be added here or this stops compiling.
+/// A silent "reads nothing" default would let `hessian_sparsity`'s
+/// liveness analysis drop an operand's variable set while it is still
+/// needed, which would quietly under-report Hessian sparsity — the kind
+/// of wrong answer that surfaces as a bad search direction, not a panic.
+/// Over-reporting an input is merely a missed optimization, so when in
+/// doubt list the slot.
+fn for_each_input(op: &TapeOp, mut f: impl FnMut(usize)) {
+    match op {
+        TapeOp::Const(_) | TapeOp::Var(_) => {}
+        TapeOp::Neg(a)
+        | TapeOp::Abs(a)
+        | TapeOp::Sqrt(a)
+        | TapeOp::Exp(a)
+        | TapeOp::Log(a)
+        | TapeOp::Log10(a)
+        | TapeOp::Sin(a)
+        | TapeOp::Cos(a)
+        | TapeOp::Tan(a)
+        | TapeOp::Atan(a)
+        | TapeOp::Acos(a)
+        | TapeOp::Sinh(a)
+        | TapeOp::Cosh(a)
+        | TapeOp::Tanh(a)
+        | TapeOp::Asin(a)
+        | TapeOp::Acosh(a)
+        | TapeOp::Asinh(a)
+        | TapeOp::Atanh(a)
+        | TapeOp::Erf(a)
+        | TapeOp::XLogX(a)
+        | TapeOp::Not(a) => f(*a),
+        TapeOp::Add(a, b)
+        | TapeOp::Sub(a, b)
+        | TapeOp::Mul(a, b)
+        | TapeOp::Div(a, b)
+        | TapeOp::Pow(a, b)
+        | TapeOp::CEntropy(a, b)
+        | TapeOp::Atan2(a, b)
+        | TapeOp::Min(a, b)
+        | TapeOp::Max(a, b)
+        | TapeOp::And(a, b)
+        | TapeOp::Or(a, b)
+        | TapeOp::Cmp(_, a, b) => {
+            f(*a);
+            f(*b);
+        }
+        TapeOp::Select(c, t, e) => {
+            f(*c);
+            f(*t);
+            f(*e);
+        }
+        TapeOp::Funcall(fc) => {
+            for arg in &fc.args {
+                if let TapeFuncallArg::Tape(t) = arg {
+                    f(*t);
+                }
+            }
+        }
     }
 }
 
