@@ -32,6 +32,7 @@ walks through adding it.
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
+| `lg(rg)` blank for many iterations while `alpha_pr` halves toward `1/128` and `\|\|d\|\|` grows | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-degenerate-reduced-hessian-that-never-asks-for-regularization) |
 
 ---
 
@@ -478,6 +479,82 @@ race itself is showing AMD winning consistently — pinning skips the
 race entirely on subsequent runs. See the full
 [`feral_ordering` table](options.md#feral_ordering-variants) for the
 other variants.
+
+### `feral_singular_pivot_floor`: a degenerate reduced Hessian that never asks for regularization
+
+#### When to try it
+
+The `lg(rg)` column is blank (`-`) on iteration after iteration while
+`alpha_pr` walks down `1/2, 1/4, … 1/128` with a matching `ls` count,
+`||d||` *grows* instead of shrinking, and the run finally exits
+`Solved To Acceptable Level` with `dual_inf` parked a couple of orders
+of magnitude above `tol`. Feasibility is usually already at machine
+precision, and the objective is right to many digits — only the dual
+residual will not come down.
+
+That combination means the reduced Hessian `Zᵀ W Z` has become
+numerically singular while its inertia is still formally correct. The
+inertia test is satisfied, so no Hessian perturbation is applied, and
+the Newton step runs off along a direction whose curvature is at the
+noise floor. The line search then has no choice but to cut the step to
+nothing. It shows up on problems whose solution set is a manifold
+rather than a point — degenerate eigenvalue models are the classic
+case — and it is not something the exit criteria can fix, because the
+iterate handed to them is the problem.
+
+To confirm before reaching for the knob, dump the KKT systems and look
+at the smallest pivot:
+
+```
+pounce problem.nl --dump kkt:all --dump-dir /tmp/dump-problem
+```
+
+#### The knob
+
+```
+pounce problem.nl feral_singular_pivot_floor=1e-8
+```
+
+FERAL force-accepts a pivot at the working-precision floor and still
+reports a clean factorization with the right inertia. This option is
+pounce's analog of MA57's `CNTL(2)`: after a successful factor the
+smallest accepted D-block pivot is compared against the floor, and a
+factor below it is reported singular so the perturbation handler
+escalates `δ_w`. The default `1e-20` almost never fires — deliberately,
+because on a *bounded* problem a tiny pivot usually comes from the
+barrier blocks (`Σ_x = z/x` as a bound activates) and is both expected
+and harmless. Raising it is a per-problem call, not a global default:
+`airport`, `jit1` and `pooling_rt2stp` all converge to `Optimal` with
+smallest pivots between `1e-12` and `1e-21`, and a `1e-8` floor would
+flag every one of them.
+
+Start at `1e-8` and back off toward `1e-10`/`1e-12` if the extra
+factorizations cost more than they save.
+
+#### Worked example: `eigenb2` (Vanderbei)
+
+110 variables, 55 equality constraints, no bounds at all. `Zᵀ W Z`'s
+smallest eigenvalue falls from `1.4e+02` at iteration 2 to `1.4e-11` by
+iteration 36 — against `‖W‖ ≈ 1.3e+02` — while the negative-eigenvalue
+count stays at exactly 55 throughout, so `lg(rg)` is blank for the whole
+run.
+
+| options | iterations | dual inf | exit |
+|---|---|---|---|
+| *(defaults)* | 67 | 4.69e-07 | Solved To Acceptable Level |
+| `feral_singular_pivot_floor=1e-8` | 39 | 1.25e-09 | Optimal Solution Found |
+| `feral_singular_pivot_floor=1e-8 mu_strategy=adaptive` | 30 | 4.98e-09 | Optimal Solution Found |
+
+The fixture is committed, so this reproduces without a benchmark corpus:
+
+```
+pounce crates/pounce-cli/tests/fixtures/eigenb2.nl \
+       feral_singular_pivot_floor=1e-8
+```
+
+Full diagnosis in
+`dev-notes/issue-541-eigenb2-degenerate-reduced-hessian.md`
+([issue #541](https://github.com/jkitchin/pounce/issues/541)).
 
 ## Diagnosing before you reach for a knob
 
