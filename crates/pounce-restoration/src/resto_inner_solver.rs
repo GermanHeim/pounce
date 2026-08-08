@@ -539,6 +539,12 @@ pub fn run_inner_resto(
     // also inherits the same flag (its `RestorationPhase` impl is the
     // closed-form `RestoRestorationPhase`, which doesn't print).
     alg.print_iter_output = print_iter_output;
+    // The gh #534 deferral is an outer-loop change and stays one. Inside the
+    // inner solve "acceptable" is a statement about the *restoration* NLP, whose
+    // acceptable-level exit feeds the status mapping below rather than a user's
+    // answer, and nothing here was measured in that regime. Off, so the inner
+    // solve behaves exactly as it did pre-#534.
+    alg.resto_decline_deferrals = 0;
     let status = alg.optimize();
 
     // ---- 7. Map status & extract orig_x/orig_s. ---------------------

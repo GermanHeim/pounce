@@ -307,6 +307,115 @@ a row's own ulp (say `1e-8` on data at `1e8`) still will not certify. That
 is the tolerance gate doing what you asked — the residual you requested is
 not representable at that scale.
 
+## `Solved_To_Acceptable_Level` and `acceptable_progress_kappa`
+
+`Solved_To_Acceptable_Level` is the fallback verdict for a solve that
+cannot reach `tol`: after `acceptable_iter` (default `15`) consecutive
+iterates with an NLP error under `acceptable_tol` (default `1e-6`), the
+solver stops and hands back the point it has. That criterion is a count of
+iterates inside a band, and on its own it asks only *is the error small* —
+never *has anything stopped moving*.
+
+Those come apart. An interior-point iterate can be near-stationary for the
+current **barrier subproblem** — a much weaker statement than near-KKT for
+the NLP — for fifteen iterations running while the solve is still
+descending. Two measured cases: the `kissing` model stopped with objective
+`1.00000108` where continuing reaches `0.84544259` and a strict
+certificate, 18% lower; `NARX_CFy` stopped with both residuals near `1e-7`
+where sixty more iterations collapse them by five orders.
+
+POUNCE therefore also requires the streak to have **flattened**. Across the
+`acceptable_iter` iterates that made it up:
+
+* the spread (`max − min`) of the NLP error must be within
+  `acceptable_progress_kappa · acceptable_tol`; and
+* the spread of the objective within the same fraction of
+  `acceptable_tol · max(1, |f|)`.
+
+`acceptable_progress_kappa` defaults to `0.1`, so at default tolerances
+both quantities must have stayed inside a tenth of the acceptable band over
+the whole streak.
+
+It is a **spread**, not a trend, and either signal alone is enough to keep
+solving. Both choices are deliberate: `kissing`'s error was an order of
+magnitude *worse* at the iterate it stopped on than at one it had already
+reached inside the same streak — it was wandering across the band, not
+converging inside it — while its objective was flat to all eight printed
+figures over the same iterates.
+
+Three things bound what this can do:
+
+* **It cannot lose a verdict.** The refused termination is *recorded*, and
+  a run that fails to do better ends at exactly that iterate under exactly
+  that status. A misfire costs iterations, never the answer — you will not
+  see `Maximum_Iterations_Exceeded` where the count alone would have said
+  `Solved_To_Acceptable_Level`.
+* **It never looks at a solve that converges.** A solve that reaches `tol`
+  never completes an acceptable-level streak, so nothing here runs.
+* **A genuine stall flattens.** When the iterate, the objective and the
+  error are all pinned — the case the acceptable-level exit exists for —
+  the window is flat and termination happens as before.
+
+Set `acceptable_progress_kappa = 0` to switch the progress test off and
+restore upstream Ipopt's bare consecutive-count criterion. Widening
+`acceptable_tol` widens the flat bar with it, so asking for a looser band
+still gets you the early exit.
+## Large gradients and `dual_inf_scale_kappa`
+
+The dual side of the same story. `dual_inf_tol` (default `1.0`) is a bare
+**absolute** bound on `‖∇L‖∞` — but the aggregate above **normalises**
+that quantity, dividing it by `s_d`, which grows with the mean magnitude
+of the multipliers. On a model whose gradients live at `1e10` the two
+gates are judging one number by standards ten orders apart.
+
+Vanderbei's `orthrds2` is the reported case: `s_d ≈ 1.6e10` with
+`‖∇L‖∞ = 89.7`, so the aggregate's dual term is `5.6e-09` — comfortably
+inside the default `tol = 1e-8`, i.e. stationary to nine digits relative
+to the size of the gradients involved — while the component gate refused
+it against `1.0`. The solve exited `Solved_To_Acceptable_Level` holding
+the answer, and `dual_inf_tol=1e3` alone turned it into
+`Optimal Solution Found` at the same objective.
+
+The simplest statement of the defect: multiply an objective by a positive
+constant. Same feasible set, same solution, same active set, same Newton
+step — and every multiplier, `s_d` and `‖∇L‖∞` scale with it, so a large
+enough constant costs the certificate.
+
+The **strict** test therefore judges the unscaled dual infeasibility
+against
+
+```
+max( dual_inf_tol ,  kappa · tol · dual_scale )
+```
+
+with `kappa = dual_inf_scale_kappa` (default `1`) and `dual_scale` the
+magnitude of the largest single term `∇L` is assembled from (`∇f`,
+`Jᵀy`, the bound multipliers). Since `∇L` is the *sum* of those terms,
+`‖∇L‖∞ / dual_scale` is the fraction of them that failed to cancel — a
+scale-invariant statement of stationarity, and the thing the absolute
+bound was standing in for.
+
+What bounds it:
+
+* **It cannot forgive non-stationarity.** A point where nothing cancelled
+  has `‖∇L‖∞ ≈ dual_scale`, a ratio of `1` against a bar of `1e-8`.
+  `min −exp(x) s.t. x >= 0` running away to `inf_du = 8.8e+47` is refused
+  by eight orders, because its `∇f` runs away by exactly the same factor.
+* **The aggregate still has to pass.** `nlp_err <= tol` is tested on the
+  same iterate; this only removes the second, inconsistent standard.
+* **It is inert on ordinary models.** At the defaults the floor does not
+  rise above `dual_inf_tol` until `dual_scale` exceeds
+  `dual_inf_tol / tol = 1e8`, so every model with `O(1)` gradients keeps
+  upstream's comparison bit for bit.
+* **Only the strict gate reads it.** `acceptable_dual_inf_tol` (`1e10`) is
+  untouched.
+
+Set `dual_inf_scale_kappa = 0` to switch the floor off and restore
+upstream Ipopt's bare-absolute bound. That is also the setting to reach
+for if you *tighten* `dual_inf_tol` and want that absolute standard
+honoured unconditionally — the floor is a floor, so it can override a
+tightened `dual_inf_tol` on a large-gradient model.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a
@@ -572,6 +681,7 @@ environment variable when left unset on the OptionsList (see
 | `feral_cascade_break`        | (unset) | Tri-state. Unset → inherit feral's Phase B default (CB on with bounded delayed-pivot catchment). `yes` records explicit intent (no behavioural change). `no` reproduces pre-Phase-B behaviour by surfacing `DelayBudgetExceeded` on non-root cascade victims.  |
 | `feral_fma`                  | `no`    | Dispatch dense kernels through fused multiply-add intrinsics. Roughly 2× throughput on aarch64 / x86_v3, at the cost of per-pivot rounding drift that trips more `WrongInertia` checks. Turn on when kernel throughput dominates and the IPM tolerates a noisier inertia signal. |
 | `feral_singular_pivot_floor` | `1e-20` | Pounce's analog of MA57's `CNTL(2)`. After a successful factor, the smallest accepted `D`-block pivot magnitude (scaled space) is compared against this absolute floor; if it falls below, the factor is reported `Singular` so the IPM bumps `δ_w`. `0` disables. |
+| `feral_inertia_pivot_floor`  | `1e-12` | Pivot magnitude below which a *mismatching* inertia count is treated as noise rather than as evidence (#540). Consulted only once the negative-eigenvalue count already disagrees with what the IPM asked for: if the smallest accepted pivot (scaled space) is under this floor, the factor is reported `Singular` instead of `WrongInertia`, so `δ_c` — the perturbation that repairs a rank-deficient constraint block — is applied before the `δ_w` ladder starts multiplying by 8 per retry. Because it only ever fires on a factor the caller was already going to reject, it cannot turn a usable factorization into a failure. Necessarily larger than `feral_singular_pivot_floor`, which governs factors that are unusable outright. `0` disables. |
 | `feral_min_par_flops`        | `1e8`   | Flop threshold above which a supernode subtree is dispatched to a parallel worker (feral#19). Lower → dispatch more aggressively (`0` fires on every multi-child tree at/above `N_PAR_MIN` supernodes); a very large value rejects all tree-level parallelism. Only matters when feral's internal parallelism is active; no effect on a serial factor. |
 | `feral_static_pivoting`      | (unset) | Tri-state. Factor with static pivoting (SSIDS-style delayed pivots disabled). Unset → inherit feral's delayed-pivot default. `yes` runs every supernode as the root does — a failing pivot is force-accepted in place with iterative refinement recovering the residual — breaking the delayed-pivot cascade that can turn one factorization into tens of seconds (feral#8; the emfl050 case in #254). feral's analog of MA57's `cntl[4]`. `no` keeps delayed pivoting on. Deliberately **not** coupled to `max_wall_time` — the accuracy/speed trade is the caller's to set per solve. |
 
@@ -645,6 +755,7 @@ embeddings).
 | `POUNCE_FERAL_CASCADE_BREAK`        | `feral_cascade_break`        |
 | `POUNCE_FERAL_FMA`                  | `feral_fma`                  |
 | `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR` | `feral_singular_pivot_floor` |
+| `POUNCE_FERAL_INERTIA_PIVOT_FLOOR`  | `feral_inertia_pivot_floor`  |
 | `POUNCE_FERAL_MIN_PAR_FLOPS`        | `feral_min_par_flops`        |
 | `POUNCE_FERAL_STATIC_PIVOTING`      | `feral_static_pivoting`      |
 

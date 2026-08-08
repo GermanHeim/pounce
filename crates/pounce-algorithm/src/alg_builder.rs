@@ -154,6 +154,15 @@ pub struct ConvCheckOptions {
     /// (gh #528). `0` disables the floor, restoring upstream Ipopt's
     /// bare-absolute primal term.
     pub primal_noise_floor_kappa: Number,
+    /// Fraction of `acceptable_tol` the KKT error and the objective may drift
+    /// across the acceptable-level streak's window while the streak still
+    /// counts as settled (gh #533). `0` disables the progress test, leaving
+    /// acceptable-level termination the bare consecutive-count criterion.
+    pub acceptable_progress_kappa: Number,
+    /// Safety factor on the scale-relative floor under `dual_inf_tol` the
+    /// **strict** gate judges the dual infeasibility against (gh #532). `0`
+    /// disables the floor, restoring upstream Ipopt's bare-absolute bound.
+    pub dual_inf_scale_kappa: Number,
 }
 
 impl Default for ConvCheckOptions {
@@ -177,6 +186,8 @@ impl Default for ConvCheckOptions {
             infeas_max_streak: 5,
             obj_scale_certificate_threshold: 1e-4,
             primal_noise_floor_kappa: 64.0,
+            acceptable_progress_kappa: 1e-1,
+            dual_inf_scale_kappa: 1.0,
         }
     }
 }
@@ -278,6 +289,15 @@ pub struct AlgorithmBuilder {
     /// is opt-in rather than imposed. See `upstream_options.rs` for the full
     /// account.
     pub dual_diverging_streak: Index,
+    /// `resto_decline_deferrals` (gh #534) — how many times the
+    /// acceptable-point restoration decline may be deferred on a solve whose
+    /// NLP error is still contracting. Default `1`; `0` restores the pre-#534
+    /// behaviour (decline immediately, always). See `upstream_options.rs`.
+    pub resto_decline_deferrals: Index,
+    /// `resto_decline_progress_ratio` (gh #534) — required per-iteration
+    /// contraction of the NLP error before a decline is deferred. Default
+    /// `0.5`; at or above `1` the progress requirement is dropped entirely.
+    pub resto_decline_progress_ratio: Number,
     /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
     /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
     /// candidate points by the status each will be *reported* under. Default
@@ -824,6 +844,8 @@ impl Default for AlgorithmBuilder {
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
             dual_diverging_streak: 0,
+            resto_decline_deferrals: 1,
+            resto_decline_progress_ratio: 0.5,
             kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -1085,8 +1107,14 @@ impl AlgorithmBuilder {
                 infeas_streak: 0,
                 obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
                 primal_noise_floor_kappa: self.conv_check.primal_noise_floor_kappa,
+                acceptable_progress_kappa: self.conv_check.acceptable_progress_kappa,
+                acceptable_window: std::collections::VecDeque::new(),
+                acceptable_progress_refusals: 0,
+                dual_inf_scale_kappa: self.conv_check.dual_inf_scale_kappa,
+                dual_floor_reported: false,
                 veto_fired: false,
                 acceptable_veto_fired: false,
+                masked_acceptable_veto_fired: false,
                 veto_extra_iters: 0,
                 rel_infeas_extra_iters: 0,
                 prev_rel_viol: f64::NAN,
@@ -1244,6 +1272,8 @@ mod tests {
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,
                             dual_diverging_streak: 0,
+                            resto_decline_deferrals: 1,
+                            resto_decline_progress_ratio: 0.5,
                             kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),

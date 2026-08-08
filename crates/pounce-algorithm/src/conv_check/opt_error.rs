@@ -63,6 +63,31 @@ pub struct OptErrorConvCheck {
     /// primal term against (gh #528). `0` disables the floor entirely,
     /// restoring upstream Ipopt's bare-absolute primal residual.
     pub primal_noise_floor_kappa: Number,
+    /// Fraction of `acceptable_tol` the KKT error — and, relative to the
+    /// objective's own size, the objective — may drift across the
+    /// acceptable-level streak's window while the streak still counts as
+    /// *settled* (gh #533). See [`Self::streak_has_flattened`]. `0` disables
+    /// the progress test, leaving acceptable-level termination the bare
+    /// consecutive-count criterion upstream Ipopt uses.
+    pub acceptable_progress_kappa: Number,
+    /// Trailing `(nlp_err, f)` samples of the current acceptable-level streak,
+    /// oldest first, at most [`Self::progress_window_len`] entries. Cleared
+    /// whenever the streak breaks — the window describes *this* streak.
+    pub acceptable_window: std::collections::VecDeque<(Number, Number)>,
+    /// Acceptable-level terminations the gh #533 progress test has refused so
+    /// far this solve. Bounded by [`ACCEPTABLE_PROGRESS_MAX_REFUSALS`], past
+    /// which the test stands aside and the streak terminates as it would
+    /// without it.
+    pub acceptable_progress_refusals: Index,
+    /// Safety factor on the scale-relative floor the **strict** gate judges
+    /// `dual_inf` against (gh #532); see [`Self::dual_inf_bound`]. `0` disables
+    /// the floor, restoring upstream Ipopt's bare-absolute `dual_inf_tol`.
+    pub dual_inf_scale_kappa: Number,
+    /// Whether the gh #532 scale-relative dual floor has already been reported
+    /// this solve. Diagnostic only — the certificate below carries a dual
+    /// infeasibility above `dual_inf_tol`, which is worth saying once and not
+    /// once per iteration.
+    pub dual_floor_reported: bool,
     /// Whether a masked **strict** certificate was ever refused this solve.
     pub veto_fired: bool,
     /// Whether a masked **acceptable-level** termination was ever refused.
@@ -72,7 +97,21 @@ pub struct OptErrorConvCheck {
     /// acceptable-level one as `StopAtAcceptablePoint`. Conflating them would
     /// either over-claim a status or, as originally written, leave the
     /// acceptable-level refusal with no safety net at all.
+    ///
+    /// Set by **both** refusal arms — the gh #200 masked-scale veto and the
+    /// gh #533 progress test — because both need the same undo. What the
+    /// masked veto's own iteration budget counts is
+    /// [`Self::masked_acceptable_veto_fired`].
     pub acceptable_veto_fired: bool,
+    /// Whether the *masked-scale* (gh #200) arm specifically refused an
+    /// acceptable-level termination.
+    ///
+    /// [`VETO_MAX_EXTRA_ITERS`] is the masked veto's budget, so only the masked
+    /// arms may spend it. Counting the gh #533 progress refusals against it too
+    /// would silently disarm the masked veto 60 iterations into any solve whose
+    /// acceptable streak was progress-refused — a different mechanism's bug
+    /// coming back for reasons having nothing to do with objective scaling.
+    pub masked_acceptable_veto_fired: bool,
     /// Iterations spent since the veto first refused a certificate.
     ///
     /// The veto is a bet that continuing reaches a better point. Some problems
@@ -106,6 +145,38 @@ pub struct OptErrorConvCheck {
 /// this number: whatever happens after the budget is spent, the refused
 /// certificate is still restored if the run ends without a better one.
 const VETO_MAX_EXTRA_ITERS: Index = 60;
+
+/// How many acceptable-level terminations the gh #533 progress test may refuse
+/// before it stands aside for the rest of the solve.
+///
+/// The test is already self-limiting — it only refuses while the streak's own
+/// window shows the solve still moving, and a solve that stops moving flattens
+/// the window within `acceptable_iter` iterations — so this bounds only the
+/// pathological case: a solve that wanders inside the acceptable band without
+/// ever settling and without ever reaching `tol`. Left unbounded that solve
+/// would run to `max_iter` (returning the refused point, so no *verdict* is
+/// lost, but spending up to 3000 iterations to say what it could have said at
+/// 40).
+///
+/// The number has to clear the widest measured rescue: `kissing` needed 447
+/// iterations past the refusal (103 → 550) to reach its strict certificate, so
+/// anything below that cannot fix the reported case. `1000` clears it with room
+/// to spare and still stops well short of the default `max_iter = 3000`. Note
+/// that only iterations on which a termination is actually *refused* are
+/// counted, not every iteration after the first refusal — a streak broken by an
+/// iterate outside the band costs nothing here.
+const ACCEPTABLE_PROGRESS_MAX_REFUSALS: Index = 1000;
+
+/// Longest trailing streak window the progress test will keep samples for.
+///
+/// The window is `acceptable_iter` long (the streak's own length), which is 15
+/// by default. The cap exists because `acceptable_iter` is a user option with no
+/// upper bound, and the window is a live allocation. Past the cap the test
+/// judges flatness over the trailing `ACCEPTABLE_PROGRESS_WINDOW_MAX` iterates
+/// of the streak instead of all of it — a strictly more permissive reading (a
+/// shorter window can only contain less movement), so the cap can never make
+/// the mechanism fire where the full window would not have.
+const ACCEPTABLE_PROGRESS_WINDOW_MAX: usize = 256;
 
 /// Smallest constraint violation rapid infeasibility detection will ever treat
 /// as "bounded away from feasible" (gh #519).
@@ -206,8 +277,17 @@ impl Default for OptErrorConvCheck {
             // [`certificate_masked`].
             obj_scale_certificate_threshold: 1e-4,
             primal_noise_floor_kappa: 64.0,
+            // A tenth of the acceptable band. See `streak_has_flattened` for
+            // why the band is the right yardstick and why a tenth of it is the
+            // conservative end of the range.
+            acceptable_progress_kappa: 1e-1,
+            acceptable_window: std::collections::VecDeque::new(),
+            acceptable_progress_refusals: 0,
+            dual_inf_scale_kappa: 1.0,
+            dual_floor_reported: false,
             veto_fired: false,
             acceptable_veto_fired: false,
+            masked_acceptable_veto_fired: false,
             veto_extra_iters: 0,
             rel_infeas_extra_iters: 0,
             prev_rel_viol: Number::NAN,
@@ -224,17 +304,79 @@ impl OptErrorConvCheck {
     /// iff every supplied residual sits at or below its tolerance.
     /// Factored out so tests can exercise the gating logic without
     /// constructing a full `IpoptCq`.
+    ///
+    /// `dual_scale` is the magnitude of the terms `∇L` is assembled from
+    /// ([`IpoptCalculatedQuantities::curr_unscaled_dual_infeasibility_scale_max`]),
+    /// which sets the scale-relative floor under `dual_inf_tol` — see
+    /// [`Self::dual_inf_bound`]. Pass `0` for the bare absolute bound.
     fn passes_component_tols(
         &self,
         overall: Number,
         dual_inf: Number,
         constr_viol: Number,
         compl_inf: Number,
+        dual_scale: Number,
     ) -> bool {
         overall <= self.tol
-            && dual_inf <= self.dual_inf_tol
+            && dual_inf <= self.dual_inf_bound(dual_scale)
             && constr_viol <= self.constr_viol_tol
             && compl_inf <= self.compl_inf_tol
+    }
+
+    /// The bound the **strict** gate judges the unscaled dual infeasibility
+    /// against: `max(dual_inf_tol, dual_inf_scale_kappa · tol · dual_scale)`
+    /// (gh #532).
+    ///
+    /// `dual_inf_tol` is a bare absolute bound on a quantity the aggregate KKT
+    /// error normalises. The aggregate's dual term is `‖∇L‖_∞ / s_d`, and `s_d`
+    /// grows with the mean magnitude of the multipliers, so on a model whose
+    /// gradients live at `1e10` the two are judging one quantity by two
+    /// standards ten orders apart: Vanderbei's `orthrds2` reaches `s_d ≈ 1.6e10`
+    /// with `‖∇L‖_∞ = 89.7`, an aggregate dual term of `5.6e-09` — comfortably
+    /// inside the default `tol = 1e-8` — and the component gate refused it
+    /// against `1.0`, so a solve stationary to nine digits exited
+    /// `Solved_To_Acceptable_Level` holding the answer. `1.0` is a reasonable
+    /// absolute bound when `‖∇f‖` is `O(1)`; it is meaningless when `‖∇f‖` is
+    /// `1e10`, and the same LP with its objective multiplied by a positive
+    /// constant — which changes no feasible point, no solution and no active
+    /// set — crossed it.
+    ///
+    /// The floor is stated relative to the terms `∇L` is *made of*
+    /// (`dual_scale`), not to `s_d`. Both remove the asymmetry the issue
+    /// reports, but `s_d` is built from multiplier magnitudes alone and does not
+    /// see `∇f`: a model with tiny constraint gradients and huge multipliers
+    /// (`‖J‖ ~ 1e-12`, `‖y‖ ~ 1e12`, so every term of `∇L` is `O(1)`) has
+    /// `s_d ~ 1e10` and would have its genuinely non-stationary residual
+    /// forgiven — exactly the user-space drift the unscaled component gate was
+    /// added for (pounce#173). `dual_scale` cannot be fooled that way, because
+    /// `dual_inf / dual_scale` is the fraction of the terms that failed to
+    /// cancel.
+    ///
+    /// So the relaxation only ever forgives a residual that is small *relative
+    /// to the problem's own scale*, and it is bounded twice over: the aggregate
+    /// `overall <= tol` gate still has to pass on the same iterate, and at the
+    /// default `kappa = 1` the floor only rises above `dual_inf_tol` once
+    /// `dual_scale` exceeds `dual_inf_tol / tol = 1e8`. A genuinely
+    /// non-stationary point has `dual_inf ≈ dual_scale` (nothing cancelled) and
+    /// is refused by eight orders of magnitude — `min -exp(x) s.t. x >= 0`
+    /// reaching `inf_du = 8.8e+47` with `∇f = −8.8e47` stays refused, which is
+    /// the case any such rule has to keep rejecting.
+    ///
+    /// A user who tightens `dual_inf_tol` below the floor is asking for an
+    /// absolute standard the floor may override; `dual_inf_scale_kappa = 0`
+    /// switches it off and restores upstream's bare comparison. Non-finite or
+    /// non-positive scales are read as "nothing can be said", which is the
+    /// absolute bound.
+    fn dual_inf_bound(&self, dual_scale: Number) -> Number {
+        if self.dual_inf_scale_kappa.is_nan()
+            || self.dual_inf_scale_kappa <= 0.0
+            || !dual_scale.is_finite()
+            || dual_scale <= 0.0
+        {
+            return self.dual_inf_tol;
+        }
+        self.dual_inf_tol
+            .max(self.dual_inf_scale_kappa * self.tol * dual_scale)
     }
 
     /// The aggregate KKT error the **strict** gate judges against `tol`
@@ -363,21 +505,176 @@ impl OptErrorConvCheck {
     /// `masked`. `masked` decides only what happens when it crosses the
     /// threshold: terminate, or record that a termination was refused here —
     /// which is exactly the iterate the unvetoed run would have returned.
-    fn note_acceptable(&mut self, acceptable_now: bool, masked: bool) -> bool {
+    ///
+    /// The gh #533 progress test is the second thing that can refuse at the
+    /// crossing, and it is undone by the same machinery — see
+    /// [`Self::streak_has_flattened`]. Everything about the count is unchanged
+    /// by it: the streak advances on the band test alone, so a progress refusal
+    /// still records exactly the iterate the unvetoed run would have returned.
+    fn note_acceptable(
+        &mut self,
+        acceptable_now: bool,
+        masked: bool,
+        nlp_err: Number,
+        curr_f: Number,
+    ) -> bool {
         if !acceptable_now {
             self.acceptable_count = 0;
+            self.acceptable_window.clear();
             return false;
         }
         self.acceptable_count += 1;
+        self.push_progress_sample(nlp_err, curr_f);
         if self.acceptable_count < self.acceptable_iter {
             return false;
         }
         if masked {
             self.acceptable_veto_fired = true;
-            false
-        } else {
-            true
+            self.masked_acceptable_veto_fired = true;
+            return false;
         }
+        // gh #533: the streak says the error has been inside the band for
+        // `acceptable_iter` iterations; it says nothing about whether the solve
+        // has stopped moving. Refuse the termination while the window shows it
+        // has not, and let the run continue — the refusal is recorded, so a run
+        // that goes nowhere still ends at this point under this status.
+        if !self.streak_has_flattened()
+            && self.acceptable_progress_refusals < ACCEPTABLE_PROGRESS_MAX_REFUSALS
+        {
+            if !self.acceptable_veto_fired {
+                tracing::info!(
+                    nlp_err,
+                    obj = curr_f,
+                    acceptable_tol = self.acceptable_tol,
+                    window = self.acceptable_window.len(),
+                    kappa = self.acceptable_progress_kappa,
+                    "refusing an acceptable-level termination: the error has been inside \
+                     the acceptable band for the whole streak but is still moving across \
+                     it, so the streak has not flattened; continuing \
+                     (acceptable_progress_kappa=0 disables)"
+                );
+            }
+            self.acceptable_progress_refusals += 1;
+            self.acceptable_veto_fired = true;
+            return false;
+        }
+        true
+    }
+
+    /// Length of the streak window the gh #533 progress test judges: the
+    /// streak's own length, clamped to `1..=`[`ACCEPTABLE_PROGRESS_WINDOW_MAX`].
+    ///
+    /// A length of 1 is representable and means the test is inert:
+    /// [`Self::streak_has_flattened`] declines to judge a window that short,
+    /// because a single iterate carries no progress information. So
+    /// `acceptable_iter = 1` never refuses, which is right — the user asked to
+    /// stop at the first qualifying iterate.
+    fn progress_window_len(&self) -> usize {
+        (self.acceptable_iter.max(1) as usize).clamp(1, ACCEPTABLE_PROGRESS_WINDOW_MAX)
+    }
+
+    /// Record one qualifying iterate in the streak window, evicting the oldest
+    /// sample once the window is full.
+    fn push_progress_sample(&mut self, nlp_err: Number, curr_f: Number) {
+        let cap = self.progress_window_len();
+        self.acceptable_window.push_back((nlp_err, curr_f));
+        while self.acceptable_window.len() > cap {
+            self.acceptable_window.pop_front();
+        }
+    }
+
+    /// Has the solve actually *flattened* over the iterates that made up the
+    /// acceptable-level streak (gh #533)?
+    ///
+    /// The streak criterion on its own is a band test repeated
+    /// `acceptable_iter` times: it asks whether the KKT error is small, never
+    /// whether anything has stopped moving. Those come apart, and when they do
+    /// the solve stops at a point that is near-stationary *for the current
+    /// barrier subproblem* — a much weaker statement than near-KKT for the NLP —
+    /// and returns a worse answer under a weaker status than continuing would
+    /// have reached. Measured on two corpus models at `main @ 880b360b`:
+    /// `kissing` (Vanderbei) stopped at iteration 103 with objective
+    /// `1.00000108` and `Solved_To_Acceptable_Level`, where continuing reaches
+    /// `0.84544259` and a strict certificate at 550 — 18% high, and Ipopt's own
+    /// answer to eight figures is the lower one; `NARX_CFy` (Mittelmann)
+    /// stopped at 565 with both residuals near `1e-7`, where 60 more iterations
+    /// (25 s, inside the benchmark's 300 s limit) collapse them by five orders
+    /// and beat both its own acceptable answer and Ipopt's.
+    ///
+    /// So: flat means *neither the error nor the objective moved* across the
+    /// window, and the yardstick for both is a fraction
+    /// `acceptable_progress_kappa` of `acceptable_tol` —
+    ///
+    /// - the error's absolute spread `max − min` against
+    ///   `kappa · acceptable_tol`;
+    /// - the objective's spread against `kappa · acceptable_tol · max(1, |f|)`,
+    ///   the same relative form upstream's own `acceptable_obj_change_tol`
+    ///   cross-check uses.
+    ///
+    /// **Spread, not trend, and either one alone is enough to refuse.** Both
+    /// choices are load-bearing, and `kissing` is why:
+    ///
+    /// - Its `inf_du` over the last four iterates of the streak ran `3.35e-08 →
+    ///   8.18e-08 → 1.08e-07 → 4.15e-07` — the error the solver stopped on was
+    ///   an order of magnitude *worse* than one it had already achieved inside
+    ///   the same streak. A trend test reads that as "not improving" and stops;
+    ///   a spread test reads it as what it is, an iterate still wandering
+    ///   across the band, and keeps going. The same holds in the other
+    ///   direction: an error still descending through the band has not settled
+    ///   either, and a solve that is still descending is one that may yet
+    ///   certify.
+    /// - Its objective was flat to all eight printed figures over those same
+    ///   iterates (`1.0000011e+00` throughout) while the continued run moved it
+    ///   by 15%. Requiring *both* signals to show movement before refusing
+    ///   would therefore have stopped exactly where it stopped before.
+    ///
+    /// The band is the right yardstick because the question is scoped to it:
+    /// the point is being certified as good to `acceptable_tol`, so "settled"
+    /// has to mean settled on that scale. It also gets the user-intent
+    /// monotonicity right in the one direction that matters — a *widened*
+    /// `acceptable_tol` widens the flat bar with it, so a user who asked for an
+    /// early exit at a loose band keeps getting one. Tightening
+    /// `acceptable_tol` makes the test more eager to keep solving, which is the
+    /// direction that cannot fabricate a verdict: a refusal is always undone at
+    /// the end of a run that fails to do better (see
+    /// `IpoptAlgorithm::honour_refused_certificate`), so its worst case is
+    /// spent iterations, never a wrong answer.
+    ///
+    /// Returns `true` — flat, terminate — whenever the test cannot see enough
+    /// to judge: `acceptable_progress_kappa <= 0` (the documented opt-out) or
+    /// `NaN`, a window not yet full, a window of one, or any non-finite sample.
+    /// Refusing on missing evidence would spend iterations for no stated reason.
+    fn streak_has_flattened(&self) -> bool {
+        if self.acceptable_progress_kappa.is_nan() || self.acceptable_progress_kappa <= 0.0 {
+            return true;
+        }
+        // A partial window is not evidence of movement. (Unreachable from
+        // `note_acceptable`, which only asks once the count has reached
+        // `acceptable_iter` and pushes one sample per count, but the predicate
+        // must not depend on that coincidence.)
+        if self.acceptable_window.len() < self.progress_window_len()
+            || self.acceptable_window.len() < 2
+        {
+            return true;
+        }
+        let bar = self.acceptable_progress_kappa * self.acceptable_tol;
+        let (mut err_lo, mut err_hi) = (Number::INFINITY, Number::NEG_INFINITY);
+        let (mut f_lo, mut f_hi) = (Number::INFINITY, Number::NEG_INFINITY);
+        for &(err, f) in &self.acceptable_window {
+            if !err.is_finite() || !f.is_finite() {
+                return true;
+            }
+            err_lo = err_lo.min(err);
+            err_hi = err_hi.max(err);
+            f_lo = f_lo.min(f);
+            f_hi = f_hi.max(f);
+        }
+        // `f` from the newest sample, matching `passes_acceptable_tols`'
+        // `max(1, |f|)` denominator convention.
+        let f_curr = self.acceptable_window.back().map_or(0.0, |&(_, f)| f);
+        let err_flat = err_hi - err_lo <= bar;
+        let obj_flat = f_hi - f_lo <= bar * f_curr.abs().max(1.0);
+        err_flat && obj_flat
     }
 
     /// Fraction of a row's own magnitude a violation must exceed before the
@@ -506,6 +803,14 @@ impl ConvCheck for OptErrorConvCheck {
         // (`if( acceptable_iter_ > 0 && CurrentIsAcceptable() )`). Without
         // the `> 0` guard, a zero would make `acceptable_count >= 0` fire on
         // the first acceptable iterate — the opposite of "disabled".
+        //
+        // The gh #533 progress test deliberately does NOT live here. It needs
+        // the objective, which this entry point does not receive, and its two
+        // callers do not want it: unit tests exercising the scalar state
+        // machine, and `RestoConvCheckAdapter`, whose inner acceptable-level
+        // answer feeds the "may the trial point leave restoration" decision
+        // rather than a user-facing verdict — and which has no refused-
+        // certificate fallback of its own to undo a refusal with.
         if self.acceptable_iter > 0 && nlp_err <= self.acceptable_tol {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
@@ -566,9 +871,24 @@ impl ConvCheck for OptErrorConvCheck {
         // value is smaller still and the gate passes either way, and with any
         // component tolerance already blown `passes_component_tols` is false
         // whatever the aggregate says.
-        let components_pass = dual_inf <= self.dual_inf_tol
-            && constr_viol <= self.constr_viol_tol
-            && compl_inf <= self.compl_inf_tol;
+        //
+        // gh #532 — the scale-relative floor under `dual_inf_tol`. Computed on
+        // the same terms `dual_inf` was assembled from, and only where it can
+        // change the verdict: below `dual_inf_tol` the absolute arm has already
+        // passed and the floor can only be looser, and with the primal or
+        // complementarity component already blown no floor on the dual makes a
+        // certificate. That laziness matters because the accessor repeats
+        // `curr_grad_lag_x`'s `∇f` and two transpose products.
+        let primal_compl_pass =
+            constr_viol <= self.constr_viol_tol && compl_inf <= self.compl_inf_tol;
+        let dual_scale =
+            if primal_compl_pass && dual_inf > self.dual_inf_tol && self.dual_inf_scale_kappa > 0.0
+            {
+                cq_ref.curr_unscaled_dual_infeasibility_scale_max()
+            } else {
+                0.0
+            };
+        let components_pass = primal_compl_pass && dual_inf <= self.dual_inf_bound(dual_scale);
         let strict_err = if nlp_err <= self.tol || !components_pass || !self.noise_floor_enabled() {
             nlp_err
         } else {
@@ -610,7 +930,9 @@ impl ConvCheck for OptErrorConvCheck {
         // `acceptable_tol`, the veto lifts, and an honest strict certificate is
         // issued. Refusing to stop early is the whole intervention; the strict
         // tolerance in scaled space is untouched.
-        if self.veto_fired || self.acceptable_veto_fired {
+        // Only the masked arms spend the masked veto's budget — see
+        // `masked_acceptable_veto_fired`.
+        if self.veto_fired || self.masked_acceptable_veto_fired {
             self.veto_extra_iters += 1;
         }
         // Call the bet off once it has plainly not paid off, so a veto that can
@@ -640,8 +962,8 @@ impl ConvCheck for OptErrorConvCheck {
         // long before convergence — and using it would arm the fallback (and
         // snapshot an arbitrary mid-solve iterate) on runs that were never
         // about to stop.
-        let refusing_strict =
-            masked && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf);
+        let refusing_strict = masked
+            && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale);
         if refusing_strict && !self.veto_fired {
             self.veto_fired = true;
             tracing::info!(
@@ -654,7 +976,9 @@ impl ConvCheck for OptErrorConvCheck {
             );
         }
 
-        if !masked && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf) {
+        if !masked
+            && self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale)
+        {
             if rel_veto {
                 rel_veto_blocked = true;
                 if self.rel_infeas_extra_iters == 0 {
@@ -668,6 +992,21 @@ impl ConvCheck for OptErrorConvCheck {
                     );
                 }
             } else {
+                // The certificate is going out with a dual infeasibility above
+                // `dual_inf_tol`, which the end-of-run summary will print
+                // beside `EXIT: Optimal Solution Found`. Say why, once.
+                if dual_inf > self.dual_inf_tol && !self.dual_floor_reported {
+                    self.dual_floor_reported = true;
+                    tracing::info!(
+                        dual_inf,
+                        dual_scale,
+                        dual_inf_tol = self.dual_inf_tol,
+                        bound = self.dual_inf_bound(dual_scale),
+                        "certifying with a dual infeasibility above dual_inf_tol: it is \
+                         within the scale-relative floor set by the terms the Lagrangian \
+                         gradient is built from (dual_inf_scale_kappa=0 disables)"
+                    );
+                }
                 return ConvergenceStatus::Converged;
             }
         }
@@ -689,7 +1028,7 @@ impl ConvCheck for OptErrorConvCheck {
         if rel_veto_blocked {
             self.rel_infeas_extra_iters += 1;
         }
-        if self.note_acceptable(acceptable_now, masked) {
+        if self.note_acceptable(acceptable_now, masked, nlp_err, curr_f) {
             return ConvergenceStatus::ConvergedToAcceptable;
         }
         if iter_count >= self.max_iter {
@@ -782,7 +1121,8 @@ impl ConvCheck for OptErrorConvCheck {
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         // Same noise-floored aggregate the strict gate uses (gh #528) — this
         // predicate exists to answer "would that gate have passed here?", so it
-        // has to ask the same question.
+        // has to ask the same question. Same scale-relative dual floor
+        // (gh #532), and lazily for the same reason.
         let strict_err = if self.noise_floor_enabled() {
             Self::strict_overall(
                 nlp_err,
@@ -791,8 +1131,13 @@ impl ConvCheck for OptErrorConvCheck {
         } else {
             nlp_err
         };
+        let dual_scale = if dual_inf > self.dual_inf_tol && self.dual_inf_scale_kappa > 0.0 {
+            cq_ref.curr_unscaled_dual_infeasibility_scale_max()
+        } else {
+            0.0
+        };
         drop(cq_ref);
-        self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf)
+        self.passes_component_tols(strict_err, dual_inf, constr_viol, compl_inf, dual_scale)
     }
 
     fn tol_or_default(&self) -> Number {
@@ -1068,7 +1413,7 @@ mod tests {
             ..Default::default()
         };
         // The residuals alone say "converged"; the objective says nothing usable.
-        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0));
+        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0, 0.0));
         // The masked predicate itself is unchanged — the finiteness gate lives at
         // the call site, where `curr_f` is in hand.
         assert!(certificate_masked(
@@ -1098,18 +1443,28 @@ mod tests {
         // through to `max_iter` and returned a bare failure where the baseline
         // returned `Solved_To_Acceptable_Level`, with no snapshot armed to roll
         // back to. Never-worse, violated.
+        //
+        // Every iterate here is a *settled* one — same error, same objective —
+        // so the gh #533 progress test is flat throughout and this test sees
+        // only the masked-veto behaviour it is about. The progress test's own
+        // arm is exercised in `a_wandering_streak_refuses_acceptable_termination`.
+        const ERR: Number = 1e-7;
+        const OBJ: Number = 1.0;
         let mut c = OptErrorConvCheck {
             acceptable_iter: 15,
             ..Default::default()
         };
         // 14 qualifying iterates while unmasked: no termination yet.
         for i in 0..14 {
-            assert!(!c.note_acceptable(true, false), "terminated early at {i}");
+            assert!(
+                !c.note_acceptable(true, false, ERR, OBJ),
+                "terminated early at {i}"
+            );
         }
         // The 15th qualifies too, but the veto is now engaged. The streak must
         // be honoured — recorded as a refused termination, not discarded.
         assert!(
-            !c.note_acceptable(true, true),
+            !c.note_acceptable(true, true, ERR, OBJ),
             "a masked iterate must not terminate the run"
         );
         assert!(
@@ -1117,6 +1472,11 @@ mod tests {
             "the streak crossed `acceptable_iter` while masked, so a termination was \
              refused here and must be recorded — otherwise the fallback has nothing to \
              restore and the run returns a bare failure"
+        );
+        assert!(
+            c.masked_acceptable_veto_fired,
+            "a masked refusal must be attributed to the masked arm — it is what spends \
+             the masked veto's iteration budget"
         );
 
         // The mirror direction: a streak that begins masked and finishes
@@ -1126,10 +1486,10 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..14 {
-            assert!(!c.note_acceptable(true, true));
+            assert!(!c.note_acceptable(true, true, ERR, OBJ));
         }
         assert!(
-            c.note_acceptable(true, false),
+            c.note_acceptable(true, false, ERR, OBJ),
             "the veto lifted with the streak already at 14; the 15th qualifying iterate \
              must terminate exactly as it would without the mechanism"
         );
@@ -1139,18 +1499,196 @@ mod tests {
             acceptable_iter: 3,
             ..Default::default()
         };
-        assert!(!c.note_acceptable(true, false));
-        assert!(!c.note_acceptable(false, true));
+        assert!(!c.note_acceptable(true, false, ERR, OBJ));
+        assert!(!c.note_acceptable(false, true, ERR, OBJ));
         assert_eq!(
             c.acceptable_count, 0,
             "a non-qualifying iterate resets the streak"
         );
-        assert!(!c.note_acceptable(true, false));
-        assert!(!c.note_acceptable(true, false));
         assert!(
-            c.note_acceptable(true, false),
+            c.acceptable_window.is_empty(),
+            "and clears the streak window"
+        );
+        assert!(!c.note_acceptable(true, false, ERR, OBJ));
+        assert!(!c.note_acceptable(true, false, ERR, OBJ));
+        assert!(
+            c.note_acceptable(true, false, ERR, OBJ),
             "3 consecutive qualifying iterates terminate"
         );
+    }
+
+    /// gh #533. The reported `kissing` streak: fifteen iterates all inside the
+    /// acceptable band, but with the KKT error wandering across it — the
+    /// iterate the solve stopped on had an error an order of magnitude *worse*
+    /// than one it had already reached in the same streak. The count alone
+    /// stops there (objective `1.00000108`, `Solved_To_Acceptable_Level`);
+    /// continuing reaches `0.84544259` with a strict certificate.
+    #[test]
+    fn a_wandering_streak_refuses_acceptable_termination() {
+        // The tail of the reported trace (`main @ 880b360b`, default options):
+        // inf_du 3.35e-08 → 8.18e-08 → 1.08e-07 → 4.15e-07 with the objective
+        // flat to all eight printed figures throughout.
+        let kissing_tail = [3.35e-08, 8.18e-08, 1.08e-07, 4.15e-07];
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 4,
+            ..Default::default()
+        };
+        for (i, &err) in kissing_tail.iter().enumerate() {
+            assert!(
+                !c.note_acceptable(true, false, err, 1.0000011),
+                "the streak must not terminate at iterate {i}: the error is still \
+                 wandering across the acceptable band"
+            );
+        }
+        assert!(
+            c.acceptable_veto_fired,
+            "the refusal must be recorded, or the run has nothing to fall back to"
+        );
+        assert!(
+            !c.masked_acceptable_veto_fired,
+            "a progress refusal is not a masked one and must not spend the masked \
+             veto's budget"
+        );
+        // The count keeps running underneath the refusal — it is what identifies
+        // the iterate the unvetoed run would have returned.
+        assert_eq!(c.acceptable_count, 4);
+
+        // Once the error settles, the window flattens — after the four-iterate
+        // window has slid clear of the wandering tail — and the streak
+        // terminates exactly as it would have without the mechanism.
+        for _ in 0..2 {
+            assert!(!c.note_acceptable(true, false, 4.15e-07, 1.0000011));
+        }
+        assert!(
+            c.note_acceptable(true, false, 4.15e-07, 1.0000011),
+            "a window of four identical iterates is settled; nothing is left to refuse"
+        );
+    }
+
+    /// The other reported signal: `NARX_CFy`'s objective was still descending
+    /// through the streak (`8.6579696e-03` at the stop, `8.6445195e-03` sixty
+    /// iterations later) even where its error spread was small. Either signal
+    /// alone must be enough to keep solving.
+    #[test]
+    fn a_still_descending_objective_refuses_acceptable_termination() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 4,
+            ..Default::default()
+        };
+        // A perfectly steady error — only the objective is moving, by ~3e-6
+        // over the window against a bar of 1e-1 · 1e-6 · max(1, |f|) = 1e-7.
+        let objs = [8.6592e-03, 8.6588e-03, 8.6584e-03, 8.6580e-03];
+        for (i, &f) in objs.iter().enumerate() {
+            assert!(
+                !c.note_acceptable(true, false, 1.5e-07, f),
+                "the streak must not terminate at iterate {i}: the objective is still \
+                 descending"
+            );
+        }
+        assert!(c.acceptable_veto_fired);
+    }
+
+    /// The opt-out is real: `acceptable_progress_kappa = 0` restores the bare
+    /// consecutive-count criterion, wandering error and all.
+    #[test]
+    fn zero_progress_kappa_restores_the_bare_count() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 4,
+            acceptable_progress_kappa: 0.0,
+            ..Default::default()
+        };
+        let kissing_tail = [3.35e-08, 8.18e-08, 1.08e-07, 4.15e-07];
+        for (i, &err) in kissing_tail.iter().enumerate() {
+            let terminated = c.note_acceptable(true, false, err, 1.0000011);
+            assert_eq!(
+                terminated,
+                i == 3,
+                "with the progress test off, iterate {i} must behave exactly as upstream"
+            );
+        }
+        assert!(!c.acceptable_veto_fired);
+    }
+
+    /// The refusal budget bounds the cost of a solve that never settles: past
+    /// [`ACCEPTABLE_PROGRESS_MAX_REFUSALS`] the test stands aside and the streak
+    /// terminates as it would have without it, so the worst case is bounded
+    /// extra iterations rather than a run to `max_iter`.
+    #[test]
+    fn the_progress_refusal_budget_is_bounded() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 2,
+            ..Default::default()
+        };
+        // A permanent two-cycle inside the band: never flat, never converging.
+        let mut terminated_at = None;
+        for k in 0..(ACCEPTABLE_PROGRESS_MAX_REFUSALS + 10) {
+            let err = if k % 2 == 0 { 1e-7 } else { 9e-7 };
+            if c.note_acceptable(true, false, err, 1.0) {
+                terminated_at = Some(k);
+                break;
+            }
+        }
+        assert_eq!(
+            c.acceptable_progress_refusals, ACCEPTABLE_PROGRESS_MAX_REFUSALS,
+            "the budget must be spent, not exceeded"
+        );
+        assert!(
+            terminated_at.is_some(),
+            "a never-settling solve must still terminate at the acceptable level once \
+             the budget is spent"
+        );
+    }
+
+    /// Flatness is judged over the streak's own window, and the window slides:
+    /// a transient early in a solve must not block termination forever.
+    #[test]
+    fn the_flatness_window_slides_past_a_transient() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 3,
+            ..Default::default()
+        };
+        // Entering the band while still descending: refused.
+        assert!(!c.note_acceptable(true, false, 9e-7, 1.0));
+        assert!(!c.note_acceptable(true, false, 5e-7, 1.0));
+        assert!(!c.note_acceptable(true, false, 2e-7, 1.0));
+        assert!(c.acceptable_veto_fired);
+        // Then it plateaus. Two iterates later the descent has slid out of the
+        // three-long window and the solve is judged settled.
+        assert!(!c.note_acceptable(true, false, 2e-7, 1.0));
+        assert!(
+            c.note_acceptable(true, false, 2e-7, 1.0),
+            "the window must slide, or an early transient blocks every later termination"
+        );
+    }
+
+    /// `acceptable_iter = 1` asks to stop at the first qualifying iterate, and
+    /// a one-iterate window carries no progress information — so the progress
+    /// test must never refuse there.
+    #[test]
+    fn a_single_iterate_streak_carries_no_progress_signal() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 1,
+            ..Default::default()
+        };
+        assert!(c.note_acceptable(true, false, 4.15e-07, 1.0));
+        assert!(!c.acceptable_veto_fired);
+    }
+
+    /// A non-finite sample must not be read as movement — the mechanism spends
+    /// iterations, so it may only fire on evidence it actually has.
+    #[test]
+    fn non_finite_samples_do_not_refuse() {
+        for bad in [Number::NAN, Number::INFINITY] {
+            let mut c = OptErrorConvCheck {
+                acceptable_iter: 2,
+                ..Default::default()
+            };
+            assert!(!c.note_acceptable(true, false, bad, 1.0));
+            assert!(
+                c.note_acceptable(true, false, 1e-7, 1.0),
+                "a {bad} sample in the window must not be treated as a progress signal"
+            );
+        }
     }
 
     #[test]
@@ -1200,7 +1738,7 @@ mod tests {
             ..Default::default()
         };
         // The gh #200 iterate: passes the strict test in scaled space...
-        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0));
+        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0, 0.0));
         // ...and the veto is what withholds it.
         assert!(certificate_masked(
             1e-8,
@@ -1224,13 +1762,13 @@ mod tests {
             ..Default::default()
         };
         // All under threshold → converged.
-        assert!(c.passes_component_tols(1e-9, 0.5, 1e-5, 1e-5));
+        assert!(c.passes_component_tols(1e-9, 0.5, 1e-5, 1e-5, 0.0));
         // dual_inf above its tolerance blocks even when nlp_err is tiny.
-        assert!(!c.passes_component_tols(1e-12, 2.0, 1e-5, 1e-5));
+        assert!(!c.passes_component_tols(1e-12, 2.0, 1e-5, 1e-5, 0.0));
         // compl_inf above its tolerance blocks.
-        assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2));
+        assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2, 0.0));
         // constr_viol above its tolerance blocks.
-        assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0));
+        assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0, 0.0));
     }
 
     #[test]
@@ -1398,6 +1936,78 @@ mod tests {
             assert!(!c.note_infeasible_stationary(1e9, 0.0, 0.0));
         }
         assert_eq!(c.infeas_streak, 0);
+    }
+
+    /// gh #532. The scale-relative floor under `dual_inf_tol`, on the numbers
+    /// that produced the report: `orthrds2` must pass, and the runaway
+    /// `min -exp(x) s.t. x >= 0` must not.
+    #[test]
+    fn dual_inf_bound_forgives_a_relatively_stationary_residual_only() {
+        let c = OptErrorConvCheck::new();
+        assert_eq!(c.dual_inf_tol, 1.0);
+        assert_eq!(c.dual_inf_scale_kappa, 1.0);
+
+        // `orthrds2`: ‖∇L‖_∞ = 89.7 against terms of magnitude ~1.6e12 (the
+        // mean multiplier magnitude behind its `s_d ≈ 1.6e10`) — stationary to
+        // nine digits relative to what it is made of, and refused by the bare
+        // `1.0` before the fix.
+        let (orthrds2_dual_inf, orthrds2_scale) = (89.669_051_358_301_67, 1.6e12);
+        assert!(orthrds2_dual_inf > c.dual_inf_tol, "the reported refusal");
+        assert!(orthrds2_dual_inf <= c.dual_inf_bound(orthrds2_scale));
+        assert!(c.passes_component_tols(
+            5.537e-9,
+            orthrds2_dual_inf,
+            1.741e-8,
+            0.0,
+            orthrds2_scale
+        ));
+
+        // `min -exp(x) s.t. x >= 0` running away: `∇f = −8.8e47` with no
+        // multiplier to meet it, so nothing cancelled and the residual IS the
+        // scale. Refused by eight orders — the case any such rule has to keep
+        // rejecting.
+        let runaway = 8.8e47;
+        assert!(runaway > c.dual_inf_bound(runaway));
+        assert!(!c.passes_component_tols(1e-12, runaway, 1.7e-10, 0.0, runaway));
+
+        // The floor is a floor, never a tightening: below `dual_inf_tol` the
+        // absolute arm decides, at any scale.
+        assert_eq!(c.dual_inf_bound(1.0), c.dual_inf_tol);
+        assert_eq!(c.dual_inf_bound(0.0), c.dual_inf_tol);
+        assert_eq!(c.dual_inf_bound(1e-30), c.dual_inf_tol);
+        // ...and it only lifts off `dual_inf_tol` once the scale passes
+        // `dual_inf_tol / (kappa · tol)` = 1e8, so every `O(1)` model keeps the
+        // upstream comparison bit for bit.
+        assert_eq!(c.dual_inf_bound(1e7), c.dual_inf_tol);
+        assert!(c.dual_inf_bound(1e10) > c.dual_inf_tol);
+
+        // Non-finite scales say nothing and must not widen anything.
+        for bad in [Number::NAN, Number::INFINITY, Number::NEG_INFINITY] {
+            assert_eq!(c.dual_inf_bound(bad), c.dual_inf_tol, "scale {bad}");
+        }
+    }
+
+    /// The floor tracks `tol`: asking for a stricter solve tightens the dual
+    /// component gate in proportion, and `dual_inf_scale_kappa = 0` is the
+    /// documented opt-out back to upstream's bare absolute bound.
+    #[test]
+    fn dual_inf_bound_tracks_tol_and_honours_the_opt_out() {
+        let mut c = OptErrorConvCheck::new();
+        assert_eq!(c.dual_inf_bound(1e12), 1e4);
+        c.tol = 1e-10;
+        assert_eq!(c.dual_inf_bound(1e12), 1e2);
+        // Kappa scales the floor as advertised.
+        c.tol = 1e-8;
+        c.dual_inf_scale_kappa = 10.0;
+        assert_eq!(c.dual_inf_bound(1e12), 1e5);
+        // `0` (and, defensively, a negative or NaN value the option's own lower
+        // bound already refuses) disables it outright — the most extreme scale
+        // must not move the bound.
+        for off in [0.0, -1.0, Number::NAN] {
+            c.dual_inf_scale_kappa = off;
+            assert_eq!(c.dual_inf_bound(1e30), c.dual_inf_tol, "kappa {off}");
+            assert!(!c.passes_component_tols(1e-12, 89.7, 0.0, 0.0, 1.6e12));
+        }
     }
 
     /// gh #528. The strict gate reads the noise-floored aggregate when that is

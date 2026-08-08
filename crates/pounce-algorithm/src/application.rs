@@ -2459,6 +2459,8 @@ impl IpoptApplication {
         alg.tiny_step_y_tol = builder.tiny_step_y_tol;
         alg.diverging_iterates_tol = builder.diverging_iterates_tol;
         alg.dual_diverging_streak = builder.dual_diverging_streak.max(0) as usize;
+        alg.resto_decline_deferrals = builder.resto_decline_deferrals.max(0) as usize;
+        alg.resto_decline_progress_ratio = builder.resto_decline_progress_ratio;
         alg.kkt_fidelity_tol = builder.kkt_fidelity_tol;
         // Honor `print_level == 0`: silence the algorithm's direct-to-stdout
         // output — the per-iteration table and, new in #206, the
@@ -2975,6 +2977,12 @@ impl IpoptApplication {
         if let Some(v) = read_num("primal_noise_floor_kappa") {
             builder.conv_check.primal_noise_floor_kappa = v;
         }
+        if let Some(v) = read_num("acceptable_progress_kappa") {
+            builder.conv_check.acceptable_progress_kappa = v;
+        }
+        if let Some(v) = read_num("dual_inf_scale_kappa") {
+            builder.conv_check.dual_inf_scale_kappa = v;
+        }
         if let Some(v) = read_num("kkt_fidelity_tol") {
             builder.kkt_fidelity_tol = v;
         }
@@ -3046,6 +3054,12 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("dual_diverging_streak") {
             builder.dual_diverging_streak = v;
+        }
+        if let Some(v) = read_int("resto_decline_deferrals") {
+            builder.resto_decline_deferrals = v;
+        }
+        if let Some(v) = read_num("resto_decline_progress_ratio") {
+            builder.resto_decline_progress_ratio = v;
         }
 
         // Barrier-parameter (μ) options — consumers in
@@ -3591,6 +3605,9 @@ pub fn feral_config_from_options(
     }
     if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
         cfg.singular_pivot_floor = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("feral_inertia_pivot_floor", "") {
+        cfg.inertia_pivot_floor = v;
     }
     // Number option (not integer): the gate is a u64 and Index is i32, too
     // narrow for large flop counts or the u64::MAX reject-all sentinel. The

@@ -1,5 +1,16 @@
 # `robot_a` / `robot_b` / `robot_c`: where the time actually goes
 
+> **Partly superseded by `robot-abc-theta-max-stall.md`.** That note ran the
+> `POUNCE_DBG_LS` trace §4b asks for and found the stall's mechanism — the
+> filter's `theta_max` ceiling — after which all three instances converge to
+> verified optima in 109–262 iterations under `theta_max_fact`. It corrects four
+> things here: §2's baseline is IPOPT+MUMPS where the repo's reference (and the
+> published benchmark) is MA57, so the per-iteration handicap is 3.9x rather
+> than 1.6x; §4b's "none of the safe knobs reproduce it" is false;
+> §4b's replacement for the falsified `theta ≈ 0` reading is `theta ≈ theta_max`;
+> and §6's `inf_pr` loose end is a real reporting defect, not a compatibility
+> wart. The measurements below stand as measured.
+
 Investigation for [pounce#476](https://github.com/jkitchin/pounce/issues/476).
 On the Mittelmann `ampl-nlp` run of 3 Aug 2026 these three instances were the
 single largest contributor to POUNCE's scaled shifted geometric mean: ~2140 s /
@@ -41,6 +52,11 @@ linear form `SUM[i]`, so they collapse to one row per collocation point,
 
 All numbers below: Apple M-series, single instance at a time, POUNCE 0.9.0 with
 FERAL, `ipopt` 3.14.19 with MUMPS 5.6.2, both reading the same `robot_a.nl`.
+
+> **Wrong baseline.** `benchmarks/README.md` makes IPOPT+**MA57** the comparison
+> convention, and `benchmarks/mittelmann/ipopt_ma57.json` already holds this
+> instance: 3000 iterations in 170.1 s = 0.057 s/iter, same host. MUMPS is 2.4x
+> slower than that here, so every ratio in §2 and §5 flatters POUNCE by 2.4x.
 
 ## 1. Not a basin artifact — the iterates are Ipopt's
 
@@ -235,6 +251,12 @@ is *where* the 80x lives: the acceptance test rejects a path that is not merely
 viable but better.
 
 ### None of the safe knobs reproduce it
+
+> **Corrected.** `theta_max_fact` does, and it is absent from the table below —
+> every entry here tunes `mu` or the corrector, none touches the filter's
+> `theta` ceiling. At `theta_max_fact=1e8` `robot_a` converges in 128 iterations
+> to a `pounce verify`-VERIFIED optimum with the filter, Armijo test and
+> restoration all armed. See `robot-abc-theta-max-stall.md`.
 
 All of Ipopt's anti-stall machinery is present (`mu_strategy`, `mu_oracle`,
 `corrector_type`, `max_soc`, watchdog, restoration, `nlp_scaling_method`).

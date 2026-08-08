@@ -53,6 +53,228 @@ changes.
   substitution, so they would report scaled-space numbers under a
   natural-units contract; stage 3 lifts this.
 
+### Fixed — the inertia test was answered with `δ_w` even when the factorization could not measure inertia (#540)
+
+- CUTE `eigena2` stopped at `Solved_To_Acceptable_Level` with the dual
+  infeasibility stuck at `3.31e-07`, where Ipopt certifies `Optimal` at
+  `9.31e-09`. The objective was already correct to twelve digits; only the
+  last two orders of the dual residual were missing. It now converges to
+  `Solve_Succeeded` in **27 iterations at `5.73e-10`** — the same iteration
+  count as Ipopt, at a residual an order of magnitude tighter, with the
+  constraint violation at `2.2e-16`.
+- The reported symptom was `δ_w` re-escalating from `10^-0.8` to `10^1.4` at
+  the second-to-last iteration, damping the Newton step from `1.2e-7` to
+  `8.2e-9`. The **`δ_w` update rule is not at fault** — it is an exact port of
+  upstream's `get_deltas_for_wrong_inertia` and it did what its input told it
+  to. The input was wrong.
+- `eigena2`'s constraint Jacobian degenerates as the iterate converges: 45 of
+  its 55 singular values fall to `~1e-8` by iteration 27, so every KKT
+  factorization taken with `δ_c = 0` down that tail is **singular to working
+  precision** (smallest pivot `~1e-16` on a `‖A‖ ≈ 240` matrix). The
+  negative-eigenvalue count read off such a factor is noise, not a
+  measurement: the same iterate returns 64, 58 and 62 against an expected 55,
+  and an exact LAPACK eigendecomposition of the dumped matrices agrees with
+  none of them. The ladder then multiplied the Hessian perturbation by 8 per
+  retry against a reading that does not respond to `δ_w` at all.
+- **The perturbation that repairs a rank-deficient constraint block is
+  `δ_c`**, which is what the `Singular` verdict reaches for. A mismatching
+  count that is contradicted by a pivot at the working-precision floor is now
+  reported `Singular` rather than `WrongInertia`, so `δ_c` is applied first.
+  It lifts the smallest pivot from `~1e-16` to `5.8e-09`, and from there the
+  counts the backend reports agree with LAPACK exactly. Upstream's MA27 /
+  MA57 / MUMPS interfaces likewise test singularity *before* comparing the
+  count.
+- **It cannot cost a usable factorization.** The trigger is consulted only
+  once the count has already mismatched — i.e. on a factorization the caller
+  was going to reject either way — so it never turns a successful factor into
+  a failure; it only changes which perturbation is reached for first.
+- New option **`feral_inertia_pivot_floor`** (default `1e-12`, the middle of
+  the `n·eps` range over which an equilibrated pivot loses its sign) sets the
+  threshold; **`0` disables the trigger**, restoring the previous routing.
+- `PDPerturbationHandler::PerturbForSingularity` no longer assumes the
+  degeneracy probe is in its pristine state when a `Singular` verdict
+  arrives. Upstream encodes that as `DBG_ASSERT`s, but every real linear
+  solver can report singularity from any rung of the `δ_w` ladder (MUMPS
+  `INFO(1) = -10`, MA27 `IFLAG = 3`); the probe is now abandoned and the
+  determined-state path taken, which keeps the `δ_w` rung already paid for.
+
+### Fixed — the acceptable-level streak had no progress test, so it stopped solves that were still descending (#533)
+
+- Acceptable-level termination fired after `acceptable_iter` (default 15)
+  consecutive iterates under `acceptable_tol`, with **no test for whether the
+  solve was still making progress**. On two corpus models that streak
+  completed at a point that is near-KKT for the *barrier subproblem* while the
+  NLP solve was still descending, and POUNCE returned a worse answer under a
+  weaker status than it would have reached by continuing.
+- `kissing` (Vanderbei) stopped at iteration 103 with objective `1.00000108`
+  and `Solved_To_Acceptable_Level`. Continuing reaches `0.84544259` with a
+  strict certificate at 550 — the reported answer was **18% high**, and the
+  lower value matches Ipopt's `0.845442591227744` to eight figures. The
+  iterate it stopped on was near-stationary for the barrier subproblem at
+  `lg(mu) = -8.6`, with `‖d‖` oscillating around `1e-6` rather than shrinking,
+  and its `inf_du` (`4.15e-07`) was an order of magnitude *worse* than one it
+  had already reached inside the same streak (`3.35e-08`).
+- `NARX_CFy` (Mittelmann) stopped at iteration 565 with both residuals near
+  `1e-7`. Sixty more iterations and 25 more seconds collapse them by five
+  orders and reach an objective (`8.6445195e-03`) that beats both its own
+  acceptable answer and Ipopt's — and at `275.7 s` that is inside the
+  benchmark's `300 s` limit, so the streak, and only the streak, stopped it.
+- **The streak must now also have flattened.** Across the `acceptable_iter`
+  iterates that made it up, the *spread* (`max − min`) of the KKT error must
+  sit within `acceptable_progress_kappa · acceptable_tol`, and the spread of
+  the objective within the same fraction of `acceptable_tol · max(1, |f|)`.
+  Spread rather than trend, because both models were *wandering* across the
+  band rather than converging inside it, and either signal alone is enough to
+  keep solving, because `kissing`'s objective was flat to all eight printed
+  figures over the iterates in question while the continued run moved it by
+  15%.
+- **Never worse, by construction.** Like the masked-certificate veto (#200),
+  this is a bet that is *tested*, not predicted: the refused termination is
+  recorded, and a run that fails to do better ends at exactly that iterate
+  under exactly that status (`Solved_To_Acceptable_Level`) instead of
+  surfacing `Maximum_Iterations_Exceeded` or a bare failure. The cost of a
+  misfire is bounded extra iterations, never a lost verdict.
+- A refused acceptable-level termination can now also be paid off by a
+  *better acceptable point*, not only by a strict certificate: a continued run
+  that itself exits `Solved_To_Acceptable_Level` at a better-ranking point
+  keeps that point (same status, better answer) rather than rolling back. Only
+  an acceptable-level refusal admits this candidate, so a refused strict
+  certificate's `Success` is never reported at a point that qualified only at
+  the acceptable level.
+- The count itself is untouched: the streak still advances on the band test
+  alone, so the refused iterate is exactly the one the unvetoed run would have
+  returned. Solves that reach `tol` never complete a streak and are entirely
+  unaffected; a solve that stalls to a genuine standstill sees a flat window
+  and terminates as before.
+- New option **`acceptable_progress_kappa`** (default `0.1`) sets the
+  fraction of the band; **`0` switches the progress test off entirely**,
+  restoring upstream Ipopt's bare consecutive-count criterion bit-for-bit.
+### Fixed — `auto` sent the NETLIB GEN family to the convex IPM, which cannot certify it, while the NLP path solves it in a second (#535)
+
+- `solver_selection=auto` routes every detected LP to the convex
+  interior-point method. On `gen` / `gen1` that costs **194× in wall clock
+  and the certificate**: 199 of a 200-iteration budget, 190.8 s, and
+  `Solved_To_Acceptable_Level` at a primal residual of `1.374e-7` against
+  `tol = 1e-8`. The general NLP filter-IPM — the same binary, the default
+  for every other class — solves the same model in **19 iterations and
+  0.982 s** to `Solve_Succeeded`, matching Ipopt-3.14.20/MA57's objective
+  to four figures.
+- The root cause is #133 and still stands: the family is highly degenerate
+  and rank-deficient, strict complementarity fails, the
+  fraction-to-boundary step collapses, and a pure IPM cannot certify the
+  vertex. Crossover was built to close exactly this and does not (it is off
+  by default because it regressed LP-suite solve times 3×–800× while still
+  not reaching an exact vertex on GEN). This is not the #528 noise floor
+  either — the largest right-hand side in `gen.nl` is `65.16`, so #531's
+  `κ = 64` floor sits at `9.2e-13` there, five orders below the violation.
+- **The routing is now the lever, not the crossover engine.** Under `auto`,
+  an LP whose convex solve finishes *without a certificate* —
+  `OptimalInaccurate` or `IterationLimit` — is re-solved on the general NLP
+  interior-point path, which owns the whole verdict. An LP is also a valid
+  NLP, and the fallback is the same discipline the conic path has used
+  since the `airport` stall: the decision is taken above the status line,
+  the `.sol` write and the JSON report, so a rerouted run still reports
+  exactly one status.
+- It is also the *faster* answer here — one second of NLP after a failed
+  convex attempt is nothing against the 190.8 s the convex attempt costs.
+- Narrow by construction. It does not fire on a convex QP (`P ≠ 0`), on a
+  solve that certified, on a *verified* infeasible / unbounded verdict, when
+  `solver_selection` names an engine, when `max_iter` was set explicitly
+  (a user-set budget is the question being asked, and `max_iter=0` must
+  still stop without a solve, #186), or with the interactive debugger
+  attached. A tightened `tol` deliberately does **not** suppress it: that is
+  an accuracy request, so trying the engine that can meet it is the right
+  response.
+- With this the `Ipopt only` column of the benchmark report loses its last
+  two entries that POUNCE was thought unable to reach at all.
+### Fixed — `dual_inf_tol` was an absolute bound on a normalized quantity, so large-gradient models could not certify (#532)
+
+- The dual twin of #528. The KKT error the strict test compares against
+  `tol` is `max(‖∇L‖_∞/s_d, max(‖c‖_∞, ‖d − s‖_∞), ‖compl‖_∞/s_c)`, and its
+  dual term carries `s_d`, which grows with the mean magnitude of the
+  multipliers. The per-component gate then tested that same `‖∇L‖_∞`
+  against `dual_inf_tol`, default `1.0` — one quantity, two standards, and
+  on a model whose gradients live at `1e10` they sit ten orders apart.
+- Vanderbei's `orthrds2` at default options: `s_d ≈ 1.6e10` with
+  `‖∇L‖_∞ = 89.7`, an aggregate dual term of `5.6e-09` against
+  `tol = 1e-8` — stationary to nine digits relative to the size of the
+  gradients involved — and `89.7 > 1.0` refused it. The solve exited
+  `Solved_To_Acceptable_Level` holding the answer; `dual_inf_tol=1e3` alone
+  turned it into `Optimal Solution Found` at the same objective, with
+  nothing else about the solve changing.
+- The map that exposes it is as simple as they come: multiplying an
+  objective by a positive constant changes no feasible point, no solution
+  and no active set, but multiplies `∇f`, every multiplier, `s_d` and
+  `‖∇L‖_∞` — so a large enough constant costs the certificate.
+- **The strict gate now judges the unscaled dual infeasibility against
+  `max(dual_inf_tol, kappa · tol · dual_scale)`**, where `dual_scale`
+  (`IpoptCalculatedQuantities::curr_unscaled_dual_infeasibility_scale_max`)
+  is the magnitude of the largest single term `∇L` is assembled from —
+  `∇f`, `Jᵀy`, the bound multipliers. `∇L` is the sum of exactly those
+  terms, so `‖∇L‖_∞ / dual_scale` is the fraction of them that failed to
+  cancel: a scale-invariant statement of stationarity, and one `s_d` cannot
+  make, since it is built from multiplier magnitudes alone and never sees
+  `∇f`.
+- The relaxation only ever forgives a residual small *relative to the
+  problem's own scale*, and never admits a non-stationary point:
+  `min -exp(x) s.t. x >= 0` reaching `inf_du = 8.8e+47` has `∇f = −8.8e47`
+  with no multiplier to meet it, so nothing cancelled and it stays refused
+  by eight orders. It is bounded twice over — the aggregate `nlp_err <= tol`
+  gate must still pass on the same iterate, and at the default `kappa = 1`
+  the floor does not rise above `dual_inf_tol` until `dual_scale` exceeds
+  `dual_inf_tol / tol = 1e8`, leaving every `O(1)` model on upstream's
+  comparison bit for bit. `acceptable_dual_inf_tol` is untouched.
+- New option **`dual_inf_scale_kappa`** (default `1`) sets the safety factor
+  on the floor; **`0` switches it off entirely**, restoring upstream Ipopt's
+  bare-absolute bound. That is also the setting to use if you tighten
+  `dual_inf_tol` and want that absolute standard honoured unconditionally.
+### Fixed — the restoration-declining guard stopped solves that were still converging (#534)
+
+- When the line search fails at a point that already passes the
+  acceptable-level tolerances, POUNCE declines to enter restoration and
+  reports that point (upstream `IpBacktrackingLineSearch.cpp`'s
+  `ACCEPTABLE_POINT_REACHED`). The reasoning is sound — restoration reduces
+  the constraint violation, and from an acceptable point it has nothing to
+  reduce and a reportable solution to lose — but the guard read the entry
+  point and **nothing about the trajectory that reached it**, so it stopped
+  a contracting endgame and a dead stall with equal confidence. On CUTE
+  `eigena2` it fires while the dual infeasibility is quartering every
+  iteration on unit steps (`1.19e-5 → 2.96e-6 → 7.38e-7 → 1.84e-7`), three
+  iterations short of a strict certificate at a point already feasible to
+  `2.4e-11`.
+- **The guard now asks whether the solve is still converging.** The decline
+  is deferred — at most `resto_decline_deferrals` times per solve, default
+  1 — when the overall NLP error contracted by at least
+  `resto_decline_progress_ratio` (default `0.5`) on each of the last three
+  outer iterations. The solve then continues for up to ten more iterations.
+- **A deferral that does not pay off is free.** The point the guard would
+  have returned is snapshotted as a floor; if the continuation does not
+  reach a strict certificate, or ends anywhere that is not at least as good
+  an answer, the floor is restored and reported. The deadline is also
+  clamped below `max_iter`, so a lost bet cannot turn
+  `Solved_To_Acceptable_Level` into `Maximum_Iterations_Exceeded`. Worst
+  case is the old behaviour plus a bounded handful of iterations, never a
+  worse reported point.
+- Where the answer *is* a stall the guard fires exactly as before: on
+  `csfi2` — the other model the issue names as reaching this guard, added
+  as a fixture — the window at the decline is
+  `[3.267e0, 1.845e-6, 8.468e-8, 8.524e-8]`, flat on its last step, and the
+  default build's answer is bit-identical to `resto_decline_deferrals=0`.
+  Forcing the deferral there costs 11 iterations and returns the same
+  primal vector, bit for bit.
+- Two new options, both pounce additions: `resto_decline_deferrals`
+  (`0` restores the pre-#534 behaviour) and
+  `resto_decline_progress_ratio` (set it very large to drop the progress
+  requirement entirely — the "bypass the guard and see how far the solve
+  gets" experiment, previously only reachable by patching the source). The
+  `pounce::algorithm` debug line for a decline now carries the NLP-error
+  window and the verdict, so a trace answers "why did it not defer?" on its
+  own.
+- **Not verified end-to-end on `eigena2`/`eigenb2`.** Those `.nl` live in
+  the gitignored benchmark archive and were not reproducible from the
+  published `.mod`; what the progress test does on their recorded traces is
+  pinned as a unit test over the numbers in the issue instead.
+
 ### Fixed — feasible, bounded LPs exited `Search_Direction_Becomes_Too_Small` once the data reached `~1e7` (#528)
 
 - On plain LPs with `O(1)` matrix entries but right-hand sides of magnitude

@@ -800,6 +800,19 @@ pub fn main() -> ExitCode {
         // engine and silently answering from a different one would hide it.
         let socp_nlp_fallback = matches!(selection, SolverSelection::Auto);
 
+        // gh #535: and the same bargain again for an LP the convex IPM cannot
+        // certify. `auto` for the same reason as above — the LP classification
+        // was our inference, so a failure to certify it is ours to fix, while a
+        // named engine keeps its verdict. Additionally suppressed when the user
+        // set `max_iter` (their budget is the question being answered, and
+        // `max_iter=0` must stop without a solve, pounce#186) and when the
+        // interactive debugger is attached (the user is stepping *this* engine;
+        // silently continuing into a different one would strand the session).
+        // See `lp_declines_to_nlp` for the rest of the gating.
+        let lp_nlp_fallback = matches!(selection, SolverSelection::Auto)
+            && debug_hook.is_none()
+            && !max_iter_explicitly_set(&app);
+
         // Banner-level routing line: report the detected problem class and
         // which of pounce's solvers was selected for it. Gated like the
         // banner (suppressed by `sb yes` and in JSON-debug protocol mode) so
@@ -1011,7 +1024,12 @@ pub fn main() -> ExitCode {
                              solver_selection=qp-ipm to debug a convex QP interactively."
                         );
                     }
-                    return run_convex_qp(
+                    // `None` means the convex solve finished an LP without a
+                    // certificate and declined it (gh #535, `auto` only — see
+                    // `lp_nlp_fallback`). It printed no verdict and wrote no
+                    // `.sol`/JSON, so control falls out of this whole block to
+                    // the NLP solve below, which owns the one verdict.
+                    if let Some(code) = run_convex_qp(
                         &prob,
                         class,
                         sol_path.as_deref(),
@@ -1022,7 +1040,10 @@ pub fn main() -> ExitCode {
                         convex_opts,
                         matches!(choice, SolverChoice::QpActiveSet),
                         engine_overrides,
-                    );
+                        lp_nlp_fallback,
+                    ) {
+                        return code;
+                    }
                 }
             }
             // Builtins never classify as convex; fall through to NLP.
@@ -2138,6 +2159,73 @@ fn resolve_scaling_retry_outcome(
     }
 }
 
+/// Should an LP whose convex solve came back without a certificate be handed
+/// to the general NLP interior-point path instead (gh #535)?
+///
+/// The NETLIB `gen`/`gen1` models are the case this exists for: `auto` routes
+/// them to the convex IPM, which exhausts its 200-iteration budget in 191 s and
+/// exits `OptimalInaccurate` with a primal residual of 1.4e-7 against
+/// `tol = 1e-8`, while the general NLP filter-IPM — the same binary, the
+/// default for every other class — solves the same model in 19 iterations and
+/// 1.0 s to a strict certificate. The models are highly degenerate and
+/// rank-deficient, strict complementarity fails, and a pure IPM cannot certify
+/// the vertex (gh #133); crossover was built to close that gap and does not.
+/// So the routing is the cheap lever: an LP is also a valid NLP, and the NLP
+/// path is already in the binary.
+///
+/// The three gates, all necessary:
+///
+/// * **`allow_nlp_fallback`** — set by the caller only under `auto` (the class
+///   was our inference, not the user's instruction), with no interactive
+///   debugger attached, and only when the user did **not** set `max_iter`. A
+///   user-set budget is a budget: `IterationLimit` is then the answer to the
+///   question that was asked, and `max_iter=0` in particular must stop without
+///   a solve (pounce#186), not launch a second one. An explicitly tightened
+///   `tol` is deliberately *not* a suppressor — that is an accuracy request,
+///   and trying the engine that can meet it is exactly the right response.
+/// * **`ProblemClass::Lp`** — `P = 0`, per the issue. A convex QP that stalls
+///   is a different (and unmeasured) population; leave it to the engine that
+///   was chosen for it.
+/// * **the status** — only the two that mean "no certificate": a
+///   reduced-accuracy exit and an exhausted budget. `Optimal` needs no help,
+///   and `PrimalInfeasible` / `DualInfeasible` are verdicts the convex solver
+///   *verified*, which a second solve must not be allowed to overwrite.
+///   `NumericalFailure` is left alone here for the same reason the QP path has
+///   always reported it: it is the post-solve verification refusing a point,
+///   and the LP corpus has no case of it that the NLP path recovers.
+///
+/// Note what this deliberately is **not**: the issue's "never-regress" variant,
+/// which would keep whichever of the two results certifies at the lower KKT
+/// error. That needs both verdicts in hand at reporting time, and the CLI's
+/// standing rule — the one `run_convex_socp` follows and gh #508 re-litigated
+/// for the NLP retry ladder — is that one solve prints one verdict. So the
+/// decision is taken *before* any status line, `.sol` or JSON report is
+/// emitted, and the NLP solve owns the whole report. The gates above are what
+/// bound the downside: this only ever runs on an LP that already failed to
+/// certify under a default budget.
+fn lp_declines_to_nlp(
+    class: pounce_cli::dispatch::ProblemClass,
+    status: pounce_convex::QpStatus,
+    allow_nlp_fallback: bool,
+) -> bool {
+    use pounce_convex::QpStatus;
+    allow_nlp_fallback
+        && class == pounce_cli::dispatch::ProblemClass::Lp
+        && matches!(
+            status,
+            QpStatus::OptimalInaccurate | QpStatus::IterationLimit
+        )
+}
+
+/// Did the user set `max_iter` explicitly? A user-set iteration budget
+/// suppresses the gh #535 LP→NLP fallback — see [`lp_declines_to_nlp`].
+fn max_iter_explicitly_set(app: &IpoptApplication) -> bool {
+    matches!(
+        app.options().get_integer_value("max_iter", ""),
+        Ok((_, true))
+    )
+}
+
 /// Solve a classified LP / convex-QP `.nl` problem through the
 /// specialized `pounce-convex` interior-point method, write a `.sol`,
 /// and return the process exit code. This is the LP/QP dispatch target
@@ -2316,6 +2404,14 @@ fn resolve_convex_presolve(
     }
 }
 
+/// Returns `None` when the LP→NLP fallback fires (gh #535): the problem is an
+/// LP, the caller allowed the fallback, and the convex solve finished without a
+/// certificate, so the caller falls through to the general NLP interior-point
+/// path. No status line, `.sol` or JSON report has been emitted in that case —
+/// the decision is taken above all three, so a rerouted solve produces exactly
+/// one verdict. (A `Presolve:` reduction line may already have been printed;
+/// it reports what presolve did, not what the solve concluded.) See
+/// [`lp_declines_to_nlp`] for the gating.
 fn run_convex_qp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
@@ -2331,7 +2427,9 @@ fn run_convex_qp(
     use_active_set: bool,
     // Inner-engine overrides from the `sqp_qp_*` family; empty for the IPM.
     engine_overrides: pounce_convex::ActiveSetOverrides,
-) -> ExitCode {
+    // gh #535: may an uncertified LP solve be handed back to the NLP path?
+    allow_nlp_fallback: bool,
+) -> Option<ExitCode> {
     use pounce_convex::active_set::solve_qp_active_set;
     use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
@@ -2343,7 +2441,7 @@ fn run_convex_qp(
                 "pounce: internal error: {} not extractable as QP",
                 class.name()
             );
-            return ExitCode::from(2);
+            return Some(ExitCode::from(2));
         }
     };
 
@@ -2383,6 +2481,13 @@ fn run_convex_qp(
         collect_iterates: want_trace,
         ..convex_opts
     };
+    // What presolve did, held back until we know this solve is the one that
+    // reports (gh #535). These lines describe the reduction, not the verdict,
+    // but they are the *only* stdout a declined convex attempt would otherwise
+    // leave behind — and "the rerouted run prints nothing from the attempt it
+    // discarded" is a cleaner contract than "nothing except one line". Flushed
+    // below, immediately after the fallback check.
+    let mut presolve_log: Vec<String> = Vec::new();
     let sol = if qp_opts.max_iter == 0 {
         // AMPL/Ipopt semantics: `max_iter=0` takes no iterations and so
         // cannot reach optimality. Presolve can otherwise solve a trivial
@@ -2412,10 +2517,10 @@ fn run_convex_qp(
                 // `Infeasible_Problem_Detected` into a normal solve, and this
                 // line is the only trace of the reduction that misfired.
                 if let Some(trigger) = ps.discarded_infeasibility() {
-                    println!(
+                    presolve_log.push(format!(
                         "Presolve: discarded an unconfirmed infeasibility claim — \
                          {trigger}; solving normally"
-                    );
+                    ));
                 }
                 let st = ps.stats();
                 if st.reduced_anything() {
@@ -2435,7 +2540,7 @@ fn run_convex_qp(
                             format!(", cap-truncated after {} layers", st.rounds)
                         }
                     };
-                    println!(
+                    presolve_log.push(format!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
                          forcing {}, dominated {}, tightened {}{})",
@@ -2451,7 +2556,7 @@ fn run_convex_qp(
                         st.dominated_cols,
                         st.tightened_bounds,
                         exit,
-                    );
+                    ));
                 }
                 let red = if use_active_set {
                     let mut mk = backend;
@@ -2465,7 +2570,7 @@ fn run_convex_qp(
                 // Name the screen and what it tripped on. A presolve
                 // infeasibility arrives with no iteration behind it, so this
                 // line is the whole record of *why* (gh #523).
-                println!("Presolve: proved primal infeasible — {trigger}");
+                presolve_log.push(format!("Presolve: proved primal infeasible — {trigger}"));
                 trivial(QpStatus::PrimalInfeasible)
             }
             PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
@@ -2477,6 +2582,40 @@ fn run_convex_qp(
         solve_qp_ipm(&qp, &qp_opts, backend)
     };
     let elapsed = t0.elapsed().as_secs_f64();
+
+    // gh #535: the convex path finished an LP without a certificate. An LP is
+    // also a valid NLP, and the general filter-IPM in this same binary solves
+    // the degenerate rank-deficient ones the interior path cannot certify
+    // (NETLIB `gen`/`gen1`: 199 iters / 191 s at reduced accuracy here, 19
+    // iters / 1.0 s and a strict certificate there). Hand it over rather than
+    // reporting the uncertified iterate as the last word.
+    //
+    // This sits above the status line, the `.sol` write and the JSON report on
+    // purpose — everything below is the verdict, and the rerouted solve owns
+    // it. See `lp_declines_to_nlp` for why each gate is there.
+    if lp_declines_to_nlp(class, sol.status, allow_nlp_fallback) {
+        let res = sol.kkt_residuals(&qp);
+        eprintln!(
+            "pounce: note: the convex ({}) solve did not certify a KKT point \
+             after {} iterations in {elapsed:.3}s (KKT error {:.2e} against \
+             tol {:.1e}); an LP is also a valid NLP, so it is being re-solved \
+             on the general NLP interior-point path, which certifies the \
+             degenerate, rank-deficient LPs the interior path stalls on (gh \
+             #133). Use solver_selection=qp-ipm to see the convex result \
+             instead.",
+            class.name(),
+            sol.iters,
+            res.kkt_error(),
+            qp_opts.tol,
+        );
+        return None;
+    }
+
+    // This solve is the one that reports, so what presolve did belongs on the
+    // record after all.
+    for line in &presolve_log {
+        println!("{line}");
+    }
 
     // Report the objective in the user's original sense, including the
     // dropped constant term: f_user = sign * (½xᵀPx + cᵀx) + const.
@@ -2621,7 +2760,7 @@ fn run_convex_qp(
         }
     }
 
-    convex_exit_code(ok, ampl)
+    Some(convex_exit_code(ok, ampl))
 }
 
 /// Solve a classified **convex QCQP** by reformulating it to a second-order
@@ -3142,6 +3281,104 @@ mod convex_status_tests {
             qp_status_to_ars(QpStatus::Optimal),
             ApplicationReturnStatus::SolveSucceeded
         );
+    }
+}
+
+#[cfg(test)]
+mod lp_nlp_fallback_tests {
+    use super::lp_declines_to_nlp;
+    use pounce_cli::dispatch::ProblemClass;
+    use pounce_convex::QpStatus;
+
+    const ALL_STATUSES: [QpStatus; 6] = [
+        QpStatus::Optimal,
+        QpStatus::OptimalInaccurate,
+        QpStatus::PrimalInfeasible,
+        QpStatus::DualInfeasible,
+        QpStatus::IterationLimit,
+        QpStatus::NumericalFailure,
+    ];
+
+    /// gh #535: the two statuses that mean "the convex solve produced no
+    /// certificate" are what hands an LP to the NLP path. `OptimalInaccurate`
+    /// is the NETLIB `gen`/`gen1` exit (199 of 200 iterations, primal residual
+    /// 1.4e-7 against `tol = 1e-8`); `IterationLimit` is the same stall when
+    /// the reduced-accuracy band is missed too.
+    #[test]
+    fn an_uncertified_lp_is_handed_to_the_nlp_path() {
+        for status in [QpStatus::OptimalInaccurate, QpStatus::IterationLimit] {
+            assert!(
+                lp_declines_to_nlp(ProblemClass::Lp, status, true),
+                "{status:?} on an LP must reroute"
+            );
+        }
+    }
+
+    /// A certified result is the answer — there is nothing for a second solve
+    /// to improve, and running one would double the cost of every LP.
+    #[test]
+    fn a_certified_lp_is_never_rerouted() {
+        assert!(!lp_declines_to_nlp(
+            ProblemClass::Lp,
+            QpStatus::Optimal,
+            true
+        ));
+    }
+
+    /// `PrimalInfeasible` / `DualInfeasible` are verdicts the convex solver
+    /// *verified*. Rerouting them would let a second solve overwrite a proof
+    /// with a numerical opinion — the same reason `run_convex_socp` reroutes
+    /// only `NumericalFailure`. `NumericalFailure` itself is left alone here:
+    /// it is the post-solve verification refusing a point, and the LP corpus
+    /// has no case of it the NLP path recovers.
+    #[test]
+    fn verified_verdicts_and_numerical_failure_stand() {
+        for status in [
+            QpStatus::PrimalInfeasible,
+            QpStatus::DualInfeasible,
+            QpStatus::NumericalFailure,
+        ] {
+            assert!(
+                !lp_declines_to_nlp(ProblemClass::Lp, status, true),
+                "{status:?} must not reroute"
+            );
+        }
+    }
+
+    /// The issue scopes the fallback to `P = 0`. A convex QP that stalls is a
+    /// different and unmeasured population, so no status reroutes it — nor
+    /// does any class the convex QP driver never sees.
+    #[test]
+    fn only_the_lp_class_reroutes() {
+        for class in [
+            ProblemClass::ConvexQp,
+            ProblemClass::ConvexQcqp,
+            ProblemClass::NonconvexQp,
+            ProblemClass::Nlp,
+        ] {
+            for status in ALL_STATUSES {
+                assert!(
+                    !lp_declines_to_nlp(class, status, true),
+                    "{class:?}/{status:?} must not reroute"
+                );
+            }
+        }
+    }
+
+    /// The caller's gate wins outright: an explicitly named engine, a user-set
+    /// `max_iter` (including the `max_iter=0` zero-iteration contract,
+    /// pounce#186) or an attached debugger clears it, and then nothing
+    /// reroutes.
+    #[test]
+    fn the_callers_gate_suppresses_every_case() {
+        for class in [ProblemClass::Lp, ProblemClass::ConvexQp] {
+            for status in ALL_STATUSES {
+                assert!(
+                    !lp_declines_to_nlp(class, status, false),
+                    "{class:?}/{status:?} must not reroute when the caller declines"
+                );
+            }
+        }
     }
 }
 

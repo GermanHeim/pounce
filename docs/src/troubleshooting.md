@@ -32,6 +32,7 @@ walks through adding it.
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
+| `alpha_pr` halves toward `1/128` while `\|\|d\|\|` grows and the dual residual stalls | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-reduced-hessian-that-collapses-to-singular) |
 
 ---
 
@@ -478,6 +479,95 @@ race itself is showing AMD winning consistently — pinning skips the
 race entirely on subsequent runs. See the full
 [`feral_ordering` table](options.md#feral_ordering-variants) for the
 other variants.
+
+### `feral_singular_pivot_floor`: a reduced Hessian that collapses to singular
+
+#### When to try it
+
+`alpha_pr` walks down `1/2, 1/4, … 1/128` with a matching `ls` count,
+`||d||` *grows* instead of shrinking, and the run exits with `dual_inf`
+parked a couple of orders of magnitude above `tol` — or reaches `tol`
+only after a long tail of tiny steps. Feasibility is usually already at
+machine precision, and the objective is right to many digits; only the
+dual residual will not come down. The `lg(rg)` column in that tail is
+typically *churning* — small values re-escalating iteration after
+iteration — rather than settling.
+
+That combination means the reduced Hessian `Zᵀ W Z` has become
+numerically singular, so the Newton step runs off along a direction
+whose curvature is at the noise floor and the line search has no choice
+but to cut the step to nothing. It shows up on problems whose solution
+set is a manifold rather than a point — degenerate eigenvalue models
+are the classic case — and it is not something the exit criteria can
+fix, because the iterate handed to them is the problem.
+
+Since [#544](https://github.com/jkitchin/pounce/pull/544) pounce already
+handles the sharpest form of this automatically: when the KKT is
+singular to working precision its inertia count is meaningless, and
+`feral_inertia_pivot_floor` (default `1e-12`) routes that case to `δ_c`
+rather than answering an unmeasurable test with `δ_w`. The recipe below
+is for what remains — it attacks the same degeneracy higher up, capping
+the null-direction step outright, and on some models that is still
+markedly faster.
+
+To confirm before reaching for the knob, dump the KKT systems and look
+at the smallest pivot:
+
+```
+pounce problem.nl --dump kkt:all --dump-dir /tmp/dump-problem
+```
+
+#### The knob
+
+```
+pounce problem.nl feral_singular_pivot_floor=1e-8
+```
+
+FERAL force-accepts a pivot at the working-precision floor and still
+reports a clean factorization with the right inertia. This option is
+pounce's analog of MA57's `CNTL(2)`: after a successful factor the
+smallest accepted D-block pivot is compared against the floor, and a
+factor below it is reported singular so the perturbation handler
+escalates `δ_w`. The default `1e-20` almost never fires — deliberately,
+because on a *bounded* problem a tiny pivot usually comes from the
+barrier blocks (`Σ_x = z/x` as a bound activates) and is both expected
+and harmless. Raising it is a per-problem call, not a global default:
+`airport`, `jit1` and `pooling_rt2stp` all converge to `Optimal` with
+smallest pivots between `1e-12` and `1e-21`, and a `1e-8` floor would
+flag every one of them.
+
+Start at `1e-8` and back off toward `1e-10`/`1e-12` if the extra
+factorizations cost more than they save.
+
+#### Worked example: `eigenb2` (Vanderbei)
+
+110 variables, 55 equality constraints, no bounds at all. `Zᵀ W Z`'s
+smallest eigenvalue falls from `1.4e+02` at iteration 2 to `1.4e-11` by
+iteration 36, against `‖W‖ ≈ 1.3e+02`. The KKT is singular to working
+precision down that tail, so its negative-eigenvalue count stops being
+measurable — FERAL reports anywhere from 43 to 64 against an expected
+55.
+
+Since #544 the default solve certifies `Optimal` (before it, this
+exited `Solved To Acceptable Level` in 67 iterations). The knob is now
+a speedup rather than a rescue:
+
+| options | iterations | dual inf | exit |
+|---|---|---|---|
+| *(defaults)* | 68 | 4.70e-09 | Optimal Solution Found |
+| `feral_singular_pivot_floor=1e-8` | 39 | 1.25e-09 | Optimal Solution Found |
+| `feral_singular_pivot_floor=1e-8 mu_strategy=adaptive` | 30 | 4.98e-09 | Optimal Solution Found |
+
+The fixture is committed, so this reproduces without a benchmark corpus:
+
+```
+pounce crates/pounce-cli/tests/fixtures/eigenb2.nl \
+       feral_singular_pivot_floor=1e-8
+```
+
+Full diagnosis in
+`dev-notes/issue-541-eigenb2-degenerate-reduced-hessian.md`
+([issue #541](https://github.com/jkitchin/pounce/issues/541)).
 
 ## Diagnosing before you reach for a knob
 
