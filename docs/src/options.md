@@ -307,6 +307,60 @@ a row's own ulp (say `1e-8` on data at `1e8`) still will not certify. That
 is the tolerance gate doing what you asked — the residual you requested is
 not representable at that scale.
 
+## `Solved_To_Acceptable_Level` and `acceptable_progress_kappa`
+
+`Solved_To_Acceptable_Level` is the fallback verdict for a solve that
+cannot reach `tol`: after `acceptable_iter` (default `15`) consecutive
+iterates with an NLP error under `acceptable_tol` (default `1e-6`), the
+solver stops and hands back the point it has. That criterion is a count of
+iterates inside a band, and on its own it asks only *is the error small* —
+never *has anything stopped moving*.
+
+Those come apart. An interior-point iterate can be near-stationary for the
+current **barrier subproblem** — a much weaker statement than near-KKT for
+the NLP — for fifteen iterations running while the solve is still
+descending. Two measured cases: the `kissing` model stopped with objective
+`1.00000108` where continuing reaches `0.84544259` and a strict
+certificate, 18% lower; `NARX_CFy` stopped with both residuals near `1e-7`
+where sixty more iterations collapse them by five orders.
+
+POUNCE therefore also requires the streak to have **flattened**. Across the
+`acceptable_iter` iterates that made it up:
+
+* the spread (`max − min`) of the NLP error must be within
+  `acceptable_progress_kappa · acceptable_tol`; and
+* the spread of the objective within the same fraction of
+  `acceptable_tol · max(1, |f|)`.
+
+`acceptable_progress_kappa` defaults to `0.1`, so at default tolerances
+both quantities must have stayed inside a tenth of the acceptable band over
+the whole streak.
+
+It is a **spread**, not a trend, and either signal alone is enough to keep
+solving. Both choices are deliberate: `kissing`'s error was an order of
+magnitude *worse* at the iterate it stopped on than at one it had already
+reached inside the same streak — it was wandering across the band, not
+converging inside it — while its objective was flat to all eight printed
+figures over the same iterates.
+
+Three things bound what this can do:
+
+* **It cannot lose a verdict.** The refused termination is *recorded*, and
+  a run that fails to do better ends at exactly that iterate under exactly
+  that status. A misfire costs iterations, never the answer — you will not
+  see `Maximum_Iterations_Exceeded` where the count alone would have said
+  `Solved_To_Acceptable_Level`.
+* **It never looks at a solve that converges.** A solve that reaches `tol`
+  never completes an acceptable-level streak, so nothing here runs.
+* **A genuine stall flattens.** When the iterate, the objective and the
+  error are all pinned — the case the acceptable-level exit exists for —
+  the window is flat and termination happens as before.
+
+Set `acceptable_progress_kappa = 0` to switch the progress test off and
+restore upstream Ipopt's bare consecutive-count criterion. Widening
+`acceptable_tol` widens the flat bar with it, so asking for a looser band
+still gets you the early exit.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a

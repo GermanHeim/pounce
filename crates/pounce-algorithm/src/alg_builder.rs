@@ -154,6 +154,11 @@ pub struct ConvCheckOptions {
     /// (gh #528). `0` disables the floor, restoring upstream Ipopt's
     /// bare-absolute primal term.
     pub primal_noise_floor_kappa: Number,
+    /// Fraction of `acceptable_tol` the KKT error and the objective may drift
+    /// across the acceptable-level streak's window while the streak still
+    /// counts as settled (gh #533). `0` disables the progress test, leaving
+    /// acceptable-level termination the bare consecutive-count criterion.
+    pub acceptable_progress_kappa: Number,
 }
 
 impl Default for ConvCheckOptions {
@@ -177,6 +182,7 @@ impl Default for ConvCheckOptions {
             infeas_max_streak: 5,
             obj_scale_certificate_threshold: 1e-4,
             primal_noise_floor_kappa: 64.0,
+            acceptable_progress_kappa: 1e-1,
         }
     }
 }
@@ -1085,8 +1091,12 @@ impl AlgorithmBuilder {
                 infeas_streak: 0,
                 obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
                 primal_noise_floor_kappa: self.conv_check.primal_noise_floor_kappa,
+                acceptable_progress_kappa: self.conv_check.acceptable_progress_kappa,
+                acceptable_window: std::collections::VecDeque::new(),
+                acceptable_progress_refusals: 0,
                 veto_fired: false,
                 acceptable_veto_fired: false,
+                masked_acceptable_veto_fired: false,
                 veto_extra_iters: 0,
                 rel_infeas_extra_iters: 0,
                 prev_rel_viol: f64::NAN,

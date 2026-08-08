@@ -900,13 +900,35 @@ impl IpoptAlgorithm {
                 .current_passes_strict(curr_nlp_err, &self.data, &self.cq);
         let curr_f = self.cq.borrow().curr_f();
         let curr_viol = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
-        // Keep the continued point in place only when it is a would-be strict
-        // certificate that also ranks strictly better; otherwise restore the
+        // The second admissible candidate: a continued run that ends *at the
+        // acceptable level itself* (gh #533). The `curr_passes_strict` gate
+        // exists to tell a settled optimum from a diverging ray, and on this
+        // exit the exit itself already answers that — `StopAtAcceptablePoint` is
+        // only reachable at a point that passed the acceptable per-component
+        // tolerances, either by qualifying here or by being the stashed
+        // acceptable iterate a rollback restored. A diverging iterate cannot
+        // produce it.
+        //
+        // This matters because the gh #533 progress refusal is frequently paid
+        // off by a *better acceptable point* rather than by a strict
+        // certificate: the streak refuses while the solve is still descending,
+        // the solve descends, and then settles somewhere better but still short
+        // of `tol`. Without this the refused point is restored and the entire
+        // continuation is discarded — never worse than baseline, but never
+        // better either, which for that whole class is pure cost.
+        //
+        // Gated on the *restored* status also being `StopAtAcceptablePoint`, so
+        // a strict refusal's `Success` is never reported at a point that only
+        // ever qualified at the acceptable level.
+        let continued_is_acceptable_exit = matches!(result, SolverReturn::StopAtAcceptablePoint)
+            && matches!(restored_status, SolverReturn::StopAtAcceptablePoint);
+        // Keep the continued point in place only when it is an admissible
+        // candidate that also ranks strictly better; otherwise restore the
         // refused snapshot exactly as before. `ranks_better` treats a non-finite
         // continued objective as worst, so a NaN-objective continuation never
         // displaces a finite refused point (the NaN-loses convention the
         // `Success` branch relies on).
-        let keep_continued = curr_passes_strict
+        let keep_continued = (curr_passes_strict || continued_is_acceptable_exit)
             && self.ranks_better(curr_f, curr_viol, refused.obj, refused.constr_viol);
         if !keep_continued {
             self.restore_snapshot(&refused);
