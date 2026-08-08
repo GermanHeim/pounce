@@ -63,6 +63,22 @@ pub struct OptErrorConvCheck {
     /// primal term against (gh #528). `0` disables the floor entirely,
     /// restoring upstream Ipopt's bare-absolute primal residual.
     pub primal_noise_floor_kappa: Number,
+    /// Fraction of `acceptable_tol` the KKT error — and, relative to the
+    /// objective's own size, the objective — may drift across the
+    /// acceptable-level streak's window while the streak still counts as
+    /// *settled* (gh #533). See [`Self::streak_has_flattened`]. `0` disables
+    /// the progress test, leaving acceptable-level termination the bare
+    /// consecutive-count criterion upstream Ipopt uses.
+    pub acceptable_progress_kappa: Number,
+    /// Trailing `(nlp_err, f)` samples of the current acceptable-level streak,
+    /// oldest first, at most [`Self::progress_window_len`] entries. Cleared
+    /// whenever the streak breaks — the window describes *this* streak.
+    pub acceptable_window: std::collections::VecDeque<(Number, Number)>,
+    /// Acceptable-level terminations the gh #533 progress test has refused so
+    /// far this solve. Bounded by [`ACCEPTABLE_PROGRESS_MAX_REFUSALS`], past
+    /// which the test stands aside and the streak terminates as it would
+    /// without it.
+    pub acceptable_progress_refusals: Index,
     /// Safety factor on the scale-relative floor the **strict** gate judges
     /// `dual_inf` against (gh #532); see [`Self::dual_inf_bound`]. `0` disables
     /// the floor, restoring upstream Ipopt's bare-absolute `dual_inf_tol`.
@@ -81,7 +97,21 @@ pub struct OptErrorConvCheck {
     /// acceptable-level one as `StopAtAcceptablePoint`. Conflating them would
     /// either over-claim a status or, as originally written, leave the
     /// acceptable-level refusal with no safety net at all.
+    ///
+    /// Set by **both** refusal arms — the gh #200 masked-scale veto and the
+    /// gh #533 progress test — because both need the same undo. What the
+    /// masked veto's own iteration budget counts is
+    /// [`Self::masked_acceptable_veto_fired`].
     pub acceptable_veto_fired: bool,
+    /// Whether the *masked-scale* (gh #200) arm specifically refused an
+    /// acceptable-level termination.
+    ///
+    /// [`VETO_MAX_EXTRA_ITERS`] is the masked veto's budget, so only the masked
+    /// arms may spend it. Counting the gh #533 progress refusals against it too
+    /// would silently disarm the masked veto 60 iterations into any solve whose
+    /// acceptable streak was progress-refused — a different mechanism's bug
+    /// coming back for reasons having nothing to do with objective scaling.
+    pub masked_acceptable_veto_fired: bool,
     /// Iterations spent since the veto first refused a certificate.
     ///
     /// The veto is a bet that continuing reaches a better point. Some problems
@@ -115,6 +145,38 @@ pub struct OptErrorConvCheck {
 /// this number: whatever happens after the budget is spent, the refused
 /// certificate is still restored if the run ends without a better one.
 const VETO_MAX_EXTRA_ITERS: Index = 60;
+
+/// How many acceptable-level terminations the gh #533 progress test may refuse
+/// before it stands aside for the rest of the solve.
+///
+/// The test is already self-limiting — it only refuses while the streak's own
+/// window shows the solve still moving, and a solve that stops moving flattens
+/// the window within `acceptable_iter` iterations — so this bounds only the
+/// pathological case: a solve that wanders inside the acceptable band without
+/// ever settling and without ever reaching `tol`. Left unbounded that solve
+/// would run to `max_iter` (returning the refused point, so no *verdict* is
+/// lost, but spending up to 3000 iterations to say what it could have said at
+/// 40).
+///
+/// The number has to clear the widest measured rescue: `kissing` needed 447
+/// iterations past the refusal (103 → 550) to reach its strict certificate, so
+/// anything below that cannot fix the reported case. `1000` clears it with room
+/// to spare and still stops well short of the default `max_iter = 3000`. Note
+/// that only iterations on which a termination is actually *refused* are
+/// counted, not every iteration after the first refusal — a streak broken by an
+/// iterate outside the band costs nothing here.
+const ACCEPTABLE_PROGRESS_MAX_REFUSALS: Index = 1000;
+
+/// Longest trailing streak window the progress test will keep samples for.
+///
+/// The window is `acceptable_iter` long (the streak's own length), which is 15
+/// by default. The cap exists because `acceptable_iter` is a user option with no
+/// upper bound, and the window is a live allocation. Past the cap the test
+/// judges flatness over the trailing `ACCEPTABLE_PROGRESS_WINDOW_MAX` iterates
+/// of the streak instead of all of it — a strictly more permissive reading (a
+/// shorter window can only contain less movement), so the cap can never make
+/// the mechanism fire where the full window would not have.
+const ACCEPTABLE_PROGRESS_WINDOW_MAX: usize = 256;
 
 /// Smallest constraint violation rapid infeasibility detection will ever treat
 /// as "bounded away from feasible" (gh #519).
@@ -215,10 +277,17 @@ impl Default for OptErrorConvCheck {
             // [`certificate_masked`].
             obj_scale_certificate_threshold: 1e-4,
             primal_noise_floor_kappa: 64.0,
+            // A tenth of the acceptable band. See `streak_has_flattened` for
+            // why the band is the right yardstick and why a tenth of it is the
+            // conservative end of the range.
+            acceptable_progress_kappa: 1e-1,
+            acceptable_window: std::collections::VecDeque::new(),
+            acceptable_progress_refusals: 0,
             dual_inf_scale_kappa: 1.0,
             dual_floor_reported: false,
             veto_fired: false,
             acceptable_veto_fired: false,
+            masked_acceptable_veto_fired: false,
             veto_extra_iters: 0,
             rel_infeas_extra_iters: 0,
             prev_rel_viol: Number::NAN,
@@ -436,21 +505,176 @@ impl OptErrorConvCheck {
     /// `masked`. `masked` decides only what happens when it crosses the
     /// threshold: terminate, or record that a termination was refused here —
     /// which is exactly the iterate the unvetoed run would have returned.
-    fn note_acceptable(&mut self, acceptable_now: bool, masked: bool) -> bool {
+    ///
+    /// The gh #533 progress test is the second thing that can refuse at the
+    /// crossing, and it is undone by the same machinery — see
+    /// [`Self::streak_has_flattened`]. Everything about the count is unchanged
+    /// by it: the streak advances on the band test alone, so a progress refusal
+    /// still records exactly the iterate the unvetoed run would have returned.
+    fn note_acceptable(
+        &mut self,
+        acceptable_now: bool,
+        masked: bool,
+        nlp_err: Number,
+        curr_f: Number,
+    ) -> bool {
         if !acceptable_now {
             self.acceptable_count = 0;
+            self.acceptable_window.clear();
             return false;
         }
         self.acceptable_count += 1;
+        self.push_progress_sample(nlp_err, curr_f);
         if self.acceptable_count < self.acceptable_iter {
             return false;
         }
         if masked {
             self.acceptable_veto_fired = true;
-            false
-        } else {
-            true
+            self.masked_acceptable_veto_fired = true;
+            return false;
         }
+        // gh #533: the streak says the error has been inside the band for
+        // `acceptable_iter` iterations; it says nothing about whether the solve
+        // has stopped moving. Refuse the termination while the window shows it
+        // has not, and let the run continue — the refusal is recorded, so a run
+        // that goes nowhere still ends at this point under this status.
+        if !self.streak_has_flattened()
+            && self.acceptable_progress_refusals < ACCEPTABLE_PROGRESS_MAX_REFUSALS
+        {
+            if !self.acceptable_veto_fired {
+                tracing::info!(
+                    nlp_err,
+                    obj = curr_f,
+                    acceptable_tol = self.acceptable_tol,
+                    window = self.acceptable_window.len(),
+                    kappa = self.acceptable_progress_kappa,
+                    "refusing an acceptable-level termination: the error has been inside \
+                     the acceptable band for the whole streak but is still moving across \
+                     it, so the streak has not flattened; continuing \
+                     (acceptable_progress_kappa=0 disables)"
+                );
+            }
+            self.acceptable_progress_refusals += 1;
+            self.acceptable_veto_fired = true;
+            return false;
+        }
+        true
+    }
+
+    /// Length of the streak window the gh #533 progress test judges: the
+    /// streak's own length, clamped to `1..=`[`ACCEPTABLE_PROGRESS_WINDOW_MAX`].
+    ///
+    /// A length of 1 is representable and means the test is inert:
+    /// [`Self::streak_has_flattened`] declines to judge a window that short,
+    /// because a single iterate carries no progress information. So
+    /// `acceptable_iter = 1` never refuses, which is right — the user asked to
+    /// stop at the first qualifying iterate.
+    fn progress_window_len(&self) -> usize {
+        (self.acceptable_iter.max(1) as usize).clamp(1, ACCEPTABLE_PROGRESS_WINDOW_MAX)
+    }
+
+    /// Record one qualifying iterate in the streak window, evicting the oldest
+    /// sample once the window is full.
+    fn push_progress_sample(&mut self, nlp_err: Number, curr_f: Number) {
+        let cap = self.progress_window_len();
+        self.acceptable_window.push_back((nlp_err, curr_f));
+        while self.acceptable_window.len() > cap {
+            self.acceptable_window.pop_front();
+        }
+    }
+
+    /// Has the solve actually *flattened* over the iterates that made up the
+    /// acceptable-level streak (gh #533)?
+    ///
+    /// The streak criterion on its own is a band test repeated
+    /// `acceptable_iter` times: it asks whether the KKT error is small, never
+    /// whether anything has stopped moving. Those come apart, and when they do
+    /// the solve stops at a point that is near-stationary *for the current
+    /// barrier subproblem* — a much weaker statement than near-KKT for the NLP —
+    /// and returns a worse answer under a weaker status than continuing would
+    /// have reached. Measured on two corpus models at `main @ 880b360b`:
+    /// `kissing` (Vanderbei) stopped at iteration 103 with objective
+    /// `1.00000108` and `Solved_To_Acceptable_Level`, where continuing reaches
+    /// `0.84544259` and a strict certificate at 550 — 18% high, and Ipopt's own
+    /// answer to eight figures is the lower one; `NARX_CFy` (Mittelmann)
+    /// stopped at 565 with both residuals near `1e-7`, where 60 more iterations
+    /// (25 s, inside the benchmark's 300 s limit) collapse them by five orders
+    /// and beat both its own acceptable answer and Ipopt's.
+    ///
+    /// So: flat means *neither the error nor the objective moved* across the
+    /// window, and the yardstick for both is a fraction
+    /// `acceptable_progress_kappa` of `acceptable_tol` —
+    ///
+    /// - the error's absolute spread `max − min` against
+    ///   `kappa · acceptable_tol`;
+    /// - the objective's spread against `kappa · acceptable_tol · max(1, |f|)`,
+    ///   the same relative form upstream's own `acceptable_obj_change_tol`
+    ///   cross-check uses.
+    ///
+    /// **Spread, not trend, and either one alone is enough to refuse.** Both
+    /// choices are load-bearing, and `kissing` is why:
+    ///
+    /// - Its `inf_du` over the last four iterates of the streak ran `3.35e-08 →
+    ///   8.18e-08 → 1.08e-07 → 4.15e-07` — the error the solver stopped on was
+    ///   an order of magnitude *worse* than one it had already achieved inside
+    ///   the same streak. A trend test reads that as "not improving" and stops;
+    ///   a spread test reads it as what it is, an iterate still wandering
+    ///   across the band, and keeps going. The same holds in the other
+    ///   direction: an error still descending through the band has not settled
+    ///   either, and a solve that is still descending is one that may yet
+    ///   certify.
+    /// - Its objective was flat to all eight printed figures over those same
+    ///   iterates (`1.0000011e+00` throughout) while the continued run moved it
+    ///   by 15%. Requiring *both* signals to show movement before refusing
+    ///   would therefore have stopped exactly where it stopped before.
+    ///
+    /// The band is the right yardstick because the question is scoped to it:
+    /// the point is being certified as good to `acceptable_tol`, so "settled"
+    /// has to mean settled on that scale. It also gets the user-intent
+    /// monotonicity right in the one direction that matters — a *widened*
+    /// `acceptable_tol` widens the flat bar with it, so a user who asked for an
+    /// early exit at a loose band keeps getting one. Tightening
+    /// `acceptable_tol` makes the test more eager to keep solving, which is the
+    /// direction that cannot fabricate a verdict: a refusal is always undone at
+    /// the end of a run that fails to do better (see
+    /// `IpoptAlgorithm::honour_refused_certificate`), so its worst case is
+    /// spent iterations, never a wrong answer.
+    ///
+    /// Returns `true` — flat, terminate — whenever the test cannot see enough
+    /// to judge: `acceptable_progress_kappa <= 0` (the documented opt-out) or
+    /// `NaN`, a window not yet full, a window of one, or any non-finite sample.
+    /// Refusing on missing evidence would spend iterations for no stated reason.
+    fn streak_has_flattened(&self) -> bool {
+        if self.acceptable_progress_kappa.is_nan() || self.acceptable_progress_kappa <= 0.0 {
+            return true;
+        }
+        // A partial window is not evidence of movement. (Unreachable from
+        // `note_acceptable`, which only asks once the count has reached
+        // `acceptable_iter` and pushes one sample per count, but the predicate
+        // must not depend on that coincidence.)
+        if self.acceptable_window.len() < self.progress_window_len()
+            || self.acceptable_window.len() < 2
+        {
+            return true;
+        }
+        let bar = self.acceptable_progress_kappa * self.acceptable_tol;
+        let (mut err_lo, mut err_hi) = (Number::INFINITY, Number::NEG_INFINITY);
+        let (mut f_lo, mut f_hi) = (Number::INFINITY, Number::NEG_INFINITY);
+        for &(err, f) in &self.acceptable_window {
+            if !err.is_finite() || !f.is_finite() {
+                return true;
+            }
+            err_lo = err_lo.min(err);
+            err_hi = err_hi.max(err);
+            f_lo = f_lo.min(f);
+            f_hi = f_hi.max(f);
+        }
+        // `f` from the newest sample, matching `passes_acceptable_tols`'
+        // `max(1, |f|)` denominator convention.
+        let f_curr = self.acceptable_window.back().map_or(0.0, |&(_, f)| f);
+        let err_flat = err_hi - err_lo <= bar;
+        let obj_flat = f_hi - f_lo <= bar * f_curr.abs().max(1.0);
+        err_flat && obj_flat
     }
 
     /// Fraction of a row's own magnitude a violation must exceed before the
@@ -579,6 +803,14 @@ impl ConvCheck for OptErrorConvCheck {
         // (`if( acceptable_iter_ > 0 && CurrentIsAcceptable() )`). Without
         // the `> 0` guard, a zero would make `acceptable_count >= 0` fire on
         // the first acceptable iterate — the opposite of "disabled".
+        //
+        // The gh #533 progress test deliberately does NOT live here. It needs
+        // the objective, which this entry point does not receive, and its two
+        // callers do not want it: unit tests exercising the scalar state
+        // machine, and `RestoConvCheckAdapter`, whose inner acceptable-level
+        // answer feeds the "may the trial point leave restoration" decision
+        // rather than a user-facing verdict — and which has no refused-
+        // certificate fallback of its own to undo a refusal with.
         if self.acceptable_iter > 0 && nlp_err <= self.acceptable_tol {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
@@ -698,7 +930,9 @@ impl ConvCheck for OptErrorConvCheck {
         // `acceptable_tol`, the veto lifts, and an honest strict certificate is
         // issued. Refusing to stop early is the whole intervention; the strict
         // tolerance in scaled space is untouched.
-        if self.veto_fired || self.acceptable_veto_fired {
+        // Only the masked arms spend the masked veto's budget — see
+        // `masked_acceptable_veto_fired`.
+        if self.veto_fired || self.masked_acceptable_veto_fired {
             self.veto_extra_iters += 1;
         }
         // Call the bet off once it has plainly not paid off, so a veto that can
@@ -794,7 +1028,7 @@ impl ConvCheck for OptErrorConvCheck {
         if rel_veto_blocked {
             self.rel_infeas_extra_iters += 1;
         }
-        if self.note_acceptable(acceptable_now, masked) {
+        if self.note_acceptable(acceptable_now, masked, nlp_err, curr_f) {
             return ConvergenceStatus::ConvergedToAcceptable;
         }
         if iter_count >= self.max_iter {
@@ -1209,18 +1443,28 @@ mod tests {
         // through to `max_iter` and returned a bare failure where the baseline
         // returned `Solved_To_Acceptable_Level`, with no snapshot armed to roll
         // back to. Never-worse, violated.
+        //
+        // Every iterate here is a *settled* one — same error, same objective —
+        // so the gh #533 progress test is flat throughout and this test sees
+        // only the masked-veto behaviour it is about. The progress test's own
+        // arm is exercised in `a_wandering_streak_refuses_acceptable_termination`.
+        const ERR: Number = 1e-7;
+        const OBJ: Number = 1.0;
         let mut c = OptErrorConvCheck {
             acceptable_iter: 15,
             ..Default::default()
         };
         // 14 qualifying iterates while unmasked: no termination yet.
         for i in 0..14 {
-            assert!(!c.note_acceptable(true, false), "terminated early at {i}");
+            assert!(
+                !c.note_acceptable(true, false, ERR, OBJ),
+                "terminated early at {i}"
+            );
         }
         // The 15th qualifies too, but the veto is now engaged. The streak must
         // be honoured — recorded as a refused termination, not discarded.
         assert!(
-            !c.note_acceptable(true, true),
+            !c.note_acceptable(true, true, ERR, OBJ),
             "a masked iterate must not terminate the run"
         );
         assert!(
@@ -1228,6 +1472,11 @@ mod tests {
             "the streak crossed `acceptable_iter` while masked, so a termination was \
              refused here and must be recorded — otherwise the fallback has nothing to \
              restore and the run returns a bare failure"
+        );
+        assert!(
+            c.masked_acceptable_veto_fired,
+            "a masked refusal must be attributed to the masked arm — it is what spends \
+             the masked veto's iteration budget"
         );
 
         // The mirror direction: a streak that begins masked and finishes
@@ -1237,10 +1486,10 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..14 {
-            assert!(!c.note_acceptable(true, true));
+            assert!(!c.note_acceptable(true, true, ERR, OBJ));
         }
         assert!(
-            c.note_acceptable(true, false),
+            c.note_acceptable(true, false, ERR, OBJ),
             "the veto lifted with the streak already at 14; the 15th qualifying iterate \
              must terminate exactly as it would without the mechanism"
         );
@@ -1250,18 +1499,196 @@ mod tests {
             acceptable_iter: 3,
             ..Default::default()
         };
-        assert!(!c.note_acceptable(true, false));
-        assert!(!c.note_acceptable(false, true));
+        assert!(!c.note_acceptable(true, false, ERR, OBJ));
+        assert!(!c.note_acceptable(false, true, ERR, OBJ));
         assert_eq!(
             c.acceptable_count, 0,
             "a non-qualifying iterate resets the streak"
         );
-        assert!(!c.note_acceptable(true, false));
-        assert!(!c.note_acceptable(true, false));
         assert!(
-            c.note_acceptable(true, false),
+            c.acceptable_window.is_empty(),
+            "and clears the streak window"
+        );
+        assert!(!c.note_acceptable(true, false, ERR, OBJ));
+        assert!(!c.note_acceptable(true, false, ERR, OBJ));
+        assert!(
+            c.note_acceptable(true, false, ERR, OBJ),
             "3 consecutive qualifying iterates terminate"
         );
+    }
+
+    /// gh #533. The reported `kissing` streak: fifteen iterates all inside the
+    /// acceptable band, but with the KKT error wandering across it — the
+    /// iterate the solve stopped on had an error an order of magnitude *worse*
+    /// than one it had already reached in the same streak. The count alone
+    /// stops there (objective `1.00000108`, `Solved_To_Acceptable_Level`);
+    /// continuing reaches `0.84544259` with a strict certificate.
+    #[test]
+    fn a_wandering_streak_refuses_acceptable_termination() {
+        // The tail of the reported trace (`main @ 880b360b`, default options):
+        // inf_du 3.35e-08 → 8.18e-08 → 1.08e-07 → 4.15e-07 with the objective
+        // flat to all eight printed figures throughout.
+        let kissing_tail = [3.35e-08, 8.18e-08, 1.08e-07, 4.15e-07];
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 4,
+            ..Default::default()
+        };
+        for (i, &err) in kissing_tail.iter().enumerate() {
+            assert!(
+                !c.note_acceptable(true, false, err, 1.0000011),
+                "the streak must not terminate at iterate {i}: the error is still \
+                 wandering across the acceptable band"
+            );
+        }
+        assert!(
+            c.acceptable_veto_fired,
+            "the refusal must be recorded, or the run has nothing to fall back to"
+        );
+        assert!(
+            !c.masked_acceptable_veto_fired,
+            "a progress refusal is not a masked one and must not spend the masked \
+             veto's budget"
+        );
+        // The count keeps running underneath the refusal — it is what identifies
+        // the iterate the unvetoed run would have returned.
+        assert_eq!(c.acceptable_count, 4);
+
+        // Once the error settles, the window flattens — after the four-iterate
+        // window has slid clear of the wandering tail — and the streak
+        // terminates exactly as it would have without the mechanism.
+        for _ in 0..2 {
+            assert!(!c.note_acceptable(true, false, 4.15e-07, 1.0000011));
+        }
+        assert!(
+            c.note_acceptable(true, false, 4.15e-07, 1.0000011),
+            "a window of four identical iterates is settled; nothing is left to refuse"
+        );
+    }
+
+    /// The other reported signal: `NARX_CFy`'s objective was still descending
+    /// through the streak (`8.6579696e-03` at the stop, `8.6445195e-03` sixty
+    /// iterations later) even where its error spread was small. Either signal
+    /// alone must be enough to keep solving.
+    #[test]
+    fn a_still_descending_objective_refuses_acceptable_termination() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 4,
+            ..Default::default()
+        };
+        // A perfectly steady error — only the objective is moving, by ~3e-6
+        // over the window against a bar of 1e-1 · 1e-6 · max(1, |f|) = 1e-7.
+        let objs = [8.6592e-03, 8.6588e-03, 8.6584e-03, 8.6580e-03];
+        for (i, &f) in objs.iter().enumerate() {
+            assert!(
+                !c.note_acceptable(true, false, 1.5e-07, f),
+                "the streak must not terminate at iterate {i}: the objective is still \
+                 descending"
+            );
+        }
+        assert!(c.acceptable_veto_fired);
+    }
+
+    /// The opt-out is real: `acceptable_progress_kappa = 0` restores the bare
+    /// consecutive-count criterion, wandering error and all.
+    #[test]
+    fn zero_progress_kappa_restores_the_bare_count() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 4,
+            acceptable_progress_kappa: 0.0,
+            ..Default::default()
+        };
+        let kissing_tail = [3.35e-08, 8.18e-08, 1.08e-07, 4.15e-07];
+        for (i, &err) in kissing_tail.iter().enumerate() {
+            let terminated = c.note_acceptable(true, false, err, 1.0000011);
+            assert_eq!(
+                terminated,
+                i == 3,
+                "with the progress test off, iterate {i} must behave exactly as upstream"
+            );
+        }
+        assert!(!c.acceptable_veto_fired);
+    }
+
+    /// The refusal budget bounds the cost of a solve that never settles: past
+    /// [`ACCEPTABLE_PROGRESS_MAX_REFUSALS`] the test stands aside and the streak
+    /// terminates as it would have without it, so the worst case is bounded
+    /// extra iterations rather than a run to `max_iter`.
+    #[test]
+    fn the_progress_refusal_budget_is_bounded() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 2,
+            ..Default::default()
+        };
+        // A permanent two-cycle inside the band: never flat, never converging.
+        let mut terminated_at = None;
+        for k in 0..(ACCEPTABLE_PROGRESS_MAX_REFUSALS + 10) {
+            let err = if k % 2 == 0 { 1e-7 } else { 9e-7 };
+            if c.note_acceptable(true, false, err, 1.0) {
+                terminated_at = Some(k);
+                break;
+            }
+        }
+        assert_eq!(
+            c.acceptable_progress_refusals, ACCEPTABLE_PROGRESS_MAX_REFUSALS,
+            "the budget must be spent, not exceeded"
+        );
+        assert!(
+            terminated_at.is_some(),
+            "a never-settling solve must still terminate at the acceptable level once \
+             the budget is spent"
+        );
+    }
+
+    /// Flatness is judged over the streak's own window, and the window slides:
+    /// a transient early in a solve must not block termination forever.
+    #[test]
+    fn the_flatness_window_slides_past_a_transient() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 3,
+            ..Default::default()
+        };
+        // Entering the band while still descending: refused.
+        assert!(!c.note_acceptable(true, false, 9e-7, 1.0));
+        assert!(!c.note_acceptable(true, false, 5e-7, 1.0));
+        assert!(!c.note_acceptable(true, false, 2e-7, 1.0));
+        assert!(c.acceptable_veto_fired);
+        // Then it plateaus. Two iterates later the descent has slid out of the
+        // three-long window and the solve is judged settled.
+        assert!(!c.note_acceptable(true, false, 2e-7, 1.0));
+        assert!(
+            c.note_acceptable(true, false, 2e-7, 1.0),
+            "the window must slide, or an early transient blocks every later termination"
+        );
+    }
+
+    /// `acceptable_iter = 1` asks to stop at the first qualifying iterate, and
+    /// a one-iterate window carries no progress information — so the progress
+    /// test must never refuse there.
+    #[test]
+    fn a_single_iterate_streak_carries_no_progress_signal() {
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 1,
+            ..Default::default()
+        };
+        assert!(c.note_acceptable(true, false, 4.15e-07, 1.0));
+        assert!(!c.acceptable_veto_fired);
+    }
+
+    /// A non-finite sample must not be read as movement — the mechanism spends
+    /// iterations, so it may only fire on evidence it actually has.
+    #[test]
+    fn non_finite_samples_do_not_refuse() {
+        for bad in [Number::NAN, Number::INFINITY] {
+            let mut c = OptErrorConvCheck {
+                acceptable_iter: 2,
+                ..Default::default()
+            };
+            assert!(!c.note_acceptable(true, false, bad, 1.0));
+            assert!(
+                c.note_acceptable(true, false, 1e-7, 1.0),
+                "a {bad} sample in the window must not be treated as a progress signal"
+            );
+        }
     }
 
     #[test]

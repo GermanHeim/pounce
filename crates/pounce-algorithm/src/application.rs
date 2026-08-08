@@ -2920,6 +2920,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("primal_noise_floor_kappa") {
             builder.conv_check.primal_noise_floor_kappa = v;
         }
+        if let Some(v) = read_num("acceptable_progress_kappa") {
+            builder.conv_check.acceptable_progress_kappa = v;
+        }
         if let Some(v) = read_num("dual_inf_scale_kappa") {
             builder.conv_check.dual_inf_scale_kappa = v;
         }

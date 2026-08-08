@@ -9,6 +9,57 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the acceptable-level streak had no progress test, so it stopped solves that were still descending (#533)
+
+- Acceptable-level termination fired after `acceptable_iter` (default 15)
+  consecutive iterates under `acceptable_tol`, with **no test for whether the
+  solve was still making progress**. On two corpus models that streak
+  completed at a point that is near-KKT for the *barrier subproblem* while the
+  NLP solve was still descending, and POUNCE returned a worse answer under a
+  weaker status than it would have reached by continuing.
+- `kissing` (Vanderbei) stopped at iteration 103 with objective `1.00000108`
+  and `Solved_To_Acceptable_Level`. Continuing reaches `0.84544259` with a
+  strict certificate at 550 — the reported answer was **18% high**, and the
+  lower value matches Ipopt's `0.845442591227744` to eight figures. The
+  iterate it stopped on was near-stationary for the barrier subproblem at
+  `lg(mu) = -8.6`, with `‖d‖` oscillating around `1e-6` rather than shrinking,
+  and its `inf_du` (`4.15e-07`) was an order of magnitude *worse* than one it
+  had already reached inside the same streak (`3.35e-08`).
+- `NARX_CFy` (Mittelmann) stopped at iteration 565 with both residuals near
+  `1e-7`. Sixty more iterations and 25 more seconds collapse them by five
+  orders and reach an objective (`8.6445195e-03`) that beats both its own
+  acceptable answer and Ipopt's — and at `275.7 s` that is inside the
+  benchmark's `300 s` limit, so the streak, and only the streak, stopped it.
+- **The streak must now also have flattened.** Across the `acceptable_iter`
+  iterates that made it up, the *spread* (`max − min`) of the KKT error must
+  sit within `acceptable_progress_kappa · acceptable_tol`, and the spread of
+  the objective within the same fraction of `acceptable_tol · max(1, |f|)`.
+  Spread rather than trend, because both models were *wandering* across the
+  band rather than converging inside it, and either signal alone is enough to
+  keep solving, because `kissing`'s objective was flat to all eight printed
+  figures over the iterates in question while the continued run moved it by
+  15%.
+- **Never worse, by construction.** Like the masked-certificate veto (#200),
+  this is a bet that is *tested*, not predicted: the refused termination is
+  recorded, and a run that fails to do better ends at exactly that iterate
+  under exactly that status (`Solved_To_Acceptable_Level`) instead of
+  surfacing `Maximum_Iterations_Exceeded` or a bare failure. The cost of a
+  misfire is bounded extra iterations, never a lost verdict.
+- A refused acceptable-level termination can now also be paid off by a
+  *better acceptable point*, not only by a strict certificate: a continued run
+  that itself exits `Solved_To_Acceptable_Level` at a better-ranking point
+  keeps that point (same status, better answer) rather than rolling back. Only
+  an acceptable-level refusal admits this candidate, so a refused strict
+  certificate's `Success` is never reported at a point that qualified only at
+  the acceptable level.
+- The count itself is untouched: the streak still advances on the band test
+  alone, so the refused iterate is exactly the one the unvetoed run would have
+  returned. Solves that reach `tol` never complete a streak and are entirely
+  unaffected; a solve that stalls to a genuine standstill sees a flat window
+  and terminates as before.
+- New option **`acceptable_progress_kappa`** (default `0.1`) sets the
+  fraction of the band; **`0` switches the progress test off entirely**,
+  restoring upstream Ipopt's bare consecutive-count criterion bit-for-bit.
 ### Fixed — `auto` sent the NETLIB GEN family to the convex IPM, which cannot certify it, while the NLP path solves it in a second (#535)
 
 - `solver_selection=auto` routes every detected LP to the convex
