@@ -165,3 +165,61 @@ fn variable_scaling_factor_is_inert_without_the_option() {
     let (ok, stdout, stderr) = run("user_scaling_var_suffix.nl", "varinert", &[]);
     assert!(ok, "solve failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
 }
+
+/// A factor that cannot be applied is refused, and the refusal is
+/// *readable*.
+///
+/// The message text is the assertion here, not decoration. It has been
+/// wrong twice: once with its line continuations lost, so it printed
+/// two runs of eighteen spaces mid-sentence, and once with the
+/// continuations replaced by `\n` escapes, which printed real newlines
+/// and the source indentation. Nothing caught either, because nothing
+/// exercised this path. So this checks the sentence arrives whole, on
+/// one line, with no run of source indentation in it.
+#[test]
+fn an_inapplicable_factor_is_refused_readably() {
+    let (ok, stdout, stderr) = run(
+        "user_scaling_bad_var_suffix.nl",
+        "badfactor",
+        &["nlp_scaling_method=user-scaling"],
+    );
+    assert!(
+        !ok,
+        "a negative factor must fail the solve\nstdout:\n{stdout}"
+    );
+
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("nlp_scaling_method=user-scaling supplied"))
+        .unwrap_or_else(|| panic!("no refusal on stderr:\n{stderr}"));
+
+    // Whole sentences, not fragments separated by swallowed newlines.
+    assert!(
+        line.contains("supplied per-variable scaling factors that cannot be applied."),
+        "the opening clause is broken up: {line}"
+    );
+    assert!(
+        line.contains("Correct the factors, or drop nlp_scaling_method=user-scaling."),
+        "the closing clause is broken up: {line}"
+    );
+    // Source indentation leaking into the output looks like this.
+    assert!(
+        !line.contains("   "),
+        "the message carries a run of source indentation: {line}"
+    );
+    // The message carries its own terminator: the caller uses
+    // `eprint!`, so without it the next line runs straight on.
+    assert!(
+        stderr.contains(
+            "or drop nlp_scaling_method=user-scaling.
+"
+        ),
+        "the refusal is not newline-terminated:
+{stderr}"
+    );
+    // And it says which factor, and why.
+    assert!(
+        line.contains("-3") && line.contains("finite and positive"),
+        "the refusal should name the offending factor and the rule: {line}"
+    );
+}

@@ -699,9 +699,12 @@ impl IpoptApplication {
             }
             Ok(None) => Ok(tnlp),
             Err(why) => Err(format!(
+                // The trailing newline belongs to the message: the
+                // caller emits it with `eprint!` and hands the same
+                // string to the journalist, as the refusals below do.
                 "pounce: nlp_scaling_method=user-scaling supplied per-variable \
                  scaling factors that cannot be applied. {why}. Correct the \
-                 factors, or drop nlp_scaling_method=user-scaling."
+                 factors, or drop nlp_scaling_method=user-scaling.\n"
             )),
         }
     }
