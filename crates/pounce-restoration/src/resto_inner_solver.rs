@@ -393,6 +393,19 @@ pub fn run_inner_resto(
         .line_search
         .acceptor_mut()
         .set_theta_max_fact(1e8);
+    // ...and opt the inner IPM out of pounce's row-count floor on the
+    // same reference (`theta_max_row_scale_kappa`, pounce#476). That
+    // floor is off by default, so this is unconditional insurance
+    // against a user who turns it on globally. It exists to fix exactly
+    // the degeneracy described above for the *outer* phase, where
+    // upstream left the 1e4 default in place on models that also start
+    // feasible. Here upstream already corrected it, and stacking the
+    // floor on top would make the inner ceiling `1e8 · m` — no ceiling
+    // at all. Keep the resto sub-IPM bit-for-bit upstream at any kappa.
+    alg_bundle
+        .line_search
+        .acceptor_mut()
+        .set_theta_max_row_scale_kappa(0.0);
 
     // Replace the inner-bundle mu update with a resto-configured fresh
     // copy. Upstream `IpAlgBuilder.cpp:929` looks up
