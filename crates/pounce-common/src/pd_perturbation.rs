@@ -264,8 +264,31 @@ impl PdPerturbationHandler {
         let mut delta_c = 0.0;
         let mut delta_d = 0.0;
 
-        let undet = matches!(self.hess_degenerate, DegenType::NotYetDetermined)
-            || matches!(self.jac_degenerate, DegenType::NotYetDetermined);
+        // Upstream's `TrialStatus` arms below assert that the degeneracy
+        // probe is still in the state that named it — `δ_x == 0` for the
+        // `DxEq0` statuses, and so on. Those are `DBG_ASSERT`s upstream,
+        // i.e. assumptions rather than invariants: every real linear
+        // solver can report `Singular` from *any* rung of the δ_x ladder
+        // (MUMPS `INFO(1) = -10`, MA27 `IFLAG = 3`, and — since pounce
+        // gh#540 — feral's inertia-trust floor), at which point the probe
+        // has already been disturbed and its arm no longer applies.
+        // Abandon the probe and fall through to the determined-state path,
+        // which asserts nothing and does the right thing from wherever the
+        // perturbations happen to be: raise δ_c if it is still zero,
+        // otherwise take a δ_x step.
+        let probe_intact = match self.test_status {
+            TrialStatus::DcEq0DxEq0 => self.delta_x_curr == 0.0 && self.delta_c_curr == 0.0,
+            TrialStatus::DcGt0DxEq0 => self.delta_x_curr == 0.0 && self.delta_c_curr > 0.0,
+            TrialStatus::DcEq0DxGt0 => self.delta_x_curr > 0.0 && self.delta_c_curr == 0.0,
+            TrialStatus::DcGt0DxGt0 | TrialStatus::NoTest => true,
+        };
+        if !probe_intact {
+            self.test_status = TrialStatus::NoTest;
+        }
+
+        let undet = probe_intact
+            && (matches!(self.hess_degenerate, DegenType::NotYetDetermined)
+                || matches!(self.jac_degenerate, DegenType::NotYetDetermined));
         if undet {
             match self.test_status {
                 TrialStatus::DcEq0DxEq0 => {
@@ -673,6 +696,84 @@ mod tests {
         let d = h.perturb_for_singular(0.1, None).unwrap();
         let expected = h.delta_cd_val * (0.1_f64).powf(h.delta_cd_exp);
         assert!((d.delta_c - expected).abs() < 1e-15);
+    }
+
+    /// gh#540: the case upstream's `DBG_ASSERT`s actually trip on. Reach
+    /// `perturb_for_singular` a *second* time, from a rung of the δ_x ladder,
+    /// while the Jacobian flag is still undetermined — so `finalize_test` has
+    /// not yet resolved it and the `DcGt0DxEq0` arm is entered with
+    /// `δ_x > 0`, against its `debug_assert!(delta_x_curr == 0.0 && ...)`.
+    /// Every real linear solver can produce this sequence (MUMPS
+    /// `INFO(1) = -10`, MA27 `IFLAG = 3`, and pounce's inertia-trust floor
+    /// all report singularity from anywhere on the ladder), so the
+    /// precondition is an assumption rather than an invariant, and the
+    /// handler has to survive it rather than assert it.
+    #[test]
+    fn a_second_singular_verdict_from_the_ladder_does_not_trip_the_probe() {
+        let mut h = PdPerturbationHandler::new();
+        let _ = h.consider_new_system(0.1, None).unwrap();
+        // Singular at δ_x = 0 → the probe raises δ_c and moves to DcGt0DxEq0,
+        // leaving the Jacobian flag undetermined.
+        let _ = h.perturb_for_singular(0.1, None).unwrap();
+        assert_eq!(h.test_status, TrialStatus::DcGt0DxEq0);
+        assert_eq!(h.jac_degenerate, DegenType::NotYetDetermined);
+        // WrongInertia next → δ_x leaves zero. `finalize_test` resolves the
+        // Hessian flag but leaves the Jacobian one undetermined (it needs
+        // `degen_iters_max` trials), so the probe is still nominally running.
+        let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        assert!(d.delta_x > 0.0);
+        assert_eq!(h.jac_degenerate, DegenType::NotYetDetermined);
+        assert_eq!(h.test_status, TrialStatus::DcGt0DxEq0);
+        // ...and now Singular again, with δ_x > 0 under a `DxEq0` status.
+        // Pre-#540 this is the `debug_assert` that fires.
+        let d = h
+            .perturb_for_singular(0.1, None)
+            .expect("a singular verdict from the ladder must not be fatal");
+        assert!(
+            d.delta_c > 0.0,
+            "δ_c was dropped by the abandoned probe: {}",
+            d.delta_c,
+        );
+        assert_eq!(
+            h.test_status,
+            TrialStatus::NoTest,
+            "a probe whose precondition no longer holds must be abandoned",
+        );
+    }
+
+    /// The same guard on the commoner sequence, where `finalize_test` has
+    /// already resolved both flags by the time the `Singular` verdict lands:
+    /// δ_c comes up and the δ_x rung the ladder already paid for is kept.
+    #[test]
+    fn singular_after_a_delta_x_step_abandons_the_probe() {
+        let mut h = PdPerturbationHandler::new();
+        // Fresh system: both flags undetermined, so the probe arms as
+        // DcEq0DxEq0 with δ_x = δ_c = 0.
+        let _ = h.consider_new_system(0.1, None).unwrap();
+        assert_eq!(h.test_status, TrialStatus::DcEq0DxEq0);
+        // First factorization came back WrongInertia — δ_x leaves zero while
+        // `test_status` still says the probe is running at δ_x = 0.
+        let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        assert!(d.delta_x > 0.0);
+        // Second factorization comes back Singular.
+        let d = h.perturb_for_singular(0.1, None).unwrap();
+        let expected_cd = h.delta_cd_val * (0.1_f64).powf(h.delta_cd_exp);
+        assert!(
+            (d.delta_c - expected_cd).abs() < 1e-20,
+            "δ_c was not raised: {}",
+            d.delta_c,
+        );
+        assert_eq!(d.delta_c, d.delta_d);
+        assert_eq!(
+            d.delta_x, h.delta_xs_init,
+            "the δ_x ladder lost the rung it had already paid for",
+        );
+        assert_eq!(
+            h.test_status,
+            TrialStatus::NoTest,
+            "a probe whose precondition no longer holds must be abandoned, \
+             not carried into finalize_test",
+        );
     }
 
     #[test]

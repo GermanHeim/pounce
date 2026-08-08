@@ -9,6 +9,51 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the inertia test was answered with `δ_w` even when the factorization could not measure inertia (#540)
+
+- CUTE `eigena2` stopped at `Solved_To_Acceptable_Level` with the dual
+  infeasibility stuck at `3.31e-07`, where Ipopt certifies `Optimal` at
+  `9.31e-09`. The objective was already correct to twelve digits; only the
+  last two orders of the dual residual were missing. It now converges to
+  `Solve_Succeeded` in **27 iterations at `5.73e-10`** — the same iteration
+  count as Ipopt, at a residual an order of magnitude tighter, with the
+  constraint violation at `2.2e-16`.
+- The reported symptom was `δ_w` re-escalating from `10^-0.8` to `10^1.4` at
+  the second-to-last iteration, damping the Newton step from `1.2e-7` to
+  `8.2e-9`. The **`δ_w` update rule is not at fault** — it is an exact port of
+  upstream's `get_deltas_for_wrong_inertia` and it did what its input told it
+  to. The input was wrong.
+- `eigena2`'s constraint Jacobian degenerates as the iterate converges: 45 of
+  its 55 singular values fall to `~1e-8` by iteration 27, so every KKT
+  factorization taken with `δ_c = 0` down that tail is **singular to working
+  precision** (smallest pivot `~1e-16` on a `‖A‖ ≈ 240` matrix). The
+  negative-eigenvalue count read off such a factor is noise, not a
+  measurement: the same iterate returns 64, 58 and 62 against an expected 55,
+  and an exact LAPACK eigendecomposition of the dumped matrices agrees with
+  none of them. The ladder then multiplied the Hessian perturbation by 8 per
+  retry against a reading that does not respond to `δ_w` at all.
+- **The perturbation that repairs a rank-deficient constraint block is
+  `δ_c`**, which is what the `Singular` verdict reaches for. A mismatching
+  count that is contradicted by a pivot at the working-precision floor is now
+  reported `Singular` rather than `WrongInertia`, so `δ_c` is applied first.
+  It lifts the smallest pivot from `~1e-16` to `5.8e-09`, and from there the
+  counts the backend reports agree with LAPACK exactly. Upstream's MA27 /
+  MA57 / MUMPS interfaces likewise test singularity *before* comparing the
+  count.
+- **It cannot cost a usable factorization.** The trigger is consulted only
+  once the count has already mismatched — i.e. on a factorization the caller
+  was going to reject either way — so it never turns a successful factor into
+  a failure; it only changes which perturbation is reached for first.
+- New option **`feral_inertia_pivot_floor`** (default `1e-12`, the middle of
+  the `n·eps` range over which an equilibrated pivot loses its sign) sets the
+  threshold; **`0` disables the trigger**, restoring the previous routing.
+- `PDPerturbationHandler::PerturbForSingularity` no longer assumes the
+  degeneracy probe is in its pristine state when a `Singular` verdict
+  arrives. Upstream encodes that as `DBG_ASSERT`s, but every real linear
+  solver can report singularity from any rung of the `δ_w` ladder (MUMPS
+  `INFO(1) = -10`, MA27 `IFLAG = 3`); the probe is now abandoned and the
+  determined-state path taken, which keeps the `δ_w` rung already paid for.
+
 ### Fixed — the acceptable-level streak had no progress test, so it stopped solves that were still descending (#533)
 
 - Acceptable-level termination fired after `acceptable_iter` (default 15)

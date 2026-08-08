@@ -72,6 +72,10 @@ pub struct FeralSolverInterface {
     /// [`FeralConfig::singular_pivot_floor`].
     singular_pivot_floor: f64,
 
+    /// Floor under which a mismatching inertia count is treated as
+    /// noise; see [`FeralConfig::inertia_pivot_floor`].
+    inertia_pivot_floor: f64,
+
     /// Running aggregate updated after every successful `factor()`.
     /// Exposed via [`Self::summary`] and (mirrored to) the optional
     /// `sink` so an out-of-band consumer can read it post-solve
@@ -126,6 +130,28 @@ pub struct FeralConfig {
     /// so `δ_w` is bumped. `0` disables the trigger. See
     /// `dev/research/near-singularity-signal.md` (feral) §4.
     pub singular_pivot_floor: f64,
+    /// Floor below which a *negative-eigenvalue count* is treated as
+    /// noise rather than as evidence (pounce gh#540). Applies only
+    /// when the count already disagrees with what the caller asked
+    /// for: if the smallest accepted pivot magnitude (scaled space) is
+    /// under this floor, `factor()` reports
+    /// [`ESymSolverStatus::Singular`] instead of
+    /// [`ESymSolverStatus::WrongInertia`], so the IPM adds `δ_c` to
+    /// de-singularize the system before it starts escalating `δ_w`.
+    ///
+    /// A factorization whose smallest pivot sits at the working-
+    /// precision floor of an equilibrated matrix has no reliable sign
+    /// on that pivot, so the inertia it reports is not a measurement.
+    /// Escalating `δ_w` against such a reading multiplies the Hessian
+    /// perturbation by 8 per retry and damps the Newton step to
+    /// nothing, while the perturbation that actually repairs a
+    /// rank-deficient constraint Jacobian is `δ_c`. This trigger
+    /// can only fire on a factorization the caller was already going
+    /// to reject, so it never turns a usable factor into a failure —
+    /// it only changes *which* perturbation is reached for first.
+    /// Necessarily larger than [`Self::singular_pivot_floor`], which
+    /// governs factors that are unusable outright. `0` disables.
+    pub inertia_pivot_floor: f64,
     /// Relative Bunch-Kaufman partial-pivoting threshold `u`: a
     /// candidate diagonal pivot is rejected when `|d| < u * col_max`.
     /// Direct analog of Ipopt's `ma27_pivtol` / `ma57_pivtol`. Smaller
@@ -213,6 +239,12 @@ impl Default for FeralConfig {
             // magnitude on the scaled matrix. Only pivots essentially
             // at the working-precision floor are flagged singular.
             singular_pivot_floor: 1e-20,
+            // The level at which a pivot of an equilibrated matrix
+            // stops carrying a trustworthy sign: `n · eps` spans
+            // ~2e-15 (n = 10) to ~2e-10 (n = 10^6), and 1e-12 sits in
+            // the middle of that range. Only consulted when the
+            // inertia already mismatched (pounce gh#540).
+            inertia_pivot_floor: 1e-12,
             pivtol: 1e-8,
             ordering: OrderingMethod::Auto,
             scaling: ScalingStrategy::Auto,
@@ -266,6 +298,10 @@ impl FeralConfig {
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(1e-20),
+            inertia_pivot_floor: std::env::var("POUNCE_FERAL_INERTIA_PIVOT_FLOOR")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1e-12),
             pivtol: resolve_pivtol_env(
                 std::env::var("POUNCE_FERAL_PIVTOL").ok().as_deref(),
                 std::env::var("FERAL_PIVTOL").ok().as_deref(),
@@ -461,6 +497,7 @@ impl FeralSolverInterface {
             negevals: 0,
             ordering: cfg.ordering,
             singular_pivot_floor: cfg.singular_pivot_floor,
+            inertia_pivot_floor: cfg.inertia_pivot_floor,
             summary: LinearSolverSummary {
                 solver_name: "feral".to_string(),
                 ..Default::default()
@@ -592,6 +629,32 @@ impl FeralSolverInterface {
                     return ESymSolverStatus::Singular;
                 }
                 if check_neg_evals && self.negevals != number_of_neg_evals {
+                    // pounce gh#540: a count read off a factorization whose
+                    // smallest pivot sits at the working-precision floor is
+                    // noise, not a measurement — on eigena2 the same
+                    // factorization returns 64/58/62 negatives for the same
+                    // 55 the caller wants, and LAPACK's exact count on the
+                    // dumped matrices agrees with none of them. Reporting
+                    // `WrongInertia` sends the IPM up the `δ_w` ladder (×8 per
+                    // retry), which damps the Newton step to nothing; the
+                    // perturbation that actually repairs the rank-deficient
+                    // constraint Jacobian underneath is `δ_c`, which is what
+                    // `Singular` reaches for. Upstream's MA27/MA57/MUMPS
+                    // interfaces likewise test singularity *before* comparing
+                    // the count.
+                    if self.inertia_pivot_floor > 0.0 {
+                        if let Some(min_piv) = self.solver.min_pivot_magnitude() {
+                            if min_piv < self.inertia_pivot_floor {
+                                tracing::debug!(
+                                    target: "pounce::linsol",
+                                    got_neg = self.negevals, expected = number_of_neg_evals,
+                                    min_piv, floor = self.inertia_pivot_floor, dim = self.dim,
+                                    "inertia untrustworthy; reporting singular"
+                                );
+                                return ESymSolverStatus::Singular;
+                            }
+                        }
+                    }
                     tracing::debug!(
                         target: "pounce::linsol",
                         got_neg = self.negevals, expected = number_of_neg_evals, dim = self.dim,
@@ -1046,6 +1109,75 @@ mod tests {
             ESymSolverStatus::Success
         );
         s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]); // SPD
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::WrongInertia
+        );
+    }
+
+    /// gh#540: when the inertia count disagrees *and* the factorization's
+    /// smallest pivot is at the working-precision floor, the count is noise
+    /// and the factor is reported `Singular` — so the IPM raises `δ_c`
+    /// (which repairs a rank-deficient constraint block) instead of walking
+    /// the `δ_w` ladder against a reading that does not respond to it.
+    ///
+    /// `[[1, 1], [1, 1 + 2^-50]]` is positive definite by a hair: its
+    /// eigenvalues are ≈ 2 and ≈ 4.4e-16, so no diagonal equilibration can
+    /// lift the small one — it is near-singular, not merely badly scaled.
+    #[test]
+    fn untrustworthy_inertia_is_reported_singular_not_wrong() {
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        let vals = [1.0, 1.0, 1.0 + f64::powi(2.0, -50)];
+
+        let mut s = FeralSolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&vals);
+        let mut rhs = [1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::Singular,
+            "a count read off a pivot at the working-precision floor was \
+             passed on as evidence",
+        );
+
+        // Disabling the trigger restores the pre-#540 verdict, which is what
+        // makes this a routing change and not a new failure mode: the same
+        // factorization is still rejected, just with the other status.
+        let mut s = FeralSolverInterface::with_config(FeralConfig {
+            inertia_pivot_floor: 0.0,
+            ..FeralConfig::default()
+        });
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&vals);
+        let mut rhs = [1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::WrongInertia
+        );
+    }
+
+    /// ...and a healthy factor with a mismatching count keeps reporting
+    /// `WrongInertia`: the floor must not swallow the ordinary
+    /// negative-curvature signal the `δ_w` ladder exists to answer.
+    /// `[[2, 1], [1, 3]]` is SPD with pivots ≈ 2 and 2.5.
+    #[test]
+    fn well_conditioned_inertia_mismatch_still_reports_wrong_inertia() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
         let mut rhs = [3.0, 4.0];
         assert_eq!(
             s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
