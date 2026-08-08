@@ -82,14 +82,13 @@ pounce falls back to no automatic scaling.
 * **From C** — call `SetIpoptProblemScaling(problem, obj, x_scaling,
   g_scaling)` then `AddIpoptStrOption("nlp_scaling_method",
   "user-scaling")`. See `crates/pounce-cinterface/include/pounce.h`.
-  Pass `NULL` (or an all-ones array) for `x_scaling`.
 * **From Rust** — implement
   [`TNLP::get_scaling_parameters`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-nlp/src/tnlp.rs)
   on your problem type.
 * **From Python** — `pounce.Problem.set_problem_scaling(obj_scaling,
-  g_scaling=...)`, followed by
-  `add_option("nlp_scaling_method", "user-scaling")`. A non-unit
-  `x_scaling=` raises. Walked through end-to-end in
+  x_scaling=..., g_scaling=...)`, followed by
+  `add_option("nlp_scaling_method", "user-scaling")`. Walked
+  through end-to-end in
   [`python/notebooks/07_scaling.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/07_scaling.ipynb).
 
 > **Specialized solvers.** A model that classifies as an LP, convex QP,

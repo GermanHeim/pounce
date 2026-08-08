@@ -283,6 +283,15 @@ pub trait TNLP {
         false
     }
 
+    /// The per-variable scaling factors this decorator applies, if it
+    /// is a scaling wrapper (gh#486). Consumers that read the
+    /// algorithm's iterate rather than the `finalize_solution` payload
+    /// see scaled coordinates and need these to undo the substitution.
+    /// A transparent decorator should forward the inner answer.
+    fn scaling_factors(&self) -> Option<Vec<pounce_common::types::Number>> {
+        None
+    }
+
     /// A *proof* that this problem has no feasible point, if presolve found
     /// one. `None` (the default) means "not proved" — which is not the same as
     /// "feasible".

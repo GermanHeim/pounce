@@ -86,15 +86,25 @@ Rules, matching AMPL/Ipopt:
   everything the [sensitivity](sensitivity.md) accessors report come back
   in your model's units.
 
-**Variables cannot be scaled.** POUNCE models objective and constraint
-scaling only, so a `scaling_factor` on a `Var` raises with a message
-naming the variables. It is a hard error on purpose: applying the
-objective and constraint factors while dropping the variable ones would
-solve a problem your Suffix does not describe, and say nothing about it
-([issue #483](https://github.com/jkitchin/pounce/issues/483)). Rescale
-those variables in the model itself — substitute `x = z / s`, declare
-`z`, and the change is explicit in the model rather than implicit in a
-suffix.
+**Variables can be scaled**, and a factor on a `Var` is applied as a
+change of variables inside the solver: the algorithm works in the
+scaled coordinates and the solution, the duals, and the bound
+multipliers come back in your model's own units. No clone of the model
+is made and no `propagate_solution` step is needed, which is what
+distinguishes this from Pyomo's `core.scale_model` transformation.
+Factors must be positive and finite. A negative factor would reverse a
+variable's direction and swap its bounds, so it raises rather than
+being applied.
+
+**One exception: the sensitivity path.** A model carrying
+[sensitivity](sensitivity.md) declarations raises if the Suffix tags a
+variable. Those accessors read the solver's KKT factorization directly
+rather than through the scaling layer, so on a variable-scaled solve
+they would report scaled-space numbers while promising your model's
+units. Solve without the sensitivity declarations, or drop the variable
+entries, until
+[issue #486](https://github.com/jkitchin/pounce/issues/486) carries the
+factors into that translation.
 
 This works on both solve paths: the ordinary ASL/subprocess solve and
 the in-process path taken when the model carries [sensitivity
