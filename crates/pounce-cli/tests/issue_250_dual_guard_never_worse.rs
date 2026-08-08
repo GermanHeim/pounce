@@ -47,6 +47,37 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pounce_cli::solve_report::SolveReport;
+use pounce_nlp::ApplicationReturnStatus;
+
+/// Wall-clock cap for every solve below. It is a **hang guard, not a
+/// performance assertion** — nothing in this file asserts a time, and no
+/// assertion gets weaker as this number grows. It exists so that a
+/// regression which stops a solve from terminating fails the test instead
+/// of wedging CI.
+///
+/// It is deliberately enormous relative to the work. Measured in a debug
+/// build (which is what CI runs) on an unloaded dev machine:
+///
+/// | solve | wall |
+/// |---|---|
+/// | `pooling_rt2stp`, defaults | 4.5 s |
+/// | `deb7`, `dual_diverging_streak=1` | 11.2 s |
+/// | `deb7`, `dual_diverging_streak=0` | 5.4 s |
+/// | `autocorr_bern55-06`, any setting | ≤ 0.3 s |
+///
+/// The previous caps were 10 s and 20 s, i.e. margins of 2.2x and 1.8x
+/// over *unloaded* debug timings. That is not enough, because
+/// `max_wall_time` is **wall** clock while `cargo test` runs these five
+/// tests concurrently with each other and with other test binaries. Under
+/// that contention a 4.5 s solve routinely passes 10 s, and
+/// `pooling_rt2stp_solves_at_default_settings` failed on CI twice in a row
+/// on a commit that does not touch the solver — with a message blaming
+/// `dual_diverging_streak`, which had nothing to do with it (gh #547).
+///
+/// `pooling_rt2stp` got slower for a real reason: #544
+/// (`feral_inertia_pivot_floor`) took it from 206 to 812 iterations, a
+/// known and recorded cost of that fix. The cap was not revisited then.
+const HANG_GUARD: &str = "max_wall_time=300";
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -87,7 +118,27 @@ fn solve(fixture_name: &str, extra: &[&str]) -> SolveReport {
     let text = std::fs::read_to_string(&json_path).expect("read json report");
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sol_path);
-    serde_json::from_str(&text).expect("deserialize SolveReport")
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize SolveReport");
+
+    // Fail loudly and accurately if the hang guard is what stopped the
+    // solve. Every assertion below reads a status or an objective, so a
+    // timed-out solve otherwise surfaces as whatever that test happens to
+    // check — and it misattributes. gh #547 was exactly this: a
+    // `MaximumWallTimeExceeded` exit reported as "has dual_diverging_streak
+    // been re-enabled by default?", which sent the diagnosis in the wrong
+    // direction. The guard firing means one of two things, neither of them
+    // the property under test: the solve genuinely stopped terminating, or
+    // `HANG_GUARD` is too small for this machine.
+    assert_ne!(
+        report.solution.status,
+        ApplicationReturnStatus::MaximumWallTimeExceeded,
+        "{fixture_name} {extra:?} hit the {HANG_GUARD} hang guard. This is \
+         NOT the property this test asserts — it means the solve stopped \
+         terminating, or the guard is too tight for this host. Do not \
+         'fix' it by loosening an assertion below (gh #547)",
+    );
+
+    report
 }
 
 /// Ipopt's answer on the identical `.nl`: -2304.0000278027342, reached in 72
@@ -97,7 +148,7 @@ const AUTOCORR_OPTIMUM: f64 = -2_304.000_027_802_734_2;
 /// The guard is opt-in as of the pounce#250 follow-up (`dual_diverging_streak`
 /// defaults to 0). Every test below must therefore enable it explicitly — at the
 /// former default of 15 — or it would exercise nothing and pass vacuously.
-const GUARD_ON: [&str; 2] = ["max_wall_time=10", "dual_diverging_streak=15"];
+const GUARD_ON: [&str; 2] = [HANG_GUARD, "dual_diverging_streak=15"];
 
 /// With the guard enabled (streak 15 — its former default; it is now off by
 /// default) the diversion must not cost the objective. Pre-fix this returned
@@ -175,7 +226,7 @@ fn dual_guard_diversion_returns_a_stationary_point() {
 fn pooling_rt2stp_solves_at_default_settings() {
     // Ipopt on the identical .nl: -3273.9549927585640, NLP error ~1e-8.
     const EXPECTED: f64 = -3_273.954_991_374_754_6;
-    let report = solve("pooling_rt2stp.nl", &["max_wall_time=10"]);
+    let report = solve("pooling_rt2stp.nl", &[HANG_GUARD]);
     let code = report.solution.solve_result_num;
     assert!(
         (0..100).contains(&code),
@@ -225,7 +276,7 @@ fn pooling_rt2stp_solves_at_default_settings() {
 fn hair_trigger_guard_returns_a_valid_honestly_labelled_point() {
     for name in ["autocorr_bern55-06.nl", "deb7.nl"] {
         for streak in ["dual_diverging_streak=0", "dual_diverging_streak=1"] {
-            let report = solve(name, &["max_wall_time=20", streak]);
+            let report = solve(name, &[HANG_GUARD, streak]);
             let obj = report.solution.objective;
             assert!(
                 obj.is_finite(),
@@ -288,7 +339,7 @@ fn best_acceptable_fallback_does_not_trade_feasibility_for_objective() {
         "acceptable_tol=1e10",
         "acceptable_dual_inf_tol=1e30",
         "acceptable_compl_inf_tol=1e10",
-        "max_wall_time=20",
+        HANG_GUARD,
     ];
 
     let off = solve(
