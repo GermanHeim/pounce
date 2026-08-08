@@ -117,6 +117,34 @@ fn a_rerouted_solve_reports_one_status_not_two() {
     );
 }
 
+/// …and nothing else from the discarded attempt either. `afiro` reduces under
+/// the convex path's presolve, which used to print its summary before the
+/// solve, so a rerouted run left one line of a solve that never reported. The
+/// summary is now held back until the convex path is known to be the one that
+/// reports — a rerouted run's stdout is the NLP solve's and nothing else.
+#[test]
+fn a_rerouted_solve_leaves_no_trace_of_the_discarded_attempt() {
+    let (rerouted, stderr, _) = run(&["solver_selection=auto", UNREACHABLE_TOL]);
+    assert!(
+        stderr.to_lowercase().contains("did not certify"),
+        "precondition: this run must reroute; stderr=\n{stderr}"
+    );
+    assert!(
+        !rerouted.contains("Presolve:"),
+        "the declined convex attempt must not leave its presolve summary \
+         behind; stdout=\n{rerouted}"
+    );
+
+    // The other half: held back, not lost. A convex solve that *does* report
+    // still says what presolve did.
+    let (kept, _, _) = run(&["solver_selection=auto"]);
+    assert!(
+        kept.contains("Presolve:"),
+        "a convex solve that reports must still print its presolve summary; \
+         stdout=\n{kept}"
+    );
+}
+
 /// The common case is untouched: an LP the convex IPM certifies is still
 /// answered by the convex IPM, with no second solve. This is the 369-of-371
 /// case in the LP suite and the reason the fallback triggers on a failure to

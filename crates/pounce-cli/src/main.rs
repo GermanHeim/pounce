@@ -2439,6 +2439,13 @@ fn run_convex_qp(
         collect_iterates: want_trace,
         ..convex_opts
     };
+    // What presolve did, held back until we know this solve is the one that
+    // reports (gh #535). These lines describe the reduction, not the verdict,
+    // but they are the *only* stdout a declined convex attempt would otherwise
+    // leave behind — and "the rerouted run prints nothing from the attempt it
+    // discarded" is a cleaner contract than "nothing except one line". Flushed
+    // below, immediately after the fallback check.
+    let mut presolve_log: Vec<String> = Vec::new();
     let sol = if qp_opts.max_iter == 0 {
         // AMPL/Ipopt semantics: `max_iter=0` takes no iterations and so
         // cannot reach optimality. Presolve can otherwise solve a trivial
@@ -2468,10 +2475,10 @@ fn run_convex_qp(
                 // `Infeasible_Problem_Detected` into a normal solve, and this
                 // line is the only trace of the reduction that misfired.
                 if let Some(trigger) = ps.discarded_infeasibility() {
-                    println!(
+                    presolve_log.push(format!(
                         "Presolve: discarded an unconfirmed infeasibility claim — \
                          {trigger}; solving normally"
-                    );
+                    ));
                 }
                 let st = ps.stats();
                 if st.reduced_anything() {
@@ -2491,7 +2498,7 @@ fn run_convex_qp(
                             format!(", cap-truncated after {} layers", st.rounds)
                         }
                     };
-                    println!(
+                    presolve_log.push(format!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
                          forcing {}, dominated {}, tightened {}{})",
@@ -2507,7 +2514,7 @@ fn run_convex_qp(
                         st.dominated_cols,
                         st.tightened_bounds,
                         exit,
-                    );
+                    ));
                 }
                 let red = if use_active_set {
                     let mut mk = backend;
@@ -2521,7 +2528,7 @@ fn run_convex_qp(
                 // Name the screen and what it tripped on. A presolve
                 // infeasibility arrives with no iteration behind it, so this
                 // line is the whole record of *why* (gh #523).
-                println!("Presolve: proved primal infeasible — {trigger}");
+                presolve_log.push(format!("Presolve: proved primal infeasible — {trigger}"));
                 trivial(QpStatus::PrimalInfeasible)
             }
             PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
@@ -2560,6 +2567,12 @@ fn run_convex_qp(
             qp_opts.tol,
         );
         return None;
+    }
+
+    // This solve is the one that reports, so what presolve did belongs on the
+    // record after all.
+    for line in &presolve_log {
+        println!("{line}");
     }
 
     // Report the objective in the user's original sense, including the
