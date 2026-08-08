@@ -590,6 +590,13 @@ pub struct LineSearchOptions {
     /// `theta_max_fact` — upper-bound factor for constraint violation in
     /// the filter (Eqn. (21)).
     pub theta_max_fact: Number,
+    /// `theta_max_row_scale_kappa` — multiplier on the constraint-row
+    /// count used as the floor of the `theta_max` reference.
+    /// **Opt-in**: default `0`, which is upstream's bare
+    /// `max(1, theta_0)` floor bit-for-bit. Set to `1` on a large model
+    /// that stalls from a feasible start. See
+    /// [`FilterLsAcceptor::theta_max_row_scale_kappa`].
+    pub theta_max_row_scale_kappa: Number,
     /// `gamma_phi` — filter margin factor for the barrier function
     /// (Eqn. (18a)).
     pub gamma_phi: Number,
@@ -640,6 +647,7 @@ impl Default for LineSearchOptions {
             eta_phi: 1e-8,
             theta_min_fact: 1e-4,
             theta_max_fact: 1e4,
+            theta_max_row_scale_kappa: 0.0,
             gamma_phi: 1e-8,
             gamma_theta: 1e-5,
             s_phi: 2.3,
@@ -1052,6 +1060,7 @@ impl AlgorithmBuilder {
                 f.eta_phi = self.line_search.eta_phi;
                 f.theta_min_fact = self.line_search.theta_min_fact;
                 f.theta_max_fact = self.line_search.theta_max_fact;
+                f.theta_max_row_scale_kappa = self.line_search.theta_max_row_scale_kappa;
                 f.gamma_phi = self.line_search.gamma_phi;
                 f.gamma_theta = self.line_search.gamma_theta;
                 f.s_phi = self.line_search.s_phi;

@@ -97,6 +97,52 @@ changes.
   solver can report singularity from any rung of the `δ_w` ladder (MUMPS
   `INFO(1) = -10`, MA27 `IFLAG = 3`); the probe is now abandoned and the
   determined-state path taken, which keeps the `δ_w` rung already paid for.
+### Added — `theta_max_row_scale_kappa`, an opt-in rescue for large models that stall from a feasible start (#476)
+
+- **No default behaviour changes.** The new option defaults to `0`, which is
+  upstream Ipopt's ceiling bit-for-bit.
+- The filter rejects outright any trial whose constraint violation exceeds
+  `theta_max = theta_max_fact · max(1, theta_0)` (Eqn. (21)). That `1` is
+  dimensionally wrong for POUNCE, because `theta` is a **1-norm over
+  constraint rows** — a *sum* of `m` residuals — so a fixed ceiling means a
+  mean per-row violation of `theta_max/m`, which shrinks as the model grows.
+  On a model started at a **feasible** point (`theta_0 = 0`) the `max`
+  collapses entirely and the ceiling becomes the bare constant `1e4` no matter
+  how many rows there are.
+- `robot_a` (Vanderbei, `m = 52013`) starts feasible, so `theta_max` locked at
+  `1e4` — a mean per-row allowance of `0.19` — while the route to the optimum
+  passes through `theta ≈ 9.4e7`. Every step toward the solution was refused at
+  the gate and the solve ground to `max_iter` at objective `8.173304`.
+- Setting `theta_max_row_scale_kappa = 1` floors the reference at the row
+  count, so the ceiling means a mean per-row violation of `theta_max_fact`
+  independent of `m`. Measured against Ipopt 3.14 on the same machine:
+
+  | model | POUNCE default | POUNCE `kappa = 1` | Ipopt (default) |
+  |---|---|---|---|
+  | `robot_a` | `Maximum_CpuTime_Exceeded`, 8.173304 | **Optimal, 1.0431952061, 112 it** | `Maximum_Iterations_Exceeded`, 8.173304 |
+  | `robot_b` | `Maximum_CpuTime_Exceeded`, 15.484684 | **Optimal, 2.3330990188, 252 it** | `Maximum_Iterations_Exceeded`, 15.484684 |
+  | `robot_c` | `Maximum_CpuTime_Exceeded`, 29.039906 | **Optimal, 1.4059755771, 109 it** | `Maximum_Iterations_Exceeded`, 29.039906 |
+
+  Ipopt is affected identically and needs `theta_max_fact = 1e8` set by hand to
+  solve any of the three.
+- **Why it is not the default.** Raising the ceiling relaxes a
+  global-convergence safeguard, and a model that was not blocked by it can
+  wander instead: on the Vanderbei corpus `brainpc1/3/5/7` (`m = 6900`,
+  `theta_0 = 1e-2`) regress, `brainpc1` from `Optimal` in 64 iterations to
+  divergent (objective `3.7e3` against `4.4e-04`). A kappa scan showed the
+  damage is a **step function, not a gradient** — `brainpc3` and `brainpc7`
+  land on the identical worse answer at every kappa in `{0.01, 0.05, 0.2,
+  1.0}`, while `robot_a` improves monotonically (287 → 153 → 127 → 112
+  iterations) — so no single multiplier separates the two families. A *static*
+  floor cannot: the question is whether a model's route to the optimum needs
+  the headroom, which the row count does not answer. Raising the ceiling
+  adaptively, only when trials are demonstrably being rejected at the
+  `theta_max` gate, is tracked as follow-up work on #476.
+- Upstream papers over the one instance of this it noticed by hard-coding
+  `resto.theta_max_fact = 1e8` for the restoration sub-IPM
+  (`IpRestoMinC_1Nrm.cpp:91`) — the same degeneracy, since the resto NLP is
+  also initialised feasible. That sub-IPM runs with `kappa = 0` regardless of
+  this option, so it stays bit-for-bit upstream.
 
 ### Fixed — the acceptable-level streak had no progress test, so it stopped solves that were still descending (#533)
 

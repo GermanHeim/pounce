@@ -594,6 +594,14 @@ impl BacktrackingLineSearch {
             self.start_watchdog(data, cq, delta);
         }
 
+        // Tell the acceptor how many constraint rows back `theta`'s
+        // 1-norm, so its `theta_max` reference can be floored in
+        // per-row rather than absolute units. Guarded inside the
+        // acceptor to be a no-op once `theta_max` has locked, so this
+        // only ever takes effect on the first line search of a solve.
+        self.acceptor
+            .set_theta_rows(cq.borrow().constraint_violation_rows() as Number);
+
         // Per-outer-iteration acceptor hook.
         self.acceptor.init_this_line_search(data, cq, delta);
 

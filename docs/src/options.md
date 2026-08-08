@@ -360,6 +360,119 @@ Set `acceptable_progress_kappa = 0` to switch the progress test off and
 restore upstream Ipopt's bare consecutive-count criterion. Widening
 `acceptable_tol` widens the flat bar with it, so asking for a looser band
 still gets you the early exit.
+## Big models that start feasible and `theta_max_row_scale_kappa`
+
+*Default `0` — off. This is an opt-in rescue, not a behaviour change; a
+stock POUNCE reproduces upstream Ipopt's ceiling exactly.*
+
+The filter has a hard ceiling. Any trial iterate whose constraint
+violation `θ` exceeds
+
+```
+theta_max = theta_max_fact · max(1, θ₀)
+```
+
+is rejected outright, before any of the filter's usual tests run. It is a
+global-convergence safeguard: it keeps the line search from wandering
+arbitrarily far from feasibility.
+
+The trouble is the `1`. POUNCE's `θ` is a **1-norm over constraint rows** —
+`‖c‖₁ + ‖d − s‖₁`, a *sum* of `m` residuals — so a ceiling of `T` really
+says "a mean per-row violation of `T/m`", and that allowance shrinks as the
+model grows. And on a problem started at a **feasible** point, `θ₀ = 0`,
+the `max` collapses and the ceiling is the bare constant `theta_max_fact`
+however large the model is.
+
+`robot_a` is the measured case: 52 013 constraint rows, a feasible start,
+so `theta_max` locked at `1e4` — a mean per-row allowance of `0.19` — while
+the route to the optimum passes through `θ ≈ 9.4e7`. Every step toward the
+solution was refused at the gate, and the solve ground to its iteration
+limit at objective `8.173304` instead of the true `1.0431952`.
+
+Setting `theta_max_row_scale_kappa = 1` floors the reference at the row
+count instead:
+
+```
+theta_max = theta_max_fact · max(θ₀, theta_max_row_scale_kappa · rows, 1)
+```
+
+so the ceiling means a mean per-row violation of `theta_max_fact`
+regardless of `m`. Measured under defaults otherwise, against Ipopt 3.14
+on the same machine:
+
+| model | POUNCE default | POUNCE `kappa = 1` | Ipopt (default) |
+|---|---|---|---|
+| `robot_a` | `Maximum_CpuTime_Exceeded`, 8.173304 | **Optimal, 1.0431952, 112 it** | `Maximum_Iterations_Exceeded`, 8.173304 |
+| `robot_b` | `Maximum_CpuTime_Exceeded`, 15.484684 | **Optimal, 2.3330990, 252 it** | `Maximum_Iterations_Exceeded`, 15.484684 |
+| `robot_c` | `Maximum_CpuTime_Exceeded`, 29.039906 | **Optimal, 1.4059756, 109 it** | `Maximum_Iterations_Exceeded`, 29.039906 |
+
+Ipopt has the same defect and no correction for it; all three solve under
+`theta_max_fact = 1e8` set by hand, which is the blunt version of the same
+move.
+
+### When to reach for it
+
+Symptoms, all three together:
+
+* a **large** number of constraint rows (thousands upward);
+* a **feasible or near-feasible starting point** — the iteration log's
+  first `inf_pr` is `0` or very small;
+* the solve stalls with `inf_pr` flat and `alpha_pr` tiny, and raising
+  `max_iter` does not help.
+
+The quick confirmation is to set `theta_max_fact = 1e8` by hand. If that
+unsticks the model, `theta_max_row_scale_kappa = 1` is the principled
+version of it — it scales the ceiling to the model rather than to a
+constant you picked.
+
+### Why it is off by default
+
+Because raising the ceiling is not free. It relaxes a global-convergence
+safeguard, and a model that was **not** being blocked by it can wander
+instead. On the Vanderbei corpus, `brainpc1/3/5/7` (`m = 6900`,
+`θ₀ = 1e-2`) all regress — `brainpc1` from `Optimal` in 64 iterations to
+divergent, objective `3.7e3` against the correct `4.4e-04`.
+
+A scan over `kappa` showed why this cannot be tuned away. The damage is a
+**step function, not a gradient**:
+
+| kappa | `robot_a` | `brainpc1` | `brainpc3` | `brainpc7` |
+|---|---|---|---|---|
+| **0** (default) | max time, 616 it | **Optimal, 64 it** | **Optimal, 43 it** | **Optimal, 43 it** |
+| 0.01 | Optimal, 287 it | max time, 3.8e8 | Acceptable, 149 it | Acceptable, 552 it |
+| 0.05 | Optimal, 153 it | max time | Acceptable, 149 it | Acceptable, 552 it |
+| 0.2 | Optimal, 127 it | max time | Acceptable, 149 it | Acceptable, 552 it |
+| 1.0 | Optimal, 112 it | max time | Acceptable, 149 it | Acceptable, 552 it |
+
+`brainpc3` and `brainpc7` land on the *identical* worse answer at every
+nonzero `kappa`, even `0.01` — where the ceiling moves only from `1e4` to
+`6.9e5`. The instant it rises at all, they break. `robot_a` meanwhile
+improves monotonically all the way to `kappa = 1`. There is no separating
+value.
+
+That is a verdict on the *design*, not on the tuning: the real question is
+whether a model's route to the optimum **needs** the extra headroom, and
+the row count does not answer it. A static floor cannot know. The
+follow-up (pounce#476) is to raise the ceiling adaptively — only when
+trials are demonstrably being rejected by the `theta_max` gate itself —
+which would never fire on `brainpc`.
+
+What still bounds the option when you do turn it on:
+
+* **It only ever raises the reference.** A model whose own `θ₀` already
+  exceeds `kappa · rows` gets exactly upstream's ceiling.
+* **It reduces to upstream on a single-row problem**, where the floor is
+  `max(kappa · 1, 1) = 1` — upstream's constant.
+* **`theta_max` is still finite**, and still fixed for the whole solve
+  after its first line search. This rescales the safeguard; it does not
+  remove it.
+* **The restoration sub-IPM is untouched**, at any `kappa`. Upstream
+  already fixes its own instance of this by hard-coding
+  `resto.theta_max_fact = 1e8` (`IpRestoMinC_1Nrm.cpp:91`) — the resto NLP
+  is also initialised feasible, so it hit the same degeneracy. Stacking
+  the row floor on top would push that inner ceiling to `1e8 · m`, i.e.
+  remove it, so the sub-IPM always runs with `kappa = 0`.
+
 ## Large gradients and `dual_inf_scale_kappa`
 
 The dual side of the same story. `dual_inf_tol` (default `1.0`) is a bare

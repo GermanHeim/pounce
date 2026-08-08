@@ -77,6 +77,51 @@ pub struct FilterLsAcceptor {
     /// Newton step from a poorly-scaled iterate landing far outside
     /// the feasible basin).
     theta_max: Option<Number>,
+    /// `theta_max_row_scale_kappa` — multiplier on the row count used as
+    /// the floor of the `theta_max` reference. **Opt-in: default `0`,
+    /// which is upstream's bare `1.0` floor bit-for-bit.**
+    ///
+    /// Upstream locks `theta_max = theta_max_fact * max(1, theta_0)`.
+    /// That `1` is dimensionally wrong for POUNCE, because `theta` is a
+    /// **1-norm over constraint rows** (`ipopt_cq.rs`
+    /// `curr_constraint_violation` = `c.asum() + dms.asum()`), so it
+    /// grows with `m` while the floor does not. On a model with a
+    /// feasible starting point (`theta_0 = 0`, so the `max` collapses to
+    /// the floor) and large `m`, the ceiling becomes the bare constant
+    /// `1e4` no matter how many rows are being summed — on `robot_a`
+    /// (`m = 52013`) that is a mean per-row residual of just `0.19`, and
+    /// the route to the optimum passes through `theta ~ 9.4e7`, so the
+    /// solve can never get there at any iteration budget.
+    ///
+    /// The fix is to floor the reference at `kappa * rows` instead of at
+    /// `1`, which keeps the ceiling's meaning ("a mean per-row violation
+    /// of `theta_max_fact`") fixed as `m` varies. Upstream needs the
+    /// same correction and does not have it; it papers over the one case
+    /// it hit by hard-coding `resto.theta_max_fact = 1e8` for the
+    /// restoration sub-IPM (`IpRestoMinC_1Nrm.cpp:91`), whose slack init
+    /// produces exactly this `theta_0 ~ 0` degeneracy.
+    ///
+    /// **Why this is not on by default.** Raising the ceiling is not
+    /// free: it relaxes a global-convergence safeguard, and a model that
+    /// was not being blocked by it can wander instead. Measured on the
+    /// Vanderbei corpus, `brainpc1/3/5/7` (`m = 6900`, `theta_0 = 1e-2`)
+    /// regress — `brainpc1` from `Optimal` in 64 iterations to divergent
+    /// (objective `3.7e3` against `4.4e-04`). A kappa scan showed the
+    /// damage is a **step function, not a gradient**: `brainpc3` and
+    /// `brainpc7` land on the identical worse answer at every kappa in
+    /// `{0.01, 0.05, 0.2, 1.0}`, while `robot_a` improves monotonically
+    /// (287 → 153 → 127 → 112 iterations). So no single multiplier
+    /// separates the two families, and a *static* floor cannot: the real
+    /// question is whether a model's route to the optimum needs the
+    /// headroom, which the row count does not answer. Until an adaptive
+    /// rule exists (pounce#476), this stays a documented opt-in for
+    /// large models that stall from a feasible start.
+    pub theta_max_row_scale_kappa: Number,
+    /// Number of constraint rows backing `theta`'s 1-norm, i.e. `dim(c)
+    /// + dim(d - s)`. Set once per solve by the line search from the
+    /// calculated quantities; `1.0` until then, which reproduces the
+    /// upstream floor.
+    theta_rows: Number,
     /// Maximum number of filter resets allowed per solve (upstream
     /// option `max_filter_resets`, default 5). Set to `0` to disable
     /// the heuristic entirely.
@@ -120,6 +165,8 @@ impl Default for FilterLsAcceptor {
             alpha_min_frac: 0.05,
             theta_min: None,
             theta_max: None,
+            theta_max_row_scale_kappa: 0.0,
+            theta_rows: 1.0,
             max_filter_resets: 5,
             filter_reset_trigger: 5,
             n_filter_resets: 0,
@@ -275,7 +322,7 @@ impl FilterLsAcceptor {
             .unwrap_or_else(|| self.theta_min_fact * theta.max(1.0));
         let theta_max = self
             .theta_max
-            .unwrap_or_else(|| self.theta_max_fact * theta.max(1.0));
+            .unwrap_or_else(|| self.theta_max_fact * theta.max(self.theta_max_reference_floor()));
 
         // `IpFilterLSAcceptor.cpp:341-348`: any trial iterate above
         // `theta_max` is rejected outright. Without this guard the
@@ -383,13 +430,29 @@ impl FilterLsAcceptor {
             .get_or_insert_with(|| self.theta_min_fact * reference_theta.max(1.0))
     }
 
+    /// Floor for the `theta_max` reference. Upstream
+    /// (`IpFilterLSAcceptor.cpp:325-331`) uses the bare constant `1.0`;
+    /// we use `max(1, kappa * rows)` so the ceiling keeps its meaning as
+    /// `m` varies — see [`Self::theta_max_row_scale_kappa`]. With
+    /// `kappa = 0`, or before the row count is known, this is exactly
+    /// upstream's `1.0`.
+    fn theta_max_reference_floor(&self) -> Number {
+        if self.theta_max_row_scale_kappa <= 0.0 {
+            return 1.0;
+        }
+        (self.theta_max_row_scale_kappa * self.theta_rows).max(1.0)
+    }
+
     /// Lazy initialiser for `theta_max_` matching upstream
-    /// `IpFilterLSAcceptor.cpp:325-331`: locked once on first
-    /// encounter to `theta_max_fact * max(1, reference_theta)`.
+    /// `IpFilterLSAcceptor.cpp:325-331`, with the row-scaled floor:
+    /// locked once on first encounter to
+    /// `theta_max_fact * max(floor, reference_theta)`.
     fn ensure_theta_max(&mut self, reference_theta: Number) -> Number {
+        let floor = self.theta_max_reference_floor();
+        let fact = self.theta_max_fact;
         *self
             .theta_max
-            .get_or_insert_with(|| self.theta_max_fact * reference_theta.max(1.0))
+            .get_or_insert_with(|| fact * reference_theta.max(floor))
     }
 }
 
@@ -519,11 +582,160 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         self.theta_max_fact = theta_max_fact;
         self.theta_max = None;
     }
+
+    fn set_theta_rows(&mut self, rows: Number) {
+        // Only meaningful before `theta_max` locks; once locked, leave it
+        // alone so the ceiling stays fixed for the rest of the solve as
+        // upstream requires.
+        if self.theta_max.is_none() && rows.is_finite() && rows >= 1.0 {
+            self.theta_rows = rows;
+        }
+    }
+
+    fn set_theta_max_row_scale_kappa(&mut self, kappa: Number) {
+        self.theta_max_row_scale_kappa = kappa;
+        self.theta_max = None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#476: **the row floor is opt-in.** Its default is `0`, so a
+    /// stock POUNCE reproduces upstream's `theta_max` exactly on every
+    /// model — no row count, no size dependence. This is the invariant
+    /// the corpus evidence demanded: at every nonzero kappa tried
+    /// (`0.01 … 1.0`) `brainpc1/3/5/7` regressed identically, so the
+    /// floor cannot be a default until it is gated on something better
+    /// than the row count. If this test fails, a default change has been
+    /// made and it needs a full-corpus sweep behind it.
+    #[test]
+    fn the_row_floor_is_off_by_default() {
+        let a = FilterLsAcceptor::new();
+        assert_eq!(a.theta_max_row_scale_kappa, 0.0);
+
+        // ...and off means off: the floor is upstream's bare `1.0` even
+        // once a large row count has been reported.
+        let mut a = FilterLsAcceptor::new();
+        a.set_theta_rows(52_013.0);
+        assert_eq!(a.theta_max_reference_floor(), 1.0);
+        assert_eq!(a.ensure_theta_max(0.0), 1e4);
+    }
+
+    /// gh#476: the degeneracy the row floor exists to fix. `theta` is a
+    /// 1-norm over constraint rows, so a model started at a FEASIBLE
+    /// point (`theta_0 = 0`) collapses upstream's `max(1, theta_0)` to
+    /// the bare constant `1` and locks `theta_max = theta_max_fact`
+    /// regardless of how many rows there are. On `robot_a`
+    /// (`m = 52013`) that is a mean per-row allowance of `1e4/52013 =
+    /// 0.19`, while the path to the optimum passes through
+    /// `theta ~ 9.4e7` — so every step toward the solution is refused
+    /// at the gate and the solve grinds to `max_iter`.
+    #[test]
+    fn feasible_start_on_a_large_model_does_not_collapse_theta_max() {
+        let rows = 52_013.0; // robot_a
+        let theta_zero = 0.0; // starts feasible
+
+        // Upstream's floor: the row count is invisible, so the ceiling is
+        // the bare `theta_max_fact` and the converged path is unreachable.
+        let mut upstream = FilterLsAcceptor::new();
+        upstream.theta_max_row_scale_kappa = 0.0;
+        upstream.set_theta_rows(rows);
+        let upstream_max = upstream.ensure_theta_max(theta_zero);
+        assert_eq!(upstream_max, 1e4);
+        assert!(
+            9.4e7 > upstream_max,
+            "the trial theta on robot_a's route to the optimum must be \
+             above the upstream ceiling — otherwise this test pins nothing",
+        );
+
+        // With the row floor opted into, the ceiling scales with the
+        // model and the same route is admissible.
+        let mut scaled = FilterLsAcceptor::new();
+        scaled.theta_max_row_scale_kappa = 1.0;
+        scaled.set_theta_rows(rows);
+        let scaled_max = scaled.ensure_theta_max(theta_zero);
+        assert_eq!(scaled_max, 1e4 * rows);
+        assert!(9.4e7 < scaled_max);
+    }
+
+    /// The floor keeps the ceiling's *meaning* — "a mean per-row
+    /// violation of `theta_max_fact`" — invariant in `m`, which is the
+    /// whole justification for scaling by the row count rather than by
+    /// some other quantity.
+    #[test]
+    fn row_floor_holds_the_per_row_allowance_constant_across_model_sizes() {
+        for rows in [1.0, 10.0, 5_000.0, 52_013.0, 1e6] {
+            let mut a = FilterLsAcceptor::new();
+            a.theta_max_row_scale_kappa = 1.0;
+            a.set_theta_rows(rows);
+            let per_row = a.ensure_theta_max(0.0) / rows;
+            assert!(
+                (per_row - a.theta_max_fact).abs() < 1e-9 * a.theta_max_fact,
+                "per-row allowance drifted at rows = {rows}: {per_row}",
+            );
+        }
+    }
+
+    /// The floor only ever *raises* the reference: a model whose own
+    /// `theta_0` already exceeds `kappa * rows` is untouched, so the
+    /// change cannot tighten the filter on any problem.
+    #[test]
+    fn row_floor_never_lowers_the_reference() {
+        let rows = 100.0;
+        let big_theta_zero = 1e6; // >> kappa * rows
+        let mut a = FilterLsAcceptor::new();
+        a.theta_max_row_scale_kappa = 1.0;
+        a.set_theta_rows(rows);
+        assert_eq!(a.ensure_theta_max(big_theta_zero), 1e4 * big_theta_zero);
+
+        // ...and that matches what upstream would have locked, exactly.
+        let mut upstream = FilterLsAcceptor::new();
+        upstream.theta_max_row_scale_kappa = 0.0;
+        assert_eq!(
+            upstream.ensure_theta_max(big_theta_zero),
+            a.ensure_theta_max(big_theta_zero),
+        );
+    }
+
+    /// A single-row problem reduces to upstream exactly, for any
+    /// `theta_0` — the floor is `max(kappa * 1, 1) = 1`, which is
+    /// upstream's constant.
+    #[test]
+    fn single_row_problem_is_bit_for_bit_upstream() {
+        for theta_zero in [0.0, 1e-12, 0.5, 1.0, 7.25, 1e9] {
+            let mut a = FilterLsAcceptor::new();
+            a.theta_max_row_scale_kappa = 1.0;
+            a.set_theta_rows(1.0);
+            let mut upstream = FilterLsAcceptor::new();
+            upstream.theta_max_row_scale_kappa = 0.0;
+            assert_eq!(
+                a.ensure_theta_max(theta_zero),
+                upstream.ensure_theta_max(theta_zero),
+                "diverged from upstream at theta_0 = {theta_zero}",
+            );
+        }
+    }
+
+    /// `theta_max` locks once per solve. A later row count — the resto
+    /// sub-IPM's, say, or a second line search — must not move a
+    /// ceiling the filter has already been judging trials against.
+    #[test]
+    fn theta_rows_is_ignored_once_theta_max_has_locked() {
+        let mut a = FilterLsAcceptor::new();
+        a.theta_max_row_scale_kappa = 1.0;
+        a.set_theta_rows(10.0);
+        let locked = a.ensure_theta_max(0.0);
+        assert_eq!(locked, 1e4 * 10.0);
+
+        a.set_theta_rows(52_013.0);
+        assert_eq!(
+            a.ensure_theta_max(0.0),
+            locked,
+            "a locked theta_max moved under a later row count",
+        );
+    }
 
     #[test]
     fn switching_condition_requires_descent() {

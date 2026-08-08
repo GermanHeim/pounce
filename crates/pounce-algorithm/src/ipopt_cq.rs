@@ -1680,6 +1680,19 @@ impl IpoptCalculatedQuantities {
         c.asum() + dms.asum()
     }
 
+    /// Number of constraint rows backing the 1-norm above, i.e.
+    /// `dim(c) + dim(d - s)`. Upstream never needs this because it
+    /// treats `theta` as a bare scalar, but any threshold expressed in
+    /// `theta` units is a *sum* over this many rows — a `theta` of `T`
+    /// is a mean per-row residual of `T / rows`. The filter acceptor
+    /// uses it to floor the `theta_max` reference so the ceiling means
+    /// the same thing on a 10-row and a 50 000-row model.
+    pub fn constraint_violation_rows(&self) -> usize {
+        let c = self.curr_c();
+        let dms = self.curr_d_minus_s();
+        (c.dim() as usize) + (dms.dim() as usize)
+    }
+
     pub fn trial_constraint_violation(&self) -> Number {
         let c = self.trial_c();
         let dms = self.trial_d_minus_s();

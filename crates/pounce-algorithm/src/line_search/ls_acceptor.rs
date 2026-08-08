@@ -141,4 +141,22 @@ pub trait BacktrackingLsAcceptor {
     /// gate before reaching f-type/Armijo dispatch. Default: no-op for
     /// non-filter acceptors.
     fn set_theta_max_fact(&mut self, _theta_max_fact: Number) {}
+
+    /// Tell the acceptor how many constraint rows back `theta`'s 1-norm
+    /// (`dim(c) + dim(d - s)`). The filter acceptor floors its
+    /// `theta_max` reference at `theta_max_row_scale_kappa * rows` so
+    /// the ceiling does not degenerate to the bare constant `1e4` on a
+    /// large-`m` model with a feasible starting point. Called once per
+    /// solve, before the first `theta_max` lock. Default: no-op.
+    fn set_theta_rows(&mut self, _rows: Number) {}
+
+    /// Override the filter acceptor's `theta_max_row_scale_kappa`.
+    /// Used by the resto sub-IPM wiring to set it to `0`, i.e. to opt
+    /// the inner IPM out of the row-count floor: upstream already
+    /// covers the resto phase's version of the same degeneracy with
+    /// its hard-coded `theta_max_fact = 1e8`
+    /// (`IpRestoMinC_1Nrm.cpp:91`), and stacking the row floor on top
+    /// of that would push the inner ceiling to `1e8 · m` — effectively
+    /// removing it. Default: no-op for non-filter acceptors.
+    fn set_theta_max_row_scale_kappa(&mut self, _kappa: Number) {}
 }

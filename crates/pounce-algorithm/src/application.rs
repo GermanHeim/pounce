@@ -3235,6 +3235,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("theta_min_fact") {
             builder.line_search.theta_min_fact = v;
         }
+        if let Some(v) = read_num("theta_max_row_scale_kappa") {
+            builder.line_search.theta_max_row_scale_kappa = v;
+        }
         if let Some(v) = read_num("theta_max_fact") {
             builder.line_search.theta_max_fact = v;
         }
