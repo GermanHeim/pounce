@@ -159,4 +159,13 @@ pub trait BacktrackingLsAcceptor {
     /// of that would push the inner ceiling to `1e8 · m` — effectively
     /// removing it. Default: no-op for non-filter acceptors.
     fn set_theta_max_row_scale_kappa(&mut self, _kappa: Number) {}
+
+    /// Override the filter acceptor's `theta_max_adaptive_trigger`.
+    /// Used by the resto sub-IPM wiring to set it to `0` for the same
+    /// reason as [`Self::set_theta_max_row_scale_kappa`]: the inner IPM
+    /// already runs at `theta_max_fact = 1e8`, which is upstream's own
+    /// hard-coded version of this rescue, so letting the adaptive rule
+    /// ratchet on top of that would raise an already-enormous ceiling
+    /// further. Default: no-op for non-filter acceptors.
+    fn set_theta_max_adaptive_trigger(&mut self, _trigger: u32) {}
 }

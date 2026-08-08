@@ -360,10 +360,7 @@ Set `acceptable_progress_kappa = 0` to switch the progress test off and
 restore upstream Ipopt's bare consecutive-count criterion. Widening
 `acceptable_tol` widens the flat bar with it, so asking for a looser band
 still gets you the early exit.
-## Big models that start feasible and `theta_max_row_scale_kappa`
-
-*Default `0` — off. This is an opt-in rescue, not a behaviour change; a
-stock POUNCE reproduces upstream Ipopt's ceiling exactly.*
+## Big models that start feasible and the `theta_max` ceiling
 
 The filter has a hard ceiling. Any trial iterate whose constraint
 violation `θ` exceeds
@@ -389,8 +386,10 @@ the route to the optimum passes through `θ ≈ 9.4e7`. Every step toward the
 solution was refused at the gate, and the solve ground to its iteration
 limit at objective `8.173304` instead of the true `1.0431952`.
 
-Setting `theta_max_row_scale_kappa = 1` floors the reference at the row
-count instead:
+POUNCE's answer is `theta_max_adaptive_trigger` (default `3`), described
+below. `theta_max_row_scale_kappa` (default `0`, off) is an earlier,
+static attempt at the same problem, kept because it is occasionally the
+more direct lever; it floors the reference at the row count instead:
 
 ```
 theta_max = theta_max_fact · max(θ₀, theta_max_row_scale_kappa · rows, 1)
@@ -410,7 +409,80 @@ Ipopt has the same defect and no correction for it; all three solve under
 `theta_max_fact = 1e8` set by hand, which is the blunt version of the same
 move.
 
-### When to reach for it
+### The adaptive rule: `theta_max_adaptive_trigger`
+
+**On by default.** Rather than guessing from problem size whether a model
+needs headroom, POUNCE measures whether the ceiling is what is refusing
+the line search, and raises it only then.
+
+A trial refused because `θ_trial > theta_max` takes a distinct early exit,
+before the filter and Armijo tests run at all. So the acceptor can count
+those refusals and compare them against the number of trials attempted.
+When **every** trial of a line search was refused at the gate, for
+`theta_max_adaptive_trigger` **consecutive** line searches, the ceiling is
+demonstrably the binding constraint — not the filter — and it is
+multiplied by `theta_max_adaptive_factor` (default `100`), at most
+`theta_max_adaptive_max_raises` times per solve (default `4`).
+
+| option | default | meaning |
+|---|---|---|
+| `theta_max_adaptive_trigger` | `3` | consecutive fully gate-refused line searches before a raise; `0` disables |
+| `theta_max_adaptive_factor` | `100` | geometric factor per raise |
+| `theta_max_adaptive_max_raises` | `4` | cap on raises per solve |
+
+Three properties follow, and they are what the static floor could not
+offer:
+
+* **A converging model cannot trip it.** Converging means trials are
+  getting past the gate; a model accepting steps never accumulates the
+  streak. `brainpc1/3/5/7` — the family the static floor damaged at every
+  `kappa` — are untouched *by construction*, not by a lucky constant.
+* **A blocked model trips it immediately.** `robot_a` is refused at the
+  gate from its first line search onward.
+* **The ceiling stays finite.** Wächter–Biegler's global-convergence
+  argument (Thm. 2) needs `theta_max` finite, not fixed. A bounded number
+  of bounded raises keeps it finite, so a solve cannot ratchet the
+  safeguard away one line search at a time.
+
+Requiring a streak rather than a single line search is deliberate: one
+Newton direction that overshoots into a huge `θ` can legitimately have
+all its trials refused, and backtracking is the right response to that.
+Only a model that cannot get past the gate *repeatedly* is one whose route
+needs the headroom.
+
+Measured, defaults otherwise:
+
+| model | rule off (`trigger = 0`) | rule on (default) |
+|---|---|---|
+| `robot_a` | `Maximum_Iterations_Exceeded`, 14.23 | **Optimal, 1.0432009, 190 it** |
+| `robot_b` | max time, 15.484684 | **Optimal, 2.3330990, 269 it** |
+| `robot_c` | max time, 29.039906 | **Optimal, 1.4059756, 222 it** |
+| `brainpc1` | Optimal, 64 it | Optimal, 64 it — *identical* |
+| `brainpc3` | Optimal, 43 it | Optimal, 43 it — *identical* |
+| `brainpc5` | Optimal, 982 it | Optimal, 982 it — *identical* |
+| `brainpc7` | Optimal, 43 it | Optimal, 43 it — *identical* |
+| `bt4` | Optimal, 9 it, −3.7047681836394486 | *identical* |
+
+Across the whole Vanderbei corpus (733 problems) the rule changes four
+outcomes: `britgas` goes from its iteration limit to `Optimal` in 16
+iterations, `catenary` solves to the same objective in 50 iterations
+instead of 56, and `coshfun` and `brainpc0` fail either way — `coshfun`
+now reporting diverging iterates, which is what Ipopt 3.14 also does on
+it. Net `Optimal` count 702 → 703.
+
+Note `brainpc0` *does* trip the rule while `brainpc1/3/5/7` do not,
+despite identical row counts. That is precisely the distinction a
+size-based floor cannot draw.
+
+The restoration sub-IPM always runs with the rule disabled. Upstream
+already corrects the resto phase's instance of this degeneracy by
+hard-coding `resto.theta_max_fact = 1e8` (`IpRestoMinC_1Nrm.cpp:91`), so a
+rule that ratchets further would be compounding a correction already made.
+
+Set `theta_max_adaptive_trigger = 0` to restore upstream Ipopt's fixed
+ceiling exactly.
+
+### When to reach for the static floor instead
 
 Symptoms, all three together:
 
@@ -425,9 +497,9 @@ unsticks the model, `theta_max_row_scale_kappa = 1` is the principled
 version of it — it scales the ceiling to the model rather than to a
 constant you picked.
 
-### Why it is off by default
+### Why the static floor is off by default
 
-Because raising the ceiling is not free. It relaxes a global-convergence
+Because raising the ceiling unconditionally is not free. It relaxes a global-convergence
 safeguard, and a model that was **not** being blocked by it can wander
 instead. On the Vanderbei corpus, `brainpc1/3/5/7` (`m = 6900`,
 `θ₀ = 1e-2`) all regress — `brainpc1` from `Optimal` in 64 iterations to
@@ -452,10 +524,9 @@ value.
 
 That is a verdict on the *design*, not on the tuning: the real question is
 whether a model's route to the optimum **needs** the extra headroom, and
-the row count does not answer it. A static floor cannot know. The
-follow-up (pounce#476) is to raise the ceiling adaptively — only when
-trials are demonstrably being rejected by the `theta_max` gate itself —
-which would never fire on `brainpc`.
+the row count does not answer it. A static floor cannot know — which is
+why the adaptive rule above, which asks the question directly, is the
+default and this one is not.
 
 What still bounds the option when you do turn it on:
 

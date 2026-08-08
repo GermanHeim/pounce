@@ -122,6 +122,68 @@ pub struct FilterLsAcceptor {
     /// calculated quantities; `1.0` until then, which reproduces the
     /// upstream floor.
     theta_rows: Number,
+    /// `theta_max_adaptive_trigger` — number of *consecutive* line
+    /// searches in which **every** trial was rejected at the Eqn.-21
+    /// `theta_max` gate before the ceiling is raised. `0` disables the
+    /// rule, leaving `theta_max` locked exactly as upstream locks it.
+    ///
+    /// This is the adaptive answer to the problem
+    /// [`Self::theta_max_row_scale_kappa`] documents and cannot solve
+    /// (pounce#476, #546). The static floor asks "does this model have
+    /// many rows?", which is a *proxy* for needing headroom, and the
+    /// kappa scan showed it is the wrong proxy: `robot_a` needs the
+    /// headroom and `brainpc1/3/5/7` are damaged by it, at every kappa,
+    /// with no separating value. The question that actually decides it
+    /// is whether the model's route to the optimum passes *through* a
+    /// `theta` above the ceiling — which is directly observable. A trial
+    /// rejected because `theta_trial > theta_max` takes a distinct early
+    /// return in [`Self::check_acceptability`], so counting those and
+    /// comparing against the number of trials attempted says whether the
+    /// gate, rather than the filter or the Armijo test, is what refused
+    /// the line search.
+    ///
+    /// The rule only fires when the gate refused **all** of a line
+    /// search's trials, for this many consecutive line searches. That
+    /// makes the failure mode it targets — every step toward the
+    /// solution refused at the gate, backtracking to `alpha_min`, hand
+    /// off to restoration, repeat — the only thing it responds to.
+    /// `brainpc` never trips it, because `brainpc` is not being refused
+    /// at the gate; it converges at the upstream ceiling and is only
+    /// hurt when the ceiling is loosened. That model family is therefore
+    /// bit-for-bit upstream **by construction** rather than by choosing
+    /// a lucky constant, which is the property the static floor could
+    /// not have.
+    ///
+    /// Requiring a *streak* rather than a single line search is
+    /// deliberate: one Newton direction that overshoots into a huge
+    /// `theta` can legitimately have all of its trials refused, and
+    /// backtracking is the correct response to that. Only a model that
+    /// cannot get past the gate repeatedly is one whose route needs the
+    /// headroom.
+    pub theta_max_adaptive_trigger: u32,
+    /// Factor by which `theta_max` is multiplied each time the adaptive
+    /// rule fires. The ladder is geometric so that a model needing many
+    /// orders of headroom reaches it in a few raises without any single
+    /// raise being large enough to discard the safeguard outright.
+    pub theta_max_adaptive_factor: Number,
+    /// Hard cap on how many times `theta_max` may be raised in one
+    /// solve. Wächter–Biegler's global-convergence argument (Thm. 2)
+    /// needs `theta_max` to be *finite*, not fixed; a bounded number of
+    /// bounded increases keeps it finite, so the ceiling still exists
+    /// and the solve cannot ratchet it away one line search at a time.
+    pub theta_max_adaptive_max_raises: u32,
+    /// Trials seen in the line search currently in progress.
+    trials_this_ls: u32,
+    /// How many of [`Self::trials_this_ls`] were refused at the
+    /// `theta_max` gate specifically.
+    theta_max_gate_rejections_this_ls: u32,
+    /// Consecutive completed line searches in which every trial was
+    /// refused at the gate. Reset by any line search that was not
+    /// entirely gate-refused.
+    gate_blocked_ls_streak: u32,
+    /// Raises used so far this solve, against
+    /// [`Self::theta_max_adaptive_max_raises`].
+    n_theta_max_raises: u32,
     /// Maximum number of filter resets allowed per solve (upstream
     /// option `max_filter_resets`, default 5). Set to `0` to disable
     /// the heuristic entirely.
@@ -167,6 +229,13 @@ impl Default for FilterLsAcceptor {
             theta_max: None,
             theta_max_row_scale_kappa: 0.0,
             theta_rows: 1.0,
+            theta_max_adaptive_trigger: 3,
+            theta_max_adaptive_factor: 100.0,
+            theta_max_adaptive_max_raises: 4,
+            trials_this_ls: 0,
+            theta_max_gate_rejections_this_ls: 0,
+            gate_blocked_ls_streak: 0,
+            n_theta_max_raises: 0,
             max_filter_resets: 5,
             filter_reset_trigger: 5,
             n_filter_resets: 0,
@@ -329,7 +398,15 @@ impl FilterLsAcceptor {
         // line search may accept a step that inflates constraint
         // violation by many orders of magnitude (POLAK6, ROSENMMX,
         // ACOPR14: theta jumps from 8 to 1e12 on iter 1).
+        // Adaptive-ceiling bookkeeping (pounce#546). Counted here, at
+        // the top, so that `trials_this_ls` is the number of trials the
+        // gate had the opportunity to refuse — the denominator the
+        // "every trial was refused at the gate" predicate needs.
+        self.trials_this_ls = self.trials_this_ls.saturating_add(1);
+
         if theta_trial > theta_max {
+            self.theta_max_gate_rejections_this_ls =
+                self.theta_max_gate_rejections_this_ls.saturating_add(1);
             self.last_rejection_due_to_filter = false;
             return AcceptDecision::Reject;
         }
@@ -454,6 +531,61 @@ impl FilterLsAcceptor {
             .theta_max
             .get_or_insert_with(|| fact * reference_theta.max(floor))
     }
+
+    /// Close the books on the line search that just finished and, if it
+    /// completes a long enough streak of gate-blocked line searches,
+    /// raise `theta_max` (pounce#546).
+    ///
+    /// Called from [`BacktrackingLsAcceptor::init_this_line_search`],
+    /// which the driver invokes once per outer iteration *before* the
+    /// α-loop — so on entry the counters describe the previous line
+    /// search, complete. A call with no trials recorded is a no-op,
+    /// which is what makes it safe against the driver reaching this
+    /// hook twice without an intervening α-loop.
+    fn end_of_line_search(&mut self) {
+        if self.trials_this_ls == 0 {
+            return;
+        }
+        // "Every trial refused at the gate" — not "some", because a line
+        // search that got past the gate and was then refused by the
+        // filter or the Armijo test is being refused by the safeguard
+        // that is supposed to refuse it.
+        let gate_blocked = self.theta_max_gate_rejections_this_ls == self.trials_this_ls;
+        self.trials_this_ls = 0;
+        self.theta_max_gate_rejections_this_ls = 0;
+
+        if !gate_blocked {
+            self.gate_blocked_ls_streak = 0;
+            return;
+        }
+        self.gate_blocked_ls_streak = self.gate_blocked_ls_streak.saturating_add(1);
+
+        if self.theta_max_adaptive_trigger == 0
+            || self.gate_blocked_ls_streak < self.theta_max_adaptive_trigger
+            || self.n_theta_max_raises >= self.theta_max_adaptive_max_raises
+            || self.theta_max_adaptive_factor <= 1.0
+        {
+            return;
+        }
+        // Nothing to raise until the ceiling has actually locked.
+        let Some(old) = self.theta_max else {
+            return;
+        };
+        let new = old * self.theta_max_adaptive_factor;
+        if !new.is_finite() {
+            return;
+        }
+        self.theta_max = Some(new);
+        self.n_theta_max_raises += 1;
+        self.gate_blocked_ls_streak = 0;
+        tracing::info!(target: "pounce::linesearch",
+            "theta_max raised {old:.3e} -> {new:.3e} (raise {} of {}): {} consecutive line searches \
+             had every trial rejected at the theta_max gate (pounce#546)",
+            self.n_theta_max_raises,
+            self.theta_max_adaptive_max_raises,
+            self.theta_max_adaptive_trigger,
+        );
+    }
 }
 
 impl BacktrackingLsAcceptor for FilterLsAcceptor {
@@ -466,6 +598,22 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         self.filter.clear();
         self.last_rejection_due_to_filter = false;
         self.count_successive_filter_rejections = 0;
+    }
+
+    /// Upstream's filter acceptor has nothing to cache per line search.
+    /// pounce uses the hook as the line-search *boundary*: it is called
+    /// once per outer iteration before the α-loop, so on entry the trial
+    /// counters describe the line search that just finished, complete.
+    /// That is what [`Self::end_of_line_search`] needs to decide whether
+    /// the `theta_max` gate — rather than the filter — is what refused
+    /// it (pounce#546).
+    fn init_this_line_search(
+        &mut self,
+        _data: &crate::ipopt_data::IpoptDataHandle,
+        _cq: &crate::ipopt_cq::IpoptCqHandle,
+        _delta: &crate::iterates_vector::IteratesVector,
+    ) {
+        self.end_of_line_search();
     }
 
     /// Port of `IpFilterLSAcceptor.cpp:CalculateAlphaMin` (lines
@@ -596,6 +744,10 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         self.theta_max_row_scale_kappa = kappa;
         self.theta_max = None;
     }
+
+    fn set_theta_max_adaptive_trigger(&mut self, trigger: u32) {
+        self.theta_max_adaptive_trigger = trigger;
+    }
 }
 
 #[cfg(test)]
@@ -621,6 +773,155 @@ mod tests {
         a.set_theta_rows(52_013.0);
         assert_eq!(a.theta_max_reference_floor(), 1.0);
         assert_eq!(a.ensure_theta_max(0.0), 1e4);
+    }
+
+    /// gh#546: the adaptive rule's whole claim is that it responds to
+    /// *evidence* rather than to problem size. Build a line search in
+    /// which every trial is refused at the `theta_max` gate, repeat it
+    /// for the trigger count, and the ceiling goes up.
+    #[test]
+    fn a_streak_of_gate_blocked_line_searches_raises_theta_max() {
+        let mut a = FilterLsAcceptor::new();
+        a.set_theta_rows(52_013.0);
+        let locked = a.ensure_theta_max(0.0);
+        assert_eq!(locked, 1e4, "upstream's collapsed ceiling");
+
+        // Two full line searches short of the trigger: still locked.
+        for _ in 0..(a.theta_max_adaptive_trigger - 1) {
+            gate_blocked_line_search(&mut a, locked);
+        }
+        assert_eq!(a.theta_max, Some(locked), "raised before the trigger");
+
+        gate_blocked_line_search(&mut a, locked);
+        assert_eq!(
+            a.theta_max,
+            Some(locked * a.theta_max_adaptive_factor),
+            "the trigger was reached and the ceiling did not move",
+        );
+        assert_eq!(a.n_theta_max_raises, 1);
+    }
+
+    /// The property the static row floor could not have: a model that is
+    /// *converging* never trips this, because converging means trials are
+    /// getting past the gate. `brainpc1/3/5/7` regressed at every kappa
+    /// under the static floor; under this rule they are untouched by
+    /// construction, and this test is what pins "by construction".
+    #[test]
+    fn a_line_search_the_filter_refuses_does_not_raise_theta_max() {
+        let mut a = FilterLsAcceptor::new();
+        let locked = a.ensure_theta_max(1.0);
+
+        // Many line searches, all refused — but refused *below* the
+        // ceiling, i.e. by the filter / iterate tests that are supposed
+        // to refuse them.
+        for _ in 0..(a.theta_max_adaptive_trigger * 10) {
+            for _ in 0..5 {
+                // theta_trial under the ceiling, but no progress on
+                // either measure ⇒ rejected, and not at the gate.
+                assert_eq!(
+                    a.check_acceptability(1.0, 1.0, 1.0, -1.0, locked / 2.0, 1e3),
+                    AcceptDecision::Reject,
+                );
+            }
+            a.end_of_line_search();
+        }
+        assert_eq!(a.theta_max, Some(locked), "the ceiling must not move");
+        assert_eq!(a.n_theta_max_raises, 0);
+    }
+
+    /// A line search in which the gate refused *some* trials is not
+    /// evidence the gate is binding — the ones it let through were
+    /// judged on their merits. Only "every trial" counts.
+    #[test]
+    fn a_partially_gate_blocked_line_search_breaks_the_streak() {
+        let mut a = FilterLsAcceptor::new();
+        let locked = a.ensure_theta_max(1.0);
+
+        for _ in 0..(a.theta_max_adaptive_trigger - 1) {
+            gate_blocked_line_search(&mut a, locked);
+        }
+        // One line search where the first trial cleared the gate.
+        let _ = a.check_acceptability(1.0, 1.0, 1.0, -1.0, locked / 2.0, 1e3);
+        let _ = a.check_acceptability(0.5, 1.0, 1.0, -1.0, locked * 10.0, 1e3);
+        a.end_of_line_search();
+        assert_eq!(a.gate_blocked_ls_streak, 0, "the streak must reset");
+
+        // ...and the streak now has to be rebuilt from scratch.
+        for _ in 0..(a.theta_max_adaptive_trigger - 1) {
+            gate_blocked_line_search(&mut a, locked);
+        }
+        assert_eq!(a.theta_max, Some(locked));
+    }
+
+    /// Wächter–Biegler Thm. 2 needs `theta_max` finite, not fixed. The
+    /// cap is what keeps it finite: a solve cannot ratchet the ceiling
+    /// away one line search at a time.
+    #[test]
+    fn the_ceiling_stops_rising_at_the_raise_cap() {
+        let mut a = FilterLsAcceptor::new();
+        let locked = a.ensure_theta_max(1.0);
+        let cap = a.theta_max_adaptive_max_raises;
+
+        for _ in 0..(a.theta_max_adaptive_trigger * (cap + 5)) {
+            let ceiling = a.theta_max.unwrap();
+            gate_blocked_line_search(&mut a, ceiling);
+        }
+        assert_eq!(a.n_theta_max_raises, cap);
+        let expected = locked * a.theta_max_adaptive_factor.powi(cap as i32);
+        assert!(
+            (a.theta_max.unwrap() - expected).abs() < 1e-6 * expected,
+            "ceiling {:?} is not exactly {cap} raises above {locked}",
+            a.theta_max,
+        );
+    }
+
+    /// `theta_max_adaptive_trigger = 0` is the escape hatch back to
+    /// upstream's fixed ceiling. It has to be a real off switch, not a
+    /// smaller threshold — the restoration sub-IPM wiring relies on it
+    /// (`resto_inner_solver.rs`), since upstream already corrects the
+    /// resto phase's instance of this with `theta_max_fact = 1e8`.
+    #[test]
+    fn trigger_zero_leaves_the_ceiling_exactly_where_upstream_locks_it() {
+        let mut a = FilterLsAcceptor::new();
+        a.set_theta_max_adaptive_trigger(0);
+        let locked = a.ensure_theta_max(1.0);
+
+        for _ in 0..100 {
+            gate_blocked_line_search(&mut a, locked);
+        }
+        assert_eq!(a.theta_max, Some(locked));
+        assert_eq!(a.n_theta_max_raises, 0);
+    }
+
+    /// The boundary hook is driven by the line-search driver, which
+    /// reaches it once per outer iteration — but the soft-restoration
+    /// path reaches it without running an α-loop. A boundary call with
+    /// no trials behind it must not be counted as a gate-blocked line
+    /// search, or the rule would fire on evidence that does not exist.
+    #[test]
+    fn a_boundary_with_no_trials_is_not_evidence() {
+        let mut a = FilterLsAcceptor::new();
+        let locked = a.ensure_theta_max(1.0);
+        for _ in 0..100 {
+            a.end_of_line_search();
+        }
+        assert_eq!(a.gate_blocked_ls_streak, 0);
+        assert_eq!(a.theta_max, Some(locked));
+    }
+
+    /// Run one line search in which every trial is refused at the gate.
+    /// `ceiling` is the currently locked `theta_max`; trials are placed
+    /// an order of magnitude above it.
+    fn gate_blocked_line_search(a: &mut FilterLsAcceptor, ceiling: Number) {
+        for k in 0..4 {
+            let alpha = 0.5_f64.powi(k);
+            assert_eq!(
+                a.check_acceptability(alpha, 1.0, 1.0, -1.0, ceiling * 10.0, 1.0),
+                AcceptDecision::Reject,
+                "trial must be refused at the gate for this helper to mean anything",
+            );
+        }
+        a.end_of_line_search();
     }
 
     /// gh#476: the degeneracy the row floor exists to fix. `theta` is a
