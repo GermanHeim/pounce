@@ -35,7 +35,8 @@ tape, so this only bit when the sum fed an enclosing operator.)
 **What is new.** Columns whose nonzero-row count exceeds
 `DENSE_COL_FACTOR` (16) times the average — never fewer than
 `DENSE_COL_MIN` (32) entries, at most `MAX_PEELED_COLS` (256) of them —
-are peeled out of the coloring and given a singleton color each. One
+become *candidates* for peeling, and those that pay for themselves are
+peeled out of the coloring and given a singleton color each. One
 product with seed `e_d` recovers the whole of column `d`, and because
 `H[d, j] == H[j, d]` that same pass also supplies every entry in row `d`.
 Row `d` therefore stops constraining anyone else's color and drops out of
@@ -64,6 +65,29 @@ Hessian peels nothing and colors by its bandwidth exactly as before, and
 every one of the repository's 62 `.nl` fixtures returns a bit-identical
 objective and exit status.
 
+**Which candidates actually get peeled.** Each peeled column costs
+exactly one color, so peeling only pays when it removes more conflict
+than it adds — and simply truncating an over-long candidate list to
+`MAX_PEELED_COLS` does not bound the damage. The columns that miss the
+cut stay in the conflict structure, so the base color count is unchanged
+and the singleton colors are pure addition. On disjoint 50x50 blocks
+scattered through a 200,000-variable Hessian that colors to `50 + 256`
+where a plain walk needs 50 — a 6x regression in the very quantity
+peeling exists to reduce, and 8.5x on 34x34 blocks.
+
+The candidate set is therefore chosen by estimating the result: for
+peeling nothing and for the top `k` candidates by degree over a doubling
+ladder, `|peeled| + max surviving row degree` is a lower bound on the
+resulting color count (a row with `d` surviving entries makes those `d`
+columns pairwise conflict), computable in one O(nnz) pass. The best
+scoring option wins, ties going to fewer peels. On the block patterns
+above every `k > 0` now scores strictly worse than peeling nothing, so
+nothing is peeled and the coloring matches the plain walk exactly; the
+one-dense-row case still collapses n = 20,000 to 2 colors. Note the plain
+coloring cannot serve as a comparison baseline here — on that same
+one-dense-row case the plain walk is itself O(n²), which is the blowup
+peeling exists to avoid — so the choice has to be made from a bound.
+
 ### Fixed — Pyomo's modern solver interface could not drive POUNCE at all (#552)
 
 `SolverFactory('ipopt_v2', executable=<pounce>)` — the v2 interface that
@@ -84,9 +108,19 @@ does and every reader therefore expects:
    v2 reader reads the first two option words unconditionally (to detect
    the documented quirk where a second word of `3` means two extra words
    follow the `z` block) and so asserts `n_opts >= 2`. A POUNCE `.sol`
-   could not be parsed through the modern interface at all. POUNCE now
-   writes the same `3 / 1 / 1 / 0` the ASL's own `writesol.c` and Ipopt
-   write.
+   could not be parsed through the modern interface at all.
+
+   POUNCE now echoes the model's own option words, which is what Ipopt
+   and the ASL's `writesol.c` do — they are AMPL's flags, passed through
+   rather than interpreted, and they are per-model: `.nl` header line 0
+   is `g<count> <opt0> …`, so `bearing_400` (`g3 1 1 0`) gets
+   `3 / 1 / 1 / 0` while `arki0003` and `camshape_6400` (`g3 10 1 0`) get
+   `3 / 10 / 1 / 0`. Verified byte-for-byte against Ipopt 3.14.20 `-AMPL`
+   output on all three. Where there is no originating header — a problem
+   built through `NlProblem::from_expressions`, the WASM entry point, or
+   a header whose declared count does not match the words present — a
+   generic `3 / 1 / 1 / 0` goes out instead, which satisfies the v2
+   reader without claiming to be the model's own.
 
 With both fixed, the same model solved through `SolverFactory('pounce')`
 and through `SolverFactory('ipopt_v2', executable=<pounce>)` returns

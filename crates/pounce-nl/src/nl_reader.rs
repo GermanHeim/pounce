@@ -226,6 +226,12 @@ pub struct NlProblem {
     /// <https://ampl.com/REFS/hooking2.pdf> §6 and the upstream `.nl`
     /// reader in `ref/Ipopt/src/Apps/AmplSolver/AmplTNLP.cpp`.
     pub suffixes: NlSuffixes,
+    /// The model's own AMPL option words, taken verbatim from `.nl`
+    /// header line 0 (`g<count> <opt0> <opt1> ...`). A solver echoes
+    /// these back in the `.sol` `Options` block rather than interpreting
+    /// them — see [`crate::sol_writer::format_sol_with_options`]. Empty
+    /// for problems not built from a `.nl` file.
+    pub ampl_options: Vec<i64>,
     /// AMPL imported (external) functions declared via top-level `F` segments.
     /// Empty unless the `.nl` file calls compiled-C user functions (typically
     /// emitted by IDAES property packages — see issue #49).
@@ -375,6 +381,7 @@ impl NlProblem {
             lambda0: vec![0.0; m],
             suffixes: NlSuffixes::default(),
             imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
             var_names,
             con_names,
         })
@@ -852,6 +859,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         x0,
         lambda0,
         suffixes,
+        ampl_options: p.ampl_options.clone(),
         imported_funcs,
         // `.nl` text carries no names; `read_nl_file` fills these from the
         // sibling `.col`/`.row` files when present.
@@ -1076,6 +1084,7 @@ struct Parser<'a> {
     num_obj: usize,
     /// Number of AMPL imported (external) functions declared in the header.
     n_funcs: usize,
+    ampl_options: Vec<i64>,
     /// Common subexpressions (`V` segments). Index in this vec is the
     /// CSE-local index, i.e. the global `.nl` index minus `n`.
     cses: Vec<Arc<Expr>>,
@@ -1091,6 +1100,7 @@ impl<'a> Parser<'a> {
             m: 0,
             num_obj: 0,
             n_funcs: 0,
+            ampl_options: Vec::new(),
             cses: Vec::new(),
         }
     }
@@ -1137,6 +1147,17 @@ impl<'a> Parser<'a> {
             return Err(format!(
                 "only ASCII (g-) .nl files supported; got header '{trimmed}'"
             ));
+        }
+        // Line 0 is `g<count> <opt0> <opt1> ...`: the digits glued to the
+        // `g` say how many AMPL option words follow on the same line.
+        // A solver echoes them back in the `.sol` `Options` block, so
+        // keep them verbatim. Malformed or truncated option lists are not
+        // fatal — the writer falls back to a generic block.
+        let mut words = trimmed.split_whitespace();
+        let n_opts: usize = words.next().and_then(|w| w[1..].parse().ok()).unwrap_or(0);
+        let opts: Vec<i64> = words.filter_map(|w| w.parse().ok()).collect();
+        if opts.len() >= n_opts {
+            self.ampl_options = opts[..n_opts].to_vec();
         }
 
         // Header line 2: n_vars n_cons n_objs ranges eqns
@@ -2475,10 +2496,103 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
 /// a very sparse average from declaring a 10-entry column "dense".
 const DENSE_COL_FACTOR: usize = 16;
 const DENSE_COL_MIN: usize = 32;
-/// Hard cap on how many columns get peeled. Each peeled column costs
-/// exactly one color, so this bounds the damage if the heuristic
-/// misfires on an unusual pattern.
+/// Hard cap on how many columns get peeled, applied on top of the
+/// pay-for-itself rule in [`select_peeled_cols`].
 const MAX_PEELED_COLS: usize = 256;
+
+/// Lower bound on the color count that results from peeling `peeled`.
+///
+/// Peeling costs one color per peeled column. On what remains, any row
+/// with `d` surviving entries makes those `d` columns pairwise
+/// conflicting, so the greedy walk needs at least `d` colors. Hence
+/// `|peeled| + max surviving row degree` is a lower bound on the total,
+/// computable in one O(nnz) pass — no coloring required.
+///
+/// The bound is what makes the choice decidable at all: the plain
+/// coloring cannot be run as a comparison baseline, because on the
+/// one-dense-row case the plain walk is itself O(n^2) — precisely the
+/// blowup peeling exists to avoid.
+fn peel_color_bound(n: usize, lower_pairs: &[(usize, usize)], peeled: &[bool]) -> usize {
+    let mut deg = vec![0usize; n];
+    for &(i, j) in lower_pairs {
+        if peeled[i] || peeled[j] {
+            continue;
+        }
+        deg[j] += 1;
+        if i != j {
+            deg[i] += 1;
+        }
+    }
+    let n_peeled = peeled.iter().filter(|&&p| p).count();
+    n_peeled + deg.iter().copied().max().unwrap_or(0)
+}
+
+/// Choose which of the candidate dense columns to actually peel.
+///
+/// Evaluates [`peel_color_bound`] for peeling nothing and for peeling the
+/// top `k` candidates by degree, over a doubling ladder of `k` up to
+/// [`MAX_PEELED_COLS`], and keeps the best. Ties go to the smaller `k`,
+/// so peeling has to earn its colors.
+///
+/// **Why not just truncate an over-long candidate list.** Cutting the
+/// candidates down to `MAX_PEELED_COLS` is not a damage bound: the
+/// columns that miss the cut stay in the conflict structure, so the base
+/// color count is untouched and the singleton colors are pure addition.
+/// On disjoint 50x50 blocks scattered through a 200k-variable Hessian
+/// that colors to `50 + 256` where a plain walk needs 50 — a 6x
+/// regression in exactly the quantity peeling exists to reduce. The
+/// bound above sees it: peeling `k` of several thousand equal-degree
+/// columns leaves the surviving max degree unchanged, so every `k > 0`
+/// scores strictly worse than peeling nothing.
+///
+/// **Why not a simple degree rule.** "Peel only columns denser than some
+/// fraction of `n`" would refuse three rows of degree 10,000 in a
+/// 200,000-variable model, where peeling three columns takes the
+/// coloring from >= 10,000 down to a handful. The win depends on what
+/// peeling leaves behind, not on the peeled column's degree alone.
+fn select_peeled_cols(
+    n: usize,
+    lower_pairs: &[(usize, usize)],
+    deg: &[usize],
+    mut candidates: Vec<usize>,
+) -> Vec<usize> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+    // Worst offenders first; they remove the most conflict per color spent.
+    candidates.sort_unstable_by(|&a, &b| deg[b].cmp(&deg[a]).then(a.cmp(&b)));
+    candidates.truncate(MAX_PEELED_COLS);
+
+    let mut mask = vec![false; n];
+    let mut best_k = 0usize;
+    // Peeling nothing: the bound is just the largest row degree.
+    let mut best_bound = peel_color_bound(n, lower_pairs, &mask);
+
+    // Doubling ladder 1, 2, 4, ... capped at the candidate count, so the
+    // cost is O(nnz log MAX_PEELED_COLS) rather than O(nnz) per k. The
+    // mask only ever gains entries, so each step just marks the new slice.
+    let mut marked = 0usize;
+    let mut k = 1usize;
+    loop {
+        let k_now = k.min(candidates.len());
+        for &j in &candidates[marked..k_now] {
+            mask[j] = true;
+        }
+        marked = k_now;
+        let bound = peel_color_bound(n, lower_pairs, &mask);
+        if bound < best_bound {
+            best_bound = bound;
+            best_k = k_now;
+        }
+        if k_now == candidates.len() {
+            break;
+        }
+        k *= 2;
+    }
+
+    candidates.truncate(best_k);
+    candidates
+}
 
 /// Greedy distance-1 coloring of the Hessian's column-intersection
 /// graph, with **dense columns peeled out**.
@@ -2531,12 +2645,8 @@ fn greedy_hessian_coloring(
     let total: usize = deg.iter().sum();
     let threshold = DENSE_COL_MIN.max(DENSE_COL_FACTOR.saturating_mul(total / n));
     let mut peeled = vec![false; n];
-    let mut dense: Vec<usize> = (0..n).filter(|&j| deg[j] > threshold).collect();
-    if dense.len() > MAX_PEELED_COLS {
-        // Keep the worst offenders: they remove the most conflicts.
-        dense.sort_unstable_by(|&a, &b| deg[b].cmp(&deg[a]).then(a.cmp(&b)));
-        dense.truncate(MAX_PEELED_COLS);
-    }
+    let candidates: Vec<usize> = (0..n).filter(|&j| deg[j] > threshold).collect();
+    let dense = select_peeled_cols(n, lower_pairs, &deg, candidates);
     for &j in &dense {
         peeled[j] = true;
     }
@@ -3839,6 +3949,7 @@ b
             lambda0: vec![],
             suffixes: NlSuffixes::default(),
             imported_funcs: vec![],
+            ampl_options: vec![],
             var_names: vec![],
             con_names: vec![],
         };
@@ -3893,6 +4004,7 @@ b
             lambda0: vec![0.0],
             suffixes: NlSuffixes::default(),
             imported_funcs: vec![],
+            ampl_options: vec![],
             var_names: vec![],
             con_names: vec![],
         };
@@ -4389,6 +4501,125 @@ J0 2
             "a tridiagonal Hessian needs a handful of colors, got {n_colors}"
         );
         assert!(var_color.iter().all(|&c| c != u32::MAX));
+    }
+
+    /// Build a Hessian of `blocks` disjoint dense `size`x`size` blocks
+    /// scattered through an otherwise diagonal `n`-variable problem.
+    /// A plain coloring needs exactly `size` colors no matter how many
+    /// blocks there are, because the blocks share no rows.
+    fn disjoint_blocks(n: usize, blocks: usize, size: usize) -> Vec<(usize, usize)> {
+        let mut pairs: Vec<(usize, usize)> = (0..n).map(|j| (j, j)).collect();
+        let stride = n / blocks;
+        for b in 0..blocks {
+            let base = b * stride;
+            for i in 0..size {
+                for j in 0..=i {
+                    if i != j {
+                        pairs.push((base + i, base + j));
+                    }
+                }
+            }
+        }
+        pairs
+    }
+
+    /// Many medium-degree columns must not be peeled.
+    ///
+    /// Regression: selecting candidates by "degree > 16x average" and then
+    /// *truncating* the list to `MAX_PEELED_COLS` is not a damage bound.
+    /// The columns that miss the cut stay in the conflict structure, so the
+    /// base color count is untouched and the singleton colors are pure
+    /// addition — these two patterns colored to 306 and 290 against a plain
+    /// walk's 50 and 34.
+    #[test]
+    fn thousands_of_medium_degree_cols_are_not_peeled() {
+        for (n, blocks, size) in [(200_000, 100, 50), (200_000, 300, 34)] {
+            let pairs = disjoint_blocks(n, blocks, size);
+            let (_, n_colors, peeled) = greedy_hessian_coloring(n, &pairs);
+            let n_peeled = peeled.iter().filter(|&&p| p).count();
+            assert_eq!(
+                n_peeled, 0,
+                "degree-{size} columns do not pay for a singleton color \
+                 (n={n}, blocks={blocks}), yet {n_peeled} were peeled"
+            );
+            assert!(
+                n_colors <= size + 1,
+                "disjoint {size}x{size} blocks color by block size regardless \
+                 of block count; got {n_colors} for n={n}, blocks={blocks}"
+            );
+        }
+    }
+
+    /// The pay-for-itself rule must not throw away the case peeling exists
+    /// for: a handful of genuinely dense rows still get peeled, and still
+    /// collapse the coloring.
+    #[test]
+    fn a_few_truly_dense_rows_are_still_peeled() {
+        let n = 5_000;
+        let dense_rows = 4;
+        let mut pairs: Vec<(usize, usize)> = (0..n).map(|j| (j, j)).collect();
+        for d in 0..dense_rows {
+            for j in 0..n {
+                if j != d {
+                    pairs.push((j.max(d), j.min(d)));
+                }
+            }
+        }
+        let (_, n_colors, peeled) = greedy_hessian_coloring(n, &pairs);
+        let n_peeled = peeled.iter().filter(|&&p| p).count();
+        assert_eq!(n_peeled, dense_rows, "every full row should peel");
+        assert!(
+            n_colors <= dense_rows + 2,
+            "peeling {dense_rows} full rows should leave a diagonal remainder, \
+             got {n_colors} colors"
+        );
+    }
+
+    /// The cap still binds, and when it does the kept columns are the
+    /// highest-degree ones.
+    #[test]
+    fn peeling_is_capped_and_keeps_the_worst_offenders() {
+        let n = 20_000;
+        let dense_rows = 400;
+        let mut pairs: Vec<(usize, usize)> = (0..n).map(|j| (j, j)).collect();
+        for d in 0..dense_rows {
+            // Row d touches the first (n - d) columns, so degree strictly
+            // decreases with d and the ordering is unambiguous.
+            for j in 0..(n - d) {
+                if j != d {
+                    pairs.push((j.max(d), j.min(d)));
+                }
+            }
+        }
+        let (_, _, peeled) = greedy_hessian_coloring(n, &pairs);
+        let n_peeled = peeled.iter().filter(|&&p| p).count();
+        assert_eq!(n_peeled, MAX_PEELED_COLS, "cap binds at {MAX_PEELED_COLS}");
+        assert!(
+            (0..MAX_PEELED_COLS).all(|d| peeled[d]),
+            "the {MAX_PEELED_COLS} densest rows are the ones kept"
+        );
+    }
+
+    /// Header line 0 is `g<count> <opt0> ...`; the option words are the
+    /// model's own and a solver echoes them into the `.sol` `Options`
+    /// block. `EQ_LIN`'s header is `g3 0 1 0`, so three words follow.
+    #[test]
+    fn header_option_words_are_kept_verbatim() {
+        let p = parse_nl_text(EQ_LIN).expect("parse");
+        assert_eq!(p.ampl_options, vec![0, 1, 0]);
+    }
+
+    /// A count that does not match the words present must not be
+    /// guessed at — the writer falls back rather than emit a wrong block.
+    #[test]
+    fn a_truncated_option_list_is_dropped_not_padded() {
+        let text = EQ_LIN.replacen("g3 0 1 0", "g9 0 1 0", 1);
+        let p = parse_nl_text(&text).expect("parse");
+        assert!(
+            p.ampl_options.is_empty(),
+            "9 declared but 3 present: {:?}",
+            p.ampl_options
+        );
     }
 
     #[test]

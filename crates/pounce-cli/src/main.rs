@@ -527,6 +527,10 @@ pub fn main() -> ExitCode {
     // read off `NlProblem` before `NlTnlp` consumes it.
     let mut nl_suffixes: Option<nl_reader::NlSuffixes> = None;
     let mut nl_dims: Option<(usize, usize)> = None;
+    // The model's own AMPL option words, echoed back in the `.sol`
+    // `Options` block the way an ASL solver does. Empty for problems
+    // that did not come from a `.nl` header.
+    let mut nl_ampl_options: Vec<i64> = Vec::new();
     // Problem class captured from the *first* `.nl` parse below, so the
     // LP/QP dispatch never has to re-read the file just to classify it
     // (re-parsing doubled parse time / peak memory on large models — code
@@ -557,6 +561,7 @@ pub fn main() -> ExitCode {
                 Ok(prob) => {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
+                    nl_ampl_options = prob.ampl_options.clone();
                     let elapsed = t0.elapsed().as_secs_f64();
                     // Render the source constraint equations and hand them to
                     // the debugger so `print equation <name|row>` can show a
@@ -1987,7 +1992,7 @@ pub fn main() -> ExitCode {
             solve_result_num: srn,
             suffixes: &sol_suffixes,
         };
-        match nl_writer::write_sol_file(sol_path, &payload) {
+        match nl_writer::write_sol_file_with_options(sol_path, &payload, &nl_ampl_options) {
             Ok(_) => eprintln!("pounce: wrote {}", sol_path.display()),
             Err(e) => eprintln!("pounce: failed to write {}: {e}", sol_path.display()),
         }
@@ -2700,7 +2705,7 @@ fn run_convex_qp(
         // Log a `.sol` write failure but do not early-return a distinct exit
         // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`
         // the final exit must still follow the solve-outcome contract.
-        if let Err(e) = nl_writer::write_sol_file(path, &payload) {
+        if let Err(e) = nl_writer::write_sol_file_with_options(path, &payload, &prob.ampl_options) {
             eprintln!("pounce: failed to write {}: {e}", path.display());
         }
     }
