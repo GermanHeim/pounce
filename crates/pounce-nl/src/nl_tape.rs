@@ -2316,7 +2316,12 @@ pub struct Summand {
     pub local_vars: Vec<usize>,
     /// Variables touched by Var ops inside `prelude_reach`.
     pub prelude_vars: Vec<usize>,
-    /// `local_vars ∪ prelude_vars`, sorted. Hessian j-loop set.
+    /// `local_vars ∪ prelude_vars`, sorted — every problem variable this
+    /// summand can contribute a derivative for. `eval_h` maps it through
+    /// the Hessian coloring to decide which colors the summand
+    /// participates in (issue #557); it must include `prelude_vars` or a
+    /// summand would be skipped for colors it reaches only through a
+    /// shared CSE body.
     pub all_vars: Vec<usize>,
 }
 
@@ -2514,103 +2519,170 @@ impl HybridTape {
         }
     }
 
-    /// Forward-over-reverse Hessian for one summand with multiplier
-    /// `weight`. Iterates over `s.all_vars`; for each seed variable
-    /// j: (1) forward tangent through prelude_reach then local_reach,
-    /// (2) reverse over local (folding adj/adj_dot into prelude at
-    /// Shared boundaries), (3) reverse over prelude_reach. All
-    /// scratch buffers are zeroed only at the touched slots inside
-    /// the per-j loop.
+    /// Forward tangent over the whole prelude for one dense seed
+    /// vector (a Hessian color): `prelude_dot[i] = (∂prelude[i]/∂x) ·
+    /// seed`. Runs **once per color for the entire constraint block**
+    /// — this is the sweep the coloring lets every summand of that
+    /// color share, and the reason the directional Hessian path
+    /// exists at all (issue #557): a per-summand-per-variable seeding
+    /// strategy would repeat it for every referencing summand.
+    /// `reach` is the set of prelude slots this color actually uses —
+    /// the union of `prelude_reach` over the color's summands. It must
+    /// be **ascending** (the prelude is emitted bottom-up, so operand
+    /// indices are always below their consumer's) and **closed under
+    /// operands**, which a union of `prelude_reach` sets is by
+    /// construction. Slots outside it are neither written nor read:
+    /// a summand only pulls `prelude_dot[k]` for `k` in its own
+    /// `prelude_reach`, so a stale tangent left in an untouched slot by
+    /// a previous color can never be observed. Passing every slot is
+    /// therefore always correct, just not always cheap — walking the
+    /// whole prelude once per color is `n_colors × |prelude|` work
+    /// against the `|prelude|` the op-ratio gate assumes.
+    pub fn prelude_tangent(
+        &self,
+        prelude_vals: &[f64],
+        seed: &[f64],
+        reach: &[u32],
+        prelude_dot: &mut [f64],
+    ) {
+        debug_assert!(prelude_dot.len() >= self.prelude.len());
+        for &i in reach {
+            let i = i as usize;
+            prelude_dot[i] = fwd_dir_step(&self.prelude[i], seed, prelude_vals, prelude_dot, i);
+        }
+    }
+
+    /// Directional forward-over-reverse Hessian pass for one summand
+    /// with multiplier `weight`, sharing the per-color prelude tangent
+    /// computed by [`prelude_tangent`]: forward-tangent the local ops
+    /// (pulling `prelude_dot` at `Shared` boundaries), then
+    /// reverse-over-tangent them, writing `weight * (H · seed)[k]`
+    /// into the dense `out[k]` at each `Var(k)` — the same contract as
+    /// [`Tape::hessian_directional`], so contributions land straight
+    /// in the coloring's `compressed[c]` buffer.
+    ///
+    /// Adjoints crossing a `Shared` boundary are folded into
+    /// `prelude_adj` / `prelude_adj_dot` **scaled by `weight`**, and
+    /// left there: reverse-over-tangent is linear in its adjoint
+    /// seeds, so accumulating `λ_k`-weighted adjoints across every
+    /// summand of a color and running [`prelude_reverse_directional`]
+    /// once with unit weight computes the same second-order prelude
+    /// contribution as a per-summand sweep — while paying for the
+    /// prelude walk once per color instead of once per (summand,
+    /// color) pair.
+    ///
+    /// `local_vals` must hold this summand's forward values (see
+    /// [`forward_summand`]); `local_dot` / `local_adj` /
+    /// `local_adj_dot` are scratch arenas (≥ `s.ops.len()`), zeroed
+    /// here only at the slots the summand reaches.
+    ///
+    /// [`prelude_tangent`]: HybridTape::prelude_tangent
+    /// [`prelude_reverse_directional`]: HybridTape::prelude_reverse_directional
+    /// [`forward_summand`]: HybridTape::forward_summand
     #[allow(clippy::too_many_arguments)]
-    pub fn hessian_summand(
+    pub fn hessian_summand_directional(
         &self,
         s: &Summand,
-        prelude_vals: &[f64],
         local_vals: &[f64],
+        prelude_dot: &[f64],
+        seed: &[f64],
         weight: f64,
-        hess_map: &HashMap<(usize, usize), usize>,
-        values: &mut [f64],
+        out: &mut [f64],
         local_dot: &mut [f64],
         local_adj: &mut [f64],
         local_adj_dot: &mut [f64],
-        prelude_dot: &mut [f64],
         prelude_adj: &mut [f64],
         prelude_adj_dot: &mut [f64],
     ) {
         if weight == 0.0 || s.local_reach.is_empty() {
             return;
         }
-        for &j in &s.all_vars {
-            for &i in &s.local_reach {
-                local_dot[i] = 0.0;
-                local_adj[i] = 0.0;
-                local_adj_dot[i] = 0.0;
+        for &i in &s.local_reach {
+            local_adj[i] = 0.0;
+            local_adj_dot[i] = 0.0;
+        }
+        // `local_dot` needs no pre-zeroing: `local_reach` is ascending
+        // and every operand of a reached op is itself reached, so each
+        // slot is written before any read.
+        for &i in &s.local_reach {
+            local_dot[i] = match &s.ops[i] {
+                SummandOp::Local(op) => fwd_dir_step(op, seed, local_vals, local_dot, i),
+                SummandOp::Shared(k) => prelude_dot[*k],
+            };
+        }
+        local_adj[s.root_slot] = 1.0;
+        for &i in s.local_reach.iter().rev() {
+            let w = local_adj[i];
+            let wd = local_adj_dot[i];
+            if w == 0.0 && wd == 0.0 {
+                continue;
             }
-            for &i in &s.prelude_reach {
-                prelude_dot[i] = 0.0;
-                prelude_adj[i] = 0.0;
-                prelude_adj_dot[i] = 0.0;
-            }
-            for &i in &s.prelude_reach {
-                prelude_dot[i] = fwd_tan_step(&self.prelude[i], j, prelude_vals, prelude_dot, i);
-            }
-            for &i in &s.local_reach {
-                local_dot[i] = match &s.ops[i] {
-                    SummandOp::Local(op) => fwd_tan_step(op, j, local_vals, local_dot, i),
-                    SummandOp::Shared(k) => prelude_dot[*k],
-                };
-            }
-            local_adj[s.root_slot] = 1.0;
-            for &i in s.local_reach.iter().rev() {
-                let w = local_adj[i];
-                let wd = local_adj_dot[i];
-                if w == 0.0 && wd == 0.0 {
-                    continue;
+            match &s.ops[i] {
+                SummandOp::Local(op) => {
+                    ror_dir_step(
+                        op,
+                        i,
+                        local_vals,
+                        local_dot,
+                        local_adj,
+                        local_adj_dot,
+                        w,
+                        wd,
+                        weight,
+                        out,
+                    );
                 }
-                match &s.ops[i] {
-                    SummandOp::Local(op) => {
-                        ror_step(
-                            op,
-                            i,
-                            j,
-                            local_vals,
-                            local_dot,
-                            local_adj,
-                            local_adj_dot,
-                            w,
-                            wd,
-                            weight,
-                            hess_map,
-                            values,
-                        );
-                    }
-                    SummandOp::Shared(k) => {
-                        prelude_adj[*k] += w;
-                        prelude_adj_dot[*k] += wd;
-                    }
+                SummandOp::Shared(k) => {
+                    prelude_adj[*k] += weight * w;
+                    prelude_adj_dot[*k] += weight * wd;
                 }
             }
-            for &i in s.prelude_reach.iter().rev() {
-                let w = prelude_adj[i];
-                let wd = prelude_adj_dot[i];
-                if w == 0.0 && wd == 0.0 {
-                    continue;
-                }
-                ror_step(
-                    &self.prelude[i],
-                    i,
-                    j,
-                    prelude_vals,
-                    prelude_dot,
-                    prelude_adj,
-                    prelude_adj_dot,
-                    w,
-                    wd,
-                    weight,
-                    hess_map,
-                    values,
-                );
+        }
+    }
+
+    /// Reverse-over-tangent over the prelude with unit weight,
+    /// consuming the adjoint accumulators built by
+    /// [`hessian_summand_directional`] across all summands of one
+    /// color and writing variable contributions into the dense `out`.
+    ///
+    /// `prelude_adj` / `prelude_adj_dot` must be all-zero except for
+    /// the accumulated seeds on entry (allocate them zeroed and this
+    /// invariant maintains itself); each slot is re-zeroed as it is
+    /// consumed — adjoints only ever propagate to lower slots, which
+    /// the reverse walk has not visited yet — so the buffers come back
+    /// all-zero, ready for the next color, without an O(prelude) fill.
+    ///
+    /// [`hessian_summand_directional`]: HybridTape::hessian_summand_directional
+    pub fn prelude_reverse_directional(
+        &self,
+        prelude_vals: &[f64],
+        prelude_dot: &[f64],
+        reach: &[u32],
+        out: &mut [f64],
+        prelude_adj: &mut [f64],
+        prelude_adj_dot: &mut [f64],
+    ) {
+        for &i in reach.iter().rev() {
+            let i = i as usize;
+            let w = prelude_adj[i];
+            let wd = prelude_adj_dot[i];
+            if w == 0.0 && wd == 0.0 {
+                continue;
             }
+            prelude_adj[i] = 0.0;
+            prelude_adj_dot[i] = 0.0;
+            ror_dir_step(
+                &self.prelude[i],
+                i,
+                prelude_vals,
+                prelude_dot,
+                prelude_adj,
+                prelude_adj_dot,
+                w,
+                wd,
+                1.0,
+                out,
+            );
         }
     }
 
@@ -3234,7 +3306,7 @@ fn summand_sparsity(
 /// Operand indices of a `TapeOp`, normalized into a fixed-length
 /// array so callers don't need to re-match every site.
 #[inline]
-fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
+pub(crate) fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
     match op {
         TapeOp::Const(_) | TapeOp::Var(_) => (None, None),
         TapeOp::Add(a, b)
@@ -3279,7 +3351,17 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
             "op_operands: TapeOp::Min/Max are unsupported on the HybridTape path \
              (build_into_summand rejects min/max lists)"
         ),
-        TapeOp::Funcall(_) => (None, None),
+        // Returning `(None, None)` here would be a silent wrong answer, not a
+        // conservative one: a Funcall's tape arguments would be missing from
+        // `local_reach`, and the directional Hessian deliberately does NOT
+        // pre-zero `local_dot`, so those slots would be read as stale scratch
+        // from a previous summand. Unreachable today —
+        // `build_into_summand` panics on `Expr::Funcall` before any tape is
+        // built — and this keeps it loud if that ever changes.
+        TapeOp::Funcall(_) => unreachable!(
+            "op_operands: TapeOp::Funcall is unsupported on the HybridTape path \
+             (build_into_summand rejects external function calls)"
+        ),
     }
 }
 
@@ -3501,17 +3583,18 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
     }
 }
 
+/// Directional forward-tangent step: [`fwd_tan_step`] with a dense
+/// seed vector instead of a single seed variable. The per-op chain
+/// rule is identical (and identical to the inline arms of
+/// [`Tape::hessian_directional`], which the hybrid Hessian path must
+/// agree with); only the `Var` arm differs — it reads `seed[k]`
+/// rather than testing `k == seed_var` — which is what lets one pass
+/// carry a whole Hessian color.
 #[inline]
-fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usize) -> f64 {
+fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) -> f64 {
     match op {
         TapeOp::Const(_) => 0.0,
-        TapeOp::Var(k) => {
-            if *k == seed_var {
-                1.0
-            } else {
-                0.0
-            }
-        }
+        TapeOp::Var(k) => seed[*k],
         TapeOp::Add(a, b) => dot[*a] + dot[*b],
         TapeOp::Sub(a, b) => dot[*a] - dot[*b],
         TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
@@ -3550,14 +3633,14 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
             let sv = vals[i];
             if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
         }
-        TapeOp::Exp(a) => dot[*a] * vals[i],
+        TapeOp::Exp(a) => vals[i] * dot[*a],
         TapeOp::Log(a) => dot[*a] / vals[*a],
         TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
-        TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
-        TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+        TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
+        TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
         TapeOp::Tan(a) => {
             let t = vals[i];
-            dot[*a] * (1.0 + t * t)
+            (1.0 + t * t) * dot[*a]
         }
         TapeOp::Atan(a) => {
             let u = vals[*a];
@@ -3571,7 +3654,7 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
         TapeOp::Tanh(a) => {
             let t = vals[i];
-            dot[*a] * (1.0 - t * t)
+            (1.0 - t * t) * dot[*a]
         }
         TapeOp::Asin(a) => {
             let u = vals[*a];
@@ -3626,18 +3709,25 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
                     k += 1;
                 }
             }
-            let _ = seed_var;
+            let _ = seed;
             acc
         }
     }
 }
 
+/// Directional reverse-over-tangent step: [`ror_step`] with the
+/// hash-map scatter replaced by the dense accumulation
+/// [`Tape::hessian_directional`] uses — at `Var(k)` the emitted
+/// second-order contribution is `out[k] += weight * wd`, landing in
+/// the coloring's per-color `compressed` buffer with no hashing. All
+/// other arms are the exact arithmetic of `hessian_directional`'s
+/// reverse sweep, so the local part of the hybrid Hessian is
+/// bit-identical to the flat tape's.
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn ror_step(
+fn ror_dir_step(
     op: &TapeOp,
     i: usize,
-    seed_var: usize,
     vals: &[f64],
     dot: &[f64],
     adj: &mut [f64],
@@ -3645,16 +3735,13 @@ fn ror_step(
     w: f64,
     wd: f64,
     weight: f64,
-    hess_map: &HashMap<(usize, usize), usize>,
-    values: &mut [f64],
+    out: &mut [f64],
 ) {
     match op {
         TapeOp::Const(_) => {}
         TapeOp::Var(k) => {
-            if wd != 0.0 && *k >= seed_var {
-                if let Some(&pos) = hess_map.get(&(*k, seed_var)) {
-                    values[pos] += weight * wd;
-                }
+            if wd != 0.0 {
+                out[*k] += weight * wd;
             }
         }
         TapeOp::Add(a, b) => {
@@ -3928,9 +4015,7 @@ fn ror_step(
                 }
                 adj_dot[tk] += wd * derivs[k] + w * second_term;
             }
-            let _ = seed_var;
-            let _ = hess_map;
-            let _ = values;
+            let _ = out;
             let _ = weight;
             let _ = i;
         }
@@ -5146,5 +5231,127 @@ mod tests {
             add(Expr::Cse(body.clone()), cnst(2.0)),
         ];
         HybridTape::build_multi(&exprs);
+    }
+
+    /// The directional hybrid Hessian (issue #557) against the flat
+    /// [`Tape::hessian_directional`] it replaces: three summands sharing one
+    /// transcendental CSE body, each with its own multiplier, swept with a
+    /// dense two-variable seed. The per-summand *local* contributions are the
+    /// exact arithmetic of the flat tape; the shared-prelude contribution
+    /// folds the multipliers into the boundary adjoints and runs one unit-
+    /// weight prelude sweep, which reassociates the floating-point products —
+    /// mathematically identical by linearity of reverse-over-tangent in the
+    /// adjoint seeds, so the comparison is at near-machine tolerance rather
+    /// than bitwise.
+    #[test]
+    fn directional_hybrid_hessian_matches_flat_directional() {
+        // body = exp(0.5*(x0 + x1)), shared by all three summands:
+        //   s0 = body^2,  s1 = body * x2,  s2 = sin(body) + x2^2.
+        let body = Arc::new(unary(UnaryOp::Exp, mul(cnst(0.5), add(var(0), var(1)))));
+        let exprs = vec![
+            pow(Expr::Cse(body.clone()), cnst(2.0)),
+            mul(Expr::Cse(body.clone()), var(2)),
+            add(
+                unary(UnaryOp::Sin, Expr::Cse(body.clone())),
+                pow(var(2), cnst(2.0)),
+            ),
+        ];
+        let weights = [1.25, -0.75, 2.5];
+        let x = [0.3, -0.1, 0.7];
+        let n = 3;
+
+        let hybrid = HybridTape::build_multi(&exprs);
+        assert!(
+            hybrid.n_prelude_ops() > 0,
+            "a CSE shared by 3 roots must be promoted into the prelude"
+        );
+
+        // Flat reference: independent tapes, one directional pass each.
+        let seeds = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]];
+        for seed in &seeds {
+            let mut flat_out = vec![0.0; n];
+            for (e, &wt) in exprs.iter().zip(&weights) {
+                let t = Tape::build(e);
+                let vals = t.forward(&x);
+                let m = t.ops.len();
+                let (mut dot, mut adj, mut adj_dot) = (vec![0.0; m], vec![0.0; m], vec![0.0; m]);
+                t.hessian_directional(
+                    &vals,
+                    seed,
+                    wt,
+                    &mut flat_out,
+                    &mut dot,
+                    &mut adj,
+                    &mut adj_dot,
+                );
+            }
+
+            let mut hyb_out = vec![0.0; n];
+            let np = hybrid.n_prelude_ops();
+            let ml = hybrid.max_summand_ops();
+            let mut prelude_vals = vec![0.0; np];
+            let mut prelude_dot = vec![0.0; np];
+            let mut prelude_adj = vec![0.0; np];
+            let mut prelude_adj_dot = vec![0.0; np];
+            let (mut local_dot, mut local_adj, mut local_adj_dot) =
+                (vec![0.0; ml], vec![0.0; ml], vec![0.0; ml]);
+            // The per-color prelude reach the caller is required to pass:
+            // the union of the color's summands' `prelude_reach`, ascending.
+            // Built here rather than passing `0..np` so the test exercises the
+            // narrowed walk `eval_h` actually performs — a reach that wrongly
+            // omitted a slot would leave its tangent stale and show up below.
+            let creach: Vec<u32> = {
+                let mut u: BTreeSet<u32> = BTreeSet::new();
+                for s in &hybrid.summands {
+                    u.extend(s.prelude_reach.iter().map(|&p| p as u32));
+                }
+                u.into_iter().collect()
+            };
+            hybrid.forward_prelude(&x, &mut prelude_vals);
+            hybrid.prelude_tangent(&prelude_vals, seed, &creach, &mut prelude_dot);
+            for (s, &wt) in hybrid.summands.iter().zip(&weights) {
+                let mut local_vals = vec![0.0; s.ops.len()];
+                hybrid.forward_summand(s, &x, &prelude_vals, &mut local_vals);
+                hybrid.hessian_summand_directional(
+                    s,
+                    &local_vals,
+                    &prelude_dot,
+                    seed,
+                    wt,
+                    &mut hyb_out,
+                    &mut local_dot,
+                    &mut local_adj,
+                    &mut local_adj_dot,
+                    &mut prelude_adj,
+                    &mut prelude_adj_dot,
+                );
+            }
+            hybrid.prelude_reverse_directional(
+                &prelude_vals,
+                &prelude_dot,
+                &creach,
+                &mut hyb_out,
+                &mut prelude_adj,
+                &mut prelude_adj_dot,
+            );
+
+            for k in 0..n {
+                let scale = flat_out[k].abs().max(1.0);
+                assert!(
+                    (hyb_out[k] - flat_out[k]).abs() <= 1e-13 * scale,
+                    "seed {seed:?} entry {k}: hybrid {} vs flat {}",
+                    hyb_out[k],
+                    flat_out[k]
+                );
+            }
+            assert!(
+                hyb_out.iter().any(|v| *v != 0.0),
+                "an all-zero H·s is no comparison"
+            );
+            // The accumulators must come back all-zero, ready for the
+            // next color (`prelude_reverse_directional`'s contract).
+            assert!(prelude_adj.iter().all(|v| *v == 0.0));
+            assert!(prelude_adj_dot.iter().all(|v| *v == 0.0));
+        }
     }
 }
