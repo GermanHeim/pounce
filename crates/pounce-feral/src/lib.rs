@@ -205,7 +205,8 @@ pub struct FeralConfig {
     pub scaling: ScalingStrategy,
     /// Per-backend internal-parallelism toggle (tri-state). `None` (the
     /// default) leaves feral's `Solver` at its own default and lets the
-    /// legacy `FERAL_PARALLEL` env var still force serial; `Some(false)`
+    /// legacy `FERAL_PARALLEL` env var force it either way (`1|on|true|yes`
+    /// / `0|off|false|no`); `Some(false)`
     /// builds an explicitly **serial** factor; `Some(true)` forces feral's
     /// internal rayon parallelism on. This is the first-class lever for
     /// outer-parallel / inner-serial batched solving — each rayon worker
@@ -273,6 +274,20 @@ impl Default for FeralConfig {
     }
 }
 
+/// Parse a boolean env value in the grammar every knob in this file shares:
+/// `1|on|true|yes` → `Some(true)`, `0|off|false|no` → `Some(false)`, and
+/// anything else (including unset) → `None`, meaning "leave the default
+/// alone". Kept as a pure helper so the vocabulary is unit-testable without
+/// mutating the process environment (a data race under rayon-parallel
+/// solves — the hazard behind L9/L12).
+fn parse_bool_env(v: Option<&str>) -> Option<bool> {
+    match v {
+        Some("1") | Some("on") | Some("true") | Some("yes") => Some(true),
+        Some("0") | Some("off") | Some("false") | Some("no") => Some(false),
+        _ => None,
+    }
+}
+
 /// Resolve the feral pivot-threshold env override from its two accepted
 /// variable names. The documented `POUNCE_FERAL_PIVTOL` — the
 /// `POUNCE_FERAL_*` convention shared by every other knob in
@@ -299,19 +314,12 @@ impl FeralConfig {
     /// [`resolve_pivtol_env`]).
     pub fn from_env() -> Self {
         Self {
-            cascade_break: match std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref() {
-                Ok("1") | Ok("on") | Ok("true") | Ok("yes") => Some(true),
-                Ok("0") | Ok("off") | Ok("false") | Ok("no") => Some(false),
-                _ => None,
-            },
-            fma: matches!(
-                std::env::var("POUNCE_FERAL_FMA").as_deref(),
-                Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
+            cascade_break: parse_bool_env(
+                std::env::var("POUNCE_FERAL_CASCADE_BREAK").ok().as_deref(),
             ),
-            refine: !matches!(
-                std::env::var("POUNCE_FERAL_REFINE").as_deref(),
-                Ok("0") | Ok("false") | Ok("off") | Ok("no"),
-            ),
+            fma: parse_bool_env(std::env::var("POUNCE_FERAL_FMA").ok().as_deref()).unwrap_or(false),
+            refine: parse_bool_env(std::env::var("POUNCE_FERAL_REFINE").ok().as_deref())
+                .unwrap_or(true),
             singular_pivot_floor: std::env::var("POUNCE_FERAL_SINGULAR_PIVOT_FLOOR")
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
@@ -335,7 +343,7 @@ impl FeralConfig {
                 .and_then(parse_scaling_strategy)
                 .unwrap_or(ScalingStrategy::Auto),
             // Left `None` so the legacy `FERAL_PARALLEL` env var still acts
-            // as the fallback serial switch in `with_config`; callers that
+            // as the fallback on/off switch in `with_config`; callers that
             // want an explicit per-backend setting use `FeralConfig.parallel`
             // directly (e.g. `FeralSolverInterface::serial`).
             parallel: None,
@@ -350,11 +358,11 @@ impl FeralConfig {
             // unrecognized value leaves `None` (inherit feral's
             // delayed-pivot default); only an explicit on/off token forces
             // the override.
-            static_pivoting: match std::env::var("POUNCE_FERAL_STATIC_PIVOTING").as_deref() {
-                Ok("1") | Ok("on") | Ok("true") | Ok("yes") => Some(true),
-                Ok("0") | Ok("off") | Ok("false") | Ok("no") => Some(false),
-                _ => None,
-            },
+            static_pivoting: parse_bool_env(
+                std::env::var("POUNCE_FERAL_STATIC_PIVOTING")
+                    .ok()
+                    .as_deref(),
+            ),
         }
     }
 }
@@ -413,15 +421,20 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
     let mut solver = Solver::with_params(np, SupernodeParams::default());
     // Internal-parallelism toggle. Explicit `cfg.parallel` is the primary
     // per-backend lever; when unset, fall back to the legacy process-wide
-    // `FERAL_PARALLEL` env var.
+    // `FERAL_PARALLEL` env var. The env var is bidirectional and uses the
+    // same `1|on|true|yes` / `0|off|false|no` grammar as every other knob
+    // here and as feral's own C-ABI shim (`feral/src/capi.rs`) — an
+    // unset or unrecognized value leaves feral's default in place. The
+    // force-*on* direction matters because feral derives its default from
+    // the platform and falls back to sequential when the rayon pool fails
+    // to build (feral#156): on hosts where that autodetection is wrong
+    // (threaded wasm), `FERAL_PARALLEL=1` is the only escape hatch a
+    // CLI/Python/NL caller has — `FeralConfig.parallel` is Rust-API-only.
     match cfg.parallel {
         Some(p) => solver = solver.with_parallel(p),
         None => {
-            if matches!(
-                std::env::var("FERAL_PARALLEL").as_deref(),
-                Ok("0") | Ok("false") | Ok("off")
-            ) {
-                solver = solver.with_parallel(false);
+            if let Some(p) = parse_bool_env(std::env::var("FERAL_PARALLEL").ok().as_deref()) {
+                solver = solver.with_parallel(p);
             }
         }
     }
@@ -1157,6 +1170,29 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every boolean env knob in this crate speaks one grammar, in both
+    /// directions. `FERAL_PARALLEL` used to be the outlier: it parsed only
+    /// `0|false|off`, so it was missing `no` (which feral's own C-ABI shim
+    /// accepts) and had no force-*on* spelling at all — `FERAL_PARALLEL=1`
+    /// silently did nothing, leaving CLI/Python/NL callers with no way to
+    /// override feral's platform-derived default (feral#156), since
+    /// `FeralConfig.parallel` is reachable only from the Rust API.
+    #[test]
+    fn parse_bool_env_accepts_the_full_grammar_both_ways() {
+        for on in ["1", "on", "true", "yes"] {
+            assert_eq!(parse_bool_env(Some(on)), Some(true), "on-token {on:?}");
+        }
+        for off in ["0", "off", "false", "no"] {
+            assert_eq!(parse_bool_env(Some(off)), Some(false), "off-token {off:?}");
+        }
+        // Unset and unrecognized both mean "leave the default alone" — the
+        // tri-state `None`, not a silent `false`.
+        assert_eq!(parse_bool_env(None), None);
+        for other in ["", "2", "TRUE", "yep", "off ", "disabled"] {
+            assert_eq!(parse_bool_env(Some(other)), None, "unrecognized {other:?}");
+        }
+    }
 
     /// L12: the pivot-threshold env override honors the documented
     /// `POUNCE_FERAL_*` convention (`POUNCE_FERAL_PIVTOL`) and keeps the bare

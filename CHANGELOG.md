@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `FERAL_PARALLEL` is now bidirectional and speaks the same grammar as every other knob
+
+`FERAL_PARALLEL` was the one boolean environment variable in
+`crates/pounce-feral` that did not accept the `1|on|true|yes` /
+`0|off|false|no` grammar the rest of the file uses. It parsed
+`0|false|off` only, which left two gaps.
+
+**No force-on at all.** `FERAL_PARALLEL=1` silently did nothing. That was
+harmless while feral's internal parallelism was simply on by default, but
+upstream feral#156 makes the default *platform-derived*, with a fallback
+to sequential when the rayon pool fails to build. On a host where that
+autodetection is wrong — threaded wasm is the motivating case — an
+explicit force-on is the escape hatch, and POUNCE swallowed it. The
+first-class lever, `FeralConfig.parallel`, is reachable only from the
+Rust API: there is no `feral_parallel` OptionsList option, so CLI,
+Python, NL and GAMS callers had no override whatsoever. (feral#156 is
+merged upstream but not in the pinned 0.15.0, so this is a fix landing
+ahead of the pin that needs it rather than a live regression.)
+
+**`no` was missing from the off list**, even though feral's own C-ABI
+shim accepts it (`feral/src/capi.rs`) — so `FERAL_PARALLEL=no` disabled
+the parallel driver when a caller went through the C API and was ignored
+when the same caller went through POUNCE.
+
+The grammar is now a single pure `parse_bool_env` helper that
+`POUNCE_FERAL_CASCADE_BREAK`, `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE`,
+`POUNCE_FERAL_STATIC_PIVOTING` and `FERAL_PARALLEL` all share, so the
+vocabulary cannot drift per knob again. Unset and unrecognized values
+still mean "leave the default alone" rather than a silent `false`.
+Behaviour of the four `POUNCE_FERAL_*` knobs is unchanged — they already
+had the full grammar; only `FERAL_PARALLEL` gains tokens.
+
 ### Added — a Rust chapter in the book, and the SQP warm-start contract on the facade (#561 follow-ups)
 
 Two gaps left open by #561, both about the Rust surface being reachable but
