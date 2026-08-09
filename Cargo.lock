@@ -305,9 +305,9 @@ dependencies = [
 
 [[package]]
 name = "feral"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd098b55d4d14e0807addbfdba87efccbe699f72f58acf8aa78d622933af3144"
+checksum = "916a692e1224d0aec71dfd5ab754fe54811c1ee2a453ab67ab36e64813e04058"
 dependencies = [
  "feral-amd",
  "feral-amf",

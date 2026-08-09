@@ -203,6 +203,48 @@ exercises both on every solve. A CI leg pinned to a Pyomo *below* the
 floor checks that the legacy plugin still imports there, so the floor is
 a tested property rather than a claim.
 
+### Changed — FERAL 0.15.0, which fixes the parallel-driver task granularity behind the #552 factorization gap
+
+The workspace pin moves `feral` 0.14.0 → 0.15.0. The change that matters for
+POUNCE is upstream feral#148: the parallel multifrontal driver spawned one
+boxed rayon task *per supernode* — roughly 1.8M allocations per solve on a
+chain-structured problem — so a chain-shaped KKT paid allocator and scheduling
+cost for a tree that offers no parallelism. It now spawns one task per subtree,
+and a chain-shaped tree collapses to a single task and takes the sequential
+driver outright.
+
+This lands on the path POUNCE actually ships: `FeralConfig.parallel` defaults
+to `None` and is only disabled by an explicit `FERAL_PARALLEL=0`
+(`crates/pounce-feral/src/lib.rs:399`), so every default solve was on the
+parallel driver. Paired A/B on the six KKT matrices dumped from real solves
+(alternating process launches, 12 pairs, `min` of 5 warm factorizations):
+
+| matrix | 0.14.0 | 0.15.0 | speedup | wins | p |
+|---|---:|---:|---:|---:|---:|
+| clnlbeam | 53.07 ms | 23.18 ms | **2.29×** | 12/12 | 0.0005 |
+| steering_12800 | 39.11 | 22.59 | **1.73×** | 12/12 | 0.0005 |
+| dtoc2 | 112.42 | 96.70 | 1.16× | 12/12 | 0.0005 |
+| rocket_12800 | 18.11 | 15.65 | 1.16× | 12/12 | 0.0005 |
+| dtoc1nd | 13.73 | 12.02 | 1.14× | 11/12 | 0.006 |
+| marine_1600 | 29.10 | 28.73 | 1.01× | 8/12 | 0.39 |
+
+The release also makes the x86_64 `pulp` dispatch actually vectorize — every
+pulp kernel had been executing its lane operations as outlined calls, roughly a
+10× kernel slowdown, invisible on aarch64 where NEON is baseline — and turns
+the packed BLAS-3 trailing update into an explicit SIMD kernel.
+
+All of it is scheduling- and codegen-only. Factors are byte-identical, pinned
+upstream by `tests/task_plan_parity.rs` and hardcoded `tests/golden_bits.rs`
+digests, and confirmed here by identical solve-vector hashes across both
+versions on all six matrices. 0.15.0's one breaking change is diagnostic-only
+(`SupernodeTiming` / `BucketStats` / `ProfileReport` moved from `*_us` fields
+to `*_ns`, with `.us()` accessors kept); POUNCE consumes none of that API, so
+no source change was needed anywhere in the workspace.
+
+This narrows but does not close the gap reported in #552. It is also the
+counterpart to the #562 change below: that one removes a POUNCE-side cost on
+the same code path.
+
 ### Changed — the FERAL backend stops rebuilding the CSC matrix on every factorization (#562)
 
 `pounce-feral` handed FERAL a `CscMatrix` built by
