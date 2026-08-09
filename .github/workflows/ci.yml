@@ -60,6 +60,18 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude pounce-hsl --verbose
 
+      # The pounce-rs facade's convex / active-set-QP / sensitivity modules are
+      # behind off-by-default features (gh #561), so the workspace steps above
+      # — which build the default feature set — never compile them. Without
+      # this step a re-export could stop matching the crate it mirrors and
+      # nothing would notice until a user enabled the feature. Cheap: the
+      # crates involved are already compiled by the workspace build.
+      - name: Test pounce-rs facade with all features
+        run: |
+          cargo clippy -p pounce-rs --all-features --all-targets -- \
+            -D clippy::correctness -D clippy::suspicious
+          cargo test -p pounce-rs --all-features --verbose
+
       # pounce-hsl is excluded from the build/test/clippy steps above because
       # it FFI-links libcoinhsl (HSL is licensed and absent from CI), so those
       # steps can't link it. But it IS on the crates.io publish list
