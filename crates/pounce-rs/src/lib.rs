@@ -20,7 +20,7 @@
 //! | feature | module | what it covers |
 //! |---|---|---|
 //! | `convex` | [`convex`] | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; QP sensitivity and reduced Hessian |
-//! | `qp` | [`qp`] | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed |
+//! | `qp` | [`qp`], [`sqp`] | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed — plus the SQP working-set warm-start contract |
 //! | `sensitivity` | [`sensitivity`] | sIPOPT-style NLP sensitivity: `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
 //! | `full` | — | all three |
 //!
@@ -240,6 +240,11 @@ pub mod linsol;
 pub mod qp;
 #[cfg(feature = "sensitivity")]
 pub mod sensitivity;
+// The SQP working-set contract. Flipping `algorithm` to `active-set-sqp` needs
+// no feature; carrying a working set across solves needs the `WorkingSet` type,
+// which is pounce-qp's.
+#[cfg(feature = "qp")]
+pub mod sqp;
 
 /// The common case in one glob import. Brings in the ergonomic [`Problem`]
 /// trait + [`Nlp`] builder, plus the low-level [`TNLP`] surface and the

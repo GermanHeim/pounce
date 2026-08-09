@@ -99,7 +99,7 @@ flat surface could not carry both:
 | feature | module | what it covers |
 |---|---|---|
 | `convex` | `pounce_rs::convex` | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; symbolic-factorization reuse; QP sensitivity and reduced Hessian |
-| `qp` | `pounce_rs::qp` | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed |
+| `qp` | `pounce_rs::qp`, `pounce_rs::sqp` | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed — plus the SQP working-set warm-start contract |
 | `sensitivity` | `pounce_rs::sensitivity` | sIPOPT-style NLP sensitivity: `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
 | `full` | — | all three |
 
