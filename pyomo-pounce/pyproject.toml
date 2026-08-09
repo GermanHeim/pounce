@@ -29,6 +29,25 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
+[project.optional-dependencies]
+# The `pyomo.contrib.solver` (v2) interface registered by
+# `pyomo_pounce.v2`. Both floors here are strictly tighter than the base
+# dependencies, and neither applies to the legacy
+# SolverFactory('pounce') plugin -- which is why the base stays where it
+# is and this is an extra: `pip install pyomo-pounce[v2]`.
+#
+# * pyomo>=6.10.1 -- `SolutionLoader`/`get_vars`, the loader API this
+#   subclasses. `pyomo.contrib.solver.common` exists from 6.9.2, but
+#   6.9.2-6.10.0 ship the older `SolutionLoaderBase`/`get_primals`.
+# * pounce-solver>0.9.0 -- the v2 route reads the `.sol` through Pyomo's
+#   `asl_sol_reader`, which is strict where the legacy reader is lenient:
+#   it asserts `n_opts >= 2`, so it needs the per-model `Options` echo
+#   added in #553. Released 0.9.0 predates that and fails on every solve
+#   through this route. The legacy plugin is unaffected, so this floor
+#   belongs here rather than on the base dependency. CI builds the binary
+#   from source and would never catch it.
+v2 = ["pyomo>=6.10.1", "pounce-solver>0.9.0"]
+
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"
 Repository = "https://github.com/jkitchin/pounce"

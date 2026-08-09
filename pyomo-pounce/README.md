@@ -50,6 +50,54 @@ print(f"x* = {value(model.x)}")  # 2.0
 > version string — two builds can share the same `X.Y.Z` while differing in
 > behavior (as a binary from before/after a fix does).
 
+## Pyomo's modern (`pyomo.contrib.solver`) interface
+
+The same solver is registered against Pyomo's newer solver interface —
+the one `ipopt_v2` uses — carrying every extra on this page:
+
+```python
+import pyomo_pounce
+from pyomo.contrib.solver.common.factory import SolverFactory as SolverFactoryV2
+
+solver = SolverFactoryV2('pounce')          # returns a v2 Results object
+results = solver.solve(model)
+print(results.solution_status, results.incumbent_objective)
+```
+
+`SolverFactory('pounce_v2')` gives the same engine behind the legacy API,
+mirroring Pyomo's own `ipopt` / `ipopt_v2` split. `SolverFactory('pounce')`
+is unchanged and remains fully supported.
+
+Both routes return the same numbers — a test solves one model through
+each and compares primals, objective, duals and reduced costs. They
+differ in API (v2 returns `Results` and hands the solution back through a
+loader, so `load_solutions=False` gives you values without touching the
+model; options are `solver_options={...}` rather than `options={...}`)
+and in per-solve overhead outside the solve, which on IDAES-shaped
+collocation models is roughly 0.25 s/solve lower on v2. See
+[the Pyomo docs page](https://jkitchin.github.io/pounce/pyomo.html) for
+the measurements.
+
+Pointing `ipopt_v2` at the `pounce` binary by hand also works, but
+silently drops all of the above — the integer-variable guard, the
+`scaling_factor` handling, the sensitivity path and the bundled-binary
+resolution. Prefer one of the two registrations above.
+
+> **Requirements for the v2 route** — `pip install pyomo-pounce[v2]` asks for
+> both:
+>
+> - **Pyomo ≥ 6.10.1**, which is where the `SolutionLoader` / `get_vars` API
+>   this builds on landed. (`pyomo.contrib.solver.common` exists from 6.9.2,
+>   but 6.9.2–6.10.0 ship the older `SolutionLoaderBase` / `get_primals`.)
+> - **pounce-solver > 0.9.0**. The v2 route reads the `.sol` through Pyomo's
+>   `asl_sol_reader`, which is strict where the legacy reader is lenient, so it
+>   needs the per-model `Options` echo added after 0.9.0.
+>
+> Neither applies to `SolverFactory('pounce')`. On an older Pyomo,
+> `import pyomo_pounce` still works and the legacy plugin behaves exactly as
+> before; `pyomo_pounce.HAVE_V2_INTERFACE` reports whether the v2 names are
+> available.
+
 ## Solver Options
 
 Pass options the same way as IPOPT:

@@ -294,6 +294,19 @@ jobs:
   # end-to-end against that binary. The pytest step exercises actual solves
   # (option forwarding, routing) that a plain import smoke test cannot —
   # without it, routing regressions like pounce#186 ship silently.
+  #
+  # This is also the ONLY job where Pyomo runs at all: it is not a
+  # dev-dependency of the workspace, so nothing else here can catch a
+  # Pyomo-side regression. Since gh#558 that includes both of the
+  # interfaces pyomo-pounce registers — the legacy ASL plugin and the
+  # `pyomo.contrib.solver` (v2) one — and `tests/test_v2.py` solves one
+  # model through both and compares primals, duals and reduced costs.
+  # That comparison is what keeps the interface table in
+  # `docs/src/pyomo.md` honest (it was hand-produced and went stale the
+  # moment Pyomo renamed anything) and what pins the two #553
+  # ASL-compatibility fixes from the Python side: quoted option values
+  # and the per-model `.sol` `Options` echo are exercised on every v2
+  # solve, where before they were covered by Rust unit tests only.
   pyomo-pounce-smoke:
     name: wheel smoke (pyomo-pounce)
     runs-on: ubuntu-latest
@@ -370,6 +383,20 @@ jobs:
           python -m pip install --no-deps pyomo-pounce/dist/*.whl
           which pounce
           python -c "import pyomo_pounce; from pyomo.opt import SolverFactory; s = SolverFactory('pounce'); print('exe:', s.executable())"
+          # Both registrations must resolve a usable binary before the
+          # suite runs. The v2 interface finds its executable and parses
+          # its version through a different code path than the legacy
+          # plugin (Pyomo's own Ipopt version parser rejects POUNCE's
+          # `pounce X.Y.Z` banner, so `available()` is NotFound without
+          # our override) — a plain `import` would not notice.
+          python - <<'PY'
+          import pyomo_pounce
+          from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+          s = SF2('pounce')
+          print('v2 exe:', s.config.executable.path())
+          print('v2 version:', s.version(), 'available:', s.available())
+          assert s.version() is not None, "v2 interface could not parse the POUNCE version"
+          PY
       - name: Run pyomo-pounce tests
         run: |
           python -m pip install pytest
@@ -378,3 +405,42 @@ jobs:
           # AMPL/`.nl` tests exercise the CLI plugin path. Both catch
           # regressions the import smoke test misses.
           python -m pytest pyomo-pounce/tests -q
+      # The v2 interface needs Pyomo >= 6.10.1; the package as a whole
+      # supports pyomo>=6.0 through the legacy plugin. Everything above
+      # installs Pyomo unpinned, i.e. always the newest release, so
+      # nothing there exercises the declared floor — it is a claim, not a
+      # tested property, and the one time it was wrong the failure mode
+      # was `import pyomo_pounce` raising, which takes the LEGACY plugin
+      # down with it (gh #558 review).
+      #
+      # 6.10.0 is the last release below the floor and the one where this
+      # actually broke: `pyomo.contrib.solver.common` exists there, so a
+      # package-level probe passed, but the loader API is still
+      # `SolutionLoaderBase`/`get_primals`. A separate venv keeps this
+      # older Pyomo away from the job's real environment.
+      - name: Below-floor Pyomo — legacy plugin must still import
+        run: |
+          python -m venv /tmp/floorenv
+          /tmp/floorenv/bin/pip install -q "pyomo==6.10.0" numpy pandas
+          /tmp/floorenv/bin/pip install -q python/dist/*.whl
+          /tmp/floorenv/bin/pip install -q --no-deps pyomo-pounce/dist/*.whl
+          /tmp/floorenv/bin/python - <<'PY'
+          import pyomo
+          # Must NOT raise: the v2 registration is optional, and a failed
+          # import here is the regression this leg exists to catch.
+          import pyomo_pounce
+          from pyomo.opt import SolverFactory
+          print('pyomo', pyomo.version.version,
+                '| HAVE_V2_INTERFACE:', pyomo_pounce.HAVE_V2_INTERFACE)
+          assert pyomo_pounce.HAVE_V2_INTERFACE is False, (
+              "6.10.0 is below the v2 floor; the guard should report the "
+              "interface as unavailable rather than claiming it works")
+          assert SolverFactory('pounce') is not None, (
+              "the legacy plugin must keep working below the v2 floor")
+          print('legacy plugin OK below the floor')
+          PY
+          # ...and the v2 test module skips cleanly rather than erroring
+          # at collection.
+          /tmp/floorenv/bin/pip install -q pytest
+          /tmp/floorenv/bin/python -m pytest pyomo-pounce/tests/test_v2.py \
+            -q --no-header -rs 2>&1 | tail -5
