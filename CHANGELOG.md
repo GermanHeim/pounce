@@ -9,6 +9,185 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a single dense Hessian row made `.nl` setup and every `eval_h` O(n²) (#552)
+
+`NlTnlp` recovers the Lagrangian Hessian by graph coloring: columns whose
+nonzero rows are pairwise disjoint share a color, and one directional
+product `H·s_c` per color recovers all of them at once. The seed and
+result buffers are `n_colors × n` dense arrays, which is fine while the
+coloring works.
+
+It does not work when the Hessian has one **dense row**. A variable that
+multiplies a sum over all the others — a total-cost variable, a shared
+design parameter, a scalar entering every constraint — puts a nonzero in
+*every* column at its own row, so no two columns may share a color and
+the greedy walk hands out one color per variable. `seeds` and
+`compressed` then become O(n²), on a model whose Hessian is otherwise
+perfectly sparse.
+
+A second, independent O(n²) sat behind it in `Tape::hessian_sparsity`,
+which kept a `BTreeSet` of dependent variables alive for *every* tape
+slot. A long additive chain — exactly what a dense row is built from —
+left one full-size set per partial sum and copied the whole running set
+at each union. (`split_top_sums` keeps top-level sums out of a single
+tape, so this only bit when the sum fed an enclosing operator.)
+
+**What is new.** Columns whose nonzero-row count exceeds
+`DENSE_COL_FACTOR` (16) times the average — never fewer than
+`DENSE_COL_MIN` (32) entries, at most `MAX_PEELED_COLS` (256) of them —
+become *candidates* for peeling, and those that pay for themselves are
+peeled out of the coloring and given a singleton color each. One
+product with seed `e_d` recovers the whole of column `d`, and because
+`H[d, j] == H[j, d]` that same pass also supplies every entry in row `d`.
+Row `d` therefore stops constraining anyone else's color and drops out of
+the conflict structure, leaving the rest to color on their real sparsity.
+`hessian_sparsity` additionally computes slot lifetimes up front and
+moves a dying operand's set into its consumer instead of copying it.
+
+Measured on `min Σ(xⱼ−1)² + x₀·Σxⱼ` discretized alongside a sparse
+constraint chain — one dense row, `nnz_h ≈ 2n`:
+
+| n = 8,010 | before | after |
+|---|---|---|
+| colors | 8,010 | 6 |
+| peak RSS through setup | 1,038 MB | 59 MB |
+| setup wall clock | 2.69 s | 0.18 s |
+
+| n = 4,010, 10 iterations | before | after |
+|---|---|---|
+| `LagrangianHessianEvaluations` | 2.069 s | 0.019 s |
+| `OverallAlgorithm` | 2.385 s | 0.284 s |
+
+Memory is now linear in `n` where it was quadratic, so what used to
+extrapolate to ~6.4 GB at n = 20,000 (and an OOM at flowsheet sizes) is a
+few tens of MB. Models without a dense row are untouched: a banded
+Hessian peels nothing and colors by its bandwidth exactly as before, and
+every one of the repository's 62 `.nl` fixtures returns a bit-identical
+objective and exit status.
+
+**Which candidates actually get peeled.** Each peeled column costs
+exactly one color, so peeling only pays when it removes more conflict
+than it adds — and simply truncating an over-long candidate list to
+`MAX_PEELED_COLS` does not bound the damage. The columns that miss the
+cut stay in the conflict structure, so the base color count is unchanged
+and the singleton colors are pure addition. On disjoint 50x50 blocks
+scattered through a 200,000-variable Hessian that colors to `50 + 256`
+where a plain walk needs 50 — a 6x regression in the very quantity
+peeling exists to reduce, and 8.5x on 34x34 blocks.
+
+The candidate set is therefore chosen by estimating the result: for
+peeling nothing and for the top `k` candidates by degree over a doubling
+ladder, `|peeled| + max surviving row degree` is a lower bound on the
+resulting color count (a row with `d` surviving entries makes those `d`
+columns pairwise conflict), computable in one O(nnz) pass. The best
+scoring option wins, ties going to fewer peels. On the block patterns
+above every `k > 0` now scores strictly worse than peeling nothing, so
+nothing is peeled and the coloring matches the plain walk exactly; the
+one-dense-row case still collapses n = 20,000 to 2 colors. Note the plain
+coloring cannot serve as a comparison baseline here — on that same
+one-dense-row case the plain walk is itself O(n²), which is the blowup
+peeling exists to avoid — so the choice has to be made from a bound.
+
+### Fixed — Pyomo's modern solver interface could not drive POUNCE at all (#552)
+
+`SolverFactory('ipopt_v2', executable=<pounce>)` — the v2 interface that
+is becoming Pyomo's default `ipopt` — failed on every model. Two
+independent gaps, both places where POUNCE diverged from what the ASL
+does and every reader therefore expects:
+
+1. **Quoted option values.** The v2 interface builds each option as
+   `option_file_name="/tmp/…/x.opt"` and passes it as a single `argv`
+   entry. With no shell in between, the quotes arrive as literal
+   characters. Ipopt's ASL option parser strips them; POUNCE did not, so
+   it looked for a file whose name began with `"`, failed to load it, and
+   aborted the run. `key=value` now drops one matching pair of surrounding
+   `"` or `'` quotes. A quote on one side only is left as content.
+
+2. **The `.sol` `Options` block.** POUNCE wrote a count of `0`. AMPL and
+   Pyomo's *legacy* reader accept that, but no ASL solver emits it: the
+   v2 reader reads the first two option words unconditionally (to detect
+   the documented quirk where a second word of `3` means two extra words
+   follow the `z` block) and so asserts `n_opts >= 2`. A POUNCE `.sol`
+   could not be parsed through the modern interface at all.
+
+   POUNCE now echoes the model's own option words, which is what Ipopt
+   and the ASL's `writesol.c` do — they are AMPL's flags, passed through
+   rather than interpreted, and they are per-model: `.nl` header line 0
+   is `g<count> <opt0> …`, so `bearing_400` (`g3 1 1 0`) gets
+   `3 / 1 / 1 / 0` while `arki0003` and `camshape_6400` (`g3 10 1 0`) get
+   `3 / 10 / 1 / 0`. Verified byte-for-byte against Ipopt 3.14.20 `-AMPL`
+   output on all three. Where there is no originating header — a problem
+   built through `NlProblem::from_expressions`, the WASM entry point, or
+   a header whose declared count does not match the words present — a
+   generic `3 / 1 / 1 / 0` goes out instead, which satisfies the v2
+   reader without claiming to be the model's own.
+
+With both fixed, the same model solved through `SolverFactory('pounce')`
+and through `SolverFactory('ipopt_v2', executable=<pounce>)` returns
+identical objectives and identical primal values. This also makes it
+possible to benchmark POUNCE against Ipopt through *one* Pyomo interface,
+which #552's overhead comparison could not do.
+
+### Changed — `eval_jac_g` takes the shared-CSE path when the shared bodies are big enough to pay for it (#476)
+
+`HybridTape` — the constraint tape that evaluates a CSE body once for the
+whole block instead of once per referencing summand — has driven `eval_g`
+since #476, while `eval_jac_g` stayed on the flat per-summand tapes whose
+CSE bodies are duplicated. The Jacobian now uses it too, but only above a
+measured threshold, because unlike `eval_g` it is not a free win.
+
+The asymmetry is structural. `eval_g` needs only values, so the prelude
+is swept once for the entire constraint block and the saving is the full
+op-count ratio. The Jacobian needs a gradient *per row*, so only the
+forward sweep can be shared — the reverse sweep still walks each
+summand's `prelude_reach` separately, and it pays a per-op cost the flat
+tape does not: a nested `SummandOp` dispatch and an indirected walk over
+a reach list rather than a straight loop over a contiguous `Vec<TapeOp>`.
+
+Measured on chain models with CSE redundancy 40, varying the shared body
+size (`eval_jac_g`, flat → hybrid, n ≈ 20,000):
+
+| flat/shared op ratio | 1.94 | 2.20 | 2.84 | 3.53 | 4.20 | 5.16 | 6.35 | 8.00 |
+|---|---|---|---|---|---|---|---|---|
+| speedup | 0.77× | 0.63× | 0.88× | 1.21× | 1.21× | 1.18× | 1.50× | 1.32× |
+
+The crossover sits near 3, so the gate is set at 4 to keep a margin: a
+model that does not clearly benefit stays on the flat path bit-for-bit.
+With the gate in place the same sweep shows 1.00–1.03× below it (i.e.
+unchanged) and 1.13–1.30× above it. `robot_a` (#476) measures 4.03×.
+
+`eval_h` is **not** changed and remains the larger prize — it is ~69% of
+AD time on these models against the Jacobian's ~19%. The dormant
+`HybridTape::hessian_summand` is not the tool for it: it re-walks
+`prelude_reach` once per seed variable, so it shares no prelude work at
+all, and it scatters through a `HashMap` lookup per emitted pair where
+the coloring path writes into a dense buffer. Amortizing prelude
+second-order work across summands needs a new directional routine, which
+is its own piece of work.
+
+`POUNCE_DBG_TAPE_STATS=1` now also prints the flat-versus-shared op counts
+for the constraint block, and `POUNCE_DBG_NO_HYBRID=1` forces the flat
+path, so the trade above is reproducible on any model.
+
+### Changed — the `.nl` reader's parse and setup paths allocate far less (#552)
+
+Reading a `.nl` put two heap allocations on every data line: one for the
+`String` the reader handed over, another for the `Vec<&str>` that
+`parse_var_coef` / `parse_bound_line` collected from it. `parse_expr`
+allocated a `String` per expression token — one per node of every
+expression tree in the file, ~620k of them for a 20k-variable model. All
+of these now borrow from the source buffer. Setup also replaced the
+global Hessian-pair `BTreeSet`, the per-row Jacobian column sets, and the
+per-summand color sets with `Vec` + `sort_unstable` + `dedup`, and
+dropped a `HashMap` that was built with one entry per Hessian nonzero,
+read once, and discarded — the decode tables are now built straight from
+the sorted pair list, which also makes the `eval_h` scatter walk `values`
+forward instead of in `HashMap` order.
+
+This is a constant-factor cleanup, not a complexity change: total setup
+on ordinary sparse models moves 1.00–1.07×. The dense-row case above is
+where the compounding shows up.
+
 ### Fixed — the filter's `theta_max` ceiling is now raised on demand instead of blocking a solve forever (#476, #546)
 
 The filter rejects any trial iterate whose constraint violation exceeds

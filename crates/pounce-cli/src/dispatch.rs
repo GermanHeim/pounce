@@ -1131,6 +1131,7 @@ mod tests {
             lambda0: vec![0.0],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1312,6 +1313,7 @@ mod tests {
             lambda0: vec![0.0; m],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1367,6 +1369,7 @@ mod tests {
             lambda0: vec![0.0],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1532,6 +1535,7 @@ mod tests {
             lambda0: vec![0.0; m],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
             var_names: Vec::new(),
             con_names: Vec::new(),
         }

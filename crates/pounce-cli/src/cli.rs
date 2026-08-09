@@ -823,14 +823,38 @@ impl Args {
 /// Parse `key=value` (or `key:=value`, ipopt-compatible). Returns
 /// `None` if the token does not contain `=`. Whitespace around the
 /// separator is trimmed; empty key or value yields `None`.
+///
+/// A value wrapped in a matching pair of quotes has them stripped. No
+/// shell is involved when a driver `exec`s us directly, so quotes the
+/// driver added for its own quoting rules arrive as literal characters:
+/// Pyomo's v2 solver interface builds every option as
+/// `option_file_name="/tmp/…/x.opt"` (`_option_to_cmd` in
+/// `pyomo/contrib/solver/solvers/ipopt.py`) and passes it as one argv
+/// entry. Ipopt's ASL option parser strips those quotes; until we did
+/// too, POUNCE looked for a file whose name literally began with `"`,
+/// failed to load it, and aborted the run — so `SolverFactory('ipopt_v2',
+/// executable=<pounce>)`, the interface that is becoming Pyomo's default
+/// `ipopt`, could not drive POUNCE at all whenever any option was set.
 fn parse_kv(s: &str) -> Option<(String, String)> {
     let (k, v) = s.split_once('=')?;
     let k = k.trim().trim_end_matches(':');
-    let v = v.trim();
+    let v = unquote(v.trim());
     if k.is_empty() || v.is_empty() {
         return None;
     }
     Some((k.to_string(), v.to_string()))
+}
+
+/// Strip one matching pair of surrounding `"` or `'` quotes. A lone
+/// quote on one side is left alone — it is more likely part of the value
+/// than a quoting artifact.
+fn unquote(v: &str) -> &str {
+    let b = v.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &v[1..v.len() - 1]
+    } else {
+        v
+    }
 }
 
 /// Parse the AMPL `pounce_options` environment variable into
@@ -1333,6 +1357,30 @@ mod tests {
         assert_eq!(parse_kv("plain_path.nl"), None);
         assert_eq!(parse_kv("=value"), None);
         assert_eq!(parse_kv("key="), None);
+    }
+
+    /// Pyomo's v2 solver interface emits every option as `key="value"`
+    /// and `exec`s the solver directly, so with no shell in between the
+    /// quotes reach us as literal characters. Ipopt's ASL parser strips
+    /// them; so must we, or `option_file_name` names a file that cannot
+    /// exist and the run aborts.
+    #[test]
+    fn parse_kv_strips_the_quotes_a_driver_added() {
+        assert_eq!(
+            parse_kv(r#"option_file_name="/tmp/pyomo/x.opt""#),
+            Some(("option_file_name".into(), "/tmp/pyomo/x.opt".into()))
+        );
+        assert_eq!(
+            parse_kv("option_file_name='/tmp/has space/x.opt'"),
+            Some(("option_file_name".into(), "/tmp/has space/x.opt".into()))
+        );
+        // A quote on one side only is content, not quoting.
+        assert_eq!(
+            parse_kv(r#"msg="unbalanced"#),
+            Some(("msg".into(), r#""unbalanced"#.into()))
+        );
+        // An empty quoted value is still empty.
+        assert_eq!(parse_kv(r#"key="""#), None);
     }
 
     #[test]

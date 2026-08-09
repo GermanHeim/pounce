@@ -124,17 +124,63 @@ pub struct SolutionFile<'a> {
     pub suffixes: &'a [SolSuffix],
 }
 
-/// Format `payload` into AMPL `.sol` ASCII text.
+/// Format `payload` into AMPL `.sol` ASCII text, with a generic
+/// `Options` block.
+///
+/// Prefer [`format_sol_with_options`] whenever the originating `.nl` is
+/// available: a real ASL solver echoes *that model's* option words, and
+/// this entry point has none to echo.
 pub fn format_sol(payload: &SolutionFile<'_>) -> String {
+    format_sol_with_options(payload, &[])
+}
+
+/// Format `payload` into AMPL `.sol` ASCII text, echoing `ampl_options`.
+///
+/// `ampl_options` are the model's own option words, read verbatim from
+/// `.nl` header line 0 (`NlProblem::ampl_options`). Ipopt and the ASL's
+/// `writesol.c` echo them back unchanged rather than interpreting them,
+/// and the values are per-model: `bearing_400` (`g3 1 1 0`) yields
+/// `3 / 1 / 1 / 0`, while `arki0003` and `camshape_6400` (`g3 10 1 0`)
+/// yield `3 / 10 / 1 / 0`. Verified against Ipopt 3.14.20 `-AMPL` output.
+///
+/// Pass an empty slice when there is no originating header — problems
+/// built through `NlProblem::from_expressions`, the WASM entry point —
+/// and a generic `3 / 1 / 1 / 0` goes out instead. That is a valid block
+/// (see the count discussion below); it simply is not this model's.
+pub fn format_sol_with_options(payload: &SolutionFile<'_>, ampl_options: &[i64]) -> String {
     let mut out = String::new();
 
-    // Header: message + a blank line + "Options" + zero options.
+    // Header: message + a blank line + the `Options` block.
+    //
+    // The block is a count followed by that many integer option words.
+    // We used to write a count of `0`, which AMPL and Pyomo's *legacy*
+    // `.sol` reader accept — but no ASL solver emits it, and Pyomo's
+    // v2 reader (`pyomo.contrib.solver.solvers.asl_sol_reader`, the one
+    // behind `ipopt_v2` and the future default `ipopt`) reads the first
+    // two option words unconditionally, to detect the documented ASL
+    // quirk where a second word of `3` means two extra words follow the
+    // `z` block. It therefore asserts `n_opts >= 2` and a count of `0`
+    // aborts the parse, so a `.sol` POUNCE wrote could not be loaded
+    // through the modern interface at all.
+    //
+    // Echo the model's own option words, which is what Ipopt and the
+    // ASL's `writesol.c` do — they are AMPL's flags, passed through
+    // rather than interpreted. With no header to echo, fall back to a
+    // generic three-word block; `1` in the second slot deliberately does
+    // not trigger the `3`-quirk test above.
     for line in payload.message.lines() {
         let _ = writeln!(out, "{line}");
     }
     out.push('\n');
     out.push_str("Options\n");
-    out.push_str("0\n");
+    if ampl_options.len() >= 2 {
+        let _ = writeln!(out, "{}", ampl_options.len());
+        for opt in ampl_options {
+            let _ = writeln!(out, "{opt}");
+        }
+    } else {
+        out.push_str("3\n1\n1\n0\n");
+    }
 
     // Count block: the canonical AMPL four-integer form
     //   <n_dual_written> <n_con> <n_primal_written> <n_var>
@@ -236,7 +282,17 @@ fn write_suffix_header(out: &mut String, kind: u32, nvalues: usize, name: &str) 
 /// Convenience: write `payload` to `path` (truncating any existing
 /// file). Returns the bytes written on success.
 pub fn write_sol_file(path: &Path, payload: &SolutionFile<'_>) -> std::io::Result<usize> {
-    let s = format_sol(payload);
+    write_sol_file_with_options(path, payload, &[])
+}
+
+/// As [`write_sol_file`], echoing the model's own `ampl_options` (see
+/// [`format_sol_with_options`]).
+pub fn write_sol_file_with_options(
+    path: &Path,
+    payload: &SolutionFile<'_>,
+    ampl_options: &[i64],
+) -> std::io::Result<usize> {
+    let s = format_sol_with_options(payload, ampl_options);
     std::fs::write(path, &s)?;
     Ok(s.len())
 }
@@ -244,6 +300,52 @@ pub fn write_sol_file(path: &Path, payload: &SolutionFile<'_>) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn options_block(text: &str) -> Vec<String> {
+        let mut lines = text.lines().skip_while(|l| *l != "Options");
+        lines.next();
+        let n: usize = lines.next().unwrap().parse().unwrap();
+        std::iter::once(n.to_string())
+            .chain(lines.take(n).map(str::to_string))
+            .collect()
+    }
+
+    /// A solver echoes the model's own AMPL option words rather than
+    /// inventing them. `arki0003` and `camshape_6400` carry `g3 10 1 0`,
+    /// and Ipopt 3.14.20 writes `3 / 10 / 1 / 0` for both — verified
+    /// against real `-AMPL` output, not just the spec.
+    #[test]
+    fn options_block_echoes_the_models_own_words() {
+        let payload = SolutionFile {
+            message: "POUNCE: SolveSucceeded",
+            x: &[1.0],
+            mult_g: &[],
+            solve_result_num: 0,
+            suffixes: &[],
+        };
+        let text = format_sol_with_options(&payload, &[10, 1, 0]);
+        assert_eq!(options_block(&text), ["3", "10", "1", "0"]);
+    }
+
+    /// With no originating header, a generic block goes out. It must
+    /// still satisfy Pyomo's v2 reader: at least two words, and a second
+    /// word that is not the `3` that signals two extra trailing values.
+    #[test]
+    fn options_block_falls_back_when_there_is_no_header() {
+        let payload = SolutionFile {
+            message: "POUNCE: SolveSucceeded",
+            x: &[1.0],
+            mult_g: &[],
+            solve_result_num: 0,
+            suffixes: &[],
+        };
+        for opts in [vec![], vec![7]] {
+            let text = format_sol_with_options(&payload, &opts);
+            let block = options_block(&text);
+            assert_eq!(block, ["3", "1", "1", "0"], "opts={opts:?}");
+            assert_ne!(block[2], "3", "must not trigger the vbtol quirk");
+        }
+    }
 
     #[test]
     fn writes_basic_primal_dual_block() {
@@ -257,7 +359,11 @@ mod tests {
         let s = format_sol(&payload);
         // Header banner present.
         assert!(s.starts_with("POUNCE: SolveSucceeded\n"));
-        assert!(s.contains("\nOptions\n0\n"));
+        // The ASL option block, as `writesol.c` and Ipopt emit it. A
+        // count of `0` here trips `assert n_opts >= 2` in Pyomo's v2
+        // `.sol` reader, which is what `ipopt_v2` (and the future
+        // default `ipopt`) uses — see `format_sol`.
+        assert!(s.contains("\nOptions\n3\n1\n1\n0\n"), "option block:\n{s}");
         // Four-integer count block: n_dual=2, m=2, n_primal=3, n=3.
         assert!(s.contains("\n2\n2\n3\n3\n"), "counts missing:\n{s}");
         // First dual line: 0.1 in exponent form.
