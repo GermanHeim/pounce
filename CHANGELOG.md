@@ -64,6 +64,36 @@ Hessian peels nothing and colors by its bandwidth exactly as before, and
 every one of the repository's 62 `.nl` fixtures returns a bit-identical
 objective and exit status.
 
+### Fixed — Pyomo's modern solver interface could not drive POUNCE at all (#552)
+
+`SolverFactory('ipopt_v2', executable=<pounce>)` — the v2 interface that
+is becoming Pyomo's default `ipopt` — failed on every model. Two
+independent gaps, both places where POUNCE diverged from what the ASL
+does and every reader therefore expects:
+
+1. **Quoted option values.** The v2 interface builds each option as
+   `option_file_name="/tmp/…/x.opt"` and passes it as a single `argv`
+   entry. With no shell in between, the quotes arrive as literal
+   characters. Ipopt's ASL option parser strips them; POUNCE did not, so
+   it looked for a file whose name began with `"`, failed to load it, and
+   aborted the run. `key=value` now drops one matching pair of surrounding
+   `"` or `'` quotes. A quote on one side only is left as content.
+
+2. **The `.sol` `Options` block.** POUNCE wrote a count of `0`. AMPL and
+   Pyomo's *legacy* reader accept that, but no ASL solver emits it: the
+   v2 reader reads the first two option words unconditionally (to detect
+   the documented quirk where a second word of `3` means two extra words
+   follow the `z` block) and so asserts `n_opts >= 2`. A POUNCE `.sol`
+   could not be parsed through the modern interface at all. POUNCE now
+   writes the same `3 / 1 / 1 / 0` the ASL's own `writesol.c` and Ipopt
+   write.
+
+With both fixed, the same model solved through `SolverFactory('pounce')`
+and through `SolverFactory('ipopt_v2', executable=<pounce>)` returns
+identical objectives and identical primal values. This also makes it
+possible to benchmark POUNCE against Ipopt through *one* Pyomo interface,
+which #552's overhead comparison could not do.
+
 ### Changed — `eval_jac_g` takes the shared-CSE path when the shared bodies are big enough to pay for it (#476)
 
 `HybridTape` — the constraint tape that evaluates a CSE body once for the

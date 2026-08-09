@@ -128,13 +128,29 @@ pub struct SolutionFile<'a> {
 pub fn format_sol(payload: &SolutionFile<'_>) -> String {
     let mut out = String::new();
 
-    // Header: message + a blank line + "Options" + zero options.
+    // Header: message + a blank line + the `Options` block.
+    //
+    // The block is a count followed by that many integer option words.
+    // We used to write a count of `0`, which AMPL and Pyomo's *legacy*
+    // `.sol` reader accept — but no ASL solver emits it, and Pyomo's
+    // v2 reader (`pyomo.contrib.solver.solvers.asl_sol_reader`, the one
+    // behind `ipopt_v2` and the future default `ipopt`) reads the first
+    // two option words unconditionally, to detect the documented ASL
+    // quirk where a second word of `3` means two extra words follow the
+    // `z` block. It therefore asserts `n_opts >= 2` and a count of `0`
+    // aborts the parse, so a `.sol` POUNCE wrote could not be loaded
+    // through the modern interface at all.
+    //
+    // Emit the same three words Ipopt and the ASL's own `writesol.c`
+    // emit. They are AMPL's option flags, which a solver echoes rather
+    // than interprets; every reader either ignores them or uses only
+    // the `3`-quirk test above, which `1` does not trigger.
     for line in payload.message.lines() {
         let _ = writeln!(out, "{line}");
     }
     out.push('\n');
     out.push_str("Options\n");
-    out.push_str("0\n");
+    out.push_str("3\n1\n1\n0\n");
 
     // Count block: the canonical AMPL four-integer form
     //   <n_dual_written> <n_con> <n_primal_written> <n_var>
@@ -257,7 +273,11 @@ mod tests {
         let s = format_sol(&payload);
         // Header banner present.
         assert!(s.starts_with("POUNCE: SolveSucceeded\n"));
-        assert!(s.contains("\nOptions\n0\n"));
+        // The ASL option block, as `writesol.c` and Ipopt emit it. A
+        // count of `0` here trips `assert n_opts >= 2` in Pyomo's v2
+        // `.sol` reader, which is what `ipopt_v2` (and the future
+        // default `ipopt`) uses — see `format_sol`.
+        assert!(s.contains("\nOptions\n3\n1\n1\n0\n"), "option block:\n{s}");
         // Four-integer count block: n_dual=2, m=2, n_primal=3, n=3.
         assert!(s.contains("\n2\n2\n3\n3\n"), "counts missing:\n{s}");
         // First dual line: 0.1 in exponent form.
