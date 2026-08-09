@@ -1901,7 +1901,42 @@ struct ConHybrid {
     prelude_vals: Vec<f64>,
     /// Per-summand local forward values, sized to `tape.max_summand_ops()`.
     local_vals: Vec<f64>,
+    /// Reverse-mode adjoint arenas for `eval_jac_g`, sized like the two
+    /// value arenas above. `gradient_summand` zeroes only the slots a
+    /// summand actually reaches, so these are allocated once and reused.
+    local_adj: Vec<f64>,
+    prelude_adj: Vec<f64>,
+    /// Whether `eval_jac_g` should take the shared-CSE path too, or stay
+    /// on the flat per-summand tapes. See [`HYBRID_JAC_MIN_OP_RATIO`] —
+    /// unlike `eval_g`, the hybrid Jacobian is not a free win.
+    use_for_jac: bool,
 }
+
+/// Flat-to-shared op-count ratio above which `eval_jac_g` switches to the
+/// shared-CSE prelude.
+///
+/// `eval_g` takes the hybrid path unconditionally because it only needs
+/// *values*: the prelude is swept once for the whole constraint block and
+/// the saving is the full op-count ratio. The Jacobian is different. Each
+/// row needs its own gradient, so only the forward sweep can be shared —
+/// the reverse sweep still walks each summand's `prelude_reach`
+/// separately, and it pays a per-op cost the flat tape does not: a nested
+/// `SummandOp` dispatch and an indirected walk over a reach list instead
+/// of a straight loop over a contiguous `Vec<TapeOp>`.
+///
+/// So the hybrid Jacobian wins only when the shared bodies are large
+/// enough for the halved forward sweep to outweigh that overhead.
+/// Measured on chain models at CSE redundancy 40, varying the body size
+/// (`eval_jac_g`, flat → hybrid):
+///
+/// | op ratio | 1.94 | 2.20 | 2.84 | 3.53 | 4.20 | 5.16 | 6.35 | 8.00 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | speedup | 0.77× | 0.63× | 0.88× | 1.21× | 1.21× | 1.18× | 1.50× | 1.32× |
+///
+/// The crossover sits near 3; this gate is set at 4 to keep a margin, so
+/// a model that does not clearly benefit stays on the flat path. For
+/// reference `robot_a` (#476) measures 4.03×.
+const HYBRID_JAC_MIN_OP_RATIO: f64 = 4.0;
 
 // `Clone` supports the batched-solve path (pounce#126): one parsed
 // model is cloned per batch instance (tapes are flat `Vec`s of ops, so
@@ -2642,13 +2677,29 @@ impl NlTnlp {
         // or more summands — otherwise the prelude comes out empty and the
         // hybrid tape is the flat tape plus an indirection. `hybrid_supported`
         // gates the opcodes `build_multi` would panic on.
-        let con_hybrid = if hybrid_supported(&con_roots) {
+        // `POUNCE_DBG_NO_HYBRID=1` forces the flat per-summand tapes for the
+        // whole constraint block. Diagnostic only: it is how the
+        // flat-versus-shared trade in `HYBRID_JAC_MIN_OP_RATIO` is measured
+        // on a real model, and how a suspected hybrid-path bug is bisected
+        // against a reference that computes the same derivatives a
+        // different way.
+        let con_hybrid = if std::env::var("POUNCE_DBG_NO_HYBRID").is_ok() {
+            None
+        } else if hybrid_supported(&con_roots) {
             let tape = HybridTape::build_multi(&con_roots);
-            (tape.n_prelude_ops() > 0).then(|| ConHybrid {
-                prelude_vals: vec![0.0; tape.n_prelude_ops()],
-                local_vals: vec![0.0; tape.max_summand_ops()],
-                row_start,
-                tape,
+            (tape.n_prelude_ops() > 0).then(|| {
+                let flat_ops: usize = con_tapes.iter().flatten().map(|t| t.ops.len()).sum();
+                let shared_ops = tape.n_prelude_ops() + tape.total_local_ops();
+                ConHybrid {
+                    prelude_vals: vec![0.0; tape.n_prelude_ops()],
+                    local_vals: vec![0.0; tape.max_summand_ops()],
+                    local_adj: vec![0.0; tape.max_summand_ops()],
+                    prelude_adj: vec![0.0; tape.n_prelude_ops()],
+                    use_for_jac: flat_ops as f64
+                        >= HYBRID_JAC_MIN_OP_RATIO * shared_ops.max(1) as f64,
+                    row_start,
+                    tape,
+                }
             })
         } else {
             None
@@ -2798,6 +2849,24 @@ impl NlTnlp {
                  n_colors={n_colors} avg_decode_per_color={avg_decode:.1} nnz_h={nnz_h}",
                 sum_ops as f64 / t as f64,
             );
+            // Flat vs shared-CSE op counts for the constraint block. The
+            // ratio is how much duplicated CSE work `eval_g`'s hybrid path
+            // avoids, and the ceiling on what routing the Jacobian /
+            // Hessian through the same prelude could save.
+            match &con_hybrid {
+                Some(h) => {
+                    let flat: usize = con_tapes.iter().flatten().map(|t| t.ops.len()).sum();
+                    let prelude = h.tape.n_prelude_ops();
+                    let local = h.tape.total_local_ops();
+                    eprintln!(
+                        "[hybrid stats] con flat_ops={flat} prelude_ops={prelude} \
+                         local_ops={local} shared_total={} flat/shared={:.2}x",
+                        prelude + local,
+                        flat as f64 / (prelude + local).max(1) as f64,
+                    );
+                }
+                None => eprintln!("[hybrid stats] con hybrid not built (no shared CSE bodies)"),
+            }
         }
 
         let compressed: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
@@ -3271,6 +3340,7 @@ impl TNLP for NlTnlp {
                 row_start,
                 prelude_vals,
                 local_vals,
+                ..
             } = h;
             tape.forward_prelude(x, prelude_vals);
             for i in 0..m {
@@ -3316,31 +3386,77 @@ impl TNLP for NlTnlp {
             }
             SparsityRequest::Values { values } => {
                 let n = self.prob.n;
-                let xs = x.unwrap_or(&self.prob.x0);
                 if self.scratch_row_grad.len() < n {
                     self.scratch_row_grad.resize(n, 0.0);
                 }
+                let Self {
+                    prob,
+                    con_tapes,
+                    con_hybrid,
+                    jac_cols,
+                    scratch_row_grad,
+                    vals_scratch,
+                    adj_scratch,
+                    ..
+                } = self;
+                let xs = x.unwrap_or(&prob.x0);
                 let mut k = 0;
-                for i in 0..self.prob.m {
-                    for &j in &self.jac_cols[i] {
-                        self.scratch_row_grad[j] = 0.0;
+                // Shared-CSE path: the forward sweep over the CSE bodies runs
+                // once for the whole constraint block instead of once per
+                // referencing summand. The reverse sweep cannot be shared —
+                // each row needs its own gradient — so a summand still walks
+                // its own `prelude_reach` backwards.
+                if let Some(h) = con_hybrid.as_mut().filter(|h| h.use_for_jac) {
+                    let ConHybrid {
+                        tape,
+                        row_start,
+                        prelude_vals,
+                        local_vals,
+                        local_adj,
+                        prelude_adj,
+                        ..
+                    } = h;
+                    tape.forward_prelude(xs, prelude_vals);
+                    for i in 0..prob.m {
+                        for &j in &jac_cols[i] {
+                            scratch_row_grad[j] = 0.0;
+                        }
+                        for s in &tape.summands[row_start[i]..row_start[i + 1]] {
+                            tape.forward_summand(s, xs, prelude_vals, local_vals);
+                            tape.gradient_summand(
+                                s,
+                                prelude_vals,
+                                local_vals,
+                                1.0,
+                                scratch_row_grad,
+                                local_adj,
+                                prelude_adj,
+                            );
+                        }
+                        for &(v, c) in &prob.con_linear[i] {
+                            scratch_row_grad[v] += c;
+                        }
+                        for &j in &jac_cols[i] {
+                            values[k] = scratch_row_grad[j];
+                            k += 1;
+                        }
                     }
-                    for t in &self.con_tapes[i] {
+                    return true;
+                }
+                for i in 0..prob.m {
+                    for &j in &jac_cols[i] {
+                        scratch_row_grad[j] = 0.0;
+                    }
+                    for t in &con_tapes[i] {
                         // Allocation-free reverse-AD per summand tape (M18):
                         // reuse the shared forward/adjoint scratch arenas.
-                        t.gradient_seed_into(
-                            xs,
-                            1.0,
-                            &mut self.scratch_row_grad,
-                            &mut self.vals_scratch,
-                            &mut self.adj_scratch,
-                        );
+                        t.gradient_seed_into(xs, 1.0, scratch_row_grad, vals_scratch, adj_scratch);
                     }
-                    for &(v, c) in &self.prob.con_linear[i] {
-                        self.scratch_row_grad[v] += c;
+                    for &(v, c) in &prob.con_linear[i] {
+                        scratch_row_grad[v] += c;
                     }
-                    for &j in &self.jac_cols[i] {
-                        values[k] = self.scratch_row_grad[j];
+                    for &j in &jac_cols[i] {
+                        values[k] = scratch_row_grad[j];
                         k += 1;
                     }
                 }
@@ -5099,6 +5215,170 @@ G0 3
 
     fn shared_cse_nl(body2: &str) -> String {
         SHARED_CSE.replace("{BODY2}", body2)
+    }
+
+    /// `eval_jac_g`'s shared-CSE path must return exactly what the flat
+    /// per-summand tapes return — it is a different traversal of the same
+    /// DAG, not a different derivative. Forced on here regardless of
+    /// `HYBRID_JAC_MIN_OP_RATIO` so the path is covered independently of
+    /// the size heuristic that decides when to use it.
+    #[test]
+    fn shared_cse_jacobian_matches_flat_tape_bit_for_bit() {
+        let nl = shared_cse_nl("o2\nv3\nv2");
+        let p = parse_nl_text(&nl).expect("parse shared-CSE model");
+
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let nnz = info.nnz_jac_g as usize;
+        hybrid
+            .con_hybrid
+            .as_mut()
+            .expect("CSE shared by 3 constraints must build the hybrid tape")
+            .use_for_jac = true;
+
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        for x in [[1.0, 1.0, 1.0], [-2.0, 0.5, 3.0], [0.0, -1.5, -0.25]] {
+            let mut jh = vec![0.0_f64; nnz];
+            let mut jf = vec![0.0_f64; nnz];
+            assert!(hybrid.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jh }));
+            assert!(flat.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jf }));
+            assert_eq!(
+                jh, jf,
+                "hybrid Jacobian differs from the flat tape at {x:?}"
+            );
+
+            // V3 = 2 x0 + 3 x1; rows are V3^2, V3^3 + x2, V3 * x2.
+            let s = 2.0 * x[0] + 3.0 * x[1];
+            let want = [
+                4.0 * s,
+                6.0 * s,
+                6.0 * s * s,
+                9.0 * s * s,
+                1.0,
+                2.0 * x[2],
+                3.0 * x[2],
+                s,
+            ];
+            assert_eq!(nnz, want.len());
+            for k in 0..nnz {
+                assert!(
+                    (jh[k] - want[k]).abs() < 1e-9,
+                    "entry {k} at {x:?}: got {}, want {}",
+                    jh[k],
+                    want[k]
+                );
+            }
+        }
+    }
+
+    /// `.nl` text for `m` constraints `S * x_{i+2} >= 0`, all sharing one
+    /// CSE `S = exp^depth(0.01 * (x0 + x1))`. A deep shared body over few
+    /// local ops per row is the regime the Jacobian gate is meant to
+    /// catch: no repository fixture has a CSE shared across constraints
+    /// at all, so without this the gate-on path has no natural coverage.
+    fn deep_shared_cse_nl(m: usize, depth: usize) -> String {
+        let n = m + 2;
+        let nzc = 3 * m;
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} {m} 1 0 0 0\n"));
+        s.push_str(&format!(" {m} 0\n 0 0\n"));
+        s.push_str(&format!(" {n} 0 0\n"));
+        s.push_str(" 0 0 0 1\n 0 0 0 0 0\n");
+        s.push_str(&format!(" {nzc} {n}\n"));
+        s.push_str(" 0 0\n 0 1 0 0 0\n");
+        // The shared body.
+        s.push_str(&format!("V{n} 0 0\n"));
+        for _ in 0..depth {
+            s.push_str("o44\n");
+        }
+        s.push_str("o2\nn0.01\no0\nv0\nv1\n");
+        // Rows: S * x_{i+2}.
+        for i in 0..m {
+            s.push_str(&format!("C{i}\no2\nv{n}\nv{}\n", i + 2));
+        }
+        s.push_str("O0 0\nn0\n");
+        s.push_str(&format!("x{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} {}\n", 0.3 + 0.05 * j as f64));
+        }
+        s.push_str("r\n");
+        for _ in 0..m {
+            s.push_str("2 0\n");
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        // Column counts: cols 0 and 1 appear in every row, col i+2 in one.
+        s.push_str(&format!("k{}\n", n - 1));
+        let mut acc = 0;
+        for j in 0..n - 1 {
+            acc += if j < 2 { m } else { 1 };
+            s.push_str(&format!("{acc}\n"));
+        }
+        for i in 0..m {
+            s.push_str(&format!("J{i} 3\n0 0.0\n1 0.0\n{} 0.0\n", i + 2));
+        }
+        s.push_str(&format!("G0 {n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.0\n"));
+        }
+        s
+    }
+
+    /// With a deep shared body the gate turns itself on, and the path it
+    /// turns on must still agree with the flat tapes exactly.
+    #[test]
+    fn a_deep_shared_body_turns_the_jacobian_gate_on_and_still_agrees() {
+        let p = parse_nl_text(&deep_shared_cse_nl(16, 40)).expect("parse");
+
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let nnz = info.nnz_jac_g as usize;
+        assert!(
+            hybrid
+                .con_hybrid
+                .as_ref()
+                .expect("shared CSE must build the hybrid tape")
+                .use_for_jac,
+            "a 40-deep body shared by 16 rows is well past the op-ratio gate"
+        );
+
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        for scale in [1.0_f64, -0.7, 2.5] {
+            let x: Vec<f64> = (0..info.n as usize)
+                .map(|j| scale * (0.2 + 0.03 * j as f64))
+                .collect();
+            let mut jh = vec![0.0_f64; nnz];
+            let mut jf = vec![0.0_f64; nnz];
+            assert!(hybrid.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jh }));
+            assert!(flat.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jf }));
+            assert_eq!(jh, jf, "gate-on Jacobian differs from the flat tape");
+            assert!(jh.iter().any(|v| *v != 0.0), "all-zero Jacobian is no test");
+        }
+    }
+
+    /// The Jacobian gate is off for a model whose shared bodies are small,
+    /// because there the hybrid traversal's per-op overhead outweighs the
+    /// halved forward sweep. `eval_g` still takes the hybrid path — that
+    /// one is a win at any ratio.
+    #[test]
+    fn a_small_shared_body_leaves_the_jacobian_on_the_flat_path() {
+        let p = parse_nl_text(&shared_cse_nl("o2\nv3\nv2")).expect("parse");
+        let mut t = NlTnlp::new(p);
+        t.get_nlp_info().unwrap();
+        let h = t.con_hybrid.as_ref().expect("hybrid built for eval_g");
+        assert!(
+            !h.use_for_jac,
+            "a 3-row model with a 2-term CSE is far below the op-ratio gate"
+        );
     }
 
     /// A CSE referenced from several constraints is evaluated once per
