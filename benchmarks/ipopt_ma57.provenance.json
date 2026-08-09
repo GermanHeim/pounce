@@ -6,5 +6,14 @@
   "ipopt_version": "Ipopt 3.14.20 (Darwin arm64), ASL(20241202)",
   "linear_solver": "ma57 (via ref/Ipopt/install-ma57)",
   "timelimit": 300,
-  "git_sha": "659d98a"
+  "git_sha": "659d98a",
+  "suite_overrides": {
+    "mittelmann": {
+      "generated": "2026-08-07",
+      "timelimit": 1800,
+      "ipopt_bin": "/Users/jkitchin/.local/bin/ipopt-ma57 (wrapper for ref/Ipopt/build-ma57, same build as install-ma57)",
+      "threads": "pinned to 1 (OMP/OPENBLAS/VECLIB/RAYON)",
+      "why": "the 300s max_cpu_time in the base stamp was reached at ~90s wall on unpinned multithreaded BLAS, leaving 6 instances truncated; see dev-notes/research/mittelmann-post-546-sweep.md"
+    }
+  }
 }
