@@ -74,6 +74,34 @@ double obj;
 int status = IpoptSolve(prob, x, NULL, &obj, NULL, NULL, NULL, NULL);
 ```
 
+### Rust
+
+The flip is one option, so it needs no cargo feature — the default
+`pounce-rs` build reaches the SQP path. On the builder API:
+
+```rust
+use pounce_rs::prelude::*;
+
+let sol = Nlp::new(MyNlp)
+    .var_bounds(&[0.0, 0.0], &[10.0, 10.0])
+    .constraint_bounds(&[1.0], &[1.0])
+    .x0(&[0.5, 0.5])
+    .option_str("algorithm", "active-set-sqp")
+    .solve();
+```
+
+or, driving `IpoptApplication` directly:
+
+```rust
+let mut app = IpoptApplication::new();
+app.initialize()?;
+app.initialize_with_options_str("algorithm active-set-sqp\n")?;
+let status = app.optimize_tnlp(tnlp);
+```
+
+Carrying a working set across solves — §3 below — additionally needs
+`features = ["qp"]`, because the `WorkingSet` type belongs to the QP engine.
+
 ### GAMS
 
 ```
@@ -263,6 +291,53 @@ for (int k = 0; k < horizon_steps; k++) {
 }
 ```
 
+### Rust: carry across solves
+
+```toml
+[dependencies]
+pounce-rs = { version = "0.9", features = ["qp"] }
+```
+
+The round trip is `last_sqp_working_set` out, `SqpIterates` in:
+
+```rust
+use pounce_rs::prelude::*;
+use pounce_rs::sqp::SqpIterates;
+
+let mut app = IpoptApplication::new();
+app.initialize()?;
+app.initialize_with_options_str("algorithm active-set-sqp\n")?;
+
+let mut working = None;
+let mut x = x0.clone();
+for _ in 0..horizon_steps {
+    // ... user code updates the parameter inside the TNLP ...
+    if let Some(w) = working.take() {
+        app.set_sqp_warm_start(SqpIterates {
+            x: x.clone(),
+            lambda_g: lambda_g.clone(),
+            lambda_x: lambda_x.clone(),   // packed: z_l − z_u
+            working: Some(w),
+        });
+    }
+    app.optimize_tnlp(Rc::clone(&tnlp));
+    working = app.last_sqp_working_set().cloned();
+    x = /* the x captured in finalize_solution */;
+}
+```
+
+The warm start is consumed by the solve that follows it, so each pass
+installs a fresh one; `clear_sqp_warm_start()` drops an unused one. Reading
+individual rows uses the same status enums the Python int8 codes above
+encode — `BoundStatus::{Inactive, AtLower, AtUpper, Fixed}` and
+`ConsStatus::{Inactive, AtLower, AtUpper, Equality}`, both re-exported from
+`pounce_rs::sqp`.
+
+When the seed comes from a *sensitivity predictor* instead of a previous
+solve (§4), there is no working set to carry —
+`pounce_rs::sqp::classify_working_set` derives one from the predicted point
+and its multipliers.
+
 ### GAMS: working set persists automatically
 
 The GAMS solver link reads variable and equation marginals (`x.m`,
@@ -297,7 +372,7 @@ playbook is:
 
 1. **Solve** at `p₀` with the IPM (better cold-start
    convergence than the SQP elastic phase).
-2. **Predictor**: ask `pounce_sensitivity::SensSolve` for
+2. **Predictor**: ask `pounce_rs::sensitivity::SensSolve` for
    `Δx ≈ ∂x*/∂p · Δp` at `p₀`.
 3. **Classify** the active set at the converged IPM iterate via
    `pounce.classify_working_set(...)`.

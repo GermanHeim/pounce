@@ -9,6 +9,49 @@ changes.
 
 ## [Unreleased]
 
+### Added — a Rust chapter in the book, and the SQP warm-start contract on the facade (#561 follow-ups)
+
+Two gaps left open by #561, both about the Rust surface being reachable but
+undocumented.
+
+**The book had no Rust chapter.** It has never had one — the Rust snippets
+lived inside the per-solver pages, so a Rust user had no entry point
+equivalent to `docs/src/python.md`. `docs/src/rust.md` is now that page:
+install, the `Problem` + `Nlp` builder, the `TNLP` trait for exact
+Hessians / custom sparsity / scaling, iteration capture, the feature-flag
+table, and a worked snippet per feature module. Linked from `SUMMARY.md`
+under Integrations, next to the Python API.
+
+**`docs/src/active-set-sqp.md` had Python / C / GAMS but no Rust**, in both
+§2 (switching to the SQP path) and §3 (carrying a working set across solves).
+Both now have a Rust section. Writing §3 turned up a real hole rather than a
+prose one: the round trip needs `SqpIterates` and `classify_working_set`,
+which lived in `pounce-algorithm`'s internals and were reachable only as
+`pounce_rs::pounce_algorithm::sqp::…`. A new Rust chapter telling readers to
+spell that would have re-created exactly the coupling #561 removed, so the
+facade grew a curated **`pounce_rs::sqp`** (feature `qp`): `SqpIterates`,
+`classify_working_set`, `SqpOptions` / `SqpGlobalization` /
+`SqpHessianSource`, and the `WorkingSet` / `BoundStatus` / `ConsStatus`
+status types.
+
+The split is worth stating because it decides which feature a reader needs:
+**flipping `algorithm` to `active-set-sqp` needs no feature at all** — it is
+one option string on the default build — while *carrying a working set* needs
+`features = ["qp"]`, because `WorkingSet` is the QP engine's type.
+
+`tests/sqp_surface.rs` pins the round trip through the facade alone
+(`last_sqp_working_set` → `SqpIterates` → `set_sqp_warm_start`, same answer
+warm as cold), that `classify_working_set` derives a seed from a predicted
+point, and that the algorithm flip needs none of those types. Nothing in CI
+compiles book snippets, so every runnable snippet in `rust.md` — and every
+API name its prose mentions — was compile-checked against
+`pounce-rs --all-features` before landing.
+
+Also swept up: the user-facing prose references #561 missed, because that
+pass fixed `use` lines only. `docs/src/sessions.md`'s "which layer do I want"
+table and its verification list, plus `active-set-sqp.md` §4, still pointed
+at `pounce_sensitivity::` / `pounce_linsol::` paths; all now name the facade.
+
 ### Added — `pounce-rs` covers the convex, active-set QP, and sensitivity paths (#561)
 
 The `pounce-rs` facade exists so Rust users depend on one crate and are

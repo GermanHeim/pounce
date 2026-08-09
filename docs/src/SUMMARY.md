@@ -30,6 +30,7 @@
 - [Pyomo](pyomo.md)
 - [GAMS](gams.md)
 - [Python API](python.md)
+- [Rust API](rust.md)
   - [Path Following & Inverse Mapping](path-following.md)
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)

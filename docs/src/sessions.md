@@ -21,9 +21,9 @@ rebuilding it on every call. The same machinery serves two workloads:
 |----------------------------------------------------------------------|-------------------------------------------|
 | One solve plus a few sensitivity queries, from Python                | `pounce.Solver` (Python)                  |
 | The same, from C                                                     | `IpoptSolver` (C ABI)                     |
-| The same, from Rust                                                  | `pounce_sensitivity::Solver`              |
-| Just a sparse symmetric factor — no IPM involved                     | `pounce_linsol::Factorization`            |
-| A one-shot sensitivity computation with a fluent builder             | `pounce_sensitivity::SensSolve` (Rust) or `Problem.solve_with_sens` (Python) |
+| The same, from Rust                                                  | `pounce_rs::sensitivity::Solver`          |
+| Just a sparse symmetric factor — no IPM involved                     | `pounce_rs::linsol::Factorization`        |
+| A one-shot sensitivity computation with a fluent builder             | `pounce_rs::sensitivity::SensSolve` (Rust) or `Problem.solve_with_sens` (Python) |
 
 The session API does **not** rebuild the IPM. Each `solve()` call runs
 the full barrier method from scratch. What it reuses is the **factor
@@ -174,7 +174,7 @@ corresponding one-shot APIs:
 * `pounce.Solver.reduced_hessian` ≡
   `Problem.solve_with_sens(compute_reduced_hessian=True)['reduced_hessian']`
   (1e-10).
-* `pounce_sensitivity::Solver::parametric_step` ≡
+* `pounce_rs::sensitivity::Solver::parametric_step` ≡
   `SensSolve::with_deltas` (1e-10).
 
 See `python/tests/test_solver_session.py` and
