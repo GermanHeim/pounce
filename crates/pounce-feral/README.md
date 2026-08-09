@@ -19,11 +19,15 @@ The wrapper mirrors `pounce-hsl::Ma57SolverInterface`:
    assembly emits are canonicalized to the lower triangle here, because
    FERAL's `CscMatrix::from_triplets` silently drops upper-triangle
    entries during LDLᵀ.
-3. `multi_solve` rebuilds the CSC matrix from the cached pattern +
+3. `multi_solve` refreshes the CSC matrix from the cached pattern +
    caller-filled values, then dispatches to `feral::Solver::factor` /
-   `solve_many`. FERAL's pattern-fingerprint cache reuses the symbolic
-   factorization across iterates with identical structure — the IPM
-   common case.
+   `solve_many`. The CSC is built by `from_triplets` once per pattern;
+   later factorizations scatter the new values through a cached
+   triplet → slot permutation, which skips the per-column allocate /
+   sort / sum-duplicates pass that would recompute the same `col_ptr`
+   and `row_idx` every iteration (gh#562). FERAL's pattern-fingerprint
+   cache likewise reuses the symbolic factorization across iterates
+   with identical structure — the IPM common case.
 4. `increase_quality` delegates to `feral::Solver::increase_quality`
    and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
    upper-layer reload-and-retry semantics line up.

@@ -9,11 +9,13 @@
 //! * `initialize_structure` caches the 0-based row/col arrays needed by
 //!   FERAL's [`CscMatrix::from_triplets`] and allocates the values
 //!   buffer.
-//! * `multi_solve` rebuilds `CscMatrix` from the cached pattern + caller-
-//!   filled values and dispatches to [`feral::Solver::factor`] /
-//!   [`feral::Solver::solve_many`]. FERAL's pattern-fingerprint cache
-//!   reuses the symbolic factorization across iterates with identical
-//!   structure (the IPM common case).
+//! * `multi_solve` refreshes the `CscMatrix` from the cached pattern +
+//!   caller-filled values and dispatches to [`feral::Solver::factor`] /
+//!   [`feral::Solver::solve_many`]. The CSC is built once per pattern; later
+//!   factorizations scatter the new values through a cached triplet → slot
+//!   permutation instead of re-running `from_triplets` (gh#562). FERAL's
+//!   pattern-fingerprint cache likewise reuses the symbolic factorization
+//!   across iterates with identical structure (the IPM common case).
 //! * `increase_quality` delegates to [`feral::Solver::increase_quality`]
 //!   and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
 //!   upper-layer reload-and-retry semantics line up.
@@ -58,8 +60,24 @@ pub struct FeralSolverInterface {
     values: Vec<Number>,
 
     /// Last factored matrix, retained so `backsolve` can run iterative
-    /// refinement against it (feral's `solve_*_refined` requires `A`).
+    /// refinement against it (feral's `solve_*_refined` requires `A`), and
+    /// re-used as the destination of the values refill (see [`Self::slot`]).
     matrix: Option<CscMatrix>,
+
+    /// Triplet → CSC slot permutation: `slot[k]` is the index into
+    /// `matrix.values` that triplet `k` of `(rows_0, cols_0)` lands in.
+    ///
+    /// The sparsity pattern is fixed by `initialize_structure` and only the
+    /// values change between IPM iterations, so the bucket-count / place /
+    /// sort / sum-duplicates pass inside `CscMatrix::from_triplets`
+    /// reproduces the same `col_ptr` and `row_idx` on every factorization —
+    /// at the cost of one `Vec<(usize, f64)>` allocation and one sort *per
+    /// column* (gh#562: 2.7 ms per factor on clnlbeam, 16.5 ms on dtoc2).
+    /// Recorded on the first `factor()` after an `initialize_structure` and
+    /// replayed as an allocation-free O(nnz) scatter thereafter; `None`
+    /// until then, and reset to `None` by `initialize_structure` — the only
+    /// place the pattern can change.
+    slot: Option<Vec<usize>>,
 
     negevals: Index,
 
@@ -445,6 +463,27 @@ pub fn parse_scaling_strategy(s: &str) -> Option<ScalingStrategy> {
     }
 }
 
+/// Record where each triplet landed in a matrix just built from it by
+/// [`CscMatrix::from_triplets`] — `slot[k]` is the index into
+/// `matrix.values` holding triplet `k`'s contribution (gh#562).
+///
+/// `from_triplets` leaves each column's `row_idx` sorted and duplicate-free,
+/// so the slot is a binary search inside the column's range. Returns `None`
+/// if any triplet cannot be located, which is a contradiction of
+/// `from_triplets`'s own postcondition; the caller then keeps rebuilding
+/// from scratch, so an unexpected feral-side change degrades to the old
+/// behavior rather than to a wrong matrix.
+fn slot_map(matrix: &CscMatrix, rows: &[usize], cols: &[usize]) -> Option<Vec<usize>> {
+    let mut slot = Vec::with_capacity(rows.len());
+    for (&r, &c) in rows.iter().zip(cols.iter()) {
+        let start = *matrix.col_ptr.get(c)?;
+        let end = *matrix.col_ptr.get(c + 1)?;
+        let within = matrix.row_idx.get(start..end)?.binary_search(&r).ok()?;
+        slot.push(start + within);
+    }
+    Some(slot)
+}
+
 impl FeralSolverInterface {
     /// Construct with config read from environment variables. Retained
     /// for legacy callers (tests, anything without an IPM options
@@ -494,6 +533,7 @@ impl FeralSolverInterface {
             cols_0: Vec::new(),
             values: Vec::new(),
             matrix: None,
+            slot: None,
             negevals: 0,
             ordering: cfg.ordering,
             singular_pivot_floor: cfg.singular_pivot_floor,
@@ -576,12 +616,42 @@ impl FeralSolverInterface {
         span.record("ordering", tracing::field::debug(&self.ordering));
     }
 
-    /// Build the lower-triangle CSC view, factor it, and stash the
-    /// strict-negative-eigenvalue count (IPOPT / MA57 `INFO(24)`
-    /// convention). Rank deficiency (zero pivots) is reported as
-    /// `Singular` so the outer loop routes to `perturb_for_singular`.
-    fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
+    /// Build the CSC view of the caller-filled triplets, ready to hand to
+    /// `feral`. The first call after an `initialize_structure` goes through
+    /// [`CscMatrix::from_triplets`] and records the triplet → slot
+    /// permutation; every later call replays that permutation into the
+    /// retained matrix (gh#562).
+    ///
+    /// Returns `false` on a structurally invalid triplet set (the
+    /// `from_triplets` error paths: out-of-range index, upper-triangle
+    /// entry, length mismatch), leaving `self.matrix` untouched.
+    fn refresh_matrix(&mut self) -> bool {
         let n = self.dim as usize;
+
+        // Fast path: the pattern is unchanged, so `col_ptr` / `row_idx`
+        // already hold the answer `from_triplets` would recompute. Zero the
+        // values and scatter the caller's triplets through the cached
+        // permutation. The `+=` (rather than a plain store) reproduces
+        // `from_triplets`'s duplicate-summing semantics for the case where
+        // several triplets share one (row, col) slot.
+        if let (Some(slot), Some(matrix)) = (self.slot.as_ref(), self.matrix.as_mut()) {
+            debug_assert_eq!(slot.len(), self.values.len());
+            debug_assert_eq!(matrix.n, n);
+            matrix.values.fill(0.0);
+            for (&s, &v) in slot.iter().zip(self.values.iter()) {
+                matrix.values[s] += v;
+            }
+            // Correctness net: in debug builds redo the full rebuild and
+            // check that the scatter landed on the same structure and the
+            // same numbers. This is also the assertion that the pattern
+            // really is immutable — a mutation of `rows_0` / `cols_0` behind
+            // `initialize_structure`'s back shows up here as a `col_ptr` /
+            // `row_idx` mismatch rather than as silent wrong arithmetic.
+            #[cfg(debug_assertions)]
+            self.assert_refill_matches_rebuild();
+            return true;
+        }
+
         // Hand the KKT to feral with its structure intact. Where a
         // constraint multiplier is zero (e.g. the initial point) the
         // (2,2) diagonal lands as structurally-present exact `0.0`
@@ -589,17 +659,72 @@ impl FeralSolverInterface {
         // without a delayed-pivot penalty, so pounce must NOT strip
         // them — dropping them leaves the constraint columns with no
         // diagonal, which is the structurally-absent-(2,2) cascade
-        // (feral#46) the strip was meant to avoid.
+        // (feral#46) the strip was meant to avoid. The permutation
+        // replay above inherits that property by construction: it keeps
+        // every slot this build created, whatever the values do later.
         let matrix = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
             Ok(m) => m,
-            Err(_) => return ESymSolverStatus::FatalError,
+            Err(_) => return false,
         };
-
-        let status = self.solver.factor(&matrix, None);
-        // Keep the matrix for refinement in backsolve, regardless of
-        // factor outcome — the caller may still issue solves against
-        // a stale factor in some restart paths.
+        self.slot = slot_map(&matrix, &self.rows_0, &self.cols_0);
         self.matrix = Some(matrix);
+        true
+    }
+
+    /// Debug-only cross-check of the [`Self::refresh_matrix`] fast path
+    /// against a fresh [`CscMatrix::from_triplets`].
+    ///
+    /// Values are compared with a relative tolerance rather than bit-wise:
+    /// where duplicate triplets are summed, the rebuild adds them in
+    /// row-sorted order and the scatter adds them in triplet order, and
+    /// floating-point addition is not associative. The structure
+    /// (`col_ptr`, `row_idx`) is compared exactly — that is the part the
+    /// permutation is asserting.
+    #[cfg(debug_assertions)]
+    fn assert_refill_matches_rebuild(&self) {
+        let matrix = self.matrix.as_ref().expect("fast path holds a matrix");
+        let rebuilt =
+            CscMatrix::from_triplets(self.dim as usize, &self.rows_0, &self.cols_0, &self.values)
+                .expect("pattern factored once already, so the triplets are structurally valid");
+        assert_eq!(
+            matrix.col_ptr, rebuilt.col_ptr,
+            "cached CSC slot permutation is stale: col_ptr changed since \
+             initialize_structure (gh#562)"
+        );
+        assert_eq!(
+            matrix.row_idx, rebuilt.row_idx,
+            "cached CSC slot permutation is stale: row_idx changed since \
+             initialize_structure (gh#562)"
+        );
+        for (i, (&got, &want)) in matrix.values.iter().zip(rebuilt.values.iter()).enumerate() {
+            if got == want || (got.is_nan() && want.is_nan()) {
+                continue;
+            }
+            let scale = 1.0f64.max(got.abs()).max(want.abs());
+            assert!(
+                (got - want).abs() <= 1e-12 * scale,
+                "refilled value at CSC slot {i} is {got}, rebuild says {want} (gh#562)"
+            );
+        }
+    }
+
+    /// Build the CSC view, factor it, and stash the
+    /// strict-negative-eigenvalue count (IPOPT / MA57 `INFO(24)`
+    /// convention). Rank deficiency (zero pivots) is reported as
+    /// `Singular` so the outer loop routes to `perturb_for_singular`.
+    fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
+        // The matrix is retained across calls for refinement in backsolve
+        // and as the refill destination, so it is in place before the
+        // factorization rather than after it — the caller may still issue
+        // solves against a stale factor in some restart paths, and this
+        // keeps that matrix consistent with the values just supplied
+        // regardless of the factor outcome.
+        if !self.refresh_matrix() {
+            return ESymSolverStatus::FatalError;
+        }
+        let matrix = self.matrix.as_ref().expect("refresh_matrix stored one");
+
+        let status = self.solver.factor(matrix, None);
         match status {
             FactorStatus::Success => {
                 if let Some(stats) = self.solver.last_factor_stats() {
@@ -744,6 +869,13 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         self.dim = dim;
         self.nonzeros = nonzeros;
         self.values = vec![0.0; nonzeros as usize];
+
+        // This is the only place the sparsity pattern can change, so it is
+        // the only place the cached triplet → CSC permutation (and the
+        // matrix it indexes into) has to be invalidated. The next `factor`
+        // rebuilds both from scratch. gh#562.
+        self.slot = None;
+        self.matrix = None;
 
         // Convert 1-based MA57-style indices to 0-based for FERAL, and
         // canonicalize each entry to the lower triangle. MA57 accepts
@@ -1637,5 +1769,240 @@ mod tests {
             "one dependency among 3 rows, got {c_deps:?}"
         );
         assert!(c_deps[0] <= 2, "row index in range: {c_deps:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // gh#562: cached triplet → CSC slot permutation.
+    //
+    // A 3×3 pattern chosen to exercise every branch `from_triplets`
+    // takes: an upper-triangle entry that `initialize_structure` must
+    // canonicalize, rows arriving out of order within a column, and a
+    // duplicate pair that has to be summed — plus a (3,3) diagonal
+    // standing in for the KKT's (2,2) multiplier block, which the
+    // refill tests drive to an explicit structural zero.
+    //
+    //   k:      0      1      2      3      4      5      6
+    //   1-based (1,1)  (3,1)  (2,2)  (1,2)  (3,3)  (3,1)  (3,2)
+    //   0-based (0,0)  (2,0)  (1,1)  (1,0)  (2,2)  (2,0)  (2,1)
+    //                                 ^ canonicalized from (0,1)
+    //
+    // Lower triangle: col 0 = rows {0,1,2}, col 1 = rows {1,2},
+    // col 2 = row {2} — six stored nonzeros from seven triplets.
+    // ---------------------------------------------------------------
+
+    const SLOT_IRN: [Index; 7] = [1, 3, 2, 1, 3, 3, 3];
+    const SLOT_JCN: [Index; 7] = [1, 1, 2, 2, 3, 1, 2];
+
+    /// Dense symmetric expansion of the triplet set above, for residual
+    /// checks. Values are the caller-supplied `values_array` order.
+    fn dense_from_triplets(vals: &[Number; 7]) -> [[f64; 3]; 3] {
+        let mut a = [[0.0f64; 3]; 3];
+        for k in 0..7 {
+            let i = (SLOT_IRN[k] - 1) as usize;
+            let j = (SLOT_JCN[k] - 1) as usize;
+            a[i][j] += vals[k];
+            if i != j {
+                a[j][i] += vals[k];
+            }
+        }
+        a
+    }
+
+    /// `slot_map` locates every triplet — including the duplicate pair
+    /// and the canonicalized upper-triangle entry — at the CSC position
+    /// `from_triplets` actually used.
+    #[test]
+    fn slot_map_matches_from_triplets_layout() {
+        let rows = vec![0usize, 2, 1, 1, 2, 2, 2];
+        let cols = vec![0usize, 0, 1, 0, 2, 0, 1];
+        let vals = vec![4.0, 1.0, 5.0, 1.0, 3.0, 1.0, 1.0];
+        let m = CscMatrix::from_triplets(3, &rows, &cols, &vals).unwrap();
+
+        assert_eq!(m.col_ptr, vec![0, 3, 5, 6]);
+        assert_eq!(m.row_idx, vec![0, 1, 2, 1, 2, 2]);
+
+        let slot = slot_map(&m, &rows, &cols).expect("every triplet is locatable");
+        assert_eq!(slot, vec![0, 2, 3, 1, 5, 2, 4]);
+
+        // Replaying the permutation reproduces the built values exactly,
+        // duplicate summing included (slot 2 takes triplets 1 and 5).
+        let mut refilled = vec![0.0f64; m.nnz()];
+        for (&s, &v) in slot.iter().zip(vals.iter()) {
+            refilled[s] += v;
+        }
+        assert_eq!(refilled, m.values);
+    }
+
+    /// The load-bearing property from gh#562: a values refill that drives
+    /// the (2,2)-block diagonal to an explicit `0.0` must not drop that
+    /// slot. The refilled matrix has to be structurally bit-identical to a
+    /// fresh `from_triplets` over the same values — same `nnz`, same
+    /// `col_ptr`, same `row_idx` — or the feral#46 structurally-absent
+    /// diagonal cascade comes back.
+    #[test]
+    fn refill_preserves_structure_when_a_diagonal_goes_to_zero() {
+        let mut s = FeralSolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(3, 7, &SLOT_IRN, &SLOT_JCN),
+            ESymSolverStatus::Success
+        );
+
+        // First factorization: builds the CSC and records the permutation.
+        let first = [4.0, 1.0, 5.0, 1.0, 3.0, 1.0, 1.0];
+        s.values_array_mut().copy_from_slice(&first);
+        let mut rhs = [1.0, 1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &SLOT_IRN, &SLOT_JCN, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!(s.slot.is_some(), "first factor must record the permutation");
+        let built = s.matrix.as_ref().unwrap();
+        let (col_ptr, row_idx, nnz) = (built.col_ptr.clone(), built.row_idx.clone(), built.nnz());
+
+        // Second factorization, same pattern, (3,3) now an exact zero.
+        let second = [4.0, 1.0, 5.0, 1.0, 0.0, 1.0, 1.0];
+        s.values_array_mut().copy_from_slice(&second);
+        let mut rhs = [1.0, 1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &SLOT_IRN, &SLOT_JCN, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+
+        let refilled = s.matrix.as_ref().unwrap();
+        let rebuilt =
+            CscMatrix::from_triplets(3, &s.rows_0, &s.cols_0, &s.values).expect("valid triplets");
+        assert_eq!(
+            refilled.nnz(),
+            nnz,
+            "the zeroed diagonal's slot was dropped by the refill"
+        );
+        assert_eq!(refilled.col_ptr, col_ptr, "col_ptr moved under the refill");
+        assert_eq!(refilled.row_idx, row_idx, "row_idx moved under the refill");
+        assert_eq!(refilled.col_ptr, rebuilt.col_ptr);
+        assert_eq!(refilled.row_idx, rebuilt.row_idx);
+        // Integer-valued and exactly representable, so the duplicate sum is
+        // order-independent and this can be a bit-wise comparison.
+        assert_eq!(refilled.values, rebuilt.values);
+        assert_eq!(
+            refilled.values[5], 0.0,
+            "the (3,3) entry must still be stored, as an explicit zero"
+        );
+    }
+
+    /// The refilled matrix is not just structurally right — the second
+    /// solve answers the second matrix. Guards against a permutation that
+    /// scatters values into the wrong slots (a transposed or stale map
+    /// would still pass the structural check above).
+    #[test]
+    fn refill_solves_the_new_matrix_not_the_old_one() {
+        let mut s = FeralSolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(3, 7, &SLOT_IRN, &SLOT_JCN),
+            ESymSolverStatus::Success
+        );
+
+        let first = [4.0, 1.0, 5.0, 1.0, 3.0, 1.0, 1.0];
+        s.values_array_mut().copy_from_slice(&first);
+        let mut rhs = [7.0, 7.0, 6.0];
+        assert_eq!(
+            s.multi_solve(true, &SLOT_IRN, &SLOT_JCN, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        check_residual(&dense_from_triplets(&first), &rhs, &[7.0, 7.0, 6.0]);
+
+        // Zeroing the (3,3) diagonal flips this to an indefinite matrix,
+        // so a stale factor cannot pass by accident.
+        let second = [4.0, 1.0, 5.0, 1.0, 0.0, 1.0, 1.0];
+        s.values_array_mut().copy_from_slice(&second);
+        let b = [1.0, -2.0, 3.0];
+        let mut rhs = b;
+        assert_eq!(
+            s.multi_solve(true, &SLOT_IRN, &SLOT_JCN, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        check_residual(&dense_from_triplets(&second), &rhs, &b);
+    }
+
+    /// `A x` must reproduce `b`.
+    fn check_residual(a: &[[f64; 3]; 3], x: &[Number], b: &[f64; 3]) {
+        for i in 0..3 {
+            let ax: f64 = (0..3).map(|j| a[i][j] * x[j]).sum();
+            assert!(
+                (ax - b[i]).abs() < 1e-9,
+                "row {i}: A·x = {ax}, b = {} (x = {x:?})",
+                b[i]
+            );
+        }
+    }
+
+    /// `initialize_structure` is the only place the pattern can change, so
+    /// it must drop the cached permutation. Re-initializing with a
+    /// *different* pattern and solving proves the stale map is gone — a
+    /// retained one would index into the previous matrix's slots.
+    #[test]
+    fn re_initializing_the_structure_invalidates_the_cached_permutation() {
+        let mut s = FeralSolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(3, 7, &SLOT_IRN, &SLOT_JCN),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut()
+            .copy_from_slice(&[4.0, 1.0, 5.0, 1.0, 3.0, 1.0, 1.0]);
+        let mut rhs = [1.0, 1.0, 1.0];
+        assert_eq!(
+            s.multi_solve(true, &SLOT_IRN, &SLOT_JCN, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!(s.slot.is_some());
+
+        // A different pattern (and a different dimension) on the same
+        // interface: the 2×2 SPD `[[2,1],[1,3]]`, solved against (3, 4).
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        assert!(s.slot.is_none(), "stale permutation survived re-init");
+        assert!(s.matrix.is_none(), "stale matrix survived re-init");
+
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-12, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 1.0).abs() < 1e-12, "x1 = {}", rhs[1]);
+    }
+
+    /// Many refills in a row stay correct — the fast path is idempotent
+    /// and does not accumulate across calls (the `fill(0.0)` before the
+    /// scatter is what makes the `+=` duplicate-summing safe to repeat).
+    #[test]
+    fn repeated_refills_do_not_accumulate() {
+        let mut s = FeralSolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(3, 7, &SLOT_IRN, &SLOT_JCN),
+            ESymSolverStatus::Success
+        );
+        let vals = [4.0, 1.0, 5.0, 1.0, 3.0, 1.0, 1.0];
+        for i in 0..4 {
+            s.values_array_mut().copy_from_slice(&vals);
+            let b = [1.0, 2.0, 3.0];
+            let mut rhs = b;
+            assert_eq!(
+                s.multi_solve(true, &SLOT_IRN, &SLOT_JCN, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success,
+                "factorization {i}"
+            );
+            let rebuilt = CscMatrix::from_triplets(3, &s.rows_0, &s.cols_0, &s.values).unwrap();
+            assert_eq!(
+                s.matrix.as_ref().unwrap().values,
+                rebuilt.values,
+                "values drifted on factorization {i}"
+            );
+            check_residual(&dense_from_triplets(&vals), &rhs, &b);
+        }
     }
 }

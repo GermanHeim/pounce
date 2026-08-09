@@ -95,6 +95,41 @@ exercises both on every solve. A CI leg pinned to a Pyomo *below* the
 floor checks that the legacy plugin still imports there, so the floor is
 a tested property rather than a claim.
 
+### Changed — the FERAL backend stops rebuilding the CSC matrix on every factorization (#562)
+
+`pounce-feral` handed FERAL a `CscMatrix` built by
+`CscMatrix::from_triplets` on **every** `factor()` call, even though
+`initialize_structure` fixes the sparsity pattern and only the values
+change between IPM iterations. Each rebuild re-ran an identical
+bucket-count / place / sort / sum-duplicates pass to arrive at the same
+`col_ptr` and `row_idx` it had computed the iteration before — and that
+pass allocates a fresh `Vec<(usize, f64)>` *per column* and sorts it, so
+on a 100k-column KKT it is ~100k short-lived allocations and ~100k sorts
+to reproduce a permutation that was already known. MA57 has no equivalent
+step (its triplet is consumed in place by `ma57bd_`), so this was pure
+overhead in the FERAL arm of every A/B comparison.
+
+The first factorization after an `initialize_structure` still goes
+through `from_triplets`, and now also records the triplet → CSC slot
+permutation. Later factorizations zero the retained matrix's values and
+scatter the caller's triplets through that permutation — one O(nnz) pass
+with no allocation. The scatter accumulates with `+=` so duplicate
+triplets landing in one slot are still summed, and because it reuses the
+slots the first build created, the explicit structural zeros on the
+(2,2) multiplier diagonal survive a refill (dropping them is the
+FERAL-side cascade that the "do not strip zeros" rule exists to avoid).
+`initialize_structure` — the only place the pattern can change —
+invalidates the permutation and the matrix.
+
+On a clnlbeam-shaped KKT (n = 99,999, nnz = 299,994) the rearrangement
+drops from ~4.4 ms to ~0.34 ms per factorization, a 13× reduction, and
+the saving grows with the matrix: the issue measures 16.5 ms of rebuild
+per factorization on `dtoc2`. Under `debug_assertions` each refill is
+cross-checked against a fresh `from_triplets` — exact on `col_ptr` and
+`row_idx`, to a relative tolerance on the values — which doubles as the
+assertion that nothing mutates the pattern behind
+`initialize_structure`'s back.
+
 ### Changed — `eval_h` routes through the shared-CSE tape, amortizing prelude second-order work across summands (#557)
 
 The follow-on to #476 (`eval_g`) and #553 (`eval_jac_g`): the Lagrangian
