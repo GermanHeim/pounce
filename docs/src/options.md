@@ -943,9 +943,14 @@ embeddings).
 | `POUNCE_FERAL_MIN_PAR_FLOPS`        | `feral_min_par_flops`        |
 | `POUNCE_FERAL_STATIC_PIVOTING`      | `feral_static_pivoting`      |
 
-`FERAL_PARALLEL=0` (legacy, no `POUNCE_` prefix) forces feral's internal
-factor serial process-wide; the first-class per-backend lever is the
-solver API, not an option.
+`FERAL_PARALLEL` (legacy, no `POUNCE_` prefix) forces feral's internal
+factor serial or parallel process-wide — `0`/`off`/`false`/`no` to force
+serial, `1`/`on`/`true`/`yes` to force parallel, and unset to leave
+feral's own platform-derived default alone. The force-on direction is the
+only override available to CLI, Python and NL callers on a host where
+that autodetection is wrong (feral falls back to sequential when the
+rayon pool fails to build); the first-class per-backend lever,
+`FeralConfig.parallel`, is the Rust solver API, not an option.
 
 ### Debug and diagnostic gates
 
