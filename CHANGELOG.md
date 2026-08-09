@@ -52,10 +52,16 @@ needed translating onto the v2 lifecycle rather than copying:
 **Inherited deliberately** from Pyomo's `Ipopt` v2 class: the `.nl`
 write, the `.sol` read, option splitting between the command line and the
 `.opt` file, and the solver-log parse. POUNCE is ASL/Ipopt-compatible on
-all of them. The one place it is not is the version banner —
-`pounce --version` prints `pounce X.Y.Z`, which Pyomo's Ipopt parser
-rejects by design — so without the override here `available()` reported
-`NotFound` and the solver refused to run.
+all of them, including the `Number of Iterations....:` and
+`Total seconds in POUNCE =` lines the log parser reads. The one place it
+is not is the version banner — `pounce --version` prints `pounce X.Y.Z`,
+and Pyomo's Ipopt parser requires a leading `ipopt` by design, so that
+other ASL executables are not mistaken for Ipopt. Without the override
+here, `version()` is `None` and `available()` reports `NotFound`. Solves
+still run (nothing gates on the version), but every availability check
+lies — including the `if not solver.available(): skip` pattern that
+guards most Pyomo test suites, and Pyomo tooling that selects a solver by
+availability.
 
 **Why it matters beyond API parity.** #552 measured the same POUNCE
 binary through both interfaces on drto/IDAES collocation models: 0.553 s

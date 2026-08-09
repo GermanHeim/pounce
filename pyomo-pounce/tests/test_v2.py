@@ -109,8 +109,11 @@ def test_pounce_v2_registered_with_the_legacy_factory():
 def test_version_is_parsed(v2):
     """Pyomo's `Ipopt._get_version` requires a banner starting `ipopt`, so
     POUNCE reads as unavailable through it. The override must parse
-    `pounce X.Y.Z`; without it `available()` is NotFound and the solver
-    refuses to run at all."""
+    `pounce X.Y.Z`; without it `version()` is None and `available()` is
+    NotFound. Solves still run — nothing gates on the version — so the
+    damage is that every availability check lies, including the
+    `if not solver.available(): skip` guard this suite's own fixture
+    uses, which would silently skip the whole file."""
     ver = v2.version()
     assert isinstance(ver, tuple) and len(ver) >= 2
     assert all(isinstance(i, int) for i in ver)
