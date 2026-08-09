@@ -14,11 +14,11 @@ certificate that, when exact, pins the global minimum and recovers its
 minimizer(s).
 
 > A second path — general-purpose **spatial branch-and-bound** (`pounce-global`)
-> for factorable nonconvex NLPs with `exp`/`ln`/trig — is **in development on
-> the `feature/global` branch and is not part of this release**. It is described
-> at the end of this chapter for context, but there is no `pounce-global` crate
-> in the shipped workspace, no `pounce.minimize_global` Python entry point, and
-> no `solver_selection=global` CLI route here.
+> for factorable nonconvex NLPs with `exp`/`ln`/trig — is **in development and is
+> not part of this release**. It is described at the end of this chapter for
+> context, but there is no `pounce-global` crate in the shipped workspace, no
+> `pounce.minimize_global` Python entry point, and no `solver_selection=global`
+> CLI route here.
 
 ## The SOS / Lasserre path (polynomials)
 
@@ -77,11 +77,11 @@ development (below).
 ## Spatial branch-and-bound (in development)
 
 > **Not in this release.** Everything in this section describes the
-> `pounce-global` crate as it exists on the `feature/global` branch. It is not
-> in the shipped workspace, and the Rust snippets below will not compile against
-> the published crates. There is no Python or CLI binding for it in this
-> release. The section is kept for design context and to set expectations for
-> what the general nonconvex path will look like.
+> `pounce-global` crate as it exists in development. It is not in the shipped
+> workspace, and the Rust snippets below will not compile against the published
+> crates. There is no Python or CLI binding for it in this release. The section
+> is kept for design context and to set expectations for what the general
+> nonconvex path will look like.
 
 ### The problem
 
@@ -127,7 +127,7 @@ The search stops when the frontier's lowest bound meets the incumbent within
 tolerance — at which point the incumbent is the certified global optimum.
 
 ```rust,ignore
-// On the `feature/global` branch — not in this release.
+// In-development API — not in this release.
 use pounce_global::{expr::var, solve_global, GlobalProblem, GlobalOptions, GlobalStatus};
 use pounce_feral::FeralSolverInterface;
 
@@ -229,9 +229,9 @@ There are two opt-in forms of parallelism:
 
 ### Honest limits
 
-On the `feature/global` branch, `pounce-global` is a complete, correct
-*continuous* global solver. It is not yet at commercial-solver scale (and, as
-noted, not yet wired into a shipped release):
+In development, `pounce-global` is a complete, correct *continuous* global
+solver. It is not yet at commercial-solver scale (and, as noted, not yet wired
+into a shipped release):
 
 - **Continuous only** — no integer branching (MINLP).
 - **Branching** offers widest, most-violation (default), and reliability
