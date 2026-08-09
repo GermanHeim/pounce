@@ -95,6 +95,74 @@ exercises both on every solve. A CI leg pinned to a Pyomo *below* the
 floor checks that the legacy plugin still imports there, so the floor is
 a tested property rather than a claim.
 
+### Changed — `eval_h` routes through the shared-CSE tape, amortizing prelude second-order work across summands (#557)
+
+The follow-on to #476 (`eval_g`) and #553 (`eval_jac_g`): the Lagrangian
+Hessian — the largest of the three evaluators by a wide margin, 66–69% of
+AD time on shared-CSE chain models — now takes the `HybridTape` path too,
+above its own measured op-ratio gate.
+
+Unlike the Jacobian, the Hessian can share **both** second-order sweeps of
+the prelude, which is why its crossover sits lower. The coloring hands
+every summand of a color the same seed vector `s_c`, so per color the
+prelude forward tangent runs once for the whole constraint block; and
+because reverse-over-tangent is linear in its adjoint seeds, each summand
+folds its row multiplier `λ_k` into the adjoints it deposits at `Shared`
+boundaries, and one unit-weight prelude reverse sweep per color replaces
+the per-summand sweeps. The per-summand local ops keep the exact
+arithmetic of the flat tape (`ror_dir_step` mirrors
+`Tape::hessian_directional`'s arms, writing into the dense per-color
+`compressed` buffer — no hashing), so the local contributions are
+bit-identical; the folded prelude sweep is mathematically identical and
+agrees to rounding, which the tests pin as exact equality on
+all-dyadic-arithmetic models and a few-ULP band on transcendental ones.
+
+Measured on chain models with CSE redundancy 40, varying the shared body
+size (`eval_h`, flat → hybrid, n ≈ 21,000, m = 20,000). Median of 5
+interleaved flat/hybrid pairs per point, with the observed range:
+
+| flat/shared op ratio | 1.94 | 2.54 | 3.12 | 3.69 | 4.24 | 5.29 | 6.76 | 8.53 |
+|---|---|---|---|---|---|---|---|---|
+| median speedup | 1.00× | 1.04× | 1.18× | 1.23× | 1.31× | 1.44× | 1.36× | 1.49× |
+| min–max | 0.91–1.11 | 0.36–1.14 | 1.10–1.33 | 1.16–1.30 | 1.23–1.32 | 1.19–1.54 | 1.27–1.50 | 1.36–1.65 |
+
+The medians are what the threshold is set from: single runs on a shared
+machine scatter too widely to place a gate on — the 2.54 column spans
+0.36× to 1.14×. The gate (`HYBRID_HESS_MIN_OP_RATIO`) sits at 3.0, the
+lowest ratio where every sample wins by at least 10%; below it `eval_h`
+stays on the flat path bit-identically, so a gate set high is merely
+conservative while one set low risks a real regression. With all default
+gates the whole AD stack at ratio 4.24 speeds up 1.25× (median of 5
+interleaved pairs, range 1.14–1.44). Models without shared CSE bodies —
+including everything Pyomo writes, which has no `V` segments — never
+build the hybrid tape and are untouched.
+
+The two prelude sweeps run once per Hessian color, so they walk the union
+of that color's summands' `prelude_reach` rather than the whole prelude.
+Walking all of it would cost `n_colors × |prelude|` where the op-ratio
+gate assumes `|prelude|` — a discrepancy the gate cannot see, unbounded
+in `n_colors`. On the chain models above this is neutral (every color
+reaches nearly every body there, so there is nothing to skip: 1.02× at
+ratio 4.24, 1.12× at 8.53); it is insurance for models where a color
+reaches only part of the prelude, which a unit test on two shared bodies
+of differing width exercises directly.
+
+The dormant `HybridTape::hessian_summand` is **removed**. It was the
+wrong tool for this and had never had a caller: it re-walked
+`prelude_reach` once per seed variable (sharing no prelude work at all)
+and scattered through a `HashMap` lookup per emitted pair. Its
+replacements are `prelude_tangent` / `hessian_summand_directional` /
+`prelude_reverse_directional`.
+
+Instrumentation and coverage: `POUNCE_DBG_FORCE_HYBRID_HESS=1` forces the
+Hessian gate on (the crossover table's measurement instrument, paired
+with the existing `POUNCE_DBG_NO_HYBRID=1` flat forcing);
+`POUNCE_DBG_TAPE_STATS=1` now prints both gates' on/off state. The
+shared-CSE paths also gain their first end-to-end coverage — no
+repository fixture had a CSE shared across constraints, all 62 checked —
+via a generated model whose one defined variable feeds 16 rows, solved
+through the CLI both hybrid and flat to the same analytic optimum.
+
 ### Fixed — a single dense Hessian row made `.nl` setup and every `eval_h` O(n²) (#552)
 
 `NlTnlp` recovers the Lagrangian Hessian by graph coloring: columns whose
