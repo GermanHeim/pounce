@@ -50,6 +50,58 @@ import pyomo_pounce
 pyomo_pounce.check_binary()   # prints a report; returns a dict
 ```
 
+### Which *interface* runs — and why it matters for timing
+
+Pyomo has more than one way to drive an NL/SOL solver, and they are
+genuinely different code paths, not aliases. All of these reach POUNCE
+(verified against Pyomo 6.10.1):
+
+| call | works | carries `pyomo-pounce`'s extras |
+|---|---|---|
+| `SolverFactory('pounce')` | yes | **yes** |
+| `SolverFactory('ipopt_v2', executable=<pounce>)` | yes | no |
+| `SolverFactory('ipopt', executable=<pounce>)` | yes | no |
+| `SolverFactory('asl', executable=<pounce>, solver='pounce')` | yes | no |
+| `SolverFactory('appsi_ipopt', …)` | no — takes no `executable` | — |
+
+`SolverFactory('pounce')` is the supported route and the only one that
+brings the rest of this page with it: the `scaling_factor` suffix
+handling, the sensitivity path, the preflight/repair helpers, the guard
+against handing a model with live integer variables to a continuous
+solver, and the bundled-binary resolution above. The generic routes run
+the same solver and return the same answer, but silently do without all
+of that.
+
+`ipopt` and `asl` are Pyomo's *legacy* solver interface; `ipopt_v2` is
+the newer `pyomo.contrib.solver` one. Driving POUNCE through `ipopt_v2`
+needs a build carrying the two ASL-compatibility fixes noted in the
+CHANGELOG under "Pyomo's modern solver interface could not drive POUNCE
+at all" — before them it failed on every model, because Pyomo v2 passes
+options as `key="value"` in a single `argv` entry (quotes and all, since
+no shell is involved) and because POUNCE's `.sol` wrote an `Options`
+count of `0`, which the v2 `.sol` reader rejects.
+
+**If you are benchmarking, put both solvers on the same interface.**
+`solver.solve(model)` is not only the solve: it is Pyomo writing the
+`.nl`, launching the process, reading the `.sol` back and loading it into
+the model. Timing around that call and subtracting the solver's own
+reported time leaves a remainder that is mostly *Pyomo's* work, and it is
+not the same work on every interface. On a 3,010-variable collocation
+model, wall clock around `solve()` for the same POUNCE binary:
+
+| interface | reported solve | remainder | total |
+|---|---|---|---|
+| `SolverFactory('pounce')` (legacy) | 0.223 s | 0.109 s | 0.332 s |
+| `ipopt_v2` | 0.188 s | 0.104 s | 0.292 s |
+
+and that remainder breaks down as ~0.082 s Pyomo writing the `.nl`,
+~0.020 s process spawn plus POUNCE's own `.nl` read and setup, and
+~0.008 s Pyomo reading the `.sol` and loading it. So comparing
+`SolverFactory('pounce')` against `SolverFactory('ipopt_v2', …)` compares
+two Pyomo interfaces as much as two solvers, and attributing the
+remainder to either solver's file handling will mislead you. Use the same
+interface on both sides, or compare the solvers' own reported times.
+
 ## User scaling with the `scaling_factor` Suffix
 
 A badly conditioned model converges poorly, and often you know its
