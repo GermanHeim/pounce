@@ -1908,10 +1908,11 @@ struct ColorWrite {
 /// prelude — 4.0x the arithmetic, paid ~10x per iteration inside the line
 /// search. See pounce#476.
 ///
-/// Only `eval_g` reads this; `eval_jac_g` / `eval_h` stay on `con_tapes`
-/// (their reverse / forward-over-reverse sweeps run once per iteration, not
-/// once per line-search trial, and `HybridTape`'s Hessian entry point uses a
-/// different seeding strategy than the coloring machinery here).
+/// `eval_g` reads this unconditionally; `eval_jac_g` and `eval_h` read it
+/// above their respective op-ratio gates ([`HYBRID_JAC_MIN_OP_RATIO`],
+/// [`HYBRID_HESS_MIN_OP_RATIO`]) — the hybrid traversal carries per-op
+/// overhead the flat tapes do not, so each derivative order has to earn
+/// its switch.
 #[derive(Debug, Clone)]
 struct ConHybrid {
     tape: HybridTape,
@@ -1931,6 +1932,55 @@ struct ConHybrid {
     /// on the flat per-summand tapes. See [`HYBRID_JAC_MIN_OP_RATIO`] —
     /// unlike `eval_g`, the hybrid Jacobian is not a free win.
     use_for_jac: bool,
+    /// Whether `eval_h` routes the constraint block through the shared
+    /// prelude (issue #557). See [`HYBRID_HESS_MIN_OP_RATIO`].
+    use_for_hess: bool,
+    // ---- eval_h (shared-CSE Hessian, issue #557) state. Populated in
+    // `try_new` after the Hessian coloring exists; cheap enough (a few
+    // index tables plus one f64 per local op) to build whenever the
+    // hybrid tape is, so tests can flip `use_for_hess` on directly. ----
+    /// Forward values of every summand, packed at
+    /// `local_off[si]..local_off[si + 1]`. One forward pass per `eval_h`
+    /// fills it; every color then reuses the values, mirroring the flat
+    /// path's forward-once-per-tape structure.
+    local_vals_all: Vec<f64>,
+    /// Prefix offsets into `local_vals_all`, length `n_summands + 1`.
+    local_off: Vec<usize>,
+    /// Constraint row of each summand (the inverse of `row_start`), for
+    /// the `λ[row]` weight lookup.
+    summand_row: Vec<u32>,
+    /// Per color: the summands whose variables fall in that color — the
+    /// hybrid analogue of `con_tape_colors`, inverted so `eval_h` walks
+    /// exactly the live (color, summand) pairs.
+    hess_color_summands: Vec<Vec<u32>>,
+    /// Per color: the prelude slots that color's summands actually reach,
+    /// ascending — `hess_color_reach[hess_color_reach_off[c]..off[c + 1]]`.
+    /// Both prelude sweeps run once per color, so walking the whole
+    /// prelude each time would cost `n_colors × |prelude|` where the
+    /// op-ratio gate assumes `|prelude|`; iterating the union of the
+    /// color's `prelude_reach` sets makes the cost proportional to what
+    /// is used, so the gate does not need an `n_colors` term. Stored as
+    /// a flat `u32` CSR rather than `Vec<Vec<_>>`: the total is
+    /// `Σ_c |reach_c|`, which is proportional to the work it drives, and
+    /// this struct is the one #552 made O(n²) by holding per-color dense
+    /// arrays.
+    hess_color_reach: Vec<u32>,
+    hess_color_reach_off: Vec<usize>,
+    /// Per-color prelude tangent, sized to `tape.n_prelude_ops()`.
+    prelude_dot: Vec<f64>,
+    /// First-/second-order prelude adjoint accumulators. NOT shared
+    /// with `eval_jac_g`'s `prelude_adj`: these two carry an all-zero-
+    /// between-colors invariant (`prelude_reverse_directional`'s
+    /// consume-and-zero contract), while `gradient_summand` zeroes only
+    /// the slots it is about to use and leaves them dirty afterwards —
+    /// sharing the buffer would seed a later `eval_h` with a stale
+    /// Jacobian adjoint.
+    hess_prelude_adj: Vec<f64>,
+    prelude_adj_dot: Vec<f64>,
+    /// Local tangent / second-order adjoint arenas, sized to
+    /// `tape.max_summand_ops()`.
+    local_dot: Vec<f64>,
+    local_adj_dot: Vec<f64>,
 }
 
 /// Flat-to-shared op-count ratio above which `eval_jac_g` switches to the
@@ -1958,6 +2008,41 @@ struct ConHybrid {
 /// a model that does not clearly benefit stays on the flat path. For
 /// reference `robot_a` (#476) measures 4.03×.
 const HYBRID_JAC_MIN_OP_RATIO: f64 = 4.0;
+
+/// Flat-to-shared op-count ratio above which `eval_h` routes the constraint
+/// block through the shared-CSE prelude (issue #557).
+///
+/// The Hessian shares **both** second-order sweeps of the prelude, not just
+/// the forward one: the coloring hands every summand of a color the same
+/// seed vector, so the prelude forward tangent runs once per color, and —
+/// because reverse-over-tangent is linear in its adjoint seeds — the
+/// `λ_k`-weighted boundary adjoints of all summands accumulate into one
+/// unit-weight prelude reverse sweep per color. That is why its crossover
+/// sits *below* the Jacobian's ([`HYBRID_JAC_MIN_OP_RATIO`], set at 4): the
+/// Jacobian can only share the forward half, and per-row gradients forbid
+/// batching its reverse sweeps at all.
+///
+/// Measured on chain models at CSE redundancy 40 (m = 20,000, 500 shared
+/// bodies), varying the body size — the same protocol as the Jacobian
+/// gate's table (`eval_h`, flat → hybrid). **Median of 5 interleaved
+/// flat/hybrid pairs per point**, with the observed range, because
+/// single runs on a shared machine are not reproducible to the precision
+/// a threshold decision needs — one sample below spans 0.36×–1.14× at a
+/// single ratio:
+///
+/// | op ratio | 1.94 | 2.54 | 3.12 | 3.69 | 4.24 | 5.29 | 6.76 | 8.53 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | median speedup | 1.00× | 1.04× | 1.18× | 1.23× | 1.31× | 1.44× | 1.36× | 1.49× |
+/// | min–max | 0.91–1.11 | 0.36–1.14 | 1.10–1.33 | 1.16–1.30 | 1.23–1.32 | 1.19–1.54 | 1.27–1.50 | 1.36–1.65 |
+///
+/// The gate sits at 3.0: that is the lowest ratio where **every** sample
+/// wins (by ≥ 10%), whereas at 1.94 and 2.54 the median is within noise of
+/// break-even and individual runs lose. Setting it there costs only a
+/// marginal forgone gain — below the gate `eval_h` stays on the flat path
+/// bit-identically, so a gate placed too high is merely conservative while
+/// one placed too low risks a real regression. For reference `robot_a`
+/// (#476) measures 4.03×.
+const HYBRID_HESS_MIN_OP_RATIO: f64 = 3.0;
 
 // `Clone` supports the batched-solve path (pounce#126): one parsed
 // model is cloned per batch instance (tapes are flat `Vec`s of ops, so
@@ -2793,13 +2878,19 @@ impl NlTnlp {
         // on a real model, and how a suspected hybrid-path bug is bisected
         // against a reference that computes the same derivatives a
         // different way.
-        let con_hybrid = if std::env::var("POUNCE_DBG_NO_HYBRID").is_ok() {
+        let mut con_hybrid = if std::env::var("POUNCE_DBG_NO_HYBRID").is_ok() {
             None
         } else if hybrid_supported(&con_roots) {
             let tape = HybridTape::build_multi(&con_roots);
             (tape.n_prelude_ops() > 0).then(|| {
                 let flat_ops: usize = con_tapes.iter().flatten().map(|t| t.ops.len()).sum();
                 let shared_ops = tape.n_prelude_ops() + tape.total_local_ops();
+                // `POUNCE_DBG_FORCE_HYBRID_HESS=1` turns the Hessian gate on
+                // regardless of the op ratio. Diagnostic only — it is how the
+                // crossover in `HYBRID_HESS_MIN_OP_RATIO` is measured
+                // (same-binary A/B against `POUNCE_DBG_NO_HYBRID=1`) on
+                // models that sit below the gate.
+                let force_hess = std::env::var("POUNCE_DBG_FORCE_HYBRID_HESS").is_ok();
                 ConHybrid {
                     prelude_vals: vec![0.0; tape.n_prelude_ops()],
                     local_vals: vec![0.0; tape.max_summand_ops()],
@@ -2807,6 +2898,19 @@ impl NlTnlp {
                     prelude_adj: vec![0.0; tape.n_prelude_ops()],
                     use_for_jac: flat_ops as f64
                         >= HYBRID_JAC_MIN_OP_RATIO * shared_ops.max(1) as f64,
+                    use_for_hess: force_hess
+                        || flat_ops as f64 >= HYBRID_HESS_MIN_OP_RATIO * shared_ops.max(1) as f64,
+                    local_vals_all: Vec::new(),
+                    local_off: Vec::new(),
+                    summand_row: Vec::new(),
+                    hess_color_summands: Vec::new(),
+                    hess_color_reach: Vec::new(),
+                    hess_color_reach_off: Vec::new(),
+                    prelude_dot: Vec::new(),
+                    hess_prelude_adj: Vec::new(),
+                    prelude_adj_dot: Vec::new(),
+                    local_dot: Vec::new(),
+                    local_adj_dot: Vec::new(),
                     row_start,
                     tape,
                 }
@@ -2909,6 +3013,87 @@ impl NlTnlp {
             .map(|row| row.iter().map(tape_colors).collect())
             .collect();
 
+        // Shared-CSE Hessian tables (issue #557): the per-color summand
+        // lists, row lookup, and packed forward-value arena `eval_h`'s
+        // hybrid path walks. Built whenever the hybrid tape is — not just
+        // above the gate — so flipping `use_for_hess` on (tests, the
+        // force env var) needs no extra setup; the cost is one f64 per
+        // local op plus small index tables.
+        if let Some(h) = con_hybrid.as_mut() {
+            let n_sum = h.tape.n_summands();
+            let mut local_off: Vec<usize> = Vec::with_capacity(n_sum + 1);
+            let mut acc = 0usize;
+            for s in &h.tape.summands {
+                local_off.push(acc);
+                acc += s.ops.len();
+            }
+            local_off.push(acc);
+            h.local_vals_all = vec![0.0; acc];
+            h.local_off = local_off;
+
+            let mut summand_row = vec![0u32; n_sum];
+            for i in 0..prob.m {
+                for si in h.row_start[i]..h.row_start[i + 1] {
+                    summand_row[si] = i as u32;
+                }
+            }
+            h.summand_row = summand_row;
+
+            // A summand's variable set (`all_vars`) equals its flat tape's,
+            // so this is `con_tape_colors` inverted to color-major order —
+            // the loop `eval_h` actually runs.
+            let mut by_color: Vec<Vec<u32>> = vec![Vec::new(); n_colors];
+            for (si, s) in h.tape.summands.iter().enumerate() {
+                let mut cs: Vec<u32> = s
+                    .all_vars
+                    .iter()
+                    .map(|&v| var_color[v])
+                    .filter(|&c| c != u32::MAX)
+                    .collect();
+                cs.sort_unstable();
+                cs.dedup();
+                for c in cs {
+                    by_color[c as usize].push(si as u32);
+                }
+            }
+            // Per-color prelude reach: the union of `prelude_reach` over the
+            // color's summands, ascending. A union of operand-closed
+            // ascending sets is itself operand-closed and ascending, which is
+            // exactly what the two prelude sweeps require. Deduped with an
+            // epoch-tagged buffer so the build costs
+            // `Σ_c Σ_{s ∈ c} |prelude_reach_s|` — the same order as the work
+            // it saves — rather than `n_colors × |prelude|`.
+            let np = h.tape.n_prelude_ops();
+            let mut seen: Vec<u32> = vec![0; np];
+            let mut epoch: u32 = 0;
+            let mut reach: Vec<u32> = Vec::new();
+            let mut reach_off: Vec<usize> = Vec::with_capacity(n_colors + 1);
+            for list in &by_color {
+                reach_off.push(reach.len());
+                epoch += 1;
+                let start = reach.len();
+                for &si in list {
+                    for &p in &h.tape.summands[si as usize].prelude_reach {
+                        if seen[p] != epoch {
+                            seen[p] = epoch;
+                            reach.push(p as u32);
+                        }
+                    }
+                }
+                reach[start..].sort_unstable();
+            }
+            reach_off.push(reach.len());
+            h.hess_color_reach = reach;
+            h.hess_color_reach_off = reach_off;
+
+            h.hess_color_summands = by_color;
+            h.prelude_dot = vec![0.0; h.tape.n_prelude_ops()];
+            h.hess_prelude_adj = vec![0.0; h.tape.n_prelude_ops()];
+            h.prelude_adj_dot = vec![0.0; h.tape.n_prelude_ops()];
+            h.local_dot = vec![0.0; h.tape.max_summand_ops()];
+            h.local_adj_dot = vec![0.0; h.tape.max_summand_ops()];
+        }
+
         // Per-row Jacobian sparsity = union of tape vars plus
         // linear-segment vars.
         let mut jac_cols: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
@@ -2970,9 +3155,12 @@ impl NlTnlp {
                     let local = h.tape.total_local_ops();
                     eprintln!(
                         "[hybrid stats] con flat_ops={flat} prelude_ops={prelude} \
-                         local_ops={local} shared_total={} flat/shared={:.2}x",
+                         local_ops={local} shared_total={} flat/shared={:.2}x \
+                         jac_gate={} hess_gate={}",
                         prelude + local,
                         flat as f64 / (prelude + local).max(1) as f64,
+                        if h.use_for_jac { "on" } else { "off" },
+                        if h.use_for_hess { "on" } else { "off" },
                     );
                 }
                 None => eprintln!("[hybrid stats] con hybrid not built (no shared CSE bodies)"),
@@ -3631,30 +3819,116 @@ impl TNLP for NlTnlp {
                     }
                 }
 
-                if let Some(lam) = lambda {
-                    for k in 0..self.prob.m {
-                        let w = lam[k];
-                        if w == 0.0 {
-                            continue;
-                        }
-                        for (ti, t) in self.con_tapes[k].iter().enumerate() {
-                            if t.ops.is_empty() {
+                match (lambda, self.con_hybrid.as_mut()) {
+                    // Shared-CSE path (issue #557). Per color the prelude's
+                    // second-order work runs ONCE for the whole constraint
+                    // block: one forward tangent, then — because
+                    // reverse-over-tangent is linear in its adjoint seeds —
+                    // one unit-weight reverse sweep over the λ-weighted
+                    // adjoints accumulated by every summand of that color.
+                    // The flat path below repeats both sweeps over the
+                    // inlined CSE body once per referencing summand.
+                    (Some(lam), Some(h)) if h.use_for_hess => {
+                        let ConHybrid {
+                            tape,
+                            prelude_vals,
+                            local_vals_all,
+                            local_off,
+                            summand_row,
+                            hess_color_summands,
+                            hess_color_reach,
+                            hess_color_reach_off,
+                            prelude_dot,
+                            hess_prelude_adj,
+                            prelude_adj_dot,
+                            local_dot,
+                            local_adj,
+                            local_adj_dot,
+                            ..
+                        } = h;
+                        // Forward once (values are color-independent):
+                        // prelude for the block, then each summand of a row
+                        // with a live multiplier into its packed slice.
+                        tape.forward_prelude(x, prelude_vals);
+                        for (si, s) in tape.summands.iter().enumerate() {
+                            if lam[summand_row[si] as usize] == 0.0 {
                                 continue;
                             }
-                            t.forward_into(x, &mut self.vals_scratch);
-                            for &c in &self.con_tape_colors[k][ti] {
-                                t.hessian_directional(
-                                    &self.vals_scratch,
-                                    &self.seeds[c as usize],
+                            tape.forward_summand(
+                                s,
+                                x,
+                                prelude_vals,
+                                &mut local_vals_all[local_off[si]..local_off[si + 1]],
+                            );
+                        }
+                        for (c, list) in hess_color_summands.iter().enumerate() {
+                            if !list
+                                .iter()
+                                .any(|&si| lam[summand_row[si as usize] as usize] != 0.0)
+                            {
+                                continue;
+                            }
+                            let seed = &self.seeds[c];
+                            let out = &mut self.compressed[c];
+                            let creach = &hess_color_reach
+                                [hess_color_reach_off[c]..hess_color_reach_off[c + 1]];
+                            tape.prelude_tangent(prelude_vals, seed, creach, prelude_dot);
+                            for &si in list {
+                                let si = si as usize;
+                                let w = lam[summand_row[si] as usize];
+                                if w == 0.0 {
+                                    continue;
+                                }
+                                tape.hessian_summand_directional(
+                                    &tape.summands[si],
+                                    &local_vals_all[local_off[si]..local_off[si + 1]],
+                                    prelude_dot,
+                                    seed,
                                     w,
-                                    &mut self.compressed[c as usize],
-                                    &mut self.dot_scratch,
-                                    &mut self.adj_scratch,
-                                    &mut self.adj_dot_scratch,
+                                    out,
+                                    local_dot,
+                                    local_adj,
+                                    local_adj_dot,
+                                    hess_prelude_adj,
+                                    prelude_adj_dot,
                                 );
+                            }
+                            tape.prelude_reverse_directional(
+                                prelude_vals,
+                                prelude_dot,
+                                creach,
+                                out,
+                                hess_prelude_adj,
+                                prelude_adj_dot,
+                            );
+                        }
+                    }
+                    (Some(lam), _) => {
+                        for k in 0..self.prob.m {
+                            let w = lam[k];
+                            if w == 0.0 {
+                                continue;
+                            }
+                            for (ti, t) in self.con_tapes[k].iter().enumerate() {
+                                if t.ops.is_empty() {
+                                    continue;
+                                }
+                                t.forward_into(x, &mut self.vals_scratch);
+                                for &c in &self.con_tape_colors[k][ti] {
+                                    t.hessian_directional(
+                                        &self.vals_scratch,
+                                        &self.seeds[c as usize],
+                                        w,
+                                        &mut self.compressed[c as usize],
+                                        &mut self.dot_scratch,
+                                        &mut self.adj_scratch,
+                                        &mut self.adj_dot_scratch,
+                                    );
+                                }
                             }
                         }
                     }
+                    (None, _) => {}
                 }
 
                 // Decode each color's compressed Hessian-vector
@@ -5506,11 +5780,13 @@ G0 3
     }
 
     /// `.nl` text for `m` constraints `S * x_{i+2} >= 0`, all sharing one
-    /// CSE `S = exp^depth(0.01 * (x0 + x1))`. A deep shared body over few
-    /// local ops per row is the regime the Jacobian gate is meant to
-    /// catch: no repository fixture has a CSE shared across constraints
-    /// at all, so without this the gate-on path has no natural coverage.
-    fn deep_shared_cse_nl(m: usize, depth: usize) -> String {
+    /// CSE `S = body(x0, x1)` (the caller passes the body's expression
+    /// text, which must reference exactly `v0` and `v1`). A deep shared
+    /// body over few local ops per row is the regime the op-ratio gates
+    /// are meant to catch: no repository fixture has a CSE shared across
+    /// constraints at all, so without this the gate-on paths have no
+    /// natural coverage.
+    fn shared_body_chain_nl(m: usize, body: &str) -> String {
         let n = m + 2;
         let nzc = 3 * m;
         let mut s = String::new();
@@ -5523,10 +5799,7 @@ G0 3
         s.push_str(" 0 0\n 0 1 0 0 0\n");
         // The shared body.
         s.push_str(&format!("V{n} 0 0\n"));
-        for _ in 0..depth {
-            s.push_str("o44\n");
-        }
-        s.push_str("o2\nn0.01\no0\nv0\nv1\n");
+        s.push_str(body);
         // Rows: S * x_{i+2}.
         for i in 0..m {
             s.push_str(&format!("C{i}\no2\nv{n}\nv{}\n", i + 2));
@@ -5559,6 +5832,35 @@ G0 3
             s.push_str(&format!("{j} 0.0\n"));
         }
         s
+    }
+
+    /// [`shared_body_chain_nl`] with `S = exp^depth(0.01 * (x0 + x1))`.
+    /// The forward value saturates to `inf` past depth ≈ 5, which the
+    /// Jacobian tests tolerate (`inf == inf`); Hessian tests need the
+    /// bounded variant below instead, whose second-order terms would
+    /// otherwise mix `inf`s of both signs into `NaN`.
+    fn deep_shared_cse_nl(m: usize, depth: usize) -> String {
+        let mut body = String::new();
+        for _ in 0..depth {
+            body.push_str("o44\n");
+        }
+        body.push_str("o2\nn0.01\no0\nv0\nv1\n");
+        shared_body_chain_nl(m, &body)
+    }
+
+    /// [`shared_body_chain_nl`] with `S = (log ∘ exp)^pairs(2 + 0.01 *
+    /// (x0 + x1))` — mathematically the identity chain, so the value
+    /// stays bounded (no `inf`/`NaN` at any reasonable `x`) while every
+    /// stage still carries nonzero curvature (`exp'' ≠ 0`, `log'' ≠ 0`)
+    /// through both second-order sweeps. `2 * pairs` body ops drive the
+    /// flat/shared op ratio as high as the Hessian gate tests need.
+    fn bounded_deep_shared_cse_nl(m: usize, pairs: usize) -> String {
+        let mut body = String::new();
+        for _ in 0..pairs {
+            body.push_str("o43\no44\n");
+        }
+        body.push_str("o0\nn2\no2\nn0.01\no0\nv0\nv1\n");
+        shared_body_chain_nl(m, &body)
     }
 
     /// With a deep shared body the gate turns itself on, and the path it
@@ -5609,6 +5911,372 @@ G0 3
         assert!(
             !h.use_for_jac,
             "a 3-row model with a 2-term CSE is far below the op-ratio gate"
+        );
+    }
+
+    /// `eval_h`'s shared-CSE path (issue #557) against the flat tapes on a
+    /// polynomial model with dyadic inputs. Folding `λ_k` into the boundary
+    /// adjoints and running one prelude sweep reassociates floating-point
+    /// products, so the two paths agree only to rounding on general inputs —
+    /// but here every operation in both traversals is exact (dyadic values,
+    /// small-integer coefficients, polynomial ops), so the results must be
+    /// bit-identical, pinning the arithmetic itself and not just its
+    /// magnitude. Forced on regardless of `HYBRID_HESS_MIN_OP_RATIO` so the
+    /// path is covered independently of the size heuristic.
+    #[test]
+    fn shared_cse_hessian_matches_flat_tape_bit_for_bit() {
+        let nl = shared_cse_nl("o2\nv3\nv2");
+        let p = parse_nl_text(&nl).expect("parse shared-CSE model");
+
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+        hybrid
+            .con_hybrid
+            .as_mut()
+            .expect("CSE shared by 3 constraints must build the hybrid tape")
+            .use_for_hess = true;
+
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        let pairs: Vec<(usize, usize)> = hybrid
+            .h_irow
+            .iter()
+            .zip(&hybrid.h_jcol)
+            .map(|(&i, &j)| (i as usize, j as usize))
+            .collect();
+
+        // Two multiplier sets: one all-live, one with a dead row so the
+        // λ == 0 skip is exercised on the hybrid path too.
+        for lam in [[0.5, -1.25, 2.0], [0.0, 1.0, 0.5]] {
+            for x in [[1.0, 1.0, 1.0], [-2.0, 0.5, 3.0], [0.0, -1.5, -0.25]] {
+                let mut hh = vec![0.0_f64; nnz];
+                let mut hf = vec![0.0_f64; nnz];
+                assert!(hybrid.eval_h(
+                    Some(&x),
+                    true,
+                    1.0,
+                    Some(&lam),
+                    true,
+                    SparsityRequest::Values { values: &mut hh }
+                ));
+                assert!(flat.eval_h(
+                    Some(&x),
+                    true,
+                    1.0,
+                    Some(&lam),
+                    true,
+                    SparsityRequest::Values { values: &mut hf }
+                ));
+                assert_eq!(
+                    hh, hf,
+                    "hybrid Hessian differs from the flat tape at {x:?}, λ = {lam:?}"
+                );
+
+                // Analytic cross-check. V3 = 2 x0 + 3 x1 =: s with gradient
+                // dV = (2, 3, 0); the rows are V3², V3³ + x2, V3·x2 and the
+                // objective is constant, so the Lagrangian Hessian is
+                //   (2 λ0 + 6 s λ1) · dV dVᵀ + λ2 · (dV e2ᵀ + e2 dVᵀ).
+                let s = 2.0 * x[0] + 3.0 * x[1];
+                let q = 2.0 * lam[0] + 6.0 * s * lam[1];
+                let dv = [2.0, 3.0, 0.0];
+                for (k, &(i, j)) in pairs.iter().enumerate() {
+                    let mut want = q * dv[i] * dv[j];
+                    if i == 2 {
+                        want += lam[2] * dv[j];
+                    }
+                    if j == 2 {
+                        want += lam[2] * dv[i];
+                    }
+                    assert!(
+                        (hh[k] - want).abs() < 1e-9,
+                        "entry ({i}, {j}) at {x:?}, λ = {lam:?}: got {}, want {want}",
+                        hh[k]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A deep (but bounded — see `bounded_deep_shared_cse_nl`) shared body
+    /// turns the Hessian gate on by itself, and the path it turns on must
+    /// agree with the flat tapes. Not bitwise here: the shared prelude
+    /// reverse sweep runs once over the `λ_k`-folded adjoints of all
+    /// summands where the flat path runs per summand, and that
+    /// reassociation moves transcendental results by rounding — so the bar
+    /// is a relative few-ULP band, with the exact-arithmetic case pinned
+    /// bitwise by `shared_cse_hessian_matches_flat_tape_bit_for_bit`.
+    #[test]
+    fn a_deep_shared_body_turns_the_hessian_gate_on_and_still_agrees() {
+        let m = 16;
+        let p = parse_nl_text(&bounded_deep_shared_cse_nl(m, 20)).expect("parse");
+
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+        assert!(
+            hybrid
+                .con_hybrid
+                .as_ref()
+                .expect("shared CSE must build the hybrid tape")
+                .use_for_hess,
+            "a 40-op body shared by 16 rows is well past the op-ratio gate"
+        );
+
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        let lam: Vec<f64> = (0..m).map(|k| 0.25 + 0.125 * k as f64).collect();
+        for scale in [1.0_f64, -0.7, 2.5] {
+            let x: Vec<f64> = (0..info.n as usize)
+                .map(|j| scale * (0.2 + 0.03 * j as f64))
+                .collect();
+            // Run the hybrid Jacobian first, the order a real solve
+            // iteration uses. Its `gradient_summand` sweeps leave the
+            // *Jacobian's* prelude adjoint arena dirty; the Hessian's
+            // accumulators must be its own buffers with the all-zero-
+            // between-colors invariant, or this seeds `eval_h` with a
+            // stale row gradient (caught here).
+            let mut jac = vec![0.0_f64; info.nnz_jac_g as usize];
+            assert!(hybrid.eval_jac_g(
+                Some(&x),
+                true,
+                SparsityRequest::Values { values: &mut jac }
+            ));
+            let mut hh = vec![0.0_f64; nnz];
+            let mut hf = vec![0.0_f64; nnz];
+            assert!(hybrid.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hh }
+            ));
+            assert!(flat.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hf }
+            ));
+            for k in 0..nnz {
+                assert!(
+                    hh[k].is_finite() && hf[k].is_finite(),
+                    "non-finite Hessian entry {k} defeats the comparison"
+                );
+                let tol = 1e-12 * hf[k].abs().max(1.0);
+                assert!(
+                    (hh[k] - hf[k]).abs() <= tol,
+                    "gate-on Hessian entry {k} at scale {scale}: hybrid {} vs flat {}",
+                    hh[k],
+                    hf[k]
+                );
+            }
+            assert!(hh.iter().any(|v| *v != 0.0), "all-zero Hessian is no test");
+        }
+    }
+
+    /// `.nl` text for two independent shared-CSE blocks of different widths:
+    /// block A's body is `sin(x0 + … + x_{wide-1})`, block B's is
+    /// `sin(x_wide + … )` over `narrow` variables, each feeding `rows` rows
+    /// of the form `body * x_r`.
+    ///
+    /// The width difference is the point. A body summing `w` variables gives
+    /// its rows a dense `w × w` Hessian block, so those `w` columns pairwise
+    /// conflict and the coloring must spend `w` colors on them; the narrower
+    /// block reuses the low colors. The surplus colors therefore belong to
+    /// block A alone, and a per-color prelude walk over *both* bodies would
+    /// be doing work for a body that color cannot reach.
+    fn two_block_shared_cse_nl(wide: usize, narrow: usize, rows: usize) -> String {
+        let nvars = wide + narrow;
+        let m = 2 * rows;
+        let n = nvars + m;
+        // Block A rows touch `wide` body vars + 1 row var; block B rows
+        // touch `narrow` + 1.
+        let nzc = rows * (wide + 1) + rows * (narrow + 1);
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} {m} 1 0 0 0\n"));
+        s.push_str(&format!(" {m} 0\n 0 0\n"));
+        s.push_str(&format!(" {n} 0 0\n"));
+        s.push_str(" 0 0 0 1\n 0 0 0 0 0\n");
+        s.push_str(&format!(" {nzc} {n}\n"));
+        s.push_str(" 0 0\n 0 2 0 0 0\n");
+        // Two bodies: V{n} over the first `wide` vars, V{n+1} over the next
+        // `narrow`. `sin` of a left-nested sum: k terms need k-1 adds.
+        for (b, (base, count)) in [(0, wide), (wide, narrow)].iter().enumerate() {
+            s.push_str(&format!("V{} 0 0\n", n + b));
+            s.push_str("o41\n");
+            for _ in 0..count - 1 {
+                s.push_str("o0\n");
+            }
+            for j in 0..*count {
+                s.push_str(&format!("v{}\n", base + j));
+            }
+        }
+        // Rows: body_b * x_{rowvar}.
+        for i in 0..m {
+            let b = i / rows;
+            s.push_str(&format!("C{i}\no2\nv{}\nv{}\n", n + b, nvars + i));
+        }
+        s.push_str("O0 0\nn0\n");
+        s.push_str(&format!("x{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} {}\n", 0.2 + 0.01 * j as f64));
+        }
+        s.push_str("r\n");
+        for _ in 0..m {
+            s.push_str("2 0\n");
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        // Cumulative Jacobian column counts for the first n-1 columns.
+        s.push_str(&format!("k{}\n", n - 1));
+        let mut acc = 0;
+        for j in 0..n - 1 {
+            acc += if j < nvars { rows } else { 1 };
+            s.push_str(&format!("{acc}\n"));
+        }
+        for i in 0..m {
+            let (base, count) = if i < rows { (0, wide) } else { (wide, narrow) };
+            s.push_str(&format!("J{i} {}\n", count + 1));
+            let mut cols: Vec<usize> = (base..base + count).collect();
+            cols.push(nvars + i);
+            cols.sort_unstable();
+            for c in cols {
+                s.push_str(&format!("{c} 0.0\n"));
+            }
+        }
+        s.push_str(&format!("G0 {n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.0\n"));
+        }
+        s
+    }
+
+    /// Both prelude sweeps run once per color, so iterating the whole prelude
+    /// each time would cost `n_colors × |prelude|` where the op-ratio gate
+    /// assumes `|prelude|` — a cost the gate cannot see (PR #559 review).
+    /// `eval_h` instead walks the union of that color's summands'
+    /// `prelude_reach`.
+    ///
+    /// What this can and cannot pin is worth being exact about, because the
+    /// change is pure performance: walking the whole prelude per color
+    /// computes the *same* Hessian, so no assertion on output values can
+    /// detect it, and a timing assertion would be flaky. So this asserts the
+    /// two things that are checkable — that the table the sweeps iterate is
+    /// strictly smaller than the naive `n_colors × |prelude|` walk on a model
+    /// where colors genuinely reach different bodies, and that each reach list
+    /// is ascending and operand-closed, the invariants that make the narrowed
+    /// walk safe — plus agreement with the flat tapes under narrowing.
+    #[test]
+    fn per_color_prelude_reach_skips_bodies_the_color_cannot_touch() {
+        let p = parse_nl_text(&two_block_shared_cse_nl(6, 2, 3)).expect("parse");
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+        let m = info.m as usize;
+
+        {
+            let h = hybrid
+                .con_hybrid
+                .as_mut()
+                .expect("two shared CSE bodies must build the hybrid tape");
+            h.use_for_hess = true;
+
+            let np = h.tape.n_prelude_ops();
+            let n_colors = h.hess_color_reach_off.len() - 1;
+            let total: usize = h.hess_color_reach.len();
+            assert!(np > 0 && n_colors > 1, "np={np} n_colors={n_colors}");
+            assert!(
+                total < n_colors * np,
+                "per-color reach must be strictly smaller than walking the whole \
+                 prelude per color: Σ|reach_c| = {total}, n_colors × |prelude| = {}",
+                n_colors * np
+            );
+            // Every reach list must be ascending and operand-closed, which is
+            // what makes the narrowed walk safe.
+            for c in 0..n_colors {
+                let r =
+                    &h.hess_color_reach[h.hess_color_reach_off[c]..h.hess_color_reach_off[c + 1]];
+                assert!(
+                    r.windows(2).all(|w| w[0] < w[1]),
+                    "color {c} reach is not strictly ascending"
+                );
+                let member: std::collections::HashSet<u32> = r.iter().copied().collect();
+                for &i in r {
+                    let (a, b) = crate::nl_tape::op_operands(&h.tape.prelude[i as usize]);
+                    for opnd in [a, b].into_iter().flatten() {
+                        assert!(
+                            member.contains(&(opnd as u32)),
+                            "color {c}: slot {i}'s operand {opnd} is missing from its reach"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        let lam: Vec<f64> = (0..m).map(|k| 0.3 + 0.2 * k as f64).collect();
+        for scale in [1.0_f64, -0.6] {
+            let x: Vec<f64> = (0..info.n as usize)
+                .map(|j| scale * (0.15 + 0.02 * j as f64))
+                .collect();
+            let mut hh = vec![0.0_f64; nnz];
+            let mut hf = vec![0.0_f64; nnz];
+            assert!(hybrid.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hh }
+            ));
+            assert!(flat.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hf }
+            ));
+            for k in 0..nnz {
+                let tol = 1e-12 * hf[k].abs().max(1.0);
+                assert!(
+                    (hh[k] - hf[k]).abs() <= tol,
+                    "narrowed-reach Hessian entry {k} at scale {scale}: \
+                     hybrid {} vs flat {}",
+                    hh[k],
+                    hf[k]
+                );
+            }
+            assert!(hh.iter().any(|v| *v != 0.0), "all-zero Hessian is no test");
+        }
+    }
+
+    /// The Hessian gate is off for a model whose shared bodies are small —
+    /// below the ratio where the shared prelude sweeps pay for the hybrid
+    /// traversal's per-op overhead — leaving `eval_h` on the flat path
+    /// (which the gate keeps bit-identical for such models by definition).
+    #[test]
+    fn a_small_shared_body_leaves_the_hessian_on_the_flat_path() {
+        let p = parse_nl_text(&shared_cse_nl("o2\nv3\nv2")).expect("parse");
+        let mut t = NlTnlp::new(p);
+        t.get_nlp_info().unwrap();
+        let h = t.con_hybrid.as_ref().expect("hybrid built for eval_g");
+        assert!(
+            !h.use_for_hess,
+            "a 3-row model with a 2-term CSE is below the Hessian op-ratio gate"
         );
     }
 
