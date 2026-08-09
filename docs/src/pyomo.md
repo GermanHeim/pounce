@@ -59,18 +59,20 @@ genuinely different code paths, not aliases. All of these reach POUNCE
 | call | works | carries `pyomo-pounce`'s extras |
 |---|---|---|
 | `SolverFactory('pounce')` | yes | **yes** |
+| `contrib.solver` `SolverFactory('pounce')` | yes | **yes** |
+| `SolverFactory('pounce_v2')` | yes | **yes** |
 | `SolverFactory('ipopt_v2', executable=<pounce>)` | yes | no |
 | `SolverFactory('ipopt', executable=<pounce>)` | yes | no |
 | `SolverFactory('asl', executable=<pounce>, solver='pounce')` | yes | no |
 | `SolverFactory('appsi_ipopt', …)` | no — takes no `executable` | — |
 
-`SolverFactory('pounce')` is the supported route and the only one that
-brings the rest of this page with it: the `scaling_factor` suffix
-handling, the sensitivity path, the preflight/repair helpers, the guard
-against handing a model with live integer variables to a continuous
-solver, and the bundled-binary resolution above. The generic routes run
-the same solver and return the same answer, but silently do without all
-of that.
+The first three are `pyomo-pounce`'s own registrations and the supported
+routes; they are the only ones that bring the rest of this page with
+them: the `scaling_factor` suffix handling, the sensitivity path, the
+preflight/repair helpers, the guard against handing a model with live
+integer variables to a continuous solver, and the bundled-binary
+resolution above. The generic routes run the same solver and return the
+same answer, but silently do without all of that.
 
 `ipopt` and `asl` are Pyomo's *legacy* solver interface; `ipopt_v2` is
 the newer `pyomo.contrib.solver` one. Driving POUNCE through `ipopt_v2`
@@ -81,26 +83,71 @@ options as `key="value"` in a single `argv` entry (quotes and all, since
 no shell is involved) and because POUNCE's `.sol` wrote an `Options`
 count of `0`, which the v2 `.sol` reader rejects.
 
+### Choosing between the legacy and v2 interfaces
+
+Both of `pyomo-pounce`'s interfaces carry the same extras and return the
+same numbers — a test in `pyomo-pounce/tests/test_v2.py` solves one model
+through both and compares primals, objective, duals and reduced costs, so
+this is checked on every CI run rather than asserted here.
+
+```python
+import pyomo_pounce
+from pyomo.environ import SolverFactory
+from pyomo.contrib.solver.common.factory import SolverFactory as SolverFactoryV2
+
+solver = SolverFactory('pounce')       # legacy interface
+solver = SolverFactoryV2('pounce')     # v2 interface (a Results object)
+solver = SolverFactory('pounce_v2')    # v2 engine, legacy-style API
+```
+
+The v2 route needs **Pyomo ≥ 6.10.1** (where the `SolutionLoader` /
+`get_vars` API it builds on landed — `pyomo.contrib.solver.common`
+exists from 6.9.2, but 6.9.2–6.10.0 ship the older
+`SolutionLoaderBase` / `get_primals`) and **pounce-solver > 0.9.0**
+(Pyomo's `asl_sol_reader` is strict where the legacy reader is lenient
+and needs the per-model `.sol` `Options` echo added after 0.9.0).
+`pip install pyomo-pounce[v2]` asks for both. Neither applies to
+`SolverFactory('pounce')`: on an older Pyomo the legacy plugin works
+exactly as before and `pyomo_pounce.HAVE_V2_INTERFACE` reports `False`.
+
+They differ in API and in per-solve overhead. The v2 interface returns a
+`Results` object and hands the solution back through a solution loader
+(so `load_solutions=False` gives you the values without touching the
+model); the legacy one returns a `SolverResults` and loads into the model
+as a side effect. Options are `solver_options={...}` on v2 against
+`options={...}` on the legacy route.
+
+**The v2 route can be materially faster outside the solve**, and how much
+depends on the model's shape. Same POUNCE binary, wall clock around
+`solve()` minus POUNCE's own reported time:
+
+| model | legacy remainder | v2 remainder |
+|---|---|---|
+| plain `pyomo.dae` four-tank collocation, n = 3,010 | 0.109 s | 0.104 s |
+| drto/IDAES `quad_tank` N=100, n = 2,910 | 0.553 s | 0.301 s |
+| drto/IDAES `cart_pole` N=100, n = 2,810 | 0.566 s | 0.295 s |
+
+On the plain model the two are indistinguishable; on the IDAES-shaped
+ones the legacy interface adds roughly 0.25 s per solve (~1.8×). If your
+models are of that kind and you are solving many of them, the v2 route is
+worth taking. (Figures from the [#552](https://github.com/jkitchin/pounce/issues/552)
+measurements; the first row was measured on Linux, the other two on
+Windows, so read down the columns rather than across the rows.)
+
 **If you are benchmarking, put both solvers on the same interface.**
 `solver.solve(model)` is not only the solve: it is Pyomo writing the
 `.nl`, launching the process, reading the `.sol` back and loading it into
 the model. Timing around that call and subtracting the solver's own
-reported time leaves a remainder that is mostly *Pyomo's* work, and it is
-not the same work on every interface. On a 3,010-variable collocation
-model, wall clock around `solve()` for the same POUNCE binary:
-
-| interface | reported solve | remainder | total |
-|---|---|---|---|
-| `SolverFactory('pounce')` (legacy) | 0.223 s | 0.109 s | 0.332 s |
-| `ipopt_v2` | 0.188 s | 0.104 s | 0.292 s |
-
-and that remainder breaks down as ~0.082 s Pyomo writing the `.nl`,
-~0.020 s process spawn plus POUNCE's own `.nl` read and setup, and
-~0.008 s Pyomo reading the `.sol` and loading it. So comparing
-`SolverFactory('pounce')` against `SolverFactory('ipopt_v2', …)` compares
-two Pyomo interfaces as much as two solvers, and attributing the
-remainder to either solver's file handling will mislead you. Use the same
-interface on both sides, or compare the solvers' own reported times.
+reported time leaves a remainder that is mostly *Pyomo's* work, and — as
+the table above shows — it is not the same work on every interface. On
+the 3,010-variable collocation model that remainder breaks down as
+~0.082 s Pyomo writing the `.nl`, ~0.020 s process spawn plus POUNCE's
+own `.nl` read and setup, and ~0.008 s Pyomo reading the `.sol` and
+loading it. So comparing `SolverFactory('pounce')` against
+`SolverFactory('ipopt_v2', …)` compares two Pyomo interfaces as much as
+two solvers, and attributing the remainder to either solver's file
+handling will mislead you. Use the same interface on both sides, or
+compare the solvers' own reported times.
 
 ## User scaling with the `scaling_factor` Suffix
 
