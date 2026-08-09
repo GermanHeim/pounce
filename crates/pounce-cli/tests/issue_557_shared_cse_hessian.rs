@@ -105,8 +105,10 @@ fn shared_cse_model_nl(m: usize, pairs: usize) -> String {
 }
 
 /// Solve the generated model, optionally with `POUNCE_DBG_NO_HYBRID=1`,
-/// returning the parsed report.
-fn solve(no_hybrid: bool) -> SolveReport {
+/// returning the parsed report and the `[hybrid stats]` line from stderr
+/// (`POUNCE_DBG_TAPE_STATS=1` is always on so the caller can assert which
+/// paths the solve actually took).
+fn solve(no_hybrid: bool) -> (SolveReport, String) {
     let nl_path = tmp_path("model.nl");
     std::fs::write(&nl_path, shared_cse_model_nl(M, PAIRS)).expect("write model");
     let json_path = tmp_path("report.json");
@@ -115,20 +117,30 @@ fn solve(no_hybrid: bool) -> SolveReport {
     cmd.arg(&nl_path)
         .arg(&sol_path)
         .arg("--json-output")
-        .arg(&json_path);
+        .arg(&json_path)
+        .env("POUNCE_DBG_TAPE_STATS", "1");
     if no_hybrid {
         cmd.env("POUNCE_DBG_NO_HYBRID", "1");
     }
-    let status = cmd.status().expect("spawn pounce");
+    let out = cmd.output().expect("spawn pounce");
     assert!(
-        status.success(),
+        out.status.success(),
         "solve exited nonzero (no_hybrid={no_hybrid})"
     );
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stats = stderr
+        .lines()
+        .find(|l| l.contains("[hybrid stats]"))
+        .unwrap_or_default()
+        .to_string();
     let text = std::fs::read_to_string(&json_path).expect("read json report");
     let _ = std::fs::remove_file(&nl_path);
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sol_path);
-    serde_json::from_str(&text).expect("deserialize SolveReport")
+    (
+        serde_json::from_str(&text).expect("deserialize SolveReport"),
+        stats,
+    )
 }
 
 /// Analytic optimum: x0 = x1 = 0.5, x_{i+2} = 1 / 2.01.
@@ -153,10 +165,24 @@ fn assert_solved_at_optimum(report: &SolveReport, ctx: &str) {
 
 /// The default run takes the shared-CSE paths (the op ratio is past both
 /// derivative gates) and must reach the analytic optimum.
+///
+/// The gate states are asserted from the solve's own `[hybrid stats]` line
+/// rather than inferred from the model's op ratio. Without that, raising
+/// `HYBRID_HESS_MIN_OP_RATIO` past this model's ratio (≈ 8) would silently
+/// turn this into a flat-versus-flat comparison that still passes — the one
+/// thing an end-to-end test for this feature must not do (PR #559 review).
 #[test]
 fn shared_cse_model_solves_on_the_hybrid_paths() {
-    let report = solve(false);
+    let (report, stats) = solve(false);
     assert_solved_at_optimum(&report, "shared-CSE model (hybrid)");
+    assert!(
+        stats.contains("hess_gate=on"),
+        "eval_h must take the shared-CSE path on this model; stats line was: {stats:?}"
+    );
+    assert!(
+        stats.contains("jac_gate=on"),
+        "eval_jac_g must take the shared-CSE path on this model; stats line was: {stats:?}"
+    );
 }
 
 /// Same binary, hybrid disabled: the flat-tape reference solve, and the
@@ -164,9 +190,19 @@ fn shared_cse_model_solves_on_the_hybrid_paths() {
 /// a different (or failed) solution, not a panic.
 #[test]
 fn shared_cse_model_matches_the_flat_tape_solve() {
-    let hybrid = solve(false);
-    let flat = solve(true);
+    let (hybrid, hstats) = solve(false);
+    let (flat, fstats) = solve(true);
     assert_solved_at_optimum(&flat, "shared-CSE model (flat reference)");
+    // Pin that the two runs really did take different paths, so this is a
+    // comparison and not a tautology.
+    assert!(
+        hstats.contains("hess_gate=on"),
+        "hybrid run did not take the shared-CSE Hessian path: {hstats:?}"
+    );
+    assert!(
+        fstats.contains("hybrid not built"),
+        "POUNCE_DBG_NO_HYBRID run should build no hybrid tape at all: {fstats:?}"
+    );
     let (oh, of) = (hybrid.solution.objective, flat.solution.objective);
     assert!(
         (oh - of).abs() <= 1e-6 * of.abs().max(1.0),

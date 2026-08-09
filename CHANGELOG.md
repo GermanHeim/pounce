@@ -32,19 +32,34 @@ agrees to rounding, which the tests pin as exact equality on
 all-dyadic-arithmetic models and a few-ULP band on transcendental ones.
 
 Measured on chain models with CSE redundancy 40, varying the shared body
-size (`eval_h`, flat → hybrid, n ≈ 21,000, m = 20,000):
+size (`eval_h`, flat → hybrid, n ≈ 21,000, m = 20,000). Median of 5
+interleaved flat/hybrid pairs per point, with the observed range:
 
 | flat/shared op ratio | 1.94 | 2.54 | 3.12 | 3.69 | 4.24 | 5.29 | 6.76 | 8.53 |
 |---|---|---|---|---|---|---|---|---|
-| speedup | 1.04× | 1.11× | 1.30× | 1.36× | 1.33× | 1.56× | 1.50× | 1.63× |
+| median speedup | 1.00× | 1.04× | 1.18× | 1.23× | 1.31× | 1.44× | 1.36× | 1.49× |
+| min–max | 0.91–1.11 | 0.36–1.14 | 1.10–1.33 | 1.16–1.30 | 1.23–1.32 | 1.19–1.54 | 1.27–1.50 | 1.36–1.65 |
 
-At 1.94 repeated runs straddle 1.0× — break-even inside timing noise,
-never a clear loss. The gate (`HYBRID_HESS_MIN_OP_RATIO`) is set at 2.5,
-below the Jacobian's 4, and low-ratio models stay bit-identical on the
-flat path. At ratio 4.24 with all default gates the whole AD stack drops
-34.6 → 23.8 ms/call (`eval_h` 24.8 → 18.3). Models without shared CSE
-bodies — including everything Pyomo writes, which has no `V` segments —
-never build the hybrid tape and are untouched.
+The medians are what the threshold is set from: single runs on a shared
+machine scatter too widely to place a gate on — the 2.54 column spans
+0.36× to 1.14×. The gate (`HYBRID_HESS_MIN_OP_RATIO`) sits at 3.0, the
+lowest ratio where every sample wins by at least 10%; below it `eval_h`
+stays on the flat path bit-identically, so a gate set high is merely
+conservative while one set low risks a real regression. With all default
+gates the whole AD stack at ratio 4.24 speeds up 1.25× (median of 5
+interleaved pairs, range 1.14–1.44). Models without shared CSE bodies —
+including everything Pyomo writes, which has no `V` segments — never
+build the hybrid tape and are untouched.
+
+The two prelude sweeps run once per Hessian color, so they walk the union
+of that color's summands' `prelude_reach` rather than the whole prelude.
+Walking all of it would cost `n_colors × |prelude|` where the op-ratio
+gate assumes `|prelude|` — a discrepancy the gate cannot see, unbounded
+in `n_colors`. On the chain models above this is neutral (every color
+reaches nearly every body there, so there is nothing to skip: 1.02× at
+ratio 4.24, 1.12× at 8.53); it is insurance for models where a color
+reaches only part of the prelude, which a unit test on two shared bodies
+of differing width exercises directly.
 
 The dormant `HybridTape::hessian_summand` is **removed**. It was the
 wrong tool for this and had never had a caller: it re-walked

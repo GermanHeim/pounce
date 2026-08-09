@@ -2316,7 +2316,12 @@ pub struct Summand {
     pub local_vars: Vec<usize>,
     /// Variables touched by Var ops inside `prelude_reach`.
     pub prelude_vars: Vec<usize>,
-    /// `local_vars ∪ prelude_vars`, sorted. Hessian j-loop set.
+    /// `local_vars ∪ prelude_vars`, sorted — every problem variable this
+    /// summand can contribute a derivative for. `eval_h` maps it through
+    /// the Hessian coloring to decide which colors the summand
+    /// participates in (issue #557); it must include `prelude_vars` or a
+    /// summand would be skipped for colors it reaches only through a
+    /// shared CSE body.
     pub all_vars: Vec<usize>,
 }
 
@@ -2521,9 +2526,28 @@ impl HybridTape {
     /// color share, and the reason the directional Hessian path
     /// exists at all (issue #557): a per-summand-per-variable seeding
     /// strategy would repeat it for every referencing summand.
-    pub fn prelude_tangent(&self, prelude_vals: &[f64], seed: &[f64], prelude_dot: &mut [f64]) {
+    /// `reach` is the set of prelude slots this color actually uses —
+    /// the union of `prelude_reach` over the color's summands. It must
+    /// be **ascending** (the prelude is emitted bottom-up, so operand
+    /// indices are always below their consumer's) and **closed under
+    /// operands**, which a union of `prelude_reach` sets is by
+    /// construction. Slots outside it are neither written nor read:
+    /// a summand only pulls `prelude_dot[k]` for `k` in its own
+    /// `prelude_reach`, so a stale tangent left in an untouched slot by
+    /// a previous color can never be observed. Passing every slot is
+    /// therefore always correct, just not always cheap — walking the
+    /// whole prelude once per color is `n_colors × |prelude|` work
+    /// against the `|prelude|` the op-ratio gate assumes.
+    pub fn prelude_tangent(
+        &self,
+        prelude_vals: &[f64],
+        seed: &[f64],
+        reach: &[u32],
+        prelude_dot: &mut [f64],
+    ) {
         debug_assert!(prelude_dot.len() >= self.prelude.len());
-        for i in 0..self.prelude.len() {
+        for &i in reach {
+            let i = i as usize;
             prelude_dot[i] = fwd_dir_step(&self.prelude[i], seed, prelude_vals, prelude_dot, i);
         }
     }
@@ -2633,11 +2657,13 @@ impl HybridTape {
         &self,
         prelude_vals: &[f64],
         prelude_dot: &[f64],
+        reach: &[u32],
         out: &mut [f64],
         prelude_adj: &mut [f64],
         prelude_adj_dot: &mut [f64],
     ) {
-        for i in (0..self.prelude.len()).rev() {
+        for &i in reach.iter().rev() {
+            let i = i as usize;
             let w = prelude_adj[i];
             let wd = prelude_adj_dot[i];
             if w == 0.0 && wd == 0.0 {
@@ -3280,7 +3306,7 @@ fn summand_sparsity(
 /// Operand indices of a `TapeOp`, normalized into a fixed-length
 /// array so callers don't need to re-match every site.
 #[inline]
-fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
+pub(crate) fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
     match op {
         TapeOp::Const(_) | TapeOp::Var(_) => (None, None),
         TapeOp::Add(a, b)
@@ -3325,7 +3351,17 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
             "op_operands: TapeOp::Min/Max are unsupported on the HybridTape path \
              (build_into_summand rejects min/max lists)"
         ),
-        TapeOp::Funcall(_) => (None, None),
+        // Returning `(None, None)` here would be a silent wrong answer, not a
+        // conservative one: a Funcall's tape arguments would be missing from
+        // `local_reach`, and the directional Hessian deliberately does NOT
+        // pre-zero `local_dot`, so those slots would be read as stale scratch
+        // from a previous summand. Unreachable today —
+        // `build_into_summand` panics on `Expr::Funcall` before any tape is
+        // built — and this keeps it loud if that ever changes.
+        TapeOp::Funcall(_) => unreachable!(
+            "op_operands: TapeOp::Funcall is unsupported on the HybridTape path \
+             (build_into_summand rejects external function calls)"
+        ),
     }
 }
 
@@ -5259,8 +5295,20 @@ mod tests {
             let mut prelude_adj_dot = vec![0.0; np];
             let (mut local_dot, mut local_adj, mut local_adj_dot) =
                 (vec![0.0; ml], vec![0.0; ml], vec![0.0; ml]);
+            // The per-color prelude reach the caller is required to pass:
+            // the union of the color's summands' `prelude_reach`, ascending.
+            // Built here rather than passing `0..np` so the test exercises the
+            // narrowed walk `eval_h` actually performs — a reach that wrongly
+            // omitted a slot would leave its tangent stale and show up below.
+            let creach: Vec<u32> = {
+                let mut u: BTreeSet<u32> = BTreeSet::new();
+                for s in &hybrid.summands {
+                    u.extend(s.prelude_reach.iter().map(|&p| p as u32));
+                }
+                u.into_iter().collect()
+            };
             hybrid.forward_prelude(&x, &mut prelude_vals);
-            hybrid.prelude_tangent(&prelude_vals, seed, &mut prelude_dot);
+            hybrid.prelude_tangent(&prelude_vals, seed, &creach, &mut prelude_dot);
             for (s, &wt) in hybrid.summands.iter().zip(&weights) {
                 let mut local_vals = vec![0.0; s.ops.len()];
                 hybrid.forward_summand(s, &x, &prelude_vals, &mut local_vals);
@@ -5281,6 +5329,7 @@ mod tests {
             hybrid.prelude_reverse_directional(
                 &prelude_vals,
                 &prelude_dot,
+                &creach,
                 &mut hyb_out,
                 &mut prelude_adj,
                 &mut prelude_adj_dot,

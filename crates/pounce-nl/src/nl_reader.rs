@@ -1953,6 +1953,19 @@ struct ConHybrid {
     /// hybrid analogue of `con_tape_colors`, inverted so `eval_h` walks
     /// exactly the live (color, summand) pairs.
     hess_color_summands: Vec<Vec<u32>>,
+    /// Per color: the prelude slots that color's summands actually reach,
+    /// ascending — `hess_color_reach[hess_color_reach_off[c]..off[c + 1]]`.
+    /// Both prelude sweeps run once per color, so walking the whole
+    /// prelude each time would cost `n_colors × |prelude|` where the
+    /// op-ratio gate assumes `|prelude|`; iterating the union of the
+    /// color's `prelude_reach` sets makes the cost proportional to what
+    /// is used, so the gate does not need an `n_colors` term. Stored as
+    /// a flat `u32` CSR rather than `Vec<Vec<_>>`: the total is
+    /// `Σ_c |reach_c|`, which is proportional to the work it drives, and
+    /// this struct is the one #552 made O(n²) by holding per-color dense
+    /// arrays.
+    hess_color_reach: Vec<u32>,
+    hess_color_reach_off: Vec<usize>,
     /// Per-color prelude tangent, sized to `tape.n_prelude_ops()`.
     prelude_dot: Vec<f64>,
     /// First-/second-order prelude adjoint accumulators. NOT shared
@@ -2011,18 +2024,25 @@ const HYBRID_JAC_MIN_OP_RATIO: f64 = 4.0;
 ///
 /// Measured on chain models at CSE redundancy 40 (m = 20,000, 500 shared
 /// bodies), varying the body size — the same protocol as the Jacobian
-/// gate's table (`eval_h`, flat → hybrid):
+/// gate's table (`eval_h`, flat → hybrid). **Median of 5 interleaved
+/// flat/hybrid pairs per point**, with the observed range, because
+/// single runs on a shared machine are not reproducible to the precision
+/// a threshold decision needs — one sample below spans 0.36×–1.14× at a
+/// single ratio:
 ///
 /// | op ratio | 1.94 | 2.54 | 3.12 | 3.69 | 4.24 | 5.29 | 6.76 | 8.53 |
 /// |---|---|---|---|---|---|---|---|---|
-/// | speedup | 1.04× | 1.11× | 1.30× | 1.36× | 1.33× | 1.56× | 1.50× | 1.63× |
+/// | median speedup | 1.00× | 1.04× | 1.18× | 1.23× | 1.31× | 1.44× | 1.36× | 1.49× |
+/// | min–max | 0.91–1.11 | 0.36–1.14 | 1.10–1.33 | 1.16–1.30 | 1.23–1.32 | 1.19–1.54 | 1.27–1.50 | 1.36–1.65 |
 ///
-/// At 1.94 repeated runs straddle 1.0× (0.97–1.18×) — break-even inside
-/// timing noise, never a clear loss — and from 2.5 up the win is
-/// consistent. The gate is set at 2.5 so the switch only happens where the
-/// benefit is real, and low-ratio models stay bit-identical on the flat
-/// path. For reference `robot_a` (#476) measures 4.03×.
-const HYBRID_HESS_MIN_OP_RATIO: f64 = 2.5;
+/// The gate sits at 3.0: that is the lowest ratio where **every** sample
+/// wins (by ≥ 10%), whereas at 1.94 and 2.54 the median is within noise of
+/// break-even and individual runs lose. Setting it there costs only a
+/// marginal forgone gain — below the gate `eval_h` stays on the flat path
+/// bit-identically, so a gate placed too high is merely conservative while
+/// one placed too low risks a real regression. For reference `robot_a`
+/// (#476) measures 4.03×.
+const HYBRID_HESS_MIN_OP_RATIO: f64 = 3.0;
 
 // `Clone` supports the batched-solve path (pounce#126): one parsed
 // model is cloned per batch instance (tapes are flat `Vec`s of ops, so
@@ -2884,6 +2904,8 @@ impl NlTnlp {
                     local_off: Vec::new(),
                     summand_row: Vec::new(),
                     hess_color_summands: Vec::new(),
+                    hess_color_reach: Vec::new(),
+                    hess_color_reach_off: Vec::new(),
                     prelude_dot: Vec::new(),
                     hess_prelude_adj: Vec::new(),
                     prelude_adj_dot: Vec::new(),
@@ -3034,6 +3056,36 @@ impl NlTnlp {
                     by_color[c as usize].push(si as u32);
                 }
             }
+            // Per-color prelude reach: the union of `prelude_reach` over the
+            // color's summands, ascending. A union of operand-closed
+            // ascending sets is itself operand-closed and ascending, which is
+            // exactly what the two prelude sweeps require. Deduped with an
+            // epoch-tagged buffer so the build costs
+            // `Σ_c Σ_{s ∈ c} |prelude_reach_s|` — the same order as the work
+            // it saves — rather than `n_colors × |prelude|`.
+            let np = h.tape.n_prelude_ops();
+            let mut seen: Vec<u32> = vec![0; np];
+            let mut epoch: u32 = 0;
+            let mut reach: Vec<u32> = Vec::new();
+            let mut reach_off: Vec<usize> = Vec::with_capacity(n_colors + 1);
+            for list in &by_color {
+                reach_off.push(reach.len());
+                epoch += 1;
+                let start = reach.len();
+                for &si in list {
+                    for &p in &h.tape.summands[si as usize].prelude_reach {
+                        if seen[p] != epoch {
+                            seen[p] = epoch;
+                            reach.push(p as u32);
+                        }
+                    }
+                }
+                reach[start..].sort_unstable();
+            }
+            reach_off.push(reach.len());
+            h.hess_color_reach = reach;
+            h.hess_color_reach_off = reach_off;
+
             h.hess_color_summands = by_color;
             h.prelude_dot = vec![0.0; h.tape.n_prelude_ops()];
             h.hess_prelude_adj = vec![0.0; h.tape.n_prelude_ops()];
@@ -3784,6 +3836,8 @@ impl TNLP for NlTnlp {
                             local_off,
                             summand_row,
                             hess_color_summands,
+                            hess_color_reach,
+                            hess_color_reach_off,
                             prelude_dot,
                             hess_prelude_adj,
                             prelude_adj_dot,
@@ -3816,7 +3870,9 @@ impl TNLP for NlTnlp {
                             }
                             let seed = &self.seeds[c];
                             let out = &mut self.compressed[c];
-                            tape.prelude_tangent(prelude_vals, seed, prelude_dot);
+                            let creach = &hess_color_reach
+                                [hess_color_reach_off[c]..hess_color_reach_off[c + 1]];
+                            tape.prelude_tangent(prelude_vals, seed, creach, prelude_dot);
                             for &si in list {
                                 let si = si as usize;
                                 let w = lam[summand_row[si] as usize];
@@ -3840,6 +3896,7 @@ impl TNLP for NlTnlp {
                             tape.prelude_reverse_directional(
                                 prelude_vals,
                                 prelude_dot,
+                                creach,
                                 out,
                                 hess_prelude_adj,
                                 prelude_adj_dot,
@@ -6016,6 +6073,189 @@ G0 3
                 assert!(
                     (hh[k] - hf[k]).abs() <= tol,
                     "gate-on Hessian entry {k} at scale {scale}: hybrid {} vs flat {}",
+                    hh[k],
+                    hf[k]
+                );
+            }
+            assert!(hh.iter().any(|v| *v != 0.0), "all-zero Hessian is no test");
+        }
+    }
+
+    /// `.nl` text for two independent shared-CSE blocks of different widths:
+    /// block A's body is `sin(x0 + … + x_{wide-1})`, block B's is
+    /// `sin(x_wide + … )` over `narrow` variables, each feeding `rows` rows
+    /// of the form `body * x_r`.
+    ///
+    /// The width difference is the point. A body summing `w` variables gives
+    /// its rows a dense `w × w` Hessian block, so those `w` columns pairwise
+    /// conflict and the coloring must spend `w` colors on them; the narrower
+    /// block reuses the low colors. The surplus colors therefore belong to
+    /// block A alone, and a per-color prelude walk over *both* bodies would
+    /// be doing work for a body that color cannot reach.
+    fn two_block_shared_cse_nl(wide: usize, narrow: usize, rows: usize) -> String {
+        let nvars = wide + narrow;
+        let m = 2 * rows;
+        let n = nvars + m;
+        // Block A rows touch `wide` body vars + 1 row var; block B rows
+        // touch `narrow` + 1.
+        let nzc = rows * (wide + 1) + rows * (narrow + 1);
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} {m} 1 0 0 0\n"));
+        s.push_str(&format!(" {m} 0\n 0 0\n"));
+        s.push_str(&format!(" {n} 0 0\n"));
+        s.push_str(" 0 0 0 1\n 0 0 0 0 0\n");
+        s.push_str(&format!(" {nzc} {n}\n"));
+        s.push_str(" 0 0\n 0 2 0 0 0\n");
+        // Two bodies: V{n} over the first `wide` vars, V{n+1} over the next
+        // `narrow`. `sin` of a left-nested sum: k terms need k-1 adds.
+        for (b, (base, count)) in [(0, wide), (wide, narrow)].iter().enumerate() {
+            s.push_str(&format!("V{} 0 0\n", n + b));
+            s.push_str("o41\n");
+            for _ in 0..count - 1 {
+                s.push_str("o0\n");
+            }
+            for j in 0..*count {
+                s.push_str(&format!("v{}\n", base + j));
+            }
+        }
+        // Rows: body_b * x_{rowvar}.
+        for i in 0..m {
+            let b = i / rows;
+            s.push_str(&format!("C{i}\no2\nv{}\nv{}\n", n + b, nvars + i));
+        }
+        s.push_str("O0 0\nn0\n");
+        s.push_str(&format!("x{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} {}\n", 0.2 + 0.01 * j as f64));
+        }
+        s.push_str("r\n");
+        for _ in 0..m {
+            s.push_str("2 0\n");
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        // Cumulative Jacobian column counts for the first n-1 columns.
+        s.push_str(&format!("k{}\n", n - 1));
+        let mut acc = 0;
+        for j in 0..n - 1 {
+            acc += if j < nvars { rows } else { 1 };
+            s.push_str(&format!("{acc}\n"));
+        }
+        for i in 0..m {
+            let (base, count) = if i < rows { (0, wide) } else { (wide, narrow) };
+            s.push_str(&format!("J{i} {}\n", count + 1));
+            let mut cols: Vec<usize> = (base..base + count).collect();
+            cols.push(nvars + i);
+            cols.sort_unstable();
+            for c in cols {
+                s.push_str(&format!("{c} 0.0\n"));
+            }
+        }
+        s.push_str(&format!("G0 {n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.0\n"));
+        }
+        s
+    }
+
+    /// Both prelude sweeps run once per color, so iterating the whole prelude
+    /// each time would cost `n_colors × |prelude|` where the op-ratio gate
+    /// assumes `|prelude|` — a cost the gate cannot see (PR #559 review).
+    /// `eval_h` instead walks the union of that color's summands'
+    /// `prelude_reach`.
+    ///
+    /// What this can and cannot pin is worth being exact about, because the
+    /// change is pure performance: walking the whole prelude per color
+    /// computes the *same* Hessian, so no assertion on output values can
+    /// detect it, and a timing assertion would be flaky. So this asserts the
+    /// two things that are checkable — that the table the sweeps iterate is
+    /// strictly smaller than the naive `n_colors × |prelude|` walk on a model
+    /// where colors genuinely reach different bodies, and that each reach list
+    /// is ascending and operand-closed, the invariants that make the narrowed
+    /// walk safe — plus agreement with the flat tapes under narrowing.
+    #[test]
+    fn per_color_prelude_reach_skips_bodies_the_color_cannot_touch() {
+        let p = parse_nl_text(&two_block_shared_cse_nl(6, 2, 3)).expect("parse");
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+        let m = info.m as usize;
+
+        {
+            let h = hybrid
+                .con_hybrid
+                .as_mut()
+                .expect("two shared CSE bodies must build the hybrid tape");
+            h.use_for_hess = true;
+
+            let np = h.tape.n_prelude_ops();
+            let n_colors = h.hess_color_reach_off.len() - 1;
+            let total: usize = h.hess_color_reach.len();
+            assert!(np > 0 && n_colors > 1, "np={np} n_colors={n_colors}");
+            assert!(
+                total < n_colors * np,
+                "per-color reach must be strictly smaller than walking the whole \
+                 prelude per color: Σ|reach_c| = {total}, n_colors × |prelude| = {}",
+                n_colors * np
+            );
+            // Every reach list must be ascending and operand-closed, which is
+            // what makes the narrowed walk safe.
+            for c in 0..n_colors {
+                let r =
+                    &h.hess_color_reach[h.hess_color_reach_off[c]..h.hess_color_reach_off[c + 1]];
+                assert!(
+                    r.windows(2).all(|w| w[0] < w[1]),
+                    "color {c} reach is not strictly ascending"
+                );
+                let member: std::collections::HashSet<u32> = r.iter().copied().collect();
+                for &i in r {
+                    let (a, b) = crate::nl_tape::op_operands(&h.tape.prelude[i as usize]);
+                    for opnd in [a, b].into_iter().flatten() {
+                        assert!(
+                            member.contains(&(opnd as u32)),
+                            "color {c}: slot {i}'s operand {opnd} is missing from its reach"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        let lam: Vec<f64> = (0..m).map(|k| 0.3 + 0.2 * k as f64).collect();
+        for scale in [1.0_f64, -0.6] {
+            let x: Vec<f64> = (0..info.n as usize)
+                .map(|j| scale * (0.15 + 0.02 * j as f64))
+                .collect();
+            let mut hh = vec![0.0_f64; nnz];
+            let mut hf = vec![0.0_f64; nnz];
+            assert!(hybrid.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hh }
+            ));
+            assert!(flat.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hf }
+            ));
+            for k in 0..nnz {
+                let tol = 1e-12 * hf[k].abs().max(1.0);
+                assert!(
+                    (hh[k] - hf[k]).abs() <= tol,
+                    "narrowed-reach Hessian entry {k} at scale {scale}: \
+                     hybrid {} vs flat {}",
                     hh[k],
                     hf[k]
                 );
