@@ -29,6 +29,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
+[project.optional-dependencies]
+# The `pyomo.contrib.solver` (v2) interface registered by
+# `pyomo_pounce.v2` needs Pyomo's `contrib.solver.common` layout, which
+# landed in 6.9.2. The base dependency stays at >=6.0 because the legacy
+# SolverFactory('pounce') plugin works there and most users only need
+# that; `pip install pyomo-pounce[v2]` asks for the newer interface.
+v2 = ["pyomo>=6.9.2"]
+
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"
 Repository = "https://github.com/jkitchin/pounce"

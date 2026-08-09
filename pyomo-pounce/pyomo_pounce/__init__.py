@@ -5,6 +5,12 @@ Usage:
     from pyomo.environ import *
     solver = SolverFactory('pounce')
 
+The same solver is registered against Pyomo's newer `pyomo.contrib.solver`
+interface as well, carrying all of the extras below (see pyomo_pounce.v2):
+    from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+    solver = SF2('pounce')             # v2 interface
+    solver = SolverFactory('pounce_v2')  # v2 engine, legacy API
+
 Initialization helpers (see the POUNCE docs' initialization chapter):
     report = pyomo_pounce.preflight(model)         # starting-point check
     pyomo_pounce.initialize(model, decisions=[...])  # fill -> repair -> block-solve
@@ -56,8 +62,29 @@ from pyomo_pounce.preflight import (
 )
 from pyomo_pounce.repair import InitializeReport, initialize, project_to_feasible
 
+# The v2 interface needs Pyomo's `pyomo.contrib.solver.common` layout,
+# which landed in 6.9.2; this package supports pyomo>=6.0 through the
+# legacy plugin and must keep importing cleanly there. So the v2
+# registration is optional: on an older Pyomo, `import pyomo_pounce`
+# still works and SolverFactory('pounce') behaves exactly as before --
+# only the v2 names are absent, and `HAVE_V2_INTERFACE` says so.
+# The probe is on Pyomo, not on `pyomo_pounce.v2`: wrapping the latter in
+# try/except would also swallow a genuine ImportError raised by a bug
+# inside it and report the interface as merely "unavailable". Once Pyomo
+# is known to have the layout, v2 is imported unguarded so real breakage
+# is loud.
+try:
+    import pyomo.contrib.solver.common.factory as _probe  # noqa: F401
+except ImportError:  # pragma: no cover - depends on the Pyomo version
+    HAVE_V2_INTERFACE = False
+else:
+    del _probe
+    from pyomo_pounce.v2 import LegacyPounceSolver, Pounce, PounceConfig
+    HAVE_V2_INTERFACE = True
+
 __all__ = [
     "POUNCE",
+    "HAVE_V2_INTERFACE",
     "check_binary",
     "declare_sens_param",
     "declare_fitted",
@@ -85,3 +112,6 @@ __all__ = [
     "Information",
     "structural_incidence",
 ]
+
+if HAVE_V2_INTERFACE:
+    __all__ += ["Pounce", "PounceConfig", "LegacyPounceSolver"]

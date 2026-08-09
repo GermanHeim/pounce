@@ -622,7 +622,7 @@ def _stream_solve(solver, x0, **solve_kwargs):
 
 
 def sens_solve(model, tee=False, sens_params=None, fitted=None,
-               residuals=None, options=None):
+               residuals=None, options=None, capture=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
     for gradient()/estimate()/covariance(). Called automatically by
     SolverFactory('pounce').solve() when declarations are present; the
@@ -633,7 +633,19 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     them; with `warm_start_init_point=yes` among them, the initial
     multipliers come from the model's `dual` / `ipopt_zL_in` /
     `ipopt_zU_in` suffixes (see `_warm_start_from_suffixes`). Returns a
-    Pyomo SolverResults, like an ordinary solve."""
+    Pyomo SolverResults, like an ordinary solve.
+
+    `capture`, when a mutable mapping is passed, is filled in with the
+    raw outcome of the solve -- the primal iterate, the engine's `info`
+    dict (multipliers included), the `.col`/`.row` name lists, the
+    surgery alias map and the elapsed solve time. This path returns a
+    *legacy* SolverResults because that is what the legacy interface
+    needs; `pyomo_pounce.v2` builds a `pyomo.contrib.solver` `Results`
+    and solution loader from the same solve, and needs the multipliers
+    and row order to do it. Populated for a failed solve too, which is
+    exactly when the session is dropped and there is nothing else left
+    to read the outcome from. Ignored when None (the default), so the
+    legacy path pays nothing for it."""
     import pounce
 
     reg = _registry(model)
@@ -747,6 +759,16 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     status_msg = str(info.get("status_msg", ""))
     tc, ss = _STATUS_RESULT.get(
         status_msg, (TerminationCondition.error, SolverStatus.error))
+
+    if capture is not None:
+        # Everything the v2 interface needs to build its own Results and
+        # solution loader, recorded before the non-converged early return
+        # below (which drops the session) so a failed solve is reported
+        # there as fully as a successful one.
+        capture.update(
+            x=np.asarray(x), info=info, status_msg=status_msg,
+            var_names=var_names, con_names=con_names, con_alias=con_alias,
+            n=int(nl.n), m=int(nl.m), solve_secs=solve_secs)
 
     # Return a Pyomo SolverResults indistinguishable from an ordinary
     # solve's: same fields (counts, time, Id/Error rc, emptied Solution

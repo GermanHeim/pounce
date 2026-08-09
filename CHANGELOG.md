@@ -9,6 +9,71 @@ changes.
 
 ## [Unreleased]
 
+### Added — `pyomo-pounce` registers a native `pyomo.contrib.solver` (v2) interface (#558)
+
+`pyomo_pounce` previously registered one solver: `POUNCE`, a subclass of
+Pyomo's *legacy* `ASL` plugin. #553 made the POUNCE binary drivable by
+Pyomo's newer `pyomo.contrib.solver` interface, but that is not the same
+as having one — a user had to point `ipopt_v2` at the executable by hand,
+and doing so silently dropped everything `pyomo-pounce` adds.
+
+`pyomo_pounce.v2.Pounce` is now registered alongside the legacy plugin:
+
+    import pyomo_pounce
+    from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+    SF2('pounce')                        # v2 interface
+    SolverFactory('pounce_v2')           # v2 engine, legacy API
+    SolverFactory('pounce')              # legacy plugin, unchanged
+
+The split follows Pyomo's own `ipopt` / `ipopt_v2` convention, so the
+registration is purely additive: `SolverFactory('pounce')` still returns
+the legacy plugin and behaves exactly as before.
+
+**The extras come with it.** That is the point of the class, and each
+needed translating onto the v2 lifecycle rather than copying:
+
+- the guard that refuses a model with live integer variables instead of
+  solving the continuous relaxation and reporting a fractional value as
+  optimal (#341);
+- `scaling_factor` Suffix handling (#483 / #486);
+- bundled-binary resolution, which keeps a stale `pounce` on `PATH` from
+  being picked up silently (#315);
+- the sensitivity path (`declare_sens_param` → in-process
+  `pounce.Solver`). This one is a real translation, not an adaptation:
+  v2 returns a `Results` and hands the solution back through a solution
+  loader the caller may decline to load, where the legacy path writes
+  values onto the model as a side effect of solving. The new
+  `PounceSensSolutionLoader` serves primals, duals and reduced costs out
+  of the in-process solve, converting the engine's internal multipliers
+  to the AMPL marginal convention `dual` carries and to Ipopt's
+  `ipopt_zU_out` sign — the same two conversions the warm-start reader
+  applies in the other direction.
+
+**Inherited deliberately** from Pyomo's `Ipopt` v2 class: the `.nl`
+write, the `.sol` read, option splitting between the command line and the
+`.opt` file, and the solver-log parse. POUNCE is ASL/Ipopt-compatible on
+all of them. The one place it is not is the version banner —
+`pounce --version` prints `pounce X.Y.Z`, which Pyomo's Ipopt parser
+rejects by design — so without the override here `available()` reported
+`NotFound` and the solver refused to run.
+
+**Why it matters beyond API parity.** #552 measured the same POUNCE
+binary through both interfaces on drto/IDAES collocation models: 0.553 s
+of non-solve time per solve through the legacy path against 0.301 s
+through v2, ~1.8×. (On a plain `pyomo.dae` model the same comparison is
+1.05×, so this is model-shape dependent.) Since `SolverFactory('pounce')`
+is the documented route, users of that model class were paying the legacy
+path's cost with no supported alternative that kept the extras.
+
+**Testing.** `pyomo-pounce/tests/test_v2.py` solves the same model
+through both interfaces and compares primals, objective, duals and
+reduced costs, and does the same for the ordinary route against the
+sensitivity route. That closes the gap noted in #558: the interface table
+in `docs/src/pyomo.md` was produced by hand and nothing in CI re-checked
+it, and the #553 ASL-compatibility fixes (quoted option values, the
+per-model `.sol` `Options` echo) were pinned by Rust unit tests only —
+the v2 route exercises both on every solve.
+
 ### Fixed — a single dense Hessian row made `.nl` setup and every `eval_h` O(n²) (#552)
 
 `NlTnlp` recovers the Lagrangian Hessian by graph coloring: columns whose

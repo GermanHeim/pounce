@@ -282,6 +282,19 @@ jobs:
   # end-to-end against that binary. The pytest step exercises actual solves
   # (option forwarding, routing) that a plain import smoke test cannot —
   # without it, routing regressions like pounce#186 ship silently.
+  #
+  # This is also the ONLY job where Pyomo runs at all: it is not a
+  # dev-dependency of the workspace, so nothing else here can catch a
+  # Pyomo-side regression. Since gh#558 that includes both of the
+  # interfaces pyomo-pounce registers — the legacy ASL plugin and the
+  # `pyomo.contrib.solver` (v2) one — and `tests/test_v2.py` solves one
+  # model through both and compares primals, duals and reduced costs.
+  # That comparison is what keeps the interface table in
+  # `docs/src/pyomo.md` honest (it was hand-produced and went stale the
+  # moment Pyomo renamed anything) and what pins the two #553
+  # ASL-compatibility fixes from the Python side: quoted option values
+  # and the per-model `.sol` `Options` echo are exercised on every v2
+  # solve, where before they were covered by Rust unit tests only.
   pyomo-pounce-smoke:
     name: wheel smoke (pyomo-pounce)
     runs-on: ubuntu-latest
@@ -358,6 +371,20 @@ jobs:
           python -m pip install --no-deps pyomo-pounce/dist/*.whl
           which pounce
           python -c "import pyomo_pounce; from pyomo.opt import SolverFactory; s = SolverFactory('pounce'); print('exe:', s.executable())"
+          # Both registrations must resolve a usable binary before the
+          # suite runs. The v2 interface finds its executable and parses
+          # its version through a different code path than the legacy
+          # plugin (Pyomo's own Ipopt version parser rejects POUNCE's
+          # `pounce X.Y.Z` banner, so `available()` is NotFound without
+          # our override) — a plain `import` would not notice.
+          python - <<'PY'
+          import pyomo_pounce
+          from pyomo.contrib.solver.common.factory import SolverFactory as SF2
+          s = SF2('pounce')
+          print('v2 exe:', s.config.executable.path())
+          print('v2 version:', s.version(), 'available:', s.available())
+          assert s.version() is not None, "v2 interface could not parse the POUNCE version"
+          PY
       - name: Run pyomo-pounce tests
         run: |
           python -m pip install pytest
