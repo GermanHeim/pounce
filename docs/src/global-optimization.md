@@ -50,13 +50,13 @@ Constraints are polynomials too, passed as `inequalities` (`g_i(x) ≥ 0`) and
 double well, a constrained problem, and a 2-D example — is in
 [`18_sos_global_optimization.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/18_sos_global_optimization.ipynb).
 
-The same solver from Rust:
+The same solver from Rust, via the `pounce-rs` facade with the `convex`
+feature on (`pounce-rs = { version = "0.9", features = ["convex"] }`):
 
 ```rust
-use pounce_convex::{sos_minimize, PolyProblem, Polynomial};
-# use pounce_feral::FeralSolverInterface;
-# use pounce_linsol::SparseSymLinearSolverInterface;
-# fn backend() -> Box<dyn SparseSymLinearSolverInterface> { Box::new(FeralSolverInterface::new()) }
+use pounce_rs::convex::{sos_minimize, PolyProblem, Polynomial};
+use pounce_rs::linsol::backend;      // the sparse LDLᵀ factory the solver takes
+
 // x⁴ − 2x² + 3 → global minimum 2 at x = ±1.
 let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 3.0)]);
 let sol = sos_minimize(&PolyProblem::new(p), None, backend);
@@ -64,7 +64,9 @@ let sol = sos_minimize(&PolyProblem::new(p), None, backend);
 // the global minimizer(s) — here both x = +1 and x = −1.
 ```
 
-The full treatment lives in the `pounce_convex::sos` module documentation.
+The full treatment lives in the `pounce_convex::sos` module documentation —
+reachable without a second dependency, since `pounce_rs::convex` re-exports
+the `pounce_convex` crate itself for anything outside its curated surface.
 
 **When SOS fits:** polynomials of modest degree and dimension — one SDP,
 recovers all global minimizers, but the SDP grows with the relaxation order.

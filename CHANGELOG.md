@@ -54,6 +54,17 @@ Enabling a feature widens the public surface, not the build: the default NLP
 path already pulls `pounce-qp`, `pounce-linsol`, and `pounce-feral`
 transitively, so only `convex` and `sensitivity` add crates to compile.
 
+The book's Rust snippets moved onto the facade too. `docs/src/sensitivity.md`,
+`docs/src/sessions.md`, and `docs/src/global-optimization.md` were telling
+readers to import `pounce_sensitivity` / `pounce_convex` / `pounce_linsol` /
+`pounce_feral` directly — the exact coupling this change removes, printed as
+the recommended way — and the SOS example hand-rolled the very backend factory
+`pounce_rs::linsol::backend()` now supplies. Each snippet names the feature it
+needs. The `pounce-qp` listings in `docs/src/active-set-sqp-warm-start.md` are
+left alone deliberately: they are annotated with the source path they quote
+(`// crates/pounce-qp/src/problem.rs`) and show that crate's own definitions,
+not user-facing imports.
+
 Each module is covered by an integration test that imports **only**
 `pounce_rs` — the property the issue is about, mechanically checked rather
 than asserted in prose. The sensitivity test pins the same upstream sIPOPT

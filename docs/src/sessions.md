@@ -118,8 +118,12 @@ handle lives alongside it.
 
 ## Rust
 
+Both session APIs come through the `pounce-rs` facade. `Solver` needs the
+`sensitivity` feature; the bare `Factorization` below needs `convex` or `qp`,
+whichever you are already using — either one enables `pounce_rs::linsol`.
+
 ```rust
-use pounce_sensitivity::Solver;
+use pounce_rs::sensitivity::Solver;
 
 let mut solver = Solver::new(app, tnlp);
 solver.solve();
@@ -135,9 +139,9 @@ solver.kkt_solve(&rhs, &mut lhs)?;
 For purely linear-algebra uses with no IPM in the loop:
 
 ```rust
-use pounce_linsol::Factorization;
+use pounce_rs::linsol::{Factorization, backend};
 
-let mut fact = Factorization::new(dim, ia, ja, &values, backend)?;
+let mut fact = Factorization::new(dim, ia, ja, values, backend())?;
 fact.solve(&mut rhs, 1)?;          // back-substitute in place
 fact.refactor(&new_values)?;       // pattern preserved; numeric reuse
 fact.solve_one(&mut another_rhs)?;
