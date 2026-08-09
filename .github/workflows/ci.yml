@@ -393,3 +393,42 @@ jobs:
           # AMPL/`.nl` tests exercise the CLI plugin path. Both catch
           # regressions the import smoke test misses.
           python -m pytest pyomo-pounce/tests -q
+      # The v2 interface needs Pyomo >= 6.10.1; the package as a whole
+      # supports pyomo>=6.0 through the legacy plugin. Everything above
+      # installs Pyomo unpinned, i.e. always the newest release, so
+      # nothing there exercises the declared floor — it is a claim, not a
+      # tested property, and the one time it was wrong the failure mode
+      # was `import pyomo_pounce` raising, which takes the LEGACY plugin
+      # down with it (gh #558 review).
+      #
+      # 6.10.0 is the last release below the floor and the one where this
+      # actually broke: `pyomo.contrib.solver.common` exists there, so a
+      # package-level probe passed, but the loader API is still
+      # `SolutionLoaderBase`/`get_primals`. A separate venv keeps this
+      # older Pyomo away from the job's real environment.
+      - name: Below-floor Pyomo — legacy plugin must still import
+        run: |
+          python -m venv /tmp/floorenv
+          /tmp/floorenv/bin/pip install -q "pyomo==6.10.0" numpy pandas
+          /tmp/floorenv/bin/pip install -q python/dist/*.whl
+          /tmp/floorenv/bin/pip install -q --no-deps pyomo-pounce/dist/*.whl
+          /tmp/floorenv/bin/python - <<'PY'
+          import pyomo
+          # Must NOT raise: the v2 registration is optional, and a failed
+          # import here is the regression this leg exists to catch.
+          import pyomo_pounce
+          from pyomo.opt import SolverFactory
+          print('pyomo', pyomo.version.version,
+                '| HAVE_V2_INTERFACE:', pyomo_pounce.HAVE_V2_INTERFACE)
+          assert pyomo_pounce.HAVE_V2_INTERFACE is False, (
+              "6.10.0 is below the v2 floor; the guard should report the "
+              "interface as unavailable rather than claiming it works")
+          assert SolverFactory('pounce') is not None, (
+              "the legacy plugin must keep working below the v2 floor")
+          print('legacy plugin OK below the floor')
+          PY
+          # ...and the v2 test module skips cleanly rather than erroring
+          # at collection.
+          /tmp/floorenv/bin/pip install -q pytest
+          /tmp/floorenv/bin/python -m pytest pyomo-pounce/tests/test_v2.py \
+            -q --no-header -rs 2>&1 | tail -5

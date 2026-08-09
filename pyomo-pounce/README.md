@@ -83,11 +83,20 @@ silently drops all of the above — the integer-variable guard, the
 `scaling_factor` handling, the sensitivity path and the bundled-binary
 resolution. Prefer one of the two registrations above.
 
-> The v2 interface needs **Pyomo ≥ 6.9.2** (where `pyomo.contrib.solver.common`
-> landed). On an older Pyomo `import pyomo_pounce` still works and the legacy
-> plugin behaves exactly as before; `pyomo_pounce.HAVE_V2_INTERFACE` reports
-> whether the v2 names are available. `pip install pyomo-pounce[v2]` asks for
-> a new enough Pyomo.
+> **Requirements for the v2 route** — `pip install pyomo-pounce[v2]` asks for
+> both:
+>
+> - **Pyomo ≥ 6.10.1**, which is where the `SolutionLoader` / `get_vars` API
+>   this builds on landed. (`pyomo.contrib.solver.common` exists from 6.9.2,
+>   but 6.9.2–6.10.0 ship the older `SolutionLoaderBase` / `get_primals`.)
+> - **pounce-solver > 0.9.0**. The v2 route reads the `.sol` through Pyomo's
+>   `asl_sol_reader`, which is strict where the legacy reader is lenient, so it
+>   needs the per-model `Options` echo added after 0.9.0.
+>
+> Neither applies to `SolverFactory('pounce')`. On an older Pyomo,
+> `import pyomo_pounce` still works and the legacy plugin behaves exactly as
+> before; `pyomo_pounce.HAVE_V2_INTERFACE` reports whether the v2 names are
+> available.
 
 ## Solver Options
 

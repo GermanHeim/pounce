@@ -20,12 +20,22 @@ import pytest
 
 import pyomo_pounce  # noqa: F401  (registers both interfaces)
 
-# The v2 interface is optional -- it needs Pyomo >= 6.9.2, while the
+# The v2 interface is optional -- it needs Pyomo >= 6.10.1, while the
 # package as a whole supports pyomo>=6.0 through the legacy plugin. On an
 # older Pyomo there is nothing here to test, and that is not a failure.
+#
+# The import above is deliberately NOT wrapped in a try/skip. `import
+# pyomo_pounce` raising is never an "old Pyomo" condition to skip past --
+# it is the regression that takes SolverFactory('pounce') down with it
+# (the v2 probe on `pyomo.contrib.solver.common` did exactly that on
+# 6.9.2-6.10.0), and it has to fail loudly. `HAVE_V2_INTERFACE` is the
+# only thing that may legitimately be False here. What actually
+# exercises this guard is the below-floor CI leg in ci.yml, which
+# installs a Pyomo older than the floor and asserts the import still
+# works and the flag is False.
 if not pyomo_pounce.HAVE_V2_INTERFACE:  # pragma: no cover
     pytest.skip(
-        "the v2 interface needs Pyomo >= 6.9.2", allow_module_level=True)
+        "the v2 interface needs Pyomo >= 6.10.1", allow_module_level=True)
 
 from pyomo.contrib.solver.common.factory import (  # noqa: E402
     SolverFactory as SolverFactoryV2,
@@ -352,6 +362,93 @@ def test_sens_route_honours_load_solutions_false(v2):
     # ...and loading on demand still works
     results.solution_loader.load_vars()
     assert value(m.x) == pytest.approx(vals[m.x])
+
+
+def test_routes_agree_on_status_at_the_iteration_limit(v2):
+    """Both routes must report the same `solution_status` for a
+    limit-stopped solve, with **default** `load_solutions`.
+
+    This is the case the other two limit tests cannot see, because they
+    pass `load_solutions=False`. `noSolution` is not loadable and
+    `unknown` is, so a disagreement here is not cosmetic: it decides
+    whether `solve()` raises `NoSolutionError` for the same model and
+    options. The sens route mapped these to `noSolution` originally,
+    which both diverged from the ordinary route and over-stated the
+    outcome — POUNCE returns a usable iterate in both cases.
+    """
+    pytest.importorskip("pounce")
+
+    opts = {"max_iter": 1}
+    plain = _model()
+    plain_results = v2.solve(
+        plain, solver_options=opts,
+        raise_exception_on_nonoptimal_result=False)
+    sens = _sens_model()
+    sens_results = v2.solve(
+        sens, solver_options=opts,
+        raise_exception_on_nonoptimal_result=False)
+
+    assert sens_results.solution_status is plain_results.solution_status
+    assert sens_results.solution_status is SolutionStatus.unknown
+    # ...and both loaded the final iterate rather than raising
+    assert value(plain.x) is not None
+    assert value(sens.x) is not None
+
+
+def test_limit_stopped_solve_reports_no_incumbent_objective(v2):
+    """`incumbent_objective` is gated on {feasible, optimal} on both
+    routes: the objective at a limit-stopped iterate is not the objective
+    at a solution, and the ordinary route leaves it None."""
+    pytest.importorskip("pounce")
+
+    opts = {"max_iter": 1}
+    plain_results = v2.solve(
+        _model(), solver_options=opts,
+        raise_exception_on_nonoptimal_result=False)
+    sens_results = v2.solve(
+        _sens_model(), solver_options=opts,
+        raise_exception_on_nonoptimal_result=False)
+    assert plain_results.incumbent_objective is None
+    assert sens_results.incumbent_objective is None
+
+
+def test_sens_loader_does_not_warn_about_surgery_components(v2, recwarn):
+    """The unresolved-name check must stay quiet on a declared-sens-param
+    model. The solve there runs on a surgery clone whose `.col`/`.row`
+    legitimately name components that exist only on the clone
+    (`_SENSITIVITY_TOOLBOX_DATA.p` and the pin row), so a plain count of
+    resolved-vs-solved names would warn on every sensitivity model — the
+    exact case this route exists for."""
+    pytest.importorskip("pounce")
+
+    m = _sens_model()
+    results = v2.solve(m, load_solutions=False)
+    recwarn.clear()
+    results.solution_loader.get_vars()
+    results.solution_loader.get_duals()
+    results.solution_loader.get_reduced_costs()
+    unresolved = [w for w in recwarn
+                  if "could not be resolved" in str(w.message)]
+    assert not unresolved, [str(w.message) for w in unresolved]
+
+
+def test_sens_loader_does_warn_about_a_real_unresolved_name(v2):
+    """...but it must still fire for a name the surgery cannot explain,
+    or the test above is vacuous. A variable the solve knows about and
+    the model does not is silently skipped by `load_vars`, leaving that
+    variable stale with no diagnostic."""
+    pytest.importorskip("pounce")
+
+    m = _sens_model()
+    results = v2.solve(m, load_solutions=False)
+    loader = results.solution_loader
+    # Splice in a name that is neither on the model nor under the
+    # sensitivity-toolbox block.
+    loader._capture["var_names"] = list(loader._capture["var_names"]) + [
+        "not_a_component"]
+    loader._capture["x"] = list(loader._capture["x"]) + [0.0]
+    with pytest.warns(UserWarning, match="could not be resolved"):
+        loader.get_vars()
 
 
 def test_sens_route_reports_iteration_count(v2):

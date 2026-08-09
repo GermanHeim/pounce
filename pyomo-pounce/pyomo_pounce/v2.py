@@ -52,6 +52,7 @@ import datetime
 import logging
 import re
 import subprocess
+import warnings
 from timeit import default_timer
 from typing import Any, Mapping, Sequence
 
@@ -76,19 +77,28 @@ try:
     )
     from pyomo.contrib.solver.solvers.ipopt import Ipopt, IpoptConfig
 except ImportError as exc:  # pragma: no cover - depends on the Pyomo version
-    # Pyomo moved this interface into `pyomo.contrib.solver.common` (and
-    # `.solvers`) in 6.9.2. Earlier versions ship an older, materially
-    # different draft of it under `pyomo.contrib.solver.*` -- different
-    # loader base class, different accessor names -- which this module
-    # does not target. `pyomo_pounce` itself still supports pyomo>=6.0
-    # through the legacy plugin, so this is raised as a clear message
-    # rather than being papered over, and `pyomo_pounce/__init__.py`
-    # treats it as "v2 unavailable" instead of failing the import.
+    # The floor is **6.10.1**, and the discriminator is `SolutionLoader`.
+    #
+    # `pyomo.contrib.solver.common` as a package landed in 6.9.2, which
+    # makes it a tempting thing to probe -- and the wrong one. Through
+    # 6.10.0 that package still shipped the older loader API
+    # (`SolutionLoaderBase`, `load_vars`, `get_primals`); `SolutionLoader`
+    # with `load_solution`/`get_vars`, which this module subclasses and
+    # calls, is 6.10.1. So 6.9.2 through 6.10.0 have the package and not
+    # the API, and a package-level probe passes there and then explodes
+    # here.
+    #
+    # `pyomo_pounce` supports pyomo>=6.0 through the legacy plugin, so
+    # this is raised with a clear message rather than papered over, and
+    # `pyomo_pounce/__init__.py` guards on the same name so that an old
+    # Pyomo means "v2 unavailable" and never a failed `import
+    # pyomo_pounce`.
     raise ImportError(
-        "pyomo_pounce.v2 needs Pyomo's `pyomo.contrib.solver.common` "
-        "interface, which is Pyomo 6.9.2 or newer. The legacy "
-        "SolverFactory('pounce') plugin works on any supported Pyomo; "
-        "upgrade Pyomo to use the v2 interface."
+        "pyomo_pounce.v2 needs Pyomo's `pyomo.contrib.solver` interface "
+        "as it exists in Pyomo 6.10.1 or newer (6.9.2-6.10.0 ship the "
+        "package but the older SolutionLoaderBase/get_primals API). The "
+        "legacy SolverFactory('pounce') plugin works on any supported "
+        "Pyomo; upgrade Pyomo to use the v2 interface."
     ) from exc
 
 from pyomo_pounce.pounce_solver import (
@@ -151,6 +161,31 @@ _VERSION_RE = re.compile(r"^\s*pounce\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
 #: `SolverStatus` pair in `sens._STATUS_RESULT`; the two enums are
 #: different sets with different members, so this is a translation of
 #: the same table, not an alias of it.
+#:
+#: The **solution status** column deliberately agrees with what the
+#: ordinary (`.sol`) route produces, because disagreeing changes whether
+#: a solve raises. Pyomo derives it in
+#: `asl_solve_code_to_solution_status` as
+#:
+#:     status = SolutionStatus.unknown if sol_data.primals else noSolution
+#:
+#: overridden only for the optimal / feasible / infeasible code bands.
+#: So "a primal vector came back" is the rule, and the limit and
+#: divergence cases keep `unknown`. The in-process route always has a
+#: primal iterate -- the engine returns `x` regardless of status -- so
+#: they map to `unknown` here too. Mapping them to `noSolution` (as this
+#: table first did) made `solve(m, solver_options={'max_iter': 1},
+#: raise_exception_on_nonoptimal_result=False)` load the final iterate on
+#: the ordinary route and raise `NoSolutionError` on this one, for the
+#: same model and options; `noSolution` was also simply the less accurate
+#: answer, since POUNCE does return a usable iterate in both cases.
+#:
+#: The **termination condition** column does NOT follow the ordinary
+#: route, on purpose: Pyomo's table reads the AMPL solve-code *band* and
+#: cannot tell a time limit from an iteration limit (its source carries
+#: `# this is not always correct` on that line), while POUNCE names the
+#: status exactly. Reporting `maxTimeLimit` for a time limit is strictly
+#: more informative, so that difference is kept.
 _V2_STATUS = {
     "Solve_Succeeded": (
         TerminationCondition.convergenceCriteriaSatisfied,
@@ -174,23 +209,23 @@ _V2_STATUS = {
     ),
     "Diverging_Iterates": (
         TerminationCondition.unbounded,
-        SolutionStatus.noSolution,
+        SolutionStatus.unknown,
     ),
     "Maximum_Iterations_Exceeded": (
         TerminationCondition.iterationLimit,
-        SolutionStatus.noSolution,
+        SolutionStatus.unknown,
     ),
     "Maximum_CpuTime_Exceeded": (
         TerminationCondition.maxTimeLimit,
-        SolutionStatus.noSolution,
+        SolutionStatus.unknown,
     ),
     "Maximum_WallTime_Exceeded": (
         TerminationCondition.maxTimeLimit,
-        SolutionStatus.noSolution,
+        SolutionStatus.unknown,
     ),
     "User_Requested_Stop": (
         TerminationCondition.interrupted,
-        SolutionStatus.noSolution,
+        SolutionStatus.unknown,
     ),
 }
 
@@ -228,9 +263,52 @@ class PounceSensSolutionLoader(SolutionLoader):
         self._var_row = {n: i for i, n in enumerate(capture["var_names"])}
         self._con_row = {n: i for i, n in enumerate(capture["con_names"])}
         self._con_alias = capture.get("con_alias") or {}
+        self._warned_unresolved = False
 
     def get_number_of_solutions(self) -> int:
         return 1 if self._has_solution else 0
+
+    def get_solution_ids(self) -> list:
+        # The base implementation would do this too, but only by way of
+        # `get_number_of_solutions`; spelling it out keeps `solution()`
+        # from raising the base class's NotImplementedError.
+        return [None] if self._has_solution else []
+
+    def _warn_unresolved(self, kind, names):
+        """Warn about solve-space names that do not resolve on the model.
+
+        Not a plain count check against `capture['n']`: on a model with
+        `declare_sens_param` declarations the solve runs on a
+        *surgery clone*, whose `.col`/`.row` files legitimately carry
+        components that exist only there -- the pinned parameter becomes
+        `_SENSITIVITY_TOOLBOX_DATA.p`, and the pin itself becomes a
+        constraint row. Those are expected to be unresolvable on the
+        original model (`sens_solve`'s own load-back skips them the same
+        way), so counting would warn on every sensitivity model, which is
+        precisely the case this route exists for. Only names outside the
+        surgery block indicate a real mismatch -- one that would
+        otherwise leave a variable silently stale after `load_vars`.
+        """
+        if self._warned_unresolved:
+            return
+        try:
+            from pyomo.contrib.sensitivity_toolbox.sens import (
+                SensitivityInterface,
+            )
+            prefix = SensitivityInterface.get_default_block_name() + "."
+        except Exception:  # noqa: BLE001 - a broken probe must not mislead
+            prefix = "_SENSITIVITY_TOOLBOX_DATA."
+        real = [n for n in names if not n.startswith(prefix)]
+        if not real:
+            return
+        self._warned_unresolved = True
+        shown = ", ".join(real[:5])
+        more = f" (+{len(real) - 5} more)" if len(real) > 5 else ""
+        warnings.warn(
+            f"pounce: {len(real)} {kind} from the solve could not be "
+            f"resolved on the model (e.g. {shown}{more}); their values "
+            f"are missing from this solution and will not be loaded.",
+            UserWarning, stacklevel=3)
 
     def _require_solution(self):
         if not self._has_solution:
@@ -247,10 +325,15 @@ class PounceSensSolutionLoader(SolutionLoader):
         x = self._capture["x"]
         out = ComponentMap()
         if vars_to_load is None:
+            missing = []
             for name, val in zip(self._capture["var_names"], x):
                 vd = self._pyomo_model.find_component(name)
-                if vd is not None:
+                if vd is None:
+                    missing.append(name)
+                else:
                     out[vd] = float(val)
+            if missing:
+                self._warn_unresolved("variables", missing)
             return out
         for vd in vars_to_load:
             row = self._var_row.get(vd.name)
@@ -277,16 +360,26 @@ class PounceSensSolutionLoader(SolutionLoader):
             raise NoSolutionError(
                 "pounce: this solve returned no constraint multipliers, so "
                 "duals are not available")
+        report_missing = cons_to_load is None
         if cons_to_load is None:
             cons_to_load = self._pyomo_model.component_data_objects(
                 Constraint, active=True, descend_into=True)
-        out = {}
+        out, missing = {}, []
         for cd in cons_to_load:
             row = self._row_of(cd)
-            if row is not None:
+            if row is None:
+                # A model constraint with no row in the solve. This
+                # direction is the reverse of the variable one -- we are
+                # walking the model, not the clone -- so a surgery
+                # artifact cannot explain it away and it is always worth
+                # reporting.
+                missing.append(cd.name)
+            else:
                 # engine's internal +lambda -> the AMPL marginal Pyomo's
                 # `dual` suffix carries
                 out[cd] = -float(lam[row])
+        if missing and report_missing:
+            self._warn_unresolved("constraints", missing)
         return out
 
     def get_reduced_costs(
@@ -300,12 +393,13 @@ class PounceSensSolutionLoader(SolutionLoader):
                 "pounce: this solve returned no bound multipliers, so "
                 "reduced costs are not available")
         if vars_to_load is None:
-            vars_to_load = [
-                vd for vd in (
-                    self._pyomo_model.find_component(n)
-                    for n in self._capture["var_names"])
-                if vd is not None
-            ]
+            vars_to_load, missing = [], []
+            for n in self._capture["var_names"]:
+                vd = self._pyomo_model.find_component(n)
+                (vars_to_load if vd is not None else missing).append(
+                    vd if vd is not None else n)
+            if missing:
+                self._warn_unresolved("variables", missing)
         out = ComponentMap()
         for vd in vars_to_load:
             row = self._var_row.get(vd.name)
@@ -416,6 +510,15 @@ class Pounce(Ipopt):
 
         reject_discrete_vars(model)
 
+        # Derived here to read the executable and the merged solver
+        # options before deciding anything. On the ordinary route
+        # `super().solve()` derives its own from the same `kwds` and this
+        # one is discarded -- so the `_check_executable` warning below is
+        # computed off an object that is then thrown away. That is safe
+        # because deriving does not mutate `self.config` and the two
+        # derivations are identical, and it is cheap next to a solve; the
+        # alternative (reaching into `Ipopt.solve` to reuse ours) would
+        # mean copying its body.
         config: PounceConfig = self.config(value=kwds, preserve_implicit=True)
         self._check_executable(config)
 
@@ -519,7 +622,14 @@ class Pounce(Ipopt):
                 raise NoSolutionError()
             results.solution_loader.load_solution()
 
-        if has_solution:
+        # Gated exactly as `Ipopt.solve` gates it -- on {feasible,
+        # optimal}, not on "a solution exists". The looser test reported
+        # an objective for an infeasible or limit-stopped solve where the
+        # ordinary route leaves `incumbent_objective` as None, which is a
+        # route disagreement in the direction of over-claiming: the
+        # number is the objective at whatever iterate the solve stopped
+        # on, not at a solution.
+        if ss in (SolutionStatus.feasible, SolutionStatus.optimal):
             obj = info.get("obj_val")
             if obj is not None:
                 results.incumbent_objective = float(obj)

@@ -71,14 +71,29 @@ through v2, ~1.8×. (On a plain `pyomo.dae` model the same comparison is
 is the documented route, users of that model class were paying the legacy
 path's cost with no supported alternative that kept the extras.
 
+**Requirements, and only for the v2 route** (`pip install
+pyomo-pounce[v2]`): **Pyomo ≥ 6.10.1**, where the `SolutionLoader` /
+`get_vars` API this builds on landed — `pyomo.contrib.solver.common`
+exists from 6.9.2, but 6.9.2–6.10.0 ship the older `SolutionLoaderBase` /
+`get_primals` — and **pounce-solver > 0.9.0**, because Pyomo's
+`asl_sol_reader` asserts `n_opts >= 2` where the legacy reader is lenient
+and so needs the per-model `.sol` `Options` echo added after 0.9.0.
+Neither applies to `SolverFactory('pounce')`: on an older Pyomo the
+legacy plugin behaves exactly as before and
+`pyomo_pounce.HAVE_V2_INTERFACE` reports `False`.
+
 **Testing.** `pyomo-pounce/tests/test_v2.py` solves the same model
 through both interfaces and compares primals, objective, duals and
 reduced costs, and does the same for the ordinary route against the
-sensitivity route. That closes the gap noted in #558: the interface table
-in `docs/src/pyomo.md` was produced by hand and nothing in CI re-checked
-it, and the #553 ASL-compatibility fixes (quoted option values, the
-per-model `.sol` `Options` echo) were pinned by Rust unit tests only —
-the v2 route exercises both on every solve.
+sensitivity route — including that they agree on `solution_status` for a
+limit-stopped solve, which decides whether `solve()` raises. That closes
+the gap noted in #558: the interface table in `docs/src/pyomo.md` was
+produced by hand and nothing in CI re-checked it, and the #553
+ASL-compatibility fixes (quoted option values, the per-model `.sol`
+`Options` echo) were pinned by Rust unit tests only — the v2 route
+exercises both on every solve. A CI leg pinned to a Pyomo *below* the
+floor checks that the legacy plugin still imports there, so the floor is
+a tested property rather than a claim.
 
 ### Fixed — a single dense Hessian row made `.nl` setup and every `eval_h` O(n²) (#552)
 

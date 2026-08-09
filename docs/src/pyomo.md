@@ -100,6 +100,16 @@ solver = SolverFactoryV2('pounce')     # v2 interface (a Results object)
 solver = SolverFactory('pounce_v2')    # v2 engine, legacy-style API
 ```
 
+The v2 route needs **Pyomo ≥ 6.10.1** (where the `SolutionLoader` /
+`get_vars` API it builds on landed — `pyomo.contrib.solver.common`
+exists from 6.9.2, but 6.9.2–6.10.0 ship the older
+`SolutionLoaderBase` / `get_primals`) and **pounce-solver > 0.9.0**
+(Pyomo's `asl_sol_reader` is strict where the legacy reader is lenient
+and needs the per-model `.sol` `Options` echo added after 0.9.0).
+`pip install pyomo-pounce[v2]` asks for both. Neither applies to
+`SolverFactory('pounce')`: on an older Pyomo the legacy plugin works
+exactly as before and `pyomo_pounce.HAVE_V2_INTERFACE` reports `False`.
+
 They differ in API and in per-solve overhead. The v2 interface returns a
 `Results` object and hands the solution back through a solution loader
 (so `load_solutions=False` gives you the values without touching the
