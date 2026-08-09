@@ -35,11 +35,19 @@ Related flags:
 
 ## Rust library
 
+Reach the sensitivity path through the `pounce-rs` facade, with the
+`sensitivity` feature on:
+
+```toml
+[dependencies]
+pounce-rs = { version = "0.9", features = ["sensitivity"] }
+```
+
 `SensSolve` is a builder that wraps the `on_converged` callback
 plumbing into a single call:
 
 ```rust
-use pounce_sensitivity::SensSolve;
+use pounce_rs::sensitivity::SensSolve;
 
 let result = SensSolve::new(vec![2, 3])
     .with_deltas(vec![0.05, 0.0])

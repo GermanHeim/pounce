@@ -28,8 +28,8 @@ numerical backbone:
   infeasibility certificates, warm starts, and post-optimal sensitivity.
 - **Global optimization** — certified global optima for nonconvex
   **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
-  spatial branch-and-bound solver, `pounce-global`, is in development on the
-  `feature/global` branch and not part of this release.)
+  spatial branch-and-bound solver, `pounce-global`, is in development and not
+  part of this release.)
 
 Convex and conic problems are solved to global optimality; nonconvex problems
 are solved locally by default, or — for polynomials — to a certified global
@@ -81,7 +81,7 @@ against external suites:
   minimum and recovers the global minimizers. A general-purpose spatial
   branch-and-bound solver (`pounce-global`, with McCormick relaxations,
   OBBT/FBBT bound tightening, and a certified optimality gap) is in development
-  on the `feature/global` branch and not part of this release.
+  and not part of this release.
 
 The shipped solvers — NLP, conic, and SOS — are reachable from the CLI, the
 Python package, and the JSON solve report.

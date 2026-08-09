@@ -1098,8 +1098,14 @@ version = "0.9.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
+ "pounce-convex",
+ "pounce-feral",
+ "pounce-linalg",
+ "pounce-linsol",
  "pounce-nlp",
  "pounce-observability",
+ "pounce-qp",
+ "pounce-sensitivity",
 ]
 
 [[package]]

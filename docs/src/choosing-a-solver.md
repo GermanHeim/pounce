@@ -37,9 +37,9 @@ pluggable backend (FERAL by default, HSL MA57 optionally).
 > homotopy from the previous solution instead of starting over.
 
 > A general-purpose **spatial branch-and-bound** solver for factorable nonconvex
-> NLPs (`pounce-global`) is in development on the `feature/global` branch and is
-> **not part of this release** — there is no `solver_selection=global` CLI route or
-> `minimize_global` Python entry point yet. Today the only certified-global path
+> NLPs (`pounce-global`) is in development and is **not part of this release** —
+> there is no `solver_selection=global` CLI route or `minimize_global` Python
+> entry point yet. Today the only certified-global path
 > for nonconvex problems is SOS / Lasserre, for *polynomials*.
 
 ## When to choose each
@@ -117,8 +117,8 @@ enough, the shipped path to a **certified global** optimum is for polynomials:
   with the relaxation order.
 
 A general-purpose **spatial branch-and-bound** solver for factorable nonconvex
-problems (including `exp`/`ln`/trig) — `pounce-global` — is in development on
-the `feature/global` branch and is **not part of this release**.
+problems (including `exp`/`ln`/trig) — `pounce-global` — is in development and
+is **not part of this release**.
 
 See [Global Optimization](global-optimization.md) for the SOS path in depth.
 
@@ -207,8 +207,7 @@ POUNCE settles a problem globally along two routes, and locally along one:
   point, which for a nonconvex problem carries no global guarantee.
 
 A general-purpose spatial branch-and-bound route for factorable nonconvex
-problems (`pounce-global`) is in development on the `feature/global` branch but
-not in this release.
+problems (`pounce-global`) is in development but not in this release.
 
 Two practical levers for a "global" answer: **modeling** (cast as much as you
 can into the convex cone library) and, when that is not possible, the **SOS /

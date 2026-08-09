@@ -9,6 +9,71 @@ changes.
 
 ## [Unreleased]
 
+### Added — `pounce-rs` covers the convex, active-set QP, and sensitivity paths (#561)
+
+The `pounce-rs` facade exists so Rust users depend on one crate and are
+insulated from churn in the internal crate layout (#168) — but its
+dependencies were `pounce-common` + `pounce-nlp` + `pounce-algorithm` +
+`pounce-observability`, which is the NLP path and nothing else. Anything past
+a single cold NLP solve — batched QPs, parametric sweeps, sensitivities —
+meant depending directly on the internal crates the facade exists to hide,
+which is exactly the coupling it was introduced to remove. The Python side
+never had this gap: `import pounce` reaches all of it.
+
+Three feature-gated modules close it. The default build is unchanged:
+
+| feature | module | covers |
+|---|---|---|
+| `convex` | `pounce_rs::convex` | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; `solve_qp_batch{,_parallel,_parallel_warm}`, `solve_qp_multi_rhs*`, `QpFactorization` symbolic reuse; `QpSensitivity` / `ReducedHessian` |
+| `qp` | `pounce_rs::qp` | sparse parametric active-set QP: `ParametricActiveSetSolver`, `QpSolver::solve_parametric`, `WorkingSet` warm starts, the `.qps` reader |
+| `sensitivity` | `pounce_rs::sensitivity` | `SensSolve` / `SensResult`, `compute_reduced_hessian`, and the long-form `SensApplication` / Schur stack |
+| `full` | — | all three |
+
+Separate modules rather than a flat re-export because `pounce-convex` and
+`pounce-qp` are different solver families that both name their types
+`QpProblem` / `QpSolution` / `QpStatus` / `QpOptions` / `QpWarmStart`; one
+flat surface cannot carry both.
+
+Two things beyond plain re-exports were needed for the modules to be usable
+from `pounce-rs` alone — without them a caller would still have had to name
+the internal crates, and the gap would have been closed only on paper:
+
+* **`pounce_rs::linsol`** (on with `convex` or `qp`). Both QP entry points are
+  parameterized over the factorization backend — `solve_qp_ipm` takes a
+  `FnMut() -> Box<dyn SparseSymLinearSolverInterface>`,
+  `ParametricActiveSetSolver::new` takes a boxed backend — so the solvers
+  alone are not callable. `backend()` and `serial_backend()` are the two
+  factories every in-tree caller writes by hand (parallel FERAL, and the
+  inner-serial one that keeps `solve_qp_batch_parallel` from
+  oversubscribing).
+* **the triplet storage** (`SymTMatrix` / `GenTMatrix` and their spaces),
+  re-exported through `pounce_rs::qp`, since `pounce_qp::QpProblem` *borrows*
+  its Hessian and Jacobian in that form.
+
+Enabling a feature widens the public surface, not the build: the default NLP
+path already pulls `pounce-qp`, `pounce-linsol`, and `pounce-feral`
+transitively, so only `convex` and `sensitivity` add crates to compile.
+
+The book's Rust snippets moved onto the facade too. `docs/src/sensitivity.md`,
+`docs/src/sessions.md`, and `docs/src/global-optimization.md` were telling
+readers to import `pounce_sensitivity` / `pounce_convex` / `pounce_linsol` /
+`pounce_feral` directly — the exact coupling this change removes, printed as
+the recommended way — and the SOS example hand-rolled the very backend factory
+`pounce_rs::linsol::backend()` now supplies. Each snippet names the feature it
+needs. The `pounce-qp` listings in `docs/src/active-set-sqp-warm-start.md` are
+left alone deliberately: they are annotated with the source path they quote
+(`// crates/pounce-qp/src/problem.rs`) and show that crate's own definitions,
+not user-facing imports.
+
+Each module is covered by an integration test that imports **only**
+`pounce_rs` — the property the issue is about, mechanically checked rather
+than asserted in prose. The sensitivity test pins the same upstream sIPOPT
+3.14.19 `parametric_cpp` golden Δx that `pounce-sensitivity`'s own tests do,
+to 1e-8. CI grew a `cargo clippy + cargo test -p pounce-rs --all-features`
+step, because the workspace build compiles default features only and would
+never have touched the new modules; `[package.metadata.docs.rs] all-features`
+keeps the published docs from showing the NLP path alone.
+
 ### Added — `pyomo-pounce` registers a native `pyomo.contrib.solver` (v2) interface (#558)
 
 `pyomo_pounce` previously registered one solver: `POUNCE`, a subclass of

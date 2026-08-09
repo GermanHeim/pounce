@@ -2,13 +2,16 @@
 
 [![crates.io](https://img.shields.io/crates/v/pounce-rs.svg)](https://crates.io/crates/pounce-rs) [![CI](https://github.com/jkitchin/pounce/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/pounce/actions/workflows/ci.yml) [![docs.rs](https://img.shields.io/docsrs/pounce-rs)](https://docs.rs/pounce-rs)
 
-A single-crate entry point for solving nonlinear programs with
-[POUNCE](https://github.com/jkitchin/pounce) in Rust. It provides two APIs:
+A single-crate entry point for solving optimization problems with
+[POUNCE](https://github.com/jkitchin/pounce) in Rust. For nonlinear programs —
+the default build — it provides two APIs:
 
 - a high-level builder API (`Problem` + `Nlp`) for the common case, where only the objective is required and everything else is optional; and
 - the low-level `TNLP` trait, re-exported for full control over Hessians, sparsity patterns, scaling, and other advanced features.
 
-Both APIs are backed by the same pure-Rust interior-point solver.
+Both APIs are backed by the same pure-Rust interior-point solver. POUNCE's
+other solver paths — convex/LP/QP, active-set QP, and sensitivity analysis —
+are behind [feature flags](#feature-flags-beyond-the-nlp-path).
 
 ## Install
 
@@ -85,6 +88,42 @@ NLP scaling, implement the re-exported `TNLP` trait directly and drive it with
 
 See the [crate docs on docs.rs](https://docs.rs/pounce-rs) for a complete HS071
 `TNLP` walkthrough.
+
+## Feature flags: beyond the NLP path
+
+The default build is the NLP path only. POUNCE's other solver families live in
+their own modules behind features — separate modules because the two QP
+families both name their types `QpProblem` / `QpSolution` / `QpStatus`, so a
+flat surface could not carry both:
+
+| feature | module | what it covers |
+|---|---|---|
+| `convex` | `pounce_rs::convex` | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; symbolic-factorization reuse; QP sensitivity and reduced Hessian |
+| `qp` | `pounce_rs::qp` | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed |
+| `sensitivity` | `pounce_rs::sensitivity` | sIPOPT-style NLP sensitivity: `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
+| `full` | — | all three |
+
+```toml
+[dependencies]
+pounce-rs = { version = "0.9", features = ["convex", "sensitivity"] }
+```
+
+`convex` and `qp` also bring in `pounce_rs::linsol`, whose `backend()` supplies
+the sparse symmetric factorization those entry points take as an argument.
+
+```rust
+use pounce_rs::convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_batch_parallel};
+use pounce_rs::linsol::serial_backend;
+
+// A batch of box-constrained QPs, one per rayon worker.
+let sols = solve_qp_batch_parallel(&probs, &QpOptions::default(), serial_backend);
+assert!(sols.iter().all(|s| s.status == QpStatus::Optimal));
+```
+
+Enabling a feature widens what this crate *exports*; it is close to free at
+build time, because the default NLP path already pulls `pounce-qp`,
+`pounce-linsol`, and `pounce-feral` transitively. Only `convex` and
+`sensitivity` add crates to compile.
 
 ## License
 

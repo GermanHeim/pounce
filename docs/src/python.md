@@ -684,9 +684,8 @@ coefficient dict and returns a certificate, *not* callables and SciPy dicts. See
 [Choosing a Solver](choosing-a-solver.md) for the full map.
 
 > A `minimize_global` entry point for factorable nonconvex problems (spatial
-> branch-and-bound) is in development on the `feature/global` branch and is not
-> exposed in this release; today the certified-global Python path is
-> `sos_minimize`, for polynomials.
+> branch-and-bound) is in development and is not exposed in this release; today
+> the certified-global Python path is `sos_minimize`, for polynomials.
 
 ## Curve fitting
 

@@ -25,8 +25,8 @@ into a *family* of solvers sharing that backbone:
   cones, each solved to the global optimum.
 - **Global optimization** — certified global optima for nonconvex
   **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
-  spatial branch-and-bound solver, `pounce-global`, is in development on the
-  `feature/global` branch and not part of this release.)
+  spatial branch-and-bound solver, `pounce-global`, is in development and not
+  part of this release.)
 
 See [Choosing a Solver](choosing-a-solver.md) for which solver fits which
 problem.
@@ -61,8 +61,8 @@ Benchmark Format (`.cbf`) reader cross-checked against the CBLIB tier —
 and adds SOS / Lasserre polynomial global optimization (`sos_minimize`).
 These are reachable from the CLI, the Python package, and the JSON solve
 report. A deterministic spatial branch-and-bound solver for general
-factorable nonconvex problems (`pounce-global`) is in development on the
-`feature/global` branch and not part of this release.
+factorable nonconvex problems (`pounce-global`) is in development and not part
+of this release.
 
 ## License
 

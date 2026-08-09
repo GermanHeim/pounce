@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Single-crate facade for solving nonlinear programs with POUNCE from Rust: re-exports the TNLP trait, the IpoptApplication driver, and the supporting types in one place (plus a prelude)."
+description = "Single-crate facade for POUNCE from Rust: re-exports the TNLP trait, the IpoptApplication driver, and the supporting types in one place (plus a prelude), with feature-gated modules for the convex/LP/QP, active-set QP, and sensitivity paths."
 keywords = ["ipopt", "nlp", "optimization", "solver", "nonlinear"]
 categories = ["mathematics", "science"]
 
@@ -15,6 +15,45 @@ pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-observability.workspace = true
+
+# Feature-gated facets (gh #561). Every one of these is already in the
+# dependency graph of the default build — pounce-algorithm pulls
+# pounce-qp / pounce-linsol / pounce-feral, and pounce-sensitivity /
+# pounce-convex sit on the same linear-solver backbone — so enabling a
+# feature widens this crate's *public surface*, not the build. Only
+# pounce-convex and pounce-sensitivity add crates to compile.
+pounce-convex = { workspace = true, optional = true }
+pounce-sensitivity = { workspace = true, optional = true }
+pounce-qp = { workspace = true, optional = true }
+# The `linsol` backend factories the convex / active-set entry points need:
+# both take a `Box<dyn SparseSymLinearSolverInterface>` factory, so a facade
+# that re-exported the solvers without a backend would still leave callers
+# depending on the internal crates directly — exactly the coupling #168 set
+# out to remove.
+pounce-linsol = { workspace = true, optional = true }
+pounce-feral = { workspace = true, optional = true }
+# `pounce_qp::QpProblem` borrows its Hessian / Jacobian as pounce-linalg
+# triplet matrices, so the active-set surface is unusable without them.
+pounce-linalg = { workspace = true, optional = true }
+
+[features]
+# Lean by default: the NLP path only, as before.
+default = []
+# LP / convex QP / SOCP / SDP / SOS interior point, batched solves, and QP
+# sensitivity (`pounce_rs::convex`).
+convex = ["dep:pounce-convex", "dep:pounce-linsol", "dep:pounce-feral"]
+# Sparse parametric active-set QP (`pounce_rs::qp`).
+qp = ["dep:pounce-qp", "dep:pounce-linalg", "dep:pounce-linsol", "dep:pounce-feral"]
+# sIPOPT-style NLP sensitivity / reduced Hessian (`pounce_rs::sensitivity`).
+sensitivity = ["dep:pounce-sensitivity"]
+# Everything the facade curates.
+full = ["convex", "qp", "sensitivity"]
+
+[package.metadata.docs.rs]
+# docs.rs must render the feature-gated modules; otherwise the published
+# documentation shows only the NLP path and the gap #561 reported looks
+# like it is still there.
+all-features = true
 
 [lints]
 workspace = true

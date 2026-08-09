@@ -1,4 +1,4 @@
-//! # pounce-rs — solve nonlinear programs with POUNCE from Rust
+//! # pounce-rs — solve optimization problems with POUNCE from Rust
 //!
 //! POUNCE's solver lives across several crates (`pounce-nlp` for the
 //! [`TNLP`] problem trait, `pounce-algorithm` for the [`IpoptApplication`]
@@ -7,9 +7,35 @@
 //! so a Rust user depends on one crate and writes `use pounce_rs::prelude::*;`
 //! — the Rust counterpart to the one-import `import pounce` Python API.
 //!
-//! It is re-exports only (no logic of its own), and it pins a single curated
-//! public surface, so downstream code is insulated from churn in the internal
-//! crate layout.
+//! It is re-exports plus one ergonomic [`builder`] layer, and it pins a
+//! single curated public surface, so downstream code is insulated from churn
+//! in the internal crate layout.
+//!
+//! ## Feature flags — the paths beyond a single NLP solve
+//!
+//! The default build is the NLP path only. Everything else POUNCE solves is
+//! behind a feature, each landing in its own module so the `Qp*` type names
+//! of the two QP families never collide:
+//!
+//! | feature | module | what it covers |
+//! |---|---|---|
+//! | `convex` | [`convex`] | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; QP sensitivity and reduced Hessian |
+//! | `qp` | [`qp`] | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed |
+//! | `sensitivity` | [`sensitivity`] | sIPOPT-style NLP sensitivity: `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
+//! | `full` | — | all three |
+//!
+//! ```toml
+//! [dependencies]
+//! pounce-rs = { version = "0.9", features = ["convex", "sensitivity"] }
+//! ```
+//!
+//! `convex` and `qp` also bring in [`linsol`], which supplies the sparse
+//! symmetric factorization backend those entry points take as an argument.
+//!
+//! Enabling a feature widens what this crate *exports*; it is close to free
+//! at build time, because the default NLP path already pulls `pounce-qp`,
+//! `pounce-linsol`, and `pounce-feral` transitively. Only `convex` and
+//! `sensitivity` add crates to compile.
 //!
 //! ## Example: HS071 (Hock–Schittkowski problem 71)
 //!
@@ -200,6 +226,20 @@ pub use pounce_observability;
 // --- ergonomic builder API (argmin-style small trait + builder; #168) -------
 pub mod builder;
 pub use builder::{Nlp, Problem, Solution as NlpSolution};
+
+// --- feature-gated facets (gh #561) -----------------------------------------
+// Each path gets its own module rather than a flat re-export: `pounce-convex`
+// and `pounce-qp` are distinct solver families that both name their types
+// `QpProblem` / `QpSolution` / `QpStatus` / `QpOptions` / `QpWarmStart`, so a
+// flat surface could not carry both.
+#[cfg(feature = "convex")]
+pub mod convex;
+#[cfg(any(feature = "convex", feature = "qp"))]
+pub mod linsol;
+#[cfg(feature = "qp")]
+pub mod qp;
+#[cfg(feature = "sensitivity")]
+pub mod sensitivity;
 
 /// The common case in one glob import. Brings in the ergonomic [`Problem`]
 /// trait + [`Nlp`] builder, plus the low-level [`TNLP`] surface and the
