@@ -135,13 +135,34 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.9.0"
 # KKTs. The one breaking change is diagnostic-only — `SupernodeTiming`,
 # `BucketStats` and `ProfileReport` moved from `*_us` fields to `*_ns` (with
 # `.us()` accessors kept for migration) — and pounce consumes none of it.
-# 0.15.0 is the current pin. If you ever need to develop against an unreleased
+# 0.15.1 is a patch release with no API change, and is the counterpart to
+# pounce #567: feral's `Solver` now derives `use_parallel` from
+# `available_parallelism()` instead of hardcoding `true` (feral#154), and a
+# `ThreadPoolBuilder::build()` failure falls back to the *sequential* driver
+# rather than silently running on rayon's global pool (feral#156). Both matter
+# to us — feral is in the `pounce-wasm` dependency tree, where the hardcoded
+# `true` was simply wrong — and #567 already wrote `pounce-feral` against these
+# semantics, so this bump is what makes that comment true. It also fixes an
+# MC64 scaling-cache gate that compared a *minimum* against a *mean* and so
+# rejected reuse on matrices that had not drifted at all (robot_1600:
+# factorization −14.3%, scaling −39.8%), speeds the MC64 Hungarian matching
+# 4–5% on large matchings (bit-identical over 51 matrices), and corrects a
+# post-amalgamation `Supernode.nrow` underestimate. That last one is the only
+# item with a behavioral edge: numeric factors and inertia are unaffected
+# (`build_row_indices` always recomputed the true row set), but
+# `estimate_assembly_flops` rises 2–3×, so matrices sitting just under
+# `PAR_MIN_FLOPS` can now route to the parallel driver. We do not pin that
+# threshold — `FeralConfig.min_par_flops` defaults to `None` — so we inherit
+# feral's, and `feral_min_par_flops` / `POUNCE_FERAL_MIN_PAR_FLOPS` remain the
+# override if the calibration turns out to want re-tuning.
+#
+# 0.15.1 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.15.0" }
+feral = { version = "0.15.1" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
