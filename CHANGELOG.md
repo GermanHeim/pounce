@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.10.0] - 2026-08-10
+
 ### Changed — FERAL 0.15.1, which stops assuming the host has threads
 
 The workspace pin moves `feral` 0.15.0 → 0.15.1. It is a patch release with
@@ -4896,7 +4899,7 @@ fact improved that family substantially (92 → 38 failures/144) before #361 too
 it to 0.
 
 
-### ### Tests — pyomo-pounce: `test_binary_check.py` failed on any Windows checkout (#366)
+### Tests — pyomo-pounce: `test_binary_check.py` failed on any Windows checkout (#366)
 
 - Three tests were POSIX-only: the shadowing test joined `PATH` with a
   hardcoded `":"` instead of `os.pathsep`, and the fake `pounce` binaries were
@@ -8866,5 +8869,13 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/jkitchin/pounce/releases/tag/v0.10.0
+[0.9.0]: https://github.com/jkitchin/pounce/releases/tag/v0.9.0
+[0.8.0]: https://github.com/jkitchin/pounce/releases/tag/v0.8.0
+[0.7.0]: https://github.com/jkitchin/pounce/releases/tag/v0.7.0
+[0.6.0]: https://github.com/jkitchin/pounce/releases/tag/v0.6.0
+[0.5.0]: https://github.com/jkitchin/pounce/releases/tag/v0.5.0
+[0.4.0]: https://github.com/jkitchin/pounce/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jkitchin/pounce/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jkitchin/pounce/releases/tag/v0.2.0
