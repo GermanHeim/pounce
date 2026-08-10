@@ -1,8 +1,23 @@
 name: CI
 
+# A bare `push:` alongside `pull_request:` runs the entire workflow twice for
+# every commit on a branch with an open PR — once per event, on the same SHA.
+# Both runs are full duplicates (measured on 40a1e9e0's parent: Test took 1256s
+# and 1270s in the two runs of the same commit), so scoping push to `main`
+# halves CI for PR work. The trade-off: a branch pushed *without* an open PR no
+# longer gets a run. Open the PR (draft is enough) to get CI on it.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# Superseded runs are wasted work — a force-push or a quick follow-up commit
+# leaves the earlier run grinding for its full ~20 minutes with nobody reading
+# the result. Cancel in-flight runs for the same ref, but never on `main`,
+# where each commit's result is the record of that commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
