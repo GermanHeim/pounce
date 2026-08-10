@@ -70,7 +70,7 @@ Homepage = "https://github.com/jkitchin/pounce"
 Issues = "https://github.com/jkitchin/pounce/issues"
 
 [dependency-groups]
-notebooks = ["pyomo>=6.7", "pyomo-pounce", "ipykernel>=6"]
+notebooks = ["pyomo>=6.7", "pyomo-pounce", "ipykernel>=6", "asdex>=0.5"]
 
 [tool.uv]
 default-groups = ["notebooks"]
