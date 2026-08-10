@@ -205,3 +205,26 @@ expect_used = "warn"
 lto = "thin"
 codegen-units = 1
 debug = 1
+
+# `cargo test` defaults to opt-level 0, which is the wrong default for this
+# workspace: most of what the suite does is run a numerical solver, and
+# unoptimized floating-point kernels are ~10x off. Measured on the full
+# `cargo test --workspace --exclude pounce-hsl`:
+#
+#              build (cold)   test run
+#   opt 0           29s          542s
+#   opt 2           86s           52s
+#
+# A 9.9x cut in the test run for +57s of build — net ~4x on total wall-clock,
+# and the CI `Test` job is the long pole that sets overall CI time. The worst
+# single offender was `pounce_nl`'s harness at 707s of CI's 1182s, dominated by
+# two `greedy_hessian_coloring` tests that build multi-million-element pair
+# vectors; those two alone go 368s -> 26s.
+#
+# This is deliberately `profile.test` and not `profile.dev`: it leaves plain
+# `cargo build` untouched for local work. Measured separately, `profile.test`
+# alone captures the entire win (86s / 52s), so raising `dev` buys nothing.
+# `debug_assertions` and overflow checks stay on at opt-level 2, so the tests
+# still assert everything they did before.
+[profile.test]
+opt-level = 2
