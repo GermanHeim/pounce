@@ -83,8 +83,8 @@ silently drops all of the above — the integer-variable guard, the
 `scaling_factor` handling, the sensitivity path and the bundled-binary
 resolution. Prefer one of the two registrations above.
 
-> **Requirements for the v2 route** — `pip install pyomo-pounce[v2]` asks for
-> both:
+> **Requirements for the v2 route** — `pip install pyomo-pounce[pyomo-v2]`
+> asks for both:
 >
 > - **Pyomo ≥ 6.10.1**, which is where the `SolutionLoader` / `get_vars` API
 >   this builds on landed. (`pyomo.contrib.solver.common` exists from 6.9.2,

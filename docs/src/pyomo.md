@@ -106,7 +106,7 @@ exists from 6.9.2, but 6.9.2–6.10.0 ship the older
 `SolutionLoaderBase` / `get_primals`) and **pounce-solver > 0.9.0**
 (Pyomo's `asl_sol_reader` is strict where the legacy reader is lenient
 and needs the per-model `.sol` `Options` echo added after 0.9.0).
-`pip install pyomo-pounce[v2]` asks for both. Neither applies to
+`pip install pyomo-pounce[pyomo-v2]` asks for both. Neither applies to
 `SolverFactory('pounce')`: on an older Pyomo the legacy plugin works
 exactly as before and `pyomo_pounce.HAVE_V2_INTERFACE` reports `False`.
 

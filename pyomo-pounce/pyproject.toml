@@ -34,7 +34,32 @@ classifiers = [
 # `pyomo_pounce.v2`. Both floors here are strictly tighter than the base
 # dependencies, and neither applies to the legacy
 # SolverFactory('pounce') plugin -- which is why the base stays where it
-# is and this is an extra: `pip install pyomo-pounce[v2]`.
+# is and this is an extra: `pip install pyomo-pounce[pyomo-v2]`.
+#
+# NAME: this extra must NOT be called `v2`, and more generally must never
+# parse as a PEP 440 version. An extra emits `; extra == "<name>"` into the
+# wheel metadata, and packaging's marker evaluator tries `Specifier("==" +
+# name)` first, falling back to a string comparison only if that is invalid.
+# PEP 440 accepts a leading `v`, so `Specifier("==v2")` *parses* -- the
+# marker then takes the version path, and pip's dependency walk (which
+# evaluates markers with `extra` set to "") ends up calling `Version("")`
+# and raising `InvalidVersion: Invalid version: ''`. That took down every
+# `docker/Dockerfile` source build for a day (release-docker on main,
+# 2026-08-09 -> 2026-08-10) while `Dockerfile.release` stayed green,
+# because the latter installs from PyPI where the extra was not yet
+# published.
+#
+# It reproduces only on packaging < 26 (pip <= 25.x), which is what the
+# `python:3.12-slim` runtime stage ships; packaging 26 changed the marker
+# evaluator and swallows it. So a modern local pip will NOT show the bug --
+# do not conclude from a clean `pip install` on your laptop that an extra
+# name is safe.
+#
+# `pyomo-v2` is safe: the trailing text defeats the version parse, so the
+# marker takes the string path. Verify any rename with:
+#
+#   python3 -c 'from packaging.markers import Marker; \
+#     print(Marker("extra == \"NEW\"").evaluate({"extra": ""}))'
 #
 # * pyomo>=6.10.1 -- `SolutionLoader`/`get_vars`, the loader API this
 #   subclasses. `pyomo.contrib.solver.common` exists from 6.9.2, but
@@ -46,7 +71,7 @@ classifiers = [
 #   through this route. The legacy plugin is unaffected, so this floor
 #   belongs here rather than on the base dependency. CI builds the binary
 #   from source and would never catch it.
-v2 = ["pyomo>=6.10.1", "pounce-solver>0.9.0"]
+pyomo-v2 = ["pyomo>=6.10.1", "pounce-solver>0.9.0"]
 
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"
