@@ -27,9 +27,9 @@ numerical backbone:
   exponential and power cones — each solved to the global optimum, with
   infeasibility certificates, warm starts, and post-optimal sensitivity.
 - **Global optimization** — certified global optima for nonconvex
-  **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
-  spatial branch-and-bound solver, `pounce-global`, is in development and not
-  part of this release.)
+  **polynomial** problems via SOS / Lasserre relaxations. Nonconvex problems
+  that are not polynomial get a *local* answer; there is no spatial
+  branch-and-bound solver.
 
 Convex and conic problems are solved to global optimality; nonconvex problems
 are solved locally by default, or — for polynomials — to a certified global
@@ -78,10 +78,9 @@ against external suites:
   classifies an `.nl` and sends LP / convex-QP problems here automatically.
 - **Global (polynomials)** — SOS / Lasserre polynomial optimization
   (`sos_minimize` / `pounce.sos_minimize`): a single SDP certifies the global
-  minimum and recovers the global minimizers. A general-purpose spatial
-  branch-and-bound solver (`pounce-global`, with McCormick relaxations,
-  OBBT/FBBT bound tightening, and a certified optimality gap) is in development
-  and not part of this release.
+  minimum and recovers the global minimizers. This is the only certified-global
+  path for a nonconvex problem, and it covers polynomials only — there is no
+  spatial branch-and-bound solver for general factorable models.
 
 The shipped solvers — NLP, conic, and SOS — are reachable from the CLI, the
 Python package, and the JSON solve report.

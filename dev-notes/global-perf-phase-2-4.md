@@ -1,5 +1,12 @@
 # pounce-global perf: Phases 2–4 execution plan (loop-driven)
 
+> **Historical — the plan this describes cannot be executed.** `pounce-global`
+> was removed from `main` by `9a4c908d` (2026-06-07), and the
+> `benchmarks/globallib/` harness every acceptance check below invokes was
+> deleted along with the rest of the dead surface on 2026-08-09. Both are
+> recoverable from history (`git checkout 9a4c908d^ -- crates/pounce-global`).
+> See `dev-notes/spatial-bnb-design.md` for the design record.
+
 A checklist the `/loop` workflow can walk top-to-bottom. Each task is a
 self-contained, independently-shippable unit with an **acceptance check** and a
 **soundness note**. Do them in order; check the box only when its acceptance

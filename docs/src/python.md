@@ -683,9 +683,9 @@ SciPy-shaped) by necessity — e.g. `sos_minimize` takes a polynomial as a
 coefficient dict and returns a certificate, *not* callables and SciPy dicts. See
 [Choosing a Solver](choosing-a-solver.md) for the full map.
 
-> A `minimize_global` entry point for factorable nonconvex problems (spatial
-> branch-and-bound) is in development and is not exposed in this release; today
-> the certified-global Python path is `sos_minimize`, for polynomials.
+> There is no `minimize_global` entry point — POUNCE has no spatial
+> branch-and-bound solver. The only certified-global Python path is
+> `sos_minimize`, for polynomials.
 
 ## Curve fitting
 

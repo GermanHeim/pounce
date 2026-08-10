@@ -61,10 +61,11 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 |---|---|---|
 | 18 | [`18_sos_global_optimization.ipynb`](18_sos_global_optimization.ipynb) | Certified polynomial global optimization with `pounce.sos_minimize` (sum-of-squares / moment relaxation). |
 
-> **Spatial branch-and-bound** (`pounce-global`, for general factorable
-> `exp`/`log`/trig problems) ships in the engine but is **not yet wired to a
-> Python entry point** in this release, so it has no notebook here. SOS (18)
-> covers the polynomial case. See [`docs/src/global-optimization.md`](../../docs/src/global-optimization.md).
+> SOS (18) covers the **polynomial** case, and it is the only certified-global
+> path POUNCE has — there is no spatial branch-and-bound solver for general
+> factorable `exp`/`log`/trig problems. For those, use the multistart notebooks
+> (19–21) below and accept an uncertified answer. See
+> [`docs/src/global-optimization.md`](../../docs/src/global-optimization.md).
 
 ## Finding many minima
 
