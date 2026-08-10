@@ -9,6 +9,63 @@ changes.
 
 ## [Unreleased]
 
+### Changed — FERAL 0.15.1, which stops assuming the host has threads
+
+The workspace pin moves `feral` 0.15.0 → 0.15.1. It is a patch release with
+no API change and no source change anywhere in the workspace, but two of its
+items are the upstream half of the `FERAL_PARALLEL` fix directly below.
+
+**`Solver` derives `use_parallel` from the platform (feral#154).**
+`Solver::new()` / `Solver::with_params()` previously hardcoded
+`use_parallel = true` and built a rayon `ThreadPool` on every `factor()`.
+That is wrong wherever the host has no usable threads, and POUNCE has such a
+host: feral is in the `pounce-wasm` dependency tree, and on
+`wasm32-wasip1` both `available_parallelism()` and `thread::spawn` report
+`Unsupported`, while a threads-enabled wasm host whose worker pool has not
+been stood up makes `build()` wait for workers that never arrive. The default
+is now `available_parallelism() > 1`.
+
+**A failed pool falls back to the sequential driver (feral#156).** When
+`use_parallel` is on but the `Solver`-owned pool could not be built, `factor()`
+(including the MC64 retry), `solve_refined` and `solve_many_refined` previously
+ran the parallel driver with no `install` — i.e. on rayon's *global* pool,
+defeating the per-`Solver` isolation exactly when nesting is least welcome
+(compare the latent nested-rayon self-deadlock in feral#102). All four now run
+the sequential driver. `Solver` also no longer initializes rayon's global
+registry on any path. No numerical change: the two drivers carry a bit-exact
+per-supernode contract.
+
+Together these are why `FERAL_PARALLEL`'s force-on arm matters, and this bump
+is what makes the comment at `crates/pounce-feral/src/lib.rs:424` true rather
+than aspirational.
+
+The release also carries three items we get for free:
+
+- **MC64 scaling-cache gate fixed.** The value-bound gate that decides whether
+  a cached MC64 scaling may be reused compared the current *minimum* scaled
+  diagonal against the baseline *mean* — different statistics, so it behaved as
+  an absolute property of the matrix rather than the drift measure it was meant
+  to be, and rejected reuse on matrices that had not moved. The fix is a strict
+  widening. Across 53 gate evaluations on the seven corpus families that route
+  to MC64, exactly two decisions change, both on `robot_1600`: factorization
+  time −14.3%, scaling time −39.8%. Inertia is unchanged on every iterate of
+  every family, and a genuine diagonal collapse is still rejected.
+- **MC64 Hungarian matching 4–5% faster** on large matchings (the min-heap now
+  stores the key inline instead of a random access into the distance array per
+  comparison). Verified bit-identical on 51 matrices across 39 families.
+- **`Supernode.nrow` corrected after amalgamation.** `find_supernodes` used
+  `col_counts[first_col].max(ncol)`, exact for a *fundamental* supernode but
+  wrong after a size-based merge; undercounts reached 40%. Numeric factors and
+  inertia are unaffected — `build_row_indices` always recomputed the true row
+  set — but everything that *estimates* from `nrow` was working from a wrong
+  number. The one edge that reaches us: `estimate_assembly_flops` rises 2–3×,
+  so matrices sitting just under `PAR_MIN_FLOPS` can now route to the parallel
+  driver where they previously fell to sequential. `FeralConfig.min_par_flops`
+  defaults to `None`, so we inherit feral's threshold — which was itself
+  calibrated against the understated estimate and may now sit in the wrong
+  place. `feral_min_par_flops` / `POUNCE_FERAL_MIN_PAR_FLOPS` is the override
+  if it needs re-tuning.
+
 ### Fixed — `FERAL_PARALLEL` is now bidirectional and speaks the same grammar as every other knob
 
 `FERAL_PARALLEL` was the one boolean environment variable in
