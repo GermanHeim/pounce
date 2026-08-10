@@ -23,10 +23,17 @@ out="$root/target/$target/release/pounce_wasm.wasm"
 
 # wasm-opt (binaryen) is optional; it typically takes another ~15% off.
 if command -v wasm-opt >/dev/null 2>&1; then
-  # Rust's wasm32-wasip1 code uses non-trapping float-to-int conversions.
-  # Keep the feature enabled when Binaryen validates the module.
-  wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-simd \
-    "$out" -o "$here/web/pounce.wasm"
+  # rustc's wasm32-wasip1 output uses post-MVP features — bulk memory,
+  # non-trapping float-to-int, sign extension, SIMD — and wasm-opt rejects
+  # the whole module ("error validating input") unless each one is enabled
+  # for validation. Enumerating them is a losing game: the exact set moves
+  # with the Rust release, and distro binaryen lags badly enough to disagree
+  # about the defaults (Ubuntu noble ships 108, from 2022; a current Homebrew
+  # is 131). `-all` enables everything the local binaryen knows about. It
+  # only widens what wasm-opt will *accept* — the emitted feature set is
+  # still whatever rustc produced, so this does not change what the page
+  # requires of a browser.
+  wasm-opt -Oz -all "$out" -o "$here/web/pounce.wasm"
 else
   cp "$out" "$here/web/pounce.wasm"
 fi
