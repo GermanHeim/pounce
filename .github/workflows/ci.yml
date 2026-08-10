@@ -89,9 +89,10 @@ jobs:
   # `test` job type-checks pounce-wasm on the host, which catches neither of
   # the two ways this surface breaks: a dependency that stops compiling for
   # wasm32 (a new `libc`/`dlopen`/thread call somewhere in the tree), and one
-  # that compiles but traps at run time on a syscall WASI does not have. The
-  # smoke test drives the same C ABI the page uses — load a `.nl`, solve it,
-  # check the objective — under Node's WASI.
+  # that compiles but traps at run time on a syscall WASI does not have. A
+  # third is the wasm-opt post-processing step, which is what the page and the
+  # demo actually ship. The smoke test drives the same C ABI the page uses —
+  # load a `.nl`, solve it, check the objective — under Node's WASI.
   wasm:
     name: WebAssembly build + smoke
     runs-on: ubuntu-latest
@@ -104,6 +105,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      # `build.sh` runs wasm-opt only when binaryen is on PATH and silently
+      # falls back to `cp` otherwise, so a CI runner without binaryen exercises
+      # the fallback and never the optimizer. That blind spot is how the
+      # validation failure this step now guards reached main: wasm-opt rejected
+      # the module ("Fatal: error validating input") because Rust's
+      # wasm32-wasip1 output uses non-trapping float-to-int and SIMD, and since
+      # build.sh runs under `set -euo pipefail` that was a hard build failure
+      # for every contributor who had binaryen installed — while CI stayed
+      # green. Installing it here means CI builds what those contributors and
+      # the deployed page actually get.
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
       - name: Build the wasm module
         run: crates/pounce-wasm/build.sh
       - name: Solve a model in wasm
