@@ -464,6 +464,8 @@ the full list and per-suite details.
 
 ## pounce in the wild
 
+You can find an external benchmark of pounce at https://plato.asu.edu/ftp/ampl-nlp.html
+
 [Opyrability](https://github.com/CODES-group/opyrability#installation) now uses pounce as its default solver.
 
 [SiNDAE](https://github.com/llueg/SiNDAE)  — A Simultaneous Approach for Training Neural Differential-Algebraic Equations
