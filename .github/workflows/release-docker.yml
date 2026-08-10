@@ -134,6 +134,32 @@ jobs:
             pull_request)
               # Rot guard only — prove both still build, publish nothing.
               push=false
+              # The release image pip-installs a *pinned, published* version
+              # from PyPI, so it can only be built against a version that is
+              # actually on PyPI. On a release PR the workspace version is by
+              # definition not — the wheels come from the python-v* tag, which
+              # is pushed after the PR merges. And every release PR touches
+              # docker/Dockerfile.release, because check-release-consistency.sh
+              # requires ARG POUNCE_VERSION to be bumped in lockstep, so every
+              # release PR matches this workflow's `docker/**` path filter.
+              # Using the workspace version here therefore fails on every
+              # release PR, on both arches, after waiting out the full ~20 min
+              # PyPI poll. Build against the newest published version instead:
+              # this guard exists to prove Dockerfile.release still builds, and
+              # against a real version is exactly how you prove that.
+              # Newest version common to *both* projects: the wait below polls
+              # for one version across both, so the latest of either alone can
+              # be a version the other has not shipped.
+              if [ -z "${VERSION_INPUT:-}" ]; then
+                latest="$(python3 -c "import json, urllib.request as u; \
+                  rel = lambda p: {v for v, f in json.load(u.urlopen('https://pypi.org/pypi/' + p + '/json'))['releases'].items() if f}; \
+                  both = [v for v in rel('pounce-solver').intersection(rel('pyomo-pounce')) if v.replace('.', '').isdigit()]; \
+                  print(max(both, key=lambda v: tuple(int(x) for x in v.split('.'))) if both else '')" || true)"
+                if [ -n "$latest" ]; then
+                  version="$latest"
+                  echo "::notice::PR rot guard: building the release image against the newest published version ($version), not the workspace version ($(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/'))."
+                fi
+              fi
               ;;
             push)
               if [ "$is_tag" = true ]; then
