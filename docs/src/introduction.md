@@ -24,9 +24,9 @@ into a *family* of solvers sharing that backbone:
   positive-semidefinite (SDP), and the non-symmetric exponential and power
   cones, each solved to the global optimum.
 - **Global optimization** — certified global optima for nonconvex
-  **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
-  spatial branch-and-bound solver, `pounce-global`, is in development and not
-  part of this release.)
+  **polynomial** problems via SOS / Lasserre relaxations. Nonconvex problems
+  that are not polynomial get a *local* answer; POUNCE has no spatial
+  branch-and-bound solver.
 
 See [Choosing a Solver](choosing-a-solver.md) for which solver fits which
 problem.
@@ -60,9 +60,9 @@ LP / QP, SOCP, exponential / power cones, and small SDPs — with a Conic
 Benchmark Format (`.cbf`) reader cross-checked against the CBLIB tier —
 and adds SOS / Lasserre polynomial global optimization (`sos_minimize`).
 These are reachable from the CLI, the Python package, and the JSON solve
-report. A deterministic spatial branch-and-bound solver for general
-factorable nonconvex problems (`pounce-global`) is in development and not part
-of this release.
+report. There is no spatial branch-and-bound solver for general factorable
+nonconvex problems — outside the polynomial case, nonconvex models are solved
+locally.
 
 ## License
 

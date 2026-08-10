@@ -36,11 +36,10 @@ pluggable backend (FERAL by default, HSL MA57 optionally).
 > working set carries across solves and `solve_parametric` can trace the
 > homotopy from the previous solution instead of starting over.
 
-> A general-purpose **spatial branch-and-bound** solver for factorable nonconvex
-> NLPs (`pounce-global`) is in development and is **not part of this release** —
-> there is no `solver_selection=global` CLI route or `minimize_global` Python
-> entry point yet. Today the only certified-global path
-> for nonconvex problems is SOS / Lasserre, for *polynomials*.
+> POUNCE has **no spatial branch-and-bound solver** for general factorable
+> nonconvex NLPs — no `solver_selection=global` CLI route, no
+> `minimize_global` Python entry point. The only certified-global path for a
+> nonconvex problem is SOS / Lasserre, and it covers *polynomials* only.
 
 ## When to choose each
 
@@ -104,10 +103,10 @@ feasible set is convex). See [LP / QP Solver Routing](lp-qp-routing.md).
 - CLI: a Conic Benchmark Format file, `pounce model.cbf` (see the CBLIB
   benchmark tier), or any convex-QCQP `.nl` under `auto` routing.
 
-### Nonconvex problem, global optimum required → **SOS** or **spatial branch-and-bound**
+### Nonconvex problem, global optimum required → **SOS** (polynomials only)
 
 When the problem is genuinely nonconvex and a *local* optimum is not good
-enough, the shipped path to a **certified global** optimum is for polynomials:
+enough, the one path to a **certified global** optimum is for polynomials:
 
 - **Polynomial** objective/constraints → **SOS / Lasserre** (`sos_minimize`,
   or `pounce.sos_minimize`). A single semidefinite program certifies the global
@@ -116,11 +115,13 @@ enough, the shipped path to a **certified global** optimum is for polynomials:
   facial-reduction step. Best for modest degree and dimension; the SDP grows
   with the relaxation order.
 
-A general-purpose **spatial branch-and-bound** solver for factorable nonconvex
-problems (including `exp`/`ln`/trig) — `pounce-global` — is in development and
-is **not part of this release**.
+If the problem is nonconvex and **not** polynomial (`exp`/`ln`/trig), POUNCE
+cannot certify a global optimum. Reformulate into the convex cone library if
+you can; otherwise multistart the local NLP solver and accept that the result
+is uncertified.
 
-See [Global Optimization](global-optimization.md) for the SOS path in depth.
+See [Global Optimization](global-optimization.md) for the SOS path in depth,
+and for the multistart fallback.
 
 ### Indefinite QP, or a QP inner-solver → **Active-set QP**
 
@@ -206,8 +207,8 @@ POUNCE settles a problem globally along two routes, and locally along one:
 - **Local for general NLP** — the filter-IPM and SQP paths converge to a KKT
   point, which for a nonconvex problem carries no global guarantee.
 
-A general-purpose spatial branch-and-bound route for factorable nonconvex
-problems (`pounce-global`) is in development but not in this release.
+There is no third route: a nonconvex, non-polynomial problem gets a local
+answer, and no certificate.
 
 Two practical levers for a "global" answer: **modeling** (cast as much as you
 can into the convex cone library) and, when that is not possible, the **SOS /
