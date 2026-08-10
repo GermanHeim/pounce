@@ -212,7 +212,7 @@ is the documented route, users of that model class were paying the legacy
 path's cost with no supported alternative that kept the extras.
 
 **Requirements, and only for the v2 route** (`pip install
-pyomo-pounce[v2]`): **Pyomo ≥ 6.10.1**, where the `SolutionLoader` /
+pyomo-pounce[pyomo-v2]`): **Pyomo ≥ 6.10.1**, where the `SolutionLoader` /
 `get_vars` API this builds on landed — `pyomo.contrib.solver.common`
 exists from 6.9.2, but 6.9.2–6.10.0 ship the older `SolutionLoaderBase` /
 `get_primals` — and **pounce-solver > 0.9.0**, because Pyomo's
