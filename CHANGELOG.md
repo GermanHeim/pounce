@@ -4899,7 +4899,7 @@ fact improved that family substantially (92 → 38 failures/144) before #361 too
 it to 0.
 
 
-### ### Tests — pyomo-pounce: `test_binary_check.py` failed on any Windows checkout (#366)
+### Tests — pyomo-pounce: `test_binary_check.py` failed on any Windows checkout (#366)
 
 - Three tests were POSIX-only: the shadowing test joined `PATH` with a
   hardcoded `":"` instead of `os.pathsep`, and the fake `pounce` binaries were
