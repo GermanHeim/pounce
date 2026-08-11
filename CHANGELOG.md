@@ -9,14 +9,19 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.10.0] - 2026-08-11
+
 ### Fixed — an ill-scaled dense Hessian column no longer costs the solve its certificate
 
-Dense-column peeling (0.10.0, "stop a dense Hessian row from costing O(n²)
-in setup and eval_h") gives a dense Hessian column its own singleton color
-and then recovers every entry in that column's *row* from the same pass, by
-symmetry. That is exact in real arithmetic. In floating point the pass is
-accumulated at the scale of the whole dense column, so each entry read out
-of it carries an absolute roundoff floor of about `eps * ||H(:, d)||` where
+Dense-column peeling — added earlier in this same release, under "a single
+dense Hessian row made `.nl` setup and every `eval_h` O(n²)" (#552) below, so
+no published version ever carried the defect described here — gives a dense
+Hessian column its own singleton color and then recovers every entry in that
+column's *row* from the same pass, by symmetry. That is exact in real
+arithmetic. In floating point the pass is accumulated at the scale of the
+whole dense column, so each entry read out of it carries an absolute
+roundoff floor of about `eps * ||H(:, d)||` where
 the ordinary path — column `j`'s own pass — would have left about
 `eps * |H[d, j]|`.
 
@@ -57,9 +62,6 @@ and the lowest on one of `cho_parmest`'s harmful columns is `8.3e-8` — a
 gap of 2.8×, measured on two model families. `1e-8` sits below both,
 because the errors are asymmetric: a false veto costs one model a coloring,
 a missed veto costs a solve its certificate.
-
-
-## [0.10.0] - 2026-08-10
 
 ### Changed — FERAL 0.15.1, which stops assuming the host has threads
 
