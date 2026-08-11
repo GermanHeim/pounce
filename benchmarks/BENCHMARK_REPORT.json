@@ -5494,7 +5494,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 155.53281535661588,
+    "pounce_obj": 155.5328153566159,
     "ipopt_obj": 155.53281535661594,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5544,7 +5544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1523.8997328865144,
+    "pounce_obj": 1523.8997328865148,
     "ipopt_obj": 1523.8997328865144,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5564,7 +5564,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1513.8023234527084,
+    "pounce_obj": 1513.8023234527088,
     "ipopt_obj": 1513.8023234527086,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5574,7 +5574,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1523.8997328865166,
+    "pounce_obj": 1523.8997328865169,
     "ipopt_obj": 1523.899732886517,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7502,11 +7502,11 @@
   {
     "name": "cho_parmest",
     "suite": "CHO",
-    "pounce_status": "Acceptable",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 67672.8675575283,
+    "pounce_obj": 67672.86755753511,
     "ipopt_obj": 67672.86755753602,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
