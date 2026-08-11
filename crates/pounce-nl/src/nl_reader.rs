@@ -4988,6 +4988,221 @@ J0 2
         s
     }
 
+    /// Locate a model in the benchmark corpus, or `None` if the corpus is
+    /// not on this machine.
+    ///
+    /// The corpus is ~2 GB and deliberately outside the checkout (see
+    /// `POUNCE_BENCH_DATA`), so tests that need it have to degrade to a
+    /// no-op rather than fail. That is a real limitation — a check that
+    /// silently does nothing is how the gap below went unnoticed in the
+    /// first place — so anything using this must also be covered by a
+    /// synthetic case that always runs.
+    fn bench_model(rel: &str) -> Option<std::path::PathBuf> {
+        let root = std::env::var("POUNCE_BENCH_DATA").ok()?;
+        let p = std::path::PathBuf::from(root).join(rel);
+        p.is_file().then_some(p)
+    }
+
+    /// The corpus check the dense-column optimization never got.
+    ///
+    /// `cho_parmest` is the model whose certificate the optimization cost,
+    /// and it could not have caught it: the model is 4.3 MB and lives in
+    /// the benchmark data set, not in the repository, so validating
+    /// against the in-repo `.nl` fixtures said nothing about it. This test
+    /// closes that by checking the corpus directly wherever the corpus
+    /// exists, which is every machine and CI job that runs the benchmarks.
+    ///
+    /// The assertion is the one that matters and the one that was never
+    /// made: whatever the guard leaves peeled must decode to the same
+    /// Hessian as peeling nothing. Against the pre-fix code this fails —
+    /// 48,931 of the 96,000 entries disagreed, to 5.75e-12 relative.
+    #[test]
+    fn cho_parmest_decodes_to_its_unpeeled_reference() {
+        let Some(path) = bench_model("cho/nl_export_results/cho_parmest.nl") else {
+            eprintln!("POUNCE_BENCH_DATA/cho not present — skipping corpus check");
+            return;
+        };
+        let p = read_nl_file(&path).expect("read cho_parmest");
+        let n = p.n;
+        let mut t = NlTnlp::new(p);
+        // The guard vetoes 7 of cho's 12 peeled columns, and putting those
+        // seven dense rows back into the conflict graph costs the coloring
+        // outright: it goes from 17 colors to 9010, and no column clears the
+        // density threshold afterwards, so the model ends up fully unpeeled.
+        // That is the price of the certificate on this model, and it is worth
+        // knowing rather than assuming the other five survive.
+        assert!(t.peeled_cols.is_empty());
+
+        let info = t.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+        let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+        assert!(t.eval_h(
+            None,
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+        // Evaluate away from `x0` with non-uniform multipliers. The damage
+        // is point-dependent, and `x0` is close to where it is least
+        // visible: only 5 entries move there, against 48,931 here. Note the
+        // guard's own probe runs at `x0` — it fires anyway because it tests
+        // a bound on what a pass *could* lose, not the damage it happens to
+        // commit at one point. That is the property that makes it robust,
+        // and this asymmetry is worth keeping in front of anyone who
+        // retunes it.
+        let x: Vec<f64> = t
+            .prob
+            .x0
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + 0.01 * (i % 7) as f64 + 0.001)
+            .collect();
+        let lambda: Vec<f64> = (0..t.prob.m).map(|i| 0.5 + 0.01 * (i % 5) as f64).collect();
+
+        let mut got = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            1.0,
+            Some(&lambda),
+            true,
+            SparsityRequest::Values { values: &mut got }
+        ));
+
+        t.recolor(&vec![true; n]);
+        assert!(t.peeled_cols.is_empty());
+        let mut want = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            1.0,
+            Some(&lambda),
+            true,
+            SparsityRequest::Values { values: &mut want }
+        ));
+
+        let scale = want.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let mut worst = 0.0_f64;
+        let mut at = 0usize;
+        for k in 0..nnz {
+            let rel = (got[k] - want[k]).abs() / want[k].abs().max(f64::MIN_POSITIVE);
+            if rel > worst {
+                worst = rel;
+                at = k;
+            }
+        }
+        assert!(
+            worst <= 1e-13,
+            "H[{},{}] decoded {:e}, unpeeled reference {:e} — relative error \
+             {worst:e} (||H||inf = {scale:e}). A peeled column is being read \
+             out of a pass it cannot be read out of.",
+            irow[at],
+            jcol[at],
+            got[at],
+            want[at]
+        );
+
+        // The check above passes trivially on correct code, because the
+        // guard leaves cho fully unpeeled and so compares a configuration
+        // against itself. It only has teeth against a regression. So prove
+        // the guard is doing necessary work rather than assuming it: put
+        // the peels back the way the pre-fix reader had them and confirm
+        // the Hessian really does come apart.
+        t.recolor(&vec![false; n]);
+        assert!(
+            !t.peeled_cols.is_empty(),
+            "restoring the unvetoed coloring must peel again"
+        );
+        let mut unguarded = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            1.0,
+            Some(&lambda),
+            true,
+            SparsityRequest::Values {
+                values: &mut unguarded
+            }
+        ));
+        let mut bad = 0usize;
+        let mut worst_unguarded = 0.0_f64;
+        for k in 0..nnz {
+            let rel = (unguarded[k] - want[k]).abs() / want[k].abs().max(f64::MIN_POSITIVE);
+            if rel > 1e-13 {
+                bad += 1;
+            }
+            worst_unguarded = worst_unguarded.max(rel);
+        }
+        // Two different counts get quoted about this model and they measure
+        // different things: 48,931 of the 96,000 entries differ from the
+        // uncompressed reference *at all*, down to the last bit, while 88
+        // exceed 1e-13 relative. The second is the one worth asserting on.
+        assert!(
+            bad >= 50 && worst_unguarded > 1e-11,
+            "peeling cho_parmest unguarded should damage the entries the guard \
+             exists to protect (measured: 88 entries past 1e-13 relative, \
+             worst 9.9e-11); got {bad} entries, worst {worst_unguarded:e}. If \
+             this fires, the model or the corpus changed and the guard's \
+             calibration should be re-derived rather than the bound relaxed."
+        );
+        eprintln!("unguarded peeling damages {bad}/{nnz} entries, worst {worst_unguarded:e}");
+    }
+
+    /// Same weighted coupling as [`weighted_dense_row_objective_nl`], but
+    /// the dense variable is `x_{n-1}` instead of `x_0`:
+    /// `sum_j (x_j - 1)^2 + x_{n-1} * sum_{j < n-1} w_j x_j`.
+    ///
+    /// The index matters, and it is the whole reason this helper exists.
+    /// With the dense variable at 0 every coupling entry is stored as
+    /// `(i, 0)` — the *column* is the peeled one — and the decode reads it
+    /// out of column 0's own pass whether or not peeling is on, so the two
+    /// paths are bit-identical and no test built on that shape can tell
+    /// them apart. Putting the dense variable last stores them as
+    /// `(n-1, j)`, where the *row* is the peeled column: peeled, they come
+    /// back from column `n-1`'s pass by symmetry, carrying that pass's
+    /// roundoff floor; unpeeled, they come back from column `j`'s own pass.
+    /// That is the category every one of `cho_parmest`'s 48,931 damaged
+    /// entries fell into.
+    fn weighted_dense_last_col_nl(n: usize, span: f64) -> String {
+        let w = |j: usize| 10_f64.powf(span / 2.0 - span * j as f64 / (n - 2) as f64);
+        let d = n - 1;
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} 0 1 0 0 0\n"));
+        s.push_str(" 0 1\n 0 0\n");
+        s.push_str(&format!(" {n} {n} {n}\n"));
+        s.push_str(" 0 0 0 1\n 0 0 0 0 0\n");
+        s.push_str(&format!(" 0 {n}\n"));
+        s.push_str(" 0 0\n 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str(&format!("o54\n{}\n", n + 1));
+        for j in 0..n {
+            s.push_str(&format!("o5\no1\nv{j}\nn1.0\nn2\n"));
+        }
+        s.push_str(&format!("o2\nv{d}\no54\n{}\n", n - 1));
+        for j in 0..d {
+            s.push_str(&format!("o2\nn{:.17e}\nv{j}\n", w(j)));
+        }
+        s.push_str(&format!("x{n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.5\n"));
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        s.push_str(&format!("G0 {n}\n"));
+        for j in 0..n {
+            s.push_str(&format!("{j} 0.0\n"));
+        }
+        s
+    }
+
     /// A well-scaled dense column is still peeled, and the entries read
     /// out of its pass are exact — the property the peel guard must not
     /// cost us.
@@ -5011,12 +5226,19 @@ J0 2
     /// An ill-scaled dense column must be un-peeled and colored the
     /// ordinary way, so its small entries come back to full precision.
     ///
-    /// Regression test for the `cho_parmest` stall: recovering `H[j, 0]`
-    /// from column 0's own pass leaves an absolute error of about
-    /// `eps * ||H(:, 0)||`, which is a relative error of ~1e-4 on the
-    /// smallest weight here. The primal solution tolerates that; the
-    /// multipliers, which come out of the KKT system the Hessian sits in,
-    /// do not, and `inf_du` stalls above `tol`.
+    /// This test covers the *guard*, not the damage. It asserts that a
+    /// column spanning 12 orders is un-peeled and that its entries are then
+    /// exact — and it is worth being precise that it does not, and cannot,
+    /// show what peeling would have cost, because on this model peeling
+    /// costs nothing: force the peel through and every entry still comes
+    /// back bit-identical to its analytic weight. The Hessian here is
+    /// constant and each entry is a single product, so there is no
+    /// accumulation for a large-magnitude pass to pollute.
+    ///
+    /// Reproducing the actual digit loss takes a model whose entries are
+    /// summed through shared intermediates, which is why the demonstration
+    /// lives in `cho_parmest_decodes_to_its_unpeeled_reference` against the
+    /// real model rather than a synthetic one.
     #[test]
     fn an_ill_scaled_dense_column_is_not_peeled_and_stays_exact() {
         let n = 200;
@@ -5076,6 +5298,125 @@ J0 2
             );
         }
         assert_eq!(checked, n - 1);
+    }
+
+    /// Whatever survives the peel guard must decode to the same Hessian
+    /// that not peeling at all produces — every entry, not just the
+    /// objective.
+    ///
+    /// This exists because the original dense-column optimization was
+    /// validated by running the repository's `.nl` fixtures and comparing
+    /// objective value and exit status, which was doubly blind: not one of
+    /// the 60 fixtures has a Hessian row dense enough to peel anything, so
+    /// the decode path under test never executed, and even had it executed,
+    /// the defect cost digits in the multipliers while leaving the
+    /// objective intact. So the instrument has to be the assembled Hessian
+    /// and the input has to actually peel — hence `peeled_any` below, which
+    /// fails if the sweep ever goes vacuous the way the fixture suite
+    /// silently did.
+    ///
+    /// What this catches is a *decode* fault: an entry recovered from the
+    /// wrong pass, which is wrong by O(1). It would not have caught the
+    /// `cho_parmest` stall, because these synthetic models lose no
+    /// precision under peeling at all (see
+    /// `an_ill_scaled_dense_column_is_not_peeled_and_stays_exact`). The
+    /// precision half is covered against the real model in
+    /// `cho_parmest_decodes_to_its_unpeeled_reference`.
+    #[test]
+    fn a_peeled_decode_matches_an_unpeeled_reference() {
+        // `last = true` puts the dense variable at `n-1`, so the coupling
+        // entries are stored with the peeled column as their *row* — the
+        // only shape in which peeling and not peeling read an entry out of
+        // different passes, and so the only shape that can detect a
+        // difference at all. See `weighted_dense_last_col_nl`.
+        let cases = [
+            (200, 0.0, false),
+            (200, 2.0, false),
+            (200, 0.0, true),
+            (200, 1.0, true),
+            (200, 2.0, true),
+            (400, 3.0, true),
+            (600, 0.0, true),
+        ];
+        let mut peeled_any = false;
+        let mut worst = 0.0_f64;
+
+        for &(n, span, last) in &cases {
+            let text = if last {
+                weighted_dense_last_col_nl(n, span)
+            } else {
+                weighted_dense_row_objective_nl(n, span)
+            };
+            let p = parse_nl_text(&text).expect("parse");
+            let mut t = NlTnlp::new(p);
+            let peeled = t.peeled_cols.clone();
+            peeled_any |= !peeled.is_empty();
+
+            let info = t.get_nlp_info().unwrap();
+            let nnz = info.nnz_h_lag as usize;
+            let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+            assert!(t.eval_h(
+                None,
+                true,
+                1.0,
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut irow,
+                    jcol: &mut jcol
+                }
+            ));
+            let x: Vec<f64> = (0..n).map(|j| 0.25 + 0.05 * (j % 13) as f64).collect();
+
+            let mut got = vec![0.0_f64; nnz];
+            assert!(t.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                None,
+                true,
+                SparsityRequest::Values { values: &mut got }
+            ));
+
+            // Same object, same tapes, same point — only the coloring
+            // differs, so any disagreement is the decode path.
+            t.recolor(&vec![true; n]);
+            assert!(
+                t.peeled_cols.is_empty(),
+                "a fully vetoed model must peel nothing"
+            );
+            let mut want = vec![0.0_f64; nnz];
+            assert!(t.eval_h(
+                Some(&x),
+                true,
+                1.0,
+                None,
+                true,
+                SparsityRequest::Values { values: &mut want }
+            ));
+
+            for k in 0..nnz {
+                let scale = want[k].abs().max(f64::MIN_POSITIVE);
+                let rel = (got[k] - want[k]).abs() / scale;
+                worst = worst.max(rel);
+                assert!(
+                    rel <= 1e-13,
+                    "n={n} span={span} last={last} peeled={peeled:?}: H[{},{}] decoded {:e}, \
+                     unpeeled reference {:e} (relative error {rel:e})",
+                    irow[k],
+                    jcol[k],
+                    got[k],
+                    want[k]
+                );
+            }
+        }
+
+        assert!(
+            peeled_any,
+            "no case peeled anything, so this test proved nothing about the \
+             decode path — the exact way the fixture suite missed the bug"
+        );
+        assert!(worst < 1e-13, "worst relative disagreement {worst:e}");
     }
 
     /// `peel_veto` bars a column from the peel set, and the row it puts
