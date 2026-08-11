@@ -419,6 +419,9 @@ ipopt-reference-provenance:
 	  printf '  "ipopt_version": "%s",\n' "$$($(IPOPT_MA57_BIN) --version 2>/dev/null | head -1)"; \
 	  printf '  "linear_solver": "%s (via ref/Ipopt/install-ma57)",\n' "$(IPOPT_LINEAR_SOLVER)"; \
 	  printf '  "timelimit": %s,\n'   "$(REF_TIMELIMIT)"; \
+	  printf '  "threads": {"OMP_NUM_THREADS": "%s", "OPENBLAS_NUM_THREADS": "%s", "VECLIB_MAXIMUM_THREADS": "%s", "RAYON_NUM_THREADS": "%s"},\n' \
+	    "$${OMP_NUM_THREADS-unset}" "$${OPENBLAS_NUM_THREADS-unset}" \
+	    "$${VECLIB_MAXIMUM_THREADS-unset}" "$${RAYON_NUM_THREADS-unset}"; \
 	  printf '  "git_sha": "%s"\n'    "$$(git -C $(REPO_ROOT) rev-parse --short HEAD 2>/dev/null)"; \
 	  echo '}'; \
 	} > $(IPOPT_PROVENANCE)

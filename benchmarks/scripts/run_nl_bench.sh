@@ -307,6 +307,43 @@ run_one() {
     "$solver_label" "$problem" "$n" "$m" "$status" "$obj" "$iter" "$elapsed"
 }
 
+# Thread-pinning stamp ------------------------------------------------
+#
+# benchmark_report.py tells the reader whether these runs were pinned to a
+# single compute thread. That claim used to be hardcoded prose, printed
+# whether or not it was true — which matters, because POUNCE's dense linear
+# algebra (faer/rayon) parallelizes, so an unpinned run is not comparable to
+# the saved single-threaded Ipopt reference.
+#
+# Record what was actually in effect so the report can state observed values
+# instead of asserting them. Sidecar file, not a key in $RESULT: the results
+# JSON is a bare array and every consumer expects that shape.
+#
+# Absent (unset) and "set to empty" are deliberately distinguished from a
+# value: an unset var means the runner did NOT pin that library, which is
+# exactly what the report must not paper over.
+ENV_STAMP="${RESULT%.json}.env.json"
+{
+  printf '{\n'
+  printf '  "recorded_by": "run_nl_bench.sh",\n'
+  printf '  "suite": "%s",\n' "$SUITE"
+  printf '  "mode": "%s",\n' "$MODE"
+  printf '  "timelimit": %s,\n' "$TIMELIMIT"
+  printf '  "cpu_count": %s,\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo null)"
+  printf '  "threads": {'
+  sep=''
+  for _var in OMP_NUM_THREADS OPENBLAS_NUM_THREADS VECLIB_MAXIMUM_THREADS \
+              RAYON_NUM_THREADS MKL_NUM_THREADS NUMEXPR_NUM_THREADS; do
+    if [ -n "${!_var+set}" ]; then
+      printf '%s\n    "%s": "%s"' "$sep" "$_var" "${!_var}"
+      sep=','
+    fi
+  done
+  [ -n "$sep" ] && printf '\n  '
+  printf '}\n'
+  printf '}\n'
+} > "$ENV_STAMP.tmp" && mv "$ENV_STAMP.tmp" "$ENV_STAMP"
+
 # Main loop ----------------------------------------------------------
 
 # Emit one solver's record, prefixing a comma+newline for every record
