@@ -39,9 +39,24 @@ recovered entry would take more than a `1e-8` relative hit is dropped from
 the peel set and colored the ordinary way. `cho_parmest` vetoes 7 of its 12
 and is back to `Optimal` in 34 iterations at an overall NLP error of
 `4.0308123324089062e-09` — bit-identical to the last release that had not
-yet grown the optimization. Every other peel-firing model vetoes nothing and
-keeps its coloring, its exit status and its speed, including the ones the
-optimization was written for (`rocket_12800` 6.9×, `steering_12800` 6.4×).
+yet grown the optimization.
+
+51 of the 56 veto nothing, so their coloring, seeds and decode tables are
+untouched and their arithmetic is unchanged — including every model the
+optimization was written for (`rocket_12800` 6.9×, `steering_12800` 6.4×,
+`gasoil_3200`, `pinene_3200`, `robot_1600`, `marine_1600`). The remaining
+four are `orth*` models that veto one column each and do not need to: the
+test is a worst-case bound, and it is loose by an amount that varies per
+column, so it is possible to bound high and measure exact. They still solve
+`Optimal`, and pay 2–3.5× on solves of 0.04–0.33 s (worst case +0.32 s
+absolute) for the recolor.
+
+That tradeoff is deliberate rather than tuned away. Over the corpus the
+highest bound on a column that recovers to machine precision is `2.9e-8`
+and the lowest on one of `cho_parmest`'s harmful columns is `8.3e-8` — a
+gap of 2.8×, measured on two model families. `1e-8` sits below both,
+because the errors are asymmetric: a false veto costs one model a coloring,
+a missed veto costs a solve its certificate.
 
 
 ## [0.10.0] - 2026-08-10
